@@ -119,6 +119,42 @@ def test_call_browser_tool_delegates_to_started_bridge():
     assert arg == {"name": "increment-counter", "args": {"by": 3}}
 
 
+def test_execute_decodes_stringified_result():
+    # The WebMCP spec defines executeTool() as returning a JSON-stringified
+    # result; the bundled demo polyfill returns the handler's object
+    # directly instead. Both must come out the same shape on the MCP side.
+    page = FakePage(response='{"counter": 4}')
+    wb = bridge.WebMCPBridge(page)
+
+    result = asyncio.run(wb.execute("increment-counter", {"by": 3}))
+
+    assert result == {"counter": 4}
+
+
+def test_execute_returns_non_json_string_result_as_is():
+    page = FakePage(response="plain text result")
+    wb = bridge.WebMCPBridge(page)
+
+    result = asyncio.run(wb.execute("some-tool", {}))
+
+    assert result == "plain text result"
+
+
+def test_execute_times_out_when_page_never_resolves():
+    class HangingPage:
+        async def evaluate(self, script, arg=None):
+            await asyncio.sleep(3600)
+
+    wb = bridge.WebMCPBridge(HangingPage())
+    original_timeout = bridge._TOOL_CALL_TIMEOUT_S
+    bridge._TOOL_CALL_TIMEOUT_S = 0.01
+    try:
+        with pytest.raises(RuntimeError):
+            asyncio.run(wb.execute("slow-tool", {}))
+    finally:
+        bridge._TOOL_CALL_TIMEOUT_S = original_timeout
+
+
 def test_call_browser_tool_defaults_missing_arguments_to_empty_dict():
     page = FakePage(response={"iso_time": "2026-01-01T00:00:00Z"})
     bridge._bridge = bridge.WebMCPBridge(page)

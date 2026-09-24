@@ -5,17 +5,25 @@ metadata:
 spec:
   podTemplate:
     spec:
-      # No securityContext hardening (runAsNonRoot, etc.) here, unlike
-      # examples/mcp-server-sandbox — Chromium's own sandboxing wants
-      # more privilege than a locked-down pod securityContext allows by
-      # default (it needs to create its own user namespaces / apply
-      # seccomp itself). Running as non-root is still possible but needs
-      # Chromium launched with --no-sandbox or an image built for it;
-      # left out here to keep the example minimal.
+      # No pod-level securityContext hardening here, unlike
+      # examples/mcp-server-sandbox — the image already runs as the base
+      # image's non-root pwuser (see Dockerfile), but bridge.py launches
+      # Chromium with its own sandbox disabled (Playwright's default),
+      # since Chromium's sandbox needs unprivileged user namespaces that
+      # plain `docker run` and most Kubernetes clusters don't grant without
+      # an explicit seccomp profile. If TARGET_PAGE_URL ever points at an
+      # untrusted page, harden this: enable chromium_sandbox=True in
+      # bridge.py and give the pod a seccompProfile that allows the
+      # clone/unshare/setns syscalls Chromium's sandbox needs.
       containers:
         - name: webmcp-bridge
           image: webmcp-bridge-sandbox:local
           imagePullPolicy: IfNotPresent
+          # bridge.py's MCP server defaults to stdio transport, which reads
+          # from the container's own stdin — without this, the container
+          # gets EOF immediately, bridge.py exits, and the pod goes
+          # Completed before the "kubectl exec -i" workflow below can attach.
+          stdin: true
           env:
             - name: TARGET_PAGE_URL
               value: "http://localhost:8090/" # the bundled demo page

@@ -31,6 +31,7 @@ Playwright's async Page/Browser objects are bound to the loop that created
 them, and calling into a Page from a second loop hangs rather than raising.
 """
 import asyncio
+import json
 import logging
 import os
 from typing import Any
@@ -41,6 +42,13 @@ from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError, a
 logger = logging.getLogger(__name__)
 
 TARGET_PAGE_URL = os.environ.get("TARGET_PAGE_URL", "http://localhost:8090/")
+
+# Bounds how long a single WebMCP tool call may run before this bridge gives
+# up on it and reports a timeout to the MCP client, rather than leaving the
+# call hanging forever if the page's handler never resolves its promise.
+# Timing out here does not stop whatever side effect the handler already
+# started in the page — only the bridge's own wait for its result.
+_TOOL_CALL_TIMEOUT_S = 30
 
 _GET_TOOLS_JS = """
 async () => (await document.modelContext.getTools())
@@ -68,9 +76,32 @@ class WebMCPBridge:
         # A WebMCP tool's execute() can return anything JSON-serializable
         # per its own declared schema, not just a dict — Any is accurate
         # here, unlike the tool-listing shape above.
-        return await self._page.evaluate(
-            _EXECUTE_TOOL_JS, {"name": tool_name, "args": arguments}
-        )
+        try:
+            result = await asyncio.wait_for(
+                self._page.evaluate(
+                    _EXECUTE_TOOL_JS, {"name": tool_name, "args": arguments}
+                ),
+                timeout=_TOOL_CALL_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                f"WebMCP tool {tool_name!r} did not respond within "
+                f"{_TOOL_CALL_TIMEOUT_S}s — any side effect it already started "
+                "in the page may still be running"
+            ) from None
+        # The WebMCP spec defines executeTool() as returning a JSON-stringified
+        # result; this example's demo polyfill instead hands back the
+        # handler's object directly, which is also legal per the spec's own
+        # "or an equivalent in-memory value" wording but not what a real
+        # implementation returns. Decode string results so both shapes come
+        # out the same on the MCP side — a real WebMCP page and the bundled
+        # demo page behave identically to whatever calls this bridge.
+        if isinstance(result, str):
+            try:
+                return json.loads(result)
+            except ValueError:
+                return result
+        return result
 
 
 mcp = FastMCP("WebMCP Bridge")
@@ -126,6 +157,15 @@ async def _start_bridge() -> None:
     # then playwright.stop()) on shutdown to avoid leaking the browser
     # process across restarts/reconnects.
     playwright = await async_playwright().start()
+    # chromium_sandbox defaults to False in Playwright's own API. It stays
+    # False here rather than being forced True: Chromium's sandbox needs
+    # unprivileged user namespaces, which most container runtimes (plain
+    # `docker run`, and most Kubernetes clusters without an explicit seccomp
+    # profile for it) don't grant — turning this on breaks the example's
+    # basic quick-start on those setups instead of just hardening it. A
+    # deployment that bridges an untrusted TARGET_PAGE_URL and has that
+    # runtime support in place should set chromium_sandbox=True here; see
+    # the README's "Governing tool calls"/hardening notes.
     browser = await playwright.chromium.launch()
     page = await browser.new_page()
     await page.goto(TARGET_PAGE_URL)

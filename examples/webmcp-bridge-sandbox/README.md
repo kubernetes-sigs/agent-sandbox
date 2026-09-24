@@ -46,6 +46,15 @@ stage) — `demo-page/index.html` installs a hand-rolled stub only when the
 real API is absent, matching just enough of the surface (register/get/
 execute) to be useful, not a spec-conformant implementation.
 
+Each `call_browser_tool` invocation is bounded to 30 seconds — if the page's
+handler never resolves, the bridge reports a timeout to the MCP client
+instead of hanging forever (a timeout doesn't undo whatever side effect the
+handler already started in the page, only the bridge's own wait for a
+result). The WebMCP spec defines `executeTool()`'s result as a JSON string;
+the bundled demo polyfill hands back an object directly instead, so
+`WebMCPBridge.execute()` decodes string results before returning them —
+either shape reaches the MCP client the same way.
+
 ## Example Sandbox
 
 Also committed as [`webmcp-bridge-sandbox.yaml`](./webmcp-bridge-sandbox.yaml)
@@ -59,20 +68,28 @@ metadata:
 spec:
   podTemplate:
     spec:
-      # No securityContext hardening (runAsNonRoot, etc.) here, unlike
-      # examples/mcp-server-sandbox — Chromium's own sandboxing wants
-      # more privilege than a locked-down pod securityContext allows by
-      # default (it needs to create its own user namespaces / apply
-      # seccomp itself). Running as non-root is still possible but needs
-      # Chromium launched with --no-sandbox or an image built for it;
-      # left out here to keep the example minimal.
+      # No pod-level securityContext hardening here, unlike
+      # examples/mcp-server-sandbox — the image already runs as the base
+      # image's non-root pwuser (see Dockerfile), but bridge.py launches
+      # Chromium with its own sandbox disabled (Playwright's default),
+      # since Chromium's sandbox needs unprivileged user namespaces that
+      # plain `docker run` and most Kubernetes clusters don't grant without
+      # an explicit seccomp profile. If TARGET_PAGE_URL ever points at an
+      # untrusted page, harden this: enable chromium_sandbox=True in
+      # bridge.py and give the pod a seccompProfile that allows the
+      # clone/unshare/setns syscalls Chromium's sandbox needs.
       containers:
         - name: webmcp-bridge
           image: webmcp-bridge-sandbox:local
           imagePullPolicy: IfNotPresent
+          # bridge.py's MCP server defaults to stdio transport, which reads
+          # from the container's own stdin — without this, the container
+          # gets EOF immediately, bridge.py exits, and the pod goes
+          # Completed before the "kubectl exec -i" workflow below can attach.
+          stdin: true
           env:
             - name: TARGET_PAGE_URL
-              value: "http://localhost:8090/"  # the bundled demo page
+              value: "http://localhost:8090/" # the bundled demo page
           # No resources block here to keep the example minimal, but a
           # real deployment should set one — headless Chromium's own
           # footprint alone is comfortably in the hundreds-of-MB range
@@ -197,13 +214,27 @@ calling out explicitly:
   just with an `ipBlock` for an external host address instead of a
   `podSelector` for an in-cluster destination:
 
+  `podSelector: {}` matches every pod in the namespace, not just this one —
+  fine in a namespace dedicated to this example, but in a shared namespace it
+  additively grants every other pod there the same egress too (Kubernetes
+  unions egress rules across all matching `NetworkPolicy` objects). Confirm
+  the bridge pod's actual labels first (`kubectl get pod webmcp-bridge-sandbox
+  --show-labels`, or check the `Sandbox` controller's own labels on the pod
+  it creates) and scope the selector to those instead:
+
   ```yaml
   apiVersion: networking.k8s.io/v1
   kind: NetworkPolicy
   metadata:
     name: allow-dev-server-egress
   spec:
-    podSelector: {}
+    podSelector:
+      matchLabels:
+        # The Sandbox controller labels the pod it creates with a hashed
+        # agents.x-k8s.io/sandbox-name-hash value, not the plain Sandbox
+        # name — read the real key/value off your own pod with the kubectl
+        # command above instead of assuming one here.
+        agents.x-k8s.io/sandbox-name-hash: "<value from kubectl get pod --show-labels>"
     policyTypes: [Egress]
     egress:
       - to:

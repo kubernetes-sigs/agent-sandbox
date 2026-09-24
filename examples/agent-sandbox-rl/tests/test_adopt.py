@@ -324,16 +324,21 @@ def test_adopt_teardown_keeps_the_pool_but_sweeps_claims(make_cluster):
   c.resources.delete_claim.assert_called_once_with("claim-1")
 
 
-def test_adopt_teardown_still_removes_unadopted_leftovers(make_cluster):
+def test_adopt_teardown_still_removes_this_runs_unadopted_leftovers(make_cluster):
+  # Teardown lists by THIS run's id, not the namespace-wide managed label — a
+  # concurrent tenant's pools are none of our business (#1736). An unadopted pool
+  # that does carry our run id is still swept; a crashed run's leftovers are the
+  # reaper's job.
   c = make_cluster("solo")
   f = _adopt_fleet(ClusterRegistry([c]))
   _seed(c, f.config, IMG_A)
   f.load_tasks([IMG_A])
   f.plan()
   c.resources.list_warmpools.return_value = [_fleet_style(f.config, IMG_A),
-                                             "stale-pool-from-a-crashed-run"]
+                                             "unadopted-leftover-of-this-run"]
   f.teardown()
-  c.resources.delete_warmpool.assert_called_once_with("stale-pool-from-a-crashed-run")
+  c.resources.list_warmpools.assert_called_with(label_selector=f.run_selector())
+  c.resources.delete_warmpool.assert_called_once_with("unadopted-leftover-of-this-run")
 
 
 # --- 5. the silent fallthrough ------------------------------------------- #

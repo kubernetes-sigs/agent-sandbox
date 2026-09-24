@@ -30,8 +30,14 @@ from kubernetes import client, watch
 
 from . import constants
 from .config import TemplateSpec
+from .exceptions import OwnedByAnotherRunError
 
 logger = logging.getLogger("agent_sandbox_rl.resources")
+
+# Read-check-write rounds `create_warmpool(reconcile=True)` makes before giving up.
+# A conflict is usually a status update from the controller, so one retry nearly
+# always suffices; the bound only stops a pathological fight.
+_RECONCILE_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -94,12 +100,18 @@ class Resources:
 
   # --- templates --------------------------------------------------------- #
   def ensure_template(self, image: str, template_name: str,
-                      template: TemplateSpec, *, dry_run: bool = False) -> bool:
+                      template: TemplateSpec, *, dry_run: bool = False,
+                      owner_run_id: str | None = None) -> bool:
     """Create the SandboxTemplate for ``image`` if absent. Idempotent.
 
     Returns True if it created the template, False if it already existed.
     ``dry_run=True`` sends a server-side dry run (``dryRun=All``) — validated
     against the CRD schema but not persisted.
+
+    With ``owner_run_id`` set, an existing template labelled with another run's
+    id raises `OwnedByAnotherRunError` — including one created concurrently and
+    found at the 409 — instead of returning False like an ordinary "already
+    existed": the caller must not build its pool on it, and nothing is written.
     """
     try:
       existing = self.custom_api.get_namespaced_custom_object(
@@ -112,7 +124,14 @@ class Resources:
       # labels would carry the OLD run-id, making this run's pods invisible to the
       # circuit breaker and mis-targeted by the reaper (the #1215 safeguards).
       # Reconcile the run/managed labels so pods this run spawns are attributed to
-      # this run.
+      # this run — unless the template is labelled as another live run's, in
+      # which case relabelling would be a write to their resource set (names
+      # collided in a shared namespace); leave it and let the caller decide.
+      cur_owner = (((existing.get("metadata") or {}).get("labels")) or {}).get(
+          constants.RUN_ID_LABEL)
+      if (owner_run_id and isinstance(cur_owner, str) and cur_owner
+          and cur_owner != owner_run_id):
+        raise OwnedByAnotherRunError("SandboxTemplate", template_name, cur_owner)
       self._reconcile_template_labels(template_name, existing)
       return False
     except client.ApiException as e:
@@ -126,10 +145,18 @@ class Resources:
           body=self._template_manifest(image, template_name, template),
           dry_run="All" if dry_run else None)
     except client.ApiException as e:
-      if e.status == 409:        # created concurrently / between our get and create
-        logger.info("SandboxTemplate '%s' already exists (409).", template_name)
-        return False
-      raise
+      if e.status != 409:
+        raise
+      # Created concurrently, between our get and create: possibly by another
+      # run using the same name, so it gets the same owner check as the get.
+      logger.info("SandboxTemplate '%s' already exists (409).", template_name)
+      if owner_run_id and not dry_run:
+        winner = self.get_template(template_name) or {}
+        cur_owner = (((winner.get("metadata") or {}).get("labels")) or {}).get(
+            constants.RUN_ID_LABEL)
+        if isinstance(cur_owner, str) and cur_owner and cur_owner != owner_run_id:
+          raise OwnedByAnotherRunError("SandboxTemplate", template_name, cur_owner)
+      return False
     logger.info("Created SandboxTemplate '%s' for %s", template_name, image)
     return True
 
@@ -270,8 +297,23 @@ class Resources:
                      "circuit breaker/reaper may under-count this run's pods for "
                      "its image", template_name, exc_info=True)
 
-  def delete_template(self, template_name: str) -> None:
-    self._delete(constants.TEMPLATES_PLURAL, template_name, "SandboxTemplate")
+  def get_template(self, template_name: str) -> dict | None:
+    """The live SandboxTemplate object, or None if it does not exist."""
+    try:
+      return self.custom_api.get_namespaced_custom_object(
+          group=constants.GROUP, version=constants.VERSION,
+          namespace=self.namespace, plural=constants.TEMPLATES_PLURAL,
+          name=template_name)
+    except client.ApiException as e:
+      if e.status == 404:
+        return None
+      raise
+
+  def delete_template(self, template_name: str, *, uid: str | None = None) -> None:
+    """Delete the template. With ``uid`` (from a prior read) the delete is
+    conditional on that exact object, as for `delete_warmpool`."""
+    self._delete(constants.TEMPLATES_PLURAL, template_name, "SandboxTemplate",
+                 uid=uid)
 
   # --- warm pools -------------------------------------------------------- #
   def _warmpool_manifest(self, name: str, template_name: str,
@@ -292,7 +334,8 @@ class Resources:
 
   def create_warmpool(self, name: str, template_name: str,
                       replicas: int, *, dry_run: bool = False,
-                      reconcile: bool = False) -> None:
+                      reconcile: bool = False,
+                      owner_run_id: str | None = None) -> bool:
     """Create a SandboxWarmPool (v1beta1: ``replicas`` + ``sandboxTemplateRef``).
 
     Idempotent on 409 (already exists). With ``reconcile=True`` a 409 instead
@@ -301,7 +344,17 @@ class Resources:
     make ``wait_for_pool_ready(expected)`` hang and over-count active replicas).
     Only the warm path needs this; the on-demand claim path leaves it ``False``
     so a hot, repeatedly-reused size-1 pool isn't patched on every claim.
-    ``dry_run=True`` sends ``dryRun=All`` and never patches (validation only)."""
+    ``dry_run=True`` sends ``dryRun=All`` and never patches (validation only).
+
+    Returns True when the pool is ours (created, or reconciled), False only when
+    ``owner_run_id`` is set and the existing pool carries another run's id label:
+    the 409 is where a name collision with a concurrent run shows up, and that
+    pool is **not** resized. Every write after the 409 is conditional on what was
+    just inspected — the reconcile patch carries the inspected resourceVersion,
+    and a re-create after the pool vanished is itself a create — so a pool
+    replaced, relabelled or merely updated in between (the controller writes
+    status continuously) is re-inspected, owner check included, instead of being
+    written blind. Gives up with ``RuntimeError`` if the pool keeps changing."""
     try:
       self.custom_api.create_namespaced_custom_object(
           group=constants.GROUP, version=constants.VERSION,
@@ -309,17 +362,54 @@ class Resources:
           body=self._warmpool_manifest(name, template_name, replicas),
           dry_run="All" if dry_run else None)
       logger.info("Created SandboxWarmPool '%s' (replicas=%d)", name, replicas)
+      return True
     except client.ApiException as e:
       if e.status != 409:
         raise
       if dry_run or not reconcile:
         logger.info("SandboxWarmPool '%s' already exists.", name)
-        return
+        return True
+    for _ in range(_RECONCILE_ATTEMPTS):
+      existing = self.get_warmpool(name)
+      if existing is None:
+        # Deleted between the 409 and the read (a teardown elsewhere): create anew.
+        try:
+          self.custom_api.create_namespaced_custom_object(
+              group=constants.GROUP, version=constants.VERSION,
+              namespace=self.namespace, plural=constants.WARMPOOLS_PLURAL,
+              body=self._warmpool_manifest(name, template_name, replicas))
+        except client.ApiException as e:
+          if e.status != 409:
+            raise
+          continue                        # re-created by someone else: inspect theirs
+        logger.info("Created SandboxWarmPool '%s' (replicas=%d)", name, replicas)
+        return True
+      meta = existing.get("metadata") or {}
+      owner = (meta.get("labels") or {}).get(constants.RUN_ID_LABEL)
+      if owner_run_id and isinstance(owner, str) and owner and owner != owner_run_id:
+        logger.warning("SandboxWarmPool '%s' belongs to run %s; not resizing it for "
+                       "run %s (use run_isolation='names' to stop sharing names)",
+                       name, owner, owner_run_id)
+        return False
       logger.info("SandboxWarmPool '%s' exists; patching replicas=%d.", name, replicas)
-      self.custom_api.patch_namespaced_custom_object(
-          group=constants.GROUP, version=constants.VERSION,
-          namespace=self.namespace, plural=constants.WARMPOOLS_PLURAL,
-          name=name, body={"spec": {"replicas": replicas}})
+      body: dict = {"spec": {"replicas": replicas}}
+      rv = meta.get("resourceVersion")
+      if isinstance(rv, str) and rv:
+        body["metadata"] = {"resourceVersion": rv}   # optimistic lock on what we inspected
+      try:
+        self.custom_api.patch_namespaced_custom_object(
+            group=constants.GROUP, version=constants.VERSION,
+            namespace=self.namespace, plural=constants.WARMPOOLS_PLURAL,
+            name=name, body=body)
+      except client.ApiException as e:
+        if e.status != 409:
+          raise
+        logger.info("SandboxWarmPool '%s' changed since it was read; re-inspecting", name)
+        continue
+      return True
+    raise RuntimeError(
+        f"SandboxWarmPool '{name}' kept changing under {_RECONCILE_ATTEMPTS} "
+        "reconcile attempts; not resizing it")
 
   def validate_manifests(self, sample_image: str, template: TemplateSpec,
                          *, name: str = "asrl-validate") -> None:
@@ -343,8 +433,22 @@ class Resources:
         body=self._warmpool_manifest(name, name, 1),
         dry_run="All")
 
-  def delete_warmpool(self, name: str) -> None:
-    self._delete(constants.WARMPOOLS_PLURAL, name, "SandboxWarmPool")
+  def delete_warmpool(self, name: str, *, uid: str | None = None) -> None:
+    """Delete the pool. With ``uid`` (from a prior read) the delete is conditional
+    on that exact object: a pool re-created under the same name by another run in
+    the meantime fails the precondition (409) and is left standing."""
+    self._delete(constants.WARMPOOLS_PLURAL, name, "SandboxWarmPool", uid=uid)
+
+  def get_warmpool(self, name: str) -> dict | None:
+    """The live SandboxWarmPool object, or None if it does not exist."""
+    try:
+      return self.custom_api.get_namespaced_custom_object(
+          group=constants.GROUP, version=constants.VERSION,
+          namespace=self.namespace, plural=constants.WARMPOOLS_PLURAL, name=name)
+    except client.ApiException as e:
+      if e.status == 404:
+        return None
+      raise
 
   def pool_ready_replicas(self, name: str) -> int:
     obj = self.custom_api.get_namespaced_custom_object(
@@ -359,6 +463,15 @@ class Resources:
     except client.ApiException:
       return 0
 
+  def _pool_ready_or_gone(self, name: str) -> int | None:
+    """readyReplicas, 0 on a transient API error, or None if the pool is gone
+    (404) — the re-check used when the watch drops, so a pool deleted out from
+    under the wait is reported instead of polled until the timeout."""
+    try:
+      return self.pool_ready_replicas(name)
+    except client.ApiException as e:
+      return None if e.status == 404 else 0
+
   def wait_for_pool_ready(self, name: str, expected: int,
                           timeout: int = 600, poll_interval: float = 1.0) -> bool:
     """Block until the pool reports ``readyReplicas >= expected``.
@@ -366,16 +479,25 @@ class Resources:
     Uses a Kubernetes **watch** on the WarmPool so readiness is detected at the
     status-update event (near-exact timing — no fixed poll grid). Falls back to a
     short re-check + ``poll_interval`` backoff if the watch drops/reconnects, and
-    is bounded by ``timeout``. Returns False on timeout.
+    is bounded by ``timeout``. Returns False on timeout, and **immediately** if
+    the pool does not exist or is deleted while waiting (a 404 on the initial
+    read, a DELETED watch event, or a 404 on the dropped-watch re-check): a pool
+    that no longer exists cannot become ready, and waiting out the timeout for it
+    is how a concurrent run's teardown once cost a caller 15 minutes per pool.
     """
     deadline = time.monotonic() + timeout
     # Fast path: already ready (also covers the readiness that landed between
-    # pool creation and the watch starting).
+    # pool creation and the watch starting). A 404 here is terminal too: the
+    # watch below starts without a resourceVersion, so it would not replay a
+    # deletion that happened before it opened, and the wait would run out the
+    # timeout on a pool that is already gone.
     try:
       if self.pool_ready_replicas(name) >= expected:
         return True
-    except client.ApiException:
-      pass
+    except client.ApiException as e:
+      if e.status == 404:
+        logger.error("WarmPool '%s' does not exist; giving up", name)
+        return False
 
     w = watch.Watch()
     try:
@@ -392,6 +514,10 @@ class Resources:
             if (obj.get("metadata") or {}).get("name") != name:
               continue                       # bookmarks / belt-and-suspenders
             ready = int((obj.get("status") or {}).get("readyReplicas", 0) or 0)
+            if event.get("type") == "DELETED":
+              logger.error("WarmPool '%s' was deleted while waiting for readiness "
+                           "(%d/%d ready); giving up", name, ready, expected)
+              return False
             logger.info("WarmPool '%s': %d/%d ready", name, ready, expected)
             if ready >= expected:
               return True
@@ -404,12 +530,20 @@ class Resources:
                          name, e.status, e)
             raise
           logger.debug("watch on '%s' interrupted (%s); re-checking", name, e)
-          if self.pool_ready_replicas_safe(name) >= expected:
+          ready = self._pool_ready_or_gone(name)
+          if ready is None:
+            logger.error("WarmPool '%s' no longer exists; giving up", name)
+            return False
+          if ready >= expected:
             return True
           time.sleep(poll_interval)
         except Exception as e:  # noqa: BLE001 — connection drop / stale RV
           logger.debug("watch on '%s' dropped (%s); re-checking", name, e)
-          if self.pool_ready_replicas_safe(name) >= expected:
+          ready = self._pool_ready_or_gone(name)
+          if ready is None:
+            logger.error("WarmPool '%s' no longer exists; giving up", name)
+            return False
+          if ready >= expected:
             return True
           time.sleep(poll_interval)
     finally:
@@ -475,7 +609,51 @@ class Resources:
                  group=constants.SANDBOX_GROUP, version=constants.SANDBOX_VERSION)
 
   def managed_selector(self) -> str:
+    """Selector for EVERY agent-sandbox-rl run's resources in the namespace. Not
+    what teardown uses (that is the fleet's run-scoped `run_selector()`); kept for
+    the reaper's explicit ``all_managed`` sweep and for listing/diagnostics."""
     return f"{constants.MANAGED_BY_LABEL}={constants.MANAGED_BY_VALUE}"
+
+  # --- namespaces (run_isolation="namespace") ---------------------------- #
+  def ensure_namespace(self, name: str, labels: dict | None = None) -> bool:
+    """Create namespace ``name`` if absent. Returns True if this call created it
+    (the caller owns it and deletes it at teardown), False if it already existed
+    (used, not owned). A namespace that exists but is still Terminating raises
+    ``RuntimeError`` — nothing can be created in it. Other errors propagate — a
+    403 means this identity cannot create namespaces: pre-create it or use
+    ``run_isolation="names"``."""
+    body = client.V1Namespace(
+        metadata=client.V1ObjectMeta(name=name, labels=dict(labels or {})))
+    try:
+      self.core_api.create_namespace(body)
+      logger.info("Created namespace '%s'", name)
+      return True
+    except client.ApiException as e:
+      if e.status != 409:
+        raise
+    # 409 also covers a namespace still Terminating (a previous run's teardown, or
+    # this run's rollback); nothing can be created in it, so say so instead of
+    # "using" it and failing on the first pool.
+    phase = None
+    try:
+      ns = self.core_api.read_namespace(name)
+      phase = getattr(getattr(ns, "status", None), "phase", None)
+    except Exception:  # noqa: BLE001 — diagnostics only
+      pass
+    if phase == "Terminating":
+      raise RuntimeError(f"namespace '{name}' is still terminating; retry once it is gone")
+    logger.info("Namespace '%s' already exists; using it (not owned)", name)
+    return False
+
+  def delete_namespace(self, name: str) -> None:
+    try:
+      self.core_api.delete_namespace(name)
+      logger.info("Deleted namespace '%s'", name)
+    except client.ApiException as e:
+      if e.status == 404:
+        logger.warning("Namespace '%s' not found (already deleted).", name)
+      else:
+        raise
 
   # --- adoption ---------------------------------------------------------- #
   def template_images(self, label_selector: str | None = None) -> "dict[str, str]":
@@ -567,15 +745,21 @@ class Resources:
             self._list_objects(plural, label_selector, group=group, version=version)]
 
   def _delete(self, plural: str, name: str, kind: str, *,
-              group: str = constants.GROUP, version: str = constants.VERSION) -> None:
+              group: str = constants.GROUP, version: str = constants.VERSION,
+              uid: str | None = None) -> None:
+    opts = client.V1DeleteOptions(
+        grace_period_seconds=0,
+        preconditions=client.V1Preconditions(uid=uid) if uid else None)
     try:
       self.custom_api.delete_namespaced_custom_object(
           group=group, version=version,
-          namespace=self.namespace, plural=plural, name=name,
-          body=client.V1DeleteOptions(grace_period_seconds=0))
+          namespace=self.namespace, plural=plural, name=name, body=opts)
       logger.info("Deleted %s '%s'", kind, name)
     except client.ApiException as e:
       if e.status == 404:
         logger.warning("%s '%s' not found (already deleted).", kind, name)
+      elif e.status == 409 and uid:
+        logger.warning("%s '%s' was replaced since it was inspected (uid precondition "
+                       "failed); not deleting", kind, name)
       else:
         raise

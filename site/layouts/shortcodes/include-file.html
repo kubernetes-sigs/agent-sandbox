@@ -31,4 +31,8 @@
 {{- $content = replaceRE `\]\(([a-zA-Z][a-zA-Z0-9_/.+-]*)/\)` (printf "](%s$1/)" $ghTree) $content -}}
 {{- $content = replaceRE `\]\(([a-zA-Z][a-zA-Z0-9_/.+-]*\.[a-zA-Z0-9]+)\)` (printf "](%s$1)" $ghBase) $content -}}
 
-{{- $content | .Page.RenderString -}}
+{{/* Emit Markdown, not HTML: callers use {{% %}}, so Hugo renders the output.
+     Rendering here too would run Goldmark twice and mangle code blocks.
+     safeHTML stops html/template from escaping the raw HTML and <#anchor>
+     link destinations that some of the included files contain. */}}
+{{- $content | safeHTML -}}

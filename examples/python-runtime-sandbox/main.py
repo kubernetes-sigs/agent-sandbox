@@ -19,7 +19,6 @@ import subprocess
 import os
 import shlex
 import logging
-import urllib.parse
 
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse
@@ -184,14 +183,13 @@ async def download_file(encoded_file_path: str):
     """
     Downloads a specified file from the base directory in the sandbox.
     """
-    decoded_path = urllib.parse.unquote(encoded_file_path)
     try:
-        full_path = get_safe_path(decoded_path)
+        full_path: str = get_safe_path(encoded_file_path)
     except ValueError:
         return JSONResponse(status_code=403, content={"message": "Access denied"})
 
     if os.path.isfile(full_path):
-        return FileResponse(path=full_path, media_type='application/octet-stream', filename=decoded_path)
+        return FileResponse(path=full_path, media_type='application/octet-stream', filename=encoded_file_path)
     return JSONResponse(status_code=404, content={"message": "File not found"})
 
 @app.get("/list/{encoded_file_path:path}", summary="List files in a directory")
@@ -199,9 +197,8 @@ async def list_files(encoded_file_path: str):
     """
     Lists the contents of a directory under the base directory in the sandbox.
     """
-    decoded_path = urllib.parse.unquote(encoded_file_path)
     try:
-        full_path = get_safe_path(decoded_path)
+        full_path: str = get_safe_path(encoded_file_path)
     except ValueError:
         return JSONResponse(status_code=403, content={"message": "Access denied"})
 
@@ -228,13 +225,12 @@ async def exists(encoded_file_path: str):
     """
     Checks if a specified file or directory exists under the base directory in the sandbox.
     """
-    decoded_path = urllib.parse.unquote(encoded_file_path)
     try:
-        full_path = get_safe_path(decoded_path)
+        full_path: str = get_safe_path(encoded_file_path)
     except ValueError:
         return JSONResponse(status_code=403, content={"message": "Access denied"})
 
     return JSONResponse(status_code=200, content={
-        "path": decoded_path,
+        "path": encoded_file_path,
         "exists": os.path.exists(full_path)
     })

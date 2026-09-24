@@ -9,4 +9,4 @@ aliases:
   - /docs/getting_started
 ---
 
-{{< include-file file="additional/README.md" >}}
+{{% include-file file="additional/README.md" %}}

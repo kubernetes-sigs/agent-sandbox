@@ -61,6 +61,12 @@ PYTHON_TEST_SUITES = [
         "dir": os.path.join("examples", "demo-cilium-egress", "exec-sandbox"),
     },
     {
+        "name": "policy-command-governance",
+        # governed_run.py is stdlib-only (os, re, shlex); the test exercises
+        # the classifier directly, no sandbox/cluster needed.
+        "dir": os.path.join("examples", "policy", "command-governance"),
+    },
+    {
         "name": "hpa-swp-scaling",
         "dir": os.path.join("examples", "hpa-swp-scaling"),
         "requirements": "requirements.txt",
@@ -75,6 +81,11 @@ PYTHON_TEST_SUITES = [
         "dir": os.path.join("examples", "firecracker-sandbox"),
         "requirements": "requirements.txt",
         "extra_packages": ["httpx"],
+    },
+    {
+        "name": "python-runtime-sandbox",
+        "dir": os.path.join("examples", "python-runtime-sandbox"),
+        "extra_packages": ["fastapi", "httpx", "python-multipart"],
     },
     {
         "name": "gke-swap-python-density",
@@ -175,6 +186,8 @@ def find_go_modules(repo_root):
 def run_go_tests(repo_root, artifact_dir):
     """ runs Go unit tests in every Go module and returns the exit code """
     returncode = 0
+    # The e2e framework tests use fake clients and do not need a cluster.
+    framework_package = "sigs.k8s.io/agent-sandbox/test/e2e/framework"
 
     for module_rel in find_go_modules(repo_root):
         module_dir = os.path.join(repo_root, module_rel) if module_rel else repo_root
@@ -183,7 +196,11 @@ def run_go_tests(repo_root, artifact_dir):
             ["go", "list", "./..."], cwd=module_dir, text=True)
         packages = [
             pkg for pkg in go_list_output.strip().split('\n')
-            if pkg and "test/e2e" not in pkg
+            if pkg and (
+                "test/e2e" not in pkg
+                or pkg == framework_package
+                or pkg.startswith(framework_package + "/")
+            )
         ]
         if not packages:
             # e.g. site/ is a module only to pin the docs theme.

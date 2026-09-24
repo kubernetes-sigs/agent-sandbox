@@ -37,7 +37,7 @@ spec:
         {{- include "agent-sandbox.controllerArgs" . | nindent 8 }}
         ports:
         - name: metrics
-          containerPort: 8080
+          containerPort: 8080   # Change to 8443 when --metrics-secure-serving is enabled.
           protocol: TCP
         - name: healthz
           containerPort: 8081

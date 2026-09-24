@@ -103,6 +103,11 @@ class TestFilesystemSafeUploadPath(unittest.TestCase):
     def test_relative_subpath_is_preserved(self):
         self.assertEqual(Filesystem._safe_upload_path("dir/foo.txt"), "dir/foo.txt")
 
+    def test_filename_spaces_are_preserved(self) -> None:
+        for path in (" leading.txt", "trailing.txt ", "dir/ both.txt "):
+            with self.subTest(path=path):
+                self.assertEqual(Filesystem._safe_upload_path(path), path)
+
     def test_leading_slash_is_stripped(self):
         # An absolute-looking path gets normalized to a relative path under the runtime root.
         self.assertEqual(Filesystem._safe_upload_path("/dir/foo.txt"), "dir/foo.txt")
@@ -122,9 +127,11 @@ class TestFilesystemSafeUploadPath(unittest.TestCase):
         # /etc/passwd normalizes to "etc/passwd" relative to the runtime root.
         self.assertEqual(Filesystem._safe_upload_path("/etc/passwd"), "etc/passwd")
 
-    def test_empty_path_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, "empty"):
-            Filesystem._safe_upload_path("")
+    def test_empty_path_is_rejected(self) -> None:
+        for path in ("", " ", "   "):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(ValueError, "empty"):
+                    Filesystem._safe_upload_path(path)
 
     def test_bare_dot_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "does not name a file"):

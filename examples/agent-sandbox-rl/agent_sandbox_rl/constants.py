@@ -55,3 +55,14 @@ DEFAULT_LABELS = {MANAGED_BY_LABEL: MANAGED_BY_VALUE}
 # Per-run label stamped on every resource a fleet creates, so an orphaned run's
 # resources can always be swept by the reaper (`reap(run_id=…)`).
 RUN_ID_LABEL = "agents.x-k8s.io/asrl-run-id"
+# How a fleet keeps concurrent runs apart (`FleetConfig.run_isolation`):
+#   "none"      — historical behaviour: stable per-image names in the configured
+#                 namespace. Safe only when nothing else runs there.
+#   "names"     — shared namespace; the run id is baked into template and pool
+#                 names so runs on the same image never share (or delete) a pool.
+#   "namespace" — a per-run namespace `<namespace>-<run id>` is created on first
+#                 use and deleted at teardown; names stay stable per image.
+RUN_ISOLATION_MODES = ("none", "names", "namespace")
+# Placeholder accepted in `template_name_prefix` / `pool_name_format`; the fleet
+# substitutes its run id at construction.
+RUN_ID_PLACEHOLDER = "{run_id}"

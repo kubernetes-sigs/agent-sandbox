@@ -20,49 +20,15 @@ running, plus `pip install k8s-agent-sandbox`.
 
 ## Usage
 
+The classification logic lives in [`governed_run.py`](governed_run.py) (unit
+tests in [`test_governed_run.py`](test_governed_run.py)) rather than inline
+here, because it does real parsing — shell chaining/piping, command
+substitution, `sudo`/`env`/`xargs` wrapper stripping — that's worth
+regression-testing, not just illustrating.
+
 ```python
-import os
-import shlex
+from governed_run import governed_run
 from k8s_agent_sandbox import SandboxClient
-
-def _flags(tokens: list[str]) -> list[str]:
-    # Tokens up to (not including) a bare "--" end-of-options marker, so
-    # `rm -- --recursive --force` (real filenames, not flags) isn't denied.
-    if "--" in tokens:
-        return tokens[: tokens.index("--")]
-    return tokens
-
-def _has_flag(tokens: list[str], short: str, long_name: str) -> bool:
-    # Checks parsed argv tokens, not the raw string, so quoting/escaping
-    # ("-r -f", "'-rf'") can't hide a flag the shell would still honor.
-    for t in tokens:
-        if t == long_name:
-            return True
-        if t.startswith("-") and not t.startswith("--") and short.lower() in t.lower():
-            return True
-    return False
-
-def _is_denied(command: str) -> bool:
-    try:
-        tokens = shlex.split(command)  # parses quoting the way a POSIX shell would
-    except ValueError:
-        return True  # unparseable quoting - fail safe, deny
-    if not tokens:
-        return False
-    exe = os.path.basename(tokens[0])  # strips a path prefix like /bin/rm
-    args = _flags(tokens[1:])
-    if exe == "rm":
-        return _has_flag(args, "r", "--recursive") and _has_flag(args, "f", "--force")
-    if exe == "mkfs" or exe.startswith("mkfs."):
-        return True
-    if exe == "dd":
-        return any(t.startswith("of=") for t in tokens[1:])  # order-independent
-    return False
-
-def governed_run(sandbox, command: str):
-    if _is_denied(command):
-        raise PermissionError(f"denied by command policy: {command}")
-    return sandbox.commands.run(command)
 
 client = SandboxClient()
 sandbox = client.create_sandbox(warmpool="python-sandbox-pool", namespace="default")
@@ -72,23 +38,54 @@ try:
 
     governed_run(sandbox, "rm -rf /")
     # PermissionError: denied by command policy: rm -rf /
+
+    governed_run(sandbox, "echo ok && rm -rf /")
+    # PermissionError: denied by command policy: echo ok && rm -rf /
 finally:
     sandbox.terminate()
 ```
 
 `rm -rf /` is rejected in this script's own process — the sandbox pod is
 never contacted for that call. This is a minimal illustration; swap
-`_is_denied()` for whatever policy engine (OPA, a YAML rules file, an LLM
+`is_denied()` for whatever policy engine (OPA, a YAML rules file, an LLM
 classifier) fits your risk model — the wrapper shape around
 `sandbox.commands.run()` is the actual pattern, not the matching logic.
 
-**Scope:** `_is_denied()` only inspects the first parsed token (the
-executable) and its own flags/arguments, so it catches `rm`/`mkfs`/`dd`
-invoked directly (including quoted/escaped spellings and path-qualified
-executables like `/bin/rm`) but not one reached via shell chaining or
-substitution (`echo hi; rm -rf /`, `$(rm -rf /)`, pipes). Closing that fully
-means parsing the command as a
-shell script (not just a word list) or, more robustly, allowlisting the
-exact commands a sandbox is permitted to run instead of denylisting
-patterns — denylists are inherently a losing game against a determined
-adversary. Pick allowlisting for anything beyond a demo.
+**Scope:** `is_denied()` checks the raw command text for destructive syntax
+(fork bombs, `curl|sh` installers), then splits on shell chaining/piping
+metacharacters (`;`, `&&`, `||`, `|`, `&`) and command substitution
+(`$(...)`, backticks — including nested), and runs a token-aware `rm`/
+`mkfs`/`dd` check against each resulting segment independently. That
+catches direct invocations (quoted/escaped spellings, path-qualified
+executables like `/bin/rm`), chaining (`echo hi; rm -rf /`), substitution
+(`$(rm -rf /)`), and `sudo`/`env`/`xargs`/`command`/`nohup`/`nice`/`stdbuf`/
+`timeout`/`exec` wrappers (`sudo rm -rf /`, including each wrapper's own
+arg-taking flags like `sudo --user root`, and `timeout`'s mandatory
+`DURATION` positional) — see `test_governed_run.py` for the full case list. A
+command in the executable position that resolves via shell expansion, a
+glob, or brace expansion rather than being a literal spelling
+(`$(printf rm) --recursive --force /`, `` `printf rm` --recursive --force / ``,
+`/bin/r[m] -rf /`, IFS-glued tokens like `rm$IFS-rf$IFS/`, or
+`{rm,-rf,/}` where brace expansion turns one token into the three words
+`rm -rf /`) is denied outright rather than evaluated, since correctly
+resolving it would mean being a shell - and the same applies to any
+*argument* of an `rm`/`mkfs`/`dd` invocation, not just the executable
+token, since a hidden expansion there (`FLAGS=-rf; rm $FLAGS /`) could
+resolve to a destructive flag the literal-text check never sees. Because
+`xargs` appends
+argv tokens it reads from its own *stdin* - typically the previous stage of
+a pipeline, a separate segment this checker can't see - to the command it
+wraps, any `xargs` invocation targeting `rm`/`mkfs`/`dd` is denied
+unconditionally regardless of what flags are visible on the `xargs` line
+itself (`find / | xargs rm` is denied even though no `-rf` appears anywhere
+in the text). It is **not** a general
+shell-grammar parser: constructs it doesn't specifically split on or
+unwrap (arbitrary subshell forms, `eval`, `bash -c '...'`, redirections,
+control-flow bodies, a command embedded in another language's string
+literal) can still slip through, because each of those requires its own
+grammar to unwrap rather than a fixed set of split characters. Closing
+that gap fully means either parsing the command as a full shell AST or,
+more robustly, allowlisting the exact commands a sandbox is permitted to
+run instead of denylisting patterns — denylists are inherently a losing
+game against a determined adversary. Pick allowlisting for anything
+beyond a demo.

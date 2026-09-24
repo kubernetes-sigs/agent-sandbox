@@ -134,11 +134,10 @@ class Filesystem:
             raise ValueError(
                 f"Upload path contains ASCII control characters: {path!r}"
             )
-        stripped = path.strip()
-        if not stripped:
+        if not path.strip():
             raise ValueError("Upload path cannot be empty.")
 
-        normalized = posixpath.normpath(stripped).lstrip("/")
+        normalized = posixpath.normpath(path).lstrip("/")
         if not normalized or normalized == ".":
             raise ValueError(f"Upload path '{path}' does not name a file.")
         parts = normalized.split("/")

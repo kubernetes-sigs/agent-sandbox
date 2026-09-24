@@ -5792,8 +5792,7 @@ func TestRecordStageLatenciesPVCBoundUsesObservationTime(t *testing.T) {
 		},
 	}
 	// CreationTimestamp is near t0; if used as bind time, latency would be ~50ms.
-	// Observation time (now) yields ~10s — covered by TestPVCBoundTransitionTimeUsesFallback
-	// and by asserting the stage is recorded (endTime = now > t0, so it is observed).
+	// PVC phase transitions have no timestamp, so the observation time yields ~10s.
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "data-pvc-sb",
@@ -5817,6 +5816,71 @@ func TestRecordStageLatenciesPVCBoundUsesObservationTime(t *testing.T) {
 	pending = r.prepareStageLatencies(context.Background(), sandbox, nil, nil)
 	emitStageLatencies(context.Background(), sandbox, pending)
 	require.Equal(t, uint64(1), histogramSampleCount(t, asmetrics.SandboxStageLatency))
+}
+
+func TestMarkInitiallyBoundPVCStage(t *testing.T) {
+	testCases := []struct {
+		name         string
+		phase        corev1.PersistentVolumeClaimPhase
+		wantRecorded bool
+	}{
+		{name: "bound", phase: corev1.ClaimBound, wantRecorded: true},
+		{name: "pending", phase: corev1.ClaimPending, wantRecorded: false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			asmetrics.SandboxStageLatency.Reset()
+			sandbox := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "pvc-sb",
+					Namespace: "default",
+					UID:       sandboxUID,
+				},
+				Spec: sandboxv1beta1.SandboxSpec{
+					SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+						VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{{
+							EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+							Spec:                   corev1.PersistentVolumeClaimSpec{},
+						}},
+					},
+				},
+			}
+			pvc := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "data-pvc-sb",
+					Namespace:       "default",
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef("pvc-sb")},
+				},
+				Status: corev1.PersistentVolumeClaimStatus{Phase: tc.phase},
+			}
+
+			c := newFakeClient(sandbox, pvc)
+			r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+			require.True(t, ensureSandboxFirstObservedTime(sandbox))
+			r.markInitiallyBoundPVCStage(t.Context(), sandbox)
+
+			_, recorded := recordedStages(sandbox)[asmetrics.StagePVCBound]
+			require.Equal(t, tc.wantRecorded, recorded)
+			require.False(t, ensureSandboxFirstObservedTime(sandbox), "first observation must only be initialized once")
+
+			pending := r.prepareStageLatencies(t.Context(), sandbox, nil, nil)
+			emitStageLatencies(t.Context(), sandbox, pending)
+			require.Equal(t, uint64(0), histogramSampleCount(t, asmetrics.SandboxStageLatency))
+
+			if tc.phase == corev1.ClaimPending {
+				livePVC := &corev1.PersistentVolumeClaim{}
+				require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pvc), livePVC))
+				livePVC.Status.Phase = corev1.ClaimBound
+				require.NoError(t, c.Status().Update(t.Context(), livePVC))
+
+				pending = r.prepareStageLatencies(t.Context(), sandbox, nil, nil)
+				emitStageLatencies(t.Context(), sandbox, pending)
+				require.Equal(t, uint64(1), histogramSampleCount(t, asmetrics.SandboxStageLatency),
+					"a PVC first observed Pending must emit when it later becomes Bound")
+			}
+		})
+	}
 }
 
 func TestRecordStageLatenciesPVCBoundIgnoresForeignOwner(t *testing.T) {
@@ -5872,7 +5936,7 @@ func TestRecordStageLatenciesPVCBoundIgnoresForeignOwner(t *testing.T) {
 	require.Equal(t, uint64(0), histogramSampleCount(t, asmetrics.SandboxStageLatency))
 }
 
-func TestReconcileStampsFirstObservedTimeAndRecordsPodCreated(t *testing.T) {
+func TestReconcileStampsFirstObservedTimeAndRecordsInitialStages(t *testing.T) {
 	asmetrics.SandboxStageLatency.Reset()
 
 	sandbox := &sandboxv1beta1.Sandbox{
@@ -5884,6 +5948,10 @@ func TestReconcileStampsFirstObservedTimeAndRecordsPodCreated(t *testing.T) {
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
 			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{{
+					EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+					Spec:                   corev1.PersistentVolumeClaimSpec{},
+				}},
 				PodTemplate: sandboxv1beta1.PodTemplate{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: "c", Image: "img"}},
@@ -5892,8 +5960,16 @@ func TestReconcileStampsFirstObservedTimeAndRecordsPodCreated(t *testing.T) {
 			},
 		},
 	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "data-obs-sb",
+			Namespace:       "default",
+			OwnerReferences: []metav1.OwnerReference{sandboxControllerRef("obs-sb")},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
 	c := &createTimestampClient{
-		WithWatch: newFakeClient(sandbox),
+		WithWatch: newFakeClient(sandbox, pvc),
 		now:       time.Now,
 	}
 	r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp(), ClusterDomain: "cluster.local"}
@@ -5907,7 +5983,9 @@ func TestReconcileStampsFirstObservedTimeAndRecordsPodCreated(t *testing.T) {
 	require.NotNil(t, updated.Status.Lifecycle.FirstObservedTime)
 	require.False(t, updated.Status.Lifecycle.FirstObservedTime.IsZero())
 	require.Contains(t, recordedStages(updated), asmetrics.StagePodCreated)
-	require.Equal(t, uint64(1), histogramSampleCount(t, asmetrics.SandboxStageLatency))
+	require.Contains(t, recordedStages(updated), asmetrics.StagePVCBound)
+	require.Equal(t, uint64(1), histogramSampleCount(t, asmetrics.SandboxStageLatency),
+		"the initially Bound PVC must not emit alongside pod_created")
 }
 
 func TestReconcileDoesNotCreateChildrenBeforeFirstObservedTimePersist(t *testing.T) {
@@ -6296,18 +6374,6 @@ func TestRecordChildReconcileErrorOnOwnershipConflict(t *testing.T) {
 	require.Error(t, err)
 	require.InDelta(t, 1, testutil.ToFloat64(asmetrics.ChildReconcileErrors.WithLabelValues(
 		"default", asmetrics.ResourcePod, asmetrics.ReasonOwnershipConflict)), 0)
-}
-
-func TestPVCBoundTransitionTimeUsesFallback(t *testing.T) {
-	fallback := time.Now()
-	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			CreationTimestamp: metav1.NewTime(fallback.Add(-5 * time.Minute)),
-		},
-	}
-	got := pvcBoundTransitionTime(pvc, fallback)
-	require.Equal(t, fallback, got)
-	require.Equal(t, fallback, pvcBoundTransitionTime(nil, fallback))
 }
 
 // histogramSampleCount sums observation counts across all series of a histogram

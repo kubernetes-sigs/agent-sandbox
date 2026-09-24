@@ -223,15 +223,12 @@ var (
 	// - ready_condition: "true" | "false"
 	// - expired: "true" | "false"
 	// - launch_type: "warm" | "cold"
-	// - sandbox_template: sandboxTemplateRef, or "unknown" when the Sandbox carries no template annotation.
-	//   Note this sentinel differs from the "__unknown__" the SandboxClaim metrics use, so the two
-	//   families do not join on sandbox_template for templateless Sandboxes.
 	// - owned_by: "SandboxClaim" | "SandboxWarmPool" | "None".
 	// - created_by: the component that created the sandbox (e.g. "go-client", "python-client", "controller", "unknown").
 	AgentSandboxesDesc = prometheus.NewDesc(
 		"agent_sandboxes",
 		"Monitor the point-in-time number of sandboxes in the cluster.",
-		[]string{"namespace", "ready_condition", "expired", "launch_type", "sandbox_template", "owned_by", "created_by"},
+		[]string{"namespace", "ready_condition", "expired", "launch_type", "owned_by", "created_by"},
 		nil,
 	)
 
@@ -376,7 +373,6 @@ func ClassifyReconcileError(err error, hint string) string {
 type SandboxMetricLabels struct {
 	Namespace  string
 	LaunchType string
-	Template   string
 	OwnedBy    string
 }
 
@@ -385,14 +381,10 @@ func LabelsFromSandbox(sandbox *sandboxv1beta1.Sandbox) SandboxMetricLabels {
 	labels := SandboxMetricLabels{
 		Namespace:  sandbox.Namespace,
 		LaunchType: LaunchTypeCold,
-		Template:   "unknown",
 		OwnedBy:    OwnedByNone,
 	}
 	if sandbox.Labels[sandboxv1beta1.SandboxLaunchTypeLabel] == sandboxv1beta1.SandboxLaunchTypeWarm {
 		labels.LaunchType = LaunchTypeWarm
-	}
-	if template, ok := sandbox.Annotations[sandboxv1beta1.SandboxTemplateRefAnnotation]; ok && template != "" {
-		labels.Template = template
 	}
 	controllerRef := metav1.GetControllerOf(sandbox)
 	if g, k := utils.GetGroupKind(controllerRef); g == extensionsv1beta1.GroupVersion.Group &&

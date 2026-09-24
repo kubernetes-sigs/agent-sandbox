@@ -46,6 +46,11 @@ func TestExtractControllerMetrics(t *testing.T) {
 			ConstLabels: []string{"build_date", "compiler", "git_commit", "git_version", "go_version", "platform"},
 		},
 		{
+			Name:   "agent_sandbox_child_reconcile_errors_total",
+			Type:   typeCounter,
+			Labels: []string{"namespace", "resource", "reason"},
+		},
+		{
 			Name:   "agent_sandbox_claim_controller_startup_latency_ms",
 			Type:   typeHistogram,
 			Labels: []string{"launch_type", "sandbox_template"},
@@ -71,11 +76,21 @@ func TestExtractControllerMetrics(t *testing.T) {
 			Labels: []string{"namespace", "launch_type", "sandbox_template"},
 		},
 		{
+			Name:   "agent_sandbox_stage_latency_ms",
+			Type:   typeHistogram,
+			Labels: []string{"namespace", "launch_type", "owned_by", "stage"},
+		},
+		{
+			Name:   "agent_sandbox_template_reconcile_errors_total",
+			Type:   typeCounter,
+			Labels: []string{"namespace", "reason"},
+		},
+		{
 			// Declared as a bare descriptor, so its Gauge type comes from the
 			// MustNewConstMetric call in sandbox_collector.go.
 			Name:   "agent_sandboxes",
 			Type:   typeGauge,
-			Labels: []string{"namespace", "ready_condition", "expired", "launch_type", "sandbox_template", "owned_by", "created_by"},
+			Labels: []string{"namespace", "ready_condition", "expired", "launch_type", "owned_by", "created_by"},
 		},
 	}
 

@@ -232,13 +232,11 @@ func TestLabelsFromSandbox(t *testing.T) {
 	labels := LabelsFromSandbox(sandbox)
 	require.Equal(t, "ns", labels.Namespace)
 	require.Equal(t, LaunchTypeWarm, labels.LaunchType)
-	require.Equal(t, "my-template", labels.Template)
 	require.Equal(t, OwnedBySandboxClaim, labels.OwnedBy)
 
 	bare := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: "ns2"}}
 	bareLabels := LabelsFromSandbox(bare)
 	require.Equal(t, LaunchTypeCold, bareLabels.LaunchType)
-	require.Equal(t, "unknown", bareLabels.Template)
 	require.Equal(t, OwnedByNone, bareLabels.OwnedBy)
 }
 

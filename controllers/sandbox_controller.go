@@ -313,9 +313,12 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// failures must not stall reconcile.
 	r.ensureSandboxTraceContext(ctx, sandbox)
 
-	ensureSandboxFirstObservedTime(sandbox)
-	// Persist firstObservedTime before creating children. If this write fails,
-	// retry must not have already created child resources against a later t0.
+	if ensureSandboxFirstObservedTime(sandbox) {
+		r.markInitiallyBoundPVCStage(ctx, sandbox)
+	}
+	// Persist firstObservedTime and any pre-existing PVC stage before creating
+	// children. If this write fails, retry must not have already created child
+	// resources against a later t0.
 	if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
 		return ctrl.Result{}, statusUpdateErr
 	}
@@ -2022,14 +2025,16 @@ func (r *SandboxReconciler) ensureSandboxTraceContext(ctx context.Context, sandb
 }
 
 // ensureSandboxFirstObservedTime records when the controller first saw this
-// Sandbox. The caller persists it before creating child resources.
-func ensureSandboxFirstObservedTime(sandbox *sandboxv1beta1.Sandbox) {
+// Sandbox and reports whether it initialized the timestamp. The caller persists
+// it before creating child resources.
+func ensureSandboxFirstObservedTime(sandbox *sandboxv1beta1.Sandbox) bool {
 	lifecycle := ensureSandboxLifecycleStatus(&sandbox.Status)
 	if lifecycle.FirstObservedTime != nil && !lifecycle.FirstObservedTime.IsZero() {
-		return
+		return false
 	}
 	now := metav1.Now()
 	lifecycle.FirstObservedTime = &now
+	return true
 }
 
 func ensureSandboxLifecycleStatus(status *sandboxv1beta1.SandboxStatus) *sandboxv1beta1.SandboxLifecycleStatus {
@@ -2048,6 +2053,25 @@ func sandboxFirstObservedTime(sandbox *sandboxv1beta1.Sandbox) (time.Time, bool)
 		return time.Time{}, false
 	}
 	return t, true
+}
+
+// markInitiallyBoundPVCStage excludes PVC binding latency that the controller
+// cannot measure. This is called only when firstObservedTime is initialized and
+// before this reconciler can create PVCs, so the transition time of an already-
+// complete stage is unknown.
+func (r *SandboxReconciler) markInitiallyBoundPVCStage(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) {
+	if !r.pvcsBound(ctx, sandbox) {
+		return
+	}
+
+	lifecycle := ensureSandboxLifecycleStatus(&sandbox.Status)
+	recorded := asmetrics.RecordedStageSet(lifecycle.RecordedStages)
+	if _, already := recorded[asmetrics.StagePVCBound]; already {
+		return
+	}
+	recorded[asmetrics.StagePVCBound] = struct{}{}
+	lifecycle.RecordedStages = asmetrics.SortedRecordedStages(recorded)
+	log.FromContext(ctx).V(4).Info("Skipping initially completed stage latency", "stage", asmetrics.StagePVCBound)
 }
 
 // recordChildReconcileError increments the child reconcile error counter with an allowlisted reason.
@@ -2125,8 +2149,7 @@ func (r *SandboxReconciler) prepareStageLatencies(ctx context.Context, sandbox *
 	if len(sandbox.Spec.VolumeClaimTemplates) > 0 {
 		// Skip PVC Gets once pvc_bound is already recorded; observe() would no-op anyway.
 		if _, already := recorded[asmetrics.StagePVCBound]; !already {
-			allBound, boundAt := r.pvcsBound(ctx, sandbox, now)
-			observe(asmetrics.StagePVCBound, allBound, boundAt)
+			observe(asmetrics.StagePVCBound, r.pvcsBound(ctx, sandbox), now)
 		}
 	}
 
@@ -2226,38 +2249,23 @@ func serviceReadyTime(svc *corev1.Service, fallback time.Time) time.Time {
 	return fallback
 }
 
-// pvcsBound reports whether every VCT-backed PVC is owned by the Sandbox and Bound,
-// and the latest Bound observation time. Unowned, foreign-owned, or unbound PVCs
-// fall through to not-bound so the stage is not recorded against a foreign claim.
-func (r *SandboxReconciler) pvcsBound(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, fallback time.Time) (bool, time.Time) {
+// pvcsBound reports whether every VCT-backed PVC is owned by the Sandbox and
+// Bound. Unowned, foreign-owned, or unbound PVCs fall through to not-bound so
+// the stage is not recorded against a foreign claim.
+func (r *SandboxReconciler) pvcsBound(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) bool {
 	if len(sandbox.Spec.VolumeClaimTemplates) == 0 {
-		return false, fallback
+		return false
 	}
-	var latestBound time.Time
 	for _, pvcTemplate := range sandbox.Spec.VolumeClaimTemplates {
 		pvc := &corev1.PersistentVolumeClaim{}
 		pvcName := pvcTemplate.Name + "-" + sandbox.Name
 		if err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: sandbox.Namespace}, pvc); err != nil {
-			return false, fallback
+			return false
 		}
 		ownership, _ := checkOwnership(pvc, sandbox)
 		if ownership != resourceOwnedBySandbox || pvc.Status.Phase != corev1.ClaimBound {
-			return false, fallback
-		}
-		boundAt := pvcBoundTransitionTime(pvc, fallback)
-		if boundAt.After(latestBound) {
-			latestBound = boundAt
+			return false
 		}
 	}
-	if latestBound.IsZero() {
-		latestBound = fallback
-	}
-	return true, latestBound
-}
-
-func pvcBoundTransitionTime(_ *corev1.PersistentVolumeClaim, fallback time.Time) time.Time {
-	// PVCs have no Bound condition with LastTransitionTime. Prefer the reconciler
-	// observation time (fallback) over CreationTimestamp, which undercounts bind
-	// latency for dynamically provisioned volumes.
-	return fallback
+	return true
 }

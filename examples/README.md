@@ -55,4 +55,5 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**vscode-sandbox**](./vscode-sandbox): An example of running VSCode in a sandbox.
 - [**warmpool-quickstart**](./warmpool-quickstart): Reference YAML for the three extension CRDs — SandboxTemplate, SandboxWarmPool, and SandboxClaim — including a secure template and an LLM-scoped network policy example.
 - [**webhook-inject-timestamp**](./webhook-inject-timestamp): A mutating webhook that stamps sandbox resources with a creation-observed timestamp for latency metrics.
+- [**webmcp-bridge-sandbox**](./webmcp-bridge-sandbox): Bridges a WebMCP-enabled page's `document.modelContext` tools onto MCP via Playwright, running inside the Sandbox pod.
 - [**windows-sandbox**](./windows-sandbox): An example of running a Windows guest inside the Agent Sandbox via KVM/QEMU.

@@ -1,0 +1,27 @@
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: webmcp-bridge-sandbox
+spec:
+  podTemplate:
+    spec:
+      # No securityContext hardening (runAsNonRoot, etc.) here, unlike
+      # examples/mcp-server-sandbox — Chromium's own sandboxing wants
+      # more privilege than a locked-down pod securityContext allows by
+      # default (it needs to create its own user namespaces / apply
+      # seccomp itself). Running as non-root is still possible but needs
+      # Chromium launched with --no-sandbox or an image built for it;
+      # left out here to keep the example minimal.
+      containers:
+        - name: webmcp-bridge
+          image: webmcp-bridge-sandbox:local
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: TARGET_PAGE_URL
+              value: "http://localhost:8090/" # the bundled demo page
+          # No resources block here to keep the example minimal, but a
+          # real deployment should set one — headless Chromium's own
+          # footprint alone is comfortably in the hundreds-of-MB range
+          # (examples/gke-swap sizes Chrome pods around 2Gi as a working
+          # limit), before counting the target page's own memory use.
+      restartPolicy: Never

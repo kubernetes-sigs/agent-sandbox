@@ -8,10 +8,10 @@ description: >
 
 ## Overview
 
-[Anthropic Managed Agents](https://docs.claude.com/en/docs/agents-and-tools/managed-agents)
+[Anthropic Managed Agents](https://platform.claude.com/docs/en/managed-agents/overview)
 is a hosted agent loop — Claude, conversation state, and a per-environment _work
 queue_ all run on Anthropic's control plane. In the
-[**self-hosted sandbox**](https://docs.claude.com/en/docs/agents-and-tools/managed-agents/self-hosting)
+[**self-hosted sandbox**](https://platform.claude.com/docs/en/managed-agents/self-hosted-sandboxes)
 configuration, Anthropic still runs the agent, but instead of executing tool
 calls (`bash`, `read`, `write`, `grep`, …) on its own infrastructure it queues
 each one and waits for _your_ cluster to pull it, run it, and post the result
@@ -258,6 +258,6 @@ without being told.
 ## References
 
 - [Reference implementation — `kubernetes-engine-samples/ai-ml/anthropic-agent-sandbox`](https://github.com/GoogleCloudPlatform/kubernetes-engine-samples/tree/main/ai-ml/anthropic-agent-sandbox)
-- [Anthropic Managed Agents — self-hosting](https://docs.claude.com/en/docs/agents-and-tools/managed-agents/self-hosting)
+- [Anthropic Managed Agents — self-hosting](https://platform.claude.com/docs/en/managed-agents/self-hosted-sandboxes)
 - [gVisor Isolation](/docs/use-cases/gvisor-isolation/)
 - [Secure Sandbox Admission Policy (VAP)](/docs/use-cases/examples/secure-sandbox-vap/)

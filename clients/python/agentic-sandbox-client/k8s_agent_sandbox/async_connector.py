@@ -122,7 +122,7 @@ class AsyncSandboxConnector:
             raise ValueError(
                 "AsyncSandboxConnector does not support SandboxLocalTunnelConnectionConfig. "
                 "Use SandboxDirectConnectionConfig, SandboxGatewayConnectionConfig, "
-                "SandboxInClusterConnectionConfig, or "
+                "SandboxInClusterConnectionConfig, "
                 "SandboxdPodTunnelConnectionConfig, or "
                 "SandboxdInClusterConnectionConfig instead. "
                 "For local development, use the synchronous SandboxClient."

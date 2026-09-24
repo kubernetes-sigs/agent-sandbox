@@ -46,14 +46,15 @@ stage) — `demo-page/index.html` installs a hand-rolled stub only when the
 real API is absent, matching just enough of the surface (register/get/
 execute) to be useful, not a spec-conformant implementation.
 
-Each `call_browser_tool` invocation is bounded to 30 seconds — if the page's
-handler never resolves, the bridge reports a timeout to the MCP client
-instead of hanging forever (a timeout doesn't undo whatever side effect the
-handler already started in the page, only the bridge's own wait for a
-result). The WebMCP spec defines `executeTool()`'s result as a JSON string;
-the bundled demo polyfill hands back an object directly instead, so
-`WebMCPBridge.execute()` decodes string results before returning them —
-either shape reaches the MCP client the same way.
+Each `call_browser_tool`/`list_browser_tools` invocation is bounded to 30
+seconds — if the page's handler, or `getTools()` itself, never resolves, the
+bridge reports a timeout to the MCP client instead of hanging forever (a
+timeout doesn't undo whatever side effect a handler already started in the
+page, only the bridge's own wait for a result). The WebMCP spec defines
+`executeTool()`'s result as a JSON string; the bundled demo polyfill hands
+back an object directly instead, so `WebMCPBridge.execute()` decodes string
+results before returning them — either shape reaches the MCP client the
+same way.
 
 ## Example Sandbox
 

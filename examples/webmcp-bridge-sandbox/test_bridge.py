@@ -155,6 +155,21 @@ def test_execute_times_out_when_page_never_resolves():
         bridge._TOOL_CALL_TIMEOUT_S = original_timeout
 
 
+def test_list_tools_times_out_when_page_never_resolves():
+    class HangingPage:
+        async def evaluate(self, script, arg=None):
+            await asyncio.sleep(3600)
+
+    wb = bridge.WebMCPBridge(HangingPage())
+    original_timeout = bridge._TOOL_CALL_TIMEOUT_S
+    bridge._TOOL_CALL_TIMEOUT_S = 0.01
+    try:
+        with pytest.raises(RuntimeError):
+            asyncio.run(wb.list_tools())
+    finally:
+        bridge._TOOL_CALL_TIMEOUT_S = original_timeout
+
+
 def test_call_browser_tool_defaults_missing_arguments_to_empty_dict():
     page = FakePage(response={"iso_time": "2026-01-01T00:00:00Z"})
     bridge._bridge = bridge.WebMCPBridge(page)

@@ -70,7 +70,16 @@ class WebMCPBridge:
         self._page = page
 
     async def list_tools(self) -> list[dict]:
-        return await self._page.evaluate(_GET_TOOLS_JS)
+        try:
+            return await asyncio.wait_for(
+                self._page.evaluate(_GET_TOOLS_JS),
+                timeout=_TOOL_CALL_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                f"getTools() on {TARGET_PAGE_URL} did not respond within "
+                f"{_TOOL_CALL_TIMEOUT_S}s"
+            ) from None
 
     async def execute(self, tool_name: str, arguments: dict[str, Any]) -> Any:
         # A WebMCP tool's execute() can return anything JSON-serializable

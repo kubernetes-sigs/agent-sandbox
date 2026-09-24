@@ -321,6 +321,7 @@ func main() {
 			metricsOpts.CertDir = metricsCertDir
 		}
 		setupLog.Info("metrics server TLS enabled (--metrics-secure-serving)")
+		metricsOpts.TLSOpts = append(metricsOpts.TLSOpts, alpnOpt)
 		tlsOpts, err := buildMetricsTLSOpts(tlsMinVersion, tlsCipherSuites)
 		if err != nil {
 			setupLog.Error(err, "invalid TLS configuration")

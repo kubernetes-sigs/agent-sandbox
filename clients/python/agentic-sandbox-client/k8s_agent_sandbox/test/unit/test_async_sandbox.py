@@ -163,6 +163,7 @@ class TestAsyncSandbox(unittest.IsolatedAsyncioTestCase):
             k8s_helper=mock_k8s_helper_instance,
             get_pod_ip=sandbox.get_pod_ip,
             get_pod_name=sandbox.get_pod_name,
+            get_service_fqdn=sandbox.get_service_fqdn,
         )
 
         mock_create_tracer_manager.assert_called_once_with(mock_tracer_config)
@@ -285,6 +286,19 @@ class TestAsyncSandbox(unittest.IsolatedAsyncioTestCase):
     async def test_get_pod_ip_returns_none_when_missing(self):
         self.mock_k8s_helper.get_sandbox.return_value = {"status": {}}
         self.assertIsNone(await self.sandbox.get_pod_ip())
+
+    async def test_get_service_fqdn_uses_status(self):
+        self.mock_k8s_helper.get_sandbox.return_value = {
+            "status": {"serviceFQDN": "sandbox.agents.svc.example.internal"}
+        }
+        self.assertEqual(
+            await self.sandbox.get_service_fqdn(),
+            "sandbox.agents.svc.example.internal",
+        )
+
+    async def test_get_service_fqdn_returns_none_when_missing(self):
+        self.mock_k8s_helper.get_sandbox.return_value = {"status": {}}
+        self.assertIsNone(await self.sandbox.get_service_fqdn())
 
     def test_properties(self):
         """Tests the commands and files properties."""

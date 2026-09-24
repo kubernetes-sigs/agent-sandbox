@@ -15,7 +15,7 @@
 import re
 from datetime import datetime, timezone
 from typing import Literal, Optional, Union
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 _ENV_VAR_NAME_RE = re.compile(r"^[-._a-zA-Z][-._a-zA-Z0-9]*$")
 
@@ -123,6 +123,31 @@ class SandboxdPodTunnelConnectionConfig(BaseModel):
             raise ValueError("port must be between 1 and 65535")
         return v
 
+class SandboxdInClusterConnectionConfig(BaseModel):
+    """Connect to sandboxd directly over the selected in-cluster address.
+
+    ``service-dns`` requires ``Sandbox.status.serviceFQDN`` and a Service
+    enabled on the Sandbox template. ``pod-ip`` uses ``Sandbox.status.podIPs``.
+    Neither mode falls back to the other. sandboxd's REST filesystem listener
+    defaults to port 8080 and its gRPC ProcessService listener to port 9090.
+    """
+    mode: Literal["service-dns", "pod-ip"]
+    rest_port: int = 8080
+    grpc_port: int = 9090
+
+    @field_validator("rest_port", "grpc_port")
+    @classmethod
+    def validate_port(cls, v: int) -> int:
+        if v < 1 or v > 65535:
+            raise ValueError("port must be between 1 and 65535")
+        return v
+
+    @model_validator(mode="after")
+    def validate_distinct_ports(self) -> "SandboxdInClusterConnectionConfig":
+        if self.rest_port == self.grpc_port:
+            raise ValueError("REST and gRPC ports must be different")
+        return self
+
 class SandboxInClusterConnectionConfig(BaseModel):
     """Configuration for direct in-cluster connection to the sandbox pod, bypassing the router.
 
@@ -138,6 +163,7 @@ SandboxConnectionConfig = Union[
     SandboxLocalTunnelConnectionConfig,
     SandboxInClusterConnectionConfig,
     SandboxdPodTunnelConnectionConfig,
+    SandboxdInClusterConnectionConfig,
 ]
 
 class SandboxTracerConfig(BaseModel):

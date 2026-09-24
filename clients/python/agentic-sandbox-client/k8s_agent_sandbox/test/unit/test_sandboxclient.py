@@ -31,6 +31,7 @@ from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
     SandboxInClusterConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
+    SandboxdInClusterConnectionConfig,
 )
 from k8s_agent_sandbox.exceptions import (
     SandboxPortForwardError,
@@ -822,6 +823,12 @@ class TestSandboxClientInClusterConfig(unittest.TestCase):
         config = SandboxInClusterConnectionConfig()
         sc = SandboxClient(connection_config=config)
         self.assertIsInstance(sc.connection_config, SandboxInClusterConnectionConfig)
+
+    @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
+    def test_sandboxd_in_cluster_config_stored(self, _):
+        config = SandboxdInClusterConnectionConfig(mode="service-dns")
+        client = SandboxClient(connection_config=config)
+        self.assertIs(client.connection_config, config)
 
     @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
     def test_default_config_is_local_tunnel(self, _):

@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Async HTTP and pod-tunnel transports used by the Python SDK.
+"""Async HTTP and sandboxd transports used by the Python SDK.
 
 Router-based connections share an ``httpx`` client. The sandboxd runtime uses
-one direct ``kubectl port-forward`` with separate local endpoints for its REST
-and gRPC listeners, both owned by the connector lifecycle.
+either a direct in-cluster address or one ``kubectl port-forward`` with separate
+REST and gRPC endpoints, both owned by the connector lifecycle.
 """
 
 import asyncio
@@ -31,7 +31,12 @@ import httpx
 
 
 from .async_k8s_helper import AsyncK8sHelper
-from .exceptions import SandboxPortForwardError, SandboxRequestError
+from .exceptions import (
+    SandboxNotReadyError,
+    SandboxPortForwardError,
+    SandboxRequestError,
+    SandboxServiceUnavailableError,
+)
 from .models import (
     SandboxConnectionConfig,
     SandboxDirectConnectionConfig,
@@ -39,6 +44,7 @@ from .models import (
     SandboxInClusterConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
     SandboxdPodTunnelConnectionConfig,
+    SandboxdInClusterConnectionConfig,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,8 +103,8 @@ class AsyncSandboxConnector:
     """
     Async connector for communicating with a Sandbox over HTTP using httpx.
 
-    Supports DirectConnection, GatewayConnection, InCluster, and sandboxd pod
-    tunnel modes. LocalTunnel mode is not supported because it relies on a
+    Supports DirectConnection, GatewayConnection, InCluster, and sandboxd
+    modes. LocalTunnel mode is not supported because it relies on a
     router subprocess; use the sync SandboxConnector for local development.
     """
 
@@ -110,13 +116,15 @@ class AsyncSandboxConnector:
         k8s_helper: AsyncK8sHelper,
         get_pod_ip: Callable[[], Awaitable[str | None]] | None = None,
         get_pod_name: Callable[[], Awaitable[str | None]] | None = None,
+        get_service_fqdn: Callable[[], Awaitable[str | None]] | None = None,
     ) -> None:
         if isinstance(connection_config, SandboxLocalTunnelConnectionConfig):
             raise ValueError(
                 "AsyncSandboxConnector does not support SandboxLocalTunnelConnectionConfig. "
                 "Use SandboxDirectConnectionConfig, SandboxGatewayConnectionConfig, "
                 "SandboxInClusterConnectionConfig, or "
-                "SandboxdPodTunnelConnectionConfig instead. "
+                "SandboxdPodTunnelConnectionConfig, or "
+                "SandboxdInClusterConnectionConfig instead. "
                 "For local development, use the synchronous SandboxClient."
             )
         self.id = sandbox_id
@@ -124,7 +132,8 @@ class AsyncSandboxConnector:
         self.connection_config = connection_config
         self.k8s_helper = k8s_helper
         self._get_pod_ip = get_pod_ip
-        self._grpc_channel = None
+        self._get_service_fqdn = get_service_fqdn
+        self._grpc_channel: Any = None
         self._grpc_channel_target: str | None = None
         # Command and filesystem calls may arrive together on first use. The
         # lock keeps channel creation and replacement single-owner.
@@ -135,13 +144,21 @@ class AsyncSandboxConnector:
         self._closed = False
         self._close_complete = False
         self.grpc_target: str | None = None
-        self._sandboxd_strategy = None
+        self._sandboxd_strategy: (
+            AsyncSandboxdPodTunnelStrategy | AsyncSandboxdInClusterStrategy | None
+        ) = None
         if isinstance(connection_config, SandboxdPodTunnelConnectionConfig):
             self._sandboxd_strategy = AsyncSandboxdPodTunnelStrategy(
                 sandbox_id=sandbox_id,
                 namespace=namespace,
                 config=connection_config,
                 get_pod_name=get_pod_name,
+            )
+        elif isinstance(connection_config, SandboxdInClusterConnectionConfig):
+            self._sandboxd_strategy = AsyncSandboxdInClusterStrategy(
+                config=connection_config,
+                get_pod_ip=get_pod_ip,
+                get_service_fqdn=get_service_fqdn,
             )
 
         self._base_url: str | None = None
@@ -164,7 +181,11 @@ class AsyncSandboxConnector:
 
         self._inject_router_headers = not isinstance(
             connection_config,
-            (SandboxInClusterConnectionConfig, SandboxdPodTunnelConnectionConfig),
+            (
+                SandboxInClusterConnectionConfig,
+                SandboxdPodTunnelConnectionConfig,
+                SandboxdInClusterConnectionConfig,
+            ),
         )
 
         transport = httpx.AsyncHTTPTransport(retries=3)
@@ -175,6 +196,9 @@ class AsyncSandboxConnector:
     async def _resolve_base_url(self) -> str:
         """Resolve the HTTP endpoint for the configured connection mode."""
         if self._sandboxd_strategy is not None:
+            if isinstance(self._sandboxd_strategy, AsyncSandboxdInClusterStrategy):
+                # A failed Pod IP refresh must not leave the previous target usable.
+                self.grpc_target = None
             base_url, self.grpc_target = await self._sandboxd_strategy.connect()
             return base_url
 
@@ -369,6 +393,8 @@ class AsyncSandboxConnector:
                 ) from e
             except httpx.HTTPError as e:
                 logger.error(f"Request to sandbox failed: {e}")
+                if isinstance(self._sandboxd_strategy, AsyncSandboxdInClusterStrategy):
+                    await self.invalidate_sandboxd_transport(None)
                 # Clear cached URLs that may have gone stale.
                 if isinstance(self.connection_config, SandboxGatewayConnectionConfig):
                     self._base_url = None
@@ -431,8 +457,8 @@ class AsyncSandboxConnector:
     async def grpc_channel(self) -> Any:
         """Return the reusable ``grpc.aio`` channel for sandboxd commands.
 
-        Dependency validation happens before tunnel setup so a missing optional
-        extra never leaves a ``kubectl`` process behind.
+        Dependency validation happens before endpoint setup so a missing
+        optional extra never leaves a ``kubectl`` process behind.
         """
         self._ensure_open()
         strategy = self._sandboxd_strategy
@@ -465,6 +491,31 @@ class AsyncSandboxConnector:
                 self._grpc_channel = grpc.aio.insecure_channel(self.grpc_target)
                 self._grpc_channel_target = self.grpc_target
                 return self._grpc_channel
+
+    async def invalidate_sandboxd_transport(self, channel: Any | None) -> None:
+        """Discard a failed direct transport without replaying its operation.
+
+        A gRPC failure supplies its channel so a late failure cannot close a
+        replacement. An HTTP failure supplies None to discard the current one.
+        """
+        if not isinstance(self._sandboxd_strategy, AsyncSandboxdInClusterStrategy):
+            return
+        async with self._lifecycle_lock:
+            if channel is not None and channel is not self._grpc_channel:
+                return
+            async with self._grpc_lock:
+                try:
+                    if self._grpc_channel is not None:
+                        result = self._grpc_channel.close()
+                        if inspect.isawaitable(result):
+                            await result
+                except Exception:
+                    logger.debug("Unable to close failed sandboxd channel", exc_info=True)
+                finally:
+                    self._grpc_channel = None
+                    self._grpc_channel_target = None
+                    self.grpc_target = None
+                    self._sandboxd_strategy.invalidate_service_fqdn()
 
     async def close(self) -> None:
         """Close HTTP, gRPC, and port-forward resources owned by the connector."""
@@ -690,3 +741,60 @@ class AsyncSandboxdPodTunnelStrategy:
         self.port_forward_process = None
         self.base_url = None
         self.grpc_target = None
+
+
+class AsyncSandboxdInClusterStrategy:
+    """Resolve one in-cluster host for sandboxd's REST and gRPC listeners."""
+
+    def __init__(
+        self,
+        config: SandboxdInClusterConnectionConfig,
+        get_pod_ip: Callable[[], Awaitable[str | None]] | None,
+        get_service_fqdn: Callable[[], Awaitable[str | None]] | None,
+    ) -> None:
+        self.config = config
+        self._get_pod_ip = get_pod_ip
+        self._get_service_fqdn = get_service_fqdn
+        self._service_fqdn: str | None = None
+        self.grpc_target: str | None = None
+
+    async def connect(self) -> tuple[str, str]:
+        """Resolve REST and gRPC endpoints from the selected Sandbox status field."""
+        self.grpc_target = None
+        if self.config.mode == "service-dns":
+            fqdn = self._service_fqdn
+            if fqdn is None:
+                fqdn = (
+                    await self._get_service_fqdn()
+                    if self._get_service_fqdn is not None else None
+                )
+                if not fqdn:
+                    raise SandboxServiceUnavailableError(
+                        "Sandbox has no Service FQDN; enable spec.service: true "
+                        "on its template to use service-dns connectivity"
+                    )
+                self._service_fqdn = fqdn
+            host = fqdn
+        else:
+            pod_ip = await self._get_pod_ip() if self._get_pod_ip is not None else None
+            if not pod_ip:
+                raise SandboxNotReadyError(
+                    "sandbox pod IP not resolved yet; cannot connect to sandboxd"
+                )
+            host = pod_ip
+
+        formatted_host = f"[{host}]" if ":" in host else host
+        target = f"{formatted_host}:{self.config.grpc_port}"
+        self.grpc_target = target
+        return f"http://{formatted_host}:{self.config.rest_port}", target
+
+    def invalidate_service_fqdn(self) -> None:
+        """Refresh Service status after a DNS or transport failure."""
+        self._service_fqdn = None
+        self.grpc_target = None
+
+    async def close(self) -> None:
+        self.invalidate_service_fqdn()
+
+    def _close_for_atexit(self) -> None:
+        self.invalidate_service_fqdn()

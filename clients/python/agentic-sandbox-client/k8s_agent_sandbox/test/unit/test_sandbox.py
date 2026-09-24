@@ -112,6 +112,7 @@ class TestSandbox(unittest.TestCase):
             k8s_helper=mock_k8s_helper_instance,
             get_pod_ip=sandbox.get_pod_ip,
             get_pod_name=sandbox.get_pod_name,
+            get_service_fqdn=sandbox.get_service_fqdn,
         )
 
         mock_create_tracer_manager.assert_called_once_with(mock_tracer_config)
@@ -317,6 +318,18 @@ class TestSandbox(unittest.TestCase):
             }
         }
         self.assertEqual(self.sandbox.get_pod_ip(), "10.244.0.42")
+
+    def test_get_service_fqdn_uses_status_and_preserves_cluster_domain(self):
+        self.mock_k8s_helper.get_sandbox.return_value = {
+            "status": {"serviceFQDN": "my-sandbox.dev.svc.example.internal"}
+        }
+        self.assertEqual(
+            self.sandbox.get_service_fqdn(), "my-sandbox.dev.svc.example.internal"
+        )
+
+    def test_get_service_fqdn_returns_none_when_missing(self):
+        self.mock_k8s_helper.get_sandbox.return_value = {"status": {}}
+        self.assertIsNone(self.sandbox.get_service_fqdn())
 
 
 class TestSandboxTerminateIdempotent(unittest.TestCase):

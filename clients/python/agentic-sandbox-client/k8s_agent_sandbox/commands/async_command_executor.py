@@ -102,6 +102,8 @@ class AsyncCommandExecutor:
         try:
             response = await stub.Execute(request, timeout=timeout)
         except grpc.RpcError as e:
+            if e.code() == grpc.StatusCode.UNAVAILABLE:
+                await self.connector.invalidate_sandboxd_transport(channel)
             raise RuntimeError(
                 f"sandboxd process service failed ({e.code()}): {e.details()}"
             ) from e

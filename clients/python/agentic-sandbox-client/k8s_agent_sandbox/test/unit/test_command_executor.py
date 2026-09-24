@@ -60,6 +60,41 @@ class TestCommandExecutor(unittest.TestCase):
         mock_span.set_attribute.assert_any_call("sandbox.exit_code", 0)
         self.assertEqual(result.stdout, "hello")
 
+    def test_sync_sandboxd_unavailable_invalidates_without_replaying(self):
+        class UnavailableRpcError(Exception):
+            def code(self):
+                return "UNAVAILABLE"
+
+            def details(self):
+                return "connection lost"
+
+        connector = MagicMock()
+        channel = MagicMock()
+        connector.grpc_channel.return_value = channel
+        stub = MagicMock()
+        stub.ProcessServiceStub.return_value.Execute.side_effect = UnavailableRpcError()
+        fake_grpc = SimpleNamespace(
+            RpcError=UnavailableRpcError,
+            StatusCode=SimpleNamespace(UNAVAILABLE="UNAVAILABLE"),
+        )
+        with patch.dict(
+            sys.modules,
+            {
+                "grpc": fake_grpc,
+                "k8s_agent_sandbox.commands._process_stubs": SimpleNamespace(
+                    process_pb2=SimpleNamespace(
+                        ProcessConfig=MagicMock(), ExecuteRequest=MagicMock()
+                    ),
+                    process_pb2_grpc=stub,
+                ),
+            },
+        ):
+            executor = CommandExecutor(connector, MagicMock(), "sandbox-client")
+            with self.assertRaisesRegex(RuntimeError, "connection lost"):
+                executor._run_sandboxd("echo hello", timeout=12)
+        connector.invalidate_sandboxd_transport.assert_called_once_with(channel)
+        stub.ProcessServiceStub.return_value.Execute.assert_called_once()
+
 
 class TestAsyncCommandExecutor(unittest.IsolatedAsyncioTestCase):
     """Verify async command routing, results, and tracing."""
@@ -124,6 +159,45 @@ class TestAsyncCommandExecutor(unittest.IsolatedAsyncioTestCase):
         mock_pb2.ExecuteRequest.assert_called_once()
         self.assertEqual(result.stdout, "hello")
         self.assertEqual(result.exit_code, 0)
+
+    async def test_async_sandboxd_unavailable_invalidates_without_replaying(self):
+        class UnavailableRpcError(Exception):
+            def code(self):
+                return "UNAVAILABLE"
+
+            def details(self):
+                return "connection lost"
+
+        connector = MagicMock()
+        connector.connect = AsyncMock()
+        channel = MagicMock()
+        connector.grpc_channel = AsyncMock(return_value=channel)
+        connector.invalidate_sandboxd_transport = AsyncMock()
+        stub = MagicMock()
+        stub.ProcessServiceStub.return_value.Execute = AsyncMock(
+            side_effect=UnavailableRpcError()
+        )
+        fake_grpc = SimpleNamespace(
+            RpcError=UnavailableRpcError,
+            StatusCode=SimpleNamespace(UNAVAILABLE="UNAVAILABLE"),
+        )
+        with patch.dict(
+            sys.modules,
+            {
+                "grpc": fake_grpc,
+                "k8s_agent_sandbox.commands._process_stubs": SimpleNamespace(
+                    process_pb2=SimpleNamespace(
+                        ProcessConfig=MagicMock(), ExecuteRequest=MagicMock()
+                    ),
+                    process_pb2_grpc=stub,
+                ),
+            },
+        ):
+            executor = AsyncCommandExecutor(connector, MagicMock(), "sandbox-client")
+            with self.assertRaisesRegex(RuntimeError, "connection lost"):
+                await executor._run_sandboxd("echo hello", timeout=12)
+        connector.invalidate_sandboxd_transport.assert_awaited_once_with(channel)
+        stub.ProcessServiceStub.return_value.Execute.assert_awaited_once()
 
 
 if __name__ == "__main__":

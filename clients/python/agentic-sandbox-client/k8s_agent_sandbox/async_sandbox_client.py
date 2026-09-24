@@ -106,7 +106,8 @@ class AsyncSandboxClient(Generic[T]):
             raise ValueError(
                 "connection_config is required for AsyncSandboxClient. "
                 "Use SandboxDirectConnectionConfig, SandboxGatewayConnectionConfig, "
-                "SandboxInClusterConnectionConfig, or SandboxdPodTunnelConnectionConfig. "
+                "SandboxInClusterConnectionConfig, SandboxdPodTunnelConnectionConfig, "
+                "or SandboxdInClusterConnectionConfig. "
                 "For local development with the router's port-forward, use the synchronous SandboxClient; "
                 "SandboxdPodTunnelConnectionConfig supports async pod port-forwarding."
             )

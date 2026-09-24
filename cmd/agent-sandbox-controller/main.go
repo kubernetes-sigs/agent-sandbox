@@ -36,6 +36,7 @@ import (
 
 	"github.com/felixge/fgprof"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/events"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/controllers"
@@ -620,6 +621,9 @@ func parseWatchNamespaces(flagValue string) ([]string, error) {
 		if ns = strings.TrimSpace(ns); ns != "" {
 			if _, ok := seen[ns]; ok {
 				continue
+			}
+			if errs := validation.IsDNS1123Label(ns); len(errs) > 0 {
+				return nil, fmt.Errorf("%s contains invalid namespace %q: %s", source, ns, strings.Join(errs, "; "))
 			}
 			seen[ns] = struct{}{}
 			result = append(result, ns)

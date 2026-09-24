@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -46,7 +47,8 @@ func TestNamespacedModeScope(t *testing.T) {
 
 	tc := framework.NewTestContext(t)
 	watchedNamespaces := namespacedModeWatchedNamespaces(t)
-	for _, namespace := range append(watchedNamespaces, namespacedModeUnwatchedNamespace) {
+	allNamespaces := append(slices.Clone(watchedNamespaces), namespacedModeUnwatchedNamespace)
+	for _, namespace := range allNamespaces {
 		ns := &corev1.Namespace{}
 		ns.Name = namespace
 		tc.MustExist(ns)

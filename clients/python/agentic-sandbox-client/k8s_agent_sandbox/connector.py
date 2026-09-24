@@ -623,16 +623,22 @@ class SandboxConnector:
         self._grpc_channel_target = target
         return self._grpc_channel
 
-    def invalidate_sandboxd_transport(self, channel: Any) -> None:
-        """Discard a failed direct gRPC channel without retrying its command."""
+    def invalidate_sandboxd_transport(self, channel: Any | None) -> None:
+        """Discard a failed direct transport without replaying its operation.
+
+        A gRPC failure supplies its channel so a late failure cannot close a
+        replacement. A streaming HTTP failure supplies None to discard the
+        current channel.
+        """
         if not isinstance(self.strategy, SandboxdInClusterStrategy):
             return
-        if channel is not self._grpc_channel:
+        if channel is not None and channel is not self._grpc_channel:
             return
-        try:
-            channel.close()
-        except Exception:
-            pass
+        if self._grpc_channel is not None:
+            try:
+                self._grpc_channel.close()
+            except Exception:
+                pass
         self._grpc_channel = None
         self._grpc_channel_target = None
         if self.strategy.config.mode == "service-dns":

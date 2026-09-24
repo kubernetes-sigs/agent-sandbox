@@ -18,6 +18,8 @@ import posixpath
 import urllib.parse
 from typing import Any, List, Protocol
 
+import requests
+
 from k8s_agent_sandbox.connector import SandboxConnector
 from k8s_agent_sandbox.exceptions import SandboxRequestError
 from k8s_agent_sandbox.models import FileEntry
@@ -245,6 +247,9 @@ class Filesystem:
                             f"File size exceeds limit of {max_bytes} bytes."
                         )
                 total += _write_all(destination, chunk)
+        except requests.exceptions.RequestException:
+            self.connector.invalidate_sandboxd_transport(None)
+            raise
         finally:
             response.close()
 

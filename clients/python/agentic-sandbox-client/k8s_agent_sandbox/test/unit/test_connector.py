@@ -276,6 +276,21 @@ class TestSandboxdInClusterConnection(unittest.TestCase):
         self.assertEqual(connector.connect(), "http://new.agents.svc:8080")
         connector.close()
 
+    def test_stream_transport_failure_discards_channel_and_service_cache(self):
+        service = MagicMock(side_effect=["old.agents.svc", "new.agents.svc"])
+        connector, _, _ = self._build(service_fqdn=service)
+        channel = MagicMock()
+        with patch.dict(
+            sys.modules,
+            {"grpc": SimpleNamespace(insecure_channel=MagicMock(return_value=channel))},
+        ):
+            connector.connect()
+            self.assertIs(connector.grpc_channel(), channel)
+        connector.invalidate_sandboxd_transport(None)
+        channel.close.assert_called_once()
+        self.assertEqual(connector.connect(), "http://new.agents.svc:8080")
+        connector.close()
+
 
 class TestGatewayConnectionStrategy(unittest.TestCase):
     """Unit tests for GatewayConnectionStrategy."""

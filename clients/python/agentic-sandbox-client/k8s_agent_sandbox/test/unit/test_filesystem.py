@@ -20,6 +20,9 @@ import unittest
 import urllib.parse
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
+import requests
+
 from k8s_agent_sandbox.exceptions import SandboxRequestError
 from k8s_agent_sandbox.files.async_filesystem import AsyncFilesystem
 from k8s_agent_sandbox.files.filesystem import Filesystem, _sandboxd_files_endpoint
@@ -383,6 +386,25 @@ class TestFilesystemStreamingRead(unittest.TestCase):
             "GET", "v1/files/dir%2Ffile.bin", timeout=60, stream=True
         )
 
+    def test_read_to_invalidates_sandboxd_after_stream_transport_failure(self):
+        self.connector.is_sandboxd.return_value = True
+        response = streaming_response([])
+
+        def broken_stream():
+            yield b"partial"
+            raise requests.exceptions.ChunkedEncodingError("connection lost")
+
+        response.iter_content.return_value = broken_stream()
+        self.connector.send_request.return_value = response
+        destination = io.BytesIO()
+
+        with self.assertRaises(requests.exceptions.ChunkedEncodingError):
+            self.filesystem.read_to("file.bin", destination)
+
+        self.assertEqual(destination.getvalue(), b"partial")
+        self.connector.invalidate_sandboxd_transport.assert_called_once_with(None)
+        response.close.assert_called_once_with()
+
     def test_read_to_rejects_non_success_status(self):
         response = streaming_response([b"error"])
         response.status_code = 300
@@ -445,6 +467,7 @@ class TestAsyncFilesystemStreamingRead(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.connector = MagicMock()
         self.connector.send_request = AsyncMock()
+        self.connector.invalidate_sandboxd_transport = AsyncMock()
         self.connector.is_sandboxd.return_value = False
         self.filesystem = AsyncFilesystem(
             self.connector, MagicMock(), trace_service_name="test"
@@ -479,6 +502,26 @@ class TestAsyncFilesystemStreamingRead(unittest.IsolatedAsyncioTestCase):
         self.connector.send_request.assert_awaited_once_with(
             "GET", "v1/files/dir%2Ffile.bin", timeout=60, stream=True
         )
+
+    async def test_read_to_invalidates_sandboxd_after_stream_transport_failure(self):
+        self.connector.is_sandboxd.return_value = True
+        response = async_streaming_response([])
+
+        async def broken_stream(*, chunk_size: int):
+            del chunk_size
+            yield b"partial"
+            raise httpx.ReadError("connection lost")
+
+        response.aiter_bytes = broken_stream
+        self.connector.send_request.return_value = response
+        destination = AsyncPartialWriter(max_write=10)
+
+        with self.assertRaises(httpx.ReadError):
+            await self.filesystem.read_to("file.bin", destination)
+
+        self.assertEqual(destination.content, b"partial")
+        self.connector.invalidate_sandboxd_transport.assert_awaited_once_with(None)
+        response.aclose.assert_awaited_once_with()
 
     async def test_read_to_enforces_unknown_length_limit_while_streaming(self):
         response = async_streaming_response([b"abc", b"def"])

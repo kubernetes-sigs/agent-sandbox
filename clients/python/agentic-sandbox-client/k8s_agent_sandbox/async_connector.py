@@ -167,7 +167,7 @@ class AsyncSandboxConnector:
             (SandboxInClusterConnectionConfig, SandboxdPodTunnelConnectionConfig),
         )
 
-        transport = httpx.AsyncHTTPTransport(retries=3)
+        transport = httpx.AsyncHTTPTransport()
         self.client = httpx.AsyncClient(
             transport=transport, timeout=httpx.Timeout(60.0)
         )
@@ -368,6 +368,17 @@ class AsyncSandboxConnector:
                     response=e.response,
                 ) from e
             except httpx.HTTPError as e:
+                if attempt < MAX_RETRIES and (
+                    isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout))
+                    or method.upper() in RETRYABLE_METHODS
+                ):
+                    delay = BACKOFF_FACTOR * (2 ** attempt)
+                    logger.warning(
+                        f"Transport error from {url}: {e}, "
+                        f"attempt {attempt + 1}/{MAX_RETRIES + 1}, retrying in {delay:.1f}s"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
                 logger.error(f"Request to sandbox failed: {e}")
                 # Clear cached URLs that may have gone stale.
                 if isinstance(self.connection_config, SandboxGatewayConnectionConfig):

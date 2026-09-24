@@ -4,13 +4,6 @@ agent-sandbox has been installed.
 
 NOTE: Namespaced mode is enabled (watchNamespace={{ .Values.controller.watchNamespace }}).
 
-In namespaced mode the controller skips webhook certificate generation, CRD
-caBundle patching, and the webhook server. Conversion webhooks are required when
-etcd still contains v1alpha1 objects and the API server needs to translate them
-to v1beta1. Without a serving conversion webhook, requests that require
-conversion will fail. Migrate all stored objects to v1beta1 before using
-namespaced mode, or keep a cluster-scoped conversion webhook available.
-
 {{- $controllerNamespace := include "agent-sandbox.namespace" . }}
 {{- $leaderElectionNamespace := include "agent-sandbox.leaderElectionNamespace" . }}
 
@@ -19,7 +12,19 @@ The chart does not generate workload or leader-election Roles and RoleBindings
 for that mode. Advanced users must set up the appropriate Roles and RoleBindings
 for the watched namespace(s) ({{ .Values.controller.watchNamespace }}) and bind
 them to the agent-sandbox-controller ServiceAccount in {{ $controllerNamespace }}.
-{{- if .Values.controller.leaderElect }} They must also configure leader-election
-RBAC in {{ $leaderElectionNamespace }}.{{- end }}
+{{- if .Values.controller.leaderElect }}
+
+WARNING: Leader election is enabled (controller.leaderElect=true, the
+default). The controller will attempt to acquire a Lease in
+{{ $leaderElectionNamespace }} on startup, but this chart does not render the
+required Role/RoleBinding granting `coordination.k8s.io/leases` permissions
+there. Without it, the controller pod will run but fail to acquire leadership
+(403 Forbidden) and will never reconcile. You must create a Role/RoleBinding
+granting get/list/watch/create/update/patch on `leases` in
+{{ $leaderElectionNamespace }}, bound to the agent-sandbox-controller
+ServiceAccount in {{ $controllerNamespace }} — or set
+controller.leaderElect=false if running a single replica without leader
+election.
+{{- end }}
 
 {{- end }}

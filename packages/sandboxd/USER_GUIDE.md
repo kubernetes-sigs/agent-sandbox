@@ -278,9 +278,10 @@ fmt.Println(resp.GetExitCode(), string(resp.GetStdout()))
 
 `sandboxd` binds the pod network (`0.0.0.0` by default), but the SDKs do not
 auto-detect it. They select the runtime and transport explicitly. The Go SDK
-and synchronous Python SDK can use a direct **pod port-forward** for `:8080`
-and `:9090`; the Go SDK can also dial the Pod IP or the Sandbox's headless
-Service from inside the cluster. Filesystem calls use REST and `Run` uses
+and both Python client variants (synchronous and asynchronous) can use a direct
+**pod port-forward** for `:8080` and `:9090`. From inside the cluster, both
+SDKs can instead dial the Pod IP or the Sandbox's headless Service directly.
+Filesystem calls use REST and `Run` uses
 gRPC. The current `sandbox-router` cannot provide this combined transport
 because it does not proxy gRPC.
 

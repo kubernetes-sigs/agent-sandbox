@@ -476,9 +476,12 @@ func TestReconcilePool_UnschedulableStuckGC(t *testing.T) {
 
 	// A terminating sandbox keeps its last mirrored PodScheduled condition until
 	// the sandbox controller observes the Pod's absence, so a stale Unschedulable
-	// must not hold a pool slot on an object that is already going away. The
-	// previous implementation got this from the backing Pod's DeletionTimestamp;
-	// reading the mirror requires checking the Sandbox's instead.
+	// must not hold a pool slot on an object that is already going away.
+	//
+	// This checks the Sandbox's DeletionTimestamp where the previous
+	// implementation checked the backing Pod's, which is not a like-for-like
+	// replacement: a deleting Pod under a still-active Sandbox is not covered
+	// here, and is tracked as #1748.
 	t.Run("terminating sandbox with a stale unschedulable condition is not held", func(t *testing.T) {
 		sb := withPodScheduled(agedSandbox("-terminating"), metav1.ConditionFalse, corev1.PodReasonUnschedulable)
 		now := metav1.Now()

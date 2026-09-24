@@ -840,22 +840,20 @@ func (r *SandboxWarmPoolReconciler) setNotProgressing(warmPool *extensionsv1beta
 }
 
 // isSandboxPodUnschedulable reports whether a pool member past its readiness
-// grace period is waiting on capacity rather than genuinely stuck, and so should
-// be held instead of replaced (#1215).
+// grace period is waiting on capacity rather than stuck, and so should be held
+// instead of replaced (#1215).
 //
-// It reads the PodScheduled condition the sandbox controller mirrors onto
-// Sandbox.status rather than fetching the Pod; the mirror copies the Pod
-// condition's status and reason verbatim. Anything other than
-// False/Unschedulable takes the stuck-sandbox path, matching the Pod-reading
-// implementation this replaced. SchedulingGated is a known gap in that set,
-// tracked separately.
+// Reads the PodScheduled condition mirrored onto Sandbox.status instead of
+// fetching the Pod. Anything but False/Unschedulable takes the stuck-sandbox
+// path; SchedulingGated is a known gap in that set, tracked separately.
 //
-// Known limitation, tracked in #1748: the mirror reports the Pod's scheduling
-// state, not its lifecycle, so a Pod deleted but wedged terminating keeps
-// reporting Unschedulable while its Sandbox stays active and holds a pool slot
-// until the Pod goes away. Closing it needs a lifecycle signal on Sandbox.status;
-// the condition's LastTransitionTime cannot substitute, since
-// meta.SetStatusCondition only advances it when Status changes.
+// Reading the mirror costs two things the Pod read gave us:
+//   - A Pod wedged terminating still reports Unschedulable, so it holds a slot
+//     until the Pod goes (#1748). LastTransitionTime cannot bound this --
+//     meta.SetStatusCondition only advances it when Status changes.
+//   - A sandbox controller predating the mirror writes no condition, making
+//     every member look stuck. Unreachable in-tree (both controllers ship in one
+//     binary), but possible if extensions ever runs as its own process.
 func isSandboxPodUnschedulable(sb *sandboxv1beta1.Sandbox) bool {
 	// A terminating sandbox keeps its last mirrored condition until the sandbox
 	// controller observes the Pod's absence. Free the slot rather than holding it

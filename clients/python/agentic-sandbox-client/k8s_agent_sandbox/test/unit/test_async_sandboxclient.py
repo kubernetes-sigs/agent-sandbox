@@ -41,6 +41,7 @@ from k8s_agent_sandbox.models import (
     SandboxInClusterConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
     SandboxdPodTunnelConnectionConfig,
+    SandboxdInClusterConnectionConfig,
 )
 
 
@@ -629,6 +630,11 @@ class TestAsyncSandboxClientInCluster(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(
             client.connection_config, SandboxdPodTunnelConnectionConfig
         )
+
+    async def test_sandboxd_in_cluster_config_accepted(self):
+        config = SandboxdInClusterConnectionConfig(mode="pod-ip")
+        client = AsyncSandboxClient(connection_config=config, cleanup=False)
+        self.assertIs(client.connection_config, config)
 
     async def test_in_cluster_connection_config_passed_to_sandbox(self):
         config = SandboxInClusterConnectionConfig()

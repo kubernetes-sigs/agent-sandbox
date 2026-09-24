@@ -90,10 +90,8 @@ class CommandExecutor:
                 "'grpc' extra: pip install k8s-agent-sandbox[grpc]"
             ) from e
 
-        # Ensure the pod tunnel is established (and the gRPC target
-        # published) before dialing. connect() is idempotent — it returns the
-        # live tunnel or re-establishes a dead one — so this also handles
-        # gRPC being the first operation and reconnecting after a teardown.
+        # Publish the selected sandboxd gRPC target before dialing. A direct
+        # Pod IP connection refreshes its target for every command.
         self.connector.connect()
         channel = self.connector.grpc_channel()
         stub = process_pb2_grpc.ProcessServiceStub(channel)
@@ -103,6 +101,8 @@ class CommandExecutor:
         try:
             response = stub.Execute(request, timeout=timeout)
         except grpc.RpcError as e:
+            if e.code() == grpc.StatusCode.UNAVAILABLE:
+                self.connector.invalidate_sandboxd_transport(channel)
             raise RuntimeError(
                 f"sandboxd process service failed ({e.code()}): {e.details()}"
             ) from e

@@ -588,6 +588,7 @@ func TestReconcileInvalidServiceNameSurfacesConditionWithoutRequeue(t *testing.T
 	require.Equal(t, metav1.ConditionFalse, ready.Status)
 	require.Equal(t, sandboxv1beta1.SandboxReasonInvalidConfiguration, ready.Reason)
 	require.Contains(t, ready.Message, "must be no more than 63 characters")
+	require.Empty(t, updated.Status.Service, "a rejected Service create must not be reflected in status.Service")
 }
 
 func TestResolvePodName(t *testing.T) {

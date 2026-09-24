@@ -50,6 +50,7 @@ TERMINAL_CLAIM_READY_REASONS = frozenset({
     "InvalidMetadata",
     "EnvVarsInjectionRejected",
     "VolumeClaimTemplatesError",
-    "ClaimExpired",     # extensions ClaimExpiredReason
-    "SandboxExpired",   # core SandboxReasonExpired, forwarded to the claim
+    "ClaimExpired",          # extensions ClaimExpiredReason
+    "SandboxExpired",        # core SandboxReasonExpired, forwarded to the claim
+    "InvalidConfiguration",  # core SandboxReasonInvalidConfiguration, forwarded to the claim
 })

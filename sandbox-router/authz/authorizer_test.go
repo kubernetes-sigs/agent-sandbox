@@ -24,11 +24,36 @@ import (
 func TestAllowAllAuthorize(t *testing.T) {
 	a := AllowAll{}
 	req, _ := http.NewRequest("GET", "/", nil)
-	if err := a.Authorize(context.Background(), req, "any", "any"); err != nil {
+	if err := a.Authorize(context.Background(), req, testAuthorizationTarget("any", "any")); err != nil {
 		t.Fatalf("AllowAll should never deny: %v", err)
 	}
-	if err := a.Authorize(context.Background(), nil, "", ""); err != nil {
+	if err := a.Authorize(context.Background(), nil, AuthorizationTarget{}); err != nil {
 		t.Fatalf("AllowAll should not care about nil request: %v", err)
+	}
+}
+
+func TestNormalizeAuthorizationTarget(t *testing.T) {
+	target, err := NormalizeAuthorizationTarget(AuthorizationTarget{
+		Namespace:   "team-a",
+		SandboxName: "box-a",
+		SandboxUID:  "uid-a",
+		Port:        9090,
+		Method:      "post",
+		Path:        "/exec/some%2ffile",
+	})
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if target.Method != "POST" || target.Path != "/exec/some%2Ffile" {
+		t.Fatalf("got method %q path %q, want POST and /exec/some%%2Ffile", target.Method, target.Path)
+	}
+}
+
+func TestNormalizeAuthorizationTarget_RejectsInvalidPathEncoding(t *testing.T) {
+	target := testAuthorizationTarget("team-a", "box-a")
+	target.Path = "/exec/%ZZ"
+	if _, err := NormalizeAuthorizationTarget(target); err == nil {
+		t.Fatal("expected invalid percent-encoding to be rejected")
 	}
 }
 

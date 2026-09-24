@@ -77,7 +77,7 @@ metadata:
     capabilities: Basic Install
     categories: AI/Machine Learning
     containerImage: registry.k8s.io/agent-sandbox/agent-sandbox-controller:v1.0.0
-    createdAt: "2026-09-04T04:06:53Z"
+    createdAt: "2026-09-08T20:42:18Z"
     operatorframework.io/suggested-namespace: agent-sandbox-system
     operators.operatorframework.io/builder: operator-sdk-v1.42.2
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
@@ -337,6 +337,7 @@ spec:
                   optional: true
                 name: config-volume
       - label:
+          app: sandbox-router
           app.kubernetes.io/component: sandbox-router
           app.kubernetes.io/name: sandbox-router
         name: sandbox-router
@@ -354,6 +355,7 @@ spec:
                 prometheus.io/port: "9090"
                 prometheus.io/scrape: "true"
               labels:
+                app: sandbox-router
                 app.kubernetes.io/component: sandbox-router
                 app.kubernetes.io/name: sandbox-router
             spec:

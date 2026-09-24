@@ -140,20 +140,26 @@ Inspired by E2B's `envd`, this approach uses a binary protocol over HTTP/2.
 
 ### Concrete Implementation: `sandboxd` Hybrid gRPC/REST Architecture
 
-To realize the hybrid model described above without forcing users to choose between two separate sidecar binaries (`execd` vs `envd`), we propose a unified portable daemon called **`sandboxd`** that serves both protocols from explicit, dedicated ports within the sidecar container:
+To realize the hybrid model described above without forcing users to choose between two separate binaries (`execd` vs `envd`), we propose a unified portable daemon called **`sandboxd`** that serves both protocols from explicit, dedicated ports in whichever container hosts the daemon:
 
 ```text
-sandboxd (sidecar)
+sandboxd (runtime daemon)
 ├── gRPC  :9090  →  ProcessService    (streaming process I/O)
 └── HTTP  :8080  →  FilesystemService (stateless file operations & runtime probes)
 ```
 
-Both ports bind strictly to `localhost` within the pod network namespace and are never exposed outside the container without explicit proxying (`sandbox-router`). The agent SDK discovers them via environment variables:
+`sandboxd` can be the Sandbox's dedicated runtime container or can be injected into an existing application image. A separate sidecar is also possible, but commands run inside that sidecar and cannot use binaries from neighboring containers; containers share the pod network and mounted volumes, not their root filesystems.
+
+Both ports bind to `0.0.0.0` by default, so clients with pod-network access can reach them through the Pod IP or a Service. Deployments must provide pod isolation and NetworkPolicy; use `--listen-host=127.0.0.1` when loopback-only access is required. The current `sandbox-router` accepts HTTP/2 client connections, but disables HTTP/2 on its upstream connections and therefore cannot carry the gRPC `ProcessService`, so it is not a complete transport for `sandboxd`.
+
+Workload-local or custom clients may use environment variables such as the following to configure their own endpoint discovery:
 
 ```bash
 SANDBOXD_GRPC_ADDR=localhost:9090
 SANDBOXD_REST_ADDR=localhost:8080
 ```
+
+These variables are a convention for application code, not an automatic SDK switch. The supported SDKs select `sandboxd` and its connectivity explicitly through their client configuration.
 
 #### Process Service (`:9090` gRPC)
 Defined in `packages/sandboxd/spec/process/v1/process.proto`.
@@ -187,7 +193,7 @@ REST is selected for filesystem operations because every operation is a simple r
 - **`/v1/metadata`** exposes workload-scoped environment variables injected by the orchestrator at pod creation time (e.g., sandbox ID, workspace path). It must never carry orchestrator credentials or Kubernetes API tokens — those must be kept outside the sandbox network namespace entirely.
 
 #### Breaking Changes vs. Existing `python-runtime`
-The `sandboxd` specification does not break existing clients today — existing SDKs continue to target the unversioned `python-runtime` API (`POST /upload`, `GET /download/...`, `GET /list/...`) unchanged. The breaking change is deferred to the SDK migration, when clients switch to point at `sandboxd` endpoints.
+The `sandboxd` wire protocol is not compatible with the unversioned `python-runtime` API (`POST /upload`, `GET /download/...`, `GET /list/...`). The supported SDKs avoid silently changing existing clients by keeping the legacy runtime available and selecting `sandboxd` explicitly. Applications that switch runtimes must also select a `sandboxd`-compatible transport and account for the endpoint and wire-format differences below.
 
 ##### Endpoint Surface Changes
 | Existing (`python-runtime`) | New (`sandboxd`) | Notes |
@@ -209,11 +215,13 @@ The `sandboxd` specification does not break existing clients today — existing 
 | `size` | `int64` | `int64` | Unchanged. |
 
 #### SDK Migration Plan
-1. **SDK Versioning Strategy:** `sandboxd` is a replacement, not an extension, making the migration a breaking SDK release (`v2.0.0` or minor bump if pre-v1.0).
-2. **Dynamic Endpoint Gating:** The SDK checks for `SANDBOXD_REST_ADDR` and `SANDBOXD_GRPC_ADDR`. If present, it connects to `sandboxd` (`/v1/files/...` and `ProcessService`); otherwise, it falls back to `python-runtime`, enabling a smooth, phased rollout across different sandbox templates.
+1. **Explicit Runtime Selection:** The Go SDK selects `sandboxd` with `Options.Runtime = RuntimeSandboxd`; the synchronous Python SDK selects it with `SandboxdPodTunnelConnectionConfig`. The legacy `python-runtime` remains available and is still the default when `sandboxd` is not selected.
+2. **Explicit Connectivity Selection:** The Go SDK and synchronous Python SDK can port-forward directly to the sandbox Pod. The Go SDK additionally supports direct in-cluster Pod IP and headless Service connectivity. These in-cluster modes require an ingress policy that admits the calling workload; the default managed NetworkPolicy allows ingress only from `sandbox-router`. Gateway connectivity through the current `sandbox-router` is not supported for `sandboxd` because the router does not proxy the gRPC surface.
+3. **Application Endpoint Convention:** `SANDBOXD_REST_ADDR` and `SANDBOXD_GRPC_ADDR` may be injected for workload-local or custom clients, but the supported SDKs do not inspect these variables or automatically fall back between runtimes.
 
 #### Security Considerations
-- **Network Containment:** Both ports (`:8080`, `:9090`) bind strictly to `localhost` inside the pod. They are not reachable outside the pod without explicit proxying (`sandbox-router`).
+- **Network Containment:** Both ports (`:8080`, `:9090`) bind to `0.0.0.0` by default and are reachable on the pod network. Deployments must restrict access with pod isolation and NetworkPolicy, or set `--listen-host=127.0.0.1` for loopback-only access. Never expose either port directly to an untrusted public network.
+- **Transport Authentication:** `sandboxd` does not authenticate clients or terminate TLS. Pod port-forward access is authorized by the Kubernetes API server; direct pod-network access must be protected by NetworkPolicy, a service mesh or mTLS proxy, or another trusted transport boundary.
 - **`/v1/metadata` & Untrusted Code:** The sandbox executes untrusted agent code which can query `/v1/metadata` via local loopback. Therefore, `/v1/metadata` must only expose non-sensitive workload configuration (sandbox ID, workspace path, resource limits). Orchestrator credentials, Kubernetes API tokens, and cloud provider keys must **never** be placed in `/v1/metadata`.
 - **Path Traversal Protection:** All file paths received on `/v1/files/{path}` are processed through `SanitizePath`. For existing paths (reads, deletes, lists), `filepath.EvalSymlinks` resolves symlinks and verifies the canonical path resides under the sandbox root (`/workspace`). For new files (writes), `filepath.Clean` is applied lexically to the path and `filepath.EvalSymlinks` is applied to the parent directory to verify it does not escape the sandbox root. Traversal attempts (`../`) are rejected with `403 Forbidden`.
 

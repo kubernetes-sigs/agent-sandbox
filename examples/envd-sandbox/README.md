@@ -1,6 +1,6 @@
 # envd Sandbox
 
-This example demonstrates running [envd](https://github.com/e2b-dev/infra/tree/main/packages/envd) — E2B's in-sandbox daemon — as the container entrypoint inside an agent-sandbox. envd exposes an E2B-compatible REST and gRPC API on port 49983, providing filesystem operations, process execution, environment management, and metrics.
+This example demonstrates running [envd](https://github.com/e2b-dev/runtime/tree/main/packages/envd) — E2B's in-sandbox daemon — as the container entrypoint inside an agent-sandbox. envd exposes an E2B-compatible REST and gRPC API on port 49983, providing filesystem operations, process execution, environment management, and metrics.
 
 ## Overview
 
@@ -11,7 +11,7 @@ This example demonstrates running [envd](https://github.com/e2b-dev/infra/tree/m
 - **REST endpoints** — `/health`, `/metrics`, `/init`, `/envs`, `/freeze`, `/unfreeze`
 - **Port forwarding** — auto-discovers and forwards localhost ports
 
-This example builds envd from the upstream [e2b-dev/infra](https://github.com/e2b-dev/infra) source and runs it in a standard Linux container with the `--isnotfc` flag (skipping Firecracker MMDS polling). No KVM or kata-deploy is required.
+This example builds envd from the upstream [e2b-dev/runtime](https://github.com/e2b-dev/runtime) source and runs it in a standard Linux container with the `--isnotfc` flag (skipping Firecracker MMDS polling). No KVM or kata-deploy is required.
 
 The [kvcache-ai/AgentENV](https://github.com/kvcache-ai/AgentENV) project uses envd in a similar way, packaging it into an ext4 tools drive attached to Firecracker microVMs for their AI agent RL training platform.
 
@@ -136,7 +136,7 @@ All four scripts test the same operations:
 
 > **WARNING**: envd in `--isnotfc` mode runs **without authentication**. Do NOT expose port 49983 to a public network.
 
-**Security model** (following [e2b-dev design](https://github.com/e2b-dev/infra/blob/main/packages/envd/debug.Dockerfile)):
+**Security model** (following [e2b-dev design](https://github.com/e2b-dev/runtime/blob/main/packages/envd/debug.Dockerfile)):
 - **envd runs as root**: Required for PTY allocation, process management, and cgroup operations.
 - **User code runs as non-root**: The `/init` request sets `defaultUser: "user"` (uid 1000), so all user-spawned processes execute as an unprivileged user. This limits blast radius if user code is malicious.
 
@@ -174,7 +174,7 @@ kubectl delete -f <(envsubst < sandbox-envd.yaml)
 
 ## Related
 
-- [envd source](https://github.com/e2b-dev/infra/tree/main/packages/envd) — upstream E2B daemon
+- [envd source](https://github.com/e2b-dev/runtime/tree/main/packages/envd) — upstream E2B daemon
 - [kvcache-ai/AgentENV](https://github.com/kvcache-ai/AgentENV/tree/main/thirdparty/envd) — envd in Firecracker microVMs
 - [E2B docs](https://e2b.dev/docs) — E2B sandbox platform documentation
 - [firecracker-sandbox](../firecracker-sandbox/) — VM-isolated sandbox with a similar API contract

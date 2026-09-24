@@ -386,9 +386,19 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			r.recordSandboxCreationMetrics(ctx, sandbox, oldStatus)
 		}
 	}
+
+	// Avoid a retry thundering-herd when we delete a namespace and the pod happens to be deleted before the sandbox.
+	if isNamespaceTerminatingError(err) {
+		return ctrl.Result{RequeueAfter: namespaceTerminatingRequeue}, nil
+	}
+
 	// return errors seen
 	return result, err
 }
+
+// namespaceTerminatingRequeue is how long to wait before re-checking a
+// Sandbox whose namespace is terminating; normally it is gone by then.
+const namespaceTerminatingRequeue = 30 * time.Second
 
 func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, wd *writeDeferral) error {
 	// Create a hash from the sandbox.Name and use it as label value
@@ -397,19 +407,37 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	var allErrors error
 	var conditionErrors error
 
+	// recordChildErr routes a child-resource reconcile error. It always feeds the
+	// condition error set (so the Ready condition reflects the failure), but a
+	// permanent apiserver validation error (Invalid) is deliberately kept out of
+	// allErrors, which is what Reconcile returns. Returning such an error would
+	// make controller-runtime requeue and re-log (at error level, with a
+	// stacktrace) a create that can never succeed on retry -- for example a
+	// Sandbox name that yields a Service name over Kubernetes' 63-character limit
+	// -- hot-looping until the Sandbox is recreated. These permanent
+	// misconfigurations surface only through Ready=False/InvalidConfiguration.
+	recordChildErr := func(err error) {
+		if err == nil {
+			return
+		}
+		conditionErrors = errors.Join(conditionErrors, err)
+		if k8serrors.IsInvalid(err) {
+			return
+		}
+		allErrors = errors.Join(allErrors, err)
+	}
+
 	// Reconcile PVCs from volumeClaimTemplates
-	err := r.reconcilePVCs(ctx, sandbox, nameHash)
-	allErrors = errors.Join(allErrors, err)
-	conditionErrors = errors.Join(conditionErrors, err)
+	recordChildErr(r.reconcilePVCs(ctx, sandbox, nameHash))
 
 	// Reconcile Pod
 	pod, podErr := r.reconcilePod(ctx, sandbox, nameHash, wd)
-	conditionErrors = errors.Join(conditionErrors, podErr)
 	podMappingConflict := isMultipleSandboxPodsError(podErr)
 	if podMappingConflict {
+		conditionErrors = errors.Join(conditionErrors, podErr)
 		r.recordMultiplePodsEvent(sandbox, podErr)
 	} else {
-		allErrors = errors.Join(allErrors, podErr)
+		recordChildErr(podErr)
 	}
 
 	if pod == nil {
@@ -430,9 +458,9 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	// ambiguous. Existing Services are left untouched for an operator to inspect.
 	var svc *corev1.Service
 	if !podMappingConflict {
-		svc, err = r.reconcileService(ctx, sandbox, nameHash)
-		allErrors = errors.Join(allErrors, err)
-		conditionErrors = errors.Join(conditionErrors, err)
+		var svcErr error
+		svc, svcErr = r.reconcileService(ctx, sandbox, nameHash)
+		recordChildErr(svcErr)
 	}
 
 	// compute and set overall conditions
@@ -601,6 +629,14 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 			readyCondition.Message = multiplePodsErr.Error()
 			return readyCondition
 		}
+		// A permanent apiserver validation error (e.g. a derived Service name over
+		// the 63-character limit) is reported with a specific, actionable reason
+		// rather than the generic ReconcilerError, and is not requeued upstream.
+		if k8serrors.IsInvalid(err) {
+			readyCondition.Reason = sandboxv1beta1.SandboxReasonInvalidConfiguration
+			readyCondition.Message = err.Error()
+			return readyCondition
+		}
 		readyCondition.Reason = "ReconcilerError"
 		readyCondition.Message = "Error seen: " + err.Error()
 		return readyCondition
@@ -766,6 +802,10 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 		return err
 	}
 
+	// Events are only emitted once the new status is persisted, so a failed patch does not produce a misleading event
+	// and a no-op reconcile does not re-emit one (due to deepEqual check above).
+	r.recordReadyTransitionEvent(sandbox, oldStatus)
+
 	// Surface error
 	return nil
 }
@@ -804,6 +844,36 @@ func (r *SandboxReconciler) recordSandboxCreationMetrics(ctx context.Context, sa
 	if !sandbox.CreationTimestamp.IsZero() && !newReady.LastTransitionTime.IsZero() {
 		latency := newReady.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
 		asmetrics.RecordSandboxCreationLatency(latency, sandbox.Namespace, launchType, templateName)
+	}
+}
+
+func (r *SandboxReconciler) recordReadyTransitionEvent(sandbox *sandboxv1beta1.Sandbox, oldStatus *sandboxv1beta1.SandboxStatus) {
+	if r.Recorder == nil {
+		return
+	}
+	var oldReason string
+	if oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionReady)); oldReady != nil {
+		oldReason = oldReady.Reason
+	}
+	newReady := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	if newReady == nil || newReady.Reason == oldReason {
+		return
+	}
+	switch newReady.Reason {
+	case sandboxv1beta1.SandboxReasonDependenciesReady:
+		r.Recorder.Eventf(sandbox, nil, corev1.EventTypeNormal, "SandboxReady", "Ready", "Sandbox is ready")
+	case sandboxv1beta1.SandboxReasonExpired:
+		// This event should only be emitted when ShutdownPolicy=Retain since in the Delete case, the Sandbox is torn down immediately on expiry.
+		// The ShutdownPolicy is checked here because updateStatus is called before handleSandboxExpiry's later policy check.
+		if sandbox.Spec.ShutdownPolicy == nil || *sandbox.Spec.ShutdownPolicy != sandboxv1beta1.ShutdownPolicyDelete {
+			r.Recorder.Eventf(sandbox, nil, corev1.EventTypeNormal, sandboxv1beta1.SandboxReasonExpired, "Expiry", "Sandbox has expired")
+		}
+	case sandboxv1beta1.SandboxReasonSuspended:
+		r.Recorder.Eventf(sandbox, nil, corev1.EventTypeNormal, sandboxv1beta1.SandboxReasonSuspended, "Suspension", "Sandbox is suspended")
+	case sandboxv1beta1.SandboxReasonPodSucceeded:
+		r.Recorder.Eventf(sandbox, nil, corev1.EventTypeNormal, sandboxv1beta1.SandboxReasonPodSucceeded, "PodCompletion", "Pod completed successfully")
+	case sandboxv1beta1.SandboxReasonPodFailed:
+		r.Recorder.Eventf(sandbox, nil, corev1.EventTypeWarning, sandboxv1beta1.SandboxReasonPodFailed, "PodCompletion", "Pod failed")
 	}
 }
 
@@ -1059,6 +1129,11 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 			}
 			err := r.Create(ctx, service, client.FieldOwner(sandboxControllerFieldOwner))
 			if err != nil {
+				if k8serrors.IsInvalid(err) {
+					logger.V(4).Info("Refusing to create Service: invalid configuration",
+						"Service.Namespace", service.Namespace, "Service.Name", service.Name, "error", err.Error())
+					return nil, err
+				}
 				logger.Error(err, "Failed to create", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
 				return nil, err
 			}
@@ -1502,7 +1577,14 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			return reconcileExistingPod(existingPod)
 		}
 		logger.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+		if r.Recorder != nil {
+			r.Recorder.Eventf(sandbox, nil, corev1.EventTypeWarning, "SandboxPodCreateFailed", "PodCreation", "Failed to create Pod %q: %s", pod.Name, err.Error())
+		}
 		return nil, err
+	}
+
+	if r.Recorder != nil {
+		r.Recorder.Eventf(sandbox, pod, corev1.EventTypeNormal, "SandboxPodCreated", "PodCreation", "Created Pod %q", pod.Name)
 	}
 
 	if r.Tracer.IsRecording(ctx) {

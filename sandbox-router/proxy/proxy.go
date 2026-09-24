@@ -21,6 +21,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"strings"
 	"time"
 
@@ -170,7 +171,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// errors in package authz. The default AllowAll authorizer wired in
 	// by NewHandler always permits, preserving the Python router's
 	// no-auth contract.
-	if err := h.authz.Authorize(r.Context(), r, target.Namespace, target.ID); err != nil {
+	upstreamPathURL := url.URL{Path: upstreamPath, RawPath: upstreamRawPath}
+	authorizationTarget, err := authz.NormalizeAuthorizationTarget(authz.AuthorizationTarget{
+		Namespace:   target.Namespace,
+		SandboxName: target.ID,
+		SandboxUID:  target.UID,
+		Port:        target.Port,
+		Method:      r.Method,
+		Path:        upstreamPathURL.EscapedPath(),
+	})
+	if err != nil {
+		WriteJSONError(w, &Error{Status: http.StatusInternalServerError, Detail: err.Error()})
+		return
+	}
+	if err := h.authz.Authorize(r.Context(), r, authorizationTarget); err != nil {
 		status := authz.HTTPStatusFor(err)
 		observability.LoggerFromContext(r.Context(), h.log).Info("authorization denied",
 			"sandbox", target.ID,

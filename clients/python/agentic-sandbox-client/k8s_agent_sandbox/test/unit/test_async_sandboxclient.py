@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for AsyncSandboxClient lifecycle and transport behavior."""
+
 import asyncio
 import json
 import os
@@ -38,6 +40,7 @@ from k8s_agent_sandbox.models import (
     SandboxGatewayConnectionConfig,
     SandboxInClusterConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
+    SandboxdPodTunnelConnectionConfig,
 )
 
 
@@ -245,6 +248,10 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError) as ctx:
             AsyncSandboxClient(connection_config=None)
         self.assertIn("connection_config is required", str(ctx.exception))
+        self.assertNotIn(
+            "SandboxGatewayConnectionConfig, or SandboxInCluster",
+            str(ctx.exception),
+        )
 
     def test_cleanup_default_registers_atexit(self):
         """Constructing without cleanup= should default to True and register the hook."""
@@ -266,9 +273,15 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
 
     def test_atexit_cleanup_deletes_tracked_claims(self):
         """_atexit_cleanup should open a fresh K8sHelper and delete all tracked claims."""
+        first_sandbox = MagicMock()
+        first_sandbox.close_connection = AsyncMock()
+        first_sandbox._close_for_atexit = MagicMock()
+        second_sandbox = MagicMock()
+        second_sandbox.close_connection = AsyncMock()
+        second_sandbox._close_for_atexit = MagicMock()
         self.client._active_connection_sandboxes = {
-            ("default", "claim-abc"): MagicMock(),
-            ("other-ns", "claim-xyz"): MagicMock(),
+            ("default", "claim-abc"): first_sandbox,
+            ("other-ns", "claim-xyz"): second_sandbox,
         }
         mock_helper_instance = MagicMock()
         mock_helper_instance.delete_sandbox_claim = MagicMock()
@@ -282,6 +295,30 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         mock_helper_instance.delete_sandbox_claim.assert_any_call(
             "claim-xyz", "other-ns", _request_timeout=_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS
         )
+        first_sandbox._close_for_atexit.assert_called_once_with()
+        second_sandbox._close_for_atexit.assert_called_once_with()
+        first_sandbox.close_connection.assert_not_awaited()
+        second_sandbox.close_connection.assert_not_awaited()
+
+    def test_atexit_cleanup_uses_loop_independent_handle_cleanup(self):
+        """atexit must not await handles created by an earlier event loop."""
+        sandbox = MagicMock()
+        sandbox.close_connection = AsyncMock()
+        sandbox._close_for_atexit = MagicMock()
+        self.client._active_connection_sandboxes = {
+            ("default", "claim-abc"): sandbox,
+        }
+        mock_helper_instance = MagicMock()
+        mock_helper_instance.delete_sandbox_claim = MagicMock()
+
+        with patch(
+            "k8s_agent_sandbox.async_sandbox_client.K8sHelper",
+            return_value=mock_helper_instance,
+        ):
+            self.client._atexit_cleanup()
+
+        sandbox._close_for_atexit.assert_called_once_with()
+        sandbox.close_connection.assert_not_awaited()
 
     def test_atexit_cleanup_skips_when_no_sandboxes(self):
         """_atexit_cleanup should be a no-op when there are no tracked sandboxes."""
@@ -293,7 +330,10 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
     def test_atexit_cleanup_suppresses_errors(self):
         """_atexit_cleanup should not propagate exceptions — cleanup is best-effort.
         A warning is printed to stderr so the user knows a sandbox was orphaned."""
-        self.client._active_connection_sandboxes = {("default", "claim-abc"): MagicMock()}
+        sandbox = MagicMock()
+        sandbox.close_connection = AsyncMock()
+        sandbox._close_for_atexit = MagicMock()
+        self.client._active_connection_sandboxes = {("default", "claim-abc"): sandbox}
         mock_helper_instance = MagicMock()
         mock_helper_instance.delete_sandbox_claim = MagicMock(side_effect=Exception("network error"))
 
@@ -564,6 +604,13 @@ class TestAsyncSandboxClientInCluster(unittest.IsolatedAsyncioTestCase):
         client = AsyncSandboxClient(connection_config=config, cleanup=False)
         self.assertIsInstance(client.connection_config, SandboxInClusterConnectionConfig)
 
+    async def test_sandboxd_config_accepted(self):
+        config = SandboxdPodTunnelConnectionConfig()
+        client = AsyncSandboxClient(connection_config=config, cleanup=False)
+        self.assertIsInstance(
+            client.connection_config, SandboxdPodTunnelConnectionConfig
+        )
+
     async def test_in_cluster_connection_config_passed_to_sandbox(self):
         config = SandboxInClusterConnectionConfig()
         client = AsyncSandboxClient(connection_config=config, cleanup=False)
@@ -669,6 +716,35 @@ class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):
         )
         url = await connector._resolve_base_url()
         self.assertEqual(url, "http://my-sandbox.dev.svc.cluster.local:8888")
+
+    async def test_in_cluster_raises_when_dns_url_unset(self):
+        config = SandboxInClusterConnectionConfig(server_port=8888)
+        connector = AsyncSandboxConnector(
+            sandbox_id="my-sandbox",
+            namespace="dev",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+        )
+        connector._dns_url = None
+        with self.assertRaises(ValueError) as ctx:
+            await connector._resolve_base_url()
+        self.assertIn("in-cluster base URL", str(ctx.exception))
+
+    async def test_direct_raises_when_base_url_unresolved(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        connector = AsyncSandboxConnector(
+            sandbox_id="my-sandbox",
+            namespace="dev",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+        )
+        # Simulate a path that skipped assignment so the post-resolve guard fires.
+        connector._base_url = None
+        connector.connection_config = MagicMock(spec=SandboxDirectConnectionConfig)
+        connector.connection_config.api_url = None
+        with self.assertRaises(ValueError) as ctx:
+            await connector._resolve_base_url()
+        self.assertIn("failed to resolve a base URL", str(ctx.exception))
 
     async def test_in_cluster_resolves_pod_ip_via_callable(self):
         config = SandboxInClusterConnectionConfig(server_port=8888)
@@ -898,6 +974,9 @@ def _stop_stub_server(server, thread):
 
 
 class TestAsyncConnectorHTTP(unittest.IsolatedAsyncioTestCase):
+    port: int
+    server: HTTPServer
+    server_thread: Thread
 
     @classmethod
     def setUpClass(cls):
@@ -926,6 +1005,216 @@ class TestAsyncConnectorHTTP(unittest.IsolatedAsyncioTestCase):
             response = await connector.send_request("GET", "health")
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()["status"], "healthy")
+        finally:
+            await connector.close()
+
+    async def test_non_streaming_request_forwards_request_auth(self):
+        connector = self._make_connector()
+        response = MagicMock()
+        response.status_code = 200
+        response.is_redirect = False
+        response.raise_for_status = MagicMock()
+        auth = httpx.BasicAuth("user", "password")
+        connector.client.request = AsyncMock(return_value=response)
+
+        try:
+            result = await connector.send_request("GET", "health", auth=auth)
+
+            self.assertIs(result, response)
+            connector.client.request.assert_awaited_once_with(
+                "GET",
+                ANY,
+                headers=ANY,
+                follow_redirects=False,
+                auth=auth,
+            )
+        finally:
+            await connector.close()
+
+    async def test_streaming_request_returns_unbuffered_response(self):
+        connector = self._make_connector()
+        request = MagicMock()
+        response = MagicMock()
+        response.status_code = 200
+        response.is_redirect = False
+        response.raise_for_status = MagicMock()
+        response.aclose = AsyncMock()
+        connector.client.build_request = MagicMock(return_value=request)
+        connector.client.send = AsyncMock(return_value=response)
+
+        try:
+            result = await connector.send_request("GET", "download/file", stream=True)
+
+            self.assertIs(result, response)
+            connector.client.build_request.assert_called_once()
+            connector.client.send.assert_awaited_once_with(
+                request,
+                auth=httpx.USE_CLIENT_DEFAULT,
+                follow_redirects=False,
+                stream=True,
+            )
+            response.aclose.assert_not_awaited()
+        finally:
+            await connector.close()
+
+    async def test_streaming_request_forwards_request_auth(self):
+        connector = self._make_connector()
+        request = MagicMock()
+        response = MagicMock()
+        response.status_code = 200
+        response.is_redirect = False
+        response.raise_for_status = MagicMock()
+        response.aclose = AsyncMock()
+        auth = httpx.BasicAuth("user", "password")
+        connector.client.build_request = MagicMock(return_value=request)
+        connector.client.send = AsyncMock(return_value=response)
+
+        try:
+            result = await connector.send_request(
+                "GET", "download/file", stream=True, auth=auth
+            )
+
+            self.assertIs(result, response)
+            connector.client.build_request.assert_called_once()
+            self.assertNotIn(
+                "auth", connector.client.build_request.call_args.kwargs
+            )
+            connector.client.send.assert_awaited_once_with(
+                request, follow_redirects=False, stream=True, auth=auth
+            )
+        finally:
+            await connector.close()
+
+    @patch("k8s_agent_sandbox.async_connector.asyncio.sleep", new_callable=AsyncMock)
+    async def test_streaming_retry_preserves_request_auth(self, mock_sleep):
+        connector = self._make_connector()
+        request = MagicMock()
+        retry_response = MagicMock()
+        retry_response.status_code = 503
+        retry_response.aclose = AsyncMock()
+        success_response = MagicMock()
+        success_response.status_code = 200
+        success_response.is_redirect = False
+        success_response.raise_for_status = MagicMock()
+        success_response.aclose = AsyncMock()
+        auth = httpx.BasicAuth("user", "password")
+        connector.client.build_request = MagicMock(return_value=request)
+        connector.client.send = AsyncMock(
+            side_effect=[retry_response, success_response]
+        )
+
+        try:
+            result = await connector.send_request(
+                "GET", "download/file", stream=True, auth=auth
+            )
+
+            self.assertIs(result, success_response)
+            self.assertEqual(
+                connector.client.send.await_args_list[0].kwargs["auth"], auth
+            )
+            self.assertEqual(
+                connector.client.send.await_args_list[1].kwargs["auth"], auth
+            )
+            mock_sleep.assert_awaited_once()
+        finally:
+            await connector.close()
+
+    async def test_streaming_error_closes_response(self):
+        connector = self._make_connector()
+        request = MagicMock()
+        response = MagicMock()
+        response.status_code = 404
+        response.is_redirect = False
+        response.aclose = AsyncMock()
+        response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "404 Not Found", request=request, response=response
+        )
+        connector.client.build_request = MagicMock(return_value=request)
+        connector.client.send = AsyncMock(return_value=response)
+
+        try:
+            with self.assertRaises(SandboxRequestError):
+                await connector.send_request("GET", "missing", stream=True)
+
+            response.aclose.assert_awaited_once_with()
+        finally:
+            await connector.close()
+
+    async def test_streaming_error_preserves_response_body(self):
+        connector = self._make_connector()
+        request = httpx.Request("GET", "http://sandbox/missing")
+
+        class SingleChunkStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b"missing file"
+
+        response = httpx.Response(
+            404, stream=SingleChunkStream(), request=request
+        )
+        connector.client.build_request = MagicMock(return_value=request)
+        connector.client.send = AsyncMock(return_value=response)
+
+        try:
+            with self.assertRaises(SandboxRequestError) as ctx:
+                await connector.send_request("GET", "missing", stream=True)
+
+            self.assertEqual(ctx.exception.response.content, b"missing file")
+            self.assertEqual(ctx.exception.response.text, "missing file")
+        finally:
+            await connector.close()
+
+    async def test_streaming_error_closes_response_when_capture_is_cancelled(self):
+        connector = self._make_connector()
+        request = MagicMock()
+        response = MagicMock()
+        response.status_code = 404
+        response.is_redirect = False
+        response.aclose = AsyncMock()
+
+        async def cancelled_body(*, chunk_size):
+            del chunk_size
+            raise asyncio.CancelledError
+            yield b"unreachable"
+
+        response.aiter_bytes = cancelled_body
+        response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "404 Not Found", request=request, response=response
+        )
+        connector.client.build_request = MagicMock(return_value=request)
+        connector.client.send = AsyncMock(return_value=response)
+
+        try:
+            with self.assertRaises(asyncio.CancelledError):
+                await connector.send_request("GET", "missing", stream=True)
+
+            response.aclose.assert_awaited_once_with()
+        finally:
+            await connector.close()
+
+    @patch("k8s_agent_sandbox.async_connector.asyncio.sleep", new_callable=AsyncMock)
+    async def test_streaming_retry_closes_discarded_response(self, mock_sleep):
+        connector = self._make_connector()
+        request = MagicMock()
+        retry_response = MagicMock()
+        retry_response.status_code = 503
+        retry_response.aclose = AsyncMock()
+        success_response = MagicMock()
+        success_response.status_code = 200
+        success_response.is_redirect = False
+        success_response.raise_for_status = MagicMock()
+        success_response.aclose = AsyncMock()
+        connector.client.build_request = MagicMock(return_value=request)
+        connector.client.send = AsyncMock(
+            side_effect=[retry_response, success_response]
+        )
+
+        try:
+            result = await connector.send_request("GET", "download/file", stream=True)
+
+            self.assertIs(result, success_response)
+            retry_response.aclose.assert_awaited_once_with()
+            success_response.aclose.assert_not_awaited()
+            mock_sleep.assert_awaited_once()
         finally:
             await connector.close()
 
@@ -1120,8 +1409,12 @@ class TestAsyncSandboxClientInClusterConnectionConfig(unittest.IsolatedAsyncioTe
 class TestAsyncConnectorCacheInvalidation(unittest.IsolatedAsyncioTestCase):
     """Tests for Bug Fix #2: Cache invalidation on HTTPStatusError."""
 
-    async def test_http_status_error_clears_pod_ip_cache(self):
-        """Verify HTTPStatusError (4xx/5xx) clears pod IP cache (Bug Fix #2)."""
+    async def test_server_error_clears_pod_ip_cache(self):
+        """Verify a 5xx clears the pod IP cache so the next request re-resolves.
+
+        A 5xx is how a stale cached Pod IP commonly surfaces after the pod is
+        replaced, so the cached routing state is dropped.
+        """
         config = SandboxInClusterConnectionConfig(server_port=8888)
 
         # Mock get_pod_ip to track how many times it's called
@@ -1138,7 +1431,67 @@ class TestAsyncConnectorCacheInvalidation(unittest.IsolatedAsyncioTestCase):
             get_pod_ip=mock_get_pod_ip,
         )
 
-        # Mock httpx client to return 404 on first request
+        # Mock httpx client to return 503 on first request
+        mock_response = MagicMock()
+        mock_response.status_code = 503
+        mock_response.is_redirect = False
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "503 Service Unavailable",
+            request=MagicMock(),
+            response=mock_response
+        )
+
+        connector.client.request = AsyncMock(return_value=mock_response)
+
+        try:
+            with patch(
+                "k8s_agent_sandbox.async_connector.asyncio.sleep",
+                new=AsyncMock(),
+            ):
+                # First request should fail with 503
+                with self.assertRaises(SandboxRequestError):
+                    await connector.send_request("GET", "test")
+
+                # Verify cache was cleared (pod_ip_resolved reset)
+                self.assertFalse(connector._pod_ip_resolved,
+                               "A 5xx should clear pod_ip_resolved flag")
+                self.assertIsNone(connector._cached_pod_ip_url,
+                                "A 5xx should clear cached pod IP URL")
+
+                # Second request should re-resolve pod IP (call count increases)
+                initial_count = call_count[0]
+                mock_response.status_code = 200
+                mock_response.raise_for_status.side_effect = None
+                connector.client.request = AsyncMock(return_value=mock_response)
+
+                await connector.send_request("GET", "test")
+
+                self.assertEqual(call_count[0], initial_count + 1,
+                               "After cache invalidation, pod IP should be re-resolved")
+        finally:
+            await connector.close()
+
+    async def test_client_error_keeps_pod_ip_cache(self):
+        """Verify a 4xx leaves the pod IP cache intact.
+
+        A 4xx means the sandbox answered a well-formed request with a client
+        error; routing is fine, so the cached Pod IP must be preserved.
+        """
+        config = SandboxInClusterConnectionConfig(server_port=8888)
+
+        call_count = [0]
+        async def mock_get_pod_ip():
+            call_count[0] += 1
+            return "10.244.0.5"
+
+        connector = AsyncSandboxConnector(
+            sandbox_id="test-sandbox",
+            namespace="default",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+            get_pod_ip=mock_get_pod_ip,
+        )
+
         mock_response = MagicMock()
         mock_response.status_code = 404
         mock_response.is_redirect = False
@@ -1151,17 +1504,16 @@ class TestAsyncConnectorCacheInvalidation(unittest.IsolatedAsyncioTestCase):
         connector.client.request = AsyncMock(return_value=mock_response)
 
         try:
-            # First request should fail with 404
             with self.assertRaises(SandboxRequestError):
                 await connector.send_request("GET", "test")
 
-            # Verify cache was cleared (pod_ip_resolved reset)
-            self.assertFalse(connector._pod_ip_resolved,
-                           "HTTPStatusError should clear pod_ip_resolved flag")
-            self.assertIsNone(connector._cached_pod_ip_url,
-                            "HTTPStatusError should clear cached pod IP URL")
+            # The 404 resolved a Pod IP once, it must stay cached.
+            self.assertTrue(connector._pod_ip_resolved,
+                            "A 4xx must not clear pod_ip_resolved flag")
+            self.assertIsNotNone(connector._cached_pod_ip_url,
+                                 "A 4xx must not clear cached pod IP URL")
 
-            # Second request should re-resolve pod IP (call count increases)
+            # A second request must reuse the cache.
             initial_count = call_count[0]
             mock_response.status_code = 200
             mock_response.raise_for_status.side_effect = None
@@ -1169,8 +1521,8 @@ class TestAsyncConnectorCacheInvalidation(unittest.IsolatedAsyncioTestCase):
 
             await connector.send_request("GET", "test")
 
-            self.assertEqual(call_count[0], initial_count + 1,
-                           "After cache invalidation, pod IP should be re-resolved")
+            self.assertEqual(call_count[0], initial_count,
+                             "A 4xx must leave the pod IP cached")
         finally:
             await connector.close()
 
@@ -1260,7 +1612,7 @@ class TestAsyncConnectorCacheInvalidation(unittest.IsolatedAsyncioTestCase):
 class SandboxClaimDeleteHandler(BaseHTTPRequestHandler):
     """Stub K8s apiserver; only handles the DELETE call atexit cleanup makes."""
 
-    received_deletes = []
+    received_deletes: list[str] = []
 
     def do_DELETE(self):
         self.__class__.received_deletes.append(self.path)
@@ -1280,6 +1632,10 @@ class TestAtexitCleanupRealInterpreterShutdown(unittest.TestCase):
     kubernetes_asyncio's aiohttp transport dispatches a per-request netrc lookup via a background thread, which fails
     once Python's own thread-pool teardown has begun. No in-process test can reproduce that condition because the 
     interpreter never actually exits mid-suite, so this spawns a real subprocess and lets it exit for real."""
+
+    port: int
+    server: HTTPServer
+    server_thread: Thread
 
     @classmethod
     def setUpClass(cls):

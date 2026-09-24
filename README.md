@@ -88,15 +88,14 @@ flowchart LR
 
 ### Standard Install (Core + Extensions)
 
-Recommended for most users and GitOps engines (Argo CD, Config Sync, kustomize).
-`sandbox-with-extensions.yaml` is a single, collision-free asset (the controller is
-declared once with extensions enabled):
+Recommended for most users:
 
 ```sh
-# Replace "vX.Y.Z" with a specific version tag (e.g., "v0.1.0") from
-# https://github.com/kubernetes-sigs/agent-sandbox/releases
-export VERSION="vX.Y.Z"
+# Quick install (latest release):
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/sandbox-with-extensions.yaml
 
+# Or pin to a specific version (recommended for production and GitOps):
+export VERSION="v1.0.2"
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox-with-extensions.yaml
 ```
 
@@ -108,10 +107,12 @@ If you prefer to install components separately:
 
 ```sh
 # Core only:
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/sandbox.yaml
 
 # Extensions (opt-in):
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/extensions.yaml
+
+# To pin to a specific version, replace "latest/download" with "download/<version>".
 ```
 
 ### Go SDK
@@ -127,9 +128,19 @@ For detailed installation and usage instructions, please refer to the [Go SDK RE
 
 ### Python SDK
 
-To interact with the agent-sandbox programmatically, you can use the Python SDK. This client library provides a high-level interface for creating and managing sandboxes.
+To interact with the agent-sandbox programmatically from Python, use the Python SDK:
+
+```sh
+pip install k8s-agent-sandbox
+```
 
 For detailed installation and usage instructions, please refer to the [Python SDK README](clients/python/agentic-sandbox-client/README.md).
+
+### Sandbox Router (Optional)
+
+The [Sandbox Router](sandbox-router/) is an HTTP reverse proxy that routes traffic from SDKs and external clients to sandbox pods. It is useful for workloads using the Go or Python SDKs, or runtime environments (like Kata Containers and gVisor) where direct pod port-forwarding is unavailable.
+
+For deployment manifests and setup options, see [sandbox-router/deploy/](sandbox-router/deploy/).
 
 ### Verify Installation
 
@@ -161,10 +172,13 @@ kubectl get crd sandboxtemplates.extensions.agents.x-k8s.io >/dev/null 2>&1 && k
 
 > **Warning**: Deleting the CRDs will **cascade-delete all custom resources** of those types across all namespaces.
 
-Once you have confirmed no resources are in use (or you are prepared to lose them), uninstall by deleting the same manifest you used to install:
+Once you have confirmed no resources are in use (or you are prepared to lose them), uninstall by deleting the manifest for the version installed on your cluster:
 
 ```sh
-# Standard Install (Core + Extensions):
+# Set the version installed on your cluster (e.g., "v1.0.2"):
+export VERSION="v1.0.2"
+
+# Standard Install:
 kubectl delete -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox-with-extensions.yaml
 
 # Or, if you used the Selective Install:
@@ -239,16 +253,12 @@ This is a community-driven effort, and we welcome collaboration!
 
 ### AI-Assisted Code Reviews (Experimental)
 
-To help improve our review velocity, we are currently experimenting with AI-assisted code reviews using GitHub Copilot and CodeRabbit as our automated first-pass reviewers. Here is the workflow:
+To help improve our review velocity, we are currently experimenting with AI-assisted code reviews using CodeRabbit as our automated first-pass reviewer. Here is the workflow:
 
-1. Copilot and CodeRabbit will automatically review open PRs (skipping draft PRs and PRs without a signed CLA).
-1. After automated reviews are posted, the PR will be labeled `action-required: resolve-copilot-comments`.
-   * **⚠️ Important Contribution Note (CLA Requirement):** If you receive a code suggestion from Copilot or CodeRabbit in your PR, please don't directly apply suggestions via the GitHub UI. It will set the AI bot as co-author and break the Kubernetes CLA requirements. For more information, read our [Contributing Guidelines](CONTRIBUTING.md). 
-1. **Interacting with AI Reviewers:**
-   * **GitHub Copilot:** If your organization or account has Copilot enabled, you can interact with Copilot directly in PR comment threads by tagging `@copilot` or clicking the Copilot sparkle icon to ask questions, explain code, or suggest fixes.
-   * **CodeRabbit:** CodeRabbit provides high-level summaries and walkthroughs, and acts as an automated gatekeeper that approves the PR once all issues are resolved. You can interact with it by commenting `@coderabbitai` on your PR (e.g., `@coderabbitai review` to request an incremental re-review, or `@coderabbitai full review` to re-evaluate the entire PR from scratch).
-1. After automated review comments are addressed or marked resolved, the PR will be labeled `ready-for-review`.
-1. Maintainers will review `ready-for-review` PRs and provide final approval.
+1. CodeRabbit will automatically review open PRs (skipping draft PRs and PRs without a signed CLA).
+   * **⚠️ Important Contribution Note (CLA Requirement):** If you receive a code suggestion from CodeRabbit in your PR, please don't directly apply suggestions via the GitHub UI. It will set the AI bot as co-author and break the Kubernetes CLA requirements. For more information, read our [Contributing Guidelines](CONTRIBUTING.md). 
+1. **Interacting with CodeRabbit:** CodeRabbit provides high-level summaries and walkthroughs, and acts as an automated gatekeeper that approves the PR once all issues are resolved. You can interact with it by commenting `@coderabbitai` on your PR (e.g., `@coderabbitai review` to request an incremental re-review, or `@coderabbitai full review` to re-evaluate the entire PR from scratch).
+1. After automated review comments are addressed or marked resolved, maintainers will review the PR and provide final approval.
 
 We actively welcome your feedback on the quality, relevance, and helpfulness of these automated reviews! As we iterate on this process, we also plan to evaluate and test different AI review tools to find the best fit for our project's workflow.
 

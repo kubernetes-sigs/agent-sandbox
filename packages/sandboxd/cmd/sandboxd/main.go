@@ -19,10 +19,10 @@
 //	HTTP  :8080  FilesystemService — stateless file operations & probes
 //
 // Both listeners bind to --listen-host (default 0.0.0.0), so the daemon is
-// reachable on the pod network — via a Service or the sandbox-router — like
-// any other in-pod service. Containment comes from pod isolation and
-// NetworkPolicy, not loopback binding; pass --listen-host=127.0.0.1 to
-// restrict to loopback for local development.
+// reachable through the Pod IP or a Service like any other in-pod service.
+// The current sandbox-router cannot proxy the gRPC surface. Containment comes
+// from pod isolation and NetworkPolicy, not loopback binding; pass
+// --listen-host=127.0.0.1 to restrict to loopback for local development.
 package main
 
 import (
@@ -62,9 +62,9 @@ const (
 	readHeaderTimeout = 10 * time.Second
 
 	// defaultListenHost is the interface sandboxd binds by default. It is
-	// 0.0.0.0 so the daemon is reachable on the pod network — via a Service
-	// or the sandbox-router — like any other in-pod service. Containment is
-	// provided by pod isolation and NetworkPolicy, not by loopback binding.
+	// 0.0.0.0 so the daemon is reachable through the Pod IP or a Service.
+	// Containment is provided by pod isolation and NetworkPolicy, not by
+	// loopback binding.
 	// Set --listen-host=127.0.0.1 to restrict to loopback (e.g. local dev).
 	defaultListenHost = "0.0.0.0"
 )

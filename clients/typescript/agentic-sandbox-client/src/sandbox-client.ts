@@ -304,6 +304,26 @@ export class SandboxClient {
       );
     }
 
+    let shutdownTime: string | undefined;
+    if (opts?.shutdownAfterSeconds !== undefined) {
+      const seconds = opts.shutdownAfterSeconds;
+      if (!Number.isInteger(seconds) || seconds <= 0) {
+        throw new SandboxError(
+          `shutdownAfterSeconds must be a positive integer, got: ${seconds}`,
+        );
+      }
+      // Fix the deadline before any asynchronous provisioning work. JavaScript
+      // permits dates beyond RFC3339's four-digit year range.
+      const deadline = new Date(Date.now() + seconds * 1000);
+      if (
+        Number.isNaN(deadline.getTime()) ||
+        deadline.getUTCFullYear() > 9999
+      ) {
+        throw new SandboxError(`shutdownAfterSeconds is too large: ${seconds}`);
+      }
+      shutdownTime = deadline.toISOString();
+    }
+
     // Empty string normalizes to defaultNamespace (matches Go client behaviour).
     const ns = namespace || this.defaultNamespace;
     const claimName = `sandbox-claim-${crypto.randomBytes(4).toString("hex")}`;
@@ -321,6 +341,7 @@ export class SandboxClient {
       warmpool,
       ns,
       opts,
+      shutdownTime,
     ).finally(() => {
       this.attaching.delete(key);
       this.provisioning.delete(key);
@@ -340,6 +361,7 @@ export class SandboxClient {
     warmpool: string,
     ns: string,
     opts?: CreateSandboxOptions,
+    shutdownTime?: string,
   ): Promise<Sandbox> {
     const sandboxReadyTimeout =
       opts?.sandboxReadyTimeout ?? this.defaultSandboxReadyTimeout;
@@ -370,6 +392,7 @@ export class SandboxClient {
         traceContextStr,
         sandboxTracer,
         sandboxTracingManager?.parentContext,
+        shutdownTime,
       );
       // deleteAll() may have swept this key while the claim was being created;
       // it could not delete a claim the apiserver had not accepted yet, so fail
@@ -664,13 +687,14 @@ export class SandboxClient {
   }
 
   /**
-   * Returns the WarmPool name referenced by a SandboxClaim.
+   * Returns the WarmPool name referenced by a SandboxClaim, or `undefined` when
+   * the claim is not warm-pool-backed (`spec.warmPoolRef` is absent).
    * Throws SandboxNotFoundError if the claim does not exist.
    */
   async getSandboxClaimWarmpoolName(
     claimName: string,
     namespace?: string,
-  ): Promise<string> {
+  ): Promise<string | undefined> {
     const ns = namespace || this.defaultNamespace;
     let claimObj: unknown;
     try {
@@ -699,7 +723,7 @@ export class SandboxClient {
         unknown
       >) ?? {};
     const warmPoolRef = (spec.warmPoolRef as Record<string, unknown>) ?? {};
-    return warmPoolRef.name as string;
+    return warmPoolRef.name as string | undefined;
   }
 
   /**
@@ -933,6 +957,7 @@ export class SandboxClient {
     traceContextStr: string = "",
     tracer: Tracer | null = null,
     parentContext?: unknown,
+    shutdownTime?: string,
   ): Promise<void> {
     if (labels) {
       validateLabels(labels);
@@ -960,6 +985,9 @@ export class SandboxClient {
         },
         spec: {
           warmPoolRef: { name: warmpool },
+          ...(shutdownTime
+            ? { lifecycle: { shutdownTime, shutdownPolicy: "Delete" } }
+            : {}),
         },
       };
 

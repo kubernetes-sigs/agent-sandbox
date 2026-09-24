@@ -12,6 +12,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**chrome-sandbox**](./chrome-sandbox): An example of running a Chrome browser in a sandbox.
 - [**code-interpreter-agent-on-adk**](./code-interpreter-agent-on-adk): An example of using Agent Sandbox as a tool in Agent Development Kit (ADK).
 - [**composing-sandbox-nw-policies**](./composing-sandbox-nw-policies): An example of composing network policies for sandboxes.
+- [**containarium-execution-scoped-token**](./containarium-execution-scoped-token): An example of execution-scoped credentials in a reused Sandbox: a run-bound token delivered only through sandboxd's `ProcessConfig.env_vars`, egress pinned to a credential proxy with Cilium, and the token revoked when the process exits.
 - [**containarium-ssh-sandbox**](./containarium-ssh-sandbox): An example of running Containarium's agent-box runtime in a Sandbox, reached over SSH with an in-container MCP server (no kube-apiserver token held by the agent).
 - [**demo-cilium-egress**](./demo-cilium-egress): A demo of enforcing sandbox egress rules with Cilium network policies.
 - [**envd-sandbox**](./envd-sandbox): An example of running E2B's envd daemon as the container entrypoint, providing an E2B-compatible REST and gRPC API for filesystem, process execution, and metrics.
@@ -34,8 +35,10 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**manual-pdb**](./manual-pdb): An example of manual PodDisruptionBudget (PDB) configuration for sandboxes.
 - [**mcp-server-sandbox**](./mcp-server-sandbox): Run an MCP (Model Context Protocol) server inside a Sandbox with attached storage.
 - [**n8n-mcp**](./n8n-mcp): An example of connecting n8n workflows to sandboxes through the MCP server integration.
+- [**network-policy-api-sandbox**](./network-policy-api-sandbox): Cluster-wide default deny and FQDN egress allowlists for sandboxes with the official Kubernetes `ClusterNetworkPolicy` API, on top of the template-managed `NetworkPolicy`, enforced by kube-network-policies (the SIG Network reference implementation).
 - [**nono-sandbox**](./nono-sandbox): An example of running nono inside an Agent Sandbox, with fine-grained filesystem isolation, network filtering, credential brokering, and ephemeral per-tool micro-sandboxes.
 - [**nullclaw-sandbox**](./nullclaw-sandbox): An example of running Nullclaw, a minimal AI assistant runtime, inside the Agent Sandbox.
+- [**openclaw-fleet-gke**](./openclaw-fleet-gke): A measured enterprise-fleet blueprint on GKE: sub-second warm claims with late-bound per-employee Filestore workspaces, stable per-employee URLs, two-tier sleep/wake, and rolling updates.
 - [**openclaw-gvisor-sandbox**](./openclaw-gvisor-sandbox): A production-shaped, gVisor-isolated OpenClaw sandbox using the template/claim pattern and persistent storage.
 - [**openclaw-kata-aks-sandbox**](./openclaw-kata-aks-sandbox): An OpenClaw sandbox isolated by Kata Containers on AKS, so the agent runtime gets its own VM and guest kernel.
 - [**pi-code-agent**](./pi-code-agent): An example of running the pi code agent inside a sandbox.

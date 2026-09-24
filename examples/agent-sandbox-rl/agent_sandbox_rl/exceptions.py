@@ -31,6 +31,16 @@ class NoClusterAvailableError(FleetError):
   """Placement could not select a cluster for a task."""
 
 
+class PoolNotFoundError(FleetError):
+  """``adopt_existing`` is on and no pre-existing warm pool serves an image.
+
+  Adopt mode exists so a harness pointed at pools someone else provisioned (the
+  multi-cluster fleet layer, a platform team, a previous run) either uses them or
+  says so. Without it the miss is silent: `acquire` falls through to the
+  on-demand path and builds a parallel size-1 pool per image, which looks like a
+  working run and is orders of magnitude slower than the warm pods it ignored."""
+
+
 class FleetOvercommitError(FleetError):
   """The in-SDK circuit breaker tripped: live sandboxes exceeded the safe ceiling
   (``overcommit_factor`` × expected, or ``max_live_sandboxes``), signalling a

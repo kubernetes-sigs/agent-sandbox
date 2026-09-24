@@ -1,0 +1,37 @@
+# Allow PyPI only for sandboxes in namespaces labelled team=b.
+#
+# Same subject as the cluster-wide policies, narrowed by a namespace label. The
+# pod selector is kept so the policy does not select non-sandbox pods in the
+# same namespace.
+#
+# Labels are not authentication: whoever can label or create namespaces can
+# opt into this allowlist, so `team` has to be a label only cluster admins set.
+#
+# pip needs both pypi.org (index) and files.pythonhosted.org (downloads).
+apiVersion: policy.networking.k8s.io/v1alpha2
+kind: ClusterNetworkPolicy
+metadata:
+  name: sandbox-egress-team-b-allow-pypi
+spec:
+  tier: Admin
+  priority: 30
+  subject:
+    pods:
+      namespaceSelector:
+        matchLabels:
+          team: b
+      podSelector:
+        matchExpressions:
+          - key: agents.x-k8s.io/sandbox-name-hash
+            operator: Exists
+  egress:
+    - name: pypi-https
+      action: Accept
+      to:
+        - domainNames:
+            - pypi.org
+            - files.pythonhosted.org
+      protocols:
+        - tcp:
+            destinationPort:
+              number: 443

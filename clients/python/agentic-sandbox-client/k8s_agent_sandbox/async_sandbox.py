@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Async handle for one running Sandbox and its local client resources."""
+
 import logging
 
 from .async_connector import AsyncSandboxConnector
@@ -46,15 +48,15 @@ class AsyncSandbox:
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
         k8s_helper: AsyncK8sHelper | None = None,
-    ):
+    ) -> None:
         if connection_config is None:
             raise ValueError(
                 "connection_config is required for AsyncSandbox. "
                 "Use SandboxDirectConnectionConfig, SandboxGatewayConnectionConfig, "
-                "or SandboxInClusterConnectionConfig."
+                "SandboxInClusterConnectionConfig, or SandboxdPodTunnelConnectionConfig."
             )
 
-        self.claim_name = claim_name
+        self.claim_name: str | None = claim_name
         self.sandbox_id = sandbox_id
         self.namespace = namespace
         self.connection_config = connection_config
@@ -67,29 +69,32 @@ class AsyncSandbox:
             connection_config=self.connection_config,
             k8s_helper=self.k8s_helper,
             get_pod_ip=self.get_pod_ip,
+            get_pod_name=self.get_pod_name,
         )
 
         self.tracer_config = tracer_config or SandboxTracerConfig()
         self.trace_service_name = self.tracer_config.trace_service_name
         self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
 
-        self._commands = AsyncCommandExecutor(
+        self._commands: AsyncCommandExecutor | None = AsyncCommandExecutor(
             self.connector, self.tracer, self.trace_service_name
         )
-        self._files = AsyncFilesystem(
+        self._files: AsyncFilesystem | None = AsyncFilesystem(
             self.connector, self.tracer, self.trace_service_name
         )
 
         self._is_closed = False
-        self._pod_name = None
-        self._sandbox_name_hash = None
+        self._pod_name: str | None = None
+        self._sandbox_name_hash: str | None = None
 
     async def get_pod_name(self) -> str:
         """Fetches the Sandbox object from Kubernetes and retrieves its current pod name."""
         if self._pod_name is not None:
             return self._pod_name
 
-        sandbox_object = await self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
+        sandbox_object = (
+            await self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
+        )
         metadata = sandbox_object.get("metadata") or {}
         annotations = metadata.get("annotations") or {}
         pod_name = annotations.get(POD_NAME_ANNOTATION)
@@ -147,10 +152,12 @@ class AsyncSandbox:
 
     @property
     def commands(self) -> AsyncCommandExecutor | None:
+        """Return the command client while this handle is active."""
         return self._commands
 
     @property
     def files(self) -> AsyncFilesystem | None:
+        """Return the filesystem client while this handle is active."""
         return self._files
 
     @property
@@ -161,7 +168,7 @@ class AsyncSandbox:
         """
         return not self._is_closed and self._commands is not None and self._files is not None
 
-    async def close_connection(self):
+    async def close_connection(self) -> None:
         """
         Closes the client-side connection and disables execution engines locally,
         but leaves the remote Kubernetes Sandbox infrastructure running.
@@ -185,7 +192,14 @@ class AsyncSandbox:
         self._is_closed = True
         logging.info(f"Connection to sandbox claim '{self.claim_name}' has been closed.")
 
-    async def terminate(self):
+    def _close_for_atexit(self) -> None:
+        """Release local resources without touching the owning event loop."""
+        self.connector._close_for_atexit()
+        self._commands = None
+        self._files = None
+        self._is_closed = True
+
+    async def terminate(self) -> None:
         """
         Permanent deletion of all server side infrastructure and client side connection.
 

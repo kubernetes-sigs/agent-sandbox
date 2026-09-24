@@ -30,9 +30,12 @@ The warm pool's SandboxTemplate must run the agent-server image with
 from __future__ import annotations
 
 import time
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _dist_version
 from typing import Any
 from urllib.request import Request, urlopen
 
+import httpx
 from pydantic import Field, PrivateAttr
 
 from openhands.sdk.logger import get_logger
@@ -72,7 +75,12 @@ class AgentSandboxWorkspace(RemoteWorkspace):
     )
     host: str = Field(
         default="",
-        description="Agent-server URL (set automatically after the claim binds).",
+        description=(
+            "Agent-server URL. Always derived from the claimed sandbox once "
+            "the claim binds; a caller-supplied value is replaced (with a "
+            "warning). Use router_url or endpoint_template to reach pods "
+            "through a gateway."
+        ),
     )
 
     # Provisioning configuration.
@@ -141,12 +149,25 @@ class AgentSandboxWorkspace(RemoteWorkspace):
     claim_labels: dict[str, str] | None = Field(
         default=None, description="Labels for the SandboxClaim object."
     )
+    check_server_version: bool = Field(
+        default=True,
+        description=(
+            "After attach, compare the agent-server's reported version with "
+            "the installed openhands-sdk and log a loud warning on skew (the "
+            "SDK and server image are released together). Never fails the "
+            "attach; disable for offline tests."
+        ),
+    )
     sandbox_client: Any = Field(
         default=None,
         exclude=True,
         description=(
-            "Injected k8s_agent_sandbox.SandboxClient (or compatible). Built "
-            "lazily with defaults when omitted; tests inject fakes."
+            "Injected k8s_agent_sandbox.SandboxClient (or compatible: "
+            "create_sandbox() returns an object with claim_name, sandbox_id, "
+            "get_pod_ip() and terminate()). Built lazily with defaults when "
+            "omitted; tests inject fakes. A returned object may set "
+            "releases_on_terminate=False when its terminate() does not "
+            "release the pod, so cleanup logs a detach rather than a release."
         ),
     )
 
@@ -203,10 +224,16 @@ class AgentSandboxWorkspace(RemoteWorkspace):
             self.namespace,
         )
         try:
-            # Mirror DockerWorkspace: bypass validate-assignment plumbing when
-            # rewriting connection fields mid-init.
-            if not self.host:
-                object.__setattr__(self, "host", self._endpoint_url(sandbox))
+            if self.host:
+                logger.warning(
+                    "host=%r is ignored: the endpoint is always derived from "
+                    "the claimed sandbox (use router_url or endpoint_template "
+                    "for gateway/proxied paths)",
+                    self.host,
+                )
+            # Bypass validate-assignment plumbing when rewriting connection
+            # fields mid-init (the same trick DockerWorkspace uses).
+            object.__setattr__(self, "host", self._endpoint_url(sandbox))
             self._wait_for_health(timeout=self.health_check_timeout)
         except Exception:
             # Never leave an orphaned claim behind a failed init.
@@ -214,6 +241,51 @@ class AgentSandboxWorkspace(RemoteWorkspace):
             raise
         logger.info("Agent-sandbox workspace is ready at %s", self.host)
         super().model_post_init(context)
+        if self.check_server_version:
+            self._log_version_skew()
+
+    def _log_version_skew(self) -> None:
+        """Warn (never fail) when the server and SDK versions diverge.
+
+        Only the failures an advisory probe is expected to hit stay quiet:
+        transport/HTTP errors reaching ``/server_info``, a non-JSON body, or
+        an SDK that isn't installed as a distribution. Anything else — an
+        unexpected payload shape or a bug in this check — is logged at
+        WARNING so it cannot silently disable the advisory on every attach.
+        """
+        try:
+            info = self.get_server_info()
+        except (httpx.HTTPError, ValueError) as e:
+            # Connection refused / timeout, non-2xx, or a body that isn't JSON.
+            logger.debug("server version check skipped: %s", e)
+            return
+        except Exception:  # noqa: BLE001 — advisory: never break the attach
+            logger.warning("server version check failed unexpectedly", exc_info=True)
+            return
+        if not isinstance(info, dict):
+            logger.warning(
+                "server version check skipped: /server_info returned %s, "
+                "expected a JSON object",
+                type(info).__name__,
+            )
+            return
+        server_version = str(info.get("version") or "")
+        try:
+            sdk_version = _dist_version("openhands-sdk")
+        except PackageNotFoundError:
+            logger.debug(
+                "server version check skipped: openhands-sdk is not installed "
+                "as a distribution"
+            )
+            return
+        if server_version and server_version != sdk_version:
+            logger.warning(
+                "agent-server reports version %s but the installed "
+                "openhands-sdk is %s — align the SandboxTemplate image "
+                "tag with the SDK release to avoid protocol skew",
+                server_version,
+                sdk_version,
+            )
 
     def _endpoint_url(self, sandbox: Any) -> str:
         if self.router_url:
@@ -285,8 +357,16 @@ class AgentSandboxWorkspace(RemoteWorkspace):
         self.cleanup()
 
     def cleanup(self) -> None:
-        """Delete the claim (the pool replenishes) and drop an owned client."""
+        """Delete the claim (the pool replenishes) and drop an owned client.
+
+        A failed termination keeps the claim reference so a later cleanup()
+        (or __del__) can retry — otherwise a claim with no ttl_s would leak
+        and silently eat warm-pool capacity. The owned client is kept open
+        while a retry is still possible.
+        """
         self._terminate_sandbox()
+        if self._sandbox is not None:
+            return  # termination failed; keep the client for the retry
         if self._owns_client and self.sandbox_client is not None:
             close = getattr(self.sandbox_client, "close", None)
             if callable(close):
@@ -301,16 +381,26 @@ class AgentSandboxWorkspace(RemoteWorkspace):
         sandbox = self._sandbox
         if sandbox is None:
             return
-        self._sandbox = None
         # Capture before terminate(): the SDK clears identity fields on close.
         claim_name = getattr(sandbox, "claim_name", "?")
         try:
             sandbox.terminate()
-            logger.info("Released sandbox claim %s", claim_name)
-        except Exception as e:  # noqa: BLE001 — ttl_s backstops a failed delete
+        except Exception as e:  # noqa: BLE001 — retried on the next cleanup()
             logger.warning(
-                "Failed to terminate sandbox %s: %s (ttl_s backstop applies "
-                "if configured)",
+                "Failed to terminate sandbox %s: %s (kept for retry; ttl_s "
+                "backstop applies if configured)",
                 claim_name,
                 e,
+            )
+            return
+        # Clear only after success so a failed delete stays retryable.
+        self._sandbox = None
+        if getattr(sandbox, "releases_on_terminate", True):
+            logger.info("Released sandbox claim %s", claim_name)
+        else:
+            # Injected view whose terminate() is a no-op on the pod (e.g. a
+            # fleet-bound handle): we only detached; its owner releases it.
+            logger.info(
+                "Detached from sandbox %s (its owner releases the claim)",
+                claim_name,
             )

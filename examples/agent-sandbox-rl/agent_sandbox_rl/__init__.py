@@ -46,6 +46,7 @@ from .exceptions import (
     FleetError,
     FleetOvercommitError,
     NoClusterAvailableError,
+    PoolNotFoundError,
     PreflightError,
 )
 from .async_fleet import AsyncSandboxFleet
@@ -71,7 +72,7 @@ from .placement import (
 from .preflight import PreflightReport, preflight_cluster
 from .prepull import prepull, prepull_delete
 from .registry_rewrite import make_rewriter, rewrite_image
-from .resources import Resources
+from .resources import DiscoveredPool, Resources
 from .sizing import (
     compute_replicas,
     plan,
@@ -114,6 +115,7 @@ __all__ = [
     "SWEBENCH_PROBE",
     # cluster / resources
     "Resources",
+    "DiscoveredPool",
     "Cluster",
     "ClusterRegistry",
     "build_api_client",
@@ -158,6 +160,7 @@ __all__ = [
     "PreflightError",
     "CapacityError",
     "NoClusterAvailableError",
+    "PoolNotFoundError",
     "FleetOvercommitError",
     "reap",
 ]

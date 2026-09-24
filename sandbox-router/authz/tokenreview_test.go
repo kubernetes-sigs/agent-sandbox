@@ -62,7 +62,7 @@ func TestTokenReview_AuthenticatedAllow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
-	if err := auth.Authorize(context.Background(), reqWithBearer("t1"), "ns", "s"); err != nil {
+	if err := auth.Authorize(context.Background(), reqWithBearer("t1"), testAuthorizationTarget("ns", "s")); err != nil {
 		t.Fatalf("expected allow, got %v", err)
 	}
 	if calls.Load() != 1 {
@@ -77,7 +77,7 @@ func TestTokenReview_UnauthenticatedRejected(t *testing.T) {
 		return true, tr, nil
 	})
 	auth, _ := NewTokenReviewAuthorizer(TokenReviewOptions{Client: cs, Log: logr.Discard()})
-	err := auth.Authorize(context.Background(), reqWithBearer("bad-token"), "ns", "s")
+	err := auth.Authorize(context.Background(), reqWithBearer("bad-token"), testAuthorizationTarget("ns", "s"))
 	if !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("expected ErrUnauthenticated, got %v", err)
 	}
@@ -90,12 +90,12 @@ func TestTokenReview_MissingTokenRespectsRequire(t *testing.T) {
 	})
 	// require=false → allow when token missing
 	auth, _ := NewTokenReviewAuthorizer(TokenReviewOptions{Client: cs, Log: logr.Discard(), RequireToken: false})
-	if err := auth.Authorize(context.Background(), reqWithBearer(""), "ns", "s"); err != nil {
+	if err := auth.Authorize(context.Background(), reqWithBearer(""), testAuthorizationTarget("ns", "s")); err != nil {
 		t.Fatalf("require=false should allow missing token, got %v", err)
 	}
 	// require=true → ErrUnauthenticated
 	auth, _ = NewTokenReviewAuthorizer(TokenReviewOptions{Client: cs, Log: logr.Discard(), RequireToken: true})
-	err := auth.Authorize(context.Background(), reqWithBearer(""), "ns", "s")
+	err := auth.Authorize(context.Background(), reqWithBearer(""), testAuthorizationTarget("ns", "s"))
 	if !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("require=true should reject missing token, got %v", err)
 	}
@@ -114,7 +114,7 @@ func TestTokenReview_PositiveResultCached(t *testing.T) {
 	auth, _ := NewTokenReviewAuthorizer(TokenReviewOptions{Client: cs, Log: logr.Discard(), TTL: 30 * time.Second})
 
 	for i := range 5 {
-		if err := auth.Authorize(context.Background(), reqWithBearer("same-token"), "ns", "s"); err != nil {
+		if err := auth.Authorize(context.Background(), reqWithBearer("same-token"), testAuthorizationTarget("ns", "s")); err != nil {
 			t.Fatalf("call %d: %v", i, err)
 		}
 	}
@@ -123,7 +123,7 @@ func TestTokenReview_PositiveResultCached(t *testing.T) {
 	}
 
 	// Different token should bypass cache.
-	if err := auth.Authorize(context.Background(), reqWithBearer("other-token"), "ns", "s"); err != nil {
+	if err := auth.Authorize(context.Background(), reqWithBearer("other-token"), testAuthorizationTarget("ns", "s")); err != nil {
 		t.Fatalf("%v", err)
 	}
 	if calls.Load() != 2 {
@@ -140,7 +140,7 @@ func TestTokenReview_NegativeResultCached(t *testing.T) {
 	auth, _ := NewTokenReviewAuthorizer(TokenReviewOptions{Client: cs, Log: logr.Discard(), TTL: 30 * time.Second})
 
 	for i := range 3 {
-		if err := auth.Authorize(context.Background(), reqWithBearer("bad"), "ns", "s"); !errors.Is(err, ErrUnauthenticated) {
+		if err := auth.Authorize(context.Background(), reqWithBearer("bad"), testAuthorizationTarget("ns", "s")); !errors.Is(err, ErrUnauthenticated) {
 			t.Fatalf("call %d expected ErrUnauthenticated, got %v", i, err)
 		}
 	}
@@ -155,7 +155,7 @@ func TestTokenReview_APIFailureSurfaces(t *testing.T) {
 	})
 	auth, _ := NewTokenReviewAuthorizer(TokenReviewOptions{Client: cs, Log: logr.Discard()})
 
-	err := auth.Authorize(context.Background(), reqWithBearer("x"), "ns", "s")
+	err := auth.Authorize(context.Background(), reqWithBearer("x"), testAuthorizationTarget("ns", "s"))
 	if err == nil {
 		t.Fatal("expected error on API failure")
 	}
@@ -164,7 +164,7 @@ func TestTokenReview_APIFailureSurfaces(t *testing.T) {
 		t.Fatalf("API failure should not look like auth deny, got %v", err)
 	}
 	// Briefly cached: subsequent call within TTL should NOT re-hit the API.
-	_ = auth.Authorize(context.Background(), reqWithBearer("x"), "ns", "s")
+	_ = auth.Authorize(context.Background(), reqWithBearer("x"), testAuthorizationTarget("ns", "s"))
 	if calls.Load() != 1 {
 		t.Fatalf("expected error cached; got %d API calls", calls.Load())
 	}
@@ -219,7 +219,7 @@ func TestTokenReview_PassesAudiences(t *testing.T) {
 		Log:       logr.Discard(),
 		Audiences: []string{"sandbox-router"},
 	})
-	if err := auth.Authorize(context.Background(), reqWithBearer("t"), "ns", "s"); err != nil {
+	if err := auth.Authorize(context.Background(), reqWithBearer("t"), testAuthorizationTarget("ns", "s")); err != nil {
 		t.Fatalf("%v", err)
 	}
 	if len(seenAudiences) != 1 || seenAudiences[0] != "sandbox-router" {
@@ -244,13 +244,13 @@ func TestTokenReview_AuthenticatesFromQueryAndCookie(t *testing.T) {
 	})
 
 	req, _ := http.NewRequest("GET", "/?token=q1", nil)
-	if err := auth.Authorize(context.Background(), req, "ns", "s"); err != nil {
+	if err := auth.Authorize(context.Background(), req, testAuthorizationTarget("ns", "s")); err != nil {
 		t.Fatalf("query: expected allow, got %v", err)
 	}
 
 	req, _ = http.NewRequest("GET", "/", nil)
 	req.AddCookie(&http.Cookie{Name: "sid", Value: "c1"})
-	if err := auth.Authorize(context.Background(), req, "ns", "s"); err != nil {
+	if err := auth.Authorize(context.Background(), req, testAuthorizationTarget("ns", "s")); err != nil {
 		t.Fatalf("cookie: expected allow, got %v", err)
 	}
 }

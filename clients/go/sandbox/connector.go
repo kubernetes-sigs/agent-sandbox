@@ -53,8 +53,9 @@ var retryableStatusCodes = map[int]bool{
 	http.StatusGatewayTimeout:      true,
 }
 
-// connector manages HTTP connectivity to the sandbox-router. It owns the
-// HTTP client, retry logic, and delegates URL discovery to a ConnectionStrategy.
+// connector manages HTTP connectivity to the sandbox runtime, either directly
+// or through the sandbox-router. It owns the HTTP client, retry logic, and
+// delegates endpoint discovery to a ConnectionStrategy.
 type connector struct {
 	strategy   ConnectionStrategy
 	httpClient *http.Client
@@ -68,11 +69,13 @@ type connector struct {
 	lastError           error
 
 	// routerHeaders controls whether X-Sandbox-* routing headers are sent.
-	// True for router-based transports (legacy runtime); false for the
-	// sandboxd pod tunnel, which talks to the pod directly.
+	// True only for transports that actually reach the sandbox-router; false
+	// for sandboxd and for any in-cluster dial, which address the pod and so
+	// have nothing to consume them.
 	routerHeaders bool
-	// grpcTarget is the dial address for sandboxd's ProcessService,
-	// published by podTunnelStrategy after the port-forward is ready.
+	// grpcTarget is the dial address for sandboxd's ProcessService, published
+	// by whichever strategy resolved it (the pod tunnel once the port-forward
+	// is ready, or the in-cluster strategy once the address is known).
 	grpcTarget string
 	grpcConn   *grpc.ClientConn
 
@@ -171,13 +174,18 @@ func (c *connector) Connect(ctx context.Context) error {
 	c.lastError = nil
 	c.mu.Unlock()
 	mode := "direct"
-	switch c.strategy.(type) {
+	switch s := c.strategy.(type) {
 	case *gatewayStrategy:
 		mode = "gateway"
 	case *tunnelStrategy:
 		mode = "port-forward"
 	case *podTunnelStrategy:
 		mode = "sandboxd-pod-tunnel"
+	case *inClusterStrategy:
+		mode = "in-cluster-pod-ip"
+		if s.useServiceDNS {
+			mode = "in-cluster-service"
+		}
 	}
 	c.log.Info("API URL discovered", "url", url, "mode", mode)
 	return nil
@@ -198,8 +206,10 @@ func (c *connector) SetGRPCTarget(target string) {
 }
 
 // GRPCConn returns a (lazily dialed) client connection to sandboxd's
-// ProcessService. The connection is plaintext: it only ever traverses the
-// port-forward tunnel to the pod's loopback listener.
+// ProcessService. The connection is plaintext, and what protects it depends on
+// the strategy that published the target: podTunnelStrategy traverses an
+// apiserver-authorized port-forward to the pod, while inClusterStrategy sends it
+// across the pod network, where NetworkPolicy (or a mesh) must confine it.
 func (c *connector) GRPCConn() (*grpc.ClientConn, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

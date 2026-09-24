@@ -34,8 +34,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -56,6 +58,22 @@ func newFakeClient(initialObjs ...runtime.Object) client.WithWatch {
 		WithRuntimeObjects(initialObjs...).
 		Build()
 }
+
+// invalidServiceNameError mirrors the apiserver's rejection of a Service whose
+// metadata.name exceeds the 63-character DNS-1035 label limit. The fake client
+// does not run apiserver name validation, so tests inject this via an
+// interceptor to reproduce the real permanent-failure path.
+func invalidServiceNameError(name string) error {
+	return k8serrors.NewInvalid(
+		schema.GroupKind{Kind: "Service"},
+		name,
+		field.ErrorList{
+			field.Invalid(field.NewPath("metadata.name"), name, "must be no more than 63 characters"),
+		},
+	)
+}
+
+const overlongSandboxName = "sandbox-name-deliberately-exceeding-the-sixty-three-char-service-label-limit"
 
 const sandboxUID = types.UID("test-sandbox-uid")
 
@@ -104,6 +122,11 @@ func TestComputeConditions(t *testing.T) {
 		}}
 		return pod
 	}
+
+	// A permanent apiserver validation error (a derived Service name over the
+	// 63-character limit) must map to Ready=False/InvalidConfiguration rather than
+	// the generic ReconcilerError.
+	invalidNameErr := invalidServiceNameError("too-long-service-name")
 
 	testCases := []struct {
 		name               string
@@ -480,6 +503,18 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "MultiplePods", Message: "multiple Pods (2) are controlled by this Sandbox; refusing to choose or create a Pod"},
 			},
 		},
+		{
+			// A permanent apiserver Invalid error (e.g. a derived Service name over
+			// the 63-character limit) is reported as InvalidConfiguration, not the
+			// generic ReconcilerError, so operators get an actionable reason.
+			name:    "17. Invalid child-resource name reports InvalidConfiguration",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
+			err:     invalidNameErr,
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "InvalidConfiguration", Message: invalidNameErr.Error()},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -493,6 +528,67 @@ func TestComputeConditions(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestReconcileInvalidServiceNameSurfacesConditionWithoutRequeue is a regression
+// test for a Sandbox whose name yields a Service name over Kubernetes'
+// 63-character limit. The apiserver permanently rejects the Service create, and
+// the controller must surface that as Ready=False/InvalidConfiguration WITHOUT
+// returning the error from Reconcile -- returning it would trigger a
+// rate-limited requeue and error-level logging on a create that can never
+// succeed, hot-looping until the Sandbox is recreated.
+func TestReconcileInvalidServiceNameSurfacesConditionWithoutRequeue(t *testing.T) {
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       overlongSandboxName,
+			Namespace:  "default",
+			UID:        sandboxUID,
+			Generation: 1,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				Service: ptr.To(true), // nolint:modernize
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "main"}},
+					},
+				},
+			},
+			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+		},
+	}
+
+	// The fake client does not enforce apiserver name validation, so inject the
+	// Service name-length rejection the real apiserver would return -- and only
+	// for names over the limit, so the test proves it is the overlong derived
+	// name (not just any Service create) that trips the permanent-failure path.
+	fc := interceptor.NewClient(newFakeClient(sandbox), interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if svc, ok := obj.(*corev1.Service); ok && len(svc.Name) > 63 {
+				return invalidServiceNameError(svc.Name)
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	})
+
+	r := &SandboxReconciler{
+		Client: fc,
+		Scheme: Scheme,
+		Tracer: asmetrics.NewNoOp(),
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}}
+
+	res, err := r.Reconcile(t.Context(), req)
+	require.NoError(t, err, "permanent Invalid error must not be returned from Reconcile (would hot-loop)")
+	require.Zero(t, res.RequeueAfter, "must not schedule a requeue for a permanent misconfiguration")
+
+	updated := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, r.Get(t.Context(), req.NamespacedName, updated))
+	ready := meta.FindStatusCondition(updated.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	require.NotNil(t, ready)
+	require.Equal(t, metav1.ConditionFalse, ready.Status)
+	require.Equal(t, sandboxv1beta1.SandboxReasonInvalidConfiguration, ready.Reason)
+	require.Contains(t, ready.Message, "must be no more than 63 characters")
 }
 
 func TestResolvePodName(t *testing.T) {
@@ -5519,4 +5615,404 @@ func TestReconcileCoalescesNodeNameStatusWrite(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, r.Get(t.Context(), req.NamespacedName, live))
 	assert.Equal(t, "node-2", live.Status.NodeName, "node changes on a Ready sandbox must be written immediately")
+}
+
+func TestReconcileNamespaceTerminatingRequeue(t *testing.T) {
+	testCases := []struct {
+		name      string
+		mutate    func(*sandboxv1beta1.Sandbox)
+		setupObjs func(*sandboxv1beta1.Sandbox) []runtime.Object
+		failObj   func(client.Object) bool
+	}{
+		{
+			name: "pod creation in terminating namespace requeues without error",
+			failObj: func(obj client.Object) bool {
+				_, isPod := obj.(*corev1.Pod)
+				return isPod
+			},
+		},
+		{
+			name: "pvc creation in terminating namespace requeues without error",
+			mutate: func(sb *sandboxv1beta1.Sandbox) {
+				sb.Spec.VolumeClaimTemplates = []sandboxv1beta1.PersistentVolumeClaimTemplate{
+					{
+						EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+						Spec: corev1.PersistentVolumeClaimSpec{
+							AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						},
+					},
+				}
+			},
+			failObj: func(obj client.Object) bool {
+				_, isPVC := obj.(*corev1.PersistentVolumeClaim)
+				return isPVC
+			},
+		},
+		{
+			name: "service creation in terminating namespace requeues without error",
+			mutate: func(sb *sandboxv1beta1.Sandbox) {
+				sb.Spec.Service = new(true)
+			},
+			setupObjs: func(sb *sandboxv1beta1.Sandbox) []runtime.Object {
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sb.Name,
+						Namespace:       sb.Namespace,
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sb.Name)},
+						Labels:          map[string]string{sandboxLabel: NameHash(sb.Name)},
+					},
+				}
+				return []runtime.Object{pod}
+			},
+			failObj: func(obj client.Object) bool {
+				_, isSvc := obj.(*corev1.Service)
+				return isSvc
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			sb := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "ns-term-sb",
+					Namespace:  "terminating-ns",
+					UID:        sandboxUID,
+					Generation: 1,
+				},
+				Spec: sandboxv1beta1.SandboxSpec{
+					SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+						PodTemplate: sandboxv1beta1.PodTemplate{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test-container"}},
+							},
+						},
+					},
+				},
+			}
+			if tc.mutate != nil {
+				tc.mutate(sb)
+			}
+
+			var initialObjs []runtime.Object
+			initialObjs = append(initialObjs, sb)
+			if tc.setupObjs != nil {
+				initialObjs = append(initialObjs, tc.setupObjs(sb)...)
+			}
+
+			fc := interceptor.NewClient(newFakeClient(initialObjs...), interceptor.Funcs{
+				Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+					if tc.failObj(obj) {
+						return newNamespaceTerminatingError(obj.GetNamespace())
+					}
+					return c.Create(ctx, obj, opts...)
+				},
+			})
+
+			r := &SandboxReconciler{
+				Client: fc,
+				Scheme: Scheme,
+				Tracer: asmetrics.NewNoOp(),
+			}
+
+			req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sb.Name, Namespace: sb.Namespace}}
+			result, err := r.Reconcile(t.Context(), req)
+			require.NoError(t, err, "reconcile must not return an error when namespace is terminating")
+			assert.Equal(t, ctrl.Result{RequeueAfter: namespaceTerminatingRequeue}, result)
+		})
+	}
+}
+
+func TestReconcileNonTerminatingErrorPropagates(t *testing.T) {
+	sb := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "err-sb",
+			Namespace:  "default",
+			UID:        sandboxUID,
+			Generation: 1,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				},
+			},
+		},
+	}
+	fc := interceptor.NewClient(newFakeClient(sb), interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if _, isPod := obj.(*corev1.Pod); isPod {
+				return k8serrors.NewInternalError(errors.New("internal server error"))
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	})
+	r := &SandboxReconciler{
+		Client: fc,
+		Scheme: Scheme,
+		Tracer: asmetrics.NewNoOp(),
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sb.Name, Namespace: sb.Namespace}}
+	_, err := r.Reconcile(t.Context(), req)
+	require.Error(t, err, "non-terminating error must be returned to trigger retry")
+	assert.False(t, isNamespaceTerminatingError(err))
+}
+
+func drainEvent(t *testing.T, recorder *events.FakeRecorder) string {
+	t.Helper()
+	select {
+	case event := <-recorder.Events:
+		return event
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for event")
+		return ""
+	}
+}
+
+// assertNoEvent fails the test if an event was recorded.
+func assertNoEvent(t *testing.T, recorder *events.FakeRecorder) {
+	t.Helper()
+	select {
+	case event := <-recorder.Events:
+		t.Fatalf("expected no event, got %q", event)
+	default:
+	}
+}
+
+func TestReconcileEvents_PodCreated(t *testing.T) {
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-name", Namespace: "default", UID: sandboxUID},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+			PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+			},
+		}},
+	}
+	recorder := events.NewFakeRecorder(10)
+	r := &SandboxReconciler{
+		Client:   newFakeClient(sandbox),
+		Scheme:   Scheme,
+		Recorder: recorder,
+		Tracer:   asmetrics.NewNoOp(),
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}}
+
+	_, err := r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+
+	require.Equal(t, "Normal SandboxPodCreated Created Pod \"sandbox-name\"", drainEvent(t, recorder))
+}
+
+func TestReconcileEvents_PodCreationFailed(t *testing.T) {
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-name", Namespace: "default", UID: sandboxUID},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+			PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+			},
+		}},
+	}
+	createErr := errors.New("injected create failure")
+	fc := interceptor.NewClient(newFakeClient(sandbox), interceptor.Funcs{
+		Create: func(ctx context.Context, client client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if _, ok := obj.(*corev1.Pod); ok {
+				return createErr
+			}
+			return client.Create(ctx, obj, opts...)
+		},
+	})
+	recorder := events.NewFakeRecorder(10)
+	r := &SandboxReconciler{
+		Client:   fc,
+		Scheme:   Scheme,
+		Recorder: recorder,
+		Tracer:   asmetrics.NewNoOp(),
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}}
+
+	_, err := r.Reconcile(t.Context(), req)
+	require.Error(t, err)
+
+	require.Equal(t, "Warning SandboxPodCreateFailed Failed to create Pod \"sandbox-name\": injected create failure", drainEvent(t, recorder))
+}
+
+// TestReconcileEvents_ReadyTransitions tests every recordReadyTransitionEvent case aside from Suspended: each builds a
+// Sandbox already in the target state, reconciles once to expect the event, then reconciles again to confirm a no-op on no change.
+func TestReconcileEvents_ReadyTransitions(t *testing.T) {
+	podTemplateSpec := sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+		PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+		},
+	}}
+	shutdownTime := metav1.NewTime(time.Now().Add(-1 * time.Minute))
+
+	testCases := []struct {
+		name        string
+		sandboxSpec sandboxv1beta1.SandboxSpec
+		pod         *corev1.Pod
+		wantEvent   string
+	}{
+		{
+			name:        "pod ready",
+			sandboxSpec: podTemplateSpec,
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "sandbox-name",
+					Namespace:       "default",
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef("sandbox-name")},
+				},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+				Status: corev1.PodStatus{
+					Phase:      corev1.PodRunning,
+					PodIPs:     []corev1.PodIP{{IP: "10.244.0.1"}},
+					Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+				},
+			},
+			wantEvent: "Normal SandboxReady Sandbox is ready",
+		},
+		{
+			name:        "pod succeeded",
+			sandboxSpec: podTemplateSpec,
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "sandbox-name",
+					Namespace:       "default",
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef("sandbox-name")},
+				},
+				Spec:   corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+				Status: corev1.PodStatus{Phase: corev1.PodSucceeded},
+			},
+			wantEvent: "Normal PodSucceeded Pod completed successfully",
+		},
+		{
+			name:        "pod failed",
+			sandboxSpec: podTemplateSpec,
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "sandbox-name",
+					Namespace:       "default",
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef("sandbox-name")},
+				},
+				Spec:   corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+				Status: corev1.PodStatus{Phase: corev1.PodFailed},
+			},
+			wantEvent: "Warning PodFailed Pod failed",
+		},
+		// The expired cases are treated separately because delete is silent on both reconciles, while retain emits an event
+		// once on the first reconcile and no-ops on the second (due to unchanged state).
+		{
+			name: "expired, retain policy",
+			sandboxSpec: sandboxv1beta1.SandboxSpec{
+				SandboxBlueprint: podTemplateSpec.SandboxBlueprint,
+				Lifecycle: sandboxv1beta1.Lifecycle{
+					ShutdownTime:   &shutdownTime,
+					ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
+				},
+			},
+			wantEvent: "Normal SandboxExpired Sandbox has expired",
+		},
+		{
+			name: "expired, delete policy",
+			sandboxSpec: sandboxv1beta1.SandboxSpec{
+				SandboxBlueprint: podTemplateSpec.SandboxBlueprint,
+				Lifecycle: sandboxv1beta1.Lifecycle{
+					ShutdownTime:   &shutdownTime,
+					ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyDelete),
+				},
+			},
+			wantEvent: "",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			sandbox := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "sandbox-name", Namespace: "default", UID: sandboxUID},
+				Spec:       tc.sandboxSpec,
+			}
+			objs := []runtime.Object{sandbox}
+			if tc.pod != nil {
+				objs = append(objs, tc.pod)
+			}
+			recorder := events.NewFakeRecorder(10)
+			r := &SandboxReconciler{
+				Client:   newFakeClient(objs...),
+				Scheme:   Scheme,
+				Recorder: recorder,
+				Tracer:   asmetrics.NewNoOp(),
+			}
+			req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}}
+
+			_, err := r.Reconcile(t.Context(), req)
+			require.NoError(t, err)
+			if tc.wantEvent == "" {
+				assertNoEvent(t, recorder)
+			} else {
+				require.Equal(t, tc.wantEvent, drainEvent(t, recorder))
+			}
+
+			_, err = r.Reconcile(t.Context(), req)
+			require.NoError(t, err)
+			assertNoEvent(t, recorder)
+		})
+	}
+}
+
+func TestReconcileEvents_SandboxSuspended(t *testing.T) {
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-name", Namespace: "default", UID: sandboxUID},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+			PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+			},
+		}},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            sandbox.Name,
+			Namespace:       sandbox.Namespace,
+			OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandbox.Name)},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+		Status: corev1.PodStatus{
+			Phase:      corev1.PodRunning,
+			PodIPs:     []corev1.PodIP{{IP: "10.244.0.1"}},
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		},
+	}
+	recorder := events.NewFakeRecorder(10)
+	r := &SandboxReconciler{
+		Client:   newFakeClient(sandbox, pod),
+		Scheme:   Scheme,
+		Recorder: recorder,
+		Tracer:   asmetrics.NewNoOp(),
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}}
+
+	_, err := r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	require.Equal(t, "Normal SandboxReady Sandbox is ready", drainEvent(t, recorder))
+
+	live := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, r.Get(t.Context(), req.NamespacedName, live))
+	live.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeSuspended
+	require.NoError(t, r.Update(t.Context(), live))
+
+	_, err = r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	require.Equal(t, "Normal SandboxSuspended Sandbox is suspended", drainEvent(t, recorder))
+
+	require.NoError(t, r.Get(t.Context(), req.NamespacedName, live))
+	live.Spec.OperatingMode = ""
+	require.NoError(t, r.Update(t.Context(), live))
+	// The suspension deleted the Pod so recreate it already Ready so this reconcile emits SandboxReady,
+	// not SandboxPodCreated for a blank new Pod.
+	pod.ResourceVersion = ""
+	require.NoError(t, r.Create(t.Context(), pod))
+
+	_, err = r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	require.Equal(t, "Normal SandboxReady Sandbox is ready", drainEvent(t, recorder))
 }

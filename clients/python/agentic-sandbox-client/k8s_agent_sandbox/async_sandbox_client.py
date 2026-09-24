@@ -74,9 +74,12 @@ class AsyncSandboxClient(Generic[T]):
     which defaults to ``cleanup=False``; the async client opts in to safer
     out-of-the-box cleanup.
 
-    Alternatively, use the ``async with`` context manager or explicitly call
-    ``await client.delete_all()`` followed by ``await client.close()`` to
-    avoid orphaned claims.
+    Use ``async with`` to delete automatically managed Claims and close local
+    connections. Explicitly named Claims remain caller-owned and are not
+    deleted on context exit. To delete them, explicitly call
+    ``await client.delete_sandbox(...)`` or ``await client.delete_all()``
+    before closing the client. Outside a context manager, call
+    ``await client.close()`` to close connections and the Kubernetes API client.
     """
 
     sandbox_class: type[T] = AsyncSandbox  # type: ignore

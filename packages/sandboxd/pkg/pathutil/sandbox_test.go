@@ -74,6 +74,21 @@ func TestSanitizePathAbsolutePathConfined(t *testing.T) {
 	require.Equal(t, filepath.Join(resolvedRoot, "f.txt"), gotFull)
 }
 
+func TestSanitizePathAbsolutePathConfinedThroughRootSymlink(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "root")
+	rootAlias := filepath.Join(base, "root-alias")
+	require.NoError(t, os.Mkdir(root, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o644))
+	require.NoError(t, os.Symlink(root, rootAlias))
+
+	got, err := SanitizePath(rootAlias, filepath.Join(rootAlias, "f.txt"))
+	require.NoError(t, err)
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(resolvedRoot, "f.txt"), got)
+}
+
 func TestSanitizePathSiblingPrefixAbsolute(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, "workspace")

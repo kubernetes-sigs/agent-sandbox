@@ -23,6 +23,10 @@ class SandboxNotReadyError(SandboxError):
     """Raised when the sandbox is not ready for communication."""
 
 
+class SandboxServiceUnavailableError(SandboxError):
+    """Raised when Service DNS was selected but the Sandbox has no Service FQDN."""
+
+
 class SandboxNotFoundError(SandboxError):
     """Raised when the sandbox or sandbox claim cannot be found or was deleted."""
 

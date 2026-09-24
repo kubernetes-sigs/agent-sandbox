@@ -64,8 +64,8 @@ class SandboxClient(Generic[T]):
         Args:
             connection_config: Configuration for connecting to the sandboxes. 
                 Defaults to SandboxLocalTunnelConnectionConfig() which uses 
-                kubectl port-forwarding. Can also be SandboxDirectConnectionConfig 
-                or SandboxGatewayConnectionConfig.
+                kubectl port-forwarding. Sandboxd supports a pod tunnel or the
+                explicit Service DNS / Pod IP in-cluster connection config.
             tracer_config: Configuration for OpenTelemetry tracing. 
                 Defaults to an empty SandboxTracerConfig (tracing disabled).
             cleanup: If True, registers an atexit hook to automatically delete 

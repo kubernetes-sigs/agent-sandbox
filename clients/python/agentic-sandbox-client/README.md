@@ -165,7 +165,7 @@ Setting `env` populates `SandboxClaim.spec.env`, which forces a cold start
 from the warm pool template instead of adopting a pre-warmed pod. This may
 increase startup latency.
 
-### 3. In-Cluster Mode (Direct Pod Connection)
+### 3. Legacy Runtime In-Cluster Mode (Direct Pod Connection)
 
 Use this when the client runs **inside the cluster** (for example, another pod in the same cluster).
 The client connects **directly to the sandbox runtime pod**, bypassing the sandbox router.
@@ -274,7 +274,8 @@ pip install k8s-agent-sandbox[async]
 The async client requires an explicit connection config — `SandboxLocalTunnelConnectionConfig`
 is not supported because it relies on a synchronous `kubectl port-forward` subprocess. Use
 `SandboxGatewayConnectionConfig`, `SandboxDirectConnectionConfig`,
-`SandboxInClusterConnectionConfig`, or `SandboxdPodTunnelConnectionConfig`. For the portable
+`SandboxInClusterConnectionConfig`, `SandboxdPodTunnelConnectionConfig`, or
+`SandboxdInClusterConnectionConfig`. For the portable
 `sandboxd` runtime, install
 both optional extras: `pip install 'k8s-agent-sandbox[async,grpc]'`.
 
@@ -301,7 +302,7 @@ async def main():
 asyncio.run(main())
 ```
 
-**In-cluster (direct to sandbox pod; default: cluster DNS):**
+**Legacy runtime in-cluster (Pod IP first, then constructed cluster DNS):**
 
 ```python
 import asyncio
@@ -309,7 +310,7 @@ from k8s_agent_sandbox import AsyncSandboxClient
 from k8s_agent_sandbox.models import SandboxInClusterConnectionConfig
 
 async def main():
-    config = SandboxInClusterConnectionConfig()  # default: cluster DNS
+    config = SandboxInClusterConnectionConfig()
 
     async with AsyncSandboxClient(connection_config=config) as client:
         sandbox = await client.create_sandbox(
@@ -346,7 +347,70 @@ async def main():
 asyncio.run(main())
 ```
 
-### 7. Labels and Pod Metadata
+### 7. sandboxd In-Cluster Mode
+
+Use `SandboxdInClusterConnectionConfig` when the Python client runs in the same
+Kubernetes cluster as a sandboxd-backed Sandbox. Select `service-dns` or `pod-ip`
+explicitly. The SDK reads the selected address from Sandbox status, uses it for
+both the REST filesystem API and gRPC `ProcessService`, and never switches to
+the other mode. The default ports are 8080 and 9090; `rest_port` and
+`grpc_port` can be overridden independently. This mode uses no `kubectl`
+process or sandbox-router headers.
+Direct access bypasses the sandbox-router's authorization checks, so restrict
+network access to trusted client workloads.
+
+For Service DNS, set `spec.service: true` on the Sandbox template so the
+controller reports `status.serviceFQDN`. If it is absent, the SDK raises
+`SandboxServiceUnavailableError`. For Pod IP, the SDK reads `status.podIPs`
+before each operation; an unavailable address raises `SandboxNotReadyError`.
+Pod IPs can be recycled after a Pod is replaced, so prefer Service DNS when
+clients and Sandboxes cross trust boundaries.
+
+The client workload needs permission to `get` `sandboxes.agents.x-k8s.io` in
+the Sandbox namespace. The Sandbox NetworkPolicy must allow the client to reach
+the sandboxd REST and gRPC ports (TCP 8080 and 9090 by default). The default
+managed policy in the [sandboxd example](../../../examples/sandboxd-sandbox/sandbox-template.yaml)
+only admits the sandbox-router; direct clients need an explicit ingress rule.
+If client egress is restricted, allow its traffic to these ports and, for
+Service DNS mode, to cluster DNS.
+When supplying `spec.networkPolicy`, preserve any other required rules because
+it replaces the default policy.
+
+Synchronous client (install `k8s-agent-sandbox[grpc]`):
+
+```python
+from k8s_agent_sandbox import SandboxClient, SandboxdInClusterConnectionConfig
+
+client = SandboxClient(
+    connection_config=SandboxdInClusterConnectionConfig(mode="service-dns")
+)
+sandbox = client.create_sandbox(warmpool="sandboxd-warmpool", namespace="default")
+try:
+    sandbox.files.write("hello.txt", b"hello\n")
+    print(sandbox.commands.run("cat hello.txt").stdout)
+finally:
+    sandbox.terminate()
+```
+
+Asynchronous client (install `k8s-agent-sandbox[async,grpc]`):
+
+```python
+import asyncio
+from k8s_agent_sandbox import AsyncSandboxClient, SandboxdInClusterConnectionConfig
+
+async def main():
+    config = SandboxdInClusterConnectionConfig(mode="pod-ip")
+    async with AsyncSandboxClient(connection_config=config) as client:
+        sandbox = await client.create_sandbox(
+            warmpool="sandboxd-warmpool", namespace="default"
+        )
+        await sandbox.files.write("hello.txt", b"hello\n")
+        print((await sandbox.commands.run("cat hello.txt")).stdout)
+
+asyncio.run(main())
+```
+
+### 8. Labels and Pod Metadata
 
 `create_sandbox` lets you attach metadata at two different levels:
 
@@ -381,7 +445,7 @@ Behavioral notes:
   domain allow-list and system-label restrictions are enforced server-side and
   are not replicated client-side.
 
-### 8. Custom Volume Claim Templates
+### 9. Custom Volume Claim Templates
 
 You can dynamically request persistent volumes to be attached to your Sandbox Pod by specifying `volume_claim_templates`. This allows the sandbox to mount custom PersistentVolumeClaims (PVCs).
 
@@ -409,7 +473,7 @@ sandbox = client.create_sandbox(
 
 The volume claim templates are validated against the warmpool template's policy and rules (e.g., whether custom volume claims are allowed or if overrides are permitted).
 
-### 9. Startup Latency: How the SDK Waits for Readiness
+### 10. Startup Latency: How the SDK Waits for Readiness
 
 `create_sandbox()` is fully **watch-based** — it never polls the Kubernetes
 API on an interval, so there is no poll-interval latency added on top of the

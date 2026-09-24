@@ -23,10 +23,15 @@ import datetime
 import unittest
 from unittest.mock import MagicMock
 
+from k8s_agent_sandbox import (
+    SandboxdInClusterConnectionConfig as PublicInClusterConfig,
+    SandboxServiceUnavailableError,
+)
 from k8s_agent_sandbox.exceptions import SandboxRequestError
 from k8s_agent_sandbox.files.filesystem import Filesystem
 from k8s_agent_sandbox.models import (
     FileEntry,
+    SandboxdInClusterConnectionConfig,
     SandboxdPodTunnelConnectionConfig,
 )
 
@@ -69,6 +74,24 @@ class TestSandboxdConfig(unittest.TestCase):
     def test_invalid_port_rejected(self):
         with self.assertRaises(ValueError):
             SandboxdPodTunnelConnectionConfig(rest_port=70000)
+
+    def test_direct_in_cluster_requires_mode_and_has_two_ports(self):
+        self.assertIs(PublicInClusterConfig, SandboxdInClusterConnectionConfig)
+        self.assertTrue(issubclass(SandboxServiceUnavailableError, RuntimeError))
+        with self.assertRaises(ValueError):
+            SandboxdInClusterConnectionConfig()
+        config = SandboxdInClusterConnectionConfig(mode="service-dns")
+        self.assertEqual((config.rest_port, config.grpc_port), (8080, 9090))
+
+    def test_direct_in_cluster_rejects_invalid_mode_and_ports(self):
+        for values in (
+            {"mode": "auto"},
+            {"mode": "pod-ip", "rest_port": 0},
+            {"mode": "pod-ip", "grpc_port": 65536},
+            {"mode": "pod-ip", "rest_port": 9090, "grpc_port": 9090},
+        ):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                SandboxdInClusterConnectionConfig(**values)
 
 
 class TestSandboxdFilesystem(unittest.TestCase):

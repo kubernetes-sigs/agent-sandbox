@@ -39,8 +39,8 @@ Initializes the SandboxClient.
 
 - `connection_config` - Configuration for connecting to the sandboxes.
   Defaults to SandboxLocalTunnelConnectionConfig() which uses
-  kubectl port-forwarding. Can also be SandboxDirectConnectionConfig
-  or SandboxGatewayConnectionConfig.
+  kubectl port-forwarding. Sandboxd supports a pod tunnel or the
+  explicit Service DNS / Pod IP in-cluster connection config.
 - `tracer_config` - Configuration for OpenTelemetry tracing.
   Defaults to an empty SandboxTracerConfig (tracing disabled).
 - `cleanup` - If True, registers an atexit hook to automatically delete
@@ -454,6 +454,21 @@ sandboxd gRPC ProcessService port on the pod.
 ##### port\_forward\_ready\_timeout
 
 Seconds to wait for port-forward readiness.
+
+<a id="k8s_agent_sandbox.models.SandboxdInClusterConnectionConfig"></a>
+
+### SandboxdInClusterConnectionConfig Objects
+
+```python
+class SandboxdInClusterConnectionConfig(BaseModel)
+```
+
+Connect to sandboxd directly over the selected in-cluster address.
+
+``service-dns`` requires ``Sandbox.status.serviceFQDN`` and a Service
+enabled on the Sandbox template. ``pod-ip`` uses ``Sandbox.status.podIPs``.
+Neither mode falls back to the other. sandboxd's REST filesystem listener
+defaults to port 8080 and its gRPC ProcessService listener to port 9090.
 
 <a id="k8s_agent_sandbox.models.SandboxInClusterConnectionConfig"></a>
 

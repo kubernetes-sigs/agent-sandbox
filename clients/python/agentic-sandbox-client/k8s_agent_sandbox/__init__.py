@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from .sandbox_client import SandboxClient
+from .models import SandboxdInClusterConnectionConfig
 from .metrics_utils import get_metrics, print_metrics
 from .exceptions import (
     SandboxError,
@@ -20,6 +21,7 @@ from .exceptions import (
     SandboxTemplateNotFoundError,
     SandboxWarmPoolNotFoundError,
     SandboxNotReadyError,
+    SandboxServiceUnavailableError,
     SandboxClaimFailedError,
     SandboxPortForwardError,
     SandboxRequestError,

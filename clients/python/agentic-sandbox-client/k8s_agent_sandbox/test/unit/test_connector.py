@@ -16,9 +16,11 @@
 
 import io
 import subprocess
+import sys
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import requests
@@ -29,14 +31,21 @@ from k8s_agent_sandbox.connector import (
     LocalTunnelConnectionStrategy,
     InClusterConnectionStrategy,
     SandboxdPodTunnelStrategy,
+    SandboxdInClusterStrategy,
     SandboxConnector,
 )
-from k8s_agent_sandbox.exceptions import SandboxPortForwardError
+from k8s_agent_sandbox.exceptions import (
+    SandboxNotReadyError,
+    SandboxPortForwardError,
+    SandboxRequestError,
+    SandboxServiceUnavailableError,
+)
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
     SandboxGatewayConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
     SandboxdPodTunnelConnectionConfig,
+    SandboxdInClusterConnectionConfig,
     SandboxInClusterConnectionConfig,
 )
 
@@ -110,6 +119,203 @@ class TestInClusterConnectionStrategy(unittest.TestCase):
             "my-sandbox", "dev", config, get_pod_ip=lambda: "2001:db8::1"
         )
         self.assertEqual(strategy.connect(), "http://[2001:db8::1]:8888")
+
+
+class TestSandboxdInClusterConnection(unittest.TestCase):
+    def _build(self, mode="service-dns", rest_port=8080, grpc_port=9090,
+               pod_ip=None, service_fqdn=None):
+        pod_ip = pod_ip or MagicMock(return_value="10.0.0.1")
+        service_fqdn = service_fqdn or MagicMock(
+            return_value="sandbox.agents.svc.example.internal"
+        )
+        connector = SandboxConnector(
+            sandbox_id="sandbox",
+            namespace="agents",
+            connection_config=SandboxdInClusterConnectionConfig(
+                mode=mode, rest_port=rest_port, grpc_port=grpc_port
+            ),
+            k8s_helper=MagicMock(),
+            get_pod_ip=pod_ip,
+            get_service_fqdn=service_fqdn,
+        )
+        return connector, pod_ip, service_fqdn
+
+    def test_service_mode_uses_reported_fqdn_for_both_endpoints(self):
+        connector, pod_ip, service = self._build(
+            rest_port=18080, grpc_port=19090
+        )
+        self.assertIsInstance(connector.strategy, SandboxdInClusterStrategy)
+        self.assertTrue(connector.is_sandboxd())
+        self.assertEqual(
+            connector.connect(), "http://sandbox.agents.svc.example.internal:18080"
+        )
+        self.assertEqual(
+            connector.strategy.grpc_target,
+            "sandbox.agents.svc.example.internal:19090",
+        )
+        self.assertEqual(connector.connect(), connector.connect())
+        service.assert_called_once()
+        pod_ip.assert_not_called()
+        connector.close()
+
+    def test_service_mode_missing_fqdn_never_falls_back(self):
+        connector, pod_ip, _ = self._build(
+            service_fqdn=MagicMock(return_value=None)
+        )
+        with self.assertRaisesRegex(SandboxServiceUnavailableError, "spec.service"):
+            connector.connect()
+        pod_ip.assert_not_called()
+        connector.close()
+
+    def test_pod_mode_refreshes_ip_and_brackets_ipv6(self):
+        pod_ip = MagicMock(side_effect=["10.0.0.1", "2001:db8::5"])
+        connector, _, service = self._build(
+            mode="pod-ip", pod_ip=pod_ip, rest_port=18080, grpc_port=19090
+        )
+        self.assertEqual(connector.connect(), "http://10.0.0.1:18080")
+        self.assertEqual(connector.connect(), "http://[2001:db8::5]:18080")
+        self.assertEqual(connector.strategy.grpc_target, "[2001:db8::5]:19090")
+        service.assert_not_called()
+        self.assertEqual(pod_ip.call_count, 2)
+        connector.close()
+
+    def test_pod_mode_missing_ip_never_falls_back(self):
+        connector, _, service = self._build(
+            mode="pod-ip", pod_ip=MagicMock(return_value=None)
+        )
+        with self.assertRaises(SandboxNotReadyError):
+            connector.connect()
+        service.assert_not_called()
+        connector.close()
+
+    def test_pod_status_read_error_does_not_reuse_old_target(self):
+        pod_ip = MagicMock(side_effect=["10.0.0.1", PermissionError("status denied")])
+        connector, _, _ = self._build(mode="pod-ip", pod_ip=pod_ip)
+        connector.connect()
+        with self.assertRaisesRegex(PermissionError, "status denied"):
+            connector.connect()
+        self.assertIsNone(connector.strategy.grpc_target)
+        connector.close()
+
+    @patch("k8s_agent_sandbox.connector.subprocess.Popen")
+    def test_rest_request_uses_direct_endpoint_without_router_headers(self, popen):
+        connector, _, _ = self._build(mode="pod-ip")
+        response = MagicMock(spec=requests.Response)
+        response.status_code = 200
+        response.is_redirect = False
+        connector.session.request = MagicMock(return_value=response)
+        connector.send_request("GET", "v1/files/a.txt", timeout=5)
+        args, kwargs = connector.session.request.call_args
+        self.assertEqual(args[1], "http://10.0.0.1:8080/v1/files/a.txt")
+        self.assertFalse(kwargs["allow_redirects"])
+        self.assertFalse(any(key.startswith("X-Sandbox-") for key in kwargs["headers"]))
+        popen.assert_not_called()
+        connector.close()
+
+    def test_grpc_channel_reuses_target_and_replaces_changed_ip(self):
+        pod_ip = MagicMock(side_effect=["10.0.0.1", "10.0.0.1", "10.0.0.2"])
+        connector, _, _ = self._build(mode="pod-ip", pod_ip=pod_ip)
+        first, second = MagicMock(), MagicMock()
+        dial = MagicMock(side_effect=[first, second])
+        with patch.dict(sys.modules, {"grpc": SimpleNamespace(insecure_channel=dial)}):
+            connector.connect()
+            self.assertIs(connector.grpc_channel(), first)
+            connector.connect()
+            self.assertIs(connector.grpc_channel(), first)
+            connector.connect()
+            self.assertIs(connector.grpc_channel(), second)
+        self.assertEqual(dial.call_count, 2)
+        dial.assert_any_call("10.0.0.1:9090")
+        dial.assert_any_call("10.0.0.2:9090")
+        first.close.assert_called_once()
+        connector.close()
+        second.close.assert_called_once()
+
+    def test_service_transport_failure_refreshes_fqdn_on_next_request(self):
+        service = MagicMock(side_effect=["old.agents.svc", "new.agents.svc"])
+        connector, _, _ = self._build(service_fqdn=service)
+        response = MagicMock(spec=requests.Response)
+        response.status_code = 200
+        response.is_redirect = False
+        connector.session.request = MagicMock(
+            side_effect=[requests.ConnectionError("dns failed"), response]
+        )
+        with self.assertRaises(SandboxRequestError):
+            connector.send_request("GET", "v1/files/a.txt")
+        connector.send_request("GET", "v1/files/a.txt")
+        self.assertEqual(service.call_count, 2)
+        args, _ = connector.session.request.call_args
+        self.assertIn("new.agents.svc", args[1])
+        connector.close()
+
+    def test_service_http_5xx_keeps_fqdn_cache(self):
+        connector, _, service = self._build()
+        response = MagicMock(spec=requests.Response)
+        response.status_code = 500
+        response.is_redirect = False
+        response.raise_for_status.side_effect = requests.HTTPError(response=response)
+        connector.session.request = MagicMock(return_value=response)
+        with self.assertRaises(SandboxRequestError):
+            connector.send_request("GET", "v1/files/a.txt")
+        connector.connect()
+        service.assert_called_once()
+        connector.close()
+
+    def test_grpc_unavailable_discards_channel_and_service_cache(self):
+        service = MagicMock(side_effect=["old.agents.svc", "new.agents.svc"])
+        connector, _, _ = self._build(service_fqdn=service)
+        channel = MagicMock()
+        with patch.dict(
+            sys.modules,
+            {"grpc": SimpleNamespace(insecure_channel=MagicMock(return_value=channel))},
+        ):
+            connector.connect()
+            self.assertIs(connector.grpc_channel(), channel)
+        connector.invalidate_sandboxd_transport(channel)
+        channel.close.assert_called_once()
+        self.assertEqual(connector.connect(), "http://new.agents.svc:8080")
+        connector.close()
+
+    def test_stream_transport_failure_discards_channel_and_service_cache(self):
+        service = MagicMock(side_effect=["old.agents.svc", "new.agents.svc"])
+        connector, _, _ = self._build(service_fqdn=service)
+        channel = MagicMock()
+        with patch.dict(
+            sys.modules,
+            {"grpc": SimpleNamespace(insecure_channel=MagicMock(return_value=channel))},
+        ):
+            connector.connect()
+            self.assertIs(connector.grpc_channel(), channel)
+        connector.invalidate_sandboxd_transport(None)
+        channel.close.assert_called_once()
+        self.assertEqual(connector.connect(), "http://new.agents.svc:8080")
+        connector.close()
+
+    def test_late_stream_failure_does_not_discard_replacement(self):
+        service = MagicMock(side_effect=["old.agents.svc", "new.agents.svc"])
+        connector, _, _ = self._build(service_fqdn=service)
+        first, second = MagicMock(), MagicMock()
+        response = MagicMock(spec=requests.Response)
+        response.status_code = 200
+        response.is_redirect = False
+        connector.session.request = MagicMock(return_value=response)
+        with patch.dict(sys.modules, {"grpc": SimpleNamespace(
+            insecure_channel=MagicMock(side_effect=[first, second])
+        )}):
+            connector.connect()
+            self.assertIs(connector.grpc_channel(), first)
+            connector.send_request("GET", "v1/files/a.txt", stream=True)
+            old_token = response._sandboxd_transport_token
+            connector.invalidate_sandboxd_transport(None, transport_token=old_token)
+            connector.connect()
+            self.assertIs(connector.grpc_channel(), second)
+            connector.invalidate_sandboxd_transport(None, transport_token=old_token)
+            self.assertIs(connector.grpc_channel(), second)
+            self.assertEqual(connector.connect(), "http://new.agents.svc:8080")
+        first.close.assert_called_once()
+        second.close.assert_not_called()
+        self.assertEqual(service.call_count, 2)
+        connector.close()
 
 
 class TestGatewayConnectionStrategy(unittest.TestCase):

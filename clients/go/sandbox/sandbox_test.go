@@ -1109,7 +1109,7 @@ func TestDrainSandboxWatch_ErrorTriggersRelist(t *testing.T) {
 			go func() { fw.Error(&tc.status) }()
 
 			var lastCond string
-			_, done, err := h.drainSandboxWatch(context.Background(), fw, "test-claim", 5*time.Second, &lastCond)
+			_, done, err := h.drainSandboxWatch(context.Background(), fw, "test-claim", &lastCond)
 			if done {
 				t.Error("expected done=false")
 			}
@@ -1129,7 +1129,7 @@ func TestDrainSandboxWatch_Deleted(t *testing.T) {
 	}()
 
 	var lastCond string
-	_, done, err := h.drainSandboxWatch(context.Background(), fw, "test-claim", 5*time.Second, &lastCond)
+	_, done, err := h.drainSandboxWatch(context.Background(), fw, "test-claim", &lastCond)
 	if done {
 		t.Error("expected done=false for Deleted event")
 	}
@@ -1885,7 +1885,7 @@ func TestDrainSandboxWatch_NonSandboxObject(t *testing.T) {
 	}()
 
 	var lastCond string
-	_, done, err := h.drainSandboxWatch(context.Background(), fw, "test-claim", 5*time.Second, &lastCond)
+	_, done, err := h.drainSandboxWatch(context.Background(), fw, "test-claim", &lastCond)
 	if done {
 		t.Error("expected done=false for non-sandbox object")
 	}
@@ -3109,6 +3109,59 @@ func TestConnector_SetPodIP(t *testing.T) {
 			c.mu.Unlock()
 			if gotPodIP != tc.expected {
 				t.Errorf("expected podIP %q, got %q", tc.expected, gotPodIP)
+			}
+		})
+	}
+}
+
+// TestWaitForSandboxReady_Public covers the context-only API without tracing setup.
+func TestWaitForSandboxReady_Public(t *testing.T) {
+	for _, scenario := range []string{"ready", "becomes ready", "canceled", "deadline", "deleted"} {
+		t.Run(scenario, func(t *testing.T) {
+			opts := defaultTestOpts()
+			s, agentsCS, _ := newTestSandbox(opts)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ready := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "target", Namespace: opts.Namespace},
+				Status: sandboxv1beta1.SandboxStatus{Conditions: []metav1.Condition{
+					{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue},
+				}},
+			}
+			agentsCS.PrependReactor("list", "sandboxes", func(_ ktesting.Action) (bool, runtime.Object, error) {
+				list := &sandboxv1beta1.SandboxList{}
+				if scenario == "ready" {
+					list.Items = append(list.Items, *ready)
+				}
+				return true, list, nil
+			})
+			fw := watch.NewRaceFreeFake()
+			defer fw.Stop()
+			agentsCS.PrependWatchReactor("sandboxes", func(_ ktesting.Action) (bool, watch.Interface, error) {
+				switch scenario {
+				case "becomes ready":
+					fw.Modify(ready)
+				case "canceled":
+					cancel()
+				case "deleted":
+					fw.Delete(ready)
+				}
+				return true, fw, nil
+			})
+			var want error
+			switch scenario {
+			case "canceled":
+				want = context.Canceled
+			case "deadline":
+				var deadlineCancel context.CancelFunc
+				ctx, deadlineCancel = context.WithDeadline(ctx, time.Now().Add(-time.Second))
+				defer deadlineCancel()
+				want = context.DeadlineExceeded
+			case "deleted":
+				want = ErrSandboxDeleted
+			}
+			if err := s.k8s.WaitForSandboxReady(ctx, "target", opts.Namespace); !errors.Is(err, want) {
+				t.Fatalf("got %v, want %v", err, want)
 			}
 		})
 	}

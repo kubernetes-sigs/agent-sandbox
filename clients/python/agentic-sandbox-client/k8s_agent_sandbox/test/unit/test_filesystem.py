@@ -389,6 +389,8 @@ class TestFilesystemStreamingRead(unittest.TestCase):
     def test_read_to_invalidates_sandboxd_after_stream_transport_failure(self):
         self.connector.is_sandboxd.return_value = True
         response = streaming_response([])
+        transport_token = object()
+        response._sandboxd_transport_token = transport_token
 
         def broken_stream():
             yield b"partial"
@@ -402,7 +404,9 @@ class TestFilesystemStreamingRead(unittest.TestCase):
             self.filesystem.read_to("file.bin", destination)
 
         self.assertEqual(destination.getvalue(), b"partial")
-        self.connector.invalidate_sandboxd_transport.assert_called_once_with(None)
+        self.connector.invalidate_sandboxd_transport.assert_called_once_with(
+            None, transport_token=transport_token
+        )
         response.close.assert_called_once_with()
 
     def test_read_to_rejects_non_success_status(self):
@@ -506,6 +510,8 @@ class TestAsyncFilesystemStreamingRead(unittest.IsolatedAsyncioTestCase):
     async def test_read_to_invalidates_sandboxd_after_stream_transport_failure(self):
         self.connector.is_sandboxd.return_value = True
         response = async_streaming_response([])
+        transport_token = object()
+        response.extensions = {"sandboxd_transport_token": transport_token}
 
         async def broken_stream(*, chunk_size: int):
             del chunk_size
@@ -520,7 +526,9 @@ class TestAsyncFilesystemStreamingRead(unittest.IsolatedAsyncioTestCase):
             await self.filesystem.read_to("file.bin", destination)
 
         self.assertEqual(destination.content, b"partial")
-        self.connector.invalidate_sandboxd_transport.assert_awaited_once_with(None)
+        self.connector.invalidate_sandboxd_transport.assert_awaited_once_with(
+            None, transport_token=transport_token
+        )
         response.aclose.assert_awaited_once_with()
 
     async def test_read_to_enforces_unknown_length_limit_while_streaming(self):

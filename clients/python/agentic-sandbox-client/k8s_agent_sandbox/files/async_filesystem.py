@@ -192,7 +192,11 @@ class AsyncFilesystem:
                         )
                 total += await _write_all(destination, chunk)
         except httpx.HTTPError:
-            await self.connector.invalidate_sandboxd_transport(None)
+            transport_token = response.extensions.get("sandboxd_transport_token")
+            if transport_token is not None:
+                await self.connector.invalidate_sandboxd_transport(
+                    None, transport_token=transport_token
+                )
             raise
         finally:
             await response.aclose()

@@ -291,6 +291,32 @@ class TestSandboxdInClusterConnection(unittest.TestCase):
         self.assertEqual(connector.connect(), "http://new.agents.svc:8080")
         connector.close()
 
+    def test_late_stream_failure_does_not_discard_replacement(self):
+        service = MagicMock(side_effect=["old.agents.svc", "new.agents.svc"])
+        connector, _, _ = self._build(service_fqdn=service)
+        first, second = MagicMock(), MagicMock()
+        response = MagicMock(spec=requests.Response)
+        response.status_code = 200
+        response.is_redirect = False
+        connector.session.request = MagicMock(return_value=response)
+        with patch.dict(sys.modules, {"grpc": SimpleNamespace(
+            insecure_channel=MagicMock(side_effect=[first, second])
+        )}):
+            connector.connect()
+            self.assertIs(connector.grpc_channel(), first)
+            connector.send_request("GET", "v1/files/a.txt", stream=True)
+            old_token = response._sandboxd_transport_token
+            connector.invalidate_sandboxd_transport(None, transport_token=old_token)
+            connector.connect()
+            self.assertIs(connector.grpc_channel(), second)
+            connector.invalidate_sandboxd_transport(None, transport_token=old_token)
+            self.assertIs(connector.grpc_channel(), second)
+            self.assertEqual(connector.connect(), "http://new.agents.svc:8080")
+        first.close.assert_called_once()
+        second.close.assert_not_called()
+        self.assertEqual(service.call_count, 2)
+        connector.close()
+
 
 class TestGatewayConnectionStrategy(unittest.TestCase):
     """Unit tests for GatewayConnectionStrategy."""

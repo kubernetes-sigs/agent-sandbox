@@ -135,6 +135,8 @@ class AsyncSandboxConnector:
         self._get_service_fqdn = get_service_fqdn
         self._grpc_channel: Any = None
         self._grpc_channel_target: str | None = None
+        self._incluster_target: str | None = None
+        self._incluster_transport_token = object()
         # Command and filesystem calls may arrive together on first use. The
         # lock keeps channel creation and replacement single-owner.
         self._grpc_lock = asyncio.Lock()
@@ -199,7 +201,17 @@ class AsyncSandboxConnector:
             if isinstance(self._sandboxd_strategy, AsyncSandboxdInClusterStrategy):
                 # A failed Pod IP refresh must not leave the previous target usable.
                 self.grpc_target = None
-            base_url, self.grpc_target = await self._sandboxd_strategy.connect()
+            try:
+                base_url, self.grpc_target = await self._sandboxd_strategy.connect()
+            except Exception:
+                if isinstance(self._sandboxd_strategy, AsyncSandboxdInClusterStrategy):
+                    self._incluster_target = None
+                    self._incluster_transport_token = object()
+                raise
+            if isinstance(self._sandboxd_strategy, AsyncSandboxdInClusterStrategy):
+                if self.grpc_target != self._incluster_target:
+                    self._incluster_target = self.grpc_target
+                    self._incluster_transport_token = object()
             return base_url
 
         if isinstance(self.connection_config, SandboxInClusterConnectionConfig):
@@ -284,6 +296,7 @@ class AsyncSandboxConnector:
         async with self._lifecycle_lock:
             self._ensure_open()
             base_url = await self._resolve_base_url()
+            transport_token = self._incluster_transport_token
         url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
 
         allowed_statuses = kwargs.pop("allowed_statuses", None)
@@ -369,8 +382,12 @@ class AsyncSandboxConnector:
                         response=response,
                     )
                 if allowed_statuses and response.status_code in allowed_statuses:
+                    if stream and isinstance(self._sandboxd_strategy, AsyncSandboxdInClusterStrategy):
+                        response.extensions["sandboxd_transport_token"] = transport_token
                     return response
                 response.raise_for_status()
+                if stream and isinstance(self._sandboxd_strategy, AsyncSandboxdInClusterStrategy):
+                    response.extensions["sandboxd_transport_token"] = transport_token
                 return response
             except httpx.HTTPStatusError as e:
                 if stream:
@@ -394,7 +411,9 @@ class AsyncSandboxConnector:
             except httpx.HTTPError as e:
                 logger.error(f"Request to sandbox failed: {e}")
                 if isinstance(self._sandboxd_strategy, AsyncSandboxdInClusterStrategy):
-                    await self.invalidate_sandboxd_transport(None)
+                    await self.invalidate_sandboxd_transport(
+                        None, transport_token=transport_token
+                    )
                 # Clear cached URLs that may have gone stale.
                 if isinstance(self.connection_config, SandboxGatewayConnectionConfig):
                     self._base_url = None
@@ -492,16 +511,23 @@ class AsyncSandboxConnector:
                 self._grpc_channel_target = self.grpc_target
                 return self._grpc_channel
 
-    async def invalidate_sandboxd_transport(self, channel: Any | None) -> None:
+    async def invalidate_sandboxd_transport(
+        self, channel: Any | None, *, transport_token: object | None = None
+    ) -> None:
         """Discard a failed direct transport without replaying its operation.
 
-        A gRPC failure supplies its channel so a late failure cannot close a
-        replacement. An HTTP failure supplies None to discard the current one.
+        A gRPC failure supplies its channel; an HTTP failure supplies the
+        request's token. A late failure must not close a replacement.
         """
         if not isinstance(self._sandboxd_strategy, AsyncSandboxdInClusterStrategy):
             return
         async with self._lifecycle_lock:
             if channel is not None and channel is not self._grpc_channel:
+                return
+            if (
+                transport_token is not None
+                and transport_token is not self._incluster_transport_token
+            ):
                 return
             async with self._grpc_lock:
                 try:
@@ -512,6 +538,8 @@ class AsyncSandboxConnector:
                 except Exception:
                     logger.debug("Unable to close failed sandboxd channel", exc_info=True)
                 finally:
+                    self._incluster_transport_token = object()
+                    self._incluster_target = None
                     self._grpc_channel = None
                     self._grpc_channel_target = None
                     self.grpc_target = None

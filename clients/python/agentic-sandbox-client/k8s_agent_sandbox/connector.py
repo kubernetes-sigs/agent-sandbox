@@ -18,6 +18,7 @@ import logging
 import math
 import socket
 import subprocess
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -543,6 +544,9 @@ class SandboxConnector:
         self._pod_ip_auth_failed = False
         self._grpc_channel: Any = None
         self._grpc_channel_target: str | None = None
+        self._transport_lock = threading.RLock()
+        self._incluster_target: str | None = None
+        self._incluster_transport_token = object()
 
         # Connection strategy initialization
         self.strategy = self._connection_strategy()
@@ -594,6 +598,10 @@ class SandboxConnector:
         The channel is plaintext and reaches the selected sandboxd listener.
         Requires the ``grpc`` extra.
         """
+        with self._transport_lock:
+            return self._grpc_channel_locked()
+
+    def _grpc_channel_locked(self):
         if not self.is_sandboxd():
             raise RuntimeError("grpc_channel() is only available for the sandboxd runtime")
         target = getattr(self.strategy, "grpc_target", None)
@@ -623,43 +631,68 @@ class SandboxConnector:
         self._grpc_channel_target = target
         return self._grpc_channel
 
-    def invalidate_sandboxd_transport(self, channel: Any | None) -> None:
+    def invalidate_sandboxd_transport(
+        self, channel: Any | None, *, transport_token: object | None = None
+    ) -> None:
         """Discard a failed direct transport without replaying its operation.
 
-        A gRPC failure supplies its channel so a late failure cannot close a
-        replacement. A streaming HTTP failure supplies None to discard the
-        current channel.
+        A gRPC failure supplies its channel; an HTTP failure supplies the
+        request's token. A late failure must not close a replacement.
         """
         if not isinstance(self.strategy, SandboxdInClusterStrategy):
             return
-        if channel is not None and channel is not self._grpc_channel:
-            return
-        if self._grpc_channel is not None:
-            try:
-                self._grpc_channel.close()
-            except Exception:
-                pass
-        self._grpc_channel = None
-        self._grpc_channel_target = None
-        if self.strategy.config.mode == "service-dns":
-            self.strategy.invalidate_service_fqdn()
-
-    def connect(self) -> str:
-        return self.strategy.connect()
-
-    def close(self):
-        self._pod_ip_resolved = False
-        self._pod_ip = None
-        if self._grpc_channel is not None:
-            try:
-                self._grpc_channel.close()
-            except Exception:
-                pass
+        with self._transport_lock:
+            if channel is not None and channel is not self._grpc_channel:
+                return
+            if (
+                transport_token is not None
+                and transport_token is not self._incluster_transport_token
+            ):
+                return
+            self._incluster_transport_token = object()
+            self._incluster_target = None
+            if self._grpc_channel is not None:
+                try:
+                    self._grpc_channel.close()
+                except Exception:
+                    pass
             self._grpc_channel = None
             self._grpc_channel_target = None
-        self.strategy.close()
-        if self.session:
-            self.session.close()
+            if self.strategy.config.mode == "service-dns":
+                self.strategy.invalidate_service_fqdn()
+
+    def connect(self) -> str:
+        with self._transport_lock:
+            try:
+                base_url = self.strategy.connect()
+            except Exception:
+                if isinstance(self.strategy, SandboxdInClusterStrategy):
+                    self._incluster_target = None
+                    self._incluster_transport_token = object()
+                raise
+            if isinstance(self.strategy, SandboxdInClusterStrategy):
+                target = self.strategy.grpc_target
+                if target != self._incluster_target:
+                    self._incluster_target = target
+                    self._incluster_transport_token = object()
+            return base_url
+
+    def close(self):
+        with self._transport_lock:
+            self._incluster_transport_token = object()
+            self._incluster_target = None
+            self._pod_ip_resolved = False
+            self._pod_ip = None
+            if self._grpc_channel is not None:
+                try:
+                    self._grpc_channel.close()
+                except Exception:
+                    pass
+                self._grpc_channel = None
+                self._grpc_channel_target = None
+            self.strategy.close()
+            if self.session:
+                self.session.close()
 
     def send_request(self, method: str, endpoint: str, **kwargs : Any) -> requests.Response:
         """Sends an HTTP request to the sandbox with standard parameters.
@@ -702,7 +735,9 @@ class SandboxConnector:
         stream_response = bool(kwargs.get("stream", False))
         try:
             # Establish connection (re-establishes if closed/dead)
-            base_url = self.connect()
+            with self._transport_lock:
+                base_url = self.connect()
+                transport_token = self._incluster_transport_token
 
             # Verify if the connection is active before sending the request
             self.strategy.verify_connection()
@@ -759,8 +794,12 @@ class SandboxConnector:
             # without closing the connection). Redirects are still rejected
             # above regardless of allowed_statuses.
             if allowed_statuses and response.status_code in allowed_statuses:
+                if stream_response and isinstance(self.strategy, SandboxdInClusterStrategy):
+                    setattr(response, "_sandboxd_transport_token", transport_token)
                 return response
             response.raise_for_status()
+            if stream_response and isinstance(self.strategy, SandboxdInClusterStrategy):
+                setattr(response, "_sandboxd_transport_token", transport_token)
             return response
         except SandboxPortForwardError:
             self.close()
@@ -783,7 +822,12 @@ class SandboxConnector:
                 logging.error(f"Request to sandbox failed: {e}")
                 self._pod_ip_resolved = False
                 self._pod_ip = None
-                self.close()
+                if isinstance(self.strategy, SandboxdInClusterStrategy):
+                    self.invalidate_sandboxd_transport(
+                        None, transport_token=transport_token
+                    )
+                else:
+                    self.close()
             elif status_code >= 500:
                 self._pod_ip_resolved = False
                 self._pod_ip = None

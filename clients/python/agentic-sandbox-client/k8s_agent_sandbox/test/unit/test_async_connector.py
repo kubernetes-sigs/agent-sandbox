@@ -576,6 +576,35 @@ class TestAsyncSandboxdInClusterConnector(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await connector.connect(), "http://new.agents.svc:8080")
         await connector.close()
 
+    async def test_late_stream_failure_does_not_discard_replacement(self):
+        service = AsyncMock(side_effect=["old.agents.svc", "new.agents.svc"])
+        connector, _, _ = self._build(service_fqdn=service)
+        first, second = MagicMock(), MagicMock()
+        first.close = AsyncMock()
+        second.close = AsyncMock()
+        response = httpx.Response(
+            200, request=httpx.Request("GET", "http://old.agents.svc:8080/v1/files/a.txt")
+        )
+        connector.client.send = AsyncMock(return_value=response)
+        fake_grpc = SimpleNamespace(aio=SimpleNamespace(
+            insecure_channel=MagicMock(side_effect=[first, second])
+        ))
+        with patch.dict(sys.modules, {"grpc": fake_grpc}):
+            await connector.connect()
+            self.assertIs(await connector.grpc_channel(), first)
+            await connector.send_request("GET", "v1/files/a.txt", stream=True)
+            old_token = response.extensions["sandboxd_transport_token"]
+            await connector.invalidate_sandboxd_transport(None, transport_token=old_token)
+            await connector.connect()
+            self.assertIs(await connector.grpc_channel(), second)
+            await connector.invalidate_sandboxd_transport(None, transport_token=old_token)
+            self.assertIs(await connector.grpc_channel(), second)
+            self.assertEqual(await connector.connect(), "http://new.agents.svc:8080")
+        first.close.assert_awaited_once()
+        second.close.assert_not_awaited()
+        self.assertEqual(service.await_count, 2)
+        await connector.close()
+
     def test_atexit_path_clears_direct_state_without_subprocess(self):
         connector, _, _ = self._build()
         strategy = connector._sandboxd_strategy

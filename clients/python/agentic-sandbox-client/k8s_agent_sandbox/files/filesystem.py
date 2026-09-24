@@ -248,7 +248,11 @@ class Filesystem:
                         )
                 total += _write_all(destination, chunk)
         except requests.exceptions.RequestException:
-            self.connector.invalidate_sandboxd_transport(None)
+            transport_token = getattr(response, "_sandboxd_transport_token", None)
+            if transport_token is not None:
+                self.connector.invalidate_sandboxd_transport(
+                    None, transport_token=transport_token
+                )
             raise
         finally:
             response.close()

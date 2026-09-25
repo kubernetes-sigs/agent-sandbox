@@ -184,8 +184,18 @@ class SandboxEnv(gym.Env):
 
     def _close_sandbox(self):
         if self._sandbox is not None:
+            sandbox = self._sandbox
+            self._sandbox = None
             try:
-                self._sandbox.terminate()
+                claim_name = getattr(sandbox, "claim_name", None)
+                if claim_name:
+                    # Let the client remove the handle from its registry as
+                    # well as terminate the underlying SandboxClaim.
+                    self._client.delete_sandbox(
+                        claim_name,
+                        namespace=self.namespace,
+                    )
+                else:
+                    sandbox.terminate()
             except Exception as e:
                 logger.warning("Failed to terminate sandbox: %s", e)
-            self._sandbox = None

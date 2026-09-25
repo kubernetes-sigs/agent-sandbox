@@ -145,6 +145,18 @@ PYTHON_TEST_SUITES = [
         ]
     },
     {
+        "name": "agent-sandbox-gymnasium-rllib",
+        "dir": os.path.join("examples", "agent-sandbox-gymnasium", "rllib"),
+        # The adaptation tests do not import Ray or contact Kubernetes. Keep
+        # this unit-test environment small by installing only the two in-repo
+        # client packages; cluster-backed verification is run explicitly.
+        "editable_installs": [
+            (os.path.join("clients", "python", "agentic-sandbox-client"), ""),
+            (os.path.join("clients", "integrations", "gymnasium"), "[test]"),
+        ],
+        "extra_packages": ["gymnasium==1.2.2"],
+    },
+    {
         "name": "integrations-nemo-gym",
         "dir": os.path.join("clients", "integrations", "nemo-gym"),
         # The integration itself needs Python >= 3.13. nemo-gym publishes

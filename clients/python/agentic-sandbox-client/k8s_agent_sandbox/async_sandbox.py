@@ -22,7 +22,9 @@ from .commands.async_command_executor import AsyncCommandExecutor
 from .constants import POD_NAME_ANNOTATION
 from .files.async_filesystem import AsyncFilesystem
 from .models import SandboxConnectionConfig, SandboxTracerConfig
+from .models import HealthStatus, RuntimeMetadata
 from .trace_manager import create_tracer_manager
+from .trace_manager import async_trace_span
 from .utils import select_pod_ip, extract_sandbox_name_hash
 
 
@@ -149,6 +151,39 @@ class AsyncSandbox:
                 return "SandboxNotReady", message
 
         return "SandboxNotReady", "Unknown message"
+
+    @async_trace_span("health")
+    async def health(self, timeout: int = 60) -> HealthStatus:
+        """Query sandboxd's /v1/health endpoint. sandboxd runtime only.
+
+        The legacy python-runtime has no equivalent endpoint and raises
+        ``NotImplementedError``.
+        """
+        if not self.connector.is_sandboxd():
+            raise NotImplementedError(
+                "health() is only supported by the sandboxd runtime; the "
+                "legacy python-runtime has no equivalent endpoint"
+            )
+        response = await self.connector.send_request(
+            "GET", "v1/health", timeout=timeout)
+        return HealthStatus.from_sandboxd(response.json())
+
+    @async_trace_span("metadata")
+    async def metadata(self, timeout: int = 60) -> RuntimeMetadata:
+        """Query sandboxd's /v1/metadata endpoint. sandboxd runtime only.
+
+        Returns orchestrator-injected, non-sensitive runtime configuration
+        (e.g. sandbox id, workspace path, env). The legacy python-runtime
+        has no equivalent endpoint and raises ``NotImplementedError``.
+        """
+        if not self.connector.is_sandboxd():
+            raise NotImplementedError(
+                "metadata() is only supported by the sandboxd runtime; the "
+                "legacy python-runtime has no equivalent endpoint"
+            )
+        response = await self.connector.send_request(
+            "GET", "v1/metadata", timeout=timeout)
+        return RuntimeMetadata.from_sandboxd(response.json())
 
     @property
     def commands(self) -> AsyncCommandExecutor | None:

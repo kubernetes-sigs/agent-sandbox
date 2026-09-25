@@ -114,6 +114,7 @@ copy-k8s-config: ## Copy ../k8s into config/ (CRDs, RBAC .generated.yaml → rol
 	cp $(K8S_ROOT)/rbac.generated.yaml $(CONFIG_DIR)/rbac/role.yaml
 	cp $(K8S_ROOT)/extensions-rbac.generated.yaml $(CONFIG_DIR)/rbac/extensions_role.yaml
 	cp $(K8S_ROOT)/extensions.yaml $(CONFIG_DIR)/rbac/extensions_role_binding.yaml
+	cp $(K8S_ROOT)/hardening/networkpolicy.yaml $(CONFIG_DIR)/network-policy/networkpolicy.yaml
 	mkdir -p $(CONFIG_DIR)/sandbox-router
 	rm -rf $(CONFIG_DIR)/sandbox-router/*
 	cp $(REPO_ROOT)/sandbox-router/deploy/*.yaml $(CONFIG_DIR)/sandbox-router/
@@ -304,6 +305,7 @@ endif
 
 .PHONY: bundle
 bundle: manifests kustomize operator-sdk ## Generate bundle manifests and metadata, then validate generated files.
+	rm -rf bundle/*
 	$(OPERATOR_SDK) generate kustomize manifests -q
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
 	cd config/default && $(KUSTOMIZE) edit set image registry.k8s.io/agent-sandbox/sandbox-router-go=$(ROUTER_IMG)

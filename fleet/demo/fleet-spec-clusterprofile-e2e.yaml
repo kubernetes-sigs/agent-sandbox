@@ -1,0 +1,55 @@
+# Copyright 2026 The Kubernetes Authors.
+# Licensed under the Apache License, Version 2.0.
+#
+# End-to-end spec for the ClusterProfile integration.
+#
+# THE TWO DELIBERATE CHOICES IN HERE
+#
+# 1. `placement_policy: capacity-aware`, NOT image-affinity. image-affinity
+#    hashes MD5(image) mod N and never looks at capacity, so it would produce
+#    a perfectly stable placement whether or not the planner had read a single
+#    ClusterProfile. It cannot distinguish a working integration from a broken
+#    one. capacity-aware scores on capacity, which is exactly the field the
+#    members publish onto ClusterProfile status.
+#
+# 2. `cluster_weights: {}` -- EMPTY, and that is the point. An operator weight
+#    here would override the weight the planner derives from
+#    agents.x-k8s.io/sandbox-capacity, quietly replacing the thing under test
+#    with a constant from this file. Empty also means _stale_placeholders()
+#    synthesises nothing, so every cluster in the registry got there by being
+#    read off the hub. The cluster LIST and the WEIGHTS both come from
+#    ClusterProfiles or they do not exist.
+#
+# Sized small on purpose: this proves a control path, not throughput.
+#
+# Templates referenced here must exist on each member cluster; apply
+# deploy/example-templates-xs.yaml (sb-tmpl-a..e, busybox:1.36).
+
+# 40 warm sandboxes fleet-wide. Enough that a weight split is visible in the
+# pool arithmetic, small enough to materialise in under a minute.
+max_concurrent: 40
+
+max_pool: 20
+
+# See note 1.
+placement_policy: capacity-aware
+
+# 0, not 2. min_clusters forces a spread across N clusters and OVERRIDES the
+# scored selector to do it -- which would manufacture the multi-cluster
+# placement we are trying to observe capacity-aware produce on its own.
+min_clusters: 0
+
+# See note 2. Do not populate this.
+cluster_weights: {}
+
+# `image` is intentionally absent: required only by image-affinity, and the
+# real pod image lives in the operator-managed SandboxTemplate on each cluster.
+models:
+  - template_name: sb-tmpl-a
+    target_tasks: 100
+  - template_name: sb-tmpl-b
+    target_tasks: 100
+  - template_name: sb-tmpl-c
+    target_tasks: 100
+  - template_name: sb-tmpl-d
+    target_tasks: 100

@@ -46,6 +46,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 - [type Info](<#Info>)
 - [type K8sHelper](<#K8sHelper>)
   - [func NewK8sHelper\(restConfig \*rest.Config, log logr.Logger\) \(\*K8sHelper, error\)](<#NewK8sHelper>)
+  - [func \(h \*K8sHelper\) WaitForSandboxReady\(ctx context.Context, sandboxName, namespace string\) error](<#K8sHelper.WaitForSandboxReady>)
 - [type Key](<#Key>)
 - [type Options](<#Options>)
 - [type Runtime](<#Runtime>)
@@ -576,6 +577,15 @@ func NewK8sHelper(restConfig *rest.Config, log logr.Logger) (*K8sHelper, error)
 ```
 
 NewK8sHelper creates a K8sHelper by loading kubeconfig and constructing all required clientsets. If restConfig is non\-nil it is used directly; otherwise in\-cluster config is tried first, then \~/.kube/config.
+
+<a name="K8sHelper.WaitForSandboxReady"></a>
+#### func \(\*K8sHelper\) [WaitForSandboxReady](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/k8s.go>)
+
+```go
+func (h *K8sHelper) WaitForSandboxReady(ctx context.Context, sandboxName, namespace string) error
+```
+
+WaitForSandboxReady waits until the named Sandbox has a true Ready condition. sandboxName is the backing Sandbox name, not the SandboxClaim name. It does not connect to the runtime. Use a context deadline to bound the wait; cancellation and deadline errors are detectable with errors.Is. A missing Sandbox is waited for, while deletion observed during the watch returns ErrSandboxDeleted. API list/watch failures are retried until ctx ends.
 
 <a name="Key"></a>
 ### type [Key](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go>)

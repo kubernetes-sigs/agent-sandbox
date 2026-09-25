@@ -518,10 +518,12 @@ func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1beta1.Sandbox, e
 // condition into the Sandbox so consumers can tell why a Sandbox is not
 // scheduled (Unschedulable, SchedulingGated, ...) without Pod access. The
 // Pod condition's status, reason and message are copied verbatim so future
-// scheduler reasons flow through unchanged. metav1.Condition requires a
-// non-empty reason, so an empty Pod reason maps to a fallback: PodScheduled
-// for status True (the scheduler sets no reason on success — the expected
-// case) and PodSchedulingUnknown for any other status missing a reason.
+// scheduler reasons flow through unchanged, except when an unscheduled Pod
+// is terminating (DeletionTimestamp is set), which reports False with reason
+// PodTerminating. metav1.Condition requires a non-empty reason, so an empty
+// Pod reason maps to a fallback: PodScheduled for status True (the scheduler
+// sets no reason on success — the expected case) and PodSchedulingUnknown
+// for any other status missing a reason.
 // Returns nil when the Pod is confirmed absent: the condition is removed rather
 // than reporting a misleading False for suspended or expired sandboxes. A Pod
 // this Sandbox does not own is likewise not mirrored, so a foreign Pod holding
@@ -549,6 +551,12 @@ func (r *SandboxReconciler) computePodScheduledCondition(sandbox *sandboxv1beta1
 	for _, podCond := range pod.Status.Conditions {
 		if podCond.Type != corev1.PodScheduled {
 			continue
+		}
+		if podCond.Status != corev1.ConditionTrue && !pod.DeletionTimestamp.IsZero() {
+			condition.Status = metav1.ConditionFalse
+			condition.Reason = sandboxv1beta1.SandboxReasonPodTerminating
+			condition.Message = "Pod is terminating"
+			return condition
 		}
 		condition.Status = metav1.ConditionStatus(podCond.Status)
 		condition.Reason = podCond.Reason

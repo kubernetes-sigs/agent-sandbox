@@ -60,11 +60,12 @@ import (
 
 const (
 	immediateRequeueDelay = time.Millisecond
-	// warmCandidateGracePeriod gives a newly created claim two seconds for a
-	// warm candidate to receive a Pod IP. This covers short IPAM delays without
-	// allowing an unavailable warm pool to postpone cold creation indefinitely.
-	warmCandidateGracePeriod   = 2 * time.Second
-	warmCandidateRetryInterval = 100 * time.Millisecond
+	// DefaultWarmCandidateGracePeriod gives a newly created claim two seconds for a
+	// warm candidate to receive a Pod IP, unless overridden via
+	// SandboxClaimReconciler.WarmCandidateGracePeriod. This covers short IPAM delays
+	// without allowing an unavailable warm pool to postpone cold creation indefinitely.
+	DefaultWarmCandidateGracePeriod = 2 * time.Second
+	warmCandidateRetryInterval      = 100 * time.Millisecond
 )
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
@@ -196,6 +197,10 @@ type SandboxClaimReconciler struct {
 	// startup-latency metric for claims first observed by the previous
 	// process. Wired to --disable-claim-observability-annotations.
 	DisableObservabilityAnnotations bool
+	// WarmCandidateGracePeriod is how long a newly created claim waits for a
+	// warm pool candidate without an observed Pod IP before falling back to
+	// cold creation. Zero means DefaultWarmCandidateGracePeriod.
+	WarmCandidateGracePeriod time.Duration
 }
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
@@ -1933,11 +1938,20 @@ func (r *SandboxClaimReconciler) migrateLegacyAssignedSandboxLabel(ctx context.C
 	return r.Patch(ctx, claim, patch)
 }
 
-func warmCandidateRetryAfter(claim *extensionsv1beta1.SandboxClaim, now time.Time) (time.Duration, bool) {
+// warmCandidateGracePeriod returns the configured warm-candidate grace period,
+// falling back to the default for zero-value construction (tests, bare literals).
+func (r *SandboxClaimReconciler) warmCandidateGracePeriod() time.Duration {
+	if r.WarmCandidateGracePeriod > 0 {
+		return r.WarmCandidateGracePeriod
+	}
+	return DefaultWarmCandidateGracePeriod
+}
+
+func (r *SandboxClaimReconciler) warmCandidateRetryAfter(claim *extensionsv1beta1.SandboxClaim, now time.Time) (time.Duration, bool) {
 	if claim.CreationTimestamp.IsZero() {
 		return 0, false
 	}
-	remaining := claim.CreationTimestamp.Add(warmCandidateGracePeriod).Sub(now)
+	remaining := claim.CreationTimestamp.Add(r.warmCandidateGracePeriod()).Sub(now)
 	if remaining <= 0 {
 		return 0, false
 	}
@@ -2124,7 +2138,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 		return adopted, nil
 	}
 	if pendingNetworkCandidates > 0 {
-		if retryAfter, ok := warmCandidateRetryAfter(claim, time.Now()); ok {
+		if retryAfter, ok := r.warmCandidateRetryAfter(claim, time.Now()); ok {
 			return nil, &warmCandidatesPendingError{
 				pendingCandidates: pendingNetworkCandidates,
 				retryAfter:        retryAfter,
@@ -2134,7 +2148,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 			"claim", claim.Name,
 			"warmPool", claim.Spec.WarmPoolRef.Name,
 			"pendingCandidates", pendingNetworkCandidates,
-			"gracePeriod", warmCandidateGracePeriod,
+			"gracePeriod", r.warmCandidateGracePeriod(),
 			"reason", "warm_candidates_network_pending",
 		)
 	}

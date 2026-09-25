@@ -47,6 +47,9 @@
 {{- if hasKey .Values.controller "sandboxWarmPoolMaxBatchSize" }}
 - --sandbox-warm-pool-max-batch-size={{ .Values.controller.sandboxWarmPoolMaxBatchSize }}
 {{- end }}
+{{- if hasKey .Values.controller "sandboxClaimWarmCandidateGracePeriod" }}
+- --sandbox-claim-warm-candidate-grace-period={{ .Values.controller.sandboxClaimWarmCandidateGracePeriod }}
+{{- end }}
 {{- if hasKey .Values.controller "sandboxWarmPoolReadinessGracePeriod" }}
 - --sandbox-warm-pool-readiness-grace-period={{ .Values.controller.sandboxWarmPoolReadinessGracePeriod }}
 {{- end }}

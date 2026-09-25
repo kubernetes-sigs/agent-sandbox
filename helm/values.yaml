@@ -50,6 +50,7 @@ controller:
   # sandboxWarmPoolConcurrentWorkers: 1
   # sandboxTemplateConcurrentWorkers: 1
   # sandboxWarmPoolMaxBatchSize: 300  # max parallel sandbox create/delete batch in the SandboxWarmPool controller
+  # sandboxClaimWarmCandidateGracePeriod: 2s        # how long a SandboxClaim waits for a warm candidate to report a Pod IP before cold creation
   # sandboxWarmPoolReadinessGracePeriod: 5m         # how long a warm pool sandbox may stay non-Ready before it is considered stuck
   # sandboxWarmPoolUnschedulableRecheckInterval: 1m # re-check interval for pools holding unschedulable sandboxes past the grace period
   # enableWarmPoolEviction: true      # mark warm-pool-created pods as safe to evict

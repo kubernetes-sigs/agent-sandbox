@@ -466,6 +466,73 @@ func TestReconcilePool_UnschedulableStuckGC(t *testing.T) {
 		err = r.Get(ctx, types.NamespacedName{Namespace: poolNamespace, Name: sb.Name}, &sandboxv1beta1.Sandbox{})
 		require.True(t, client.IgnoreNotFound(err) == nil && err != nil, "sandbox without a pod should be deleted")
 	})
+
+	t.Run("sandbox with terminating pod is deleted and replaced while pod remains terminating", func(t *testing.T) {
+		warmPool := newPool()
+		sb := agedSandbox("-pod-terminating")
+		sb.Status.Conditions = []metav1.Condition{
+			{
+				Type:   string(sandboxv1beta1.SandboxConditionPodScheduled),
+				Status: metav1.ConditionFalse,
+				Reason: sandboxv1beta1.SandboxReasonSuspendedPodTerminating,
+			},
+			{
+				Type:   string(sandboxv1beta1.SandboxConditionReady),
+				Status: metav1.ConditionFalse,
+				Reason: sandboxv1beta1.SandboxReasonSuspendedPodTerminating,
+			},
+		}
+		now := metav1.Now()
+		pod := podWithScheduled(sb.Name, corev1.ConditionFalse, corev1.PodReasonUnschedulable)
+		pod.DeletionTimestamp = &now
+		pod.Finalizers = []string{"agents.x-k8s.io/test-hold"}
+
+		lc := newLaggingClient(newFakeClient(newTestScheme(), template, warmPool, sb, pod))
+		r := SandboxWarmPoolReconciler{
+			Client:       lc,
+			Scheme:       newTestScheme(),
+			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+		}
+		ctx := context.Background()
+
+		// Pass 1 deletes the pool-owned sandbox whose pod is terminating.
+		_, err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		err = r.Get(ctx, types.NamespacedName{Namespace: poolNamespace, Name: sb.Name}, &sandboxv1beta1.Sandbox{})
+		require.True(t, client.IgnoreNotFound(err) == nil && err != nil, "sandbox with terminating pod should be deleted")
+
+		// Pass 2 (after the sandbox deletion is observed by the watch) creates a
+		// replacement even while the old pod remains stuck terminating.
+		h := &warmPoolSandboxEventHandler{EventHandler: handler.Funcs{}, expectations: r.exp()}
+		h.Delete(ctx, event.DeleteEvent{Object: sb}, nil)
+
+		_, err = r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		require.Equal(t, 1, lc.createCount(), "sandbox with terminating pod should be replaced while pod remains terminating")
+	})
+
+	t.Run("suspended sandbox with PodTerminating condition is not deleted by isPodTerminating", func(t *testing.T) {
+		sb := createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-suspending")
+		sb.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeSuspended
+		sb.Status.Conditions = []metav1.Condition{
+			{
+				Type:   string(sandboxv1beta1.SandboxConditionSuspended),
+				Status: metav1.ConditionFalse,
+				Reason: sandboxv1beta1.SandboxReasonSuspendedPodTerminating,
+			},
+			{
+				Type:   string(sandboxv1beta1.SandboxConditionPodScheduled),
+				Status: metav1.ConditionFalse,
+				Reason: sandboxv1beta1.SandboxReasonSuspendedPodTerminating,
+			},
+			{
+				Type:   string(sandboxv1beta1.SandboxConditionReady),
+				Status: metav1.ConditionFalse,
+				Reason: sandboxv1beta1.SandboxReasonSuspended,
+			},
+		}
+		require.False(t, isPodTerminating(sb), "suspended sandbox must not be treated as having an unexpectedly terminating pod")
+	})
 }
 
 // phantomListClient wraps the fake client to model the opposite staleness of

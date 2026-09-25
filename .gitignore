@@ -22,6 +22,7 @@ temp/
 
 # TypeScript
 node_modules/
+**/.eslintcache
 clients/typescript/agentic-sandbox-client/dist/
 
 # E2E test artifacts (generated during 'make test-e2e')

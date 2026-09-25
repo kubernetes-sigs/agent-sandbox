@@ -166,7 +166,7 @@ console.log(env.SANDBOX_ID);
 
 All file paths are sandbox-root-relative POSIX paths and are validated **before any network request**, without being decoded or normalized first:
 
-- `""` and `"."` (and equivalent all-dot/empty-segment forms) refer to the sandbox root. `read`/`list`/`exists` accept it; `write`/`delete` reject it, as they do a trailing `/`.
+- `""` and `"."` (and equivalent all-dot/empty-segment forms) refer to the sandbox root. `list()` and `exists()` accept it; `read()` passes validation but then rejects because the root is a directory; `write()`/`delete()` reject it up front, as they do a trailing `/`.
 - An absolute path (leading `/`) is always rejected.
 - Any `..` path segment is always rejected, including for `exists()` (which never silently reports `false` for a rejected path — it throws).
 

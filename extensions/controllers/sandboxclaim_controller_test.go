@@ -1961,7 +1961,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		},
 	}
 	claimPastWarmCandidateGracePeriod := claim.DeepCopy()
-	claimPastWarmCandidateGracePeriod.CreationTimestamp = metav1.NewTime(time.Now().Add(-warmCandidateGracePeriod - time.Second))
+	claimPastWarmCandidateGracePeriod.CreationTimestamp = metav1.NewTime(time.Now().Add(-DefaultWarmCandidateGracePeriod - time.Second))
 
 	warmPoolUID := types.UID("warmpool-uid-123")
 	poolNameHash := sandboxcontrollers.NameHash("test-pool")
@@ -2799,6 +2799,7 @@ func TestSandboxClaimWarmCandidateGrace(t *testing.T) {
 	tests := []struct {
 		name          string
 		claimCreated  time.Time
+		gracePeriod   time.Duration
 		withCandidate bool
 		wantRequeue   bool
 		wantCold      bool
@@ -2816,7 +2817,21 @@ func TestSandboxClaimWarmCandidateGrace(t *testing.T) {
 		},
 		{
 			name:          "pending candidate past deadline cold starts",
-			claimCreated:  time.Now().Add(-warmCandidateGracePeriod - time.Second),
+			claimCreated:  time.Now().Add(-DefaultWarmCandidateGracePeriod - time.Second),
+			withCandidate: true,
+			wantCold:      true,
+		},
+		{
+			name:          "pending candidate past default deadline requeues when configured grace period is longer",
+			claimCreated:  time.Now().Add(-DefaultWarmCandidateGracePeriod - time.Second),
+			gracePeriod:   10 * time.Second,
+			withCandidate: true,
+			wantRequeue:   true,
+		},
+		{
+			name:          "pending candidate past configured grace period cold starts",
+			claimCreated:  time.Now().Add(-6 * time.Second),
+			gracePeriod:   5 * time.Second,
 			withCandidate: true,
 			wantCold:      true,
 		},
@@ -2825,6 +2840,7 @@ func TestSandboxClaimWarmCandidateGrace(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			fakeClient, reconciler, req, _ := newWarmCandidateGraceFixture(t, tc.claimCreated, tc.withCandidate)
+			reconciler.WarmCandidateGracePeriod = tc.gracePeriod
 			result, err := reconciler.Reconcile(context.Background(), req)
 			require.NoError(t, err)
 			if tc.wantRequeue {
@@ -2847,6 +2863,15 @@ func TestSandboxClaimWarmCandidateGrace(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSandboxClaimDefaults(t *testing.T) {
+	require.Equal(t, 2*time.Second, DefaultWarmCandidateGracePeriod,
+		"DefaultWarmCandidateGracePeriod is the --sandbox-claim-warm-candidate-grace-period default; changing it alters cold-fallback timing for every deployment that does not set the flag")
+
+	var r SandboxClaimReconciler
+	require.Equal(t, DefaultWarmCandidateGracePeriod, r.warmCandidateGracePeriod(),
+		"zero WarmCandidateGracePeriod must fall back to the default")
 }
 
 func TestSandboxClaimAdoptsCandidateThatBecomesNetworkReadyDuringGrace(t *testing.T) {

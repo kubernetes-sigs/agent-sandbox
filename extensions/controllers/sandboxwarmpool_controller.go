@@ -78,6 +78,13 @@ const (
 	// SandboxWarmPoolReconciler.UnschedulableRecheckInterval.
 	DefaultUnschedulableRecheckInterval = time.Minute
 
+	// missingTemplateRequeueDelay is the fallback requeue when the referenced
+	// SandboxTemplate does not exist. The SandboxTemplate watch normally
+	// retriggers the pool as soon as the template appears; this only guards
+	// against lost events. Same duration as the claim controller's
+	// missing-dependency fallback.
+	missingTemplateRequeueDelay = time.Minute
+
 	// graceRequeueSlack pads the self-scheduled post-grace requeue so the
 	// re-evaluation lands strictly after the deadline despite clock jitter.
 	graceRequeueSlack = 2 * time.Second
@@ -766,16 +773,23 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		}
 	}
 
-	// Surface (and clear) the not-progressing signal. A pool with
-	// unschedulable sandboxes past the readiness grace period cannot make
-	// progress toward spec.replicas until cluster capacity frees up; degrade
-	// visibly instead of churning.
-	if unschedulableReplicas > 0 {
+	// Surface (and clear) the not-progressing signal. A missing template
+	// cannot create sandboxes (#1570); unschedulable members past grace
+	// cannot make progress toward spec.replicas (#1215). Missing-template
+	// takes priority for the event: it is why replacements cannot be created.
+	// A pool scaled to zero does not need the template to satisfy desired
+	// state, so it must not warn or requeue for a missing template.
+	switch {
+	case desiredReplicas > 0 && k8serrors.IsNotFound(tmplErr):
+		r.setNotProgressing(warmPool, poolKey, true, fmt.Sprintf(
+			"SandboxTemplate %q not found", warmPool.Spec.TemplateRef.Name))
+		requeueAfter = minNonZeroDuration(requeueAfter, missingTemplateRequeueDelay)
+	case unschedulableReplicas > 0:
 		r.setNotProgressing(warmPool, poolKey, true, fmt.Sprintf(
 			"%d/%d sandboxes are unschedulable past the %s readiness grace period; holding them instead of replacing (replacements would be equally unschedulable)",
 			unschedulableReplicas, desiredReplicas, r.readinessGracePeriod()))
 		requeueAfter = minNonZeroDuration(requeueAfter, r.unschedulableRecheckInterval())
-	} else {
+	default:
 		r.setNotProgressing(warmPool, poolKey, false, "")
 	}
 
@@ -1028,7 +1042,13 @@ func (r *SandboxWarmPoolReconciler) fetchTemplateAndHash(ctx context.Context, wa
 	}
 
 	if tmplErr != nil {
-		logger.Error(tmplErr, "Failed to get sandbox template and hash", "templateRef", warmPool.Spec.TemplateRef.Name)
+		if k8serrors.IsNotFound(tmplErr) {
+			// Expected while the template is still being created; V(4) so a
+			// missing-template requeue does not Error-log every minute.
+			logger.V(4).Info("SandboxTemplate not found", "templateRef", warmPool.Spec.TemplateRef.Name)
+		} else {
+			logger.Error(tmplErr, "Failed to get sandbox template and hash", "templateRef", warmPool.Spec.TemplateRef.Name)
+		}
 	}
 	return template, currentPodTemplateHash, currentSandboxBlueprintHash, tmplErr
 }

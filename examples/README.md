@@ -53,6 +53,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**sandbox-ksa**](./sandbox-ksa): Examples of a sandbox with a service account, namespace, and a basic sandbox.
 - [**sandboxd-sandbox**](./sandboxd-sandbox): An example of running the sandboxd runtime daemon inside a sandbox for command execution and file I/O.
 - [**sandboxed-tools**](./sandboxed-tools): An example of an agent executing its tools inside a sandbox via the Go SDK.
+- [**urunc-sandbox**](./urunc-sandbox): An example of running a sandbox on urunc, an OCI runtime for unikernels and single-application kernels, enabling extremely small sandboxes with various guest kernels.
 - [**vscode-sandbox**](./vscode-sandbox): An example of running VSCode in a sandbox.
 - [**warmpool-quickstart**](./warmpool-quickstart): Reference YAML for the three extension CRDs — SandboxTemplate, SandboxWarmPool, and SandboxClaim — including a secure template and an LLM-scoped network policy example.
 - [**webhook-inject-timestamp**](./webhook-inject-timestamp): A mutating webhook that stamps sandbox resources with a creation-observed timestamp for latency metrics.

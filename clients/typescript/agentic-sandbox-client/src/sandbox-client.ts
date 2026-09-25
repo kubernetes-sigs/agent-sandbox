@@ -14,6 +14,7 @@
 
 import * as crypto from "node:crypto";
 import * as k8s from "@kubernetes/client-node";
+import { resolveInClusterHost, selectPodIP } from "./connection.js";
 import {
   CLAIM_API_GROUP,
   CLAIM_API_VERSION,
@@ -37,8 +38,12 @@ import {
   SandboxWarmPoolNotFoundError,
 } from "./exceptions.js";
 import { resolveLogger } from "./logger.js";
-import type { SandboxInit } from "./sandbox.js";
-import { raceWithTimeout, Sandbox } from "./sandbox.js";
+import type { ResolvedSandboxdOptions, SandboxInit } from "./sandbox.js";
+import {
+  normalizeSandboxdOptions,
+  raceWithTimeout,
+  Sandbox,
+} from "./sandbox.js";
 import type { Tracer } from "./trace-manager.js";
 import {
   getCurrentSpan,
@@ -164,6 +169,51 @@ type WatchPassResult<V> =
   | { type: "error"; error: Error }
   | { type: "closed" };
 
+/** What a Ready Sandbox object tells us about how to reach it. */
+interface ReadySandbox {
+  sandboxName: string;
+  podName: string;
+  /** True when podName came from the pod-name annotation. */
+  podNameFromAnnotation: boolean;
+  /** Chosen from status.podIPs via selectPodIP(); "" when absent. */
+  podIP: string;
+  /** status.serviceFQDN; "" when the Sandbox has no headless Service. */
+  serviceFQDN: string;
+  annotations: Record<string, string>;
+}
+
+/**
+ * Reads a Sandbox object: undefined when it is not Ready yet, "unnamed" when
+ * it is Ready but has no metadata.name, otherwise its connection details.
+ */
+function readReadySandbox(
+  obj: Record<string, unknown> | undefined,
+): ReadySandbox | "unnamed" | undefined {
+  const status = (obj?.status as Record<string, unknown>) ?? {};
+  const conditions = (status.conditions as Array<Record<string, string>>) ?? [];
+  const isReady = conditions.some(
+    (c) => c.type === "Ready" && c.status === "True",
+  );
+  if (!isReady) return undefined;
+
+  const metadata = (obj?.metadata as Record<string, unknown>) ?? {};
+  const sandboxName = metadata.name as string | undefined;
+  if (!sandboxName) return "unnamed";
+
+  const annotations = (metadata.annotations as Record<string, string>) ?? {};
+  const podNameAnnotation = annotations[POD_NAME_ANNOTATION];
+  const podIPs = Array.isArray(status.podIPs) ? status.podIPs : [];
+  return {
+    sandboxName,
+    podName: podNameAnnotation ?? sandboxName,
+    podNameFromAnnotation: podNameAnnotation !== undefined,
+    podIP: selectPodIP(podIPs),
+    serviceFQDN:
+      typeof status.serviceFQDN === "string" ? status.serviceFQDN : "",
+    annotations,
+  };
+}
+
 /**
  * True when a Watch `done(err)` signals the stream ended without a real
  * failure, so the caller should re-GET and restart the watch from a fresh
@@ -199,6 +249,7 @@ export class SandboxClient {
   private readonly enableTracing: boolean;
   private readonly traceServiceName: string;
   private readonly logger: Logger;
+  private readonly sandboxdOptions: ResolvedSandboxdOptions;
 
   private tracerInitialized = false;
   private autoCleanupActive = false;
@@ -260,6 +311,7 @@ export class SandboxClient {
     this.enableTracing = options.enableTracing ?? false;
     this.traceServiceName = options.traceServiceName ?? "sandbox-client";
     this.logger = resolveLogger(options.logger, options.quiet);
+    this.sandboxdOptions = normalizeSandboxdOptions(options.sandboxd);
 
     this.kubeConfig = new k8s.KubeConfig();
     this.kubeConfig.loadFromDefault();
@@ -378,8 +430,7 @@ export class SandboxClient {
       sandboxTracingManager.startLifecycleSpan();
     }
 
-    let sandboxName: string;
-    let podName: string;
+    let ready: ReadySandbox;
 
     try {
       const traceContextStr =
@@ -402,13 +453,13 @@ export class SandboxClient {
           `SandboxClaim '${claimName}' was cleaned up while it was being created.`,
         );
       }
-      ({ sandboxName, podName } = await this.waitForSandboxReady(
+      ready = await this.waitForSandboxReady(
         claimName,
         ns,
         sandboxReadyTimeout * 1000,
         sandboxTracer,
         sandboxTracingManager?.parentContext,
-      ));
+      );
     } catch (err) {
       sandboxTracingManager?.endLifecycleSpan();
       // Clean up orphaned claim before re-throwing. A 409 means the name is
@@ -447,11 +498,16 @@ export class SandboxClient {
 
     const init: SandboxInit = {
       claimName,
-      sandboxName,
-      podName,
+      sandboxName: ready.sandboxName,
+      podName: ready.podName,
+      podIP: ready.podIP,
+      serviceFQDN: ready.serviceFQDN,
       namespace: ns,
       customObjectsApi: this.customObjectsApi,
+      kubeConfig: this.kubeConfig,
+      sandboxdOptions: this.sandboxdOptions,
       tracingManager: sandboxTracingManager,
+      traceServiceName: this.traceServiceName,
       logger: this.logger,
     };
 
@@ -616,16 +672,15 @@ export class SandboxClient {
     }
 
     // Resolve the sandbox identity and wait for readiness
-    let sandboxName: string;
-    let podName: string;
+    let ready: ReadySandbox;
     try {
-      ({ sandboxName, podName } = await this.waitForSandboxReady(
+      ready = await this.waitForSandboxReady(
         claimName,
         ns,
         this.defaultSandboxReadyTimeout * 1000,
         sandboxTracer,
         sandboxTracingManager?.parentContext,
-      ));
+      );
     } catch (err) {
       sandboxTracingManager?.endLifecycleSpan();
       throw err;
@@ -633,11 +688,16 @@ export class SandboxClient {
 
     const init: SandboxInit = {
       claimName,
-      sandboxName,
-      podName,
+      sandboxName: ready.sandboxName,
+      podName: ready.podName,
+      podIP: ready.podIP,
+      serviceFQDN: ready.serviceFQDN,
       namespace: ns,
       customObjectsApi: this.customObjectsApi,
+      kubeConfig: this.kubeConfig,
+      sandboxdOptions: this.sandboxdOptions,
       tracingManager: sandboxTracingManager,
+      traceServiceName: this.traceServiceName,
       logger: this.logger,
     };
 
@@ -1234,6 +1294,12 @@ export class SandboxClient {
     }
   }
 
+  private logPodNameSource(ready: ReadySandbox): void {
+    if (ready.podNameFromAnnotation) {
+      this.logger.info(`Found pod name from annotation: ${ready.podName}`);
+    }
+  }
+
   /**
    * Runs a single watch pass for a Sandbox resource.
    * Returns a WatchPassResult — never rejects (errors are wrapped in the result).
@@ -1244,9 +1310,7 @@ export class SandboxClient {
     namespace: string,
     remainingMs: number,
     resourceVersion?: string,
-  ): Promise<
-    WatchPassResult<{ podName: string; annotations: Record<string, string> }>
-  > {
+  ): Promise<WatchPassResult<ReadySandbox>> {
     return new Promise((resolve) => {
       const watcher = new k8s.Watch(this.kubeConfig);
       let abortController: AbortController | undefined;
@@ -1264,12 +1328,7 @@ export class SandboxClient {
         }
       }, remainingMs);
 
-      const settle = (
-        result: WatchPassResult<{
-          podName: string;
-          annotations: Record<string, string>;
-        }>,
-      ) => {
+      const settle = (result: WatchPassResult<ReadySandbox>) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
@@ -1295,39 +1354,20 @@ export class SandboxClient {
               return;
             }
             if (type === "ADDED" || type === "MODIFIED") {
-              const status = (obj.status as Record<string, unknown>) ?? {};
-              const conditions =
-                (status.conditions as Array<Record<string, string>>) ?? [];
-              const isReady = conditions.some(
-                (c) => c.type === "Ready" && c.status === "True",
-              );
-
-              if (isReady) {
-                const metadata =
-                  (obj.metadata as Record<string, unknown>) ?? {};
-                const resolvedName = metadata.name as string | undefined;
-                if (!resolvedName) {
-                  settle({
-                    type: "error",
-                    error: new SandboxMetadataError(
-                      "Could not determine sandbox name from sandbox object.",
-                    ),
-                  });
-                  return;
-                }
-                this.logger.info(`Sandbox ${resolvedName} is ready.`);
-
-                const annotations =
-                  (metadata.annotations as Record<string, string>) ?? {};
-                const podNameAnnotation = annotations[POD_NAME_ANNOTATION];
-                const podName = podNameAnnotation ?? resolvedName;
-                if (podNameAnnotation) {
-                  this.logger.info(
-                    `Found pod name from annotation: ${podName}`,
-                  );
-                }
-
-                settle({ type: "resolved", value: { podName, annotations } });
+              const ready = readReadySandbox(obj);
+              if (ready === "unnamed") {
+                settle({
+                  type: "error",
+                  error: new SandboxMetadataError(
+                    "Could not determine sandbox name from sandbox object.",
+                  ),
+                });
+                return;
+              }
+              if (ready) {
+                this.logger.info(`Sandbox ${ready.sandboxName} is ready.`);
+                this.logPodNameSource(ready);
+                settle({ type: "resolved", value: ready });
               }
             } else if (type === "DELETED") {
               settle({
@@ -1376,7 +1416,7 @@ export class SandboxClient {
     sandboxName: string,
     namespace: string,
     timeoutMs: number,
-  ): Promise<{ podName: string; annotations: Record<string, string> }> {
+  ): Promise<ReadySandbox> {
     this.logger.info("Watching for Sandbox to become ready...");
 
     const deadline = Date.now() + timeoutMs;
@@ -1397,26 +1437,13 @@ export class SandboxClient {
         const obj = existing as Record<string, unknown>;
         const objMetadata = (obj?.metadata as Record<string, unknown>) ?? {};
         resourceVersion = objMetadata.resourceVersion as string | undefined;
-        const status = (obj?.status as Record<string, unknown>) ?? {};
-        const conditions =
-          (status.conditions as Array<Record<string, string>>) ?? [];
-        const isReady = conditions.some(
-          (c) => c.type === "Ready" && c.status === "True",
-        );
-        if (isReady) {
-          const metadata = (obj?.metadata as Record<string, unknown>) ?? {};
-          const resolvedName = metadata.name as string | undefined;
-          if (resolvedName) {
-            this.logger.info(`Sandbox ${resolvedName} is already ready (GET).`);
-            const annotations =
-              (metadata.annotations as Record<string, string>) ?? {};
-            const podNameAnnotation = annotations[POD_NAME_ANNOTATION];
-            const podName = podNameAnnotation ?? resolvedName;
-            if (podNameAnnotation) {
-              this.logger.info(`Found pod name from annotation: ${podName}`);
-            }
-            return { podName, annotations };
-          }
+        const ready = readReadySandbox(obj);
+        if (ready && ready !== "unnamed") {
+          this.logger.info(
+            `Sandbox ${ready.sandboxName} is already ready (GET).`,
+          );
+          this.logPodNameSource(ready);
+          return ready;
         }
       } catch {
         // Sandbox may not exist yet or transient error — fall through to watch.
@@ -1466,11 +1493,7 @@ export class SandboxClient {
     totalTimeoutMs: number,
     tracer: Tracer | null = null,
     parentContext?: unknown,
-  ): Promise<{
-    sandboxName: string;
-    podName: string;
-    annotations: Record<string, string>;
-  }> {
+  ): Promise<ReadySandbox> {
     const fn = async () => {
       const startTime = Date.now();
 
@@ -1491,13 +1514,21 @@ export class SandboxClient {
           `Sandbox name resolution for claim '${claimName}' consumed the entire timeout budget.`,
         );
       }
-      const { podName, annotations } = await this.watchForSandboxReady(
+      const ready = await this.watchForSandboxReady(
         sandboxName,
         namespace,
         remainingMs,
       );
-
-      return { sandboxName, podName, annotations };
+      // Fail here rather than on the first files/commands call, the same
+      // point at which the Go client's Open() fails.
+      if (this.sandboxdOptions.connectivity !== "port-forward") {
+        resolveInClusterHost(
+          this.sandboxdOptions.connectivity,
+          ready.podIP,
+          ready.serviceFQDN,
+        );
+      }
+      return { ...ready, sandboxName };
     };
 
     return withSpan(

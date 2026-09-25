@@ -1,0 +1,90 @@
+# Copyright 2026 The Kubernetes Authors.
+# Licensed under the Apache License, Version 2.0.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: multi-cluster-fleet
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fleet-member
+  namespace: multi-cluster-fleet
+---
+# Namespaced grants. The member only manages fleet objects in its own
+# namespace (--namespace, default multi-cluster-fleet), so pool create/delete
+# must not be cluster-wide: a compromised member should not be able to plant
+# or remove warm pools in namespaces the fleet layer does not own. If you run
+# the member with a different --namespace, mirror this Role + RoleBinding
+# there.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fleet-member
+  namespace: multi-cluster-fleet
+rules:
+  # SandboxWarmPool — fleet-member OWNS these (creates + deletes per assignment).
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxwarmpools"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxwarmpools/status"]
+    verbs: ["get"]
+  # SandboxTemplate — READ-ONLY. Operator owns these (kubectl / GitOps).
+  # Fleet-member only verifies existence before creating a WarmPool that refs them.
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxtemplates"]
+    verbs: ["get", "list", "watch"]
+  # Read-only on SandboxClaims for capacity signal (active_claims)
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxclaims"]
+    verbs: ["get", "list", "watch"]
+  # Read Sandboxes owned by warmpools (used by SDK for active_claims count)
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fleet-member
+  namespace: multi-cluster-fleet
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: fleet-member
+subjects:
+  - kind: ServiceAccount
+    name: fleet-member
+    namespace: multi-cluster-fleet
+---
+# Cluster-scoped grants — only what genuinely spans the cluster: the node
+# pressure signal reads every node, and the pod walk behind it is
+# list_pod_for_all_namespaces (pods land in whatever namespaces workloads
+# use, not the fleet's own).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fleet-member
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # Node pressure signal for capacity reports
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fleet-member
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fleet-member
+subjects:
+  - kind: ServiceAccount
+    name: fleet-member
+    namespace: multi-cluster-fleet

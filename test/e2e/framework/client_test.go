@@ -16,9 +16,12 @@ package framework
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -164,5 +167,24 @@ exec sleep 30`)
 	}
 	if elapsed < timeout {
 		t.Errorf("startPortForward returned after %s, before the %s deadline", elapsed, timeout)
+	}
+}
+
+func TestStartPortForwardCleanupReapsChild(t *testing.T) {
+	var cmd *exec.Cmd
+	if !t.Run("forward", func(t *testing.T) {
+		cl := &ClusterClient{T: t}
+		cmd = fakePortForwardCmd(t, `echo "Forwarding from 127.0.0.1:8080 -> 8080"
+exec sleep 30`)
+		if err := cl.startPortForward(cmd, portForwardReadyTimeout); err != nil {
+			t.Fatalf("startPortForward failed on a child that printed the ready marker: %v", err)
+		}
+	}) {
+		return
+	}
+
+	// Signal reports ErrProcessDone only once Wait has reaped the child.
+	if err := cmd.Process.Signal(syscall.Signal(0)); !errors.Is(err, os.ErrProcessDone) {
+		t.Errorf("port-forward outlived the test that started it: Signal(0) = %v, want %v", err, os.ErrProcessDone)
 	}
 }

@@ -161,6 +161,15 @@ verify-chart-version:
 bump-chart-version:
 	./dev/tools/bump-chart-version
 
+# Pinned Helm CLI, used by dev/tools/push-chart.
+HELM_VERSION := v3.19.0
+
+.PHONY: helm
+helm: bin/helm
+
+bin/helm:
+	GOBIN=$(CURDIR)/bin go install helm.sh/helm/v3/cmd/helm@$(HELM_VERSION)
+
 # Location of your local k8s.io repo (can be overridden: make release-promote TAG=v0.1.0 K8S_IO_DIR=../other/k8s.io)
 K8S_IO_DIR ?= ../../kubernetes/k8s.io
 

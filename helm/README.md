@@ -5,6 +5,61 @@ CRDs are bundled in the `crds/` directory and are installed automatically by Hel
 
 ## Installation
 
+Starting with the first stable release built after this chart gained OCI publishing support, released versions are published as an OCI Helm chart to `registry.k8s.io`. This is the recommended way to install `agent-sandbox` once a version has been published; earlier releases (including v1.0.3 and prior) were never published this way and are not available at this path.
+
+```bash
+helm install agent-sandbox \
+  oci://registry.k8s.io/agent-sandbox/charts/agent-sandbox \
+  --version <chart-version> \
+  --namespace agent-sandbox-system \
+  --create-namespace
+```
+
+Published charts bake in the matching `agent-sandbox-controller` image tag (set when the chart is packaged for release), so `--set image.tag=...` is not needed here -- pick the controller version by installing the matching chart `--version`. Add `--set controller.extensions=true` to enable `SandboxWarmPool`, `SandboxTemplate`, and `SandboxClaim` support, or `--set namespace.create=false --set namespace.name=my-namespace` to install into an existing namespace, same as installing from source below.
+
+### Upgrading
+
+```bash
+helm upgrade agent-sandbox \
+  oci://registry.k8s.io/agent-sandbox/charts/agent-sandbox \
+  --version X.Y.Z \
+  --namespace agent-sandbox-system \
+  --reuse-values \
+  --set image.tag=vX.Y.Z
+```
+
+`X.Y.Z` and `vX.Y.Z` must refer to the same release.
+
+> **Note**: Helm does not upgrade CRDs automatically. To update CRDs manually after a chart version bump, pull the chart and apply them directly:
+>
+> ```bash
+> helm pull oci://registry.k8s.io/agent-sandbox/charts/agent-sandbox --version <chart-version> --untar
+> kubectl apply -f agent-sandbox/crds/
+> ```
+
+### Upgrading from v1alpha1
+
+Support for the `v1alpha1` API has been removed. If you are upgrading from an older release that uses `v1alpha1`, you must upgrade to a `v0.5.x` release and run the storage migration first. Note that this upgrade inverts the general order above: you must apply the `v1beta1` CRDs **before** running `helm upgrade` to prevent conversion errors during webhook service teardown. See the [Helm Upgrade Ordering section in `docs/api-migration-guide.md`](../docs/api-migration-guide.md#helm-upgrade-ordering) for the full sequence.
+
+### Uninstallation
+
+```bash
+helm uninstall agent-sandbox --namespace agent-sandbox-system
+```
+
+> **Note**: Helm does not delete CRDs on uninstall. To remove all CRDs and their associated custom resources, pull the matching chart first to get a local copy of `crds/`:
+>
+> ```bash
+> helm pull oci://registry.k8s.io/agent-sandbox/charts/agent-sandbox --version <chart-version> --untar
+> kubectl delete -f agent-sandbox/crds/
+> ```
+>
+> Warning: This will delete **all** `Sandbox`, `SandboxWarmPool`, `SandboxTemplate`, and `SandboxClaim` objects across all namespaces.
+
+## Installing from source
+
+For local development, or to install a chart version that hasn't been released yet, install directly from this checkout instead of the published OCI chart. Unlike the published chart, `image.tag` has no default here and must always be set explicitly.
+
 ### Basic install
 
 ```bash
@@ -36,7 +91,7 @@ helm install agent-sandbox ./helm/ \
   --set namespace.name=my-namespace
 ```
 
-## Upgrading
+### Upgrading from source
 
 ```bash
 helm upgrade agent-sandbox ./helm/ \
@@ -51,11 +106,7 @@ helm upgrade agent-sandbox ./helm/ \
 > kubectl apply -f helm/crds/
 > ```
 
-### Upgrading from v1alpha1
-
-Support for the `v1alpha1` API has been removed. If you are upgrading from an older release that uses `v1alpha1`, you must upgrade to a `v0.5.x` release and run the storage migration first. Note that this upgrade inverts the general order above: you must apply the `v1beta1` CRDs **before** running `helm upgrade` to prevent conversion errors during webhook service teardown. See the [Helm Upgrade Ordering section in `docs/api-migration-guide.md`](../docs/api-migration-guide.md#helm-upgrade-ordering) for the full sequence.
-
-## Uninstallation
+### Uninstalling a source install
 
 ```bash
 helm uninstall agent-sandbox --namespace agent-sandbox-system
@@ -150,3 +201,5 @@ That content is versioned by `Chart.yaml` rather than by its own contents, so **
 make verify-chart-version   # check
 make bump-chart-version     # increment the patch version (bump minor/major by hand)
 ```
+
+The committed `Chart.yaml` continues to follow the repository's existing source-chart versioning policy above. Published OCI release artifacts (starting with the first release built after chart publishing was added -- see [Installation](#installation)) are instead packaged with the repository release version via `helm package --version`, without rewriting the committed `Chart.yaml`. See [`docs/release.md`](../docs/release.md) for the staging and promotion flow.

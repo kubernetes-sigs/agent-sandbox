@@ -1,0 +1,255 @@
+#!/usr/bin/env python3
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Packages and publishes the agent-sandbox Helm chart as an OCI artifact.
+
+Only publishes for an exact stable vX.Y.Z release tag; other refs (main
+commits, rc/post/dev pre-releases) exit 0 without pushing anything. The
+release tag is normally passed in via --tag (cloudbuild.yaml always does
+this); git-based auto-detection from HEAD is a fallback for local use.
+
+The committed helm/Chart.yaml continues to follow the repository's existing
+source-chart versioning policy. Published OCI release artifacts are instead
+packaged with the repository release version via `helm package --version`,
+without rewriting the committed Chart.yaml.
+
+Packaging happens on a temporary copy of helm/, so the checked-in chart
+(including values.yaml, where image.tag has no default) is never modified.
+Only the standard library is used for that edit -- the Cloud Build image this
+runs in guarantees python3, not third-party packages like PyYAML.
+"""
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+from shared.git_ops import is_stable_release_tag
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+CHART_NAME = "agent-sandbox"  # must match helm/Chart.yaml's `name:`
+STAGING_CHART_REPO = "us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/charts"
+
+
+def find_head_release_tag(repo_root):
+    """Returns the stable vX.Y.Z tag pointing at HEAD, or None.
+
+    Uses `git tag --points-at HEAD` rather than `git describe`: it only needs
+    the tag refs to be present (already required for the existing image
+    build's GIT_VERSION/GIT_SHA injection in this same postsubmit job), not a
+    full commit-count history walk.
+    """
+    result = subprocess.run(
+        ["git", "tag", "--points-at", "HEAD"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    candidates = sorted({t for t in result.stdout.split() if is_stable_release_tag(t)})
+    if not candidates:
+        return None
+    if len(candidates) > 1:
+        # Pathological (multiple stable release tags on one commit): refuse
+        # to guess which one owns this chart release rather than picking one
+        # silently.
+        print(
+            f"push-chart: multiple stable release tags point at HEAD ({candidates}); "
+            "skipping chart publish.",
+            file=sys.stderr,
+        )
+        return None
+    return candidates[0]
+
+
+_KEY_LINE_RE = re.compile(r"^(?P<indent>[ \t]*)(?P<key>[A-Za-z0-9_.\-]+):(?P<rest>.*)$")
+
+
+def _parse_key_line(line):
+    """Returns (indent, key, rest) for a `key:`/`key: value` line, else None."""
+    match = _KEY_LINE_RE.match(line)
+    if not match:
+        return None
+    return match.group("indent"), match.group("key"), match.group("rest")
+
+
+def set_image_tag(values_path, image_tag):
+    """Rewrites the tag: field directly under the top-level image: mapping.
+
+    Line-oriented and stdlib-only (no PyYAML), since the Cloud Build image
+    this runs in isn't guaranteed to have it. Everything else in the file --
+    comments, ordering, unrelated tag: keys -- is left as-is.
+    """
+    with open(values_path) as f:
+        lines = f.readlines()
+
+    image_idx = None
+    for i, line in enumerate(lines):
+        parsed = _parse_key_line(line)
+        if parsed and parsed[0] == "" and parsed[1] == "image":
+            image_idx = i
+            break
+    if image_idx is None:
+        raise ValueError(f"{values_path}: no top-level 'image:' mapping found")
+
+    # The image: block runs until the next top-level (unindented) key, or EOF.
+    block_end = len(lines)
+    child_indent = None
+    for i in range(image_idx + 1, len(lines)):
+        parsed = _parse_key_line(lines[i])
+        if parsed is None:
+            continue
+        indent, _key, _rest = parsed
+        if indent == "":
+            block_end = i
+            break
+        if child_indent is None:
+            child_indent = indent
+
+    tag_indices = []
+    for i in range(image_idx + 1, block_end):
+        parsed = _parse_key_line(lines[i])
+        if parsed and parsed[0] == child_indent and parsed[1] == "tag":
+            tag_indices.append(i)
+
+    if len(tag_indices) != 1:
+        raise ValueError(
+            f"{values_path}: expected exactly one 'tag:' field directly under "
+            f"'image:', found {len(tag_indices)}"
+        )
+
+    tag_idx = tag_indices[0]
+    _, _, rest = _parse_key_line(lines[tag_idx])
+    comment = ""
+    if "#" in rest:
+        comment = "  #" + rest.split("#", 1)[1]
+    lines[tag_idx] = f'{child_indent}tag: "{image_tag}"{comment}\n'
+
+    with open(values_path, "w") as f:
+        f.writelines(lines)
+
+
+def prepare_release_chart_copy(chart_dir, dest_root, image_tag):
+    """Copies chart_dir into dest_root and pins image.tag in the copy only.
+
+    The source chart_dir (helm/) is only ever read here, never written to.
+    """
+    chart_copy = os.path.join(dest_root, "chart")
+    shutil.copytree(chart_dir, chart_copy)
+    set_image_tag(os.path.join(chart_copy, "values.yaml"), image_tag)
+    return chart_copy
+
+
+def package_chart(chart_copy, chart_version, app_version, dest_dir, helm_bin):
+    """Runs `helm package` and returns the path to the produced .tgz."""
+    subprocess.run(
+        [
+            helm_bin, "package",
+            "--version", chart_version,
+            "--app-version", app_version,
+            chart_copy,
+            "-d", dest_dir,
+        ],
+        check=True,
+    )
+    return os.path.join(dest_dir, f"{CHART_NAME}-{chart_version}.tgz")
+
+
+def push_package(package_path, staging_repo, helm_bin):
+    """Runs `helm push` to publish the packaged chart to the OCI staging repo."""
+    subprocess.run(
+        [helm_bin, "push", package_path, f"oci://{staging_repo}"],
+        check=True,
+    )
+
+
+def main(args):
+    tag = args.tag or find_head_release_tag(args.repo_root)
+    if tag is None:
+        print("push-chart: HEAD is not tagged with a stable vX.Y.Z release; skipping chart publish.")
+        return 0
+    if not is_stable_release_tag(tag):
+        print(f"push-chart: {tag!r} is not a stable vX.Y.Z release tag; skipping chart publish.")
+        return 0
+
+    chart_version = tag[1:]  # strip the leading 'v'
+    app_version = tag
+
+    if shutil.which(args.helm_bin) is None:
+        print(
+            f"ERROR: helm binary not found or not executable at {args.helm_bin!r}. "
+            "Run 'make helm' to install the pinned CLI.",
+            file=sys.stderr,
+        )
+        return 1
+
+    dest_dir = args.dest_dir or tempfile.mkdtemp(prefix="agent-sandbox-chart-out-")
+    os.makedirs(dest_dir, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix="agent-sandbox-chart-src-") as tmp:
+        chart_copy = prepare_release_chart_copy(args.chart_dir, tmp, image_tag=tag)
+        package_path = package_chart(chart_copy, chart_version, app_version, dest_dir, args.helm_bin)
+        print(f"push-chart: packaged {package_path} (version={chart_version}, appVersion={app_version})")
+
+        if args.dry_run:
+            print(f"push-chart: --dry-run set; not pushing to oci://{args.staging_repo}")
+            return 0
+
+        push_package(package_path, args.staging_repo, args.helm_bin)
+        print(f"push-chart: pushed {package_path} to oci://{args.staging_repo}")
+
+    return 0
+
+
+def make_parser():
+    """Create the argument parser for push-chart.
+
+    Exported as a module-level function so tests (push_chart_test.py) can
+    exercise the real parser rather than re-creating a parallel copy that
+    might drift from the production definition.
+    """
+    parser = argparse.ArgumentParser(
+        description="Package and publish the agent-sandbox Helm chart as an OCI artifact "
+                     "for stable vX.Y.Z release tags only."
+    )
+    parser.add_argument("--repo-root", default=REPO_ROOT,
+                         help="Path to the agent-sandbox repository (for git tag detection).")
+    parser.add_argument("--chart-dir", default=os.path.join(REPO_ROOT, "helm"),
+                         help="Path to the source Helm chart directory. Never modified.")
+    parser.add_argument("--helm-bin",
+                         default=os.environ.get("HELM_BIN", os.path.join(REPO_ROOT, "bin", "helm")),
+                         help="Path to the helm binary. Defaults to the repo-pinned bin/helm "
+                              "installed by 'make helm'.")
+    parser.add_argument("--staging-repo", default=STAGING_CHART_REPO,
+                         help="OCI registry path (without the oci:// scheme) to push the "
+                              "packaged chart to. `helm push` appends the chart name itself.")
+    parser.add_argument("--dest-dir", default=None,
+                         help="Directory to write the packaged .tgz to. Defaults to a new temp directory.")
+    parser.add_argument("--tag", default=None,
+                         help="Override the release tag to publish (for local testing/validation, "
+                              "e.g. --dry-run). By default, auto-detected from an exact tag on HEAD.")
+    parser.add_argument("--dry-run", action="store_true",
+                         help="Package the chart but do not push it.")
+    return parser
+
+
+if __name__ == "__main__":
+    parser = make_parser()
+    cli_args = parser.parse_args()
+    sys.exit(main(cli_args))

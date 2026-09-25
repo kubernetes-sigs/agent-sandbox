@@ -1,0 +1,95 @@
+<!--
+ Copyright 2026 The Kubernetes Authors.
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>WebMCP demo page</title>
+</head>
+<body>
+<h1>WebMCP demo page</h1>
+<p>
+  This page registers two tools on <code>document.modelContext</code>, the
+  browser-side API proposed by <a href="https://github.com/webmachinelearning/webmcp">WebMCP</a>.
+  Open your browser's devtools console and run
+  <code>await document.modelContext.getTools()</code> to see them yourself —
+  or let <code>bridge.py</code>, running in this same Sandbox pod, do it for you
+  over MCP.
+</p>
+<p>Counter value: <span id="counter">0</span></p>
+
+<script>
+  // No browser ships document.modelContext yet, and the WebMCP spec repo
+  // publishes no reference polyfill (explainer/discussion only). This
+  // installs a hand-rolled one only when the real API is absent — just
+  // enough surface (registerTool/getTools/executeTool) for this example,
+  // not a spec-conformant implementation. Swap this for a maintained
+  // polyfill once one exists.
+  function installPolyfillIfMissing() {
+    if (document.modelContext) return;
+    const tools = new Map();
+    document.modelContext = {
+      async registerTool(tool) {
+        tools.set(tool.name, tool);
+      },
+      async getTools() {
+        return Array.from(tools.values());
+      },
+      async executeTool(tool, args) {
+        return tool.execute(args);
+      },
+    };
+  }
+
+  let counter = 0;
+
+  async function registerDemoTools() {
+    installPolyfillIfMissing();
+
+    // Read-only tool: no state change, safe to call freely.
+    await document.modelContext.registerTool({
+      name: "get-server-time",
+      description: "Returns the current time as seen by this page.",
+      inputSchema: { type: "object", properties: {} },
+      async execute() {
+        return { iso_time: new Date().toISOString() };
+      },
+    });
+
+    // Mutating tool: changes in-page state. A real deployment would
+    // classify this differently from the read-only tool above before
+    // deciding whether to allow it — see the README's "Governing tool
+    // calls" section.
+    await document.modelContext.registerTool({
+      name: "increment-counter",
+      description: "Increments this page's counter and returns the new value.",
+      inputSchema: {
+        type: "object",
+        properties: { by: { type: "number", description: "Amount to add (default 1)" } },
+      },
+      async execute({ by }) {
+        counter += typeof by === "number" ? by : 1;
+        document.getElementById("counter").textContent = String(counter);
+        return { counter };
+      },
+    });
+  }
+
+  registerDemoTools();
+</script>
+</body>
+</html>

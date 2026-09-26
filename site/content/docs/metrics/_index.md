@@ -42,7 +42,7 @@ Those last two measure across a process boundary and inherit any clock skew betw
 | --- | --- |
 | `namespace` | Namespace of the `Sandbox` or `SandboxClaim`. |
 | `launch_type` | `warm` when the Sandbox came from a `SandboxWarmPool`, `cold` otherwise. The claim latency histograms additionally report `unknown` when no Sandbox was resolved; `agent_sandboxes` never does, and reports a Sandbox carrying no launch-type label as `cold`. |
-| `sandbox_template` | Name of the `SandboxTemplate` resolved for the object. When none can be resolved the value is `unknown` on `agent_sandboxes` and `__unknown__` on the `SandboxClaim` families. |
+| `sandbox_template` | Name of the `SandboxTemplate` resolved for a SandboxClaim. When none can be resolved the value is `__unknown__`. |
 | `created_by` | Component that created the object, normalized to `go-client`, `python-client`, `controller`, or `unknown`. |
 | `owned_by` | `SandboxClaim` or `SandboxWarmPool` when one of those controls the `Sandbox`; `None` for any other controller, or for none at all. |
 | `ready_condition` | `true` or `false`, from the `Ready` condition of the `Sandbox`. |

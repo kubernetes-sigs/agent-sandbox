@@ -307,22 +307,25 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	// Initialize trace ID for active resources missing an ID (inline, no re-reconcile)
-	tc := r.Tracer.GetTraceContext(ctx)
-	if tc != "" && (sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "") {
-		patch := client.MergeFrom(sandbox.DeepCopy())
-		if sandbox.Annotations == nil {
-			sandbox.Annotations = make(map[string]string)
-		}
-		sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
-
-		if err := r.Patch(ctx, sandbox, patch); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
 	oldStatus := sandbox.Status.DeepCopy()
+
+	// Initialize the optional trace-context annotation. Best-effort: patch
+	// failures must not stall reconcile.
+	r.ensureSandboxTraceContext(ctx, sandbox)
+
+	if ensureSandboxFirstObservedTime(sandbox) {
+		r.markInitiallyBoundPVCStage(ctx, sandbox)
+	}
+	// Persist firstObservedTime and any pre-existing PVC stage before creating
+	// children. If this write fails, retry must not have already created child
+	// resources against a later t0.
+	if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
+		return ctrl.Result{}, statusUpdateErr
+	}
+	oldStatus = sandbox.Status.DeepCopy()
+
 	var err error
+	var pendingStageLatencies []pendingStageLatency
 	sandboxDeleted := false
 	result := ctrl.Result{}
 
@@ -351,7 +354,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				window: min(r.WriteBehindWindow, podMetadataFlushBound),
 			}
 		}
-		err = r.reconcileChildResources(ctx, sandbox, wd)
+		pendingStageLatencies, err = r.reconcileChildResources(ctx, sandbox, wd)
 		expiredAfterReconcile, requeueAfter := checkSandboxExpiry(sandbox, time.Now())
 		result.RequeueAfter = requeueAfter
 		if expiredAfterReconcile {
@@ -380,6 +383,8 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
 			// Surface update error
 			err = errors.Join(err, statusUpdateErr)
+		} else {
+			emitStageLatencies(ctx, sandbox, pendingStageLatencies)
 		}
 	}
 
@@ -396,11 +401,12 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 // Sandbox whose namespace is terminating; normally it is gone by then.
 const namespaceTerminatingRequeue = 30 * time.Second
 
-func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, wd *writeDeferral) error {
+func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, wd *writeDeferral) ([]pendingStageLatency, error) {
 	// Create a hash from the sandbox.Name and use it as label value
 	nameHash := NameHash(sandbox.Name)
 
 	var allErrors error
+	var pending []pendingStageLatency
 	var conditionErrors error
 
 	// recordChildErr routes a child-resource reconcile error. It always feeds the
@@ -459,6 +465,12 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 		recordChildErr(svcErr)
 	}
 
+	// Prepare Ready-path stage latencies once per stage (skip while suspending).
+	// Samples are emitted only after the lifecycle status persist succeeds.
+	if sandbox.Spec.OperatingMode != sandboxv1beta1.SandboxOperatingModeSuspended {
+		pending = r.prepareStageLatencies(ctx, sandbox, pod, svc)
+	}
+
 	// compute and set overall conditions
 	conditions := r.computeConditions(sandbox, conditionErrors, svc, pod, podErr)
 	// Conditions that are only present while they apply: Finished has no
@@ -482,7 +494,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 		}
 	}
 
-	return allErrors
+	return pending, allErrors
 }
 
 func (r *SandboxReconciler) recordMultiplePodsEvent(sandbox *sandboxv1beta1.Sandbox, err error) {
@@ -1060,6 +1072,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 	if err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, service); err != nil {
 		if !k8serrors.IsNotFound(err) {
 			logger.Error(err, "Failed to get Service")
+			r.recordChildReconcileError(sandbox, asmetrics.ResourceService, asmetrics.ReasonOther, err)
 			return nil, fmt.Errorf("service get failed: %w", err)
 		}
 		// Service does not exist, and desired is true — create service
@@ -1084,6 +1097,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 			service.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Service"))
 			if err := ctrl.SetControllerReference(sandbox, service, r.Scheme); err != nil {
 				logger.Error(err, "Failed to set controller reference")
+				r.recordChildReconcileError(sandbox, asmetrics.ResourceService, asmetrics.ReasonOther, err)
 				return nil, fmt.Errorf("SetControllerReference for Service failed: %w", err)
 			}
 			err := r.Create(ctx, service, client.FieldOwner(sandboxControllerFieldOwner))
@@ -1094,6 +1108,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 					return nil, err
 				}
 				logger.Error(err, "Failed to create", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
+				r.recordChildReconcileError(sandbox, asmetrics.ResourceService, asmetrics.ReasonCreateFailed, err)
 				return nil, err
 			}
 			r.setServiceStatus(sandbox, service)
@@ -1115,6 +1130,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 			logger.Info("Deleting owned service because service is disabled",
 				"Service.Name", service.Name, "Sandbox.Name", sandbox.Name)
 			if err := r.Delete(ctx, service); err != nil && !k8serrors.IsNotFound(err) {
+				r.recordChildReconcileError(sandbox, asmetrics.ResourceService, asmetrics.ReasonDeleteFailed, err)
 				return nil, fmt.Errorf("failed to delete service: %w", err)
 			}
 		}
@@ -1128,8 +1144,10 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 		logger.Info("Refusing to use service: service is owned by a different controller",
 			"Service.Name", service.Name, "Sandbox.Name", sandbox.Name,
 			"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
-		return nil, fmt.Errorf("service %q is owned by %s/%s (UID: %s), not by sandbox %q",
+		err := fmt.Errorf("service %q is owned by %s/%s (UID: %s), not by sandbox %q",
 			service.Name, controllerRef.Kind, controllerRef.Name, controllerRef.UID, sandbox.Name)
+		r.recordChildReconcileError(sandbox, asmetrics.ResourceService, asmetrics.ReasonOwnershipConflict, err)
+		return nil, err
 
 	case resourceUnowned:
 		if desired == nil {
@@ -1144,15 +1162,19 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 			logger.V(4).Info("Refusing to adopt unowned service: missing pool authorization label or sandbox tracking label",
 				"Service.Name", service.Name, "Sandbox.Name", sandbox.Name,
 				"RequiredLabel", sandboxv1beta1.SandboxAdoptableLabel, "TrackingLabel", sandboxLabel)
-			return nil, fmt.Errorf("cannot adopt unowned service %q: missing required pool authorization label (%q) or sandbox tracking label (%q)",
+			err := fmt.Errorf("cannot adopt unowned service %q: missing required pool authorization label (%q) or sandbox tracking label (%q)",
 				service.Name, sandboxv1beta1.SandboxAdoptableLabel, sandboxLabel)
+			r.recordChildReconcileError(sandbox, asmetrics.ResourceService, asmetrics.ReasonAdoptRefused, err)
+			return nil, err
 		}
 		if service.Spec.ClusterIP != corev1.ClusterIPNone && service.Spec.ClusterIP != "" {
 			logger.V(4).Info("Refusing to adopt service: ClusterIP mismatch (immutable, expected None)",
 				"Service.Name", service.Name, "Sandbox.Name", sandbox.Name,
 				"Service.ClusterIP", service.Spec.ClusterIP)
-			return nil, fmt.Errorf("cannot adopt service %q: ClusterIP is %q (expected %q, field is immutable)",
+			err := fmt.Errorf("cannot adopt service %q: ClusterIP is %q (expected %q, field is immutable)",
 				service.Name, service.Spec.ClusterIP, corev1.ClusterIPNone)
+			r.recordChildReconcileError(sandbox, asmetrics.ResourceService, asmetrics.ReasonAdoptRefused, err)
+			return nil, err
 		}
 
 		logger.Info("Adopting unowned service", "Service.Name", service.Name, "Sandbox.Name", sandbox.Name)
@@ -1167,9 +1189,11 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 		service.Spec.Ports = desiredPorts
 
 		if err := ctrl.SetControllerReference(sandbox, service, r.Scheme); err != nil {
+			r.recordChildReconcileError(sandbox, asmetrics.ResourceService, asmetrics.ReasonOther, err)
 			return nil, fmt.Errorf("SetControllerReference for Service failed: %w", err)
 		}
 		if err := r.Update(ctx, service); err != nil {
+			r.recordChildReconcileError(sandbox, asmetrics.ResourceService, asmetrics.ReasonOther, err)
 			return nil, fmt.Errorf("failed to update service with owner reference: %w", err)
 		}
 
@@ -1199,6 +1223,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 		if needsUpdate {
 			logger.Info("Reconciling owned service drift", "Service.Namespace", service.Namespace, "Service.Name", service.Name, "Sandbox.Namespace", sandbox.Namespace, "Sandbox.Name", sandbox.Name)
 			if err := r.Patch(ctx, service, patch); err != nil {
+				r.recordChildReconcileError(sandbox, asmetrics.ResourceService, asmetrics.ReasonOther, err)
 				return nil, fmt.Errorf("failed to patch owned service: %w", err)
 			}
 		}
@@ -1229,11 +1254,16 @@ func (r *SandboxReconciler) clearPodNameAnnotation(ctx context.Context, sandbox 
 		return nil
 	}
 	logger := log.FromContext(ctx)
+	// Metadata patches return the stored object and can clobber in-memory status
+	// that has not been persisted yet (e.g. firstObservedTime).
+	statusCopy := sandbox.Status.DeepCopy()
 	patch := client.MergeFrom(sandbox.DeepCopy())
 	delete(sandbox.Annotations, sandboxv1beta1.SandboxPodNameAnnotation)
 	if err := r.Patch(ctx, sandbox, patch); err != nil {
+		sandbox.Status = *statusCopy
 		return fmt.Errorf("failed to clear pod name annotation: %w", err)
 	}
+	sandbox.Status = *statusCopy
 	logger.Info("Removed pod name annotation from sandbox", "Sandbox.Name", sandbox.Name)
 	return nil
 }
@@ -1266,6 +1296,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		client.MatchingFields{podSandboxNameHashIndex: nameHash},
 	); err != nil {
 		logger.Error(err, "Failed to list pods")
+		r.recordChildReconcileError(sandbox, asmetrics.ResourcePod, asmetrics.ReasonOther, err)
 		return nil, fmt.Errorf("pod list failed: %w", err)
 	}
 
@@ -1283,11 +1314,13 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	if err != nil {
 		if !k8serrors.IsNotFound(err) {
 			logger.Error(err, "Failed to get Pod")
+			r.recordChildReconcileError(sandbox, asmetrics.ResourcePod, asmetrics.ReasonOther, err)
 			return nil, fmt.Errorf("pod get failed: %w", err)
 		}
 		if podNameAnnotationExists {
 			logger.Info("Pod referenced by annotation not found, clearing annotation to recover state", "podName", podName)
 			if err := r.clearPodNameAnnotation(ctx, sandbox); err != nil {
+				r.recordChildReconcileError(sandbox, asmetrics.ResourcePod, asmetrics.ReasonOther, err)
 				return nil, err
 			}
 		}
@@ -1326,6 +1359,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 				if pod.DeletionTimestamp.IsZero() {
 					logger.Info("Deleting Pod because .Spec.OperatingMode is Suspended", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 					if err := r.Delete(ctx, pod); err != nil {
+						r.recordChildReconcileError(sandbox, asmetrics.ResourcePod, asmetrics.ReasonDeleteFailed, err)
 						return pod, fmt.Errorf("failed to delete pod: %w", err)
 					}
 				} else {
@@ -1345,6 +1379,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 		// Remove the pod name annotation from the sandbox if it exists
 		if err := r.clearPodNameAnnotation(ctx, sandbox); err != nil {
+			r.recordChildReconcileError(sandbox, asmetrics.ResourcePod, asmetrics.ReasonOther, err)
 			return pod, err
 		}
 
@@ -1371,11 +1406,14 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
 
 			if err := r.clearPodNameAnnotation(ctx, sandbox); err != nil {
+				r.recordChildReconcileError(sandbox, asmetrics.ResourcePod, asmetrics.ReasonOther, err)
 				return nil, err
 			}
 
-			return nil, fmt.Errorf("pod %q is owned by %s/%s (UID: %s), not by sandbox %q",
+			err := fmt.Errorf("pod %q is owned by %s/%s (UID: %s), not by sandbox %q",
 				pod.Name, controllerRef.Kind, controllerRef.Name, controllerRef.UID, sandbox.Name)
+			r.recordChildReconcileError(sandbox, asmetrics.ResourcePod, asmetrics.ReasonOwnershipConflict, err)
+			return nil, err
 
 		case resourceUnowned:
 			isAdoptablePool := pod.Labels != nil && pod.Labels[sandboxv1beta1.SandboxAdoptableLabel] == "true"
@@ -1384,11 +1422,14 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 				logger.V(4).Info("Refusing to adopt unowned pod: missing pool authorization label or sandbox tracking label",
 					"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name,
 					"RequiredLabel", sandboxv1beta1.SandboxAdoptableLabel, "TrackingLabel", sandboxLabel)
-				return nil, fmt.Errorf("cannot adopt unowned pod %q: missing required pool authorization label (%q) or sandbox tracking label (%q)",
+				err := fmt.Errorf("cannot adopt unowned pod %q: missing required pool authorization label (%q) or sandbox tracking label (%q)",
 					pod.Name, sandboxv1beta1.SandboxAdoptableLabel, sandboxLabel)
+				r.recordChildReconcileError(sandbox, asmetrics.ResourcePod, asmetrics.ReasonAdoptRefused, err)
+				return nil, err
 			}
 
 			if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
+				r.recordChildReconcileError(sandbox, asmetrics.ResourcePod, asmetrics.ReasonOther, err)
 				return nil, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
 			}
 			needsUpdate = true
@@ -1434,6 +1475,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			deferred := deferrable && !wd.shouldWrite()
 			if !deferred {
 				if err := r.Patch(ctx, pod, patch); err != nil {
+					r.recordChildReconcileError(sandbox, asmetrics.ResourcePod, asmetrics.ReasonOther, err)
 					return nil, fmt.Errorf("failed to patch pod: %w", err)
 				}
 			}
@@ -1523,6 +1565,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	}
 	pod.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Pod"))
 	if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
+		r.recordChildReconcileError(sandbox, asmetrics.ResourcePod, asmetrics.ReasonOther, err)
 		return nil, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
 	}
 	if err := r.Create(ctx, pod, client.FieldOwner(sandboxControllerFieldOwner)); err != nil {
@@ -1531,11 +1574,13 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 				"Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 			existingPod := &corev1.Pod{}
 			if getErr := r.Get(ctx, types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, existingPod); getErr != nil {
+				r.recordChildReconcileError(sandbox, asmetrics.ResourcePod, asmetrics.ReasonOther, getErr)
 				return nil, fmt.Errorf("pod already exists but failed to fetch: %w", getErr)
 			}
 			return reconcileExistingPod(existingPod)
 		}
 		logger.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+		r.recordChildReconcileError(sandbox, asmetrics.ResourcePod, asmetrics.ReasonCreateFailed, err)
 		if r.Recorder != nil {
 			r.Recorder.Eventf(sandbox, nil, corev1.EventTypeWarning, "SandboxPodCreateFailed", "PodCreation", "Failed to create Pod %q: %s", pod.Name, err.Error())
 		}
@@ -1719,8 +1764,10 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 				logger.V(4).Info("Refusing to use PVC: PVC is owned by a different controller",
 					"PVC.Name", pvcName, "Sandbox.Name", sandbox.Name,
 					"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
-				return fmt.Errorf("PVC %q is owned by %s/%s (UID: %s), not by sandbox %q",
+				err := fmt.Errorf("PVC %q is owned by %s/%s (UID: %s), not by sandbox %q",
 					pvcName, controllerRef.Kind, controllerRef.Name, controllerRef.UID, sandbox.Name)
+				r.recordChildReconcileError(sandbox, asmetrics.ResourcePVC, asmetrics.ReasonOwnershipConflict, err)
+				return err
 
 			case resourceUnowned:
 				isAdoptablePool := pvc.Labels != nil && pvc.Labels[sandboxv1beta1.SandboxAdoptableLabel] == "true"
@@ -1729,17 +1776,21 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 					logger.V(4).Info("Refusing to adopt unowned PVC: missing pool authorization label or sandbox tracking label",
 						"PVC.Name", pvcName, "Sandbox.Name", sandbox.Name,
 						"RequiredLabel", sandboxv1beta1.SandboxAdoptableLabel, "TrackingLabel", sandboxLabel)
-					return fmt.Errorf("cannot adopt unowned PVC %q: missing required pool authorization label (%q) or sandbox tracking label (%q)",
+					err := fmt.Errorf("cannot adopt unowned PVC %q: missing required pool authorization label (%q) or sandbox tracking label (%q)",
 						pvcName, sandboxv1beta1.SandboxAdoptableLabel, sandboxLabel)
+					r.recordChildReconcileError(sandbox, asmetrics.ResourcePVC, asmetrics.ReasonAdoptRefused, err)
+					return err
 				}
 
 				logger.Info("Adopting unowned PVC", "PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)
 
 				patch := client.MergeFrom(pvc.DeepCopy())
 				if err := ctrl.SetControllerReference(sandbox, pvc, r.Scheme); err != nil {
+					r.recordChildReconcileError(sandbox, asmetrics.ResourcePVC, asmetrics.ReasonOther, err)
 					return fmt.Errorf("SetControllerReference for PVC failed: %w", err)
 				}
 				if err := r.Patch(ctx, pvc, patch); err != nil {
+					r.recordChildReconcileError(sandbox, asmetrics.ResourcePVC, asmetrics.ReasonOther, err)
 					return fmt.Errorf("failed to patch PVC with owner reference: %w", err)
 				}
 
@@ -1751,6 +1802,7 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 
 		if !k8serrors.IsNotFound(err) {
 			logger.Error(err, "Failed to get PVC")
+			r.recordChildReconcileError(sandbox, asmetrics.ResourcePVC, asmetrics.ReasonOther, err)
 			return fmt.Errorf("failed to get PVC: %w", err)
 		}
 
@@ -1771,10 +1823,12 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 			Spec: pvcTemplate.Spec,
 		}
 		if err := ctrl.SetControllerReference(sandbox, pvc, r.Scheme); err != nil {
+			r.recordChildReconcileError(sandbox, asmetrics.ResourcePVC, asmetrics.ReasonOther, err)
 			return fmt.Errorf("SetControllerReference for PVC failed: %w", err)
 		}
 		if err := r.Create(ctx, pvc, client.FieldOwner(sandboxControllerFieldOwner)); err != nil {
 			logger.Error(err, "Failed to create PVC", "PVC.Namespace", sandbox.Namespace, "PVC.Name", pvcName)
+			r.recordChildReconcileError(sandbox, asmetrics.ResourcePVC, asmetrics.ReasonCreateFailed, err)
 			return err
 		}
 	}
@@ -1791,6 +1845,7 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 	pod := &corev1.Pod{}
 	if err := r.Get(ctx, types.NamespacedName{Name: podName, Namespace: sandbox.Namespace}, pod); err != nil {
 		if !k8serrors.IsNotFound(err) {
+			r.recordChildReconcileError(sandbox, asmetrics.ResourcePod, asmetrics.ReasonOther, err)
 			allErrors = errors.Join(allErrors, fmt.Errorf("failed to get pod: %w", err))
 		}
 	} else {
@@ -1798,6 +1853,7 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 		switch ownership {
 		case resourceOwnedBySandbox:
 			if err := r.Delete(ctx, pod); err != nil && !k8serrors.IsNotFound(err) {
+				r.recordChildReconcileError(sandbox, asmetrics.ResourcePod, asmetrics.ReasonDeleteFailed, err)
 				allErrors = errors.Join(allErrors, fmt.Errorf("failed to delete pod: %w", err))
 			}
 		case resourceUnowned:
@@ -1814,6 +1870,7 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 	service := &corev1.Service{}
 	if err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, service); err != nil {
 		if !k8serrors.IsNotFound(err) {
+			r.recordChildReconcileError(sandbox, asmetrics.ResourceService, asmetrics.ReasonOther, err)
 			allErrors = errors.Join(allErrors, fmt.Errorf("failed to get service: %w", err))
 		}
 	} else {
@@ -1821,6 +1878,7 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 		switch ownership {
 		case resourceOwnedBySandbox:
 			if err := r.Delete(ctx, service); err != nil && !k8serrors.IsNotFound(err) {
+				r.recordChildReconcileError(sandbox, asmetrics.ResourceService, asmetrics.ReasonDeleteFailed, err)
 				allErrors = errors.Join(allErrors, fmt.Errorf("failed to delete service: %w", err))
 			}
 		case resourceUnowned:
@@ -1844,9 +1902,11 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 	// If we reach here, sandbox is not deleted
 	// Only update "expired" status if cleanup was successful
 	if allErrors == nil {
-		// Drop live-resource status while retaining terminal conditions.
+		// Drop live-resource status while retaining terminal conditions and
+		// controller-observed lifecycle bookkeeping.
 		conditions := sandbox.Status.Conditions
-		sandbox.Status = sandboxv1beta1.SandboxStatus{Conditions: conditions}
+		lifecycle := sandbox.Status.Lifecycle
+		sandbox.Status = sandboxv1beta1.SandboxStatus{Conditions: conditions, Lifecycle: lifecycle}
 		// Update status to mark as expired
 		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
 			Type:               string(sandboxv1beta1.SandboxConditionReady),
@@ -1938,4 +1998,274 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers
 		Owns(&corev1.Service{}, builder.WithPredicates(labelSelectorPredicate)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Complete(r)
+}
+
+// ensureSandboxTraceContext stamps the optional W3C trace-context annotation.
+// Annotation persistence is best-effort: patch failures are logged and do not
+// fail reconcile.
+func (r *SandboxReconciler) ensureSandboxTraceContext(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) {
+	logger := log.FromContext(ctx)
+	tc := r.Tracer.GetTraceContext(ctx)
+	if tc == "" || (sandbox.Annotations != nil && sandbox.Annotations[asmetrics.TraceContextAnnotation] != "") {
+		return
+	}
+
+	statusCopy := sandbox.Status.DeepCopy()
+	patch := client.MergeFrom(sandbox.DeepCopy())
+	if sandbox.Annotations == nil {
+		sandbox.Annotations = make(map[string]string)
+	}
+	sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
+	if err := r.Patch(ctx, sandbox, patch); err != nil {
+		logger.Error(err, "failed to patch sandbox trace context annotation; will retry")
+		sandbox.Status = *statusCopy
+		return
+	}
+	sandbox.Status = *statusCopy
+}
+
+// ensureSandboxFirstObservedTime records when the controller first saw this
+// Sandbox and reports whether it initialized the timestamp. The caller persists
+// it before creating child resources.
+func ensureSandboxFirstObservedTime(sandbox *sandboxv1beta1.Sandbox) bool {
+	lifecycle := ensureSandboxLifecycleStatus(&sandbox.Status)
+	if lifecycle.FirstObservedTime != nil && !lifecycle.FirstObservedTime.IsZero() {
+		return false
+	}
+	now := metav1.Now()
+	lifecycle.FirstObservedTime = &now
+	return true
+}
+
+func ensureSandboxLifecycleStatus(status *sandboxv1beta1.SandboxStatus) *sandboxv1beta1.SandboxLifecycleStatus {
+	if status.Lifecycle == nil {
+		status.Lifecycle = &sandboxv1beta1.SandboxLifecycleStatus{}
+	}
+	return status.Lifecycle
+}
+
+func sandboxFirstObservedTime(sandbox *sandboxv1beta1.Sandbox) (time.Time, bool) {
+	if sandbox.Status.Lifecycle == nil || sandbox.Status.Lifecycle.FirstObservedTime == nil {
+		return time.Time{}, false
+	}
+	t := sandbox.Status.Lifecycle.FirstObservedTime.Time
+	if t.IsZero() {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+// markInitiallyBoundPVCStage excludes PVC binding latency that the controller
+// cannot measure. This is called only when firstObservedTime is initialized and
+// before this reconciler can create PVCs, so the transition time of an already-
+// complete stage is unknown.
+func (r *SandboxReconciler) markInitiallyBoundPVCStage(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) {
+	if !r.pvcsBound(ctx, sandbox) {
+		return
+	}
+
+	lifecycle := ensureSandboxLifecycleStatus(&sandbox.Status)
+	recorded := asmetrics.RecordedStageSet(lifecycle.RecordedStages)
+	if _, already := recorded[asmetrics.StagePVCBound]; already {
+		return
+	}
+	recorded[asmetrics.StagePVCBound] = struct{}{}
+	lifecycle.RecordedStages = asmetrics.SortedRecordedStages(recorded)
+	log.FromContext(ctx).V(4).Info("Skipping initially completed stage latency", "stage", asmetrics.StagePVCBound)
+}
+
+// recordChildReconcileError increments the child reconcile error counter with an allowlisted reason.
+func (r *SandboxReconciler) recordChildReconcileError(sandbox *sandboxv1beta1.Sandbox, resource, hint string, err error) {
+	if err == nil || sandbox == nil {
+		return
+	}
+	asmetrics.RecordChildReconcileError(sandbox.Namespace, resource, asmetrics.ClassifyReconcileError(err, hint))
+}
+
+type pendingStageLatency struct {
+	stage   string
+	latency time.Duration
+}
+
+func emitStageLatencies(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, pending []pendingStageLatency) {
+	if len(pending) == 0 {
+		return
+	}
+	logger := log.FromContext(ctx)
+	labels := asmetrics.LabelsFromSandbox(sandbox)
+	for _, p := range pending {
+		asmetrics.RecordStageLatency(p.latency, labels.Namespace, labels.LaunchType, labels.OwnedBy, p.stage)
+		logger.V(4).Info("Recorded sandbox stage latency", "stage", p.stage, "latencyMs", p.latency.Milliseconds())
+	}
+}
+
+// prepareStageLatencies updates status.lifecycle.recordedStages for Ready-path
+// stages that have been reached. Histogram samples are returned so the caller
+// can emit them only after the durable lifecycle state has been persisted.
+func (r *SandboxReconciler) prepareStageLatencies(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod, svc *corev1.Service) []pendingStageLatency {
+	logger := log.FromContext(ctx)
+	now := time.Now()
+	t0, ok := sandboxFirstObservedTime(sandbox)
+	if !ok {
+		logger.V(1).Info("Skipping stage latencies: missing firstObservedTime")
+		return nil
+	}
+
+	lifecycle := ensureSandboxLifecycleStatus(&sandbox.Status)
+	recorded := asmetrics.RecordedStageSet(lifecycle.RecordedStages)
+	updated := false
+	var pending []pendingStageLatency
+
+	observe := func(stage string, reached bool, endTime time.Time) {
+		if !reached {
+			return
+		}
+		if _, ok := recorded[stage]; ok {
+			return
+		}
+		if endTime.IsZero() {
+			endTime = now
+		}
+		// Stages reached before the controller started observing (warm launch or
+		// pre-existing sandboxes after upgrade) are marked recorded without
+		// observing, to avoid a spike of near-zero histogram samples.
+		if endTime.Before(t0) {
+			recorded[stage] = struct{}{}
+			updated = true
+			logger.V(4).Info("Skipping pre-observation stage latency", "stage", stage)
+			return
+		}
+		latency := endTime.Sub(t0)
+		pending = append(pending, pendingStageLatency{stage: stage, latency: latency})
+		recorded[stage] = struct{}{}
+		updated = true
+	}
+
+	observe(asmetrics.StagePodCreated, podCreated(pod), podCreatedTime(pod, now))
+	observe(asmetrics.StagePodScheduled, podScheduled(pod), podConditionTransitionTime(pod, corev1.PodScheduled, now))
+	observe(asmetrics.StagePodRunning, podRunning(pod), podRunningTime(pod, now))
+	observe(asmetrics.StagePodReady, podReadyWithIP(pod), podConditionTransitionTime(pod, corev1.PodReady, now))
+
+	if len(sandbox.Spec.VolumeClaimTemplates) > 0 {
+		// Skip PVC Gets once pvc_bound is already recorded; observe() would no-op anyway.
+		if _, already := recorded[asmetrics.StagePVCBound]; !already {
+			observe(asmetrics.StagePVCBound, r.pvcsBound(ctx, sandbox), now)
+		}
+	}
+
+	svcRequired := serviceRequired(sandbox, svc)
+	if svcRequired {
+		observe(asmetrics.StageServiceReady, svc != nil, serviceReadyTime(svc, now))
+	}
+
+	if !updated {
+		return nil
+	}
+
+	lifecycle.RecordedStages = asmetrics.SortedRecordedStages(recorded)
+	return pending
+}
+
+func podCreated(pod *corev1.Pod) bool {
+	// A newly created Pod may not have UID populated yet on the returned object
+	// (especially with the fake client); existence is enough for this stage.
+	return pod != nil
+}
+
+func podCreatedTime(pod *corev1.Pod, fallback time.Time) time.Time {
+	if pod == nil {
+		return fallback
+	}
+	if !pod.CreationTimestamp.IsZero() {
+		return pod.CreationTimestamp.Time
+	}
+	return fallback
+}
+
+func podScheduled(pod *corev1.Pod) bool {
+	return podConditionTrue(pod, corev1.PodScheduled)
+}
+
+func podRunning(pod *corev1.Pod) bool {
+	return pod != nil && pod.Status.Phase == corev1.PodRunning
+}
+
+func podRunningTime(pod *corev1.Pod, fallback time.Time) time.Time {
+	if pod == nil {
+		return fallback
+	}
+	// Prefer StartTime when present; otherwise fall back to reconcile wall clock.
+	if pod.Status.StartTime != nil && !pod.Status.StartTime.IsZero() {
+		return pod.Status.StartTime.Time
+	}
+	return fallback
+}
+
+func podReadyWithIP(pod *corev1.Pod) bool {
+	if pod == nil || len(pod.Status.PodIPs) == 0 {
+		return false
+	}
+	return podConditionTrue(pod, corev1.PodReady)
+}
+
+func podConditionTrue(pod *corev1.Pod, condType corev1.PodConditionType) bool {
+	if pod == nil {
+		return false
+	}
+	for _, c := range pod.Status.Conditions {
+		if c.Type == condType {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+func podConditionTransitionTime(pod *corev1.Pod, condType corev1.PodConditionType, fallback time.Time) time.Time {
+	if pod == nil {
+		return fallback
+	}
+	for _, c := range pod.Status.Conditions {
+		if c.Type == condType && c.Status == corev1.ConditionTrue && !c.LastTransitionTime.IsZero() {
+			return c.LastTransitionTime.Time
+		}
+	}
+	return fallback
+}
+
+func serviceRequired(sandbox *sandboxv1beta1.Sandbox, svc *corev1.Service) bool {
+	if sandbox.Spec.Service != nil {
+		return *sandbox.Spec.Service
+	}
+	return svc != nil
+}
+
+func serviceReadyTime(svc *corev1.Service, fallback time.Time) time.Time {
+	if svc == nil {
+		return fallback
+	}
+	if !svc.CreationTimestamp.IsZero() {
+		return svc.CreationTimestamp.Time
+	}
+	return fallback
+}
+
+// pvcsBound reports whether every VCT-backed PVC is owned by the Sandbox and
+// Bound. Unowned, foreign-owned, or unbound PVCs fall through to not-bound so
+// the stage is not recorded against a foreign claim.
+func (r *SandboxReconciler) pvcsBound(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) bool {
+	if len(sandbox.Spec.VolumeClaimTemplates) == 0 {
+		return false
+	}
+	for _, pvcTemplate := range sandbox.Spec.VolumeClaimTemplates {
+		pvc := &corev1.PersistentVolumeClaim{}
+		pvcName := pvcTemplate.Name + "-" + sandbox.Name
+		if err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: sandbox.Namespace}, pvc); err != nil {
+			return false
+		}
+		ownership, _ := checkOwnership(pvc, sandbox)
+		if ownership != resourceOwnedBySandbox || pvc.Status.Phase != corev1.ClaimBound {
+			return false
+		}
+	}
+	return true
 }

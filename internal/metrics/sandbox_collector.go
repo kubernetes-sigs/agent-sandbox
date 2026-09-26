@@ -41,7 +41,6 @@ type AgentSandboxesMetricKey struct {
 	ReadyCondition string
 	Expired        string
 	LaunchType     string
-	Template       string
 	OwnedBy        string
 	CreatedBy      string
 }
@@ -56,7 +55,6 @@ func NewAgentSandboxesConstMetric(count int, key AgentSandboxesMetricKey) promet
 		key.ReadyCondition,
 		key.Expired,
 		key.LaunchType,
-		key.Template,
 		key.OwnedBy,
 		key.CreatedBy,
 	)
@@ -129,13 +127,6 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 			launchTypeStr = LaunchTypeWarm
 		}
 
-		sandboxTemplateStr := "unknown"
-		// If a user manually creates a Sandbox without a SandboxClaim, it won't have the
-		// SandboxTemplateRefAnnotation. The collector correctly handles this by defaulting to "unknown".
-		if template, ok := sandbox.Annotations[sandboxv1beta1.SandboxTemplateRefAnnotation]; ok && template != "" {
-			sandboxTemplateStr = template
-		}
-
 		ownedByStr := "None"
 		controllerRef := metav1.GetControllerOf(&sandbox)
 		// Owner references keep the apiVersion that was current when they
@@ -156,7 +147,6 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 			ReadyCondition: readyConditionStr,
 			Expired:        expiredStr,
 			LaunchType:     launchTypeStr,
-			Template:       sandboxTemplateStr,
 			OwnedBy:        ownedByStr,
 			CreatedBy:      createdByStr,
 		}

@@ -359,9 +359,15 @@ div.feature-state-notice {
   }
 }
 
-.link-card:hover {
+.link-card:hover,
+.link-card:focus-visible {
   cursor: pointer;
   background: rgba($primary, 0.2);
+}
+
+.link-card:focus-visible {
+  outline: 3px solid $primary;
+  outline-offset: 3px;
 }
 
 .link-card>.title {
@@ -456,9 +462,15 @@ h1.text-center {
     max-width: 100%;
   }
 
-  &:hover {
+  &:hover,
+  &:focus-visible {
     background: rgba($primary, 0.15);
     border-color: rgba($primary, 0.5);
+  }
+
+  &:focus-visible {
+    outline: 3px solid $primary;
+    outline-offset: 3px;
   }
 
   >.label {

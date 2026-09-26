@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -1189,6 +1190,84 @@ class TestK8sHelperBatchMethods(unittest.TestCase):
         mock_coord.replace_namespaced_lease.assert_called_once_with(
             "batch-b1", "default", lease, _request_timeout=20
         )
+
+    def test_claim_batch_requests_forward_resource_selector_and_timeout(
+        self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
+    ):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+        mock_api.list_namespaced_custom_object.return_value = {"items": [], "metadata": {}}
+        mock_coord = MagicMock()
+        mock_coord_cls.return_value = mock_coord
+        helper = K8sHelper()
+        selector = "agents.x-k8s.io/batch-id=b1"
+        lease = client.V1Lease(metadata=client.V1ObjectMeta(name="batch-b1"))
+        cases = [
+            ("create_sandbox_claim", lambda: helper.create_sandbox_claim(
+                "b1-0", "pool-a", "default", log_level=logging.DEBUG, _request_timeout=30),
+             mock_api.create_namespaced_custom_object, {"plural": "sandboxclaims"}),
+            ("list_sandbox_claim_objects", lambda: helper.list_sandbox_claim_objects(
+                "default", selector, _request_timeout=30),
+             mock_api.list_namespaced_custom_object,
+             {"plural": "sandboxclaims", "label_selector": selector}),
+            ("delete_sandbox_claims_by_label", lambda: helper.delete_sandbox_claims_by_label(
+                "default", selector, _request_timeout=30),
+             mock_api.delete_collection_namespaced_custom_object,
+             {"group": "extensions.agents.x-k8s.io", "plural": "sandboxclaims",
+              "label_selector": selector}),
+            ("get_sandbox_warmpool", lambda: helper.get_sandbox_warmpool(
+                "pool-a", "default", _request_timeout=30),
+             mock_api.get_namespaced_custom_object,
+             {"group": "extensions.agents.x-k8s.io", "plural": "sandboxwarmpools", "name": "pool-a"}),
+            ("get_sandbox_template", lambda: helper.get_sandbox_template(
+                "tmpl", "default", _request_timeout=30),
+             mock_api.get_namespaced_custom_object,
+             {"group": "extensions.agents.x-k8s.io", "plural": "sandboxtemplates", "name": "tmpl"}),
+            ("create_batch_lease", lambda: helper.create_batch_lease(
+                "default", lease, _request_timeout=30),
+             mock_coord.create_namespaced_lease, {}),
+            ("delete_batch_lease", lambda: helper.delete_batch_lease(
+                "batch-b1", "default", _request_timeout=30),
+             mock_coord.delete_namespaced_lease, {}),
+        ]
+        for name, call, api_method, expected in cases:
+            with self.subTest(name):
+                api_method.reset_mock()
+                call()
+                kwargs = api_method.call_args.kwargs
+                self.assertEqual(kwargs["_request_timeout"], 30)
+                for key, value in expected.items():
+                    self.assertEqual(kwargs[key], value)
+
+    def test_create_sandbox_claim_logs_at_the_given_level(
+        self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
+    ):
+        helper = K8sHelper()
+        with self.assertLogs(level="DEBUG") as logs:
+            helper.create_sandbox_claim("b1-0", "pool-a", "default", log_level=logging.DEBUG)
+        self.assertEqual([r.levelno for r in logs.records], [logging.DEBUG])
+
+    def test_warmpool_and_template_gets_return_none_and_lease_delete_ignores_404_other_errors_raise(
+        self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
+    ):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+        mock_coord = MagicMock()
+        mock_coord_cls.return_value = mock_coord
+        helper = K8sHelper()
+
+        mock_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+        mock_coord.delete_namespaced_lease.side_effect = client.ApiException(status=404)
+        self.assertIsNone(helper.get_sandbox_warmpool("pool-a", "default"))
+        self.assertIsNone(helper.get_sandbox_template("tmpl", "default"))
+        helper.delete_batch_lease("batch-b1", "default")
+
+        mock_api.get_namespaced_custom_object.side_effect = client.ApiException(status=403)
+        mock_coord.delete_namespaced_lease.side_effect = client.ApiException(status=403)
+        with self.assertRaises(client.ApiException):
+            helper.get_sandbox_warmpool("pool-a", "default")
+        with self.assertRaises(client.ApiException):
+            helper.delete_batch_lease("batch-b1", "default")
 
 
 if __name__ == '__main__':

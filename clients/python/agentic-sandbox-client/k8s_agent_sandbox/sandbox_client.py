@@ -275,11 +275,9 @@ class SandboxClient(Generic[T]):
                 raise SandboxNotFoundError(f"Underlying Sandbox '{sandbox_id}' not found.")
         except Exception as e:
             if existing:
-                if key in self._explicit_claims:
-                    existing.close_connection()
-                else:
-                    existing.terminate()
-            self._active_connection_sandboxes.pop(key, None)
+                # A failed lookup doesn't mean the claim is gone, and cleanup
+                # only reaches tracked handles, so close locally and stay tracked.
+                existing.close_connection()
             raise SandboxNotFoundError(f"Sandbox claim '{claim_name}' not found or resolution failed in namespace '{namespace}': {e}") from e
 
         # If it's already in the registry and active (and verified on K8s), return the existing object

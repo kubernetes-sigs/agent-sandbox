@@ -18,6 +18,7 @@ from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 import asyncio
+import contextlib
 import inspect
 
 import pytest
@@ -382,6 +383,28 @@ async def test_failed_readiness_preserves_explicit_claim(sdk_client):
             await invoke(client.create_sandbox, 'pool-a', claim_name='workflow-a')
     assert await invoke(client.list_all_sandboxes) == ['workflow-a']
     assert api.deletes == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('claim_name', [None, 'workflow-a'])
+@pytest.mark.parametrize('failure', ['WarmPoolNotFound', 'watch-429'])
+async def test_failed_lookup_never_deletes_claim(sdk_client, claim_name, failure):
+    api, client, register = sdk_client
+    sandbox = await invoke(client.create_sandbox, 'pool-a', claim_name=claim_name)
+    key = (C.CLAIM_PLURAL_NAME, 'default', sandbox.claim_name)
+    if failure == 'WarmPoolNotFound':
+        api.objects[key]['status']['conditions'] = [
+            {'type': 'Ready', 'status': 'False', 'reason': 'WarmPoolNotFound'}
+        ]
+        lookup_failure = contextlib.nullcontext()
+    else:
+        lookup_failure = patch.object(api, 'list_namespaced_custom_object', side_effect=ApiException(status=429))
+    with lookup_failure, pytest.raises(SandboxNotFoundError):
+        await invoke(client.get_sandbox, sandbox.claim_name)
+    assert api.deletes == []
+    assert not sandbox.is_active
+    register.call_args.args[0]()
+    assert api.remaining(C.CLAIM_PLURAL_NAME) == ([] if claim_name is None else [key])
 
 
 @pytest.mark.asyncio

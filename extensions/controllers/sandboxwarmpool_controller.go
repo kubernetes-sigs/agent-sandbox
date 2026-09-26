@@ -845,6 +845,9 @@ func (r *SandboxWarmPoolReconciler) setNotProgressing(warmPool *extensionsv1beta
 // condition report false, preserving the delete-and-replace behavior for
 // genuinely stuck sandboxes.
 func (r *SandboxWarmPoolReconciler) isSandboxPodUnschedulable(ctx context.Context, sb *sandboxv1beta1.Sandbox) bool {
+	if !sb.DeletionTimestamp.IsZero() || isPodTerminating(sb) {
+		return false
+	}
 	// The backing pod normally shares the sandbox's name; a sandbox that
 	// adopted a warm pod tracks the pod name in an annotation (same
 	// resolution the sandbox controller uses).
@@ -950,6 +953,25 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, p
 
 		if !isOrphan && !isControlledByPool {
 			logger.Info("Ignoring sandbox with different controller", "sandbox", sb.Name, "controller", controllerRef.Name)
+			continue
+		}
+
+		if isPodTerminating(&sb) {
+			logger.Info("Deleting warm pool sandbox with terminating pod", "sandbox", sb.Name, "isOrphan", isOrphan)
+			if isControlledByPool {
+				r.exp().ExpectDeletion(poolKey, sb.UID)
+			}
+			if err := r.Delete(ctx, &sb); err != nil {
+				if isControlledByPool {
+					r.exp().DeletionObserved(poolKey, sb.UID)
+				}
+				if !k8serrors.IsNotFound(err) {
+					logger.Error(err, "Failed to delete sandbox with terminating pod", "sandbox", sb.Name)
+					allErrors = errors.Join(allErrors, err)
+				}
+			} else if isControlledByPool {
+				terminatingReplicas++
+			}
 			continue
 		}
 
@@ -1406,4 +1428,20 @@ func slowStartBatch(ctx context.Context, count int, initialBatchSize int, fn fun
 	}
 
 	return successes, nil
+}
+
+// isPodTerminating returns true if the underlying pod of a non-suspended
+// sandbox is known to be terminating. Sandboxes in Suspended operating mode
+// intentionally terminate their pod while preserving the Sandbox resource, so
+// they are excluded here.
+func isPodTerminating(sb *sandboxv1beta1.Sandbox) bool {
+	if sb.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
+		return false
+	}
+	for _, cond := range sb.Status.Conditions {
+		if (cond.Type == string(sandboxv1beta1.SandboxConditionPodScheduled) || cond.Type == string(sandboxv1beta1.SandboxConditionReady)) && cond.Reason == sandboxv1beta1.SandboxReasonSuspendedPodTerminating {
+			return true
+		}
+	}
+	return false
 }

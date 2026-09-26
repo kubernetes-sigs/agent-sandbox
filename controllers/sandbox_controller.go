@@ -546,6 +546,13 @@ func (r *SandboxReconciler) computePodScheduledCondition(sandbox *sandboxv1beta1
 		return nil
 	}
 
+	if sandbox.Spec.OperatingMode != sandboxv1beta1.SandboxOperatingModeSuspended && !pod.DeletionTimestamp.IsZero() {
+		condition.Status = metav1.ConditionFalse
+		condition.Reason = sandboxv1beta1.SandboxReasonSuspendedPodTerminating
+		condition.Message = "Pod is terminating"
+		return condition
+	}
+
 	for _, podCond := range pod.Status.Conditions {
 		if podCond.Type != corev1.PodScheduled {
 			continue
@@ -658,6 +665,11 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 		case corev1.PodFailed:
 			readyCondition.Reason = sandboxv1beta1.SandboxReasonPodFailed
 			readyCondition.Message = "Pod failed"
+			return readyCondition
+		}
+		if !pod.DeletionTimestamp.IsZero() {
+			readyCondition.Reason = sandboxv1beta1.SandboxReasonSuspendedPodTerminating
+			readyCondition.Message = "Pod is terminating"
 			return readyCondition
 		}
 	}

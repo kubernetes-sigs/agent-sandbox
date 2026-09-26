@@ -70,7 +70,7 @@ kubectl get sandbox dynamic-ephemeral-sandbox
 When creating a new sandbox via the `k8s_agent_sandbox` SDK, you can customize its readiness checks and lifecycle behavior using optional parameters:
 
 * **`sandbox_ready_timeout`**: The maximum time (in seconds) the client will wait for the sandbox environment to become ready before timing out.
-* **`shutdown_after_seconds`**: A Time-To-Live (TTL) integer in seconds. Setting this parameter tells the SDK to automatically populate the underlying Kubernetes claim's `spec.lifecycle` with a `shutdownPolicy` of `"Delete"` and schedule the deletion for *now + shutdown_after_seconds* (UTC). 
+* **`shutdown_after_seconds`**: A Time-To-Live (TTL) integer in seconds. Setting this parameter tells the SDK to automatically populate the underlying Kubernetes claim's `spec.lifecycle` with a `shutdownPolicy` of `"Delete"` and schedule the deletion for *now + shutdown_after_seconds* (UTC).
 
 The following example demonstrates how to pass these parameters. Notice how the SDK handles the cluster cleanup policy for you:
 
@@ -206,6 +206,32 @@ func main() {
 }
   {{< /blocks/tab >}}
 {{< /blocks/tabs >}}
+
+## Opt-in recovery from Failed pods
+
+By default, when a Sandbox's backing Pod reaches `phase=Failed` (for example after node-pressure eviction), the controller surfaces `Finished=True` with reason `PodFailed` and does not create a replacement. That matches StatefulSet behavior and keeps one-shot workloads compatible with Claim `ttlSecondsAfterFinished`.
+
+For long-running sandboxes that should recover while preserving Sandbox identity and PVCs, set:
+
+```yaml
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: resilient-sandbox
+spec:
+  podFailurePolicy: Recreate
+  operatingMode: Running
+  podTemplate:
+    spec:
+      containers:
+      - name: workspace
+        image: alpine:latest
+        command: ["sleep", "infinity"]
+```
+
+With `podFailurePolicy: Recreate`, the controller deletes the controller-owned Failed Pod and creates a new one from `podTemplate`. PVCs from `volumeClaimTemplates` stay owned by the Sandbox and are remounted.
+
+`PodSucceeded` is unchanged (still terminal). Combining `Recreate` with `restartPolicy: Never` and a container that always exits non-zero can recreate repeatedly; the controller applies Deployment-style in-memory exponential backoff (5s, doubling up to 5m) between replacement Creates so a crash loop cannot hot-loop the API server. Backoff resets after the replacement Pod has been Running for 10 minutes. See [KEP-729](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/keps/729-opt-in-pod-recreation-on-failure/README.md).
 
 ## Restart Policy and Cleanup Interaction
 

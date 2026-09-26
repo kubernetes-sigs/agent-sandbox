@@ -1735,5 +1735,33 @@ asyncio.run(main())
         )
 
 
+class TestAsyncSandboxClientGetBatch(unittest.IsolatedAsyncioTestCase):
+
+    def setUp(self):
+        patcher = patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        config = SandboxDirectConnectionConfig(api_url="http://test-router:8080")
+        self.client = AsyncSandboxClient(connection_config=config, cleanup=False)
+
+    @patch("k8s_agent_sandbox.async_sandbox_client.AsyncSandboxBatch._attach")
+    async def test_get_batch_registers_and_unregisters(self, mock_attach):
+        mock_batch = MagicMock()
+
+        async def _attach(*args, **kwargs):
+            return mock_batch
+
+        mock_attach.side_effect = _attach
+
+        batch = await self.client.get_batch("b1", namespace="ns-a")
+
+        mock_attach.assert_called_once_with(self.client, "b1", "ns-a")
+        self.assertIs(batch, mock_batch)
+        self.assertEqual(self.client._active_batches, {("ns-a", "b1"): mock_batch})
+
+        self.client._unregister_batch("ns-a", "b1")
+        self.assertEqual(self.client._active_batches, {})
+
+
 if __name__ == "__main__":
     unittest.main()

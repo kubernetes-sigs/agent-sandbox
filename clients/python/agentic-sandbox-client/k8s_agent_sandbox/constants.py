@@ -54,3 +54,10 @@ TERMINAL_CLAIM_READY_REASONS = frozenset({
     "SandboxExpired",        # core SandboxReasonExpired, forwarded to the claim
     "InvalidConfiguration",  # core SandboxReasonInvalidConfiguration, forwarded to the claim
 })
+
+# Constants for Sandbox Batches
+BATCH_ID_LABEL = "agents.x-k8s.io/batch-id"
+BATCH_GROUP_SIZE_ANNOTATION = "agents.x-k8s.io/batch-group-size"
+BATCH_GROUP_MIN_READY_ANNOTATION = "agents.x-k8s.io/batch-group-min-ready"
+BATCH_LEASE_NAME_PREFIX = "batch-"
+BATCH_LEASE_DURATION_ANNOTATION = "agents.x-k8s.io/batch-lease-duration"

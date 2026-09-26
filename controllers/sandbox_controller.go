@@ -307,9 +307,12 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	// Initialize trace ID for active resources missing an ID (inline, no re-reconcile)
+	oldStatus := sandbox.Status.DeepCopy()
+
+	// Initialize trace ID annotation for active resources missing it.
 	tc := r.Tracer.GetTraceContext(ctx)
-	if tc != "" && (sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "") {
+	needTraceContextPatch := tc != "" && (sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "")
+	if needTraceContextPatch {
 		patch := client.MergeFrom(sandbox.DeepCopy())
 		if sandbox.Annotations == nil {
 			sandbox.Annotations = make(map[string]string)
@@ -321,7 +324,6 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	oldStatus := sandbox.Status.DeepCopy()
 	var err error
 	sandboxDeleted := false
 	result := ctrl.Result{}
@@ -380,6 +382,8 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
 			// Surface update error
 			err = errors.Join(err, statusUpdateErr)
+		} else {
+			r.recordSandboxCreationMetrics(ctx, sandbox, oldStatus)
 		}
 	}
 
@@ -804,6 +808,43 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 
 	// Surface error
 	return nil
+}
+
+// recordSandboxCreationMetrics detects the first transition to Ready=True and records
+// the Sandbox creation latency using Kubernetes' persisted lifecycle timestamps.
+func (r *SandboxReconciler) recordSandboxCreationMetrics(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, oldStatus *sandboxv1beta1.SandboxStatus) {
+	logger := log.FromContext(ctx)
+
+	// Only record on the first transition to Ready=True.
+	newReady := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	wasReady := oldReady != nil && oldReady.Status == metav1.ConditionTrue
+
+	if newReady == nil || newReady.Status != metav1.ConditionTrue {
+		return
+	}
+
+	if wasReady {
+		return
+	}
+
+	// Resolve metric labels.
+	launchType := asmetrics.LaunchTypeCold
+	if sandbox.Labels[sandboxv1beta1.SandboxLaunchTypeLabel] == sandboxv1beta1.SandboxLaunchTypeWarm {
+		launchType = asmetrics.LaunchTypeWarm
+	}
+
+	templateName := "unknown"
+	if tmpl, ok := sandbox.Annotations[sandboxv1beta1.SandboxTemplateRefAnnotation]; ok && tmpl != "" {
+		templateName = tmpl
+	}
+
+	logger.V(1).Info("Sandbox reached Ready state", "sandbox", sandbox.Name, "launchType", launchType)
+
+	if !sandbox.CreationTimestamp.IsZero() && !newReady.LastTransitionTime.IsZero() {
+		latency := newReady.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
+		asmetrics.RecordSandboxCreationLatency(latency, sandbox.Namespace, launchType, templateName)
+	}
 }
 
 func (r *SandboxReconciler) recordReadyTransitionEvent(sandbox *sandboxv1beta1.Sandbox, oldStatus *sandboxv1beta1.SandboxStatus) {

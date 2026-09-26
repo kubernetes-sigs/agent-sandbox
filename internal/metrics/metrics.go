@@ -103,16 +103,16 @@ var (
 	// SandboxCreationLatency measures the time from Sandbox creation to the Sandbox Ready condition.
 	// Labels:
 	// - namespace: the namespace of the sandbox
-	// - launch_type: "warm", "cold"
-	// - sandbox_template: the SandboxTemplateRef, or "__unknown__" when the Sandbox carries no template
-	//   annotation. This metric is only recorded for a resolved Sandbox, so the no-Sandbox case cannot occur.
+	// - launch_type: "warm" | "cold" (defaults to cold when the launch-type label is absent)
+	// - sandbox_template: the SandboxTemplateRef, or "unknown" when the Sandbox carries no template annotation.
+	//
+	// Recorded by the core Sandbox reconciler on first Ready. For warm-pool
+	// sandboxes this fires when the pool member becomes Ready (including
+	// sandboxes that are never claimed), not at claim adoption time.
 	SandboxCreationLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name: "agent_sandbox_creation_latency_ms",
-			Help: "Latency from Sandbox creation to the Sandbox Ready condition in milliseconds. " +
-				"Note: For warm launches the Sandbox is created by the SandboxWarmPool, so this measures the " +
-				"pool's provisioning time; a claim may adopt the Sandbox before or after it becomes Ready.",
-			// Buckets for latency from 50ms to 10 minutes
+			Name:    "agent_sandbox_creation_latency_ms",
+			Help:    "Latency from Sandbox creation to the Sandbox Ready condition in milliseconds; source timestamps have second-level Kubernetes precision. For warm-pool sandboxes, observed at pool-member Ready (including unclaimed pool sandboxes), not at claim adoption.",
 			Buckets: []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000, 300000, 600000},
 		},
 		[]string{"namespace", "launch_type", "sandbox_template"},
@@ -188,14 +188,12 @@ func init() {
 
 // RecordClaimStartupLatency records the duration since the provided start time.
 func RecordClaimStartupLatency(startTime time.Time, launchType, templateName string) {
-	duration := float64(time.Since(startTime).Milliseconds())
-	ClaimStartupLatency.WithLabelValues(launchType, templateName).Observe(duration)
+	recordLatencyDuration(ClaimStartupLatency, time.Since(startTime), launchType, templateName)
 }
 
 // RecordClaimControllerStartupLatency records the duration since the provided controller start time.
 func RecordClaimControllerStartupLatency(startTime time.Time, launchType, templateName string) {
-	duration := float64(time.Since(startTime).Milliseconds())
-	ClaimControllerStartupLatency.WithLabelValues(launchType, templateName).Observe(duration)
+	recordLatencyDuration(ClaimControllerStartupLatency, time.Since(startTime), launchType, templateName)
 }
 
 // RecordClientClaimStartupLatency records the duration since the client request time.
@@ -211,7 +209,14 @@ func RecordClientClaimStartupLatency(ctx context.Context, startTime time.Time, l
 
 // RecordSandboxCreationLatency records the measured latency duration for a sandbox creation.
 func RecordSandboxCreationLatency(duration time.Duration, namespace, launchType, templateName string) {
-	SandboxCreationLatency.WithLabelValues(namespace, launchType, templateName).Observe(float64(duration.Milliseconds()))
+	recordLatencyDuration(SandboxCreationLatency, duration, namespace, launchType, templateName)
+}
+
+func recordLatencyDuration(histogram *prometheus.HistogramVec, duration time.Duration, labelValues ...string) {
+	if duration < 0 {
+		return
+	}
+	histogram.WithLabelValues(labelValues...).Observe(float64(duration.Milliseconds()))
 }
 
 // NormalizeCreatedBy returns the createdBy label normalized to a known allow-list

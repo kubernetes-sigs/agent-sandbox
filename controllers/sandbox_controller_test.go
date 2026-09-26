@@ -25,6 +25,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -5367,6 +5368,40 @@ func TestSandboxReconcile_ConditionsDoNotAccumulate(t *testing.T) {
 	// Steady state for a running, ready sandbox: Suspended, PodScheduled, Ready.
 	require.Len(t, got.Status.Conditions, 3,
 		"conditions slice must not grow across %d reconcile iterations — controller must upsert not append", iters)
+}
+
+func TestRecordSandboxCreationMetrics(t *testing.T) {
+	asmetrics.SandboxCreationLatency.Reset()
+
+	createdAt := metav1.NewTime(time.Now().Add(-10 * time.Second))
+	readyAt := metav1.NewTime(createdAt.Add(5 * time.Second))
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "sandbox-metrics",
+			Namespace:         "default",
+			CreationTimestamp: createdAt,
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			Conditions: []metav1.Condition{{
+				Type:               string(sandboxv1beta1.SandboxConditionReady),
+				Status:             metav1.ConditionTrue,
+				LastTransitionTime: readyAt,
+			}},
+		},
+	}
+
+	r := &SandboxReconciler{}
+	r.recordSandboxCreationMetrics(t.Context(), sandbox, &sandboxv1beta1.SandboxStatus{})
+	assert.Equal(t, 1, testutil.CollectAndCount(asmetrics.SandboxCreationLatency), "first Ready transition should record creation latency")
+
+	oldReady := &sandboxv1beta1.SandboxStatus{
+		Conditions: []metav1.Condition{{
+			Type:   string(sandboxv1beta1.SandboxConditionReady),
+			Status: metav1.ConditionTrue,
+		}},
+	}
+	r.recordSandboxCreationMetrics(t.Context(), sandbox, oldReady)
+	assert.Equal(t, 1, testutil.CollectAndCount(asmetrics.SandboxCreationLatency), "an already-Ready sandbox should not be recorded again")
 }
 
 type mockTracer struct {

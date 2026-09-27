@@ -1278,7 +1278,7 @@ func (r *SandboxReconciler) reconcileInPlaceResources(ctx context.Context, sandb
 			return condition, nil
 		}
 		if resourceResizeReported(sandbox) && podTemplateResourcesEnacted(pod, sandbox) {
-			return resourceResizeCondition(sandbox, metav1.ConditionTrue, sandboxv1beta1.SandboxReasonResourceResizeCompleted, "CPU and memory resources were resized in place"), nil
+			return resourceResizeCondition(sandbox, metav1.ConditionTrue, sandboxv1beta1.SandboxReasonResourceResizeCompleted, "Pod resources match the PodTemplate"), nil
 		}
 		return nil, nil
 	}

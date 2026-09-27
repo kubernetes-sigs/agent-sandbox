@@ -208,7 +208,7 @@ func TestSetResourceResizeConditionRetainsTerminalOutcomeUntilDisabled(t *testin
 		sandbox,
 		metav1.ConditionTrue,
 		sandboxv1beta1.SandboxReasonResourceResizeCompleted,
-		"CPU and memory resources were resized in place",
+		"Pod resources match the PodTemplate",
 	)
 	setResourceResizeCondition(sandbox, completed)
 	setResourceResizeCondition(sandbox, nil)
@@ -543,6 +543,7 @@ func TestReconcileInPlaceResourcesCompletesWhenTerminalOutcomeNoLongerHasDrift(t
 			require.NotNil(t, condition)
 			assert.Equal(t, metav1.ConditionTrue, condition.Status)
 			assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizeCompleted, condition.Reason)
+			assert.Equal(t, "Pod resources match the PodTemplate", condition.Message)
 			assert.Equal(t, sandbox.Generation, condition.ObservedGeneration)
 		})
 	}

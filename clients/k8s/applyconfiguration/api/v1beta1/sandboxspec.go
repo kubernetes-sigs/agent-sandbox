@@ -31,9 +31,9 @@ type SandboxSpecApplyConfiguration struct {
 	// NOTE: Once a field is added here, it is promoted to both Sandbox and SandboxTemplate.
 	// Since moving fields out is breaking, if unsure whether a new field should be shared,
 	// define it in SandboxSpec (or SandboxTemplateSpec) first and promote it here later.
-	SandboxBlueprintApplyConfiguration `json:",inline"`
+	SandboxBlueprintApplyConfiguration `json:""`
 	// Lifecycle defines when and how the sandbox should be shut down.
-	LifecycleApplyConfiguration `json:",inline"`
+	LifecycleApplyConfiguration `json:""`
 	// operatingMode specifies the desired operational state of the Sandbox:
 	// - Running (default): the controller keeps a backing Pod running.
 	// - Suspended: the controller terminates the backing Pod but retains the

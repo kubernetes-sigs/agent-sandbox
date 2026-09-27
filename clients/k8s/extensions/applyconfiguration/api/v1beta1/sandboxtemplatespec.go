@@ -30,7 +30,7 @@ type SandboxTemplateSpecApplyConfiguration struct {
 	// NOTE: Once a field is added here, it is promoted to both Sandbox and SandboxTemplate.
 	// Since moving fields out is breaking, if unsure whether a new field should be shared,
 	// define it in SandboxTemplateSpec (or SandboxSpec) first and promote it here later.
-	apiv1beta1.SandboxBlueprintApplyConfiguration `json:",inline"`
+	apiv1beta1.SandboxBlueprintApplyConfiguration `json:""`
 	// networkPolicy defines the network policy to be applied to the sandboxes
 	// created from this template. A single shared NetworkPolicy is created per Template.
 	// Behavior is dictated by the NetworkPolicyManagement field:

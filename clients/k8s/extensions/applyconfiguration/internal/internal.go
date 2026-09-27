@@ -216,6 +216,9 @@ var schemaYAML = typed.YAMLObject(`types:
     - name: signerName
       type:
         scalar: string
+    - name: user
+      type:
+        scalar: numeric
 - name: Condition.v1.meta.apis.pkg.apimachinery.k8s.io
   map:
     fields:
@@ -286,6 +289,9 @@ var schemaYAML = typed.YAMLObject(`types:
   map:
     fields:
     - name: defaultMode
+      type:
+        scalar: numeric
+    - name: defaultUser
       type:
         scalar: numeric
     - name: items
@@ -494,10 +500,16 @@ var schemaYAML = typed.YAMLObject(`types:
     - name: resourceFieldRef
       type:
         namedType: ResourceFieldSelector.v1.core.api.k8s.io
+    - name: user
+      type:
+        scalar: numeric
 - name: DownwardAPIVolumeSource.v1.core.api.k8s.io
   map:
     fields:
     - name: defaultMode
+      type:
+        scalar: numeric
+    - name: defaultUser
       type:
         scalar: numeric
     - name: items
@@ -512,6 +524,9 @@ var schemaYAML = typed.YAMLObject(`types:
     - name: medium
       type:
         scalar: string
+    - name: mode
+      type:
+        scalar: numeric
     - name: sizeLimit
       type:
         namedType: Quantity.resource.api.pkg.apimachinery.k8s.io
@@ -683,6 +698,17 @@ var schemaYAML = typed.YAMLObject(`types:
     - name: volumeClaimTemplate
       type:
         namedType: PersistentVolumeClaimTemplate.v1.core.api.k8s.io
+- name: EvictionResponder.v1.core.api.k8s.io
+  map:
+    fields:
+    - name: name
+      type:
+        scalar: string
+      default: ""
+    - name: priority
+      type:
+        scalar: numeric
+    elementRelationship: atomic
 - name: ExecAction.v1.core.api.k8s.io
   map:
     fields:
@@ -797,6 +823,9 @@ var schemaYAML = typed.YAMLObject(`types:
 - name: GRPCAction.v1.core.api.k8s.io
   map:
     fields:
+    - name: mode
+      type:
+        scalar: string
     - name: port
       type:
         scalar: numeric
@@ -850,6 +879,9 @@ var schemaYAML = typed.YAMLObject(`types:
     - name: port
       type:
         namedType: IntOrString.intstr.util.pkg.apimachinery.k8s.io
+    - name: protocol
+      type:
+        scalar: string
     - name: scheme
       type:
         scalar: string
@@ -968,6 +1000,9 @@ var schemaYAML = typed.YAMLObject(`types:
       type:
         scalar: string
       default: ""
+    - name: user
+      type:
+        scalar: numeric
 - name: LabelSelector.v1.meta.apis.pkg.apimachinery.k8s.io
   map:
     fields:
@@ -1429,6 +1464,9 @@ var schemaYAML = typed.YAMLObject(`types:
     - name: signerName
       type:
         scalar: string
+    - name: user
+      type:
+        scalar: numeric
     - name: userAnnotations
       type:
         map:
@@ -1590,6 +1628,14 @@ var schemaYAML = typed.YAMLObject(`types:
         list:
           elementType:
             namedType: EphemeralContainer.v1.core.api.k8s.io
+          elementRelationship: associative
+          keys:
+          - name
+    - name: evictionResponders
+      type:
+        list:
+          elementType:
+            namedType: EvictionResponder.v1.core.api.k8s.io
           elementRelationship: associative
           keys:
           - name
@@ -1803,6 +1849,9 @@ var schemaYAML = typed.YAMLObject(`types:
   map:
     fields:
     - name: defaultMode
+      type:
+        scalar: numeric
+    - name: defaultUser
       type:
         scalar: numeric
     - name: sources
@@ -2029,6 +2078,9 @@ var schemaYAML = typed.YAMLObject(`types:
     - name: defaultMode
       type:
         scalar: numeric
+    - name: defaultUser
+      type:
+        scalar: numeric
     - name: items
       type:
         list:
@@ -2093,6 +2145,9 @@ var schemaYAML = typed.YAMLObject(`types:
       type:
         scalar: string
       default: ""
+    - name: user
+      type:
+        scalar: numeric
 - name: SleepAction.v1.core.api.k8s.io
   map:
     fields:
@@ -2334,6 +2389,12 @@ var schemaYAML = typed.YAMLObject(`types:
 - name: VolumeMount.v1.core.api.k8s.io
   map:
     fields:
+    - name: bindMountOptions
+      type:
+        list:
+          elementType:
+            scalar: string
+          elementRelationship: associative
     - name: mountPath
       type:
         scalar: string

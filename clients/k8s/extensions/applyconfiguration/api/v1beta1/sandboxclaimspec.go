@@ -30,6 +30,9 @@ type SandboxClaimSpecApplyConfiguration struct {
 	// lifecycle defines when and how the SandboxClaim should be shut down.
 	Lifecycle *LifecycleApplyConfiguration `json:"lifecycle,omitempty"`
 	// additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.
+	// Label keys must carry a domain prefix from the controller's label-domain allowlist
+	// (default: sandbox.users.io, including subdomains), configured via the
+	// allowed-label-domains key of the optional agent-sandbox-config ConfigMap.
 	// Label values are limited to 63 characters and must match Kubernetes label value patterns.
 	// Annotations in restricted system domains are rejected, except cluster-autoscaler.kubernetes.io/safe-to-evict.
 	AdditionalPodMetadata *apiv1beta1.PodMetadataApplyConfiguration `json:"additionalPodMetadata,omitempty"`

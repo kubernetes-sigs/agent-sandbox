@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/events"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
@@ -844,6 +845,72 @@ func TestReconcilePoolSetsObservedGeneration(t *testing.T) {
 
 	require.Equal(t, warmPool.Generation, warmPool.Status.ObservedGeneration,
 		"observedGeneration should track the pool's metadata.generation")
+}
+
+// TestReconcilePoolMissingTemplate is a regression test for #1570: a pool
+// whose SandboxTemplate does not exist must surface a Warning event instead
+// of silently never creating sandboxes.
+func TestReconcilePoolMissingTemplate(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	replicas := int32(2)
+	scheme := newTestScheme()
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      poolName,
+			Namespace: poolNamespace,
+			UID:       "warmpool-uid-1570",
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "does-not-exist"},
+		},
+	}
+
+	recorder := events.NewFakeRecorder(16)
+	r := SandboxWarmPoolReconciler{
+		Client:   newFakeClient(scheme, warmPool),
+		Scheme:   scheme,
+		Recorder: recorder,
+	}
+
+	_, err := r.reconcilePool(context.Background(), warmPool)
+	require.NoError(t, err, "a missing template is reported via events, not a reconcile error")
+	require.Equal(t, int32(0), warmPool.Status.Replicas, "no sandboxes can be created without a template")
+
+	select {
+	case e := <-recorder.Events:
+		require.Contains(t, e, reasonWarmPoolNotProgressing)
+		require.Contains(t, e, corev1.EventTypeWarning)
+		require.Contains(t, e, "does-not-exist")
+	default:
+		t.Fatal("expected a WarmPoolNotProgressing event for the missing template")
+	}
+
+	// Repeated reconciles in the same state do not re-emit.
+	_, err = r.reconcilePool(context.Background(), warmPool)
+	require.NoError(t, err)
+	select {
+	case e := <-recorder.Events:
+		t.Fatalf("unexpected duplicate event while state is unchanged: %s", e)
+	default:
+	}
+
+	// The template shows up: the pool recovers and progress resumes.
+	template := createTemplate(poolNamespace)
+	template.Name = "does-not-exist"
+	require.NoError(t, r.Create(context.Background(), template))
+
+	_, err = r.reconcilePool(context.Background(), warmPool)
+	require.NoError(t, err)
+	select {
+	case e := <-recorder.Events:
+		require.Contains(t, e, reasonWarmPoolProgressing)
+		require.Contains(t, e, corev1.EventTypeNormal)
+	default:
+		t.Fatal("expected a WarmPoolProgressing event once the template is found")
+	}
 }
 
 func TestUpdateStatusClearsZeroValues(t *testing.T) {

@@ -768,14 +768,19 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 
 	// Surface (and clear) the not-progressing signal. A pool with
 	// unschedulable sandboxes past the readiness grace period cannot make
-	// progress toward spec.replicas until cluster capacity frees up; degrade
-	// visibly instead of churning.
-	if unschedulableReplicas > 0 {
+	// progress toward spec.replicas until cluster capacity frees up, and a
+	// pool whose SandboxTemplate is missing can never create any sandboxes;
+	// degrade visibly in both cases instead of sitting silent.
+	switch {
+	case k8serrors.IsNotFound(tmplErr):
+		r.setNotProgressing(warmPool, poolKey, true, fmt.Sprintf(
+			"SandboxTemplate %q not found", warmPool.Spec.TemplateRef.Name))
+	case unschedulableReplicas > 0:
 		r.setNotProgressing(warmPool, poolKey, true, fmt.Sprintf(
 			"%d/%d sandboxes are unschedulable past the %s readiness grace period; holding them instead of replacing (replacements would be equally unschedulable)",
 			unschedulableReplicas, desiredReplicas, r.readinessGracePeriod()))
 		requeueAfter = minNonZeroDuration(requeueAfter, r.unschedulableRecheckInterval())
-	} else {
+	default:
 		r.setNotProgressing(warmPool, poolKey, false, "")
 	}
 

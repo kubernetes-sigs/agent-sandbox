@@ -17,7 +17,6 @@ import math
 import signal
 import subprocess
 import os
-import shlex
 import logging
 
 from fastapi import FastAPI, UploadFile, File
@@ -114,12 +113,18 @@ async def health_check():
 async def execute_command(request: ExecuteRequest):
     """
     Executes a shell command inside the sandbox and returns its output.
-    Uses shlex.split for security to prevent shell injection.
+
+    The command runs under "/bin/sh -c" so shell syntax the caller expects
+    to work (&&, |, >, ;, quoting) actually does. Without a shell, operators
+    like these are passed as literal argv to the first command instead of
+    being interpreted, which does not fail loudly: e.g. "mkdir -p a && echo
+    hi > a/f.txt" makes mkdir create directories literally named "&&",
+    "echo", "hi", ">" and "a/f.txt". The caller already has arbitrary code
+    execution in their own sandbox, so a shell adds no new exposure.
     """
     try:
-        # Split the command string into a list to safely pass to subprocess
-        args = shlex.split(request.command)
-        
+        args = ["/bin/sh", "-c", request.command]
+
         # Execute the command, always from the base directory. Run it in a
         # worker thread so a long-running or hung command doesn't block the
         # event loop (and with it, the health check and file endpoints), and

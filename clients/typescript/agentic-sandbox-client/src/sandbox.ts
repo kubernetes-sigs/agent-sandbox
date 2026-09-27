@@ -525,7 +525,7 @@ export class Sandbox {
         }),
         CLEANUP_TIMEOUT_MS,
         () => {
-          throw new Error(
+          throw new SandboxError(
             `SandboxClaim cleanup timed out after ${CLEANUP_TIMEOUT_MS}ms`,
           );
         },

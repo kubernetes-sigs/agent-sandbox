@@ -145,11 +145,30 @@ func TestCopyStream(t *testing.T) {
 
 		var gotPID int32 = -1
 		var stdout, stderr bytes.Buffer
-		_, err := copyStream(stream, &stdout, &stderr, func(processID int32) {
+		_, err := copyStream(stream, &stdout, &stderr, func(processID int32) error {
 			gotPID = processID
+			return nil
 		})
 		require.NoError(t, err)
 		assert.EqualValues(t, 99, gotPID)
+	})
+
+	t.Run("stops immediately when onInit fails", func(t *testing.T) {
+		// A command reading stdin (cat, for example) never exits if the
+		// stdin EOF write fails and nothing tells copyStream to give up; it
+		// must report the error instead of waiting for an exit event that
+		// will never come.
+		stream := &scriptedStream{events: []*processv1.StartResponse{
+			{Event: &processv1.StartResponse_Init{Init: &processv1.InitEvent{ProcessId: 5}}},
+			exitEvent(0),
+		}}
+
+		var stdout, stderr bytes.Buffer
+		_, err := copyStream(stream, &stdout, &stderr, func(int32) error {
+			return errors.New("sending stdin EOF: boom")
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "boom")
 	})
 }
 

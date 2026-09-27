@@ -117,8 +117,14 @@ func runCommand(ctx context.Context, grpcAddr string, req execRequest) (int, err
 		config.Cwd = &req.Workdir
 	}
 
+	// A separate cancelable context for the stream lets a failed stdin EOF
+	// tear the stream down instead of leaving copyStream waiting on a
+	// process that will never see EOF and never exits.
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+
 	client := processv1.NewProcessServiceClient(conn)
-	stream, err := client.Start(ctx, &processv1.StartRequest{Config: config})
+	stream, err := client.Start(streamCtx, &processv1.StartRequest{Config: config})
 	if err != nil {
 		return 0, annotateWorkdir(fmt.Errorf("starting command in sandbox: %w", err), req.Workdir)
 	}
@@ -126,11 +132,15 @@ func runCommand(ctx context.Context, grpcAddr string, req execRequest) (int, err
 	// This path never forwards the caller's stdin, so closing it as soon as
 	// the process exists is what tells a command reading from it (cat, for
 	// example) to stop rather than block forever.
-	closeStdin := func(processID int32) {
-		_, _ = client.WriteStdin(ctx, &processv1.WriteStdinRequest{
+	closeStdin := func(processID int32) error {
+		if _, err := client.WriteStdin(ctx, &processv1.WriteStdinRequest{
 			ProcessId: processID,
 			Payload:   &processv1.WriteStdinRequest_Eof{Eof: &emptypb.Empty{}},
-		})
+		}); err != nil {
+			cancelStream()
+			return fmt.Errorf("sending stdin EOF: %w", err)
+		}
+		return nil
 	}
 
 	exitCode, err := copyStream(stream, req.Stdout, req.Stderr, closeStdin)
@@ -159,8 +169,10 @@ type startStream interface {
 
 // copyStream drains a Start stream, forwarding output to stdout/stderr and
 // returning the process exit code. onInit, if not nil, is called once with
-// the process ID carried by the stream's Init event.
-func copyStream(stream startStream, stdout, stderr io.Writer, onInit func(processID int32)) (int, error) {
+// the process ID carried by the stream's Init event; an error from onInit
+// stops the stream immediately instead of waiting for more events that may
+// never arrive.
+func copyStream(stream startStream, stdout, stderr io.Writer, onInit func(processID int32) error) (int, error) {
 	// sandboxd closes the stream after the ExitEvent, so a clean EOF without
 	// one means the sandbox died mid-command and the status is unknown.
 	exitCode := 0
@@ -192,7 +204,9 @@ func copyStream(stream startStream, stdout, stderr io.Writer, onInit func(proces
 			sawExit = true
 		case *processv1.StartResponse_Init:
 			if onInit != nil {
-				onInit(event.Init.GetProcessId())
+				if err := onInit(event.Init.GetProcessId()); err != nil {
+					return 0, err
+				}
 			}
 		}
 	}

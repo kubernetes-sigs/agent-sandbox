@@ -27,6 +27,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/emptypb"
 
 	processv1 "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1"
 )
@@ -116,12 +117,23 @@ func runCommand(ctx context.Context, grpcAddr string, req execRequest) (int, err
 		config.Cwd = &req.Workdir
 	}
 
-	stream, err := processv1.NewProcessServiceClient(conn).Start(ctx, &processv1.StartRequest{Config: config})
+	client := processv1.NewProcessServiceClient(conn)
+	stream, err := client.Start(ctx, &processv1.StartRequest{Config: config})
 	if err != nil {
 		return 0, annotateWorkdir(fmt.Errorf("starting command in sandbox: %w", err), req.Workdir)
 	}
 
-	exitCode, err := copyStream(stream, req.Stdout, req.Stderr)
+	// This path never forwards the caller's stdin, so closing it as soon as
+	// the process exists is what tells a command reading from it (cat, for
+	// example) to stop rather than block forever.
+	closeStdin := func(processID int32) {
+		_, _ = client.WriteStdin(ctx, &processv1.WriteStdinRequest{
+			ProcessId: processID,
+			Payload:   &processv1.WriteStdinRequest_Eof{Eof: &emptypb.Empty{}},
+		})
+	}
+
+	exitCode, err := copyStream(stream, req.Stdout, req.Stderr, closeStdin)
 	return exitCode, annotateWorkdir(err, req.Workdir)
 }
 
@@ -146,8 +158,9 @@ type startStream interface {
 }
 
 // copyStream drains a Start stream, forwarding output to stdout/stderr and
-// returning the process exit code.
-func copyStream(stream startStream, stdout, stderr io.Writer) (int, error) {
+// returning the process exit code. onInit, if not nil, is called once with
+// the process ID carried by the stream's Init event.
+func copyStream(stream startStream, stdout, stderr io.Writer, onInit func(processID int32)) (int, error) {
 	// sandboxd closes the stream after the ExitEvent, so a clean EOF without
 	// one means the sandbox died mid-command and the status is unknown.
 	exitCode := 0
@@ -178,8 +191,9 @@ func copyStream(stream startStream, stdout, stderr io.Writer) (int, error) {
 			exitCode = int(event.Exit.GetExitCode())
 			sawExit = true
 		case *processv1.StartResponse_Init:
-			// The process ID is only needed for signalling and stdin, which
-			// this one-shot path does not use.
+			if onInit != nil {
+				onInit(event.Init.GetProcessId())
+			}
 		}
 	}
 }

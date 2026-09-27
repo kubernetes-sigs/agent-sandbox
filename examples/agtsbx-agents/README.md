@@ -77,7 +77,7 @@ For work you want to keep, `--keep` leaves the sandbox in place so the results
 can be copied out:
 
 ```console
-$ agtsbx run --keep --name agentbox -e ANTHROPIC_API_KEY agtsbx-agents:latest \
+$ agtsbx run --runtime docker --keep --name agentbox -e ANTHROPIC_API_KEY agtsbx-agents:latest \
     claude -p 'write hello.py'
 $ docker cp agentbox:/workspace/hello.py .
 $ docker rm -f agentbox

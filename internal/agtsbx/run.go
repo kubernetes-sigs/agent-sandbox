@@ -248,6 +248,20 @@ func Run(ctx context.Context, args []string, streams IO) (int, error) {
 		return 1, err
 	}
 
+	return runOnBackend(ctx, backend, runCommand, opts, progress, streams)
+}
+
+// sandboxCommandRunner runs the sandboxed command and reports its exit code.
+// It is runCommand in production, and a fake in tests that exercise
+// runOnBackend without a real sandboxd.
+type sandboxCommandRunner func(ctx context.Context, grpcAddr string, req execRequest) (int, error)
+
+// runOnBackend starts the sandbox, always tears it down afterwards, and runs
+// the command in between. It is split out from Run so the orchestration
+// (start, deferred stop, command, error and exit-code plumbing) can be
+// exercised against a fake Backend and sandboxCommandRunner, without a real
+// container engine, cluster or sandboxd.
+func runOnBackend(ctx context.Context, backend Backend, run sandboxCommandRunner, opts runOptions, progress io.Writer, streams IO) (int, error) {
 	// opts.Env is not part of the spec: it reaches the sandbox with the
 	// command below, so no credential lands in the engine argv or the
 	// Sandbox object.
@@ -278,7 +292,7 @@ func Run(ctx context.Context, args []string, streams IO) (int, error) {
 		fmt.Fprintf(progress, "agtsbx: sandbox %s left running (--keep)\n", spec.Name)
 	}
 
-	exitCode, err := runCommand(ctx, instance.Endpoints().GRPCAddr, execRequest{
+	exitCode, err := run(ctx, instance.Endpoints().GRPCAddr, execRequest{
 		Command: opts.Command,
 		Env:     opts.Env,
 		Workdir: opts.Workdir,

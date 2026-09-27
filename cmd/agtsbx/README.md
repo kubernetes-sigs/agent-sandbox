@@ -142,7 +142,7 @@ $ agtsbx run -q sandboxd:local sh -c 'exit 42'; echo $?
 $ agtsbx run -q sandboxd:local sh -c 'for i in 1 2 3; do echo $i; sleep 1; done'
 
 # Keep the sandbox for inspection
-$ agtsbx run --keep --name debugbox sandboxd:local echo started
+$ agtsbx run --runtime docker --keep --name debugbox sandboxd:local echo started
 $ docker exec -it debugbox sh
 ```
 

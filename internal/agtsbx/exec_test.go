@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -76,7 +77,7 @@ func TestCopyStream(t *testing.T) {
 		}}
 
 		var stdout, stderr bytes.Buffer
-		code, err := copyStream(stream, &stdout, &stderr)
+		code, err := copyStream(stream, &stdout, &stderr, nil)
 		require.NoError(t, err)
 
 		assert.Equal(t, 0, code)
@@ -92,7 +93,7 @@ func TestCopyStream(t *testing.T) {
 		}}
 
 		var stdout, stderr bytes.Buffer
-		code, err := copyStream(stream, &stdout, &stderr)
+		code, err := copyStream(stream, &stdout, &stderr, nil)
 		require.NoError(t, err)
 		assert.Equal(t, 17, code)
 	})
@@ -102,7 +103,7 @@ func TestCopyStream(t *testing.T) {
 		stream := &scriptedStream{events: []*processv1.StartResponse{stdoutEvent("partial")}}
 
 		var stdout, stderr bytes.Buffer
-		_, err := copyStream(stream, &stdout, &stderr)
+		_, err := copyStream(stream, &stdout, &stderr, nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "before reporting an exit code")
 	})
@@ -114,23 +115,41 @@ func TestCopyStream(t *testing.T) {
 		}
 
 		var stdout, stderr bytes.Buffer
-		_, err := copyStream(stream, &stdout, &stderr)
+		_, err := copyStream(stream, &stdout, &stderr, nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "connection reset")
 	})
 
-	t.Run("ignores init events", func(t *testing.T) {
+	t.Run("does not write output for init events", func(t *testing.T) {
 		stream := &scriptedStream{events: []*processv1.StartResponse{
 			{Event: &processv1.StartResponse_Init{Init: &processv1.InitEvent{ProcessId: 7}}},
 			exitEvent(0),
 		}}
 
 		var stdout, stderr bytes.Buffer
-		code, err := copyStream(stream, &stdout, &stderr)
+		code, err := copyStream(stream, &stdout, &stderr, nil)
 		require.NoError(t, err)
 		assert.Equal(t, 0, code)
 		assert.Empty(t, stdout.String())
 		assert.Empty(t, stderr.String())
+	})
+
+	t.Run("reports the process ID from the init event", func(t *testing.T) {
+		// This one-shot path never forwards the caller's stdin, so the
+		// caller uses onInit to close it; otherwise a command reading
+		// stdin (cat, for example) blocks forever.
+		stream := &scriptedStream{events: []*processv1.StartResponse{
+			{Event: &processv1.StartResponse_Init{Init: &processv1.InitEvent{ProcessId: 99}}},
+			exitEvent(0),
+		}}
+
+		var gotPID int32 = -1
+		var stdout, stderr bytes.Buffer
+		_, err := copyStream(stream, &stdout, &stderr, func(processID int32) {
+			gotPID = processID
+		})
+		require.NoError(t, err)
+		assert.EqualValues(t, 99, gotPID)
 	})
 }
 
@@ -260,8 +279,14 @@ func TestRunCommandReportsUnreachableSandbox(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	// Port 1 on loopback is reserved and never served, so the RPC fails fast.
-	_, err := runCommand(ctx, "127.0.0.1:1", execRequest{
+	// A closed listener's address is guaranteed unused, unlike a hardcoded
+	// port that some other service on the host may happen to be using.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := listener.Addr().String()
+	require.NoError(t, listener.Close())
+
+	_, err = runCommand(ctx, addr, execRequest{
 		Command: []string{"true"},
 		Stdout:  io.Discard,
 		Stderr:  io.Discard,

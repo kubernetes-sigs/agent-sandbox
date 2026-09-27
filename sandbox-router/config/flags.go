@@ -89,6 +89,30 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 			"cipher-suite names (e.g. TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256). "+
 			"Default: Go defaults. Honors "+EnvTLSCipherSuites+".")
 
+	stringEnumVar(fs, (*string)(&c.UpstreamTLSMode), "upstream-tls-mode", string(c.UpstreamTLSMode),
+		"How the router connects to sandboxes: off (plain HTTP) or on (HTTPS, "+
+			"verifying sandbox certificates against the Sandbox's DNS name, "+
+			"<id>.<namespace>.svc.<domain>, where <domain> is "+
+			"--upstream-tls-cluster-domain or else --cluster-domain).")
+	fs.StringVar(&c.UpstreamTLSClusterDomain, "upstream-tls-cluster-domain", c.UpstreamTLSClusterDomain,
+		"Domain in the DNS name sandbox certificates are verified against. "+
+			"Empty uses --cluster-domain. Set it when sandbox certificates use a "+
+			"domain other than the cluster's DNS domain; when "+
+			"the router falls back to DNS it still dials the --cluster-domain name. "+
+			"Requires --upstream-tls-mode=on.")
+	fs.StringVar(&c.UpstreamTLSCAFile, "upstream-tls-ca-file", c.UpstreamTLSCAFile,
+		"Path to the PEM-encoded CA bundle used to verify sandbox serving "+
+			"certificates, reloaded when it changes. Empty uses the system roots, "+
+			"read once per process. Requires --upstream-tls-mode=on.")
+	fs.StringVar(&c.UpstreamTLSCertFile, "upstream-tls-cert-file", c.UpstreamTLSCertFile,
+		"Path to the PEM-encoded client certificate presented to sandboxes that "+
+			"request one. Reloaded on change. May be the same file as "+
+			"--upstream-tls-key-file. Must be set together with "+
+			"--upstream-tls-key-file. Requires --upstream-tls-mode=on.")
+	fs.StringVar(&c.UpstreamTLSKeyFile, "upstream-tls-key-file", c.UpstreamTLSKeyFile,
+		"Path to the PEM-encoded private key for --upstream-tls-cert-file. "+
+			"Must be set together with --upstream-tls-cert-file.")
+
 	fs.StringVar(&c.ClusterDomain, "cluster-domain", c.ClusterDomain,
 		"Kubernetes cluster DNS suffix used to build sandbox FQDNs. "+
 			"Honors "+EnvClusterDomain+".")

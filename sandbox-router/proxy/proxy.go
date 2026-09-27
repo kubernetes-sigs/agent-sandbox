@@ -16,6 +16,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -23,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,9 +46,15 @@ type Handler struct {
 	metrics    *observability.Metrics
 	propagator propagation.TextMapPropagator
 	transport  http.RoundTripper
-	cache      Lookup
-	authz      authz.Authorizer
-	log        logr.Logger
+	// upstreamTLS is true when sandboxes are dialed over HTTPS.
+	upstreamTLS bool
+	// upstreamTLSDomain is the domain in the DNS name sandbox certificates
+	// are verified against. It is --upstream-tls-cluster-domain when that
+	// is set, and --cluster-domain otherwise.
+	upstreamTLSDomain string
+	cache             Lookup
+	authz             authz.Authorizer
+	log               logr.Logger
 }
 
 // Options bundles the dependencies NewHandler needs. Metrics, Propagator,
@@ -65,7 +73,11 @@ type Options struct {
 	// uses authz.AllowAll — the Python-compatible default. Set this to
 	// a TokenReview authorizer to enforce per-sandbox auth (KEP-NNNN).
 	Authorizer authz.Authorizer
-	Logger     logr.Logger
+	// If UpstreamTLS is set, the handler connects to sandboxes over HTTPS
+	// with this configuration, which tlsutil.BuildUpstreamTLS builds.
+	// Otherwise it connects over plain HTTP.
+	UpstreamTLS *tls.Config
+	Logger      logr.Logger
 }
 
 // NewHandler builds a Handler from o.
@@ -76,7 +88,7 @@ func NewHandler(o Options) *Handler {
 	if o.Propagator == nil {
 		o.Propagator = propagation.TraceContext{}
 	}
-	var tr http.RoundTripper = defaultTransport(o.Config)
+	var tr http.RoundTripper = defaultTransport(o.Config, o.UpstreamTLS)
 	// Wrap with retry only if max-retries > 0. The transport is unchanged
 	// when retries are disabled so the request path stays a single Dial.
 	if o.Config.UpstreamMaxRetries > 0 {
@@ -107,14 +119,20 @@ func NewHandler(o Options) *Handler {
 	if authorizer == nil {
 		authorizer = authz.AllowAll{}
 	}
+	upstreamTLSDomain := o.Config.UpstreamTLSClusterDomain
+	if upstreamTLSDomain == "" {
+		upstreamTLSDomain = o.Config.ClusterDomain
+	}
 	return &Handler{
-		cfg:        o.Config,
-		metrics:    o.Metrics,
-		propagator: o.Propagator,
-		transport:  tr,
-		cache:      o.Cache,
-		authz:      authorizer,
-		log:        o.Logger,
+		cfg:               o.Config,
+		metrics:           o.Metrics,
+		propagator:        o.Propagator,
+		transport:         tr,
+		upstreamTLS:       o.UpstreamTLS != nil,
+		upstreamTLSDomain: upstreamTLSDomain,
+		cache:             o.Cache,
+		authz:             authorizer,
+		log:               o.Logger,
 	}
 }
 
@@ -178,7 +196,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// ErrorHandler also needs src to invalidate the cache entry on
 	// dial-class failures, and the Rewrite callback re-uses the URL.
 	target0 := target // capture for closures
-	upstreamURL, src, resolved := target0.Resolve("http", h.cfg.ClusterDomain, upstreamPath, r.URL.RawQuery, h.cache)
+	scheme := "http"
+	if h.upstreamTLS {
+		scheme = "https"
+	}
+	upstreamURL, src, resolved := target0.Resolve(scheme, h.cfg.ClusterDomain, upstreamPath, r.URL.RawQuery, h.cache)
 	if upstreamRawPath != "" {
 		// Only ever set for a path-routed request (see resolveTarget).
 		// Target.Resolve only assigns URL.Path, so without this a path-
@@ -248,9 +270,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		outboundRawQuery = stripQueryParam(outboundRawQuery, h.cfg.AuthzCookieQueryParam)
 	}
 	upstreamURL.RawQuery = outboundRawQuery
+	// With upstream TLS the outbound URL's host is the Sandbox's DNS name,
+	// while new connections go to the resolved address, which DialContext
+	// reads from a value stored on the request context (dialAddrKey).
+	// net/http sends that name as the TLS ServerName, and the
+	// configuration from tlsutil.BuildUpstreamTLS verifies the sandbox
+	// certificate against it. Pooled connections are keyed by that name
+	// too, so a connection verified as one sandbox is not reused for a
+	// request routed to another that happens to resolve to the same Pod IP
+	// (a recycled IP, or a caller-supplied X-Sandbox-Pod-IP). Conversely,
+	// a request may reuse an idle connection that an earlier request for
+	// the same Sandbox dialed to a different resolved address, such as the
+	// IP of a Pod since replaced.
+	outboundURL := upstreamURL
+	var dialAddr string
+	if h.upstreamTLS {
+		named := *upstreamURL
+		named.Host = net.JoinHostPort(target0.ServiceHost(h.upstreamTLSDomain), strconv.Itoa(target0.Port))
+		outboundURL = &named
+		if named.Host != upstreamURL.Host {
+			dialAddr = upstreamURL.Host
+		}
+	}
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.Out.URL = upstreamURL
+			pr.Out.URL = outboundURL
 			// Clear inbound Host so net/http picks the URL host. Matches the
 			// Python router's behavior of stripping Host before forwarding.
 			pr.Out.Host = ""
@@ -375,6 +419,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel = context.WithTimeout(ctx, h.cfg.ProxyTimeout)
 		defer cancel()
 	}
+	if dialAddr != "" {
+		ctx = context.WithValue(ctx, dialAddrKey{}, dialAddr)
+	}
 	rp.ServeHTTP(w, r.WithContext(ctx))
 }
 
@@ -442,12 +489,24 @@ func isUpgradeRequest(r *http.Request) bool {
 // internal dials through an external proxy — connectivity breaks and
 // in the worst case Pod-IP traffic leaves the cluster. Defaulting to
 // no proxy makes "router goes direct to the sandbox" the guarantee.
-func defaultTransport(cfg *config.Config) *http.Transport {
+//
+// If upstreamTLS is set, the transport uses it for TLS connections to
+// sandboxes. With ForceAttemptHTTP2 false, net/http does not negotiate
+// HTTP/2 when a custom TLSClientConfig is set, so the router speaks
+// HTTP/1.1 to sandboxes with or without TLS.
+func defaultTransport(cfg *config.Config, upstreamTLS *tls.Config) *http.Transport {
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
 	return &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if a, ok := ctx.Value(dialAddrKey{}).(string); ok {
+				addr = a
+			}
+			return dialer.DialContext(ctx, network, addr)
+		},
+		TLSClientConfig:       upstreamTLS,
 		ForceAttemptHTTP2:     false,
 		MaxIdleConns:          200,
 		MaxIdleConnsPerHost:   16,
@@ -457,6 +516,13 @@ func defaultTransport(cfg *config.Config) *http.Transport {
 		ResponseHeaderTimeout: cfg.ResponseHeaderTimeout,
 	}
 }
+
+// dialAddrKey is the request-context key for the address to dial when
+// it differs from the outbound URL's host. With upstream TLS, the URL's
+// host is the name in the sandbox certificate, but the connection goes
+// to the resolved address: a Pod IP or, on DNS fallback, the
+// --cluster-domain name.
+type dialAddrKey struct{}
 
 // recordUpstreamErrorReason bumps the upstream-error counter with a
 // pre-classified reason label.

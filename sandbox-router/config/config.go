@@ -39,6 +39,18 @@ const (
 	MTLSRequired MTLSMode = "required"
 )
 
+// UpstreamTLSMode controls whether the router connects to sandboxes over TLS.
+type UpstreamTLSMode string
+
+const (
+	// UpstreamTLSOff connects to sandboxes over plain HTTP.
+	UpstreamTLSOff UpstreamTLSMode = "off"
+	// UpstreamTLSOn connects to sandboxes over HTTPS, verifying sandbox
+	// certificates against UpstreamTLSCAFile, or the system roots when that
+	// is empty.
+	UpstreamTLSOn UpstreamTLSMode = "on"
+)
+
 // CookieSameSite selects the SameSite attribute of the browser-session
 // cookie (see Config.AuthzCookieName).
 type CookieSameSite string
@@ -116,6 +128,31 @@ type Config struct {
 	// TLSCipherSuites is an optional list of cipher suites for the HTTPS
 	// proxy listener, using Go cipher-suite names. Empty uses Go defaults.
 	TLSCipherSuites []string
+
+	// UpstreamTLSMode selects plain HTTP or HTTPS for upstream connections.
+	// With HTTPS the sandbox certificate is verified against the Sandbox's
+	// DNS name (<id>.<namespace>.svc.<domain>), whatever address is dialed.
+	UpstreamTLSMode UpstreamTLSMode
+	// UpstreamTLSClusterDomain is the <domain> in that verified name. When it
+	// is empty, ClusterDomain is used. Set it when sandbox certificates use a
+	// domain other than the cluster's DNS domain. It changes only the name
+	// that certificates are verified against. When the router falls back to
+	// DNS, it still dials the ClusterDomain name.
+	UpstreamTLSClusterDomain string
+	// UpstreamTLSCAFile is the path to the PEM-encoded CA bundle used to
+	// verify sandbox serving certificates, reloaded when it changes. When it
+	// is empty, the system roots are used, read once per process. Setting it
+	// requires UpstreamTLSMode to be UpstreamTLSOn.
+	UpstreamTLSCAFile string
+	// UpstreamTLSCertFile is the path to the PEM-encoded client certificate
+	// the router presents to sandboxes that request one. Optional. It must be
+	// set together with UpstreamTLSKeyFile, and setting it requires
+	// UpstreamTLSMode to be UpstreamTLSOn.
+	// Both may name the same file if it holds both the key and the chain.
+	UpstreamTLSCertFile string
+	// UpstreamTLSKeyFile is the path to the PEM-encoded private key for
+	// UpstreamTLSCertFile. Must be set together with it.
+	UpstreamTLSKeyFile string
 
 	// ClusterDomain is the Kubernetes cluster DNS suffix used to build target
 	// service FQDNs (e.g. "cluster.local"). Honors CLUSTER_DOMAIN.
@@ -334,6 +371,7 @@ func Defaults() Config {
 		MetricsAddr:               ":9090",
 		ProbeAddr:                 ":8081",
 		MTLSMode:                  MTLSOff,
+		UpstreamTLSMode:           UpstreamTLSOff,
 		ClusterDomain:             "cluster.local",
 		ProxyTimeout:              180 * time.Second,
 		ResponseHeaderTimeout:     30 * time.Second,
@@ -388,6 +426,26 @@ func (c *Config) Validate() error {
 		case "VersionTLS10", "VersionTLS11", "VersionTLS12", "VersionTLS13":
 		default:
 			return fmt.Errorf("invalid --tls-min-version %q; must be one of: VersionTLS10, VersionTLS11, VersionTLS12, VersionTLS13", c.TLSMinVersion)
+		}
+	}
+
+	switch c.UpstreamTLSMode {
+	case UpstreamTLSOff, UpstreamTLSOn:
+	default:
+		return fmt.Errorf("invalid --upstream-tls-mode %q (want off or on)", c.UpstreamTLSMode)
+	}
+	if (c.UpstreamTLSCertFile == "") != (c.UpstreamTLSKeyFile == "") {
+		return errors.New("--upstream-tls-cert-file and --upstream-tls-key-file must be set together")
+	}
+	if c.UpstreamTLSMode == UpstreamTLSOff {
+		if c.UpstreamTLSCAFile != "" {
+			return errors.New("--upstream-tls-ca-file requires --upstream-tls-mode=on")
+		}
+		if c.UpstreamTLSCertFile != "" {
+			return errors.New("--upstream-tls-cert-file requires --upstream-tls-mode=on")
+		}
+		if c.UpstreamTLSClusterDomain != "" {
+			return errors.New("--upstream-tls-cluster-domain requires --upstream-tls-mode=on")
 		}
 	}
 

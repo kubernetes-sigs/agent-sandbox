@@ -134,6 +134,10 @@ Run `sandbox-router --help` for the full list. The most relevant:
 | `--tls-min-version` | `""` (TLS 1.2) | Minimum TLS version: `VersionTLS10`, `VersionTLS11`, `VersionTLS12`, `VersionTLS13`. Honors `TLS_MIN_VERSION`. |
 | `--tls-cipher-suites` | `""` (Go defaults) | Comma-separated Go cipher-suite names. Honors `TLS_CIPHER_SUITES`. Ignored when min version is TLS 1.3. |
 | `--mtls-mode` | `off` | `off` / `optional` / `required`. |
+| `--upstream-tls-mode` | `off` | `off` (plain HTTP to sandboxes) / `on` (HTTPS). See [Upstream TLS](#upstream-tls). |
+| `--upstream-tls-ca-file` | — | CA bundle for verifying sandbox serving certs. Hot-reloaded on change. Empty uses the system roots. Requires `--upstream-tls-mode=on`. |
+| `--upstream-tls-cluster-domain` | `""` (`--cluster-domain`) | Domain in the DNS name that sandbox certs are verified against. Set it when sandbox certificates use a domain other than the cluster's DNS domain. Requires `--upstream-tls-mode=on`. |
+| `--upstream-tls-cert-file` / `--upstream-tls-key-file` | — | Client cert and key presented to sandboxes that request one; both flags may name the same file if it contains the key and the certificate. Hot-reloaded like the server cert. Set together; require `--upstream-tls-mode=on`. |
 | `--cluster-domain` | `cluster.local` | Honors `CLUSTER_DOMAIN` env var (Python parity). |
 | `--proxy-timeout` | `180s` | Per-request upstream timeout. Honors `PROXY_TIMEOUT_SECONDS` (numeric seconds). |
 | `--upstream-max-retries` | `3` | Dial retries. `0` disables. |
@@ -295,6 +299,24 @@ The HTTPS listener is opt-in (set `--https-bind-address`). Cert and key are read
 ### Metrics endpoint TLS
 
 Set `--metrics-secure-serving` to serve the `/metrics` endpoint over TLS using the same certificate as the HTTPS proxy listener. The metrics TLS config shares the `--tls-min-version` and `--tls-cipher-suites` settings but does not enable mTLS (Prometheus scraping does not present client certs). Requires `--tls-cert-file` and `--tls-key-file`; `--https-bind-address` is not required — the metrics endpoint can be the only TLS listener.
+
+### Upstream TLS
+
+By default the router connects to sandboxes over plain HTTP. `--upstream-tls-mode=on` switches upstream connections to HTTPS; the sandbox must then serve TLS on its port. Sandbox certificates are verified against `--upstream-tls-ca-file`, or, when that flag is empty, against the system roots, which the router reads once at startup (on Linux, `SSL_CERT_FILE` and `SSL_CERT_DIR` override their location). Adding `--upstream-tls-cert-file` and `--upstream-tls-key-file` makes the router present that client certificate, so a sandbox can require mTLS and accept only the router. Upstream TLS connections use HTTP/1.1, like plain-HTTP ones.
+
+The router dials a Pod IP when it has one (from the Pod-IP cache when `--cache-enabled` is set, or from `X-Sandbox-Pod-IP`), and otherwise dials the Sandbox's DNS name under `--cluster-domain`. Either way it verifies the sandbox certificate against the Sandbox's DNS name, `<id>.<namespace>.svc.<domain>`, and sends that name as SNI and, with the port, as the `Host` header. Sandbox certificates therefore need that name as a DNS SAN; IP SANs are not used. Pooled connections are keyed by that name too, so a connection verified for one sandbox is not reused for another that resolves to the same IP. Conversely, a request can reuse an idle connection that an earlier request for the same Sandbox dialed to an older address.
+
+`<domain>` is the value of `--upstream-tls-cluster-domain` when that flag is set, and the value of `--cluster-domain` otherwise. Set `--upstream-tls-cluster-domain` when sandbox certificates use a domain other than the cluster's DNS domain. The flag changes only the name that certificates are verified against. When the router falls back to DNS, it still dials the `--cluster-domain` name.
+
+The router watches `--upstream-tls-ca-file` and reloads it when the file changes, as it does for the certificate files, so a CA bundle in a Secret or ConfigMap volume can be rotated without restarting the router. The new bundle applies only to connections opened after the reload; connections already open, such as idle connections in the pool and WebSocket connections, were verified against the old bundle and keep working until they close. If the new file can't be read or contains no certificate the router can parse, the router keeps using the previous bundle; at startup there is no previous bundle, so the router exits with an error. The router can't tell that a file was cut off partway through, though: if it contains at least one complete certificate, the router uses that and drops the rest, so replace the file atomically, which Secret and ConfigMap volumes already do.
+
+#### With Pod Certificates
+
+Kubernetes Pod Certificates (`PodCertificateRequest` and `podCertificate` projected volumes, stable since v1.37) and ClusterTrustBundle projections (also stable since v1.37) can supply the certificates and the trust bundle that upstream TLS uses, and the kubelet rotates them:
+
+- **Router client certificate:** a `podCertificate` projected volume on the router pod. Prefer `credentialBundlePath`, which writes the key and certificate chain into the same file, and point both `--upstream-tls-cert-file` and `--upstream-tls-key-file` at it: the router then reads that file once per reload, so the key and chain come from the same version of the file. With separate files, a reload that reads a key and certificate that don't match fails, and the previous pair stays in use until the next change. Sandboxes that verify client certificates generally require the client-auth extended key usage; see the signer's documentation, for example its supported `userAnnotations`, for how to request it.
+- **Trust bundle:** a `clusterTrustBundle` projected volume selecting the signer's bundles by `signerName` and a `labelSelector`, as `--upstream-tls-ca-file`. An empty selector (`{}`) matches all of that signer's bundles; leaving it unset matches none. The router reloads the file when the kubelet updates it.
+- **Sandbox serving certificate:** a `podCertificate` volume on the sandbox pod, used by the TLS endpoint in that pod, such as an Envoy sidecar. The signer decides which names it contains, and it must include `<id>.<namespace>.svc.<domain>` as a DNS SAN (for current Sandboxes the pod name equals the Sandbox name). If the signer issues names that end in a domain other than the cluster DNS domain, set `--upstream-tls-cluster-domain` to that domain.
 
 ## Metrics
 

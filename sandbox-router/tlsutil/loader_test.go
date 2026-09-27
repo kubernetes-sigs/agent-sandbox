@@ -210,3 +210,41 @@ func TestCertReloader_KubernetesAtomicWriterRotation(t *testing.T) {
 	}
 	t.Fatalf("certificate was not reloaded after Kubernetes-style ..data symlink swap")
 }
+
+// TestCertReloaderCredentialBundle covers a Pod Certificates credential bundle
+// (credentialBundlePath), a file that contains the PKCS#8 key followed by the
+// certificate chain. The test passes its path as both the cert file and the
+// key file.
+func TestCertReloaderCredentialBundle(t *testing.T) {
+	c := genSelfSignedCert(t, "bundle")
+	bundle := filepath.Join(t.TempDir(), "credentialbundle.pem")
+	if err := os.WriteFile(bundle, append(append([]byte{}, c.KeyPEM...), c.CertPEM...), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	r, err := NewCertReloader(bundle, bundle, logr.Discard(), nil)
+	if err != nil {
+		t.Fatalf("NewCertReloader on a credential bundle: %v", err)
+	}
+	if _, err := r.GetClientCertificate(nil); err != nil {
+		t.Fatalf("GetClientCertificate: %v", err)
+	}
+}
+
+func TestCAReloaderKeepsPoolOnBrokenBundle(t *testing.T) {
+	certPath, _ := writeCert(t, genSelfSignedCert(t, "ca"))
+	r, err := NewCAReloader(certPath, logr.Discard())
+	if err != nil {
+		t.Fatalf("NewCAReloader: %v", err)
+	}
+	before := r.Pool()
+
+	if err := os.WriteFile(certPath, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatalf("write broken bundle: %v", err)
+	}
+	if err := r.reload(); err == nil {
+		t.Fatal("reload of a broken bundle succeeded, want an error")
+	}
+	if r.Pool() != before {
+		t.Fatal("broken bundle replaced the pool, want the previous one kept")
+	}
+}

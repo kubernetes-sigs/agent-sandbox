@@ -163,6 +163,35 @@ func run(cfg *config.Config, log logr.Logger) error {
 		}
 	}
 
+	// --- Upstream TLS to sandboxes ------------------------------------------
+	var upstreamTLS *tls.Config
+	if cfg.UpstreamTLSMode == config.UpstreamTLSOn {
+		var clientCert *tlsutil.CertReloader
+		if cfg.UpstreamTLSCertFile != "" {
+			var err error
+			clientCert, err = tlsutil.NewCertReloader(cfg.UpstreamTLSCertFile, cfg.UpstreamTLSKeyFile,
+				log.WithName("upstream-tls"), nil)
+			if err != nil {
+				return fmt.Errorf("upstream client cert reloader: %w", err)
+			}
+			if err := clientCert.Start(ctx); err != nil {
+				return fmt.Errorf("upstream client cert watcher: %w", err)
+			}
+		}
+		var ca *tlsutil.CAReloader
+		if cfg.UpstreamTLSCAFile != "" {
+			var err error
+			ca, err = tlsutil.NewCAReloader(cfg.UpstreamTLSCAFile, log.WithName("upstream-tls"))
+			if err != nil {
+				return fmt.Errorf("upstream CA reloader: %w", err)
+			}
+			if err := ca.Start(ctx); err != nil {
+				return fmt.Errorf("upstream CA watcher: %w", err)
+			}
+		}
+		upstreamTLS = tlsutil.BuildUpstreamTLS(ca, clientCert)
+	}
+
 	// --- Kubernetes client (shared by cache + tokenreview) ----------------
 	// Build once if either feature needs it so we don't load kubeconfig
 	// twice. Nil when neither feature is on; helpers below handle that.
@@ -274,11 +303,12 @@ func run(cfg *config.Config, log logr.Logger) error {
 
 	// --- Proxy handler -----------------------------------------------------
 	proxyOpts := proxy.Options{
-		Config:     cfg,
-		Metrics:    metrics,
-		Propagator: otel.GetTextMapPropagator(),
-		Logger:     log.WithName("proxy"),
-		Authorizer: authorizer,
+		Config:      cfg,
+		Metrics:     metrics,
+		Propagator:  otel.GetTextMapPropagator(),
+		Logger:      log.WithName("proxy"),
+		Authorizer:  authorizer,
+		UpstreamTLS: upstreamTLS,
 	}
 	if podCache != nil {
 		proxyOpts.Cache = podCache
@@ -343,6 +373,7 @@ func run(cfg *config.Config, log logr.Logger) error {
 		"metrics", cfg.MetricsAddr,
 		"probes", cfg.ProbeAddr,
 		"mtls", cfg.MTLSMode,
+		"upstreamTLS", upstreamTLS != nil,
 		"tracing", cfg.EnableTracing,
 		"otelMetrics", cfg.EnableOTelMetrics,
 		"cache", cfg.CacheEnabled,

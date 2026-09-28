@@ -17,7 +17,10 @@ set -e
 # Serves demo-page/ so bridge.py has something to point Playwright at.
 # A real deployment would point TARGET_PAGE_URL at whatever page actually
 # registers WebMCP tools instead of running one in the same pod.
-python3 -m http.server 8090 --directory demo-page &
+# --bind 127.0.0.1: only bridge.py, in this same pod, ever needs to reach
+# this server — the default 0.0.0.0 bind would expose it to the rest of
+# the pod network for no benefit.
+python3 -m http.server 8090 --directory demo-page --bind 127.0.0.1 &
 HTTP_PID=$!
 
 # Nothing supervises this after bridge.py starts — if it dies later,

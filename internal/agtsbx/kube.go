@@ -16,6 +16,7 @@ package agtsbx
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -47,6 +48,8 @@ type kubeBackend struct {
 	readyTimeout time.Duration
 	httpClient   *http.Client
 	progress     writerFunc
+	// watchRetryDelay is the pause before watching again after a watch ends.
+	watchRetryDelay time.Duration
 }
 
 func newKubeBackend(opts backendOptions) (Backend, error) {
@@ -62,6 +65,8 @@ func newKubeBackend(opts backendOptions) (Backend, error) {
 		readyTimeout: opts.ReadyTimeout,
 		httpClient:   &http.Client{Timeout: 5 * time.Second},
 		progress:     opts.Stderr,
+
+		watchRetryDelay: time.Second,
 	}, nil
 }
 
@@ -176,6 +181,10 @@ func (b *kubeBackend) deleteIfOurs(name string) {
 	b.cleanup(name)
 }
 
+// errWatchEnded means a watch stopped for a reason that does not affect the
+// Sandbox itself, so waitReady should re-read it and watch again.
+var errWatchEnded = errors.New("watch ended")
+
 // waitReady blocks until the Sandbox reports the Ready condition. It watches
 // rather than polls so a sandbox that starts quickly is not held up by a fixed
 // poll interval.
@@ -187,21 +196,46 @@ func (b *kubeBackend) waitReady(ctx context.Context, name string) error {
 
 	client := b.helper.AgentsClient.Sandboxes(b.namespace)
 
-	// Check the current state first: with a warm image the Sandbox can go
-	// Ready before the watch below is established, missing that event.
-	current, err := client.Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("reading sandbox %s/%s: %w", b.namespace, name, err)
-	}
-	if sandboxReady(current) {
-		return nil
-	}
+	for {
+		// Check the current state before every watch: with a warm image the
+		// Sandbox can go Ready before the watch is established, missing that
+		// event, and a watch that ended may have hidden the transition too.
+		current, err := client.Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("reading sandbox %s/%s: %w", b.namespace, name, err)
+		}
+		if sandboxReady(current) {
+			return nil
+		}
 
-	watcher, err := client.Watch(ctx, metav1.ListOptions{
+		err = b.watchUntilReady(ctx, name, current.ResourceVersion)
+		if !errors.Is(err, errWatchEnded) {
+			return err
+		}
+
+		// Server-side watch timeouts and dropped connections are routine, so
+		// start over rather than fail. The pause keeps a server that closes
+		// every watch at once from being hammered until the deadline.
+		select {
+		case <-ctx.Done():
+			return b.notReadyError(name, ctx.Err())
+		case <-time.After(b.watchRetryDelay):
+		}
+	}
+}
+
+// watchUntilReady watches the Sandbox from resourceVersion. It returns nil once
+// the Sandbox is Ready and errWatchEnded if the watch stopped without saying
+// anything about the Sandbox; any other error is final.
+func (b *kubeBackend) watchUntilReady(ctx context.Context, name, resourceVersion string) error {
+	watcher, err := b.helper.AgentsClient.Sandboxes(b.namespace).Watch(ctx, metav1.ListOptions{
 		FieldSelector:   "metadata.name=" + name,
-		ResourceVersion: current.ResourceVersion,
+		ResourceVersion: resourceVersion,
 	})
 	if err != nil {
+		if ctx.Err() != nil {
+			return b.notReadyError(name, ctx.Err())
+		}
 		return fmt.Errorf("watching sandbox %s/%s: %w", b.namespace, name, err)
 	}
 	defer watcher.Stop()
@@ -209,17 +243,22 @@ func (b *kubeBackend) waitReady(ctx context.Context, name string) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("sandbox %s/%s did not become ready within %s: %w", b.namespace, name, b.readyTimeout, ctx.Err())
+			return b.notReadyError(name, ctx.Err())
 		case event, ok := <-watcher.ResultChan():
 			if !ok {
-				return fmt.Errorf("watch on sandbox %s/%s closed before it became ready", b.namespace, name)
+				return errWatchEnded
 			}
 			switch event.Type {
 			case watch.Deleted:
 				return fmt.Errorf("sandbox %s/%s was deleted before it became ready", b.namespace, name)
 			case watch.Error:
+				watchErr := k8serrors.FromObject(event.Object)
+				// The resourceVersion aged out; a fresh read gets a new one.
+				if k8serrors.IsResourceExpired(watchErr) || k8serrors.IsGone(watchErr) {
+					return errWatchEnded
+				}
 				// Spinning until the deadline would hide the real cause.
-				return fmt.Errorf("watch on sandbox %s/%s failed: %w", b.namespace, name, k8serrors.FromObject(event.Object))
+				return fmt.Errorf("watch on sandbox %s/%s failed: %w", b.namespace, name, watchErr)
 			}
 			observed, ok := event.Object.(*sandboxv1beta1.Sandbox)
 			if !ok {
@@ -230,6 +269,10 @@ func (b *kubeBackend) waitReady(ctx context.Context, name string) error {
 			}
 		}
 	}
+}
+
+func (b *kubeBackend) notReadyError(name string, cause error) error {
+	return fmt.Errorf("sandbox %s/%s did not become ready within %s: %w", b.namespace, name, b.readyTimeout, cause)
 }
 
 // sandboxReady reports whether the Sandbox's Ready condition is True.

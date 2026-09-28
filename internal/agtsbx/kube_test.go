@@ -17,6 +17,8 @@ package agtsbx
 import (
 	"errors"
 	"io"
+	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -196,6 +198,55 @@ func TestKubeBackendWaitReady(t *testing.T) {
 		require.Error(t, err)
 		// The real cause must survive: a bare timeout would hide it.
 		assert.Contains(t, err.Error(), "too old resource version")
+	})
+
+	t.Run("watches again after the watch closes", func(t *testing.T) {
+		// Server-side watch timeouts are routine and must not fail startup.
+		backend, client := newFakeKubeBackend(t, 10*time.Second, newSandbox(metav1.ConditionFalse))
+
+		first, second := watch.NewFake(), watch.NewFake()
+		var watches atomic.Int32
+		client.PrependWatchReactor("sandboxes", func(k8stesting.Action) (bool, watch.Interface, error) {
+			if watches.Add(1) == 1 {
+				return true, first, nil
+			}
+			return true, second, nil
+		})
+
+		go func() {
+			first.Stop()
+			second.Modify(newSandbox(metav1.ConditionTrue))
+		}()
+
+		require.NoError(t, backend.waitReady(t.Context(), "box"))
+		assert.Equal(t, int32(2), watches.Load())
+	})
+
+	t.Run("re-reads the sandbox after the resource version expires", func(t *testing.T) {
+		backend, client := newFakeKubeBackend(t, 10*time.Second, newSandbox(metav1.ConditionFalse))
+
+		first := watch.NewFake()
+		established := make(chan struct{})
+		var watches atomic.Int32
+		client.PrependWatchReactor("sandboxes", func(k8stesting.Action) (bool, watch.Interface, error) {
+			if watches.Add(1) == 1 {
+				close(established)
+				return true, first, nil
+			}
+			return true, watch.NewFake(), nil
+		})
+
+		go func() {
+			// Ready while the first watch is open but unreported, so only a
+			// fresh read can see it once that watch expires.
+			<-established
+			_, err := client.AgentsV1beta1().Sandboxes("default").Update(t.Context(), newSandbox(metav1.ConditionTrue), metav1.UpdateOptions{})
+			assert.NoError(t, err)
+			first.Error(&metav1.Status{Code: http.StatusGone, Reason: metav1.StatusReasonExpired, Message: "too old resource version"})
+		}()
+
+		require.NoError(t, backend.waitReady(t.Context(), "box"))
+		assert.Equal(t, int32(1), watches.Load(), "should have found the sandbox Ready on re-read without watching again")
 	})
 
 	t.Run("times out when the sandbox never becomes ready", func(t *testing.T) {

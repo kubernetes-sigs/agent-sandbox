@@ -33,6 +33,7 @@ import (
 func newFakeClient(objects ...runtime.Object) *fake.ClientBuilder {
 	scheme := runtime.NewScheme()
 	_ = sandboxv1beta1.AddToScheme(scheme)
+	_ = extensionsv1beta1.AddToScheme(scheme)
 	return fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objects...)
 }
 

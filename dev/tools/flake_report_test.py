@@ -53,6 +53,13 @@ class ClassifyRedRunTest(unittest.TestCase):
             True, True, artifacts(finished={"result": "ABORTED"}))
         self.assertEqual(cls, "aborted")
 
+    def test_lowercase_aborted_from_crier_is_not_infra(self):
+        # crier writes a lowercase "aborted" result when the pod died before
+        # podutils uploaded finished.json; those runs must not count as infra.
+        cls = flake_report.classify_red_run(
+            False, False, artifacts(finished={"result": "aborted"}))
+        self.assertEqual(cls, "aborted")
+
     def test_failing_testcase_is_a_test_failure(self):
         cls = flake_report.classify_red_run(
             True, True,

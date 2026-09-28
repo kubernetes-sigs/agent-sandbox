@@ -178,27 +178,31 @@ async def upload_file(file: UploadFile = File(...)):
             content={"message": f"File upload failed: {str(e)}"}
         )
 
-@app.get("/download/{encoded_file_path:path}", summary="Download a file from the sandbox")
-async def download_file(encoded_file_path: str):
+@app.get("/download/{file_path:path}", summary="Download a file from the sandbox")
+async def download_file(file_path: str):
     """
     Downloads a specified file from the base directory in the sandbox.
     """
     try:
-        full_path: str = get_safe_path(encoded_file_path)
+        full_path: str = get_safe_path(file_path)
     except ValueError:
         return JSONResponse(status_code=403, content={"message": "Access denied"})
 
     if os.path.isfile(full_path):
-        return FileResponse(path=full_path, media_type='application/octet-stream', filename=encoded_file_path)
+        return FileResponse(
+            path=full_path,
+            media_type='application/octet-stream',
+            filename=os.path.basename(full_path),
+        )
     return JSONResponse(status_code=404, content={"message": "File not found"})
 
-@app.get("/list/{encoded_file_path:path}", summary="List files in a directory")
-async def list_files(encoded_file_path: str):
+@app.get("/list/{file_path:path}", summary="List files in a directory")
+async def list_files(file_path: str):
     """
     Lists the contents of a directory under the base directory in the sandbox.
     """
     try:
-        full_path: str = get_safe_path(encoded_file_path)
+        full_path: str = get_safe_path(file_path)
     except ValueError:
         return JSONResponse(status_code=403, content={"message": "Access denied"})
 
@@ -220,17 +224,17 @@ async def list_files(encoded_file_path: str):
     except Exception as e:
         return JSONResponse(status_code=500, content={"message": f"List files failed: {str(e)}"})
 
-@app.get("/exists/{encoded_file_path:path}", summary="Check if the relative path exists")
-async def exists(encoded_file_path: str):
+@app.get("/exists/{file_path:path}", summary="Check if the relative path exists")
+async def exists(file_path: str):
     """
     Checks if a specified file or directory exists under the base directory in the sandbox.
     """
     try:
-        full_path: str = get_safe_path(encoded_file_path)
+        full_path: str = get_safe_path(file_path)
     except ValueError:
         return JSONResponse(status_code=403, content={"message": "Access denied"})
 
     return JSONResponse(status_code=200, content={
-        "path": encoded_file_path,
+        "path": file_path,
         "exists": os.path.exists(full_path)
     })

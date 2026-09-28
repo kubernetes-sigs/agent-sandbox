@@ -197,7 +197,10 @@ def classify_red_run(has_failing_test, has_test_results, fetch_artifact):
     fetched.
     """
     finished = fetch_artifact("finished.json") or {}
-    if finished.get("result") == "ABORTED":
+    # podutils writes "ABORTED" but crier writes "aborted" when the pod died
+    # before podutils could upload — exactly the junit-less runs classified
+    # here, so the comparison must be case-insensitive.
+    if (finished.get("result") or "").upper() == "ABORTED":
         return "aborted"
     if has_failing_test:
         return "test_failure"

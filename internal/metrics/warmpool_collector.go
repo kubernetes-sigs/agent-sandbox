@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+	"sigs.k8s.io/agent-sandbox/internal/utils"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
@@ -121,10 +122,13 @@ func (c *WarmPoolCollector) Collect(ch chan<- prometheus.Metric) {
 
 	for _, sb := range sandboxList.Items {
 		// Resolve the owning warm pool via the sandbox's controlling OwnerReference.
+		// Match on group+kind only: sandboxes created before the v1beta1 API
+		// still carry v1alpha1 owner references after an in-place upgrade, and
+		// the UID check below already confirms the owner identity.
 		ctrl := metav1.GetControllerOf(&sb)
-		if ctrl == nil ||
-			ctrl.Kind != "SandboxWarmPool" ||
-			ctrl.APIVersion != extensionsv1beta1.GroupVersion.String() {
+		if g, k := utils.GetGroupKind(ctrl); ctrl == nil ||
+			g != extensionsv1beta1.GroupVersion.Group ||
+			k != extensionsv1beta1.SandboxWarmPoolKind {
 			continue
 		}
 

@@ -40,6 +40,14 @@ func ownerRefTo(pool *extensionsv1beta1.SandboxWarmPool) metav1.OwnerReference {
 	}
 }
 
+// legacyOwnerRefTo mimics an owner reference written by a pre-v1beta1 pool
+// controller, which an in-place upgrade leaves in place.
+func legacyOwnerRefTo(pool *extensionsv1beta1.SandboxWarmPool) metav1.OwnerReference {
+	ref := ownerRefTo(pool)
+	ref.APIVersion = "extensions.agents.x-k8s.io/v1alpha1"
+	return ref
+}
+
 func TestWarmPoolCollector(t *testing.T) {
 	pool1 := &extensionsv1beta1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{
@@ -98,6 +106,40 @@ func TestWarmPoolCollector(t *testing.T) {
 							sandboxv1beta1.SandboxWarmPoolLabel: "",
 						},
 						OwnerReferences: []metav1.OwnerReference{ownerRefTo(pool1)},
+					},
+					Status: sandboxv1beta1.SandboxStatus{
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(sandboxv1beta1.SandboxConditionReady),
+								Status: metav1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			expectedCount: 4,
+			expectedLabels: map[string]int{
+				"namespace:default sandbox_status:failed sandbox_template:template-1 warmpool_name:pool-1":    0,
+				"namespace:default sandbox_status:pending sandbox_template:template-1 warmpool_name:pool-1":   0,
+				"namespace:default sandbox_status:ready sandbox_template:template-1 warmpool_name:pool-1":     1,
+				"namespace:default sandbox_status:succeeded sandbox_template:template-1 warmpool_name:pool-1": 0,
+			},
+		},
+		{
+			// A pool controller from before v1beta1 wrote v1alpha1 owner
+			// references; an in-place upgrade keeps them, and the pool must
+			// not report as empty because of the stale apiVersion.
+			name: "legacy v1alpha1-owned warmpool sandbox",
+			objects: []runtime.Object{
+				pool1,
+				&sandboxv1beta1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sb-legacy",
+						Namespace: "default",
+						Labels: map[string]string{
+							sandboxv1beta1.SandboxWarmPoolLabel: "",
+						},
+						OwnerReferences: []metav1.OwnerReference{legacyOwnerRefTo(pool1)},
 					},
 					Status: sandboxv1beta1.SandboxStatus{
 						Conditions: []metav1.Condition{

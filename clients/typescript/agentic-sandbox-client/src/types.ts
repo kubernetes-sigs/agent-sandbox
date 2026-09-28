@@ -28,6 +28,188 @@ export interface SandboxClientOptions {
    * Mirrors the Go client's Options.Quiet.
    */
   quiet?: boolean;
+  /**
+   * Configures the connection to the sandboxd runtime (files/commands) that
+   * every Sandbox handle created or attached by this client uses.
+   */
+  sandboxd?: SandboxdOptions;
+}
+
+/**
+ * Configures the lazily-established connection each Sandbox handle uses to
+ * reach sandboxd (REST files API + gRPC process API) inside its Pod.
+ *
+ * Every field defaults only when `undefined`; explicit 0, NaN,
+ * Infinity, or a negative value is rejected at construction time. Ports must
+ * be integers in [1, 65535]; size limits must be positive safe integers;
+ * `*TimeoutMs` fields must be integers in [1, 2147483647].
+ */
+export interface SandboxdOptions {
+  /**
+   * How the SDK reaches sandboxd. Default: "port-forward". See
+   * {@link SandboxdConnectivity}.
+   */
+  connectivity?: SandboxdConnectivity;
+  /** sandboxd's REST files/health port inside the Pod. Default: 8080. */
+  restPort?: number;
+  /** sandboxd's gRPC process port inside the Pod. Default: 9090. */
+  grpcPort?: number;
+  /**
+   * Budget (ms) for establishing the shared connection, through a
+   * successful /v1/health check: for "port-forward" it starts when both
+   * local listeners are opened; for the in-cluster modes it bounds the
+   * health polling against the pod address. Re-applied in full on every
+   * reconnect. Default: 30000.
+   */
+  portForwardReadyTimeoutMs?: number;
+  /**
+   * Maximum bytes accepted from files.read() / files.readStream().
+   * Default: 256 MiB.
+   */
+  maxDownloadSize?: number;
+  /**
+   * Maximum bytes sent by files.write() / files.writeStream().
+   * Default: 256 MiB.
+   */
+  maxUploadSize?: number;
+  /**
+   * Maximum bytes accepted for JSON response bodies (list, health, error
+   * detail previews). Default: 8 MiB.
+   */
+  maxMetadataResponseSize?: number;
+  /**
+   * Maximum decoded size of a single ExecuteResponse — stdout + stderr +
+   * protobuf overhead combined, not stdout alone. Must fit the gRPC
+   * transport's receive limit (at most 0xffffffff). Default: 4 MiB.
+   */
+  maxCommandOutputSize?: number;
+}
+
+/**
+ * Transport used to reach sandboxd. Same values as the Go client's
+ * Connectivity.
+ *
+ * - `"port-forward"`: a WebSocket port-forward brokered by the apiserver.
+ *   Works from anywhere a kubeconfig does, including a laptop or CI runner.
+ * - `"in-cluster-service"`: dials the Sandbox's headless Service by its
+ *   in-cluster DNS name (status.serviceFQDN), taking the apiserver off the
+ *   data path. The Service only ever selects its own Sandbox's pod, and a
+ *   deleted Sandbox takes its Service with it, so connections fail rather
+ *   than land on another pod that inherited the IP (DNS caching still leaves
+ *   a TTL-bounded window). Requires `spec.service: true` on the template;
+ *   createSandbox()/getSandbox() throw SandboxNoServiceError when the Sandbox
+ *   has no Service instead of falling back to the pod IP.
+ * - `"in-cluster-pod-ip"`: dials status.podIPs (IPv4 preferred). Needs no
+ *   Service, but nothing detects that the pod was rescheduled: requests can
+ *   continue to a stale address Kubernetes may have reassigned to an
+ *   unrelated pod.
+ *
+ * Both in-cluster modes require this process to run inside the same cluster
+ * as the sandbox pods, and send REST and gRPC in plaintext across the pod
+ * network.
+ */
+export type SandboxdConnectivity =
+  | "port-forward"
+  | "in-cluster-service"
+  | "in-cluster-pod-ip";
+
+/**
+ * Options accepted by every call that reaches the sandbox runtime:
+ * sandbox.files.*, sandbox.commands.run(), sandbox.health() and
+ * sandbox.metadata().
+ */
+export interface RuntimeCallOptions {
+  /**
+   * Total budget (ms) for this call, from entry through response
+   * processing — including any time spent waiting on the shared connect.
+   * Default: 60000.
+   */
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+/**
+ * Options accepted by every sandbox.files.* method. Kept as an alias of
+ * {@link RuntimeCallOptions} so existing callers keep compiling.
+ */
+export type FileCallOptions = RuntimeCallOptions;
+
+/**
+ * Process settings that map 1:1 onto sandboxd's ProcessConfig (besides the
+ * argv itself).
+ */
+export interface ProcessOptions {
+  /**
+   * Environment variables merged over sandboxd's own environment (not a
+   * replacement for it); a key given here overrides sandboxd's value. Note
+   * that `PATH` set here does not affect how the executable itself is looked
+   * up — sandboxd resolves it against its own `PATH`.
+   */
+  env?: Readonly<Record<string, string>>;
+  /**
+   * Working directory, relative to the sandbox root. Default: the sandbox
+   * root. sandboxd rejects a directory that resolves outside the sandbox
+   * root (PERMISSION_DENIED).
+   */
+  cwd?: string;
+}
+
+/** Options accepted by sandbox.commands.run(). */
+export interface RunOptions extends ProcessOptions, RuntimeCallOptions {}
+
+export interface WriteOptions extends RuntimeCallOptions {
+  /** POSIX file mode, e.g. "0644". Must match `^0[0-7]{3}$`. */
+  mode?: string;
+}
+
+export interface DeleteOptions extends RuntimeCallOptions {
+  /** Delete non-empty directories recursively. Default: false. */
+  recursive?: boolean;
+}
+
+/** Result of sandbox.commands.run(). A non-zero exitCode is not an error. */
+export interface ExecutionResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}
+
+/** One row of a DirectoryListing returned by sandbox.files.list(). */
+export interface FileEntry {
+  name: string;
+  size: number;
+  type: "file" | "directory";
+  /** Validated RFC3339 timestamp string, not converted to a Date. */
+  modifiedAt: string;
+  /** Octal POSIX mode, e.g. "0644", when the server reports one. */
+  mode?: string;
+}
+
+/** Result of sandbox.files.list(). */
+export interface DirectoryListing {
+  path: string;
+  entries: FileEntry[];
+}
+
+/** Result of sandbox.health(). */
+export interface SandboxHealth {
+  status: "ok";
+  /** Seconds sandboxd has been running. */
+  uptimeSeconds: number;
+}
+
+/**
+ * Result of sandbox.metadata(): the non-sensitive, workload-scoped
+ * configuration sandboxd exposes.
+ */
+export interface SandboxMetadata {
+  /**
+   * Environment variables the orchestrator injected into sandboxd. sandboxd
+   * exposes only names matching its `--metadata-env-prefix` (default
+   * `SANDBOX_`) and withholds any name that looks like a credential, so this
+   * is not sandboxd's full environment. Empty when none apply.
+   */
+  env: Readonly<Record<string, string>>;
 }
 
 /**

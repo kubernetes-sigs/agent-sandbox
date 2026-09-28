@@ -12,19 +12,41 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+export { SandboxCommands } from "./commands.js";
 export {
   SandboxClaimFailedError,
+  SandboxClosedError,
+  SandboxConnectionError,
+  type SandboxConnectionErrorKind,
+  type SandboxdApiCode,
+  SandboxdApiError,
+  SandboxdRpcError,
   SandboxError,
   SandboxMetadataError,
+  SandboxNoServiceError,
   SandboxNotFoundError,
   SandboxTemplateNotFoundError,
   SandboxTimeoutError,
   SandboxWarmPoolNotFoundError,
 } from "./exceptions.js";
+export { SandboxFiles } from "./files.js";
 export { Sandbox } from "./sandbox.js";
 export { SandboxClient } from "./sandbox-client.js";
 export type {
   CreateSandboxOptions,
+  DeleteOptions,
+  DirectoryListing,
+  ExecutionResult,
+  FileCallOptions,
+  FileEntry,
   Logger,
+  ProcessOptions,
+  RunOptions,
+  RuntimeCallOptions,
   SandboxClientOptions,
+  SandboxdConnectivity,
+  SandboxdOptions,
+  SandboxHealth,
+  SandboxMetadata,
+  WriteOptions,
 } from "./types.js";

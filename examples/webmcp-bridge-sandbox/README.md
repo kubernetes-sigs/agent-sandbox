@@ -189,6 +189,12 @@ they ever reach the page. `demo-page/index.html`'s `increment-counter` tool
 exists specifically to give you something mutating to test that
 classification against.
 
+That risk isn't limited to what `call_browser_tool` executes: `list_browser_tools`
+hands back the tool `name`/`description` text exactly as the page registered
+it, and that text goes straight to the agent's LLM as tool-list content — an
+untrusted `TARGET_PAGE_URL` can use it for prompt injection before
+`call_browser_tool` is ever invoked.
+
 `call_browser_tool(tool_name: str, arguments: dict)` is intentionally
 generic — a single MCP tool that dispatches to whichever WebMCP tool the
 page happens to have registered, discovered at runtime via

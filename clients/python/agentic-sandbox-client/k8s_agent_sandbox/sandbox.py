@@ -16,6 +16,7 @@ import logging
 from .trace_manager import create_tracer_manager
 from .commands.command_executor import CommandExecutor
 from .files.filesystem import Filesystem
+from .watcher.file_watcher import FileWatcher
 from .models import (
     SandboxConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
@@ -72,6 +73,7 @@ class Sandbox:
         # Initialisation of namespaced engines
         self._commands: CommandExecutor | None = CommandExecutor(self.connector, self.tracer, self.trace_service_name)
         self._files: Filesystem | None = Filesystem(self.connector, self.tracer, self.trace_service_name)
+        self._watcher: FileWatcher | None = FileWatcher(self.connector, self.tracer, self.trace_service_name)
         
         # Internal state tracking
         self._is_closed = False
@@ -151,6 +153,11 @@ class Sandbox:
         return self._files
 
     @property
+    def watcher(self) -> FileWatcher | None:
+        """Filesystem event streaming interface (sandboxd runtime only)."""
+        return self._watcher
+
+    @property
     def is_active(self) -> bool:
         """
         Returns True if the connection hasn't been explicitly closed 
@@ -177,6 +184,7 @@ class Sandbox:
         # Don't allow anymore further executions.
         self._commands = None
         self._files = None
+        self._watcher = None
         
         # Cleanup Trace if it exists
         if self.tracing_manager:

@@ -16,6 +16,8 @@
 package metrics
 
 import (
+	"context"
+	"sync/atomic"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -24,10 +26,19 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
+
+// terminatingAt returns a deletion timestamp for objects that are being
+// deleted; the fake client requires a finalizer alongside it.
+func terminatingAt() *metav1.Time {
+	now := metav1.Now()
+	return &now
+}
 
 func ownerRefTo(pool *extensionsv1beta1.SandboxWarmPool) metav1.OwnerReference {
 	isController := true
@@ -308,8 +319,11 @@ func TestWarmPoolCollector(t *testing.T) {
 			},
 		},
 		{
+			// pool1 is present so the lookup miss (not the no-pools
+			// short-circuit) is what skips the sandbox.
 			name: "orphaned sandbox",
 			objects: []runtime.Object{
+				pool1,
 				&sandboxv1beta1.Sandbox{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "sb-1",
@@ -322,6 +336,120 @@ func TestWarmPoolCollector(t *testing.T) {
 								Name: "pool-that-does-not-exist",
 							},
 						})},
+					},
+				},
+			},
+			expectedCount: 4,
+			expectedLabels: map[string]int{
+				"namespace:default sandbox_status:failed sandbox_template:template-1 warmpool_name:pool-1":    0,
+				"namespace:default sandbox_status:pending sandbox_template:template-1 warmpool_name:pool-1":   0,
+				"namespace:default sandbox_status:ready sandbox_template:template-1 warmpool_name:pool-1":     0,
+				"namespace:default sandbox_status:succeeded sandbox_template:template-1 warmpool_name:pool-1": 0,
+			},
+		},
+		{
+			// A pool deleted and recreated under the same name leaves behind
+			// sandboxes whose owner UID no longer matches; they belong to the
+			// old pool and must not be attributed to the new one.
+			name: "stale owner UID from recreated pool",
+			objects: []runtime.Object{
+				pool1,
+				&sandboxv1beta1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sb-stale",
+						Namespace: "default",
+						Labels: map[string]string{
+							sandboxv1beta1.SandboxWarmPoolLabel: "",
+						},
+						OwnerReferences: []metav1.OwnerReference{ownerRefTo(&extensionsv1beta1.SandboxWarmPool{
+							ObjectMeta: metav1.ObjectMeta{
+								Name: pool1.Name,
+								UID:  "uid-old",
+							},
+						})},
+					},
+					Status: sandboxv1beta1.SandboxStatus{
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(sandboxv1beta1.SandboxConditionReady),
+								Status: metav1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			expectedCount: 4,
+			expectedLabels: map[string]int{
+				"namespace:default sandbox_status:failed sandbox_template:template-1 warmpool_name:pool-1":    0,
+				"namespace:default sandbox_status:pending sandbox_template:template-1 warmpool_name:pool-1":   0,
+				"namespace:default sandbox_status:ready sandbox_template:template-1 warmpool_name:pool-1":     0,
+				"namespace:default sandbox_status:succeeded sandbox_template:template-1 warmpool_name:pool-1": 0,
+			},
+		},
+		{
+			// The sandbox reconciler leaves conditions untouched once deletion
+			// starts, so a terminating sandbox still reads Ready=True.
+			name: "terminating sandbox is not counted",
+			objects: []runtime.Object{
+				pool1,
+				&sandboxv1beta1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "sb-terminating",
+						Namespace:         "default",
+						DeletionTimestamp: terminatingAt(),
+						Finalizers:        []string{"test.agents.x-k8s.io/hold"},
+						Labels: map[string]string{
+							sandboxv1beta1.SandboxWarmPoolLabel: "",
+						},
+						OwnerReferences: []metav1.OwnerReference{ownerRefTo(pool1)},
+					},
+					Status: sandboxv1beta1.SandboxStatus{
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(sandboxv1beta1.SandboxConditionReady),
+								Status: metav1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			expectedCount: 4,
+			expectedLabels: map[string]int{
+				"namespace:default sandbox_status:failed sandbox_template:template-1 warmpool_name:pool-1":    0,
+				"namespace:default sandbox_status:pending sandbox_template:template-1 warmpool_name:pool-1":   0,
+				"namespace:default sandbox_status:ready sandbox_template:template-1 warmpool_name:pool-1":     0,
+				"namespace:default sandbox_status:succeeded sandbox_template:template-1 warmpool_name:pool-1": 0,
+			},
+		},
+		{
+			name: "terminating pool is not reported",
+			objects: []runtime.Object{
+				&extensionsv1beta1.SandboxWarmPool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              pool1.Name,
+						Namespace:         pool1.Namespace,
+						UID:               pool1.UID,
+						DeletionTimestamp: terminatingAt(),
+						Finalizers:        []string{"test.agents.x-k8s.io/hold"},
+					},
+					Spec: pool1.Spec,
+				},
+				&sandboxv1beta1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sb-1",
+						Namespace: "default",
+						Labels: map[string]string{
+							sandboxv1beta1.SandboxWarmPoolLabel: "",
+						},
+						OwnerReferences: []metav1.OwnerReference{ownerRefTo(pool1)},
+					},
+					Status: sandboxv1beta1.SandboxStatus{
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(sandboxv1beta1.SandboxConditionReady),
+								Status: metav1.ConditionTrue,
+							},
+						},
 					},
 				},
 			},
@@ -396,4 +524,39 @@ func TestWarmPoolCollector(t *testing.T) {
 			require.Equal(t, tc.expectedLabels, actualLabels)
 		})
 	}
+}
+
+// TestWarmPoolCollectorSkipsSandboxListWithoutPools pins the short-circuit:
+// with no warm pools there is nothing to attribute sandboxes to, so the
+// collector must not scan the Sandbox cache on every scrape.
+func TestWarmPoolCollectorSkipsSandboxListWithoutPools(t *testing.T) {
+	labeledSandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sb-1",
+			Namespace: "default",
+			Labels: map[string]string{
+				sandboxv1beta1.SandboxWarmPoolLabel: "",
+			},
+		},
+	}
+	// Collect runs on a prometheus goroutine, so the interceptor only records
+	// the call; failing from there would hang Gather instead of failing the test.
+	var listedSandboxes atomic.Bool
+	fakeClient := newFakeClient(labeledSandbox).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if _, ok := list.(*sandboxv1beta1.SandboxList); ok {
+					listedSandboxes.Store(true)
+				}
+				return c.List(ctx, list, opts...)
+			},
+		}).
+		Build()
+
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(NewWarmPoolCollector(fakeClient, logr.Discard()))
+	count, err := testutil.GatherAndCount(reg, "agent_sandbox_warmpool_size")
+	require.NoError(t, err)
+	require.Equal(t, 0, count)
+	require.False(t, listedSandboxes.Load(), "sandboxes were listed although no warm pools exist")
 }

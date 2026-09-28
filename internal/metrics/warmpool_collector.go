@@ -94,6 +94,11 @@ func (c *WarmPoolCollector) Collect(ch chan<- prometheus.Metric) {
 	statuses := []string{SandboxStatusReady, SandboxStatusPending, SandboxStatusSucceeded, SandboxStatusFailed}
 
 	for _, pool := range warmPoolList.Items {
+		// A terminating pool no longer offers capacity; the pool controller
+		// stops reconciling it too.
+		if !pool.DeletionTimestamp.IsZero() {
+			continue
+		}
 		key := pool.Namespace + "/" + pool.Name
 		poolMap[key] = poolInfo{
 			Name:      pool.Name,
@@ -114,6 +119,12 @@ func (c *WarmPoolCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 	}
 
+	// Clusters that enable the extensions without using warm pools would
+	// otherwise scan the Sandbox cache on every scrape only to skip every item.
+	if len(poolMap) == 0 {
+		return
+	}
+
 	var sandboxList sandboxv1beta1.SandboxList
 	if err := c.client.List(ctx, &sandboxList, client.HasLabels{sandboxv1beta1.SandboxWarmPoolLabel}, client.UnsafeDisableDeepCopy); err != nil {
 		c.logger.Error(err, "Failed to list sandboxes for metrics collection")
@@ -121,14 +132,19 @@ func (c *WarmPoolCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	for _, sb := range sandboxList.Items {
+		// The sandbox reconciler stops updating conditions once deletion
+		// starts, so a terminating sandbox keeps a stale Ready=True. The pool
+		// controller and claim adoption both exclude these; so must the gauge.
+		if !sb.DeletionTimestamp.IsZero() {
+			continue
+		}
+
 		// Resolve the owning warm pool via the sandbox's controlling OwnerReference.
 		// Match on group+kind only: sandboxes created before the v1beta1 API
 		// still carry v1alpha1 owner references after an in-place upgrade, and
 		// the UID check below already confirms the owner identity.
 		ctrl := metav1.GetControllerOf(&sb)
-		if g, k := utils.GetGroupKind(ctrl); ctrl == nil ||
-			g != extensionsv1beta1.GroupVersion.Group ||
-			k != extensionsv1beta1.SandboxWarmPoolKind {
+		if !utils.MatchesGroupKind(ctrl, extensionsv1beta1.GroupVersion.Group, extensionsv1beta1.SandboxWarmPoolKind) {
 			continue
 		}
 

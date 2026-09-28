@@ -8194,6 +8194,23 @@ func TestCreateSandboxAlreadyExistsBackoffGrowsAndResets(t *testing.T) {
 	require.False(t, tracked, "attempt counter must be cleared once the claim reconciles past the race")
 }
 
+// TestCacheLagAttemptMapResetsOnUIDChange verifies that cacheLagAttemptMap
+// does not let a same-named replacement claim inherit an earlier claim's
+// backed-off attempt count: a differing UID must restart the count at 1.
+func TestCacheLagAttemptMapResetsOnUIDChange(t *testing.T) {
+	var m cacheLagAttemptMap
+	key := types.NamespacedName{Namespace: "default", Name: "claim"}
+
+	require.Equal(t, 1, m.Increment(key, "uid-a"))
+	require.Equal(t, 2, m.Increment(key, "uid-a"))
+	require.Equal(t, 3, m.Increment(key, "uid-a"))
+
+	// The old claim is gone and a new one with the same name takes its
+	// place; its first cache-lag attempt must not continue at 4.
+	require.Equal(t, 1, m.Increment(key, "uid-b"))
+	require.Equal(t, 2, m.Increment(key, "uid-b"))
+}
+
 // TestCreateSandboxAlreadyExistsRecoversViaAuthoritativeRead verifies that an
 // AlreadyExists from a cold-start Create is resolved in the same pass: the
 // APIReader read-back returns the live sandbox even though the informer cache

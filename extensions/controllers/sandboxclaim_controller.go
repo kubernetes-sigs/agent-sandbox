@@ -122,6 +122,15 @@ func cacheLagRequeueDelayFor(attempts int) time.Duration {
 	return delay
 }
 
+// cacheLagAttemptEntry pairs the consecutive cache-lag attempt count with the
+// UID of the SandboxClaim it was observed for. We store the UID to protect
+// against stale data when a claim is deleted and a new one is created with
+// the same name, mirroring observedTimeEntry above.
+type cacheLagAttemptEntry struct {
+	attempts int
+	uid      types.UID
+}
+
 // cacheLagAttemptMap is a type-safe wrapper around sync.Map that tracks the
 // number of consecutive errSandboxAlreadyExists requeues seen for a claim.
 // Read by cacheLagRequeueDelayFor to grow the requeue delay on a persistently
@@ -131,14 +140,20 @@ type cacheLagAttemptMap struct {
 	inner sync.Map
 }
 
-// Increment records another consecutive cache-lag attempt for key and
-// returns the new attempt count.
-func (m *cacheLagAttemptMap) Increment(key types.NamespacedName) int {
-	val, _ := m.inner.Load(key)
-	attempts, _ := val.(int)
-	attempts++
-	m.inner.Store(key, attempts)
-	return attempts
+// Increment records another consecutive cache-lag attempt for the claim
+// identified by key and uid, and returns the new attempt count. A uid that
+// differs from the stored entry (a same-named replacement claim) starts the
+// count fresh at 1 instead of inheriting the earlier claim's backoff.
+func (m *cacheLagAttemptMap) Increment(key types.NamespacedName, uid types.UID) int {
+	entry := cacheLagAttemptEntry{uid: uid}
+	if val, ok := m.inner.Load(key); ok {
+		if existing := val.(cacheLagAttemptEntry); existing.uid == uid {
+			entry = existing
+		}
+	}
+	entry.attempts++
+	m.inner.Store(key, entry)
+	return entry.attempts
 }
 
 // Delete clears key, so a later cache-lag streak starts fresh at the flat
@@ -154,7 +169,7 @@ func (m *cacheLagAttemptMap) Load(key types.NamespacedName) (int, bool) {
 	if !ok {
 		return 0, false
 	}
-	return val.(int), true
+	return val.(cacheLagAttemptEntry).attempts, true
 }
 
 var restrictedDomains = []string{"kubernetes.io", "k8s.io", "agents.x-k8s.io"}
@@ -472,7 +487,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// instead of re-issuing Create at cacheLagRequeueDelay forever (#1313).
 	if errors.Is(reconcileErr, errSandboxAlreadyExists) {
 		hitCacheLag = true
-		attempts := r.cacheLagAttempts.Increment(req.NamespacedName)
+		attempts := r.cacheLagAttempts.Increment(req.NamespacedName, claim.UID)
 		requeueDelay := cacheLagRequeueDelayFor(attempts)
 		logger.V(4).Info("Sandbox already exists; requeueing to let cache converge", "claim", claim.Name, "error", reconcileErr, "attempt", attempts, "requeueAfter", requeueDelay)
 		if result.RequeueAfter > 0 && result.RequeueAfter < requeueDelay {

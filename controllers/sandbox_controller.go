@@ -22,6 +22,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -222,6 +223,68 @@ func init() {
 	utilruntime.Must(sandboxv1beta1.AddToScheme(Scheme))
 }
 
+// lifecycleTimeEntry stores a controller-observed lifecycle start timestamp and
+// the UID of the Sandbox so same-named successors cannot consume stale entries.
+type lifecycleTimeEntry struct {
+	timestamp time.Time
+	uid       types.UID
+}
+
+// lifecycleTimeMap is a type-safe wrapper around sync.Map that stores lifecycleTimeEntry values.
+type lifecycleTimeMap struct {
+	inner sync.Map
+}
+
+func (m *lifecycleTimeMap) Load(key types.NamespacedName) (lifecycleTimeEntry, bool) {
+	val, ok := m.inner.Load(key)
+	if !ok {
+		return lifecycleTimeEntry{}, false
+	}
+	return val.(lifecycleTimeEntry), true
+}
+
+func (m *lifecycleTimeMap) Store(key types.NamespacedName, entry lifecycleTimeEntry) {
+	m.inner.Store(key, entry)
+}
+
+func (m *lifecycleTimeMap) Delete(key types.NamespacedName) {
+	m.inner.Delete(key)
+}
+
+func (m *lifecycleTimeMap) LoadOrStore(key types.NamespacedName, entry lifecycleTimeEntry) (lifecycleTimeEntry, bool) {
+	actual, loaded := m.inner.LoadOrStore(key, entry)
+	return actual.(lifecycleTimeEntry), loaded
+}
+
+// anchor seeds a start timestamp for key/uid if no entry with the same UID is
+// already present, overwriting any stale entry from a same-named predecessor.
+// Returns true when a new entry for uid was seeded on this call.
+func (m *lifecycleTimeMap) anchor(key types.NamespacedName, uid types.UID, now time.Time) bool {
+	newEntry := lifecycleTimeEntry{timestamp: now, uid: uid}
+	existing, loaded := m.LoadOrStore(key, newEntry)
+	if !loaded {
+		return true
+	}
+	if existing.uid != uid {
+		m.Store(key, newEntry)
+		return true
+	}
+	return false
+}
+
+// take loads and deletes the entry for key when the stored UID matches uid,
+// returning its timestamp. Entries belonging to a different UID are left
+// intact so a late reconcile for a predecessor cannot delete a successor's
+// active timer (anchor overwrites stale predecessor entries when needed).
+func (m *lifecycleTimeMap) take(key types.NamespacedName, uid types.UID) (time.Time, bool) {
+	entry, ok := m.Load(key)
+	if !ok || entry.uid != uid {
+		return time.Time{}, false
+	}
+	m.Delete(key)
+	return entry.timestamp, true
+}
+
 // SandboxReconciler reconciles a Sandbox object.
 type SandboxReconciler struct {
 	client.Client
@@ -229,6 +292,12 @@ type SandboxReconciler struct {
 	Recorder      events.EventRecorder
 	Tracer        asmetrics.Instrumenter
 	ClusterDomain string
+
+	// suspendStartTimes and resumeStartTimes self-time in-flight suspend and
+	// resume transitions per Sandbox key (NamespacedName), guarded by UID.
+	// In-memory only; transitions in flight across a controller restart are not timed.
+	suspendStartTimes lifecycleTimeMap
+	resumeStartTimes  lifecycleTimeMap
 
 	// WriteBehindWindow, when > 0, defers this controller's RECOVERABLE
 	// metadata-only write — the pod label/annotation reconciliation patch —
@@ -283,6 +352,8 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if err := r.Get(ctx, req.NamespacedName, sandbox); err != nil {
 		if k8serrors.IsNotFound(err) {
 			logger.Info("sandbox resource not found. Ignoring since object must be deleted")
+			r.suspendStartTimes.Delete(req.NamespacedName)
+			r.resumeStartTimes.Delete(req.NamespacedName)
 			r.deferralClock.clear(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
@@ -303,6 +374,8 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// If the sandbox is being deleted, do nothing
 	if !sandbox.DeletionTimestamp.IsZero() {
 		logger.Info("Sandbox is being deleted")
+		r.suspendStartTimes.Delete(req.NamespacedName)
+		r.resumeStartTimes.Delete(req.NamespacedName)
 		r.deferralClock.clear(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
@@ -798,9 +871,10 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 		return err
 	}
 
-	// Events are only emitted once the new status is persisted, so a failed patch does not produce a misleading event
-	// and a no-op reconcile does not re-emit one (due to deepEqual check above).
+	// Events and lifecycle metrics are only emitted once the new status is persisted, so a failed patch does not
+	// produce a misleading event or metric observation, and a no-op reconcile does not re-emit one.
 	r.recordReadyTransitionEvent(sandbox, oldStatus)
+	r.recordLifecycleMetrics(ctx, oldStatus, sandbox)
 
 	// Surface error
 	return nil
@@ -833,6 +907,111 @@ func (r *SandboxReconciler) recordReadyTransitionEvent(sandbox *sandboxv1beta1.S
 		r.Recorder.Eventf(sandbox, nil, corev1.EventTypeNormal, sandboxv1beta1.SandboxReasonPodSucceeded, "PodCompletion", "Pod completed successfully")
 	case sandboxv1beta1.SandboxReasonPodFailed:
 		r.Recorder.Eventf(sandbox, nil, corev1.EventTypeWarning, sandboxv1beta1.SandboxReasonPodFailed, "PodCompletion", "Pod failed")
+	}
+}
+
+// recordLifecycleMetrics records Prometheus counters and latency histograms for
+// Sandbox suspend, resume, Finished, and expiry status transitions.
+func (r *SandboxReconciler) recordLifecycleMetrics(ctx context.Context, oldStatus *sandboxv1beta1.SandboxStatus, sandbox *sandboxv1beta1.Sandbox) {
+	key := types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}
+	logger := log.FromContext(ctx).WithName("lifecycle-metrics").WithValues("sandbox", key.String(), "uid", string(sandbox.UID))
+
+	templateName := asmetrics.SandboxTemplateLabel(sandbox)
+	ownedBy := asmetrics.SandboxOwnedByLabel(sandbox)
+
+	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	newReady := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+
+	// 1. Finished transition: Finished condition becomes True (or changes terminal reason).
+	oldFinished := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionFinished))
+	newFinished := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished))
+	if newFinished != nil && newFinished.Status == metav1.ConditionTrue &&
+		(oldFinished == nil || oldFinished.Status != metav1.ConditionTrue || oldFinished.Reason != newFinished.Reason) {
+		asmetrics.RecordSandboxFinished(sandbox.Namespace, templateName, ownedBy, newFinished.Reason)
+	}
+
+	// 2. Expiry transition: Ready condition transitions to Reason=SandboxExpired.
+	if newReady != nil && newReady.Reason == sandboxv1beta1.SandboxReasonExpired &&
+		(oldReady == nil || oldReady.Reason != sandboxv1beta1.SandboxReasonExpired) {
+		r.suspendStartTimes.Delete(key)
+		r.resumeStartTimes.Delete(key)
+		asmetrics.RecordSandboxExpired(sandbox.Namespace, templateName, ownedBy, asmetrics.SandboxShutdownPolicyLabel(sandbox))
+		return
+	}
+
+	oldSuspended := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
+	newSuspended := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
+
+	// 3. Suspend path: operatingMode is Suspended.
+	if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
+		// Entering or remaining in Suspended cancels any in-flight resume timer.
+		r.resumeStartTimes.Delete(key)
+
+		wasJustAnchored := false
+		// Suspend is newly requested when transitioning out of NotSuspended (or initial nil state).
+		if (oldSuspended == nil || oldSuspended.Reason == sandboxv1beta1.SandboxReasonNotSuspended) &&
+			newSuspended != nil && newSuspended.Reason != sandboxv1beta1.SandboxReasonNotSuspended {
+			asmetrics.RecordSandboxSuspend(sandbox.Namespace, templateName, ownedBy, asmetrics.SuspendResultRequested)
+			wasJustAnchored = r.suspendStartTimes.anchor(key, sandbox.UID, time.Now())
+			logger.V(4).Info("Observed Sandbox suspend requested", "justAnchored", wasJustAnchored)
+		}
+
+		// Record suspend error when entering a suspend error reason.
+		if newSuspended != nil &&
+			(newSuspended.Reason == sandboxv1beta1.SandboxReasonSuspendedPodStateUnknown ||
+				newSuspended.Reason == sandboxv1beta1.SandboxReasonSuspendedPodNotOwned) &&
+			(oldSuspended == nil || oldSuspended.Reason != newSuspended.Reason) {
+			asmetrics.RecordSandboxSuspend(sandbox.Namespace, templateName, ownedBy, asmetrics.SuspendResultError)
+		}
+
+		// Suspend completes when Suspended condition transitions to True (PodTerminated).
+		if (oldSuspended == nil || oldSuspended.Status != metav1.ConditionTrue) &&
+			newSuspended != nil && newSuspended.Status == metav1.ConditionTrue {
+			asmetrics.RecordSandboxSuspend(sandbox.Namespace, templateName, ownedBy, asmetrics.SuspendResultPodTerminated)
+			if startTime, ok := r.suspendStartTimes.take(key, sandbox.UID); ok && !wasJustAnchored {
+				duration := time.Since(startTime)
+				logger.V(4).Info("Recording Sandbox suspend latency", "duration_ms", duration.Milliseconds())
+				asmetrics.RecordSandboxSuspendLatency(duration, sandbox.Namespace, templateName, ownedBy)
+			}
+		}
+		return
+	}
+
+	// 4. Resume path: operatingMode is Running.
+	// Returning to Running cancels any in-flight suspend timer.
+	r.suspendStartTimes.Delete(key)
+
+	wasJustAnchored := false
+	// Anchor a resume start once, only when leaving a fully-suspended state
+	// (Suspended condition transitions from True to False).
+	if oldSuspended != nil && oldSuspended.Status == metav1.ConditionTrue &&
+		newSuspended != nil && newSuspended.Status == metav1.ConditionFalse {
+		asmetrics.RecordSandboxResume(sandbox.Namespace, templateName, ownedBy, asmetrics.ResumeResultRequested)
+		wasJustAnchored = r.resumeStartTimes.anchor(key, sandbox.UID, time.Now())
+		logger.V(4).Info("Observed Sandbox resume requested", "justAnchored", wasJustAnchored)
+	}
+
+	if meta.IsStatusConditionTrue(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady)) {
+		// Ready: record a resume only if an in-flight resume timer was anchored for this UID.
+		if startTime, ok := r.resumeStartTimes.take(key, sandbox.UID); ok {
+			asmetrics.RecordSandboxResume(sandbox.Namespace, templateName, ownedBy, asmetrics.ResumeResultReady)
+			if !wasJustAnchored {
+				duration := time.Since(startTime)
+				logger.V(4).Info("Recording Sandbox resume latency", "duration_ms", duration.Milliseconds())
+				asmetrics.RecordSandboxResumeLatency(duration, sandbox.Namespace, templateName, ownedBy)
+			}
+		}
+		return
+	}
+
+	// Record resume error if an in-flight resume hits a reconcile/config error on Ready=False.
+	if entry, ok := r.resumeStartTimes.Load(key); ok && entry.uid == sandbox.UID && newReady != nil {
+		isErrReason := newReady.Reason == "ReconcilerError" ||
+			newReady.Reason == sandboxv1beta1.SandboxReasonInvalidConfiguration ||
+			newReady.Reason == sandboxv1beta1.SandboxReasonMultiplePods
+		if isErrReason && (oldReady == nil || oldReady.Reason != newReady.Reason) {
+			asmetrics.RecordSandboxResume(sandbox.Namespace, templateName, ownedBy, asmetrics.ResumeResultError)
+		}
 	}
 }
 

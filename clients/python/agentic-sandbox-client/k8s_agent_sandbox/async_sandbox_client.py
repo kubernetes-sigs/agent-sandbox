@@ -375,12 +375,9 @@ class AsyncSandboxClient(Generic[T]):
             raise
         except Exception as e:
             if existing:
-                if key in self._explicit_claims:
-                    await existing.close_connection()
-                else:
-                    await existing.terminate()
-            async with self._lock:
-                self._active_connection_sandboxes.pop(key, None)
+                # A failed lookup doesn't mean the claim is gone, and cleanup
+                # only reaches tracked handles, so close locally and stay tracked.
+                await existing.close_connection()
             raise SandboxNotFoundError(
                 f"Sandbox claim '{claim_name}' not found or resolution failed "
                 f"in namespace '{namespace}': {e}"

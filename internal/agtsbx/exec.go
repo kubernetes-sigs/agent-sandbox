@@ -132,19 +132,37 @@ func runCommand(ctx context.Context, grpcAddr string, req execRequest) (int, err
 	// This path never forwards the caller's stdin, so closing it as soon as
 	// the process exists is what tells a command reading from it (cat, for
 	// example) to stop rather than block forever.
-	closeStdin := func(processID int32) error {
-		if _, err := client.WriteStdin(ctx, &processv1.WriteStdinRequest{
-			ProcessId: processID,
-			Payload:   &processv1.WriteStdinRequest_Eof{Eof: &emptypb.Empty{}},
-		}); err != nil {
+	onInit := func(processID int32) error {
+		if err := sendStdinEOF(ctx, client, processID); err != nil {
 			cancelStream()
 			return fmt.Errorf("sending stdin EOF: %w", err)
 		}
 		return nil
 	}
 
-	exitCode, err := copyStream(stream, req.Stdout, req.Stderr, closeStdin)
+	exitCode, err := copyStream(stream, req.Stdout, req.Stderr, onInit)
 	return exitCode, annotateWorkdir(err, req.Workdir)
+}
+
+// stdinWriter is the WriteStdin half of the ProcessService client, narrowed
+// so sendStdinEOF can be tested without a gRPC server.
+type stdinWriter interface {
+	WriteStdin(ctx context.Context, in *processv1.WriteStdinRequest, opts ...grpc.CallOption) (*processv1.WriteStdinResponse, error)
+}
+
+// sendStdinEOF closes the command's stdin. A command that exits before the
+// EOF arrives has already been dropped from sandboxd's registry, so NotFound
+// means there is no stdin left to close, not a failure. Any other error is
+// returned because the command may still be waiting on its stdin.
+func sendStdinEOF(ctx context.Context, client stdinWriter, processID int32) error {
+	_, err := client.WriteStdin(ctx, &processv1.WriteStdinRequest{
+		ProcessId: processID,
+		Payload:   &processv1.WriteStdinRequest_Eof{Eof: &emptypb.Empty{}},
+	})
+	if status.Code(err) == codes.NotFound {
+		return nil
+	}
+	return err
 }
 
 // annotateWorkdir adds a hint to NotFound errors raised under a --workdir.

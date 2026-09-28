@@ -29,6 +29,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -311,4 +312,43 @@ func TestRunCommandReportsUnreachableSandbox(t *testing.T) {
 		Stderr:  io.Discard,
 	})
 	require.Error(t, err)
+}
+
+// fakeStdinWriter records the WriteStdin request and returns a canned error.
+type fakeStdinWriter struct {
+	req *processv1.WriteStdinRequest
+	err error
+}
+
+func (f *fakeStdinWriter) WriteStdin(_ context.Context, in *processv1.WriteStdinRequest, _ ...grpc.CallOption) (*processv1.WriteStdinResponse, error) {
+	f.req = in
+	return &processv1.WriteStdinResponse{}, f.err
+}
+
+func TestSendStdinEOF(t *testing.T) {
+	tests := []struct {
+		name    string
+		err     error
+		wantErr bool
+	}{
+		{name: "success"},
+		// The command finished and was dropped from sandboxd's registry
+		// before the EOF arrived.
+		{name: "process already gone", err: status.Error(codes.NotFound, "process 7 not found")},
+		{name: "other failure is reported", err: status.Error(codes.Internal, "boom"), wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			writer := &fakeStdinWriter{err: tc.err}
+			err := sendStdinEOF(context.Background(), writer, 7)
+			if tc.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			require.NotNil(t, writer.req)
+			assert.Equal(t, int32(7), writer.req.GetProcessId())
+			assert.NotNil(t, writer.req.GetEof())
+		})
+	}
 }

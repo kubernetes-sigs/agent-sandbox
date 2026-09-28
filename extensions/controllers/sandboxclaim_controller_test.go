@@ -8174,7 +8174,7 @@ func TestCreateSandboxAlreadyExistsBackoffGrowsAndResets(t *testing.T) {
 	}
 
 	// Enough further stale passes to reach the cap, and stay there.
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		result, err := reconciler.Reconcile(context.Background(), req)
 		require.NoError(t, err)
 		require.LessOrEqual(t, result.RequeueAfter, maxCacheLagRequeueDelay, "requeue delay must never exceed the cap")

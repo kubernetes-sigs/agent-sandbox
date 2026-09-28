@@ -2129,6 +2129,29 @@ describe("SandboxClient (registry)", () => {
       expect(mockWatchFn).not.toHaveBeenCalled();
     });
 
+    it("GET path: throws SandboxClaimFailedError on InvalidConfiguration", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        status: {
+          conditions: [
+            {
+              type: "Ready",
+              status: "False",
+              reason: "InvalidConfiguration",
+              message:
+                "Service 'warmpool-bad-name' is invalid: must be no more than 63 characters",
+            },
+          ],
+        },
+      });
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("warmpool-bad-name"),
+      ).rejects.toBeInstanceOf(SandboxClaimFailedError);
+      expect(mockWatchFn).not.toHaveBeenCalled();
+    });
+
     it("watch path: throws SandboxClaimFailedError on a terminal Ready=False reason", async () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
       mockGetNamespacedCustomObject.mockResolvedValueOnce({ status: {} });

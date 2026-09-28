@@ -349,6 +349,34 @@ class TestK8sHelperResolveSandboxName(unittest.TestCase):
         self.assertIn("VolumeClaimTemplatesError", str(context.exception))
 
     @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
+    def test_wait_for_claim_ready_invalid_configuration_fails_fast(self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls):
+        """InvalidConfiguration (forwarded from the Sandbox) fails fast too."""
+        mock_watch = MagicMock()
+        mock_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-claim"},
+                "status": {
+                    "conditions": [
+                        {
+                            "type": "Ready",
+                            "status": "False",
+                            "reason": "InvalidConfiguration",
+                            "message": "Service 'test-claim' is invalid: must be no more than 63 characters",
+                        }
+                    ]
+                },
+            },
+        }
+        mock_watch.stream.return_value = [mock_event]
+        mock_watch_class.return_value = mock_watch
+
+        helper = K8sHelper()
+        with self.assertRaises(SandboxClaimFailedError) as context:
+            helper.wait_for_claim_ready("test-claim", "default", timeout=5)
+        self.assertIn("InvalidConfiguration", str(context.exception))
+
+    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
     def test_wait_for_claim_ready_transient_reason_keeps_waiting(self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls):
         """Transient Ready=False reasons (controller retries) do not abort the wait."""
         mock_watch = MagicMock()

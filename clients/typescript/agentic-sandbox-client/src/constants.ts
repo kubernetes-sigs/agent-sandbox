@@ -38,4 +38,5 @@ export const TERMINAL_CLAIM_READY_REASONS: ReadonlySet<string> = new Set([
   "VolumeClaimTemplatesError",
   "ClaimExpired", // extensions ClaimExpiredReason
   "SandboxExpired", // core SandboxReasonExpired, forwarded to the claim
+  "InvalidConfiguration", // core SandboxReasonInvalidConfiguration, forwarded to the claim
 ]);

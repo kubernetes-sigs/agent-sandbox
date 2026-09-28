@@ -604,8 +604,14 @@ a `PodSnapshotStorageConfig` (GCS bucket, `tokenSource: podKSA`) and a
 `PodSnapshotPolicy` whose grouping rules include `agents.x-k8s.io/sandbox-name-hash`
 and whose selector matches your template's pod labels (every fleet pod carries
 `app=agent-sandbox-rl` and `sandbox=<template-name>`); a pod ServiceAccount with the
-Workload Identity bucket grants (`storage.bucketViewer` + `storage.objectUser`). See
-the SDK extension's README and the
+Workload Identity bucket grants (`storage.bucketViewer` + `storage.objectUser`); and
+`storage.objectUser` on the same bucket for **GKE's service agent**
+(`service-<PROJECT_NUMBER>@container-engine-robot.iam.gserviceaccount.com`), which is
+what deletes snapshot objects — without that grant deleted `PodSnapshot`s hang in
+`Terminating` on their finalizer, so `release(h, delete_snapshots=True)` burns its full
+timeout per sandbox and leaks the snapshots. See
+[examples/podsnapshot-golden-warmpool](../podsnapshot-golden-warmpool/README.md#2-snapshot-storage-bucket--iam)
+for the exact bindings, and the SDK extension's README and the
 [site docs](https://agent-sandbox.sigs.k8s.io/docs/sandbox/snapshots/) for manifests.
 
 ```python

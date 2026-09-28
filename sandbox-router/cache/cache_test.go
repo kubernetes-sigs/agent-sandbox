@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+	k8scache "k8s.io/client-go/tools/cache"
 )
 
 const (
@@ -481,6 +482,35 @@ func TestCache_StaleDeleteDoesNotEvictReplacementForSameSandbox(t *testing.T) {
 	if !ok || e.PodUID != replacementPod.UID || e.PodIP != testPodIP2 {
 		t.Fatalf("stale delete evicted replacement entry: %+v, found=%v", e, ok)
 	}
+	if byName, ok := c.GetByName(testPodNS, testPodName); !ok || byName.PodIP != testPodIP2 {
+		t.Fatalf("name index lost the replacement after stale delete: %+v, found=%v", byName, ok)
+	}
+}
+
+func TestCache_StaleTombstoneDeleteDoesNotEvictReplacementForSameSandbox(t *testing.T) {
+	const sandboxUID = types.UID("sandbox-recreated")
+	c := &Cache{
+		log:     logr.Discard(),
+		entries: make(map[types.UID]Entry),
+		byName:  make(map[string]types.UID),
+	}
+
+	oldPod := makePod(testPodName, testPodNS, sandboxUID, testPodIP, true)
+	oldPod.UID = types.UID("old-pod")
+	replacementPod := makePod(testPodName, testPodNS, sandboxUID, testPodIP2, true)
+	replacementPod.UID = types.UID("replacement-pod")
+
+	c.onAddOrUpdate(oldPod)
+	c.onAddOrUpdate(replacementPod)
+	c.onDelete(k8scache.DeletedFinalStateUnknown{Key: nameKey(testPodNS, testPodName), Obj: oldPod})
+
+	e, ok := c.Get(sandboxUID)
+	if !ok || e.PodUID != replacementPod.UID || e.PodIP != testPodIP2 {
+		t.Fatalf("stale tombstone delete evicted replacement entry: %+v, found=%v", e, ok)
+	}
+	if byName, ok := c.GetByName(testPodNS, testPodName); !ok || byName.PodIP != testPodIP2 {
+		t.Fatalf("name index lost the replacement after stale tombstone delete: %+v, found=%v", byName, ok)
+	}
 }
 
 func TestCache_StaleNotReadyDoesNotEvictReplacementForSameSandbox(t *testing.T) {
@@ -506,6 +536,9 @@ func TestCache_StaleNotReadyDoesNotEvictReplacementForSameSandbox(t *testing.T) 
 	if !ok || e.PodUID != replacementPod.UID || e.PodIP != testPodIP2 {
 		t.Fatalf("stale NotReady event evicted replacement entry: %+v, found=%v", e, ok)
 	}
+	if byName, ok := c.GetByName(testPodNS, testPodName); !ok || byName.PodIP != testPodIP2 {
+		t.Fatalf("name index lost the replacement after stale NotReady event: %+v, found=%v", byName, ok)
+	}
 }
 
 func TestCache_CurrentPodDeleteEvictsEntry(t *testing.T) {
@@ -523,6 +556,9 @@ func TestCache_CurrentPodDeleteEvictsEntry(t *testing.T) {
 
 	if _, ok := c.Get(sandboxUID); ok {
 		t.Fatal("current Pod delete must evict the cache entry")
+	}
+	if _, ok := c.GetByName(testPodNS, testPodName); ok {
+		t.Fatal("current Pod delete must evict the name index entry")
 	}
 }
 
@@ -543,6 +579,38 @@ func TestCache_CurrentPodNotReadyEvictsEntry(t *testing.T) {
 
 	if _, ok := c.Get(sandboxUID); ok {
 		t.Fatal("current Pod NotReady update must evict the cache entry")
+	}
+	if _, ok := c.GetByName(testPodNS, testPodName); ok {
+		t.Fatal("current Pod NotReady update must evict the name index entry")
+	}
+}
+
+func TestCache_EmptyCachedPodUIDFallsBackToEviction(t *testing.T) {
+	// If a cached entry has an empty PodUID (unknown Pod identity at upsert
+	// time), a subsequent delete or NotReady event carrying a PodUID must
+	// still evict the entry rather than stranding it forever.
+	const sandboxUID = types.UID("sandbox-unknown-pod-uid")
+	c := &Cache{
+		log:     logr.Discard(),
+		entries: make(map[types.UID]Entry),
+		byName:  make(map[string]types.UID),
+	}
+
+	c.upsert(sandboxUID, Entry{
+		PodIP:       testPodIP,
+		SandboxName: testPodName,
+		Namespace:   testPodNS,
+	}, true)
+
+	pod := makePod(testPodName, testPodNS, sandboxUID, testPodIP, true)
+	pod.UID = types.UID("pod-with-uid")
+	c.onDelete(pod)
+
+	if _, ok := c.Get(sandboxUID); ok {
+		t.Fatal("delete event must evict entry whose cached PodUID is empty")
+	}
+	if _, ok := c.GetByName(testPodNS, testPodName); ok {
+		t.Fatal("delete event must evict name index entry whose cached PodUID is empty")
 	}
 }
 

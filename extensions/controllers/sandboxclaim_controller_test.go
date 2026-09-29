@@ -8194,6 +8194,21 @@ func TestCreateSandboxAlreadyExistsBackoffGrowsAndResets(t *testing.T) {
 	require.False(t, tracked, "attempt counter must be cleared once the claim reconciles past the race")
 }
 
+// TestCacheLagRequeueDelayFor verifies non-positive attempt counts do not
+// panic on a negative shift and that large counts stay at the cap.
+func TestCacheLagRequeueDelayFor(t *testing.T) {
+	for attempts, want := range map[int]time.Duration{
+		-1:   cacheLagRequeueDelay,
+		0:    cacheLagRequeueDelay,
+		1:    cacheLagRequeueDelay,
+		2:    2 * cacheLagRequeueDelay,
+		100:  maxCacheLagRequeueDelay,
+		1000: maxCacheLagRequeueDelay,
+	} {
+		require.Equal(t, want, cacheLagRequeueDelayFor(attempts), "attempts=%d", attempts)
+	}
+}
+
 // TestCacheLagAttemptMapResetsOnUIDChange verifies that cacheLagAttemptMap
 // does not let a same-named replacement claim inherit an earlier claim's
 // backed-off attempt count: a differing UID must restart the count at 1.

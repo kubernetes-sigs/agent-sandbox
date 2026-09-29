@@ -111,10 +111,14 @@ const maxCacheLagRequeueDelay = 5 * time.Second
 
 // cacheLagRequeueDelayFor grows the requeue delay geometrically with the
 // number of consecutive errSandboxAlreadyExists attempts seen for one claim,
-// capped at maxCacheLagRequeueDelay. attempts must be >= 1; the first attempt
-// returns cacheLagRequeueDelay unchanged, so the common single-pass cache lag
-// is not slowed down.
+// capped at maxCacheLagRequeueDelay. The first attempt returns
+// cacheLagRequeueDelay unchanged, so the common single-pass cache lag is not
+// slowed down. Values below 1 are treated as the first attempt, since a
+// negative shift count would panic.
 func cacheLagRequeueDelayFor(attempts int) time.Duration {
+	if attempts <= 1 {
+		return cacheLagRequeueDelay
+	}
 	delay := cacheLagRequeueDelay << (attempts - 1)
 	if delay <= 0 || delay > maxCacheLagRequeueDelay {
 		return maxCacheLagRequeueDelay

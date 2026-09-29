@@ -138,6 +138,12 @@ class Filesystem:
         timeout: int = 60,
         allow_unsafe_paths: bool = False,
     ) -> None:
+        """Upload content to a sandbox-relative path.
+
+        Binary file objects are read in chunks from their current position and
+        sent once without retries. The caller must close the file object; its
+        position may advance if the upload fails.
+        """
         if isinstance(content, str):
             content = content.encode("utf-8")
         elif isinstance(content, (bytearray, memoryview)):

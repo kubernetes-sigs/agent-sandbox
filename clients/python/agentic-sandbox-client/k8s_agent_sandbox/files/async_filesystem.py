@@ -21,12 +21,6 @@ from collections.abc import AsyncIterator
 from typing import Any, Awaitable, BinaryIO, Protocol
 
 from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
-from k8s_agent_sandbox.files.filesystem import (
-    Filesystem,
-    _multipart_framing,
-    _read_binary_chunk,
-    _validate_binary_stream,
-)
 from k8s_agent_sandbox.exceptions import SandboxRequestError
 from k8s_agent_sandbox.files.filesystem import (
     Filesystem,
@@ -96,6 +90,12 @@ class AsyncFilesystem:
         timeout: int = 60,
         allow_unsafe_paths: bool = False,
     ) -> None:
+        """Upload content to a sandbox-relative path.
+
+        Binary file objects are read in chunks from their current position and
+        sent once without retries. The caller must close the file object; its
+        position may advance if the upload fails.
+        """
         if isinstance(content, str):
             content = content.encode("utf-8")
         elif isinstance(content, (bytearray, memoryview)):

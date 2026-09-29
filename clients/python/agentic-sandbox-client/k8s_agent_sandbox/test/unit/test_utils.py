@@ -14,7 +14,7 @@
 
 import unittest
 
-from k8s_agent_sandbox.utils import extract_sandbox_name_hash
+from k8s_agent_sandbox.utils import extract_sandbox_name_hash, merge_headers
 
 
 class TestExtractSandboxNameHash(unittest.TestCase):
@@ -67,6 +67,23 @@ class TestExtractSandboxNameHash(unittest.TestCase):
         sandbox_object = {}
         sandbox_name_hash = extract_sandbox_name_hash(sandbox_object)
         self.assertIsNone(sandbox_name_hash)
+
+
+class TestMergeHeaders(unittest.TestCase):
+    def test_later_layer_wins_case_insensitively(self):
+        merged = merge_headers(
+            {"Authorization": "Bearer a", "X-Keep": "1"}, {"authorization": "Bearer b"}
+        )
+        self.assertEqual(merged, {"X-Keep": "1", "authorization": "Bearer b"})
+
+    def test_none_layers_are_skipped(self):
+        self.assertEqual(merge_headers({"A": "1"}, None), {"A": "1"})
+        self.assertEqual(merge_headers(None, None), {})
+
+    def test_inputs_are_not_mutated(self):
+        base = {"A": "1"}
+        merge_headers(base, {"a": "2"}).clear()
+        self.assertEqual(base, {"A": "1"})
 
 
 if __name__ == "__main__":

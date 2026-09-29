@@ -47,6 +47,7 @@ from .models import (
     SandboxdPodTunnelConnectionConfig,
     SandboxdInClusterConnectionConfig,
 )
+from .utils import merge_headers
 
 logger = logging.getLogger(__name__)
 
@@ -322,7 +323,7 @@ class AsyncSandboxConnector:
         allowed_statuses = kwargs.pop("allowed_statuses", None)
         disable_retries = kwargs.pop("_disable_retries", False)
         # Precedence: config < caller < SDK routing headers.
-        headers = {**self._extra_headers, **kwargs.pop("headers", {})}
+        headers = merge_headers(self._extra_headers, kwargs.pop("headers", None))
         # For security and SSRF mitigation, the SDK explicitly mandates blocking all HTTP redirects
         # to the internal sandbox endpoints. Any user-provided redirect settings are overridden and
         # ignored. We pop 'follow_redirects' here to prevent a TypeError due to duplicate keyword

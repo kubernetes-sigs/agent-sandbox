@@ -989,11 +989,25 @@ class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):
         connector = self._connector_with_ok_response(config)
         try:
             await connector.send_request(
-                "GET", "health", headers={"Authorization": "Bearer other"}
+                "GET", "health", headers={"authorization": "Bearer other"}
             )
 
             _, call_kwargs = connector.client.request.call_args
-            self.assertEqual(call_kwargs["headers"]["Authorization"], "Bearer other")
+            self.assertEqual(call_kwargs["headers"]["authorization"], "Bearer other")
+            self.assertNotIn("Authorization", call_kwargs["headers"])
+        finally:
+            await connector.close()
+
+    async def test_explicit_none_headers_are_accepted(self):
+        config = SandboxDirectConnectionConfig(
+            api_url="https://router", extra_headers={"Authorization": "Bearer t"}
+        )
+        connector = self._connector_with_ok_response(config)
+        try:
+            await connector.send_request("GET", "health", headers=None)
+
+            _, call_kwargs = connector.client.request.call_args
+            self.assertEqual(call_kwargs["headers"]["Authorization"], "Bearer t")
         finally:
             await connector.close()
 

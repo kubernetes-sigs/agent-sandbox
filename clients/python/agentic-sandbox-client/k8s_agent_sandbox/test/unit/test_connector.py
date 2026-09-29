@@ -853,10 +853,22 @@ class TestSandboxConnectorExtraHeadersAndTLS(unittest.TestCase):
         )
         connector = self._make_connector(config)
 
-        connector.send_request("GET", "/execute", headers={"Authorization": "Bearer other"})
+        connector.send_request("GET", "/execute", headers={"authorization": "Bearer other"})
 
         sent = connector.session.request.call_args.kwargs["headers"]
-        self.assertEqual(sent["Authorization"], "Bearer other")
+        self.assertEqual(sent["authorization"], "Bearer other")
+        self.assertNotIn("Authorization", sent)
+
+    def test_explicit_none_headers_are_accepted(self):
+        config = SandboxDirectConnectionConfig(
+            api_url="https://router", extra_headers={"Authorization": "Bearer t"}
+        )
+        connector = self._make_connector(config)
+
+        connector.send_request("GET", "/execute", headers=None)
+
+        sent = connector.session.request.call_args.kwargs["headers"]
+        self.assertEqual(sent["Authorization"], "Bearer t")
 
     def test_tls_options_are_passed_on_each_request(self):
         config = SandboxDirectConnectionConfig(

@@ -39,6 +39,7 @@ from .models import (
     SandboxdInClusterConnectionConfig,
 )
 from .k8s_helper import K8sHelper
+from .utils import merge_headers
 from .exceptions import (
     SandboxNotReadyError,
     SandboxPortForwardError,
@@ -846,7 +847,7 @@ class SandboxConnector:
             url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
 
             # Precedence: config < caller < SDK routing headers.
-            headers = {**self._extra_headers, **kwargs.get("headers", {})}
+            headers = merge_headers(self._extra_headers, kwargs.get("headers"))
             if self.strategy.should_inject_router_headers():
                 headers["X-Sandbox-ID"] = self.id
                 headers["X-Sandbox-Namespace"] = self.namespace

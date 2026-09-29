@@ -279,6 +279,26 @@ class TestSandboxdInClusterConnection(unittest.TestCase):
         self.assertEqual(connector.connect(), "http://new.agents.svc:8080")
         connector.close()
 
+    def test_pod_transport_failure_does_not_redial_stale_grpc_target(self):
+        pod_ip = MagicMock(side_effect=["10.0.0.1", "10.0.0.2"])
+        connector, _, _ = self._build(mode="pod-ip", pod_ip=pod_ip)
+        first, second = MagicMock(), MagicMock()
+        dial = MagicMock(side_effect=[first, second])
+        with patch.dict(sys.modules, {"grpc": SimpleNamespace(insecure_channel=dial)}):
+            connector.connect()
+            self.assertIs(connector.grpc_channel(), first)
+            connector.invalidate_sandboxd_transport(first)
+            self.assertIsNone(connector.strategy.grpc_target)
+            with self.assertRaisesRegex(SandboxRequestError, "call connect"):
+                connector.grpc_channel()
+            self.assertEqual(dial.call_count, 1)
+
+            self.assertEqual(connector.connect(), "http://10.0.0.2:8080")
+            self.assertIs(connector.grpc_channel(), second)
+        first.close.assert_called_once()
+        connector.close()
+        second.close.assert_called_once()
+
     def test_stream_transport_failure_discards_channel_and_service_cache(self):
         service = MagicMock(side_effect=["old.agents.svc", "new.agents.svc"])
         connector, _, _ = self._build(service_fqdn=service)

@@ -536,7 +536,7 @@ class SandboxdInClusterStrategy(ConnectionStrategy):
         return f"http://{formatted_host}:{self.config.rest_port}"
 
     def invalidate_service_fqdn(self) -> None:
-        """Refresh Service status after a DNS or transport failure."""
+        """Clear cached Service status and gRPC target after a failure."""
         self._service_fqdn = None
         self.grpc_target = None
 
@@ -747,8 +747,7 @@ class SandboxConnector:
                     pass
             self._grpc_channel = None
             self._grpc_channel_target = None
-            if self.strategy.config.mode == "service-dns":
-                self.strategy.invalidate_service_fqdn()
+            self.strategy.invalidate_service_fqdn()
 
     def connect(self) -> str:
         with self._transport_lock:

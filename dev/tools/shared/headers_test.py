@@ -15,15 +15,18 @@
 # limitations under the License.
 
 import os
+import subprocess
 import sys
+import tempfile
 import time
 import unittest
+from pathlib import Path
 
 # Make the test importable regardless of how it is invoked (python -m unittest,
 # pytest from any cwd, etc.).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from headers import _match_path_parts, is_path_excluded
+from headers import _match_path_parts, apply_headers_to_tree, is_path_excluded
 
 
 class MatchPathPartsTest(unittest.TestCase):
@@ -97,6 +100,35 @@ class IsPathExcludedTest(unittest.TestCase):
 
     def test_no_patterns(self):
         self.assertFalse(is_path_excluded("a/b/c", []))
+
+
+class ApplyHeadersToTreeTest(unittest.TestCase):
+    def test_skips_gitignored_dependencies_but_updates_source(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            (root / ".gitignore").write_text("node_modules/\nbin/\n.venv/\nlocal-deps/\n")
+
+            files = {
+                "tracked.py": "print('tracked')\n",
+                "new.py": "print('new')\n",
+                "client/node_modules/pkg.js": "console.log('dependency');\n",
+                "bin/python-venv-test/lib/site-packages/pkg.py": "print('dependency')\n",
+                ".venv/lib/pkg.py": "print('dependency')\n",
+                "local-deps/pkg.py": "print('dependency')\n",
+            }
+            for name, content in files.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+            subprocess.run(["git", "-C", str(root), "add", ".gitignore", "tracked.py"], check=True)
+
+            apply_headers_to_tree(root)
+
+            for name in ("tracked.py", "new.py"):
+                self.assertIn("Licensed under the Apache License", (root / name).read_text())
+            for name in files.keys() - {"tracked.py", "new.py"}:
+                self.assertEqual((root / name).read_text(), files[name])
 
 
 if __name__ == "__main__":

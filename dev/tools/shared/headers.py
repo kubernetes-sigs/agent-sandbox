@@ -18,6 +18,7 @@ import os
 import fnmatch
 import argparse
 import datetime
+import subprocess
 
 # The license header to apply
 APACHE_HEADER = """Copyright {year} The Kubernetes Authors.
@@ -262,7 +263,7 @@ def is_path_excluded(relative_path, exclude_patterns):
 
 def apply_headers_to_tree(root_dir, excludes=None, dry_run=False):
     """
-    Applies headers to all files in a repository, respecting excludes.
+    Applies headers to tracked and non-ignored untracked files in a repository.
     """
     year = datetime.datetime.now().year
     header_text = APACHE_HEADER.format(year=year)
@@ -270,18 +271,16 @@ def apply_headers_to_tree(root_dir, excludes=None, dry_run=False):
     all_excludes = DEFAULT_EXCLUDES + (excludes or [])
     print(f"Excluding patterns: {all_excludes}")
 
-    for root, dirs, files in os.walk(root_dir, topdown=True):
-        rel_root = os.path.relpath(root, root_dir)
-        if rel_root == '.':
-            rel_root = ''
-
-        # Filter dirs in-place so os.walk doesn't recurse into them
-        dirs[:] = [d for d in dirs if not is_path_excluded(os.path.join(rel_root, d), all_excludes)]
-
-        for file in files:
-            rel_path = os.path.join(rel_root, file)
-            if is_path_excluded(rel_path, all_excludes):
-                continue
-
-            full_path = os.path.join(root, file)
+    paths = subprocess.check_output(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+        cwd=root_dir,
+    )
+    for path in paths.split(b"\0"):
+        if not path:
+            continue
+        rel_path = os.fsdecode(path)
+        if is_path_excluded(rel_path, all_excludes):
+            continue
+        full_path = os.path.join(root_dir, rel_path)
+        if os.path.isfile(full_path):
             apply_license_header(full_path, header_text, dry_run)

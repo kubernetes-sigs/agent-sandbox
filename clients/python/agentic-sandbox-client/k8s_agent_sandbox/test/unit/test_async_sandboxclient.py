@@ -17,6 +17,7 @@
 import asyncio
 import json
 import os
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -949,6 +950,119 @@ class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):
         _, call_kwargs = connector.client.request.call_args
         sent_headers = call_kwargs.get("headers", {})
         self.assertNotIn("X-Sandbox-Timeout", sent_headers)
+
+
+    def _connector_with_ok_response(self, config):
+        connector = AsyncSandboxConnector(
+            sandbox_id="my-sandbox",
+            namespace="dev",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+        )
+        mock_response = AsyncMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.is_redirect = False
+        mock_response.raise_for_status.return_value = None
+        connector.client.request = AsyncMock(return_value=mock_response)
+        return connector
+
+    async def test_extra_headers_are_sent_with_routing_headers(self):
+        config = SandboxDirectConnectionConfig(
+            api_url="https://router", extra_headers={"Authorization": "Bearer t"}
+        )
+        connector = self._connector_with_ok_response(config)
+        try:
+            await connector.send_request("GET", "health")
+
+            _, call_kwargs = connector.client.request.call_args
+            self.assertEqual(call_kwargs["headers"]["Authorization"], "Bearer t")
+            self.assertEqual(call_kwargs["headers"]["X-Sandbox-ID"], "my-sandbox")
+            # Must not mutate the config.
+            self.assertEqual(config.extra_headers, {"Authorization": "Bearer t"})
+        finally:
+            await connector.close()
+
+    async def test_caller_headers_override_extra_headers(self):
+        config = SandboxDirectConnectionConfig(
+            api_url="https://router", extra_headers={"Authorization": "Bearer t"}
+        )
+        connector = self._connector_with_ok_response(config)
+        try:
+            await connector.send_request(
+                "GET", "health", headers={"Authorization": "Bearer other"}
+            )
+
+            _, call_kwargs = connector.client.request.call_args
+            self.assertEqual(call_kwargs["headers"]["Authorization"], "Bearer other")
+        finally:
+            await connector.close()
+
+    async def test_tls_options_build_context_for_transport(self):
+        config = SandboxDirectConnectionConfig(
+            api_url="https://router",
+            client_cert=("/c.crt", "/c.key"),
+            ca_cert="/ca.pem",
+        )
+        context = MagicMock(spec=ssl.SSLContext)
+        with patch(
+            "k8s_agent_sandbox.async_connector.ssl.create_default_context",
+            return_value=context,
+        ) as create_context, patch(
+            "k8s_agent_sandbox.async_connector.httpx.AsyncHTTPTransport",
+            wraps=httpx.AsyncHTTPTransport,
+        ) as transport:
+            connector = AsyncSandboxConnector(
+                sandbox_id="my-sandbox",
+                namespace="dev",
+                connection_config=config,
+                k8s_helper=MagicMock(),
+            )
+        try:
+            create_context.assert_called_once_with(cafile="/ca.pem")
+            context.load_cert_chain.assert_called_once_with("/c.crt", "/c.key")
+            self.assertIs(transport.call_args.kwargs["verify"], context)
+        finally:
+            await connector.close()
+
+    async def test_client_cert_alone_keeps_default_trust_store(self):
+        config = SandboxDirectConnectionConfig(
+            api_url="https://router", client_cert=("/c.crt", "/c.key")
+        )
+        context = MagicMock(spec=ssl.SSLContext)
+        with patch(
+            "k8s_agent_sandbox.async_connector.httpx.create_ssl_context",
+            return_value=context,
+        ) as create_context, patch(
+            "k8s_agent_sandbox.async_connector.ssl.create_default_context"
+        ) as stdlib_context:
+            connector = AsyncSandboxConnector(
+                sandbox_id="my-sandbox",
+                namespace="dev",
+                connection_config=config,
+                k8s_helper=MagicMock(),
+            )
+        try:
+            create_context.assert_called_once_with()
+            stdlib_context.assert_not_called()
+            context.load_cert_chain.assert_called_once_with("/c.crt", "/c.key")
+        finally:
+            await connector.close()
+
+    async def test_no_custom_context_without_tls_options(self):
+        with patch(
+            "k8s_agent_sandbox.async_connector.httpx.AsyncHTTPTransport",
+            wraps=httpx.AsyncHTTPTransport,
+        ) as transport:
+            connector = AsyncSandboxConnector(
+                sandbox_id="my-sandbox",
+                namespace="dev",
+                connection_config=SandboxDirectConnectionConfig(api_url="https://router"),
+                k8s_helper=MagicMock(),
+            )
+        try:
+            self.assertIs(transport.call_args.kwargs["verify"], True)
+        finally:
+            await connector.close()
 
 
 class AsyncSandboxHandler(BaseHTTPRequestHandler):

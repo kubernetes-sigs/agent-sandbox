@@ -15,6 +15,7 @@
 """Unit tests for synchronous sandbox connectivity."""
 
 import io
+import os
 import subprocess
 import sys
 import threading
@@ -26,6 +27,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import requests
+from pydantic import ValidationError
 
 from k8s_agent_sandbox.connector import (
     DirectConnectionStrategy,
@@ -781,6 +783,119 @@ class TestSandboxConnectorHeaderInjection(unittest.TestCase):
         mock_session.request.return_value = mock_resp
 
         connector.send_request("GET", "/execute")
+
+class TestSandboxDirectConnectionConfigExtras(unittest.TestCase):
+    """Validation of extra_headers and the mTLS options."""
+
+    def test_reserved_routing_header_is_rejected_case_insensitively(self):
+        for name in ("X-Sandbox-ID", "x-sandbox-port", "X-SANDBOX-Timeout"):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValidationError, "reserved"):
+                    SandboxDirectConnectionConfig(
+                        api_url="https://router", extra_headers={name: "v"}
+                    )
+
+    def test_tls_options_require_https(self):
+        for options in ({"ca_cert": "/ca.pem"}, {"client_cert": ("/c.crt", "/c.key")}):
+            with self.subTest(options=options):
+                with self.assertRaisesRegex(ValidationError, "https://"):
+                    SandboxDirectConnectionConfig(api_url="http://router", **options)
+
+    def test_tls_options_accepted_on_https(self):
+        config = SandboxDirectConnectionConfig(
+            api_url="HTTPS://router",
+            client_cert=["/c.crt", "/c.key"],
+            ca_cert="/ca.pem",
+        )
+        self.assertEqual(config.client_cert, ("/c.crt", "/c.key"))
+        self.assertEqual(config.ca_cert, "/ca.pem")
+
+    def test_repr_hides_header_values(self):
+        config = SandboxDirectConnectionConfig(
+            api_url="https://router", extra_headers={"Authorization": "Bearer secret"}
+        )
+        self.assertNotIn("secret", repr(config))
+
+
+class TestSandboxConnectorExtraHeadersAndTLS(unittest.TestCase):
+    def _make_connector(self, config):
+        connector = SandboxConnector(
+            sandbox_id="my-sb",
+            namespace="my-ns",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+        )
+        mock_resp = MagicMock(spec=requests.Response)
+        mock_resp.status_code = 200
+        mock_resp.is_redirect = False
+        mock_resp.raise_for_status.return_value = None
+        connector.session = MagicMock()
+        connector.session.request.return_value = mock_resp
+        return connector
+
+    def test_extra_headers_are_sent_with_routing_headers(self):
+        config = SandboxDirectConnectionConfig(
+            api_url="https://router", extra_headers={"Authorization": "Bearer t"}
+        )
+        connector = self._make_connector(config)
+
+        connector.send_request("GET", "/execute")
+
+        sent = connector.session.request.call_args.kwargs["headers"]
+        self.assertEqual(sent["Authorization"], "Bearer t")
+        self.assertEqual(sent["X-Sandbox-ID"], "my-sb")
+        # Must not mutate the config.
+        self.assertEqual(config.extra_headers, {"Authorization": "Bearer t"})
+
+    def test_caller_headers_override_extra_headers(self):
+        config = SandboxDirectConnectionConfig(
+            api_url="https://router", extra_headers={"Authorization": "Bearer t"}
+        )
+        connector = self._make_connector(config)
+
+        connector.send_request("GET", "/execute", headers={"Authorization": "Bearer other"})
+
+        sent = connector.session.request.call_args.kwargs["headers"]
+        self.assertEqual(sent["Authorization"], "Bearer other")
+
+    def test_tls_options_are_passed_on_each_request(self):
+        config = SandboxDirectConnectionConfig(
+            api_url="https://router",
+            client_cert=("/c.crt", "/c.key"),
+            ca_cert="/ca.pem",
+        )
+        connector = self._make_connector(config)
+
+        connector.send_request("GET", "/execute")
+
+        kwargs = connector.session.request.call_args.kwargs
+        self.assertEqual(kwargs["verify"], "/ca.pem")
+        self.assertEqual(kwargs["cert"], ("/c.crt", "/c.key"))
+
+    def test_no_tls_kwargs_without_tls_options(self):
+        connector = self._make_connector(SandboxDirectConnectionConfig(api_url="https://router"))
+
+        connector.send_request("GET", "/execute")
+
+        kwargs = connector.session.request.call_args.kwargs
+        self.assertNotIn("verify", kwargs)
+        self.assertNotIn("cert", kwargs)
+
+    def test_ca_cert_wins_over_requests_ca_bundle_env(self):
+        # requests prefers REQUESTS_CA_BUNDLE over a session-level verify.
+        config = SandboxDirectConnectionConfig(api_url="https://router", ca_cert="/ca.pem")
+        connector = self._make_connector(config)
+        connector.session = requests.Session()
+        ok = MagicMock(spec=requests.Response)
+        ok.status_code = 200
+        ok.is_redirect = False
+        connector.session.send = MagicMock(return_value=ok)
+
+        with patch.dict(os.environ, {"REQUESTS_CA_BUNDLE": "/env-bundle.pem"}):
+            connector.send_request("GET", "/execute")
+
+        self.assertEqual(connector.session.send.call_args.kwargs["verify"], "/ca.pem")
+
 
 class TestSandboxConnectorErrorHandling(unittest.TestCase):
     def _make_connector(self):

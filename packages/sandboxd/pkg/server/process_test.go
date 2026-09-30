@@ -387,6 +387,65 @@ func TestStartWithPTY(t *testing.T) {
 	require.Contains(t, res.stdout.String(), "24 80")
 }
 
+// ptyRaceIterations is how many short-lived PTY processes the race regression
+// tests start. The races they guard against (#1803) only show up on some runs,
+// so a single run would pass most of the time even without the fix.
+const ptyRaceIterations = 50
+
+// TestStartWithPTY_DeliversAllOutputOfShortLivedProcess guards against the PTY
+// being closed as soon as the child is reaped, which discarded output the
+// kernel still had buffered, so the client saw exit code 0 and truncated or
+// empty output.
+func TestStartWithPTY_DeliversAllOutputOfShortLivedProcess(t *testing.T) {
+	client := newProcessClient(t, t.TempDir())
+	ctx := testCtx(t)
+
+	for i := range ptyRaceIterations {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			t.Parallel()
+			stream, err := client.Start(ctx, &processv1.StartRequest{
+				// The output is larger than the PTY buffer, so the child is
+				// still writing its tail when it exits; that tail is what a
+				// premature close drops.
+				Config: &processv1.ProcessConfig{Command: []string{"seq", "1", "2000"}},
+				Pty:    &processv1.PTY{Cols: 80, Rows: 24},
+			})
+			require.NoError(t, err)
+
+			res := drainStart(t, stream)
+			require.Equal(t, int32(0), res.exitCode)
+			// The line discipline turns "\n" into "\r\n".
+			lines := strings.Split(strings.TrimRight(res.stdout.String(), "\r\n"), "\r\n")
+			require.Equal(t, 2000, len(lines), "last line: %q", lines[len(lines)-1])
+		})
+	}
+}
+
+// TestStartWithPTY_InitialSizeVisibleImmediately guards against the requested
+// window size being applied after the child started, so a child that queries
+// it right away saw 0x0.
+func TestStartWithPTY_InitialSizeVisibleImmediately(t *testing.T) {
+	client := newProcessClient(t, t.TempDir())
+	ctx := testCtx(t)
+
+	for i := range ptyRaceIterations {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			t.Parallel()
+			stream, err := client.Start(ctx, &processv1.StartRequest{
+				// Exec stty directly rather than through sh so the size is
+				// read as early as possible.
+				Config: &processv1.ProcessConfig{Command: []string{"stty", "size"}},
+				Pty:    &processv1.PTY{Cols: 80, Rows: 24},
+			})
+			require.NoError(t, err)
+
+			res := drainStart(t, stream)
+			require.Equal(t, int32(0), res.exitCode)
+			require.Equal(t, "24 80\r\n", res.stdout.String())
+		})
+	}
+}
+
 func TestResizeTTYWithPTY(t *testing.T) {
 	client := newProcessClient(t, t.TempDir())
 	ctx := testCtx(t)

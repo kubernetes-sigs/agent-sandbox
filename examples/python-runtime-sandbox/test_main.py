@@ -13,9 +13,9 @@
 # limitations under the License.
 
 import os
-import shlex
 import signal
 import subprocess
+import tempfile
 from collections.abc import AsyncIterator
 from http import HTTPStatus
 from pathlib import Path
@@ -95,7 +95,7 @@ def test_execute_command_success(mock_popen):
 
     mock_popen.assert_called_once()
     called_args, called_kwargs = mock_popen.call_args
-    assert called_args[0] == shlex.split("echo hello")
+    assert called_args[0] == ["/bin/sh", "-c", "echo hello"]
     assert called_kwargs["cwd"] == "/app"
     assert called_kwargs["start_new_session"] is True
     mock_popen.return_value.__enter__.return_value.communicate.assert_called_once_with(timeout=300.0)
@@ -156,14 +156,32 @@ def test_execute_command_timeout_returns_failed_execution(mock_popen, mock_getpg
 
 
 def test_execute_command_invalid_syntax_returns_error():
-    # An unterminated quote makes shlex.split raise, which the handler
-    # catches and reports as a failed execution rather than a 500.
+    # An unterminated quote is a shell syntax error, reported by sh on
+    # stderr with a non-zero exit code, not a 500.
     response = client.post("/execute", json={"command": "echo 'unterminated"})
 
     assert response.status_code == 200
     body = response.json()
-    assert body["exit_code"] == 1
-    assert "Failed to execute command" in body["stderr"]
+    assert body["exit_code"] != 0
+    assert "unterminated" not in body["stdout"]
+
+
+def test_execute_command_runs_shell_operators():
+    # Without a shell, "&&" and ">" are passed as literal argv to the first
+    # command instead of being interpreted: mkdir -p would then create
+    # directories literally named "&&", "echo", "hi", ">" and "a/f.txt".
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        with patch.dict(os.environ, {"SANDBOX_BASE_DIR": tmp_dir}):
+            response = client.post(
+                "/execute",
+                json={"command": "mkdir -p a && echo hi > a/f.txt"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["exit_code"] == 0
+        target = os.path.join(tmp_dir, "a", "f.txt")
+        assert os.path.isfile(target)
+        assert open(target).read() == "hi\n"
 
 
 def test_upload_file_writes_to_safe_path(tmp_path):

@@ -2,7 +2,7 @@ module sigs.k8s.io/agent-sandbox
 
 go 1.26.0
 
-toolchain go1.26.4
+toolchain go1.27.1
 
 require (
 	github.com/creack/pty v1.1.24

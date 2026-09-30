@@ -2,7 +2,7 @@ module sigs.k8s.io/agent-sandbox/examples/sandboxed-tools
 
 go 1.26.0
 
-toolchain go1.26.4
+toolchain go1.27.1
 
 // This example is its own module so that its dependencies (including the
 // agentclientprotocol example, from which the ACP server reuses pkg/acp) stay

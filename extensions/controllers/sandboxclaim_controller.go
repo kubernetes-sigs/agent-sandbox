@@ -1222,12 +1222,29 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 
 			logger.V(4).Info("Attempting sandbox adoption", "sandbox candidate", adopted.Name, "warm pool", poolName, "claim", claim.Name)
 
-			// Update claim to record adoption (optimistic lock)
+			// Record the adoption on the claim as a metadata-only merge patch
+			// under an optimistic lock on the cached base. Not an Update: a
+			// full-object PUT re-serializes the user-owned spec, and that
+			// round-trip is not byte-stable (the non-pointer
+			// additionalPodMetadata struct is emitted as {} even when the
+			// stored object omits it), which the API server counts as a spec
+			// change and answers with a metadata.generation bump on a claim
+			// the user never touched. The optimistic lock is what keeps a
+			// stale cached base from overwriting a committed assignment; a
+			// 409 is retried below against a fresh read.
 			if claim.Annotations == nil {
 				claim.Annotations = make(map[string]string)
 			}
 			claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] = adopted.Name
-			if err := r.Update(ctx, claim); err != nil {
+			patch, err := rawpatch.Annotations(
+				map[string]string{extensionsv1beta1.AssignedSandboxNameAnnotation: adopted.Name},
+				rawpatch.WithOptimisticLock(claim.ResourceVersion),
+			)
+			if err != nil {
+				r.WarmSandboxQueue.Add(namespacedWarmPoolNameForQueue, adoptedKey)
+				return false, fmt.Errorf("failed to build adoption patch for claim %s: %w", claim.Name, err)
+			}
+			if err := r.Patch(ctx, claim, patch); err != nil {
 				if !k8errors.IsConflict(err) {
 					r.WarmSandboxQueue.Add(namespacedWarmPoolNameForQueue, adoptedKey)
 					logger.Error(err, "Failed to update claim for adoption", "claim", claim.Name, "sandbox", adopted.Name)
@@ -1407,13 +1424,20 @@ func (r *SandboxClaimReconciler) authoritativeReader() client.Reader {
 	return r.Client
 }
 
-// updateClaimOnFreshBase applies a guarded mutation to the claim in the
-// shared fetch-fresh/guard/mutate/copy-back shape: inside a
+// updateClaimOnFreshBase applies a guarded metadata mutation to the claim in
+// the shared fetch-fresh/guard/mutate/copy-back shape: inside a
 // retry.RetryOnConflict loop, re-read the claim from the authoritative reader
 // (the informer cache is stale by definition when the caller conflicted), let
-// mutate inspect and modify the fresh object, persist it when mutate asks for
-// a write, and copy the server-accepted object back into claim so the rest of
-// the pass operates on the accepted base.
+// mutate inspect and modify the fresh object, persist the delta when mutate
+// asks for a write, and copy the server-accepted object back into claim so
+// the rest of the pass operates on the accepted base.
+//
+// The delta is persisted as an optimistically locked merge patch diffed
+// against the fresh base rather than an Update: the patch carries only what
+// mutate changed (metadata), never the user-owned spec, so unlike a
+// full-object PUT it cannot bump metadata.generation through a non-byte-stable
+// spec round-trip (see adoptSandboxFromCandidates). The lock keeps the write
+// conditional on the base actually being fresh.
 //
 // mutate returns (false, nil) to skip the write; the fresh base is still
 // copied back. Any error from the fresh read or from mutate aborts the
@@ -1427,12 +1451,13 @@ func (r *SandboxClaimReconciler) updateClaimOnFreshBase(ctx context.Context, cla
 		if err := reader.Get(ctx, key, fresh); err != nil {
 			return err
 		}
+		base := fresh.DeepCopy()
 		write, err := mutate(fresh)
 		if err != nil {
 			return err
 		}
 		if write {
-			if err := r.Update(ctx, fresh); err != nil {
+			if err := r.Patch(ctx, fresh, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 				return err
 			}
 		}
@@ -1460,7 +1485,7 @@ func retryOnConflictKeepingAttemptErr(fn func() error) error {
 	return err
 }
 
-// retryAdoptionAnnotation retries the optimistically locked claim update that
+// retryAdoptionAnnotation retries the optimistically locked claim patch that
 // records an adoption after a 409: verify on a fresh base that no other
 // sandbox has been assigned in the meantime, then re-apply the assignment. On
 // success the fresh, annotated object is copied back into claim so the rest

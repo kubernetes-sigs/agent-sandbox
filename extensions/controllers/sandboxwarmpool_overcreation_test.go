@@ -432,6 +432,8 @@ func TestReconcilePool_UnschedulableStuckGC(t *testing.T) {
 		warmPool := newPool()
 		// The pod scheduled fine; the sandbox is stuck for some other reason.
 		sb := withPodScheduled(agedSandbox("-stuck"), metav1.ConditionTrue, sandboxv1beta1.SandboxReasonPodScheduled)
+		// Scheduled after creation, but longer ago than the grace period.
+		sb.Status.Conditions[len(sb.Status.Conditions)-1].LastTransitionTime = metav1.NewTime(time.Now().Add(-8 * time.Minute))
 
 		lc := newLaggingClient(newFakeClient(newTestScheme(), template, warmPool, sb))
 		r := SandboxWarmPoolReconciler{
@@ -472,6 +474,26 @@ func TestReconcilePool_UnschedulableStuckGC(t *testing.T) {
 		require.NoError(t, err)
 		err = r.Get(ctx, types.NamespacedName{Namespace: poolNamespace, Name: sb.Name}, &sandboxv1beta1.Sandbox{})
 		require.True(t, client.IgnoreNotFound(err) == nil && err != nil, "sandbox without a pod should be deleted")
+	})
+
+	t.Run("held sandbox gets a fresh grace once scheduled", func(t *testing.T) {
+		warmPool := newPool()
+		// Created well past the grace period, scheduled just now, not Ready yet.
+		sb := withPodScheduled(agedSandbox("-held"), metav1.ConditionTrue, sandboxv1beta1.SandboxReasonPodScheduled)
+
+		lc := newLaggingClient(newFakeClient(newTestScheme(), template, warmPool, sb))
+		r := SandboxWarmPoolReconciler{
+			Client:       lc,
+			Scheme:       newTestScheme(),
+			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+		}
+		ctx := context.Background()
+
+		requeueAfter, err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: poolNamespace, Name: sb.Name}, &sandboxv1beta1.Sandbox{}),
+			"a just-scheduled sandbox must not be deleted as stuck")
+		require.Positive(t, requeueAfter, "the post-grace evaluation must be self-scheduled")
 	})
 
 	// A terminating sandbox keeps its last mirrored PodScheduled condition until
@@ -565,6 +587,44 @@ func TestIsSandboxPodUnschedulable(t *testing.T) {
 				sb.Finalizers = []string{"agents.x-k8s.io/test-hold"}
 			}
 			require.Equal(t, tc.want, isSandboxPodUnschedulable(sb))
+		})
+	}
+}
+
+// TestReadinessGraceStart pins when a pool member's readiness grace period
+// starts: at creation, or when its Pod was scheduled if that is later.
+func TestReadinessGraceStart(t *testing.T) {
+	created := time.Now().Add(-10 * time.Minute).Truncate(time.Second)
+	scheduled := created.Add(7 * time.Minute)
+	podScheduled := func(status metav1.ConditionStatus, at time.Time) []metav1.Condition {
+		return []metav1.Condition{{
+			Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+			Status:             status,
+			Reason:             "Test",
+			LastTransitionTime: metav1.NewTime(at),
+		}}
+	}
+
+	tests := []struct {
+		name       string
+		conditions []metav1.Condition
+		want       time.Time
+	}{
+		{name: "no PodScheduled condition", conditions: nil, want: created},
+		{name: "scheduled after creation", conditions: podScheduled(metav1.ConditionTrue, scheduled), want: scheduled},
+		{name: "scheduled transition before creation", conditions: podScheduled(metav1.ConditionTrue, created.Add(-time.Minute)), want: created},
+		{name: "scheduling state unknown after creation", conditions: podScheduled(metav1.ConditionUnknown, scheduled), want: scheduled},
+		{name: "not scheduled", conditions: podScheduled(metav1.ConditionFalse, scheduled), want: created},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sb := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.NewTime(created)},
+				Status:     sandboxv1beta1.SandboxStatus{Conditions: tc.conditions},
+			}
+			got := readinessGraceStart(sb)
+			require.True(t, tc.want.Equal(got), "got %v, want %v", got, tc.want)
 		})
 	}
 }

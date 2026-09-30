@@ -63,7 +63,8 @@ const (
 	sandboxWarmPoolLabelIndex = ".metadata.labels[" + warmPoolSandboxLabel + "]"
 
 	// DefaultWarmPoolReadinessGracePeriod is how long a pool sandbox may stay
-	// non-Ready before the reconciler considers it stuck and replaces it,
+	// non-Ready, counted from when its Pod is scheduled (or from creation if it
+	// has not been), before the reconciler considers it stuck and replaces it,
 	// unless overridden via SandboxWarmPoolReconciler.ReadinessGracePeriod.
 	DefaultWarmPoolReadinessGracePeriod = 5 * time.Minute
 
@@ -107,9 +108,10 @@ type SandboxWarmPoolReconciler struct {
 	Scheme                 *runtime.Scheme
 	MaxBatchSize           int
 	EnableWarmPoolEviction bool
-	// ReadinessGracePeriod is how long a pool sandbox may stay non-Ready
-	// before it is considered stuck (delete-and-replace, or held if its pod
-	// is unschedulable). Zero means DefaultWarmPoolReadinessGracePeriod.
+	// ReadinessGracePeriod is how long a pool sandbox may stay non-Ready,
+	// counted from when its Pod is scheduled (or from creation if it has not
+	// been), before it is considered stuck (delete-and-replace, or held if its
+	// pod is unschedulable). Zero means DefaultWarmPoolReadinessGracePeriod.
 	ReadinessGracePeriod time.Duration
 	// UnschedulableRecheckInterval is the requeue interval while a pool holds
 	// unschedulable sandboxes past the readiness grace period. Zero means
@@ -517,7 +519,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	var nextGraceDeadline time.Duration
 	for _, sb := range activeSandboxes {
 		if !isSandboxReady(&sb) && !sb.CreationTimestamp.IsZero() {
-			age := now.Sub(sb.CreationTimestamp.Time)
+			age := now.Sub(readinessGraceStart(&sb))
 			if age <= r.readinessGracePeriod() {
 				// Not Ready but still within the grace period. In a quiet
 				// cluster nothing else touches the Sandbox objects of a pool
@@ -837,6 +839,26 @@ func (r *SandboxWarmPoolReconciler) setNotProgressing(warmPool *extensionsv1beta
 	} else {
 		r.Recorder.Eventf(warmPool, nil, corev1.EventTypeNormal, reasonWarmPoolProgressing, "Reconciling", "Warm pool is progressing again")
 	}
+}
+
+// readinessGraceStart returns when a pool member's readiness grace period
+// began: at creation or, if later, when its Pod was scheduled. A member held
+// past the grace period while unschedulable only starts pulling images and
+// starting containers once it schedules; counting from creation would delete it
+// as stuck before it can become Ready.
+//
+// The mirrored PodScheduled condition's LastTransitionTime approximates when
+// the Pod was scheduled: meta.SetStatusCondition only advances it when Status
+// changes. Unknown anchors the same way, so a transient Pod reconcile error
+// restarts the grace period rather than falling back to creation and deleting
+// a just-scheduled member; one that stays Unknown is still replaced.
+func readinessGraceStart(sb *sandboxv1beta1.Sandbox) time.Time {
+	start := sb.CreationTimestamp.Time
+	cond := meta.FindStatusCondition(sb.Status.Conditions, string(sandboxv1beta1.SandboxConditionPodScheduled))
+	if cond != nil && cond.Status != metav1.ConditionFalse && cond.LastTransitionTime.After(start) {
+		start = cond.LastTransitionTime.Time
+	}
+	return start
 }
 
 // isSandboxPodUnschedulable reports whether a pool member past its readiness

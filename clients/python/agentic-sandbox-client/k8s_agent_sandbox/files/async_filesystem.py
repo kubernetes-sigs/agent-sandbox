@@ -20,6 +20,8 @@ import urllib.parse
 from collections.abc import AsyncIterator
 from typing import Any, Awaitable, BinaryIO, Protocol
 
+import httpx
+
 from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
 from k8s_agent_sandbox.exceptions import SandboxRequestError
 from k8s_agent_sandbox.files.filesystem import (
@@ -243,6 +245,13 @@ class AsyncFilesystem:
                             f"File size exceeds limit of {max_bytes} bytes."
                         )
                 total += await _write_all(destination, chunk)
+        except httpx.HTTPError:
+            transport_token = response.extensions.get("sandboxd_transport_token")
+            if transport_token is not None:
+                await self.connector.invalidate_sandboxd_transport(
+                    None, transport_token=transport_token
+                )
+            raise
         finally:
             await response.aclose()
 

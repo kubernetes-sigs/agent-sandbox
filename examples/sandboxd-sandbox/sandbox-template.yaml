@@ -22,7 +22,7 @@
 # (Go: Runtime: RuntimeSandboxd; Python: SandboxdPodTunnelConnectionConfig).
 # This template does not enable a Service, and its default managed
 # NetworkPolicy allows ingress only from sandbox-router, which cannot proxy
-# the gRPC ProcessService. To use the Go SDK's direct in-cluster connectivity,
+# the gRPC ProcessService. To use the Go or Python SDK's direct in-cluster connectivity,
 # set spec.service: true for Service mode and configure spec.networkPolicy to
 # admit the calling workload on TCP ports 8080 and 9090; see USER_GUIDE.md.
 apiVersion: extensions.agents.x-k8s.io/v1beta1

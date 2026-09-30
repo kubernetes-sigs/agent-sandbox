@@ -428,6 +428,27 @@ func TestReconcilePool_UnschedulableStuckGC(t *testing.T) {
 		}
 	})
 
+	// A gated pod waits in an external queue (for example Kueue). Deleting it
+	// loses its queue position and orphans its queue entry (#1735).
+	t.Run("scheduling-gated sandbox is held, not replaced", func(t *testing.T) {
+		warmPool := newPool()
+		sb := withPodScheduled(agedSandbox("-gated"), metav1.ConditionFalse, corev1.PodReasonSchedulingGated)
+
+		lc := newLaggingClient(newFakeClient(newTestScheme(), template, warmPool, sb))
+		r := SandboxWarmPoolReconciler{
+			Client:       lc,
+			Scheme:       newTestScheme(),
+			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+		}
+		ctx := context.Background()
+
+		requeueAfter, err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: poolNamespace, Name: sb.Name}, &sandboxv1beta1.Sandbox{}))
+		require.Equal(t, 0, lc.createCount(), "no replacement may be created for a gated sandbox")
+		require.Equal(t, DefaultUnschedulableRecheckInterval, requeueAfter)
+	})
+
 	t.Run("genuinely stuck sandbox (pod scheduled) is still replaced", func(t *testing.T) {
 		warmPool := newPool()
 		// The pod scheduled fine; the sandbox is stuck for some other reason.
@@ -495,14 +516,9 @@ func TestReconcilePool_UnschedulableStuckGC(t *testing.T) {
 
 // TestIsSandboxPodUnschedulable pins the decision table of the mirrored-condition
 // read directly, independent of reconcilePool. Only PodScheduled=False with reason
-// Unschedulable is a hold signal: a missing condition and an Unknown status are the
-// two shapes the mirror uses for "Pod absent" and "Pod state unknown", so both fall
-// through to the stuck-sandbox path.
-//
-// The reason set here is carried over unchanged from the Pod-reading version this
-// refactor replaces; it is not a claim that the set is complete. SchedulingGated in
-// particular is a known gap and is deliberately left out of this table so a fix can
-// add it without first overturning an assertion made here.
+// Unschedulable or SchedulingGated is a hold signal: a missing condition and an
+// Unknown status are the two shapes the mirror uses for "Pod absent" and "Pod state
+// unknown", so both fall through to the stuck-sandbox path.
 func TestIsSandboxPodUnschedulable(t *testing.T) {
 	deleting := metav1.Now()
 
@@ -547,8 +563,24 @@ func TestIsSandboxPodUnschedulable(t *testing.T) {
 			want:       true,
 		},
 		{
+			name:       "False/SchedulingGated (waiting in an external queue)",
+			conditions: cond(metav1.ConditionFalse, corev1.PodReasonSchedulingGated),
+			want:       true,
+		},
+		{
+			name:       "False/unrecognized reason",
+			conditions: cond(metav1.ConditionFalse, "SomethingElse"),
+			want:       false,
+		},
+		{
 			name:       "deleting sandbox with a stale False/Unschedulable",
 			conditions: cond(metav1.ConditionFalse, corev1.PodReasonUnschedulable),
+			deleting:   true,
+			want:       false,
+		},
+		{
+			name:       "deleting sandbox with a stale False/SchedulingGated",
+			conditions: cond(metav1.ConditionFalse, corev1.PodReasonSchedulingGated),
 			deleting:   true,
 			want:       false,
 		},

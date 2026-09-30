@@ -844,8 +844,10 @@ func (r *SandboxWarmPoolReconciler) setNotProgressing(warmPool *extensionsv1beta
 // instead of replaced (#1215).
 //
 // Reads the PodScheduled condition mirrored onto Sandbox.status instead of
-// fetching the Pod. Anything but False/Unschedulable takes the stuck-sandbox
-// path; SchedulingGated is a known gap in that set, tracked separately.
+// fetching the Pod. Anything but False/Unschedulable or False/SchedulingGated
+// takes the stuck-sandbox path. A gated Pod is waiting in an external queue
+// (for example Kueue), and deleting it forfeits its position and orphans its
+// queue entry (#1735).
 //
 // Reading the mirror costs two things the Pod read gave us:
 //   - A Pod wedged terminating still reports Unschedulable, so it holds a slot
@@ -865,7 +867,8 @@ func isSandboxPodUnschedulable(sb *sandboxv1beta1.Sandbox) bool {
 	if cond == nil {
 		return false
 	}
-	return cond.Status == metav1.ConditionFalse && cond.Reason == corev1.PodReasonUnschedulable
+	return cond.Status == metav1.ConditionFalse &&
+		(cond.Reason == corev1.PodReasonUnschedulable || cond.Reason == corev1.PodReasonSchedulingGated)
 }
 
 // resolveUpdateStrategy returns the effective update strategy for the warm pool,

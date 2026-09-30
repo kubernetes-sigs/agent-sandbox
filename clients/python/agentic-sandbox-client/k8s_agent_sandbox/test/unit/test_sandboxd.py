@@ -20,6 +20,7 @@ command path, which requires generated stubs + the native grpcio extension.
 """
 
 import datetime
+import io
 import unittest
 from unittest.mock import MagicMock
 
@@ -87,6 +88,18 @@ class TestSandboxdFilesystem(unittest.TestCase):
         self.assertEqual(args[1], "v1/files/dir%2Fscript.py")
         self.assertEqual(kwargs["data"], b"print(1)")
         self.assertEqual(kwargs["headers"]["Content-Type"], "application/octet-stream")
+
+    def test_write_streams_raw_body_once(self):
+        source = io.BytesIO(b"skip-streamed payload")
+        source.seek(5)
+
+        self._fs.write("dir/data.bin", source)
+
+        args, kwargs = self._last_call()
+        self.assertEqual(args[0], "PUT")
+        self.assertEqual(b"".join(kwargs["data"]), b"streamed payload")
+        self.assertTrue(kwargs["_disable_retries"])
+        self.assertFalse(source.closed)
 
     def test_read_gets_files_endpoint(self):
         resp = MagicMock()

@@ -79,7 +79,13 @@ footer {
     }
   }
 
+  .td-navbar-nav-scroll {
+    min-width: 0;
+  }
+
   .navbar-nav {
+    overflow-x: auto;
+
     @include media-breakpoint-down(md) {
       font-size: 0.875rem;
 

@@ -223,6 +223,12 @@ export interface Logger {
   error(message: string): void;
 }
 
+/** The `additionalPodMetadata` block of a SandboxClaim spec. */
+export interface PodMetadata {
+  labels?: Record<string, string>;
+  annotations?: Record<string, string>;
+}
+
 export interface CreateSandboxOptions {
   sandboxReadyTimeout?: number;
   labels?: Record<string, string>;
@@ -234,4 +240,17 @@ export interface CreateSandboxOptions {
    * that produces a valid RFC3339 deadline. Omit to leave expiration unset.
    */
   shutdownAfterSeconds?: number;
+  /**
+   * Labels stamped onto the running Sandbox Pod through the claim's
+   * `spec.additionalPodMetadata.labels`. Unlike `labels`, which land on the
+   * SandboxClaim object, these are readable from inside the sandbox through
+   * the Downward API. Only label syntax is checked client-side; the
+   * controller's label-domain allowlist is enforced server-side.
+   */
+  podLabels?: Record<string, string>;
+  /**
+   * Annotations stamped onto the running Sandbox Pod through the claim's
+   * `spec.additionalPodMetadata.annotations`.
+   */
+  podAnnotations?: Record<string, string>;
 }

@@ -40,6 +40,7 @@ export type {
   FileCallOptions,
   FileEntry,
   Logger,
+  PodMetadata,
   ProcessOptions,
   RunOptions,
   RuntimeCallOptions,

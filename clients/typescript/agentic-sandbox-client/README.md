@@ -58,6 +58,23 @@ RFC3339 deadline; invalid values reject with `SandboxError` before provisioning.
 Omitting it leaves expiration unset. Continue to call `sandbox.close()` when work
 finishes; expiration provides a fallback if the client cannot clean up.
 
+### Pod labels and annotations
+
+`labels` land on the SandboxClaim. Use `podLabels` and `podAnnotations` to set
+metadata on the sandbox Pod instead, where code inside the sandbox can read it
+through the Downward API:
+
+```typescript
+const sandbox = await client.createSandbox("my-warm-pool", "default", {
+  podLabels: { "sandbox.users.io/session": "abc123" },
+  podAnnotations: { "sandbox.users.io/note": "demo" },
+});
+```
+
+These populate `spec.additionalPodMetadata`, matching the Python SDK's
+`pod_labels` and `pod_annotations`. Pod label syntax is checked before
+provisioning; the controller's label-domain allowlist is enforced server-side.
+
 ### Listing sandboxes
 
 With Kubernetes credentials configured and permission to list SandboxClaims, run

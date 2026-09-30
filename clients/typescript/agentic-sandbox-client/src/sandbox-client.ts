@@ -54,6 +54,7 @@ import {
 import type {
   CreateSandboxOptions,
   Logger,
+  PodMetadata,
   SandboxClientOptions,
 } from "./types.js";
 
@@ -124,6 +125,25 @@ function validateLabels(labels: Record<string, string>): void {
       validateLabelName(value, `value '${value}' for key '${key}'`);
     }
   }
+}
+
+/**
+ * Assembles `spec.additionalPodMetadata`, or undefined when neither section
+ * has entries so the manifest carries no empty block.
+ */
+function buildPodMetadata(
+  podLabels?: Record<string, string>,
+  podAnnotations?: Record<string, string>,
+): PodMetadata | undefined {
+  const podMetadata: PodMetadata = {};
+  if (podLabels && Object.keys(podLabels).length > 0) {
+    validateLabels(podLabels);
+    podMetadata.labels = podLabels;
+  }
+  if (podAnnotations && Object.keys(podAnnotations).length > 0) {
+    podMetadata.annotations = podAnnotations;
+  }
+  return Object.keys(podMetadata).length > 0 ? podMetadata : undefined;
 }
 
 /**
@@ -378,6 +398,9 @@ export class SandboxClient {
       shutdownTime = deadline.toISOString();
     }
 
+    // Like the deadline above, checked before any provisioning work starts.
+    const podMetadata = buildPodMetadata(opts?.podLabels, opts?.podAnnotations);
+
     // Empty string normalizes to defaultNamespace (matches Go client behaviour).
     const ns = namespace || this.defaultNamespace;
     const claimName = `sandbox-claim-${crypto.randomBytes(4).toString("hex")}`;
@@ -396,6 +419,7 @@ export class SandboxClient {
       ns,
       opts,
       shutdownTime,
+      podMetadata,
     ).finally(() => {
       this.attaching.delete(key);
       this.provisioning.delete(key);
@@ -416,6 +440,7 @@ export class SandboxClient {
     ns: string,
     opts?: CreateSandboxOptions,
     shutdownTime?: string,
+    podMetadata?: PodMetadata,
   ): Promise<Sandbox> {
     const sandboxReadyTimeout =
       opts?.sandboxReadyTimeout ?? this.defaultSandboxReadyTimeout;
@@ -446,6 +471,7 @@ export class SandboxClient {
         sandboxTracer,
         sandboxTracingManager?.parentContext,
         shutdownTime,
+        podMetadata,
       );
       // deleteAll() may have swept this key while the claim was being created;
       // it could not delete a claim the apiserver had not accepted yet, so fail
@@ -1026,6 +1052,7 @@ export class SandboxClient {
     tracer: Tracer | null = null,
     parentContext?: unknown,
     shutdownTime?: string,
+    podMetadata?: PodMetadata,
   ): Promise<void> {
     if (labels) {
       validateLabels(labels);
@@ -1053,6 +1080,7 @@ export class SandboxClient {
         },
         spec: {
           warmPoolRef: { name: warmpool },
+          ...(podMetadata ? { additionalPodMetadata: podMetadata } : {}),
           ...(shutdownTime
             ? { lifecycle: { shutdownTime, shutdownPolicy: "Delete" } }
             : {}),

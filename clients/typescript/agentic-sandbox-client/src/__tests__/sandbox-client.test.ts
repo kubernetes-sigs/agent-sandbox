@@ -426,6 +426,79 @@ describe("SandboxClient (registry)", () => {
       });
     });
 
+    it("passes pod labels and annotations as additionalPodMetadata, apart from claim labels", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-pod-metadata");
+
+      const client = new SandboxClient();
+      await client.createSandbox("tpl", "default", {
+        labels: { team: "infra" },
+        podLabels: { "sandbox.users.io/session": "abc" },
+        podAnnotations: { note: "hello" },
+      });
+
+      const createArgs = mockCreateNamespacedCustomObject.mock.calls[0][0];
+      expect(createArgs.body.metadata.labels).toEqual({ team: "infra" });
+      expect(createArgs.body.spec).toEqual({
+        warmPoolRef: { name: "tpl" },
+        additionalPodMetadata: {
+          labels: { "sandbox.users.io/session": "abc" },
+          annotations: { note: "hello" },
+        },
+      });
+    });
+
+    it.each([
+      ["labels only", { podLabels: { app: "x" } }, { labels: { app: "x" } }],
+      [
+        "annotations only",
+        { podAnnotations: { note: "hi" } },
+        { annotations: { note: "hi" } },
+      ],
+      [
+        "empty labels beside annotations",
+        { podLabels: {}, podAnnotations: { note: "hi" } },
+        { annotations: { note: "hi" } },
+      ],
+    ])("sends only the pod metadata that was set (%s)", async (_label, opts, expected) => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-partial-pod-metadata");
+
+      const client = new SandboxClient();
+      await client.createSandbox("tpl", "default", opts);
+
+      const createArgs = mockCreateNamespacedCustomObject.mock.calls[0][0];
+      expect(createArgs.body.spec.additionalPodMetadata).toEqual(expected);
+    });
+
+    it("omits additionalPodMetadata when the pod maps are empty", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-empty-pod-metadata");
+
+      const client = new SandboxClient();
+      await client.createSandbox("tpl", "default", {
+        podLabels: {},
+        podAnnotations: {},
+      });
+
+      const createArgs = mockCreateNamespacedCustomObject.mock.calls[0][0];
+      expect(createArgs.body.spec).toEqual({ warmPoolRef: { name: "tpl" } });
+    });
+
+    it("rejects invalid pod labels before provisioning", async () => {
+      mockSandboxReadyFlow("sandbox-invalid-pod-label");
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", {
+          podLabels: { "bad key!": "v" },
+        }),
+      ).rejects.toThrow("invalid characters");
+      expect(mockCreateNamespacedCustomObject).not.toHaveBeenCalled();
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+      expect(mockWatchFn).not.toHaveBeenCalled();
+    });
+
     it("sets a deletion deadline from the create call, preserving namespace and labels", async () => {
       vi.useFakeTimers();
       try {

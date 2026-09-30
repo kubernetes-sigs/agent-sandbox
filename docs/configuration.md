@@ -162,6 +162,8 @@ spec:
       containers:
       - name: agent-sandbox-controller
         args:
+        - --leader-elect=true
+        - --extensions
         - --sandbox-concurrent-workers=200
         - --sandbox-claim-concurrent-workers=150
         - --sandbox-warm-pool-concurrent-workers=4
@@ -183,7 +185,7 @@ When running high sustained claim rates (e.g., 10–20+ claims/second) or managi
    * **Fix**: Enable `--separate-watch-connection=true` and shard write traffic with `--api-connections=4` (or `8`).
 
 2. **Replenishment Pacing & Warm Pool Sharding**:
-   By default, replenishment is unpaced (`--sandbox-warm-pool-max-refill-rate=0`), causing the controller to attempt to satisfy the entire deficit at once in giant batches. This floods the API server with parallel POST requests, triggering API Priority & Fairness (APF) throttling and overflowing watch caches. Additionally, because reconciles and expectations gates are serialized per `SandboxWarmPool`, a single pool's sustained refill ceiling is ~70–85 sandboxes/s.
+   By default, replenishment is unpaced (`--sandbox-warm-pool-max-refill-rate=0`), causing the controller to create replacement sandboxes in repeated bursts bounded only by `--sandbox-warm-pool-max-batch-size` (default `300`), waiting for observed `ADD` events between batches. Firing up to 300 parallel `POST` requests per batch floods the API server, triggering API Priority & Fairness (APF) throttling and saturating watch delivery. Additionally, because reconciles and expectations gates are serialized per `SandboxWarmPool`, a single pool's sustained refill ceiling is ~70–85 sandboxes/s.
    * **Fix**: Set `--sandbox-warm-pool-max-refill-rate` (e.g. `25`–`30` for a sustained 20 claims/s workload, or `80`–`100` for higher rates) to pace replenishment smoothly, bound `--sandbox-warm-pool-max-batch-size=200`, and shard large warm pools (>500–1,000 replicas or >30 claims/s sustained) across multiple `SandboxWarmPool` resources with `--sandbox-warm-pool-concurrent-workers` matched to the pool count.
 
 3. **Reducing API Server & etcd Pressure**:

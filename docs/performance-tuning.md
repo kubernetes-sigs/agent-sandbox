@@ -70,9 +70,19 @@ For sustained claim rates above **~30 claims/s** or warm pools larger than
 - **Split capacity across multiple `SandboxWarmPool` resources** (for example,
   4 pools of 450 replicas instead of 1 pool of 1,800 replicas) and set
   `--sandbox-warm-pool-concurrent-workers` to match the number of active pools.
-- **Always set `--sandbox-warm-pool-max-refill-rate`** (e.g., `50`–`100` per
-  pool) so replenishment flows as a steady token-bucket stream rather than
-  300-sandbox bursts.
+- **Set `--sandbox-warm-pool-max-refill-rate`** (e.g., `50`–`100` per pool when
+  watch delivery is healthy) so replenishment flows as a steady token-bucket
+  stream rather than 300-sandbox bursts.
+  - **Caveat under watch lag:** The expectations gate admits one create batch
+    per watch round-trip, and `refillBucket` caps each batch at `max(1, rate)`
+    tokens (1 second of creates). Under an $L$-second watch lag, effective
+    per-pool refill drops to $\approx \min(\text{rate}, \text{batchSize}) / L$
+    (for example, `rate=100` with a 15 s lag yields only ~7 creates/s per pool,
+    *below* the unpaced `300 / 15 = 20`/s). When watch lag is present, the
+    primary levers are pool count and `--sandbox-warm-pool-max-batch-size`, and
+    the per-pool rate must be sized as
+    $\text{rate} \ge \text{claims/s} \times L / \text{pools}$ rather than a flat
+    `50`–`100`.
 - **Isolate watch streams** with `--separate-watch-connection=true` and
   `--api-connections=4` so mutating write traffic cannot starve the informer
   watch events that clear each pool's expectations gate.
@@ -432,12 +442,12 @@ primary constraint — which is why the sustained profile below omits it.
 
 | Symptom | Root cause | Fix |
 |---|---|---|
-| **Warm pool stops refilling for 10 s–5 m** while claims drain the pool (`warmPoolExpectations` gate stays closed) | Watch `ADD` events for newly created `Sandbox` objects are queued behind mutating write bursts on a shared HTTP/2 connection, or `kube-apiserver` is slow decoding ~10 KB `Sandbox` watch payloads | Enable `--separate-watch-connection=true`, `--api-connections=4`, and `--sandbox-warm-pool-max-refill-rate=100`; shard across multiple `SandboxWarmPool`s; ensure `ConcurrentWatchObjectDecode` (KEP-6178, beta/default in Kubernetes 1.31+) is enabled on the API server |
-| **`Sandbox` watch force-closed (`410 Gone` / relist)** or **etcd DB grows to multiple GBs between defrags** | Unpaced 300-sandbox refill bursts writing ~10 KB per `Sandbox` (inlined `podTemplate` + `managedFields`) plus `Pod` specs overflow the API server watch cache ring buffer and bloat etcd MVCC revisions | Pace refills with `--sandbox-warm-pool-max-refill-rate`; enable `--disable-sandbox-events`, `--disable-claim-events`, and `--disable-claim-observability-annotations`; tune the managed control plane (below) |
+| **Warm pool stops refilling for 10 s–5 m** while claims drain the pool (`warmPoolExpectations` gate stays closed) | Watch `ADD` events for newly created `Sandbox` objects are queued behind mutating write bursts on a shared HTTP/2 connection, or `kube-apiserver` is slow decoding ~10 KB `Sandbox` watch payloads | Enable `--separate-watch-connection=true`, `--api-connections=4`, and pace/shard across multiple `SandboxWarmPool`s; ensure `ConcurrentWatchObjectDecode` (KEP-6178; beta and default-off in Kubernetes 1.31–1.36, default-on in 1.37+) is enabled on the API server |
+| **`Sandbox` watch force-closed (`410 Gone` / relist)** or **etcd DB grows to multiple GBs between defrags** | Unpaced 300-sandbox refill bursts writing ~10 KB per `Sandbox` (inlined `podTemplate` + `managedFields`) plus `Pod` specs saturate `kube-apiserver` watch delivery and bloat etcd MVCC revisions | Pace refills with `--sandbox-warm-pool-max-refill-rate`; enable `--disable-sandbox-events`, `--disable-claim-events`, and `--disable-claim-observability-annotations`; tune the managed control plane (below) |
 | **High claim adoption latency while warm sandboxes are Ready** (`workqueue` wait or APF queuing) | Warm-pool refill `POST` requests share `workload-low` in APF and starve latency-critical claim adoption `PATCH`es | Apply `examples/apf-insulation/apf-insulation.yaml` ([APF Insulation](apf-insulation.md)) and pace refills with `--sandbox-warm-pool-max-refill-rate` |
 | **High rate of HTTP `409 Conflict` errors** in controller logs during bursts | Excessive worker concurrency colliding on `Sandbox` or `Pod` `resourceVersion` updates | Keep workers near the validated `200/150` profile (avoid 1000+ workers); optionally set `--sandbox-write-behind-window=250ms` for burst-dominated workloads |
 
-### Managed Kubernetes control plane checklist (GKE / AKS / EKS)
+### Managed Kubernetes control plane checklist
 
 Each `Sandbox` custom resource stores an inlined `PodTemplate` plus
 `metadata.managedFields` (~10 KB per object in etcd). Although the controller
@@ -457,12 +467,13 @@ provider:
    etcd disk throughput/IOPS or synchronized defragmentation. Upgrade to a
    dedicated/high-scale control-plane tier and verify that etcd defragmentation
    runs rolling (one member at a time behind leader transfer).
-2. **Watch cache ring buffer (`--watch-cache-sizes`) & `ConcurrentWatchObjectDecode`:**
-   Confirm `ConcurrentWatchObjectDecode` (KEP-6178) is enabled so serializing
-   ~10 KB `Sandbox` watch events does not lag the controller's watch stream. If
-   bursts still force-close the controller's `Sandbox` watch (`too old resource
-   version`), ask the provider to increase the CRD watch cache ring buffer size
-   (e.g., `--watch-cache-sizes=sandboxes.agents.x-k8s.io#5000`).
+2. **`ConcurrentWatchObjectDecode` (KEP-6178):**
+   `ConcurrentWatchObjectDecode` lets `kube-apiserver` decode ~10 KB `Sandbox`
+   watch payloads concurrently instead of falling 10–15 s behind on the
+   controller's watch stream. It is beta but **default-off in Kubernetes
+   1.31–1.36** and becomes **default-on in 1.37+** — on 1.31–1.36 managed
+   control planes, explicitly enable it (or ask your provider to enable the
+   feature gate).
 3. **API server inflight seats & `kube-scheduler` QPS:**
    Default Kubernetes API server limits (`--max-requests-inflight=400`,
    `--max-mutating-requests-inflight=200`) leave only ~77 concurrency seats for

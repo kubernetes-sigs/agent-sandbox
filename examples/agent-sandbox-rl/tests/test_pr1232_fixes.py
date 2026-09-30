@@ -81,6 +81,13 @@ def test_pod_template_carries_run_and_managed_labels():
   assert labels[constants.MANAGED_BY_LABEL] == constants.MANAGED_BY_VALUE
 
 
+def test_run_id_label_is_not_controller_reserved():
+  # The controller drops pod labels under these prefixes, so a run-id key in
+  # them never reaches a pod and the breaker and reaper match no pods (#1807).
+  assert not constants.RUN_ID_LABEL.startswith(
+      ("agents.x-k8s.io/", "extensions.agents.x-k8s.io/"))
+
+
 # --- #1: count_pods + breaker counts pods --------------------------------- #
 def test_count_pods_uses_remaining_item_count():
   r = _res()

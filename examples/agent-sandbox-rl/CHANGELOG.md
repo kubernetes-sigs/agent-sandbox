@@ -5,6 +5,13 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 
 ## [0.1.0.dev0] — unreleased
 
+### Fixed ([#1807](https://github.com/kubernetes-sigs/agent-sandbox/issues/1807))
+- **The run-id label is now `agent-sandbox-rl/run-id`.** The controller drops pod
+  labels under `agents.x-k8s.io/`, so pods never carried the old key and the
+  circuit breaker count and the reaper pod sweep matched nothing.
+  **Behaviour change:** resources made with the old key are not matched by
+  `reap(run_id=...)`; sweep them with `reap(all_managed=True)`.
+
 ### Fixed (concurrent runs in one namespace —
 [#1736](https://github.com/kubernetes-sigs/agent-sandbox/issues/1736))
 - **`teardown()` is scoped to this run.** It listed claims, pools and templates by

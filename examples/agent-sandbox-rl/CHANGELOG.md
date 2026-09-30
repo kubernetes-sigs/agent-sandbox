@@ -5,6 +5,19 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 
 ## [0.1.0.dev0] — unreleased
 
+### Fixed (run-id pod safeguards —
+[#1807](https://github.com/kubernetes-sigs/agent-sandbox/issues/1807))
+- **The circuit breaker and the reaper's pod force-delete see this run's pods
+  again.** Both selected pods by `agents.x-k8s.io/asrl-run-id`, but since #894 the
+  Sandbox controller strips `agents.x-k8s.io/*` labels from the pod template before
+  it reaches the pod, so `live_owned_count()` was always 0 (the breaker could never
+  trip on pod count) and `reap(run_id=…)`'s grace-0 pod delete matched nothing. The
+  pod template now also carries the run id as `agent-sandbox-rl/run-id`
+  (`POD_RUN_ID_LABEL`), which the controller leaves alone, and
+  `live_owned_count()` / the reaper's pod sweep select on it
+  (`fleet.pod_run_selector()`). Claims, pools and templates keep
+  `agents.x-k8s.io/asrl-run-id`, and the ownership checks still read it.
+
 ### Fixed (concurrent runs in one namespace —
 [#1736](https://github.com/kubernetes-sigs/agent-sandbox/issues/1736))
 - **`teardown()` is scoped to this run.** It listed claims, pools and templates by

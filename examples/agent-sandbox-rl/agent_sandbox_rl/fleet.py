@@ -217,13 +217,20 @@ class SandboxFleet:
     """Label selector for resources this run owns (the reaper key)."""
     return f"{constants.RUN_ID_LABEL}={self.run_id}"
 
+  def pod_run_selector(self) -> str:
+    """Label selector for sandbox pods this run owns. Pods carry the run id under
+    POD_RUN_ID_LABEL, not RUN_ID_LABEL: the Sandbox controller strips
+    `agents.x-k8s.io/*` labels from pods."""
+    return f"{constants.POD_RUN_ID_LABEL}={self.run_id}"
+
   def live_owned_count(self) -> int:
     """Live sandbox **pods** this run owns (by run-id label), across clusters.
 
     The Sandbox controller does not copy the run-id label onto Sandbox CRs, so we
-    count pods instead — the pod template carries the fleet labels (incl. run-id),
-    so this reflects the actual live footprint, including #1215 over-creation."""
-    sel = self.run_selector()
+    count pods instead — the pod template carries the run id (as
+    POD_RUN_ID_LABEL), so this reflects the actual live footprint, including
+    #1215 over-creation."""
+    sel = self.pod_run_selector()
     n = 0
     for c in self.registry:
       try:

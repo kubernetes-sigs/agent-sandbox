@@ -247,17 +247,26 @@ class Resources:
         },
         "spec": {
             "podTemplate": {
-                # Propagate the fleet labels (incl. the per-run RUN_ID_LABEL) onto
-                # the pod template so every sandbox POD carries them — the Sandbox
-                # controller does not copy the claim/pool run-id label onto Sandbox
-                # CRs, so pods are how a run attributes its live footprint (circuit
-                # breaker count + reaper pod sweep). `sandbox=<template>` is kept for
-                # the colocation affinity above.
-                "metadata": {"labels": {**self.labels, "sandbox": template_name}},
+                # See _pod_template_labels: this is how pods carry the run id.
+                "metadata": {"labels": self._pod_template_labels(template_name)},
                 "spec": pod_spec,
             }
         },
     }
+
+  def _pod_template_labels(self, template_name: str) -> dict:
+    """Labels for a template's pod template, so every sandbox POD carries them —
+    the Sandbox controller does not copy the claim/pool run-id label onto Sandbox
+    CRs, so pods are how a run attributes its live footprint (circuit breaker
+    count + reaper pod sweep). The controller drops `agents.x-k8s.io/*` keys
+    (RUN_ID_LABEL included) on the way to the pod, so the run id is repeated under
+    POD_RUN_ID_LABEL, which survives. `sandbox=<template>` is kept for the
+    colocation affinity."""
+    labels = {**self.labels, "sandbox": template_name}
+    run_id = self.labels.get(constants.RUN_ID_LABEL)
+    if run_id:
+      labels[constants.POD_RUN_ID_LABEL] = run_id
+    return labels
 
   def _reconcile_template_labels(self, template_name: str, existing: dict) -> None:
     """Patch a pre-existing template's metadata + pod-template labels up to this
@@ -270,7 +279,7 @@ class Resources:
     is last-writer-wins. Both directions are safe: a breaker under-counts and fails
     open, and a per-run reap misses the other run's pods rather than deleting them."""
     desired_meta = dict(self.labels)
-    desired_pod = {**self.labels, "sandbox": template_name}
+    desired_pod = self._pod_template_labels(template_name)
     cur_meta = ((existing.get("metadata") or {}).get("labels")) or {}
     cur_pod = ((((existing.get("spec") or {}).get("podTemplate") or {})
                 .get("metadata") or {}).get("labels")) or {}

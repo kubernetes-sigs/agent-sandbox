@@ -97,6 +97,16 @@ def test_pod_run_label_is_not_system_reserved():
   assert constants.POD_RUN_ID_LABEL not in kw["body"]["metadata"]["labels"]
 
 
+def test_pod_template_has_no_pod_run_label_without_a_run_id():
+  # A Resources with no run id (e.g. the reaper's own) must not stamp an empty one.
+  r = _res()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  r.ensure_template(IMG, TNAME, TemplateSpec())
+  _, kw = r.custom_api.create_namespaced_custom_object.call_args
+  labels = kw["body"]["spec"]["podTemplate"]["metadata"]["labels"]
+  assert constants.POD_RUN_ID_LABEL not in labels
+
+
 # --- #1: count_pods + breaker counts pods --------------------------------- #
 def test_count_pods_uses_remaining_item_count():
   r = _res()

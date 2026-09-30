@@ -16,7 +16,21 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
   (`POD_RUN_ID_LABEL`), which the controller leaves alone, and
   `live_owned_count()` / the reaper's pod sweep select on it
   (`fleet.pod_run_selector()`). Claims, pools and templates keep
-  `agents.x-k8s.io/asrl-run-id`, and the ownership checks still read it.
+  `agents.x-k8s.io/asrl-run-id`, and the ownership checks still read it. Warm pods
+  created before the upgrade don't gain the new label (changing a template's
+  pod-template labels doesn't replace pool members), so `reap(run_id=…)` misses
+  them until they cycle.
+- **No provisioning path relabels another run's template** (the relabel half of
+  [#1808](https://github.com/kubernetes-sigs/agent-sandbox/issues/1808)). The
+  on-demand path in `acquire()` and `ensure_templates()` called `ensure_template`
+  without an owner check, so an existing template was relabelled to the calling
+  run even when another live run owned it. That run's teardown and
+  `reap(run_id=…)` then deleted the owner's template, the owner's unwarm skipped
+  it and its next warm raised, and — with the pod label above — the calling
+  run's reap force-deleted the owner's pods. The on-demand path now reuses
+  another run's template as it finds it (as it already did with the pool), and
+  `ensure_templates()` raises a `FleetError` naming the owning run, like the
+  warm path.
 
 ### Fixed (concurrent runs in one namespace —
 [#1736](https://github.com/kubernetes-sigs/agent-sandbox/issues/1736))

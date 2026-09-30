@@ -580,7 +580,7 @@ def test_ensure_template_refuses_another_runs_template():
     r.ensure_template(IMG, "tmpl", TemplateSpec(), owner_run_id="mine")
   assert ei.value.owner == "other"
   r.custom_api.patch_namespaced_custom_object.assert_not_called()   # no relabel
-  # Without owner_run_id (the bulk / on-demand callers) it is still "existed".
+  # Without owner_run_id it is still "existed".
   r.custom_api.get_namespaced_custom_object.return_value = {
       "metadata": {"labels": {constants.RUN_ID_LABEL: "mine"}},
       "spec": {"podTemplate": {"metadata": {"labels": {}}}}}
@@ -598,6 +598,35 @@ def test_ensure_template_owner_checks_a_template_created_in_the_race():
       status=409)                                      # ... another run won the create
   with pytest.raises(OwnedByAnotherRunError):
     r.ensure_template(IMG, "tmpl", TemplateSpec(), owner_run_id="mine")
+
+
+def test_ensure_template_share_foreign_reuses_without_relabel():
+  # #1808: the on-demand path reuses another run's template; relabelling it
+  # handed it to this run's teardown/reap while the owner's pool still used it.
+  from agent_sandbox_rl import TemplateSpec
+  r = Resources(MagicMock(), MagicMock(), "ns",
+                labels={constants.RUN_ID_LABEL: "mine"})
+  r.custom_api.get_namespaced_custom_object.return_value = {
+      "metadata": {"labels": {constants.RUN_ID_LABEL: "other"}},
+      "spec": {"podTemplate": {"metadata": {"labels": {
+          constants.RUN_ID_LABEL: "other"}}}}}
+  assert r.ensure_template(IMG, "tmpl", TemplateSpec(), owner_run_id="mine",
+                           share_foreign=True) is False
+  r.custom_api.patch_namespaced_custom_object.assert_not_called()   # no relabel
+  r.custom_api.create_namespaced_custom_object.assert_not_called()
+
+
+def test_ensure_template_share_foreign_tolerates_the_race():
+  from agent_sandbox_rl import TemplateSpec
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = [
+      client.ApiException(status=404),
+      {"metadata": {"labels": {constants.RUN_ID_LABEL: "other"}}}]
+  r.custom_api.create_namespaced_custom_object.side_effect = client.ApiException(
+      status=409)
+  assert r.ensure_template(IMG, "tmpl", TemplateSpec(), owner_run_id="mine",
+                           share_foreign=True) is False
+  r.custom_api.patch_namespaced_custom_object.assert_not_called()
 
 
 def test_unwarm_deletes_exactly_the_inspected_pool(make_cluster):
@@ -743,6 +772,31 @@ def test_on_demand_rollback_leaves_another_runs_pool_and_template(make_cluster):
     f.acquire(f.load_tasks([IMG])[0])
   c.resources.delete_warmpool.assert_not_called()
   c.resources.delete_template.assert_not_called()
+
+
+def test_on_demand_acquire_shares_another_runs_template_without_relabel(make_cluster):
+  c = make_cluster("solo")
+  f = _fleet(c)
+  f.plan()                                               # empty plan: on-demand
+  f.acquire(f.load_tasks([IMG])[0])
+  _, kw = c.resources.ensure_template.call_args
+  assert kw["owner_run_id"] == f.run_id and kw["share_foreign"] is True
+
+
+def test_ensure_templates_refuses_another_runs_template(make_cluster):
+  # Unguarded, the bulk path relabelled another run's template to this run, and
+  # the warm path's owner check then saw this run's id and passed.
+  from agent_sandbox_rl.exceptions import OwnedByAnotherRunError
+  c = make_cluster("solo")
+  f = _fleet(c)
+  f.load_tasks([IMG])
+  f.plan()
+  c.resources.ensure_template.side_effect = OwnedByAnotherRunError(
+      "SandboxTemplate", f.config.template_name(IMG), "other-run-0001")
+  with pytest.raises(FleetError, match="other-run-0001"):
+    f.ensure_templates()
+  _, kw = c.resources.ensure_template.call_args
+  assert kw["owner_run_id"] == f.run_id
 
 
 def test_template_helpers():

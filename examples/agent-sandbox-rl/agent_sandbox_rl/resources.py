@@ -101,7 +101,8 @@ class Resources:
   # --- templates --------------------------------------------------------- #
   def ensure_template(self, image: str, template_name: str,
                       template: TemplateSpec, *, dry_run: bool = False,
-                      owner_run_id: str | None = None) -> bool:
+                      owner_run_id: str | None = None,
+                      share_foreign: bool = False) -> bool:
     """Create the SandboxTemplate for ``image`` if absent. Idempotent.
 
     Returns True if it created the template, False if it already existed.
@@ -112,6 +113,9 @@ class Resources:
     id raises `OwnedByAnotherRunError` — including one created concurrently and
     found at the 409 — instead of returning False like an ordinary "already
     existed": the caller must not build its pool on it, and nothing is written.
+    ``share_foreign=True`` returns False for such a template instead of raising,
+    still without writing to it — for callers that reuse another run's template
+    and pool as they find them (the on-demand acquire path).
     """
     try:
       existing = self.custom_api.get_namespaced_custom_object(
@@ -131,6 +135,10 @@ class Resources:
           constants.RUN_ID_LABEL)
       if (owner_run_id and isinstance(cur_owner, str) and cur_owner
           and cur_owner != owner_run_id):
+        if share_foreign:
+          logger.info("SandboxTemplate '%s' belongs to run %s; reusing it without "
+                      "relabelling.", template_name, cur_owner)
+          return False
         raise OwnedByAnotherRunError("SandboxTemplate", template_name, cur_owner)
       self._reconcile_template_labels(template_name, existing)
       return False
@@ -150,7 +158,7 @@ class Resources:
       # Created concurrently, between our get and create: possibly by another
       # run using the same name, so it gets the same owner check as the get.
       logger.info("SandboxTemplate '%s' already exists (409).", template_name)
-      if owner_run_id and not dry_run:
+      if owner_run_id and not dry_run and not share_foreign:
         winner = self.get_template(template_name) or {}
         cur_owner = (((winner.get("metadata") or {}).get("labels")) or {}).get(
             constants.RUN_ID_LABEL)
@@ -261,7 +269,12 @@ class Resources:
     count + reaper pod sweep). The controller drops `agents.x-k8s.io/*` keys
     (RUN_ID_LABEL included) on the way to the pod, so the run id is repeated under
     POD_RUN_ID_LABEL, which survives. `sandbox=<template>` is kept for the
-    colocation affinity."""
+    colocation affinity.
+
+    A pod takes its run id from the template it was created from, not from the
+    run that claims it: a run claiming from another run's pool gets pods labelled
+    with the pool owner's id, which its own breaker does not count and its own
+    reap does not force-delete (the claim-delete cascade still removes them)."""
     labels = {**self.labels, "sandbox": template_name}
     run_id = self.labels.get(constants.RUN_ID_LABEL)
     if run_id:
@@ -274,10 +287,11 @@ class Resources:
     this run's pods to a stale run-id (breaker/reaper correctness, #1215). Only
     patches on mismatch; failures warn (the safeguards degrade, not the run).
 
-    Two concurrent runs sharing an image (same deterministic template name) take
-    turns re-labeling this template — pod attribution between their breakers/reapers
-    is last-writer-wins. Both directions are safe: a breaker under-counts and fails
-    open, and a per-run reap misses the other run's pods rather than deleting them."""
+    Callers that may meet another live run's template must pass ``owner_run_id``
+    to `ensure_template` (every fleet path does), so this never relabels one:
+    pods created after such a relabel would carry the relabelling run's id, so
+    its breaker would count them and its `reap(run_id=…)` force-delete them,
+    including ones the owning run has claimed (#1808)."""
     desired_meta = dict(self.labels)
     desired_pod = self._pod_template_labels(template_name)
     cur_meta = ((existing.get("metadata") or {}).get("labels")) or {}
@@ -344,7 +358,8 @@ class Resources:
   def create_warmpool(self, name: str, template_name: str,
                       replicas: int, *, dry_run: bool = False,
                       reconcile: bool = False,
-                      owner_run_id: str | None = None) -> bool:
+                      owner_run_id: str | None = None,
+                      share_foreign: bool = False) -> bool:
     """Create a SandboxWarmPool (v1beta1: ``replicas`` + ``sandboxTemplateRef``).
 
     Idempotent on 409 (already exists). With ``reconcile=True`` a 409 instead

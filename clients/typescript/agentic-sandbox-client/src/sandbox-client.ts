@@ -66,12 +66,12 @@ const LABEL_PREFIX_MAX_LENGTH = 253;
 
 function validateLabelName(name: string, context: string): void {
   if (name.length > LABEL_NAME_MAX_LENGTH) {
-    throw new Error(
+    throw new SandboxError(
       `Label ${context} '${name}' exceeds max length of ${LABEL_NAME_MAX_LENGTH} characters.`,
     );
   }
   if (!LABEL_NAME_RE.test(name)) {
-    throw new Error(
+    throw new SandboxError(
       `Label ${context} '${name}' contains invalid characters. ` +
         `Must start and end with alphanumeric, and contain only [-A-Za-z0-9_.].`,
     );
@@ -81,7 +81,7 @@ function validateLabelName(name: string, context: string): void {
 function validateLabels(labels: Record<string, string>): void {
   for (const [key, value] of Object.entries(labels)) {
     if (!key) {
-      throw new Error("Label key cannot be empty.");
+      throw new SandboxError("Label key cannot be empty.");
     }
 
     if (key.includes("/")) {
@@ -90,27 +90,29 @@ function validateLabels(labels: Record<string, string>): void {
       const name = key.slice(slashIdx + 1);
 
       if (!prefix || prefix.length > LABEL_PREFIX_MAX_LENGTH) {
-        throw new Error(
+        throw new SandboxError(
           `Label key prefix '${prefix}' is invalid or exceeds ${LABEL_PREFIX_MAX_LENGTH} characters.`,
         );
       }
       if (!LABEL_PREFIX_RE.test(prefix)) {
-        throw new Error(
+        throw new SandboxError(
           `Label key prefix '${prefix}' must be a valid DNS subdomain.`,
         );
       }
       if (prefix.includes("..")) {
-        throw new Error(
+        throw new SandboxError(
           `Label key prefix '${prefix}' must be a valid DNS subdomain.`,
         );
       }
       if (prefix.split(".").some((seg) => seg.length > 63)) {
-        throw new Error(
+        throw new SandboxError(
           `Label key prefix '${prefix}' has a DNS label segment exceeding 63 characters.`,
         );
       }
       if (!name) {
-        throw new Error(`Label key '${key}' has an empty name after prefix.`);
+        throw new SandboxError(
+          `Label key '${key}' has an empty name after prefix.`,
+        );
       }
       validateLabelName(name, `key name in '${key}'`);
     } else {
@@ -339,7 +341,7 @@ export class SandboxClient {
     opts?: CreateSandboxOptions,
   ): Promise<Sandbox> {
     if (!warmpool) {
-      throw new Error("Warmpool name cannot be empty.");
+      throw new SandboxError("Warmpool name cannot be empty.");
     }
 
     // Validate the per-call override with the same rule as the constructor
@@ -479,7 +481,7 @@ export class SandboxClient {
           }),
           CLEANUP_TIMEOUT_MS,
           () => {
-            throw new Error("Rollback cleanup timed out");
+            throw new SandboxError("Rollback cleanup timed out");
           },
         );
       } catch (cleanupErr) {
@@ -894,7 +896,7 @@ export class SandboxClient {
         }),
         CLEANUP_TIMEOUT_MS,
         () => {
-          throw new Error(
+          throw new SandboxError(
             `SandboxClaim cleanup timed out after ${CLEANUP_TIMEOUT_MS}ms`,
           );
         },

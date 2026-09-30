@@ -483,11 +483,23 @@ describe("SandboxClient (registry)", () => {
       expect(mockWatchFn).not.toHaveBeenCalled();
     });
 
-    it("throws when warmpool is empty", async () => {
+    it("throws SandboxError when warmpool is empty", async () => {
       const client = new SandboxClient();
-      await expect(client.createSandbox("")).rejects.toThrow(
-        "Warmpool name cannot be empty.",
-      );
+      const pending = client.createSandbox("");
+      await expect(pending).rejects.toThrow("Warmpool name cannot be empty.");
+      await expect(pending).rejects.toBeInstanceOf(SandboxError);
+    });
+
+    it("throws SandboxError for an invalid label, not a plain Error", async () => {
+      mockSandboxReadyFlow("sandbox-bad-label");
+
+      const client = new SandboxClient();
+      const pending = client.createSandbox("tpl", "default", {
+        labels: { "": "value" },
+      });
+      await expect(pending).rejects.toThrow("Label key cannot be empty.");
+      await expect(pending).rejects.toBeInstanceOf(SandboxError);
+      expect(mockCreateNamespacedCustomObject).not.toHaveBeenCalled();
     });
 
     it.each([

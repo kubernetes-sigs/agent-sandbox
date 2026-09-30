@@ -26,6 +26,7 @@ from k8s_agent_sandbox.async_connector import (
     AsyncSandboxConnector,
     AsyncSandboxdInClusterStrategy,
     AsyncSandboxdPodTunnelStrategy,
+    MAX_RETRIES,
 )
 from k8s_agent_sandbox.exceptions import (
     SandboxNotReadyError,
@@ -79,6 +80,23 @@ class TestAsyncSandboxdConnector(unittest.IsolatedAsyncioTestCase):
                     "v1/files/data",
                     content=body(),
                     _disable_retries=True,
+                )
+            connector.client.request.assert_awaited_once()
+        finally:
+            await connector.close()
+
+    async def test_disable_retries_for_non_replayable_transport_failure(self):
+        connector = self._build()
+        connector._resolve_base_url = AsyncMock(return_value="http://127.0.0.1:18080")
+        request = httpx.Request("PUT", "http://127.0.0.1:18080/v1/files/data")
+        connector.client.request = AsyncMock(
+            side_effect=httpx.ConnectError("connection failed", request=request)
+        )
+
+        try:
+            with self.assertRaises(SandboxRequestError):
+                await connector.send_request(
+                    "PUT", "v1/files/data", _disable_retries=True
                 )
             connector.client.request.assert_awaited_once()
         finally:
@@ -508,11 +526,18 @@ class TestAsyncSandboxdInClusterConnector(unittest.IsolatedAsyncioTestCase):
         request = httpx.Request("GET", "http://old.agents.svc:8080/v1/files/a.txt")
         response = httpx.Response(200, request=request)
         connector.client.request = AsyncMock(
-            side_effect=[httpx.ConnectError("dns failed", request=request), response]
+            side_effect=[
+                httpx.ConnectError("dns failed", request=request)
+                for _ in range(MAX_RETRIES + 1)
+            ] + [response]
         )
         try:
-            with self.assertRaises(SandboxRequestError):
-                await connector.send_request("GET", "v1/files/a.txt")
+            with patch(
+                "k8s_agent_sandbox.async_connector.asyncio.sleep",
+                new_callable=AsyncMock,
+            ):
+                with self.assertRaises(SandboxRequestError):
+                    await connector.send_request("GET", "v1/files/a.txt")
             await connector.send_request("GET", "v1/files/a.txt")
             self.assertEqual(service.await_count, 2)
             args, _ = connector.client.request.call_args

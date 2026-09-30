@@ -411,7 +411,7 @@ class AsyncSandboxConnector:
                     response=e.response,
                 ) from e
             except httpx.HTTPError as e:
-                if attempt < MAX_RETRIES and (
+                if attempt < max_retries and (
                     isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout))
                     or method.upper() in RETRYABLE_METHODS
                 ):
@@ -439,9 +439,9 @@ class AsyncSandboxConnector:
                     response=None,
                 ) from e
 
-        logger.error(f"All {MAX_RETRIES + 1} attempts failed for {url}")
+        logger.error(f"All {max_retries + 1} attempts failed for {url}")
         raise SandboxRequestError(
-            f"Failed to communicate with the sandbox at {url} after {MAX_RETRIES + 1} attempts.",
+            f"Failed to communicate with the sandbox at {url} after {max_retries + 1} attempts.",
             status_code=last_response.status_code if last_response else None,
             response=last_response,
         )

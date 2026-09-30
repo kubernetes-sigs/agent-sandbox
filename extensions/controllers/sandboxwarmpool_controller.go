@@ -82,6 +82,18 @@ const (
 	// graceRequeueSlack pads the self-scheduled post-grace requeue so the
 	// re-evaluation lands strictly after the deadline despite clock jitter.
 	graceRequeueSlack = 2 * time.Second
+
+	// warmPoolStatusWriteInterval is the minimum spacing between two
+	// counter-only status writes (replicas/readyReplicas) for one pool. Every
+	// adopted claim otherwise costs three back-to-back status patches (member
+	// dropped, replacement created, replacement Ready), which at tens of
+	// claims/s makes the pool object the hottest etcd key in the cluster. The
+	// controller never reads its own status (refill works off the informer
+	// cache plus expectations), so one second of counter staleness is
+	// invisible to users while capping churn at one write per second per pool.
+	// Non-counter changes (selector, observedGeneration) still write through
+	// immediately.
+	warmPoolStatusWriteInterval = time.Second
 )
 
 // graceRequeueJitterFactor spreads the self-scheduled post-grace requeues of
@@ -132,6 +144,13 @@ type SandboxWarmPoolReconciler struct {
 
 	// now is a test hook for the reconciler's clock; nil means time.Now.
 	now func() time.Time
+
+	// statusWriteMu guards lastStatusWrite, the per-pool timestamp of the most
+	// recent status patch, used to debounce counter-only status writes to at
+	// most one per warmPoolStatusWriteInterval. A pool with no entry (fresh
+	// controller start) writes immediately.
+	statusWriteMu   sync.Mutex
+	lastStatusWrite map[types.NamespacedName]time.Time
 
 	// ReplenishDelay defers creation of replacement sandboxes after pool
 	// members drop out of the pool (e.g. a burst of SandboxClaims adopting
@@ -451,11 +470,15 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	// Update status if it has changed
-	if err := r.updateStatus(ctx, oldStatus, warmPool); err != nil {
+	// Update status if it has changed. A debounced counter-only write asks for
+	// a requeue at the interval boundary so it is never lost; that pass
+	// re-derives the counts from the cache and writes the current values.
+	statusRequeue, err := r.updateStatus(ctx, oldStatus, warmPool)
+	if err != nil {
 		logger.Error(err, "Failed to update SandboxWarmPool status")
 		return ctrl.Result{}, err
 	}
+	requeueAfter = minNonZeroDuration(requeueAfter, statusRequeue)
 
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
@@ -468,6 +491,9 @@ func (r *SandboxWarmPoolReconciler) forgetPool(key types.NamespacedName) {
 	delete(r.notProgressing, key)
 	r.notProgressingMu.Unlock()
 	r.forgetReplenishState(key)
+	r.statusWriteMu.Lock()
+	delete(r.lastStatusWrite, key)
+	r.statusWriteMu.Unlock()
 }
 
 // reconcilePool ensures the correct number of pre-allocated sandboxes exist in the pool.
@@ -1114,12 +1140,36 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 }
 
 // updateStatus updates the status of the SandboxWarmPool if it has changed.
-func (r *SandboxWarmPoolReconciler) updateStatus(ctx context.Context, oldStatus *extensionsv1beta1.SandboxWarmPoolStatus, warmPool *extensionsv1beta1.SandboxWarmPool) error {
+//
+// Counter-only changes (replicas/readyReplicas) are debounced to one write per
+// warmPoolStatusWriteInterval per pool: when the previous write is more recent
+// than that, the patch is skipped and the remaining wait is returned so the
+// caller requeues for the interval boundary, where the counts are re-derived
+// and written once. Any other status change writes through immediately. A
+// nonzero return therefore means "requeue after this long", never an error.
+func (r *SandboxWarmPoolReconciler) updateStatus(ctx context.Context, oldStatus *extensionsv1beta1.SandboxWarmPoolStatus, warmPool *extensionsv1beta1.SandboxWarmPool) (time.Duration, error) {
 	logger := log.FromContext(ctx)
 
 	// Check if status has changed
 	if equality.Semantic.DeepEqual(oldStatus, &warmPool.Status) {
-		return nil
+		return 0, nil
+	}
+
+	poolKey := types.NamespacedName{Namespace: warmPool.Namespace, Name: warmPool.Name}
+	now := r.clockNow()
+	if isCounterOnlyStatusChange(oldStatus, &warmPool.Status) {
+		r.statusWriteMu.Lock()
+		last := r.lastStatusWrite[poolKey]
+		r.statusWriteMu.Unlock()
+		// A missing entry yields the zero time, so the first write after a
+		// controller start is never deferred.
+		if remaining := warmPoolStatusWriteInterval - now.Sub(last); remaining > 0 {
+			logger.V(4).Info("Deferring SandboxWarmPool counter-only status write",
+				"replicas", warmPool.Status.Replicas,
+				"readyReplicas", warmPool.Status.ReadyReplicas,
+				"requeueAfter", remaining)
+			return remaining, nil
+		}
 	}
 
 	oldWarmPool := warmPool.DeepCopy()
@@ -1127,11 +1177,29 @@ func (r *SandboxWarmPoolReconciler) updateStatus(ctx context.Context, oldStatus 
 	patch := client.MergeFrom(oldWarmPool)
 
 	if err := r.Status().Patch(ctx, warmPool, patch); err != nil {
-		return fmt.Errorf("failed to update SandboxWarmPool status: %w", err)
+		return 0, fmt.Errorf("failed to update SandboxWarmPool status: %w", err)
 	}
 
+	r.statusWriteMu.Lock()
+	if r.lastStatusWrite == nil {
+		r.lastStatusWrite = make(map[types.NamespacedName]time.Time)
+	}
+	r.lastStatusWrite[poolKey] = now
+	r.statusWriteMu.Unlock()
+
 	logger.Info("Updated SandboxWarmPool status", "replicas", warmPool.Status.Replicas, "readyReplicas", warmPool.Status.ReadyReplicas)
-	return nil
+	return 0, nil
+}
+
+// isCounterOnlyStatusChange reports whether old and new differ only in the
+// replica counters, i.e. whether the change is eligible for debouncing.
+// Anything else (selector, observedGeneration after a spec change) must be
+// written through so clients gating on observedGeneration are not delayed.
+func isCounterOnlyStatusChange(oldStatus, newStatus *extensionsv1beta1.SandboxWarmPoolStatus) bool {
+	countersOnly := oldStatus.DeepCopy()
+	countersOnly.Replicas = newStatus.Replicas
+	countersOnly.ReadyReplicas = newStatus.ReadyReplicas
+	return equality.Semantic.DeepEqual(countersOnly, newStatus)
 }
 
 func (r *SandboxWarmPoolReconciler) getTemplate(ctx context.Context, warmPool *extensionsv1beta1.SandboxWarmPool) (*extensionsv1beta1.SandboxTemplate, error) {

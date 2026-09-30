@@ -160,3 +160,5 @@ That content is versioned by `Chart.yaml` rather than by its own contents, so **
 make verify-chart-version   # check
 make bump-chart-version     # increment the patch version (bump minor/major by hand)
 ```
+
+`make lint-helm` lints the chart with [chart-testing](https://github.com/helm/chart-testing), running `helm lint` once per `ci/*-values.yaml` file. Add a values file there when adding a template that is only rendered under non-default values.

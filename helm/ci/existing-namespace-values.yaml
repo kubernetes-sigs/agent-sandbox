@@ -1,0 +1,5 @@
+image:
+  tag: v0.0.0-lint
+namespace:
+  create: false
+  name: my-namespace

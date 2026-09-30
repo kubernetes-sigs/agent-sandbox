@@ -2664,7 +2664,7 @@ func TestSandboxClaimPreservesAssignedWarmPoolSandboxWithoutPodIPs(t *testing.T)
 		Tracer:           asmetrics.NewNoOp(),
 	}
 
-	assigned, err := reconciler.getOrCreateSandbox(ctx, claim, template)
+	assigned, err := reconciler.getOrCreateSandbox(ctx, claim, template, nil)
 	require.NoError(t, err)
 	require.Equal(t, rotatingSandbox.Name, assigned.Name)
 
@@ -3462,6 +3462,81 @@ func TestRecordCreationLatencyMetric_ClaimFirstReadyAnnotation(t *testing.T) {
 		// observedTimes entry should be drained.
 		_, loaded := r.observedTimes.Load(key)
 		require.False(t, loaded, "observedTimes entry should be drained after annotation guard")
+	})
+
+	t.Run("flag on: readiness flap is deduplicated in memory with no first-ready patch", func(t *testing.T) {
+		asmetrics.ClaimStartupLatency.Reset()
+		asmetrics.ClaimControllerStartupLatency.Reset()
+
+		claim := &extensionsv1beta1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "flap-flag-on",
+				Namespace:         "default",
+				UID:               "uid-flap-flag-on",
+				CreationTimestamp: pastTime,
+				Annotations: map[string]string{
+					asmetrics.WebhookAnnotation:       time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+					asmetrics.ObservabilityAnnotation: time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+				},
+			},
+			Spec: extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"}},
+			Status: extensionsv1beta1.SandboxClaimStatus{
+				Conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+			},
+		}
+
+		scheme := newScheme(t)
+		warmPool := &extensionsv1beta1.SandboxWarmPool{ObjectMeta: metav1.ObjectMeta{Name: "test-warmpool", Namespace: "default"}, Spec: extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "tpl"}}}
+		claimPatches := 0
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(warmPool, claim).
+			WithInterceptorFuncs(interceptor.Funcs{
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok {
+						claimPatches++
+					}
+					return c.Patch(ctx, obj, patch, opts...)
+				},
+			}).Build()
+		r := &SandboxClaimReconciler{Client: fakeClient, DisableObservabilityAnnotations: true}
+
+		key := types.NamespacedName{Name: "flap-flag-on", Namespace: "default"}
+		r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now().Add(-5 * time.Second), uid: "uid-flap-flag-on"})
+
+		// First Ready transition records, and arms the guard in memory only.
+		require.NoError(t, r.recordCreationLatencyMetric(ctx, claim, &extensionsv1beta1.SandboxClaimStatus{}, nil))
+		require.Equal(t, 1, testutil.CollectAndCount(asmetrics.ClaimStartupLatency))
+		require.Equal(t, 1, testutil.CollectAndCount(asmetrics.ClaimControllerStartupLatency))
+		require.Equal(t, 0, claimPatches, "the flag must suppress the first-ready stamp write")
+
+		persisted := &extensionsv1beta1.SandboxClaim{}
+		require.NoError(t, fakeClient.Get(ctx, key, persisted))
+		require.Empty(t, persisted.Annotations[asmetrics.ClaimFirstReadyAnnotation], "no first-ready annotation may land with the flag on")
+
+		// Flap back to Ready on a re-fetched object that carries no
+		// annotation guard: the in-memory guard must dedup the record.
+		r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now().Add(-5 * time.Second), uid: "uid-flap-flag-on"})
+		require.NoError(t, r.recordCreationLatencyMetric(ctx, persisted, &extensionsv1beta1.SandboxClaimStatus{}, nil))
+		require.Equal(t, 1, testutil.CollectAndCount(asmetrics.ClaimStartupLatency), "flap must not double-count claim startup latency")
+		require.Equal(t, 1, testutil.CollectAndCount(asmetrics.ClaimControllerStartupLatency), "flap must not double-count controller startup latency")
+		require.Equal(t, 0, claimPatches)
+
+		// The mid-flap NotReady pass (previously Ready) backfills the guard
+		// in memory as well, still without a write.
+		notReady := persisted.DeepCopy()
+		notReady.Status.Conditions = []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse}}
+		readyOldStatus := &extensionsv1beta1.SandboxClaimStatus{
+			Conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+		}
+		require.NoError(t, r.recordCreationLatencyMetric(ctx, notReady, readyOldStatus, nil))
+		require.Equal(t, 0, claimPatches)
+
+		// A same-named replacement claim (new UID) is not mistaken for the
+		// recorded one, and the NotFound cleanup drops the entry.
+		replacement := persisted.DeepCopy()
+		replacement.UID = "uid-flap-flag-on-replacement"
+		require.False(t, r.firstReadyGuardArmed(replacement), "the in-memory guard must be UID-scoped")
+		r.firstReadyRecorded.Delete(key)
+		require.False(t, r.firstReadyGuardArmed(persisted), "deleting the entry must disarm the guard")
 	})
 
 	t.Run("annotation patch failure returns error and metrics are still recorded", func(t *testing.T) {
@@ -4572,7 +4647,7 @@ func TestSandboxClaimClearsAssignedSandboxOwnedByAnotherClaim(t *testing.T) {
 				WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
 			}
 
-			sandbox, err := reconciler.getOrCreateSandbox(ctx, claim, nil)
+			sandbox, err := reconciler.getOrCreateSandbox(ctx, claim, nil, nil)
 			require.NoError(t, err)
 			require.Nil(t, sandbox)
 

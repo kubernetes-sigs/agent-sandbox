@@ -97,8 +97,18 @@ func TestInitializeAnnotationsRawPayload(t *testing.T) {
 	)
 
 	live := claim.DeepCopy()
-	if err := r.initializeAnnotations(context.Background(), live); err != nil {
-		t.Fatalf("initializeAnnotations failed: %v", err)
+	pending := r.initializeAnnotations(context.Background(), live)
+	if len(pending) != 2 {
+		t.Fatalf("expected both annotations pending persistence, got %v", pending)
+	}
+	if captured != nil {
+		t.Fatalf("initializeAnnotations must only stamp in-memory; the write is deferred to the flush, got %s", captured)
+	}
+	if err := r.flushPendingAnnotations(context.Background(), live, pending); err != nil {
+		t.Fatalf("flushPendingAnnotations failed: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("a successful flush must clear the pending set, got %v", pending)
 	}
 
 	if capturedType != types.MergePatchType {
@@ -142,10 +152,15 @@ func TestInitializeAnnotationsRawPayload(t *testing.T) {
 		t.Errorf("pre-existing annotation lost: %v", got.Annotations)
 	}
 
-	// Idempotence short-circuit: annotations already present make no API call.
+	// Idempotence short-circuit: annotations already present leave nothing
+	// pending, so the flush makes no API call.
 	captured = nil
-	if err := r.initializeAnnotations(context.Background(), live); err != nil {
-		t.Fatalf("second initializeAnnotations failed: %v", err)
+	pending = r.initializeAnnotations(context.Background(), live)
+	if pending != nil {
+		t.Errorf("expected nothing pending when annotations already present, got %v", pending)
+	}
+	if err := r.flushPendingAnnotations(context.Background(), live, pending); err != nil {
+		t.Fatalf("flush with nothing pending failed: %v", err)
 	}
 	if captured != nil {
 		t.Errorf("expected no patch when annotations already present, got %s", captured)
@@ -182,8 +197,12 @@ func TestInitializeAnnotationsDisabledStampsInMemoryOnly(t *testing.T) {
 	}
 
 	live := claim.DeepCopy()
-	if err := r.initializeAnnotations(context.Background(), live); err != nil {
-		t.Fatalf("initializeAnnotations failed: %v", err)
+	pending := r.initializeAnnotations(context.Background(), live)
+	if pending != nil {
+		t.Errorf("expected nothing pending persistence with the flag enabled, got %v", pending)
+	}
+	if err := r.flushPendingAnnotations(context.Background(), live, pending); err != nil {
+		t.Fatalf("flushPendingAnnotations failed: %v", err)
 	}
 
 	if patches != 0 {
@@ -338,11 +357,12 @@ func (p claimWriteProfile) total() int {
 // warm-pool adoption reconcile, with and without --disable-claim-events (nil
 // recorder) and --disable-claim-observability-annotations:
 //
-//   - flags off: the observability annotation patch, the adoption patch, the
-//     status patch, and the first-ready stamp — four claim writes;
-//   - flags on: the adoption patch, the status patch, and the first-ready
-//     stamp (the readiness-flap metrics-dedup guard, outside this flag's
-//     scope) — three claim writes.
+//   - flags off: ONE adoption patch that carries the assignment annotation
+//     together with the observability annotations stamped earlier in the
+//     pass (no standalone observability patch), the status patch, and the
+//     first-ready stamp — three claim writes;
+//   - flags on: the adoption patch (assignment only) and the status patch —
+//     two claim writes; the first-ready flap guard moves in memory.
 //
 // In both runs the adoption write is a metadata-only, optimistically locked
 // merge patch and never a full-object Update: the old Update re-serialized
@@ -474,17 +494,18 @@ func TestDisableFlagsWarmAdoptionClaimWrites(t *testing.T) {
 		}
 	}
 
-	t.Run("flags off: one observability patch plus the adoption patch", func(t *testing.T) {
+	t.Run("flags off: observability annotations fold into the adoption patch", func(t *testing.T) {
 		profile := run(t, false)
-		assertAdoptionPatch(t, profile, []string{extensionsv1beta1.AssignedSandboxNameAnnotation})
-		if profile.obsPatches != 1 {
-			t.Errorf("expected exactly 1 observability annotation patch with flags off, got %d", profile.obsPatches)
+		// Sorted key order, as the body is emitted.
+		assertAdoptionPatch(t, profile, []string{asmetrics.ObservabilityAnnotation, extensionsv1beta1.AssignedSandboxNameAnnotation})
+		if profile.obsPatches != 0 {
+			t.Errorf("expected no standalone observability patch (it rides on the adoption patch), got %d", profile.obsPatches)
 		}
 		if profile.firstReadyPatches != 1 {
 			t.Errorf("expected exactly 1 first-ready stamp patch, got %d", profile.firstReadyPatches)
 		}
-		if profile.total() != 4 {
-			t.Errorf("expected 4 claim writes per adoption with defaults, got %d: %+v", profile.total(), profile)
+		if profile.total() != 3 {
+			t.Errorf("expected 3 claim writes per adoption with defaults, got %d: %+v", profile.total(), profile)
 		}
 		if profile.bound.Annotations[asmetrics.ObservabilityAnnotation] == "" {
 			t.Error("observability annotation should be persisted with flags off")
@@ -494,21 +515,19 @@ func TestDisableFlagsWarmAdoptionClaimWrites(t *testing.T) {
 		}
 	})
 
-	t.Run("flags on: zero observability claim patches", func(t *testing.T) {
+	t.Run("flags on: adoption and status patches only", func(t *testing.T) {
 		profile := run(t, true)
 		assertAdoptionPatch(t, profile, []string{extensionsv1beta1.AssignedSandboxNameAnnotation})
 		if profile.obsPatches != 0 {
 			t.Errorf("expected 0 observability claim patches with the flags enabled, got %d", profile.obsPatches)
 		}
-		// The first-ready stamp is a metrics-dedup correctness write (the
-		// readiness flap guard) and is expected regardless of the flags.
-		if profile.firstReadyPatches != 1 {
-			t.Errorf("expected exactly 1 first-ready stamp patch, got %d", profile.firstReadyPatches)
+		if profile.firstReadyPatches != 0 {
+			t.Errorf("expected the first-ready stamp write to be suppressed by the flag, got %d", profile.firstReadyPatches)
 		}
-		if profile.total() != 3 {
-			t.Errorf("expected 3 claim writes per adoption with the flags on, got %d: %+v", profile.total(), profile)
+		if profile.total() != 2 {
+			t.Errorf("expected 2 claim writes per adoption with the flags on, got %d: %+v", profile.total(), profile)
 		}
-		for _, key := range []string{asmetrics.ObservabilityAnnotation, asmetrics.TraceContextAnnotation} {
+		for _, key := range []string{asmetrics.ObservabilityAnnotation, asmetrics.TraceContextAnnotation, asmetrics.ClaimFirstReadyAnnotation} {
 			if v := profile.bound.Annotations[key]; v != "" {
 				t.Errorf("observability annotation %s must not be persisted with the flag on, got %q", key, v)
 			}

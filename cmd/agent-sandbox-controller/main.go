@@ -159,11 +159,13 @@ func main() {
 		"Disable Kubernetes Event emission from the SandboxClaim controller (its Eventf calls become no-ops), "+
 			"reducing API server writes during large claim bursts. Default false (events enabled).")
 	flag.BoolVar(&disableClaimObservabilityAnnotations, "disable-claim-observability-annotations", false,
-		"Skip persisting the SandboxClaim observability annotations (controller first-observed timestamp, trace context), "+
-			"removing one API write per claim. The values are still stamped on the in-memory object, so startup-latency "+
-			"metrics and trace propagation to the Sandbox keep working within the controller process. Costs the on-object "+
-			"debugging breadcrumbs and, after a controller restart, the startup-latency metric for claims first observed "+
-			"by the previous process. Default false (annotations persisted).")
+		"Skip persisting the SandboxClaim observability annotations (controller first-observed timestamp, trace context, "+
+			"first-ready timestamp), removing up to two API writes per claim. The values are still stamped on the in-memory "+
+			"object, so startup-latency metrics and trace propagation to the Sandbox keep working within the controller "+
+			"process, and the first-ready readiness-flap metrics guard is kept in memory. Costs the on-object debugging "+
+			"breadcrumbs and, after a controller restart, the startup-latency metric for claims first observed by the "+
+			"previous process plus a one-time metric re-record for a claim whose readiness flap straddles the restart. "+
+			"Default false (annotations persisted).")
 	flag.DurationVar(&sandboxWriteBehindWindow, "sandbox-write-behind-window", 0,
 		"Coalescing window for the Sandbox controller's recoverable metadata-only writes. 0 disables coalescing.")
 	flag.BoolVar(&metricsSecureServing, "metrics-secure-serving", false,

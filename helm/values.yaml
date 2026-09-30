@@ -58,7 +58,7 @@ controller:
   # sandboxWarmPoolReplenishDelay: 0s # defer replacement sandbox creation during claim bursts (0s = immediate)
   # sandboxWarmPoolMaxRefillRate: 0   # max replacement sandboxes/sec per pool (0 = unpaced)
   # sandboxWarmPoolReadinessGracePeriod: 5m         # how long a warm pool sandbox may stay non-Ready (counted from pod scheduling) before it is considered stuck
-  # sandboxWarmPoolUnschedulableRecheckInterval: 1m # re-check interval for pools holding unschedulable sandboxes past the grace period
+  # sandboxWarmPoolUnschedulableRecheckInterval: 1m # re-check interval for pools holding unschedulable or gated sandboxes past the grace period
   # enableWarmPoolEviction: true      # mark warm-pool-created pods as safe to evict
   # disableClaimEvents: false
   # disableClaimObservabilityAnnotations: false

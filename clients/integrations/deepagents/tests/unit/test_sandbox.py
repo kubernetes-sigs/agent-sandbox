@@ -12,8 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+
 import pytest
 
+from k8s_agent_sandbox.exceptions import SandboxRequestError
 from k8s_agent_sandbox.models import ExecutionResult
 from deepagents.backends.protocol import (
     ExecuteResponse,
@@ -28,24 +31,53 @@ from deepagents_k8s_agent_sandbox import (
 )
 
 
-def test_execute(lifecycle_manager, mock_sandbox):
+@pytest.mark.parametrize("method", ["execute", "aexecute"])
+@pytest.mark.parametrize("exit_code", [0, 42, -1])
+def test_execute(lifecycle_manager, mock_sandbox, method, exit_code):
     backend = K8sAgentSandbox(
         lifecycle_manager,
     )
 
-    mock_sandbox.commands.run.return_value = ExecutionResult(
-        exit_code=0,
-        stdout="some output",
-        stderr="some logs",
-    )
+    mock_sandbox.commands.run.side_effect = [
+        ExecutionResult(exit_code=0, stdout="", stderr=""),
+        ExecutionResult(
+            exit_code=exit_code,
+            stdout="some output",
+            stderr="some logs",
+        ),
+    ]
     
-    result = backend.execute("some-command", timeout=180)
+    result = getattr(backend, method)("some-command", timeout=180)
+    if method == "aexecute":
+        result = asyncio.run(result)
 
     assert result == ExecuteResponse(
         output='some output\n<stderr>\nsome logs\n</stderr>', 
-        exit_code=0, 
+        exit_code=exit_code,
         truncated=False
     )
+
+
+@pytest.mark.parametrize("method", ["execute", "aexecute"])
+@pytest.mark.parametrize("failure", [
+    SandboxRequestError("Sandbox response was lost."),
+    RuntimeError("Sandbox returned an invalid execution result."),
+])
+def test_execute_propagates_operational_failure(
+    lifecycle_manager, mock_sandbox, method, failure
+):
+    backend = K8sAgentSandbox(lifecycle_manager)
+    mock_sandbox.commands.run.side_effect = [
+        ExecutionResult(exit_code=0, stdout="", stderr=""),
+        failure,
+    ]
+
+    with pytest.raises(type(failure)) as caught:
+        result = getattr(backend, method)("some-command")
+        if method == "aexecute":
+            asyncio.run(result)
+
+    assert caught.value is failure
 
 
 @pytest.mark.parametrize("state,expected_error", [

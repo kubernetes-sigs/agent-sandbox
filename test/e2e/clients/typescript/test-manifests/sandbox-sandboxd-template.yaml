@@ -1,0 +1,55 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: ts-sdk-sandboxd-template
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        app: typescript-sandboxd
+        sandbox: sdk-sandboxd-test
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 1000
+      containers:
+      - name: sandboxd
+        image: "{image_prefix}sandboxd:{image_tag}"
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        # Fixtures for sandbox.metadata(): sandboxd serves only names with its
+        # default "SANDBOX_" prefix and withholds credential-looking ones. The
+        # token value is a dummy, present only to prove it is filtered out.
+        env:
+        - name: SANDBOX_E2E_MARKER
+          value: ts-sdk
+        - name: SANDBOX_E2E_API_TOKEN
+          value: dummy-not-a-credential
+        - name: E2E_UNPREFIXED
+          value: not-exposed
+        ports:
+        - containerPort: 8080
+        - containerPort: 9090
+        readinessProbe:
+          httpGet:
+            path: /v1/health
+            port: 8080
+          initialDelaySeconds: 0
+          periodSeconds: 1
+          failureThreshold: 30
+          timeoutSeconds: 2

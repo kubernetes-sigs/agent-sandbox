@@ -23,7 +23,7 @@ import aiohttp
 from kubernetes_asyncio import client
 
 from k8s_agent_sandbox.async_k8s_helper import AsyncK8sHelper
-from k8s_agent_sandbox.exceptions import SandboxMetadataError, SandboxTemplateNotFoundError
+from k8s_agent_sandbox.exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxTemplateNotFoundError
 from k8s_agent_sandbox.constants import CLIENT_REQUEST_TIME_ANNOTATION
 
 
@@ -252,6 +252,38 @@ class TestAsyncK8sHelperResolveSandboxName(unittest.IsolatedAsyncioTestCase):
 
         name = await self.helper.wait_for_claim_ready("test-claim", "default", timeout=5)
         self.assertEqual(name, "cold-sandbox-1")
+
+    @patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch")
+    async def test_async_wait_for_claim_ready_invalid_configuration_fails_fast(self, mock_watch_class):
+        """InvalidConfiguration (forwarded from the Sandbox) fails fast too."""
+        mock_watch = MagicMock()
+        mock_watch.close = AsyncMock()
+        mock_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-claim"},
+                "status": {
+                    "conditions": [
+                        {
+                            "type": "Ready",
+                            "status": "False",
+                            "reason": "InvalidConfiguration",
+                            "message": "Service 'test-claim' is invalid: must be no more than 63 characters",
+                        }
+                    ]
+                },
+            },
+        }
+
+        async def mock_stream(*args, **kwargs):
+            yield mock_event
+
+        mock_watch.stream = mock_stream
+        mock_watch_class.return_value = mock_watch
+
+        with self.assertRaises(SandboxClaimFailedError) as context:
+            await self.helper.wait_for_claim_ready("test-claim", "default", timeout=5)
+        self.assertIn("InvalidConfiguration", str(context.exception))
 
     @patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch")
     async def test_async_watch_resource_version_passthrough(self, mock_watch_class):

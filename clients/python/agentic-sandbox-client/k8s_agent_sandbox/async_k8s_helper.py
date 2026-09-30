@@ -154,7 +154,10 @@ class AsyncK8sHelper:
         return await self._watch_claim(claim_name, namespace, timeout, require_ready=False,
                                        resource_version=resource_version)
 
-    async def wait_for_claim_ready(self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None) -> str:
+    async def wait_for_claim_ready(
+        self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None,
+        *, expected_uid: str | None = None, initial_claim: dict | None = None,
+    ) -> str:
         """Watches the SandboxClaim until it is bound to a sandbox AND its
         Ready condition is True, then returns the sandbox name.
 
@@ -169,12 +172,17 @@ class AsyncK8sHelper:
             resource_version: Optional resourceVersion to start the watch
                 from (e.g. ``metadata.resourceVersion`` of the create
                 response). Defaults to ``"0"`` — see ``_watch_claim``.
+            expected_uid: If provided, reject events for a same-name replacement.
+            initial_claim: Optional create/GET response to evaluate before
+                waiting for future watch events.
         """
         return await self._watch_claim(claim_name, namespace, timeout, require_ready=True,
-                                       resource_version=resource_version)
+                                       resource_version=resource_version,
+                                       expected_uid=expected_uid, initial_claim=initial_claim)
 
     async def _watch_claim(self, claim_name: str, namespace: str, timeout: int, require_ready: bool,
-                           resource_version: str | None = None) -> str:
+                           resource_version: str | None = None,
+                           *, expected_uid: str | None = None, initial_claim: dict | None = None) -> str:
         """Shared SandboxClaim watch loop.
 
         Returns the sandbox name once ``status.sandbox.name`` is populated;
@@ -209,16 +217,23 @@ class AsyncK8sHelper:
                 )
             w = watch.Watch()
             try:
-                async for event in w.stream(
-                    func=self.custom_objects_api.list_namespaced_custom_object,
-                    namespace=namespace,
-                    group=CLAIM_API_GROUP,
-                    version=CLAIM_API_VERSION,
-                    plural=CLAIM_PLURAL_NAME,
-                    field_selector=f"metadata.name={claim_name}",
-                    resource_version=rv,
-                    timeout_seconds=remaining,
-                ):
+                async def events():
+                    # An already-ready GET may never produce another watch event.
+                    if initial_claim is not None:
+                        yield {"type": "ADDED", "object": initial_claim}
+                    async for event in w.stream(
+                        func=self.custom_objects_api.list_namespaced_custom_object,
+                        namespace=namespace,
+                        group=CLAIM_API_GROUP,
+                        version=CLAIM_API_VERSION,
+                        plural=CLAIM_PLURAL_NAME,
+                        field_selector=f"metadata.name={claim_name}",
+                        resource_version=rv,
+                        timeout_seconds=remaining,
+                    ):
+                        yield event
+
+                async for event in events():
                     if event is None:
                         continue
                     if event["type"] == "DELETED":
@@ -227,6 +242,13 @@ class AsyncK8sHelper:
                         )
                     if event["type"] in ["ADDED", "MODIFIED"]:
                         claim_object = event["object"]
+                        metadata = claim_object.get("metadata") or {}
+                        if expected_uid is not None and metadata.get("uid") != expected_uid:
+                            raise SandboxNotFoundError(
+                                f"SandboxClaim '{claim_name}' was replaced while waiting for readiness."
+                            )
+                        if expected_uid is not None and metadata.get("deletionTimestamp"):
+                            raise SandboxNotFoundError(f"SandboxClaim '{claim_name}' is terminating.")
                         # Track the last-seen resourceVersion so a stream
                         # restart resumes instead of replaying history.
                         seen_rv = (claim_object.get("metadata") or {}).get("resourceVersion")
@@ -296,6 +318,7 @@ class AsyncK8sHelper:
                 await asyncio.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
                 continue
             finally:
+                initial_claim = None
                 await w.close()
 
     async def wait_for_sandbox_ready(
@@ -364,10 +387,15 @@ class AsyncK8sHelper:
             finally:
                 await w.close()
 
-    async def delete_sandbox_claim(self, name: str, namespace: str) -> None:
-        """Deletes a SandboxClaim custom resource."""
+    async def delete_sandbox_claim(self, name: str, namespace: str, *, expected_uid: str | None = None) -> None:
+        """Deletes a SandboxClaim, optionally requiring a matching UID."""
         await self._ensure_initialized()
 
+        delete_kwargs: dict[str, Any] = {}
+        if expected_uid is not None:
+            delete_kwargs["body"] = client.V1DeleteOptions(
+                preconditions=client.V1Preconditions(uid=expected_uid)
+            )
         try:
             await self.custom_objects_api.delete_namespaced_custom_object(
                 group=CLAIM_API_GROUP,
@@ -375,6 +403,7 @@ class AsyncK8sHelper:
                 namespace=namespace,
                 plural=CLAIM_PLURAL_NAME,
                 name=name,
+                **delete_kwargs,
             )
             logger.info(f"Terminated SandboxClaim: {name}")
         except client.ApiException as e:

@@ -872,10 +872,11 @@ var managedFieldsResetPatch = client.RawPatch(types.MergePatchType, []byte(`{"me
 // apiserver's skipNonAppliedManager stops tracking all later Update/Patch
 // writes (including this controller's status patches and kubelet pod
 // status writes), so one reset is effectively permanent for this
-// controller's write pattern. Tracking resumes only if some client
-// Server-Side Applies the object, which then owns the existing fields as
-// before-first-apply; that is the trade-off: users doing SSA on stripped
-// objects lose conflict detection for fields this controller wrote.
+// controller's write pattern. Tracking resumes when a client first
+// Server-Side Applies the object: the apiserver reconstructs ownership of
+// the existing fields under before-first-apply, so a conflicting apply
+// still conflicts. The trade-off is the lost ownership history (which
+// manager wrote what), not conflict detection itself.
 //
 // Objects are always born tracked (the sentinel is ignored on create and
 // on subresource requests), so the strip has to be this follow-up patch on

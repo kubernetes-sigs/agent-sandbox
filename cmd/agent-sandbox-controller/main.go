@@ -170,7 +170,8 @@ func main() {
 	flag.BoolVar(&stripManagedFields, "strip-managed-fields", false,
 		"Clear metadata.managedFields on each Sandbox and on each Pod the Sandbox controller creates (one extra merge patch "+
 			"per object, right after creation), cutting stored object size and API server field-tracking cost for every "+
-			"later write. Disables Server-Side Apply conflict detection on those objects. Default false.")
+			"later write. Discards the Server-Side Apply ownership history on those objects (a later apply sees existing fields as owned by "+
+			"before-first-apply). Default false.")
 	flag.BoolVar(&metricsSecureServing, "metrics-secure-serving", false,
 		"Serve metrics over HTTPS instead of HTTP. When enabled without --metrics-cert-dir, "+
 			"a self-signed certificate is generated automatically. Conventional HTTPS metrics port is :8443.")

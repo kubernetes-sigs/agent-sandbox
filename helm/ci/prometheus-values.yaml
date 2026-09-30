@@ -1,0 +1,7 @@
+image:
+  tag: v0.0.0-lint
+metrics:
+  serviceMonitor:
+    enabled: true
+  prometheusRule:
+    enabled: true

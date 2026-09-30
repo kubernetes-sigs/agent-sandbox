@@ -296,6 +296,16 @@ func TestReconcilePool_TerminatingCountsAgainstTarget(t *testing.T) {
 	require.Equal(t, 1, lc.createCount(), "replacement is created once the terminating sandbox is gone")
 }
 
+// nextEvent returns the next event recorded by recorder, or "" if none is pending.
+func nextEvent(recorder *events.FakeRecorder) string {
+	select {
+	case e := <-recorder.Events:
+		return e
+	default:
+		return ""
+	}
+}
+
 // TestReconcilePool_UnschedulableStuckGC: a non-Ready sandbox past the
 // readiness grace period whose backing pod is unschedulable must be HELD, not
 // deleted — deleting it would just create an equally unschedulable
@@ -496,6 +506,71 @@ func TestReconcilePool_UnschedulableStuckGC(t *testing.T) {
 		require.Positive(t, requeueAfter, "the post-grace evaluation must be self-scheduled")
 	})
 
+	t.Run("scheduling-gated sandbox is held, not replaced", func(t *testing.T) {
+		warmPool := newPool()
+		sb := withPodScheduled(agedSandbox("-gated"), metav1.ConditionFalse, corev1.PodReasonSchedulingGated)
+
+		recorder := events.NewFakeRecorder(16)
+		lc := newLaggingClient(newFakeClient(newTestScheme(), template, warmPool, sb))
+		r := SandboxWarmPoolReconciler{
+			Client:       lc,
+			Scheme:       newTestScheme(),
+			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+			Recorder:     recorder,
+		}
+		ctx := context.Background()
+
+		requeueAfter, err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: poolNamespace, Name: sb.Name}, &sandboxv1beta1.Sandbox{}),
+			"a gated sandbox must not be deleted as stuck")
+		require.Equal(t, 0, lc.createCount(), "no replacement may be created for a gated sandbox")
+		require.Equal(t, DefaultUnschedulableRecheckInterval, requeueAfter)
+		require.Equal(t, replicas, warmPool.Status.Replicas)
+		_, message := notProgressingSignal(0, 1, replicas, DefaultWarmPoolReadinessGracePeriod)
+		require.Equal(t, corev1.EventTypeWarning+" "+reasonWarmPoolNotProgressing+" "+message, nextEvent(recorder))
+	})
+
+	// Once its gate is removed, a Pod may still find no capacity. Unlike
+	// client-go, FakeRecorder does not fold same-action events, so check the
+	// action.
+	t.Run("a change of hold cause is reported again", func(t *testing.T) {
+		warmPool := newPool()
+		sb := withPodScheduled(agedSandbox("-switch"), metav1.ConditionFalse, corev1.PodReasonSchedulingGated)
+		key := types.NamespacedName{Namespace: poolNamespace, Name: sb.Name}
+
+		recorder := events.NewFakeRecorder(16)
+		recorder.Verbose = true
+		lc := newLaggingClient(newFakeClient(newTestScheme(), template, warmPool, sb))
+		r := SandboxWarmPoolReconciler{
+			Client:       lc,
+			Scheme:       newTestScheme(),
+			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+			Recorder:     recorder,
+		}
+		ctx := context.Background()
+
+		_, err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		require.Contains(t, nextEvent(recorder), corev1.EventTypeWarning+" "+reasonWarmPoolNotProgressing+" HoldingSchedulingGated ")
+
+		got := &sandboxv1beta1.Sandbox{}
+		require.NoError(t, r.Get(ctx, key, got))
+		for i := range got.Status.Conditions {
+			if got.Status.Conditions[i].Type == string(sandboxv1beta1.SandboxConditionPodScheduled) {
+				got.Status.Conditions[i].Reason = corev1.PodReasonUnschedulable
+			}
+		}
+		require.NoError(t, r.Update(ctx, got))
+		_, err = r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		require.Contains(t, nextEvent(recorder), corev1.EventTypeWarning+" "+reasonWarmPoolNotProgressing+" HoldingUnschedulable ")
+
+		_, err = r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		require.Empty(t, nextEvent(recorder), "no duplicate event while the cause is unchanged")
+	})
+
 	// A terminating sandbox keeps its last mirrored PodScheduled condition until
 	// the sandbox controller observes the Pod's absence, so a stale Unschedulable
 	// must not hold a pool slot on an object that is already going away.
@@ -515,17 +590,14 @@ func TestReconcilePool_UnschedulableStuckGC(t *testing.T) {
 	})
 }
 
-// TestIsSandboxPodUnschedulable pins the decision table of the mirrored-condition
-// read directly, independent of reconcilePool. Only PodScheduled=False with reason
-// Unschedulable is a hold signal: a missing condition and an Unknown status are the
-// two shapes the mirror uses for "Pod absent" and "Pod state unknown", so both fall
-// through to the stuck-sandbox path.
-//
-// The reason set here is carried over unchanged from the Pod-reading version this
-// refactor replaces; it is not a claim that the set is complete. SchedulingGated in
-// particular is a known gap and is deliberately left out of this table so a fix can
-// add it without first overturning an assertion made here.
-func TestIsSandboxPodUnschedulable(t *testing.T) {
+// TestSandboxPodHoldPredicates pins the decision table of the mirrored-condition
+// reads directly, independent of reconcilePool. PodScheduled=False with reason
+// Unschedulable or SchedulingGated is a hold signal, and each reason belongs to
+// exactly one predicate so a held member is counted once. A missing condition and
+// an Unknown status are the two shapes the mirror uses for "Pod absent" and "Pod
+// state unknown", so both fall through to the stuck-sandbox path, as does any
+// other False reason.
+func TestSandboxPodHoldPredicates(t *testing.T) {
 	deleting := metav1.Now()
 
 	cond := func(status metav1.ConditionStatus, reason string) []metav1.Condition {
@@ -538,41 +610,46 @@ func TestIsSandboxPodUnschedulable(t *testing.T) {
 	}
 
 	tests := []struct {
-		name       string
-		conditions []metav1.Condition
-		deleting   bool
-		want       bool
+		name              string
+		conditions        []metav1.Condition
+		deleting          bool
+		wantUnschedulable bool
+		wantGated         bool
 	}{
 		{
 			name:       "no PodScheduled condition (mirror removed: Pod confirmed absent)",
 			conditions: nil,
-			want:       false,
 		},
 		{
 			name:       "other conditions but no PodScheduled",
 			conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "NotReady", LastTransitionTime: metav1.Now()}},
-			want:       false,
 		},
 		{
 			name:       "Unknown (transient Pod lookup failure)",
 			conditions: cond(metav1.ConditionUnknown, sandboxv1beta1.SandboxReasonPodSchedulingUnknown),
-			want:       false,
 		},
 		{
 			name:       "True/PodScheduled (scheduled fine; stuck for another reason)",
 			conditions: cond(metav1.ConditionTrue, sandboxv1beta1.SandboxReasonPodScheduled),
-			want:       false,
 		},
 		{
-			name:       "False/Unschedulable (the hold signal)",
-			conditions: cond(metav1.ConditionFalse, corev1.PodReasonUnschedulable),
-			want:       true,
+			name:              "False/Unschedulable (waiting on capacity)",
+			conditions:        cond(metav1.ConditionFalse, corev1.PodReasonUnschedulable),
+			wantUnschedulable: true,
+		},
+		{
+			name:       "False/SchedulingGated (waiting on its gate owner)",
+			conditions: cond(metav1.ConditionFalse, corev1.PodReasonSchedulingGated),
+			wantGated:  true,
+		},
+		{
+			name:       "False/SchedulerError (any other reason)",
+			conditions: cond(metav1.ConditionFalse, corev1.PodReasonSchedulerError),
 		},
 		{
 			name:       "deleting sandbox with a stale False/Unschedulable",
 			conditions: cond(metav1.ConditionFalse, corev1.PodReasonUnschedulable),
 			deleting:   true,
-			want:       false,
 		},
 	}
 
@@ -586,7 +663,8 @@ func TestIsSandboxPodUnschedulable(t *testing.T) {
 				sb.DeletionTimestamp = &deleting
 				sb.Finalizers = []string{"agents.x-k8s.io/test-hold"}
 			}
-			require.Equal(t, tc.want, isSandboxPodUnschedulable(sb))
+			require.Equal(t, tc.wantUnschedulable, isSandboxPodUnschedulable(sb), "isSandboxPodUnschedulable")
+			require.Equal(t, tc.wantGated, isSandboxPodSchedulingGated(sb), "isSandboxPodSchedulingGated")
 		})
 	}
 }
@@ -625,6 +703,47 @@ func TestReadinessGraceStart(t *testing.T) {
 			}
 			got := readinessGraceStart(sb)
 			require.True(t, tc.want.Equal(got), "got %v, want %v", got, tc.want)
+		})
+	}
+}
+
+// TestNotProgressingSignal pins the not-progressing cause and message for each
+// kind of hold.
+func TestNotProgressingSignal(t *testing.T) {
+	tests := []struct {
+		name          string
+		unschedulable int32
+		gated         int32
+		wantCause     string
+		wantMessage   string
+	}{
+		{name: "nothing held"},
+		{
+			name:          "unschedulable only",
+			unschedulable: 2,
+			wantCause:     "HoldingUnschedulable",
+			wantMessage:   "2/4 sandboxes are unschedulable past the 5m0s readiness grace period; holding them instead of replacing (replacements would be equally unschedulable)",
+		},
+		{
+			name:        "gated only",
+			gated:       3,
+			wantCause:   "HoldingSchedulingGated",
+			wantMessage: "3/4 sandboxes are waiting on scheduling gates (SchedulingGated) past the 5m0s readiness grace period; holding them until the controller that owns the gates removes them (replacements would be gated again)",
+		},
+		{
+			name:          "unschedulable and gated",
+			unschedulable: 1,
+			gated:         2,
+			wantCause:     "HoldingUnschedulableAndSchedulingGated",
+			wantMessage:   "3/4 sandboxes are not scheduled past the 5m0s readiness grace period (1 unschedulable, 2 waiting on scheduling gates); holding them instead of replacing (replacements would be blocked the same way)",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cause, message := notProgressingSignal(tc.unschedulable, tc.gated, 4, 5*time.Minute)
+			require.Equal(t, tc.wantCause, cause)
+			require.Equal(t, tc.wantMessage, message)
 		})
 	}
 }

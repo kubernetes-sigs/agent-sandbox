@@ -75,8 +75,8 @@ const (
 	expectationsPendingRequeueDelay = 30 * time.Second
 
 	// DefaultUnschedulableRecheckInterval is the rate-limited retry interval
-	// for a pool holding unschedulable sandboxes instead of churning
-	// delete/create (#1215), unless overridden via
+	// for a pool holding unschedulable or scheduling-gated sandboxes instead of
+	// churning delete/create (#1215), unless overridden via
 	// SandboxWarmPoolReconciler.UnschedulableRecheckInterval.
 	DefaultUnschedulableRecheckInterval = time.Minute
 
@@ -111,11 +111,12 @@ type SandboxWarmPoolReconciler struct {
 	// ReadinessGracePeriod is how long a pool sandbox may stay non-Ready,
 	// counted from when its Pod is scheduled (or from creation if it has not
 	// been), before it is considered stuck (delete-and-replace, or held if its
-	// pod is unschedulable). Zero means DefaultWarmPoolReadinessGracePeriod.
+	// pod is unschedulable or scheduling-gated). Zero means
+	// DefaultWarmPoolReadinessGracePeriod.
 	ReadinessGracePeriod time.Duration
 	// UnschedulableRecheckInterval is the requeue interval while a pool holds
-	// unschedulable sandboxes past the readiness grace period. Zero means
-	// DefaultUnschedulableRecheckInterval.
+	// unschedulable or scheduling-gated sandboxes past the readiness grace
+	// period. Zero means DefaultUnschedulableRecheckInterval.
 	UnschedulableRecheckInterval time.Duration
 	// Recorder emits pool-level Events (e.g. WarmPoolNotProgressing). May be
 	// nil (tests); all uses are nil-guarded.
@@ -127,10 +128,10 @@ type SandboxWarmPoolReconciler struct {
 	expectations *warmPoolExpectations
 	expOnce      sync.Once
 
-	// notProgressingMu guards notProgressing, the set of pools currently held
-	// in a not-progressing state (used to emit transition events exactly once).
+	// notProgressingMu guards notProgressing, the cause each pool is currently
+	// not progressing for (used to emit an event once per change of cause).
 	notProgressingMu sync.Mutex
-	notProgressing   map[types.NamespacedName]struct{}
+	notProgressing   map[types.NamespacedName]string
 
 	// now is a test hook for the reconciler's clock; nil means time.Now.
 	now func() time.Time
@@ -514,6 +515,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	now := r.clockNow()
 	var healthySandboxes []sandboxv1beta1.Sandbox
 	unschedulableReplicas := int32(0)
+	gatedReplicas := int32(0)
 	// nextGraceDeadline is the time remaining until the earliest readiness
 	// grace deadline among not-yet-Ready sandboxes (0 = none pending).
 	var nextGraceDeadline time.Duration
@@ -544,6 +546,14 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			// frees up.
 			if isSandboxPodUnschedulable(&sb) {
 				unschedulableReplicas++
+				healthySandboxes = append(healthySandboxes, sb)
+				continue
+			}
+			// Likewise a gated Pod waits for the controller that owns its
+			// scheduling gates (e.g. Kueue admission) to remove them; a
+			// replacement would be gated again at the back of its queue.
+			if isSandboxPodSchedulingGated(&sb) {
+				gatedReplicas++
 				healthySandboxes = append(healthySandboxes, sb)
 				continue
 			}
@@ -585,6 +595,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		"current", currentReplicas,
 		"terminating", terminatingReplicas,
 		"unschedulable", unschedulableReplicas,
+		"gated", gatedReplicas,
 		"poolName", warmPool.Name,
 		"poolNameHash", poolNameHash)
 
@@ -768,17 +779,14 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		}
 	}
 
-	// Surface (and clear) the not-progressing signal. A pool with
-	// unschedulable sandboxes past the readiness grace period cannot make
-	// progress toward spec.replicas until cluster capacity frees up; degrade
-	// visibly instead of churning.
-	if unschedulableReplicas > 0 {
-		r.setNotProgressing(warmPool, poolKey, true, fmt.Sprintf(
-			"%d/%d sandboxes are unschedulable past the %s readiness grace period; holding them instead of replacing (replacements would be equally unschedulable)",
-			unschedulableReplicas, desiredReplicas, r.readinessGracePeriod()))
+	// Surface (and clear) the not-progressing signal. A pool holding
+	// unschedulable or gated sandboxes past the readiness grace period cannot
+	// make progress toward spec.replicas until capacity frees up or the gates
+	// are removed; degrade visibly instead of churning.
+	cause, message := notProgressingSignal(unschedulableReplicas, gatedReplicas, desiredReplicas, r.readinessGracePeriod())
+	r.setNotProgressing(warmPool, poolKey, cause, message)
+	if cause != "" {
 		requeueAfter = minNonZeroDuration(requeueAfter, r.unschedulableRecheckInterval())
-	} else {
-		r.setNotProgressing(warmPool, poolKey, false, "")
 	}
 
 	// Self-schedule the post-grace evaluation for not-yet-Ready sandboxes so
@@ -810,22 +818,43 @@ func minNonZeroDuration(a, b time.Duration) time.Duration {
 	return min(a, b)
 }
 
-// setNotProgressing tracks the pool's not-progressing state and emits a
-// transition Event: a Warning when the pool stops progressing and a Normal
-// event once progress resumes. Repeated reconciles in the same state do not
-// re-emit.
-func (r *SandboxWarmPoolReconciler) setNotProgressing(warmPool *extensionsv1beta1.SandboxWarmPool, poolKey types.NamespacedName, notProgressing bool, message string) {
+// notProgressingSignal returns why a pool holding sandboxes past the readiness
+// grace period is not progressing, and the message reporting it. The cause
+// changes only with the kind of hold, not with the counts, and is the event
+// action.
+func notProgressingSignal(unschedulable, gated, desired int32, grace time.Duration) (cause, message string) {
+	switch {
+	case unschedulable > 0 && gated > 0:
+		return "HoldingUnschedulableAndSchedulingGated", fmt.Sprintf(
+			"%d/%d sandboxes are not scheduled past the %s readiness grace period (%d unschedulable, %d waiting on scheduling gates); holding them instead of replacing (replacements would be blocked the same way)",
+			unschedulable+gated, desired, grace, unschedulable, gated)
+	case gated > 0:
+		return "HoldingSchedulingGated", fmt.Sprintf(
+			"%d/%d sandboxes are waiting on scheduling gates (SchedulingGated) past the %s readiness grace period; holding them until the controller that owns the gates removes them (replacements would be gated again)",
+			gated, desired, grace)
+	case unschedulable > 0:
+		return "HoldingUnschedulable", fmt.Sprintf(
+			"%d/%d sandboxes are unschedulable past the %s readiness grace period; holding them instead of replacing (replacements would be equally unschedulable)",
+			unschedulable, desired, grace)
+	}
+	return "", ""
+}
+
+// setNotProgressing tracks why the pool is not progressing ("" once it is) and
+// emits an Event when that changes: a Warning when the pool stops progressing
+// or the cause changes, and a Normal event once progress resumes. Repeated
+// reconciles with the same cause do not re-emit.
+func (r *SandboxWarmPoolReconciler) setNotProgressing(warmPool *extensionsv1beta1.SandboxWarmPool, poolKey types.NamespacedName, cause, message string) {
 	r.notProgressingMu.Lock()
-	_, was := r.notProgressing[poolKey]
-	if notProgressing == was {
+	if r.notProgressing[poolKey] == cause {
 		r.notProgressingMu.Unlock()
 		return
 	}
-	if notProgressing {
+	if cause != "" {
 		if r.notProgressing == nil {
-			r.notProgressing = make(map[types.NamespacedName]struct{})
+			r.notProgressing = make(map[types.NamespacedName]string)
 		}
-		r.notProgressing[poolKey] = struct{}{}
+		r.notProgressing[poolKey] = cause
 	} else {
 		delete(r.notProgressing, poolKey)
 	}
@@ -834,8 +863,11 @@ func (r *SandboxWarmPoolReconciler) setNotProgressing(warmPool *extensionsv1beta
 	if r.Recorder == nil {
 		return
 	}
-	if notProgressing {
-		r.Recorder.Eventf(warmPool, nil, corev1.EventTypeWarning, reasonWarmPoolNotProgressing, "Reconciling", "%s", message)
+	if cause != "" {
+		// client-go folds repeats of an object's event with the same type,
+		// reason and action into one series and drops their messages, so each
+		// cause needs its own action.
+		r.Recorder.Eventf(warmPool, nil, corev1.EventTypeWarning, reasonWarmPoolNotProgressing, cause, "%s", message)
 	} else {
 		r.Recorder.Eventf(warmPool, nil, corev1.EventTypeNormal, reasonWarmPoolProgressing, "Reconciling", "Warm pool is progressing again")
 	}
@@ -843,9 +875,9 @@ func (r *SandboxWarmPoolReconciler) setNotProgressing(warmPool *extensionsv1beta
 
 // readinessGraceStart returns when a pool member's readiness grace period
 // began: at creation or, if later, when its Pod was scheduled. A member held
-// past the grace period while unschedulable only starts pulling images and
-// starting containers once it schedules; counting from creation would delete it
-// as stuck before it can become Ready.
+// past the grace period while unschedulable or gated only starts pulling images
+// and starting containers once it schedules; counting from creation would
+// delete it as stuck before it can become Ready.
 //
 // The mirrored PodScheduled condition's LastTransitionTime approximates when
 // the Pod was scheduled: meta.SetStatusCondition only advances it when Status
@@ -866,28 +898,41 @@ func readinessGraceStart(sb *sandboxv1beta1.Sandbox) time.Time {
 // instead of replaced (#1215).
 //
 // Reads the PodScheduled condition mirrored onto Sandbox.status instead of
-// fetching the Pod. Anything but False/Unschedulable takes the stuck-sandbox
-// path; SchedulingGated is a known gap in that set, tracked separately.
+// fetching the Pod. Anything but False/Unschedulable or False/SchedulingGated
+// (see isSandboxPodSchedulingGated) takes the stuck-sandbox path.
 //
 // Reading the mirror costs two things the Pod read gave us:
-//   - A Pod wedged terminating still reports Unschedulable, so it holds a slot
-//     until the Pod goes (#1748). LastTransitionTime cannot bound this --
+//   - A Pod wedged terminating still reports its last reason, so it holds a
+//     slot until the Pod goes (#1748). LastTransitionTime cannot bound this --
 //     meta.SetStatusCondition only advances it when Status changes.
 //   - A sandbox controller predating the mirror writes no condition, making
 //     every member look stuck. Unreachable in-tree (both controllers ship in one
 //     binary), but possible if extensions ever runs as its own process.
 func isSandboxPodUnschedulable(sb *sandboxv1beta1.Sandbox) bool {
+	return podNotScheduledReason(sb) == corev1.PodReasonUnschedulable
+}
+
+// isSandboxPodSchedulingGated reports whether a pool member past its readiness
+// grace period is waiting on scheduling gates rather than stuck, and so should
+// be held instead of replaced.
+func isSandboxPodSchedulingGated(sb *sandboxv1beta1.Sandbox) bool {
+	return podNotScheduledReason(sb) == corev1.PodReasonSchedulingGated
+}
+
+// podNotScheduledReason returns the reason of a live pool member's mirrored
+// PodScheduled=False condition, or "" otherwise.
+func podNotScheduledReason(sb *sandboxv1beta1.Sandbox) string {
 	// A terminating sandbox keeps its last mirrored condition until the sandbox
 	// controller observes the Pod's absence. Free the slot rather than holding it
 	// for an object already going away.
 	if !sb.DeletionTimestamp.IsZero() {
-		return false
+		return ""
 	}
 	cond := meta.FindStatusCondition(sb.Status.Conditions, string(sandboxv1beta1.SandboxConditionPodScheduled))
-	if cond == nil {
-		return false
+	if cond == nil || cond.Status != metav1.ConditionFalse {
+		return ""
 	}
-	return cond.Status == metav1.ConditionFalse && cond.Reason == corev1.PodReasonUnschedulable
+	return cond.Reason
 }
 
 // resolveUpdateStrategy returns the effective update strategy for the warm pool,

@@ -72,12 +72,23 @@ async function startH2Server(
   server.on("connection", (socket: net.Socket) => {
     lastRawSocket = socket;
   });
+  // After a GOAWAY the client may leave its session open, which would make
+  // server.close() wait on it; destroy sessions ourselves on close.
+  const sessions = new Set<http2.ServerHttp2Session>();
+  server.on("session", (session) => {
+    sessions.add(session);
+    session.once("close", () => sessions.delete(session));
+  });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const addr = server.address();
   if (!addr || typeof addr === "string") throw new Error("failed to bind");
   return {
     baseUrl: `http://127.0.0.1:${addr.port}`,
-    close: () => new Promise((resolve) => server.close(() => resolve())),
+    close: () =>
+      new Promise((resolve) => {
+        server.close(() => resolve());
+        for (const session of sessions) session.destroy();
+      }),
   };
 }
 

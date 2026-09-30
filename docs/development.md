@@ -180,6 +180,8 @@ The configuration for these jobs is managed in the [kubernetes/test-infra](https
 
 The CI scripts are located in the [`dev/ci/`](../dev/ci/) directory.
 
+Running `dev/ci/presubmits/test-autogen-up-to-date` locally requires a clean working tree: commit or stash (`git stash -u`) your changes first.
+
 Note that presubmits are triggered on every push to the `main` branch, and postsubmits are triggered on every merge to the `main` branch.
 
 ### Pull Requests

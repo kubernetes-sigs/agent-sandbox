@@ -217,13 +217,20 @@ class SandboxFleet:
     """Label selector for resources this run owns (the reaper key)."""
     return f"{constants.RUN_ID_LABEL}={self.run_id}"
 
+  def pod_run_selector(self) -> str:
+    """Label selector for sandbox pods this run owns. Pods carry the run id under
+    POD_RUN_ID_LABEL, not RUN_ID_LABEL: the Sandbox controller strips
+    `agents.x-k8s.io/*` labels from pods."""
+    return f"{constants.POD_RUN_ID_LABEL}={self.run_id}"
+
   def live_owned_count(self) -> int:
     """Live sandbox **pods** this run owns (by run-id label), across clusters.
 
     The Sandbox controller does not copy the run-id label onto Sandbox CRs, so we
-    count pods instead — the pod template carries the fleet labels (incl. run-id),
-    so this reflects the actual live footprint, including #1215 over-creation."""
-    sel = self.run_selector()
+    count pods instead — the pod template carries the run id (as
+    POD_RUN_ID_LABEL), so this reflects the actual live footprint, including
+    #1215 over-creation."""
+    sel = self.pod_run_selector()
     n = 0
     for c in self.registry:
       try:
@@ -796,8 +803,13 @@ class SandboxFleet:
   def _ensure_pool(self, cluster: Cluster, image: str, replicas: int) -> str:
     template = self.config.template_name(image)
     pool = self.config.pool_name(image)
+    # The on-demand path reuses another run's pool on a 409, so it reuses their
+    # template the same way: relabelling it would hand it to this run, whose
+    # teardown/reap would then delete it (and force-delete the pods it goes on
+    # to create) while the owner's pool still uses it.
     cluster.resources.ensure_template(
-        image, template, cluster.template_spec(self.config.template))
+        image, template, cluster.template_spec(self.config.template),
+        owner_run_id=self.run_id, share_foreign=True)
     cluster.resources.create_warmpool(pool, template, replicas)
     return pool
 
@@ -812,8 +824,14 @@ class SandboxFleet:
       return
     for e in plan.entries:
       c = self.registry.get(e.cluster)
-      c.resources.ensure_template(
-          e.image, e.template, c.template_spec(self.config.template))
+      try:
+        # Owner-checked like the warm path: a relabel here would stamp this run's
+        # id onto another run's template and then pass the warm path's check.
+        c.resources.ensure_template(
+            e.image, e.template, c.template_spec(self.config.template),
+            owner_run_id=self.run_id)
+      except OwnedByAnotherRunError as exc:
+        raise self._collision_error(e, "template", e.template, exc.owner) from exc
 
   def _warm_entry(self, e, wait: bool, replicas_override: int | None = None) -> None:
     """Warm one plan entry's pool (create template+pool, reserve, optionally wait

@@ -519,7 +519,11 @@ raises `FleetOvercommitError` (catches accidental over-creation; `factor=0` disa
 teardown on graceful exits (normal return, exceptions, `SIGINT`/`SIGTERM`) — these are
 **best-effort** and can't catch `SIGKILL` / OOM / node loss. For those abrupt cases,
 every resource is labelled with `fleet.run_id`, and **`reap(run_id=…)`** / `python -m
-agent_sandbox_rl.reaper` is the recovery path — sweeping an orphaned run by label. `plan()` also emits **advisory** `plan.warnings` (never fatal)
+agent_sandbox_rl.reaper` is the recovery path — sweeping an orphaned run by label.
+Claims, pools and templates carry it as `RUN_ID_LABEL` (`agents.x-k8s.io/asrl-run-id`);
+pods carry it as `POD_RUN_ID_LABEL` (`agent-sandbox-rl/run-id`), because the Sandbox
+controller strips `agents.x-k8s.io/*` labels from pods — select pods by that key
+(`fleet.pod_run_selector()`). `plan()` also emits **advisory** `plan.warnings` (never fatal)
 for footprint/concurrency beyond what the control plane comfortably absorbs.
 
 **ClusterConfig:** `name`, `kubeconfig`, `context`, `in_cluster`, `namespace`,

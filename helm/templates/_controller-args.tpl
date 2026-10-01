@@ -15,7 +15,7 @@
 - --leader-election-namespace={{ include "agent-sandbox.namespace" . }}
 {{- end }}
 {{- if .Values.controller.watchNamespace }}
-- --namespace={{ .Values.controller.watchNamespace }}
+- {{ printf "--namespace=%s" .Values.controller.watchNamespace | quote }}
 {{- end }}
 {{- if hasKey .Values.controller "extensions" }}
 - --extensions={{ .Values.controller.extensions }}

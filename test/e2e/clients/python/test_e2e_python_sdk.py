@@ -243,20 +243,22 @@ def test_python_sdk_annotation(tc, temp_namespace, sandbox_coldpool):
             version=CLAIM_API_VERSION,
             namespace=temp_namespace,
             plural=CLAIM_PLURAL_NAME,
-            name=sandbox.claim_name
+            name=sandbox.claim_name,
         )
 
         annotations = claim.get("metadata", {}).get("annotations", {})
         print(f"Annotations: {annotations}")
 
-        assert CLIENT_REQUEST_TIME_ANNOTATION in annotations, f"Expected annotation '{CLIENT_REQUEST_TIME_ANNOTATION}' missing"
+        assert CLIENT_REQUEST_TIME_ANNOTATION in annotations, (
+            f"Expected annotation '{CLIENT_REQUEST_TIME_ANNOTATION}' missing"
+        )
 
         timestamp_str = annotations[CLIENT_REQUEST_TIME_ANNOTATION]
         print(f"Timestamp: {timestamp_str}")
 
         try:
             dt = datetime.fromisoformat(timestamp_str)
-            assert dt.tzname() == 'UTC', "Timestamp should be in UTC"
+            assert dt.tzname() == "UTC", "Timestamp should be in UTC"
         except ValueError as e:
             pytest.fail(f"Failed to parse timestamp '{timestamp_str}': {e}")
 
@@ -288,7 +290,12 @@ def test_python_sdk_router_mode_warmpool(
 
 
 def test_python_sdk_gateway_mode(
-    tc, temp_namespace, sandbox_template, deploy_router, deploy_gateway, sandbox_coldpool
+    tc,
+    temp_namespace,
+    sandbox_template,
+    deploy_router,
+    deploy_gateway,
+    sandbox_coldpool,
 ):
     """Tests the Python SDK in Gateway mode (with Gateway and Router) without warmpool."""
     config = SandboxGatewayConnectionConfig(
@@ -347,17 +354,11 @@ def test_python_sdk_volume_claim_templates(
     storage_class = os.getenv("SANDBOX_TEST_STORAGE_CLASS")
     custom_vcts = [
         {
-            "metadata": {
-                "name": "custom-workspace"
-            },
+            "metadata": {"name": "custom-workspace"},
             "spec": {
                 "accessModes": ["ReadWriteOnce"],
-                "resources": {
-                    "requests": {
-                        "storage": "1Gi"
-                    }
-                }
-            }
+                "resources": {"requests": {"storage": "1Gi"}},
+            },
         }
     ]
     if storage_class:
@@ -371,15 +372,21 @@ def test_python_sdk_volume_claim_templates(
             namespace=temp_namespace,
             volume_claim_templates=custom_vcts,
         )
-        
+
         # Verify that volumeClaimTemplates was propagated to the SandboxClaim spec
         print("Verifying SandboxClaim spec.volumeClaimTemplates...")
-        claim_res = client.k8s_helper.get_sandbox_claim(sandbox.claim_name, temp_namespace)
+        claim_res = client.k8s_helper.get_sandbox_claim(
+            sandbox.claim_name, temp_namespace
+        )
         assert claim_res is not None, f"SandboxClaim {sandbox.claim_name} should exist"
         claim_spec = claim_res.get("spec", {})
         claim_vcts = claim_spec.get("volumeClaimTemplates", [])
-        assert len(claim_vcts) == 1, f"Expected 1 volumeClaimTemplate on SandboxClaim, got {len(claim_vcts)}"
-        assert claim_vcts[0].get("metadata", {}).get("name") == "custom-workspace", "Volume claim template name mismatch in SandboxClaim"
+        assert len(claim_vcts) == 1, (
+            f"Expected 1 volumeClaimTemplate on SandboxClaim, got {len(claim_vcts)}"
+        )
+        assert claim_vcts[0].get("metadata", {}).get("name") == "custom-workspace", (
+            "Volume claim template name mismatch in SandboxClaim"
+        )
 
         # Verify that volumeClaimTemplates was propagated to the Sandbox spec
         print("Verifying Sandbox spec.volumeClaimTemplates...")
@@ -389,29 +396,86 @@ def test_python_sdk_volume_claim_templates(
         sandbox_vcts = sandbox_spec.get("volumeClaimTemplates", [])
 
         # Verify that our custom volume claim template exists in Sandbox spec.volumeClaimTemplates
-        custom_vct = next((v for v in sandbox_vcts if v.get("metadata", {}).get("name") == "custom-workspace"), None)
-        assert custom_vct is not None, "Custom volume claim template 'custom-workspace' not found in Sandbox spec"
-        assert custom_vct.get("spec", {}).get("accessModes") == ["ReadWriteOnce"], "Volume claim template accessModes mismatch in Sandbox"
+        custom_vct = next(
+            (
+                v
+                for v in sandbox_vcts
+                if v.get("metadata", {}).get("name") == "custom-workspace"
+            ),
+            None,
+        )
+        assert custom_vct is not None, (
+            "Custom volume claim template 'custom-workspace' not found in Sandbox spec"
+        )
+        assert custom_vct.get("spec", {}).get("accessModes") == ["ReadWriteOnce"], (
+            "Volume claim template accessModes mismatch in Sandbox"
+        )
         if storage_class:
-            assert custom_vct.get("spec", {}).get("storageClassName") == storage_class, "Volume claim template storageClassName mismatch in Sandbox"
-        assert custom_vct.get("spec", {}).get("resources", {}).get("requests", {}).get("storage") == "1Gi", "Volume claim template storage request mismatch in Sandbox"
-
+            assert (
+                custom_vct.get("spec", {}).get("storageClassName") == storage_class
+            ), "Volume claim template storageClassName mismatch in Sandbox"
+        assert (
+            custom_vct.get("spec", {})
+            .get("resources", {})
+            .get("requests", {})
+            .get("storage")
+            == "1Gi"
+        ), "Volume claim template storage request mismatch in Sandbox"
 
         # Verify that the PersistentVolumeClaim resource was created with the expected properties
         print("Verifying PVC creation in cluster...")
         pvc_name = f"custom-workspace-{sandbox.sandbox_id}"
-        pvc_res = client.k8s_helper.core_v1_api.read_namespaced_persistent_volume_claim(pvc_name, temp_namespace)
+        pvc_res = client.k8s_helper.core_v1_api.read_namespaced_persistent_volume_claim(
+            pvc_name, temp_namespace
+        )
         assert pvc_res is not None, f"PVC {pvc_name} should exist"
         assert pvc_res.spec.resources.requests is not None
-        assert pvc_res.spec.resources.requests.get("storage") == "1Gi", "PVC storage request mismatch in cluster"
+        assert pvc_res.spec.resources.requests.get("storage") == "1Gi", (
+            "PVC storage request mismatch in cluster"
+        )
         if storage_class:
-            assert pvc_res.spec.storage_class_name == storage_class, "PVC storageClassName mismatch in cluster"
+            assert pvc_res.spec.storage_class_name == storage_class, (
+                "PVC storageClassName mismatch in cluster"
+            )
 
         print("Running command to verify sandbox is operational...")
         wait_until_sandbox_routable(sandbox)
         res = sandbox.commands.run("df -h")
         print(f"Disk space output:\n{res.stdout}")
-        assert res.exit_code == 0, f"Command df -h failed with exit code {res.exit_code}: {res.stderr}"
+        assert res.exit_code == 0, (
+            f"Command df -h failed with exit code {res.exit_code}: {res.stderr}"
+        )
 
     finally:
         client.delete_all()
+
+
+def test_command_execution(sandbox):
+    """Tests command execution and pod introspection."""
+    print("\n--- Testing Command Execution ---")
+    command_to_run = "echo 'Hello from the sandbox shruti!'"
+    print(f"Executing command: '{command_to_run}'")
+
+    result = sandbox.commands.run(command_to_run)
+
+    print(f"Stdout: {result.stdout.strip()}")
+    print(f"Stderr: {result.stderr.strip()}")
+    print(f"Exit Code: {result.exit_code}")
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "Hello from the sandbox shruti!"
+
+    print("\n--- Command Execution Test Passed! ---")
+
+    # Test introspection commands
+    print("\n--- Testing Pod Introspection ---")
+
+    print("\n--- Listing files in /app ---")
+    list_files_result = sandbox.commands.run("ls -la /app")
+    print(list_files_result.stdout)
+
+    print("\n--- Printing environment variables ---")
+    env_result = sandbox.commands.run("env")
+    print(env_result.stdout)
+
+    print("--- Introspection Tests Finished ---")

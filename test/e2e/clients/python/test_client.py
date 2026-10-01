@@ -12,26 +12,76 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import argparse
-import os
-import time
 import logging
-import sys
+import os
 import subprocess
+import sys
+import time
 from unittest.mock import MagicMock
+
+import pytest
 from k8s_agent_sandbox import SandboxClient, SandboxWarmPoolNotFoundError
 from k8s_agent_sandbox.models import (
+    ExecutionResult,
     SandboxDirectConnectionConfig,
     SandboxGatewayConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
     SandboxTracerConfig,
-    ExecutionResult,
 )
 from k8s_agent_sandbox.sandbox import Sandbox
+
+from test.e2e.clients.python.framework.sdk_helpers import validate_client_cleanup
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", force=True
 )
+
+pytestmark = pytest.mark.example
+
+
+@pytest.fixture(scope="module")
+def sandbox_connection_config(request):
+    if request.config.getoption("--gateway-name"):
+        return SandboxGatewayConnectionConfig(
+            gateway_name=request.config.getoption("--gateway-name"),
+            server_port=request.config.getoption("--server-port"),
+        )
+    elif request.config.getoption("--api-url"):
+        return SandboxDirectConnectionConfig(
+            api_url=request.config.getoption("--api-url"),
+            server_port=request.config.getoption("--server-port"),
+        )
+    else:
+        return SandboxLocalTunnelConnectionConfig(
+            server_port=request.config.getoption("--server-port"),
+            router_namespace=request.config.getoption("--router-namespace"),
+        )
+
+
+@pytest.fixture(scope="module")
+def sandbox_tracer_config(request):
+    return SandboxTracerConfig(
+        enable_tracing=request.config.getoption("--enable-tracing"),
+        trace_service_name=request.config.getoption("--trace-service-name"),
+    )
+
+
+@pytest.fixture(scope="module")
+def sandbox_client(sandbox_connection_config, sandbox_tracer_config):
+    SandboxClient(
+        connection_config=sandbox_connection_config,
+        tracer_config=sandbox_tracer_config,
+        cleanup=True,
+    )
+
+
+@pytest.fixture(autouse=True, scope="module")
+def validate_cleanup_gate(request, sandbox_connection_config, sandbox_client):
+    warmpool_name = request.config.getoption("--warmpool-name")
+    namespace = request.config.getoption("--namespace")
+    validate_client_cleanup(
+        sandbox_client, warmpool_name, namespace, sandbox_connection_config
+    )
 
 
 def test_command_execution(sandbox: Sandbox):
@@ -485,31 +535,6 @@ def test_volume_claim_templates(
     print("--- Volume Claim Templates Test Passed! ---")
 
 
-def run_client_tests(client: SandboxClient, warmpool_name: str, namespace: str):
-    # Test Create, Get and List sandboxes
-    sandbox, sandbox2 = test_creation_get_and_list_sandboxes(
-        client, warmpool_name, namespace
-    )
-
-    # Test wrong warmpool name
-    test_wrong_warmpool_name(client, namespace)
-
-    # Test custom volume claim templates
-    test_volume_claim_templates(client, warmpool_name, namespace)
-
-    # Test SandboxClaim annotation
-    test_claim_annotation(client, warmpool_name, namespace)
-
-    # Run Sandbox Tests
-    run_sandbox_tests(sandbox)
-
-    # Test persistence of Sandbox in Kubernetes cluster after client side disconnection
-    test_explicit_close_connection_and_persistence(client, warmpool_name, namespace)
-
-    # Test Sandbox deletion at Kubernetes cluster
-    test_termination_and_deletion(client, sandbox, sandbox2, namespace)
-
-
 def test_client_cleanup_flag(
     client: SandboxClient, warmpool_name: str, namespace: str, connection_config
 ):
@@ -611,115 +636,3 @@ print(f"CLAIM_NAME:{{sb.claim_name}}")
     # Clean up the persisted sandbox explicitly
     sb_false.terminate()
     print("--- SandboxClient cleanup flag Test Passed ---")
-
-
-def main(
-    warmpool_name: str,
-    gateway_name: str | None,
-    api_url: str | None,
-    namespace: str,
-    server_port: int,
-    enable_tracing: bool,
-    router_namespace: str,
-):
-    """
-    Tests the Sandbox client by creating a sandbox, running a command,
-    and then cleaning up.
-    """
-
-    print(
-        f"--- Starting Sandbox Client Test (Namespace: {namespace}, Port: {server_port}) ---"
-    )
-    if gateway_name:
-        print(f"Mode: Gateway Discovery ({gateway_name})")
-    elif api_url:
-        print(f"Mode: Direct API URL ({api_url})")
-    else:
-        print("Mode: Local Port-Forward fallback")
-
-    # Create Connection Config object
-    if gateway_name:
-        connection_config = SandboxGatewayConnectionConfig(
-            gateway_name=gateway_name, server_port=server_port
-        )
-    elif api_url:
-        connection_config = SandboxDirectConnectionConfig(
-            api_url=api_url, server_port=server_port
-        )
-    else:
-        connection_config = SandboxLocalTunnelConnectionConfig(
-            server_port=server_port, router_namespace=router_namespace
-        )
-
-    tracer_config = SandboxTracerConfig(
-        enable_tracing=enable_tracing, trace_service_name="sandbox-client-test"
-    )
-
-    client = SandboxClient(
-        connection_config=connection_config, tracer_config=tracer_config, cleanup=True
-    )
-
-    test_client_cleanup_flag(client, warmpool_name, namespace, connection_config)
-
-    try:
-        run_client_tests(client, warmpool_name, namespace)
-
-    except Exception as e:
-        print(f"\n--- An error occurred during the test: {e} ---")
-    finally:
-        print("Cleaning up all sandboxes...")
-        client.delete_all()
-        print("\n--- Sandbox Client Test Finished ---")
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Test the Sandbox client.")
-    parser.add_argument(
-        "--warmpool-name",
-        default="python-sandbox-pool",
-        help="The name of the sandbox warm pool to use for the test.",
-    )
-
-    # Default is None to allow testing the Port-Forward fallback
-    parser.add_argument(
-        "--gateway-name",
-        default=None,
-        help="The name of the Gateway resource. If omitted, defaults to local port-forward mode.",
-    )
-
-    parser.add_argument(
-        "--api-url",
-        help="Direct URL to router (e.g. http://localhost:8080)",
-        default=None,
-    )
-    parser.add_argument(
-        "--namespace", default="default", help="Namespace to create sandbox in"
-    )
-    parser.add_argument(
-        "--server-port",
-        type=int,
-        default=8888,
-        help="Port the sandbox container listens on",
-    )
-    parser.add_argument(
-        "--router-namespace",
-        default="default",
-        help="Namespace where the Router service resides",
-    )
-    parser.add_argument(
-        "--enable-tracing",
-        action="store_true",
-        help="Enable OpenTelemetry tracing in the agentic-sandbox-client.",
-    )
-
-    args = parser.parse_args()
-
-    main(
-        warmpool_name=args.warmpool_name,
-        gateway_name=args.gateway_name,
-        api_url=args.api_url,
-        namespace=args.namespace,
-        server_port=args.server_port,
-        enable_tracing=args.enable_tracing,
-        router_namespace=args.router_namespace,
-    )

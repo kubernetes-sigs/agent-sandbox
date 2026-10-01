@@ -15,3 +15,6 @@ approvers:
   - "@justinsb"
   - "@barney-s"
   - "@janetkuo"
+
+see-also:
+  - "/keps/359-refactor-python-sdk"

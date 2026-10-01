@@ -17,6 +17,7 @@ TOC is auto-generated via `make toc-update`.
     - [Coordination Substrate](#coordination-substrate)
     - [Placement Algorithm](#placement-algorithm)
     - [Failure Handling](#failure-handling)
+    - [Security Considerations](#security-considerations)
     - [Example FleetSpec](#example-fleetspec)
     - [API Changes](#api-changes)
     - [Implementation Guidance](#implementation-guidance)
@@ -50,7 +51,7 @@ Two workload shapes motivate this:
 - Place warm pools across N clusters from one declarative spec and one command.
 - **Derive** per-cluster budgets and per-pool replica counts from live capacity rather than having an admin author them.
 - Automatically exclude a degraded or unreachable cluster from the next placement pass.
-- Keep placement deterministic, so re-applying an unchanged spec does not churn pools.
+- Keep placement **churn-bounded**: fully deterministic under the policies that promise it (`pinned`, the `min_clusters` round-robin, `image-affinity`'s hash), and bounded elsewhere. The default `capacity-aware` policy scores live capacity signals, so re-applying an unchanged spec at a different time can legitimately move a pool; the spread-first pre-pass and `min_clusters` exist to bound exactly that churn. A moved pool is a teardown on the old cluster and a cold fill on the new one (see [Failure Handling](#failure-handling)). Placement stickiness against the previously published assignment is a listed follow-up.
 - Add **no new CRDs, no new controller, and no hub apiserver**.
 - Ship as an example plus a reusable Python library, so an external scheduler can import the planner without adopting the daemon.
 
@@ -81,6 +82,7 @@ Two workload shapes motivate this:
 | --- | --- | --- | --- |
 | `fleet-member` | Single-replica Deployment, Python container reusing `k8s_agent_sandbox.SandboxClient` | One per fleet cluster, in the `multi-cluster-fleet` namespace | Object storage + its **own** local apiserver only |
 | `fleetctl` | Stateless CLI, one invocation per apply | Admin host — laptop, jump box, or CI. Never in-cluster | Object storage only |
+| `FleetSandboxClient` | Optional claim-side wrapper, a Python class in the same package (see [Client-Side Resolution](#client-side-resolution)) | Wherever the trainer/harness runs | Object storage (read-only) + the **resolved** cluster's apiserver, via the caller's own kubeconfig |
 | Fleet bucket | One object-storage bucket per fleet | — | — |
 
 The critical property is that **no component talks to another cluster's apiserver.** A member reconciles only its own cluster; the planner holds no Kubernetes credentials at all. That is what removes the need for a hub, cross-cluster networking, and fleet-wide credential distribution.
@@ -109,6 +111,8 @@ SandboxClaim → adopts a warm Sandbox → served
 
 `SandboxTemplate` objects are pre-applied by the admin on every fleet cluster via `kubectl` or GitOps. **The fleet layer never creates templates**; it only references them by name and verifies they exist before creating a pool. Pod spec, resources, and env stay in the `SandboxTemplate` CR where they already live.
 
+**Namespaces.** Everything the fleet layer manages lives in one namespace per cluster — the member's `--namespace`, default `multi-cluster-fleet`. Pools are created there, the templates they reference must already exist there, and claims written by the wrapper land there. `FleetSpec` has no per-model namespace field, deliberately: the namespace is the fleet's isolation boundary and the member's entire write scope (a namespaced Role — see [Security Considerations](#security-considerations)). Teams share a fleet by sharing a spec, or isolate by running two fleets: two member Deployments in two namespaces against two buckets or prefixes. One team's spec cannot create pools against another team's templates, because its member cannot see them.
+
 #### Client-Side Resolution
 
 The upstream `SandboxClient` is single-cluster and stays that way. Fleet-aware claiming is a **thin wrapper around it**, not a change to it, and it is optional — a caller that already knows which cluster it wants keeps using `SandboxClient` directly.
@@ -124,10 +128,7 @@ The contract:
 
 This is what makes resolution API-version-independent, and it is the reason the contract is stated in terms of templates rather than pools. `template_name` is a key into `fleet/assignments.json`, matched against the `template` field of each planned pool. It is not a claim field, and it is deliberately *not* the warm-pool name, which the planner derives and the admin never types.
 
-**Which claims this applies to — all of them, on both served versions.** The claim is written by the SDK on the already-resolved cluster, so whichever version it writes, and whatever the claim can or cannot do once it lands, resolution has already happened. Concretely:
-
-- `extensions.agents.x-k8s.io/v1beta1` (storage): `warmPoolRef` is `+required`; there is no `templateRef`. Going from a claim back to a template means a lookup — `warmPoolRef.name` → `SandboxWarmPool.spec.sandboxTemplateRef.name` — which the fleet layer never has to do.
-- `extensions.agents.x-k8s.io/v1alpha1` (`served: true, storage: false`): `templateRef` is required and `warmpool` is an optional policy taking `none`, `default`, or a specific pool name. The conversion webhook normalises all of it into a `v1beta1` `warmPoolRef`, on two branches (the `WarmPool`/`TemplateRef` → `WarmPoolRef` conversion in `extensions/api/v1alpha1/sandboxclaim_conversion.go`): a specific pool passes through unchanged; otherwise, if a bound sandbox already exists whose name differs from the claim's, the pool name is recovered from it, and only failing that is `shadow-pool-<templateRef.Name>` synthesised. Note the second branch is keyed on whether a sandbox is bound, **not** on the policy value, so `none` and `default` convert identically.
+**Which claims this applies to — all of them.** The claim is written by the SDK on the already-resolved cluster, so whatever the claim can or cannot do once it lands, resolution has already happened. On the sole served version, `extensions.agents.x-k8s.io/v1beta1`, `warmPoolRef` is `+required` and there is no `templateRef` — going from a claim back to a template would mean a lookup (`warmPoolRef.name` → `SandboxWarmPool.spec.sandboxTemplateRef.name`) that the fleet layer never has to perform.
 
 Cold starts do not bypass any of this either. Two `v1beta1` spec fields force one — `env`, because the warm pods were started without those variables, and `volumeClaimTemplates`, because warm pods have no such volumes. A claim carrying either still names a warm pool and is still served on the resolved cluster; the controller cold-starts it from that pool's `SandboxTemplate` instead of adopting a warm replica. That works precisely because the template exists on the resolved cluster, which is what the assignment guarantees.
 
@@ -149,6 +150,43 @@ Three object kinds in one bucket:
 
 Capacity reports carry warm-pool depth, ready count, active claims, a node-pressure signal, and the generation that member has observed.
 
+These three payloads are the API of this design, so here they are worked in full (current `schema_version: 1`). The assignments object, written by `fleetctl` and read by every member:
+
+```json
+{
+  "schema_version": 1,
+  "generation": 42,
+  "updated_at": "2026-09-03T17:20:04Z",
+  "clusters": {
+    "fleet-a": {
+      "pools": [
+        {"template": "swe-img-4f2a", "warmpool": "swe-img-4f2a-pool",
+         "replicas": 27, "image": "us-docker.pkg.dev/proj/repo/swe:4f2a"}
+      ]
+    },
+    "fleet-b": {"pools": []}
+  }
+}
+```
+
+A capacity report, written by one member every 30 s to `fleet/capacity/<cluster>.json`:
+
+```json
+{
+  "cluster": "fleet-a",
+  "updated_at": "2026-09-03T17:20:19Z",
+  "generation_observed": 42,
+  "warmpool_depth": 120177,
+  "warmpool_ready": 119940,
+  "active_claims": null,
+  "claim_p90_ms": 0.0,
+  "node_pressure_score": null,
+  "reported_pools": ["swe-img-4f2a-pool"]
+}
+```
+
+`null` means *unmeasured*, deliberately distinct from `0` — see the eligibility rules under [Placement Algorithm](#placement-algorithm). The third payload, `fleet/spec.json`, is the archived copy of the applied `FleetSpec` (authored as YAML — the full example is under [Example FleetSpec](#example-fleetspec)) plus one stamp the author never writes, `applied_generation`.
+
 **Three separate concerns, three separate fields.** An earlier draft of this design used one integer, `generation`, for all three. That conflation is a defect, so they are split:
 
 | Field | Answers | Written by | On mismatch |
@@ -160,6 +198,7 @@ Capacity reports carry warm-pool depth, ready count, active claims, a node-press
 - **`schema_version` is a compatibility gate, not an ordering token.** A higher `generation` tells an older member nothing about whether it can understand the payload. Members accept a payload whose `schema_version` they know and reject one they do not; unknown *fields* within a known version are ignored, so additive changes do not require a version bump. Refusing is the safe failure: a member that cannot parse an assignment must not conclude the assignment is empty and tear down every pool it holds. That holds even when the refusal arrives on a fresh process start, before this process has parsed any assignment: with no last-good set to fall back on, the member skips reconciliation entirely rather than reading the refusal as an empty plan. The same rule covers a malformed payload (a pool the member cannot parse) and an *absent* `fleet/assignments.json`: the planner drains by publishing an explicit empty payload, never by deleting the object, so a missing or unparseable object reads as "no plan available" — the member keeps its current pools, loudly, and re-reads every tick until a usable plan appears.
 - **`generation` is derived, and `fleet/assignments.json` is where it lives.** `fleetctl apply` reads the currently published assignment, takes its `generation`, increments, and publishes the result; with no assignment object present yet, the first apply is generation `1`. It is deliberately *not* read back out of the archived `fleet/spec.json`. The archive is a human-readable record of what was applied, written after the plan succeeds — making it the counter would put the authoritative value in the one object nothing in the system reads, and desynchronise the fleet the first time an archive write failed after a successful publish. Keeping the counter on the assignment also keeps it on the same object as the compare-and-set precondition below and the same object members compare against, so ordering, storage, and consumption all agree. The archived spec is stamped with the generation that was applied (as `applied_generation`, a separate key from the deprecated spec-input field), for traceability only. A hand-bumped integer is a silent-failure footgun: forget the bump and every member correctly ignores the apply, with no error anywhere — the operator sees a successful `fleetctl apply` and no change in the fleet. An explicit `--generation` override remains for replay and disaster recovery, and `fleetctl apply` refuses to publish a generation that is not greater than the one already in the bucket.
 - **Ordering under concurrent applies is enforced by the store, not by the integer.** Two admins applying at once can otherwise derive the same next generation from the same base and race, and last-writer-wins silently discards one plan. Assignments are written with a compare-and-set precondition on the object's own store-side generation (`ifGenerationMatch` on GCS, `If-Match` on an S3-compatible store), so the loser's write fails and is retried against the state the winner produced. The monotonic `generation` remains what *members* compare, because a member sees only the payload, never the store metadata.
+- **Compare-and-set is a requirement on the backend, not a nicety — and GCS is the only backend implemented.** Every result in this document was produced on GCS, whose preconditions are honoured on every object unconditionally. An S3 backend must provide the same guarantee through conditional writes (`If-Match` on `PutObject`, generally available on AWS S3 since late 2024); S3-compatible stores vary — some honour the header, some ignore it and return success — and a store that ignores it silently reverts the two-admins race to last-writer-wins. A backend therefore has to *prove* CAS before it is trusted: at startup it writes with a deliberately stale precondition and requires the `412`; a store that answers `200` is refused outright, and there is no fallback to unconditional writes. External coordinators (a DynamoDB table, an etcd) are out of scope — they reintroduce exactly the kind of service this design exists to avoid, and object-store CAS is sufficient.
 
 Both files are read atomically: the read pins the object generation across fetch and body download, so a member never pairs new bytes with an old revision.
 
@@ -179,6 +218,10 @@ score(cluster) = weight × ready_ratio / (1 + load × (1 + pressure))
 | `ready_ratio` | `warmpool_ready / warmpool_depth`, or `1.0` for an empty cluster |
 | `load` | `warmpool_depth + planned_replicas` (in-run bookkeeping) |
 | `pressure` | Node CPU+memory request/allocatable ratio, clamped to `[0, 1]` |
+
+`warmpool_depth` and `warmpool_ready` come from the member's capacity report: the sums of `status.replicas` and `status.readyReplicas` across the pools it manages — sandboxes created versus sandboxes passing readiness, as aggregated by the `SandboxWarmPool` controller.
+
+**Fill timing shapes scored placement during a rollout, and that deserves saying out loud.** A cluster mid-fill has `ready_ratio` near zero and wins nothing until its pools finish filling — the `1.0` default applies only to a cluster with *no* pools at all. The spread-first pre-pass guarantees every eligible cluster its first pool regardless, so the bias affects only the extras beyond one-per-cluster: they lean toward whichever clusters finished filling first. That is accepted behavior for the capacity-aware default — a cluster mid-fill genuinely cannot adopt claims yet — and it is the second reason the churn [goal](#goals) is scoped to the policies that promise determinism; `min_clusters` removes the bias entirely by ignoring scoring.
 
 `placement_policy` selects among six selectors. The other five: `image-affinity` (MD5 of the image modulo the sorted cluster count, so a given image always lands on the same cluster for pull locality; falls back to least-loaded when that cluster is out of capacity), `least-loaded` (fewest active claims, with *unmeasured* sorting last rather than as zero, so a cluster whose claim list failed cannot win the tiebreak by looking idle), `capacity-weighted` (static `weight / (1 + active_replicas)` — the predecessor of `capacity-aware`, kept for parity with the PoC), `round-robin` (cycles eligible clusters in stable order), and `pinned` (each model names its target cluster in the spec, for fleets whose data layer is pre-sharded per cluster — the planner honours the name directly rather than scoring). `capacity-aware` is the default and the policy every scale run reported below used.
 
@@ -209,6 +252,8 @@ replicas = clamp(round(cluster_budget × tasks_pool / tasks_total),
                  min(tasks_pool, max_pool))
 ```
 
+`tasks_pool` is that pool's `target_tasks`. `tasks_total` is the sum of `target_tasks` over the models placed on **that cluster** — the denominator is per-cluster, not fleet-wide, because the fleet-wide division already happened in the Hamilton step, whose output `cluster_budget` is what is being shared here.
+
 Three knobs, and the smallest binds: `max_concurrent` (fleet-wide warm budget), `target_tasks` (per-pool proportional share), `max_pool` (hard per-pool cap). For direct control, set `max_pool` to the size you want and `target_tasks >= max_pool`.
 
 **Preconditions, rejected at spec load.** `max_concurrent`, `max_pool`, and every `target_tasks` must be `>= 1`; `cluster_weights` values must be finite and `>= 0`. These are schema constraints, validated before planning, so the formula above cannot be reached with a zero denominator or a non-positive cap. Rejecting at load is deliberate: the error can name the file and the offending key, where the same bad value surfacing from inside the allocator produces an `OverflowError` with no indication of which cluster is at fault.
@@ -232,18 +277,31 @@ The completeness precondition is the easiest to miss, because `cluster_weights` 
 
 Staleness-based, with no health-check protocol and no cross-cluster probing. A capacity report older than **90 seconds** excludes that cluster from the next placement pass, exactly as a `weight: 0` drain does.
 
-**Exclusion is not omission, and that is the whole contract.** An excluded cluster is written into the assignment with an *empty* pool set, and an empty pool set means "drop everything". There is only one exclusion mechanism and one outcome, so a drain and a stale cluster behave identically: as soon as that cluster's member next reads the file, its warm pools go away.
+**Exclusion is an explicit empty entry — never a missing one.** An excluded cluster is written into the assignment with an *empty* pool set, and an empty pool set means "drop everything"; a drain and a stale cluster use the same mechanism and get the same outcome as soon as that cluster's member next reads the file. The planner writes an entry for **every** cluster in its registry, so a member that finds other clusters in the payload but no entry for itself is reading a plan from a registry that has never seen it — a mistyped `--cluster-name`, or a bucket belonging to a different fleet. That is not an instruction: the member holds its current pool set and logs the discrepancy every tick until the plan or its own configuration is corrected.
+
+**Which pools a member considers its own:** exactly those in its namespace carrying the management label it stamps at creation (`fleet.agent-sandbox.io/managed=true`). The orphan sweep lists by that label and nothing else, so pools an operator created by hand are never touched, whatever they are named.
 
 **What that deletes, precisely.** Deleting a `SandboxWarmPool` deletes the warm, unclaimed sandboxes it owns. It does **not** touch sandboxes that have already been claimed, because adoption re-parents them: the claim controller clears the sandbox's owner references and makes the `SandboxClaim` the controller, so the pool is no longer an owner by the time work is running on it. A drain therefore removes idle warm capacity and leaves in-flight work alone, which is what makes it usable for maintenance — cordon the cluster with `weight: 0`, let claims drain naturally, then take it out. What it is *not* is a way to park a cluster with its warm capacity intact; re-applying with a non-zero weight is what refills it, and that refill is a cold fill.
 
-**The sharp edge is the trigger, not the behaviour.** Teardown on exclusion is correct when the cluster is genuinely gone, and it is what lets a drain empty a cluster that has already stopped reporting. But the staleness trigger is a missing *capacity report*, not a missing member, and those are different failures. A cluster whose reconcile loop is perfectly healthy and whose publish path is broken — bucket permissions, a wedged capacity thread — will read that empty assignment and shed every warm pool it holds while looking fine from inside. The planner logs the teardown with the cluster name and report age rather than performing it silently. Narrowing it further (a separate liveness signal, or a grace period distinguishing "briefly restarting" from "gone") is listed under follow-ups.
+**The sharp edge is the trigger, not the behaviour — and the member defends itself against the worst case.** Teardown on exclusion is correct when the cluster is genuinely gone, and it is what lets a drain empty a cluster that has already stopped reporting. But the staleness trigger is a missing *capacity report*, not a missing member: a cluster whose reconcile loop is healthy and whose publish path is broken — bucket permissions, an expired credential, a wedged capacity thread — would otherwise read that empty assignment and shed every warm pool it holds while looking fine from inside. The member therefore tracks its own last successful capacity publish and **refuses to act on an empty pool set while its own publishes have been failing for longer than the staleness window**: it holds its pools, logs the refusal every tick, and applies the drain the moment the publish path recovers — no new plan needs to be published. The deliberate way to drain a member in that state is to scale it down. The planner additionally logs every staleness-driven teardown with the cluster name and report age. Richer options (a separate liveness signal, a grace period distinguishing "briefly restarting" from "gone") stay as follow-ups.
 
 Two guards bound the blast radius:
 
 - **A fleet-wide teardown is never the response to an absence of data.** If *no* cluster has a fresh report and there are models to place, the planner refuses to publish and exits non-zero, rather than emitting an empty plan that would drop every warm pool on every cluster. An empty plan requires an affirmative instruction, and there are exactly two: every cluster explicitly weighted `0`, or `models: []` — the form the shipped drain spec uses, at weight `1.0`. The `models: []` form deliberately publishes even when every report is stale: a drain has to work on a fleet whose members are already scaled to zero and no longer reporting, and with nothing to place, "no data" and "empty plan" agree.
 - **`fleetctl apply` writes assignments before archiving the spec, and only if planning succeeded.** A failed plan leaves the bucket describing the last plan that actually ran.
+- **`fleetctl apply --dry-run` shows the blast radius before anything is written.** An apply can legitimately delete every warm pool in the fleet; the dry run plans against live inventory and prints the delta against the currently published assignment — every pool created, resized, or torn down, per cluster, with teardown lines explicitly marked — as a one-shot, read-only command.
 
 Members are self-healing rather than transactional: a reconcile pass that partially fails re-arms itself and retries on the next tick, rather than waiting for the spec to change. This matters because `assignments.json` only changes when a human runs `fleetctl apply` — a member that skipped a pool because its template had not been applied yet would otherwise serve the wrong pool set indefinitely.
+
+#### Security Considerations
+
+**Write access to the bucket is fleet authority, and must be treated like an admin kubeconfig.** Publishing an assignment creates and deletes `SandboxWarmPool` objects on every member cluster. The apiserver a hub design would have supplied — RBAC, admission, audit, per-namespace scoping — is replaced here by object-store IAM, so the scoping has to happen there:
+
+- **Writers.** Only fleet admins and the planner identity hold write on `fleet/spec.json` and `fleet/assignments.json`. Members do not: each member's identity can write **only its own** `fleet/capacity/<cluster>.json` (per-object IAM conditions — on GCS this requires uniform bucket-level access, which the setup tooling verifies before granting anything) and read the assignments object. A compromised member can therefore lie about its own capacity, attracting or repelling placement, but cannot rewrite the plan.
+- **Member RBAC on its own cluster is namespace-scoped, not cluster-wide.** A Role in the fleet namespace grants warm-pool CRUD plus read-only template, claim, and sandbox access; the only cluster-scoped grants are read-only `nodes` and `pods` for the node-pressure signal. A compromised member cannot create or delete pools outside its namespace, and two fleets in two namespaces cannot touch each other's objects.
+- **Integrity.** Assignment payloads are not signed; bucket IAM is the integrity boundary, which is why the writer scoping above is load-bearing. Two properties bound what a stale or replayed object can do anyway: members ignore any payload whose `generation` is not greater than the one they last observed, and refuse any `schema_version` they do not understand. Payload signing is a follow-up for a hardened profile.
+- **Blast radius of a leaked writer credential is real and stated plainly:** a writer can publish an empty plan and drain the fleet, and to every member that is indistinguishable from an operator drain — necessarily, because members must obey real drains. The mitigations are containment and reconstruction, not prevention: writer credentials belong to CI or a planner service account rather than humans, and the bucket should run with object versioning enabled. The member-side self-defense above additionally prevents the *accidental* version of this event (an expired member credential silently draining a healthy cluster).
+- **Audit and after-the-fact reconstruction.** There is no apiserver audit log; its replacement is bucket-side. Object versioning preserves every published assignment and capacity report with writer identity and timestamp; cloud audit logging on the bucket adds reads; `generation` gives a total order across plans; and the archived spec records what was asked for. Together they answer "who published what, when" — the question an audit log answers — assembled from the bucket rather than queried from one API.
 
 #### Example FleetSpec
 
@@ -283,7 +341,7 @@ The admin does **not** pick clusters, warm-pool names, per-cluster budgets, per-
 
 `FleetSpec` and `Assignments` are file schemas in object storage, not Kubernetes resources. They are deliberately *not* CRDs: making them CRDs would require a cluster to host them, which reintroduces the hub apiserver this design exists to avoid.
 
-The fleet layer consumes the existing extension APIs unchanged — it creates `SandboxWarmPool` objects referencing operator-managed `SandboxTemplate` objects, via `CustomObjectsApi` and the existing Python SDK. Claims are written through the SDK rather than constructed per-version, so both `extensions.agents.x-k8s.io/v1alpha1` and `v1beta1` claims are served — resolution happens before the claim exists and never inspects one: see [Client-Side Resolution](#client-side-resolution).
+The fleet layer consumes the existing extension APIs unchanged — it creates `SandboxWarmPool` objects referencing operator-managed `SandboxTemplate` objects, via `CustomObjectsApi` and the existing Python SDK. Claims are written through the SDK against the served `extensions.agents.x-k8s.io/v1beta1` API; resolution happens before the claim exists and never inspects one: see [Client-Side Resolution](#client-side-resolution).
 
 Of the three object-storage schemas, the two the planner authors — `fleet/spec.json` and `fleet/assignments.json` — are versioned by `schema_version` rather than by Kubernetes API versioning. `generation` orders successive plans within one schema; it is not a compatibility marker, and a reader must not infer parseability from it.
 
@@ -302,7 +360,7 @@ The implementation is written and validated at the scale reported below, but it 
 | `fleet/python/agent_sandbox_fleet/budget.py` | Hamilton largest-remainder split |
 | `fleet/python/agent_sandbox_fleet/sizing.py` | Per-pool replica calculation |
 | `fleet/python/agent_sandbox_fleet/fleet_member.py` | The daemon: reconcile loop, capacity loop |
-| `fleet/python/agent_sandbox_fleet/cli.py` | `fleetctl apply` / `status` / `show-assignments` / `show-registry` |
+| `fleet/python/agent_sandbox_fleet/cli.py` | `fleetctl apply` (with `--dry-run` plan-delta preview) / `status` / `show-assignments` / `show-registry` |
 | `fleet/deploy/` | Member Deployment, RBAC, image build |
 
 Notes for anyone extending it:
@@ -342,9 +400,9 @@ Four findings that shape the design:
 
 4. **`status.readyReplicas` should not be used as a benchmark completion signal.** This is a statement about *measurement methodology*, not a claim that the field is wrong or that the pool-readiness contract should change: `readyReplicas` is the API's ready-state count and remains the right thing for a client to consume. But it is produced by a status-aggregation path that competes with the create path for the same starved control plane, and under load it does not merely lag — it stops. One cluster froze at 62,604 for 14 minutes while still filling, under-reporting by 51%; the pods were ready and serving the whole time. Anything timing a fill must therefore count each pod's own `Ready` condition directly, where `lastTransitionTime` also gives wall clock for free. Counting `status.phase=Running` is not a substitute either, because terminating pods keep that phase and get double-counted. The fleet's own capacity reports carry both the aggregated depth and the directly-counted ready total for exactly this reason.
 
-Steady-state cost is small and bounded: one object-storage write per cluster per 30 s, one read per cluster per 30 s, and a planner pass that is `O(pools × clusters)` in memory on an admin host. The member's own apiserver load is a paged warm-pool list per tick plus, in `full` capacity mode, a sandbox list and a node/pod walk — the latter two are `O(cluster)` and can be disabled with `--capacity-detail=light`, which reports warm-pool depth and readiness only. That is what the capacity-aware planner actually consumes.
+Steady-state cost is small and bounded: one object-storage write per cluster per 30 s, one read per cluster per 30 s, and a planner pass that is `O(pools × clusters)` in memory on an admin host. The member's own apiserver load is a paged warm-pool list per tick plus, in `full` capacity mode, a sandbox list and a node/pod walk. The latter two are `O(cluster)` and **off by default** — `--capacity-detail` defaults to `light` (warm-pool depth and readiness only, which is what the capacity-aware planner actually consumes), because an unpaged pod list has OOMed a member at 200K pods and the walk competes for the very apiserver concurrency a fill needs. `full` opts in where the pressure and active-claims signals are worth that cost.
 
-Known limits: single-replica members mean a member outage stops reconciliation on that cluster until the Deployment recovers (pools already created keep serving). The 30 s poll bounds how fast a re-apply propagates. The design assumes uniform node pools within a cluster and one bucket per fleet.
+Known limits: a single-replica member means a member outage pauses *reconciliation* on that cluster until the Deployment is rescheduled — and only reconciliation. Warm pools are `SandboxWarmPool` objects owned by the agent-sandbox controller, which keeps them filled and replaces failed pods whether or not a member exists; a member's absence delays the next change to the *pool set*, never the serving or self-healing of the pools already placed. The same holds for a member that restarts while the bucket is unreadable: it holds (see [Failure Handling](#failure-handling)) and the pools under it keep serving. A locally cached copy of the last assignment would not change that outcome — the cached plan is already applied — while adding a second source of truth that can replay a stale plan, so it is a follow-up only for the narrow case of resuming a half-applied pass across a restart. Propagation latency is bounded by Deployment rescheduling plus one 30 s poll; multi-replica members with Lease-based leader election are a follow-up for operators who need that bound tighter than a reschedule. The design assumes uniform node pools within a cluster and one bucket per fleet.
 
 ## Alternatives (Optional)
 

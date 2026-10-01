@@ -416,7 +416,7 @@ func TestStartWithPTY_DeliversAllOutputOfShortLivedProcess(t *testing.T) {
 			require.Equal(t, int32(0), res.exitCode)
 			// The line discipline turns "\n" into "\r\n".
 			lines := strings.Split(strings.TrimRight(res.stdout.String(), "\r\n"), "\r\n")
-			require.Equal(t, 2000, len(lines), "last line: %q", lines[len(lines)-1])
+			require.Len(t, lines, 2000, "last line: %q", lines[len(lines)-1])
 		})
 	}
 }

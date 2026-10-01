@@ -15,11 +15,26 @@
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 
 script_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(script_dir)
+
+def go_toolchain_env(repo_root, environ):
+    """Pins GOTOOLCHAIN to go.mod's toolchain unless the caller already chose one."""
+    env = environ.copy()
+    if (env.get("GOTOOLCHAIN") or "auto") != "auto":
+        return env
+    with open(os.path.join(repo_root, "go.mod")) as f:
+        match = re.search(r"^toolchain\s+(\S+)\s*$", f.read(), re.MULTILINE)
+    if not match:
+        sys.exit("go.mod has no toolchain line to build the code generators with")
+    # GOTOOLCHAIN=auto never downgrades, so a newer local or CI Go would
+    # otherwise build the generators and change their output.
+    env["GOTOOLCHAIN"] = match.group(1) + "+auto"
+    return env
 
 def main():
     parser = argparse.ArgumentParser()
@@ -39,43 +54,25 @@ def main():
         ("google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.3.0", "protoc-gen-go-grpc"),
     ]
 
-    # Check if we need to install/update tools by comparing against a version stamp file
-    stamp_file = os.path.join(local_bin, ".tools_stamp")
-    expected_stamp = "\n".join([import_path for import_path, _ in tools])
-    needs_install = False
+    env = go_toolchain_env(repo_root, os.environ)
+    print(f"Using GOTOOLCHAIN={env.get('GOTOOLCHAIN', 'auto')}")
 
-    if not os.path.exists(stamp_file):
-        needs_install = True
-    else:
-        with open(stamp_file, "r") as f:
-            if f.read().strip() != expected_stamp.strip():
-                needs_install = True
+    # Reinstall on every run so the tools are always built by that toolchain.
+    print("Installing required code generation tools...")
+    # Configure GOBIN to install tools locally into the repo's bin directory
+    install_env = env.copy()
+    install_env["GOBIN"] = local_bin
 
-    for _, binary_name in tools:
-        if not os.path.exists(os.path.join(local_bin, binary_name)):
-            needs_install = True
-            break
-
-    if needs_install:
-        print("Installing required code generation tools...")
-        # Configure GOBIN to install tools locally into the repo's bin directory
-        env = os.environ.copy()
-        env["GOBIN"] = local_bin
-
-        for import_path, binary_name in tools:
-            print(f"  Installing {binary_name} ({import_path.split('@')[1]})...")
-            # Running go install outside the main module context to avoid modifying go.mod
-            subprocess.check_call(["go", "install", import_path], env=env, cwd=repo_root)
-
-        with open(stamp_file, "w") as f:
-            f.write(expected_stamp + "\n")
-        print("Tools installed successfully.")
+    for import_path, binary_name in tools:
+        print(f"  Installing {binary_name} ({import_path.split('@')[1]})...")
+        # Running go install outside the main module context to avoid modifying go.mod
+        subprocess.check_call(["go", "install", import_path], env=install_env, cwd=repo_root)
+    print("Tools installed successfully.")
 
     if args.install_only:
         sys.exit(0)
 
     # Add local bin to PATH so go generate (and buf generate) can find them
-    env = os.environ.copy()
     env["PATH"] = local_bin + os.pathsep + env.get("PATH", "")
 
     print(f"Running go generate ./... in {repo_root}")

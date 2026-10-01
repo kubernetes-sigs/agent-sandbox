@@ -49,6 +49,7 @@ This skill guides AI agents to update the Go version used throughout the `agent-
     *   After updating the files, run `go mod tidy` in directories containing `go.mod` files to verify module resolution and clean up dependencies.
     *   *CRITICAL NOTE*: **Do NOT run `go mod tidy` inside `site/`**. Running Go's native `go mod tidy` in the Hugo site directory will fail or strip theme dependencies.
     *   Run `make all` (which includes lint(ing), building, and unit testing) from the repository root to ensure the project builds and tests pass successfully with the new Go version.
+    *   `dev/tools/fix-go-generate` builds the code generators with the `toolchain` from `go.mod`, so `make all` may regenerate files (e.g. formatting in `packages/sandboxd/spec/process/v1/process.pb.go`). Commit that output with the bump.
     *   Ensure no unintended formatting changes or unrelated modifications are introduced.
 
 ## Helper Scripts

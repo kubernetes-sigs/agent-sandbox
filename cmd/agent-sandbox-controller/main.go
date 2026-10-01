@@ -437,9 +437,9 @@ func main() {
 			"namespaces", watchNS)
 		if enableLeaderElection && leaderElectionNamespace == "" {
 			if _, err := os.Stat("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); os.IsNotExist(err) {
-				setupLog.Info("WARNING: --watch-namespaces is set but --leader-election-namespace is empty and "+
-					"the in-cluster namespace file is not available; controller-runtime will default to \"kube-system\" "+
-					"for leader election, which may lack the required Lease/Event RBAC in namespace-scoped mode. "+
+				setupLog.Info("WARNING: --watch-namespaces is set but --leader-election-namespace is empty and " +
+					"the in-cluster namespace file is not available; controller-runtime will default to \"kube-system\" " +
+					"for leader election, which may lack the required Lease/Event RBAC in namespace-scoped mode. " +
 					"Set --leader-election-namespace explicitly when running out-of-cluster")
 			}
 		}

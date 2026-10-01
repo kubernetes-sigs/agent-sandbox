@@ -173,11 +173,12 @@ func TestSandboxWarmPoolReconcileRequeuesForActiveTTL(t *testing.T) {
 	scheme := newTestScheme()
 	ttl := int32(60)
 	zeroReplicas := int32(0)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	warmPool := &extensionsv1beta1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "active-ttl-pool",
 			Namespace:         "default",
-			CreationTimestamp: metav1.NewTime(time.Now().Add(-30 * time.Second)),
+			CreationTimestamp: metav1.NewTime(now.Add(-30 * time.Second)),
 		},
 		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
 			Replicas:               &zeroReplicas,
@@ -186,11 +187,11 @@ func TestSandboxWarmPoolReconcileRequeuesForActiveTTL(t *testing.T) {
 		},
 	}
 	client := newFakeClient(scheme, warmPool, createTemplate(warmPool.Namespace))
-	reconciler := &SandboxWarmPoolReconciler{Client: client, Scheme: scheme}
+	reconciler := &SandboxWarmPoolReconciler{Client: client, Scheme: scheme, now: func() time.Time { return now }}
 
 	result, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: warmPool.Name, Namespace: warmPool.Namespace}})
 	require.NoError(t, err)
-	require.InDelta(t, 30*time.Second, result.RequeueAfter, float64(time.Second))
+	require.Equal(t, 30*time.Second, result.RequeueAfter)
 }
 
 func TestSandboxWarmPoolReconcileDeletesExpiredTTL(t *testing.T) {

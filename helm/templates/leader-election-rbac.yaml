@@ -1,4 +1,4 @@
-{{- if and .Values.controller.watchNamespaces (hasKey .Values.controller "leaderElect") .Values.controller.leaderElect }}
+{{- if and .Values.controller.watchNamespaces (ne (default true .Values.controller.leaderElect) false) }}
 {{- $leNs := include "agent-sandbox.leaderElectionNamespace" . }}
 {{- $controllerNs := include "agent-sandbox.namespace" . }}
 {{- if eq $leNs $controllerNs }}

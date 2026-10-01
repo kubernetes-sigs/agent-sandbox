@@ -43,6 +43,11 @@ type SandboxClaimSpecApplyConfiguration struct {
 	// volumeClaimTemplates is a list of persistent volume claims to be created for the sandbox.
 	// Specifying this field forces a cold start because warm pool pods will not have these volumes.
 	VolumeClaimTemplates []apiv1beta1.PersistentVolumeClaimTemplateApplyConfiguration `json:"volumeClaimTemplates,omitempty"`
+	// workspaceResources overrides resource requirements for named PodSpec containers or init containers at claim time.
+	// Unset request and limit entries keep the values from the SandboxTemplate.
+	// Any non-empty override forces a cold start because warm-pool adoption is skipped for per-claim sizing.
+	// Claim writers may override resources independently of the SandboxTemplate; namespace ResourceQuota and LimitRange policies still apply.
+	WorkspaceResources []WorkspaceResourceOverrideApplyConfiguration `json:"workspaceResources,omitempty"`
 }
 
 // SandboxClaimSpecApplyConfiguration constructs a declarative configuration of the SandboxClaimSpec type for use with
@@ -97,6 +102,19 @@ func (b *SandboxClaimSpecApplyConfiguration) WithVolumeClaimTemplates(values ...
 			panic("nil value passed to WithVolumeClaimTemplates")
 		}
 		b.VolumeClaimTemplates = append(b.VolumeClaimTemplates, *values[i])
+	}
+	return b
+}
+
+// WithWorkspaceResources adds the given value to the WorkspaceResources field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the WorkspaceResources field.
+func (b *SandboxClaimSpecApplyConfiguration) WithWorkspaceResources(values ...*WorkspaceResourceOverrideApplyConfiguration) *SandboxClaimSpecApplyConfiguration {
+	for i := range values {
+		if values[i] == nil {
+			panic("nil value passed to WithWorkspaceResources")
+		}
+		b.WorkspaceResources = append(b.WorkspaceResources, *values[i])
 	}
 	return b
 }

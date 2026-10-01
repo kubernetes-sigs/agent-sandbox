@@ -955,6 +955,21 @@ def test_shared_run_id_borrowed_pool_is_never_resized_or_deleted(make_cluster):
   c.resources.delete_template.assert_not_called()
 
 
+def test_shared_run_id_owner_can_grow_its_own_pool(make_cluster):
+  # A pool this fleet created has no on-demand mark, so asking warm_shared_pool
+  # again would call it borrowed and skip the resize.
+  c = make_cluster("solo")
+  c.resources.warm_shared_pool.return_value = "created"
+  f = _fleet(c, run_id="job-7")
+  f.load_tasks([IMG]); f.plan()
+  f.warm_image(IMG, replicas_override=1, wait=False)
+  f.warm_image(IMG, replicas_override=3, wait=False)
+  c.resources.warm_shared_pool.assert_called_once()
+  args, kw = c.resources.create_warmpool.call_args
+  assert args[2] == 3 and kw["reconcile"] is True and kw["owner_run_id"] == "job-7"
+  assert f._warmed[IMG] == 3 and c.active_replicas == 3
+
+
 def test_shared_run_id_warm_onto_another_runs_pool_still_raises(make_cluster):
   c = make_cluster("solo")
   c.resources.warm_shared_pool.return_value = "foreign"

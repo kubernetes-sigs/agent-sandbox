@@ -626,6 +626,11 @@ class SandboxFleet:
       logger.warning("template '%s' on cluster '%s' belongs to run %s, not this run "
                      "(%s); leaving it alone", template, c.name, owner, self.run_id)
       return
+    # Known gap: callers delete the pool first and the template here, and an
+    # on-demand acquire in between (another process of a shared-run-id job, or
+    # this one) can build a new pool on this template just before it goes. That
+    # acquire times out waiting for readiness; the next one recreates the
+    # template, so it recovers on its own.
     uid = meta.get("uid")
     if isinstance(uid, str) and uid:
       c.resources.delete_template(template, uid=uid)
@@ -897,9 +902,11 @@ class SandboxFleet:
         # built on — and later delete — their template. Same answer as a pool
         # collision: fail, write nothing.
         raise self._collision_error(e, "template", e.template, exc.owner) from exc
-      if self._shared_run_id:
+      if self._shared_run_id and not already:
         # The run-id label is the whole job's, so it can't say which process
         # owns this pool; warm_shared_pool decides who may resize and delete it.
+        # Only a first warm asks: an image already in `_warmed` is this fleet's
+        # pool, and growing it takes the ordinary reconcile path below.
         status = c.resources.warm_shared_pool(e.pool, e.template, reps,
                                               run_id=self.run_id)
         ours = status != "foreign"

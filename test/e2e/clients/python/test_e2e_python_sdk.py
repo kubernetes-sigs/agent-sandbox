@@ -15,7 +15,6 @@
 import io
 import os
 import tempfile
-from test.e2e.clients.python.framework.context import TestContext
 
 import pytest
 import yaml
@@ -25,9 +24,13 @@ from k8s_agent_sandbox.models import (
     SandboxLocalTunnelConnectionConfig,
 )
 
-TEST_MANIFESTS_DIR = "test/e2e/clients/python/test_manifests"
-TEMPLATE_YAML_PATH = os.path.join(TEST_MANIFESTS_DIR, "sandbox_template.yaml")
-WARMPOOL_YAML_PATH = os.path.join(TEST_MANIFESTS_DIR, "sandbox_warmpool.yaml")
+from test.e2e.clients.python.framework.context import TestContext
+from test.e2e.clients.python.framework.sdk_helpers import (
+    run_sdk_tests,
+    wait_until_sandbox_routable,
+    GATEWAY_NAME,
+)
+
 
 ROUTER_YAML_PATH = (
     "clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml"

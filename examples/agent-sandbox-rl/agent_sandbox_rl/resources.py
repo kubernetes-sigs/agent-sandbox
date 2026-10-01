@@ -438,19 +438,9 @@ class Resources:
 
   def warm_shared_pool(self, name: str, template_name: str, replicas: int, *,
                        run_id: str) -> str:
-    """The warm path's create for fleets that share a run id (`FleetConfig.run_id`),
-    where the run-id label no longer says which process may resize or delete a
-    pool. Returns:
-
-    - ``"created"``: this call created the pool; the caller owns it.
-    - ``"taken"``: the pool was an on-demand pool of this job (marked with
-      ``ON_DEMAND_ANNOTATION``); this call resized it, removed the mark, and the
-      caller now owns it. The patch carries the inspected resourceVersion, so of
-      several processes warming the same image at once exactly one takes it.
-    - ``"borrowed"``: another process of the job warmed it. Left as it is: the
-      caller must not resize or delete it.
-    - ``"foreign"``: another run's pool. Nothing is written.
-    """
+    """Warm-path create under a shared run id. Returns "created" or "taken" (an
+    on-demand pool resized and unmarked; the caller owns it), "borrowed" (another
+    process's; don't resize or delete), or "foreign" (another run's)."""
     try:
       self.custom_api.create_namespaced_custom_object(
           group=constants.GROUP, version=constants.VERSION,

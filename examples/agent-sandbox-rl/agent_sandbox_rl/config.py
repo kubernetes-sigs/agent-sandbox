@@ -375,9 +375,7 @@ class FleetConfig(BaseModel):
             f"resolved {kind} name {name!r} ({len(name)} chars) is not a valid "
             "DNS-1123 subdomain after the run id was added; shorten "
             "template_name_prefix / pool_name_format")
-    # The template name is also a pod label value (`sandbox=<template>`), capped
-    # at 63; past that every pod is rejected and the Sandbox reports
-    # InvalidConfiguration at the first warm.
+    # Also the `sandbox=<template>` pod label value, so at most 63 or every pod fails.
     if len(template) > 63:
       raise ValueError(
           f"resolved template name {template!r} is {len(template)} chars; it is "

@@ -49,5 +49,6 @@ export type {
   SandboxdOptions,
   SandboxHealth,
   SandboxMetadata,
+  SandboxStatus,
   WriteOptions,
 } from "./types.js";

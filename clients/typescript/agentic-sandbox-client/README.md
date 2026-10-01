@@ -2,7 +2,7 @@
 
 This TypeScript client provides a high-level interface for creating and interacting with sandboxes managed by the Agent Sandbox controller, mirroring the [Go client](../../go/README.md) and [Python client](../../python/agentic-sandbox-client/README.md).
 
-The surface covers the Kubernetes resource layer (provisioning a `SandboxClaim`, watching it to readiness, and tearing it down via `SandboxClient` / `Sandbox`) and the sandboxd runtime layer (`sandbox.commands.run()`, `sandbox.files.{read,write,readStream,writeStream,exists,list,delete}()`, `sandbox.health()`, and `sandbox.metadata()`). `Start`/PTY/interactive process support is not part of this surface yet.
+The surface covers the Kubernetes resource layer (provisioning a `SandboxClaim`, watching it to readiness, and tearing it down via `SandboxClient` / `Sandbox`) and the sandboxd runtime layer (`sandbox.commands.run()`, `sandbox.files.{read,write,readStream,writeStream,exists,list,delete}()`, `sandbox.health()`, and `sandbox.metadata()`), plus `sandbox.status()` for the Sandbox's Kubernetes readiness. `Start`/PTY/interactive process support is not part of this surface yet.
 
 ## Usage
 
@@ -171,6 +171,17 @@ console.log(env.SANDBOX_ID);
 - `health()` probes sandboxd's `/v1/health` and resolves with `{ status: "ok", uptimeSeconds }`. The lazy connect already waits for sandboxd to become healthy, so a first call against a not-yet-ready sandboxd fails with the connect's timeout or connection error, not a 503; only on an already-established connection does an unready sandboxd (for example during shutdown) reject with a `SandboxdApiError` (status 503). A resolved `health()` means "reachable and ready now", not "just came up".
 - `metadata()` reads sandboxd's `/v1/metadata` and resolves with `{ env }`: the orchestrator-injected variables sandboxd chooses to expose. sandboxd serves only names starting with its `--metadata-env-prefix` (default `SANDBOX_`) and withholds any name that looks like a credential (containing `TOKEN`, `SECRET`, `KEY`, and similar). `env` is therefore not sandboxd's full environment, and is empty when nothing matches. Templates that need a value visible here must set it on the sandboxd container under the configured prefix; nothing in the controller injects one for you.
 - Neither call is retried automatically, and neither records any value in tracing spans (`metadata()` records only the number of variables).
+
+### Sandbox status
+
+`sandbox.status()` reads the Sandbox's `Ready` condition from Kubernetes, without connecting to sandboxd:
+
+```ts
+const { status, message } = await sandbox.status();
+// status: "SandboxReady" | "SandboxNotReady" | "SandboxNotFound"
+```
+
+It resolves with `SandboxNotFound` when the Sandbox object is gone (also after `close()`) and rejects with a `SandboxError` on any other read failure. The values match the Python client's `status()`.
 
 ### Execution target and path rules
 

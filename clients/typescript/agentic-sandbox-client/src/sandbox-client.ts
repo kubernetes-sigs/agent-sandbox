@@ -40,8 +40,10 @@ import {
 import { resolveLogger } from "./logger.js";
 import type { ResolvedSandboxdOptions, SandboxInit } from "./sandbox.js";
 import {
+  findReadyCondition,
   normalizeSandboxdOptions,
   raceWithTimeout,
+  readConditions,
   Sandbox,
 } from "./sandbox.js";
 import type { Tracer } from "./trace-manager.js";
@@ -211,13 +213,9 @@ interface ReadySandbox {
 function readReadySandbox(
   obj: Record<string, unknown> | undefined,
 ): ReadySandbox | "unnamed" | undefined {
-  const status = (obj?.status as Record<string, unknown>) ?? {};
-  const conditions = (status.conditions as Array<Record<string, string>>) ?? [];
-  const isReady = conditions.some(
-    (c) => c.type === "Ready" && c.status === "True",
-  );
-  if (!isReady) return undefined;
+  if (findReadyCondition(obj)?.status !== "True") return undefined;
 
+  const status = (obj?.status as Record<string, unknown>) ?? {};
   const metadata = (obj?.metadata as Record<string, unknown>) ?? {};
   const sandboxName = metadata.name as string | undefined;
   if (!sandboxName) return "unnamed";
@@ -1169,10 +1167,8 @@ export class SandboxClient {
             }
             if (type === "ADDED" || type === "MODIFIED") {
               const status = (obj.status as Record<string, unknown>) ?? {};
-              const conditions =
-                (status.conditions as Array<Record<string, string>>) ?? [];
               try {
-                inspectClaimConditions(conditions);
+                inspectClaimConditions(readConditions(obj));
               } catch (err) {
                 settle({
                   type: "error",
@@ -1273,9 +1269,7 @@ export class SandboxClient {
         const metadata = (claimObj?.metadata as Record<string, unknown>) ?? {};
         resourceVersion = metadata.resourceVersion as string | undefined;
         const status = (claimObj?.status as Record<string, unknown>) ?? {};
-        const conditions =
-          (status.conditions as Array<Record<string, string>>) ?? [];
-        inspectClaimConditions(conditions); // throws SandboxTemplateNotFoundError / SandboxWarmPoolNotFoundError / SandboxClaimFailedError
+        inspectClaimConditions(readConditions(claimObj)); // throws SandboxTemplateNotFoundError / SandboxWarmPoolNotFoundError / SandboxClaimFailedError
         const sandboxStatus = (status.sandbox as Record<string, unknown>) ?? {};
         const name = sandboxStatus.name as string | undefined;
         if (name) {

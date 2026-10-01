@@ -16,9 +16,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // ---------- hoisted mock fns ----------
 
-const { mockDeleteNamespacedCustomObject } = vi.hoisted(() => ({
-  mockDeleteNamespacedCustomObject: vi.fn(),
-}));
+const { mockDeleteNamespacedCustomObject, mockGetNamespacedCustomObject } =
+  vi.hoisted(() => ({
+    mockDeleteNamespacedCustomObject: vi.fn(),
+    mockGetNamespacedCustomObject: vi.fn(),
+  }));
 
 // ---------- mock: @kubernetes/client-node ----------
 
@@ -33,12 +35,17 @@ import {
   CLAIM_API_GROUP,
   CLAIM_API_VERSION,
   CLAIM_PLURAL_NAME,
+  SANDBOX_API_GROUP,
+  SANDBOX_API_VERSION,
+  SANDBOX_PLURAL_NAME,
 } from "../constants.js";
 import { SandboxError } from "../exceptions.js";
 import type { SandboxInit } from "../sandbox.js";
 import {
+  findReadyCondition,
   normalizeSandboxdOptions,
   raceWithTimeout,
+  readConditions,
   Sandbox,
 } from "../sandbox.js";
 
@@ -47,6 +54,7 @@ import {
 function makeMockCustomObjectsApi() {
   return {
     deleteNamespacedCustomObject: mockDeleteNamespacedCustomObject,
+    getNamespacedCustomObject: mockGetNamespacedCustomObject,
   } as unknown as import("@kubernetes/client-node").CustomObjectsApi;
 }
 
@@ -211,6 +219,108 @@ describe("Sandbox", () => {
     });
   });
 
+  describe("status()", () => {
+    const sandboxWithConditions = (
+      conditions: Array<Record<string, string>> | undefined,
+    ) => ({ status: conditions === undefined ? {} : { conditions } });
+
+    it("reads the Sandbox object with the Sandbox API coordinates", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValueOnce(
+        sandboxWithConditions([]),
+      );
+
+      await new Sandbox(createTestInit()).status();
+
+      expect(mockGetNamespacedCustomObject).toHaveBeenCalledExactlyOnceWith({
+        group: SANDBOX_API_GROUP,
+        version: SANDBOX_API_VERSION,
+        namespace: "default",
+        plural: SANDBOX_PLURAL_NAME,
+        name: "test-sandbox",
+      });
+    });
+
+    it("reports SandboxReady with the condition message", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValueOnce(
+        sandboxWithConditions([
+          { type: "Ready", status: "True", message: "Pod is ready" },
+        ]),
+      );
+
+      await expect(new Sandbox(createTestInit()).status()).resolves.toEqual({
+        status: "SandboxReady",
+        message: "Pod is ready",
+      });
+    });
+
+    it("reports SandboxNotReady with the condition message", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValueOnce(
+        sandboxWithConditions([
+          { type: "Ready", status: "False", message: "Pod is pending" },
+        ]),
+      );
+
+      await expect(new Sandbox(createTestInit()).status()).resolves.toEqual({
+        status: "SandboxNotReady",
+        message: "Pod is pending",
+      });
+    });
+
+    it("reports SandboxNotReady with an empty message when the condition has none", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValueOnce(
+        sandboxWithConditions([{ type: "Ready", status: "False" }]),
+      );
+
+      const result = await new Sandbox(createTestInit()).status();
+      expect(result).toEqual({ status: "SandboxNotReady", message: "" });
+    });
+
+    it.each([
+      ["no conditions", []],
+      ["no Ready condition", [{ type: "Other", status: "True" }]],
+      ["no status block", undefined],
+    ])("reports SandboxNotReady when there are %s", async (_name, conditions) => {
+      mockGetNamespacedCustomObject.mockResolvedValueOnce(
+        sandboxWithConditions(conditions),
+      );
+
+      const result = await new Sandbox(createTestInit()).status();
+      expect(result.status).toBe("SandboxNotReady");
+    });
+
+    it("reports SandboxNotFound on a 404", async () => {
+      mockGetNamespacedCustomObject.mockRejectedValueOnce(
+        Object.assign(new Error("not found"), { code: 404 }),
+      );
+
+      const result = await new Sandbox(createTestInit()).status();
+      expect(result.status).toBe("SandboxNotFound");
+    });
+
+    it("rejects with SandboxError (preserving the cause) on a non-404 error", async () => {
+      const cause = new Error("connection refused");
+      mockGetNamespacedCustomObject.mockRejectedValueOnce(cause);
+
+      const err = await new Sandbox(createTestInit())
+        .status()
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(SandboxError);
+      expect((err as Error).cause).toBe(cause);
+    });
+
+    it("still works after close()", async () => {
+      mockDeleteNamespacedCustomObject.mockResolvedValueOnce({});
+      mockGetNamespacedCustomObject.mockRejectedValueOnce(
+        Object.assign(new Error("not found"), { statusCode: 404 }),
+      );
+      const sandbox = new Sandbox(createTestInit());
+      await sandbox.close();
+
+      const result = await sandbox.status();
+      expect(result.status).toBe("SandboxNotFound");
+    });
+  });
+
   describe("[Symbol.asyncDispose]()", () => {
     it("closes the handle and deletes the claim", async () => {
       mockDeleteNamespacedCustomObject.mockResolvedValueOnce({});
@@ -262,5 +372,31 @@ describe("raceWithTimeout", () => {
     vi.useFakeTimers();
     await raceWithTimeout(Promise.resolve("done"), 1000, () => "timeout");
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("readConditions / findReadyCondition", () => {
+  it("returns no conditions for a missing object, status or conditions", () => {
+    expect(readConditions(undefined)).toEqual([]);
+    expect(readConditions({})).toEqual([]);
+    expect(readConditions({ status: {} })).toEqual([]);
+  });
+
+  it("returns the conditions as reported", () => {
+    const conditions = [{ type: "Ready", status: "True" }];
+    expect(readConditions({ status: { conditions } })).toBe(conditions);
+  });
+
+  it("finds the Ready condition among others", () => {
+    const ready = { type: "Ready", status: "False", reason: "Pending" };
+    const obj = { status: { conditions: [{ type: "Other" }, ready] } };
+    expect(findReadyCondition(obj)).toBe(ready);
+  });
+
+  it("returns undefined when there is no Ready condition", () => {
+    expect(findReadyCondition(undefined)).toBeUndefined();
+    expect(
+      findReadyCondition({ status: { conditions: [{ type: "Other" }] } }),
+    ).toBeUndefined();
   });
 });

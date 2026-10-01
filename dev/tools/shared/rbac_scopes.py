@@ -108,11 +108,11 @@ def watched_namespace_rules(cluster_role_yaml):
                 for g, rs in watched_groups.items():
                     by_resources[tuple(sorted(rs))].append(g)
                 for rs, gs in by_resources.items():
-                    kept.append({
-                        "apiGroups": sorted(gs),
-                        "resources": sorted(rs),
-                        "verbs": rule["verbs"],
-                    })
+                    split = {k: v for k, v in rule.items()
+                             if k not in ("apiGroups", "resources")}
+                    split["apiGroups"] = sorted(gs)
+                    split["resources"] = sorted(rs)
+                    kept.append(split)
     return yaml.dump(kept, default_flow_style=False, sort_keys=False)
 
 
@@ -133,6 +133,13 @@ def leader_election_rules(cluster_role_yaml):
     for rule in rules:
         _classify_rule(rule)  # validate all resources are classified
         resources = set(rule.get("resources", []))
-        if resources & _LE_RESOURCES:
+        le_resources = sorted(resources & _LE_RESOURCES)
+        if not le_resources:
+            continue
+        if le_resources == sorted(resources):
             kept.append(rule)
+        else:
+            split = {k: v for k, v in rule.items() if k != "resources"}
+            split["resources"] = le_resources
+            kept.append(split)
     return yaml.dump(kept, default_flow_style=False, sort_keys=False)

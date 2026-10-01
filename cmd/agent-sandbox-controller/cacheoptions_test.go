@@ -146,6 +146,7 @@ func TestParseWatchNamespaces(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("WATCH_NAMESPACE", "")
 			got, err := parseWatchNamespaces(tt.raw)
 			if tt.wantErr {
 				if err == nil {

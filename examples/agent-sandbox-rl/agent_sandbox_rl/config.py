@@ -181,15 +181,8 @@ class FleetConfig(BaseModel):
   # rollback delete gets the hook again until it succeeds once. Teardown only
   # ever sweeps this run's resources, in every mode.
   run_isolation: str = "none"
-  # Ownership id for this fleet's resources: the run-id labels, `{run_id}` in
-  # names, and the per-run namespace. None (default): a random id per fleet. Set
-  # the same value in every process of one job — an orchestrator that warms pools
-  # and workers that claim from them — so they own the job's resources together
-  # instead of treating each other as competing runs. Setting it means shared,
-  # even in a single process: teardown deletes only the pools this fleet created
-  # (not everything carrying the id; on-demand pools are left for the reaper),
-  # keeps a per-run namespace unless `teardown(delete_namespace=True)`, and the
-  # pod-count circuit breaker is off. Sweep the whole job with `reap(run_id=…)`.
+  # Run id shared by a job's processes (None: random per fleet). Setting it changes
+  # teardown and the circuit breaker; see "One job, several processes" in the README.
   run_id: str | None = None
   run_namespace_labels: dict[str, str] = Field(default_factory=dict)
   run_namespace_setup: Callable[..., Any] | None = None

@@ -440,7 +440,8 @@ class Resources:
                        run_id: str) -> str:
     """Warm-path create under a shared run id. Returns "created" or "taken" (an
     on-demand pool resized and unmarked; the caller owns it), "borrowed" (another
-    process's; don't resize or delete), or "foreign" (another run's)."""
+    process's; don't resize or delete), or "foreign" (another run's). The takeover
+    patch carries the inspected resourceVersion, so only one racing process wins."""
     try:
       self.custom_api.create_namespaced_custom_object(
           group=constants.GROUP, version=constants.VERSION,

@@ -182,7 +182,7 @@ class FleetConfig(BaseModel):
   # ever sweeps this run's resources, in every mode.
   run_isolation: str = "none"
   # Run id shared by a job's processes (None: random per fleet). Setting it changes
-  # teardown and the circuit breaker; see "One job, several processes" in the README.
+  # teardown and the circuit breaker; see "Concurrent runs on one cluster" in the README.
   run_id: str | None = None
   run_namespace_labels: dict[str, str] = Field(default_factory=dict)
   run_namespace_setup: Callable[..., Any] | None = None

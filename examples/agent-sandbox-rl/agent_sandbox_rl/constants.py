@@ -60,6 +60,11 @@ RUN_ID_LABEL = "agents.x-k8s.io/asrl-run-id"
 # pod (system-reserved since #894), so RUN_ID_LABEL never lands on pods; the
 # circuit breaker's pod count and the reaper's pod sweep select on this key.
 POD_RUN_ID_LABEL = "agent-sandbox-rl/run-id"
+# Marks a warm pool the on-demand acquire path created for a job whose processes
+# share a run id (`FleetConfig.run_id`). The first process to warm that image
+# takes the pool over (removes the mark, resizes it, owns its deletion); a pool
+# without the mark belongs to whichever process warmed it, and others borrow it.
+ON_DEMAND_ANNOTATION = "agent-sandbox-rl/on-demand"
 # How a fleet keeps concurrent runs apart (`FleetConfig.run_isolation`):
 #   "none"      — historical behaviour: stable per-image names in the configured
 #                 namespace. Safe only when nothing else runs there.

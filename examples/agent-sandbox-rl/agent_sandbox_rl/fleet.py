@@ -268,10 +268,14 @@ class SandboxFleet:
       # detector for pods that DO carry the run label.
       expected = 0
     if self._shared_run_id:
-      # Same shape as adoption: `live_owned_count` counts the pods of every
-      # process sharing this run id, so this process's own intent is no ceiling
-      # for it. Only `max_live_sandboxes`, read as a job-wide cap, applies.
-      expected = 0
+      # `live_owned_count` counts the pods of every process sharing this run id,
+      # which no single process's intent or claim cap describes, and a trip would
+      # tear this process down over pods it didn't create. The over-creation this
+      # guards against (#1215) is fixed in the controller since v0.5.4, so shared
+      # mode goes without it; `max_live_sandboxes` is still enforced per process
+      # by acquire().
+      yield
+      return
     ceilings = []
     if factor and factor > 0 and expected > 0:
       ceilings.append(int(expected * factor))
@@ -519,8 +523,11 @@ class SandboxFleet:
         # succeeded once. "Already exists" is not "set up": a namespace kept after
         # a failed rollback delete is still ours and still missing whatever the
         # hook provides, so the hook must tolerate a re-run on a partly set-up
-        # namespace.
-        if (key not in self._created_namespaces or key in self._namespaces_set_up
+        # namespace. With a shared run id the namespace is the job's whichever
+        # process created it, so every process runs the hook (once each): if the
+        # creator's hook failed, a peer's run completes the setup.
+        owned = key in self._created_namespaces or self._shared_run_id
+        if (not owned or key in self._namespaces_set_up
             or self.config.run_namespace_setup is None):
           continue
         try:
@@ -531,7 +538,9 @@ class SandboxFleet:
               f"namespace '{c.namespace}' on cluster '{c.name}': {exc}") from exc
         self._namespaces_set_up.add(key)
     except BaseException:
-      for c in created_now:
+      # A shared run id's namespace may already hold another process's pools by
+      # now, so it is never rolled back; the next attempt re-runs the hook.
+      for c in ([] if self._shared_run_id else created_now):
         key = (c.name, c.namespace)
         try:
           c.resources.delete_namespace(c.namespace)
@@ -819,7 +828,12 @@ class SandboxFleet:
     cluster.resources.ensure_template(
         image, template, cluster.template_spec(self.config.template),
         owner_run_id=self.run_id, share_foreign=True)
-    cluster.resources.create_warmpool(pool, template, replicas)
+    # With a shared run id, mark the pool so the job's first warm of this image
+    # takes it over (see warm_shared_pool); this path never deletes it there.
+    cluster.resources.create_warmpool(
+        pool, template, replicas,
+        annotations=({constants.ON_DEMAND_ANNOTATION: "true"}
+                     if self._shared_run_id else None))
     return pool
 
   def ensure_templates(self) -> None:
@@ -883,8 +897,27 @@ class SandboxFleet:
         # built on — and later delete — their template. Same answer as a pool
         # collision: fail, write nothing.
         raise self._collision_error(e, "template", e.template, exc.owner) from exc
-      ours = c.resources.create_warmpool(e.pool, e.template, reps, reconcile=True,
-                                         owner_run_id=self.run_id)
+      if self._shared_run_id:
+        # The run-id label is the whole job's, so it can't say which process
+        # owns this pool; warm_shared_pool decides who may resize and delete it.
+        status = c.resources.warm_shared_pool(e.pool, e.template, reps,
+                                              run_id=self.run_id)
+        ours = status != "foreign"
+      else:
+        status = None
+        ours = c.resources.create_warmpool(e.pool, e.template, reps, reconcile=True,
+                                           owner_run_id=self.run_id)
+    if status == "borrowed":
+      # Another process of this job warmed it: claim from it, but its depth and
+      # its deletion stay with that process, so nothing is recorded or reserved
+      # (teardown and unwarm skip what isn't in `_warmed`). Readiness is >= 1, as
+      # for an adopted pool, since the depth isn't ours.
+      if wait and not c.resources.wait_for_pool_ready(
+          e.pool, 1, timeout=self.config.ready_timeout):
+        raise FleetError(
+            f"borrowed warm pool '{e.pool}' on cluster '{e.cluster}' had no ready "
+            f"replica within {self.config.ready_timeout}s")
+      return
     if ours is False:
       # The image-derived name is a concurrent run's pool (create_warmpool checks
       # the owner at the 409). Nothing of theirs was written; nothing is recorded
@@ -1160,6 +1193,13 @@ class SandboxFleet:
                      "%d — its depth belongs to whoever provisioned it",
                      entry.pool, entry.cluster, replicas)
       return
+    if self._shared_run_id and image not in self._warmed:
+      # Borrowed from another process of this job (or not warmed at all): its
+      # depth is that process's. Resizing would also record it here, and this
+      # fleet's teardown would then delete it.
+      logger.info("not scaling pool '%s' on '%s': this fleet did not warm it",
+                  entry.pool, entry.cluster)
+      return
     replicas = max(0, replicas)
     c = self.registry.get(entry.cluster)
     # create_warmpool inspects the pool at the 409 and patches with that object's
@@ -1310,22 +1350,26 @@ class SandboxFleet:
       # If this call created the on-demand pool, undo it fully (delete pool +
       # template, release the replica, forget it) so a failed acquire leaves no
       # trace. A reused pool is left for the next acquire.
+      # With a shared run id, `created_pool` only means this fleet hadn't used
+      # the pool before: another process may have created it, or taken it over
+      # since, so nothing is deleted; leftovers are `reap(run_id=…)`'s.
       if created_pool:
-        try:
-          # Guarded like `_unwarm_entry`: on a 409 the on-demand create reuses
-          # an existing pool, which may be another run's under the same name.
-          owned, live = self._pool_ownership(cluster, pool)
-          if owned and live is not None:
-            uid = (live.get("metadata") or {}).get("uid")
-            if isinstance(uid, str) and uid:
-              cluster.resources.delete_warmpool(pool, uid=uid)
-            else:
-              cluster.resources.delete_warmpool(pool)
-          self._delete_template_if_owned(
-              cluster, self.config.template_name(task.image))
-        except Exception:  # noqa: BLE001
-          logger.warning("failed to remove on-demand pool after acquire error",
-                         exc_info=True)
+        if not self._shared_run_id:
+          try:
+            # Guarded like `_unwarm_entry`: on a 409 the on-demand create reuses
+            # an existing pool, which may be another run's under the same name.
+            owned, live = self._pool_ownership(cluster, pool)
+            if owned and live is not None:
+              uid = (live.get("metadata") or {}).get("uid")
+              if isinstance(uid, str) and uid:
+                cluster.resources.delete_warmpool(pool, uid=uid)
+              else:
+                cluster.resources.delete_warmpool(pool)
+            self._delete_template_if_owned(
+                cluster, self.config.template_name(task.image))
+          except Exception:  # noqa: BLE001
+            logger.warning("failed to remove on-demand pool after acquire error",
+                           exc_info=True)
         cluster.release_replicas(1)
         with self._lock:
           self._ondemand.discard(key)

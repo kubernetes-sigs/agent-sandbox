@@ -185,11 +185,11 @@ class FleetConfig(BaseModel):
   # names, and the per-run namespace. None (default): a random id per fleet. Set
   # the same value in every process of one job — an orchestrator that warms pools
   # and workers that claim from them — so they own the job's resources together
-  # instead of treating each other as competing runs. Because the id is shared,
-  # teardown and the circuit breaker act for this process only: teardown deletes
-  # what this fleet warmed rather than everything carrying the id, keeps a per-run
-  # namespace unless `teardown(delete_namespace=True)`, and the breaker enforces
-  # only `max_live_sandboxes`. Sweep the whole job with `reap(run_id=…)`.
+  # instead of treating each other as competing runs. Setting it means shared,
+  # even in a single process: teardown deletes only the pools this fleet created
+  # (not everything carrying the id; on-demand pools are left for the reaper),
+  # keeps a per-run namespace unless `teardown(delete_namespace=True)`, and the
+  # pod-count circuit breaker is off. Sweep the whole job with `reap(run_id=…)`.
   run_id: str | None = None
   run_namespace_labels: dict[str, str] = Field(default_factory=dict)
   run_namespace_setup: Callable[..., Any] | None = None
@@ -382,6 +382,14 @@ class FleetConfig(BaseModel):
             f"resolved {kind} name {name!r} ({len(name)} chars) is not a valid "
             "DNS-1123 subdomain after the run id was added; shorten "
             "template_name_prefix / pool_name_format")
+    # The template name is also a pod label value (`sandbox=<template>`), capped
+    # at 63; past that every pod is rejected and the Sandbox reports
+    # InvalidConfiguration at the first warm.
+    if len(template) > 63:
+      raise ValueError(
+          f"resolved template name {template!r} is {len(template)} chars; it is "
+          "used as a pod label value, so it must be at most 63. Shorten "
+          "template_name_prefix or run_id")
 
 
 _DNS1123_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")

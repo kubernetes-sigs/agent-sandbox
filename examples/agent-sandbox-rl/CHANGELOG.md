@@ -9,14 +9,20 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 [#1808](https://github.com/kubernetes-sigs/agent-sandbox/issues/1808))
 - **`FleetConfig.run_id`** sets the fleet's run id instead of a random one, so the
   processes of one job (an orchestrator that warms pools, workers that claim from
-  them) own the job's templates and pools together. Before, each process was its
-  own run: a worker that went on demand before the orchestrator warmed an image
+  them) share the job's templates and pools. Before, each process was its own
+  run: a worker that went on demand before the orchestrator warmed an image
   created the template under its id, and the orchestrator's `warm_image` then
-  raised. With a caller-supplied id, `teardown()` releases this fleet's claims and
-  unwarms only the images it warmed instead of sweeping everything with the id,
-  keeps a per-run namespace unless `delete_namespace=True`, and the circuit
-  breaker enforces only `max_live_sandboxes` (the pod count is job-wide). The
-  default is unchanged.
+  raised. With a shared id, a pool is resized and deleted only by the process
+  that created it: warming an image another process already warmed borrows its
+  pool, and the first warm of an on-demand pool (marked with
+  `agent-sandbox-rl/on-demand`) takes it over. `teardown()` deletes only the
+  pools this fleet created, a per-run namespace is kept unless
+  `delete_namespace=True` and is never rolled back after a failed setup hook,
+  and the pod-count circuit breaker is off (`max_live_sandboxes` still caps each
+  process's claims). The default is unchanged.
+- **The resolved template name must be at most 63 characters**, since it is the
+  `sandbox=<template>` pod label value; a longer one (a long prefix or `run_id`)
+  passed validation and then failed every pod at the first warm.
 
 ### Fixed (run-id pod safeguards —
 [#1807](https://github.com/kubernetes-sigs/agent-sandbox/issues/1807))

@@ -807,3 +807,79 @@ def test_template_helpers():
   _, kw = r.custom_api.delete_namespaced_custom_object.call_args
   assert kw["body"].preconditions.uid == "u-1"
 
+
+
+# --- caller-supplied run_id: one job, several processes (#1808) ------------ #
+def test_supplied_run_id_drives_labels_names_and_namespace(make_cluster):
+  f = _fleet(make_cluster("solo"), run_id="job-7", run_isolation="names",
+             template_name_prefix="oh-")
+  assert f.run_id == "job-7"
+  assert f.config.labels[constants.RUN_ID_LABEL] == "job-7"
+  assert f.run_selector() == f"{constants.RUN_ID_LABEL}=job-7"
+  assert f.config.template_name(IMG).startswith("oh-job-7-")
+  c = make_cluster("solo", namespace="rl")
+  g = SandboxFleet(FleetConfig(run_id="job-7", run_isolation="namespace",
+                               clusters=[ClusterConfig(namespace="rl")]),
+                   registry=ClusterRegistry([c]))
+  assert c.namespace == "rl-job-7" and g.run_id == "job-7"
+
+
+def test_default_run_id_is_still_random_per_fleet(make_cluster):
+  f1, f2 = _fleet(make_cluster("a")), _fleet(make_cluster("b"))
+  assert f1.run_id != f2.run_id and len(f1.run_id) == 12
+
+
+@pytest.mark.parametrize("bad", ["Job-7", "job_7", "-job", "job-", "j" * 64, ""])
+def test_supplied_run_id_must_be_a_dns_label(bad):
+  with pytest.raises(ValueError, match="run_id"):
+    FleetConfig(run_id=bad)
+
+
+def test_shared_run_id_teardown_unwarms_only_what_this_fleet_warmed(make_cluster):
+  # A worker's exit must not sweep the orchestrator's pools or other workers'
+  # claims, which all carry the same id.
+  c = make_cluster("solo")
+  f = _fleet(c, run_id="job-7")
+  f.load_tasks([IMG, "registry.example/repo/other:tag"])
+  f.plan()
+  f.warm_image(IMG, wait=False)
+  pool, tmpl = f.config.pool_name(IMG), f.config.template_name(IMG)
+  f.teardown()
+  c.resources.list_claims.assert_not_called()
+  c.resources.list_warmpools.assert_not_called()
+  c.resources.list_templates.assert_not_called()
+  assert [a.args[0] for a in c.resources.delete_warmpool.call_args_list] == [pool]
+  assert [a.args[0] for a in c.resources.delete_template.call_args_list] == [tmpl]
+
+
+def test_shared_run_id_teardown_keeps_the_namespace_unless_asked(make_cluster):
+  c = make_cluster("solo", namespace="rl")
+  c.resources.ensure_namespace.return_value = True        # this process created it
+  cfg = FleetConfig(run_id="job-7", run_isolation="namespace",
+                    clusters=[ClusterConfig(namespace="rl")])
+  f = SandboxFleet(cfg, registry=ClusterRegistry([c]))
+  f.load_tasks([IMG]); f.plan()
+  f.teardown()
+  c.resources.delete_namespace.assert_not_called()
+  g = SandboxFleet(cfg, registry=ClusterRegistry([c]))
+  g.load_tasks([IMG]); g.plan()
+  g.teardown(delete_namespace=True)
+  c.resources.delete_namespace.assert_called_once_with("rl-job-7")
+
+
+def test_shared_run_id_breaker_ignores_intent_but_keeps_the_hard_cap(make_cluster,
+                                                                     monkeypatch):
+  # The pod count covers every process sharing the id; one process's intent is
+  # no ceiling for it.
+  from agent_sandbox_rl import FleetOvercommitError
+  f = _fleet(make_cluster("solo"), run_id="job-7", breaker_poll_s=0.02)
+  monkeypatch.setattr(f, "live_owned_count", lambda: 50)
+  with f.overcommit_guard(expected=1):
+    time.sleep(0.2)                                        # no trip on intent
+  g = _fleet(make_cluster("solo"), run_id="job-7", breaker_poll_s=0.02,
+             max_live_sandboxes=10)
+  monkeypatch.setattr(g, "live_owned_count", lambda: 50)
+  monkeypatch.setattr(g, "teardown", lambda *a, **k: None)
+  with pytest.raises(FleetOvercommitError):
+    with g.overcommit_guard(expected=1):
+      time.sleep(0.2)

@@ -181,6 +181,16 @@ class FleetConfig(BaseModel):
   # rollback delete gets the hook again until it succeeds once. Teardown only
   # ever sweeps this run's resources, in every mode.
   run_isolation: str = "none"
+  # Ownership id for this fleet's resources: the run-id labels, `{run_id}` in
+  # names, and the per-run namespace. None (default): a random id per fleet. Set
+  # the same value in every process of one job — an orchestrator that warms pools
+  # and workers that claim from them — so they own the job's resources together
+  # instead of treating each other as competing runs. Because the id is shared,
+  # teardown and the circuit breaker act for this process only: teardown deletes
+  # what this fleet warmed rather than everything carrying the id, keeps a per-run
+  # namespace unless `teardown(delete_namespace=True)`, and the breaker enforces
+  # only `max_live_sandboxes`. Sweep the whole job with `reap(run_id=…)`.
+  run_id: str | None = None
   run_namespace_labels: dict[str, str] = Field(default_factory=dict)
   run_namespace_setup: Callable[..., Any] | None = None
   labels: dict[str, str] = Field(default_factory=lambda: dict(constants.DEFAULT_LABELS))
@@ -230,6 +240,16 @@ class FleetConfig(BaseModel):
     if v not in constants.RUN_ISOLATION_MODES:
       raise ValueError(f"unknown run_isolation '{v}'; choose from "
                        f"{list(constants.RUN_ISOLATION_MODES)}")
+    return v
+
+  @field_validator("run_id")
+  @classmethod
+  def _valid_run_id(cls, v: str | None) -> str | None:
+    # Goes into label values and, per run_isolation, object and namespace names.
+    if v is not None and not _DNS1123_LABEL.match(v):
+      raise ValueError(
+          f"run_id {v!r} must be a DNS-1123 label (lowercase alphanumerics and "
+          "'-', starting and ending with an alphanumeric, 63 chars max)")
     return v
 
   @field_validator("template_name_prefix")

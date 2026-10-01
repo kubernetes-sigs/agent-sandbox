@@ -5,6 +5,19 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 
 ## [0.1.0.dev0] — unreleased
 
+### Added (one job, several processes —
+[#1808](https://github.com/kubernetes-sigs/agent-sandbox/issues/1808))
+- **`FleetConfig.run_id`** sets the fleet's run id instead of a random one, so the
+  processes of one job (an orchestrator that warms pools, workers that claim from
+  them) own the job's templates and pools together. Before, each process was its
+  own run: a worker that went on demand before the orchestrator warmed an image
+  created the template under its id, and the orchestrator's `warm_image` then
+  raised. With a caller-supplied id, `teardown()` releases this fleet's claims and
+  unwarms only the images it warmed instead of sweeping everything with the id,
+  keeps a per-run namespace unless `delete_namespace=True`, and the circuit
+  breaker enforces only `max_live_sandboxes` (the pod count is job-wide). The
+  default is unchanged.
+
 ### Fixed (run-id pod safeguards —
 [#1807](https://github.com/kubernetes-sigs/agent-sandbox/issues/1807))
 - **The circuit breaker and the reaper's pod force-delete see this run's pods

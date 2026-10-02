@@ -210,8 +210,8 @@ batch Lease ``batch-<id>``, and starts the batch's watch. The claims ``<id>-0`` 
 ``<id>-<N-1>``, where ``N`` is the sum of the group sizes, are then created in the background
 until ``err()`` is set. Each group's claims get consecutive ordinals in group order, but each
 group's first ``min_ready`` claims are created first, interleaved across groups in proportion
-to their sizes, and the rest follow. Use ``members()`` to see them as they become Ready, and
-``release()`` to delete the batch.
+to their sizes, and the rest follow. Use ``events()`` or ``iter_ready_groups()`` to consume
+them as they become Ready, and ``release()`` to delete the batch.
 
 Every claim gets the same ``shutdownTime``, the time of this call plus ``N / create_rps``
 seconds (rounded up) plus ``quorum_timeout`` plus ``work_budget`` plus 600 seconds, so an
@@ -230,8 +230,8 @@ Nothing extends a claim's ``shutdownTime``, so a batch held for a whole run sets
 - `max_in_flight` - Maximum claim creates in flight at once. Defaults to 20.
 - `work_budget` - Seconds the caller expects to work with the batch after it is Ready;
   part of each claim's ``shutdownTime``. Defaults to 3600.
-- `quorum_timeout` - Seconds the caller allows for the batch's claims to become Ready;
-  part of each claim's ``shutdownTime``. Defaults to 600.
+- `quorum_timeout` - Seconds after the last claim create that a group may take to reach
+  ``min_ready``. Defaults to 600.
 - `lease_duration` - Seconds the batch Lease stays valid without renewal. Defaults to 60.
   
 
@@ -249,11 +249,10 @@ Nothing extends a claim's ``shutdownTime``, so a batch held for a whole run sets
 
   
   >>> client = SandboxClient()
-  >>> batch = client.claim_batch([BatchGroup(warmpool="python-sandbox-pool", size=4)])
-  >>> while not any(m.state is MemberState.READY for m in batch.members()):
-  ...     time.sleep(1)
-  >>> member = next(m for m in batch.members() if m.state is MemberState.READY)
-  >>> batch.connect(member).commands.run("echo hello")
+  >>> batch = client.claim_batch([BatchGroup(warmpool="python-sandbox-pool", size=4, min_ready=2)])
+  >>> for group in batch.iter_ready_groups():
+  ...     if group.error is None:
+  ...         batch.connect(group.members[0]).commands.run("echo hello")
   >>> batch.release()
 
 <a id="k8s_agent_sandbox.sandbox_client.SandboxClient.get_batch"></a>
@@ -694,6 +693,43 @@ Represents the identity of a single claim in a batch.
 
 The group this member belongs to.
 
+<a id="k8s_agent_sandbox.models.BatchEventType"></a>
+
+### BatchEventType Objects
+
+```python
+class BatchEventType(str, Enum)
+```
+
+The kind of change a ``BatchEvent`` reports.
+
+<a id="k8s_agent_sandbox.models.BatchEvent"></a>
+
+### BatchEvent Objects
+
+```python
+class BatchEvent(BaseModel)
+```
+
+One change yielded by ``SandboxBatch.events()``. ``member`` is ``None`` for ``LEASE_DEGRADED``.
+
+<a id="k8s_agent_sandbox.models.GroupReady"></a>
+
+### GroupReady Objects
+
+```python
+@dataclass(frozen=True)
+class GroupReady()
+```
+
+One group's quorum outcome, yielded by ``SandboxBatch.iter_ready_groups()``.
+
+On success, ``members`` holds exactly ``min_ready`` Ready members and ``error`` is ``None``.
+On failure, ``error`` is a ``QuorumUnreachableError`` or ``TimeoutError`` and ``members`` is empty.
+
+This is a dataclass rather than a Pydantic model because ``error`` holds a raw Python
+``Exception`` object (preserving traceback and causes) rather than serializable data.
+
 <a id="k8s_agent_sandbox.sandbox_batch"></a>
 
 ## k8s\_agent\_sandbox.sandbox\_batch
@@ -784,6 +820,49 @@ Returns whether background Lease renewal is failing.
 
 ``True`` from the first failed renewal until a renewal succeeds. It stays ``True`` once
 renewal stops on an error, such as the Lease expiring, so it can be polled at any time.
+
+<a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.events"></a>
+
+##### events
+
+```python
+def events() -> Iterator[BatchEvent]
+```
+
+Returns an iterator over the batch's events.
+
+``MEMBER_READY`` is yielded once per initial claim that becomes Ready, ``MEMBER_FAILED`` and
+``MEMBER_LOST`` once per initial claim that fails or is deleted, and ``LEASE_DEGRADED`` once
+per episode of failing Lease renewals. If ``iter_ready_groups()`` was called first, a group's
+members are yielded only after that group has yielded successfully in ``iter_ready_groups()``;
+otherwise, a group that fails yields none. The iterator ends once every initial claim is Ready
+or can't become Ready, if the quorum timeout has passed, or once ``err()`` is set. Calling
+``events()`` again continues where the previous iterator stopped.
+
+**Raises**:
+
+- `BatchError` - If this handle has been detached or released, when called or while waiting.
+
+<a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.iter_ready_groups"></a>
+
+##### iter\_ready\_groups
+
+```python
+def iter_ready_groups() -> Iterator[GroupReady]
+```
+
+Returns an iterator that yields one ``GroupReady`` per group, as soon as its outcome is known.
+
+A group yields its first ``min_ready`` Ready members, in the order they became Ready. It
+fails with ``QuorumUnreachableError`` once too few of its members can still become Ready,
+or with ``TimeoutError`` if it hasn't reached ``min_ready`` within the quorum timeout.
+The iterator ends once every group has yielded, or once ``err()`` is set. Calling it again
+continues with the groups that haven't yielded yet.
+
+**Raises**:
+
+- `BatchError` - If ``events()`` was called first, or this handle has been detached or
+  released, when called or while waiting.
 
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.release"></a>
 

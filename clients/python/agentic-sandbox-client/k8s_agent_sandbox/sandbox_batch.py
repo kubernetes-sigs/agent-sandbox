@@ -72,14 +72,6 @@ def _is_transport_error(error: BaseException) -> bool:
     return isinstance(error, _TRANSPORT_ERRORS)
 
 
-def _watch_backoff_delay(failures: int) -> float:
-    return batch_utils.backoff_delay(
-        failures,
-        batch_utils.BATCH_BACKOFF_BASE_SECONDS,
-        batch_utils.BATCH_BACKOFF_MAX_SECONDS,
-    )
-
-
 class SandboxBatch:
     """A handle to an existing batch's claims, obtained via ``SandboxClient.get_batch``.
 
@@ -447,7 +439,7 @@ class SandboxBatch:
                 if batch_utils.is_retryable_status(e.status):
                     # Likely transient: retry the re-list, or the watch from the last-seen resourceVersion.
                     failures += 1
-                    self._watch_stop.wait(_watch_backoff_delay(failures))
+                    self._watch_stop.wait(batch_utils.retry_delay(failures, e))
                     continue
                 # Response codes outside of this (e.g. 403, 404) are not recoverable
                 # by retrying, so we error then exit
@@ -460,7 +452,7 @@ class SandboxBatch:
                 if _is_transport_error(e):
                     # Likely transient network-level failure so retry
                     failures += 1
-                    self._watch_stop.wait(_watch_backoff_delay(failures))
+                    self._watch_stop.wait(batch_utils.retry_delay(failures, e))
                     continue
                 # Anything else (e.g. a certificate error) is not known to be transient, so surface it
                 # via err() instead of leaving the thread dead with err() still None.

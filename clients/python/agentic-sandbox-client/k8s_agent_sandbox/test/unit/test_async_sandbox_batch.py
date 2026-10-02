@@ -565,23 +565,21 @@ class TestWatcher(BaseAsyncBatchClientTest):
         self.assertIsInstance(handle.err(), k8s_client.ApiException)
         self.assertEqual(handle.err().status, 403)
 
-    async def _assert_retries_then_cancels(self, handle, status):
+    async def test_503_waits_retry_after_then_retries_from_last_resource_version(self):
+        handle = _make_handle(self.client)
+        error = self._terminating_error(status=503)
+        error.headers = {"Retry-After": "7"}
         self.mock_k8s_helper.watch_sandbox_claims = MagicMock(
-            side_effect=[
-                self._terminating_error(status=status),
-                _agen_then_raise([], asyncio.CancelledError()),
-            ]
+            side_effect=[error, _agen_then_raise([], asyncio.CancelledError())]
         )
-        with self.assertRaises(asyncio.CancelledError):
-            await handle._watch_loop()
+        with patch("k8s_agent_sandbox.async_sandbox_batch.asyncio.sleep") as sleep:
+            with self.assertRaises(asyncio.CancelledError):
+                await handle._watch_loop()
         self.assertIsNone(handle.err())
+        sleep.assert_awaited_once_with(7.0)
         calls = self.mock_k8s_helper.watch_sandbox_claims.call_args_list
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[1].args[2], "5")
-
-    async def test_503_retries_from_last_resource_version_and_leaves_err_none(self):
-        handle = _make_handle(self.client)
-        await self._assert_retries_then_cancels(handle, 503)
 
     async def test_label_selector_is_exact(self):
         handle = _make_handle(self.client, batch_id="b1234")
@@ -610,7 +608,7 @@ class TestWatcher(BaseAsyncBatchClientTest):
         )
         handle = _make_handle(self.client)
         self.mock_k8s_helper.watch_sandbox_claims = MagicMock(side_effect=[refused, tls_eof, tls_eof.os_error, bad_cert])
-        with patch("k8s_agent_sandbox.async_sandbox_batch._watch_backoff_delay", return_value=0):
+        with patch.object(batch_utils, "retry_delay", return_value=0):
             await handle._watch_loop()
         self.assertEqual(self.mock_k8s_helper.watch_sandbox_claims.call_count, 4)
         self.assertIs(handle.err(), bad_cert)
@@ -620,7 +618,7 @@ class TestWatcher(BaseAsyncBatchClientTest):
         self.mock_k8s_helper.watch_sandbox_claims = MagicMock(
             side_effect=[TimeoutError(), _agen_then_raise([], asyncio.CancelledError())]
         )
-        with patch("k8s_agent_sandbox.async_sandbox_batch._watch_backoff_delay", return_value=0):
+        with patch.object(batch_utils, "retry_delay", return_value=0):
             with self.assertRaises(asyncio.CancelledError):
                 await handle._watch_loop()
         self.assertIsNone(handle.err())

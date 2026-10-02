@@ -14,10 +14,15 @@
 
 """Utility functions for the Kubernetes Agent Sandbox Python client."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+from contextlib import asynccontextmanager, contextmanager, suppress
 from datetime import datetime, timedelta, timezone
 import functools
+import inspect
 import ipaddress
+import json
+import os
+import tempfile
 import time
 from typing import Any
 
@@ -202,3 +207,90 @@ def construct_sandbox_claim_env_spec(env: Mapping[str, str] | None) -> list[Sand
         SandboxClaimEnvVar(name=name, value=value)
         for name, value in env.items()
     ]
+
+
+def kubeconfig_from_configuration(
+    configuration: Any, authorization: str | None
+) -> dict[str, Any]:
+    """Build a kubeconfig for the cluster a Kubernetes ``Configuration`` targets.
+
+    ``authorization`` is the resolved ``Authorization`` header value. Only a
+    bearer token is carried over; basic auth is not.
+    """
+    cluster: dict[str, Any] = {"server": configuration.host}
+    if configuration.ssl_ca_cert:
+        cluster["certificate-authority"] = configuration.ssl_ca_cert
+    if not configuration.verify_ssl:
+        cluster["insecure-skip-tls-verify"] = True
+    if getattr(configuration, "tls_server_name", None):
+        cluster["tls-server-name"] = configuration.tls_server_name
+    if getattr(configuration, "proxy", None):
+        cluster["proxy-url"] = configuration.proxy
+
+    user: dict[str, Any] = {}
+    if configuration.cert_file:
+        user["client-certificate"] = configuration.cert_file
+    if configuration.key_file:
+        user["client-key"] = configuration.key_file
+    scheme, _, credential = (authorization or "").partition(" ")
+    if scheme.lower() == "bearer" and credential:
+        user["token"] = credential
+
+    return {
+        "apiVersion": "v1",
+        "kind": "Config",
+        "clusters": [{"name": "sandbox", "cluster": cluster}],
+        "users": [{"name": "sandbox", "user": user}],
+        "contexts": [
+            {"name": "sandbox", "context": {"cluster": "sandbox", "user": "sandbox"}}
+        ],
+        "current-context": "sandbox",
+    }
+
+
+@contextmanager
+def _temporary_kubeconfig(
+    configuration: Any, authorization: str | None
+) -> Iterator[list[str]]:
+    # mkstemp creates the file 0600, and it can hold a bearer token.
+    fd, path = tempfile.mkstemp(prefix="sandbox-kubeconfig-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(kubeconfig_from_configuration(configuration, authorization), f)
+        yield ["--kubeconfig", path]
+    finally:
+        with suppress(FileNotFoundError):
+            os.unlink(path)
+
+
+@contextmanager
+def kubectl_kubeconfig_args(api_client: Any | None) -> Iterator[list[str]]:
+    """Yield the ``kubectl`` flags that target an injected ``ApiClient``'s cluster.
+
+    ``kubectl`` otherwise uses the ambient kubeconfig, which may be a different
+    cluster than the one ``api_client`` talks to. Yields no flags when
+    ``api_client`` is None. The kubeconfig is deleted on exit, which is safe
+    once ``kubectl`` has started because it reads the file only at startup.
+    """
+    if api_client is None:
+        yield []
+        return
+    configuration = api_client.configuration
+    authorization = configuration.get_api_key_with_prefix("authorization")
+    with _temporary_kubeconfig(configuration, authorization) as args:
+        yield args
+
+
+@asynccontextmanager
+async def async_kubectl_kubeconfig_args(api_client: Any | None) -> AsyncIterator[list[str]]:
+    """Async variant of :func:`kubectl_kubeconfig_args` for ``kubernetes_asyncio``."""
+    if api_client is None:
+        yield []
+        return
+    configuration = api_client.configuration
+    # kubernetes_asyncio runs a possibly async refresh hook here.
+    authorization = configuration.get_api_key_with_prefix("authorization")
+    if inspect.isawaitable(authorization):
+        authorization = await authorization
+    with _temporary_kubeconfig(configuration, authorization) as args:
+        yield args

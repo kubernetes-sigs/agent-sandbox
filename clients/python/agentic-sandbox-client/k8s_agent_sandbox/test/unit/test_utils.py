@@ -12,9 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+import os
+import stat
 import unittest
+from types import SimpleNamespace
 
-from k8s_agent_sandbox.utils import extract_sandbox_name_hash
+from kubernetes import client as sync_client
+from kubernetes_asyncio import client as async_client
+
+from k8s_agent_sandbox.utils import (
+    async_kubectl_kubeconfig_args,
+    extract_sandbox_name_hash,
+    kubectl_kubeconfig_args,
+)
 
 
 class TestExtractSandboxNameHash(unittest.TestCase):
@@ -67,6 +78,141 @@ class TestExtractSandboxNameHash(unittest.TestCase):
         sandbox_object = {}
         sandbox_name_hash = extract_sandbox_name_hash(sandbox_object)
         self.assertIsNone(sandbox_name_hash)
+
+
+def _read_kubeconfig(args):
+    flag, path = args
+    assert flag == "--kubeconfig"
+    with open(path) as f:
+        return json.load(f)
+
+
+def _cluster_and_user(kubeconfig):
+    return kubeconfig["clusters"][0]["cluster"], kubeconfig["users"][0]["user"]
+
+
+class TestKubectlKubeconfigArgs(unittest.TestCase):
+    def _configuration(self):
+        cfg = sync_client.Configuration()
+        cfg.host = "https://cluster-b:6443"
+        cfg.ssl_ca_cert = "/certs/ca.crt"
+        cfg.cert_file = "/certs/client.crt"
+        cfg.key_file = "/certs/client.key"
+        cfg.api_key = {"authorization": "secret"}
+        cfg.api_key_prefix = {"authorization": "Bearer"}
+        return cfg
+
+    def test_no_flags_without_api_client(self):
+        with kubectl_kubeconfig_args(None) as args:
+            self.assertEqual(args, [])
+
+    def test_kubeconfig_targets_the_injected_cluster(self):
+        api_client = sync_client.ApiClient(configuration=self._configuration())
+
+        with kubectl_kubeconfig_args(api_client) as args:
+            kubeconfig = _read_kubeconfig(args)
+            self.assertEqual(
+                stat.S_IMODE(os.stat(args[1]).st_mode), 0o600,
+                "the file can hold a bearer token",
+            )
+
+        cluster, user = _cluster_and_user(kubeconfig)
+        self.assertEqual(
+            cluster,
+            {"server": "https://cluster-b:6443", "certificate-authority": "/certs/ca.crt"},
+        )
+        self.assertEqual(
+            user,
+            {
+                "client-certificate": "/certs/client.crt",
+                "client-key": "/certs/client.key",
+                "token": "secret",
+            },
+        )
+        self.assertEqual(kubeconfig["current-context"], "sandbox")
+        self.assertFalse(os.path.exists(args[1]))
+
+    def test_optional_cluster_settings(self):
+        cfg = self._configuration()
+        cfg.verify_ssl = False
+        cfg.tls_server_name = "api.internal"
+        cfg.proxy = "http://proxy:3128"
+
+        with kubectl_kubeconfig_args(sync_client.ApiClient(configuration=cfg)) as args:
+            cluster, _ = _cluster_and_user(_read_kubeconfig(args))
+
+        self.assertTrue(cluster["insecure-skip-tls-verify"])
+        self.assertEqual(cluster["tls-server-name"], "api.internal")
+        self.assertEqual(cluster["proxy-url"], "http://proxy:3128")
+
+    def test_refreshed_token_is_used(self):
+        cfg = self._configuration()
+        cfg.refresh_api_key_hook = lambda c: c.api_key.update(authorization="fresh")
+
+        with kubectl_kubeconfig_args(sync_client.ApiClient(configuration=cfg)) as args:
+            _, user = _cluster_and_user(_read_kubeconfig(args))
+
+        self.assertEqual(user["token"], "fresh")
+
+    def test_basic_auth_is_not_carried_over(self):
+        cfg = self._configuration()
+        cfg.api_key = {"authorization": "dXNlcjpwYXNz"}
+        cfg.api_key_prefix = {"authorization": "Basic"}
+
+        with kubectl_kubeconfig_args(sync_client.ApiClient(configuration=cfg)) as args:
+            _, user = _cluster_and_user(_read_kubeconfig(args))
+
+        self.assertNotIn("token", user)
+
+    def test_file_is_removed_when_the_body_raises(self):
+        api_client = sync_client.ApiClient(configuration=self._configuration())
+
+        with self.assertRaises(RuntimeError):
+            with kubectl_kubeconfig_args(api_client) as args:
+                raise RuntimeError("boom")
+
+        self.assertFalse(os.path.exists(args[1]))
+
+
+class TestAsyncKubectlKubeconfigArgs(unittest.IsolatedAsyncioTestCase):
+    def _configuration(self):
+        cfg = async_client.Configuration()
+        cfg.host = "https://cluster-b:6443"
+        cfg.ssl_ca_cert = "/certs/ca.crt"
+        cfg.api_key = {"authorization": "secret"}
+        cfg.api_key_prefix = {"authorization": "Bearer"}
+        return cfg
+
+    async def test_no_flags_without_api_client(self):
+        async with async_kubectl_kubeconfig_args(None) as args:
+            self.assertEqual(args, [])
+
+    async def test_kubeconfig_targets_the_injected_cluster(self):
+        # Only ``.configuration`` is read, and a real async ApiClient would
+        # try to load the fake CA file.
+        api_client = SimpleNamespace(configuration=self._configuration())
+
+        async with async_kubectl_kubeconfig_args(api_client) as args:
+            kubeconfig = _read_kubeconfig(args)
+
+        cluster, user = _cluster_and_user(kubeconfig)
+        self.assertEqual(cluster["server"], "https://cluster-b:6443")
+        self.assertEqual(cluster["certificate-authority"], "/certs/ca.crt")
+        self.assertEqual(user, {"token": "secret"})
+        self.assertFalse(os.path.exists(args[1]))
+
+    async def test_async_refresh_hook_is_awaited(self):
+        cfg = self._configuration()
+
+        async def refresh(c):
+            c.api_key["authorization"] = "fresh"
+
+        cfg.refresh_api_key_hook = refresh
+
+        async with async_kubectl_kubeconfig_args(SimpleNamespace(configuration=cfg)) as args:
+            _, user = _cluster_and_user(_read_kubeconfig(args))
+
+        self.assertEqual(user["token"], "fresh")
 
 
 if __name__ == "__main__":

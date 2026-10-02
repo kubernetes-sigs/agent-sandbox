@@ -46,6 +46,7 @@ from .models import (
     SandboxdPodTunnelConnectionConfig,
     SandboxdInClusterConnectionConfig,
 )
+from .utils import async_kubectl_kubeconfig_args
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +156,7 @@ class AsyncSandboxConnector:
                 namespace=namespace,
                 config=connection_config,
                 get_pod_name=get_pod_name,
+                api_client=k8s_helper.injected_api_client,
             )
         elif isinstance(connection_config, SandboxdInClusterConnectionConfig):
             self._sandboxd_strategy = AsyncSandboxdInClusterStrategy(
@@ -621,11 +623,14 @@ class AsyncSandboxdPodTunnelStrategy:
         namespace: str,
         config: SandboxdPodTunnelConnectionConfig,
         get_pod_name: Callable[[], Awaitable[str | None]] | None = None,
+        api_client: Any | None = None,
     ) -> None:
         self.sandbox_id = sandbox_id
         self.namespace = namespace
         self.config = config
         self._get_pod_name = get_pod_name
+        # Injected client whose cluster kubectl must target instead of the ambient one.
+        self._api_client = api_client
         self.port_forward_process: asyncio.subprocess.Process | None = None
         self.base_url: str | None = None
         self.grpc_target: str | None = None
@@ -681,6 +686,13 @@ class AsyncSandboxdPodTunnelStrategy:
                 "sandbox pod name not resolved yet; cannot port-forward to sandboxd"
             )
 
+        async with async_kubectl_kubeconfig_args(self._api_client) as kube_args:
+            return await self._start_tunnel_locked(pod_name, kube_args)
+
+    async def _start_tunnel_locked(
+        self, pod_name: str, kube_args: list[str]
+    ) -> tuple[str, str]:
+        """Start ``kubectl`` while the caller holds ``_lifecycle_lock``."""
         rest_local = self._get_free_port()
         grpc_local = self._get_free_port()
         try:
@@ -693,6 +705,7 @@ class AsyncSandboxdPodTunnelStrategy:
                     f"{grpc_local}:{self.config.grpc_port}",
                     "-n",
                     self.namespace,
+                    *kube_args,
                     # kubectl logs each forwarded connection. Discard the
                     # long-lived subprocess output because this SDK has no log
                     # consumer for the forwarding process.

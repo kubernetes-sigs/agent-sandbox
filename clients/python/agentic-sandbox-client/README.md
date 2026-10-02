@@ -592,7 +592,7 @@ Latency guidance:
 
 By default, `SandboxClient` and `AsyncSandboxClient` load their Kubernetes credentials via an in-cluster config if running inside a pod, otherwise `KUBECONFIG`, falling back to `~/.kube/config`'s `current-context` if unset. To target a different cluster/context instead, pass a pre-configured `api_client`.
 
-> **Warning:** In local-tunnel mode, `api_client` only affects Kubernetes API calls. The `kubectl` calls that reach the sandbox-router (the service check and the port-forward) still use your ambient kubeconfig context, so make sure it points at the same cluster as `api_client`, or they will target the wrong cluster.
+> **Note:** The `kubectl` calls in the local-tunnel and sandboxd pod-tunnel modes target the same cluster as `api_client`. The SDK gives `kubectl` a short-lived kubeconfig built from the client's host, CA, client certificate and bearer token. Basic auth is not carried over.
 
 **A kubeconfig file outside the default location** (e.g. a `pytest-kind` cluster):
 

@@ -22,13 +22,34 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	io_prometheus_client "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/internal/version"
 )
+
+func histogramSampleCount(vec *prometheus.HistogramVec) uint64 {
+	ch := make(chan prometheus.Metric)
+	go func() {
+		vec.Collect(ch)
+		close(ch)
+	}()
+	var count uint64
+	for m := range ch {
+		pb := &io_prometheus_client.Metric{}
+		if err := m.Write(pb); err == nil {
+			count += pb.GetHistogram().GetSampleCount()
+		}
+	}
+	return count
+}
 
 func TestClaimLatencyRecording(t *testing.T) {
 	testCases := []struct {
@@ -102,6 +123,97 @@ func TestSandboxCreationLatencyRecording(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSandboxLifecycleMetricsRecording(t *testing.T) {
+	t.Run("SuspendTotal", func(t *testing.T) {
+		SandboxSuspendTotal.Reset()
+		RecordSandboxSuspend("default", "tmpl-a", extensionsv1beta1.SandboxClaimKind, SuspendResultRequested)
+		RecordSandboxSuspend("default", "tmpl-a", extensionsv1beta1.SandboxClaimKind, SuspendResultPodTerminated)
+		RecordSandboxSuspend("default", "", "invalid-owner", "unexpected-result")
+
+		require.InDelta(t, 1.0, testutil.ToFloat64(SandboxSuspendTotal.WithLabelValues("default", "tmpl-a", "SandboxClaim", "requested")), 0.001)
+		require.InDelta(t, 1.0, testutil.ToFloat64(SandboxSuspendTotal.WithLabelValues("default", "tmpl-a", "SandboxClaim", "pod_terminated")), 0.001)
+		require.InDelta(t, 1.0, testutil.ToFloat64(SandboxSuspendTotal.WithLabelValues("default", "unknown", "None", "unknown")), 0.001)
+	})
+
+	t.Run("SuspendLatency", func(t *testing.T) {
+		SandboxSuspendLatency.Reset()
+		RecordSandboxSuspendLatency(1500*time.Millisecond, "default", "tmpl-a", extensionsv1beta1.SandboxClaimKind)
+		RecordSandboxSuspendLatency(2500*time.Millisecond, "default", "tmpl-a", extensionsv1beta1.SandboxClaimKind)
+
+		require.Equal(t, uint64(2), histogramSampleCount(SandboxSuspendLatency))
+	})
+
+	t.Run("ResumeTotal", func(t *testing.T) {
+		SandboxResumeTotal.Reset()
+		RecordSandboxResume("default", "tmpl-a", extensionsv1beta1.SandboxClaimKind, ResumeResultRequested)
+		RecordSandboxResume("default", "tmpl-a", extensionsv1beta1.SandboxClaimKind, ResumeResultReady)
+		RecordSandboxResume("default", "", "custom", "bad")
+
+		require.InDelta(t, 1.0, testutil.ToFloat64(SandboxResumeTotal.WithLabelValues("default", "tmpl-a", "SandboxClaim", "requested")), 0.001)
+		require.InDelta(t, 1.0, testutil.ToFloat64(SandboxResumeTotal.WithLabelValues("default", "tmpl-a", "SandboxClaim", "ready")), 0.001)
+		require.InDelta(t, 1.0, testutil.ToFloat64(SandboxResumeTotal.WithLabelValues("default", "unknown", "None", "unknown")), 0.001)
+	})
+
+	t.Run("ResumeLatency", func(t *testing.T) {
+		SandboxResumeLatency.Reset()
+		RecordSandboxResumeLatency(2*time.Second, "default", "tmpl-a", extensionsv1beta1.SandboxClaimKind)
+		RecordSandboxResumeLatency(3*time.Second, "default", "tmpl-a", extensionsv1beta1.SandboxClaimKind)
+
+		require.Equal(t, uint64(2), histogramSampleCount(SandboxResumeLatency))
+	})
+
+	t.Run("FinishedTotal", func(t *testing.T) {
+		SandboxFinishedTotal.Reset()
+		RecordSandboxFinished("default", "tmpl-a", OwnedByNone, sandboxv1beta1.SandboxReasonPodSucceeded)
+		RecordSandboxFinished("default", "tmpl-a", OwnedByNone, sandboxv1beta1.SandboxReasonPodFailed)
+		RecordSandboxFinished("default", "", "other", "UnknownReason")
+
+		require.InDelta(t, 1.0, testutil.ToFloat64(SandboxFinishedTotal.WithLabelValues("default", "tmpl-a", "None", "PodSucceeded")), 0.001)
+		require.InDelta(t, 1.0, testutil.ToFloat64(SandboxFinishedTotal.WithLabelValues("default", "tmpl-a", "None", "PodFailed")), 0.001)
+		require.InDelta(t, 1.0, testutil.ToFloat64(SandboxFinishedTotal.WithLabelValues("default", "unknown", "None", "unknown")), 0.001)
+	})
+
+	t.Run("ExpiredTotal", func(t *testing.T) {
+		SandboxExpiredTotal.Reset()
+		RecordSandboxExpired("default", "tmpl-a", extensionsv1beta1.SandboxClaimKind, string(sandboxv1beta1.ShutdownPolicyDelete))
+		RecordSandboxExpired("default", "", "other", "")
+
+		require.InDelta(t, 1.0, testutil.ToFloat64(SandboxExpiredTotal.WithLabelValues("default", "tmpl-a", "SandboxClaim", "Delete")), 0.001)
+		require.InDelta(t, 1.0, testutil.ToFloat64(SandboxExpiredTotal.WithLabelValues("default", "unknown", "None", "Retain")), 0.001)
+	})
+
+	t.Run("SandboxLabelExtractors", func(t *testing.T) {
+		require.Equal(t, "unknown", SandboxTemplateLabel(nil))
+		require.Equal(t, "None", SandboxOwnedByLabel(nil))
+		require.Equal(t, "Retain", SandboxShutdownPolicyLabel(nil))
+
+		delPolicy := sandboxv1beta1.ShutdownPolicyDelete
+		sb := &sandboxv1beta1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					sandboxv1beta1.SandboxTemplateRefAnnotation: "my-template",
+				},
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: extensionsv1beta1.GroupVersion.String(),
+						Kind:       extensionsv1beta1.SandboxClaimKind,
+						Name:       "my-claim",
+						Controller: new(true),
+					},
+				},
+			},
+			Spec: sandboxv1beta1.SandboxSpec{
+				Lifecycle: sandboxv1beta1.Lifecycle{
+					ShutdownPolicy: &delPolicy,
+				},
+			},
+		}
+		require.Equal(t, "my-template", SandboxTemplateLabel(sb))
+		require.Equal(t, "SandboxClaim", SandboxOwnedByLabel(sb))
+		require.Equal(t, "Delete", SandboxShutdownPolicyLabel(sb))
+	})
 }
 
 func TestSandboxClaimCreationRecording(t *testing.T) {

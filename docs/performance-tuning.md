@@ -327,15 +327,18 @@ rates above ~200/s.
 
 ### `--disable-claim-observability-annotations` (default: false)
 
-Skips the dedicated API write that persists the SandboxClaim observability
-annotations (controller first-observed timestamp, trace context). The values
-are still stamped on the in-memory object, so startup-latency metrics and
-trace propagation within the current process keep working.
+Skips persisting the SandboxClaim observability annotations: the controller
+first-observed timestamp and trace context (one write per claim, or none on
+the warm path, where they ride along on the adoption patch by default) and
+the first-ready timestamp (one write per claim). The values are still stamped
+on the in-memory object, so startup-latency metrics and trace propagation
+within the current process keep working.
 
-Treat this flag as removing one write per claim, not as a guarantee the
-annotations never appear on the object: when a later full-object update
-carries the claim (e.g. the adoption update on the warm path), the stamped
-values are persisted along with it. The write saving holds either way.
+The first-ready annotation doubles as the guard that keeps readiness flaps
+(Ready -> NotReady -> Ready) from re-recording a claim's startup-latency
+histograms. With the flag on that guard is kept in memory instead, so it is
+lost on a controller restart: a claim whose flap straddles the restart can
+re-record its startup-latency metrics once.
 
 ### `--sandbox-write-behind-window` (default: 0 — disabled)
 

@@ -410,7 +410,8 @@ class SandboxClient(Generic[T]):
                 part of each claim's ``shutdownTime``. Defaults to 3600.
             quorum_timeout: Seconds after the last claim create that a group may take to reach
                 ``min_ready``. A group that reaches it later, before any consumer checks the
-                deadline, still succeeds. Defaults to 600.
+                deadline, still succeeds. The same deadline fails the batch quorum in
+                ``wait_for_quorum()``. Defaults to 600.
             lease_duration: Seconds the batch Lease stays valid without renewal. Defaults to 60.
 
         Raises:

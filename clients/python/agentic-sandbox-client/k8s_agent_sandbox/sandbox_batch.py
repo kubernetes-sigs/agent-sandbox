@@ -43,6 +43,7 @@ from .exceptions import (
     BatchInUseError,
     BatchLeaseExpiredError,
     BatchNotFoundError,
+    BatchTimeoutError,
     SandboxNotReadyError,
     SandboxTemplateNotFoundError,
     SandboxWarmPoolNotFoundError,
@@ -478,7 +479,9 @@ class SandboxBatch:
         and ``MEMBER_LOST`` once per initial claim that fails or is deleted. Called on its own, it
         streams every Ready member. Called after ``group_outcomes()``, it yields a group's members
         only after that group has yielded successfully there, so a group that fails yields none.
-        ``group_outcomes()`` can't be called after ``events()``, since the first of the two to be
+        Called after ``wait_for_quorum()``, it yields the members the quorum doesn't return once the
+        quorum is reached, and none if the quorum fails. ``group_outcomes()`` and
+        ``wait_for_quorum()`` can't be called after ``events()``, since the first consumer to be
         called fixes how members are handed out.
 
         The iterator ends once every initial claim has been handed out, dropped with a failed group,
@@ -509,13 +512,53 @@ class SandboxBatch:
         continues with the groups that haven't yielded yet.
 
         Raises:
-            BatchError: If ``events()`` was called first, or this handle has been detached or
-                released, when called or while waiting.
+            BatchError: If ``events()`` or ``wait_for_quorum()`` was called first, or this handle has
+                been detached or released, when called or while waiting.
         """
         with self._lock:
             self._check_active()
             self._state.set_mode(batch_state.ConsumerMode.GROUP)
         return self._iterate(self._state.pop_group_outcome, self._state.groups_done)
+
+    def wait_for_quorum(self) -> list[Member]:
+        """Waits until every group has ``min_ready`` Ready members, and returns them.
+
+        The returned list has each group's first ``min_ready`` members, in the order they became
+        Ready, with the groups in batch order. Members it doesn't return are yielded by ``events()``.
+        If the quorum fails, no members are handed out and no more claims are created. The quorum
+        also fails if the wait ends with any other exception, such as a cancellation or
+        ``KeyboardInterrupt``. Can be called only once per handle.
+
+        The handle checks the quorum timeout only while a consumer waits or claims are still being
+        created, so a quorum reached after the deadline, before any consumer checks it, still succeeds.
+
+        ``QuorumUnreachableError`` and ``BatchTimeoutError`` are both ``BatchError``, so
+        ``except BatchError`` handles every failure.
+
+        Raises:
+            QuorumUnreachableError: If too few members of a group can still become Ready.
+            BatchTimeoutError: If the quorum isn't reached within the quorum timeout.
+            BatchError: If ``events()`` or ``group_outcomes()`` was called first, this method
+                was already called, ``err()`` is set while waiting, or this handle has been
+                detached or released, when called or while waiting.
+        """
+        with self._lock:
+            self._check_active()
+            self._state.set_mode(batch_state.ConsumerMode.QUORUM)
+        try:
+            result = self._next(self._state.quorum_result, lambda: False)
+            if result is None:
+                raise BatchError(f"batch '{self.batch_id}' stopped while waiting for quorum") from self._state.error()
+        except BaseException:
+            # This was the only wait, so a quorum left undecided would hold its members forever.
+            with self._changed:
+                self._state.fail_quorum(BatchTimeoutError("wait_for_quorum() ended before the quorum was reached"))
+                self._changed.notify_all()
+            raise
+        members, error = result
+        if error is not None:
+            raise error
+        return members
 
     def _iterate(self, pop: Callable[[], _T | None], done: Callable[[], bool]) -> Iterator[_T]:
         while (item := self._next(pop, done)) is not None:

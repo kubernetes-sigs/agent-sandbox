@@ -17,6 +17,7 @@ import contextlib
 import logging
 import queue
 import ssl
+from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
 import unittest
@@ -47,6 +48,7 @@ from k8s_agent_sandbox.exceptions import (
     BatchLeaseExpiredError,
     BatchNotFoundError,
     BatchTimeoutError,
+    QuorumUnreachableError,
     SandboxNotReadyError,
     SandboxTemplateNotFoundError,
     SandboxWarmPoolNotFoundError,
@@ -1597,6 +1599,106 @@ class TestConsumers(BaseClaimBatchTest):
         self.assertEqual(_drain(batch.group_outcomes()), [])
         self.assertEqual(_drain(batch.events()), [])
         self.assertEqual(batch.err().status, 403)
+
+
+class TestWaitForQuorum(BaseClaimBatchTest):
+
+    def wait_in_background(self, pool, batch, **kwargs):
+        future = pool.submit(batch.wait_for_quorum, **kwargs)
+        _wait_until(lambda: batch._state._mode == batch_state.ConsumerMode.QUORUM)
+        return future
+
+    def test_returns_min_ready_per_group_in_group_order_then_events_yield_the_rest(self):
+        self.cluster.ready_on_create = False
+        batch = self.claim(
+            [BatchGroup(warmpool="pool-a", size=2, min_ready=1), BatchGroup(warmpool="pool-b", size=2, min_ready=1)]
+        )
+        _wait_until(lambda: len(self.cluster.created) == 4)
+        for name, warmpool in (("b1-3", "pool-b"), ("b1-1", "pool-a"), ("b1-2", "pool-b"), ("b1-0", "pool-a")):
+            self.cluster.push(name, warmpool)
+        self.assertEqual([m.claim_name for m in batch.wait_for_quorum()], ["b1-1", "b1-3"])
+        self.assertEqual(
+            sorted((e.type, e.member.claim_name) for e in _drain(batch.events())),
+            [(BatchEventType.MEMBER_READY, "b1-0"), (BatchEventType.MEMBER_READY, "b1-2")],
+        )
+
+    def test_quorum_timeout_raises_batch_timeout_error_and_stops_the_remaining_creates(self):
+        self.cluster.ready_on_create = False
+        offset = [0.0]
+        fake_time = SimpleNamespace(monotonic=lambda: time.monotonic() + offset[0], sleep=time.sleep)
+        with patch.object(sandbox_batch, "time", fake_time), ThreadPoolExecutor() as pool:
+            # At one create per second, b1-1 still waits for its pacing slot when the deadline passes.
+            batch = self.claim([BatchGroup(warmpool="pool-a", size=2)], create_rps=1, quorum_timeout=60)
+            _wait_until(lambda: batch._fill_deadline is not None)
+            future = self.wait_in_background(pool, batch)
+            offset[0] = 62
+            self.cluster.push("b1-0", ready=False)
+            with self.assertRaises(BatchTimeoutError):
+                future.result(5)
+            _wait_until(lambda: batch._state._never_created == 1)
+        self.assertEqual(self.cluster.names(), ["b1-0"])
+
+    def test_an_unreachable_group_raises_and_stops_creates_for_every_group(self):
+        gate = threading.Event()
+
+        def hook(name):
+            if name == "b1-0":
+                gate.wait(5)
+                raise k8s_client.ApiException(status=403)
+
+        self.cluster.create_hook = hook
+        batch = self.claim(
+            [BatchGroup(warmpool="pool-a", size=3), BatchGroup(warmpool="pool-b", size=2)], max_in_flight=1
+        )
+        with ThreadPoolExecutor() as pool:
+            future = self.wait_in_background(pool, batch)
+            gate.set()
+            with self.assertRaises(QuorumUnreachableError) as raised:
+                future.result(5)
+        self.assertEqual(raised.exception.warmpool, "pool-a")
+        self.assertEqual([e.type for e in _drain(batch.events())], [BatchEventType.MEMBER_FAILED])
+        self.assertEqual(self.cluster.names(), [])
+
+    def test_any_exception_that_ends_the_wait_fails_the_quorum(self):
+        gate = threading.Event()
+        self.cluster.create_hook = lambda name: gate.wait(5) if name == "b1-0" else None
+        batch = self.claim([BatchGroup(warmpool="pool-a", size=2)], max_in_flight=1)
+        with patch.object(batch._changed, "wait", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                batch.wait_for_quorum()
+        gate.set()
+        # The quorum failed, so b1-0 becoming Ready isn't handed out and b1-1 is never created.
+        self.assertEqual(_drain(batch.events()), [])
+        self.assertEqual(self.cluster.names(), ["b1-0"])
+
+    def test_release_or_a_failed_watch_ends_the_wait_with_batch_error(self):
+        self.cluster.ready_on_create = False
+        batch = self.claim([BatchGroup(warmpool="pool-a", size=1)])
+        with ThreadPoolExecutor() as pool:
+            future = self.wait_in_background(pool, batch)
+            batch.release()
+            with self.assertRaises(BatchError):
+                future.result(5)
+
+        self.cluster.helper.watch_sandbox_claims.side_effect = k8s_client.ApiException(status=403)
+        batch = self.claim([BatchGroup(warmpool="pool-a", size=1)], batch_id="b2")
+        with self.assertRaises(BatchError) as raised:
+            batch.wait_for_quorum()
+        self.assertEqual(raised.exception.__cause__.status, 403)
+
+    def test_reattached_batch_at_min_ready_returns_at_once(self):
+        annotations = {BATCH_GROUP_SIZE_ANNOTATION: "2", BATCH_GROUP_MIN_READY_ANNOTATION: "1"}
+        self.cluster.helper.list_sandbox_claim_objects.return_value = (
+            [
+                _claim("b1-0", conditions=_NOT_READY, annotations=annotations),
+                _claim("b1-1", conditions=_READY, sandbox={"name": "sbx-b1-1"}, annotations=annotations),
+            ],
+            "5",
+        )
+        self.cluster.helper.read_batch_lease.return_value = _lease(renew_time=datetime.now(UTC))
+        batch = self.client.get_batch("b1")
+        self.addCleanup(batch._stop_background_threads)
+        self.assertEqual([m.claim_name for m in batch.wait_for_quorum()], ["b1-1"])
 
 
 class TestRelease(BaseClaimBatchTest):

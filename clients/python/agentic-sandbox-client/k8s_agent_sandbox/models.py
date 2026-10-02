@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import re
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal, Optional, Union
@@ -253,3 +254,33 @@ class Member(BaseModel):
     reason: str | None = None
     message: str | None = None
 
+
+class BatchEventType(str, Enum):
+    """The kind of change a ``BatchEvent`` reports."""
+    MEMBER_READY = "member_ready"
+    MEMBER_LOST = "member_lost"
+    MEMBER_FAILED = "member_failed"
+    LEASE_DEGRADED = "lease_degraded"
+
+
+class BatchEvent(BaseModel):
+    """One change yielded by ``SandboxBatch.events()``. ``member`` is ``None`` for ``LEASE_DEGRADED``."""
+    model_config = ConfigDict(frozen=True)
+
+    type: BatchEventType
+    member: Member | None = None
+
+
+@dataclass(frozen=True)
+class GroupReady:
+    """One group's quorum outcome, yielded by ``SandboxBatch.iter_ready_groups()``.
+
+    On success, ``members`` holds exactly ``min_ready`` Ready members and ``error`` is ``None``.
+    On failure, ``error`` is a ``QuorumUnreachableError`` or ``TimeoutError`` and ``members`` is empty.
+
+    This is a dataclass rather than a Pydantic model because ``error`` holds a raw Python
+    ``Exception`` object (preserving traceback and causes) rather than serializable data.
+    """
+    warmpool: str
+    members: list[Member] = field(default_factory=list)
+    error: Exception | None = None

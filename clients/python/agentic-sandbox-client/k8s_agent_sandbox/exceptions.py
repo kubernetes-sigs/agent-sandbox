@@ -103,3 +103,23 @@ class BatchInUseError(BatchError):
 
 class BatchExistsError(BatchError):
     """``claim_batch`` found an existing Lease or claims for the batch id."""
+
+
+class QuorumUnreachableError(BatchError):
+    """A group can no longer reach ``min_ready``: fewer than ``min_ready`` of its
+    members can still become Ready.
+
+    ``failed`` counts terminal members, including failed creates, and ``lost`` counts
+    members whose claim was deleted, or was missing when the batch was re-attached.
+    """
+
+    def __init__(self, *, warmpool: str, size: int, min_ready: int, failed: int, lost: int) -> None:
+        super().__init__(
+            f"group '{warmpool}' can no longer reach min_ready={min_ready}: "
+            f"size={size}, failed={failed}, lost={lost}"
+        )
+        self.warmpool = warmpool
+        self.size = size
+        self.min_ready = min_ready
+        self.failed = failed
+        self.lost = lost

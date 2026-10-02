@@ -30,7 +30,7 @@ from test.e2e.clients.python.test_e2e_python_sdk import (  # noqa: F401
 
 from k8s_agent_sandbox import SandboxClient
 from k8s_agent_sandbox.exceptions import BatchNotFoundError
-from k8s_agent_sandbox.models import BatchGroup, MemberState, SandboxLocalTunnelConnectionConfig
+from k8s_agent_sandbox.models import BatchEventType, BatchGroup, MemberState, SandboxLocalTunnelConnectionConfig
 
 MEMBERS_READY_TIMEOUT_SECONDS = 120
 
@@ -113,7 +113,7 @@ def test_batch_get_batch_members_connect_detach(
         client.delete_all()
 
 
-def test_claim_batch_members_connect_release(
+def test_claim_batch_ready_group_connect_release(
     tc, temp_namespace, sandbox_warmpool, deploy_router
 ):
     config = SandboxLocalTunnelConnectionConfig(router_namespace=temp_namespace)
@@ -122,22 +122,22 @@ def test_claim_batch_members_connect_release(
         batch = client.claim_batch(
             [BatchGroup(warmpool=sandbox_warmpool, size=2)],
             namespace=temp_namespace,
+            quorum_timeout=MEMBERS_READY_TIMEOUT_SECONDS,
         )
 
-        deadline = time.monotonic() + MEMBERS_READY_TIMEOUT_SECONDS
-        while True:
-            members = batch.members()
-            if len(members) == 2 and all(m.state is MemberState.READY for m in members):
-                break
-            if time.monotonic() > deadline:
-                pytest.fail(f"batch members did not become ready in time: {members}")
-            time.sleep(1)
+        groups = list(batch.iter_ready_groups())
         assert batch.err() is None
+        assert len(groups) == 1
+        assert groups[0].error is None, groups[0].error
+        assert len(groups[0].members) == 2
 
-        sandbox = batch.connect(members[0])
+        sandbox = batch.connect(groups[0].members[0])
         result = sandbox.commands.run("echo 'Hello from batch'")
         assert result.stdout == "Hello from batch\n"
         assert result.exit_code == 0
+
+        # Both members went to the group, so there's no MEMBER_READY left for events().
+        assert [e for e in batch.events() if e.type == BatchEventType.MEMBER_READY] == []
 
         batch.release()
 

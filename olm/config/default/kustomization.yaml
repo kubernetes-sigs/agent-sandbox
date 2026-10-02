@@ -14,6 +14,14 @@ resources:
 # config/prometheus/monitor.yaml (see docs/configuration.md "Enabling secure
 # metrics end-to-end").
 # - ../prometheus
+# [Optional] Controller NetworkPolicy: uncomment ../network-policy to deploy
+# ingress/egress restrictions for the controller pod. Required by compliance
+# frameworks (SOC 2, FedRAMP, PCI-DSS, CIS Kubernetes benchmarks) that mandate
+# network segmentation for control-plane components. Commented out by default
+# because egress-deny semantics can break clusters with non-standard API server
+# endpoints, private proxies, or CNI/DNS configurations. See
+# k8s/hardening/networkpolicy.yaml for the full policy and tuning guidance.
+# - ../network-policy
 images:
 - name: registry.k8s.io/agent-sandbox/sandbox-router-go
   newName: registry.k8s.io/agent-sandbox/sandbox-router-go

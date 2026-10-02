@@ -44,6 +44,13 @@ type SandboxSpecApplyConfiguration struct {
 	// actually up (see SandboxConditionReady).
 	// Defaults to Running if not specified.
 	OperatingMode *apiv1beta1.SandboxOperatingMode `json:"operatingMode,omitempty"`
+	// resourceResizePolicy controls CPU and memory reconciliation for an
+	// already-running backing Pod. Disabled is the safe default: the
+	// controller never replaces a Pod in response to resource changes.
+	// InPlace manages only CPU and memory request or limit keys explicitly
+	// present in the PodTemplate. An omitted key preserves the live Pod value,
+	// including values added by admission, and does not request removal.
+	ResourceResizePolicy *ResourceResizePolicyApplyConfiguration `json:"resourceResizePolicy,omitempty"`
 }
 
 // SandboxSpecApplyConfiguration constructs a declarative configuration of the SandboxSpec type for use with
@@ -102,5 +109,13 @@ func (b *SandboxSpecApplyConfiguration) WithShutdownPolicy(value apiv1beta1.Shut
 // If called multiple times, the OperatingMode field is set to the value of the last call.
 func (b *SandboxSpecApplyConfiguration) WithOperatingMode(value apiv1beta1.SandboxOperatingMode) *SandboxSpecApplyConfiguration {
 	b.OperatingMode = &value
+	return b
+}
+
+// WithResourceResizePolicy sets the ResourceResizePolicy field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the ResourceResizePolicy field is set to the value of the last call.
+func (b *SandboxSpecApplyConfiguration) WithResourceResizePolicy(value *ResourceResizePolicyApplyConfiguration) *SandboxSpecApplyConfiguration {
+	b.ResourceResizePolicy = value
 	return b
 }

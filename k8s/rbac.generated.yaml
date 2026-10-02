@@ -20,6 +20,12 @@ rules:
   - watch
 - apiGroups:
   - ""
+  resources:
+  - pods/resize
+  verbs:
+  - patch
+- apiGroups:
+  - ""
   - events.k8s.io
   resources:
   - events

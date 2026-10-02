@@ -160,6 +160,6 @@ The TypeScript SDK lives at [clients/typescript/agentic-sandbox-client/](clients
 
 - Architecture overview, motivation, and install instructions: [README.md](README.md).
 - Roadmap: [roadmap.md](roadmap.md).
-- Configuration / scale tuning: [docs/configuration.md](docs/configuration.md).
+- Configuration / scale tuning: [docs/configuration.md](docs/configuration.md), [docs/performance-tuning.md](docs/performance-tuning.md), and [docs/apf-insulation.md](docs/apf-insulation.md).
 - Deep design proposals: [docs/keps/](docs/keps/) (template at [docs/keps/NNNN-template/](docs/keps/NNNN-template/)).
 - Slack: `#agent-sandbox` on Kubernetes Slack for project work; `#sig-apps` for broader SIG Apps discussion. Mailing list: [SIG Apps](https://groups.google.com/a/kubernetes.io/g/sig-apps). New to k8s Slack? Get an invite at https://slack.k8s.io/.

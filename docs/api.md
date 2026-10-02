@@ -74,6 +74,24 @@ _Appears in:_
 | `spec` _[PersistentVolumeClaimSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#persistentvolumeclaimspec-v1-core)_ | spec is the PVC's spec |  | Required: \{\} <br /> |
 
 
+#### PodFailurePolicy
+
+_Underlying type:_ _string_
+
+PodFailurePolicy controls behavior when the backing Pod reaches phase Failed.
+
+_Validation:_
+- Enum: [Ignore Recreate]
+
+_Appears in:_
+- [SandboxSpec](#sandboxspec)
+
+| Field | Description |
+| --- | --- |
+| `Ignore` | PodFailurePolicyIgnore leaves a Failed Pod in place and surfaces Finished=True<br />(StatefulSet-like). This is the default.<br /> |
+| `Recreate` | PodFailurePolicyRecreate deletes the controller-owned Failed Pod so a new one<br />is created. The Sandbox identity and any Sandbox-owned PVCs are retained.<br /> |
+
+
 #### PodMetadata
 
 
@@ -137,7 +155,7 @@ Sandbox is the Schema for the sandboxes API.
 
 
 SandboxBlueprint defines the configuration shared between Sandbox and SandboxTemplate.
-It deliberately excludes runtime-only fields (operatingMode, lifecycle).
+It deliberately excludes runtime-only fields (operatingMode, lifecycle, podFailurePolicy).
 
 
 
@@ -194,6 +212,7 @@ _Appears in:_
 | `shutdownTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | shutdownTime is the absolute time at which the Sandbox expires. When the current<br />time reaches shutdownTime, the controller tears down the underlying resources<br />(Pod and Service) and then applies shutdownPolicy to the Sandbox object itself.<br />If unset, the Sandbox never expires and lives until it is explicitly deleted. |  | Format: date-time <br />Optional: \{\} <br /> |
 | `shutdownPolicy` _[ShutdownPolicy](#shutdownpolicy)_ | shutdownPolicy determines what happens to the Sandbox object itself when it expires<br />(i.e. when shutdownTime is reached). The underlying resources (Pod, Service) are<br />always deleted on expiry regardless of this policy; shutdownPolicy governs only the<br />Sandbox object:<br />  - Retain (default): the Sandbox object is kept after its resources are torn down.<br />    Its live status fields are cleared and a Ready=False condition with reason<br />    SandboxExpired is set so the expiry is observable.<br />  - Delete: the Sandbox object is deleted once its underlying resources are removed.<br />This field has no effect while shutdownTime is unset, since the Sandbox never expires. | Retain | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
 | `operatingMode` _[SandboxOperatingMode](#sandboxoperatingmode)_ | operatingMode specifies the desired operational state of the Sandbox:<br />  - Running (default): the controller keeps a backing Pod running.<br />  - Suspended: the controller terminates the backing Pod but retains the<br />    Sandbox object and its volumes so it can later be resumed.<br />This field declares intent only. The observed readiness of the Sandbox is<br />reported by the Ready condition, and the progress of a suspension by the<br />Suspended condition; a Sandbox in Running mode is not Ready until its Pod is<br />actually up (see SandboxConditionReady).<br />Defaults to Running if not specified. | Running | Enum: [Running Suspended] <br />Optional: \{\} <br /> |
+| `podFailurePolicy` _[PodFailurePolicy](#podfailurepolicy)_ | podFailurePolicy controls what happens when the backing Pod enters phase Failed.<br />Ignore (default): leave the Failed pod and surface Finished=True (StatefulSet-like).<br />Recreate: delete the controller-owned Failed pod so a new one is created;<br />the Sandbox identity and any Sandbox-owned PVCs are retained.<br />Combined with restartPolicy Never and a container that always exits non-zero,<br />Recreate can recreate the Pod repeatedly; the controller applies Deployment-style<br />in-memory exponential backoff (5s, doubling up to 5m) between creates so a crash<br />loop cannot hot-loop the API server. Backoff resets after the replacement Pod has<br />been Running for 10 minutes. Backoff state is not persisted in status. | Ignore | Enum: [Ignore Recreate] <br />Optional: \{\} <br /> |
 
 
 #### SandboxStatus

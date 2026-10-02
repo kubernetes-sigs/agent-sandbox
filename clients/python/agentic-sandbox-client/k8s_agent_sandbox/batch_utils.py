@@ -25,6 +25,8 @@ import uuid
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from enum import Enum
+from fractions import Fraction
+from itertools import accumulate
 from typing import NamedTuple
 
 from .constants import (
@@ -250,6 +252,24 @@ def validate_claim_batch_args(
             else validate_lease_duration_value(lease_duration)
         ),
     )
+
+
+def fill_create_plan(batch_id: str, groups: Sequence[BatchGroup]) -> list[tuple[str, BatchGroup]]:
+    """Returns the fill's claim names and their groups, in the order the claims are created.
+
+    Each group's claims get consecutive ordinals, in group order, so a re-attached handle can
+    restore the group order from them. The create order is different. Each group's first
+    ``min_ready`` claims go first, so quorum waits only on their pacing, and the rest follow. Within
+    each part the groups are interleaved in proportion to their sizes, so no group waits behind a
+    whole earlier group.
+    """
+    first_ordinals = list(accumulate((group.size for group in groups), initial=0))
+    slots = sorted(
+        (k >= (group.min_ready or 0), Fraction(k, group.size), index, k)
+        for index, group in enumerate(groups)
+        for k in range(group.size)
+    )
+    return [(f"{batch_id}-{first_ordinals[index] + k}", groups[index]) for _, _, index, k in slots]
 
 
 class CreateOutcome(Enum):

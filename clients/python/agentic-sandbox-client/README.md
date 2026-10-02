@@ -644,33 +644,69 @@ An injected `api_client` is caller-owned: the SDK never closes it, so closing it
 
 ### 14. Batch claims
 
-`SandboxClient.get_batch()` attaches to an existing batch of `SandboxClaims` sharing an
-`agents.x-k8s.io/batch-id` label, returning a `SandboxBatch` handle. The claims can be spread across
-warmpools but must be in the same namespace. `get_batch()` is only for re-attaching to claims;
-it does not create anything and assumes the batch's claims and its `coordination.k8s.io/v1`
-Lease (named `batch-<id>`) already exist. `claim_batch`, which creates both, is a later
-addition to this SDK.
+`SandboxClient.claim_batch()` claims a batch of `SandboxClaims` across one or more warm pools in one call,
+returning a `SandboxBatch` handle right away. Each `BatchGroup` names a warm pool and how many claims to
+create from it (`size`). The claims are named `<batch-id>-0` to `<batch-id>-<N-1>`, where `N` is the sum
+of the group sizes. They carry the `agents.x-k8s.io/batch-id` label, and are created in the background,
+paced at `create_rps` creates per second with at most `max_in_flight` in flight. The batch also has a
+`coordination.k8s.io/v1` Lease named `batch-<batch-id>`, which the handle renews while it is alive.
 
 ```python
-from k8s_agent_sandbox import MemberState
+import time
 
-batch = client.get_batch("b1234abcd12", namespace="default")
+from k8s_agent_sandbox import BatchGroup, MemberState, SandboxClient
 
-ready = [m for m in batch.members() if m.state is MemberState.READY]
-for member in ready:
-    sandbox = batch.connect(member)
-    sandbox.commands.run("echo hello")
+client = SandboxClient()
+batch = client.claim_batch(
+    [BatchGroup(warmpool="python-sandbox-pool", size=8)],
+    namespace="default",
+)
 
-batch.detach()
+while True:
+    members = batch.members()
+    if sum(m.state is MemberState.READY for m in members) >= 4:
+        break
+    if batch.err() is not None:
+        raise batch.err()
+    # Terminal members (including CreateFailed) and lost ones can never become Ready.
+    if batch.size - sum(m.state in (MemberState.FAILED, MemberState.LOST) for m in members) < 4:
+        raise RuntimeError("fewer than 4 members can still become Ready")
+    time.sleep(1)
+for member in batch.members():
+    if member.state is MemberState.READY:
+        batch.connect(member).commands.run("echo hello")
+
+batch.release()
 ```
+
+`members()` shows each claim once the watch has seen it, and a claim whose create failed shows up as a
+`FAILED` member with reason `CreateFailed`. Iterating over members as they become Ready is a later
+addition to this SDK. `release()` deletes the batch's claims and then its Lease; `detach(grace=None)`
+instead leaves everything in place and releases the Lease so `get_batch()` can take the batch over.
+
+The `claim_batch()` defaults are `create_rps=50`, `max_in_flight=20`, `quorum_timeout=600` seconds,
+`work_budget=3600` seconds, and `lease_duration=60` seconds. Every claim gets the same `shutdownTime`, the
+time of the `claim_batch()` call plus `N / create_rps` seconds (rounded up) plus `quorum_timeout` plus
+`work_budget` plus 600 seconds, so the controller deletes an abandoned batch's claims eventually.
+`work_budget` is a hard cap. Nothing extends a claim's `shutdownTime`, so a batch held for a whole run sets
+`work_budget` to the run's length.
+
+The client tracks every batch handle it returns. `delete_all()`, and the client's exit cleanup
+(`cleanup=True`, or leaving `async with` for `AsyncSandboxClient`), release every tracked batch; call
+`detach()` first to hand a batch off instead.
+
+`SandboxClient.get_batch()` attaches to an existing batch that was detached, returning a handle that
+supports all of the above.
 
 `SandboxBatch` (and its async twin `AsyncSandboxBatch`) expose:
 
 - `batch_id`, `namespace`, `groups`, `size`: the batch's identity and its per-warmpool `BatchGroup`s.
 - `members(warmpool=None)`: a snapshot of every `Member`, sorted by ordinal. A member's `state` is `PENDING`, `READY`, `FAILED` or `LOST`.
 - `connect(member)`: a connected `Sandbox`/`AsyncSandbox` for a ready member.
-- `err()`: the error that stopped the background watch/renewal, or `None`.
+- `err()`: the error that stopped the background watch/renewal, or `None`. Once it is set, no more claims
+  are created.
 - `lease_degraded()`: whether Lease renewal is failing, from the first failed renewal until one succeeds.
+- `release()` deletes the batch's claims, then its Lease. Idempotent.
 - `detach(grace=None)`: stops the background tasks and releases the Lease so another `get_batch` can take over; idempotent.
 
 #### RBAC
@@ -685,10 +721,13 @@ metadata:
 rules:
 - apiGroups: ["extensions.agents.x-k8s.io"]
   resources: ["sandboxclaims"]
-  verbs: ["get", "list", "watch"]
+  verbs: ["create", "get", "list", "watch", "deletecollection"]
+- apiGroups: ["extensions.agents.x-k8s.io"]
+  resources: ["sandboxwarmpools", "sandboxtemplates"]
+  verbs: ["get"]
 - apiGroups: ["coordination.k8s.io"]
   resources: ["leases"]
-  verbs: ["get", "update"]
+  verbs: ["create", "get", "update", "delete"]
 ```
 
 Connecting to a member uses the same connection modes as a single sandbox, so it also needs the

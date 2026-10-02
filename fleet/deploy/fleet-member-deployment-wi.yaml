@@ -1,0 +1,104 @@
+# Copyright 2026 The Kubernetes Authors.
+# Licensed under the Apache License, Version 2.0.
+#
+# Workload Identity variant of fleet-member-deployment.yaml.
+#
+# Use this on GKE clusters created with --workload-pool=PROJECT_ID.svc.id.goog.
+# The ServiceAccount must be annotated with iam.gke.io/gcp-service-account.
+# GCS auth flows via the GKE metadata server (ADC), no key file mounted.
+#
+# envsubst variables:
+#   ${FLEET_MEMBER_IMAGE}  Container image for the fleet-member (Python + SDK)
+#   ${CLUSTER_NAME}        This cluster's identity within the fleet
+#   ${FLEET_BUCKET}        GCS bucket serving as the hub
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fleet-member
+  namespace: multi-cluster-fleet
+  labels:
+    app: fleet-member
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app: fleet-member}
+  template:
+    metadata:
+      labels: {app: fleet-member}
+    spec:
+      serviceAccountName: fleet-member
+      # Co-locate with the agent-sandbox-controller on the dedicated
+      # controller-pool. Fleet-member does k8s API calls in tight loops
+      # (list SandboxWarmPool + Sandbox for capacity reports); running
+      # it on a beefy machine with no workload contention keeps those
+      # loops fast even at 100k+ pods per cluster.
+      nodeSelector:
+        cloud.google.com/gke-nodepool: controller-pool
+      tolerations:
+        - key: controller-pool
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      containers:
+        - name: fleet-member
+          image: ${FLEET_MEMBER_IMAGE}
+          imagePullPolicy: IfNotPresent
+          # The image ships USER fleet, but ${FLEET_MEMBER_IMAGE} is
+          # operator-supplied, so that is a convention rather than a boundary.
+          # Assert it here. This pod holds the fleet's Kubernetes credentials
+          # and its Workload Identity binding, so it is the one that most
+          # needs the assertion.
+          #
+          # runAsUser is set EXPLICITLY rather than left to the image. The
+          # kubelet enforces runAsNonRoot by inspecting the image's user
+          # field, and a NON-NUMERIC one -- `USER fleet`, which is what this
+          # image shipped -- cannot be resolved to a uid at admission. The
+          # container is then refused with CreateContainerConfigError:
+          # "image has non-numeric user (fleet), cannot verify user is
+          # non-root", which reads as a broken manifest rather than a broken
+          # image. Pinning the uid here makes the assertion hold whatever
+          # ${FLEET_MEMBER_IMAGE} turns out to be.
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          args:
+            - --cluster-name=${CLUSTER_NAME}
+            - --bucket=${FLEET_BUCKET}
+            - --namespace=multi-cluster-fleet
+            - --log-level=INFO
+            # Poll intervals — tuned down from the 30s default to shrink the
+            # placement wall-clock floor. 5s + 5s replaces the 30s + 30s
+            # (reconcile + capacity) that was ~60s of dead time on warm-cache
+            # placement runs (see the high-image-cardinality test
+            # decomposition).
+            # GCS cost at 5s: ~36 ops/min per cluster fleet-wide — trivial
+            # at any realistic cluster count (target scale = 60 clusters →
+            # ~43k ops/hr, well under $1/hr).
+            - --reconcile-interval=5
+            - --capacity-interval=5
+            # light == warmpool depth/ready only. `full` additionally does a
+            # whole-cluster Sandbox list AND Pod list every tick; at 200k pods
+            # that is ~12 GB of Python objects (OOM) and it competes with the
+            # agent-sandbox controller for APF seats — i.e. the measuring
+            # instrument changes the measurement. Switch back to full only on
+            # small clusters where active_claims / node_pressure are wanted.
+            - --capacity-detail=light
+          resources:
+            # Sized for density, NOT for the XS profile. fleet-member lists
+            # SandboxWarmPool AND Sandbox in tight loops, so its working set
+            # tracks the cluster's sandbox count. Measured on the M2.5 fleet:
+            # the agent-sandbox controller needs ~40 KB per sandbox (8.9 GB at
+            # 235k). The previous 256Mi/512Mi was fine at the 300-sandbox XS
+            # profile and OOMs well before a capacity report at 200k — which
+            # stops placement silently, because a dead member simply stops
+            # publishing rather than erroring.
+            requests: {cpu: 500m, memory: 4Gi}
+            limits:   {cpu: "2",  memory: 12Gi}

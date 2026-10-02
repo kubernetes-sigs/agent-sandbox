@@ -26,9 +26,9 @@ from k8s_agent_sandbox.models import (
 
 from test.e2e.clients.python.framework.context import TestContext
 from test.e2e.clients.python.framework.sdk_helpers import (
+    GATEWAY_NAME,
     run_sdk_tests,
     wait_until_sandbox_routable,
-    GATEWAY_NAME,
 )
 
 

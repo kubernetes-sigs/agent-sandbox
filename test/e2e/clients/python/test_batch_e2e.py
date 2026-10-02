@@ -156,6 +156,57 @@ def test_claim_batch_ready_group_connect_release(
         client.delete_all()
 
 
+def test_claim_batch_wait_for_quorum_events_release(
+    tc, temp_namespace, sandbox_warmpool, deploy_router
+):
+    config = SandboxLocalTunnelConnectionConfig(router_namespace=temp_namespace)
+    client = SandboxClient(connection_config=config)
+    try:
+        # The warm pool has two replicas, so the third claim is created from the template.
+        batch = client.claim_batch(
+            [BatchGroup(warmpool=sandbox_warmpool, size=3, min_ready=2)],
+            namespace=temp_namespace,
+            quorum_timeout=MEMBERS_READY_TIMEOUT_SECONDS,
+        )
+
+        quorum = batch.wait_for_quorum()
+        assert len(quorum) == 2
+
+        sandbox = batch.connect(quorum[0])
+        result = sandbox.commands.run("echo 'Hello from batch'")
+        assert result.stdout == "Hello from batch\n"
+        assert result.exit_code == 0
+
+        ready = [e.member for e in batch.events() if e.type == BatchEventType.MEMBER_READY]
+        assert batch.err() is None
+        assert sorted(m.claim_name for m in quorum + ready) == [f"{batch.batch_id}-{i}" for i in range(3)]
+
+        batch.release()
+
+        custom_objects_api = tc.get_custom_objects_api()
+        deadline = time.monotonic() + MEMBERS_READY_TIMEOUT_SECONDS
+        while True:
+            claims = custom_objects_api.list_namespaced_custom_object(
+                group="extensions.agents.x-k8s.io",
+                version="v1beta1",
+                namespace=temp_namespace,
+                plural="sandboxclaims",
+                label_selector=f"agents.x-k8s.io/batch-id={batch.batch_id}",
+            )["items"]
+            if not claims:
+                break
+            if time.monotonic() > deadline:
+                pytest.fail(f"batch claims were not deleted in time: {claims}")
+            time.sleep(1)
+
+        coordination_api = kubernetes.client.CoordinationV1Api(tc.get_api_client())
+        with pytest.raises(kubernetes.client.ApiException) as e:
+            coordination_api.read_namespaced_lease(f"batch-{batch.batch_id}", temp_namespace)
+        assert e.value.status == 404
+    finally:
+        client.delete_all()
+
+
 def test_get_batch_not_found_raises(tc, temp_namespace):
     client = SandboxClient()
     with pytest.raises(BatchNotFoundError):

@@ -18,12 +18,25 @@ import math
 import os
 import random
 import re
+import secrets
 import socket
+import string
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
+from enum import Enum
+from typing import NamedTuple
 
+from .constants import (
+    BATCH_ID_LABEL,
+    BATCH_LEASE_DURATION_ANNOTATION,
+    BATCH_QUORUM_TIMEOUT_ANNOTATION,
+    BATCH_WORK_BUDGET_ANNOTATION,
+    CREATED_BY_LABEL,
+)
 from .exceptions import BatchError
+from .models import BatchGroup
+from .pod_metadata import validate_labels
 
 CLOCK_SKEW_MARGIN = 5
 BATCH_DEFAULT_LEASE_DURATION_SECONDS = 60
@@ -32,6 +45,23 @@ BATCH_BACKOFF_MAX_SECONDS = 30.0
 
 _BATCH_ID_RE = re.compile(r"^[a-z]([-a-z0-9]*[a-z0-9])?$")
 BATCH_ID_MAX_LENGTH = 52
+_BATCH_ID_ALPHABET = string.ascii_lowercase + string.digits
+_GENERATED_BATCH_ID_RANDOM_LENGTH = 11
+
+BATCH_DEFAULT_CREATE_RPS = 50.0
+BATCH_DEFAULT_MAX_IN_FLIGHT = 20
+BATCH_DEFAULT_QUORUM_TIMEOUT_SECONDS = 600
+BATCH_DEFAULT_WORK_BUDGET_SECONDS = 3600
+# Added to each claim's shutdownTime
+BATCH_SHUTDOWN_MARGIN_SECONDS = 600
+BATCH_CREATE_ATTEMPTS = 3
+BATCH_REQUEST_TIMEOUT_SECONDS = 30
+# Extra wait past BATCH_REQUEST_TIMEOUT_SECONDS when stopping the creators, so a create that just
+# timed out has time to return and its worker to exit.
+BATCH_CREATOR_STOP_GRACE_SECONDS = 1
+# Set above the apiserver's 60s request timeout, its 504 response can end a long deletecollection first.
+BATCH_COLLECTION_REQUEST_TIMEOUT_SECONDS = 90
+BATCH_RELEASE_MAX_IDLE_ROUNDS = 3
 
 
 def validate_batch_id(batch_id: str) -> None:
@@ -120,3 +150,144 @@ def backoff_delay(
     doublings = min(attempt - 1, math.ceil(math.log2(cap / base)))
     wait = min(cap, base * 2 ** doublings)
     return wait / 2 + rand() * wait / 2
+
+
+def generate_batch_id() -> str:
+    """Generates a batch id: ``"b"`` followed by 11 random lowercase letters and digits."""
+    return "b" + "".join(
+        secrets.choice(_BATCH_ID_ALPHABET) for _ in range(_GENERATED_BATCH_ID_RANDOM_LENGTH)
+    )
+
+
+class ClaimBatchArgs(NamedTuple):
+    """``claim_batch`` arguments after validation, with defaults filled in."""
+    groups: list[BatchGroup]
+    labels: dict[str, str]
+    batch_id: str
+    create_rps: float
+    max_in_flight: int
+    work_budget: int
+    quorum_timeout: int
+    lease_duration: int
+
+
+def _positive_int(name: str, value: object, default: int) -> int:
+    if value is None:
+        return default
+    if type(value) is not int or value <= 0:
+        raise ValueError(f"{name} must be a positive int, got {value!r}")
+    return value
+
+
+def validate_claim_batch_args(
+    groups: Sequence[BatchGroup],
+    labels: dict[str, str] | None,
+    batch_id: str | None,
+    create_rps: float | None,
+    max_in_flight: int | None,
+    work_budget: int | None,
+    quorum_timeout: int | None,
+    lease_duration: int | None,
+) -> ClaimBatchArgs:
+    """Validates ``claim_batch`` arguments and fills in defaults.
+
+    Raises:
+        ValueError: If any argument is invalid.
+    """
+    groups = list(groups)
+    if not groups:
+        raise ValueError("groups must not be empty")
+    pools: set[str] = set()
+    for group in groups:
+        if not isinstance(group, BatchGroup):
+            raise ValueError(f"groups must contain BatchGroup items, got {type(group).__name__}")
+        if group.size < 1:
+            raise ValueError(f"group '{group.warmpool}' size must be at least 1")
+        if group.warmpool in pools:
+            raise ValueError(f"warm pool '{group.warmpool}' appears in more than one group")
+        pools.add(group.warmpool)
+
+    if create_rps is None:
+        create_rps = BATCH_DEFAULT_CREATE_RPS
+    elif isinstance(create_rps, bool) or not isinstance(create_rps, (int, float)) or not create_rps > 0:
+        raise ValueError(f"create_rps must be a positive number, got {create_rps!r}")
+
+    labels = dict(labels or {})
+    if BATCH_ID_LABEL in labels:
+        raise ValueError(f"labels must not set {BATCH_ID_LABEL}; claim_batch sets it")
+    if labels:
+        validate_labels(labels)
+
+    if batch_id is None:
+        batch_id = generate_batch_id()
+    else:
+        validate_batch_id(batch_id)
+
+    return ClaimBatchArgs(
+        groups=groups,
+        labels=labels,
+        batch_id=batch_id,
+        create_rps=float(create_rps),
+        max_in_flight=_positive_int("max_in_flight", max_in_flight, BATCH_DEFAULT_MAX_IN_FLIGHT),
+        work_budget=_positive_int("work_budget", work_budget, BATCH_DEFAULT_WORK_BUDGET_SECONDS),
+        quorum_timeout=_positive_int(
+            "quorum_timeout", quorum_timeout, BATCH_DEFAULT_QUORUM_TIMEOUT_SECONDS
+        ),
+        lease_duration=(
+            BATCH_DEFAULT_LEASE_DURATION_SECONDS
+            if lease_duration is None
+            else validate_lease_duration_value(lease_duration)
+        ),
+    )
+
+
+class CreateOutcome(Enum):
+    """What a failed claim create means."""
+    SUCCESS = "success"
+    RETRY = "retry"
+    FAIL = "fail"
+
+
+def create_error_outcome(status: int | None, attempt: int) -> CreateOutcome:
+    """Decides what a failed claim create means, given its status and attempt number.
+
+    Receiving a 409 on the first attempt means a name collision, and we assume that on a later attempt,
+    it almost always means an earlier attempt did create the claim but its response was lost (e.g. the
+    request timed out or the connection dropped after the apiserver stored the claim).
+    """
+    if status == 409:
+        return CreateOutcome.FAIL if attempt == 1 else CreateOutcome.SUCCESS
+    if is_retryable_status(status) and attempt < BATCH_CREATE_ATTEMPTS:
+        return CreateOutcome.RETRY
+    return CreateOutcome.FAIL
+
+
+def retry_delay(attempt: int, error: BaseException | None) -> float:
+    """How long to wait before retry number ``attempt``. Uses the error's ``Retry-After`` seconds
+    when it has one (capped at ``BATCH_BACKOFF_MAX_SECONDS``), or otherwise a jittered backoff.
+    """
+    headers = getattr(error, "headers", None)
+    retry_after = headers.get("Retry-After") if headers else None
+    # The HTTP-date form of Retry-After is ignored in favor of the backoff.
+    if isinstance(retry_after, str) and retry_after.strip().isdigit():
+        return min(float(retry_after.strip()), BATCH_BACKOFF_MAX_SECONDS)
+    return backoff_delay(attempt, BATCH_BACKOFF_BASE_SECONDS, BATCH_BACKOFF_MAX_SECONDS)
+
+
+def batch_lease_metadata(
+    batch_id: str, lease_duration: int, work_budget: int, quorum_timeout: int
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Returns the batch Lease's labels and annotations, which ``get_batch`` reads back."""
+    labels = {BATCH_ID_LABEL: batch_id, CREATED_BY_LABEL: "python-client"}
+    annotations = {
+        BATCH_LEASE_DURATION_ANNOTATION: str(lease_duration),
+        BATCH_WORK_BUDGET_ANNOTATION: str(work_budget),
+        BATCH_QUORUM_TIMEOUT_ANNOTATION: str(quorum_timeout),
+    }
+    return labels, annotations
+
+
+def warmpool_template_name(warmpool_obj: dict) -> str | None:
+    """Returns the name of the SandboxTemplate a SandboxWarmPool object references, if any."""
+    spec = warmpool_obj.get("spec") or {}
+    return (spec.get("sandboxTemplateRef") or {}).get("name") or None

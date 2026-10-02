@@ -7,6 +7,8 @@
 {{- end }}
 {{- if hasKey .Values.controller "leaderElectionNamespace" }}
 - --leader-election-namespace={{ .Values.controller.leaderElectionNamespace }}
+{{- else if .Values.controller.watchNamespaces }}
+- --leader-election-namespace={{ include "agent-sandbox.namespace" . }}
 {{- end }}
 {{- if hasKey .Values.controller "extensions" }}
 - --extensions={{ .Values.controller.extensions }}
@@ -82,6 +84,10 @@
 {{- end }}
 {{- if hasKey .Values.controller "disableClaimObservabilityAnnotations" }}
 - --disable-claim-observability-annotations={{ .Values.controller.disableClaimObservabilityAnnotations }}
+{{- end }}
+{{- if .Values.controller.watchNamespaces }}
+{{- include "agent-sandbox.validateWatchNamespaces" . }}
+- --watch-namespaces={{ join "," .Values.controller.watchNamespaces }}
 {{- end }}
 {{- range .Values.controller.extraArgs }}
 - {{ . | quote }}

@@ -82,6 +82,7 @@ func main() {
 	var sandboxWarmPoolUnschedulableRecheckInterval time.Duration
 	var enableWarmPoolEviction bool
 	var cacheLabelSelectors bool
+	var watchNamespaces string
 	var printVersion bool
 	var disableSandboxEvents bool
 	var disableClaimEvents bool
@@ -155,6 +156,13 @@ func main() {
 	flag.BoolVar(&disableSandboxEvents, "disable-sandbox-events", false,
 		"Disable Kubernetes Event emission from the Sandbox controller (its Eventf calls become no-ops), "+
 			"reducing API server writes during large warm-pool fills. Default false (events enabled).")
+	flag.StringVar(&watchNamespaces, "watch-namespaces", "",
+		"Comma-separated list of namespaces to watch. Falls back to the WATCH_NAMESPACE "+
+			"environment variable when empty. When set, the controller's informer cache is restricted "+
+			"to the specified namespaces via cache.Options.DefaultNamespaces. The Helm chart automatically "+
+			"switches from ClusterRole+ClusterRoleBinding to namespace-scoped Role+RoleBinding when "+
+			"controller.watchNamespaces is configured. "+
+			"When empty (default), the controller watches all namespaces (cluster-wide).")
 	flag.BoolVar(&disableClaimEvents, "disable-claim-events", false,
 		"Disable Kubernetes Event emission from the SandboxClaim controller (its Eventf calls become no-ops), "+
 			"reducing API server writes during large claim bursts. Default false (events enabled).")
@@ -413,12 +421,29 @@ func main() {
 	mgrOpts := buildManagerOptions(scheme, metricsOpts, probeAddr, enableLeaderElection, leaderElectionNamespace)
 	// managedFields stripping, the Pod spec diet, and (optionally) the
 	// tracking-label scoping; see buildCacheOptions for the rationale.
-	cacheOpts, err := buildCacheOptions(cacheLabelSelectors)
+	watchNS, err := parseWatchNamespaces(watchNamespaces)
+	if err != nil {
+		setupLog.Error(err, "invalid --watch-namespaces value", "raw", watchNamespaces)
+		os.Exit(1)
+	}
+	cacheOpts, err := buildCacheOptions(cacheLabelSelectors, watchNS)
 	if err != nil {
 		setupLog.Error(err, "unable to build cache options")
 		os.Exit(1)
 	}
 	mgrOpts.Cache = cacheOpts
+	if len(watchNS) > 0 {
+		setupLog.Info("informer cache restricted to specified namespaces (--watch-namespaces)",
+			"namespaces", watchNS)
+		if enableLeaderElection && leaderElectionNamespace == "" {
+			if _, err := os.Stat("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); os.IsNotExist(err) {
+				setupLog.Info("WARNING: --watch-namespaces is set but --leader-election-namespace is empty and " +
+					"the in-cluster namespace file is not available; controller-runtime will default to \"kube-system\" " +
+					"for leader election, which may lack the required Lease/Event RBAC in namespace-scoped mode. " +
+					"Set --leader-election-namespace explicitly when running out-of-cluster")
+			}
+		}
+	}
 	if cacheLabelSelectors {
 		setupLog.Info("informer caches for Pods and Services scoped to the sandbox tracking label (--cache-label-selectors)",
 			"label", controllers.SandboxNameHashLabel)

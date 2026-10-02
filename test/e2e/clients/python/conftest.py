@@ -76,12 +76,6 @@ def pytest_addoption(parser):
         help="Port the sandbox container listens on",
     )
     parser.addoption(
-        "--router-namespace",
-        action="store",
-        default="testing-default",
-        help="Namespace where the Router service resides",
-    )
-    parser.addoption(
         "--enable-tracing",
         action="store_true",
         default=False,

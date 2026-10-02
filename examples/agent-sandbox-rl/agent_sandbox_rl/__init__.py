@@ -36,6 +36,7 @@ from .capacity import (
 from .cluster import Cluster, ClusterRegistry, build_api_client
 from .config import (
     ClusterConfig,
+    FailFastPolicy,
     FleetConfig,
     ObservabilityConfig,
     ResourceSpec,
@@ -46,12 +47,15 @@ from .exceptions import (
     FleetError,
     FleetOvercommitError,
     NoClusterAvailableError,
+    OwnedByAnotherRunError,
     PoolNotFoundError,
     PreflightError,
+    SandboxLostError,
+    SandboxStartError,
 )
 from .async_fleet import AsyncSandboxFleet
 from .fleet import FleetPlan, PlanEntry, SandboxFleet
-from .reaper import reap
+from .reaper import reap, reap_orphans
 from .handles import SandboxHandle, SandboxSession
 from .observability import Observer, RunReport, repo_family, serve_metrics
 from .recycle import (
@@ -91,6 +95,7 @@ __all__ = [
     "TemplateSpec",
     "ResourceSpec",
     "ObservabilityConfig",
+    "FailFastPolicy",
     # sizing
     "compute_replicas",
     "recommend_window",
@@ -162,7 +167,11 @@ __all__ = [
     "NoClusterAvailableError",
     "PoolNotFoundError",
     "FleetOvercommitError",
+    "OwnedByAnotherRunError",
+    "SandboxStartError",
+    "SandboxLostError",
     "reap",
+    "reap_orphans",
 ]
 
 __version__ = "0.1.0.dev0"

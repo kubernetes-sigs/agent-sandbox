@@ -32,6 +32,9 @@ import {
   DEFAULT_PORT_FORWARD_READY_TIMEOUT_MS,
   DEFAULT_SANDBOXD_GRPC_PORT,
   DEFAULT_SANDBOXD_REST_PORT,
+  SANDBOX_API_GROUP,
+  SANDBOX_API_VERSION,
+  SANDBOX_PLURAL_NAME,
 } from "./constants.js";
 import {
   isK8s404,
@@ -64,8 +67,31 @@ import type {
   SandboxdOptions,
   SandboxHealth,
   SandboxMetadata,
+  SandboxStatus,
   WriteOptions,
 } from "./types.js";
+
+/**
+ * `status.conditions` of a Kubernetes object, or [] when it has none.
+ * @internal Not part of the public API.
+ */
+export function readConditions(
+  obj: Record<string, unknown> | undefined,
+): Array<Record<string, string>> {
+  const status = (obj?.status as Record<string, unknown>) ?? {};
+  return (status.conditions as Array<Record<string, string>>) ?? [];
+}
+
+/**
+ * The `Ready` condition of a Kubernetes object, if the controller has
+ * reported one.
+ * @internal Not part of the public API.
+ */
+export function findReadyCondition(
+  obj: Record<string, unknown> | undefined,
+): Record<string, string> | undefined {
+  return readConditions(obj).find((c) => c.type === "Ready");
+}
 
 /**
  * Races an operation against a timeout and always releases the timeout timer.
@@ -456,6 +482,49 @@ export class Sandbox {
    */
   metadata(opts?: RuntimeCallOptions): Promise<SandboxMetadata> {
     return this.metadataImpl(opts);
+  }
+
+  /**
+   * Reads the Sandbox's `Ready` condition from Kubernetes. Resolves with
+   * `SandboxNotFound` when the Sandbox object is gone, including after
+   * `close()`, and with `SandboxNotReady` when it has no `Ready` condition
+   * yet. Any other failure to read it rejects with a {@link SandboxError}.
+   * Unlike `health()`, this does not connect to sandboxd.
+   */
+  async status(): Promise<SandboxStatus> {
+    let sandboxObj: Record<string, unknown>;
+    try {
+      sandboxObj = (await this.customObjectsApi.getNamespacedCustomObject({
+        group: SANDBOX_API_GROUP,
+        version: SANDBOX_API_VERSION,
+        namespace: this.namespace,
+        plural: SANDBOX_PLURAL_NAME,
+        name: this.sandboxName,
+      })) as Record<string, unknown>;
+    } catch (err: unknown) {
+      if (isK8s404(err)) {
+        return {
+          status: "SandboxNotFound",
+          message: "Sandbox object not found in Kubernetes.",
+        };
+      }
+      throw new SandboxError(
+        `Failed to read Sandbox '${this.sandboxName}' in namespace '${this.namespace}'.`,
+        { cause: err },
+      );
+    }
+
+    const ready = findReadyCondition(sandboxObj);
+    if (!ready) {
+      return {
+        status: "SandboxNotReady",
+        message: "Ready condition not reported yet.",
+      };
+    }
+    return {
+      status: ready.status === "True" ? "SandboxReady" : "SandboxNotReady",
+      message: ready.message ?? "",
+    };
   }
 
   /**

@@ -513,7 +513,7 @@ class TestWatcher(BaseBatchClientTest):
         handle._watch_loop()
         self.assertIsNone(handle.err())
 
-    def _retry_then_stop(self, handle, status):
+    def _retry_then_stop(self, handle, status, headers=None):
         """A watch attempt raising ``status`` followed by one that succeeds
         with no events, at which point the test stops the loop from inside
         the mocked call itself (there is no third attempt, so ``err()``
@@ -523,17 +523,21 @@ class TestWatcher(BaseBatchClientTest):
         def side_effect(*args, **kwargs):
             calls["n"] += 1
             if calls["n"] == 1:
-                raise self._terminating_error(status=status)
+                error = self._terminating_error(status=status)
+                error.headers = headers
+                raise error
             handle._watch_stop.set()
             return iter(())
 
         self.mock_k8s_helper.watch_sandbox_claims.side_effect = side_effect
 
-    def test_503_retries_from_last_resource_version_and_leaves_err_none(self):
+    def test_503_waits_retry_after_then_retries_from_last_resource_version(self):
         handle = _make_handle(self.client)
-        self._retry_then_stop(handle, 503)
-        handle._watch_loop()
+        self._retry_then_stop(handle, 503, headers={"Retry-After": "7"})
+        with patch.object(handle._watch_stop, "wait") as wait:
+            handle._watch_loop()
         self.assertIsNone(handle.err())
+        wait.assert_called_once_with(7.0)
         calls = self.mock_k8s_helper.watch_sandbox_claims.call_args_list
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[1].args[2], "5")
@@ -553,7 +557,7 @@ class TestWatcher(BaseBatchClientTest):
             urllib3.exceptions.MaxRetryError(None, "/", reason=refused),
             urllib3.exceptions.MaxRetryError(None, "/", reason=urllib3.exceptions.SSLError("boom")),
         ]
-        with patch("k8s_agent_sandbox.sandbox_batch._watch_backoff_delay", return_value=0):
+        with patch.object(batch_utils, "retry_delay", return_value=0):
             handle._watch_loop()
         self.assertEqual(self.mock_k8s_helper.watch_sandbox_claims.call_count, 2)
         self.assertIsInstance(handle.err().reason, urllib3.exceptions.SSLError)

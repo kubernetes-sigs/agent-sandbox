@@ -30,6 +30,8 @@ from .constants import (
 from .exceptions import BatchError
 from .models import BatchGroup, Member, MemberState
 
+CREATE_FAILED_REASON = "CreateFailed"
+
 
 def parse_ordinal(batch_id: str, claim_name: str) -> int | None:
     """Extracts the ordinal from a ``<batch-id>-<ordinal>`` claim name."""
@@ -215,3 +217,17 @@ class BatchState:
 
     def error(self) -> Exception | None:
         return self._error
+
+    def record_create_failure(self, claim_name: str, warmpool: str, message: str) -> None:
+        """Records a claim whose create failed as a terminal member with reason ``CreateFailed``."""
+        if claim_name in self._members:
+            # The watch has already seen the claim, so an earlier attempt did create it.
+            return
+        member = Member(
+            claim_name=claim_name,
+            warmpool=warmpool,
+            state=MemberState.FAILED,
+            reason=CREATE_FAILED_REASON,
+            message=message,
+        )
+        self._members[claim_name] = member

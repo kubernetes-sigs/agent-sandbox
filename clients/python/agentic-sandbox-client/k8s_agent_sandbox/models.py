@@ -60,6 +60,23 @@ class FileEntry(BaseModel):
             mode=entry.get("mode"),
         )
 
+
+class FileEvent(BaseModel):
+    """A filesystem change observed by :meth:`FileWatcher.watch`.
+
+    Mirrors the ``watcher.v1.FileEvent`` protobuf message with SDK-idiomatic
+    field names. ``type`` is a string matching the proto names (``create``,
+    ``write``, ``remove``, ``rename``, ``chmod``, ``error``); future proto
+    versions may introduce additional values, so consumers should tolerate
+    unknown types rather than treating the set as closed.
+    """
+
+    type: str  # Kind of change observed (e.g. "create", "write", "rename").
+    path: str = ""  # Sandbox-relative path of the affected file or directory.
+    old_path: str = ""  # For ``rename`` events, the previous path; empty otherwise.
+    error: str = ""  # For ``error`` events, a human-readable message; empty otherwise.
+
+
 class SandboxClaimEnvVar(BaseModel):
     """Represents an environment variable entry in a SandboxClaim spec."""
     name: str  # Name of the environment variable.

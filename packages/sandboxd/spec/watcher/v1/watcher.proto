@@ -1,0 +1,91 @@
+// Copyright 2026 The Kubernetes Authors.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package watcher.v1;
+
+option go_package = "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/watcher/v1;watcherv1";
+option java_multiple_files = true;
+option java_package = "io.sandboxd.packages.sandboxd.spec.watcher";
+
+// FileWatcherService provides real-time filesystem event streaming
+// for directories within the sandbox. Events are delivered via
+// server-side streaming gRPC, allowing AI agents and other clients
+// to react immediately to file changes without polling.
+service FileWatcherService {
+  // WatchDir streams filesystem events (create, write, remove, rename,
+  // chmod) for the given directory. The stream remains open until the
+  // client disconnects or the watched directory is removed.
+  //
+  // Events are debounced (~250ms) to coalesce bursts from atomic writes
+  // (temp-file + rename). Each event path is re-validated against the
+  // sandbox root on delivery to prevent symlink-swap escapes.
+  //
+  // Errors that terminate the watch (e.g. directory removed) are surfaced
+  // as a final FileEvent with type ERROR before the stream closes, rather
+  // than as a gRPC status code, so clients can distinguish transient
+  // transport failures from intentional termination.
+  rpc WatchDir(WatchDirRequest) returns (stream FileEvent);
+}
+
+// WatchDirRequest subscribes to filesystem events for a directory.
+message WatchDirRequest {
+  // Sandbox-relative path of the directory to watch (e.g. "src" or
+  // "workspace/logs"). Must resolve to a directory within the sandbox
+  // root; the server returns INVALID_ARGUMENT otherwise.
+  string path = 1;
+
+  // If true, watch subdirectories recursively. New subdirectories
+  // created during the watch are automatically added; removed ones
+  // are dropped. If false, only the named directory itself is watched.
+  bool recursive = 2;
+}
+
+// FileEventType classifies a filesystem change.
+enum FileEventType {
+  FILE_EVENT_TYPE_UNSPECIFIED = 0;
+  // A new file or directory was created.
+  FILE_EVENT_TYPE_CREATE = 1;
+  // An existing file's contents were modified.
+  FILE_EVENT_TYPE_WRITE = 2;
+  // A file or directory was removed.
+  FILE_EVENT_TYPE_REMOVE = 3;
+  // A file or directory was renamed. On Linux, fsnotify does not provide
+  // the source path, so old_path is empty. On platforms where fsnotify
+  // reports both endpoints, old_path carries the previous location.
+  FILE_EVENT_TYPE_RENAME = 4;
+  // A file or directory's permissions or ownership were changed.
+  FILE_EVENT_TYPE_CHMOD = 5;
+  // A watch error occurred (e.g. watched directory removed, inotify
+  // limit reached). The error field carries a human-readable message.
+  // This is the last event on the stream before it closes.
+  FILE_EVENT_TYPE_ERROR = 6;
+}
+
+// FileEvent describes a single filesystem change within a watched directory.
+message FileEvent {
+  // Kind of change observed.
+  FileEventType type = 1;
+
+  // Sandbox-relative path of the affected file or directory.
+  string path = 2;
+
+  // For RENAME events, the previous (source) path of the file before
+  // renaming. Currently empty on all platforms because the server does
+  // not receive both endpoints from fsnotify. Reserved for future use.
+  string old_path = 3;
+
+  // Human-readable description for ERROR events. Empty otherwise.
+  string error = 4;
+}

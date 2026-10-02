@@ -329,6 +329,46 @@ def from_sandboxd(cls, entry: dict) -> "FileEntry"
 
 Build from a sandboxd DirectoryListing entry.
 
+<a id="k8s_agent_sandbox.models.FileEvent"></a>
+
+### FileEvent Objects
+
+```python
+class FileEvent(BaseModel)
+```
+
+A filesystem change observed by :meth:`FileWatcher.watch`.
+
+Mirrors the ``watcher.v1.FileEvent`` protobuf message with SDK-idiomatic
+field names. ``type`` is a string matching the proto names (``create``,
+``write``, ``remove``, ``rename``, ``chmod``, ``error``); future proto
+versions may introduce additional values, so consumers should tolerate
+unknown types rather than treating the set as closed.
+
+<a id="k8s_agent_sandbox.models.FileEvent.type"></a>
+
+##### type
+
+Kind of change observed (e.g. "create", "write", "rename").
+
+<a id="k8s_agent_sandbox.models.FileEvent.path"></a>
+
+##### path
+
+Sandbox-relative path of the affected file or directory.
+
+<a id="k8s_agent_sandbox.models.FileEvent.old_path"></a>
+
+##### old\_path
+
+For ``rename`` events, the previous path; empty otherwise.
+
+<a id="k8s_agent_sandbox.models.FileEvent.error"></a>
+
+##### error
+
+For ``error`` events, a human-readable message; empty otherwise.
+
 <a id="k8s_agent_sandbox.models.SandboxClaimEnvVar"></a>
 
 ### SandboxClaimEnvVar Objects

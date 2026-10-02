@@ -35,6 +35,7 @@ type Sandbox struct {
 	connector *connector
 	commands  *Commands
 	files     *Files
+	watchers  *Watchers
 	opts      Options
 	log       logr.Logger
 
@@ -205,6 +206,16 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 		log:          opts.Logger,
 		maxDownload:  opts.MaxDownloadSize,
 		maxUpload:    opts.MaxUploadSize,
+		errPrefix:    errPrefix,
+		trackOp:      trackOp,
+		lifecycleCtx: getLifecycleCtx,
+	}
+	s.watchers = &Watchers{
+		connector:    conn,
+		runtime:      opts.Runtime,
+		tracer:       tracer,
+		svcName:      svcName,
+		log:          opts.Logger,
 		errPrefix:    errPrefix,
 		trackOp:      trackOp,
 		lifecycleCtx: getLifecycleCtx,
@@ -584,6 +595,10 @@ func (s *Sandbox) Commands() *Commands { return s.commands }
 // Files returns the file operations sub-object.
 func (s *Sandbox) Files() *Files { return s.files }
 
+// Watchers returns the filesystem event streaming sub-object. Requires the
+// sandboxd runtime; WatchDir calls return an error on the legacy runtime.
+func (s *Sandbox) Watchers() *Watchers { return s.watchers }
+
 // Convenience aliases that delegate to sub-objects.
 
 func (s *Sandbox) Run(ctx context.Context, command string, opts ...CallOption) (*ExecutionResult, error) {
@@ -623,6 +638,13 @@ func (s *Sandbox) Exists(ctx context.Context, path string, opts ...CallOption) (
 // interface to avoid breaking existing implementers.
 func (s *Sandbox) Delete(ctx context.Context, path string, recursive bool, opts ...CallOption) error {
 	return s.files.Delete(ctx, path, recursive, opts...)
+}
+
+// WatchDir streams filesystem events for a sandbox-relative directory path.
+// The returned channel is closed when ctx is cancelled or the watch ends.
+// Requires the sandboxd runtime. Convenience alias for Watchers().WatchDir.
+func (s *Sandbox) WatchDir(ctx context.Context, path string, opts ...WatchOptions) (<-chan FileEvent, error) {
+	return s.watchers.WatchDir(ctx, path, opts...)
 }
 
 // Info accessors.

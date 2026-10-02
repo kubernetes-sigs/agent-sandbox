@@ -170,3 +170,17 @@ def validate_tag(tag):
         print(f"❌ Error: Tag '{tag}' is invalid.")
         print("   Allowed examples: v0.1.0, v0.1.0rc1, v0.1.0.post1")
         sys.exit(1)
+
+
+_STABLE_RELEASE_TAG_RE = re.compile(r"^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+
+
+def is_stable_release_tag(tag):
+    """True if tag is an exact stable release version, e.g. v1.2.3.
+
+    Stricter than validate_tag: excludes rc/post/dev pre-releases. Those are
+    valid image releases but are never published as a Helm chart -- chart
+    publishing (dev/tools/push-chart, dev/tools/tag-promote-images) only
+    happens for stable tags.
+    """
+    return bool(_STABLE_RELEASE_TAG_RE.match(tag))

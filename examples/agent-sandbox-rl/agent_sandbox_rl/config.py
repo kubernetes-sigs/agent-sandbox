@@ -111,6 +111,41 @@ class ClusterConfig(BaseModel):
     return v
 
 
+class FailFastPolicy(BaseModel):
+  """When to give up on a claimed sandbox whose pod is not coming up.
+
+  `SandboxFleet.acquire` runs a watchdog next to the SDK's claim wait (see
+  `failfast.py`). Reasons that never clear on their own (``InvalidImageName``, a
+  ``Failed`` pod, an OOM-killed container) fail at once; reasons that can be
+  transient (``ImagePullBackOff``, ``CreateContainerConfigError``,
+  ``CrashLoopBackOff``, ...) fail once they have persisted for ``grace_s``; an
+  ``Unschedulable`` pod fails after ``unschedulable_grace_s`` (the cluster
+  autoscaler gets its chance). ``enabled=False`` restores the plain wait, bounded
+  only by ``claim_timeout`` / ``ready_timeout``.
+  """
+
+  enabled: bool = True
+  # Warm adoptions are Ready within a second or two; do not poll pods for those.
+  initial_delay_s: float = 10.0
+  poll_s: float = 5.0
+  grace_s: float = 60.0
+  unschedulable_grace_s: float = 180.0
+
+  @field_validator("initial_delay_s", "grace_s", "unschedulable_grace_s")
+  @classmethod
+  def _non_negative(cls, v: float) -> float:
+    if v < 0:
+      raise ValueError("must be >= 0")
+    return v
+
+  @field_validator("poll_s")
+  @classmethod
+  def _poll_positive(cls, v: float) -> float:
+    if v <= 0:
+      raise ValueError("poll_s must be > 0")
+    return v
+
+
 class FleetConfig(BaseModel):
   """Top-level fleet configuration."""
 
@@ -125,6 +160,13 @@ class FleetConfig(BaseModel):
   warm_per_task: bool = False
   window_size: int | None = None            # sliding: None = auto from max_concurrent
   ready_timeout: int = 900
+  # Seconds `acquire()` waits for ONE claim to become Ready. None = ready_timeout,
+  # which also bounds whole-pool fills and is sized for those (15 minutes); a
+  # single claim that is not Ready after a few minutes is stuck, and an RL step
+  # cannot absorb the difference. Pair with `fail_fast` for the cases that can be
+  # recognised before the timeout.
+  claim_timeout: int | None = None
+  fail_fast: FailFastPolicy = Field(default_factory=FailFastPolicy)
   # Stage the warm fill in waves of <= this many sandbox creates in flight,
   # waiting for each wave to reach Ready before the next. Bounds the controller's
   # concurrent create burst (Σ pools×replicas). On controllers <= v0.5.3 this
@@ -205,6 +247,17 @@ class FleetConfig(BaseModel):
     if v < 1:
       raise ValueError("must be >= 1")
     return v
+
+  @field_validator("claim_timeout")
+  @classmethod
+  def _claim_timeout_positive(cls, v: int | None) -> int | None:
+    if v is not None and v < 1:
+      raise ValueError("claim_timeout must be >= 1 or None")
+    return v
+
+  def effective_claim_timeout(self) -> int:
+    """Per-claim readiness bound: ``claim_timeout`` if set, else ``ready_timeout``."""
+    return self.claim_timeout if self.claim_timeout is not None else self.ready_timeout
 
   @field_validator("avg_image_gb", "node_ephemeral_gb")
   @classmethod

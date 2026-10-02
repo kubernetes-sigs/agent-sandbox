@@ -59,3 +59,41 @@ class FleetOvercommitError(FleetError):
   """The in-SDK circuit breaker tripped: live sandboxes exceeded the safe ceiling
   (``overcommit_factor`` × expected, or ``max_live_sandboxes``), signalling a
   runaway/over-creation. The fleet is torn down before this is raised."""
+
+
+class SandboxStartError(FleetError):
+  """A claimed sandbox cannot start and waiting for it cannot help.
+
+  Raised by `SandboxFleet.acquire` when the fail-fast watchdog sees the claim's
+  pod in a state the controller will not recover from on its own: an image that
+  cannot be pulled, a container that cannot be configured, an OOM-killed
+  container, a pod unschedulable past the grace period. Without it the claim sat
+  there until ``ready_timeout`` (15 minutes by default). The claim has already
+  been deleted when this is raised. ``reason`` is the Kubernetes reason string
+  (``ImagePullBackOff``, ``Unschedulable``, ``OOMKilled``, ...)."""
+
+  def __init__(self, reason: str, message: str, *, claim_name: str,
+               pod_name: str | None = None, image: str | None = None):
+    where = f"pod '{pod_name}'" if pod_name else f"claim '{claim_name}'"
+    tail = f" (image {image})" if image else ""
+    super().__init__(f"sandbox failed to start: {reason} on {where}{tail}: {message}")
+    self.reason = reason
+    self.detail = message
+    self.claim_name = claim_name
+    self.pod_name = pod_name
+    self.image = image
+
+
+class SandboxLostError(FleetError):
+  """The sandbox behind a handle is gone (pod deleted, evicted, OOM-killed or
+  finished). Raised from ``SandboxHandle.exec`` in place of the raw transport
+  error so an RL loop can release the handle and re-acquire at once instead of
+  spending its step timeout on a dead pod. ``cause`` is the underlying error."""
+
+  def __init__(self, pod_name: str, claim_name: str, cause: BaseException | None = None):
+    super().__init__(
+        f"sandbox pod '{pod_name}' (claim '{claim_name}') is gone"
+        + (f": {type(cause).__name__}: {cause}" if cause is not None else ""))
+    self.pod_name = pod_name
+    self.claim_name = claim_name
+    self.cause = cause

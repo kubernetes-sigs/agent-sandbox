@@ -21,8 +21,11 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
+from kubernetes import client
 from kubernetes.stream import stream
 
+from . import constants
+from .exceptions import SandboxLostError
 from .sources import Task
 
 if TYPE_CHECKING:
@@ -59,6 +62,24 @@ def _as_script(command) -> str:
   # shell-quote each arg so argv round-trips through the bash session intact
   # (e.g. ['sh','-c','echo $(hostname)'] -> "sh -c 'echo $(hostname)'").
   return shlex.join(command)
+
+
+def _pod_is_live(pod) -> bool:
+  """False once a pod is being deleted, has finished, or its runtime container
+  has terminated. Accepts a ``V1Pod`` or its ``to_dict()``."""
+  d = pod.to_dict() if hasattr(pod, "to_dict") else (pod or {})
+  meta = d.get("metadata") or {}
+  status = d.get("status") or {}
+  if meta.get("deletion_timestamp") or meta.get("deletionTimestamp"):
+    return False
+  if status.get("phase") in ("Failed", "Succeeded"):
+    return False
+  statuses = status.get("container_statuses") or status.get("containerStatuses") or []
+  runtime = [c for c in statuses if (c or {}).get("name") == constants.RUNTIME_CONTAINER]
+  for c in runtime or statuses:
+    if ((c or {}).get("state") or {}).get("terminated"):
+      return False
+  return True
 
 
 class SandboxSession:
@@ -201,10 +222,50 @@ class SandboxHandle:
     client, so parallel one-shot execs stay isolated per thread while the client
     is cached per thread rather than rebuilt per call.
     """
-    if self._session is not None and self._session.is_open:
-      return self._session.run(command, timeout=timeout)
-    core = self._cluster.exec_core_api()
-    return exec_in_pod(core, self.pod_name, self._cluster.namespace, command)
+    try:
+      if self._session is not None and self._session.is_open:
+        return self._session.run(command, timeout=timeout)
+      core = self._cluster.exec_core_api()
+      return exec_in_pod(core, self.pod_name, self._cluster.namespace, command)
+    except Exception as e:  # noqa: BLE001 — re-raised below unless the pod is gone
+      self._raise_if_lost(e)
+      raise
+
+  def is_alive(self) -> bool:
+    """Whether the backing pod still exists and has not finished.
+
+    One ``GET`` on the pod. False if the pod is not found, is being deleted, has
+    reached ``Failed``/``Succeeded``, or its runtime container has terminated.
+    A handle with no cluster wiring answers True (unknown is not dead).
+    ``exec()`` consults this only after a transport error, so a live sandbox
+    pays nothing for it."""
+    if self._cluster is None:
+      return True
+    try:
+      # Bounded (connect, read): this runs on an error path and must not turn a
+      # stalled API server into a hang; on timeout the original error stands.
+      pod = self._cluster.exec_core_api().read_namespaced_pod_status(
+          self.pod_name, self._cluster.namespace, _request_timeout=(3, 10))
+    except client.ApiException as e:
+      if e.status == 404:
+        return False
+      raise
+    return _pod_is_live(pod)
+
+  def _raise_if_lost(self, cause: BaseException) -> None:
+    """Raise `SandboxLostError` when an exec failure is explained by a dead pod.
+
+    A pod that was OOM-killed or evicted mid-episode surfaces as a 404 on the
+    exec handshake or as a closed session (``TimeoutError``). Both are also what
+    a slow command looks like, so the pod is checked before deciding. If the
+    check itself fails the original error stands."""
+    try:
+      alive = self.is_alive()
+    except Exception:  # noqa: BLE001
+      return
+    if not alive:
+      self.close_session()
+      raise SandboxLostError(self.pod_name, self.claim_name, cause) from cause
 
   def open_session(self) -> "SandboxSession":
     """Open (once) a persistent exec session so subsequent ``exec()`` calls reuse

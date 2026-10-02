@@ -74,3 +74,26 @@ RUN_ISOLATION_MODES = ("none", "names", "namespace")
 # Placeholder accepted in `template_name_prefix` / `pool_name_format`; the fleet
 # substitutes its run id at construction.
 RUN_ID_PLACEHOLDER = "{run_id}"
+
+# Pod name of a Sandbox when it differs from the Sandbox name (annotation set by
+# the controller on the Sandbox object; mirrors the SDK's POD_NAME_ANNOTATION).
+POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name"
+
+# Fail-fast classification of a claimed sandbox's pod (see failfast.py).
+# Waiting reasons that never clear on their own: fail as soon as they are seen.
+TERMINAL_WAITING_REASONS = frozenset({
+    "InvalidImageName",
+    "ErrImageNeverPull",
+})
+# Waiting reasons that usually mean a misconfiguration but can be transient (a
+# registry blip, a Secret created a moment late): fail once they have persisted
+# for `FailFastPolicy.grace_s`.
+RETRYABLE_WAITING_REASONS = frozenset({
+    "ErrImagePull",
+    "ImagePullBackOff",
+    "CreateContainerConfigError",
+    "CreateContainerError",
+    "RunContainerError",
+    "CrashLoopBackOff",
+    "PostStartHookError",
+})

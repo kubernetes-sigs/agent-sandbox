@@ -682,8 +682,10 @@ class Resources:
       cont = getattr(resp.metadata, "_continue", None)
     return total
 
-  def delete_claim(self, name: str) -> None:
-    self._delete(constants.CLAIMS_PLURAL, name, "SandboxClaim")
+  def delete_claim(self, name: str, *,
+                   request_timeout: float | tuple[float, float] | None = None) -> None:
+    self._delete(constants.CLAIMS_PLURAL, name, "SandboxClaim",
+                 request_timeout=request_timeout)
 
   def delete_sandbox(self, name: str) -> None:
     self._delete(constants.SANDBOXES_PLURAL, name, "Sandbox",
@@ -827,14 +829,18 @@ class Resources:
 
   def _delete(self, plural: str, name: str, kind: str, *,
               group: str = constants.GROUP, version: str = constants.VERSION,
-              uid: str | None = None) -> None:
+              uid: str | None = None,
+              request_timeout: float | tuple[float, float] | None = None) -> None:
     opts = client.V1DeleteOptions(
         grace_period_seconds=0,
         preconditions=client.V1Preconditions(uid=uid) if uid else None)
+    # `request_timeout` bounds the API call ((connect, read) seconds); callers on
+    # a latency-sensitive path pass one so a stalled apiserver cannot pin them.
+    extra = {"_request_timeout": request_timeout} if request_timeout is not None else {}
     try:
       self.custom_api.delete_namespaced_custom_object(
           group=group, version=version,
-          namespace=self.namespace, plural=plural, name=name, body=opts)
+          namespace=self.namespace, plural=plural, name=name, body=opts, **extra)
       logger.info("Deleted %s '%s'", kind, name)
     except client.ApiException as e:
       if e.status == 404:

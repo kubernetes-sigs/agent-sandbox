@@ -99,3 +99,7 @@ class BatchLeaseExpiredError(BatchError):
 
 class BatchInUseError(BatchError):
     """``get_batch`` found a live Lease held by a different holder."""
+
+
+class BatchExistsError(BatchError):
+    """``claim_batch`` found an existing Lease or claims for the batch id."""

@@ -82,14 +82,19 @@ func (p *ManagedProcess) Signal(sig syscall.Signal) error {
 	return nil
 }
 
-// CloseStdin closes the process stdin writer if present.
+// CloseStdin closes the process stdin writer if present. Closing an already
+// closed writer is a no-op: a process that exits closes its own stdin, so a
+// client's EOF can arrive after that and must not be reported as a failure.
 func (p *ManagedProcess) CloseStdin() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.Stdin == nil {
 		return nil
 	}
-	return p.Stdin.Close()
+	if err := p.Stdin.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+		return err
+	}
+	return nil
 }
 
 // ResizeTTY resizes the pseudo-terminal window if active and process is running.

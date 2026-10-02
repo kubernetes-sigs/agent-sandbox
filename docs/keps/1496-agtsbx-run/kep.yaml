@@ -1,0 +1,15 @@
+title: "agtsbx: a docker-like CLI for running one command in a sandbox"
+kep-number: 1496
+authors:
+  - "@ericcurtin"
+status: provisional
+creation-date: 2026-09-30
+reviewers:
+  - "@janetkuo"
+  - "@aditya-shantanu"
+approvers:
+  - "@janetkuo"
+  - "@justinsb"
+
+see-also:
+  - "/keps/539.2-runtime-standardization"

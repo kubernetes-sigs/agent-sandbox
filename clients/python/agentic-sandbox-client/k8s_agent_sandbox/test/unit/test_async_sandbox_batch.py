@@ -22,6 +22,7 @@ import ssl
 import time
 import unittest
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -52,11 +53,12 @@ from k8s_agent_sandbox.exceptions import (
     BatchInUseError,
     BatchLeaseExpiredError,
     BatchNotFoundError,
+    BatchTimeoutError,
     SandboxNotReadyError,
     SandboxTemplateNotFoundError,
     SandboxWarmPoolNotFoundError,
 )
-from k8s_agent_sandbox.models import BatchGroup, MemberState, SandboxDirectConnectionConfig
+from k8s_agent_sandbox.models import BatchEventType, BatchGroup, MemberState, SandboxDirectConnectionConfig
 
 
 def _lease(
@@ -1226,6 +1228,17 @@ async def _wait_until(condition, timeout=5.0):
         await asyncio.sleep(0.01)
 
 
+async def _drain(aiterable, timeout=5.0):
+    """Collects an async iterator, failing instead of hanging if it doesn't end."""
+    async def collect():
+        return [item async for item in aiterable]
+
+    try:
+        return await asyncio.wait_for(collect(), timeout)
+    except asyncio.TimeoutError:
+        raise AssertionError("iterator did not end in time") from None
+
+
 class BaseClaimBatchTest(BaseAsyncBatchClientTest):
 
     def setUp(self):
@@ -1456,6 +1469,92 @@ class TestClaimBatchCreation(BaseClaimBatchTest):
             (MemberState.FAILED, "CreateFailed", "sandboxclaims is forbidden"),
         )
 
+    async def test_failed_group_stops_creates_only_in_group_mode(self):
+        for mode in ("group", "stream"):
+            with self.subTest(mode):
+                self.setUp()
+                gate = asyncio.Event()
+
+                async def hook(name):
+                    if name == "b1-0":
+                        await gate.wait()
+                        raise k8s_client.ApiException(status=403)
+
+                self.cluster.create_hook = hook
+                batch = await self.claim(
+                    [BatchGroup(warmpool="pool-a", size=3), BatchGroup(warmpool="pool-b", size=2)],
+                    max_in_flight=1,
+                )
+                consume = batch.iter_ready_groups if mode == "group" else batch.events
+                items = consume()
+                gate.set()
+                await _drain(items)
+                if mode == "group":
+                    self.assertEqual(self.cluster.names(), ["b1-3", "b1-4"])
+                else:
+                    self.assertEqual(self.cluster.names(), ["b1-1", "b1-2", "b1-3", "b1-4"])
+
+
+class TestConsumers(BaseClaimBatchTest):
+
+    async def test_events_end_on_settle_and_a_second_call_continues(self):
+        batch = await self.claim([BatchGroup(warmpool="pool-a", size=2)])
+        first = await anext(batch.events())
+        rest = await _drain(batch.events())
+        self.assertEqual(
+            sorted((e.type, e.member.claim_name) for e in [first, *rest]),
+            [(BatchEventType.MEMBER_READY, "b1-0"), (BatchEventType.MEMBER_READY, "b1-1")],
+        )
+
+    async def test_groups_yield_when_ready_and_time_out_after_the_last_create(self):
+        self.cluster.ready_on_create = False
+        offset = [0.0]
+        fake_time = SimpleNamespace(monotonic=lambda: time.monotonic() + offset[0])
+        with patch.object(async_sandbox_batch, "time", fake_time):
+            batch = await self.claim(
+                [BatchGroup(warmpool="pool-a", size=1), BatchGroup(warmpool="pool-b", size=1)],
+                quorum_timeout=60,
+            )
+            await _wait_until(lambda: len(self.cluster.created) == 2)
+            self.assertAlmostEqual(batch._fill_deadline - self.cluster.created[-1][1], 60, delta=0.5)
+            groups = batch.iter_ready_groups()
+            self.cluster.push("b1-0", "pool-a")
+            first = await asyncio.wait_for(anext(groups), 5)
+            self.assertEqual((first.warmpool, [m.claim_name for m in first.members]), ("pool-a", ["b1-0"]))
+
+            offset[0] = 61
+            self.cluster.push("b1-1", "pool-b", ready=False)
+            [second] = await _drain(groups)
+        self.assertEqual(second.warmpool, "pool-b")
+        self.assertIsInstance(second.error, BatchTimeoutError)
+
+    async def test_release_wakes_a_waiting_consumer_with_batch_error(self):
+        self.cluster.ready_on_create = False
+        batch = await self.claim([BatchGroup(warmpool="pool-a", size=1)])
+        consumer = asyncio.ensure_future(_drain(batch.events()))
+        await asyncio.sleep(0.1)
+        await batch.release()
+        with self.assertRaises(BatchError):
+            await consumer
+
+    async def test_client_close_wakes_a_waiting_consumer_with_batch_error(self):
+        self.cluster.ready_on_create = False
+        self.cluster.helper.close = AsyncMock()
+        batch = await self.claim([BatchGroup(warmpool="pool-a", size=1)])
+        consumer = asyncio.ensure_future(_drain(batch.events()))
+        await asyncio.sleep(0.1)
+        await self.client.close()
+        with self.assertRaises(BatchError):
+            await asyncio.wait_for(consumer, 5)
+
+    async def test_iterators_end_when_the_watch_fails(self):
+        self.cluster.ready_on_create = False
+        self.cluster.helper.watch_sandbox_claims.side_effect = k8s_client.ApiException(status=403)
+        batch = await self.claim([BatchGroup(warmpool="pool-a", size=1)])
+        self.assertEqual(await _drain(batch.iter_ready_groups()), [])
+        self.assertEqual(await _drain(batch.events()), [])
+        self.assertEqual(batch.err().status, 403)
+
 
 class TestRelease(BaseClaimBatchTest):
 
@@ -1480,6 +1579,8 @@ class TestRelease(BaseClaimBatchTest):
             await batch.connect(MagicMock(claim_name="b1-0"))
         with self.assertRaises(BatchError):
             await batch.detach()
+        with self.assertRaises(BatchError):
+            batch.events()
 
     async def test_hung_create_delays_release_only_until_the_request_timeout(self):
         hung = asyncio.Event()
@@ -1558,6 +1659,26 @@ class TestRelease(BaseClaimBatchTest):
         self.assertLess(created, 20)
         self.cluster.helper.delete_sandbox_claims_by_label.assert_not_called()
         self.cluster.helper.delete_batch_lease.assert_not_called()
+
+
+@patch.object(AsyncSandboxBatch, "_start", lambda self: None)
+class TestGetBatchQuorumTimeout(BaseAsyncBatchClientTest):
+
+    async def test_quorum_timeout_annotation_is_validated_and_counts_from_attach(self):
+        self.mock_k8s_helper.list_sandbox_claim_objects = AsyncMock(return_value=([_claim("b1-0")], "5"))
+        self.mock_k8s_helper.replace_batch_lease = AsyncMock()
+        self.mock_k8s_helper.read_batch_lease = AsyncMock(return_value=_lease(
+            renew_time=datetime.now(UTC), annotations={BATCH_QUORUM_TIMEOUT_ANNOTATION: "abc"}
+        ))
+        with self.assertRaises(BatchError):
+            await self.client.get_batch("b1")
+        self.mock_k8s_helper.replace_batch_lease.assert_not_called()
+
+        self.mock_k8s_helper.read_batch_lease.return_value = _lease(
+            renew_time=datetime.now(UTC), annotations={BATCH_QUORUM_TIMEOUT_ANNOTATION: "90"}
+        )
+        batch = await self.client.get_batch("b1")
+        self.assertAlmostEqual(batch._fill_deadline - time.monotonic(), 90, delta=5)
 
 
 class TestClientBatchCleanup(BaseClaimBatchTest):

@@ -14,6 +14,7 @@
 
 """Validation, Lease, and retry helpers shared by both sync and async batch handles."""
 
+import json
 import math
 import os
 import random
@@ -25,6 +26,7 @@ import uuid
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from enum import Enum
+from itertools import accumulate
 from typing import Any, NamedTuple
 
 from .constants import (
@@ -63,6 +65,20 @@ BATCH_CREATE_ATTEMPTS = 3
 # timed out has time to return and its worker to exit.
 BATCH_CREATOR_STOP_GRACE_SECONDS = 1
 BATCH_RELEASE_MAX_IDLE_ROUNDS = 3
+
+
+def api_status_message(body: str | bytes | None, reason: str | None) -> str:
+    """Returns the ``message`` of the Status in an apiserver error response body, or ``reason``
+    when the body has none.
+    """
+    if body:
+        try:
+            message = json.loads(body).get("message")
+        except (ValueError, AttributeError):
+            message = None
+        if message:
+            return str(message)
+    return reason or ""
 
 
 def validate_batch_id(batch_id: str) -> None:
@@ -255,6 +271,24 @@ def validate_claim_batch_args(
             else validate_lease_duration_value(lease_duration)
         ),
     )
+
+
+def fill_create_plan(batch_id: str, groups: Sequence[BatchGroup]) -> list[tuple[str, BatchGroup]]:
+    """Returns the fill's claim names and their groups, in the order the claims are created.
+
+    Each group's claims get consecutive ordinals, in group order, so a re-attached handle can
+    restore the group order from them. The create order is different. Each group's first
+    ``min_ready`` claims go first, so quorum waits only on their pacing, and the rest follow. Within
+    each part the groups go one after another in group order, so the first groups are complete and
+    can be consumed while later groups are still being created.
+    """
+    first_ordinals = list(accumulate((group.size for group in groups), initial=0))
+    slots = sorted(
+        (k >= (group.min_ready or 0), index, k)
+        for index, group in enumerate(groups)
+        for k in range(group.size)
+    )
+    return [(f"{batch_id}-{first_ordinals[index] + k}", groups[index]) for _, index, k in slots]
 
 
 class CreateOutcome(Enum):

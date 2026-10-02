@@ -211,8 +211,8 @@ batch Lease ``batch-<id>``, and starts the batch's watch. The claims ``<id>-0`` 
 ``<id>-<N-1>``, where ``N`` is the sum of the group sizes, are then created in the background
 until ``err()`` is set. Each group's claims get consecutive ordinals in group order. Each
 group's first ``min_ready`` claims are created first, one group after another in group
-order, and the rest follow in the same order. Use ``members()`` to see them as they become
-Ready, and ``release()`` to delete the batch.
+order, and the rest follow in the same order. Use ``events()`` or ``group_outcomes()``
+to consume them as they become Ready, and ``release()`` to delete the batch.
 
 Every claim gets the same ``shutdownTime``, the time of this call plus ``N / create_rps``
 seconds (rounded up) plus ``quorum_timeout`` plus ``work_budget`` plus 600 seconds, so an
@@ -236,8 +236,9 @@ an error that stops the watch or Lease renewal shows in ``err()``.
 - `max_in_flight` - Maximum claim creates in flight at once. Defaults to 20.
 - `work_budget` - Seconds the caller expects to work with the batch after it is Ready;
   part of each claim's ``shutdownTime``. Defaults to 3600.
-- `quorum_timeout` - Seconds the caller allows for the batch's claims to become Ready;
-  part of each claim's ``shutdownTime``. Defaults to 600.
+- `quorum_timeout` - Seconds after the last claim create that a group may take to reach
+  ``min_ready``. A group that reaches it later, before any consumer checks the
+  deadline, still succeeds. Defaults to 600.
 - `lease_duration` - Seconds the batch Lease stays valid without renewal. Defaults to 60.
   
 
@@ -255,12 +256,11 @@ an error that stops the watch or Lease renewal shows in ``err()``.
 
   
   >>> client = SandboxClient()
-  >>> batch = client.claim_batch([BatchGroup(warmpool="python-sandbox-pool", size=4)])
+  >>> batch = client.claim_batch([BatchGroup(warmpool="python-sandbox-pool", size=4, min_ready=2)])
   >>> try:
-  ...     while not any(m.state is MemberState.READY for m in batch.members()):
-  ...         time.sleep(1)
-  ...     member = next(m for m in batch.members() if m.state is MemberState.READY)
-  ...     batch.connect(member).commands.run("echo hello")
+  ...     for group in batch.group_outcomes():
+  ...         if group.error is None:
+  ...             batch.connect(group.members[0]).commands.run("echo hello")
   ... finally:
   ...     batch.release()
 
@@ -276,7 +276,9 @@ Attaches to an existing batch, taking over its Lease.
 
 Resumes batch lease renewal and starts a label-scoped watch that keeps
 ``members()`` up to date. Only a batch released with ``detach()`` can be re-attached,
-within its grace window.
+within its grace window. A group whose claims are all gone is unknown to the new handle,
+so it isn't in ``groups`` and ``group_outcomes()`` doesn't yield it. The new handle restarts
+the fill deadline, which ends ``quorum_timeout`` seconds after the attach.
 
 Client exit cleanup detaches a batch attached here with ``detach()``'s default grace instead
 of releasing it. Call ``release()`` to delete the batch. If a ``release()`` call fails,
@@ -759,6 +761,43 @@ Represents the identity of a single claim in a batch.
 
 The group this member belongs to.
 
+<a id="k8s_agent_sandbox.models.BatchEventType"></a>
+
+### BatchEventType Objects
+
+```python
+class BatchEventType(StrEnum)
+```
+
+The kind of change a ``BatchEvent`` reports.
+
+<a id="k8s_agent_sandbox.models.BatchEvent"></a>
+
+### BatchEvent Objects
+
+```python
+class BatchEvent(BaseModel)
+```
+
+One change yielded by ``SandboxBatch.events()``.
+
+<a id="k8s_agent_sandbox.models.GroupOutcome"></a>
+
+### GroupOutcome Objects
+
+```python
+@dataclass(frozen=True)
+class GroupOutcome()
+```
+
+One group's quorum outcome, yielded by ``SandboxBatch.group_outcomes()``.
+
+On success, ``members`` holds exactly ``min_ready`` Ready members and ``error`` is ``None``.
+On failure, ``error`` is a ``QuorumUnreachableError`` or ``BatchTimeoutError`` and ``members`` is empty.
+
+This is a dataclass rather than a Pydantic model because ``error`` holds a raw Python
+``Exception`` object (preserving traceback and causes) rather than serializable data.
+
 <a id="k8s_agent_sandbox.sandbox_batch"></a>
 
 ## k8s\_agent\_sandbox.sandbox\_batch
@@ -854,6 +893,58 @@ Returns whether background Lease renewal is failing.
 
 ``True`` from the first failed renewal until a renewal succeeds. It stays ``True`` once
 renewal stops on an error, such as the Lease expiring, so it can be polled at any time.
+
+<a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.events"></a>
+
+##### events
+
+```python
+def events() -> Iterator[BatchEvent]
+```
+
+Hands out each initial claim once, as it becomes Ready, fails, or is lost.
+
+``MEMBER_READY`` is yielded once per initial claim that becomes Ready, and ``MEMBER_FAILED``
+and ``MEMBER_LOST`` once per initial claim that fails or is deleted. Called on its own, it
+streams every Ready member. Called after ``group_outcomes()``, it yields a group's members
+only after that group has yielded successfully there, so a group that fails yields none.
+``group_outcomes()`` can't be called after ``events()``, since the first of the two to be
+called fixes how members are handed out.
+
+The iterator ends once every initial claim has been handed out, dropped with a failed group,
+or can't become Ready, once the fill deadline (``quorum_timeout`` after the last claim create)
+has passed, or once ``err()`` is set. A Ready member that a group holds until its outcome is
+decided keeps the iterator open. A change after the iterator ends, such as a handed-out
+member that fails, is yielded only by a later call of ``events()``, which continues where
+the previous iterator stopped. ``members()`` always shows each claim's current state.
+
+**Raises**:
+
+- `BatchError` - If this handle has been detached or released, when called or while waiting.
+
+<a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.group_outcomes"></a>
+
+##### group\_outcomes
+
+```python
+def group_outcomes() -> Iterator[GroupOutcome]
+```
+
+Returns an iterator that yields one ``GroupOutcome`` per group, as soon as its outcome is known.
+
+A group yields its first ``min_ready`` Ready members, in the order they became Ready. A group that
+fails is still yielded, with ``error`` set to ``QuorumUnreachableError`` once too few
+of its members can still become Ready, or to ``BatchTimeoutError`` if it hasn't reached
+``min_ready`` within the quorum timeout. The handle checks that deadline only while a consumer
+waits or claims are still being created, so a group that reaches ``min_ready`` after the
+deadline, before any consumer checks it, still succeeds.
+The iterator ends once every group has yielded, or once ``err()`` is set. Calling it again
+continues with the groups that haven't yielded yet.
+
+**Raises**:
+
+- `BatchError` - If ``events()`` was called first, or this handle has been detached or
+  released, when called or while waiting.
 
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.release"></a>
 

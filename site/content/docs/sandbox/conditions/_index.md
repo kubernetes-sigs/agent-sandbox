@@ -36,7 +36,7 @@ Summarizes whether the Sandbox can serve traffic. It is `True` only when the bac
 | `False` | `SandboxSuspended` | The Sandbox is suspending or suspended (`spec.operatingMode: Suspended`). |
 | `False` | `PodSucceeded` | The Pod completed successfully. |
 | `False` | `PodFailed` | The Pod failed. |
-| `False` | `SandboxExpired` | `spec.shutdownTime` was reached and the resources were torn down. See [shutdown time]({{< ref "/docs/sandbox/lifecycle" >}}). |
+| `False` | `SandboxExpired` | `spec.shutdownTime` was reached. Resource cleanup may still be pending or in progress. See [shutdown time]({{< ref "/docs/sandbox/lifecycle" >}}). |
 
 ### Suspended
 
@@ -52,7 +52,7 @@ Reports progress of a suspension. It is never removed: a running Sandbox reports
 
 ### Finished
 
-Present only after the backing Pod reaches a terminal phase, and kept after expiry. It is always `True`.
+Present only while an owned Pod is in a terminal phase. It is always `True`. Expiry does not create it, but `shutdownPolicy: Retain` keeps an existing one. `Delete` removes the Sandbox.
 
 | Status | Reason | Meaning |
 | --- | --- | --- |
@@ -61,11 +61,11 @@ Present only after the backing Pod reaches a terminal phase, and kept after expi
 
 ### PodScheduled
 
-Mirrors the backing Pod's `PodScheduled` condition, so you can see why a Sandbox is not scheduled without reading the Pod. It is absent while the Sandbox has no backing Pod.
+Mirrors the backing Pod's `PodScheduled` condition, so you can see why a Sandbox is not scheduled without reading the Pod. It is absent when the Pod is confirmed absent or not owned by the Sandbox. A failed Pod lookup does not remove it, see `PodSchedulingUnknown`.
 
 The status, reason and message are copied from the Pod, so reasons set by the scheduler (such as `Unschedulable` or `SchedulingGated`) pass through unchanged. The controller adds two reasons of its own:
 
 | Status | Reason | Meaning |
 | --- | --- | --- |
 | `True` | `PodScheduled` | The Pod is scheduled to a node. Used when the Pod condition has no reason. |
-| `Unknown` | `PodSchedulingUnknown` | The Pod has not reported a `PodScheduled` condition yet, the Pod condition is not `True` and has no reason, or the Pod state could not be read. |
+| `False` or `Unknown` | `PodSchedulingUnknown` | The Pod has not reported a `PodScheduled` condition yet, the Pod condition is not `True` and has no reason, or the Pod state could not be read. |

@@ -116,8 +116,9 @@ const (
 	// to a node. Used when the Pod's PodScheduled condition carries no reason
 	// of its own (the scheduler sets none on success).
 	SandboxReasonPodScheduled = "PodScheduled"
-	// SandboxReasonPodSchedulingUnknown indicates the backing Pod exists but
-	// has not reported a PodScheduled condition yet.
+	// SandboxReasonPodSchedulingUnknown indicates the scheduling state cannot be
+	// determined: the Pod has not reported PodScheduled yet, reports it without a
+	// reason (and not True), or could not be read.
 	SandboxReasonPodSchedulingUnknown = "PodSchedulingUnknown"
 
 	// SandboxConditionFinished reports that the backing Pod reached a terminal phase.
@@ -129,8 +130,8 @@ const (
 	// SandboxReasonPodFailed indicates the backing Pod completed unsuccessfully.
 	SandboxReasonPodFailed = "PodFailed"
 
-	// SandboxReasonExpired is a Ready=False reason: the Sandbox reached its shutdownTime
-	// and its underlying resources were torn down (see Lifecycle).
+	// SandboxReasonExpired is a Ready=False reason: the Sandbox reached its shutdownTime.
+	// Teardown of its underlying resources may still be pending (see Lifecycle).
 	SandboxReasonExpired = "SandboxExpired"
 
 	// SandboxPodNameAnnotation is the annotation used to track the pod name adopted from a warm pool.

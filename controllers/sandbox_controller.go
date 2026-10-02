@@ -633,7 +633,7 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 			readyCondition.Message = err.Error()
 			return readyCondition
 		}
-		readyCondition.Reason = "ReconcilerError"
+		readyCondition.Reason = sandboxv1beta1.SandboxReasonReconcilerError
 		readyCondition.Message = "Error seen: " + err.Error()
 		return readyCondition
 	}

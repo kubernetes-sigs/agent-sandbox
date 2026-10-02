@@ -44,13 +44,11 @@ func (c ConditionType) String() string { return string(c) }
 
 const (
 	// SandboxConditionSuspended reports progress of an administrative suspension.
-	// It is set while operatingMode is Suspended: Status is True once the backing Pod
-	// has been terminated (reason PodTerminated), and False while the Pod is still
-	// terminating (reason PodNotTerminated).
-	// Note: the controller does not currently remove this condition when the Sandbox is
-	// resumed, so a stale Suspended condition may linger after operatingMode returns to
-	// Running. Consumers should treat Ready as the authoritative signal and not infer the
-	// live operating state from the mere presence of this condition.
+	// While operatingMode is Suspended, Status is True once the backing Pod has been
+	// terminated (reason PodTerminated), and False while the Pod is still terminating
+	// (reason PodTerminating).
+	// The condition is never removed: once the Sandbox runs again it reports False with
+	// reason NotSuspended. Consumers should treat Ready as the authoritative signal.
 	SandboxConditionSuspended ConditionType = "Suspended"
 	// SandboxReasonSuspendedPodTerminated indicates the Suspended condition is True because the backing Pod has been terminated.
 	SandboxReasonSuspendedPodTerminated = "PodTerminated"
@@ -87,6 +85,10 @@ const (
 	// to be running but its underlying dependencies (Pod and/or Service) are not fully
 	// provisioned or not yet reporting Ready.
 	SandboxReasonDependenciesNotReady = "DependenciesNotReady"
+	// SandboxReasonReconcilerError is a Ready=False reason: reconciling a child
+	// resource failed with an error that is not covered by a more specific reason.
+	// The controller retries, so this is typically transient.
+	SandboxReasonReconcilerError = "ReconcilerError"
 	// SandboxReasonMultiplePods indicates the Sandbox cannot become ready because
 	// more than one Pod is controlled by its UID and the controller cannot choose
 	// a canonical stateful Pod safely.

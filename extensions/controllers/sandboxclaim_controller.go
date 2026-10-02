@@ -780,7 +780,7 @@ func (r *SandboxClaimReconciler) updateStatus(ctx context.Context, oldStatus *ex
 
 func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.SandboxClaim, sandbox *v1beta1.Sandbox, err error, isClaimExpired bool) metav1.Condition {
 	if err != nil {
-		reason := "ReconcilerError"
+		reason := v1beta1.SandboxReasonReconcilerError
 		if errors.Is(err, ErrTemplateNotFound) {
 			reason = "TemplateNotFound"
 			msg := strings.TrimSuffix(err.Error(), ": "+ErrTemplateNotFound.Error())

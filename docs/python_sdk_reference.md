@@ -30,7 +30,8 @@ type: ignore
 ```python
 def __init__(connection_config: SandboxConnectionConfig | None = None,
              tracer_config: SandboxTracerConfig | None = None,
-             cleanup: bool = False) -> None
+             cleanup: bool = False,
+             api_client: client.ApiClient | None = None) -> None
 ```
 
 Initializes the SandboxClient.
@@ -46,6 +47,8 @@ Initializes the SandboxClient.
 - `cleanup` - If True, registers an atexit hook to automatically delete
   tracked sandboxes when the program terminates, excluding claims
   explicitly named through create_sandbox(). Defaults to False.
+- `api_client` - Optional pre-configured Kubernetes ``ApiClient`` forwarded
+  to the underlying ``K8sHelper`` to target a specific cluster/context.
 
 <a id="k8s_agent_sandbox.sandbox_client.SandboxClient.create_sandbox"></a>
 

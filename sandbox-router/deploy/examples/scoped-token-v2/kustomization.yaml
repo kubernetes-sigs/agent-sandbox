@@ -1,0 +1,17 @@
+# Composes the activation patch onto the core install, so the first
+# router Pods already require scoped tokens instead of starting allow-all.
+# Kustomize cannot use a parent directory as the base of an overlay nested
+# inside it, so this lists the core files and builds with
+# --load-restrictor=LoadRestrictionsNone. Keep the list in step with
+# ../../kustomization.yaml.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../../serviceaccount.yaml
+- ../../rbac.yaml
+- ../../deployment.yaml
+- ../../service.yaml
+- ../../pdb.yaml
+- ../../networkpolicy.yaml
+patches:
+- path: deployment-patch.yaml

@@ -18,6 +18,7 @@ import os
 import fnmatch
 import argparse
 import datetime
+import subprocess
 
 # The license header to apply
 APACHE_HEADER = """Copyright {year} The Kubernetes Authors.
@@ -260,9 +261,18 @@ def is_path_excluded(relative_path, exclude_patterns):
     return False
 
 
+def _list_files(root_dir):
+    """Lists tracked and untracked files under root_dir, skipping git-ignored ones."""
+    output = subprocess.check_output(
+        ["git", "-C", root_dir, "ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+    return [path for path in os.fsdecode(output).split("\0") if path]
+
+
 def apply_headers_to_tree(root_dir, excludes=None, dry_run=False):
     """
-    Applies headers to all files in a repository, respecting excludes.
+    Applies headers to the tracked and untracked files of a git repository,
+    skipping git-ignored files and respecting excludes. Excludes are matched
+    against file paths; to exclude a directory, end the pattern with "/**".
     """
     year = datetime.datetime.now().year
     header_text = APACHE_HEADER.format(year=year)
@@ -270,18 +280,16 @@ def apply_headers_to_tree(root_dir, excludes=None, dry_run=False):
     all_excludes = DEFAULT_EXCLUDES + (excludes or [])
     print(f"Excluding patterns: {all_excludes}")
 
-    for root, dirs, files in os.walk(root_dir, topdown=True):
-        rel_root = os.path.relpath(root, root_dir)
-        if rel_root == '.':
-            rel_root = ''
+    real_root = os.path.realpath(root_dir)
+    for rel_path in _list_files(root_dir):
+        if is_path_excluded(rel_path, all_excludes):
+            continue
 
-        # Filter dirs in-place so os.walk doesn't recurse into them
-        dirs[:] = [d for d in dirs if not is_path_excluded(os.path.join(rel_root, d), all_excludes)]
-
-        for file in files:
-            rel_path = os.path.join(rel_root, file)
-            if is_path_excluded(rel_path, all_excludes):
-                continue
-
-            full_path = os.path.join(root, file)
-            apply_license_header(full_path, header_text, dry_run)
+        full_path = os.path.join(real_root, rel_path)
+        # git lists symlinks (e.g. .github/skills), paths under a directory
+        # replaced by a symlink, and tracked files deleted from the working
+        # tree; writing through a symlink would modify its target, which may
+        # be outside the repo.
+        if os.path.realpath(full_path) != full_path or not os.path.isfile(full_path):
+            continue
+        apply_license_header(full_path, header_text, dry_run)

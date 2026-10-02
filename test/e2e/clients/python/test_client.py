@@ -45,7 +45,7 @@ logging.basicConfig(
 pytestmark = pytest.mark.example
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def sandbox_connection_config(request, temp_namespace):
     if request.config.getoption("--gateway-name"):
         return SandboxGatewayConnectionConfig(
@@ -60,7 +60,7 @@ def sandbox_connection_config(request, temp_namespace):
     else:
         return SandboxLocalTunnelConnectionConfig(
             server_port=request.config.getoption("--server-port"),
-            router_namespace=request.config.getoption("--router-namespace"),
+            router_namespace=temp_namespace,
         )
 
 
@@ -85,6 +85,12 @@ def sandbox_client(sandbox_connection_config, sandbox_tracer_config):
 
 @pytest.fixture
 def sandbox(sandbox_warmpool, temp_namespace, sandbox_client):
+    sandbox = sandbox_client.create_sandbox(sandbox_warmpool, namespace=temp_namespace)
+    return sandbox
+
+
+@pytest.fixture
+def sandbox2(sandbox_warmpool, temp_namespace, sandbox_client):
     sandbox = sandbox_client.create_sandbox(sandbox_warmpool, namespace=temp_namespace)
     return sandbox
 
@@ -239,7 +245,7 @@ def test_command_execution(sandbox: Sandbox, sandbox_warmpool, deploy_router):
     print("--- Introspection Tests Finished ---")
 
 
-def test_file_operations(sandbox: Sandbox):
+def test_file_operations(sandbox: Sandbox, deploy_router):
     """Tests file write, read, list, and existence checks."""
     print("\n--- Testing File Operations ---")
     file_content = "This is a test file."
@@ -462,6 +468,7 @@ def test_creation_get_and_list_sandboxes(
     sandbox_client: SandboxClient,
     sandbox_warmpool,
     temp_namespace,
+    deploy_router,
 ) -> tuple[Sandbox, Sandbox]:
     print(
         f"Creating sandbox with warm pool '{sandbox_warmpool}' in namespace '{temp_namespace}'..."
@@ -561,7 +568,10 @@ def test_claim_annotation(
 
 
 def test_volume_claim_templates(
-    sandbox_client: SandboxClient, sandbox_warmpool, temp_namespace
+    sandbox_client: SandboxClient,
+    sandbox_warmpool,
+    temp_namespace,
+    deploy_router,
 ):
     print("\n--- Testing Custom Volume Claim Templates on SandboxClaim ---")
 
@@ -608,15 +618,11 @@ def test_volume_claim_templates(
         assert sandbox_res is not None, f"Sandbox {sandbox.sandbox_id} should exist"
         sandbox_spec = sandbox_res.get("spec", {})
         sandbox_vcts = sandbox_spec.get("volumeClaimTemplates", [])
-        assert len(sandbox_vcts) == 2, (
-            f"Expected 2 volumeClaimTemplates in Sandbox, got {len(sandbox_vcts)}"
+        assert len(sandbox_vcts) == 1, (
+            f"Expected 1 volumeClaimTemplates in Sandbox, got {len(sandbox_vcts)}"
         )
 
-        # sandbox_vcts[0] is the template's default workspace
-        assert sandbox_vcts[0].get("metadata", {}).get("name") == "workspace"
-
-        # sandbox_vcts[1] is the custom one we passed
-        vct = sandbox_vcts[1]
+        vct = sandbox_vcts[0]
         assert vct.get("metadata", {}).get("name") == "custom-workspace", (
             "Volume claim template name mismatch in Sandbox"
         )

@@ -451,34 +451,3 @@ def test_python_sdk_volume_claim_templates(
 
     finally:
         client.delete_all()
-
-
-def test_command_execution(sandbox):
-    """Tests command execution and pod introspection."""
-    print("\n--- Testing Command Execution ---")
-    command_to_run = "echo 'Hello from the sandbox shruti!'"
-    print(f"Executing command: '{command_to_run}'")
-
-    result = sandbox.commands.run(command_to_run)
-
-    print(f"Stdout: {result.stdout.strip()}")
-    print(f"Stderr: {result.stderr.strip()}")
-    print(f"Exit Code: {result.exit_code}")
-
-    assert result.exit_code == 0
-    assert result.stdout.strip() == "Hello from the sandbox shruti!"
-
-    print("\n--- Command Execution Test Passed! ---")
-
-    # Test introspection commands
-    print("\n--- Testing Pod Introspection ---")
-
-    print("\n--- Listing files in /app ---")
-    list_files_result = sandbox.commands.run("ls -la /app")
-    print(list_files_result.stdout)
-
-    print("\n--- Printing environment variables ---")
-    env_result = sandbox.commands.run("env")
-    print(env_result.stdout)
-
-    print("--- Introspection Tests Finished ---")

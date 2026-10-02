@@ -190,14 +190,14 @@ def sandbox_warmpool(tc, temp_namespace, sandbox_template):
 def sandbox_coldpool(tc, temp_namespace, sandbox_template):
     """Deploys a zero-replica sandbox warmpool for cold start tests"""
     manifest = f"""apiVersion: extensions.agents.x-k8s.io/v1beta1
-    kind: SandboxWarmPool
-    metadata:
-        name: python-sdk-coldpool
-    spec:
-        replicas: 0
-        sandboxTemplateRef:
-            name: {sandbox_template}
-    """
+kind: SandboxWarmPool
+metadata:
+  name: python-sdk-coldpool
+spec:
+  replicas: 0
+  sandboxTemplateRef:
+    name: {sandbox_template}
+"""
     tc.apply_manifest_text(manifest, namespace=temp_namespace)
     print("Coldpool manifest applied.")
     return "python-sdk-coldpool"

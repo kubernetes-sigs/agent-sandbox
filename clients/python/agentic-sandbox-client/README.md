@@ -226,6 +226,19 @@ finally:
     sandbox.terminate()
 ```
 
+If the router sits behind an authenticating gateway, add headers to every request
+with `extra_headers`, and enable mTLS with `client_cert` and `ca_cert`. The TLS
+options require an `https://` URL, and `X-Sandbox-*` header names are reserved.
+
+```python
+SandboxDirectConnectionConfig(
+    api_url="https://sandbox.example.com",
+    extra_headers={"Authorization": "Bearer <token>"},
+    client_cert=("/path/to/client.crt", "/path/to/client.key"),
+    ca_cert="/path/to/ca.crt",  # omit to use the default trust store
+)
+```
+
 ### 5. Custom Ports
 
 If your sandbox runtime listens on a port other than 8888 (e.g., a Node.js app on 3000), specify `server_port`.

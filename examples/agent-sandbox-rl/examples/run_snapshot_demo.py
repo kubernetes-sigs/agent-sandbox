@@ -24,6 +24,10 @@ bucket grants — see README → Snapshots. Env-configured:
   NAMESPACE=rl POD_SA=podsnap-sa RUNTIME_CLASS=gvisor IMAGE=python:3.12-slim \\
   python examples/run_snapshot_demo.py
 
+NODE_SELECTOR=key=value[,key=value] pins the pod to the nodes that support
+whole-pod snapshots when only some gVisor nodes do (on GKE, not E2 machines),
+e.g. NODE_SELECTOR=cloud.google.com/gke-nodepool=<pool>.
+
 The probe: a file on the container rootfs (not a volume) and a background shell
 loop that increments a counter in its own memory and mirrors it to a file only on
 request. A cold boot loses the file and the loop; a restore keeps both.
@@ -58,21 +62,34 @@ PROBE_START = (
     "nohup bash -c 'n=0; trap \"echo \\$n > /tmp/counter\" USR1; "
     "while sleep 0.2; do n=$((n+1)); done' >/dev/null 2>&1 & "
     "echo $! > /tmp/loop.pid; sleep 1; echo started")
+# key=value lines, not JSON: a one-shot exec's preloaded response is run through
+# the kubernetes client's deserializer, which turns JSON-shaped output into a
+# Python repr.
 PROBE_READ = (
     "kill -USR1 $(cat /tmp/loop.pid) 2>/dev/null && sleep 0.5; "
-    "printf '{\"marker\":\"%s\",\"counter\":\"%s\",\"pid_alive\":%s}' "
-    "\"$(cat /tmp/marker 2>/dev/null)\" \"$(cat /tmp/counter 2>/dev/null)\" "
-    "$(kill -0 $(cat /tmp/loop.pid 2>/dev/null) 2>/dev/null && echo true || echo false)")
+    "echo marker=$(cat /tmp/marker 2>/dev/null); "
+    "echo counter=$(cat /tmp/counter 2>/dev/null); "
+    "kill -0 $(cat /tmp/loop.pid 2>/dev/null) 2>/dev/null "
+    "&& echo pid_alive=true || echo pid_alive=false")
 
 
 def probe(handle) -> dict:
-  return json.loads(handle.exec(PROBE_READ).strip() or "{}")
+  out = {}
+  for line in handle.exec(PROBE_READ).splitlines():
+    key, sep, value = line.partition("=")
+    if sep:
+      out[key.strip()] = value.strip()
+  out["pid_alive"] = out.get("pid_alive") == "true"
+  return out
 
 
 def main():
   namespace = _env("NAMESPACE", "default")
+  node_selector = dict(kv.split("=", 1)
+                       for kv in _env("NODE_SELECTOR", "").split(",") if kv)
   template = TemplateSpec(
       runtime_class=_env("RUNTIME_CLASS", "gvisor"),
+      node_selector=node_selector or None,
       resources=ResourceSpec(cpu=_env("CPU", "250m"), memory=_env("MEMORY", "512Mi")),
       extra_pod_spec={"serviceAccountName": _env("POD_SA", "podsnap-sa")},
   )
@@ -92,7 +109,7 @@ def main():
     log.info("claimed %s (pod %s)", h.sandbox_id, h.pod_name)
     log.info("probe start: %s", h.exec(PROBE_START).strip())
     before = probe(h)
-    assert before["marker"] == "golden-v1" and before["pid_alive"], before
+    assert before.get("marker") == "golden-v1" and before["pid_alive"], before
 
     t0 = time.monotonic()
     uid = fleet.snapshot(h, "checkpoint")

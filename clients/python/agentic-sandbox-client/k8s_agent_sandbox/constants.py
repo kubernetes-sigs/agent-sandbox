@@ -20,6 +20,8 @@ GATEWAY_PLURAL = "gateways"
 CLAIM_API_GROUP = "extensions.agents.x-k8s.io"
 CLAIM_API_VERSION = "v1beta1"
 CLAIM_PLURAL_NAME = "sandboxclaims"
+WARMPOOL_PLURAL_NAME = "sandboxwarmpools"
+TEMPLATE_PLURAL_NAME = "sandboxtemplates"
 
 SANDBOX_API_GROUP = "agents.x-k8s.io"
 SANDBOX_API_VERSION = "v1beta1"
@@ -63,3 +65,5 @@ BATCH_LEASE_NAME_PREFIX = "batch-"
 # The batch's own Lease duration. After detach(grace), the Lease's leaseDurationSeconds holds
 # the grace instead, so get_batch reads this to restore the original on takeover.
 BATCH_LEASE_DURATION_ANNOTATION = "agents.x-k8s.io/batch-lease-duration"
+BATCH_WORK_BUDGET_ANNOTATION = "agents.x-k8s.io/batch-work-budget"
+BATCH_QUORUM_TIMEOUT_ANNOTATION = "agents.x-k8s.io/batch-quorum-timeout"

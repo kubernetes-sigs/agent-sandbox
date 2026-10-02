@@ -19,19 +19,29 @@ Contains methods for modifying and re-populating a batch's state that operate on
 Kubernetes objects and thus do not perform any network I/O, threading, or locking of their own.
 """
 
+from collections import deque
 from collections.abc import Sequence
-from typing import Any
+from enum import Enum
 from operator import itemgetter
+from typing import Any
 
 from .constants import (
     BATCH_GROUP_MIN_READY_ANNOTATION,
     BATCH_GROUP_SIZE_ANNOTATION,
     TERMINAL_CLAIM_READY_REASONS,
 )
-from .exceptions import BatchError
-from .models import BatchGroup, Member, MemberState
+from .exceptions import BatchError, BatchTimeoutError, QuorumUnreachableError
+from .models import BatchEvent, BatchEventType, BatchGroup, GroupOutcome, Member, MemberState
 
 CREATE_FAILED_REASON = "CreateFailed"
+
+
+class ConsumerMode(Enum):
+    """How a batch hands out Ready members. Set by the first consumer type called."""
+    # Set upon calling events() first. Here, every Ready member is streamed.
+    STREAM = "stream"
+    # Set by calling group consumer (group_outcomes()) first. Here, members are handed out per group.
+    GROUP = "group"
 
 
 def parse_ordinal(batch_id: str, claim_name: str) -> int | None:
@@ -153,7 +163,12 @@ def derive_member(claim_obj: dict[str, Any]) -> Member:
 
 
 class BatchState:
-    """The internal state of a batch handle, containing its members and metadata."""
+    """The internal state of a batch handle, containing its members and metadata.
+
+    Exposes methods for tracking the batch's fill (its initial claims, which carry the group annotations).
+    Each change to a fill member queues the events and group outcomes that ``events()`` and
+    ``group_outcomes()`` yield, in O(1).
+    """
 
     def __init__(self, batch_id: str, groups: Sequence[BatchGroup]) -> None:
         self.batch_id = batch_id
@@ -161,7 +176,40 @@ class BatchState:
         self.size = sum(g.size for g in self.groups)
 
         self._members: dict[str, Member] = {}
+        # Claims of the initial fill. Ordinals can't tell them apart from later claims, since a
+        # re-attached handle only knows the sizes of the groups that still have claims.
+        self._fill_claims: set[str] = set()
         self._error: Exception | None = None
+
+        self._group_by_pool: dict[str, BatchGroup] = {g.warmpool: g for g in self.groups}
+        self._mode: ConsumerMode | None = None
+        # The Ready fill members not yet handed out, per pool. A dict is used as an ordered set to return
+        # members in the order they became ready.
+        self._waiting: dict[str, dict[str, None]] = {pool: {} for pool in self._group_by_pool}
+        # Set of claims already handed to the handle
+        self._dispatched: set[str] = set()
+        # Fill members that can no longer become Ready (terminal or lost). Each is counted once and never
+        # removed, even if its claim comes back, so group outcomes and the settle check never contradict
+        # what callers were already told.
+        self._unable: set[str] = set()
+        self._failed: dict[str, int] = dict.fromkeys(self._group_by_pool, 0)
+        self._lost: dict[str, int] = dict.fromkeys(self._group_by_pool, 0)
+        # Fill claims that will never exist (e.g., creates skipped because their group failed, and
+        # claims missing when a batch is re-attached). These have no name, so they are not added to _unable.
+        self._never_created = 0
+        # Fill claims each group lacked when the batch was re-attached, also counted in _lost and
+        # _never_created. Those two also count real losses and skipped creates, so they can't tell how
+        # many counts a late claim may take back.
+        self._missing: dict[str, int] = dict.fromkeys(self._group_by_pool, 0)
+        # Fill members whose outcome is decided. A member is added once it is unable, handed out, or
+        # dropped while Ready because its group failed. It stays here if it later stops being Ready,
+        # so a settled fill stays settled. A held member isn't added, since it may stop being Ready
+        # and be handed out later. _unable and _dispatched overlap, so one set keeps the count O(1).
+        self._resolved: set[str] = set()
+        self._group_outcomes: dict[str, GroupOutcome] = {}   # Each group's final outcome
+        self._events_to_yield: deque[BatchEvent] = deque()  # Events events() hasn't returned yet; oldest first
+        self._group_outcomes_to_yield: deque[GroupOutcome] = deque()  # Outcomes group_outcomes() hasn't returned yet; oldest first
+        self._fill_expired = False
 
     def seed_from_claims(self, claim_objs: Sequence[dict[str, Any]]) -> None:
         """Reconstructs state from the batch's existing claims."""
@@ -172,8 +220,18 @@ class BatchState:
         """Derives a ``Member`` from a claim and inserts or updates it."""
         metadata = claim_obj.get("metadata") or {}
         claim_name = metadata.get("name", "")
+        annotations = metadata.get("annotations") or {}
+        if BATCH_GROUP_SIZE_ANNOTATION in annotations and BATCH_GROUP_MIN_READY_ANNOTATION in annotations:
+            self._fill_claims.add(claim_name)
         member = derive_member(claim_obj)
+        if claim_name not in self._members and self._is_fill(claim_name, member) and self._missing[member.warmpool]:
+            # A create that timed out before the batch was re-attached landed later. Its claim takes back
+            # one missing count, so the slot counts once, by its real state.
+            self._missing[member.warmpool] -= 1
+            self._lost[member.warmpool] -= 1
+            self._never_created -= 1
         self._members[claim_name] = member
+        self._on_fill_change(claim_name, member)
         return member
 
     def mark_lost(self, claim_name: str) -> Member | None:
@@ -192,6 +250,7 @@ class BatchState:
             update.update(state=MemberState.LOST, reason=None, message=None)
         lost_member = existing.model_copy(update=update)
         self._members[claim_name] = lost_member
+        self._on_fill_change(claim_name, lost_member)
         return lost_member
 
     def resync_from_list(self, claim_objs: Sequence[dict[str, Any]]) -> None:
@@ -227,11 +286,132 @@ class BatchState:
     def error(self) -> Exception | None:
         return self._error
 
+    def _is_fill(self, claim_name: str, member: Member) -> bool:
+        """Whether a claim is one of the batch's initial claims (i.e. it carries the group annotations and its pool is known)."""
+        return claim_name in self._fill_claims and member.warmpool in self._group_by_pool
+
+    def _on_fill_change(self, claim_name: str, member: Member) -> None:
+        """Updates the fill accounting for one changed member, queuing any events and group outcome."""
+        if not self._is_fill(claim_name, member):
+            return
+        pool = member.warmpool
+        if claim_name not in self._unable and member.state in (MemberState.FAILED, MemberState.LOST):
+            self._unable.add(claim_name)
+            self._resolved.add(claim_name)
+            if member.state is MemberState.LOST:
+                self._lost[pool] += 1
+            else:
+                self._failed[pool] += 1
+            self._waiting[pool].pop(claim_name, None)
+            event_type = (
+                BatchEventType.MEMBER_LOST
+                if member.state is MemberState.LOST
+                else BatchEventType.MEMBER_FAILED
+            )
+            self._events_to_yield.append(BatchEvent(type=event_type, member=member))
+        elif claim_name not in self._unable and member.state is MemberState.READY:
+            if claim_name not in self._dispatched:
+                self._route_ready_member(claim_name, pool)
+        elif member.state is not MemberState.READY:
+            # A member that handed out earlier stays handed out, while one that still waiting
+            # is dropped until it is Ready again.
+            self._waiting[pool].pop(claim_name, None)
+        if self._mode == ConsumerMode.GROUP:
+            self._decide_group_outcome(pool)
+
+    def _route_ready_member(self, claim_name: str, pool: str) -> None:
+        """Decides, then either hands a newly Ready member out, holds it until its group
+        yields, or drops it if its group failed.
+        """
+        outcome = self._group_outcomes.get(pool)
+        if self._mode == ConsumerMode.STREAM or (outcome is not None and outcome.error is None):
+            self._dispatch(claim_name)
+        elif outcome is None:
+            # In group mode, a group's Ready members are held until the group yields, so a
+            # group that fails never hands out any of its members.
+            self._waiting[pool][claim_name] = None
+        else:
+            # The group failed, so the member is dropped.
+            self._resolved.add(claim_name)
+
+    def _dispatch(self, claim_name: str) -> None:
+        """Hands a member out to ``events()`` as ``MEMBER_READY``."""
+        self._dispatched.add(claim_name)
+        self._resolved.add(claim_name)
+        self._events_to_yield.append(
+            BatchEvent(type=BatchEventType.MEMBER_READY, member=self._members[claim_name])
+        )
+
+    def _decide_group_outcome(self, pool: str) -> None:
+        """Sets a group's outcome once it has ``min_ready`` held members, or can no longer get them."""
+        if pool in self._group_outcomes:
+            return
+        group = self._group_by_pool[pool]
+        min_ready = group.min_ready or 0
+        waiting = self._waiting[pool]
+        if len(waiting) >= min_ready:
+            names = list(waiting)
+            waiting.clear()
+            cohort = names[:min_ready]
+            self._dispatched.update(cohort)
+            self._resolved.update(cohort)
+            self._set_group_outcome(GroupOutcome(warmpool=pool, members=[self._members[n] for n in cohort]))
+            for name in names[min_ready:]:
+                self._dispatch(name)
+        elif group.size - self._failed[pool] - self._lost[pool] < min_ready:
+            self._resolved.update(waiting)
+            waiting.clear()
+            self._set_group_outcome(GroupOutcome(warmpool=pool, error=QuorumUnreachableError(
+                warmpool=pool,
+                size=group.size,
+                min_ready=min_ready,
+                failed=self._failed[pool],
+                lost=self._lost[pool],
+            )))
+
+    def _set_group_outcome(self, outcome: GroupOutcome) -> None:
+        """Records a group's outcome and queues it for ``group_outcomes()``."""
+        self._group_outcomes[outcome.warmpool] = outcome
+        self._group_outcomes_to_yield.append(outcome)
+
+    def _time_out_undecided_groups(self) -> None:
+        """Gives every group without an outcome a ``BatchTimeoutError``."""
+        for pool in self._group_by_pool:
+            if pool not in self._group_outcomes:
+                self._waiting[pool].clear()
+                self._set_group_outcome(GroupOutcome(warmpool=pool, error=BatchTimeoutError("Group quorum timed out")))
+
+    def set_mode(self, mode: ConsumerMode) -> None:
+        """Fixes how Ready members are handed out, on the first call of ``events()``
+        (``ConsumerMode.STREAM``) or ``group_outcomes()`` (``ConsumerMode.GROUP``).
+
+        Raises:
+            BatchError: If ``group_outcomes()`` is called after ``events()`` fixed stream mode.
+        """
+        if self._mode == mode or (self._mode == ConsumerMode.GROUP and mode == ConsumerMode.STREAM):
+            return
+        if self._mode == ConsumerMode.STREAM:
+            raise BatchError("group_outcomes() can't be used after events()")
+        self._mode = mode
+        if mode == ConsumerMode.STREAM:
+            for waiting in self._waiting.values():
+                for name in waiting:
+                    self._dispatch(name)
+                waiting.clear()
+        else:
+            for pool in self._group_by_pool:
+                self._decide_group_outcome(pool)
+            if self._fill_expired:
+                self._time_out_undecided_groups()
+
     def record_create_failure(self, claim_name: str, warmpool: str, message: str) -> None:
         """Records a claim whose create failed as a terminal member with reason ``CreateFailed``."""
         if claim_name in self._members:
             # The watch has already seen the claim, so an earlier attempt did create it.
             return
+        # Only the fill's creates are recorded here, and their claims would have carried the group
+        # annotations.
+        self._fill_claims.add(claim_name)
         member = Member(
             claim_name=claim_name,
             warmpool=warmpool,
@@ -240,3 +420,60 @@ class BatchState:
             message=message,
         )
         self._members[claim_name] = member
+        self._on_fill_change(claim_name, member)
+
+    def record_skipped_create(self) -> None:
+        """Counts a fill claim that won't be created because its group failed, so the fill can settle."""
+        self._never_created += 1
+
+    def group_failed(self, warmpool: str) -> bool:
+        """Whether the group's quorum failed, so its remaining claims shouldn't be created."""
+        outcome = self._group_outcomes.get(warmpool)
+        return self._mode == ConsumerMode.GROUP and outcome is not None and outcome.error is not None
+
+    def expire_fill(self) -> bool:
+        """Ends the fill at its deadline. In group mode, every group without an outcome gets a
+        ``BatchTimeoutError``. Members are left as they are.
+
+        Returns ``False`` if the fill had already expired.
+        """
+        if self._fill_expired:
+            return False
+        self._fill_expired = True
+        if self._mode == ConsumerMode.GROUP:
+            self._time_out_undecided_groups()
+        return True
+
+    def count_missing_fill_as_unable(self) -> None:
+        """For a re-attached batch, counts each group's fill claims that don't exist as unable.
+        The previous handle stopped creating before it detached, so such a claim can still appear only
+        if a create that timed out landed anyway. ``upsert_claim`` then takes its count back.
+        """
+        seen: dict[str, int] = dict.fromkeys(self._group_by_pool, 0)
+        for name, member in self._members.items():
+            if self._is_fill(name, member):
+                seen[member.warmpool] += 1
+        for pool, group in self._group_by_pool.items():
+            missing = max(0, group.size - seen[pool])
+            self._missing[pool] += missing
+            self._lost[pool] += missing
+            self._never_created += missing
+
+    def pop_event(self) -> BatchEvent | None:
+        return self._events_to_yield.popleft() if self._events_to_yield else None
+
+    def pop_group_outcome(self) -> GroupOutcome | None:
+        return self._group_outcomes_to_yield.popleft() if self._group_outcomes_to_yield else None
+
+    def fill_settled(self) -> bool:
+        """Whether every fill member's outcome is decided, or if the fill deadline has passed."""
+        return self._fill_expired or len(self._resolved) + self._never_created >= self.size
+
+    def events_done(self) -> bool:
+        return self.fill_settled() and not self._events_to_yield
+
+    def groups_done(self) -> bool:
+        return (
+            len(self._group_outcomes) == len(self._group_by_pool)
+            and not self._group_outcomes_to_yield
+        )

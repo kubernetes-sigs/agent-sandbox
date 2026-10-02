@@ -270,6 +270,7 @@ To ensure a truly clean slate and prevent state leakage between tasks, the `Clea
 - **Memory & Kernel State:** Language kernels (like Jupyter) must be restarted to clear in-memory variables and imported modules.
 - **Network State:** Ensuring all ports bound by the agent are released and listening sockets are closed.
 - **Environment Variables:** Resetting the environment block to the default "golden" state.
+- **Credentials:** Revoking every token or credential issued for the run, not just removing it from the environment block. Removal from `env` does not invalidate a copy already read out of the sandbox by the time `Clean()` runs.
 
 ## Alternatives
 

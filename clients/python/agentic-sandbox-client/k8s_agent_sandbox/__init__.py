@@ -32,6 +32,7 @@ from .exceptions import (
     BatchNotFoundError,
     BatchLeaseExpiredError,
     BatchInUseError,
+    BatchExistsError,
 )
 
 

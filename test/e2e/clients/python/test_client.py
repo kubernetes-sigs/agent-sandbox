@@ -20,6 +20,7 @@ import time
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
 from k8s_agent_sandbox import SandboxClient, SandboxWarmPoolNotFoundError
 from k8s_agent_sandbox.models import (
     ExecutionResult,
@@ -30,6 +31,13 @@ from k8s_agent_sandbox.models import (
 )
 from k8s_agent_sandbox.sandbox import Sandbox
 
+from test.e2e.clients.python.framework.sdk_helpers import (
+    WARMPOOL_YAML_PATH,
+    TEMPLATE_YAML_PATH,
+    get_image_prefix,
+    get_image_tag,
+)
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", force=True
 )
@@ -38,7 +46,7 @@ pytestmark = pytest.mark.example
 
 
 @pytest.fixture(scope="module")
-def sandbox_connection_config(request):
+def sandbox_connection_config(request, temp_namespace):
     if request.config.getoption("--gateway-name"):
         return SandboxGatewayConnectionConfig(
             gateway_name=request.config.getoption("--gateway-name"),
@@ -76,17 +84,17 @@ def sandbox_client(sandbox_connection_config, sandbox_tracer_config):
 
 
 @pytest.fixture
-def sandbox(request, sandbox_client):
-    warmpool_name = request.config.getoption("--warmpool-name")
-    namespace = request.config.getoption("--namespace")
-    sandbox = sandbox_client.create_sandbox(warmpool_name, namespace=namespace)
+def sandbox(sandbox_warmpool, temp_namespace, sandbox_client):
+    sandbox = sandbox_client.create_sandbox(sandbox_warmpool, namespace=temp_namespace)
     return sandbox
 
 
 @pytest.fixture
-def sandbox_create_script(request, sandbox_connection_config):
-    warmpool_name = request.config.getoption("--warmpool-name")
-    namespace = request.config.getoption("--namespace")
+def sandbox_create_script(
+    sandbox_connection_config,
+    sandbox_warmpool,
+    temp_namespace,
+):
     if isinstance(sandbox_connection_config, SandboxGatewayConnectionConfig):
         conn_code = f"SandboxGatewayConnectionConfig(gateway_name='{sandbox_connection_config.gateway_name}', gateway_namespace='{sandbox_connection_config.gateway_namespace}', server_port={sandbox_connection_config.server_port})"
     elif isinstance(sandbox_connection_config, SandboxDirectConnectionConfig):
@@ -95,21 +103,26 @@ def sandbox_create_script(request, sandbox_connection_config):
         conn_code = f"SandboxLocalTunnelConnectionConfig(server_port={sandbox_connection_config.server_port}, router_namespace='{sandbox_connection_config.router_namespace}')"
 
     script = f"""
-    from k8s_agent_sandbox import SandboxClient
-    from k8s_agent_sandbox.models import SandboxGatewayConnectionConfig, SandboxDirectConnectionConfig, SandboxLocalTunnelConnectionConfig
-    import sys
-    
-    cleanup_flag = sys.argv[1] == 'True'
-    conn_config = {conn_code}
-    client = SandboxClient(connection_config=conn_config, cleanup=cleanup_flag)
-    
-    sb = client.create_sandbox('{warmpool_name}', namespace='{namespace}')
-    print(f"CLAIM_NAME:{{sb.claim_name}}")
-    """
+from k8s_agent_sandbox import SandboxClient
+from k8s_agent_sandbox.models import SandboxGatewayConnectionConfig, SandboxDirectConnectionConfig, SandboxLocalTunnelConnectionConfig
+import sys
+
+cleanup_flag = sys.argv[1] == 'True'
+conn_config = {conn_code}
+client = SandboxClient(connection_config=conn_config, cleanup=cleanup_flag)
+
+sb = client.create_sandbox('{sandbox_warmpool}', namespace='{temp_namespace}')
+print(f"CLAIM_NAME:{{sb.claim_name}}")
+"""
     return script
 
 
-def test_sandbox_cleanup_flag_true(request, sandbox_create_script, sandbox_client):
+def test_sandbox_cleanup_flag_true(
+    sandbox_create_script,
+    sandbox_client,
+    sandbox_warmpool,
+    temp_namespace,
+):
     print("Simulating script exit with cleanup=True...")
     res_true = subprocess.run(
         [sys.executable, "-c", sandbox_create_script, "True"],
@@ -141,9 +154,7 @@ def test_sandbox_cleanup_flag_true(request, sandbox_create_script, sandbox_clien
     deleted = False
     while time.monotonic() - start_time < 60:
         try:
-            sandbox_client.get_sandbox(
-                claim_true, namespace=request.config.getoption("--namespace")
-            )
+            sandbox_client.get_sandbox(claim_true, namespace=temp_namespace)
             time.sleep(2)
         except Exception as e:
             if "not found" in str(e).lower():
@@ -158,7 +169,9 @@ def test_sandbox_cleanup_flag_true(request, sandbox_create_script, sandbox_clien
     print("Verified: Sandbox was successfully deleted on script exit.")
 
 
-def test_sandbox_cleanup_flag_false(request, sandbox_create_script, sandbox_client):
+def test_sandbox_cleanup_flag_false(
+    sandbox_create_script, sandbox_client, sandbox_warmpool, temp_namespace
+):
     print("Simulating script exit with cleanup=False...")
     res_false = subprocess.run(
         [sys.executable, "-c", sandbox_create_script, "False"],
@@ -186,9 +199,7 @@ def test_sandbox_cleanup_flag_false(request, sandbox_create_script, sandbox_clie
     print(f"Created sandbox '{claim_false}' in subprocess. Verifying persistence...")
 
     # Verify the claim was NOT deleted by verifying we can cleanly reconnect to it
-    sb_false = sandbox_client.get_sandbox(
-        claim_false, request.config.getoption("--namespace")
-    )
+    sb_false = sandbox_client.get_sandbox(claim_false, temp_namespace)
     assert sb_false.is_active, f"Sandbox {claim_false} should still be active!"
     print("Verified: Sandbox persisted after script exit.")
 
@@ -197,7 +208,7 @@ def test_sandbox_cleanup_flag_false(request, sandbox_create_script, sandbox_clie
     print("--- SandboxClient cleanup flag Test Passed ---")
 
 
-def test_command_execution(sandbox: Sandbox):
+def test_command_execution(sandbox: Sandbox, sandbox_warmpool, deploy_router):
     """Tests command execution and pod introspection."""
     print("\n--- Testing Command Execution ---")
     command_to_run = "echo 'Hello from the sandbox shruti!'"
@@ -312,7 +323,8 @@ def test_termination_and_deletion(
     sandbox_client: SandboxClient,
     sandbox: Sandbox,
     sandbox2: Sandbox,
-    namespace: str,
+    temp_namespace: str,
+    sandbox_warmpool,
 ):
     print("\n--- Testing Termination and Get ---")
     print(f"Terminating sandbox {sandbox.claim_name}...")
@@ -323,7 +335,7 @@ def test_termination_and_deletion(
     start_time = time.monotonic()
     while True:
         try:
-            sandbox_client.get_sandbox(sandbox.claim_name, namespace=namespace)
+            sandbox_client.get_sandbox(sandbox.claim_name, namespace=temp_namespace)
             if time.monotonic() - start_time > 60:
                 raise AssertionError(
                     f"Sandbox {sandbox.claim_name} was not deleted within timeout"
@@ -375,7 +387,7 @@ def test_termination_and_deletion(
     start_time = time.monotonic()
     while True:
         try:
-            sandbox_client.get_sandbox(sandbox2.claim_name, namespace=namespace)
+            sandbox_client.get_sandbox(sandbox2.claim_name, namespace=temp_namespace)
             if time.monotonic() - start_time > 60:
                 raise AssertionError(
                     f"Sandbox {sandbox2.claim_name} was not deleted within timeout"
@@ -389,15 +401,14 @@ def test_termination_and_deletion(
     print("--- Sandbox 2 Retrieval Failure Verified ---")
 
 
-def test_wrong_warmpool_name(request, sandbox_client: SandboxClient):
+def test_wrong_warmpool_name(sandbox_client: SandboxClient, temp_namespace):
     print("\n--- Testing Wrong Warmpool Name ---")
     wrong_warmpool = "this-warmpool-does-not-exist-123"
-    namespace = request.config.getoption("--namespace")
     print(
         f"Attempting to create sandbox with non-existent warm pool '{wrong_warmpool}'..."
     )
     try:
-        sandbox_client.create_sandbox(wrong_warmpool, namespace=namespace)
+        sandbox_client.create_sandbox(wrong_warmpool, namespace=temp_namespace)
         raise AssertionError("Expected SandboxWarmPoolNotFoundError was not raised")
     except SandboxWarmPoolNotFoundError as e:
         print(f"Caught expected SandboxWarmPoolNotFoundError: {e}")
@@ -405,12 +416,12 @@ def test_wrong_warmpool_name(request, sandbox_client: SandboxClient):
 
 
 def test_explicit_close_connection_and_persistence(
-    request, sandbox_client: SandboxClient
+    sandbox_client: SandboxClient, sandbox_warmpool, temp_namespace
 ):
     print("\n--- Testing Explicit Disconnect and Persistence ---")
-    warmpool_name = request.config.getoption("--warmpool-name")
-    namespace = request.config.getoption("--namespace")
-    persist_sandbox = sandbox_client.create_sandbox(warmpool_name, namespace=namespace)
+    persist_sandbox = sandbox_client.create_sandbox(
+        sandbox_warmpool, namespace=temp_namespace
+    )
     persist_claim = persist_sandbox.claim_name
 
     print(f"Explicitly closing connection for sandbox '{persist_claim}'...")
@@ -421,14 +432,16 @@ def test_explicit_close_connection_and_persistence(
 
     print("Checking active sandboxes list...")
     active_list = sandbox_client.list_active_sandboxes()
-    assert (namespace, persist_claim) not in active_list, (
+    assert (temp_namespace, persist_claim) not in active_list, (
         "Sandbox with closed connection should be removed from active list"
     )
 
     print(f"Re-attaching to sandbox '{persist_claim}' with closed connection...")
-    reattached_sandbox = sandbox_client.get_sandbox(persist_claim, namespace=namespace)
+    reattached_sandbox = sandbox_client.get_sandbox(
+        persist_claim, namespace=temp_namespace
+    )
     assert reattached_sandbox.is_active, "Reattached sandbox should be active"
-    assert (namespace, persist_claim) in sandbox_client.list_active_sandboxes(), (
+    assert (temp_namespace, persist_claim) in sandbox_client.list_active_sandboxes(), (
         "Restored sandbox should be back in active list"
     )
     assert persist_sandbox is not reattached_sandbox, (
@@ -446,21 +459,20 @@ def test_explicit_close_connection_and_persistence(
 
 
 def test_creation_get_and_list_sandboxes(
-    request,
     sandbox_client: SandboxClient,
+    sandbox_warmpool,
+    temp_namespace,
 ) -> tuple[Sandbox, Sandbox]:
-    warmpool_name = request.config.getoption("--warmpool-name")
-    namespace = request.config.getoption("--namespace")
     print(
-        f"Creating sandbox with warm pool '{warmpool_name}' in namespace '{namespace}'..."
+        f"Creating sandbox with warm pool '{sandbox_warmpool}' in namespace '{temp_namespace}'..."
     )
-    sandbox = sandbox_client.create_sandbox(warmpool_name, namespace=namespace)
+    sandbox = sandbox_client.create_sandbox(sandbox_warmpool, namespace=temp_namespace)
     print(f"Sandbox created with claim name: {sandbox.claim_name}")
 
     print(
-        f"Creating second sandbox with warm pool '{warmpool_name}' in namespace '{namespace}'..."
+        f"Creating second sandbox with warm pool '{sandbox_warmpool}' in namespace '{temp_namespace}'..."
     )
-    sandbox2 = sandbox_client.create_sandbox(warmpool_name, namespace=namespace)
+    sandbox2 = sandbox_client.create_sandbox(sandbox_warmpool, namespace=temp_namespace)
     print(f"Sandbox 2 created with claim name: {sandbox2.claim_name}")
 
     print("\n--- Verifying Active Sandboxes ---")
@@ -472,7 +484,7 @@ def test_creation_get_and_list_sandboxes(
     # Test get_sandbox
     print("\n--- Testing get_sandbox ---")
     reattached_sandbox = sandbox_client.get_sandbox(
-        sandbox.claim_name, namespace=namespace
+        sandbox.claim_name, namespace=temp_namespace
     )
     print(f"Re-attached to sandbox: {reattached_sandbox.claim_name}")
 
@@ -491,7 +503,9 @@ def test_creation_get_and_list_sandboxes(
     return sandbox, sandbox2
 
 
-def test_claim_annotation(request, sandbox_client: SandboxClient):
+def test_claim_annotation(
+    sandbox_client: SandboxClient, sandbox_warmpool, temp_namespace
+):
     print("\n--- Testing SandboxClaim Annotation ---")
     import uuid
     from datetime import datetime
@@ -504,10 +518,8 @@ def test_claim_annotation(request, sandbox_client: SandboxClient):
     )
 
     claim_name = f"test-annotation-{uuid.uuid4().hex[:8]}"
-    warmpool_name = request.config.getoption("--warmpool-name")
-    namespace = request.config.getoption("--namespace")
     # Create claim using client
-    sandbox_client._create_claim(claim_name, warmpool_name, namespace)
+    sandbox_client._create_claim(claim_name, sandbox_warmpool, temp_namespace)
 
     try:
         # Get claim using k8s_helper
@@ -515,7 +527,7 @@ def test_claim_annotation(request, sandbox_client: SandboxClient):
             sandbox_client.k8s_helper.custom_objects_api.get_namespaced_custom_object(
                 group=CLAIM_API_GROUP,
                 version=CLAIM_API_VERSION,
-                namespace=namespace,
+                namespace=temp_namespace,
                 plural=CLAIM_PLURAL_NAME,
                 name=claim_name,
             )
@@ -545,10 +557,12 @@ def test_claim_annotation(request, sandbox_client: SandboxClient):
 
     finally:
         print(f"Cleaning up claim {claim_name}...")
-        sandbox_client._delete_claim(claim_name, namespace)
+        sandbox_client._delete_claim(claim_name, temp_namespace)
 
 
-def test_volume_claim_templates(request, sandbox_client: SandboxClient):
+def test_volume_claim_templates(
+    sandbox_client: SandboxClient, sandbox_warmpool, temp_namespace
+):
     print("\n--- Testing Custom Volume Claim Templates on SandboxClaim ---")
 
     storage_class = os.getenv("SANDBOX_TEST_STORAGE_CLASS")
@@ -564,12 +578,9 @@ def test_volume_claim_templates(request, sandbox_client: SandboxClient):
     if storage_class:
         custom_vcts[0]["spec"]["storageClassName"] = storage_class
 
-    warmpool_name = request.config.getoption("--warmpool-name")
-    namespace = request.config.getoption("--namespace")
-
     print("Creating sandbox with custom volume claim templates...")
     sandbox = sandbox_client.create_sandbox(
-        warmpool_name, namespace=namespace, volume_claim_templates=custom_vcts
+        sandbox_warmpool, namespace=temp_namespace, volume_claim_templates=custom_vcts
     )
     print(f"Sandbox created with claim name: {sandbox.claim_name}")
 
@@ -577,7 +588,7 @@ def test_volume_claim_templates(request, sandbox_client: SandboxClient):
         # Verify that volumeClaimTemplates was propagated to the SandboxClaim spec
         print("Verifying SandboxClaim spec.volumeClaimTemplates...")
         claim_res = sandbox_client.k8s_helper.get_sandbox_claim(
-            sandbox.claim_name, namespace
+            sandbox.claim_name, temp_namespace
         )
         assert claim_res is not None, f"SandboxClaim {sandbox.claim_name} should exist"
         claim_spec = claim_res.get("spec", {})
@@ -592,7 +603,7 @@ def test_volume_claim_templates(request, sandbox_client: SandboxClient):
         # Verify that volumeClaimTemplates was propagated to the Sandbox spec
         print("Verifying Sandbox spec.volumeClaimTemplates...")
         sandbox_res = sandbox_client.k8s_helper.get_sandbox(
-            sandbox.sandbox_id, namespace
+            sandbox.sandbox_id, temp_namespace
         )
         assert sandbox_res is not None, f"Sandbox {sandbox.sandbox_id} should exist"
         sandbox_spec = sandbox_res.get("spec", {})
@@ -630,7 +641,7 @@ def test_volume_claim_templates(request, sandbox_client: SandboxClient):
         print("Verifying PVC creation in cluster...")
         pvc_name = f"custom-workspace-{sandbox.sandbox_id}"
         pvc_res = sandbox_client.k8s_helper.core_v1_api.read_namespaced_persistent_volume_claim(
-            pvc_name, namespace
+            pvc_name, temp_namespace
         )
         assert pvc_res is not None, f"PVC {pvc_name} should exist"
         assert pvc_res.spec.resources.requests is not None

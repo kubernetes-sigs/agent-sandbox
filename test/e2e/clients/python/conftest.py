@@ -47,7 +47,7 @@ def pytest_addoption(parser):
     parser.addoption(
         "--warmpool-name",
         action="store",
-        default="python-sandbox-pool",
+        default="python-sdk-warmpool",
         help="The name of the sandbox warm pool to use for the test.",
     )
     parser.addoption(
@@ -65,7 +65,7 @@ def pytest_addoption(parser):
     parser.addoption(
         "--namespace",
         action="store",
-        default="default",
+        default="testing-default",
         help="Namespace to create sandbox in",
     )
     parser.addoption(
@@ -78,7 +78,7 @@ def pytest_addoption(parser):
     parser.addoption(
         "--router-namespace",
         action="store",
-        default="default",
+        default="testing-default",
         help="Namespace where the Router service resides",
     )
     parser.addoption(
@@ -103,9 +103,13 @@ def tc():
 
 
 @pytest.fixture
-def temp_namespace(tc):
+def temp_namespace(
+    request,
+    tc,
+):
     """Creates and yields a temporary namespace for testing"""
-    namespace = tc.create_temp_namespace(prefix="py-sdk-e2e-")
+    namespace = request.config.getoption("--namespace")
+    namespace = tc.create_temp_namespace(prefix=namespace)
     yield namespace
     tc.delete_namespace(namespace)
 
@@ -174,16 +178,18 @@ def sandbox_template(tc, temp_namespace):
 
 
 @pytest.fixture
-def sandbox_warmpool(tc, temp_namespace, sandbox_template):
+def sandbox_warmpool(request, tc, sandbox_template, temp_namespace):
     """Deploys the sandbox warmpool into the test namespace"""
+    warmpool_name = request.config.getoption("--warmpool-name")
     with open(WARMPOOL_YAML_PATH, "r") as f:
-        manifest = f.read()
-    tc.apply_manifest_text(manifest, namespace=temp_namespace)
+        manifest = yaml.safe_load(f)
+    manifest["metadata"]["name"] = warmpool_name
+    tc.apply_manifest_text(yaml.safe_dump(manifest), namespace=temp_namespace)
     print("Warmpool manifest applied.")
 
-    tc.wait_for_warmpool_ready("python-sdk-warmpool", namespace=temp_namespace)
+    tc.wait_for_warmpool_ready(warmpool_name, namespace=temp_namespace)
     print("Warmpool is ready.")
-    return "python-sdk-warmpool"
+    return warmpool_name
 
 
 @pytest.fixture

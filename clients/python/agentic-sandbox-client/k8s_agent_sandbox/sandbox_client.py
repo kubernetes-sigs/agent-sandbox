@@ -21,6 +21,7 @@ import uuid
 import atexit
 import sys
 import logging
+from collections.abc import Sequence
 from typing import List, Dict, Tuple, TypeVar, Generic, Type
 
 from kubernetes.client import ApiException
@@ -31,9 +32,11 @@ from .claim_adoption import validate_claim_name, validate_claim_for_adoption
 from .trace_manager import (
     create_tracer_manager, initialize_tracer, trace_span, trace
 )
+from . import batch_utils
 from .sandbox import Sandbox
 from .sandbox_batch import SandboxBatch
 from .models import (
+    BatchGroup,
     SandboxConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
     SandboxTracerConfig,
@@ -75,7 +78,8 @@ class SandboxClient(Generic[T]):
                 Defaults to an empty SandboxTracerConfig (tracing disabled).
             cleanup: If True, registers an atexit hook to automatically delete
                 tracked sandboxes when the program terminates, excluding claims
-                explicitly named through create_sandbox(). Defaults to False.
+                explicitly named through create_sandbox(), and to release tracked
+                batches. Defaults to False.
         """
         # Sandbox related configuration
         self.connection_config = connection_config or SandboxLocalTunnelConnectionConfig()
@@ -92,6 +96,8 @@ class SandboxClient(Generic[T]):
         # Tracks all the active client side connections to the created sandbox claims
         self._active_connection_sandboxes: Dict[Tuple[str, str], T] = {}
         self._explicit_claims: set[tuple[str, str]] = set()
+        # Batch handles from claim_batch() and get_batch() until they are released or detached
+        self._active_batches: Dict[Tuple[str, str], SandboxBatch] = {}
         
         # Optional automatic cleanup of sandboxes on program termination
         if cleanup:
@@ -337,6 +343,69 @@ class SandboxClient(Generic[T]):
         """
         return self.k8s_helper.list_sandbox_claims(namespace, label_selector=label_selector)
 
+    def claim_batch(
+        self,
+        groups: Sequence[BatchGroup],
+        *,
+        namespace: str = "default",
+        labels: dict[str, str] | None = None,
+        batch_id: str | None = None,
+        create_rps: float | None = None,
+        max_in_flight: int | None = None,
+        work_budget: int | None = None,
+        quorum_timeout: int | None = None,
+        lease_duration: int | None = None,
+    ) -> SandboxBatch:
+        """Claims a batch of sandboxes across one or more warm pools, returning its handle at once.
+
+        Checks that every group's ``SandboxWarmPool`` and its ``SandboxTemplate`` exist, creates the
+        batch Lease ``batch-<id>``, and starts the batch's watch. The claims ``<id>-0`` to
+        ``<id>-<size-1>`` are then created in the background, in group order. Use ``members()`` to
+        see them as they become Ready, and ``release()`` to delete the batch.
+
+        Each claim's ``shutdownTime`` is its create time plus ``quorum_timeout`` plus ``work_budget``
+        plus 600 seconds, so an abandoned batch is eventually deleted by the controller.
+
+        Args:
+            groups: One ``BatchGroup`` per warm pool, each with ``size`` at least 1.
+            namespace: Kubernetes namespace for the claims and the Lease.
+            labels: Optional labels for every claim.
+            batch_id: Optional batch id; a DNS-1123 label starting with a letter, at most 52
+                characters. Generated if omitted.
+            create_rps: Maximum claim creates started per second. Defaults to 50.
+            max_in_flight: Maximum claim creates in flight at once. Defaults to 20.
+            work_budget: Seconds the caller expects to work with the batch after it is Ready;
+                part of each claim's ``shutdownTime``. Defaults to 3600.
+            quorum_timeout: Seconds the caller allows for the batch's claims to become Ready;
+                part of each claim's ``shutdownTime``. Defaults to 600.
+            lease_duration: Seconds the batch Lease stays valid without renewal. Defaults to 60.
+
+        Raises:
+            ValueError: If an argument is invalid.
+            SandboxWarmPoolNotFoundError: If a group's warm pool doesn't exist.
+            SandboxTemplateNotFoundError: If a warm pool's template doesn't exist, or it names none.
+            BatchExistsError: If a Lease or claims with this batch id already exist.
+            ApiException: For any other API error before the first claim is created, such as a
+                403. If the Lease was already created, it is deleted first.
+
+        Example:
+
+            >>> client = SandboxClient()
+            >>> batch = client.claim_batch([BatchGroup(warmpool="python-sandbox-pool", size=4)])
+            >>> while not any(m.ready for m in batch.members()):
+            ...     time.sleep(1)
+            >>> member = next(m for m in batch.members() if m.ready)
+            >>> batch.connect(member).commands.run("echo hello")
+            >>> batch.release()
+        """
+        args = batch_utils.validate_claim_batch_args(
+            groups, labels, batch_id, create_rps, max_in_flight, work_budget, quorum_timeout,
+            lease_duration,
+        )
+        batch = SandboxBatch._claim(self, args, namespace, self._trace_context_annotations())
+        self._active_batches[(namespace, batch.batch_id)] = batch
+        return batch
+
     def get_batch(self, batch_id: str, namespace: str = "default") -> SandboxBatch:
         """Attaches to an existing batch, taking over its Lease.
 
@@ -359,7 +428,12 @@ class SandboxClient(Generic[T]):
             >>> batch = client.get_batch("b1234abcd12")
             >>> ready = [m for m in batch.members() if m.ready]
         """
-        return SandboxBatch._attach(self, batch_id, namespace)
+        batch = SandboxBatch._attach(self, batch_id, namespace)
+        self._active_batches[(namespace, batch_id)] = batch
+        return batch
+
+    def _unregister_batch(self, namespace: str, batch_id: str) -> None:
+        self._active_batches.pop((namespace, batch_id), None)
 
     def delete_sandbox(self, claim_name: str, namespace: str = "default") -> None:
         """Stops the client side connection and deletes the Kubernetes resources.
@@ -383,7 +457,7 @@ class SandboxClient(Generic[T]):
             
     def delete_all(self) -> None:
         """
-        Cleanup all tracked sandboxes managed by this client.
+        Cleanup all tracked sandboxes managed by this client, and release every tracked batch.
         
         Example:
         
@@ -399,6 +473,7 @@ class SandboxClient(Generic[T]):
                 logging.error(
                     f"Cleanup failed for {claim_name} in namespace {ns}: {e}"
                 )
+        self._release_batches()
 
     def _delete_automatic_sandboxes(self) -> None:
         for key, sandbox in list(self._active_connection_sandboxes.items()):
@@ -410,6 +485,16 @@ class SandboxClient(Generic[T]):
                     self.delete_sandbox(claim_name, namespace)
             except Exception as e:
                 logging.error(f"Cleanup failed for {claim_name} in namespace {namespace}: {e}")
+        self._release_batches()
+
+    def _release_batches(self) -> None:
+        # A handle that exits without detach() has signaled no handoff, so its batch is released
+        # whether this client claimed it or re-attached to it.
+        for (namespace, batch_id), batch in list(self._active_batches.items()):
+            try:
+                batch.release()
+            except Exception as e:
+                logging.error(f"Failed to release batch '{batch_id}' in namespace {namespace}: {e}")
 
     @trace_span("create_claim")
     def _create_claim(
@@ -431,23 +516,25 @@ class SandboxClient(Generic[T]):
                 span.set_attribute("sandbox.lifecycle.shutdown_time", lifecycle["shutdownTime"])
                 span.set_attribute("sandbox.lifecycle.shutdown_policy", lifecycle["shutdownPolicy"])
 
-        annotations = {}
-        if self.tracing_manager:
-            trace_context_str = self.tracing_manager.get_trace_context_json()
-            if trace_context_str:
-                annotations["opentelemetry.io/trace-context"] = trace_context_str
-
         return self.k8s_helper.create_sandbox_claim(
             claim_name,
             warmpool_name,
             namespace,
-            annotations=annotations,
+            annotations=self._trace_context_annotations(),
             labels=labels,
             lifecycle=lifecycle,
             volume_claim_templates=volume_claim_templates,
             pod_metadata=pod_metadata,
             env=env,
         )
+
+    def _trace_context_annotations(self) -> dict[str, str]:
+        annotations = {}
+        if self.tracing_manager:
+            trace_context_str = self.tracing_manager.get_trace_context_json()
+            if trace_context_str:
+                annotations["opentelemetry.io/trace-context"] = trace_context_str
+        return annotations
 
     @trace_span("wait_for_claim_ready")
     def _wait_for_claim_ready(self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None, **kwargs) -> str:

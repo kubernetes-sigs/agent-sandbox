@@ -5982,3 +5982,180 @@ func TestReconcileEvents_SandboxSuspended(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "Normal SandboxReady Sandbox is ready", drainEvent(t, recorder))
 }
+
+// managedFieldsResetSentinel is the wire body of managedFieldsResetPatch.
+const managedFieldsResetSentinel = `{"metadata":{"managedFields":[{}]}}`
+
+func kindOf(obj client.Object) string {
+	switch obj.(type) {
+	case *corev1.Pod:
+		return "Pod"
+	case *sandboxv1beta1.Sandbox:
+		return "Sandbox"
+	default:
+		return fmt.Sprintf("%T", obj)
+	}
+}
+
+// newManagedFieldsTestClient wraps inner so tests can observe the writes
+// relevant to --strip-managed-fields, in order: Pod creates, managedFields
+// reset patches, and Sandbox status patches. Reset patches are recorded and
+// swallowed rather than forwarded: the fake client has no field manager, so
+// applying the sentinel would store a literal empty entry and bump the
+// ResourceVersion, unlike a real apiserver. resetErr, when non-nil, is
+// returned from the reset patch instead, to simulate apiserver failures.
+func newManagedFieldsTestClient(inner client.WithWatch, resetErr func(client.Object) error) (client.WithWatch, *[]string) {
+	ops := &[]string{}
+	fc := interceptor.NewClient(inner, interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if _, isPod := obj.(*corev1.Pod); isPod {
+				*ops = append(*ops, "create Pod/"+obj.GetName())
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			data, err := patch.Data(obj)
+			if err != nil {
+				return err
+			}
+			if string(data) != managedFieldsResetSentinel {
+				return c.Patch(ctx, obj, patch, opts...)
+			}
+			*ops = append(*ops, "reset "+kindOf(obj)+"/"+obj.GetName())
+			if resetErr != nil {
+				return resetErr(obj)
+			}
+			return nil
+		},
+		SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if _, isSandbox := obj.(*sandboxv1beta1.Sandbox); isSandbox && subResourceName == "status" {
+				*ops = append(*ops, "status Sandbox/"+obj.GetName())
+			}
+			return c.SubResource(subResourceName).Patch(ctx, obj, patch, opts...)
+		},
+	})
+	return fc, ops
+}
+
+// stripManagedFieldsSandbox returns a minimal Sandbox for the strip tests.
+func stripManagedFieldsSandbox(name, ns string) *sandboxv1beta1.Sandbox {
+	return &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, UID: sandboxUID, Generation: 1},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+			PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+			},
+		}},
+	}
+}
+
+// markPodReady flips the sandbox's pod to Running/Ready so the next reconcile
+// drives the Sandbox to Ready=True.
+func markPodReady(t *testing.T, c client.Client, key types.NamespacedName) {
+	t.Helper()
+	pod := &corev1.Pod{}
+	require.NoError(t, c.Get(t.Context(), key, pod))
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.PodIPs = []corev1.PodIP{{IP: "10.0.0.8"}}
+	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+	require.NoError(t, c.Status().Update(t.Context(), pod))
+}
+
+func resetOps(ops []string) []string {
+	var out []string
+	for _, op := range ops {
+		if strings.HasPrefix(op, "reset ") {
+			out = append(out, op)
+		}
+	}
+	return out
+}
+
+// TestStripManagedFieldsDisabledIssuesNoResetPatch pins the default: with the
+// flag off, a full create-to-Ready sequence never issues the managedFields
+// reset sentinel to either the Pod or the Sandbox.
+func TestStripManagedFieldsDisabledIssuesNoResetPatch(t *testing.T) {
+	sb := stripManagedFieldsSandbox("strip-off", "strip-ns")
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sb.Name, Namespace: sb.Namespace}}
+	fc, ops := newManagedFieldsTestClient(newFakeClient(sb), nil)
+	r := &SandboxReconciler{Client: fc, Scheme: Scheme, Tracer: asmetrics.NewNoOp(), ClusterDomain: "cluster.local"}
+
+	_, err := r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	markPodReady(t, fc, req.NamespacedName)
+	_, err = r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+
+	live := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, fc.Get(t.Context(), req.NamespacedName, live))
+	require.True(t, meta.IsStatusConditionTrue(live.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady)))
+	require.Contains(t, *ops, "create Pod/"+sb.Name)
+	require.Contains(t, *ops, "status Sandbox/"+sb.Name)
+	require.Empty(t, resetOps(*ops), "flag off must be byte-identical: no managedFields reset patch")
+}
+
+// TestStripManagedFieldsResetsPodAndSandboxOnce verifies that with the flag
+// on, the first reconcile resets the Sandbox before its first status write
+// and resets the Pod right after creating it, and that neither reset repeats
+// once the Sandbox has conditions and the Pod exists.
+func TestStripManagedFieldsResetsPodAndSandboxOnce(t *testing.T) {
+	sb := stripManagedFieldsSandbox("strip-on", "strip-ns")
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sb.Name, Namespace: sb.Namespace}}
+	fc, ops := newManagedFieldsTestClient(newFakeClient(sb), nil)
+	r := &SandboxReconciler{Client: fc, Scheme: Scheme, Tracer: asmetrics.NewNoOp(), ClusterDomain: "cluster.local", StripManagedFields: true}
+
+	_, err := r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		"reset Sandbox/" + sb.Name,
+		"create Pod/" + sb.Name,
+		"reset Pod/" + sb.Name,
+		"status Sandbox/" + sb.Name,
+	}, *ops, "first reconcile: Sandbox reset precedes the first status write; Pod reset follows create")
+
+	// Conditions now exist and the Pod already exists: no further resets
+	// across the Pending -> Ready transitions.
+	*ops = nil
+	_, err = r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	markPodReady(t, fc, req.NamespacedName)
+	_, err = r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+
+	live := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, fc.Get(t.Context(), req.NamespacedName, live))
+	require.True(t, meta.IsStatusConditionTrue(live.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady)))
+	require.Empty(t, resetOps(*ops), "reset must happen at most once per object")
+}
+
+// TestStripManagedFieldsResetFailureIsBestEffort verifies that a failing
+// reset patch (NotFound for the Pod, a transient error for the Sandbox) never
+// fails the reconcile or suppresses the status write.
+func TestStripManagedFieldsResetFailureIsBestEffort(t *testing.T) {
+	sb := stripManagedFieldsSandbox("strip-err", "strip-ns")
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sb.Name, Namespace: sb.Namespace}}
+	fc, ops := newManagedFieldsTestClient(newFakeClient(sb), func(obj client.Object) error {
+		if _, isPod := obj.(*corev1.Pod); isPod {
+			return k8serrors.NewNotFound(corev1.Resource("pods"), obj.GetName())
+		}
+		return k8serrors.NewInternalError(errors.New("etcd leader changed"))
+	})
+	r := &SandboxReconciler{Client: fc, Scheme: Scheme, Tracer: asmetrics.NewNoOp(), ClusterDomain: "cluster.local", StripManagedFields: true}
+
+	_, err := r.Reconcile(t.Context(), req)
+	require.NoError(t, err, "a failed managedFields reset must never fail the reconcile")
+	require.Equal(t, []string{"reset Sandbox/" + sb.Name, "reset Pod/" + sb.Name}, resetOps(*ops), "both resets are attempted")
+	require.Contains(t, *ops, "status Sandbox/"+sb.Name, "status write still happens after a failed reset")
+
+	live := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, fc.Get(t.Context(), req.NamespacedName, live))
+	require.NotEmpty(t, live.Status.Conditions)
+	require.NoError(t, fc.Get(t.Context(), req.NamespacedName, &corev1.Pod{}), "pod must still be created")
+
+	// Next reconcile: conditions exist, so the Sandbox reset is not retried
+	// (there is no per-object retry state); the Pod exists, so no Pod reset.
+	*ops = nil
+	_, err = r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	require.Empty(t, resetOps(*ops))
+}

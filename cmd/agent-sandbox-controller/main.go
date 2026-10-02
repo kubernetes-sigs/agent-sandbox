@@ -78,6 +78,7 @@ func main() {
 	var sandboxWarmPoolReplenishDelay time.Duration
 	var sandboxWarmPoolMaxRefillRate float64
 	var sandboxWriteBehindWindow time.Duration
+	var stripManagedFields bool
 	var sandboxWarmPoolReadinessGracePeriod time.Duration
 	var sandboxWarmPoolUnschedulableRecheckInterval time.Duration
 	var enableWarmPoolEviction bool
@@ -166,6 +167,11 @@ func main() {
 			"by the previous process. Default false (annotations persisted).")
 	flag.DurationVar(&sandboxWriteBehindWindow, "sandbox-write-behind-window", 0,
 		"Coalescing window for the Sandbox controller's recoverable metadata-only writes. 0 disables coalescing.")
+	flag.BoolVar(&stripManagedFields, "strip-managed-fields", false,
+		"Clear metadata.managedFields on each Sandbox and on each Pod the Sandbox controller creates (one extra merge patch "+
+			"per object, right after creation), cutting stored object size and API server field-tracking cost for every "+
+			"later write. Discards the Server-Side Apply ownership history on those objects (a later apply sees existing fields as owned by "+
+			"before-first-apply). Default false.")
 	flag.BoolVar(&metricsSecureServing, "metrics-secure-serving", false,
 		"Serve metrics over HTTPS instead of HTTP. When enabled without --metrics-cert-dir, "+
 			"a self-signed certificate is generated automatically. Conventional HTTPS metrics port is :8443.")
@@ -448,6 +454,10 @@ func main() {
 			"window", sandboxWriteBehindWindow, "podPatchBound", "1s")
 	}
 
+	if stripManagedFields {
+		setupLog.Info("Sandbox controller managedFields stripping enabled (--strip-managed-fields)")
+	}
+
 	// Every Eventf site in the sandbox controller is nil-guarded on the
 	// recorder, so a nil recorder cleanly disables event emission.
 	var sandboxRecorder events.EventRecorder
@@ -458,12 +468,13 @@ func main() {
 	}
 
 	if err = (&controllers.SandboxReconciler{
-		Client:            mgr.GetClient(),
-		Scheme:            mgr.GetScheme(),
-		Recorder:          sandboxRecorder,
-		Tracer:            instrumenter,
-		ClusterDomain:     clusterDomain,
-		WriteBehindWindow: sandboxWriteBehindWindow,
+		Client:             mgr.GetClient(),
+		Scheme:             mgr.GetScheme(),
+		Recorder:           sandboxRecorder,
+		Tracer:             instrumenter,
+		ClusterDomain:      clusterDomain,
+		WriteBehindWindow:  sandboxWriteBehindWindow,
+		StripManagedFields: stripManagedFields,
 	}).SetupWithManager(mgr, sandboxConcurrentWorkers); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Sandbox")
 		os.Exit(1)

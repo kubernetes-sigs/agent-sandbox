@@ -250,6 +250,13 @@ type SandboxReconciler struct {
 	// --sandbox-write-behind-window flag.
 	WriteBehindWindow time.Duration
 
+	// StripManagedFields, when true, clears metadata.managedFields on each
+	// Pod this controller creates and on each Sandbox the first time it is
+	// reconciled (see stripManagedFields for the mechanism and the
+	// trade-off). Gated by the --strip-managed-fields flag; default false
+	// leaves every write byte-identical to the stock path.
+	StripManagedFields bool
+
 	// deferralClock records when each request's pending deferral was first
 	// observed — timestamp-only, no mutation payload; see deferredWriteClock
 	// for why this one piece of in-memory state is unavoidable and why
@@ -319,6 +326,19 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if err := r.Patch(ctx, sandbox, patch); err != nil {
 			return ctrl.Result{}, err
 		}
+	}
+
+	// The informer cache strips managedFields (TransformStripManagedFields),
+	// so the controller cannot see whether this Sandbox still has them.
+	// Empty status.conditions is a stateless once-per-object proxy: it holds
+	// exactly until this controller's first status write, which happens on
+	// the first reconcile below, and no other component writes Sandbox
+	// status. A reconcile that fails before that write repeats the reset,
+	// which the apiserver treats as a no-op. Sandboxes that already had
+	// conditions when the flag was turned on are left alone; they can be
+	// reset out-of-band with kubectl patch (see docs/configuration.md).
+	if r.StripManagedFields && len(sandbox.Status.Conditions) == 0 {
+		r.stripManagedFields(ctx, sandbox)
 	}
 
 	oldStatus := sandbox.Status.DeepCopy()
@@ -833,6 +853,39 @@ func (r *SandboxReconciler) recordReadyTransitionEvent(sandbox *sandboxv1beta1.S
 		r.Recorder.Eventf(sandbox, nil, corev1.EventTypeNormal, sandboxv1beta1.SandboxReasonPodSucceeded, "PodCompletion", "Pod completed successfully")
 	case sandboxv1beta1.SandboxReasonPodFailed:
 		r.Recorder.Eventf(sandbox, nil, corev1.EventTypeWarning, sandboxv1beta1.SandboxReasonPodFailed, "PodCompletion", "Pod failed")
+	}
+}
+
+// managedFieldsResetPatch is the API server's documented reset sentinel
+// for metadata.managedFields: a list containing one empty entry
+// (apimachinery isResetManagedFields).
+var managedFieldsResetPatch = client.RawPatch(types.MergePatchType, []byte(`{"metadata":{"managedFields":[{}]}}`))
+
+// stripManagedFields clears metadata.managedFields on obj, opting the rest
+// of its lifecycle out of API server field tracking.
+//
+// Why: a Sandbox carries its full pod template inline and managedFields
+// mirrors that template's field tree, so managedFields is 32-46% of a
+// stored Sandbox and ~60% of a stored Pod. Every one of the ~8 status and
+// metadata writes per sandbox lifetime rewrites the whole object into etcd
+// and every watch event carries it. Once managedFields are empty the
+// apiserver's skipNonAppliedManager stops tracking all later Update/Patch
+// writes (including this controller's status patches and kubelet pod
+// status writes), so one reset is effectively permanent for this
+// controller's write pattern. Tracking resumes when a client first
+// Server-Side Applies the object: the apiserver reconstructs ownership of
+// the existing fields under before-first-apply, so a conflicting apply
+// still conflicts. The trade-off is the lost ownership history (which
+// manager wrote what), not conflict detection itself.
+//
+// Objects are always born tracked (the sentinel is ignored on create and
+// on subresource requests), so the strip has to be this follow-up patch on
+// the main resource. Best-effort by design: a failed strip leaves a
+// normally-tracked object and must never fail the reconcile.
+func (r *SandboxReconciler) stripManagedFields(ctx context.Context, obj client.Object) {
+	if err := r.Patch(ctx, obj, managedFieldsResetPatch); err != nil {
+		log.FromContext(ctx).Info("Failed to strip managedFields; object stays field-tracked",
+			"kind", fmt.Sprintf("%T", obj), "namespace", obj.GetNamespace(), "name", obj.GetName(), "error", err)
 	}
 }
 
@@ -1540,6 +1593,11 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			r.Recorder.Eventf(sandbox, nil, corev1.EventTypeWarning, "SandboxPodCreateFailed", "PodCreation", "Failed to create Pod %q: %s", pod.Name, err.Error())
 		}
 		return nil, err
+	}
+
+	// Create always records managedFields, so the strip is a follow-up patch.
+	if r.StripManagedFields {
+		r.stripManagedFields(ctx, pod)
 	}
 
 	if r.Recorder != nil {

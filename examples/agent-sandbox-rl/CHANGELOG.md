@@ -51,6 +51,44 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
   `ensure_templates()` raises a `FleetError` naming the owning run, like the
   warm path.
 
+### Added (fail fast on claims that cannot start)
+- **`acquire()` fails fast on a pod that will not come up.** The SDK's claim wait
+  can only see the claim, so a pod stuck in `ImagePullBackOff`,
+  `CreateContainerConfigError`, `CrashLoopBackOff`, OOM-killed at start, or
+  `Unschedulable` looked like one still starting and ran out `ready_timeout`
+  (15 minutes) before the caller learned anything. `acquire()` now names its claim
+  and runs a `ClaimWatchdog` (`failfast.py`) next to the wait; when the pod is in a
+  state the controller will not recover from, the watchdog deletes the claim and
+  `acquire()` raises **`SandboxStartError`** with the Kubernetes reason, the pod and
+  the image. Reasons that never clear fail at once; transient-looking ones fail
+  after `FailFastPolicy.grace_s` (60 s); `Unschedulable` after
+  `unschedulable_grace_s` (180 s). Off with `FleetConfig(fail_fast=FailFastPolicy(enabled=False))`.
+- **`FleetConfig.claim_timeout`** bounds one claim's readiness wait separately from
+  `ready_timeout`, which also bounds whole-pool fills and is sized for those.
+  `None` (default) keeps the old behaviour.
+- **`SandboxHandle.is_alive()`** and **`SandboxLostError`**: an `exec()` that fails
+  because the pod is gone (deleted, evicted, OOM-killed, finished) now raises
+  `SandboxLostError` instead of the raw transport error, after one pod read, so an
+  RL loop can release and re-acquire at once instead of spending its step timeout.
+- **`reap_orphans(alive_run_ids)`** / `python -m agent_sandbox_rl.reaper --orphans
+  --alive-run-ids a,b`: reap every run in the namespace whose driver the caller
+  does not list as alive, discovered through the run-id label on its claims,
+  pools and templates (pods and Sandboxes are reached through those).
+  This is the sweep an external reaper should call rather than matching names or
+  ages itself; `--min-age-s` (300) protects runs that just started, `--dry-run`
+  reports only.
+- `OwnedByAnotherRunError` is now exported from the package root.
+
+### Fixed
+- **`reap()` reaches a run's Sandboxes and pods without relying on the run-id
+  label.** Sandbox CRs never carry it, and pods created before `POD_RUN_ID_LABEL`
+  ([#1807](https://github.com/kubernetes-sigs/agent-sandbox/issues/1807)) carry no
+  run id at all, so the label-based sweeps alone left them to the owner cascade.
+  The sweep now records, before deleting anything, each pool's `status.selector`
+  and each claim's `status.sandbox.name` (and that Sandbox's `status.labelSelector`),
+  deletes those Sandboxes by name and force-deletes pods by every selector, so a
+  stalled owner cascade still ends with the pods gone.
+
 ### Fixed (concurrent runs in one namespace —
 [#1736](https://github.com/kubernetes-sigs/agent-sandbox/issues/1736))
 - **`teardown()` is scoped to this run.** It listed claims, pools and templates by

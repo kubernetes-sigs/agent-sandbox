@@ -1044,6 +1044,8 @@ class TestStart(unittest.TestCase):
 
 _READY = [{"type": "Ready", "status": "True"}]
 _NOT_READY = [{"type": "Ready", "status": "False", "reason": "SandboxNotReady"}]
+# Fill claims carry their group's annotations. The batch state only checks that they are there.
+_FILL = {BATCH_GROUP_SIZE_ANNOTATION: "1", BATCH_GROUP_MIN_READY_ANNOTATION: "1"}
 
 
 class _Cluster:
@@ -1082,14 +1084,13 @@ class _Cluster:
         self.calls.append("create")
         self.created.append((name, time.monotonic()))
         if self.ready_on_create:
-            self.push(name, warmpool)
+            self.push(name, warmpool, annotations=kwargs["annotations"])
 
-    def push(self, name, warmpool="pool-a", ready=True):
+    def push(self, name, warmpool="pool-a", ready=True, annotations=_FILL):
         conditions = _READY if ready else _NOT_READY
         sandbox = {"name": f"sbx-{name}"} if ready else None
-        self.watch_queue.put(
-            {"type": "MODIFIED", "object": _claim(name, warmpool, conditions=conditions, sandbox=sandbox)}
-        )
+        claim = _claim(name, warmpool, conditions=conditions, sandbox=sandbox, annotations=annotations)
+        self.watch_queue.put({"type": "MODIFIED", "object": claim})
 
     def names(self):
         return [name for name, _ in self.created]

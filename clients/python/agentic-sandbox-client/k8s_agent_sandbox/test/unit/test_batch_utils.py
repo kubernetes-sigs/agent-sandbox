@@ -259,5 +259,19 @@ class TestRetryDelay(unittest.TestCase):
                 self.assertTrue(base / 2 <= batch_utils.retry_delay(1, error) <= base)
 
 
+class TestQuorumTimeoutAnnotation(unittest.TestCase):
+
+    def test_parse_table(self):
+        self.assertEqual(
+            batch_utils.parse_quorum_timeout_annotation(None),
+            batch_utils.BATCH_DEFAULT_QUORUM_TIMEOUT_SECONDS,
+        )
+        self.assertEqual(batch_utils.parse_quorum_timeout_annotation("90"), 90)
+        for value in ("abc", "0", "-1"):
+            with self.subTest(value=value):
+                with self.assertRaises(BatchError):
+                    batch_utils.parse_quorum_timeout_annotation(value)
+
+
 if __name__ == "__main__":
     unittest.main()

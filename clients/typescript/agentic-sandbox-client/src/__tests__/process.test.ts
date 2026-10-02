@@ -39,7 +39,7 @@ import { ProcessClient } from "../process.js";
  */
 async function startH2Server(
   routes: (router: ConnectRouter) => void,
-  opts?: { disruptFirstExecute?: "session" | "socket" },
+  opts?: { disruptFirstExecute?: "session" | "socket" | "stream" },
 ): Promise<{ baseUrl: string; close(): Promise<void> }> {
   const inner = connectNodeAdapter({ routes });
   let triggered = false;
@@ -53,6 +53,10 @@ async function startH2Server(
       triggered = true;
       if (opts.disruptFirstExecute === "session") {
         req.stream.session?.destroy();
+      } else if (opts.disruptFirstExecute === "stream") {
+        // How macOS delivers a session teardown.
+        req.stream.session?.goaway(http2.constants.NGHTTP2_NO_ERROR);
+        req.stream.close(http2.constants.NGHTTP2_NO_ERROR);
       } else {
         // req.stream.session.socket is a Proxy that throws
         // ERR_HTTP2_NO_SOCKET_MANIPULATION on destroy(); use the raw socket
@@ -68,12 +72,23 @@ async function startH2Server(
   server.on("connection", (socket: net.Socket) => {
     lastRawSocket = socket;
   });
+  // After a GOAWAY the client may leave its session open, which would make
+  // server.close() wait on it; destroy sessions ourselves on close.
+  const sessions = new Set<http2.ServerHttp2Session>();
+  server.on("session", (session) => {
+    sessions.add(session);
+    session.once("close", () => sessions.delete(session));
+  });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const addr = server.address();
   if (!addr || typeof addr === "string") throw new Error("failed to bind");
   return {
     baseUrl: `http://127.0.0.1:${addr.port}`,
-    close: () => new Promise((resolve) => server.close(() => resolve())),
+    close: () =>
+      new Promise((resolve) => {
+        server.close(() => resolve());
+        for (const session of sessions) session.destroy();
+      }),
   };
 }
 
@@ -294,6 +309,34 @@ describe("ProcessClient.run", () => {
       activeClient.run(
         { command: ["echo", "hi"] },
         30_000,
+        new AbortController().signal,
+      ),
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof SandboxConnectionError &&
+        err.kind === "socket" &&
+        err.cause instanceof ConnectError &&
+        err.cause.code === Code.Canceled,
+    );
+  });
+
+  it("classifies a clean stream close with no response as a connection error", async () => {
+    activeServer = await startH2Server(
+      (router) => {
+        router.service(ProcessService, {
+          execute: () => create(ExecuteResponseSchema, {}),
+        });
+      },
+      { disruptFirstExecute: "stream" },
+    );
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+    await expect(
+      activeClient.run(
+        { command: ["echo", "hi"] },
+        2_000,
         new AbortController().signal,
       ),
     ).rejects.toSatisfy(

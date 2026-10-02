@@ -1,0 +1,81 @@
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: docker-sbx
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        sandbox: docker-sbx
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kvm: "true"
+      containers:
+        - name: sbx
+          image: docker-sbx:local
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DOCKER_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: docker-sbx-credentials
+                  key: DOCKER_USERNAME
+            - name: DOCKER_PAT
+              valueFrom:
+                secretKeyRef:
+                  name: docker-sbx-credentials
+                  key: DOCKER_PAT
+            - name: XDG_STATE_HOME
+              value: /data/state
+            - name: XDG_CACHE_HOME
+              value: /data/cache
+            - name: XDG_CONFIG_HOME
+              value: /data/config
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "sbx daemon status | grep -q 'Status: running'"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: workspace
+              mountPath: /workspace
+            - name: dev-kvm
+              mountPath: /dev/kvm
+      volumes:
+        - name: dev-kvm
+          hostPath:
+            path: /dev/kvm
+            type: CharDevice
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          sandbox: docker-sbx
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 50Gi
+    - metadata:
+        name: workspace
+        labels:
+          sandbox: docker-sbx
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 5Gi

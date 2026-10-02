@@ -99,6 +99,7 @@ The following table lists the configurable parameters and their defaults. For fl
 | `controller.sandboxWarmPoolMaxBatchSize` | Max batch size for parallel sandbox create/delete in the SandboxWarmPool controller (extensions only) | `300` |
 | `controller.sandboxWarmPoolReplenishDelay` | Defer replacement sandbox creation after warm pool members drop out during claim bursts (extensions only) | unset (controller default `0s`) |
 | `controller.sandboxWarmPoolMaxRefillRate` | Max rate (sandboxes/second, per pool) for warm pool replenishment (`0` = unpaced, extensions only) | unset (controller default `0`) |
+| `controller.sandboxClaimWarmCandidateGracePeriod` | How long a newly created SandboxClaim waits for a warm pool candidate to report a Pod IP before falling back to cold creation (extensions only) | unset (controller default `2s`) |
 | `controller.sandboxWarmPoolReadinessGracePeriod` | How long a warm pool sandbox may stay non-Ready before it is considered stuck and replaced, or held if unschedulable (extensions only) | unset (controller default `5m`) |
 | `controller.sandboxWarmPoolUnschedulableRecheckInterval` | Re-check interval for pools holding unschedulable sandboxes past the readiness grace period (extensions only) | unset (controller default `1m`) |
 | `controller.enableWarmPoolEviction` | Mark pods created by a warm pool as safe to evict (extensions only) | `true` |

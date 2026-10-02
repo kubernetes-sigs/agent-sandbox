@@ -305,6 +305,20 @@ def retry_delay(attempt: int, error: BaseException | None) -> float:
     return backoff_delay(attempt, BATCH_BACKOFF_BASE_SECONDS, BATCH_BACKOFF_MAX_SECONDS)
 
 
+def parse_quorum_timeout_annotation(value: str | None) -> int:
+    """Parses ``BATCH_QUORUM_TIMEOUT_ANNOTATION`` upon ``get_batch``. If missing, falls back to the default.
+    """
+    if value is None:
+        return BATCH_DEFAULT_QUORUM_TIMEOUT_SECONDS
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = 0
+    if parsed <= 0:
+        raise BatchError(f"batch quorum timeout annotation {value!r} is not a positive integer")
+    return parsed
+
+
 def batch_lease_metadata(
     batch_id: str, lease_duration: int, work_budget: int, quorum_timeout: int
 ) -> tuple[dict[str, str], dict[str, str]]:

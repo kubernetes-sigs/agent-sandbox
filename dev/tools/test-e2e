@@ -30,9 +30,9 @@ def run_go_e2e_tests(repo_root, artifact_dir, env):
     print(f"Race detector enabled: {race_enabled}")
 
     go_test_args = [
-        "./test/e2e/...",
-        "--parallel=1",
-        "-v",
+       "./test/e2e/...",
+       "--parallel=1",
+       "-v",
     ]
 
     if race_enabled:
@@ -40,13 +40,13 @@ def run_go_e2e_tests(repo_root, artifact_dir, env):
 
     go_test_cmd = utils.go_tool_args(
         "gotestsum",
-        # junit_ prefix + $ARTIFACTS: prow spyglass only renders junit files
-        # matching artifacts/junit*.xml.
-        f"--junitfile={artifact_dir}/junit_e2e-go.xml",
-        f"--jsonfile={artifact_dir}/test-e2e.json",
-        "--",
-        *go_test_args,
-    )
+         # junit_ prefix + $ARTIFACTS: prow spyglass only renders junit files
+         # matching artifacts/junit*.xml.
+         f"--junitfile={artifact_dir}/junit_e2e-go.xml",
+         f"--jsonfile={artifact_dir}/test-e2e.json",
+         "--",
+         *go_test_args,
+)
     print(f"Running command: {' '.join(go_test_cmd)}")
     return subprocess.run(go_test_cmd, env=env, cwd=repo_root).returncode
 
@@ -58,8 +58,7 @@ def run_go_e2e_benchmarks(repo_root, artifact_dir, env):
 
     # Run benchmarks with go test directly (not gotestsum) to get clean benchmark output
     go_test_cmd = [
-        "go",
-        "test",
+        "go", "test",
         "-bench=.",
         "-benchtime=1x",  # Run each benchmark once (e2e tests are expensive)
         "-run=^$",  # Don't run tests, only benchmarks
@@ -69,13 +68,11 @@ def run_go_e2e_benchmarks(repo_root, artifact_dir, env):
     print(f"Benchmark output will be saved to: {benchmark_file}")
 
     with open(benchmark_file, "w") as f:
-        process = subprocess.Popen(
-            go_test_cmd, env=env, cwd=repo_root, stdout=subprocess.PIPE, text=True
-        )
+        process = subprocess.Popen(go_test_cmd, env=env, cwd=repo_root, stdout=subprocess.PIPE, text=True)
 
         for line in process.stdout:
             sys.stdout.write(line)  # Print to terminal as it happens
-            f.write(line)  # Save to file also
+            f.write(line)           # Save to file also
 
         process.wait()
 
@@ -84,12 +81,14 @@ def run_go_e2e_benchmarks(repo_root, artifact_dir, env):
         return process.returncode
 
     csv_file = os.path.join(artifact_dir, "benchmarks.csv")
-    benchstat_cmd = utils.go_tool_args("benchstat", "-format", "csv", benchmark_file)
+    benchstat_cmd = utils.go_tool_args(
+        "benchstat",
+        "-format", "csv",
+        benchmark_file
+    )
     print(f"Running benchstat: {' '.join(benchstat_cmd)}")
     with open(csv_file, "w") as f_csv:
-        benchstat_result = subprocess.run(
-            benchstat_cmd, env=env, cwd=repo_root, stdout=f_csv
-        )
+        benchstat_result = subprocess.run(benchstat_cmd, env=env, cwd=repo_root, stdout=f_csv)
 
     if benchstat_result.returncode != 0:
         print(f"benchstat failed with exit code {benchstat_result.returncode}")
@@ -137,9 +136,7 @@ def setup_typescript_sdk(repo_root, env):
     if not npm_path or not npx_path:
         return False, None, None
 
-    sdk_path = os.path.join(
-        repo_root, "clients", "typescript", "agentic-sandbox-client"
-    )
+    sdk_path = os.path.join(repo_root, "clients", "typescript", "agentic-sandbox-client")
 
     print(f"Installing TypeScript SDK dependencies at {sdk_path}")
     result = subprocess.run([npm_path, "install"], cwd=sdk_path, env=env, check=False)
@@ -148,9 +145,7 @@ def setup_typescript_sdk(repo_root, env):
         return False, None, None
 
     print("Building TypeScript SDK...")
-    result = subprocess.run(
-        [npm_path, "run", "build"], cwd=sdk_path, env=env, check=False
-    )
+    result = subprocess.run([npm_path, "run", "build"], cwd=sdk_path, env=env, check=False)
     if result.returncode != 0:
         print("Failed to build TypeScript SDK.")
         return False, None, None
@@ -173,9 +168,7 @@ def run_typescript_e2e_tests(repo_root, artifact_dir, env, npm_path, npx_path):
     # junit_ prefix + $ARTIFACTS so prow spyglass renders it.
     junit_report_path = os.path.join(artifact_dir, "junit_e2e-typescript-sdk.xml")
     vitest_cmd = [
-        npx_path,
-        "vitest",
-        "run",
+        npx_path, "vitest", "run",
         "--reporter=verbose",
         "--reporter=junit",
         f"--outputFile.junit={junit_report_path}",
@@ -203,10 +196,8 @@ def run_python_e2e_tests(repo_root, artifact_dir, env):
         "pytest",
         f"--junitxml={junit_report_path}",
         "-v",
-        "-n",
-        "auto",  # to run tests in parallel
-        "-m",
-        "not example",
+        "-n", "auto",  # to run tests in parallel
+        "-m", "not example",
         os.path.join(repo_root, "test", "e2e/"),
     ]
 
@@ -238,30 +229,18 @@ def ensure_extensions_enabled(env):
     # Check current args
     result = subprocess.run(
         [
-            *kubectl,
-            "get",
-            "deployment",
-            "agent-sandbox-controller",
-            "-n",
-            "agent-sandbox-system",
-            "-o",
-            "json",
+            *kubectl, "get", "deployment", "agent-sandbox-controller",
+            "-n", "agent-sandbox-system",
+            "-o", "json",
         ],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
+        env=env, capture_output=True, text=True, check=False,
     )
     if result.returncode != 0:
-        print(
-            f"Warning: could not read controller deployment args: {result.stderr.strip()}"
-        )
+        print(f"Warning: could not read controller deployment args: {result.stderr.strip()}")
         return False
 
     deployment = json.loads(result.stdout)
-    current_args = deployment["spec"]["template"]["spec"]["containers"][0].get(
-        "args", []
-    )
+    current_args = deployment["spec"]["template"]["spec"]["containers"][0].get("args", [])
     if "--extensions" in current_args or "--extensions=true" in current_args:
         print("Controller already running with --extensions. Nothing to do.")
         return True
@@ -270,38 +249,26 @@ def ensure_extensions_enabled(env):
     print("Patching controller deployment to add --extensions flag...")
 
     new_args = current_args + ["--extensions"]
-    patch = json.dumps(
-        {
-            "spec": {
-                "template": {
-                    "spec": {
-                        "containers": [
-                            {
-                                "name": "agent-sandbox-controller",
-                                "args": new_args,
-                            }
-                        ]
-                    }
+    patch = json.dumps({
+        "spec": {
+            "template": {
+                "spec": {
+                    "containers": [{
+                        "name": "agent-sandbox-controller",
+                        "args": new_args,
+                    }]
                 }
             }
         }
-    )
+    })
 
     patch_result = subprocess.run(
         [
-            *kubectl,
-            "patch",
-            "deployment",
-            "agent-sandbox-controller",
-            "-n",
-            "agent-sandbox-system",
-            "-p",
-            patch,
+            *kubectl, "patch", "deployment", "agent-sandbox-controller",
+            "-n", "agent-sandbox-system",
+            "-p", patch,
         ],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
+        env=env, capture_output=True, text=True, check=False,
     )
     if patch_result.returncode != 0:
         print(f"Error patching deployment: {patch_result.stderr.strip()}")
@@ -310,16 +277,11 @@ def ensure_extensions_enabled(env):
     print("Patch applied. Waiting for rollout to complete...")
     rollout_result = subprocess.run(
         [
-            *kubectl,
-            "rollout",
-            "status",
-            "deployment/agent-sandbox-controller",
-            "-n",
-            "agent-sandbox-system",
+            *kubectl, "rollout", "status", "deployment/agent-sandbox-controller",
+            "-n", "agent-sandbox-system",
             "--timeout=120s",
         ],
-        env=env,
-        check=False,
+        env=env, check=False,
     )
     if rollout_result.returncode != 0:
         print("Error: controller rollout did not complete within 120s.")
@@ -330,7 +292,7 @@ def ensure_extensions_enabled(env):
 
 
 def main(args):
-    """invokes unit tests and outputs a junit results file"""
+    """ invokes unit tests and outputs a junit results file """
     repo_root = utils.get_repo_root()
 
     artifact_dir = os.getenv("ARTIFACTS")
@@ -377,9 +339,7 @@ def main(args):
 
         go_test_result = run_go_e2e_tests(repo_root, artifact_dir, env)
         python_test_result = run_python_e2e_tests(repo_root, artifact_dir, env)
-        typescript_test_result = run_typescript_e2e_tests(
-            repo_root, artifact_dir, env, npm_path, npx_path
-        )
+        typescript_test_result = run_typescript_e2e_tests(repo_root, artifact_dir, env, npm_path, npx_path)
 
     if args.suite in ["all", "benchmarks"]:
         go_benchmark_result = run_go_e2e_benchmarks(repo_root, artifact_dir, env)
@@ -398,12 +358,7 @@ def main(args):
         print("TypeScript SDK E2E tests failed.")
         exit_code = 1
 
-    if (
-        go_test_result != 0
-        or python_test_result != 0
-        or go_benchmark_result != 0
-        or typescript_test_result != 0
-    ):
+    if go_test_result != 0 or python_test_result != 0 or go_benchmark_result != 0 or typescript_test_result != 0:
         print("One or more E2E tests failed.")
         exit_code = 1
 

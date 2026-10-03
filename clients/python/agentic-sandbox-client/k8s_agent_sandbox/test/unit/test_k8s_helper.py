@@ -1015,6 +1015,13 @@ class TestK8sHelperApiClientInjection(unittest.TestCase):
         mock_config.load_incluster_config.assert_not_called()
         mock_config.load_kube_config.assert_not_called()
 
+    def test_injected_api_client_is_exposed_only_when_injected(
+        self, mock_config, mock_custom_cls, mock_core_cls
+    ):
+        sentinel = MagicMock(name="ApiClient")
+        self.assertIs(K8sHelper(api_client=sentinel).injected_api_client, sentinel)
+        self.assertIsNone(K8sHelper().injected_api_client)
+
 
 if __name__ == '__main__':
     unittest.main()

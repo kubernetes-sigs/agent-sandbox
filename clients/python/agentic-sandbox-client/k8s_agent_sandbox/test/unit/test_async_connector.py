@@ -15,12 +15,15 @@
 """Tests for async sandboxd tunnel and gRPC channel ownership."""
 
 import asyncio
+import json
+import os
 import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+from kubernetes_asyncio import client as async_client
 
 from k8s_agent_sandbox.async_connector import (
     AsyncSandboxConnector,
@@ -398,6 +401,107 @@ class TestAsyncSandboxdConnector(unittest.IsolatedAsyncioTestCase):
         self.assertIs(strategy.port_forward_process, process)
         await strategy.close()
         self.assertIsNone(strategy.port_forward_process)
+
+
+class TestAsyncTunnelTargetsInjectedApiClient(unittest.IsolatedAsyncioTestCase):
+    """kubectl must reach the cluster an injected ApiClient targets, not the ambient one."""
+
+    def _api_client(self):
+        cfg = async_client.Configuration()
+        cfg.host = "https://cluster-b:6443"
+        cfg.api_key = {"authorization": "secret"}
+        cfg.api_key_prefix = {"authorization": "Bearer"}
+        return async_client.ApiClient(configuration=cfg)
+
+    def _strategy(self, api_client):
+        return AsyncSandboxdPodTunnelStrategy(
+            sandbox_id="sandbox-1",
+            namespace="agents",
+            config=SandboxdPodTunnelConnectionConfig(),
+            get_pod_name=AsyncMock(return_value="sandbox-1"),
+            api_client=api_client,
+        )
+
+    def _recording_subprocess(self, calls):
+        async def create_subprocess(*cmd, **kwargs):
+            # kubectl reads the kubeconfig at startup, so capture it here.
+            path = cmd[cmd.index("--kubeconfig") + 1] if "--kubeconfig" in cmd else None
+            content = None
+            if path:
+                with open(path) as f:
+                    content = json.load(f)
+            calls.append((cmd, path, content))
+            process = MagicMock(returncode=None)
+            process.terminate = MagicMock()
+            process.wait = AsyncMock()
+            return process
+
+        return create_subprocess
+
+    @patch("k8s_agent_sandbox.async_connector.asyncio.create_subprocess_exec")
+    @patch.object(AsyncSandboxdPodTunnelStrategy, "_is_port_open", new_callable=AsyncMock)
+    async def test_pod_tunnel_uses_injected_cluster(self, is_port_open, create_subprocess):
+        is_port_open.return_value = True
+        calls = []
+        create_subprocess.side_effect = self._recording_subprocess(calls)
+        api_client = self._api_client()
+        strategy = self._strategy(api_client)
+
+        await strategy.connect()
+
+        cmd, path, content = calls[0]
+        self.assertEqual(cmd[:3], ("kubectl", "port-forward", "pod/sandbox-1"))
+        self.assertEqual(content["clusters"][0]["cluster"]["server"], "https://cluster-b:6443")
+        self.assertEqual(content["users"][0]["user"]["token"], "secret")
+        self.assertFalse(os.path.exists(path), "kubeconfig must not outlive the connect")
+        await strategy.close()
+        await api_client.close()
+
+    @patch("k8s_agent_sandbox.async_connector.asyncio.create_subprocess_exec")
+    @patch.object(AsyncSandboxdPodTunnelStrategy, "_is_port_open", new_callable=AsyncMock)
+    async def test_pod_tunnel_without_api_client_adds_no_flags(
+        self, is_port_open, create_subprocess
+    ):
+        is_port_open.return_value = True
+        calls = []
+        create_subprocess.side_effect = self._recording_subprocess(calls)
+        strategy = self._strategy(None)
+
+        await strategy.connect()
+
+        self.assertNotIn("--kubeconfig", calls[0][0])
+        await strategy.close()
+
+    @patch("k8s_agent_sandbox.async_connector.asyncio.create_subprocess_exec")
+    async def test_pod_tunnel_removes_kubeconfig_when_start_fails(self, create_subprocess):
+        paths = []
+
+        async def fail(*cmd, **kwargs):
+            paths.append(cmd[cmd.index("--kubeconfig") + 1])
+            raise FileNotFoundError("kubectl not found")
+
+        create_subprocess.side_effect = fail
+        api_client = self._api_client()
+        strategy = self._strategy(api_client)
+
+        with self.assertRaises(SandboxPortForwardError):
+            await strategy.connect()
+
+        self.assertFalse(os.path.exists(paths[0]))
+        await api_client.close()
+
+    async def test_connector_passes_the_helpers_injected_client_to_the_tunnel(self):
+        injected = MagicMock(name="ApiClient")
+        connector = AsyncSandboxConnector(
+            sandbox_id="sandbox-1",
+            namespace="agents",
+            connection_config=SandboxdPodTunnelConnectionConfig(),
+            k8s_helper=MagicMock(injected_api_client=injected),
+            get_pod_name=AsyncMock(return_value="sandbox-1"),
+        )
+
+        self.assertIs(connector._sandboxd_strategy._api_client, injected)
+        await connector.close()
 
 
 class TestAsyncSandboxdInClusterConnector(unittest.IsolatedAsyncioTestCase):

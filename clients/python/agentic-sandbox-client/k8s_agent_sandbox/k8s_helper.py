@@ -47,6 +47,8 @@ class K8sHelper:
     def __init__(self, api_client: client.ApiClient | None = None) -> None:
         """When ``api_client`` is provided it is used directly; otherwise the underlying Kubernetes client
         config is loaded (in-cluster, then ``KUBECONFIG``, falling back to ``~/.kube/config`` if unset)."""
+        # Kept so kubectl subprocesses can target the same cluster.
+        self.injected_api_client = api_client
         if api_client is None:
             try:
                 config.load_incluster_config()

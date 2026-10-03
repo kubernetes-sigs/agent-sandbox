@@ -1259,7 +1259,8 @@ const START_PID = 7;
  * "output" (stdout, stderr, exit 3), "no-exit" (Init, then a clean end),
  * "hang" (Init, then idle until aborted), "chatty-hang" (Init, one stdout
  * chunk, then idle until aborted), "slow-init" (never sends Init),
- * "missing" (NOT_FOUND before Init).
+ * "missing" (NOT_FOUND before Init), "unknown-event" (Init, an event with
+ * no known case, then like "output").
  */
 function processRoutes(log: ProcessServerLog): (router: ConnectRouter) => void {
   const encode = (text: string) => new TextEncoder().encode(text);
@@ -1290,7 +1291,11 @@ function processRoutes(log: ProcessServerLog): (router: ConnectRouter) => void {
             value: create(InitEventSchema, { processId: START_PID }),
           },
         });
-        if (scenario === "output") {
+        if (scenario === "unknown-event") {
+          // What a newer sandboxd's unknown oneof case decodes to here.
+          yield create(StartResponseSchema, {});
+        }
+        if (scenario === "output" || scenario === "unknown-event") {
           yield create(StartResponseSchema, {
             event: { case: "stdout", value: encode("hello ") },
           });
@@ -1439,6 +1444,55 @@ describe("Sandbox commands.start()", () => {
     await expect(viaEvents.wait()).resolves.toEqual({ exitCode: 3 });
   });
 
+  it("lets wait() take over draining once an events loop has been left", async () => {
+    const s = await startSandbox();
+    const handle = await s.commands.start("output");
+
+    for await (const _event of handle.events) break;
+    const iterator = handle.events[Symbol.asyncIterator]();
+    await iterator.return?.();
+
+    await expect(handle.wait()).resolves.toEqual({ exitCode: 3 });
+    expect(() => handle.events).toThrow(/already consumed/);
+    await expect(iterator.next()).rejects.toMatchObject({
+      telemetryCode: "invalid_argument",
+    });
+  });
+
+  it("resumes events after an early break when wait() was not called", async () => {
+    const s = await startSandbox();
+    const handle = await s.commands.start("output");
+
+    const first: string[] = [];
+    for await (const event of handle.events) {
+      first.push(event.type);
+      break;
+    }
+    const rest = await collectEvents(handle.events);
+
+    expect(first).toEqual(["stdout"]);
+    expect(rest.map((e) => e.type)).toEqual(["stderr", "exit"]);
+    await expect(handle.wait()).resolves.toEqual({ exitCode: 3 });
+  });
+
+  it("does not let wait() steal events from a loop whose body is still awaiting", async () => {
+    const s = await startSandbox();
+    const handle = await s.commands.start("output");
+
+    const seen: string[] = [];
+    let waiting: Promise<{ exitCode: number }> | undefined;
+    for await (const event of handle.events) {
+      seen.push(event.type);
+      if (!waiting) {
+        waiting = handle.wait();
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    }
+
+    expect(seen).toEqual(["stdout", "stderr", "exit"]);
+    await expect(waiting).resolves.toEqual({ exitCode: 3 });
+  });
+
   it("kills the process and rejects wait() with the error a callback threw", async () => {
     const s = await startSandbox();
     const boom = new Error("callback failed");
@@ -1473,6 +1527,36 @@ describe("Sandbox commands.start()", () => {
       kind: "protocol",
     });
     await expect(handle.wait()).rejects.toBeInstanceOf(SandboxConnectionError);
+  });
+
+  it("keeps one stream's protocol error from failing the shared connection", async () => {
+    const s = await startSandbox();
+    const other = await s.commands.start("hang");
+    const otherWait = other.wait();
+    otherWait.catch(() => {});
+
+    const broken = await s.commands.start("no-exit");
+    await expect(broken.wait()).rejects.toMatchObject({
+      name: "SandboxConnectionError",
+      kind: "protocol",
+    });
+
+    // Invalidating the generation would have failed both of these.
+    await other.write("still here");
+    await expect(s.commands.run("echo")).resolves.toMatchObject({
+      exitCode: 0,
+    });
+    await other.close();
+    await expect(otherWait).rejects.toBeInstanceOf(SandboxClosedError);
+  });
+
+  it("skips Start events it does not know", async () => {
+    const s = await startSandbox();
+    const handle = await s.commands.start("unknown-event");
+
+    const events = await collectEvents(handle.events);
+
+    expect(events.map((e) => e.type)).toEqual(["stdout", "stderr", "exit"]);
   });
 
   it("validates arguments before connecting", async () => {

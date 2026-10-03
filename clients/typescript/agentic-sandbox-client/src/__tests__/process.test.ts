@@ -30,7 +30,7 @@ import {
   SandboxConnectionError,
   SandboxdRpcError,
 } from "../exceptions.js";
-import { ProcessClient } from "../process.js";
+import { ProcessClient, StreamLocalFailure } from "../process.js";
 
 /**
  * `disruptFirstExecute` severs the transport on the first Execute request
@@ -455,13 +455,12 @@ describe("ProcessClient.start", () => {
       yield exitMsg(0) as never;
     });
 
-    await expect(
-      client.start(
-        { command: ["true"] },
-        undefined,
-        new AbortController().signal,
-      ),
-    ).rejects.toMatchObject({
+    const err = await client
+      .start({ command: ["true"] }, undefined, new AbortController().signal)
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(StreamLocalFailure);
+    expect((err as StreamLocalFailure).error).toMatchObject({
       name: "SandboxConnectionError",
       kind: "protocol",
     });
@@ -483,7 +482,9 @@ describe("ProcessClient.start", () => {
 
     await started.events.next();
 
-    await expect(started.events.next()).rejects.toMatchObject({
+    const err = await started.events.next().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(StreamLocalFailure);
+    expect((err as StreamLocalFailure).error).toMatchObject({
       kind: "protocol",
     });
   });

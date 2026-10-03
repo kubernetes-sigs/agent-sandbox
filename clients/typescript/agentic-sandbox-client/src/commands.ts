@@ -107,9 +107,10 @@ export function validatePtySize(size: unknown, name: string): PtySize {
  * A process started with `sandbox.commands.start()`. Receive its output
  * either by passing `onStdout`/`onStderr` to `start()`, by iterating
  * `events`, or by just calling `wait()` (which discards it); these are
- * mutually exclusive. Nothing is buffered on the SDK side: until one of
- * them is in use the stream is not read, and sandboxd's process blocks on a
- * full pipe.
+ * mutually exclusive, except that `wait()` takes over from an `events`
+ * loop that has been left. Nothing is buffered on the SDK side: until one
+ * of them is in use the stream is not read, and sandboxd's process blocks
+ * on a full pipe.
  *
  * The process lives exactly as long as its stream. Closing the handle
  * (`close()`), aborting `StartOptions.signal`, or closing the Sandbox
@@ -126,6 +127,9 @@ export class ProcessHandle {
   private terminal = false;
   private exitSeen = false;
   private streamEnded = false;
+  /** Set by the iterator's `return()`, i.e. when a `for await` loop is left. */
+  private iteratorReleased = false;
+  private pullChain: Promise<unknown> = Promise.resolve();
   private readonly exit: Promise<{ exitCode: number }>;
   private resolveExit!: (result: { exitCode: number }) => void;
   private rejectExit!: (err: unknown) => void;
@@ -156,8 +160,9 @@ export class ProcessHandle {
   /**
    * The process's events in order, ending with one "exit" event. Only
    * available if no callbacks were given to `start()` and `wait()` has not
-   * been called. Iterating is resumable: leaving a `for await` loop early
-   * neither kills the process nor discards anything.
+   * taken over. Iterating is resumable: leaving a `for await` loop early
+   * neither kills the process nor discards anything, until `wait()` is
+   * called, which then discards the rest of the output.
    */
   get events(): AsyncIterable<ProcessEvent> {
     if (this.consumer !== "none" && this.consumer !== "iterator") {
@@ -170,8 +175,21 @@ export class ProcessHandle {
       const iterator: AsyncIterableIterator<ProcessEvent> = {
         [Symbol.asyncIterator]: () => iterator,
         next: async () => {
+          if (this.consumer === "drain") {
+            throw invalidArgument(
+              "events is unavailable: wait() took over consuming the output",
+            );
+          }
+          this.iteratorReleased = false;
           const step = await this.pull();
           return step.done ? { done: true, value: undefined } : step;
+        },
+        // Called when a `for await` loop is left early. The process keeps
+        // running and nothing is discarded, but the stream is no longer read,
+        // so a later wait() has to read it.
+        return: async () => {
+          this.iteratorReleased = true;
+          return { done: true, value: undefined };
         },
       };
       this.iterator = iterator;
@@ -181,13 +199,23 @@ export class ProcessHandle {
 
   /**
    * Resolves with the exit code once the process exits (-1 if it was killed
-   * by a signal). If neither callbacks nor `events` are in use, this starts
-   * discarding the output so the process can make progress. Rejects as soon
+   * by a signal). If neither callbacks nor `events` are in use, or an
+   * `events` loop has been left (break, return, or throw), this starts
+   * discarding the remaining output so the process can make progress;
+   * `events` is unavailable from then on. An `events` iterator driven by
+   * hand with `next()` must be finished with `return()` for this to apply.
+   * Rejects as soon
    * as the stream is torn down (abort, close, lost connection), even if
    * output is no longer being read.
    */
   wait(): Promise<{ exitCode: number }> {
-    if (this.consumer === "none") {
+    // Only a released iterator is taken over: while a loop is still running
+    // (even if its body is awaiting something), its events must not be
+    // stolen.
+    if (
+      this.consumer === "none" ||
+      (this.consumer === "iterator" && this.iteratorReleased)
+    ) {
       this.consumer = "drain";
       void this.pump();
     }
@@ -298,8 +326,18 @@ export class ProcessHandle {
     this.unwatch?.();
   }
 
+  /**
+   * Reads one event. Reads are serialized, so a hand-driven `next()` still
+   * in flight when wait() takes over cannot race the drain.
+   */
+  private pull(): Promise<IteratorResult<ProcessEvent, undefined>> {
+    const step = this.pullChain.then(() => this.pullOnce());
+    this.pullChain = step.catch(() => {});
+    return step;
+  }
+
   /** Reads one event, settling `exit` on the terminal outcomes. */
-  private async pull(): Promise<IteratorResult<ProcessEvent, undefined>> {
+  private async pullOnce(): Promise<IteratorResult<ProcessEvent, undefined>> {
     if (this.streamEnded || (this.terminal && !this.exitSeen)) {
       // Already finished: a normal end, or the failure recorded in `exit`.
       await this.exit;

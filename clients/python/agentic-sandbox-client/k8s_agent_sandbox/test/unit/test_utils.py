@@ -142,8 +142,30 @@ class TestKubectlKubeconfigArgs(unittest.TestCase):
             cluster, _ = _cluster_and_user(_read_kubeconfig(args))
 
         self.assertTrue(cluster["insecure-skip-tls-verify"])
+        # kubectl rejects a CA together with insecure-skip-tls-verify.
+        self.assertNotIn("certificate-authority", cluster)
         self.assertEqual(cluster["tls-server-name"], "api.internal")
         self.assertEqual(cluster["proxy-url"], "http://proxy:3128")
+
+    def test_impersonation_headers_are_carried_over(self):
+        api_client = sync_client.ApiClient(configuration=self._configuration())
+        api_client.set_default_header("impersonate-user", "alice")
+        api_client.set_default_header("Impersonate-Group", "devs")
+
+        with kubectl_kubeconfig_args(api_client) as args:
+            _, user = _cluster_and_user(_read_kubeconfig(args))
+
+        self.assertEqual(user["as"], "alice")
+        self.assertEqual(user["as-groups"], ["devs"])
+
+    def test_no_impersonation_without_headers(self):
+        api_client = sync_client.ApiClient(configuration=self._configuration())
+
+        with kubectl_kubeconfig_args(api_client) as args:
+            _, user = _cluster_and_user(_read_kubeconfig(args))
+
+        self.assertNotIn("as", user)
+        self.assertNotIn("as-groups", user)
 
     def test_refreshed_token_is_used(self):
         cfg = self._configuration()
@@ -190,7 +212,9 @@ class TestAsyncKubectlKubeconfigArgs(unittest.IsolatedAsyncioTestCase):
     async def test_kubeconfig_targets_the_injected_cluster(self):
         # Only ``.configuration`` is read, and a real async ApiClient would
         # try to load the fake CA file.
-        api_client = SimpleNamespace(configuration=self._configuration())
+        api_client = SimpleNamespace(
+            configuration=self._configuration(), default_headers={"Impersonate-User": "alice"}
+        )
 
         async with async_kubectl_kubeconfig_args(api_client) as args:
             kubeconfig = _read_kubeconfig(args)
@@ -198,7 +222,7 @@ class TestAsyncKubectlKubeconfigArgs(unittest.IsolatedAsyncioTestCase):
         cluster, user = _cluster_and_user(kubeconfig)
         self.assertEqual(cluster["server"], "https://cluster-b:6443")
         self.assertEqual(cluster["certificate-authority"], "/certs/ca.crt")
-        self.assertEqual(user, {"token": "secret"})
+        self.assertEqual(user, {"token": "secret", "as": "alice"})
         self.assertFalse(os.path.exists(args[1]))
 
     async def test_async_refresh_hook_is_awaited(self):
@@ -209,7 +233,7 @@ class TestAsyncKubectlKubeconfigArgs(unittest.IsolatedAsyncioTestCase):
 
         cfg.refresh_api_key_hook = refresh
 
-        async with async_kubectl_kubeconfig_args(SimpleNamespace(configuration=cfg)) as args:
+        async with async_kubectl_kubeconfig_args(SimpleNamespace(configuration=cfg, default_headers={})) as args:
             _, user = _cluster_and_user(_read_kubeconfig(args))
 
         self.assertEqual(user["token"], "fresh")

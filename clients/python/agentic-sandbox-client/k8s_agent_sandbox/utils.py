@@ -210,18 +210,23 @@ def construct_sandbox_claim_env_spec(env: Mapping[str, str] | None) -> list[Sand
 
 
 def kubeconfig_from_configuration(
-    configuration: Any, authorization: str | None
+    configuration: Any,
+    authorization: str | None,
+    default_headers: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build a kubeconfig for the cluster a Kubernetes ``Configuration`` targets.
 
     ``authorization`` is the resolved ``Authorization`` header value. Only a
-    bearer token is carried over; basic auth is not.
+    bearer token is carried over; basic auth is not. ``default_headers`` are
+    the ``ApiClient``'s; only the impersonation user and group are carried over.
     """
     cluster: dict[str, Any] = {"server": configuration.host}
-    if configuration.ssl_ca_cert:
-        cluster["certificate-authority"] = configuration.ssl_ca_cert
+    # kubectl rejects a CA with insecure-skip-tls-verify. The Python clients
+    # ignore the CA when verify_ssl is off, so do the same.
     if not configuration.verify_ssl:
         cluster["insecure-skip-tls-verify"] = True
+    elif configuration.ssl_ca_cert:
+        cluster["certificate-authority"] = configuration.ssl_ca_cert
     if getattr(configuration, "tls_server_name", None):
         cluster["tls-server-name"] = configuration.tls_server_name
     if getattr(configuration, "proxy", None):
@@ -235,6 +240,11 @@ def kubeconfig_from_configuration(
     scheme, _, credential = (authorization or "").partition(" ")
     if scheme.lower() == "bearer" and credential:
         user["token"] = credential
+    headers = {k.lower(): v for k, v in (default_headers or {}).items()}
+    if headers.get("impersonate-user"):
+        user["as"] = headers["impersonate-user"]
+    if headers.get("impersonate-group"):
+        user["as-groups"] = [headers["impersonate-group"]]
 
     return {
         "apiVersion": "v1",
@@ -250,13 +260,18 @@ def kubeconfig_from_configuration(
 
 @contextmanager
 def _temporary_kubeconfig(
-    configuration: Any, authorization: str | None
+    api_client: Any, authorization: str | None
 ) -> Iterator[list[str]]:
     # mkstemp creates the file 0600, and it can hold a bearer token.
     fd, path = tempfile.mkstemp(prefix="sandbox-kubeconfig-", suffix=".json")
     try:
         with os.fdopen(fd, "w") as f:
-            json.dump(kubeconfig_from_configuration(configuration, authorization), f)
+            json.dump(
+                kubeconfig_from_configuration(
+                    api_client.configuration, authorization, api_client.default_headers
+                ),
+                f,
+            )
         yield ["--kubeconfig", path]
     finally:
         with suppress(FileNotFoundError):
@@ -277,7 +292,7 @@ def kubectl_kubeconfig_args(api_client: Any | None) -> Iterator[list[str]]:
         return
     configuration = api_client.configuration
     authorization = configuration.get_api_key_with_prefix("authorization")
-    with _temporary_kubeconfig(configuration, authorization) as args:
+    with _temporary_kubeconfig(api_client, authorization) as args:
         yield args
 
 
@@ -292,5 +307,5 @@ async def async_kubectl_kubeconfig_args(api_client: Any | None) -> AsyncIterator
     authorization = configuration.get_api_key_with_prefix("authorization")
     if inspect.isawaitable(authorization):
         authorization = await authorization
-    with _temporary_kubeconfig(configuration, authorization) as args:
+    with _temporary_kubeconfig(api_client, authorization) as args:
         yield args

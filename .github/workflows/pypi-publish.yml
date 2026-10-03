@@ -177,5 +177,23 @@ jobs:
           name: python-package-distributions
           path: dist/
 
-      - name: Publish distribution 📦 to PyPI
+      # The action uploads a whole directory and stops at the first error.
+      # Publish each project from its own directory, SDK first, so a failure
+      # in the adapter (e.g. a project not yet registered on PyPI) cannot
+      # block the SDK.
+      - name: Separate the adapter distributions
+        run: |
+          mkdir dist-deepagents
+          mv dist/deepagents_k8s_agent_sandbox-* dist-deepagents/
+
+      # skip-existing makes a re-run safe after a partial publish.
+      - name: Publish k8s-agent-sandbox 📦 to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          skip-existing: true
+
+      - name: Publish deepagents-k8s-agent-sandbox 📦 to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: dist-deepagents/
+          skip-existing: true

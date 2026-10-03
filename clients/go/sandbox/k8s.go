@@ -24,6 +24,7 @@ import (
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/trace"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
@@ -198,8 +199,43 @@ func (h *K8sHelper) deleteClaim(ctx context.Context, name, namespace string) err
 	return nil
 }
 
+// terminalClaimReadyReasons are SandboxClaim Ready=False reasons the claim
+// controller does not retry on its own (see computeReadyCondition in
+// extensions/controllers/sandboxclaim_controller.go). Transient reasons such as
+// AdoptionPending, SandboxMissing, SandboxNotReady and ReconcilerError are
+// left out because the controller recovers from them. Kept in sync with
+// TERMINAL_CLAIM_READY_REASONS in the Python and TypeScript SDKs.
+var terminalClaimReadyReasons = map[string]bool{
+	"InvalidMetadata":                                true,
+	"EnvVarsInjectionRejected":                       true,
+	"VolumeClaimTemplatesError":                      true,
+	extv1beta1.ClaimExpiredReason:                    true,
+	sandboxv1beta1.SandboxReasonExpired:              true,
+	sandboxv1beta1.SandboxReasonInvalidConfiguration: true,
+}
+
+// claimFailure returns an error if the claim reports a failure that waiting
+// longer cannot fix, so callers fail fast instead of burning the full timeout.
+func claimFailure(claim *extv1beta1.SandboxClaim) error {
+	ready := meta.FindStatusCondition(claim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	if ready == nil || ready.Status != metav1.ConditionFalse {
+		return nil
+	}
+	switch ready.Reason {
+	case "TemplateNotFound":
+		return fmt.Errorf("%w: claim %s: %s", ErrTemplateNotFound, claim.Name, ready.Message)
+	case "WarmPoolNotFound":
+		return fmt.Errorf("%w: claim %s: %s", ErrWarmPoolNotFound, claim.Name, ready.Message)
+	}
+	if terminalClaimReadyReasons[ready.Reason] {
+		return fmt.Errorf("%w: claim %s has terminal reason %s: %s", ErrClaimFailed, claim.Name, ready.Reason, ready.Message)
+	}
+	return nil
+}
+
 // resolveSandboxName watches SandboxClaim status until the sandbox name is
 // populated. With warm pool, the sandbox name may differ from the claim name.
+// It returns early with a claimFailure error if the claim can never become ready.
 func (h *K8sHelper) resolveSandboxName(ctx context.Context, claimName, namespace string, timeout time.Duration, tracer trace.Tracer, svcName string) (string, error) {
 	ctx, span := startSpan(ctx, tracer, svcName, "resolve_sandbox_name")
 	defer span.End()
@@ -217,6 +253,10 @@ func (h *K8sHelper) resolveSandboxName(ctx context.Context, claimName, namespace
 	for {
 		claim, err := h.ExtensionsClient.SandboxClaims(namespace).Get(ctx, claimName, metav1.GetOptions{})
 		if err == nil {
+			if failure := claimFailure(claim); failure != nil {
+				recordError(span, failure)
+				return "", failure
+			}
 			if name := claim.Status.SandboxStatus.Name; name != "" {
 				h.Log.Info("sandbox name resolved", "claim", claimName, "sandbox", name)
 				return name, nil
@@ -284,6 +324,9 @@ func (h *K8sHelper) drainClaimWatch(ctx context.Context, watcher watch.Interface
 			claim, ok := event.Object.(*extv1beta1.SandboxClaim)
 			if !ok {
 				continue
+			}
+			if failure := claimFailure(claim); failure != nil {
+				return "", false, failure
 			}
 			if name := claim.Status.SandboxStatus.Name; name != "" {
 				return name, true, nil

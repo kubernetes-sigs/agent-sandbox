@@ -74,7 +74,7 @@ The Virtualization and Authentication checks must pass. `sbx` needs a one-time g
 By default `sbx` sizes a VM from the host's CPUs and memory, so pass `--cpus` and `--memory` to keep VMs inside the pod limits in `sandbox.yaml`:
 
 ```bash
-kubectl exec docker-sbx -- sbx create --name demo --cpus 3 --memory 2g shell /workspace
+kubectl exec docker-sbx -- sbx create --name demo --cpus 1 --memory 2g shell /workspace
 kubectl exec docker-sbx -- sbx exec demo -- uname -r
 kubectl exec docker-sbx -- uname -r
 ```
@@ -87,7 +87,7 @@ Pass the model key through stdin so it never appears in the pod spec. The `sbx` 
 
 ```bash
 kubectl exec -i docker-sbx -- sbx secret set anthropic <<< "$ANTHROPIC_API_KEY"
-kubectl exec -it docker-sbx -- sbx run --cpus 3 --memory 4g claude /workspace
+kubectl exec -it docker-sbx -- sbx run --cpus 2 --memory 4g claude /workspace
 ```
 
 The `workspace` PVC is mounted into the microVM at the same path. See the [supported agents](https://docs.docker.com/ai/sandboxes/agents/).
@@ -103,7 +103,7 @@ kubectl delete pvc -l sandbox=docker-sbx   # also deletes all VM disks and store
 
 ## Configuration
 
-- **VM size:** keep the sum of running VMs, plus headroom for the daemon, under the pod memory limit.
+- **VM size:** keep the sum of running VMs, plus headroom for the daemon, under the pod CPU and memory limits.
 - **VM disks:** `DOCKER_SANDBOXES_ROOT_SIZE` (default 20 GB) and `DOCKER_SANDBOXES_DOCKER_SIZE` (default 10 GB) apply at creation, for example `kubectl exec docker-sbx -- env DOCKER_SANDBOXES_ROOT_SIZE=40g sbx create ...`. Size the `data` PVC for every sandbox you keep.
 - **Egress:** `sbx policy ls` shows the rules and `sbx policy log` shows blocked requests. The pod also needs outbound access to Docker and your model provider.
 - **Newer `sbx`:** `docker build --build-arg DOCKER_SBX_VERSION=<version> .`. Commands and flags change between releases, so check `sbx --help`.

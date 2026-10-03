@@ -16,6 +16,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -26,6 +27,7 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/watch"
 	ktesting "k8s.io/client-go/testing"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
@@ -567,6 +569,105 @@ func TestResolveSandboxName_FromClaimStatus(t *testing.T) {
 	if name != "warm-pool-sandbox-xyz" {
 		t.Errorf("expected warm-pool-sandbox-xyz, got %s", name)
 	}
+}
+
+// claimNotReady returns a claim whose Ready condition is False for reason.
+func claimNotReady(name, reason string) *extv1beta1.SandboxClaim {
+	return &extv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Status: extv1beta1.SandboxClaimStatus{
+			Conditions: []metav1.Condition{{
+				Type:    string(sandboxv1beta1.SandboxConditionReady),
+				Status:  metav1.ConditionFalse,
+				Reason:  reason,
+				Message: "detail",
+			}},
+		},
+	}
+}
+
+func TestClaimFailure(t *testing.T) {
+	for _, tc := range []struct {
+		reason string
+		want   error
+	}{
+		{"TemplateNotFound", ErrTemplateNotFound},
+		{"WarmPoolNotFound", ErrWarmPoolNotFound},
+		{"InvalidMetadata", ErrClaimFailed},
+		{"EnvVarsInjectionRejected", ErrClaimFailed},
+		{"VolumeClaimTemplatesError", ErrClaimFailed},
+		{"ClaimExpired", ErrClaimFailed},
+		{"SandboxExpired", ErrClaimFailed},
+		{"InvalidConfiguration", ErrClaimFailed},
+		// The controller retries these, so waiting can still succeed.
+		{"AdoptionPending", nil},
+		{"SandboxMissing", nil},
+		{"SandboxNotReady", nil},
+		{"ReconcilerError", nil},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			err := claimFailure(claimNotReady("c", tc.reason))
+			if tc.want == nil {
+				if err != nil {
+					t.Fatalf("expected no failure, got: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("expected %v, got: %v", tc.want, err)
+			}
+		})
+	}
+
+	t.Run("no conditions", func(t *testing.T) {
+		if err := claimFailure(&extv1beta1.SandboxClaim{}); err != nil {
+			t.Fatalf("expected no failure, got: %v", err)
+		}
+	})
+	t.Run("ready", func(t *testing.T) {
+		claim := claimNotReady("c", "ClaimExpired")
+		claim.Status.Conditions[0].Status = metav1.ConditionTrue
+		if err := claimFailure(claim); err != nil {
+			t.Fatalf("expected no failure for Ready=True, got: %v", err)
+		}
+	})
+}
+
+// A claim that can never become ready must fail fast instead of waiting out
+// the timeout, whether it is seen by the initial get or by the watch.
+func TestResolveSandboxName_FailsFastOnTerminalClaim(t *testing.T) {
+	newHelper := func() (*K8sHelper, *fakeextensions.Clientset) {
+		extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+		return &K8sHelper{ExtensionsClient: extensionsCS.ExtensionsV1beta1(), Log: logr.Discard()}, extensionsCS
+	}
+	tracer := noop.NewTracerProvider().Tracer("test")
+
+	t.Run("get", func(t *testing.T) {
+		k8s, extensionsCS := newHelper()
+		extensionsCS.PrependReactor("get", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+			return true, claimNotReady("c", "WarmPoolNotFound"), nil
+		})
+
+		_, err := k8s.resolveSandboxName(context.Background(), "c", "default", 5*time.Second, tracer, "test")
+		if !errors.Is(err, ErrWarmPoolNotFound) {
+			t.Fatalf("expected ErrWarmPoolNotFound, got: %v", err)
+		}
+	})
+
+	t.Run("watch", func(t *testing.T) {
+		k8s, extensionsCS := newHelper()
+		extensionsCS.PrependReactor("get", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+			return true, &extv1beta1.SandboxClaim{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "default"}}, nil
+		})
+		fw := watch.NewFake()
+		extensionsCS.PrependWatchReactor("sandboxclaims", ktesting.DefaultWatchReactor(fw, nil))
+		go fw.Modify(claimNotReady("c", "InvalidMetadata"))
+
+		_, err := k8s.resolveSandboxName(context.Background(), "c", "default", 5*time.Second, tracer, "test")
+		if !errors.Is(err, ErrClaimFailed) {
+			t.Fatalf("expected ErrClaimFailed, got: %v", err)
+		}
+	})
 }
 
 // TestWaitForSandboxReady_UsesSandboxName verifies the ready check uses the

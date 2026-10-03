@@ -48,7 +48,11 @@ import {
 } from "./exceptions.js";
 import { SandboxFiles } from "./files.js";
 import { noopLogger } from "./logger.js";
-import { ProcessClient, type ProcessSpec } from "./process.js";
+import {
+  ProcessClient,
+  type ProcessSpec,
+  StreamLocalFailure,
+} from "./process.js";
 import {
   resolveSandboxPath,
   SandboxdRestClient,
@@ -904,6 +908,10 @@ export class Sandbox {
     // untouched for writeStreamImpl() to unwrap.
     if (err instanceof SourceFailure) {
       return err;
+    }
+    // A protocol violation on one Start stream ends only that stream.
+    if (err instanceof StreamLocalFailure) {
+      return err.error;
     }
     if (err instanceof SandboxConnectionError) {
       this.invalidateGeneration(gen, err);

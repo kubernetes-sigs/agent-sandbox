@@ -717,6 +717,17 @@ describe("TypeScript SDK E2E — sandbox runtime operations (sandboxd)", () => {
       expect(events.at(-1)).toEqual({ type: "exit", exitCode: 4 });
       await expect(proc.wait()).resolves.toEqual({ exitCode: 4 });
 
+      // Leaving `events` early and then calling wait() must drain the rest,
+      // or the process blocks on a full pipe and wait() never settles.
+      const chatty = await sandbox.commands.start("sh", [
+        "-c",
+        "echo ready; head -c 1048576 /dev/zero; exit 6",
+      ]);
+      for await (const event of chatty.events) {
+        if (event.type === "stdout") break;
+      }
+      await expect(chatty.wait()).resolves.toEqual({ exitCode: 6 });
+
       // Consuming through callbacks.
       const captured = await startCaptured(sandbox, "sh", ["-c", script]);
       await expect(captured.handle.wait()).resolves.toEqual({ exitCode: 4 });

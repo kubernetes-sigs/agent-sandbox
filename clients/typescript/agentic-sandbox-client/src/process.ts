@@ -137,6 +137,16 @@ function protocolError(message: string): SandboxConnectionError {
   return new SandboxConnectionError(message, "protocol");
 }
 
+/**
+ * Wraps a protocol violation confined to one Start stream, so
+ * Sandbox.classifyOperationFailure() reports `error` without invalidating
+ * the connection every other operation shares. Never escapes to callers.
+ * @internal
+ */
+export class StreamLocalFailure {
+  constructor(readonly error: SandboxConnectionError) {}
+}
+
 function truncateUtf8(s: string, maxBytes: number): string {
   const bytes = new TextEncoder().encode(s);
   if (bytes.length <= maxBytes) return s;
@@ -193,7 +203,8 @@ interface ProcessRpcClient {
 /**
  * A running Start stream, positioned after its InitEvent. `events` ends
  * (done) only after an "exit" event was yielded; a stream that ends any
- * other way rejects instead.
+ * other way rejects instead. A protocol violation confined to the stream
+ * rejects with a StreamLocalFailure.
  * @internal
  */
 export interface StartedProcess {
@@ -326,9 +337,15 @@ export class ProcessClient {
     } catch (err) {
       throw fail(err);
     }
-    if (first.done || first.value.event.case !== "init") {
+    // Ends only this stream: the connection itself is still sound.
+    const streamFailure = async (
+      message: string,
+    ): Promise<StreamLocalFailure> => {
       await source.return?.().catch(() => {});
-      throw protocolError(
+      return new StreamLocalFailure(protocolError(message));
+    };
+    if (first.done || first.value.event.case !== "init") {
+      throw await streamFailure(
         "sandboxd Start stream did not begin with an InitEvent",
       );
     }
@@ -346,7 +363,7 @@ export class ProcessClient {
           }
           if (step.done) {
             if (exited) return { done: true, value: undefined };
-            throw protocolError(
+            throw await streamFailure(
               "sandboxd Start stream ended without an ExitEvent",
             );
           }
@@ -355,21 +372,29 @@ export class ProcessClient {
             case "stdout":
             case "stderr":
               if (exited) {
-                throw protocolError("sandboxd sent output after ExitEvent");
+                throw await streamFailure(
+                  "sandboxd sent output after ExitEvent",
+                );
               }
               return {
                 done: false,
                 value: { type: event.case, data: event.value },
               };
             case "exit":
-              if (exited) throw protocolError("sandboxd sent two ExitEvents");
+              if (exited) {
+                throw await streamFailure("sandboxd sent two ExitEvents");
+              }
               exited = true;
               return {
                 done: false,
                 value: { type: "exit", exitCode: event.value.exitCode },
               };
+            case "init":
+              throw await streamFailure("sandboxd sent a second InitEvent");
             default:
-              throw protocolError("sandboxd sent an unexpected Start event");
+              // An event this client does not know yet (a newer sandboxd);
+              // skip it rather than fail the stream.
+              continue;
           }
         }
       },

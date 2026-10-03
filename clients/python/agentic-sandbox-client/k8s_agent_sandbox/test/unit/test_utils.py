@@ -19,7 +19,9 @@ import unittest
 from types import SimpleNamespace
 
 from kubernetes import client as sync_client
+from kubernetes import config as sync_config
 from kubernetes_asyncio import client as async_client
+from kubernetes_asyncio import config as async_config
 
 from k8s_agent_sandbox.utils import (
     async_kubectl_kubeconfig_args,
@@ -89,6 +91,18 @@ def _read_kubeconfig(args):
 
 def _cluster_and_user(kubeconfig):
     return kubeconfig["clusters"][0]["cluster"], kubeconfig["users"][0]["user"]
+
+
+# What kubectl writes for a token user. load_kube_config stores the token under
+# api_key["BearerToken"], not "authorization".
+_TOKEN_KUBECONFIG = {
+    "apiVersion": "v1",
+    "kind": "Config",
+    "clusters": [{"name": "c", "cluster": {"server": "https://cluster-b:6443"}}],
+    "users": [{"name": "u", "user": {"token": "loaded-secret"}}],
+    "contexts": [{"name": "x", "context": {"cluster": "c", "user": "u"}}],
+    "current-context": "x",
+}
 
 
 class TestKubectlKubeconfigArgs(unittest.TestCase):
@@ -176,6 +190,15 @@ class TestKubectlKubeconfigArgs(unittest.TestCase):
 
         self.assertEqual(user["token"], "fresh")
 
+    def test_token_from_load_kube_config_is_carried_over(self):
+        cfg = sync_client.Configuration()
+        sync_config.load_kube_config_from_dict(_TOKEN_KUBECONFIG, client_configuration=cfg)
+
+        with kubectl_kubeconfig_args(sync_client.ApiClient(configuration=cfg)) as args:
+            _, user = _cluster_and_user(_read_kubeconfig(args))
+
+        self.assertEqual(user["token"], "loaded-secret")
+
     def test_basic_auth_is_not_carried_over(self):
         cfg = self._configuration()
         cfg.api_key = {"authorization": "dXNlcjpwYXNz"}
@@ -224,6 +247,15 @@ class TestAsyncKubectlKubeconfigArgs(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cluster["certificate-authority"], "/certs/ca.crt")
         self.assertEqual(user, {"token": "secret", "as": "alice"})
         self.assertFalse(os.path.exists(args[1]))
+
+    async def test_token_from_load_kube_config_is_carried_over(self):
+        cfg = async_client.Configuration()
+        await async_config.load_kube_config_from_dict(_TOKEN_KUBECONFIG, client_configuration=cfg)
+
+        async with async_kubectl_kubeconfig_args(SimpleNamespace(configuration=cfg, default_headers={})) as args:
+            _, user = _cluster_and_user(_read_kubeconfig(args))
+
+        self.assertEqual(user["token"], "loaded-secret")
 
     async def test_async_refresh_hook_is_awaited(self):
         cfg = self._configuration()

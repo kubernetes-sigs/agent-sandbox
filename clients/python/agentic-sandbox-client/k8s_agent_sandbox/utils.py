@@ -258,6 +258,11 @@ def kubeconfig_from_configuration(
     }
 
 
+# load_kube_config stores a token under BearerToken. Older kubernetes releases
+# and hand-built configurations use authorization.
+_AUTHORIZATION_KEYS = ("BearerToken", "authorization")
+
+
 @contextmanager
 def _temporary_kubeconfig(
     api_client: Any, authorization: str | None
@@ -291,7 +296,11 @@ def kubectl_kubeconfig_args(api_client: Any | None) -> Iterator[list[str]]:
         yield []
         return
     configuration = api_client.configuration
-    authorization = configuration.get_api_key_with_prefix("authorization")
+    authorization = None
+    for key in _AUTHORIZATION_KEYS:
+        authorization = configuration.get_api_key_with_prefix(key)
+        if authorization:
+            break
     with _temporary_kubeconfig(api_client, authorization) as args:
         yield args
 
@@ -303,9 +312,13 @@ async def async_kubectl_kubeconfig_args(api_client: Any | None) -> AsyncIterator
         yield []
         return
     configuration = api_client.configuration
-    # kubernetes_asyncio runs a possibly async refresh hook here.
-    authorization = configuration.get_api_key_with_prefix("authorization")
-    if inspect.isawaitable(authorization):
-        authorization = await authorization
+    authorization = None
+    for key in _AUTHORIZATION_KEYS:
+        # kubernetes_asyncio runs a possibly async refresh hook here.
+        authorization = configuration.get_api_key_with_prefix(key)
+        if inspect.isawaitable(authorization):
+            authorization = await authorization
+        if authorization:
+            break
     with _temporary_kubeconfig(api_client, authorization) as args:
         yield args

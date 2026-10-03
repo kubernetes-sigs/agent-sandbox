@@ -55,7 +55,7 @@ kubectl create secret generic docker-sbx-credentials \
 
 ```bash
 kubectl apply -f sandbox.yaml
-kubectl wait --for=condition=ready pod/docker-sbx --timeout=5m
+kubectl wait --for=condition=Ready sandbox/docker-sbx --timeout=5m
 ```
 
 The pod is ready once the daemon is running. A failed sign-in makes the container exit (`CrashLoopBackOff`); see `kubectl logs docker-sbx`.
@@ -74,7 +74,7 @@ The Virtualization and Authentication checks must pass. `sbx` needs a one-time g
 By default `sbx` sizes a VM from the host's CPUs and memory, so pass `--cpus` and `--memory` to keep VMs inside the pod limits in `sandbox.yaml`:
 
 ```bash
-kubectl exec docker-sbx -- sbx create --name demo --cpus 3 --memory 6g shell /workspace
+kubectl exec docker-sbx -- sbx create --name demo --cpus 3 --memory 2g shell /workspace
 kubectl exec docker-sbx -- sbx exec demo -- uname -r
 kubectl exec docker-sbx -- uname -r
 ```
@@ -87,7 +87,7 @@ Pass the model key through stdin so it never appears in the pod spec. The `sbx` 
 
 ```bash
 kubectl exec -i docker-sbx -- sbx secret set anthropic <<< "$ANTHROPIC_API_KEY"
-kubectl exec -it docker-sbx -- sbx run --cpus 3 --memory 6g claude /workspace
+kubectl exec -it docker-sbx -- sbx run --cpus 3 --memory 4g claude /workspace
 ```
 
 The `workspace` PVC is mounted into the microVM at the same path. See the [supported agents](https://docs.docker.com/ai/sandboxes/agents/).

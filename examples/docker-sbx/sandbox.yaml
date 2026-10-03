@@ -8,6 +8,8 @@ spec:
       labels:
         sandbox: docker-sbx
     spec:
+      # Give the daemon time to flush disks and stop microVMs.
+      terminationGracePeriodSeconds: 120
       automountServiceAccountToken: false
       nodeSelector:
         kvm: "true"
@@ -33,6 +35,8 @@ spec:
             - name: XDG_CONFIG_HOME
               value: /data/config
           readinessProbe:
+            # entrypoint.sh signs in to Docker Hub before the daemon starts.
+            initialDelaySeconds: 10
             exec:
               command: ["sh", "-c", "sbx daemon status | grep -q 'Status: running'"]
             periodSeconds: 10

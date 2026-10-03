@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import io
 import os
 import subprocess
 import sys
@@ -60,6 +61,7 @@ def wait_until_sandbox_routable(sandbox):
     sandbox.files.exists(".")
 
 
+
 def run_sdk_tests(sandbox):
     """Runs basic SDK operations to validate functionality"""
     wait_until_sandbox_routable(sandbox)
@@ -87,3 +89,20 @@ def run_sdk_tests(sandbox):
         streamed_content = destination.read().decode("utf-8")
     assert written == len(file_content.encode("utf-8"))
     assert streamed_content == file_content
+
+    # Exercise the streaming multipart path through the real SDK, Router, and
+    # runtime. Start after a prefix to verify that write() honors the caller's
+    # current file position instead of rewinding the stream.
+    stream_content = b"streamed through the Python SDK"
+    stream = io.BytesIO(b"skip-" + stream_content)
+    stream.seek(len(b"skip-"))
+    stream_path = "streamed.txt"
+    print(f"Streaming content to '{stream_path}'...")
+    sandbox.files.write(stream_path, stream)
+    assert not stream.closed, "write() must not close caller-owned streams"
+
+    streamed_content = sandbox.files.read(stream_path)
+    assert streamed_content == stream_content, (
+        f"Streamed file content mismatch: {streamed_content!r}"
+    )
+

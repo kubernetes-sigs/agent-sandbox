@@ -27,6 +27,11 @@ import uuid
 from types import TracebackType
 from typing import Generic, TypeVar
 
+from kubernetes import client as sync_client
+from kubernetes_asyncio import client as async_client
+from kubernetes_asyncio.client import ApiException
+
+from .claim_adoption import validate_claim_name, validate_claim_for_adoption
 from .async_k8s_helper import AsyncK8sHelper
 from .async_sandbox import AsyncSandbox
 from .exceptions import SandboxNotFoundError
@@ -45,6 +50,58 @@ T = TypeVar("T", bound=AsyncSandbox)
 # unresponsive apiserver would otherwise hang process exit indefinitely.
 _ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS = 300
 
+# Connection/auth fields, copied from an injected kubernetes_asyncio Configuration onto a
+# sync one by _sync_configuration_from_async, since the sync Configuration is only used
+# for atexit cleanup and needs nothing beyond connecting and authenticating.
+_CONNECTION_FIELDS = (
+    "host", "api_key", "api_key_prefix", "username", "password",
+    "ssl_ca_cert", "cert_file", "key_file", "verify_ssl",
+    "proxy_headers", "tls_server_name", "assert_hostname",
+    "socket_options", "retries", "connection_pool_maxsize",
+)
+
+
+def _sync_configuration_from_async(async_configuration) -> sync_client.Configuration:
+    """Builds the sync Configuration atexit cleanup uses from an injected async one, copying only
+    ``_CONNECTION_FIELDS`` so sync-only fields (e.g. ``no_proxy``) keep their defaults and an async
+    ``refresh_api_key_hook`` is never carried over."""
+    sync_configuration = sync_client.Configuration()
+    for field in _CONNECTION_FIELDS:
+        if hasattr(async_configuration, field):
+            setattr(sync_configuration, field, getattr(async_configuration, field))
+    # kubernetes_asyncio leaves proxy unset and lets aiohttp read HTTPS_PROXY/NO_PROXY, while the sync
+    # Configuration reads them itself, so only an explicit proxy may override that.
+    if async_configuration.proxy:
+        sync_configuration.proxy = async_configuration.proxy
+    # Copied so neither the refresh hook nor the alias below mutates the injected config.
+    sync_configuration.api_key = dict(async_configuration.api_key)
+    sync_configuration.api_key_prefix = dict(async_configuration.api_key_prefix)
+    _refresh_api_key_for_atexit(async_configuration.refresh_api_key_hook, sync_configuration)
+    # kubernetes<36's auth_settings() reads "authorization", not kubernetes_asyncio's "BearerToken".
+    for values in (sync_configuration.api_key, sync_configuration.api_key_prefix):
+        if "BearerToken" in values:
+            values.setdefault("authorization", values["BearerToken"])
+    return sync_configuration
+
+
+def _refresh_api_key_for_atexit(refresh_api_key_hook, sync_configuration) -> None:
+    """Runs the injected client's ``refresh_api_key_hook`` against the sync copy, since kubernetes_asyncio
+    only runs it when preparing a request and the token may have expired since the last one. An async hook
+    can't be awaited at atexit, so its coroutine is closed unrun and the live ``api_key`` is used as-is."""
+    if refresh_api_key_hook is None:
+        return
+    try:
+        result = refresh_api_key_hook(sync_configuration)
+        if asyncio.iscoroutine(result):
+            result.close()
+    except Exception as e:
+        if sys.stderr is not None:
+            print(
+                "[agent-sandbox] Warning: failed to refresh API key during atexit "
+                f"cleanup, using the last known one: {e}",
+                file=sys.stderr,
+            )
+
 
 class AsyncSandboxClient(Generic[T]):
     """
@@ -60,8 +117,8 @@ class AsyncSandboxClient(Generic[T]):
     ``SandboxLocalTunnelConnectionConfig``.
 
     By default (``cleanup=True``) an atexit hook is registered that deletes
-    all tracked sandboxes on program termination, so sandboxes are not leaked
-    if the program exits without explicit cleanup. The hook also terminates
+    tracked sandboxes on program termination, except explicitly named Claims.
+    The hook also terminates
     loop-independent local resources such as sandboxd port-forward processes.
     Pass ``cleanup=False`` to opt out of this behavior::
 
@@ -71,9 +128,12 @@ class AsyncSandboxClient(Generic[T]):
     which defaults to ``cleanup=False``; the async client opts in to safer
     out-of-the-box cleanup.
 
-    Alternatively, use the ``async with`` context manager or explicitly call
-    ``await client.delete_all()`` followed by ``await client.close()`` to
-    avoid orphaned claims.
+    Use ``async with`` to delete automatically managed Claims and close local
+    connections. Explicitly named Claims remain caller-owned and are not
+    deleted on context exit. To delete them, explicitly call
+    ``await client.delete_sandbox(...)`` or ``await client.delete_all()``
+    before closing the client. Outside a context manager, call
+    ``await client.close()`` to close connections and the Kubernetes API client.
     """
 
     sandbox_class: type[T] = AsyncSandbox  # type: ignore
@@ -83,6 +143,7 @@ class AsyncSandboxClient(Generic[T]):
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
         cleanup: bool = True,
+        api_client: async_client.ApiClient | None = None,
     ) -> None:
         """
         Args:
@@ -92,7 +153,8 @@ class AsyncSandboxClient(Generic[T]):
             tracer_config: Configuration for OpenTelemetry tracing.
                 Defaults to an empty SandboxTracerConfig (tracing disabled).
             cleanup: If True, registers an atexit hook to automatically delete
-                all tracked sandboxes when the program terminates. The hook
+                tracked sandboxes when the program terminates, excluding claims
+                explicitly named through create_sandbox(). The hook
                 synchronously terminates loop-independent local resources and
                 uses the synchronous ``K8sHelper`` for claim deletion, so it
                 remains usable during interpreter shutdown. Cleanup is
@@ -101,13 +163,18 @@ class AsyncSandboxClient(Generic[T]):
                 sandboxes are not leaked when a caller forgets to clean up;
                 pass ``cleanup=False`` to opt out. Note this differs from the
                 synchronous ``SandboxClient``, which defaults to False.
+            api_client: Optional pre-configured ``kubernetes_asyncio`` ``ApiClient``
+                forwarded to the underlying ``AsyncK8sHelper`` to target a specific
+                cluster/context.
         """
         if connection_config is None:
             raise ValueError(
                 "connection_config is required for AsyncSandboxClient. "
                 "Use SandboxDirectConnectionConfig, SandboxGatewayConnectionConfig, "
-                "SandboxInClusterConnectionConfig, or SandboxdPodTunnelConnectionConfig. "
-                "For local development with kubectl port-forward, use the synchronous SandboxClient."
+                "SandboxInClusterConnectionConfig, SandboxdPodTunnelConnectionConfig, "
+                "or SandboxdInClusterConnectionConfig. "
+                "For local development with the router's port-forward, use the synchronous SandboxClient; "
+                "SandboxdPodTunnelConnectionConfig supports async pod port-forwarding."
             )
 
         self.connection_config = connection_config
@@ -117,9 +184,12 @@ class AsyncSandboxClient(Generic[T]):
             initialize_tracer(self.tracer_config.trace_service_name)
         self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
 
-        self.k8s_helper = AsyncK8sHelper()
+        self.k8s_helper = AsyncK8sHelper(api_client=api_client)
+        # Held so atexit cleanup can read configuration/default_headers/cookie live at cleanup time
+        self._injected_api_client = api_client
 
         self._active_connection_sandboxes: dict[tuple[str, str], T] = {}
+        self._explicit_claims: set[tuple[str, str]] = set()
         self._lock = asyncio.Lock()
 
         if cleanup:
@@ -135,19 +205,24 @@ class AsyncSandboxClient(Generic[T]):
         exc_tb: TracebackType | None,
     ) -> None:
         try:
-            await self.delete_all()
+            await self._delete_automatic_sandboxes()
         finally:
             await self.close()
 
     async def close(self) -> None:
-        """Shuts down all tracked sandbox connections and the K8s API client."""
+        """Shuts down tracked sandbox connections and the K8s API client.
+
+        A connection that fails to close remains tracked so a later call can
+        retry its cleanup.
+        """
         async with self._lock:
-            for sandbox in self._active_connection_sandboxes.values():
+            for key, sandbox in list(self._active_connection_sandboxes.items()):
                 try:
                     await sandbox.close_connection()
                 except Exception as e:
                     logger.error(f"Failed to close sandbox connection: {e}")
-            self._active_connection_sandboxes.clear()
+                else:
+                    self._active_connection_sandboxes.pop(key, None)
         await self.k8s_helper.close()
 
     async def create_sandbox(
@@ -157,6 +232,8 @@ class AsyncSandboxClient(Generic[T]):
         sandbox_ready_timeout: int = 180,
         labels: dict[str, str] | None = None,
         *,
+        claim_name: str | None = None,
+        adopt_existing: bool = False,
         shutdown_after_seconds: int | None = None,
         volume_claim_templates: list[dict] | None = None,
         pod_labels: dict[str, str] | None = None,
@@ -171,6 +248,12 @@ class AsyncSandboxClient(Generic[T]):
             sandbox_ready_timeout: Seconds to wait for the sandbox to be ready.
             labels: Optional Kubernetes labels to attach to the claim object
                 (``SandboxClaim.metadata.labels``).
+            claim_name: Optional DNS-1123 Claim name. Explicit names remain
+                caller-owned and are excluded from automatic cleanup.
+            adopt_existing: On 409, attach to the existing named Claim after
+                checking its warm pool and that it is not terminating. Requires
+                claim_name. Creation options are not reapplied on adoption;
+                an existing shutdownTime is preserved.
             shutdown_after_seconds: Optional TTL in seconds. When set, the
                 claim's ``spec.lifecycle`` is populated with a ``shutdownTime``
                 of *now + shutdown_after_seconds* (UTC) and a ``shutdownPolicy``
@@ -205,19 +288,38 @@ class AsyncSandboxClient(Generic[T]):
 
         lifecycle = construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds) if shutdown_after_seconds is not None else None
 
-        claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
+        generated_name = claim_name is None
+        if adopt_existing and generated_name:
+            raise ValueError("adopt_existing requires an explicit claim_name.")
+        if claim_name is None:
+            claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
+        else:
+            validate_claim_name(claim_name)
+            self._explicit_claims.add((namespace, claim_name))
+
+        cleanup_generated = generated_name
+        claim_uid = None
 
         try:
-            created_claim = await self._create_claim(
-                claim_name,
-                warmpool,
-                namespace,
-                labels=labels,
-                lifecycle=lifecycle,
-                volume_claim_templates=volume_claim_templates,
-                pod_metadata=pod_metadata,
-                env=env,
-            )
+            try:
+                created_claim = await self._create_claim(
+                    claim_name,
+                    warmpool,
+                    namespace,
+                    labels=labels,
+                    lifecycle=lifecycle,
+                    volume_claim_templates=volume_claim_templates,
+                    pod_metadata=pod_metadata,
+                    env=env,
+                )
+            except ApiException as error:
+                if error.status == 409:
+                    cleanup_generated = False
+                if not (adopt_existing and error.status == 409):
+                    raise
+                created_claim = await self.k8s_helper.get_sandbox_claim(claim_name, namespace)
+            if not generated_name:
+                validate_claim_for_adoption(created_claim, claim_name, warmpool)
             # Wait for the claim to be bound and Ready in a single watch.
             # The claim status carries the sandbox name (which differs from
             # the claim name with warm pools) and the forwarded Ready
@@ -227,10 +329,22 @@ class AsyncSandboxClient(Generic[T]):
             # watch cache instead of a quorum etcd read per wait.
             claim_rv = None
             if isinstance(created_claim, dict):
-                claim_rv = (created_claim.get("metadata") or {}).get("resourceVersion")
+                metadata = created_claim.get("metadata") or {}
+                claim_rv = metadata.get("resourceVersion")
+                claim_uid = metadata.get("uid")
+            wait_kwargs = {} if generated_name else {
+                "expected_uid": claim_uid, "initial_claim": created_claim,
+            }
             sandbox_id = await self._wait_for_claim_ready(
-                claim_name, namespace, sandbox_ready_timeout, resource_version=claim_rv
+                claim_name, namespace, sandbox_ready_timeout, resource_version=claim_rv,
+                **wait_kwargs,
             )
+
+            async with self._lock:
+                existing = self._active_connection_sandboxes.get((namespace, claim_name))
+            if existing and existing.is_active and existing.sandbox_id == sandbox_id:
+                # Preserve extension state across serial retries on this client.
+                return existing
 
             sandbox = self.sandbox_class(
                 claim_name=claim_name,
@@ -241,11 +355,20 @@ class AsyncSandboxClient(Generic[T]):
                 k8s_helper=self.k8s_helper,
             )
         except (Exception, asyncio.CancelledError):
-            await asyncio.shield(self._delete_claim(claim_name, namespace))
+            if cleanup_generated:
+                # Preserve legacy rollback even if the create response was lost.
+                delete_kwargs = {"expected_uid": claim_uid} if claim_uid else {}
+                try:
+                    await asyncio.shield(self._delete_claim(claim_name, namespace, **delete_kwargs))
+                except Exception as cleanup_error:
+                    logger.error(f"Failed to roll back SandboxClaim '{claim_name}': {cleanup_error}")
             raise
 
         async with self._lock:
+            previous = self._active_connection_sandboxes.get((namespace, claim_name))
             self._active_connection_sandboxes[(namespace, claim_name)] = sandbox
+        if previous is not None:
+            await previous.close_connection()
         return sandbox
 
     async def get_sandbox(
@@ -313,9 +436,9 @@ class AsyncSandboxClient(Generic[T]):
             raise
         except Exception as e:
             if existing:
-                await existing.terminate()
-            async with self._lock:
-                self._active_connection_sandboxes.pop(key, None)
+                # A failed lookup doesn't mean the claim is gone, and cleanup
+                # only reaches tracked handles, so close locally and stay tracked.
+                await existing.close_connection()
             raise SandboxNotFoundError(
                 f"Sandbox claim '{claim_name}' not found or resolution failed "
                 f"in namespace '{namespace}': {e}"
@@ -388,6 +511,13 @@ class AsyncSandboxClient(Generic[T]):
             except Exception as e:
                 logger.error(f"Cleanup failed for {claim_name} in namespace {ns}: {e}")
 
+    async def _delete_automatic_sandboxes(self) -> None:
+        async with self._lock:
+            claims = list(self._active_connection_sandboxes)
+        for namespace, claim_name in claims:
+            if (namespace, claim_name) not in self._explicit_claims:
+                await self.delete_sandbox(claim_name, namespace)
+
     def _atexit_cleanup(self):
         """Best-effort atexit cleanup for claims and local sandbox resources.
 
@@ -395,8 +525,10 @@ class AsyncSandboxClient(Generic[T]):
         emergency path first so sandboxd port-forward processes are not left
         behind. Claim deletion uses the synchronous :class:`K8sHelper` because
         an atexit handler may run after async event-loop resources and the
-        process-wide executor have started shutting down. Per-claim failures
-        and top-level errors are reported to ``sys.stderr`` rather than raised.
+        process-wide executor have started shutting down. An injected
+        ``api_client``'s connection settings are read at cleanup time and
+        mirrored onto that helper so it targets the same cluster. Per-claim
+        failures and top-level errors are reported to ``sys.stderr`` rather than raised.
         """
         try:
             claims = list(self._active_connection_sandboxes.keys())
@@ -417,8 +549,19 @@ class AsyncSandboxClient(Generic[T]):
                             file=sys.stderr,
                         )
 
-            helper = K8sHelper()
+            atexit_api_client = None
+            if self._injected_api_client is not None:
+                atexit_api_client = sync_client.ApiClient(
+                    configuration=_sync_configuration_from_async(self._injected_api_client.configuration),
+                    cookie=self._injected_api_client.cookie,
+                )
+                for name, value in dict(self._injected_api_client.default_headers).items():
+                    atexit_api_client.set_default_header(name, value)
+
+            helper = K8sHelper(api_client=atexit_api_client)
             for ns, claim_name in (key for key, _ in tracked):
+                if (ns, claim_name) in self._explicit_claims:
+                    continue
                 try:
                     helper.delete_sandbox_claim(
                         claim_name,
@@ -478,9 +621,9 @@ class AsyncSandboxClient(Generic[T]):
         )
 
     @async_trace_span("wait_for_claim_ready")
-    async def _wait_for_claim_ready(self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None) -> str:
+    async def _wait_for_claim_ready(self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None, **kwargs) -> str:
         """Waits for the SandboxClaim to be bound and Ready, returning the sandbox name."""
-        return await self.k8s_helper.wait_for_claim_ready(claim_name, namespace, timeout, resource_version=resource_version)
+        return await self.k8s_helper.wait_for_claim_ready(claim_name, namespace, timeout, resource_version=resource_version, **kwargs)
 
     @async_trace_span("wait_for_sandbox_ready")
     async def _wait_for_sandbox_ready(
@@ -490,6 +633,6 @@ class AsyncSandboxClient(Generic[T]):
         await self.k8s_helper.wait_for_sandbox_ready(sandbox_id, namespace, timeout)
 
     @async_trace_span("delete_claim")
-    async def _delete_claim(self, claim_name: str, namespace: str) -> None:
+    async def _delete_claim(self, claim_name: str, namespace: str, **kwargs) -> None:
         """Delete a claim through the client's shared Kubernetes helper."""
-        await self.k8s_helper.delete_sandbox_claim(claim_name, namespace)
+        await self.k8s_helper.delete_sandbox_claim(claim_name, namespace, **kwargs)

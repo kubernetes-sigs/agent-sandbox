@@ -35,6 +35,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**manual-pdb**](./manual-pdb): An example of manual PodDisruptionBudget (PDB) configuration for sandboxes.
 - [**mcp-server-sandbox**](./mcp-server-sandbox): Run an MCP (Model Context Protocol) server inside a Sandbox with attached storage.
 - [**n8n-mcp**](./n8n-mcp): An example of connecting n8n workflows to sandboxes through the MCP server integration.
+- [**nemoclaw-sandbox**](./nemoclaw-sandbox): A tutorial on setting up a testing environment for AI agents using NemoClaw, OpenClaw, and OpenShell within a Kubernetes Agent Sandbox.
 - [**network-policy-api-sandbox**](./network-policy-api-sandbox): Cluster-wide default deny and FQDN egress allowlists for sandboxes with the official Kubernetes `ClusterNetworkPolicy` API, on top of the template-managed `NetworkPolicy`, enforced by kube-network-policies (the SIG Network reference implementation).
 - [**nono-sandbox**](./nono-sandbox): An example of running nono inside an Agent Sandbox, with fine-grained filesystem isolation, network filtering, credential brokering, and ephemeral per-tool micro-sandboxes.
 - [**nullclaw-sandbox**](./nullclaw-sandbox): An example of running Nullclaw, a minimal AI assistant runtime, inside the Agent Sandbox.
@@ -50,9 +51,12 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**quickstart**](./quickstart): An end-to-end getting-started walkthrough — controller install, warm pool, router, and SDK test client — plus gVisor and Kata isolation variants.
 - [**ray-integration**](./ray-integration): An example of integrating Ray with agent-sandbox for secure Proxy Execution during Agentic Reinforcement Learning (RL) training.
 - [**sandbox-ksa**](./sandbox-ksa): Examples of a sandbox with a service account, namespace, and a basic sandbox.
+- [**sandbox-tilt-demo**](./sandbox-tilt-demo): A Tilt configuration that builds the controller from source, installs the Sandbox CRD and controller on a kind cluster, and runs a demo Sandbox to watch a pod be created and torn down.
 - [**sandboxd-sandbox**](./sandboxd-sandbox): An example of running the sandboxd runtime daemon inside a sandbox for command execution and file I/O.
 - [**sandboxed-tools**](./sandboxed-tools): An example of an agent executing its tools inside a sandbox via the Go SDK.
+- [**urunc-sandbox**](./urunc-sandbox): An example of running a sandbox on urunc, an OCI runtime for unikernels and single-application kernels, enabling extremely small sandboxes with various guest kernels.
 - [**vscode-sandbox**](./vscode-sandbox): An example of running VSCode in a sandbox.
 - [**warmpool-quickstart**](./warmpool-quickstart): Reference YAML for the three extension CRDs — SandboxTemplate, SandboxWarmPool, and SandboxClaim — including a secure template and an LLM-scoped network policy example.
 - [**webhook-inject-timestamp**](./webhook-inject-timestamp): A mutating webhook that stamps sandbox resources with a creation-observed timestamp for latency metrics.
+- [**webmcp-bridge-sandbox**](./webmcp-bridge-sandbox): Bridges a WebMCP-enabled page's `document.modelContext` tools onto MCP via Playwright, running inside the Sandbox pod.
 - [**windows-sandbox**](./windows-sandbox): An example of running a Windows guest inside the Agent Sandbox via KVM/QEMU.

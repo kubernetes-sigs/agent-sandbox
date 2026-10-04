@@ -663,7 +663,7 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 			readyCondition.Message = err.Error()
 			return readyCondition
 		}
-		readyCondition.Reason = "ReconcilerError"
+		readyCondition.Reason = sandboxv1beta1.SandboxReasonReconcilerError
 		readyCondition.Message = "Error seen: " + err.Error()
 		return readyCondition
 	}
@@ -1120,7 +1120,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 			if err != nil {
 				if k8serrors.IsInvalid(err) {
 					logger.V(4).Info("Refusing to create Service: invalid configuration",
-						"Service.Namespace", service.Namespace, "Service.Name", service.Name, "error", err.Error())
+						"Service.Namespace", service.Namespace, "Service.Name", service.Name, "error", err)
 					return nil, err
 				}
 				logger.Error(err, "Failed to create", "Service.Namespace", service.Namespace, "Service.Name", service.Name)

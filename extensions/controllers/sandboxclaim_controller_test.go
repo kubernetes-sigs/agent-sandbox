@@ -8084,6 +8084,157 @@ func TestCreateSandboxToleratesAlreadyExists(t *testing.T) {
 	require.NotEqual(t, "SandboxCreatePending", readyCond.Reason, "expected pending reason to clear once cache converged")
 }
 
+// TestCreateSandboxAlreadyExistsBackoffGrowsAndResets verifies that repeated
+// errSandboxAlreadyExists requeues for the same claim grow the requeue delay
+// geometrically, capped at maxCacheLagRequeueDelay, instead of re-issuing
+// Create at the flat cacheLagRequeueDelay forever. It also verifies the
+// attempt counter clears once the claim reconciles past the race, so a later,
+// unrelated cache-lag streak starts fresh (#1313).
+func TestCreateSandboxAlreadyExistsBackoffGrowsAndResets(t *testing.T) {
+	scheme := newScheme(t)
+	claimName := "already-exists-backoff-claim"
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: "default", UID: "claim-uid"},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
+		},
+		Status: extensionsv1beta1.SandboxClaimStatus{
+			SandboxStatus: extensionsv1beta1.SandboxStatus{Name: claimName},
+		},
+	}
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"}},
+	}
+
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "app", Image: "test"}},
+			},
+		}}},
+	}
+
+	// Pre-create the sandbox owned by this claim to simulate a previous
+	// successful create; Get is intercepted below to keep reporting it
+	// missing so every pass hits errSandboxAlreadyExists.
+	existingSandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      claimName,
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+				Kind:       "SandboxClaim",
+				Name:       claimName,
+				UID:        "claim-uid",
+				Controller: ptr.To(true), // nolint:modernize
+			}},
+		},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "app", Image: "test"}},
+			},
+		}}},
+	}
+
+	cacheStale := true
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(claim, warmPool, template, existingSandbox).
+		WithStatusSubresource(claim).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*sandboxv1beta1.Sandbox); ok && key.Name == claimName && cacheStale {
+					return k8errors.NewNotFound(
+						schema.GroupResource{Group: "agents.x-k8s.io", Resource: "sandboxes"},
+						key.Name,
+					)
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claimName, Namespace: "default"}}
+
+	// The cache stays stale for several passes: the delay must double each
+	// time, matching cacheLagRequeueDelayFor.
+	wantDelays := []time.Duration{
+		cacheLagRequeueDelay,
+		2 * cacheLagRequeueDelay,
+		4 * cacheLagRequeueDelay,
+		8 * cacheLagRequeueDelay,
+	}
+	for attempt, want := range wantDelays {
+		result, err := reconciler.Reconcile(context.Background(), req)
+		require.NoError(t, err, "attempt %d: sentinel should be converted to nil error", attempt+1)
+		require.Equal(t, want, result.RequeueAfter, "attempt %d: unexpected requeue delay", attempt+1)
+	}
+
+	// Enough further stale passes to reach the cap, and stay there.
+	for range 10 {
+		result, err := reconciler.Reconcile(context.Background(), req)
+		require.NoError(t, err)
+		require.LessOrEqual(t, result.RequeueAfter, maxCacheLagRequeueDelay, "requeue delay must never exceed the cap")
+	}
+	result, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	require.Equal(t, maxCacheLagRequeueDelay, result.RequeueAfter, "expected the delay to have settled at the cap")
+
+	// Cache catches up: the claim resolves past the race, which must clear
+	// the attempt counter so a later, independent race does not inherit this
+	// streak's backed-off delay.
+	cacheStale = false
+	_, err = reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+
+	_, tracked := reconciler.cacheLagAttempts.Load(req.NamespacedName)
+	require.False(t, tracked, "attempt counter must be cleared once the claim reconciles past the race")
+}
+
+// TestCacheLagRequeueDelayFor verifies non-positive attempt counts do not
+// panic on a negative shift and that large counts stay at the cap.
+func TestCacheLagRequeueDelayFor(t *testing.T) {
+	for attempts, want := range map[int]time.Duration{
+		-1:   cacheLagRequeueDelay,
+		0:    cacheLagRequeueDelay,
+		1:    cacheLagRequeueDelay,
+		2:    2 * cacheLagRequeueDelay,
+		100:  maxCacheLagRequeueDelay,
+		1000: maxCacheLagRequeueDelay,
+	} {
+		require.Equal(t, want, cacheLagRequeueDelayFor(attempts), "attempts=%d", attempts)
+	}
+}
+
+// TestCacheLagAttemptMapResetsOnUIDChange verifies that cacheLagAttemptMap
+// does not let a same-named replacement claim inherit an earlier claim's
+// backed-off attempt count: a differing UID must restart the count at 1.
+func TestCacheLagAttemptMapResetsOnUIDChange(t *testing.T) {
+	var m cacheLagAttemptMap
+	key := types.NamespacedName{Namespace: "default", Name: "claim"}
+
+	require.Equal(t, 1, m.Increment(key, "uid-a"))
+	require.Equal(t, 2, m.Increment(key, "uid-a"))
+	require.Equal(t, 3, m.Increment(key, "uid-a"))
+
+	// The old claim is gone and a new one with the same name takes its
+	// place; its first cache-lag attempt must not continue at 4.
+	require.Equal(t, 1, m.Increment(key, "uid-b"))
+	require.Equal(t, 2, m.Increment(key, "uid-b"))
+}
+
 // TestCreateSandboxAlreadyExistsRecoversViaAuthoritativeRead verifies that an
 // AlreadyExists from a cold-start Create is resolved in the same pass: the
 // APIReader read-back returns the live sandbox even though the informer cache

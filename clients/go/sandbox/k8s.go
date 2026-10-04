@@ -292,14 +292,39 @@ func (h *K8sHelper) drainClaimWatch(ctx context.Context, watcher watch.Interface
 	}
 }
 
-// waitForSandboxReady watches the Sandbox resource until it becomes ready.
+// WaitForSandboxReady waits until the named Sandbox has a true Ready condition.
+// sandboxName is the backing Sandbox name, not the SandboxClaim name. It does not
+// connect to the runtime. Use a context deadline to bound the wait; cancellation
+// and deadline errors are detectable with errors.Is. A missing Sandbox is waited
+// for, while deletion observed during the watch returns ErrSandboxDeleted.
+// API list/watch failures are retried until ctx ends.
+func (h *K8sHelper) WaitForSandboxReady(ctx context.Context, sandboxName, namespace string) error {
+	if sandboxName == "" || namespace == "" {
+		return fmt.Errorf("sandbox: sandbox name and namespace are required")
+	}
+	_, err := h.waitForSandboxState(ctx, sandboxName, namespace)
+	return err
+}
+
+// waitForSandboxReady adds SDK tracing and timeout semantics to the shared wait.
 func (h *K8sHelper) waitForSandboxReady(ctx context.Context, sandboxName, namespace string, timeout time.Duration, tracer trace.Tracer, svcName string) (*sandboxState, error) {
 	ctx, span := startSpan(ctx, tracer, svcName, "wait_for_sandbox_ready")
 	defer span.End()
-
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	state, err := h.waitForSandboxState(ctx, sandboxName, namespace)
+	if err != nil {
+		if ctx.Err() != nil {
+			err = fmt.Errorf("%w: sandbox %s did not become ready within %s: %v", ErrTimeout, sandboxName, timeout, err)
+		}
+		recordError(span, err)
+	}
+	return state, err
+}
+
+// waitForSandboxState shares the list/watch loop between SDK opens and public waits.
+func (h *K8sHelper) waitForSandboxState(ctx context.Context, sandboxName, namespace string) (*sandboxState, error) {
 	listOpts := metav1.ListOptions{
 		FieldSelector: fmt.Sprintf("metadata.name=%s", sandboxName),
 	}
@@ -309,6 +334,9 @@ func (h *K8sHelper) waitForSandboxReady(ctx context.Context, sandboxName, namesp
 	var lastConditions string
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("sandbox %s readiness wait ended (last conditions: %s): %w", sandboxName, lastConditions, err)
+		}
 		list, listErr := h.AgentsClient.Sandboxes(namespace).List(ctx, listOpts)
 		if listErr == nil {
 			for i := range list.Items {
@@ -328,8 +356,7 @@ func (h *K8sHelper) waitForSandboxReady(ctx context.Context, sandboxName, namesp
 		watcher, err := h.AgentsClient.Sandboxes(namespace).Watch(ctx, listOpts)
 		if err != nil {
 			if ctx.Err() != nil {
-				retErr := fmt.Errorf("%w: sandbox %s did not become ready within %s (last conditions: %s)", ErrTimeout, sandboxName, timeout, lastConditions)
-				recordError(span, retErr)
+				retErr := fmt.Errorf("sandbox %s readiness wait ended (last conditions: %s): %w", sandboxName, lastConditions, ctx.Err())
 				return nil, retErr
 			}
 			h.Log.V(1).Info("watch creation failed, retrying", "error", err, "sandbox", sandboxName)
@@ -342,13 +369,12 @@ func (h *K8sHelper) waitForSandboxReady(ctx context.Context, sandboxName, namesp
 			continue
 		}
 
-		state, done, watchErr := h.drainSandboxWatch(ctx, watcher, sandboxName, timeout, &lastConditions)
+		state, done, watchErr := h.drainSandboxWatch(ctx, watcher, sandboxName, &lastConditions)
 		watcher.Stop()
 		if done {
 			return state, nil
 		}
 		if watchErr != nil {
-			recordError(span, watchErr)
 			return nil, watchErr
 		}
 		h.Log.V(1).Info("sandbox watch closed, re-establishing", "sandbox", sandboxName)
@@ -362,11 +388,11 @@ func (h *K8sHelper) waitForSandboxReady(ctx context.Context, sandboxName, namesp
 	}
 }
 
-func (h *K8sHelper) drainSandboxWatch(ctx context.Context, watcher watch.Interface, sandboxName string, timeout time.Duration, lastConditions *string) (*sandboxState, bool, error) {
+func (h *K8sHelper) drainSandboxWatch(ctx context.Context, watcher watch.Interface, sandboxName string, lastConditions *string) (*sandboxState, bool, error) {
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, false, fmt.Errorf("%w: sandbox %s did not become ready within %s (last conditions: %s)", ErrTimeout, sandboxName, timeout, *lastConditions)
+			return nil, false, fmt.Errorf("sandbox %s readiness wait ended (last conditions: %s): %w", sandboxName, *lastConditions, ctx.Err())
 		case event, ok := <-watcher.ResultChan():
 			if !ok {
 				return nil, false, nil

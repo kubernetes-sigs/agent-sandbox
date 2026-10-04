@@ -44,13 +44,11 @@ func (c ConditionType) String() string { return string(c) }
 
 const (
 	// SandboxConditionSuspended reports progress of an administrative suspension.
-	// It is set while operatingMode is Suspended: Status is True once the backing Pod
-	// has been terminated (reason PodTerminated), and False while the Pod is still
-	// terminating (reason PodNotTerminated).
-	// Note: the controller does not currently remove this condition when the Sandbox is
-	// resumed, so a stale Suspended condition may linger after operatingMode returns to
-	// Running. Consumers should treat Ready as the authoritative signal and not infer the
-	// live operating state from the mere presence of this condition.
+	// While operatingMode is Suspended, Status is True once the backing Pod has been
+	// terminated (reason PodTerminated), and False while the Pod is still terminating
+	// (reason PodTerminating).
+	// The condition is never removed: once the Sandbox runs again it reports False with
+	// reason NotSuspended. Consumers should treat Ready as the authoritative signal.
 	SandboxConditionSuspended ConditionType = "Suspended"
 	// SandboxReasonSuspendedPodTerminated indicates the Suspended condition is True because the backing Pod has been terminated.
 	SandboxReasonSuspendedPodTerminated = "PodTerminated"
@@ -87,6 +85,10 @@ const (
 	// to be running but its underlying dependencies (Pod and/or Service) are not fully
 	// provisioned or not yet reporting Ready.
 	SandboxReasonDependenciesNotReady = "DependenciesNotReady"
+	// SandboxReasonReconcilerError is a Ready=False reason: reconciling a child
+	// resource failed with an error that is not covered by a more specific reason.
+	// The controller retries, so this is typically transient.
+	SandboxReasonReconcilerError = "ReconcilerError"
 	// SandboxReasonMultiplePods indicates the Sandbox cannot become ready because
 	// more than one Pod is controlled by its UID and the controller cannot choose
 	// a canonical stateful Pod safely.
@@ -114,8 +116,9 @@ const (
 	// to a node. Used when the Pod's PodScheduled condition carries no reason
 	// of its own (the scheduler sets none on success).
 	SandboxReasonPodScheduled = "PodScheduled"
-	// SandboxReasonPodSchedulingUnknown indicates the backing Pod exists but
-	// has not reported a PodScheduled condition yet.
+	// SandboxReasonPodSchedulingUnknown indicates the scheduling state cannot be
+	// determined: the Pod has not reported PodScheduled yet, reports it without a
+	// reason (and not True), or could not be read.
 	SandboxReasonPodSchedulingUnknown = "PodSchedulingUnknown"
 
 	// SandboxConditionFinished reports that the backing Pod reached a terminal phase.
@@ -127,8 +130,8 @@ const (
 	// SandboxReasonPodFailed indicates the backing Pod completed unsuccessfully.
 	SandboxReasonPodFailed = "PodFailed"
 
-	// SandboxReasonExpired is a Ready=False reason: the Sandbox reached its shutdownTime
-	// and its underlying resources were torn down (see Lifecycle).
+	// SandboxReasonExpired is a Ready=False reason: the Sandbox reached its shutdownTime.
+	// Teardown of its underlying resources may still be pending (see Lifecycle).
 	SandboxReasonExpired = "SandboxExpired"
 
 	// SandboxPodNameAnnotation is the annotation used to track the pod name adopted from a warm pool.

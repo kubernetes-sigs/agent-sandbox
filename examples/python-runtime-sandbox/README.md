@@ -38,6 +38,15 @@ This class models the response body for the `/execute` endpoint.
   mounted at `/workspace`) keeps the runtime's own code out of the working
   area and lets the container run with `readOnlyRootFilesystem: true`.
 
+### File paths
+
+URL-encode the relative path once for `/download`, `/list`, and `/exists`.
+Use `urllib.parse.quote(path, safe="/")` to leave directory separators readable.
+Encoding the separators with `safe=""` also works: the HTTP server decodes
+`%2F` to `/` before routing. A literal `%2F` in a file or directory name must
+be sent as `%252F`, so it remains part of the name rather than a separator.
+Likewise, a filename containing literal `%20` uses `%2520` in the request URL.
+
 ## Testing on a local kind cluster using agent-sandbox
 
 To test the sandbox on a local [kind](https://kind.sigs.k8s.io/) cluster, you can use the `run-test-kind.sh` script.

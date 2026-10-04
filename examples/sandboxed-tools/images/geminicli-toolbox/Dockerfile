@@ -20,7 +20,7 @@
 #   cd examples/sandboxed-tools
 #   go run ./cmd/sandboxed-tools-cli -session mysession -toolset geminicli
 
-FROM golang:1.26-bookworm AS build
+FROM golang:1.27-bookworm AS build
 WORKDIR /src
 # examples/sandboxed-tools is its own module that replaces the root module
 # and the agentclientprotocol example with local paths, so all three go.mod

@@ -23,7 +23,9 @@ spec:
         args:
         - "--leader-elect=true"
         - "--extensions"
-        # Uncomment to serve metrics over HTTPS with a TLS profile:
+        # Uncomment to serve metrics over HTTPS with a TLS profile.
+        # When enabling, also change the Service port and containerPort
+        # from 8080 to 8443.
         # - "--metrics-secure-serving"
         # - "--metrics-bind-address=:8443"
         # - "--metrics-cert-dir=/etc/metrics-certs"
@@ -31,7 +33,7 @@ spec:
         # - "--tls-cipher-suites=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"
         ports:
         - name: metrics
-          containerPort: 8080
+          containerPort: 8080   # Change to 8443 when --metrics-secure-serving is enabled.
           protocol: TCP
         - name: healthz
           containerPort: 8081

@@ -321,6 +321,7 @@ func main() {
 			metricsOpts.CertDir = metricsCertDir
 		}
 		setupLog.Info("metrics server TLS enabled (--metrics-secure-serving)")
+		metricsOpts.TLSOpts = append(metricsOpts.TLSOpts, alpnOpt)
 		tlsOpts, err := buildMetricsTLSOpts(tlsMinVersion, tlsCipherSuites)
 		if err != nil {
 			setupLog.Error(err, "invalid TLS configuration")
@@ -469,6 +470,11 @@ func main() {
 	}
 
 	if extensions {
+		// Warm-pool collector lists extensionsv1beta1.SandboxWarmPoolList, whose
+		// scheme is only registered when extensions are enabled. Register here so
+		// scrapes don't fail with "no kind is registered" in non-extensions builds.
+		asmetrics.RegisterWarmPoolCollector(mgr.GetClient(), mgr.GetLogger().WithName("warmpool-collector"))
+
 		warmSandboxQueue := queue.NewSimpleSandboxQueue()
 
 		var allowedDomains []string

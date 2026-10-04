@@ -278,9 +278,10 @@ fmt.Println(resp.GetExitCode(), string(resp.GetStdout()))
 
 `sandboxd` binds the pod network (`0.0.0.0` by default), but the SDKs do not
 auto-detect it. They select the runtime and transport explicitly. The Go SDK
-and synchronous Python SDK can use a direct **pod port-forward** for `:8080`
-and `:9090`; the Go SDK can also dial the Pod IP or the Sandbox's headless
-Service from inside the cluster. Filesystem calls use REST and `Run` uses
+and both Python client variants (synchronous and asynchronous) can use a direct
+**pod port-forward** for `:8080` and `:9090`. From inside the cluster, both
+SDKs can instead dial the Pod IP or the Sandbox's headless Service directly.
+Filesystem calls use REST and `Run` uses
 gRPC. The current `sandbox-router` cannot provide this combined transport
 because it does not proxy gRPC.
 
@@ -340,6 +341,23 @@ try:
 finally:
     sandbox.terminate()
 ```
+
+An in-cluster Python client can use the reported Service FQDN or Pod IP
+directly, with no port-forward. The same REST and gRPC calls above work with
+either explicit mode:
+
+```python
+from k8s_agent_sandbox.models import SandboxdInClusterConnectionConfig
+
+client = SandboxClient(
+    connection_config=SandboxdInClusterConnectionConfig(mode="service-dns")
+)
+# Use mode="pod-ip" to select status.podIPs instead; neither mode falls back.
+```
+
+The client ServiceAccount needs `get` permission on the namespaced Sandbox,
+and the Sandbox NetworkPolicy must admit the client on both sandboxd ports.
+See the Python SDK README for the full synchronous and asynchronous examples.
 
 The Python gRPC path requires the `grpc` extra: `pip install k8s-agent-sandbox[grpc]`.
 

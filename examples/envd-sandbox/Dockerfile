@@ -24,7 +24,7 @@
 # NOTE: For production use, pin ENVD_VERSION to a specific commit or release
 # tag (e.g., --build-arg ENVD_VERSION=v0.1.0 or a commit hash) instead of
 # tracking the moving `main` branch.
-FROM --platform=$BUILDPLATFORM golang:1.26.2 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.1 AS builder
 
 # Pinned to a known-good release tag, with the resolved commit verified below.
 # Override with --build-arg ENVD_VERSION=<ref> to track upstream or pin to a

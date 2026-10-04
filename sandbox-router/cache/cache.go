@@ -299,9 +299,9 @@ func (c *Cache) upsert(uid types.UID, e Entry, indexName bool) {
 	}
 	c.mu.Unlock()
 	if !existed {
-		c.log.V(1).Info("cache add", "uid", uid, "pod", e.SandboxName, "ip", e.PodIP, "ns", e.Namespace)
+		c.log.V(1).Info("cache add", "uid", uid, "pod", e.SandboxName, "pod_uid", e.PodUID, "ip", e.PodIP, "ns", e.Namespace)
 	} else if prev.PodIP != e.PodIP {
-		c.log.V(1).Info("cache update", "uid", uid, "pod", e.SandboxName, "ip", e.PodIP, "ns", e.Namespace, "prev_ip", prev.PodIP)
+		c.log.V(1).Info("cache update", "uid", uid, "pod", e.SandboxName, "pod_uid", e.PodUID, "ip", e.PodIP, "ns", e.Namespace, "prev_ip", prev.PodIP)
 	}
 }
 
@@ -309,22 +309,28 @@ func (c *Cache) remove(uid types.UID) {
 	c.removePod(uid, "")
 }
 
-// removePod removes the entry for uid only when podUID is empty (an internal
-// unconditional eviction) or matches the Pod that currently supplies the
-// entry. Matching the Pod UID prevents a delayed delete or NotReady event for
-// an older Pod from evicting a replacement Pod with the same Sandbox owner.
+// removePod removes the entry for uid only when either Pod UID is empty
+// (unknown Pod identity or an internal unconditional eviction) or podUID
+// matches the Pod that currently supplies the entry. Matching the Pod UID
+// prevents a delayed delete or NotReady event for an older Pod from evicting
+// a replacement Pod with the same Sandbox owner, while falling back to
+// unconditional removal when either UID is empty ensures an entry is never
+// stranded with nothing able to evict it.
 func (c *Cache) removePod(uid, podUID types.UID) {
 	c.mu.Lock()
-	if podUID != "" {
-		if entry, ok := c.entries[uid]; !ok || entry.PodUID != podUID {
-			c.mu.Unlock()
-			return
-		}
+	cur, found := c.entries[uid]
+	stale := found && cur.PodUID != "" && podUID != "" && cur.PodUID != podUID
+	var existed bool
+	if !stale {
+		existed = c.removeLocked(uid)
 	}
-	existed := c.removeLocked(uid)
 	c.mu.Unlock()
-	if existed {
-		c.log.V(1).Info("cache remove", "uid", uid)
+	switch {
+	case stale:
+		c.log.V(1).Info("cache remove ignored: event from a replaced pod",
+			"uid", uid, "event_pod_uid", podUID, "cached_pod_uid", cur.PodUID)
+	case existed:
+		c.log.V(1).Info("cache remove", "uid", uid, "pod_uid", podUID)
 	}
 }
 

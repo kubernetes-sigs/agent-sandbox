@@ -2,8 +2,8 @@
 # resource requests for your tenant count and request rate — see the
 # "Scaling guidance" section of the package README.
 #
-# This example shows the plain-HTTP setup. For TLS, set --https-bind-address
-# and mount a Secret at /tls (see networkpolicy.yaml + the README's TLS section).
+# This example shows the plain-HTTP setup. For TLS, uncomment the TLS-related
+# arguments and volumes and see networkpolicy.yaml + the README's TLS section.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -58,6 +58,10 @@ spec:
         imagePullPolicy: IfNotPresent
         args:
         - --http-bind-address=:8080
+        # Uncomment to enable TLS:
+        # - --https-bind-address=:8443
+        # - --tls-cert-file=/tls/tls.crt
+        # - --tls-key-file=/tls/tls.key
         - --metrics-bind-address=:9090
         - --health-probe-bind-address=:8081
         - --cluster-domain=cluster.local
@@ -74,12 +78,21 @@ spec:
         - name: proxy
           containerPort: 8080
           protocol: TCP
+        # Uncomment to enable TLS:
+        # - name: proxy-tls
+        #   containerPort: 8443
+        #   protocol: TCP
         - name: metrics
           containerPort: 9090
           protocol: TCP
         - name: healthz
           containerPort: 8081
           protocol: TCP
+        # Uncomment to enable TLS mounts:
+        # volumeMounts:
+        # - name: tls-certs
+        #   mountPath: /tls
+        #   readOnly: true
         livenessProbe:
           httpGet:
             path: /healthz
@@ -109,6 +122,11 @@ spec:
             drop: ["ALL"]
           seccompProfile:
             type: RuntimeDefault
+      # Uncomment to provide TLS certificates via Secret:
+      # volumes:
+      # - name: tls-certs
+      #   secret:
+      #     secretName: sandbox-router-tls
       # Give in-flight requests a chance to finish before the kubelet
       # delivers SIGKILL. The router's own --shutdown-timeout defaults to
       # 30s; keep this slightly larger.

@@ -30,7 +30,8 @@ type: ignore
 ```python
 def __init__(connection_config: SandboxConnectionConfig | None = None,
              tracer_config: SandboxTracerConfig | None = None,
-             cleanup: bool = False) -> None
+             cleanup: bool = False,
+             api_client: client.ApiClient | None = None) -> None
 ```
 
 Initializes the SandboxClient.
@@ -46,6 +47,8 @@ Initializes the SandboxClient.
 - `cleanup` - If True, registers an atexit hook to automatically delete
   tracked sandboxes when the program terminates, excluding claims
   explicitly named through create_sandbox(). Defaults to False.
+- `api_client` - Optional pre-configured Kubernetes ``ApiClient`` forwarded
+  to the underlying ``K8sHelper`` to target a specific cluster/context.
 
 <a id="k8s_agent_sandbox.sandbox_client.SandboxClient.create_sandbox"></a>
 
@@ -358,6 +361,9 @@ class SandboxDirectConnectionConfig(BaseModel)
 
 Configuration for connecting directly to a Sandbox URL.
 
+``extra_headers`` and ``client_cert``/``ca_cert`` (mTLS) support a router
+behind an authenticating gateway.
+
 <a id="k8s_agent_sandbox.models.SandboxDirectConnectionConfig.api_url"></a>
 
 ##### api\_url
@@ -369,6 +375,24 @@ Direct URL to the router.
 ##### server\_port
 
 Port the sandbox container listens on.
+
+<a id="k8s_agent_sandbox.models.SandboxDirectConnectionConfig.extra_headers"></a>
+
+##### extra\_headers
+
+Sent on every request.
+
+<a id="k8s_agent_sandbox.models.SandboxDirectConnectionConfig.client_cert"></a>
+
+##### client\_cert
+
+(certificate path, private key path) for mTLS.
+
+<a id="k8s_agent_sandbox.models.SandboxDirectConnectionConfig.ca_cert"></a>
+
+##### ca\_cert
+
+CA bundle path used to verify the router; default trust store if unset.
 
 <a id="k8s_agent_sandbox.models.SandboxGatewayConnectionConfig"></a>
 

@@ -39,6 +39,7 @@ from .models import (
     SandboxdInClusterConnectionConfig,
 )
 from .k8s_helper import K8sHelper
+from .utils import merge_headers
 from .exceptions import (
     SandboxNotReadyError,
     SandboxPortForwardError,
@@ -654,7 +655,16 @@ class SandboxConnector:
         self._no_retry_session.mount(
             "https://", HTTPAdapter(max_retries=Retry(total=0))
         )
-        
+
+        # Per request: REQUESTS_CA_BUNDLE overrides a session-level verify.
+        self._extra_headers: dict[str, str] = {}
+        self._tls_kwargs: dict[str, Any] = {}
+        if isinstance(connection_config, SandboxDirectConnectionConfig):
+            self._extra_headers = connection_config.extra_headers
+            if connection_config.ca_cert:
+                self._tls_kwargs["verify"] = connection_config.ca_cert
+            if connection_config.client_cert:
+                self._tls_kwargs["cert"] = connection_config.client_cert
 
     def _connection_strategy(self) -> ConnectionStrategy:
         if isinstance(self.connection_config, SandboxDirectConnectionConfig):
@@ -836,7 +846,8 @@ class SandboxConnector:
             # Prepare the request
             url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
 
-            headers = kwargs.get("headers", {}).copy()
+            # Precedence: config < caller < SDK routing headers.
+            headers = merge_headers(self._extra_headers, kwargs.get("headers"))
             if self.strategy.should_inject_router_headers():
                 headers["X-Sandbox-ID"] = self.id
                 headers["X-Sandbox-Namespace"] = self.namespace
@@ -882,7 +893,7 @@ class SandboxConnector:
                 self._no_retry_session if disable_retries else self.session
             )
             response = request_session.request(
-                method, url, allow_redirects=False, **kwargs
+                method, url, allow_redirects=False, **{**self._tls_kwargs, **kwargs}
             )
             if response.is_redirect:
                 raise requests.exceptions.HTTPError(

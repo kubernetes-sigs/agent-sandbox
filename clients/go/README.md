@@ -317,7 +317,9 @@ Calling `Open()` on a client with an orphaned claim returns `ErrOrphanedClaim`.
 | `ErrAlreadyOpen` | `Open()` called on an already-open client. Call `Close()` first. |
 | `ErrOrphanedClaim` | A previous claim could not be cleaned up (failed `Close()`, failed `Open()` rollback, or sandbox disappeared during reconnect); call `Close()` to retry deletion. |
 | `ErrTimeout` | Sandbox or Gateway did not become ready within the configured timeout. |
-| `ErrClaimFailed` | SandboxClaim creation was rejected by the API server. |
+| `ErrClaimFailed` | SandboxClaim creation was rejected by the API server, or the claim reported a failure the controller does not retry (for example `InvalidMetadata` or `ClaimExpired`). |
+| `ErrWarmPoolNotFound` | The claim's SandboxWarmPool does not exist. |
+| `ErrTemplateNotFound` | The SandboxTemplate behind the warm pool does not exist. |
 | `ErrPortForwardDied` | The SPDY tunnel dropped. Call `Open()` to reconnect. |
 | `ErrRetriesExhausted` | All HTTP retry attempts failed. |
 | `ErrSandboxDeleted` | The Sandbox was deleted before becoming ready. |

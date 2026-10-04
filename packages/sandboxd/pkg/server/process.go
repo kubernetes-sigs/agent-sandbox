@@ -166,7 +166,18 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		// its own process group (pgid == pid), so process-group signalling
 		// works without Setpgid. Setting both would make fork fail with
 		// EPERM (setpgid is illegal on a session leader).
-		ptyFile, err = pty.Start(cmd)
+		//
+		// The initial size must be applied before the child starts: setting
+		// it afterwards races with a child that reads the terminal size
+		// immediately (e.g. `stty size` would report 0 0).
+		if req.GetPty().GetCols() > 0 && req.GetPty().GetRows() > 0 {
+			ptyFile, err = pty.StartWithSize(cmd, &pty.Winsize{
+				Cols: uint16(req.GetPty().GetCols()),
+				Rows: uint16(req.GetPty().GetRows()),
+			})
+		} else {
+			ptyFile, err = pty.Start(cmd)
+		}
 		if err != nil {
 			return mapCommandError(err, "failed to start command with PTY")
 		}
@@ -219,14 +230,6 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 	// grandchildren from becoming orphan processes.
 	s.killProcessGroupOnContextDone(stream.Context(), cmd, proc.Done)
 
-	// Set initial TTY size if requested.
-	if usePTY && req.GetPty().GetCols() > 0 && req.GetPty().GetRows() > 0 {
-		_ = pty.Setsize(ptyFile, &pty.Winsize{
-			Cols: uint16(req.GetPty().GetCols()),
-			Rows: uint16(req.GetPty().GetRows()),
-		})
-	}
-
 	if err := stream.Send(&processv1.StartResponse{
 		Event: &processv1.StartResponse_Init{
 			Init: &processv1.InitEvent{ProcessId: pid},
@@ -278,30 +281,22 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 	if usePTY {
 		streamWg.Add(1)
 		go streamOutput(ptyFile, false)
-		// For a PTY the reader unblocks with EIO once the child exits, so
-		// reaping first is safe; closing the PTY afterwards unblocks any
-		// straggling read (e.g. a grandchild still holds the slave side).
+		// For a PTY the reader unblocks with EIO once the child exits and
+		// the kernel's buffered output is drained. Closing the master right
+		// after Wait would discard that buffer, dropping the output of a
+		// short-lived process, so give the reader a chance to finish first.
+		// Closing the PTY only on timeout unblocks a straggling read (e.g. a
+		// grandchild still holds the slave side).
 		waitErr = cmd.Wait()
+		waitForReaders(&streamWg, func() { _ = proc.ClosePTY() })
 		_ = proc.ClosePTY()
-		streamWg.Wait()
 	} else {
 		streamWg.Add(2)
 		go streamOutput(stdoutR, false)
 		go streamOutput(stderrR, true)
 
 		waitErr = cmd.Wait()
-
-		readersDone := make(chan struct{})
-		go func() {
-			streamWg.Wait()
-			close(readersDone)
-		}()
-		select {
-		case <-readersDone:
-		case <-time.After(pipeDrainGrace):
-			closeAll(stdoutR, stderrR)
-			<-readersDone
-		}
+		waitForReaders(&streamWg, func() { closeAll(stdoutR, stderrR) })
 	}
 
 	exitCode := int32(0)
@@ -556,4 +551,22 @@ func readProcChildren(pid int) []int {
 		}
 	}
 	return children
+}
+
+// waitForReaders blocks until every output reader in wg has finished. Readers
+// get pipeDrainGrace to reach EOF on their own; after that forceClose is called
+// to unblock any that are stuck (a grandchild may still hold the write side),
+// and waitForReaders waits for them to return.
+func waitForReaders(wg *sync.WaitGroup, forceClose func()) {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(pipeDrainGrace):
+		forceClose()
+		<-done
+	}
 }

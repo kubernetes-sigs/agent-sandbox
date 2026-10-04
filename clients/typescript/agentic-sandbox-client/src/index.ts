@@ -50,5 +50,6 @@ export type {
   SandboxHealth,
   SandboxMetadata,
   SandboxStatus,
+  VolumeClaimTemplate,
   WriteOptions,
 } from "./types.js";

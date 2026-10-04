@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import * as http2 from "node:http2";
 import { ERROR_DETAIL_MAX_BYTES } from "./constants.js";
 import {
   SandboxClosedError,
@@ -56,6 +57,8 @@ type GrpcDeps = {
   ProcessConfigSchema: typeof import("./_proto/process/v1/process_pb.js")["ProcessConfigSchema"];
   ProcessService: typeof import("./_proto/process/v1/process_pb.js")["ProcessService"];
 };
+
+type H2SessionManager = InstanceType<GrpcDeps["Http2SessionManager"]>;
 
 let depsPromise: Promise<GrpcDeps> | null = null;
 
@@ -143,6 +146,39 @@ function connectCodeName(code: number, codeEnum: GrpcDeps["Code"]): string {
   return "unknown";
 }
 
+/**
+ * connect-node hangs to the deadline when the server closes a stream with
+ * NO_ERROR before any response (macOS session teardown). Fail it as Canceled,
+ * like the abrupt form on Linux.
+ */
+function createSessionManager(
+  deps: GrpcDeps,
+  baseUrl: string,
+): H2SessionManager {
+  class ClosedStreamSessionManager extends deps.Http2SessionManager {
+    override async request(...args: Parameters<H2SessionManager["request"]>) {
+      const stream = await super.request(...args);
+      let responded = false;
+      stream.once("response", () => {
+        responded = true;
+      });
+      stream.once("close", () => {
+        if (!responded && stream.rstCode === http2.constants.NGHTTP2_NO_ERROR) {
+          stream.emit(
+            "error",
+            new deps.ConnectError(
+              "HTTP/2 stream closed before a response was received",
+              deps.Code.Canceled,
+            ),
+          );
+        }
+      });
+      return stream;
+    }
+  }
+  return new ClosedStreamSessionManager(baseUrl);
+}
+
 export class ProcessClient {
   private closed = false;
   private sessionManager: { abort(reason?: Error): void } | null = null;
@@ -165,7 +201,8 @@ export class ProcessClient {
       this.initPromise = (async () => {
         const deps = await loadGrpcDeps();
         if (this.closed) return;
-        const sessionManager = new deps.Http2SessionManager(
+        const sessionManager = createSessionManager(
+          deps,
           this.opts.grpcBaseUrl,
         );
         const transport = deps.createGrpcTransport({

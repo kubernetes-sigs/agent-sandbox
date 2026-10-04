@@ -960,6 +960,32 @@ func TestOpen_RollbackDeletesClaim(t *testing.T) {
 	}
 }
 
+func TestOpen_TerminalClaimFailsFastAndRollsBack(t *testing.T) {
+	opts := defaultTestOpts()
+	c, _, extensionsCS := newTestSandbox(opts)
+	extensionsCS.PrependReactor("get", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		return true, claimNotReady("test-claim", "WarmPoolNotFound"), nil
+	})
+
+	err := c.Open(context.Background())
+	if !errors.Is(err, ErrWarmPoolNotFound) {
+		t.Fatalf("expected ErrWarmPoolNotFound, got: %v", err)
+	}
+	if c.ClaimName() != "" {
+		t.Errorf("expected empty ClaimName after rollback, got %q", c.ClaimName())
+	}
+
+	deleted := false
+	for _, action := range extensionsCS.Actions() {
+		if action.GetVerb() == "delete" && action.GetResource().Resource == "sandboxclaims" {
+			deleted = true
+		}
+	}
+	if !deleted {
+		t.Error("expected the SandboxClaim to be deleted during rollback")
+	}
+}
+
 func TestClose_DeleteClaim_NotFound(t *testing.T) {
 	opts := defaultTestOpts()
 	c, agentsCS, extensionsCS := newTestSandbox(opts)

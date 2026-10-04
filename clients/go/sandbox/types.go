@@ -43,6 +43,8 @@ var (
 	ErrNotReady         = errors.New("sandbox is not ready")
 	ErrTimeout          = errors.New("operation timed out")
 	ErrClaimFailed      = errors.New("claim creation failed")
+	ErrWarmPoolNotFound = errors.New("sandbox warm pool not found")
+	ErrTemplateNotFound = errors.New("sandbox template not found")
 	ErrPortForwardDied  = errors.New("port-forward connection lost")
 	ErrNoSandboxService = errors.New("sandbox has no headless Service")
 	ErrAlreadyOpen      = errors.New("sandbox is already open; call Close first")
@@ -52,7 +54,8 @@ var (
 	ErrGatewayDeleted   = errors.New("gateway was deleted during address discovery")
 	ErrResponseTooLarge = errors.New("response exceeded 16 MB limit")
 	// ErrUnsupportedByRuntime is returned by operations the selected
-	// runtime cannot perform (e.g. Delete on the legacy python-runtime).
+	// runtime or connection cannot perform (e.g. Delete on the legacy
+	// python-runtime, or Run with RuntimeSandboxd and APIURL).
 	ErrUnsupportedByRuntime = errors.New("operation not supported by the sandbox runtime")
 )
 

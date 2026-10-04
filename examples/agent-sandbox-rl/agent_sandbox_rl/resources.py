@@ -339,16 +339,16 @@ class Resources:
                  uid=uid)
 
   # --- warm pools -------------------------------------------------------- #
-  def _warmpool_manifest(self, name: str, template_name: str,
-                         replicas: int) -> dict:
+  def _warmpool_manifest(self, name: str, template_name: str, replicas: int,
+                         annotations: dict | None = None) -> dict:
+    metadata: dict = {"name": name, "namespace": self.namespace,
+                      "labels": dict(self.labels)}
+    if annotations:
+      metadata["annotations"] = dict(annotations)
     return {
         "apiVersion": f"{constants.GROUP}/{constants.VERSION}",
         "kind": "SandboxWarmPool",
-        "metadata": {
-            "name": name,
-            "namespace": self.namespace,
-            "labels": dict(self.labels),
-        },
+        "metadata": metadata,
         "spec": {
             "replicas": replicas,
             "sandboxTemplateRef": {"name": template_name},
@@ -359,7 +359,8 @@ class Resources:
                       replicas: int, *, dry_run: bool = False,
                       reconcile: bool = False,
                       owner_run_id: str | None = None,
-                      share_foreign: bool = False) -> bool:
+                      share_foreign: bool = False,
+                      annotations: dict | None = None) -> bool:
     """Create a SandboxWarmPool (v1beta1: ``replicas`` + ``sandboxTemplateRef``).
 
     Idempotent on 409 (already exists). With ``reconcile=True`` a 409 instead
@@ -383,7 +384,7 @@ class Resources:
       self.custom_api.create_namespaced_custom_object(
           group=constants.GROUP, version=constants.VERSION,
           namespace=self.namespace, plural=constants.WARMPOOLS_PLURAL,
-          body=self._warmpool_manifest(name, template_name, replicas),
+          body=self._warmpool_manifest(name, template_name, replicas, annotations),
           dry_run="All" if dry_run else None)
       logger.info("Created SandboxWarmPool '%s' (replicas=%d)", name, replicas)
       return True
@@ -435,6 +436,62 @@ class Resources:
         f"SandboxWarmPool '{name}' kept changing under {_RECONCILE_ATTEMPTS} "
         "reconcile attempts; not resizing it")
 
+  def warm_shared_pool(self, name: str, template_name: str, replicas: int, *,
+                       run_id: str) -> str:
+    """Warm-path create under a shared run id. Returns "created" or "taken" (an
+    on-demand pool resized and unmarked; the caller owns it), "borrowed" (another
+    process's; don't resize or delete), or "foreign" (another run's). The takeover
+    patch carries the inspected resourceVersion, so only one racing process wins."""
+    try:
+      self.custom_api.create_namespaced_custom_object(
+          group=constants.GROUP, version=constants.VERSION,
+          namespace=self.namespace, plural=constants.WARMPOOLS_PLURAL,
+          body=self._warmpool_manifest(name, template_name, replicas))
+      logger.info("Created SandboxWarmPool '%s' (replicas=%d)", name, replicas)
+      return "created"
+    except client.ApiException as e:
+      if e.status != 409:
+        raise
+    for _ in range(_RECONCILE_ATTEMPTS):
+      existing = self.get_warmpool(name)
+      if existing is None:
+        try:
+          self.custom_api.create_namespaced_custom_object(
+              group=constants.GROUP, version=constants.VERSION,
+              namespace=self.namespace, plural=constants.WARMPOOLS_PLURAL,
+              body=self._warmpool_manifest(name, template_name, replicas))
+        except client.ApiException as e:
+          if e.status != 409:
+            raise
+          continue
+        logger.info("Created SandboxWarmPool '%s' (replicas=%d)", name, replicas)
+        return "created"
+      meta = existing.get("metadata") or {}
+      owner = (meta.get("labels") or {}).get(constants.RUN_ID_LABEL)
+      if isinstance(owner, str) and owner and owner != run_id:
+        return "foreign"
+      if (meta.get("annotations") or {}).get(constants.ON_DEMAND_ANNOTATION) != "true":
+        logger.info("SandboxWarmPool '%s' was warmed by another process of run %s; "
+                    "borrowing it as it is.", name, run_id)
+        return "borrowed"
+      body: dict = {"metadata": {"annotations": {constants.ON_DEMAND_ANNOTATION: None}},
+                    "spec": {"replicas": replicas}}
+      rv = meta.get("resourceVersion")
+      if isinstance(rv, str) and rv:
+        body["metadata"]["resourceVersion"] = rv
+      try:
+        self.custom_api.patch_namespaced_custom_object(
+            group=constants.GROUP, version=constants.VERSION,
+            namespace=self.namespace, plural=constants.WARMPOOLS_PLURAL,
+            name=name, body=body)
+      except client.ApiException as e:
+        if e.status != 409:
+          raise
+        continue                          # changed since read: re-inspect
+      logger.info("Took over on-demand SandboxWarmPool '%s' (replicas=%d).",
+                  name, replicas)
+      return "taken"
+    raise RuntimeError(f"SandboxWarmPool '{name}' kept changing while being warmed")
   def validate_manifests(self, sample_image: str, template: TemplateSpec,
                          *, name: str = "asrl-validate") -> None:
     """Server-side dry-run the hand-built Template + WarmPool manifests against

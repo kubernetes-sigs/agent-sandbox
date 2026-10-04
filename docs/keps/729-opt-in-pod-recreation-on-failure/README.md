@@ -20,7 +20,7 @@ TOC is auto-generated via `make toc-update`.
 
 ## Summary
 
-Add an opt-in `Sandbox.spec.podFailurePolicy` field. When set to `Recreate`, the Sandbox controller deletes a controller-owned backing Pod that has entered `phase=Failed`, clears the pod-name annotation, and relies on the existing missing-pod create path to provision a fresh Pod. The Sandbox identity and any PVCs owned by the Sandbox are preserved. The default `Ignore` keeps today's StatefulSet-like behavior.
+Add an opt-in `podFailurePolicy.action` field to `SandboxBlueprint`, which is shared by `Sandbox` and `SandboxTemplate`. When set to `Recreate`, the Sandbox controller deletes a controller-owned backing Pod that has entered `phase=Failed`, clears the pod-name annotation, and relies on the existing missing-pod create path to provision a fresh Pod. The Sandbox identity and any PVCs owned by the Sandbox are preserved. The default `Ignore` keeps today's StatefulSet-like behavior.
 
 ## Motivation
 
@@ -37,14 +37,14 @@ Auto-recreation must remain opt-in so platforms that rely on terminal `Finished`
 ### Goals
 
 - Opt-in recovery from `PodFailed` without deleting the Sandbox or its PVCs.
-- Place the control on the Sandbox API (Claim does not manage Pods).
+- Place the reusable control in `SandboxBlueprint` so direct Sandboxes and Sandboxes provisioned from templates use the same behavior.
 - Preserve default Ignore behavior (non-breaking).
 - Bound crash-loop recreate churn with Deployment-style in-memory exponential backoff (5s…5m).
 
 ### Non-Goals
 
 - Recreating on `PodSucceeded`.
-- SandboxClaim-level passthrough of the policy.
+- A per-claim override distinct from the referenced `SandboxTemplate`.
 - Template-drift / `podTemplate` update recreation ([#612](https://github.com/kubernetes-sigs/agent-sandbox/issues/612)).
 - In-place resource resize ([#1054](https://github.com/kubernetes-sigs/agent-sandbox/issues/1054)).
 - Persisted recreate backoff / max-retry limits in `SandboxStatus` (Job-style status fields). In-memory backoff is in scope (see below).
@@ -60,43 +60,46 @@ Auto-recreation must remain opt-in so platforms that rely on terminal `Finished`
 
 ```text
 reconcilePod sees existing Pod
-  → if phase=Failed AND podFailurePolicy=Recreate AND owned by Sandbox
+  → if phase=Failed AND podFailurePolicy.action=Recreate AND owned by Sandbox
       → Delete Pod (bump in-memory backoff only on successful delete; skip bump on NotFound), clear agents.x-k8s.io/pod-name annotation, return nil
   → next reconcile: Pod missing → if recreate backoff not elapsed, skip Create and RequeueAfter
   → once backoff elapses: existing create path builds a new Pod
   → PVCs from volumeClaimTemplates remain Sandbox-owned and are remounted
-  → when the replacement Pod has been Running for 10 minutes, reset in-memory backoff
+  → after the same replacement Pod UID has been continuously observed Running for 10 minutes, reset in-memory backoff
 ```
 
 Expiry handling already short-circuits before child reconcile, so expired Sandboxes do not recreate Failed Pods. Suspend continues to delete the Pod for suspension and does not create while `operatingMode=Suspended`.
 
 With Recreate, `Finished` must not stick on the Failed Pod being replaced: `reconcilePod` runs before `computeFinishedCondition`, and returning a nil Pod after delete clears Finished for that reconcile.
 
-**Crash-loop backoff (Deployment pattern):** `Recreate` combined with `restartPolicy: Never` and a container that always exits non-zero can recreate repeatedly. Without delay, Owns(Pod) watch events would drive an immediate Delete→Create hot loop (workqueue rate limiting does not apply to watch `Add`s). This KEP uses the Deployment-style approach: track retry state in controller memory and gate Create with exponential backoff (5s base, doubling up to 5m), waking via `RequeueAfter`. Backoff is not reset on the first Running observation: a container that crashes shortly after start would otherwise recreate at the 5s base forever. Reset (and Failed-delete decay) require the Pod to have been started for 10 minutes, matching kubelet CrashLoopBackOff decay. A Failed delete that returns `NotFound` does not bump (stale cache / already gone). State is lost on process restart / leader failover (at most one un-backed-off recreate burst). Persisting `failureCount` / `lastFailureTime` on `SandboxStatus` (Job pattern) is deferred.
+**Crash-loop backoff (Deployment pattern):** `Recreate` combined with `restartPolicy: Never` and a container that always exits non-zero can recreate repeatedly. Without delay, Owns(Pod) watch events would drive an immediate Delete→Create hot loop (workqueue rate limiting does not apply to watch `Add`s). This KEP uses the Deployment-style approach: track retry state in controller memory and gate Create with exponential backoff (5s base, doubling up to 5m), waking via `RequeueAfter`. Backoff is not reset on the first Running observation: a container that crashes shortly after start would otherwise recreate at the 5s base forever. The reset window starts when the controller first observes a particular Pod UID in `Running`; Pending time, including image pulls, does not count. A non-Running observation or a different Pod UID restarts the window. A Failed delete that returns `NotFound` does not bump (stale cache / already gone). The controller emits an Event when it schedules a replacement delay and clears in-memory state when recreation is no longer applicable (for example after success, suspension, expiry, deletion, or changing the policy). State is lost on process restart / leader failover (at most one un-backed-off recreate burst). Persisting `failureCount` / `lastFailureTime` on `SandboxStatus` (Job pattern) is deferred.
 
 #### API Changes
 
-On `SandboxSpec` (runtime field next to `operatingMode`, not in `SandboxBlueprint`):
+On `SandboxBlueprint`, so `SandboxTemplate` and the Sandboxes provisioned from it inherit the policy:
 
 ```go
-// PodFailurePolicy controls behavior when the backing Pod reaches phase Failed.
+// PodFailurePolicyAction controls behavior when the backing Pod reaches phase Failed.
 // +kubebuilder:validation:Enum=Ignore;Recreate
-type PodFailurePolicy string
+type PodFailurePolicyAction string
 
 const (
-	PodFailurePolicyIgnore   PodFailurePolicy = "Ignore"
-	PodFailurePolicyRecreate PodFailurePolicy = "Recreate"
+	PodFailurePolicyActionIgnore   PodFailurePolicyAction = "Ignore"
+	PodFailurePolicyActionRecreate PodFailurePolicyAction = "Recreate"
 )
 
-// podFailurePolicy controls what happens when the backing Pod enters phase Failed.
-// Ignore (default): leave the Failed pod and surface Finished=True (StatefulSet-like).
-// Recreate: delete the controller-owned Failed pod so a new one is created; PVC/Sandbox retained.
-// +kubebuilder:default=Ignore
+type PodFailurePolicy struct {
+	// +kubebuilder:default=Ignore
+	// +optional
+	Action PodFailurePolicyAction `json:"action,omitempty"`
+}
+
+// +kubebuilder:default={action: Ignore}
 // +optional
-PodFailurePolicy PodFailurePolicy `json:"podFailurePolicy,omitempty"`
+PodFailurePolicy *PodFailurePolicy `json:"podFailurePolicy,omitempty"`
 ```
 
-Enum (not bool) matches project API conventions and `ShutdownPolicy`. A plain enum (not a WarmPool-style `{type:}` struct) is enough because no nested strategy fields are expected.
+The nested policy object leaves room for future strategy settings without replacing the field's shape. Its `action` enum avoids a boolean whose meaning would become unclear as additional behaviors are introduced.
 
 #### Implementation Guidance
 
@@ -104,7 +107,8 @@ Enum (not bool) matches project API conventions and `ShutdownPolicy`. A plain en
 - Only delete when ownership is `resourceOwnedBySandbox` and `DeletionTimestamp` is zero.
 - Refuse delete for foreign-owned pods (same logging pattern as suspend).
 - Log the recreate delete at `Info` (major lifecycle event).
-- Apply Deployment-style in-memory recreate backoff: bump on successful Failed delete (skip bump when Delete returns NotFound), gate Create, `RequeueAfter` for the remaining delay. Reset only after the replacement Pod has been Running for 10 minutes (or when a Failed pod's StartTime shows it ran that long), so a crash loop that passes through Running still doubles 5s→5m.
+- Apply Deployment-style in-memory recreate backoff: bump on successful Failed delete (skip bump when Delete returns NotFound), gate Create, and use `RequeueAfter` for the remaining delay. Start the 10-minute reset window only when the controller first observes `Running` for a Pod UID; do not use Pod `startTime`, because Pending and image-pull time must not count.
+- Emit a Normal Event when a successful Failed-Pod delete schedules its replacement delay, and clear backoff state after success or whenever the Sandbox can no longer recreate Failed Pods.
 - Unit-test Ignore vs Recreate, ownership refusal, Succeeded+Recreate (no recreate), Suspended (suspend path only), recreate backoff gate/reset, skip-bump on Delete NotFound, and no reset on brief Running.
 - Optional e2e: Fail once, recreate, remount PVC with surviving data.
 

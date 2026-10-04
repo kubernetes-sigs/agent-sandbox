@@ -45,11 +45,16 @@ spec:
                 - Suspended
                 type: string
               podFailurePolicy:
-                default: Ignore
-                enum:
-                - Ignore
-                - Recreate
-                type: string
+                default:
+                  action: Ignore
+                properties:
+                  action:
+                    default: Ignore
+                    enum:
+                    - Ignore
+                    - Recreate
+                    type: string
+                type: object
               podTemplate:
                 properties:
                   metadata:

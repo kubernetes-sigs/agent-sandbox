@@ -30,7 +30,7 @@ import (
 )
 
 // TestSandboxPodFailurePolicyRecreate verifies that a Failed pod is deleted and
-// replaced when podFailurePolicy=Recreate, and that PVC data survives across the
+// replaced when podFailurePolicy.action=Recreate, and that PVC data survives across the
 // recreation (first boot writes a marker and exits 1; second boot sees it and sleeps).
 func TestSandboxPodFailurePolicyRecreate(t *testing.T) {
 	tc := framework.NewTestContext(t)
@@ -47,6 +47,9 @@ func TestSandboxPodFailurePolicyRecreate(t *testing.T) {
 		Spec: sandboxv1beta1.SandboxSpec{
 			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
 				Service: new(true),
+				PodFailurePolicy: &sandboxv1beta1.PodFailurePolicy{
+					Action: sandboxv1beta1.PodFailurePolicyActionRecreate,
+				},
 				PodTemplate: sandboxv1beta1.PodTemplate{
 					Spec: corev1.PodSpec{
 						RestartPolicy: corev1.RestartPolicyNever,
@@ -75,8 +78,7 @@ func TestSandboxPodFailurePolicyRecreate(t *testing.T) {
 					},
 				}},
 			},
-			OperatingMode:    sandboxv1beta1.SandboxOperatingModeRunning,
-			PodFailurePolicy: sandboxv1beta1.PodFailurePolicyRecreate,
+			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 		},
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), sandbox))

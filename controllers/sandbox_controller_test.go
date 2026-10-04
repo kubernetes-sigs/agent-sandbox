@@ -86,6 +86,10 @@ const overlongSandboxName = "sandbox-name-deliberately-exceeding-the-sixty-three
 
 const sandboxUID = types.UID("test-sandbox-uid")
 
+func recreatePodFailurePolicy() *sandboxv1beta1.PodFailurePolicy {
+	return &sandboxv1beta1.PodFailurePolicy{Action: sandboxv1beta1.PodFailurePolicyActionRecreate}
+}
+
 func sandboxControllerRef(name string) metav1.OwnerReference {
 	return metav1.OwnerReference{
 		APIVersion:         sandboxv1beta1.GroupVersion.String(),
@@ -359,8 +363,8 @@ func TestComputeConditions(t *testing.T) {
 			sandbox: &sandboxv1beta1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Generation: gen},
 				Spec: sandboxv1beta1.SandboxSpec{
+					SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodFailurePolicy: recreatePodFailurePolicy()},
 					OperatingMode:    sandboxv1beta1.SandboxOperatingModeRunning,
-					PodFailurePolicy: sandboxv1beta1.PodFailurePolicyRecreate,
 				},
 			},
 			svc: &corev1.Service{},
@@ -3277,12 +3281,13 @@ func TestReconcilePod(t *testing.T) {
 						"other-annotation":                      "keep-me",
 					},
 				},
-				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "test-container"}},
-					},
-				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodFailurePolicy: sandboxv1beta1.PodFailurePolicyRecreate,
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodFailurePolicy: recreatePodFailurePolicy(),
+					PodTemplate: sandboxv1beta1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test-container"}},
+						},
+					}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				},
 			},
 			wantPod: nil,
@@ -3321,12 +3326,13 @@ func TestReconcilePod(t *testing.T) {
 						"other-annotation":                      "keep-me",
 					},
 				},
-				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "test-container"}},
-					},
-				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodFailurePolicy: sandboxv1beta1.PodFailurePolicyRecreate,
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodFailurePolicy: recreatePodFailurePolicy(),
+					PodTemplate: sandboxv1beta1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test-container"}},
+						},
+					}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				},
 			},
 			wantPod:         nil,
@@ -3369,12 +3375,13 @@ func TestReconcilePod(t *testing.T) {
 						sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
 					},
 				},
-				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "test-container"}},
-					},
-				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodFailurePolicy: sandboxv1beta1.PodFailurePolicyRecreate,
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodFailurePolicy: recreatePodFailurePolicy(),
+					PodTemplate: sandboxv1beta1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test-container"}},
+						},
+					}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				},
 			},
 			wantPod:                nil,
@@ -3409,20 +3416,21 @@ func TestReconcilePod(t *testing.T) {
 					Namespace: sandboxNs,
 					UID:       sandboxUID,
 				},
-				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "test-container"}},
-					},
-					ObjectMeta: sandboxv1beta1.PodMetadata{
-						Labels: map[string]string{
-							"custom-label": "label-val",
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodFailurePolicy: recreatePodFailurePolicy(),
+					PodTemplate: sandboxv1beta1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test-container"}},
 						},
-						Annotations: map[string]string{
-							"custom-annotation": "anno-val",
+						ObjectMeta: sandboxv1beta1.PodMetadata{
+							Labels: map[string]string{
+								"custom-label": "label-val",
+							},
+							Annotations: map[string]string{
+								"custom-annotation": "anno-val",
+							},
 						},
-					},
-				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodFailurePolicy: sandboxv1beta1.PodFailurePolicyRecreate,
+					}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				},
 			},
 			wantPod: &corev1.Pod{
@@ -3475,8 +3483,8 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 				Spec: sandboxv1beta1.SandboxSpec{
+					SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodFailurePolicy: recreatePodFailurePolicy()},
 					OperatingMode:    sandboxv1beta1.SandboxOperatingModeSuspended,
-					PodFailurePolicy: sandboxv1beta1.PodFailurePolicyRecreate,
 				},
 			},
 			wantPodDeleting: true,
@@ -3880,66 +3888,64 @@ func TestRecreateBackoffDelayDoublesAndCaps(t *testing.T) {
 
 	require.Zero(t, b.delay(key))
 
-	b.bump(key)
+	b.recordFailure(key, "pod-1")
 	require.Equal(t, recreateBackoffBase, b.delay(key))
 
 	now = now.Add(recreateBackoffBase)
 	require.Zero(t, b.delay(key))
 
-	b.bump(key)
+	b.recordFailure(key, "pod-2")
 	require.Equal(t, 2*recreateBackoffBase, b.delay(key))
 
-	// Advance through several bumps until the cap is hit.
+	// Advance through several failures until the cap is hit.
 	for range 10 {
 		now = now.Add(b.delay(key))
-		b.bump(key)
+		b.recordFailure(key, "another-pod")
 	}
 	require.Equal(t, recreateBackoffMax, b.delay(key))
 }
 
-func TestRecreateBackoffResetClearsDelay(t *testing.T) {
+func TestRecreateBackoffClearRestartsDelay(t *testing.T) {
 	key := types.NamespacedName{Namespace: "ns", Name: "sb"}
 	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
 	b := recreateBackoff{now: func() time.Time { return now }}
 
-	b.bump(key)
+	b.recordFailure(key, "pod-1")
 	require.Equal(t, recreateBackoffBase, b.delay(key))
 
-	b.reset(key)
+	b.clear(key)
 	require.Zero(t, b.delay(key))
 
-	b.bump(key)
-	require.Equal(t, recreateBackoffBase, b.delay(key), "reset should restart at the base delay")
+	b.recordFailure(key, "pod-2")
+	require.Equal(t, recreateBackoffBase, b.delay(key), "clear should restart at the base delay")
 }
 
-func TestPodLivedAtLeast(t *testing.T) {
+func TestRecreateBackoffRunningObservationUsesControllerTime(t *testing.T) {
+	key := types.NamespacedName{Namespace: "ns", Name: "sb"}
 	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
-	require.False(t, podLivedAtLeast(nil, now))
-	require.False(t, podLivedAtLeast(&corev1.Pod{}, now))
+	b := recreateBackoff{now: func() time.Time { return now }}
+	b.recordFailure(key, "failed-pod")
 
-	pod := &corev1.Pod{Status: corev1.PodStatus{StartTime: &metav1.Time{Time: now}}}
-	require.False(t, podLivedAtLeast(pod, now))
+	require.Equal(t, recreateBackoffResetAfter, b.observeRunning(key, "replacement-pod"))
+	now = now.Add(4 * time.Minute)
+	require.Equal(t, recreateBackoffResetAfter-4*time.Minute, b.observeRunning(key, "replacement-pod"))
 
-	pod.Status.StartTime = &metav1.Time{Time: now.Add(-recreateBackoffResetAfter + time.Second)}
-	require.False(t, podLivedAtLeast(pod, now))
-
-	pod.Status.StartTime = &metav1.Time{Time: now.Add(-recreateBackoffResetAfter)}
-	require.True(t, podLivedAtLeast(pod, now))
+	b.resetRunningObservation(key)
+	now = now.Add(time.Minute)
+	require.Equal(t, recreateBackoffResetAfter, b.observeRunning(key, "replacement-pod"),
+		"a non-Running observation must restart the stable-Running window")
 }
 
-func TestRemainingPodLiveWait(t *testing.T) {
+func TestRecreateBackoffRunningObservationRestartsForNewPodUID(t *testing.T) {
+	key := types.NamespacedName{Namespace: "ns", Name: "sb"}
 	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
-	require.Zero(t, remainingPodLiveWait(nil, now))
-	require.Zero(t, remainingPodLiveWait(&corev1.Pod{}, now))
+	b := recreateBackoff{now: func() time.Time { return now }}
+	b.recordFailure(key, "failed-pod")
+	b.observeRunning(key, "replacement-1")
+	now = now.Add(4 * time.Minute)
 
-	pod := &corev1.Pod{Status: corev1.PodStatus{StartTime: &metav1.Time{Time: now}}}
-	require.Equal(t, recreateBackoffResetAfter, remainingPodLiveWait(pod, now))
-
-	pod.Status.StartTime = &metav1.Time{Time: now.Add(-4 * time.Minute)}
-	require.Equal(t, recreateBackoffResetAfter-4*time.Minute, remainingPodLiveWait(pod, now))
-
-	pod.Status.StartTime = &metav1.Time{Time: now.Add(-recreateBackoffResetAfter)}
-	require.Zero(t, remainingPodLiveWait(pod, now))
+	require.Equal(t, recreateBackoffResetAfter, b.observeRunning(key, "replacement-2"),
+		"a different replacement Pod must get its own stable-Running window")
 }
 
 func TestReconcilePodFailurePolicyRecreateCreatesReplacement(t *testing.T) {
@@ -3956,21 +3962,23 @@ func TestReconcilePodFailurePolicyRecreateCreatesReplacement(t *testing.T) {
 				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
 			},
 		},
-		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
-			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{{Name: "test-container"}},
-			},
-			ObjectMeta: sandboxv1beta1.PodMetadata{
-				Labels: map[string]string{"custom-label": "label-val"},
-			},
-		}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-			PodFailurePolicy: sandboxv1beta1.PodFailurePolicyRecreate,
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+			PodFailurePolicy: recreatePodFailurePolicy(),
+			PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
+				},
+				ObjectMeta: sandboxv1beta1.PodMetadata{
+					Labels: map[string]string{"custom-label": "label-val"},
+				},
+			}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 		},
 	}
 	failedPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            sandboxName,
 			Namespace:       sandboxNs,
+			UID:             "failed-pod-uid",
 			ResourceVersion: "1",
 			Labels:          map[string]string{sandboxLabel: nameHash},
 			OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
@@ -3980,10 +3988,12 @@ func TestReconcilePodFailurePolicyRecreateCreatesReplacement(t *testing.T) {
 	}
 
 	tracer := &mockTracer{}
+	recorder := events.NewFakeRecorder(2)
 	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
 	r := SandboxReconciler{
 		Client:        newFakeClient(failedPod, sandbox),
 		Scheme:        Scheme,
+		Recorder:      recorder,
 		Tracer:        tracer,
 		ClusterDomain: "cluster.local",
 	}
@@ -3999,6 +4009,10 @@ func TestReconcilePodFailurePolicyRecreateCreatesReplacement(t *testing.T) {
 			"pod.Name": sandboxName,
 		},
 	})
+	event := drainEvent(t, recorder)
+	assert.Contains(t, event, corev1.EventTypeNormal)
+	assert.Contains(t, event, recreateBackoffEventReason)
+	assert.Contains(t, event, recreateBackoffBase.String())
 
 	livePod := &corev1.Pod{}
 	err = r.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, livePod)
@@ -4014,6 +4028,7 @@ func TestReconcilePodFailurePolicyRecreateCreatesReplacement(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, replacement)
 	require.Equal(t, recreateBackoffBase, requeueAfter)
+	assertNoEvent(t, recorder)
 
 	now = now.Add(recreateBackoffBase)
 	replacement, requeueAfter, err = r.reconcilePod(t.Context(), liveSandbox, nameHash, nil)
@@ -4033,6 +4048,7 @@ func TestReconcilePodFailurePolicyRecreateDoesNotBumpOnDeleteNotFound(t *testing
 	key := types.NamespacedName{Namespace: sandboxNs, Name: sandboxName}
 
 	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+	recorder := events.NewFakeRecorder(1)
 	r := SandboxReconciler{
 		Client: newFakeClientWithInterceptor(interceptor.Funcs{
 			Delete: func(_ context.Context, _ client.WithWatch, obj client.Object, _ ...client.DeleteOption) error {
@@ -4040,11 +4056,12 @@ func TestReconcilePodFailurePolicyRecreateDoesNotBumpOnDeleteNotFound(t *testing
 			},
 		}, failedPod, sandbox),
 		Scheme:        Scheme,
+		Recorder:      recorder,
 		Tracer:        asmetrics.NewNoOp(),
 		ClusterDomain: "cluster.local",
 	}
 	r.recreateBackoff.now = func() time.Time { return now }
-	r.recreateBackoff.bump(key)
+	r.recreateBackoff.recordFailure(key, "previous-pod")
 	require.Equal(t, recreateBackoffBase, r.recreateBackoff.delay(key))
 
 	pod, requeueAfter, err := r.reconcilePod(t.Context(), sandbox, nameHash, nil)
@@ -4052,6 +4069,7 @@ func TestReconcilePodFailurePolicyRecreateDoesNotBumpOnDeleteNotFound(t *testing
 	require.Nil(t, pod)
 	require.Equal(t, recreateBackoffBase, requeueAfter, "NotFound delete must not double-count the failure")
 	require.Equal(t, recreateBackoffBase, r.recreateBackoff.delay(key))
+	assertNoEvent(t, recorder)
 }
 
 func TestReconcilePodFailurePolicyRecreateBackoffSurvivesBriefRunning(t *testing.T) {
@@ -4084,7 +4102,8 @@ func TestReconcilePodFailurePolicyRecreateBackoffSurvivesBriefRunning(t *testing
 
 	running := replacement.DeepCopy()
 	running.Status.Phase = corev1.PodRunning
-	running.Status.StartTime = &metav1.Time{Time: now}
+	// A long Pending or image-pull period must not count toward stable Running.
+	running.Status.StartTime = &metav1.Time{Time: now.Add(-time.Hour)}
 	require.NoError(t, r.Status().Update(t.Context(), running))
 
 	observed, requeueAfter, err := r.reconcilePod(t.Context(), liveSandbox, nameHash, nil)
@@ -4131,10 +4150,18 @@ func TestReconcilePodFailurePolicyRecreateResetsAfterStableRunning(t *testing.T)
 
 	running := replacement.DeepCopy()
 	running.Status.Phase = corev1.PodRunning
-	running.Status.StartTime = &metav1.Time{Time: now.Add(-recreateBackoffResetAfter)}
+	running.Status.StartTime = &metav1.Time{Time: now.Add(-time.Hour)}
 	require.NoError(t, r.Status().Update(t.Context(), running))
 
 	observed, requeueAfter, err := r.reconcilePod(t.Context(), liveSandbox, nameHash, nil)
+	require.NoError(t, err)
+	require.NotNil(t, observed)
+	require.Equal(t, recreateBackoffResetAfter, requeueAfter,
+		"the reset window starts when the controller first observes Running, not at Pod startTime")
+	require.True(t, r.recreateBackoff.has(key))
+
+	now = now.Add(recreateBackoffResetAfter)
+	observed, requeueAfter, err = r.reconcilePod(t.Context(), liveSandbox, nameHash, nil)
 	require.NoError(t, err)
 	require.NotNil(t, observed)
 	require.Zero(t, requeueAfter)
@@ -4149,7 +4176,6 @@ func TestReconcilePodFailurePolicyRecreateDecaysOnLongLivedFailedPod(t *testing.
 	key := types.NamespacedName{Namespace: sandboxNs, Name: sandboxName}
 
 	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
-	failedPod.Status.StartTime = &metav1.Time{Time: now.Add(-recreateBackoffResetAfter)}
 	r := SandboxReconciler{
 		Client:        newFakeClient(failedPod, sandbox),
 		Scheme:        Scheme,
@@ -4157,15 +4183,126 @@ func TestReconcilePodFailurePolicyRecreateDecaysOnLongLivedFailedPod(t *testing.
 		ClusterDomain: "cluster.local",
 	}
 	r.recreateBackoff.now = func() time.Time { return now }
-	r.recreateBackoff.bump(key)
+	r.recreateBackoff.recordFailure(key, "first-failed-pod")
 	now = now.Add(recreateBackoffBase)
-	r.recreateBackoff.bump(key)
+	r.recreateBackoff.recordFailure(key, "second-failed-pod")
 	require.Equal(t, 2*recreateBackoffBase, r.recreateBackoff.delay(key))
+	r.recreateBackoff.observeRunning(key, failedPod.UID)
+	now = now.Add(recreateBackoffResetAfter)
 
 	pod, requeueAfter, err := r.reconcilePod(t.Context(), sandbox, nameHash, nil)
 	require.NoError(t, err)
 	require.Nil(t, pod)
-	require.Equal(t, recreateBackoffBase, requeueAfter, "Failed pod that ran for the decay window is a new incident")
+	require.Equal(t, recreateBackoffBase, requeueAfter, "a Pod observed Running for the decay window starts a new incident")
+}
+
+func TestReconcilePodFailurePolicyRecreateClearsBackoffOnSucceeded(t *testing.T) {
+	sandbox, pod := recreatePolicySandboxAndFailedPod()
+	pod.Status.Phase = corev1.PodSucceeded
+	key := types.NamespacedName{Namespace: sandbox.Namespace, Name: sandbox.Name}
+	r := SandboxReconciler{
+		Client:        newFakeClient(pod, sandbox),
+		Scheme:        Scheme,
+		Tracer:        asmetrics.NewNoOp(),
+		ClusterDomain: "cluster.local",
+	}
+	r.recreateBackoff.recordFailure(key, "previous-pod")
+
+	observed, requeueAfter, err := r.reconcilePod(t.Context(), sandbox, NameHash(sandbox.Name), nil)
+	require.NoError(t, err)
+	require.NotNil(t, observed)
+	require.Zero(t, requeueAfter)
+	require.False(t, r.recreateBackoff.has(key))
+}
+
+func TestReconcileClearsRecreateBackoffWhenInactive(t *testing.T) {
+	newSandbox := func(name string) *sandboxv1beta1.Sandbox {
+		return &sandboxv1beta1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       name,
+				Namespace:  "default",
+				UID:        types.UID(name),
+				Generation: 1,
+			},
+			Spec: sandboxv1beta1.SandboxSpec{
+				SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodTemplate: sandboxv1beta1.PodTemplate{
+						Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+					},
+					PodFailurePolicy: recreatePodFailurePolicy(),
+				},
+				OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+			},
+		}
+	}
+
+	testCases := []struct {
+		name    string
+		sandbox *sandboxv1beta1.Sandbox
+	}{
+		{name: "not found"},
+		{
+			name: "deleting",
+			sandbox: func() *sandboxv1beta1.Sandbox {
+				sandbox := newSandbox("deleting")
+				deletionTime := metav1.Now()
+				sandbox.DeletionTimestamp = &deletionTime
+				sandbox.Finalizers = []string{"agents.x-k8s.io/test-hold"}
+				return sandbox
+			}(),
+		},
+		{
+			name: "policy disabled",
+			sandbox: func() *sandboxv1beta1.Sandbox {
+				sandbox := newSandbox("policy-disabled")
+				sandbox.Spec.PodFailurePolicy = &sandboxv1beta1.PodFailurePolicy{
+					Action: sandboxv1beta1.PodFailurePolicyActionIgnore,
+				}
+				return sandbox
+			}(),
+		},
+		{
+			name: "suspended",
+			sandbox: func() *sandboxv1beta1.Sandbox {
+				sandbox := newSandbox("suspended")
+				sandbox.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeSuspended
+				return sandbox
+			}(),
+		},
+		{
+			name: "expired and retained",
+			sandbox: func() *sandboxv1beta1.Sandbox {
+				sandbox := newSandbox("expired-retained")
+				shutdownTime := metav1.NewTime(time.Now().Add(-time.Minute))
+				sandbox.Spec.ShutdownTime = &shutdownTime
+				sandbox.Spec.ShutdownPolicy = ptr.To(sandboxv1beta1.ShutdownPolicyRetain)
+				return sandbox
+			}(),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			key := types.NamespacedName{Namespace: "default", Name: strings.ReplaceAll(tc.name, " ", "-")}
+			var objects []runtime.Object
+			if tc.sandbox != nil {
+				key = types.NamespacedName{Namespace: tc.sandbox.Namespace, Name: tc.sandbox.Name}
+				objects = append(objects, tc.sandbox)
+			}
+			r := SandboxReconciler{
+				Client:        newFakeClient(objects...),
+				Scheme:        Scheme,
+				Tracer:        asmetrics.NewNoOp(),
+				ClusterDomain: "cluster.local",
+			}
+			r.recreateBackoff.recordFailure(key, "failed-pod")
+			require.True(t, r.recreateBackoff.has(key))
+
+			_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: key})
+			require.NoError(t, err)
+			require.False(t, r.recreateBackoff.has(key))
+		})
+	}
 }
 
 func recreatePolicySandboxAndFailedPod() (*sandboxv1beta1.Sandbox, *corev1.Pod) {
@@ -4181,21 +4318,23 @@ func recreatePolicySandboxAndFailedPod() (*sandboxv1beta1.Sandbox, *corev1.Pod) 
 				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
 			},
 		},
-		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
-			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{{Name: "test-container"}},
-			},
-			ObjectMeta: sandboxv1beta1.PodMetadata{
-				Labels: map[string]string{"custom-label": "label-val"},
-			},
-		}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-			PodFailurePolicy: sandboxv1beta1.PodFailurePolicyRecreate,
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+			PodFailurePolicy: recreatePodFailurePolicy(),
+			PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
+				},
+				ObjectMeta: sandboxv1beta1.PodMetadata{
+					Labels: map[string]string{"custom-label": "label-val"},
+				},
+			}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 		},
 	}
 	failedPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            sandboxName,
 			Namespace:       sandboxNs,
+			UID:             "failed-pod-uid",
 			ResourceVersion: "1",
 			Labels:          map[string]string{sandboxLabel: nameHash},
 			OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
@@ -4230,20 +4369,21 @@ func TestReconcilePodFailurePolicyRecreatePatchBehavior(t *testing.T) {
 						sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
 					},
 				},
-				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "test-container"}},
-					},
-					ObjectMeta: sandboxv1beta1.PodMetadata{
-						Labels: map[string]string{
-							"custom-label": "label-val",
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodFailurePolicy: recreatePodFailurePolicy(),
+					PodTemplate: sandboxv1beta1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test-container"}},
 						},
-						Annotations: map[string]string{
-							"custom-annotation": "anno-val",
+						ObjectMeta: sandboxv1beta1.PodMetadata{
+							Labels: map[string]string{
+								"custom-label": "label-val",
+							},
+							Annotations: map[string]string{
+								"custom-annotation": "anno-val",
+							},
 						},
-					},
-				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodFailurePolicy: sandboxv1beta1.PodFailurePolicyRecreate,
+					}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				},
 			},
 			failedPod: &corev1.Pod{
@@ -4271,12 +4411,13 @@ func TestReconcilePodFailurePolicyRecreatePatchBehavior(t *testing.T) {
 						sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
 					},
 				},
-				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "test-container"}},
-					},
-				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodFailurePolicy: sandboxv1beta1.PodFailurePolicyRecreate,
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodFailurePolicy: recreatePodFailurePolicy(),
+					PodTemplate: sandboxv1beta1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test-container"}},
+						},
+					}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				},
 			},
 			failedPod: &corev1.Pod{
@@ -5835,6 +5976,10 @@ func TestSuspendedConditionUnknownWhenPodLookupFails(t *testing.T) {
 	require.Equal(t, metav1.ConditionUnknown, suspended.Status,
 		"the pod lookup failed, so suspension cannot be confirmed")
 	require.Equal(t, sandboxv1beta1.SandboxReasonSuspendedPodStateUnknown, suspended.Reason)
+	ready := meta.FindStatusCondition(updatedSandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	require.NotNil(t, ready)
+	require.Equal(t, "Error seen: pod get failed: Internal error occurred: pod get failed", ready.Message,
+		"the wrapped Pod error must be routed to conditions exactly once")
 }
 
 func TestSandboxShutdownExpiryUsesTwoPassAndPreservesFinishedCondition(t *testing.T) {

@@ -113,7 +113,8 @@ type Options struct {
 	// Runtime selects the in-sandbox runtime API. Default: RuntimeLegacyPython.
 	// RuntimeSandboxd talks to the sandbox pod rather than the sandbox-router,
 	// so GatewayName is not supported with it. APIURL remains available as an
-	// advanced/testing escape hatch for the REST endpoint.
+	// advanced/testing escape hatch for the REST endpoint only: Run needs the
+	// gRPC endpoint and returns ErrUnsupportedByRuntime with it.
 	Runtime Runtime
 
 	// Connectivity selects the transport. Default: ConnectivityPortForward.

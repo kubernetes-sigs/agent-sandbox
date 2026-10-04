@@ -18,6 +18,7 @@ from typing import Literal, Optional, Union
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 _ENV_VAR_NAME_RE = re.compile(r"^[-._a-zA-Z][-._a-zA-Z0-9]*$")
+_RESERVED_HEADER_PREFIX = "x-sandbox-"
 
 class ExecutionResult(BaseModel):
     """A structured object for holding the result of a command execution."""
@@ -81,9 +82,34 @@ class SandboxClaimEnvVar(BaseModel):
         return v
 
 class SandboxDirectConnectionConfig(BaseModel):
-    """Configuration for connecting directly to a Sandbox URL."""
+    """Configuration for connecting directly to a Sandbox URL.
+
+    ``extra_headers`` and ``client_cert``/``ca_cert`` (mTLS) support a router
+    behind an authenticating gateway.
+    """
     api_url: str  # Direct URL to the router.
     server_port: int = 8888  # Port the sandbox container listens on.
+    # Hidden from repr to keep credentials out of logs.
+    extra_headers: dict[str, str] = Field(default_factory=dict, repr=False)  # Sent on every request.
+    client_cert: Optional[tuple[str, str]] = None  # (certificate path, private key path) for mTLS.
+    ca_cert: Optional[str] = None  # CA bundle path used to verify the router; default trust store if unset.
+
+    @field_validator("extra_headers")
+    @classmethod
+    def validate_extra_headers(cls, v: dict[str, str]) -> dict[str, str]:
+        for name in v:
+            if name.lower().startswith(_RESERVED_HEADER_PREFIX):
+                raise ValueError(
+                    f"header {name!r} is reserved: the SDK sets {_RESERVED_HEADER_PREFIX}* headers itself"
+                )
+        return v
+
+    @model_validator(mode="after")
+    def validate_tls_requires_https(self) -> "SandboxDirectConnectionConfig":
+        # TLS options are ignored on http://, so fail loudly instead.
+        if (self.client_cert or self.ca_cert) and not self.api_url.lower().startswith("https://"):
+            raise ValueError("client_cert and ca_cert require an https:// api_url")
+        return self
 
 class SandboxGatewayConnectionConfig(BaseModel):
     """Configuration for connecting via Kubernetes Gateway API."""

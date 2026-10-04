@@ -30,6 +30,18 @@ from .constants import SANDBOX_NAME_HASH_LABEL
 from .models import SandboxClaimEnvVar
 
 
+def merge_headers(*layers: Mapping[str, str] | None) -> dict[str, str]:
+    """Merge header mappings case-insensitively; later layers win.
+
+    ``None`` layers are skipped. Returns a new dict.
+    """
+    merged: dict[str, tuple[str, str]] = {}
+    for layer in layers:
+        for name, value in (layer or {}).items():
+            merged[name.lower()] = (name, value)
+    return dict(merged.values())
+
+
 def record_latency(metric):
     """Decorator to measure and record execution latency to a Prometheus metric.
 

@@ -393,11 +393,25 @@ func TestSandboxdRun_GRPCErrorSurfacesCode(t *testing.T) {
 }
 
 func TestSandboxdRun_NotConnected(t *testing.T) {
-	c := newReadySandboxdTestSandbox("http://unused.invalid")
-	// No gRPC target published (tunnel never connected).
+	// The in-cluster strategy publishes a gRPC target on Open; before that,
+	// Run is merely not ready.
+	c, _, _ := newTestSandbox(inClusterTestOpts())
 	_, err := c.Run(context.Background(), "echo hi")
 	if !errors.Is(err, ErrNotReady) {
 		t.Fatalf("expected ErrNotReady, got: %v", err)
+	}
+}
+
+// APIURL addresses only the REST API, so no gRPC target is ever published:
+// Run must fail permanently instead of reporting a retryable ErrNotReady.
+func TestSandboxdRun_DirectURLUnsupported(t *testing.T) {
+	c := newReadySandboxdTestSandbox("http://unused.invalid")
+	_, err := c.Run(context.Background(), "echo hi")
+	if !errors.Is(err, ErrUnsupportedByRuntime) {
+		t.Fatalf("expected ErrUnsupportedByRuntime, got: %v", err)
+	}
+	if errors.Is(err, ErrNotReady) {
+		t.Errorf("a permanent failure must not look retryable, got: %v", err)
 	}
 }
 

@@ -113,6 +113,8 @@ var (
     ErrNotReady         = errors.New("sandbox is not ready")
     ErrTimeout          = errors.New("operation timed out")
     ErrClaimFailed      = errors.New("claim creation failed")
+    ErrWarmPoolNotFound = errors.New("sandbox warm pool not found")
+    ErrTemplateNotFound = errors.New("sandbox template not found")
     ErrPortForwardDied  = errors.New("port-forward connection lost")
     ErrNoSandboxService = errors.New("sandbox has no headless Service")
     ErrAlreadyOpen      = errors.New("sandbox is already open; call Close first")
@@ -122,7 +124,8 @@ var (
     ErrGatewayDeleted   = errors.New("gateway was deleted during address discovery")
     ErrResponseTooLarge = errors.New("response exceeded 16 MB limit")
     // ErrUnsupportedByRuntime is returned by operations the selected
-    // runtime cannot perform (e.g. Delete on the legacy python-runtime).
+    // runtime or connection cannot perform (e.g. Delete on the legacy
+    // python-runtime, or Run with RuntimeSandboxd and APIURL).
     ErrUnsupportedByRuntime = errors.New("operation not supported by the sandbox runtime")
 )
 ```
@@ -585,7 +588,7 @@ NewK8sHelper creates a K8sHelper by loading kubeconfig and constructing all requ
 func (h *K8sHelper) WaitForSandboxReady(ctx context.Context, sandboxName, namespace string) error
 ```
 
-WaitForSandboxReady waits until the named Sandbox has a true Ready condition. sandboxName is the backing Sandbox name, not the SandboxClaim name. It does not connect to the runtime. Use a context deadline to bound the wait; cancellation and deadline errors are detectable with errors.Is. A missing Sandbox is waited for, while deletion observed during the watch returns ErrSandboxDeleted. API list/watch failures are retried until ctx ends.
+WaitForSandboxReady waits until the named Sandbox has a true Ready condition. sandboxName is the backing Sandbox name, not the SandboxClaim name. It does not connect to the runtime. Use a context deadline to bound the wait; cancellation and deadline errors are detectable with errors.Is. A missing Sandbox is waited for, while deletion observed during the watch returns ErrSandboxDeleted. A terminal Ready=False reason such as PodFailed returns ErrClaimFailed. API list/watch failures are retried until ctx ends.
 
 <a name="Key"></a>
 ### type [Key](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go>)
@@ -616,7 +619,8 @@ type Options struct {
     // Runtime selects the in-sandbox runtime API. Default: RuntimeLegacyPython.
     // RuntimeSandboxd talks to the sandbox pod rather than the sandbox-router,
     // so GatewayName is not supported with it. APIURL remains available as an
-    // advanced/testing escape hatch for the REST endpoint.
+    // advanced/testing escape hatch for the REST endpoint only: Run needs the
+    // gRPC endpoint and returns ErrUnsupportedByRuntime with it.
     Runtime Runtime
 
     // Connectivity selects the transport. Default: ConnectivityPortForward.

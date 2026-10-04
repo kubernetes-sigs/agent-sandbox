@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import type * as k8s from "@kubernetes/client-node";
+
 export interface SandboxClientOptions {
   namespace?: string;
   sandboxReadyTimeout?: number;
@@ -229,6 +231,16 @@ export interface PodMetadata {
   annotations?: Record<string, string>;
 }
 
+/** One entry of a SandboxClaim's `spec.volumeClaimTemplates`. */
+export interface VolumeClaimTemplate {
+  metadata?: {
+    name?: string;
+    labels?: Record<string, string>;
+    annotations?: Record<string, string>;
+  };
+  spec: k8s.V1PersistentVolumeClaimSpec;
+}
+
 export interface CreateSandboxOptions {
   sandboxReadyTimeout?: number;
   labels?: Record<string, string>;
@@ -253,4 +265,11 @@ export interface CreateSandboxOptions {
    * `spec.additionalPodMetadata.annotations`.
    */
   podAnnotations?: Record<string, string>;
+  /**
+   * PersistentVolumeClaims to create for the sandbox, sent as the claim's
+   * `spec.volumeClaimTemplates`. Setting this forces a cold start, because
+   * warm pool Pods do not have these volumes. The controller validates the
+   * templates against the SandboxTemplate's volume policy.
+   */
+  volumeClaimTemplates?: VolumeClaimTemplate[];
 }

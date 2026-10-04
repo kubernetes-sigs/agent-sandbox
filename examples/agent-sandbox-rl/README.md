@@ -491,6 +491,25 @@ create), so two runs racing on one name cannot delete or resize each other's poo
 Sharing one warm fleet across consumers on purpose is the
 [adoption](#adopting-warm-pools-someone-else-provisioned) model, not a name collision.
 
+**One job, several processes.** Each fleet gets a random run id, so an
+orchestrator that warms pools and workers that claim from them are separate runs
+to each other: a worker's on-demand pool blocks the orchestrator's later warm of
+that image. Give every process in the job the same `FleetConfig(run_id="…")` (a
+DNS-1123 label) and they share the job's templates and pools;
+`run_isolation="names"` / `"namespace"` then isolate the job as a whole. A pool
+is deleted only by the process that created it: a process warming an image whose
+pool another process already warmed borrows it (claims from it, never resizes or
+deletes it), and the first warm of an image a worker provisioned on demand takes
+that pool over. So each process's `teardown()` releases its own claims and
+deletes only the pools it created; on-demand pools nobody took over are left for
+the reaper. A per-run namespace is kept unless `teardown(delete_namespace=True)`,
+and every process runs `run_namespace_setup` once (it must already be safe to
+re-run). Setting `run_id` means shared even in a single process, and turns off
+the pod-count circuit breaker, which can't attribute a job-wide pod count to one
+process; `max_live_sandboxes` still caps each process's claims. Clean up the job
+once, at the end, with `reap(run_id=…)` — not from each process's exit hook,
+where it would sweep the other processes' resources too.
+
 ## Configuration reference
 
 **FleetConfig:** `clusters`, `placement`, `max_concurrent` (1), `max_warmpool_size`
@@ -504,7 +523,8 @@ create burst; on controllers ≤ v0.5.3 also pair with a low
 (False — use pools that already exist and fail loudly on a miss, see
 [above](#adopting-warm-pools-someone-else-provisioned)), `run_isolation` (`none` |
 `names` | `namespace`, see [above](#concurrent-runs-on-one-cluster)) with
-`run_namespace_labels` and `run_namespace_setup`, `labels`. Disk-aware sizing (optional):
+`run_namespace_labels` and `run_namespace_setup`, `run_id` (None = random per fleet;
+set it to share one across a job's processes), `labels`. Disk-aware sizing (optional):
 `avg_image_gb`, `node_ephemeral_gb`, `disk_headroom` (0.25), `cluster_nodes`
 (None) — when set, the auto window for `sliding`/`pipelined` is capped so resident
 images fit disk; `cluster_nodes` makes that the *whole pool's* disk (distinct images
@@ -514,7 +534,8 @@ bound; the capacity planner sets it from the probed node count).
 **Runaway safeguards** (see `plans/sdk-runaway-safeguards.md`): `overcommit_factor`
 (1.5) + `max_live_sandboxes` (None) — the **circuit breaker**: if live sandboxes this
 run owns exceed `min(expected × factor, max_live_sandboxes)`, the fleet tears down and
-raises `FleetOvercommitError` (catches accidental over-creation; `factor=0` disables);
+raises `FleetOvercommitError` (catches accidental over-creation; `factor=0` disables;
+off when `run_id` is set, see [above](#concurrent-runs-on-one-cluster));
 `breaker_poll_s` (5.0). `install_teardown_hooks` (True) installs atexit/SIGINT/SIGTERM
 teardown on graceful exits (normal return, exceptions, `SIGINT`/`SIGTERM`) — these are
 **best-effort** and can't catch `SIGKILL` / OOM / node loss. For those abrupt cases,

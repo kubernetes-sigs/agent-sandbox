@@ -188,9 +188,12 @@ kubectl delete -f https://github.com/kubernetes-sigs/agent-sandbox/releases/down
 
 For Helm-based installations, see the [Helm chart README](helm/README.md#uninstallation).
 
-## Configuration
+## Configuration & Performance Tuning
 
-For advanced scale and concurrency tuning (e.g., API QPS and worker counts), please see the [Configuration Guide](docs/configuration.md).
+For controller flags, high-throughput benchmark profiles, warm-pool refill shaping, and API Priority and Fairness (APF) insulation, see:
+*   [Configuration Guide](docs/configuration.md) — full CLI flag reference and deployment examples.
+*   [Performance Tuning Guide](docs/performance-tuning.md) — benchmark data, burst vs. sustained profiles, multi-pool sharding, and managed control-plane checklist.
+*   [APF Insulation Guide](docs/apf-insulation.md) — `FlowSchema` and `PriorityLevelConfiguration` manifests to protect claim adoption from bulk refill traffic.
 
 ## Getting Started
 

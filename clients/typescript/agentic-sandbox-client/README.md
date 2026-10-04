@@ -75,6 +75,29 @@ These populate `spec.additionalPodMetadata`, matching the Python SDK's
 `pod_labels` and `pod_annotations`. Pod label syntax is checked before
 provisioning; the controller's label-domain allowlist is enforced server-side.
 
+### Persistent volumes
+
+Use `volumeClaimTemplates` to attach PersistentVolumeClaims to the sandbox Pod:
+
+```typescript
+const sandbox = await client.createSandbox("my-warm-pool", "default", {
+  volumeClaimTemplates: [
+    {
+      metadata: { name: "my-volume" },
+      spec: {
+        accessModes: ["ReadWriteOnce"],
+        resources: { requests: { storage: "1Gi" } },
+      },
+    },
+  ],
+});
+```
+
+These populate `spec.volumeClaimTemplates`, matching the Python SDK's
+`volume_claim_templates`. Warm pool Pods do not have these volumes, so setting
+this forces a cold start. The controller validates the templates against the
+SandboxTemplate's volume policy.
+
 ### Listing sandboxes
 
 With Kubernetes credentials configured and permission to list SandboxClaims, run

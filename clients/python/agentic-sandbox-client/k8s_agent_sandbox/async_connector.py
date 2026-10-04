@@ -24,6 +24,7 @@ import inspect
 import logging
 import math
 import socket
+import ssl
 from collections.abc import Callable
 from typing import Any, Awaitable
 
@@ -46,7 +47,7 @@ from .models import (
     SandboxdPodTunnelConnectionConfig,
     SandboxdInClusterConnectionConfig,
 )
-from .utils import async_kubectl_kubeconfig_args
+from .utils import async_kubectl_kubeconfig_args, merge_headers
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,18 @@ def _router_timeout_header_value(timeout) -> str | None:
     if value is None or not math.isfinite(value) or value <= 0:
         return None
     return str(value)
+
+
+def _build_ssl_context(config: SandboxDirectConnectionConfig) -> ssl.SSLContext:
+    """Build the TLS context (httpx deprecates verify/cert paths)."""
+    if config.ca_cert:
+        context = ssl.create_default_context(cafile=config.ca_cert)
+    else:
+        # Same trust store as the default client.
+        context = httpx.create_ssl_context()
+    if config.client_cert:
+        context.load_cert_chain(*config.client_cert)
+    return context
 
 
 class AsyncSandboxConnector:
@@ -192,7 +205,14 @@ class AsyncSandboxConnector:
             ),
         )
 
-        transport = httpx.AsyncHTTPTransport()
+        self._extra_headers: dict[str, str] = {}
+        verify: ssl.SSLContext | bool = True
+        if isinstance(connection_config, SandboxDirectConnectionConfig):
+            self._extra_headers = connection_config.extra_headers
+            if connection_config.ca_cert or connection_config.client_cert:
+                verify = _build_ssl_context(connection_config)
+
+        transport = httpx.AsyncHTTPTransport(verify=verify)
         self.client = httpx.AsyncClient(
             transport=transport, timeout=httpx.Timeout(60.0)
         )
@@ -303,7 +323,8 @@ class AsyncSandboxConnector:
 
         allowed_statuses = kwargs.pop("allowed_statuses", None)
         disable_retries = kwargs.pop("_disable_retries", False)
-        headers = kwargs.pop("headers", {}).copy()
+        # Precedence: config < caller < SDK routing headers.
+        headers = merge_headers(self._extra_headers, kwargs.pop("headers", None))
         # For security and SSRF mitigation, the SDK explicitly mandates blocking all HTTP redirects
         # to the internal sandbox endpoints. Any user-provided redirect settings are overridden and
         # ignored. We pop 'follow_redirects' here to prevent a TypeError due to duplicate keyword

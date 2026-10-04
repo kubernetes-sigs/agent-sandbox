@@ -221,6 +221,10 @@ func claimFailure(claim *extv1beta1.SandboxClaim) error {
 	if ready == nil || ready.Status != metav1.ConditionFalse {
 		return nil
 	}
+	// A condition from an older generation predates the claim's current spec.
+	if ready.ObservedGeneration != 0 && ready.ObservedGeneration < claim.Generation {
+		return nil
+	}
 	switch ready.Reason {
 	case "TemplateNotFound":
 		return fmt.Errorf("%w: claim %s: %s", ErrTemplateNotFound, claim.Name, ready.Message)

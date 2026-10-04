@@ -631,6 +631,18 @@ func TestClaimFailure(t *testing.T) {
 			t.Fatalf("expected no failure for Ready=True, got: %v", err)
 		}
 	})
+	t.Run("stale generation", func(t *testing.T) {
+		claim := claimNotReady("c", "WarmPoolNotFound")
+		claim.Generation = 2
+		claim.Status.Conditions[0].ObservedGeneration = 1
+		if err := claimFailure(claim); err != nil {
+			t.Fatalf("expected no failure for a stale condition, got: %v", err)
+		}
+		claim.Status.Conditions[0].ObservedGeneration = 2
+		if err := claimFailure(claim); !errors.Is(err, ErrWarmPoolNotFound) {
+			t.Fatalf("expected ErrWarmPoolNotFound for a current condition, got: %v", err)
+		}
+	})
 }
 
 // A claim that can never become ready must fail fast instead of waiting out

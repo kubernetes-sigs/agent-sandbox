@@ -54,7 +54,8 @@ var (
 	ErrGatewayDeleted   = errors.New("gateway was deleted during address discovery")
 	ErrResponseTooLarge = errors.New("response exceeded 16 MB limit")
 	// ErrUnsupportedByRuntime is returned by operations the selected
-	// runtime cannot perform (e.g. Delete on the legacy python-runtime).
+	// runtime or connection cannot perform (e.g. Delete on the legacy
+	// python-runtime, or Run with RuntimeSandboxd and APIURL).
 	ErrUnsupportedByRuntime = errors.New("operation not supported by the sandbox runtime")
 )
 

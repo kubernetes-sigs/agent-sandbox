@@ -122,7 +122,8 @@ var (
     ErrGatewayDeleted   = errors.New("gateway was deleted during address discovery")
     ErrResponseTooLarge = errors.New("response exceeded 16 MB limit")
     // ErrUnsupportedByRuntime is returned by operations the selected
-    // runtime cannot perform (e.g. Delete on the legacy python-runtime).
+    // runtime or connection cannot perform (e.g. Delete on the legacy
+    // python-runtime, or Run with RuntimeSandboxd and APIURL).
     ErrUnsupportedByRuntime = errors.New("operation not supported by the sandbox runtime")
 )
 ```
@@ -616,7 +617,8 @@ type Options struct {
     // Runtime selects the in-sandbox runtime API. Default: RuntimeLegacyPython.
     // RuntimeSandboxd talks to the sandbox pod rather than the sandbox-router,
     // so GatewayName is not supported with it. APIURL remains available as an
-    // advanced/testing escape hatch for the REST endpoint.
+    // advanced/testing escape hatch for the REST endpoint only: Run needs the
+    // gRPC endpoint and returns ErrUnsupportedByRuntime with it.
     Runtime Runtime
 
     // Connectivity selects the transport. Default: ConnectivityPortForward.

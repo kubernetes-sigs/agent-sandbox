@@ -190,6 +190,10 @@ for _, key := range client.ListActiveSandboxes() {
 
 // Re-attach to existing sandbox by claim name
 sb, _ := client.GetSandbox(ctx, sb1.ClaimName(), "default")
+
+// Label the claims a client creates (Options.Labels), then list by label
+labeled, _ := sandbox.NewClient(ctx, sandbox.Options{Labels: map[string]string{"app": "agent"}})
+names, _ := labeled.ListAllSandboxes(ctx, "default", sandbox.WithLabelSelector("app=agent"))
 ```
 
 ## Configuration
@@ -201,6 +205,7 @@ All options are documented on the `Options` struct in
 - `Env`: environment variables to inject into the `SandboxClaim`. Setting this
   forces a cold start from the warm pool template instead of adopting a
   pre-warmed pod, which may increase startup latency.
+- `Labels`: labels added to every `SandboxClaim` the client creates.
 - `GatewayName`: set to enable Gateway mode.
 - `APIURL`: set for Direct URL mode (takes precedence over `GatewayName`).
 - `TracerProvider`: OpenTelemetry integration.

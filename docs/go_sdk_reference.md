@@ -21,7 +21,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(c \*Client\) EnableAutoCleanup\(\) \(stop func\(\)\)](<#Client.EnableAutoCleanup>)
   - [func \(c \*Client\) GetSandbox\(ctx context.Context, claimName, namespace string\) \(\*Sandbox, error\)](<#Client.GetSandbox>)
   - [func \(c \*Client\) ListActiveSandboxes\(\) \[\]Key](<#Client.ListActiveSandboxes>)
-  - [func \(c \*Client\) ListAllSandboxes\(ctx context.Context, namespace string\) \(\[\]string, error\)](<#Client.ListAllSandboxes>)
+  - [func \(c \*Client\) ListAllSandboxes\(ctx context.Context, namespace string, opts ...ListOption\) \(\[\]string, error\)](<#Client.ListAllSandboxes>)
 - [type Commands](<#Commands>)
   - [func \(c \*Commands\) Run\(ctx context.Context, command string, opts ...CallOption\) \(\*ExecutionResult, error\)](<#Commands.Run>)
 - [type ConnectionStrategy](<#ConnectionStrategy>)
@@ -48,6 +48,8 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func NewK8sHelper\(restConfig \*rest.Config, log logr.Logger\) \(\*K8sHelper, error\)](<#NewK8sHelper>)
   - [func \(h \*K8sHelper\) WaitForSandboxReady\(ctx context.Context, sandboxName, namespace string\) error](<#K8sHelper.WaitForSandboxReady>)
 - [type Key](<#Key>)
+- [type ListOption](<#ListOption>)
+  - [func WithLabelSelector\(selector string\) ListOption](<#WithLabelSelector>)
 - [type Options](<#Options>)
 - [type Runtime](<#Runtime>)
 - [type Sandbox](<#Sandbox>)
@@ -248,10 +250,10 @@ ListActiveSandboxes returns tracked sandboxes, pruning inactive handles.
 #### func \(\*Client\) [ListAllSandboxes](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go>)
 
 ```go
-func (c *Client) ListAllSandboxes(ctx context.Context, namespace string) ([]string, error)
+func (c *Client) ListAllSandboxes(ctx context.Context, namespace string, opts ...ListOption) ([]string, error)
 ```
 
-ListAllSandboxes lists all SandboxClaim names in the given namespace.
+ListAllSandboxes lists SandboxClaim names in the given namespace, optionally narrowed with WithLabelSelector.
 
 <a name="Commands"></a>
 ### type [Commands](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/commands.go>)
@@ -602,6 +604,24 @@ type Key struct {
 }
 ```
 
+<a name="ListOption"></a>
+### type [ListOption](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+ListOption configures Client.ListAllSandboxes.
+
+```go
+type ListOption func(*listOptions)
+```
+
+<a name="WithLabelSelector"></a>
+#### func [WithLabelSelector](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithLabelSelector(selector string) ListOption
+```
+
+WithLabelSelector restricts the listing to claims matching a Kubernetes label selector, for example "app=agent,tier\!=dev". Pair it with Options.Labels, which stamps labels on the claims the client creates.
+
 <a name="Options"></a>
 ### type [Options](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/options.go>)
 
@@ -665,6 +685,11 @@ type Options struct {
     // Env is the list of environment variables to inject into the SandboxClaim.
     // Setting Env forces a cold start from the warm pool template.
     Env []extv1beta1.EnvVar
+
+    // Labels are added to every SandboxClaim this client creates, so they can
+    // be selected later (see WithLabelSelector). The SDK's own created-by label
+    // always wins over a colliding key.
+    Labels map[string]string
 
     // SandboxReadyTimeout is how long to wait for the sandbox to become ready. Default: 180s.
     SandboxReadyTimeout time.Duration

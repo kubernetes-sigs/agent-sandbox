@@ -599,6 +599,8 @@ func TestClaimFailure(t *testing.T) {
 		{"ClaimExpired", ErrClaimFailed},
 		{"SandboxExpired", ErrClaimFailed},
 		{"InvalidConfiguration", ErrClaimFailed},
+		{"PodFailed", ErrClaimFailed},
+		{"PodSucceeded", ErrClaimFailed},
 		// The controller retries these, so waiting can still succeed.
 		{"AdoptionPending", nil},
 		{"SandboxMissing", nil},
@@ -680,6 +682,68 @@ func TestResolveSandboxName_FailsFastOnTerminalClaim(t *testing.T) {
 			t.Fatalf("expected ErrClaimFailed, got: %v", err)
 		}
 	})
+}
+
+func TestSandboxFailure(t *testing.T) {
+	notReady := func(reason string) *sandboxv1beta1.Sandbox {
+		return &sandboxv1beta1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: "sb", Generation: 2},
+			Status: sandboxv1beta1.SandboxStatus{Conditions: []metav1.Condition{{
+				Type:               string(sandboxv1beta1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				Reason:             reason,
+				ObservedGeneration: 2,
+			}}},
+		}
+	}
+	if err := sandboxFailure(notReady("PodFailed")); !errors.Is(err, ErrClaimFailed) {
+		t.Fatalf("expected ErrClaimFailed, got: %v", err)
+	}
+	if err := sandboxFailure(notReady("DependenciesNotReady")); err != nil {
+		t.Fatalf("expected no failure for a transient reason, got: %v", err)
+	}
+	stale := notReady("PodFailed")
+	stale.Status.Conditions[0].ObservedGeneration = 1
+	if err := sandboxFailure(stale); err != nil {
+		t.Fatalf("expected no failure for a stale condition, got: %v", err)
+	}
+}
+
+// A Sandbox that can never become ready must fail fast instead of waiting out
+// the timeout, whether it is seen by the initial list or by the watch.
+func TestWaitForSandboxReady_FailsFastOnTerminalSandbox(t *testing.T) {
+	failed := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "target", Namespace: "default"},
+		Status: sandboxv1beta1.SandboxStatus{Conditions: []metav1.Condition{{
+			Type:   string(sandboxv1beta1.SandboxConditionReady),
+			Status: metav1.ConditionFalse,
+			Reason: sandboxv1beta1.SandboxReasonPodFailed,
+		}}},
+	}
+	for _, scenario := range []string{"list", "watch"} {
+		t.Run(scenario, func(t *testing.T) {
+			agentsCS := fakeagents.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+			k8s := &K8sHelper{AgentsClient: agentsCS.AgentsV1beta1(), Log: logr.Discard()}
+			agentsCS.PrependReactor("list", "sandboxes", func(_ ktesting.Action) (bool, runtime.Object, error) {
+				list := &sandboxv1beta1.SandboxList{}
+				if scenario == "list" {
+					list.Items = append(list.Items, *failed)
+				}
+				return true, list, nil
+			})
+			fw := watch.NewRaceFreeFake()
+			defer fw.Stop()
+			agentsCS.PrependWatchReactor("sandboxes", func(_ ktesting.Action) (bool, watch.Interface, error) {
+				fw.Modify(failed)
+				return true, fw, nil
+			})
+
+			_, err := k8s.waitForSandboxReady(context.Background(), "target", "default", 5*time.Second, noop.NewTracerProvider().Tracer("test"), "test")
+			if !errors.Is(err, ErrClaimFailed) {
+				t.Fatalf("expected ErrClaimFailed, got: %v", err)
+			}
+		})
+	}
 }
 
 // TestWaitForSandboxReady_UsesSandboxName verifies the ready check uses the

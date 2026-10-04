@@ -199,30 +199,50 @@ func (h *K8sHelper) deleteClaim(ctx context.Context, name, namespace string) err
 	return nil
 }
 
-// terminalClaimReadyReasons are SandboxClaim Ready=False reasons the claim
-// controller does not retry on its own (see computeReadyCondition in
+// terminalReadyReasons are Ready=False reasons that the claim and Sandbox
+// controllers do not retry on their own (see computeReadyCondition in
 // extensions/controllers/sandboxclaim_controller.go). Transient reasons such as
 // AdoptionPending, SandboxMissing, SandboxNotReady and ReconcilerError are
 // left out because the controller recovers from them. Kept in sync with
-// TERMINAL_CLAIM_READY_REASONS in the Python and TypeScript SDKs.
-var terminalClaimReadyReasons = map[string]bool{
+// TERMINAL_CLAIM_READY_REASONS in the Python and TypeScript SDKs, plus the
+// finished-Pod reasons, which the Sandbox controller never recovers from.
+var terminalReadyReasons = map[string]bool{
 	"InvalidMetadata":                                true,
 	"EnvVarsInjectionRejected":                       true,
 	"VolumeClaimTemplatesError":                      true,
 	extv1beta1.ClaimExpiredReason:                    true,
 	sandboxv1beta1.SandboxReasonExpired:              true,
 	sandboxv1beta1.SandboxReasonInvalidConfiguration: true,
+	sandboxv1beta1.SandboxReasonPodFailed:            true,
+	sandboxv1beta1.SandboxReasonPodSucceeded:         true,
+}
+
+// currentNotReady returns the Ready=False condition, or nil if Ready is absent,
+// not False, or describes an older generation than the object's current spec.
+func currentNotReady(conditions []metav1.Condition, generation int64) *metav1.Condition {
+	ready := meta.FindStatusCondition(conditions, string(sandboxv1beta1.SandboxConditionReady))
+	if ready == nil || ready.Status != metav1.ConditionFalse {
+		return nil
+	}
+	if ready.ObservedGeneration != 0 && ready.ObservedGeneration < generation {
+		return nil
+	}
+	return ready
+}
+
+// terminalFailure returns ErrClaimFailed if ready carries a terminal reason.
+func terminalFailure(kind, name string, ready *metav1.Condition) error {
+	if ready == nil || !terminalReadyReasons[ready.Reason] {
+		return nil
+	}
+	return fmt.Errorf("%w: %s %s has terminal reason %s: %s", ErrClaimFailed, kind, name, ready.Reason, ready.Message)
 }
 
 // claimFailure returns an error if the claim reports a failure that waiting
 // longer cannot fix, so callers fail fast instead of burning the full timeout.
 func claimFailure(claim *extv1beta1.SandboxClaim) error {
-	ready := meta.FindStatusCondition(claim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
-	if ready == nil || ready.Status != metav1.ConditionFalse {
-		return nil
-	}
-	// A condition from an older generation predates the claim's current spec.
-	if ready.ObservedGeneration != 0 && ready.ObservedGeneration < claim.Generation {
+	ready := currentNotReady(claim.Status.Conditions, claim.Generation)
+	if ready == nil {
 		return nil
 	}
 	switch ready.Reason {
@@ -231,10 +251,14 @@ func claimFailure(claim *extv1beta1.SandboxClaim) error {
 	case "WarmPoolNotFound":
 		return fmt.Errorf("%w: claim %s: %s", ErrWarmPoolNotFound, claim.Name, ready.Message)
 	}
-	if terminalClaimReadyReasons[ready.Reason] {
-		return fmt.Errorf("%w: claim %s has terminal reason %s: %s", ErrClaimFailed, claim.Name, ready.Reason, ready.Message)
-	}
-	return nil
+	return terminalFailure("claim", claim.Name, ready)
+}
+
+// sandboxFailure is claimFailure for the Sandbox itself, which reports
+// terminal reasons (PodFailed, SandboxExpired, ...) only after the claim has
+// already resolved to its name.
+func sandboxFailure(sb *sandboxv1beta1.Sandbox) error {
+	return terminalFailure("sandbox", sb.Name, currentNotReady(sb.Status.Conditions, sb.Generation))
 }
 
 // resolveSandboxName watches SandboxClaim status until the sandbox name is
@@ -344,6 +368,7 @@ func (h *K8sHelper) drainClaimWatch(ctx context.Context, watcher watch.Interface
 // connect to the runtime. Use a context deadline to bound the wait; cancellation
 // and deadline errors are detectable with errors.Is. A missing Sandbox is waited
 // for, while deletion observed during the watch returns ErrSandboxDeleted.
+// A terminal Ready=False reason such as PodFailed returns ErrClaimFailed.
 // API list/watch failures are retried until ctx ends.
 func (h *K8sHelper) WaitForSandboxReady(ctx context.Context, sandboxName, namespace string) error {
 	if sandboxName == "" || namespace == "" {
@@ -392,6 +417,9 @@ func (h *K8sHelper) waitForSandboxState(ctx context.Context, sandboxName, namesp
 				}
 				if isSandboxReady(&list.Items[i]) {
 					return extractState(&list.Items[i]), nil
+				}
+				if failure := sandboxFailure(&list.Items[i]); failure != nil {
+					return nil, failure
 				}
 				lastConditions = formatConditions(list.Items[i].Status.Conditions)
 			}
@@ -461,6 +489,9 @@ func (h *K8sHelper) drainSandboxWatch(ctx context.Context, watcher watch.Interfa
 			*lastConditions = formatConditions(sb.Status.Conditions)
 			if isSandboxReady(sb) {
 				return extractState(sb), true, nil
+			}
+			if failure := sandboxFailure(sb); failure != nil {
+				return nil, false, failure
 			}
 		}
 	}

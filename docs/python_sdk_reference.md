@@ -361,6 +361,9 @@ class SandboxDirectConnectionConfig(BaseModel)
 
 Configuration for connecting directly to a Sandbox URL.
 
+``extra_headers`` and ``client_cert``/``ca_cert`` (mTLS) support a router
+behind an authenticating gateway.
+
 <a id="k8s_agent_sandbox.models.SandboxDirectConnectionConfig.api_url"></a>
 
 ##### api\_url
@@ -372,6 +375,24 @@ Direct URL to the router.
 ##### server\_port
 
 Port the sandbox container listens on.
+
+<a id="k8s_agent_sandbox.models.SandboxDirectConnectionConfig.extra_headers"></a>
+
+##### extra\_headers
+
+Sent on every request.
+
+<a id="k8s_agent_sandbox.models.SandboxDirectConnectionConfig.client_cert"></a>
+
+##### client\_cert
+
+(certificate path, private key path) for mTLS.
+
+<a id="k8s_agent_sandbox.models.SandboxDirectConnectionConfig.ca_cert"></a>
+
+##### ca\_cert
+
+CA bundle path used to verify the router; default trust store if unset.
 
 <a id="k8s_agent_sandbox.models.SandboxGatewayConnectionConfig"></a>
 

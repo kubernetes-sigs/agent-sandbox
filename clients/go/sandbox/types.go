@@ -43,6 +43,8 @@ var (
 	ErrNotReady         = errors.New("sandbox is not ready")
 	ErrTimeout          = errors.New("operation timed out")
 	ErrClaimFailed      = errors.New("claim creation failed")
+	ErrWarmPoolNotFound = errors.New("sandbox warm pool not found")
+	ErrTemplateNotFound = errors.New("sandbox template not found")
 	ErrPortForwardDied  = errors.New("port-forward connection lost")
 	ErrNoSandboxService = errors.New("sandbox has no headless Service")
 	ErrAlreadyOpen      = errors.New("sandbox is already open; call Close first")

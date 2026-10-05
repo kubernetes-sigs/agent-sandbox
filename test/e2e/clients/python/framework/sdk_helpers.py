@@ -14,20 +14,7 @@
 
 import io
 import os
-import subprocess
-import sys
-import time
 import tempfile
-from test.e2e.clients.python.framework.context import TestContext
-
-import pytest
-import yaml
-from k8s_agent_sandbox import SandboxClient
-from k8s_agent_sandbox.models import (
-    SandboxDirectConnectionConfig,
-    SandboxGatewayConnectionConfig,
-    SandboxLocalTunnelConnectionConfig,
-)
 
 TEST_MANIFESTS_DIR = "test/e2e/clients/python/test_manifests"
 TEMPLATE_YAML_PATH = os.path.join(TEST_MANIFESTS_DIR, "sandbox_template.yaml")

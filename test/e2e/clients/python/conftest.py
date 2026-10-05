@@ -12,18 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import tempfile
-
 import pytest
 import yaml
-from k8s_agent_sandbox import SandboxClient
-from k8s_agent_sandbox.models import (
-    SandboxDirectConnectionConfig,
-    SandboxGatewayConnectionConfig,
-    SandboxLocalTunnelConnectionConfig,
-    SandboxTracerConfig,
-)
 
 from test.e2e.clients.python.framework.context import TestContext
 from test.e2e.clients.python.framework.sdk_helpers import (

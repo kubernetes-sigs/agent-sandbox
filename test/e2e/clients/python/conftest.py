@@ -55,7 +55,7 @@ def pytest_addoption(parser):
     parser.addoption(
         "--namespace",
         action="store",
-        default="testing-default",
+        default="py-sdk-e2e-",
         help="Namespace to create sandbox in",
     )
     parser.addoption(
@@ -103,7 +103,7 @@ def deploy_router(tc, temp_namespace):
     """Deploys the sandbox router into the test namespace"""
     image_tag = get_image_tag()
     image_prefix = get_image_prefix()
-    router_image = f"{image_prefix}sandbox-router:{image_tag}"
+    router_image = f"{image_prefix}sandbox-router-go:{image_tag}"
     print(f"Using router image: {router_image}")
 
     with open(ROUTER_YAML_PATH, "r") as f:

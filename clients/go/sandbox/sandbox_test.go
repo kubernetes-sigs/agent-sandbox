@@ -1117,6 +1117,47 @@ func TestOpen_CreateClaimFailure(t *testing.T) {
 	}
 }
 
+func TestCreateClaim_Labels(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		labels map[string]string
+		want   map[string]string
+	}{
+		{
+			name: "none",
+			want: map[string]string{sandboxv1beta1.CreatedByLabel: "go-client"},
+		},
+		{
+			name:   "user labels are kept",
+			labels: map[string]string{"app": "agent", "example.com/tier": ""},
+			want:   map[string]string{"app": "agent", "example.com/tier": "", sandboxv1beta1.CreatedByLabel: "go-client"},
+		},
+		{
+			name:   "created-by label cannot be overridden",
+			labels: map[string]string{sandboxv1beta1.CreatedByLabel: "someone-else"},
+			want:   map[string]string{sandboxv1beta1.CreatedByLabel: "go-client"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+			var created *extv1beta1.SandboxClaim
+			extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+				created = action.(ktesting.CreateAction).GetObject().(*extv1beta1.SandboxClaim)
+				created.Name = created.GenerateName + "test12345"
+				return true, created, nil
+			})
+			h := &K8sHelper{ExtensionsClient: extensionsCS.ExtensionsV1beta1(), Log: logr.Discard()}
+
+			if _, err := h.createClaim(context.Background(), "default", "pool", nil, tc.labels, otel.GetTracerProvider().Tracer("test"), "test"); err != nil {
+				t.Fatalf("createClaim() error: %v", err)
+			}
+			if !reflect.DeepEqual(created.Labels, tc.want) {
+				t.Errorf("claim labels = %v, want %v", created.Labels, tc.want)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // drainSandboxWatch tests (K8sHelper method)
 // ---------------------------------------------------------------------------
@@ -1652,6 +1693,8 @@ func TestValidation_InvalidNames(t *testing.T) {
 		{"uppercase GatewayName", Options{WarmPoolName: "pool", GatewayName: "MyGateway"}},
 		{"uppercase Namespace", Options{WarmPoolName: "pool", Namespace: "MyNS"}},
 		{"uppercase WarmPoolName", Options{WarmPoolName: "MyWarmPool"}},
+		{"Labels key with a space", Options{WarmPoolName: "pool", Labels: map[string]string{"bad key": "v"}}},
+		{"Labels value with a slash", Options{WarmPoolName: "pool", Labels: map[string]string{"k": "a/b"}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

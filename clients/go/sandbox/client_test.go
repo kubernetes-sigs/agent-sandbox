@@ -170,6 +170,34 @@ func TestClient_ListAllSandboxes(t *testing.T) {
 	}
 }
 
+func TestClient_ListAllSandboxes_LabelSelector(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []ListOption
+		want string
+	}{
+		{name: "no selector"},
+		{name: "selector", opts: []ListOption{WithLabelSelector("app=agent,tier!=dev")}, want: "app=agent,tier!=dev"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, extensionsCS := newTestClient(t)
+
+			var got string
+			extensionsCS.PrependReactor("list", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+				got = action.(ktesting.ListAction).GetListRestrictions().Labels.String()
+				return true, &extv1beta1.SandboxClaimList{}, nil
+			})
+
+			if _, err := c.ListAllSandboxes(context.Background(), "default", tc.opts...); err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("label selector = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestClient_DeleteSandbox_Untracked(t *testing.T) {
 	c, extensionsCS := newTestClient(t)
 

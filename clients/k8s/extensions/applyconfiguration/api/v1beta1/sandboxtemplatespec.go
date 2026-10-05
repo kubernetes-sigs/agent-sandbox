@@ -17,7 +17,6 @@
 package v1beta1
 
 import (
-	agentsandboxapiv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	apiv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/applyconfiguration/api/v1beta1"
 	extensionsapiv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
@@ -115,8 +114,8 @@ func (b *SandboxTemplateSpecApplyConfiguration) WithService(value bool) *Sandbox
 // WithPodFailurePolicy sets the PodFailurePolicy field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the PodFailurePolicy field is set to the value of the last call.
-func (b *SandboxTemplateSpecApplyConfiguration) WithPodFailurePolicy(value agentsandboxapiv1beta1.PodFailurePolicy) *SandboxTemplateSpecApplyConfiguration {
-	b.SandboxBlueprintApplyConfiguration.PodFailurePolicy = &value
+func (b *SandboxTemplateSpecApplyConfiguration) WithPodFailurePolicy(value *apiv1beta1.PodFailurePolicyApplyConfiguration) *SandboxTemplateSpecApplyConfiguration {
+	b.SandboxBlueprintApplyConfiguration.PodFailurePolicy = value
 	return b
 }
 

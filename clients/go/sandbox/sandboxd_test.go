@@ -361,6 +361,75 @@ func TestSandboxdRun_ExecutesViaGRPC(t *testing.T) {
 	}
 }
 
+func TestSandboxdRun_ForwardsEnvAndWorkingDir(t *testing.T) {
+	c := newReadySandboxdTestSandbox("http://unused.invalid")
+	svc := &fakeProcessService{response: &processv1.ExecuteResponse{}}
+	startFakeProcessServer(t, c, svc)
+
+	// Repeated WithEnv calls accumulate and the later value wins.
+	_, err := c.Run(context.Background(), "env",
+		WithEnv(map[string]string{"A": "1", "B": "old"}),
+		WithEnv(map[string]string{"B": "2"}),
+		WithWorkingDir("proj"))
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	cfg := svc.lastRequest.GetConfig()
+	if got := cfg.GetEnvVars(); len(got) != 2 || got["A"] != "1" || got["B"] != "2" {
+		t.Errorf("env = %v, want A=1 B=2", got)
+	}
+	if cfg.Cwd == nil || *cfg.Cwd != "proj" {
+		t.Errorf("cwd = %v, want proj", cfg.Cwd)
+	}
+
+	// Without options, nothing extra is sent.
+	if _, err := c.Run(context.Background(), "env"); err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	cfg = svc.lastRequest.GetConfig()
+	if len(cfg.GetEnvVars()) != 0 || cfg.Cwd != nil {
+		t.Errorf("unexpected env/cwd by default: %v %v", cfg.GetEnvVars(), cfg.Cwd)
+	}
+}
+
+func TestSandboxdRun_RejectsInvalidEnvKey(t *testing.T) {
+	for _, key := range []string{"", "A=B"} {
+		t.Run(key, func(t *testing.T) {
+			c := newReadySandboxdTestSandbox("http://unused.invalid")
+			svc := &fakeProcessService{response: &processv1.ExecuteResponse{}}
+			startFakeProcessServer(t, c, svc)
+
+			_, err := c.Run(context.Background(), "env", WithEnv(map[string]string{key: "v"}))
+			if err == nil || !strings.Contains(err.Error(), "invalid env key") {
+				t.Fatalf("expected invalid env key error, got: %v", err)
+			}
+			if svc.lastRequest != nil {
+				t.Error("an invalid env key must not reach sandboxd")
+			}
+		})
+	}
+}
+
+func TestRun_LegacyRuntimeRejectsEnvAndWorkingDir(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("an unsupported option must not reach the server")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	c := newReadyTestSandbox(server.URL)
+	for name, opt := range map[string]CallOption{
+		"env": WithEnv(map[string]string{"A": "1"}),
+		"cwd": WithWorkingDir("proj"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := c.Run(context.Background(), "env", opt); !errors.Is(err, ErrUnsupportedByRuntime) {
+				t.Fatalf("expected ErrUnsupportedByRuntime, got: %v", err)
+			}
+		})
+	}
+}
+
 func TestSandboxdRun_NonZeroExitCode(t *testing.T) {
 	c := newReadySandboxdTestSandbox("http://unused.invalid")
 	svc := &fakeProcessService{response: &processv1.ExecuteResponse{

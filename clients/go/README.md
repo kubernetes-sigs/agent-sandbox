@@ -192,8 +192,16 @@ for _, key := range client.ListActiveSandboxes() {
 sb, _ := client.GetSandbox(ctx, sb1.ClaimName(), "default")
 
 // Label the claims a client creates (Options.Labels), then list by label
-labeled, _ := sandbox.NewClient(ctx, sandbox.Options{Labels: map[string]string{"app": "agent"}})
-names, _ := labeled.ListAllSandboxes(ctx, "default", sandbox.WithLabelSelector("app=agent"))
+labeled, err := sandbox.NewClient(ctx, sandbox.Options{Labels: map[string]string{"app": "agent"}})
+if err != nil { log.Fatal(err) }
+defer labeled.DeleteAll(ctx)
+
+sb3, err := labeled.CreateSandbox(ctx, "python-pool", "default")
+if err != nil { log.Fatal(err) }
+
+names, err := labeled.ListAllSandboxes(ctx, "default", sandbox.WithLabelSelector("app=agent"))
+if err != nil { log.Fatal(err) }
+fmt.Println(names) // includes sb3.ClaimName()
 ```
 
 ## Configuration

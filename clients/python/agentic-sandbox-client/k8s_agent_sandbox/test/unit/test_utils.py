@@ -200,6 +200,30 @@ class TestKubectlKubeconfigArgs(unittest.TestCase):
 
         self.assertEqual(user["token"], "loaded-secret")
 
+    def test_token_from_default_headers_is_carried_over(self):
+        api_client = sync_client.ApiClient(
+            configuration=sync_client.Configuration(host="https://cluster-b:6443"),
+            header_name="Authorization",
+            header_value="Bearer header-secret",
+        )
+
+        with kubectl_kubeconfig_args(api_client) as args:
+            _, user = _cluster_and_user(_read_kubeconfig(args))
+
+        self.assertEqual(user["token"], "header-secret")
+
+    def test_configuration_token_wins_over_default_headers(self):
+        api_client = sync_client.ApiClient(
+            configuration=self._configuration(),
+            header_name="Authorization",
+            header_value="Bearer header-secret",
+        )
+
+        with kubectl_kubeconfig_args(api_client) as args:
+            _, user = _cluster_and_user(_read_kubeconfig(args))
+
+        self.assertEqual(user["token"], "secret")
+
     def test_basic_auth_is_not_carried_over(self):
         cfg = self._configuration()
         cfg.api_key = {"authorization": "dXNlcjpwYXNz"}
@@ -257,6 +281,17 @@ class TestAsyncKubectlKubeconfigArgs(unittest.IsolatedAsyncioTestCase):
             _, user = _cluster_and_user(_read_kubeconfig(args))
 
         self.assertEqual(user["token"], "loaded-secret")
+
+    async def test_token_from_default_headers_is_carried_over(self):
+        api_client = SimpleNamespace(
+            configuration=async_client.Configuration(),
+            default_headers={"Authorization": "Bearer header-secret"},
+        )
+
+        async with async_kubectl_kubeconfig_args(api_client) as args:
+            _, user = _cluster_and_user(_read_kubeconfig(args))
+
+        self.assertEqual(user["token"], "header-secret")
 
     async def test_async_refresh_hook_is_awaited(self):
         cfg = self._configuration()

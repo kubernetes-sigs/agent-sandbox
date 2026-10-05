@@ -228,9 +228,11 @@ def kubeconfig_from_configuration(
 ) -> dict[str, Any]:
     """Build a kubeconfig for the cluster a Kubernetes ``Configuration`` targets.
 
-    ``authorization`` is the resolved ``Authorization`` header value. Only a
-    bearer token is carried over; basic auth is not. ``default_headers`` are
-    the ``ApiClient``'s; only the impersonation user and group are carried over.
+    ``authorization`` is the resolved ``Authorization`` header value, falling
+    back to the ``Authorization`` in ``default_headers``. Only a bearer token is
+    carried over; basic auth is not. ``default_headers`` are the
+    ``ApiClient``'s; besides that token, only the impersonation user and group
+    are carried over.
     """
     cluster: dict[str, Any] = {"server": configuration.host}
     # kubectl rejects a CA with insecure-skip-tls-verify. The Python clients
@@ -249,10 +251,11 @@ def kubeconfig_from_configuration(
         user["client-certificate"] = configuration.cert_file
     if configuration.key_file:
         user["client-key"] = configuration.key_file
-    scheme, _, credential = (authorization or "").partition(" ")
+    headers = {k.lower(): v for k, v in (default_headers or {}).items()}
+    # An ApiClient built with header_name/header_value has no api_key token.
+    scheme, _, credential = (authorization or headers.get("authorization") or "").partition(" ")
     if scheme.lower() == "bearer" and credential:
         user["token"] = credential
-    headers = {k.lower(): v for k, v in (default_headers or {}).items()}
     if headers.get("impersonate-user"):
         user["as"] = headers["impersonate-user"]
     if headers.get("impersonate-group"):

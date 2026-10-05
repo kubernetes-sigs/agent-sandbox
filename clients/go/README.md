@@ -162,7 +162,8 @@ default). `Run()` responses are capped at 16 MB; `List()`/`Exists()` at 8 MB.
 ### Runtime Health and Metadata
 
 With `RuntimeSandboxd`, query the in-sandbox daemon. The legacy runtime returns
-`ErrUnsupportedByRuntime`.
+`ErrUnsupportedByRuntime`. Neither call retries unless you pass
+`WithMaxAttempts`.
 
 ```go
 health, err := sb.Health(ctx)   // health.Status, health.UptimeSeconds

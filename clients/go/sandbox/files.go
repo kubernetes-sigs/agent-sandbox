@@ -85,6 +85,16 @@ func applyCallOpts(ctx context.Context, opts []CallOption) (context.Context, con
 	return ctx, func() {}, co.maxAttempts
 }
 
+// applyCallOptsNoRetry is applyCallOpts for operations that do not retry
+// unless the caller opts in with WithMaxAttempts.
+func applyCallOptsNoRetry(ctx context.Context, opts []CallOption) (context.Context, context.CancelFunc, int) {
+	ctx, cancel, maxAttempts := applyCallOpts(ctx, opts)
+	if maxAttempts == 0 {
+		maxAttempts = 1
+	}
+	return ctx, cancel, maxAttempts
+}
+
 // Files provides file operations on a sandbox.
 type Files struct {
 	connector    *connector

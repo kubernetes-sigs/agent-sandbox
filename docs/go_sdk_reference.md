@@ -925,7 +925,7 @@ Files returns the file operations sub\-object.
 func (s *Sandbox) Health(ctx context.Context, opts ...CallOption) (*Health, error)
 ```
 
-Health returns sandboxd's report from GET /v1/health. It returns an HTTPError while sandboxd is shutting down, and ErrUnsupportedByRuntime on the legacy python\-runtime. Not part of the Handle interface to avoid breaking existing implementers.
+Health returns sandboxd's report from GET /v1/health. It returns an HTTPError while sandboxd is shutting down, and ErrUnsupportedByRuntime on the legacy python\-runtime. It does not retry unless WithMaxAttempts is set. Not part of the Handle interface to avoid breaking existing implementers.
 
 <a name="Sandbox.IsReady"></a>
 #### func \(\*Sandbox\) [IsReady](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
@@ -952,7 +952,7 @@ func (s *Sandbox) List(ctx context.Context, path string, opts ...CallOption) ([]
 func (s *Sandbox) Metadata(ctx context.Context, opts ...CallOption) (*Metadata, error)
 ```
 
-Metadata returns the workload\-scoped configuration sandboxd serves from GET /v1/metadata \(sandboxd runtime only; the legacy python\-runtime returns ErrUnsupportedByRuntime\). Not part of the Handle interface to avoid breaking existing implementers.
+Metadata returns the workload\-scoped configuration sandboxd serves from GET /v1/metadata \(sandboxd runtime only; the legacy python\-runtime returns ErrUnsupportedByRuntime\). It does not retry unless WithMaxAttempts is set. Not part of the Handle interface to avoid breaking existing implementers.
 
 <a name="Sandbox.Open"></a>
 #### func \(\*Sandbox\) [Open](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)

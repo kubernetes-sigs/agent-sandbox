@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -513,7 +514,7 @@ func TestSandboxdRuntimeReports_HTTPErrors(t *testing.T) {
 				}))
 				defer server.Close()
 
-				err := report.call(context.Background(), newReadySandboxdTestSandbox(server.URL), WithMaxAttempts(1))
+				err := report.call(context.Background(), newReadySandboxdTestSandbox(server.URL))
 				var httpErr *HTTPError
 				if !errors.As(err, &httpErr) {
 					t.Fatalf("expected HTTPError, got: %v", err)
@@ -523,6 +524,33 @@ func TestSandboxdRuntimeReports_HTTPErrors(t *testing.T) {
 				}
 				if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
 					t.Errorf("expected %v, got: %v", tt.wantErr, err)
+				}
+			})
+		}
+	}
+}
+
+func TestSandboxdRuntimeReports_RetriesOnlyWhenAsked(t *testing.T) {
+	for _, report := range runtimeReports {
+		for _, tt := range []struct {
+			name string
+			opts []CallOption
+			want int32
+		}{
+			{"default is one attempt", nil, 1},
+			{"opt in to retries", []CallOption{WithMaxAttempts(3)}, 3},
+		} {
+			t.Run(report.name+"/"+tt.name, func(t *testing.T) {
+				var requests atomic.Int32
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					requests.Add(1)
+					w.WriteHeader(http.StatusServiceUnavailable)
+				}))
+				defer server.Close()
+
+				_ = report.call(context.Background(), newReadySandboxdTestSandbox(server.URL), tt.opts...)
+				if got := requests.Load(); got != tt.want {
+					t.Errorf("requests = %d, want %d", got, tt.want)
 				}
 			})
 		}

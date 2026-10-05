@@ -625,16 +625,16 @@ func (s *Sandbox) Delete(ctx context.Context, path string, recursive bool, opts 
 
 // Health returns sandboxd's report from GET /v1/health. It returns an
 // HTTPError while sandboxd is shutting down, and ErrUnsupportedByRuntime on
-// the legacy python-runtime. Not part of the Handle interface to avoid
-// breaking existing implementers.
+// the legacy python-runtime. It does not retry unless WithMaxAttempts is set.
+// Not part of the Handle interface to avoid breaking existing implementers.
 func (s *Sandbox) Health(ctx context.Context, opts ...CallOption) (*Health, error) {
 	return getSandboxdJSON[Health](ctx, s, "health", opts)
 }
 
 // Metadata returns the workload-scoped configuration sandboxd serves from
 // GET /v1/metadata (sandboxd runtime only; the legacy python-runtime returns
-// ErrUnsupportedByRuntime). Not part of the Handle interface to avoid
-// breaking existing implementers.
+// ErrUnsupportedByRuntime). It does not retry unless WithMaxAttempts is set.
+// Not part of the Handle interface to avoid breaking existing implementers.
 func (s *Sandbox) Metadata(ctx context.Context, opts ...CallOption) (*Metadata, error) {
 	md, err := getSandboxdJSON[Metadata](ctx, s, "metadata", opts)
 	if err != nil {
@@ -650,7 +650,7 @@ func (s *Sandbox) Metadata(ctx context.Context, opts ...CallOption) (*Metadata, 
 // JSON body into a T. op doubles as the span and error-message operation name.
 func getSandboxdJSON[T any](ctx context.Context, s *Sandbox, op string, opts []CallOption) (*T, error) {
 	defer s.trackOp()()
-	ctx, callCancel, maxAttempts := applyCallOpts(ctx, opts)
+	ctx, callCancel, maxAttempts := applyCallOptsNoRetry(ctx, opts)
 	defer callCancel()
 	ctx, span := startSpan(withLifecycleSpan(ctx, s.currentLifecycleCtx()), s.tracer, s.traceServiceName, op)
 	defer span.End()

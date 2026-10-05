@@ -217,13 +217,21 @@ def test_execute_command_request_timeout_kills_process_group(tmp_path):
     assert body["exit_code"] == 124
     assert body["stdout"] == "started\n"
     assert elapsed < 10
-    # The orphaned child may linger briefly as a zombie until init reaps it.
+    # The orphaned child may stay a zombie (killed, not yet reaped) when no
+    # init process reaps orphans, e.g. in a container; that counts as exited.
     child_pid = int(pid_file.read_text())
     reap_deadline = time.monotonic() + 5
     while time.monotonic() < reap_deadline:
         try:
             os.kill(child_pid, 0)
         except ProcessLookupError:
+            break
+        child_state = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(child_pid)],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if child_state.startswith("Z"):
             break
         time.sleep(0.05)
     else:

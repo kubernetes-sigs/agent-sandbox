@@ -17,6 +17,10 @@ from k8s_agent_sandbox.connector import SandboxConnector
 from k8s_agent_sandbox.models import ExecutionResult
 from k8s_agent_sandbox.trace_manager import trace, trace_span
 
+# Extra time the HTTP read waits beyond command_timeout, so the response the
+# runtime sends after killing a timed-out command still arrives.
+_COMMAND_TIMEOUT_MARGIN_SECONDS = 10
+
 def _extract_executable(command: str) -> str:
     if not command:
         return ""
@@ -27,6 +31,17 @@ def _extract_executable(command: str) -> str:
         # Extract base executable name (strip directory paths)
         return field.split("/")[-1]
     return ""
+
+
+def _execute_request(
+    command: str, timeout: float, command_timeout: float | None
+) -> tuple[dict[str, Any], float]:
+    """Builds the legacy /execute payload and the read timeout to send it with."""
+    payload: dict[str, Any] = {"command": command}
+    if command_timeout is None:
+        return payload, timeout
+    payload["timeout_seconds"] = command_timeout
+    return payload, max(timeout, command_timeout + _COMMAND_TIMEOUT_MARGIN_SECONDS)
 
 
 class CommandExecutor:
@@ -41,21 +56,37 @@ class CommandExecutor:
         self.trace_service_name = trace_service_name
 
     @trace_span("run")
-    def run(self, command: str, timeout: int = 60) -> ExecutionResult:
+    def run(
+        self, command: str, timeout: int = 60, command_timeout: float | None = None
+    ) -> ExecutionResult:
+        """Run a shell command and return its output and exit code.
+
+        Args:
+            command: The shell command to run in the sandbox.
+            timeout: Seconds to wait for the sandbox to respond.
+            command_timeout: Optional limit, in seconds, on how long the command
+                itself may run. The sandbox kills the command when it is
+                exceeded, and the read timeout is extended past it so the
+                result still arrives. The legacy runtime reports this as an
+                ExecutionResult with ``timed_out`` set (runtimes that predate
+                the field ignore the limit); sandboxd uses it as the gRPC
+                deadline and raises RuntimeError when it is exceeded.
+        """
         span = trace.get_current_span()
         if span.is_recording():
             executable = _extract_executable(command)
             span.set_attribute("sandbox.command.executable", executable)
 
         if self.connector.is_sandboxd():
-            result = self._run_sandboxd(command, timeout)
+            result = self._run_sandboxd(
+                command, timeout if command_timeout is None else command_timeout)
             if span.is_recording():
                 span.set_attribute("sandbox.exit_code", result.exit_code)
             return result
 
-        payload = {"command": command}
+        payload, read_timeout = _execute_request(command, timeout, command_timeout)
         response = self.connector.send_request(
-            "POST", "execute", json=payload, timeout=timeout)
+            "POST", "execute", json=payload, timeout=read_timeout)
 
         try:
             response_data = response.json()
@@ -70,7 +101,7 @@ class CommandExecutor:
             span.set_attribute("sandbox.exit_code", result.exit_code)
         return result
 
-    def _run_sandboxd(self, command: str, timeout: int) -> ExecutionResult:
+    def _run_sandboxd(self, command: str, timeout: float) -> ExecutionResult:
         """Execute via sandboxd's gRPC ProcessService.
 
         The shell-string API is preserved by wrapping the command in

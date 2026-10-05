@@ -16,6 +16,7 @@ from typing import Any
 """Non-blocking command execution for legacy and sandboxd runtimes."""
 
 from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
+from k8s_agent_sandbox.commands.command_executor import _execute_request
 from k8s_agent_sandbox.models import ExecutionResult
 from k8s_agent_sandbox.trace_manager import async_trace_span, trace
 
@@ -44,22 +45,38 @@ class AsyncCommandExecutor:
         self.trace_service_name = trace_service_name
 
     @async_trace_span("run")
-    async def run(self, command: str, timeout: int = 60) -> ExecutionResult:
-        """Run a shell command and return its output and exit code."""
+    async def run(
+        self, command: str, timeout: int = 60, command_timeout: float | None = None
+    ) -> ExecutionResult:
+        """Run a shell command and return its output and exit code.
+
+        Args:
+            command: The shell command to run in the sandbox.
+            timeout: Seconds to wait for the sandbox to respond.
+            command_timeout: Optional limit, in seconds, on how long the command
+                itself may run. The sandbox kills the command when it is
+                exceeded, and the read timeout is extended past it so the
+                result still arrives. The legacy runtime reports this as an
+                ExecutionResult with ``timed_out`` set (runtimes that predate
+                the field ignore the limit); sandboxd uses it as the gRPC
+                deadline and raises RuntimeError when it is exceeded.
+        """
         span = trace.get_current_span()
         if span.is_recording():
             executable = _extract_executable(command)
             span.set_attribute("sandbox.command.executable", executable)
 
         if self.connector.is_sandboxd():
-            result = await self._run_sandboxd(command, timeout)
+            result = await self._run_sandboxd(
+                command, timeout if command_timeout is None else command_timeout
+            )
             if span.is_recording():
                 span.set_attribute("sandbox.exit_code", result.exit_code)
             return result
 
-        payload = {"command": command}
+        payload, read_timeout = _execute_request(command, timeout, command_timeout)
         response = await self.connector.send_request(
-            "POST", "execute", json=payload, timeout=timeout
+            "POST", "execute", json=payload, timeout=read_timeout
         )
 
         try:
@@ -79,7 +96,7 @@ class AsyncCommandExecutor:
             span.set_attribute("sandbox.exit_code", result.exit_code)
         return result
 
-    async def _run_sandboxd(self, command: str, timeout: int) -> ExecutionResult:
+    async def _run_sandboxd(self, command: str, timeout: float) -> ExecutionResult:
         """Execute through sandboxd while preserving the shell-string API."""
         try:
             import grpc

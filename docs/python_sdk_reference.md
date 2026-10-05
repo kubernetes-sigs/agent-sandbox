@@ -262,6 +262,12 @@ Standard error from the command.
 
 Exit code of the command.
 
+<a id="k8s_agent_sandbox.models.ExecutionResult.timed_out"></a>
+
+##### timed\_out
+
+True if the runtime killed the command for exceeding its time limit.
+
 <a id="k8s_agent_sandbox.models.FileEntry"></a>
 
 ### FileEntry Objects

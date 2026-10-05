@@ -786,17 +786,19 @@ describe("TypeScript SDK E2E — sandbox runtime operations (sandboxd)", () => {
       namespace,
     );
     try {
-      // stty and tty only succeed on a real terminal.
+      // stty and tty only succeed on a real terminal. A short-lived process
+      // also checks that its output and initial size are not lost (#1803).
       const probe = await startCaptured(
         sandbox,
         "sh",
-        ["-c", "stty size; tty"],
+        ["-c", "stty size; tty; echo to-stderr >&2"],
         { pty: { cols: 80, rows: 24 } },
       );
       await expect(probe.handle.wait()).resolves.toEqual({ exitCode: 0 });
       expect(probe.stdout()).toMatch(/24 80/);
       expect(probe.stdout()).toMatch(/\/dev\/pts\/\d+/);
       // A terminal has one output stream: stderr is merged into stdout.
+      expect(probe.stdout()).toContain("to-stderr");
       expect(probe.stderr()).toBe("");
 
       const term = await startCaptured(sandbox, "sh", [], {

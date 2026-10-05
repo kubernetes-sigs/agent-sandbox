@@ -49,6 +49,7 @@ export type {
   SandboxdOptions,
   SandboxHealth,
   SandboxMetadata,
+  SandboxStatus,
   VolumeClaimTemplate,
   WriteOptions,
 } from "./types.js";

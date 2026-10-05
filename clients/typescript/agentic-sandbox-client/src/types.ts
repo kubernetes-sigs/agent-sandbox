@@ -193,6 +193,16 @@ export interface DirectoryListing {
   entries: FileEntry[];
 }
 
+/**
+ * Result of sandbox.status(): the Sandbox's `Ready` condition. Values match
+ * the Python SDK's `Sandbox.status()`.
+ */
+export interface SandboxStatus {
+  status: "SandboxReady" | "SandboxNotReady" | "SandboxNotFound";
+  /** The condition's message; a fixed note when there is no condition. */
+  message: string;
+}
+
 /** Result of sandbox.health(). */
 export interface SandboxHealth {
   status: "ok";

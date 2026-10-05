@@ -335,10 +335,6 @@ div.feature-state-notice {
   .td-cover-block--height-full {
     padding-top: 2rem;
   }
-
-  .quickstart-heading {
-    margin-top: 1rem;
-  }
 }
 
 .mx-auto>.container {
@@ -524,6 +520,12 @@ h1.text-center {
   font-size: 2rem;
   font-weight: 400;
   text-align: center;
+}
+
+@include media-breakpoint-down(md) {
+  .quickstart-heading {
+    margin-top: 1rem;
+  }
 }
 
 .quickstart-subtitle {

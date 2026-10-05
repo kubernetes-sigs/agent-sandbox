@@ -24,6 +24,8 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	"go.opentelemetry.io/otel/trace"
+	metav1validation "k8s.io/apimachinery/pkg/apis/meta/v1/validation"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/rest"
 
 	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
@@ -159,6 +161,11 @@ type Options struct {
 	// Env is the list of environment variables to inject into the SandboxClaim.
 	// Setting Env forces a cold start from the warm pool template.
 	Env []extv1beta1.EnvVar
+
+	// Labels are added to every SandboxClaim this client creates, so they can
+	// be selected later (see WithLabelSelector). The SDK's own created-by label
+	// always wins over a colliding key.
+	Labels map[string]string
 
 	// SandboxReadyTimeout is how long to wait for the sandbox to become ready. Default: 180s.
 	SandboxReadyTimeout time.Duration
@@ -372,6 +379,9 @@ func (o *Options) validateCommon() error {
 		if u.Host == "" {
 			return fmt.Errorf("sandbox: APIURL %q must include a host", o.APIURL)
 		}
+	}
+	if err := metav1validation.ValidateLabels(o.Labels, field.NewPath("Labels")).ToAggregate(); err != nil {
+		return fmt.Errorf("sandbox: invalid Labels: %w", err)
 	}
 	if !isValidDNSLabel(o.Namespace) {
 		return fmt.Errorf("sandbox: Namespace %q is not a valid Kubernetes namespace (DNS label)", o.Namespace)

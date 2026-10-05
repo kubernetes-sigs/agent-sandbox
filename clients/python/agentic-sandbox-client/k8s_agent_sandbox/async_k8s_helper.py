@@ -55,6 +55,14 @@ class AsyncK8sHelper:
         # An injected client is caller-owned; only close clients we create.
         self._owns_api_client = api_client is None
 
+    @property
+    def injected_api_client(self) -> client.ApiClient | None:
+        """The caller-provided client, or None when the ambient config is used.
+
+        Kept so kubectl subprocesses can target the same cluster.
+        """
+        return None if self._owns_api_client else self._api_client
+
     async def _ensure_initialized(self) -> None:
         if self._initialized:
             return

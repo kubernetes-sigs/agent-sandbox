@@ -103,6 +103,22 @@ func WithMaxAttempts(n int) CallOption {
 	}
 }
 
+// ListOption configures Client.ListAllSandboxes.
+type ListOption func(*listOptions)
+
+type listOptions struct {
+	labelSelector string
+}
+
+// WithLabelSelector restricts the listing to claims matching a Kubernetes
+// label selector, for example "app=agent,tier!=dev". Pair it with
+// Options.Labels, which stamps labels on the claims the client creates.
+func WithLabelSelector(selector string) ListOption {
+	return func(o *listOptions) {
+		o.labelSelector = selector
+	}
+}
+
 // Handle provides high-level interaction with a sandbox instance.
 // Sandbox implements this interface; consumers should accept Handle
 // in their APIs to enable testing with mocks. For sub-object access

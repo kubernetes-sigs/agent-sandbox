@@ -938,6 +938,16 @@ class TestAsyncK8sHelperApiClientInjection(unittest.IsolatedAsyncioTestCase):
         await helper.close()
         injected.close.assert_not_awaited()
 
+    async def test_injected_api_client_is_exposed_only_when_injected(
+        self, mock_config, mock_api_client_cls, mock_custom_cls, mock_core_cls
+    ):
+        injected = AsyncMock(name="ApiClient")
+        self.assertIs(AsyncK8sHelper(api_client=injected).injected_api_client, injected)
+
+        ambient = AsyncK8sHelper()
+        await ambient._ensure_initialized()
+        self.assertIsNone(ambient.injected_api_client)
+
     async def test_injected_api_client_still_used_after_close(
         self, mock_config, mock_api_client_cls, mock_custom_cls, mock_core_cls
     ):

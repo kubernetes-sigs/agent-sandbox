@@ -333,7 +333,7 @@ time-based limit is `maxLifetimeSeconds`, which computes a per-claim
 // ClaimDefaults defines default values for SandboxClaims targeting a pool.
 // +kubebuilder:validation:XValidation:rule="!has(self.lifecycle) || !has(self.lifecycle.shutdownTime)",message="shutdownTime is not allowed in claimDefaults.lifecycle; use maxLifetimeSeconds instead"
 // +kubebuilder:validation:XValidation:rule="!has(self.lifecycle) || !has(self.lifecycle.ttlSecondsAfterFinished) || self.lifecycle.ttlSecondsAfterFinished >= 5",message="ttlSecondsAfterFinished in claimDefaults must be at least 5 to avoid premature expiry during transient Finished states"
-// +kubebuilder:validation:XValidation:rule="!has(self.lifecycle) || !has(self.lifecycle.ttlSecondsAfterFinished) || self.lifecycle.shutdownPolicy == 'Delete'",message="shutdownPolicy must be Delete when ttlSecondsAfterFinished is set in claimDefaults; Retain+TTL would preserve the claim object but never reclaim the sandbox"
+// +kubebuilder:validation:XValidation:rule="!has(self.lifecycle) || !has(self.lifecycle.ttlSecondsAfterFinished) || self.lifecycle.shutdownPolicy in ['Delete', 'DeleteForeground']",message="shutdownPolicy must be Delete or DeleteForeground when ttlSecondsAfterFinished is set in claimDefaults; Retain+TTL reclaims the sandbox but leaks the claim object indefinitely"
 type ClaimDefaults struct {
     // lifecycle specifies the default lifecycle for claims with nil Lifecycle.
     // If the claim sets its own Lifecycle, this field is ignored.
@@ -403,9 +403,9 @@ if err := r.Update(ctx, claim); err != nil {
 // When maxLifetimeSeconds is set, ShutdownTime is computed as now + duration,
 // giving each claim a unique wall-clock deadline.
 // Note: ShutdownPolicy defaults to Retain via +kubebuilder:default on the
-// Lifecycle type. A CEL rule on ClaimDefaults requires shutdownPolicy=Delete
-// when ttlSecondsAfterFinished is set, so the CRD default is overridden at
-// validation time, not here.
+// Lifecycle type. A CEL rule on ClaimDefaults requires shutdownPolicy in
+// {Delete, DeleteForeground} when ttlSecondsAfterFinished is set, so the
+// CRD default is overridden at validation time, not here.
 func resolvePoolLifecycle(pool *extensionsv1beta1.SandboxWarmPool, claim *extensionsv1beta1.SandboxClaim) *extensionsv1beta1.Lifecycle {
     if claim.Spec.Lifecycle != nil {
         return nil

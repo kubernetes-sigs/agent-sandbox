@@ -82,6 +82,25 @@ function invalidArgument(message: string): SandboxError {
   return new SandboxError(message, { telemetryCode: "invalid_argument" });
 }
 
+/**
+ * Validates and defaults a per-call `timeoutMs`. Lives here rather than in
+ * sandbox.ts because ProcessHandle.write() must validate it before splitting
+ * its budget across chunks, and sandbox.ts already imports this module.
+ * @internal
+ */
+export function validateTimeoutMs(
+  name: string,
+  value: number | undefined,
+): number {
+  if (value === undefined) return DEFAULT_OPERATION_TIMEOUT_MS;
+  if (!Number.isInteger(value) || value <= 0 || value > 2147483647) {
+    throw invalidArgument(
+      `${name} must be a positive integer <= 2147483647, got: ${value}`,
+    );
+  }
+  return value;
+}
+
 /** Validates a terminal size. Shared with sandbox.commands.start(). @internal */
 export function validatePtySize(size: unknown, name: string): PtySize {
   const { cols, rows } = (size ?? {}) as Partial<PtySize>;
@@ -239,23 +258,20 @@ export class ProcessHandle {
       throw invalidArgument("data must be a string or Uint8Array");
     }
     // Each chunk is its own RPC with its own timer, so the budget is fixed
-    // once here and every chunk gets only what is left of it. A malformed
-    // timeoutMs is passed through untouched for the session to reject.
-    const budgetMs = opts?.timeoutMs ?? DEFAULT_OPERATION_TIMEOUT_MS;
-    const deadline = Number.isFinite(budgetMs) ? Date.now() + budgetMs : NaN;
+    // once here and every chunk gets only what is left of it. It is
+    // validated first: a non-positive budget would otherwise surface as a
+    // timeout instead of invalid_argument.
+    const budgetMs = validateTimeoutMs("timeoutMs", opts?.timeoutMs);
+    const deadline = Date.now() + budgetMs;
     for (let i = 0; i < bytes.length; i += STDIN_CHUNK_BYTES) {
-      let chunkOpts = opts;
-      if (!Number.isNaN(deadline)) {
-        const remainingMs = deadline - Date.now();
-        if (remainingMs <= 0) {
-          throw new SandboxTimeoutError(`write timed out after ${budgetMs}ms`);
-        }
-        chunkOpts = { ...opts, timeoutMs: Math.ceil(remainingMs) };
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        throw new SandboxTimeoutError(`write timed out after ${budgetMs}ms`);
       }
-      await this.session.writeStdin(
-        bytes.subarray(i, i + STDIN_CHUNK_BYTES),
-        chunkOpts,
-      );
+      await this.session.writeStdin(bytes.subarray(i, i + STDIN_CHUNK_BYTES), {
+        ...opts,
+        timeoutMs: Math.ceil(remainingMs),
+      });
     }
   }
 

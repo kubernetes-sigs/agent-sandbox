@@ -1635,6 +1635,20 @@ describe("Sandbox commands.start()", () => {
     expect(Date.now() - startedAt).toBeLessThan(850);
   });
 
+  it("rejects a malformed write() timeoutMs as invalid_argument, not a timeout", async () => {
+    const s = await startSandbox();
+    const handle = await s.commands.start("hang");
+
+    for (const timeoutMs of [0, -1, Number.NaN, 1.5, 2147483648]) {
+      for (const data of ["x", ""]) {
+        const err = await handle.write(data, { timeoutMs }).catch((e) => e);
+        expect(err).not.toBeInstanceOf(SandboxTimeoutError);
+        expect(err).toMatchObject({ telemetryCode: "invalid_argument" });
+      }
+    }
+    expect(log.stdin).toHaveLength(0);
+  });
+
   it("rejects bad control calls client-side, including closeStdin() on a PTY", async () => {
     const s = await startSandbox();
     const plain = await s.commands.start("hang");

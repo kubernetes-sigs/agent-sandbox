@@ -18,6 +18,7 @@ import {
   type ProcessSession,
   SandboxCommands,
   validatePtySize,
+  validateTimeoutMs,
 } from "./commands.js";
 import {
   createConnectionStrategy,
@@ -33,7 +34,6 @@ import {
   DEFAULT_MAX_DOWNLOAD_SIZE,
   DEFAULT_MAX_METADATA_RESPONSE_SIZE,
   DEFAULT_MAX_UPLOAD_SIZE,
-  DEFAULT_OPERATION_TIMEOUT_MS,
   DEFAULT_PORT_FORWARD_READY_TIMEOUT_MS,
   DEFAULT_SANDBOXD_GRPC_PORT,
   DEFAULT_SANDBOXD_REST_PORT,
@@ -239,12 +239,6 @@ function validateConnectivity(
     );
   }
   return value;
-}
-
-function validateTimeoutMs(name: string, value: number | undefined): number {
-  return (
-    validateBoundedInt(name, value, 2147483647) ?? DEFAULT_OPERATION_TIMEOUT_MS
-  );
 }
 
 /**

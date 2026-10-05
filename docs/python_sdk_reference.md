@@ -268,6 +268,28 @@ Exit code of the command.
 
 True if the runtime killed the command for exceeding its time limit.
 
+<a id="k8s_agent_sandbox.models.LegacyExecuteRequest"></a>
+
+### LegacyExecuteRequest Objects
+
+```python
+class LegacyExecuteRequest(BaseModel)
+```
+
+Request body for the legacy python-runtime /execute endpoint.
+
+<a id="k8s_agent_sandbox.models.LegacyExecuteRequest.command"></a>
+
+##### command
+
+Shell command to run.
+
+<a id="k8s_agent_sandbox.models.LegacyExecuteRequest.timeout_seconds"></a>
+
+##### timeout\_seconds
+
+Limit on how long the command may run; omitted when unset.
+
 <a id="k8s_agent_sandbox.models.FileEntry"></a>
 
 ### FileEntry Objects

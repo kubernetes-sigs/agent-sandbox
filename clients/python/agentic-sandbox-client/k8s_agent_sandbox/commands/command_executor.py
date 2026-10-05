@@ -14,7 +14,7 @@
 
 from typing import Any
 from k8s_agent_sandbox.connector import SandboxConnector
-from k8s_agent_sandbox.models import ExecutionResult
+from k8s_agent_sandbox.models import ExecutionResult, LegacyExecuteRequest
 from k8s_agent_sandbox.trace_manager import trace, trace_span
 
 # Extra time the HTTP read waits beyond command_timeout, so the response the
@@ -37,10 +37,11 @@ def _execute_request(
     command: str, timeout: float, command_timeout: float | None
 ) -> tuple[dict[str, Any], float]:
     """Builds the legacy /execute payload and the read timeout to send it with."""
-    payload: dict[str, Any] = {"command": command}
+    payload = LegacyExecuteRequest(
+        command=command, timeout_seconds=command_timeout
+    ).model_dump(exclude_none=True)
     if command_timeout is None:
         return payload, timeout
-    payload["timeout_seconds"] = command_timeout
     return payload, max(timeout, command_timeout + _COMMAND_TIMEOUT_MARGIN_SECONDS)
 
 

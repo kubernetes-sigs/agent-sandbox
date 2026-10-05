@@ -221,6 +221,7 @@ class TestAsyncCommandExecutor(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(kwargs["timeout"], 600)
         self.assertTrue(result.timed_out)
         self.assertEqual(result.exit_code, 124)
+        self.assertEqual(result.stdout, "partial")
 
     async def test_async_sandboxd_uses_command_timeout_as_deadline(self):
         connector = MagicMock()

@@ -11,6 +11,12 @@
 #   ${FLEET_MEMBER_IMAGE}  Container image for the fleet-member (Python + SDK)
 #   ${CLUSTER_NAME}        This cluster's identity within the fleet
 #   ${FLEET_BUCKET}        GCS bucket serving as the hub
+#
+# Two replicas, one active. The replicas elect on a coordination.k8s.io Lease
+# (deploy/rbac.yaml grants it) and only the holder runs the loops; the other
+# stands by and takes over within the 15s lease duration. A lost lease exits
+# the pod non-zero so it rejoins as a follower. Pools are controller-owned
+# and keep serving either way; this bounds how long a NEW assignment waits.
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -20,9 +26,13 @@ metadata:
   labels:
     app: fleet-member
 spec:
-  replicas: 1
+  replicas: 2
   strategy:
-    type: Recreate
+    # Rolling, not Recreate: the new pod comes up as a follower and only
+    # leads once the old leader's lease lapses, so an image roll never has
+    # two members acting on the same cluster, and never zero either.
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
   selector:
     matchLabels: {app: fleet-member}
   template:
@@ -69,9 +79,17 @@ spec:
               drop: ["ALL"]
             seccompProfile:
               type: RuntimeDefault
+          env:
+            # Lease holder identity. Falls back to the hostname (same value
+            # in a pod), but being explicit keeps `kubectl get lease` legible.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef: {fieldPath: metadata.name}
           args:
             - --cluster-name=${CLUSTER_NAME}
             - --bucket=${FLEET_BUCKET}
+            # Default, stated so the replicas: 2 above reads as intended.
+            - --leader-elect
             - --namespace=multi-cluster-fleet
             - --log-level=INFO
             # Poll intervals — tuned down from the 30s default to shrink the

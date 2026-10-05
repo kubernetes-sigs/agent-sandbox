@@ -21,6 +21,17 @@ placement_policy: capacity-aware
 # stronger than the default spread-first pre-pass (e.g. models > clusters).
 min_clusters: 5
 
+# stale_teardown_after_s (optional, default 900). A cluster whose capacity
+# report is >90s old leaves NEW placement at once, but the pools it already
+# holds are KEPT: its entry is carried forward in assignments.json with
+# `stale_since` set, the member changes nothing, and claims stop routing there.
+# Only after it has been silent this long -- or on an explicit drain (weight 0,
+# or models: []) -- is the entry emptied and the pools dropped. 0 = never on
+# staleness alone. While frozen, its models are placed again on the live
+# clusters, so the fleet runs above max_concurrent by that share until it
+# reports again.
+stale_teardown_after_s: 900
+
 cluster_weights:
   ap-multi-1: 1.0
   ap-multi-2: 1.0

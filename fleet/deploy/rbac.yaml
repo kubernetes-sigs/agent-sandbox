@@ -44,6 +44,15 @@ rules:
   - apiGroups: ["agents.x-k8s.io"]
     resources: ["sandboxes"]
     verbs: ["get", "list", "watch"]
+  # Leader election: the member replicas elect on ONE Lease in this namespace
+  # (name = --lease-name, default fleet-member) and only the holder runs the
+  # reconcile/capacity loops. Namespaced on purpose -- a member can never
+  # touch another fleet's Lease. Without this rule the member fails loudly at
+  # startup (it refuses to idle as a never-elected follower); run with
+  # --no-leader-elect and replicas: 1 if you really want no Lease.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

@@ -745,3 +745,131 @@ def test_a_long_but_valid_template_name_is_accepted_with_a_warning(caplog):
     with caplog.at_level(logging.WARNING):
         ModelSpec(template_name="t" * 100, target_tasks=5)
     assert "truncate" in caplog.text
+
+
+def test_dry_run_preview_writes_nothing():
+    gcs = _RecordingGCS()
+    _apply(gcs)
+    before = list(gcs.puts)
+    out = planner.preview(gcs, _spec(), provider=_StaticProvider(_live_registry()))
+    assert gcs.puts == before, "preview must not write"
+    assert "DRY RUN" in out
+    assert "generation 2" in out
+
+
+def test_dry_run_preview_calls_out_teardowns():
+    # The whole reason --dry-run exists: apply can delete every pool in the
+    # fleet, and the delta must say so before anything is written.
+    gcs = _RecordingGCS()
+    _apply(gcs)
+    spec2 = _spec(models=[ModelSpec(image="gcr.io/x/img-9:v1",
+                                    template_name="tmpl-9", target_tasks=5)])
+    out = planner.preview(gcs, spec2, provider=_StaticProvider(_live_registry()))
+    assert "TEARDOWN" in out
+    assert "- tmpl-1-pool" in out
+    assert "+ tmpl-9-pool" in out
+
+
+# --------------------------------------------------------------------------- #
+# Two-threshold staleness: a stale cluster is excluded from NEW placement at
+# 90 s, but its published entry is FROZEN (carried forward, stale_since set)
+# rather than emptied until stale_teardown_after_s. An empty pool set is only
+# ever an explicit instruction or a prolonged silence.
+# --------------------------------------------------------------------------- #
+
+def _ab_registry(a_age=1.0, b_age=1.0, b_weight=1.0) -> PlannerRegistry:
+    reg = PlannerRegistry()
+    reg.clusters["a"] = PlannerCluster(name="a", report_age_s=a_age)
+    reg.clusters["b"] = PlannerCluster(name="b", report_age_s=b_age, weight=b_weight)
+    return reg
+
+
+def _published_ab():
+    """A plan with both clusters fresh: tmpl-1 on a, tmpl-2 on b."""
+    return plan(_spec(), _ab_registry(), generation=1)
+
+
+def test_a_stale_cluster_with_published_pools_is_frozen_not_emptied():
+    prev = _published_ab()
+    assert prev.clusters["b"].pools, "fixture: b must hold a pool"
+    assn = plan(_spec(), _ab_registry(b_age=200), generation=2, previous=prev)
+    b = assn.clusters["b"]
+    assert b.pools == prev.clusters["b"].pools, "frozen entry must be verbatim"
+    assert b.stale_since, "frozen entry must be marked"
+    # b is excluded from NEW placement: its model is also placed on a, so the
+    # live fleet keeps serving it while b's pools stand by.
+    assert {p.template for p in assn.clusters["a"].pools} == {"tmpl-1", "tmpl-2"}
+    assert assn.clusters["a"].stale_since is None
+
+
+def test_a_frozen_entry_keeps_its_first_stale_since():
+    prev = _published_ab()
+    first = plan(_spec(), _ab_registry(b_age=200), generation=2, previous=prev)
+    again = plan(_spec(), _ab_registry(b_age=400), generation=3, previous=first)
+    assert again.clusters["b"].stale_since == first.clusters["b"].stale_since
+
+
+def test_a_stale_cluster_past_the_teardown_window_is_emptied():
+    prev = _published_ab()
+    assn = plan(_spec(), _ab_registry(b_age=901), generation=2, previous=prev)
+    assert assn.clusters["b"].pools == []
+    assert assn.clusters["b"].stale_since is None
+
+
+def test_teardown_window_zero_means_never_on_staleness_alone():
+    prev = _published_ab()
+    spec = _spec(stale_teardown_after_s=0)
+    assn = plan(spec, _ab_registry(b_age=10_000_000), generation=2, previous=prev)
+    assert assn.clusters["b"].pools == prev.clusters["b"].pools
+
+
+def test_a_vanished_report_object_freezes_regardless_of_window():
+    # Dead clusters leave their last report behind; a report that is GONE while
+    # pools were published is bucket-side trouble, so the window does not apply.
+    from agent_sandbox_fleet.inventory import STALE_AGE_S
+    prev = _published_ab()
+    assn = plan(_spec(), _ab_registry(b_age=STALE_AGE_S), generation=2, previous=prev)
+    assert assn.clusters["b"].pools == prev.clusters["b"].pools
+    assert assn.clusters["b"].stale_since
+
+
+def test_an_explicit_drain_still_empties_a_stale_cluster():
+    prev = _published_ab()
+    spec = _spec(cluster_weights={"a": 1.0, "b": 0.0})
+    assn = plan(spec, _ab_registry(b_age=200, b_weight=0.0), generation=2, previous=prev)
+    assert assn.clusters["b"].pools == []
+
+
+def test_models_empty_drain_empties_a_stale_cluster():
+    prev = _published_ab()
+    spec = FleetSpec(max_concurrent=1, max_pool=1, cluster_weights={"a": 1.0, "b": 1.0},
+                     models=[])
+    assn = plan(spec, _ab_registry(b_age=200), generation=2, previous=prev)
+    assert assn.clusters["b"].pools == []
+    assert assn.clusters["a"].pools == []
+
+
+def test_a_stale_cluster_that_held_nothing_stays_empty():
+    assn = plan(_spec(), _ab_registry(b_age=200), generation=2, previous=None)
+    assert assn.clusters["b"].pools == []
+    assert assn.clusters["b"].stale_since is None
+
+
+def test_apply_carries_the_published_payload_into_the_plan():
+    gcs = _RecordingGCS()
+    planner.apply(gcs, _spec(), provider=_StaticProvider(_ab_registry()))
+    before = gcs.objects[Paths().assignments]
+    assert before["clusters"]["b"]["pools"]
+    planner.apply(gcs, _spec(), provider=_StaticProvider(_ab_registry(b_age=200)))
+    after = gcs.objects[Paths().assignments]
+    assert after["clusters"]["b"]["pools"] == before["clusters"]["b"]["pools"]
+    assert after["clusters"]["b"]["stale_since"]
+    assert after["generation"] == 2
+
+
+def test_dry_run_marks_frozen_entries():
+    gcs = _RecordingGCS()
+    planner.apply(gcs, _spec(), provider=_StaticProvider(_ab_registry()))
+    out = planner.preview(gcs, _spec(), provider=_StaticProvider(_ab_registry(b_age=200)))
+    assert "FROZEN" in out
+    assert "TEARDOWN" not in out, "a freeze is not a teardown"

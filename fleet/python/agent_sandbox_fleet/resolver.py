@@ -262,6 +262,12 @@ class ClusterResolver:
         assignments = self._read(refresh=refresh)
         matches: list[dict] = []
         for cname, entry in assignments.get("clusters", {}).items():
+            if entry.get("stale_since"):
+                # The planner froze this entry because the cluster stopped
+                # reporting capacity: its pools are kept standing in case it
+                # comes back, but nothing should be routed there -- the
+                # cluster may be unreachable, and its warm depth is a guess.
+                continue
             for pool in entry.get("pools", []):
                 if pool.get("template") == template and pool.get("replicas", 0) > 0:
                     matches.append({

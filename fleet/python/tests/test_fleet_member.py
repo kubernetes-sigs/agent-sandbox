@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 
 import pytest
 
@@ -693,3 +694,174 @@ def test_a_corrected_plan_is_picked_up_after_a_refusal():
     assert changed is True
     assert assignments.generation == 6
     assert [p.template for p in assignments.clusters["c1"].pools] == ["t2"]
+
+
+# --------------------------------------------------------------------------- #
+# Exclusion is an explicit empty entry, never a missing one — and an empty
+# entry is refused while the member's own capacity publishes are failing.
+# --------------------------------------------------------------------------- #
+
+class _DeleteRecorder:
+    def __init__(self, sink):
+        self._sink = sink
+
+    def delete_namespaced_custom_object(self, **kw):
+        self._sink.append(kw["name"])
+
+
+def test_a_plan_that_omits_this_cluster_is_held_not_applied(caplog):
+    # The planner writes an entry for every cluster in its registry, so a
+    # plan naming other clusters but not this one comes from a registry that
+    # has never seen this cluster — wrong --cluster-name or wrong bucket —
+    # and must not read as "tear everything down".
+    gcs = _FakeGCS()
+    gcs.obj = (_assignment_bytes(fleet_member.SCHEMA_VERSION, 4, ["t1"]),
+               "etag-1")                       # payload names only "c1"
+    fm = _bare_member(gcs=gcs)                 # this member is "test"
+    deleted: list[str] = []
+    fm.custom_objects = _DeleteRecorder(deleted)
+    fm._template_exists = lambda t: True
+    fm._ensure_warmpool = lambda g, p: None
+    fm._list_managed_pool_names = lambda: ["held-pool"]
+    with caplog.at_level(logging.ERROR):
+        fm._reconcile_once()
+    assert deleted == []
+    assert "never a missing one" in caplog.text
+    assert fm._last_assignment is None
+    assert fm._last_etag == "", "the hold must re-evaluate every tick"
+
+
+def test_an_empty_entry_is_refused_while_own_publish_is_stale(caplog):
+    body = json.dumps({
+        "schema_version": 1, "generation": 6,
+        "clusters": {"test": {"pools": []},
+                     "other": {"pools": [{"template": "t", "warmpool":
+                                          "t-pool", "replicas": 1}]}},
+    }).encode()
+    gcs = _FakeGCS()
+    gcs.obj = (body, "etag-1")
+    fm = _bare_member(gcs=gcs)
+    deleted: list[str] = []
+    fm.custom_objects = _DeleteRecorder(deleted)
+    fm._template_exists = lambda t: True
+    fm._ensure_warmpool = lambda g, p: None
+    fm._list_managed_pool_names = lambda: ["survivor-pool"]
+
+    fm._capacity_ok_at = time.monotonic() - 1000    # publish path broken
+    with caplog.at_level(logging.ERROR):
+        fm._reconcile_once()
+    assert deleted == [], "self-defense failed: drained on our own silence"
+    assert "REFUSING" in caplog.text
+
+    # The moment the publish path recovers, the same plan drains normally —
+    # no new publish required (the hold cleared the etag).
+    fm._capacity_ok_at = time.monotonic()
+    fm._reconcile_once()
+    assert deleted == ["survivor-pool"]
+
+
+def test_capacity_publish_success_refreshes_the_selfdefense_stamp():
+    class _GoodGCS:
+        def put_json(self, path, obj):
+            pass
+
+    fm = _bare_member(gcs=_GoodGCS())
+    fm._collect_capacity = lambda: fleet_member.CapacityReport(cluster="test")
+    fm._capacity_ok_at = time.monotonic() - 500
+    fm._capacity_once()
+    assert time.monotonic() - fm._capacity_ok_at < 5
+
+
+def test_capacity_publish_failure_does_not_refresh_the_stamp():
+    class _BadGCS:
+        def put_json(self, path, obj):
+            raise RuntimeError("403 forbidden")
+
+    fm = _bare_member(gcs=_BadGCS())
+    fm._collect_capacity = lambda: fleet_member.CapacityReport(cluster="test")
+    old = time.monotonic() - 500
+    fm._capacity_ok_at = old
+    fm._capacity_once()
+    assert fm._capacity_ok_at == old
+
+
+# --------------------------------------------------------------------------- #
+# Frozen entries and leader election.
+# --------------------------------------------------------------------------- #
+
+def test_a_frozen_entry_is_applied_unchanged_and_flagged(caplog):
+    body = json.dumps({
+        "schema_version": 1, "generation": 9,
+        "clusters": {"test": {"pools": [{"template": "t", "warmpool": "t-pool",
+                                         "replicas": 3}],
+                              "stale_since": "2026-10-01T00:00:00Z"}},
+    }).encode()
+    gcs = _FakeGCS(); gcs.obj = (body, "etag-1")
+    fm = _bare_member(gcs=gcs)
+    ensured: list[str] = []
+    fm._template_exists = lambda t: True
+    fm._ensure_warmpool = lambda g, p: ensured.append(p.warmpool)
+    fm._list_managed_pool_names = lambda: ["t-pool"]
+    fm.custom_objects = _DeleteRecorder([])
+    with caplog.at_level(logging.WARNING):
+        fm._reconcile_once()
+    assert ensured == ["t-pool"], "frozen pools are kept, i.e. still ensured"
+    assert "marks this cluster STALE" in caplog.text
+    assert fm._last_assignment.clusters["test"].stale_since == "2026-10-01T00:00:00Z"
+
+
+def _election_member(**attrs):
+    base = dict(leader_elect=False, lease_name="fleet-member", identity="pod-a",
+                _loops_started=False, _exit_code=0, _capacity_ok_at=0.0)
+    base.update(attrs)
+    return _bare_member(**base)
+
+
+def test_run_without_election_starts_loops_and_exits_zero_on_stop():
+    fm = _election_member()
+    started: list[str] = []
+
+    def loop(name):
+        def _f():
+            started.append(name)
+            if len(started) == 2:
+                fm._stop.set()
+        return _f
+
+    fm._reconcile_loop = loop("reconcile")
+    fm._capacity_loop = loop("capacity")
+    assert fm.run() == 0
+    assert sorted(started) == ["capacity", "reconcile"]
+
+
+def test_start_loops_is_idempotent_and_resets_the_selfdefense_stamp():
+    fm = _election_member()
+    fm._reconcile_loop = lambda: None
+    fm._capacity_loop = lambda: None
+    fm._start_loops()
+    fm._start_loops()
+    assert fm._loops_started is True
+    assert time.monotonic() - fm._capacity_ok_at < 5, (
+        "a new leader must not inherit a stale stamp from its standby period")
+
+
+def test_losing_the_lease_stops_loops_and_exits_one():
+    fm = _election_member(leader_elect=True)
+    fm._on_stopped_leading()
+    assert fm._stop.is_set()
+    assert fm._exit_code == 1
+
+
+def test_election_failure_exits_two_instead_of_idling(monkeypatch):
+    # A Lease RBAC denial raises out of the election loop. Swallowing it would
+    # leave a pod that never leads and never says why.
+    import agent_sandbox_fleet.leaselock as ll
+    fm = _election_member(leader_elect=True)
+
+    def boom(*a, **kw):
+        raise RuntimeError("cannot read Lease: needs get/create/update on leases")
+
+    monkeypatch.setattr(ll, "LeaseLock", boom)
+    fm._run_election()
+    assert fm._stop.is_set()
+    assert fm._exit_code == 2

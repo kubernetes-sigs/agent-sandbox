@@ -592,3 +592,21 @@ def test_delete_with_explicit_cluster_builds_via_resolver_naming():
     )
     assert len(built) == 1
     assert built[0].deleted == [("foreign-claim", "multi-cluster-fleet")]
+
+
+def test_resolver_never_routes_to_a_frozen_cluster():
+    # The planner carries a stale cluster's entry forward with `stale_since` so
+    # its pools are not torn down; routing claims there would target a cluster
+    # that may be unreachable. Skip it, under every strategy.
+    gcs = FakeGCS()
+    data = _assn({
+        "cluster-a": [_pool("shared")],
+        "cluster-b": [_pool("shared")],
+        "cluster-c": [_pool("shared")],
+    })
+    data["clusters"]["cluster-b"]["stale_since"] = "2026-10-01T00:00:00Z"
+    gcs.set_assignments(data)
+    r = ClusterResolver("test", gcs=gcs)
+    assert [m.cluster for m in r.list_matches("shared")] == ["cluster-a", "cluster-c"]
+    picks = {r.resolve("shared", strategy="round-robin").cluster for _ in range(6)}
+    assert picks == {"cluster-a", "cluster-c"}

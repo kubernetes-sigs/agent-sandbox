@@ -35,7 +35,7 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 
 from . import budget, inventory as _inventory, placement, sizing
-from .inventory import InventoryProvider
+from .inventory import STALE_AGE_S, InventoryProvider
 from .objectstore import GCS, Paths
 from .placement import PlannerCluster, PlannerRegistry
 
@@ -133,6 +133,16 @@ class FleetSpec(BaseModel):
     # scored placement entirely. Kills the CapacityAware ping-pong that happens
     # when models > clusters and extras oscillate on re-apply.
     min_clusters: int = Field(ge=0, default=0)
+    # How a STALE cluster (no fresh capacity report) is treated. Staleness
+    # always excludes it from NEW placement. What happens to the pools it
+    # already holds is a second, longer threshold: until a cluster's report is
+    # older than this, its last published entry is carried forward unchanged
+    # (frozen) so a transient reporting failure never tears a healthy cluster
+    # down; past it, the entry is emptied and the member drops the pools. 0 =
+    # never empty on staleness alone -- only an explicit drain (weight 0 or
+    # models: []) does. An empty pool set is therefore only ever the result of
+    # an explicit instruction or a prolonged, deliberate-length silence.
+    stale_teardown_after_s: int = Field(ge=0, default=900)
 
     @field_validator("schema_version")
     @classmethod
@@ -189,6 +199,11 @@ class AssignmentPool(BaseModel):
 
 class ClusterAssignment(BaseModel):
     pools: list[AssignmentPool] = Field(default_factory=list)
+    # Set by the planner when this cluster's capacity report is stale and the
+    # entry is a carry-forward of the last published one rather than a fresh
+    # placement. Members apply it unchanged; the resolver skips it. See
+    # FleetSpec.stale_teardown_after_s.
+    stale_since: str | None = None
 
 
 class Assignments(BaseModel):
@@ -221,7 +236,8 @@ def load_registry(gcs: GCS, weights: dict[str, float], paths: Paths | None = Non
 # --------------------------------------------------------------------------- #
 
 def plan(spec: FleetSpec, registry: PlannerRegistry,
-         generation: int = 0) -> Assignments:
+         generation: int = 0,
+         previous: "Assignments | dict | None" = None) -> Assignments:
     """Produce ClusterAssignments from a FleetSpec + live registry.
 
     `generation` is passed in rather than read off the spec so that plan()
@@ -449,19 +465,152 @@ def plan(spec: FleetSpec, registry: PlannerRegistry,
     # and whose publish path is not will drop every warm pool it holds. Keeping
     # the behavior (a drain has to be able to empty a cluster that is not
     # reporting) but logging it, since the alternative is a silent teardown.
+    #
+    # UPDATE to the sharp edge above: a stale cluster is now FROZEN, not
+    # emptied, until its report is older than spec.stale_teardown_after_s.
+    # Freezing means carrying its last published entry forward verbatim with
+    # `stale_since` set: the member sees the same pools it already runs and
+    # changes nothing, the resolver stops routing claims there, and new
+    # placement ignores it. Only an explicit drain (weight 0, models: []) or
+    # a silence longer than the teardown window empties it. A report object
+    # that is MISSING outright (age >= STALE_AGE_S) with pools previously
+    # published is the most suspicious shape of all -- dead clusters leave
+    # their last report behind; a vanished object means bucket-side trouble
+    # -- so it freezes regardless of the window.
+    prev = _previous_entries(previous)
+    now = _dt.datetime.now(_dt.timezone.utc)
+    now_iso = now.isoformat().replace("+00:00", "Z")
+    window = spec.stale_teardown_after_s
+    frozen_replicas = 0
+    frozen_names: list[str] = []
     for cname in registry.clusters:
-        if cname not in clusters:
-            if registry.clusters[cname].report_age_s > registry.max_report_age_s:
-                logger.warning(
-                    "cluster %s has no fresh capacity report (age %.0fs) — assigning "
-                    "empty, which DROPS any warm pools it currently holds",
-                    cname, registry.clusters[cname].report_age_s,
-                )
-            clusters[cname] = ClusterAssignment(pools=[])
-
-    now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z")
+        if cname in clusters:
+            continue
+        c = registry.clusters[cname]
+        stale = c.report_age_s > registry.max_report_age_s
+        prev_pools, prev_since = prev.get(cname, ([], None))
+        past_window = (window > 0 and c.report_age_s < STALE_AGE_S
+                       and c.report_age_s > window)
+        if (stale and c.weight > 0 and spec.models and prev_pools
+                and not past_window):
+            if prev_since:
+                since = prev_since
+            elif c.report_age_s >= STALE_AGE_S:
+                since = now_iso
+            else:
+                since = (now - _dt.timedelta(seconds=c.report_age_s)
+                         ).isoformat().replace("+00:00", "Z")
+            pools = [AssignmentPool.model_validate(p) for p in prev_pools]
+            replicas = sum(p.replicas for p in pools)
+            frozen_replicas += replicas
+            frozen_names.append(cname)
+            logger.warning(
+                "cluster %s has no fresh capacity report (%s) — FREEZING its "
+                "published entry (%d pools, %d replicas) instead of emptying "
+                "it: excluded from new placement, claims will not route "
+                "there, pools torn down %s. Check the member's capacity "
+                "publish path, or drain it explicitly with weight 0.",
+                cname, _age_str(c.report_age_s), len(pools), replicas,
+                (f"only after {window}s of silence" if window > 0
+                 else "only on an explicit drain (stale_teardown_after_s=0)"),
+            )
+            clusters[cname] = ClusterAssignment(pools=pools, stale_since=since)
+            continue
+        if stale:
+            if past_window:
+                why = f"silent for longer than stale_teardown_after_s={window}s"
+            elif c.weight <= 0:
+                why = "drained at weight 0"
+            elif not spec.models:
+                why = "spec has no models (drain)"
+            else:
+                why = "it held no pools in the published assignment"
+            logger.warning(
+                "cluster %s has no fresh capacity report (%s) — assigning "
+                "empty (%s), which DROPS any warm pools it currently holds",
+                cname, _age_str(c.report_age_s), why,
+            )
+        clusters[cname] = ClusterAssignment(pools=[])
+    if frozen_names:
+        logger.warning(
+            "%d frozen cluster(s) (%s) keep %d replicas outside the budget: the "
+            "fleet total exceeds max_concurrent=%d by that much until they "
+            "report again or are drained",
+            len(frozen_names), ", ".join(frozen_names), frozen_replicas,
+            spec.max_concurrent,
+        )
     return Assignments(schema_version=SCHEMA_VERSION, generation=generation,
                        updated_at=now_iso, clusters=clusters)
+
+
+def preview(
+    gcs: GCS,
+    spec: FleetSpec,
+    paths: Paths | None = None,
+    provider: InventoryProvider | None = None,
+) -> str:
+    """Plan against live inventory and return the delta against the currently
+    published assignments — `fleetctl apply --dry-run`. Publishes nothing and
+    archives nothing; the only store calls are reads.
+    """
+    paths = paths or Paths()
+    provider = provider or _inventory.GCSInventory(gcs, paths)
+    previous, _store_gen = read_published_payload(gcs, paths)
+    published_gen = int(previous.get("generation", 0)) if previous else 0
+    reg = provider.load(spec.cluster_weights)
+    assn = plan(spec, reg, generation=next_generation(published_gen, None),
+                previous=previous)
+    return format_delta(previous, assn)
+
+
+def format_delta(published: dict | None, planned: Assignments) -> str:
+    """Human-readable diff between a published assignments payload and a
+    planned one. Deletions are called out hard: a `- pool` line is a warm-pool
+    teardown on that cluster the moment a member reads the new file, and the
+    whole reason --dry-run exists is that `apply` can otherwise delete every
+    pool in the fleet with nothing printed in advance.
+    """
+    old: dict[str, dict[str, int]] = {}
+    for cname, body in ((published or {}).get("clusters") or {}).items():
+        old[cname] = {
+            p["warmpool"]: int(p.get("replicas", 0))
+            for p in (body or {}).get("pools", []) if p.get("warmpool")
+        }
+    new = {cname: {p.warmpool: p.replicas for p in ca.pools}
+           for cname, ca in planned.clusters.items()}
+    lines: list[str] = []
+    adds = dels = resized = 0
+    for cname in sorted(set(old) | set(new)):
+        o, n = old.get(cname, {}), new.get(cname, {})
+        frozen = ""
+        entry = planned.clusters.get(cname)
+        if entry is not None and entry.stale_since:
+            frozen = (f"  [FROZEN since {entry.stale_since}: no fresh capacity "
+                      "report; carried forward, no new placement]")
+        if o == n:
+            lines.append(f"  {cname}: unchanged "
+                         f"({sum(n.values())} replicas in {len(n)} pools){frozen}")
+            continue
+        lines.append(f"  {cname}:{frozen}")
+        for pool in sorted(set(o) | set(n)):
+            if pool not in o:
+                adds += 1
+                lines.append(f"    + {pool} ({n[pool]})")
+            elif pool not in n:
+                dels += 1
+                lines.append(f"    - {pool} ({o[pool]})  [TEARDOWN]")
+            elif o[pool] != n[pool]:
+                resized += 1
+                lines.append(f"    ~ {pool} {o[pool]} -> {n[pool]}")
+    total_old = sum(sum(v.values()) for v in old.values())
+    total_new = sum(sum(v.values()) for v in new.values())
+    head = (f"DRY RUN — nothing was written. Would publish generation "
+            f"{planned.generation}: +{adds} pool(s), -{dels} pool(s), "
+            f"~{resized} resized; total replicas {total_old} -> {total_new}.")
+    if dels:
+        head += (" Lines marked [TEARDOWN] delete warm pools on that cluster "
+                 "as soon as its member reads the new plan.")
+    return "\n".join([head, *lines])
 
 
 def _warmpool_name(template: str) -> str:
@@ -478,6 +627,30 @@ def publish(gcs: GCS, assignments: Assignments, paths: Paths | None = None,
                 assignments.generation, len(assignments.clusters))
 
 
+def read_published_payload(gcs: GCS, paths: Paths | None = None
+                           ) -> tuple[dict | None, int]:
+    """Return (published assignments payload or None, store generation).
+
+    The payload is what `plan()` needs as `previous` -- a stale cluster's entry
+    is carried forward from it -- and the store generation is the
+    compare-and-set token for the next publish. See `read_published` for the
+    schema guard.
+    """
+    paths = paths or Paths()
+    raw, store_gen = gcs.get_json_with_generation(paths.assignments)
+    if raw is None:
+        return None, 0
+    published_schema = raw.get("schema_version", SCHEMA_VERSION)
+    if published_schema != SCHEMA_VERSION:
+        raise ValueError(
+            f"published {paths.assignments} has schema_version "
+            f"{published_schema}, which this fleetctl ({SCHEMA_VERSION}) does "
+            f"not understand — it was written by a different version. Refusing "
+            f"to overwrite it; upgrade fleetctl."
+        )
+    return raw, store_gen
+
+
 def read_published(gcs: GCS, paths: Paths | None = None) -> tuple[int, int]:
     """Return (payload generation, store generation) of the live assignments.
 
@@ -491,19 +664,28 @@ def read_published(gcs: GCS, paths: Paths | None = None) -> tuple[int, int]:
     would silently downgrade the fleet, and the generation inside a payload this
     code cannot parse is not trustworthy input to an increment.
     """
-    paths = paths or Paths()
-    raw, store_gen = gcs.get_json_with_generation(paths.assignments)
+    raw, store_gen = read_published_payload(gcs, paths)
     if raw is None:
         return 0, 0
-    published_schema = raw.get("schema_version", SCHEMA_VERSION)
-    if published_schema != SCHEMA_VERSION:
-        raise ValueError(
-            f"published {paths.assignments} has schema_version "
-            f"{published_schema}, which this fleetctl ({SCHEMA_VERSION}) does "
-            f"not understand — it was written by a different version. Refusing "
-            f"to overwrite it; upgrade fleetctl."
-        )
     return int(raw.get("generation", 0)), store_gen
+
+
+def _previous_entries(previous) -> dict[str, tuple[list[dict], str | None]]:
+    """Normalise `plan(previous=...)` -- an Assignments, a raw payload dict, or
+    None -- into {cluster: (pool dicts, stale_since)}."""
+    if previous is None:
+        return {}
+    if not isinstance(previous, dict):
+        previous = previous.model_dump()
+    out: dict[str, tuple[list[dict], str | None]] = {}
+    for cname, body in (previous.get("clusters") or {}).items():
+        body = body or {}
+        out[cname] = (list(body.get("pools") or []), body.get("stale_since"))
+    return out
+
+
+def _age_str(age_s: float) -> str:
+    return "no report at all" if age_s >= STALE_AGE_S else f"age {age_s:.0f}s"
 
 
 def next_generation(current: int, override: int | None = None) -> int:
@@ -561,10 +743,11 @@ def apply(
     """
     paths = paths or Paths()
     provider = provider or _inventory.GCSInventory(gcs, paths)
-    published_gen, store_gen = read_published(gcs, paths)
+    previous, store_gen = read_published_payload(gcs, paths)
+    published_gen = int(previous.get("generation", 0)) if previous else 0
     gen = next_generation(published_gen, generation)
     reg = provider.load(spec.cluster_weights)
-    assn = plan(spec, reg, generation=gen)
+    assn = plan(spec, reg, generation=gen, previous=previous)
     publish(gcs, assn, paths, if_generation_match=store_gen)
     archived = spec.model_dump(exclude={"generation"})
     # What was applied, for humans; not an input. Stamped under its own key:

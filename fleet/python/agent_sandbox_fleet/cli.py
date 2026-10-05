@@ -109,6 +109,15 @@ def cmd_apply(args) -> int:
     gcs = GCS(_bucket_from(args))
     provider = _provider_from(args, gcs)
 
+    if getattr(args, "dry_run", False):
+        if args.loop:
+            sys.exit("--dry-run and --loop are mutually exclusive: a dry run "
+                     "is a one-shot question, not a daemon")
+        with open(args.file) as f:
+            spec = planner.FleetSpec.model_validate(yaml.safe_load(f))
+        print(planner.preview(gcs, spec, provider=provider))
+        return 0
+
     if not args.loop:
         return _apply_once(gcs, args.file, args.quiet, provider,
                            generation=getattr(args, "generation", None))
@@ -191,6 +200,9 @@ def cmd_status(args) -> int:
     for name in sorted(reg.clusters):
         c = reg.clusters[name]
         n_pools = len(assn.clusters.get(name).pools) if assn and name in assn.clusters else 0
+        if assn and name in assn.clusters and assn.clusters[name].stale_since:
+            # Frozen by the planner: pools kept, no new placement, no routing.
+            n_pools = f"{n_pools}*"
         age = int(c.report_age_s) if c.report_age_s < 1e8 else "STALE"
         # "-" not "0": the member reports None when it could not measure claims
         # (light mode, or the list failed), and 0 would read as a healthy idle.
@@ -199,6 +211,10 @@ def cmd_status(args) -> int:
                          claims, f"{c.claim_p90_ms:.1f}", n_pools))
 
     if assn is not None:
+        frozen = sorted(n for n, ca in assn.clusters.items() if ca.stale_since)
+        if frozen:
+            print(f"\n* FROZEN (no fresh capacity report; pools carried forward, no "
+                  f"new placement or routing): {', '.join(frozen)}")
         print(f"\nassignments generation: {assn.generation}  updated_at: {assn.updated_at}")
     wm = gcs.get_json(paths.weight_manifest)
     if wm:
@@ -425,6 +441,14 @@ def build_parser() -> argparse.ArgumentParser:
     a = sub.add_parser("apply", parents=[common],
                        help="Apply a FleetSpec (writes spec + assignments to GCS)")
     a.add_argument("-f", "--file", required=True, help="Path to fleet-spec.yaml")
+    a.add_argument(
+        "--dry-run", action="store_true",
+        help="Plan against live inventory and print the delta against the "
+             "currently published assignments — including every warm-pool "
+             "teardown the apply would cause — without writing anything. "
+             "apply can delete every pool in the fleet; this is how you see "
+             "that coming.",
+    )
     a.add_argument(
         "--loop", action="store_true",
         help="Run continuously — re-plan every --loop-interval seconds. Fixes "

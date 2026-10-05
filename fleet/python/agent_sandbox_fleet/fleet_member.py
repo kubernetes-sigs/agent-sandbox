@@ -33,6 +33,10 @@ Two concurrent loops:
    --capacity-interval with warmpool depth/ready, active_claims,
    node_pressure_score.
 
+With --leader-elect (the default) several replicas of the member run and
+only the holder of a coordination.k8s.io Lease drives the two loops; the
+rest stand by. See run() and leaselock.py.
+
 Entrypoint:
   python -m agent_sandbox_fleet.fleet_member \\
       --cluster-name=$CLUSTER_NAME --bucket=$FLEET_BUCKET
@@ -47,6 +51,7 @@ import json
 import logging
 import os
 import signal
+import socket
 import sys
 import threading
 import time
@@ -91,6 +96,21 @@ GENERATION_ANNOTATION = "fleet.agent-sandbox.io/assignment-generation"
 # image deliberately does not depend on the planner's pydantic stack.
 SCHEMA_VERSION = 1
 SUPPORTED_SCHEMA_VERSIONS = frozenset({SCHEMA_VERSION})
+
+# Self-defense window, matching the planner's capacity staleness threshold
+# (PlannerRegistry.max_report_age_s). A member whose own capacity publishes
+# have been failing for longer than this refuses to act on an assignment that
+# gives it an empty pool set: the most likely cause of that exclusion is the
+# member's own missing report, not an operator drain.
+CAPACITY_STALENESS_S = 90.0
+
+# Leader election timings, in seconds. Standard client-go shape (15/10/2):
+# a follower takes over at most LEASE_DURATION_S after the leader's last
+# successful renew, and a leader that cannot renew for RENEW_DEADLINE_S
+# steps down and exits before anyone else can legitimately hold the Lease.
+LEASE_DURATION_S = 15
+LEASE_RENEW_DEADLINE_S = 10
+LEASE_RETRY_PERIOD_S = 2
 
 
 # ----------------------------------------------------------------------------
@@ -157,6 +177,11 @@ _UNKNOWN_POOL_FIELDS: set[str] = set()
 @dataclass
 class ClusterAssignment:
     pools: list[AssignmentPool] = field(default_factory=list)
+    # Set when the planner carried this entry forward because it has not seen
+    # a fresh capacity report from this cluster. The pools are the ones already
+    # running; applying them is a no-op, and the field is a signal that OUR
+    # publish path is the thing to look at.
+    stale_since: str | None = None
 
 
 @dataclass
@@ -207,11 +232,22 @@ class FleetMember:
         namespace: str = "multi-cluster-fleet",
         reconcile_interval: float = 30.0,
         capacity_interval: float = 30.0,
-        capacity_detail: str = "full",
+        capacity_detail: str = "light",
         paths: Paths | None = None,
         hub_publisher: Any = None,
+        leader_elect: bool = True,
+        lease_name: str = "fleet-member",
+        identity: str | None = None,
     ):
         self.cluster_name = cluster_name
+        # Active/passive HA: with leader_elect on, several replicas of this
+        # Deployment run, one holds a coordination.k8s.io Lease, and only it
+        # drives the two loops. The others wait. See run().
+        self.leader_elect = leader_elect
+        self.lease_name = lease_name
+        self.identity = identity or os.environ.get("POD_NAME") or socket.gethostname()
+        self._loops_started = False
+        self._exit_code = 0
         self.namespace = namespace
         self.reconcile_interval = reconcile_interval
         self.capacity_interval = capacity_interval
@@ -249,25 +285,92 @@ class FleetMember:
         # Armed whenever a reconcile pass does not fully apply, so the etag
         # short-circuit below does not strand a half-reconciled cluster.
         self._retry_pending = False
+        # Monotonic time of the last capacity report that reached a sink.
+        # Starts "fresh" so the capacity loop gets one full window before the
+        # self-defense check in _reconcile_once can arm.
+        self._capacity_ok_at = time.monotonic()
         self._stop = threading.Event()
 
     # -- Lifecycle -----------------------------------------------------------
 
-    def run(self) -> None:
-        """Start all loops. Blocks until SIGINT/SIGTERM."""
+    def run(self) -> int:
+        """Run until SIGINT/SIGTERM (exit 0), the lease is lost (exit 1), or
+        leader election itself fails (exit 2). Non-zero exits are deliberate:
+        the Deployment restarts the pod and it rejoins as a follower, which is
+        simpler and safer than trying to re-acquire from inside a process that
+        may still have loop threads mid-tick.
+        """
         for sig in (signal.SIGINT, signal.SIGTERM):
             signal.signal(sig, self._on_signal)
 
-        threads = [
-            threading.Thread(target=self._reconcile_loop, name="reconcile", daemon=True),
-            threading.Thread(target=self._capacity_loop, name="capacity", daemon=True),
-        ]
-        for t in threads:
-            t.start()
-
-        log.info("fleet-member running; waiting for shutdown signal")
+        if not self.leader_elect:
+            self._start_loops()
+            log.info("fleet-member running (leader election disabled); waiting "
+                     "for shutdown signal")
+        else:
+            threading.Thread(target=self._run_election, name="leader-election",
+                             daemon=True).start()
+            log.info("fleet-member %s standing by for Lease %s/%s",
+                     self.identity, self.namespace, self.lease_name)
         self._stop.wait()
-        log.info("shutdown signal received; loops will exit at next tick")
+        log.info("stopping (exit %d); loops will exit at next tick", self._exit_code)
+        return self._exit_code
+
+    def _start_loops(self) -> None:
+        if self._loops_started:
+            return
+        self._loops_started = True
+        # A replica that becomes leader long after it started must not read
+        # its own startup time as "last successful capacity publish" and
+        # refuse its first empty assignment; the stamp belongs to this term.
+        self._capacity_ok_at = time.monotonic()
+        for target, name in ((self._reconcile_loop, "reconcile"),
+                             (self._capacity_loop, "capacity")):
+            threading.Thread(target=target, name=name, daemon=True).start()
+
+    def _run_election(self) -> None:
+        """Drive the kubernetes client's election loop with a Lease lock.
+
+        The loop calls `onstarted_leading` when the Lease is acquired and
+        `onstopped_leading` when a renew misses its deadline; after that it
+        returns. Anything it raises -- in practice a Lease RBAC denial, which
+        LeaseLock turns into a RuntimeError naming the missing rule -- lands
+        here, and must stop the process: a dead election thread with a main
+        thread still waiting on _stop would be a member that never leads and
+        never says why.
+        """
+        from kubernetes.leaderelection import electionconfig, leaderelection
+
+        from .leaselock import LeaseLock
+
+        try:
+            lock = LeaseLock(self.lease_name, self.namespace, self.identity)
+            cfg = electionconfig.Config(
+                lock,
+                lease_duration=LEASE_DURATION_S,
+                renew_deadline=LEASE_RENEW_DEADLINE_S,
+                retry_period=LEASE_RETRY_PERIOD_S,
+                onstarted_leading=self._on_started_leading,
+                onstopped_leading=self._on_stopped_leading,
+            )
+            leaderelection.LeaderElection(cfg).run()
+        except Exception:
+            log.exception("leader election failed; exiting so the Deployment "
+                          "restarts this pod")
+            self._exit_code = 2
+            self._stop.set()
+
+    def _on_started_leading(self) -> None:
+        log.info("fleet-member %s acquired Lease %s/%s; starting loops",
+                 self.identity, self.namespace, self.lease_name)
+        self._start_loops()
+
+    def _on_stopped_leading(self) -> None:
+        log.error("fleet-member %s LOST Lease %s/%s; stopping loops and exiting "
+                  "non-zero so a fresh pod rejoins as a follower",
+                  self.identity, self.namespace, self.lease_name)
+        self._exit_code = 1
+        self._stop.set()
 
     def _on_signal(self, signum: int, frame: Any) -> None:
         self._stop.set()
@@ -314,6 +417,54 @@ class FleetMember:
                 and not self._retry_pending):
             return
 
+        local_entry = assignments.clusters.get(self.cluster_name)
+        if local_entry is None and assignments.clusters:
+            # Exclusion is an explicit empty entry — the planner writes one
+            # for every cluster in its registry. A plan that names other
+            # clusters but not this one is therefore a plan from a registry
+            # that has never seen this cluster: a misconfigured
+            # --cluster-name, or a bucket belonging to a different fleet.
+            # That is not an instruction; hold the current pool set.
+            log.error(
+                "assignments.json (generation %d) names %d cluster(s) but "
+                "not %r — holding the current pool set and NOT reconciling. "
+                "Check --cluster-name and --bucket; exclusion is an explicit "
+                "empty entry, never a missing one.",
+                assignments.generation, len(assignments.clusters),
+                self.cluster_name,
+            )
+            # Forget the etag so every tick re-reads and re-evaluates (and
+            # stays loud): the hold must lift on a corrected plan without
+            # this process needing a restart.
+            self._last_etag = ""
+            return
+        if (local_entry is not None and not local_entry.pools
+                and time.monotonic() - self._capacity_ok_at
+                    > CAPACITY_STALENESS_S):
+            # Self-defense. An empty entry is a teardown order, and the
+            # planner issues one for any cluster whose capacity report went
+            # stale. If OUR OWN publishes have been failing for longer than
+            # the staleness window, the likeliest cause of this order is our
+            # missing report — bucket IAM, a wedged capacity thread — not an
+            # operator drain. Refuse and keep serving; a genuine drain still
+            # lands the moment the publish path recovers, and the operator's
+            # deliberate alternative is to scale this member away.
+            log.error(
+                "assignment (generation %d) gives this cluster an EMPTY pool "
+                "set, but this member has not successfully published a "
+                "capacity report for %.0fs (window %.0fs). REFUSING to tear "
+                "down: the exclusion is most likely our own missing report. "
+                "Fix the capacity publish path, or scale this member down to "
+                "drain deliberately.",
+                assignments.generation,
+                time.monotonic() - self._capacity_ok_at, CAPACITY_STALENESS_S,
+            )
+            # Forget the etag so the hold re-evaluates every tick: the drain
+            # must land the moment the publish path recovers, without a new
+            # plan having to be published.
+            self._last_etag = ""
+            return
+
         # Assume failure. Cleared only after every pool has been applied and
         # every orphan deleted, so an exception anywhere between here and the
         # end of the method leaves the retry armed.
@@ -321,6 +472,16 @@ class FleetMember:
         self._last_assignment = assignments
 
         local = assignments.clusters.get(self.cluster_name, ClusterAssignment())
+        if local.stale_since:
+            log.warning(
+                "assignment (generation %d) marks this cluster STALE since %s: "
+                "the planner has not seen a fresh capacity report from us. Its "
+                "%d pool(s) are carried forward unchanged -- nothing is torn "
+                "down -- but new placement and claim routing skip this cluster "
+                "until we report again. Check the capacity publish path "
+                "(bucket IAM, hub reachability, the capacity thread).",
+                assignments.generation, local.stale_since, len(local.pools),
+            )
         desired = {p.warmpool: p for p in local.pools}
 
         # 1. For each pool, verify the referenced SandboxTemplate exists
@@ -395,6 +556,13 @@ class FleetMember:
                     "assignments.json is GONE from the bucket; keeping the "
                     "current pool set and NOT reconciling. Publish a drain "
                     "spec to tear the fleet down deliberately.")
+            else:
+                # Loud on the fresh-start shape too: silence here reads as
+                # "reconciled fine" while the member is actually idling.
+                log.warning(
+                    "no assignments.json in the bucket — no plan has been "
+                    "published yet (bootstrap, or a wrong --bucket). NOT "
+                    "reconciling; existing pools are left untouched.")
             self._last_etag = ""
             return self._last_assignment, False
         if etag == self._last_etag:
@@ -453,7 +621,8 @@ class FleetMember:
             name: ClusterAssignment(
                 pools=[
                     AssignmentPool.from_json(p) for p in body.get("pools", [])
-                ]
+                ],
+                stale_since=body.get("stale_since"),
             )
             for name, body in raw.get("clusters", {}).items()
         }
@@ -656,6 +825,12 @@ class FleetMember:
                 failed.append("clusterprofile")
 
         sinks = 2 if self.hub_publisher is not None else 1
+        if len(failed) < sinks:
+            # At least one sink got the report, so the planner (whichever
+            # inventory it reads) can see this cluster. This stamp is what
+            # the reconcile loop's self-defense checks before honouring an
+            # empty pool set.
+            self._capacity_ok_at = time.monotonic()
         if len(failed) == sinks:
             # Partial delivery is survivable and already logged per sink. Total
             # failure means this cluster is invisible to the planner, which is
@@ -873,16 +1048,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--reconcile-interval", type=positive_float, default=30.0)
     p.add_argument("--capacity-interval", type=positive_float, default=30.0)
     p.add_argument(
-        "--capacity-detail", choices=("full", "light"), default="full",
-        help="full: also report active_claims + node_pressure_score, which "
-             "cost one Sandbox list and one Pod list per tick. light: "
-             "warmpool depth/ready only. Use light on density runs — at 200k "
-             "pods the full lists OOM the member and steal apiserver "
-             "concurrency from the controller being measured. TRADE-OFF: in "
-             "light mode both fields are reported as unmeasured (omitted, "
-             "not 0), so capacity-aware placement goes pressure-blind "
-             "(degrades to weights + ready-ratio) and least-loaded degrades "
-             "to active_replicas.",
+        "--capacity-detail", choices=("full", "light"), default="light",
+        help="light (default): warmpool depth/ready only — O(pools) per "
+             "tick. full: also report active_claims + node_pressure_score, "
+             "which cost one Sandbox list and one node/pod walk per tick — "
+             "O(cluster), and at 200k pods the unpaged lists have OOMed a "
+             "member and stolen apiserver concurrency from the controller. "
+             "TRADE-OFF of light: both signals are reported as unmeasured "
+             "(omitted, not 0), so capacity-aware placement goes "
+             "pressure-blind (degrades to weights + ready-ratio) and "
+             "least-loaded degrades to active_replicas.",
     )
     # -- ClusterProfile publishing (SIG-Multicluster hub) ------------------- #
     # Off by default. When enabled the member ALSO applies its capacity onto
@@ -938,6 +1113,23 @@ def main(argv: list[str] | None = None) -> int:
                    action="store_false",
                    help="Apply to the main object instead — for fixture CRDs "
                         "that do not declare a status subresource")
+    # -- Leader election ---------------------------------------------------- #
+    # On by default: deploy/fleet-member-deployment-wi.yaml runs 2 replicas and
+    # only the Lease holder drives the loops. Off = single replica, no Lease
+    # RBAC needed (what the kind fixtures and the unit suite use).
+    p.add_argument("--leader-elect", dest="leader_elect",
+                   action=argparse.BooleanOptionalAction,
+                   default=os.environ.get("LEADER_ELECT", "true").lower()
+                           not in ("0", "false", "no"),
+                   help="Hold a coordination.k8s.io Lease in --namespace and run "
+                        "the loops only while holding it (default: on). Needs "
+                        "get/create/update on leases; see deploy/rbac.yaml.")
+    p.add_argument("--lease-name",
+                   default=os.environ.get("LEASE_NAME", "fleet-member"),
+                   help="Lease object name (default fleet-member)")
+    p.add_argument("--identity", default=os.environ.get("POD_NAME"),
+                   help="Lease holder identity; defaults to $POD_NAME, then the "
+                        "hostname")
     p.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"))
     args = p.parse_args(argv)
 
@@ -1005,9 +1197,11 @@ def main(argv: list[str] | None = None) -> int:
         capacity_interval=args.capacity_interval,
         capacity_detail=args.capacity_detail,
         hub_publisher=hub_publisher,
+        leader_elect=args.leader_elect,
+        lease_name=args.lease_name,
+        identity=args.identity,
     )
-    fm.run()
-    return 0
+    return fm.run()
 
 
 if __name__ == "__main__":

@@ -76,7 +76,11 @@ CLI/batch job.
      keeping).
    - Falls back to LeastLoaded (min active_claims, active_replicas) if the
      affinity target is at capacity.
-   - New: filters out clusters whose capacity report is >90s stale.
+   - Excludes clusters whose capacity report is >90s stale from NEW
+     placement. Their previously published entry is carried forward
+     unchanged (frozen, `stale_since` set) rather than emptied, until the
+     report is older than `stale_teardown_after_s` (default 900s; 0 = never
+     on staleness alone) -- see [Failure modes](#failure-modes-and-recovery).
 4. **Planner** runs harvested `budget.hamilton_split` to divide
    `spec.max_concurrent` across placed clusters by weight.
 5. **Planner** runs harvested `sizing.compute_replicas` per (cluster, image)
@@ -269,12 +273,35 @@ per stream. Multiple streams (e.g. different actor classes) live under
 
 ## Failure modes and recovery
 
+**Two thresholds for a stale cluster, and an empty pool set is only ever
+explicit.** A capacity report older than 90s drops the cluster out of *new*
+placement, but the planner carries its last published entry forward with
+`stale_since` set instead of emptying it: the member keeps the same pools
+(applying them is a no-op), the resolver stops routing claims there, and
+`fleetctl status` marks it `*`. Only a silence longer than
+`stale_teardown_after_s` (default 900s; `0` = never) or an explicit drain
+(weight 0, `models: []`) empties the entry. A report object that has
+*vanished* while pools were published freezes regardless of the window: dead
+clusters leave their last report behind, a missing object is bucket-side
+trouble. The member adds its own last line of defense: it refuses an empty
+pool set while its own capacity publishes have been failing for >90s.
+
+**Member availability.** The member Deployment runs two replicas; one holds
+a `coordination.k8s.io` Lease (`fleet-member`, in the member namespace) and
+only it drives the reconcile and capacity loops. A lost lease exits the pod
+non-zero and it rejoins as a follower; the standby takes over within the 15s
+lease duration. `--no-leader-elect` runs a single replica with no Lease RBAC.
+Either way the pools themselves are controller-owned and keep serving and
+self-healing with no member present at all.
+
 | Failure | Behavior | Recovery |
 |---|---|---|
-| Agent crashes | Its capacity report goes stale (>90s). Next planner apply excludes the cluster. Local warmpools continue to serve. | Restart the agent. On next reconcile it publishes fresh capacity and gets included on next apply. |
+| Member leader pod dies / node drained | The standby replica acquires the Lease within ~15s and starts the loops; the capacity report rarely goes stale at all. Pools unaffected. | The Deployment reschedules the dead pod; it rejoins as a follower. |
+| Both member replicas down | Capacity report goes stale (>90s). Next apply excludes the cluster from new placement and FREEZES its published entry; pools keep serving; claims route elsewhere. Emptied only after `stale_teardown_after_s`. | Restore the Deployment. Fresh capacity on the next tick → next apply places normally and the freeze lifts. |
+| Member's capacity publish path broken (bucket IAM, expired credential) while its read path works | Planner freezes the entry as above. Even past the teardown window the member refuses the empty pool set, because its own publishes have been failing >90s, and logs the refusal every tick. | Fix the publish path; the pending plan applies on the next tick. To drain deliberately, scale the member down or set weight 0. |
 | GCS unreachable from an agent | Reconcile loop backs off (exponential to 60s). Warmpools continue serving whatever they last knew. | Auto-recovers when GCS returns. |
 | Assignments file corrupt | Agent logs the parse error, keeps last-known-good in memory, capacity reports still flow. | Planner writes a fresh assignments.json. |
-| Planner run with a cluster missing capacity report | Excluded from placement. Warmpools on that cluster orphan (kept alive by their own agent, but no new assignments come in). | Cluster agent republishes capacity → next apply includes it → assignments trickle in. |
+| Planner run with a cluster missing its capacity report | Excluded from new placement; its published pools are frozen (not torn down), kept alive by the warm-pool controller; nothing routes there. A plan that omits a cluster's entry entirely is held by that member, never read as a teardown. | Member republishes capacity → next apply places it normally. |
 | Weight delta upload half-fails | Agents see the new manifest but partial delta; download fails with checksum mismatch (mock adds SHA256). Retry with backoff. | Trainer republishes. |
 | Weight-sync patches a label on a pod that's mid-request | The mock inference sandbox reads the label on next request; existing requests complete on old version. Matches Cognition's KV-cache-intact model. | N/A — by design. |
 

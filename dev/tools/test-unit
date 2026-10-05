@@ -380,6 +380,14 @@ def run_typescript_tests(repo_root, artifact_dir):
     print("\n=== Installing TypeScript dependencies ===")
     subprocess.check_call([npm_path, "install", "--prefer-offline"], cwd=ts_dir, env=env)
 
+    returncode = 0
+    for script in ("check", "typecheck"):
+        print(f"\n=== Running TypeScript {script} ===")
+        result = subprocess.run(
+            [npm_path, "run", script], cwd=ts_dir, env=env)
+        if result.returncode != 0:
+            returncode = result.returncode
+
     junit_file = os.path.join(artifact_dir, "junit_unit-typescript.xml")
     print("\n=== Running TypeScript unit tests ===")
     result = subprocess.run([
@@ -388,8 +396,10 @@ def run_typescript_tests(repo_root, artifact_dir):
         "--reporter=junit",
         f"--outputFile.junit={junit_file}",
     ], cwd=ts_dir, env=env)
+    if result.returncode != 0:
+        returncode = result.returncode
 
-    return result.returncode
+    return returncode
 
 
 def main():

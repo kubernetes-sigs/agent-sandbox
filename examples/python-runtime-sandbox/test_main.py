@@ -16,6 +16,7 @@ import os
 import signal
 import subprocess
 import tempfile
+import time
 from collections.abc import AsyncIterator
 from http import HTTPStatus
 from pathlib import Path
@@ -91,7 +92,9 @@ def test_execute_command_success(mock_popen):
         response = client.post("/execute", json={"command": "echo hello"})
 
     assert response.status_code == 200
-    assert response.json() == {"stdout": "hello\n", "stderr": "", "exit_code": 0}
+    assert response.json() == {
+        "stdout": "hello\n", "stderr": "", "exit_code": 0, "timed_out": False,
+    }
 
     mock_popen.assert_called_once()
     called_args, called_kwargs = mock_popen.call_args
@@ -137,22 +140,112 @@ def test_execute_command_runs_from_configured_base_dir(mock_popen, tmp_path):
 @patch('main.os.killpg')
 @patch('main.os.getpgid', return_value=4321)
 @patch('main.subprocess.Popen')
-def test_execute_command_timeout_returns_failed_execution(mock_popen, mock_getpgid, mock_killpg):
+def test_execute_command_timeout_reports_timed_out(mock_popen, mock_getpgid, mock_killpg):
     mock_process = _mock_process(mock_popen, pid=4321)
     mock_process.communicate.side_effect = [
         subprocess.TimeoutExpired(cmd="sleep infinity", timeout=300),
-        ("", ""),
+        ("partial out", "partial err"),
     ]
 
     response = client.post("/execute", json={"command": "sleep infinity"})
 
     assert response.status_code == 200
     body = response.json()
-    assert body["exit_code"] == 1
-    assert "Failed to execute command" in body["stderr"]
-    assert "timed out" in body["stderr"]
+    assert body["timed_out"] is True
+    assert body["exit_code"] == 124
+    assert body["stdout"] == "partial out"
+    assert body["stderr"].startswith("partial err")
+    assert "timed out after 300" in body["stderr"]
     mock_getpgid.assert_called_once_with(4321)
     mock_killpg.assert_called_once_with(4321, signal.SIGKILL)
+
+
+@patch('main.subprocess.Popen')
+def test_execute_command_request_timeout_shortens_server_limit(mock_popen):
+    mock_process = _mock_process(mock_popen)
+
+    with patch.dict(os.environ, {"SANDBOX_EXEC_TIMEOUT_SECONDS": "300"}):
+        response = client.post(
+            "/execute", json={"command": "echo hello", "timeout_seconds": 2.5}
+        )
+
+    assert response.status_code == 200
+    assert response.json()["timed_out"] is False
+    mock_process.communicate.assert_called_once_with(timeout=2.5)
+
+
+@patch('main.subprocess.Popen')
+def test_execute_command_request_timeout_cannot_extend_server_limit(mock_popen):
+    mock_process = _mock_process(mock_popen)
+
+    with patch.dict(os.environ, {"SANDBOX_EXEC_TIMEOUT_SECONDS": "5"}):
+        response = client.post(
+            "/execute", json={"command": "echo hello", "timeout_seconds": 3600}
+        )
+
+    assert response.status_code == 200
+    mock_process.communicate.assert_called_once_with(timeout=5.0)
+
+
+@pytest.mark.parametrize("timeout_seconds", [0, -1, "soon"])
+def test_execute_command_rejects_invalid_request_timeout(timeout_seconds):
+    response = client.post(
+        "/execute", json={"command": "echo hello", "timeout_seconds": timeout_seconds}
+    )
+
+    assert response.status_code == 422
+
+
+def test_execute_command_request_timeout_kills_process_group(tmp_path):
+    # A real command that outlives its deadline: the backgrounded sleep shares
+    # the shell's process group, so it must be gone once the request returns.
+    pid_file = tmp_path / "child.pid"
+    with patch.dict(os.environ, {"SANDBOX_BASE_DIR": str(tmp_path)}):
+        start = time.monotonic()
+        response = client.post(
+            "/execute",
+            json={
+                "command": "echo started; sleep 30 & echo $! > child.pid; wait",
+                "timeout_seconds": 1,
+            },
+        )
+        elapsed = time.monotonic() - start
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["timed_out"] is True
+    assert body["exit_code"] == 124
+    assert body["stdout"] == "started\n"
+    assert elapsed < 10
+    # The orphaned child may stay a zombie (killed, not yet reaped) when no
+    # init process reaps orphans, e.g. in a container; that counts as exited.
+    child_pid = int(pid_file.read_text())
+    reap_deadline = time.monotonic() + 5
+    while time.monotonic() < reap_deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        child_state = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(child_pid)],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if child_state.startswith("Z"):
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail(f"child process {child_pid} survived the timeout")
+
+
+def test_execute_command_failure_is_not_timed_out(tmp_path):
+    with patch.dict(os.environ, {"SANDBOX_BASE_DIR": str(tmp_path)}):
+        response = client.post("/execute", json={"command": "exit 3", "timeout_seconds": 5})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["exit_code"] == 3
+    assert body["timed_out"] is False
 
 
 def test_execute_command_invalid_syntax_returns_error():

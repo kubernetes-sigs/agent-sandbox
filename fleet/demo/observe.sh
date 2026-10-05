@@ -93,7 +93,7 @@ restore() {
     # it cannot -- which still does the job, because both of its branches write
     # the current context to the kubeconfig FILE, not to shell state.
     if ( switch_context "$_RESTORE_MEMBER" ) \
-       && kubectl -n "$NS" scale deployment/fleet-member --replicas=1; then
+       && kubectl -n "$NS" scale deployment/fleet-member --replicas=2; then
       _RESTORE_MEMBER=""
     else
       failed=yes
@@ -112,7 +112,7 @@ restore() {
     [[ -z "$_RESTORE_MEMBER" ]] || printf '%s\n' \
       "  fleet-member on $_RESTORE_MEMBER is still scaled to 0. Point kubectl" \
       "  at $_RESTORE_MEMBER and run:" \
-      "    kubectl -n $NS scale deployment/fleet-member --replicas=1" >&2
+      "    kubectl -n $NS scale deployment/fleet-member --replicas=2" >&2
     [[ -z "$_RESTORE_ASSIGN" ]] || printf '%s\n' \
       "  gs://${FLEET_BUCKET:-<bucket>}/fleet/assignments.json is still the" \
       "  corrupted placeholder; every member is running on last-known-good." \
@@ -151,18 +151,26 @@ fail_modes() {
   # anything is owed.
   trap restore EXIT INT TERM
 
-  section "FAIL MODE 1 — kill $second's fleet-member, wait 100s, re-apply, expect it out of assignments"
+  section "FAIL MODE 1 — kill $second's fleet-member, wait 100s, re-apply, expect its entry FROZEN (pools kept, stale_since set, no new placement)"
   switch_context "$second"
   _RESTORE_MEMBER="$second"
+  # To zero, i.e. BOTH replicas: with leader election a single dead pod just
+  # hands the Lease to the standby and the report never goes stale.
   kubectl -n "$NS" scale deployment/fleet-member --replicas=0
-  echo "sleeping 100s for capacity report to age out (>90s threshold)"
+  echo "sleeping 100s for capacity report to age out (>90s placement threshold)"
   sleep 100
   fleetctl apply -f "$FLEET_SPEC"
   fleetctl show-assignments
   echo
+  echo "expect: $second keeps its previous pools and carries \"stale_since\"; its"
+  echo "models are placed again on the live clusters (fleet runs above budget"
+  echo "until it reports). It is EMPTIED only after stale_teardown_after_s"
+  echo "(default 900s) of silence, or an explicit drain. Status marks it with *:"
+  fleetctl status
+  echo
   read -rp "press enter to restore $second's fleet-member..."
   switch_context "$second"
-  kubectl -n "$NS" scale deployment/fleet-member --replicas=1
+  kubectl -n "$NS" scale deployment/fleet-member --replicas=2
   _RESTORE_MEMBER=""
   kubectl -n "$NS" rollout status deployment/fleet-member
 

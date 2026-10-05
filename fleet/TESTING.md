@@ -25,7 +25,7 @@ gcloud services enable container.googleapis.com storage.googleapis.com \
 `artifactregistry.googleapis.com` is needed by §3d and by the XS driver's
 Phase 3, both of which push the fleet-member image to Artifact Registry.
 
-Local: `python` 3.10+, `kubectl` 1.31+, `docker` 26+, gcloud SDK 500+.
+Local: `python` 3.11+ (the in-repo SDK requires it), `kubectl` 1.31+, `docker` 26+, gcloud SDK 500+.
 
 ## 1. Unit tests — no infra
 
@@ -260,10 +260,11 @@ from**. Fail modes 1 and 3 recover by re-applying it; pointing it at a
 different spec replaces the live assignment instead of restoring it, and the
 recovery you then observe is a re-plan of something else.
 
-Runs all three: kill a member (its capacity report ages out, the next `apply`
-shifts assignments away), hand-delete a warm pool (the member recreates it on
-the next reconcile), and corrupt `assignments.json` (members log a parse error
-and keep serving last-known-good).
+Runs all three: kill a member (its capacity report ages out; the next `apply`
+freezes its entry — pools kept, `stale_since` set, nothing routed there — and
+places its models again on the live clusters), hand-delete a warm pool (the
+member recreates it on the next reconcile), and corrupt `assignments.json`
+(members log a parse error and keep serving last-known-good).
 
 Each should recover without operator intervention. The corrupt-JSON case is the
 one worth watching closely — a member that *stops* serving on a bad read is a
@@ -390,10 +391,14 @@ of the fleet.
 - [ ] `./demo/preflight-cp-plan.py demo/fleet-spec-xs.yaml` — exit 0
 - [ ] the same against a hub-driven spec, which needs `--capacities`, and
       `--omit <cluster>` there shows the short landing rather than an error
-- [ ] 3+ clusters, one member each, all publishing capacity within 60 s
+- [ ] 3+ clusters, two member replicas each, all publishing capacity within
+      60 s; `kubectl -n multi-cluster-fleet get lease fleet-member` names
+      exactly one holder per cluster
 - [ ] `fleetctl apply` on a 3-image spec spreads pools per the selected policy,
       and per-cluster totals sum **exactly** to `max_concurrent`
-- [ ] Fail-mode 1 (kill member): assignments shift on the next `apply`
+- [ ] Fail-mode 1 (kill both member replicas): the next `apply` freezes that
+      cluster's entry (`stale_since`), re-places its models elsewhere, and
+      deletes nothing; `fleetctl status` marks it `*`
 - [ ] Fail-mode 2 (delete pool): member recreates within 60 s
 - [ ] Fail-mode 3 (corrupt JSON): member logs the error and keeps serving
 - [ ] `stress-e2e.py --rate 5 --duration 60` — >95% success, 0 leaked claims,
@@ -435,12 +440,17 @@ and hub share a VPC. Members read the hub ConfigMap once at startup, so
 annotation on any managed pool, and check `--reconcile-interval`.
 
 **Assignments keep churning mid-run** — you are probably using `--loop` for a
-one-shot fill. A heartbeat that goes stale triggers a replan, and a replan
-against a fleet that is already full will reap sandboxes.
+one-shot fill. A heartbeat that goes stale triggers a replan; the stale
+cluster's pools are frozen rather than reaped, but its models are placed again
+on the live clusters, so the fleet grows past `max_concurrent` until the
+heartbeat returns and the next replan removes the duplicates — churn either
+way.
 
-**Two members in the same cluster fighting** — one replica per cluster is the
-supported configuration (`replicas: 1`, `strategy: Recreate`). Confirm nobody
-scaled it up.
+**Two members in the same cluster fighting** — they should not be able to: the
+Deployment runs two replicas and only the Lease holder
+(`kubectl -n multi-cluster-fleet get lease fleet-member`) runs the loops. If
+both are acting, one was started with `--no-leader-elect`, or a second
+Deployment with a different `--lease-name` exists.
 
 ## Cost notes
 

@@ -255,8 +255,9 @@ state. A claim that explicitly sets its own `Lifecycle` keeps its setting.
 **Story 2: Developer using the default pool for debugging**
 
 As a developer, I use a warm pool with no `claimDefaults` configured. My
-claims default to `Retain` as today, so I can inspect the sandbox state after
-my code finishes. Nothing changes for me.
+claims keep `Lifecycle: nil` — no expiration, no automatic cleanup — so I
+manage them manually and can inspect the sandbox state after my code finishes.
+Nothing changes for me.
 
 **Story 3: SDK integration with explicit lifecycle**
 
@@ -332,6 +333,7 @@ time-based limit is `maxLifetimeSeconds`, which computes a per-claim
 // ClaimDefaults defines default values for SandboxClaims targeting a pool.
 // +kubebuilder:validation:XValidation:rule="!has(self.lifecycle) || !has(self.lifecycle.shutdownTime)",message="shutdownTime is not allowed in claimDefaults.lifecycle; use maxLifetimeSeconds instead"
 // +kubebuilder:validation:XValidation:rule="!has(self.lifecycle) || !has(self.lifecycle.ttlSecondsAfterFinished) || self.lifecycle.ttlSecondsAfterFinished >= 5",message="ttlSecondsAfterFinished in claimDefaults must be at least 5 to avoid premature expiry during transient Finished states"
+// +kubebuilder:validation:XValidation:rule="!has(self.lifecycle) || !has(self.lifecycle.ttlSecondsAfterFinished) || self.lifecycle.shutdownPolicy == 'Delete'",message="shutdownPolicy must be Delete when ttlSecondsAfterFinished is set in claimDefaults; Retain+TTL would preserve the claim object but never reclaim the sandbox"
 type ClaimDefaults struct {
     // lifecycle specifies the default lifecycle for claims with nil Lifecycle.
     // If the claim sets its own Lifecycle, this field is ignored.
@@ -342,6 +344,8 @@ type ClaimDefaults struct {
     // sandbox may run. At claim creation (warm adoption or cold fallback), the controller computes
     // ShutdownTime = now + maxLifetimeSeconds and sets it on the claim's
     // lifecycle. Each claim gets a unique deadline.
+    // When set without lifecycle, the controller defaults ShutdownPolicy to
+    // Delete (diverging from the field-level +kubebuilder:default=Retain).
     // +optional
     // +kubebuilder:validation:Minimum=1
     MaxLifetimeSeconds *int32 `json:"maxLifetimeSeconds,omitempty"`
@@ -398,6 +402,10 @@ if err := r.Update(ctx, claim); err != nil {
 // has no lifecycle of its own. Returns nil if no defaults apply.
 // When maxLifetimeSeconds is set, ShutdownTime is computed as now + duration,
 // giving each claim a unique wall-clock deadline.
+// Note: ShutdownPolicy defaults to Retain via +kubebuilder:default on the
+// Lifecycle type. A CEL rule on ClaimDefaults requires shutdownPolicy=Delete
+// when ttlSecondsAfterFinished is set, so the CRD default is overridden at
+// validation time, not here.
 func resolvePoolLifecycle(pool *extensionsv1beta1.SandboxWarmPool, claim *extensionsv1beta1.SandboxClaim) *extensionsv1beta1.Lifecycle {
     if claim.Spec.Lifecycle != nil {
         return nil
@@ -420,6 +428,13 @@ func resolvePoolLifecycle(pool *extensionsv1beta1.SandboxWarmPool, claim *extens
             time.Duration(*cd.MaxLifetimeSeconds) * time.Second,
         ))
         lc.ShutdownTime = &deadline
+        // When maxLifetimeSeconds is the only claimDefaults field (no
+        // lifecycle), the controller creates a bare Lifecycle struct.
+        // Default to Delete so the sandbox is cleaned up at the deadline.
+        // When lifecycle IS set, ShutdownPolicy is already populated
+        // (either explicitly or via +kubebuilder:default=Retain); the
+        // CEL rule on ClaimDefaults ensures ttlSecondsAfterFinished
+        // always pairs with Delete.
         if lc.ShutdownPolicy == "" {
             lc.ShutdownPolicy = extensionsv1beta1.ShutdownPolicyDelete
         }
@@ -584,8 +599,11 @@ v1beta1-originated pool updated through the v1alpha1 API preserves
 
 **Downgrade (new controller → old controller):**
 
-- Pools with `claimDefaults` set are ignored by the old controller (unknown
-  field in spec is preserved by the API server but not read by the controller).
+- Pools with `claimDefaults` set are ignored by the old controller, provided
+  the CRD schema that defines `claimDefaults` remains installed. The old
+  controller does not read this field.
+- If a downgrade also applies a CRD schema without `claimDefaults`, a later
+  pool write can prune the field. Restore the values before upgrading again.
 - Claims that were adopted with injected lifecycle retain their `Spec.Lifecycle`
   in the API server. The old controller reads `Spec.Lifecycle` normally and
   honors it. No behavioral regression.

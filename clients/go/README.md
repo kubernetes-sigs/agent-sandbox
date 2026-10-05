@@ -159,6 +159,16 @@ exists, err := sb.Exists(ctx, "script.py")
 `Read()` and `ReadTo()` responses are capped by `MaxDownloadSize` (256 MB by
 default). `Run()` responses are capped at 16 MB; `List()`/`Exists()` at 8 MB.
 
+### Runtime Health and Metadata
+
+With `RuntimeSandboxd`, query the in-sandbox daemon. The legacy runtime returns
+`ErrUnsupportedByRuntime`.
+
+```go
+health, err := sb.Health(ctx)   // health.Status, health.UptimeSeconds
+meta, err := sb.Metadata(ctx)   // meta.Env (non-sensitive, SANDBOX_-prefixed by default)
+```
+
 ### 5. Custom TLS / Transport
 
 If your Gateway uses HTTPS with a private CA, provide a custom transport:

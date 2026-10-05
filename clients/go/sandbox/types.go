@@ -136,6 +136,22 @@ type ExecutionResult struct {
 	ExitCode int    `json:"exit_code"`
 }
 
+// Health is the sandboxd runtime's report from GET /v1/health.
+type Health struct {
+	Status string `json:"status"`
+	// UptimeSeconds is how long sandboxd has been running.
+	UptimeSeconds int64 `json:"uptime_seconds"`
+}
+
+// Metadata is the non-sensitive, workload-scoped configuration sandboxd
+// serves from GET /v1/metadata.
+type Metadata struct {
+	// Env holds the environment variables sandboxd exposes: only names
+	// matching its --metadata-env-prefix, minus anything that looks like a
+	// credential. It is never nil.
+	Env map[string]string `json:"env"`
+}
+
 // FileType represents the type of a file entry.
 type FileType string
 

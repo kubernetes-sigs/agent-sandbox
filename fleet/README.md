@@ -10,8 +10,9 @@ cluster can hold. It is **not** a general-purpose multi-cluster scheduler and is
 not trying to become one — no federation, no cross-cluster control plane. See
 [What this deliberately does not do](#what-this-deliberately-does-not-do).
 
-Two moving parts: `fleetctl`, which plans; and an in-cluster `fleet-member`,
-one per cluster, which reconciles that plan locally.
+Two moving parts: `fleetctl`, which plans; and an in-cluster `fleet-member`
+per cluster (a two-replica Deployment; the Lease holder reconciles that plan
+locally).
 
 ## How it works
 
@@ -53,6 +54,15 @@ one per cluster, which reconciles that plan locally.
    CRs from a hub instead, and each member publishes its own capacity into its
    own profile. The spec and `assignments.json` still travel through the bucket
    either way.
+4. **Failure is graded, and teardown is never implicit.** A cluster whose
+   capacity report goes stale (>90 s) leaves new placement at once, but the
+   pools it holds are frozen (`stale_since` in `assignments.json`) and claims
+   stop routing there; its entry is emptied only after `stale_teardown_after_s`
+   (default 15 min, `0` = never) or an explicit drain (weight `0`,
+   `models: []`). The member also refuses an empty pool set while its own
+   capacity publishes are failing, so a broken credential cannot drain a
+   healthy cluster. `fleetctl apply --dry-run` prints every teardown before
+   anything is written.
 
 [ARCHITECTURE.md](ARCHITECTURE.md) has the design in full.
 
@@ -273,8 +283,10 @@ takes no `-f`, so it answers "is every member fresh?" and not "what will this
 spec do?".
 
 **Avoid `--loop` for a one-shot fill.** A heartbeat that goes stale mid-run
-triggers a replan, and a replan against a fleet that is already full will reap
-sandboxes.
+triggers a replan; the stale cluster's pools are frozen rather than reaped, but
+its models are placed again on the live clusters, so the fleet grows past
+`max_concurrent` until the heartbeat returns and the next replan removes the
+duplicates — churn either way.
 
 ## `fleetctl`
 

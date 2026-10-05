@@ -331,6 +331,16 @@ div.feature-state-notice {
   padding-top: 8rem;
 }
 
+@include media-breakpoint-down(md) {
+  .td-cover-block--height-full {
+    padding-top: 2rem;
+  }
+
+  .quickstart-heading {
+    margin-top: 1rem;
+  }
+}
+
 .mx-auto>.container {
   display: flex;
   flex-direction: row;

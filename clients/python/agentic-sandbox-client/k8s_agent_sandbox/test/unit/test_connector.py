@@ -15,6 +15,7 @@
 """Unit tests for synchronous sandbox connectivity."""
 
 import io
+import json
 import os
 import subprocess
 import sys
@@ -27,6 +28,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import requests
+from kubernetes import client as k8s_client
 from pydantic import ValidationError
 
 from k8s_agent_sandbox.connector import (
@@ -1272,6 +1274,149 @@ class TestTunnelConcurrency(unittest.TestCase):
         self._connect_concurrently(strategy)
 
         self.assertEqual(mock_popen.call_count, 1)
+
+
+class TestTunnelTargetsInjectedApiClient(unittest.TestCase):
+    """kubectl must reach the cluster an injected ApiClient targets, not the ambient one."""
+
+    def _api_client(self):
+        cfg = k8s_client.Configuration()
+        cfg.host = "https://cluster-b:6443"
+        cfg.api_key = {"authorization": "secret"}
+        cfg.api_key_prefix = {"authorization": "Bearer"}
+        return k8s_client.ApiClient(configuration=cfg)
+
+    def _recording_popen(self, calls):
+        def popen(cmd, **kwargs):
+            # kubectl reads the kubeconfig at startup, so capture it here.
+            path = cmd[cmd.index("--kubeconfig") + 1] if "--kubeconfig" in cmd else None
+            content = None
+            if path:
+                with open(path) as f:
+                    content = json.load(f)
+            calls.append((cmd, path, content))
+            process = MagicMock()
+            process.poll.return_value = None
+            return process
+        return popen
+
+    def _assert_targets_cluster_b(self, calls):
+        cmd, path, content = calls[0]
+        self.assertEqual(content["clusters"][0]["cluster"]["server"], "https://cluster-b:6443")
+        self.assertEqual(content["users"][0]["user"]["token"], "secret")
+        self.assertFalse(os.path.exists(path), "kubeconfig must not outlive the connect")
+        return cmd
+
+    @patch.object(LocalTunnelConnectionStrategy, "_is_port_open", return_value=True)
+    @patch("subprocess.run", return_value=MagicMock(returncode=0, stderr=b""))
+    @patch("subprocess.Popen")
+    def test_local_tunnel_preflight_and_port_forward_use_injected_cluster(
+        self, mock_popen, mock_run, _
+    ):
+        popen_calls = []
+        mock_popen.side_effect = self._recording_popen(popen_calls)
+        strategy = LocalTunnelConnectionStrategy(
+            "sb", "ns", SandboxLocalTunnelConnectionConfig(), self._api_client()
+        )
+
+        strategy.connect()
+
+        cmd = self._assert_targets_cluster_b(popen_calls)
+        self.assertEqual(cmd[:3], ["kubectl", "port-forward", "svc/sandbox-router-svc"])
+        preflight = mock_run.call_args.args[0]
+        self.assertEqual(preflight[:3], ["kubectl", "get", "svc/sandbox-router-svc"])
+        self.assertEqual(
+            preflight[preflight.index("--kubeconfig") + 1],
+            cmd[cmd.index("--kubeconfig") + 1],
+            "preflight and port-forward must share one kubeconfig",
+        )
+
+    @patch.object(LocalTunnelConnectionStrategy, "_get_free_port", return_value=18080)
+    @patch.object(LocalTunnelConnectionStrategy, "_is_port_open", return_value=True)
+    @patch("subprocess.run", return_value=MagicMock(returncode=0, stderr=b""))
+    @patch("subprocess.Popen")
+    def test_local_tunnel_without_api_client_adds_no_flags(self, mock_popen, mock_run, *_):
+        calls = []
+        mock_popen.side_effect = self._recording_popen(calls)
+        strategy = LocalTunnelConnectionStrategy("sb", "ns", SandboxLocalTunnelConnectionConfig())
+
+        strategy.connect()
+
+        self.assertEqual(
+            calls[0][0],
+            ["kubectl", "port-forward", "svc/sandbox-router-svc", "18080:8080",
+             "-n", "agent-sandbox-system"],
+        )
+        self.assertEqual(
+            mock_run.call_args.args[0],
+            ["kubectl", "get", "svc/sandbox-router-svc", "-n", "agent-sandbox-system"],
+        )
+
+    @patch.object(LocalTunnelConnectionStrategy, "_preflight_check_router_service")
+    @patch("subprocess.Popen")
+    def test_local_tunnel_removes_kubeconfig_when_port_forward_crashes(self, mock_popen, _):
+        process = MagicMock()
+        process.poll.return_value = 1
+        process.communicate.return_value = (b"", b"boom")
+        calls = []
+
+        def popen(cmd, **kwargs):
+            calls.append(cmd[cmd.index("--kubeconfig") + 1])
+            return process
+
+        mock_popen.side_effect = popen
+        strategy = LocalTunnelConnectionStrategy(
+            "sb", "ns", SandboxLocalTunnelConnectionConfig(), self._api_client()
+        )
+
+        with self.assertRaises(SandboxPortForwardError):
+            strategy.connect()
+
+        self.assertFalse(os.path.exists(calls[0]))
+
+    @patch.object(SandboxdPodTunnelStrategy, "_is_port_open", return_value=True)
+    @patch("subprocess.Popen")
+    def test_sandboxd_pod_tunnel_uses_injected_cluster(self, mock_popen, _):
+        calls = []
+        mock_popen.side_effect = self._recording_popen(calls)
+        strategy = SandboxdPodTunnelStrategy(
+            "sb", "ns", SandboxdPodTunnelConnectionConfig(),
+            get_pod_name=lambda: "sb-pod", api_client=self._api_client(),
+        )
+
+        strategy.connect()
+
+        cmd = self._assert_targets_cluster_b(calls)
+        self.assertEqual(cmd[:3], ["kubectl", "port-forward", "pod/sb-pod"])
+
+    @patch.object(SandboxdPodTunnelStrategy, "_is_port_open", return_value=True)
+    @patch("subprocess.Popen")
+    def test_reused_tunnel_does_not_write_another_kubeconfig(self, mock_popen, _):
+        calls = []
+        mock_popen.side_effect = self._recording_popen(calls)
+        strategy = SandboxdPodTunnelStrategy(
+            "sb", "ns", SandboxdPodTunnelConnectionConfig(),
+            get_pod_name=lambda: "sb-pod", api_client=self._api_client(),
+        )
+
+        strategy.connect()
+        strategy.connect()
+
+        self.assertEqual(len(calls), 1)
+
+    def test_connector_passes_the_helpers_injected_client_to_tunnels(self):
+        injected = self._api_client()
+        helper = MagicMock(injected_api_client=injected)
+
+        for config, expected in (
+            (SandboxLocalTunnelConnectionConfig(), LocalTunnelConnectionStrategy),
+            (SandboxdPodTunnelConnectionConfig(), SandboxdPodTunnelStrategy),
+        ):
+            connector = SandboxConnector(
+                sandbox_id="sb", namespace="ns", connection_config=config, k8s_helper=helper,
+            )
+            self.assertIsInstance(connector.strategy, expected)
+            self.assertIs(connector.strategy._api_client, injected)
 
 
 class TestSandboxConnectorTransportRetry(unittest.TestCase):

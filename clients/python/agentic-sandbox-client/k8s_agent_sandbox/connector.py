@@ -39,7 +39,7 @@ from .models import (
     SandboxdInClusterConnectionConfig,
 )
 from .k8s_helper import K8sHelper
-from .utils import merge_headers
+from .utils import kubectl_kubeconfig_args, merge_headers
 from .exceptions import (
     SandboxNotReadyError,
     SandboxPortForwardError,
@@ -193,10 +193,13 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
         sandbox_id: str,
         namespace: str,
         config: SandboxLocalTunnelConnectionConfig,
+        api_client: Any | None = None,
     ) -> None:
         self.sandbox_id = sandbox_id
         self.namespace = namespace
         self.config = config
+        # Injected client whose cluster kubectl must target instead of the ambient one.
+        self._api_client = api_client
         self.port_forward_process: subprocess.Popen[bytes] | None = None
         self.base_url: str | None = None
         self._lock = threading.RLock()  # Reentrant: connect() calls close().
@@ -215,7 +218,7 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
         except (socket.timeout, ConnectionRefusedError):
             return False
 
-    def _preflight_check_router_service(self) -> None:
+    def _preflight_check_router_service(self, kube_args: list[str] | None = None) -> None:
         """Validates the router service exists in the configured namespace before port-forwarding.
 
         Raises SandboxPortForwardError with namespace context and a remediation hint if the
@@ -225,7 +228,7 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
         try:
             result = subprocess.run(
                 ["kubectl", "get", ROUTER_SERVICE_NAME,
-                 "-n", self.config.router_namespace],
+                 "-n", self.config.router_namespace, *(kube_args or [])],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=10,
@@ -274,11 +277,15 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
                     "failed to clean up the existing port-forward before reconnecting"
                 )
 
+        with kubectl_kubeconfig_args(self._api_client) as kube_args:
+            return self._start_tunnel(kube_args)
+
+    def _start_tunnel(self, kube_args: list[str]) -> str:
         start_time = time.monotonic()
         status = "success"
 
         try:
-            self._preflight_check_router_service()
+            self._preflight_check_router_service(kube_args)
 
             local_port = self._get_free_port()
 
@@ -290,7 +297,8 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
                     "kubectl", "port-forward",
                     ROUTER_SERVICE_NAME,
                     f"{local_port}:8080",
-                    "-n", self.config.router_namespace
+                    "-n", self.config.router_namespace,
+                    *kube_args,
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE
@@ -380,11 +388,13 @@ class SandboxdPodTunnelStrategy(ConnectionStrategy):
         namespace: str,
         config: SandboxdPodTunnelConnectionConfig,
         get_pod_name: Callable[[], str | None] | None = None,
+        api_client: Any | None = None,
     ):
         self.sandbox_id = sandbox_id
         self.namespace = namespace
         self.config = config
         self._get_pod_name = get_pod_name
+        self._api_client = api_client
         self.port_forward_process: subprocess.Popen | None = None
         self.base_url: str | None = None
         self.grpc_target: str | None = None
@@ -426,6 +436,10 @@ class SandboxdPodTunnelStrategy(ConnectionStrategy):
                 "sandbox pod name not resolved yet; cannot port-forward to sandboxd"
             )
 
+        with kubectl_kubeconfig_args(self._api_client) as kube_args:
+            return self._start_tunnel(pod_name, kube_args)
+
+    def _start_tunnel(self, pod_name: str, kube_args: list[str]) -> str:
         start_time = time.monotonic()
         status = "success"
         try:
@@ -439,6 +453,7 @@ class SandboxdPodTunnelStrategy(ConnectionStrategy):
                     f"{rest_local}:{self.config.rest_port}",
                     f"{grpc_local}:{self.config.grpc_port}",
                     "-n", self.namespace,
+                    *kube_args,
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -672,11 +687,22 @@ class SandboxConnector:
         elif isinstance(self.connection_config, SandboxGatewayConnectionConfig):
             return GatewayConnectionStrategy(self.connection_config, self.k8s_helper)
         elif isinstance(self.connection_config, SandboxLocalTunnelConnectionConfig):
-            return LocalTunnelConnectionStrategy(self.id, self.namespace, self.connection_config)
+            return LocalTunnelConnectionStrategy(
+                self.id,
+                self.namespace,
+                self.connection_config,
+                self.k8s_helper.injected_api_client,
+            )
         elif isinstance(self.connection_config, SandboxInClusterConnectionConfig):
             return InClusterConnectionStrategy(self.id, self.namespace, self.connection_config, self._get_pod_ip)
         elif isinstance(self.connection_config, SandboxdPodTunnelConnectionConfig):
-            return SandboxdPodTunnelStrategy(self.id, self.namespace, self.connection_config, self._get_pod_name)
+            return SandboxdPodTunnelStrategy(
+                self.id,
+                self.namespace,
+                self.connection_config,
+                self._get_pod_name,
+                self.k8s_helper.injected_api_client,
+            )
         elif isinstance(self.connection_config, SandboxdInClusterConnectionConfig):
             return SandboxdInClusterStrategy(
                 self.connection_config, self._get_pod_ip, self._get_service_fqdn

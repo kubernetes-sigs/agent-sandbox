@@ -13,12 +13,17 @@
 # limitations under the License.
 
 import re
+import warnings
 from datetime import datetime, timezone
 from typing import Literal, Optional, Union
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 _ENV_VAR_NAME_RE = re.compile(r"^[-._a-zA-Z][-._a-zA-Z0-9]*$")
 _RESERVED_HEADER_PREFIX = "x-sandbox-"
+_DEPRECATED_IN_CLUSTER_MODES = {
+    "service-dns": "in-cluster-service",
+    "pod-ip": "in-cluster-pod-ip",
+}
 
 class ExecutionResult(BaseModel):
     """A structured object for holding the result of a command execution."""
@@ -152,14 +157,28 @@ class SandboxdPodTunnelConnectionConfig(BaseModel):
 class SandboxdInClusterConnectionConfig(BaseModel):
     """Connect to sandboxd directly over the selected in-cluster address.
 
-    ``service-dns`` requires ``Sandbox.status.serviceFQDN`` and a Service
-    enabled on the Sandbox template. ``pod-ip`` uses ``Sandbox.status.podIPs``.
-    Neither mode falls back to the other. sandboxd's REST filesystem listener
-    defaults to port 8080 and its gRPC ProcessService listener to port 9090.
+    ``in-cluster-service`` requires ``Sandbox.status.serviceFQDN`` and a Service
+    enabled on the Sandbox template. ``in-cluster-pod-ip`` uses
+    ``Sandbox.status.podIPs``. Neither mode falls back to the other. sandboxd's
+    REST filesystem listener defaults to port 8080 and its gRPC ProcessService
+    listener to port 9090.
     """
-    mode: Literal["service-dns", "pod-ip"]
+    mode: Literal["in-cluster-service", "in-cluster-pod-ip"]
     rest_port: int = 8080
     grpc_port: int = 9090
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def map_deprecated_mode(cls, v: object) -> object:
+        if isinstance(v, str) and v in _DEPRECATED_IN_CLUSTER_MODES:
+            new = _DEPRECATED_IN_CLUSTER_MODES[v]
+            warnings.warn(
+                f"SandboxdInClusterConnectionConfig mode {v!r} is deprecated; use {new!r}",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            return new
+        return v
 
     @field_validator("rest_port", "grpc_port")
     @classmethod

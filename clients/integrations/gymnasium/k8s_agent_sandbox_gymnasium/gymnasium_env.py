@@ -22,8 +22,7 @@ try:
 except ModuleNotFoundError as e:
     raise ImportError(
         "The 'gymnasium' library is required to use 'k8s_agent_sandbox_gymnasium'. "
-        "Install it via `pip install k8s-agent-sandbox-gymnasium` "
-        "or install gymnasium directly: `pip install gymnasium`."
+        "Install it via `pip install gymnasium`."
     ) from e
 
 from typing import Optional

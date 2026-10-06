@@ -258,7 +258,7 @@ class AnalyzeTabTest(unittest.TestCase):
                                return_value=self.TABLE), \
              mock.patch.object(flake_report, "make_artifact_fetcher",
                                fake_fetcher):
-            return flake_report.analyze_tab("dash", "tab", 6)
+            return flake_report.analyze_tab("dash", "tab", 6)[:3]
 
     def test_red_runs_split_into_causes(self):
         _, _, infra = self.analyze()
@@ -312,7 +312,7 @@ class AnalyzeTabTest(unittest.TestCase):
                                return_value=table), \
              mock.patch.object(flake_report, "make_artifact_fetcher",
                                fake_fetcher):
-            flaky, consistent, _ = flake_report.analyze_tab("dash", "tab", 3)
+            flaky, consistent, _, _ = flake_report.analyze_tab("dash", "tab", 3)
         findings = {f["test"]: f for f in flaky + consistent}
         # TestP: one real failure on a single changelist. Before the fix the
         # aborted rerun's pass counted as a retest flip, promoting it to a
@@ -346,7 +346,7 @@ class AnalyzeTabTest(unittest.TestCase):
                                return_value=table), \
              mock.patch.object(flake_report, "make_artifact_fetcher",
                                fake_fetcher):
-            _, _, infra = flake_report.analyze_tab("dash", "tab", 2)
+            _, _, infra, _ = flake_report.analyze_tab("dash", "tab", 2)
         self.assertEqual(infra["pretest_failures"], 0)
         self.assertEqual(infra["infra_runs"], 0)
 
@@ -539,3 +539,264 @@ class UpdateIssuesClosedDedupTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FalsePositiveFilterTest(unittest.TestCase):
+    """The four filters that keep a PR's own breakage out of flake counts."""
+
+    QUERY = "kubernetes-ci-logs/pr-logs/directory/job"
+
+    def analyze(self, table, artifacts, pr_files=None, dirs=None):
+        fetched = []
+
+        def fake_fetcher(gcs_query, build_id):
+            def fetch(name):
+                fetched.append((build_id, name))
+                return artifacts.get(build_id, {}).get(name)
+            fetch.resolved_dir = lambda: (dirs or {}).get(build_id)
+            return fetch
+
+        with mock.patch.object(flake_report, "fetch_json", return_value=table), \
+             mock.patch.object(flake_report, "make_artifact_fetcher", fake_fetcher):
+            result = flake_report.analyze_tab("dash", "tab", 10, pr_files)
+        return result, fetched
+
+    def test_aborted_run_with_green_overall_does_not_count(self):
+        # Column 0: run aborted mid-suite; Overall never went red but TestA
+        # carries the junit error. Column 1: clean pass with no failing cell
+        # (must not cost an artifact fetch). Column 2: a real failure.
+        table = {
+            "query": self.QUERY,
+            "changelists": ["b0", "b1", "b2"],
+            "column_ids": ["b0", "b1", "b2"],
+            "timestamps": [300, 200, 100],
+            "tests": [
+                {"name": "job.Overall", "statuses": rle([1, 1, 12])},
+                {"name": "pkg.TestA", "statuses": rle([12, 1, 12])},
+            ],
+        }
+        artifacts = {"b0": {"finished.json": {"result": "aborted"}},
+                     "b2": {"finished.json": {"result": "FAILURE", "revision": "x"}}}
+        (flaky, consistent, infra, pr_local), fetched = self.analyze(table, artifacts)
+        self.assertEqual(flaky, [])
+        # One failing column on one changelist with a pass in the window is
+        # neither flaky nor consistent; nothing is reported.
+        self.assertEqual(consistent, [])
+        self.assertEqual(pr_local, [])
+        self.assertNotIn("b1", {b for b, _ in fetched})
+        # Infra accounting still counts only red-Overall columns.
+        self.assertEqual(infra["red_runs"], 1)
+        self.assertEqual(infra["aborted_runs"], 0)
+
+    def test_suite_wide_failure_is_excluded_per_suite(self):
+        # 80 Go rows and 10 pytest rows. Column 0 fails every pytest row
+        # (100% of that suite, 11% of the lane); column 1 fails 2 Go rows.
+        # Columns 2-3 are green so the Go rows look flaky across two PRs.
+        go = [{"name": f"pkg.TestGo{i}", "statuses": rle([1, 12 if i < 2 else 1, 1, 1])}
+              for i in range(80)]
+        py = [{"name": f"pytest.test_py{i}", "statuses": rle([12, 1, 1, 1])}
+              for i in range(10)]
+        table = {
+            "query": self.QUERY,
+            "changelists": ["b0", "b1", "b2", "b3"],
+            "column_ids": ["b0", "b1", "b2", "b3"],
+            "timestamps": [400, 300, 200, 100],
+            "tests": [{"name": "job.Overall", "statuses": rle([12, 12, 1, 1])}] + go + py,
+        }
+        artifacts = {b: {"finished.json": {"result": "FAILURE", "revision": "x"}}
+                     for b in ("b0", "b1")}
+        dirs = {"b0": "https://x/pr-logs/pull/o_r/10/job/b0",
+                "b1": "https://x/pr-logs/pull/o_r/11/job/b1"}
+        (flaky, consistent, _, pr_local), _ = self.analyze(table, artifacts, dirs=dirs)
+        names = {f["test"] for f in flaky}
+        self.assertFalse(any(n.startswith("pytest.") for n in names), names)
+        self.assertEqual(consistent, [])
+        self.assertEqual(pr_local, [])
+        # The Go rows failing in column 1 only ever failed on one PR, so
+        # they are not flaky either; but they were counted (not excluded).
+        self.assertEqual(names, set())
+
+    def test_setup_errors_across_a_suite_are_a_harness_failure(self):
+        # Three pytest rows, two of which fail in column 0 with fixture
+        # setup errors; under the size threshold, but the messages say the
+        # harness broke, not the tests.
+        table = {
+            "query": self.QUERY,
+            "changelists": ["b0", "b1", "b2"],
+            "column_ids": ["b0", "b1", "b2"],
+            "timestamps": [300, 200, 100],
+            "tests": [
+                {"name": "job.Overall", "statuses": rle([12, 1, 1])},
+                {"name": "pytest.test_a", "statuses": rle([12, 1, 1]),
+                 "messages": ['failed on setup with "TimeoutError"', "", ""]},
+                {"name": "pytest.test_b", "statuses": rle([12, 1, 1]),
+                 "messages": ['failed on setup with "TimeoutError"', "", ""]},
+                {"name": "pytest.test_c", "statuses": rle([1, 1, 1])},
+            ],
+        }
+        artifacts = {"b0": {"finished.json": {"result": "FAILURE", "revision": "x"}}}
+        (flaky, consistent, _, pr_local), _ = self.analyze(table, artifacts)
+        self.assertEqual((flaky, consistent, pr_local), ([], [], []))
+
+    def test_pr_touching_test_sources_is_not_a_flake(self):
+        table = {
+            "query": self.QUERY,
+            "changelists": ["b0", "b1", "b2", "b3", "b4"],
+            "column_ids": ["b0", "b1", "b2", "b3", "b4"],
+            "timestamps": [500, 400, 300, 200, 100],
+            "tests": [
+                {"name": "job.Overall", "statuses": rle([12, 12, 1, 1, 1])},
+                {"name": "pytest.test_x", "statuses": rle([12, 12, 1, 1, 1])},
+            ],
+        }
+        artifacts = {b: {"finished.json": {"result": "FAILURE", "revision": "x"}}
+                     for b in ("b0", "b1")}
+        dirs = {"b0": "https://x/pr-logs/pull/o_r/4242/job/b0",
+                "b1": "https://x/pr-logs/pull/o_r/4343/job/b1"}
+        calls = []
+
+        def pr_files(pr):
+            calls.append(pr)
+            return {"4242": ["test/e2e/clients/python/conftest.py"],
+                    "4343": ["README.md"]}[pr]
+
+        (flaky, consistent, _, pr_local), _ = self.analyze(
+            table, artifacts, pr_files=pr_files, dirs=dirs)
+        # 4242 touched the harness: excluded. 4343 did not: counted. One
+        # genuine failure on one PR with a pass is not flaky.
+        self.assertEqual(flaky, [])
+        self.assertEqual(consistent, [])
+        self.assertEqual(pr_local, [])
+        self.assertEqual(sorted(calls), ["4242", "4343"])
+
+        # Both PRs touching the harness: everything is PR-local.
+        (flaky, consistent, _, pr_local), _ = self.analyze(
+            table, artifacts, dirs=dirs,
+            pr_files=lambda pr: ["test/e2e/clients/python/conftest.py"])
+        self.assertEqual(flaky, [])
+        self.assertEqual([p["reason"] for p in pr_local], ["pr-touches-test-sources"])
+        self.assertEqual(pr_local[0]["runs"], 2)
+
+        # Without a lookup (--no-pr-files) both failures count and two
+        # distinct PRs make it flaky; the counter stays at zero.
+        (flaky, _, _, _), _ = self.analyze(table, artifacts, dirs=dirs)
+        (finding,) = flaky
+        self.assertEqual(finding["self_regression_cols"], 0)
+        self.assertEqual(finding["distinct_changelists"], 2)
+
+    def test_distinct_changelists_counts_prs_not_builds(self):
+        # Three pushes of the same PR each failed TestA; a fourth column
+        # from another PR passed. Build IDs differ, the PR does not.
+        table = {
+            "query": self.QUERY,
+            "changelists": ["b0", "b1", "b2", "b3"],
+            "column_ids": ["b0", "b1", "b2", "b3"],
+            "timestamps": [400, 300, 200, 100],
+            "tests": [
+                {"name": "job.Overall", "statuses": rle([12, 12, 12, 1])},
+                {"name": "pkg.TestA", "statuses": rle([12, 12, 12, 1])},
+                {"name": "pkg.TestB", "statuses": rle([1, 1, 1, 1])},
+            ],
+        }
+        artifacts = {b: {"finished.json": {"result": "FAILURE", "revision": "x"}}
+                     for b in ("b0", "b1", "b2")}
+        dirs = {b: "https://x/pr-logs/pull/o_r/77/job/" + b for b in ("b0", "b1", "b2")}
+        (flaky, consistent, _, pr_local), _ = self.analyze(table, artifacts, dirs=dirs)
+        self.assertEqual(flaky, [])
+        # Three pushes of one PR: PR-local, not "failing at head", even
+        # though the test passed on another PR earlier in the window.
+        self.assertEqual(consistent, [])
+        self.assertEqual([(p["test"], p["reason"]) for p in pr_local],
+                         [("pkg.TestA", "failing-only-on-one-pr")])
+
+    def test_consistent_requires_history(self):
+        table = {
+            "query": self.QUERY,
+            "changelists": ["b0", "b1", "b2"],
+            "column_ids": ["b0", "b1", "b2"],
+            "timestamps": [300, 200, 100],
+            "tests": [
+                {"name": "job.Overall", "statuses": rle([12, 12, 1])},
+                # Failing at head across two PRs, never passed: breakage.
+                {"name": "pkg.TestBroken", "statuses": rle([12, 12, 0])},
+                # Exists only on one PR's run: that PR's new test.
+                {"name": "pkg.TestNew", "statuses": rle([12, 0, 0])},
+            ],
+        }
+        artifacts = {b: {"finished.json": {"result": "FAILURE", "revision": "x"}}
+                     for b in ("b0", "b1")}
+        dirs = {"b0": "https://x/pr-logs/pull/o_r/1/job/b0",
+                "b1": "https://x/pr-logs/pull/o_r/2/job/b1"}
+        (flaky, consistent, _, pr_local), _ = self.analyze(table, artifacts, dirs=dirs)
+        self.assertEqual([f["test"] for f in consistent], ["pkg.TestBroken"])
+        self.assertEqual([p["test"] for p in pr_local], ["pkg.TestNew"])
+        report = flake_report.render_report("dash", flaky, consistent, [], 3, pr_local)
+        self.assertIn("PR-local failures", report)
+        self.assertIn("pkg.TestNew", report)
+
+
+class HelperTest(unittest.TestCase):
+    def test_suite_of(self):
+        self.assertEqual(flake_report.suite_of("pytest.test_x"), "pytest")
+        self.assertEqual(flake_report.suite_of(
+            "src/__tests__/tunnel.test.ts.PodTunnel > relays bytes"),
+            "src/__tests__/tunnel.test.ts")
+        self.assertEqual(flake_report.suite_of(
+            "test-e2e-typescript-sdk.test.ts.Sandbox > creates"),
+            "test-e2e-typescript-sdk.test.ts")
+        self.assertEqual(flake_report.suite_of(
+            "sigs.k8s.io/agent-sandbox/test/e2e/extensions.TestFoo/sub"),
+            "sigs.k8s.io/agent-sandbox/test/e2e/extensions")
+        self.assertEqual(flake_report.suite_of("pkg.TestA"), "pkg")
+        self.assertEqual(flake_report.suite_of("weird"), "other")
+
+    def test_test_source_paths(self):
+        self.assertIn("test/e2e/clients/python/",
+                      flake_report.test_source_paths("pytest.test_x"))
+        self.assertIn("clients/typescript/agentic-sandbox-client/src/__tests__/tunnel.test.ts",
+                      flake_report.test_source_paths("src/__tests__/tunnel.test.ts.PodTunnel > x"))
+        self.assertEqual(flake_report.test_source_paths(
+            "sigs.k8s.io/agent-sandbox/test/e2e/extensions.TestFoo"),
+            ["test/e2e/extensions/"])
+        self.assertEqual(flake_report.test_source_paths("weird"), [])
+
+    def test_touches(self):
+        self.assertTrue(flake_report.touches(["test/e2e/clients/python/conftest.py"],
+                                             ["test/e2e/clients/python/"]))
+        self.assertTrue(flake_report.touches(["a/b.ts"], ["a/b.ts"]))
+        self.assertFalse(flake_report.touches(["README.md"], ["test/e2e/clients/python/"]))
+        self.assertFalse(flake_report.touches(None, ["x/"]))
+
+    def test_pr_number_from_dir(self):
+        self.assertEqual(flake_report.pr_number_from_dir(
+            "https://storage.googleapis.com/kubernetes-ci-logs/pr-logs/pull/"
+            "kubernetes-sigs_agent-sandbox/1827/presubmit-agent-sandbox-test-e2e/210"),
+            "1827")
+        self.assertIsNone(flake_report.pr_number_from_dir(
+            "https://storage.googleapis.com/kubernetes-ci-logs/logs/periodic/210"))
+        self.assertIsNone(flake_report.pr_number_from_dir(None))
+
+    def test_align_messages(self):
+        # Aligned when lengths match.
+        self.assertEqual(flake_report.align_messages([12, 1, 0], ["a", "", "c"]),
+                         {0: "a", 2: "c"})
+        # Compressed to non-empty cells otherwise.
+        self.assertEqual(flake_report.align_messages([0, 12, 0, 1], ["x", "y"]),
+                         {1: "x", 3: "y"})
+        self.assertEqual(flake_report.align_messages([12, 12], None), {})
+
+    def test_make_pr_files_lookup_caches_and_tolerates_failure(self):
+        calls = []
+
+        def fake_gh(*args, input_text=None):
+            calls.append(args)
+            if "9" in args:
+                raise RuntimeError("boom")
+            return "a.py\nb.py\n"
+
+        with mock.patch.object(flake_report, "gh", fake_gh):
+            lookup = flake_report.make_pr_files_lookup("o/r")
+            self.assertEqual(lookup("8"), ["a.py", "b.py"])
+            self.assertEqual(lookup("8"), ["a.py", "b.py"])
+            self.assertIsNone(lookup("9"))
+        self.assertEqual(len(calls), 2)

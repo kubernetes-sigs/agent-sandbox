@@ -446,18 +446,24 @@ class SandboxdPodTunnelStrategy(ConnectionStrategy):
             rest_local = self._get_free_port()
             grpc_local = self._get_free_port()
             logging.info(f"Starting sandboxd pod tunnel for {self.sandbox_id}")
-            self.port_forward_process = subprocess.Popen(
-                [
-                    "kubectl", "port-forward",
-                    f"pod/{pod_name}",
-                    f"{rest_local}:{self.config.rest_port}",
-                    f"{grpc_local}:{self.config.grpc_port}",
-                    "-n", self.namespace,
-                    *kube_args,
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
+            try:
+                self.port_forward_process = subprocess.Popen(
+                    [
+                        "kubectl", "port-forward",
+                        f"pod/{pod_name}",
+                        f"{rest_local}:{self.config.rest_port}",
+                        f"{grpc_local}:{self.config.grpc_port}",
+                        "-n", self.namespace,
+                        *kube_args,
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+            except OSError as e:
+                raise SandboxPortForwardError(
+                    "failed to start sandboxd port-forward for pod "
+                    f"{self.namespace}/{pod_name}: {e}"
+                ) from e
             while time.monotonic() - start_time < self.config.port_forward_ready_timeout:
                 if self.port_forward_process.poll() is not None:
                     _, stderr = self.port_forward_process.communicate()
@@ -471,7 +477,10 @@ class SandboxdPodTunnelStrategy(ConnectionStrategy):
                     return self.base_url
                 time.sleep(0.05)
             self.close()
-            raise TimeoutError("Failed to establish sandboxd pod tunnel.")
+            raise SandboxPortForwardError(
+                "timed out waiting for sandboxd port-forward for pod "
+                f"{self.namespace}/{pod_name}"
+            )
         except Exception:
             status = "failure"
             raise

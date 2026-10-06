@@ -31,10 +31,14 @@ from kubernetes import client as sync_client
 from kubernetes_asyncio import client as async_client
 from kubernetes_asyncio.client import ApiException
 
-from .claim_adoption import validate_claim_name, validate_claim_for_adoption
+from .claim_adoption import (
+    validate_claim_name,
+    validate_claim_for_adoption,
+    validate_claim_warmpool,
+)
 from .async_k8s_helper import AsyncK8sHelper
 from .async_sandbox import AsyncSandbox
-from .exceptions import SandboxNotFoundError
+from .exceptions import SandboxNotFoundError, SandboxWarmPoolMismatchError
 from .k8s_helper import K8sHelper
 from .pod_metadata import build_pod_metadata, validate_labels
 from .utils import construct_sandbox_claim_lifecycle_spec
@@ -190,6 +194,7 @@ class AsyncSandboxClient(Generic[T]):
 
         self._active_connection_sandboxes: dict[tuple[str, str], T] = {}
         self._explicit_claims: set[tuple[str, str]] = set()
+        self._failed_deletes: set[tuple[str, str]] = set()
         self._lock = asyncio.Lock()
 
         if cleanup:
@@ -212,8 +217,8 @@ class AsyncSandboxClient(Generic[T]):
     async def close(self) -> None:
         """Shuts down tracked sandbox connections and the K8s API client.
 
-        A connection that fails to close remains tracked so a later call can
-        retry its cleanup.
+        A connection that fails to close or a claim whose deletion failed
+        remains tracked so a later call or atexit cleanup can retry.
         """
         async with self._lock:
             for key, sandbox in list(self._active_connection_sandboxes.items()):
@@ -222,7 +227,8 @@ class AsyncSandboxClient(Generic[T]):
                 except Exception as e:
                     logger.error(f"Failed to close sandbox connection: {e}")
                 else:
-                    self._active_connection_sandboxes.pop(key, None)
+                    if key not in self._failed_deletes:
+                        self._active_connection_sandboxes.pop(key, None)
         await self.k8s_helper.close()
 
     async def create_sandbox(
@@ -367,6 +373,7 @@ class AsyncSandboxClient(Generic[T]):
         async with self._lock:
             previous = self._active_connection_sandboxes.get((namespace, claim_name))
             self._active_connection_sandboxes[(namespace, claim_name)] = sandbox
+            self._failed_deletes.discard((namespace, claim_name))
         if previous is not None:
             await previous.close_connection()
         return sandbox
@@ -405,31 +412,17 @@ class AsyncSandboxClient(Generic[T]):
 
         try:
             if warmpool_name is not None:
-                claim_object = await self.k8s_helper.get_sandbox_claim(
+                existing_warmpool = await self.get_sandbox_claim_warmpool_name(
                     claim_name, namespace
                 )
-                if not claim_object:
-                    raise SandboxNotFoundError(
-                        f"SandboxClaim '{claim_name}' not found in namespace '{namespace}'."
-                    )
-                existing_warmpool = (
-                    claim_object.get("spec", {})
-                    .get("warmPoolRef", {})
-                    .get("name")
-                )
-                if existing_warmpool != warmpool_name:
-                    raise ValueError(
-                        f"SandboxClaim '{claim_name}' in namespace '{namespace}' references "
-                        f"warmpool '{existing_warmpool}', not '{warmpool_name}'. Refusing "
-                        f"to reattach."
-                    )
+                validate_claim_warmpool(claim_name, existing_warmpool, warmpool_name)
             sandbox_id = await self.k8s_helper.resolve_sandbox_name(
                 claim_name, namespace, timeout=resolve_timeout
             )
             sandbox_object = await self.k8s_helper.get_sandbox(sandbox_id, namespace)
             if not sandbox_object:
                 raise SandboxNotFoundError(f"Underlying Sandbox '{sandbox_id}' not found.")
-        except ValueError:
+        except SandboxWarmPoolMismatchError:
             # Warmpool mismatch is a signed-off refusal — propagate
             # untouched so the caller sees the security-relevant reason
             # rather than a generic "not found" wrap.
@@ -462,15 +455,20 @@ class AsyncSandboxClient(Generic[T]):
 
         async with self._lock:
             self._active_connection_sandboxes[key] = new_handle
+            self._failed_deletes.discard(key)
         return new_handle
 
     async def list_active_sandboxes(self) -> list[tuple[str, str]]:
         """Returns a list of ``(namespace, claim_name)`` tuples currently managed."""
         async with self._lock:
             for key, obj in list(self._active_connection_sandboxes.items()):
-                if not obj.is_active:
+                if not obj.is_active and key not in self._failed_deletes:
                     self._active_connection_sandboxes.pop(key, None)
-            return list(self._active_connection_sandboxes.keys())
+            return [
+                key
+                for key, obj in self._active_connection_sandboxes.items()
+                if obj.is_active
+            ]
 
     async def list_all_sandboxes(self, namespace: str = "default", label_selector: str | None = None) -> list[str]:
         """Lists all SandboxClaim names in the Kubernetes cluster for a namespace.
@@ -488,17 +486,20 @@ class AsyncSandboxClient(Generic[T]):
         key = (namespace, claim_name)
         async with self._lock:
             sandbox = self._active_connection_sandboxes.get(key)
-        try:
-            if sandbox:
+        if sandbox:
+            try:
                 await sandbox.terminate()
+            except BaseException:
                 async with self._lock:
-                    self._active_connection_sandboxes.pop(key, None)
-            else:
-                await self._delete_claim(claim_name, namespace)
-        except Exception as e:
-            logger.error(
-                f"Failed to delete sandbox '{claim_name}' in namespace '{namespace}': {e}"
-            )
+                    self._failed_deletes.add(key)
+                raise
+            async with self._lock:
+                self._failed_deletes.discard(key)
+                self._active_connection_sandboxes.pop(key, None)
+        else:
+            await self._delete_claim(claim_name, namespace)
+            async with self._lock:
+                self._failed_deletes.discard(key)
 
     async def delete_all(self) -> None:
         """Cleanup all tracked sandboxes managed by this client."""
@@ -513,10 +514,16 @@ class AsyncSandboxClient(Generic[T]):
 
     async def _delete_automatic_sandboxes(self) -> None:
         async with self._lock:
-            claims = list(self._active_connection_sandboxes)
-        for namespace, claim_name in claims:
-            if (namespace, claim_name) not in self._explicit_claims:
-                await self.delete_sandbox(claim_name, namespace)
+            items = list(self._active_connection_sandboxes.items())
+        for key, sandbox in items:
+            namespace, claim_name = key
+            try:
+                if key in self._explicit_claims:
+                    await sandbox.close_connection()
+                else:
+                    await self.delete_sandbox(claim_name, namespace)
+            except Exception as e:
+                logger.error(f"Cleanup failed for {claim_name} in namespace {namespace}: {e}")
 
     def _atexit_cleanup(self):
         """Best-effort atexit cleanup for claims and local sandbox resources.
@@ -636,3 +643,19 @@ class AsyncSandboxClient(Generic[T]):
     async def _delete_claim(self, claim_name: str, namespace: str, **kwargs) -> None:
         """Delete a claim through the client's shared Kubernetes helper."""
         await self.k8s_helper.delete_sandbox_claim(claim_name, namespace, **kwargs)
+
+    async def get_sandbox_claim_warmpool_name(
+        self, claim_name: str, namespace: str
+    ) -> str:
+        """Get warmpool name of a sandbox claim."""
+        claim_object = await self.k8s_helper.get_sandbox_claim(claim_name, namespace)
+        if not claim_object:
+            raise SandboxNotFoundError(
+                f"SandboxClaim '{claim_name}' not found in namespace '{namespace}'."
+            )
+        warmpool_name = (
+            claim_object.get("spec", {})
+            .get("warmPoolRef", {})
+            .get("name")
+        )
+        return warmpool_name

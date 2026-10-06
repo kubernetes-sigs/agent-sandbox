@@ -314,21 +314,25 @@ class TestAsyncSandbox(unittest.IsolatedAsyncioTestCase):
     def test_close_for_atexit(self):
         """Atexit cleanup delegates without awaiting the connector."""
         self.mock_connector._close_for_atexit = MagicMock()
+        self.sandbox._pod_name = "cached-pod-name"
 
         self.sandbox._close_for_atexit()
 
         self.mock_connector._close_for_atexit.assert_called_once_with()
         self.assertIsNone(self.sandbox.commands)
         self.assertIsNone(self.sandbox.files)
+        self.assertIsNone(self.sandbox._pod_name)
         self.assertTrue(self.sandbox._is_closed)
 
     async def test_close_connection(self):
         """Tests the public close_connection method."""
+        self.sandbox._pod_name = "cached-pod-name"
         await self.sandbox.close_connection()
 
         self.mock_connector.close.assert_awaited_once()
         self.assertIsNone(self.sandbox.commands)
         self.assertIsNone(self.sandbox.files)
+        self.assertIsNone(self.sandbox._pod_name)
         self.mock_tracer_manager.end_lifecycle_span.assert_called_once()
         self.assertTrue(self.sandbox._is_closed)
 

@@ -51,6 +51,7 @@ root = "../../.."
 
 [project.optional-dependencies]
 async = [
+    "aiohttp",
     "httpx",
     "kubernetes_asyncio<34.0.0",
 ]
@@ -66,6 +67,7 @@ test = [
     "pytest",
     "pytest-xdist",
     "pytest-asyncio",
+    "aiohttp",
     "httpx",
     "kubernetes_asyncio<34.0.0",
     "mypy~=1.14",
@@ -74,7 +76,6 @@ tracing = [
     "opentelemetry-api>=1.39,<1.42",
     "opentelemetry-sdk>=1.39,<1.42",
     "opentelemetry-exporter-otlp>=1.39,<1.42",
-    "opentelemetry-instrumentation-requests~=0.60b0",
 ]
 
 [tool.pytest.ini_options]

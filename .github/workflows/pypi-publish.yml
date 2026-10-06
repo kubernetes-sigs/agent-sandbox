@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  # Exercise test and build before a release tag does. publish-to-pypi is
+  # skipped for non-push events.
+  pull_request:
+    paths:
+      - ".github/workflows/pypi-publish.yml"
+      - "clients/python/agentic-sandbox-client/pyproject.toml"
 
 permissions:
   contents: read
@@ -66,6 +72,19 @@ jobs:
 
       - name: Check distribution packages
         run: python3 -m twine check dist/*
+
+      # Trusted publishing cannot create a new PyPI project, so an upload for
+      # an unregistered distribution fails at release time and aborts the whole
+      # upload. Catch that here instead.
+      - name: Verify every distribution is a registered PyPI project
+        run: |
+          for whl in dist/*.whl; do
+            name="$(basename "$whl" | cut -d- -f1)"
+            if ! curl -sfL -o /dev/null "https://pypi.org/pypi/${name}/json"; then
+              echo "::error::${name} is not a PyPI project. Register it with a Trusted Publisher before adding it to this workflow."
+              exit 1
+            fi
+          done
 
       - name: Store the distribution packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

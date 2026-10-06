@@ -80,8 +80,15 @@ jobs:
         run: |
           for whl in dist/*.whl; do
             name="$(basename "$whl" | cut -d- -f1)"
-            if ! curl -sfL -o /dev/null "https://pypi.org/pypi/${name}/json"; then
+            if ! code="$(curl -sSL --retry 3 --max-time 30 -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/${name}/json")"; then
+              echo "::error::Could not verify ${name} on PyPI after retries; refusing to continue."
+              exit 1
+            fi
+            if [ "$code" = "404" ]; then
               echo "::error::${name} is not a PyPI project. Register it with a Trusted Publisher before adding it to this workflow."
+              exit 1
+            elif [ "$code" != "200" ]; then
+              echo "::error::PyPI returned HTTP ${code} while verifying ${name}; refusing to continue."
               exit 1
             fi
           done

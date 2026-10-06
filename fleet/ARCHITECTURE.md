@@ -296,7 +296,7 @@ self-healing with no member present at all.
 
 | Failure | Behavior | Recovery |
 |---|---|---|
-| Member leader pod dies / node drained | The standby replica acquires the Lease within ~15s and starts the loops; the capacity report rarely goes stale at all. Pools unaffected. | The Deployment reschedules the dead pod; it rejoins as a follower. |
+| Member leader pod dies / node drained | The standby replica acquires the Lease within ~15s and starts the loops; the capacity report rarely goes stale at all. Pools unaffected. The standby is on another node only when `controller-pool` has more than one (the anti-affinity is preferred, not required, so a one-node pool still schedules both); on a one-node pool a *drain* takes both replicas and the next row applies. | The Deployment reschedules the dead pod; it rejoins as a follower. |
 | Both member replicas down | Capacity report goes stale (>90s). Next apply excludes the cluster from new placement and FREEZES its published entry; pools keep serving; claims route elsewhere. Emptied only after `stale_teardown_after_s`. | Restore the Deployment. Fresh capacity on the next tick → next apply places normally and the freeze lifts. |
 | Member's capacity publish path broken (bucket IAM, expired credential) while its read path works | Planner freezes the entry as above. Even past the teardown window the member refuses the empty pool set, because its own publishes have been failing >90s, and logs the refusal every tick. | Fix the publish path; the pending plan applies on the next tick. To drain deliberately, scale the member down or set weight 0. |
 | GCS unreachable from an agent | Reconcile loop backs off (exponential to 60s). Warmpools continue serving whatever they last knew. | Auto-recovers when GCS returns. |

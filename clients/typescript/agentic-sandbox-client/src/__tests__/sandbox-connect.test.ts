@@ -1656,6 +1656,8 @@ describe("Sandbox commands.start()", () => {
 
     await expect(pty.closeStdin()).rejects.toMatchObject({
       telemetryCode: "invalid_argument",
+      // The hint spells out the escape, not a raw EOT byte.
+      message: expect.stringContaining('write("\\x04")'),
     });
     await expect(plain.signal("SIGHUP" as never)).rejects.toMatchObject({
       telemetryCode: "invalid_argument",

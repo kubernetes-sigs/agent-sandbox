@@ -284,7 +284,7 @@ export class ProcessHandle {
     this.assertOpen();
     if (this.session.pty) {
       throw invalidArgument(
-        'closeStdin() is not supported for a PTY process; write("\x04") instead',
+        'closeStdin() is not supported for a PTY process; write("\\x04") instead',
       );
     }
     await this.session.writeStdin(null, opts);

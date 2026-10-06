@@ -136,6 +136,8 @@ def make_artifact_fetcher(gcs_query, build_id):
     cache = {}
 
     def resolve():
+        if not build_id or not gcs_query:
+            return None
         if "dir" not in cache:
             cache["dir"] = None
             if "/pr-logs/directory/" in gcs_query:
@@ -151,8 +153,6 @@ def make_artifact_fetcher(gcs_query, build_id):
         return cache["dir"]
 
     def fetch(name):
-        if not build_id or not gcs_query:
-            return None
         base = resolve()
         if not base:
             return None
@@ -289,16 +289,15 @@ def suite_of(name):
 
 def test_source_paths(name):
     """Repo paths whose modification by the failing PR makes a failure of
-    this test the PR's own regression rather than a flake: the test's own
-    file plus the harness that drives its suite."""
+    this test the PR's own regression rather than a flake. SDK suites
+    (pytest, vitest) match their whole SDK and e2e trees, since a change to
+    the SDK implementation or harness breaks tests in any file; Go suites
+    match their package."""
     if name.startswith("pytest."):
         return ["test/e2e/clients/python/", "clients/python/"]
-    m = re.match(r"(.*?\.test\.ts)", name)
-    if m:
-        f = m.group(1)
-        return [f"clients/typescript/agentic-sandbox-client/{f}",
-                f"test/e2e/clients/typescript/{f}",
-                "test/e2e/clients/typescript/framework/"]
+    if re.match(r"(.*?\.test\.ts)", name):
+        return ["test/e2e/clients/typescript/",
+                "clients/typescript/agentic-sandbox-client/"]
     m = re.match(r"^(.*?)\.(Test\w+)(/|$)", name)
     if m:
         pkg = m.group(1)
@@ -541,12 +540,13 @@ def analyze_tab(dashboard, tab, window, pr_files=None):
 
         # Recent completed results all failing => hard breakage, not a flake.
         # RUNNING cells haven't finished, so they say nothing either way;
-        # aborted runs never finished either. Breakage at head shows up on
+        # aborted runs never finished, and lane- or suite-wide outages say
+        # nothing about this test in particular. Breakage at head shows up on
         # more than one PR; a row whose recent failures all come from one
         # PR (several pushes of it, or a test that only exists there) is
         # that PR's own breakage and is reported as PR-local instead.
         recent = [cell(statuses, i) for i in range(ncols)
-                  if i not in aborted_cols
+                  if not excluded(i)
                   and cell(statuses, i) not in (0, RUNNING_STATUS)][:3]
         if recent and all(s in FAIL_STATUSES for s in recent):
             if distinct_cls >= 2:

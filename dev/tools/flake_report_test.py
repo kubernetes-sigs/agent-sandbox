@@ -200,6 +200,18 @@ class MakeArtifactFetcherTest(unittest.TestCase):
         fetch = flake_report.make_artifact_fetcher("bucket/logs/job", None)
         self.assertIsNone(fetch("finished.json"))
 
+        def no_fetch(url):
+            raise AssertionError(f"unexpected fetch of {url}")
+
+        # Resolving the run dir directly must not look up a pointer file
+        # for a missing build id or an empty query either.
+        with mock.patch.object(flake_report, "fetch_text", no_fetch):
+            fetch = flake_report.make_artifact_fetcher(
+                "bucket/pr-logs/directory/job", None)
+            self.assertIsNone(fetch.resolved_dir())
+            fetch = flake_report.make_artifact_fetcher("", "123")
+            self.assertIsNone(fetch.resolved_dir())
+
         def boom(url):
             raise RuntimeError("404")
 
@@ -709,6 +721,31 @@ class FalsePositiveFilterTest(unittest.TestCase):
         self.assertEqual([(p["test"], p["reason"]) for p in pr_local],
                          [("pkg.TestA", "failing-only-on-one-pr")])
 
+    def test_outage_columns_do_not_count_as_consecutive_failures(self):
+        # Columns 0-2 are lane-wide outages (every row fails); only column 3
+        # is a genuine single-PR failure of TestA, and column 4 passed. The
+        # outages must not make TestA look consistently failing at head.
+        rows = [{"name": f"pkg.Test{c}", "statuses": rle([12, 12, 12, 1, 1])}
+                for c in "BCD"]
+        table = {
+            "query": self.QUERY,
+            "changelists": ["b0", "b1", "b2", "b3", "b4"],
+            "column_ids": ["b0", "b1", "b2", "b3", "b4"],
+            "timestamps": [500, 400, 300, 200, 100],
+            "tests": [
+                {"name": "job.Overall", "statuses": rle([12, 12, 12, 12, 1])},
+                {"name": "pkg.TestA", "statuses": rle([12, 12, 12, 12, 1])},
+            ] + rows,
+        }
+        artifacts = {b: {"finished.json": {"result": "FAILURE", "revision": "x"}}
+                     for b in ("b0", "b1", "b2", "b3")}
+        dirs = {b: f"https://x/pr-logs/pull/o_r/{n}/job/{b}"
+                for n, b in enumerate(("b0", "b1", "b2", "b3"), start=1)}
+        (flaky, consistent, _, pr_local), _ = self.analyze(table, artifacts, dirs=dirs)
+        self.assertEqual(flaky, [])
+        self.assertEqual(consistent, [])
+        self.assertEqual(pr_local, [])
+
     def test_consistent_requires_history(self):
         table = {
             "query": self.QUERY,
@@ -753,8 +790,14 @@ class HelperTest(unittest.TestCase):
     def test_test_source_paths(self):
         self.assertIn("test/e2e/clients/python/",
                       flake_report.test_source_paths("pytest.test_x"))
-        self.assertIn("clients/typescript/agentic-sandbox-client/src/__tests__/tunnel.test.ts",
-                      flake_report.test_source_paths("src/__tests__/tunnel.test.ts.PodTunnel > x"))
+        # SDK implementation changes break tests in any vitest file, so the
+        # whole SDK tree counts, not just the test's own file.
+        ts = flake_report.test_source_paths("src/__tests__/tunnel.test.ts.PodTunnel > x")
+        self.assertTrue(flake_report.touches(
+            ["clients/typescript/agentic-sandbox-client/src/tunnel.ts"], ts))
+        self.assertTrue(flake_report.touches(
+            ["test/e2e/clients/typescript/framework/helpers.ts"], ts))
+        self.assertFalse(flake_report.touches(["clients/python/x.py"], ts))
         self.assertEqual(flake_report.test_source_paths(
             "sigs.k8s.io/agent-sandbox/test/e2e/extensions.TestFoo"),
             ["test/e2e/extensions/"])

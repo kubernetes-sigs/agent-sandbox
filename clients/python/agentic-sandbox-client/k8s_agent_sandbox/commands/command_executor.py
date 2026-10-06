@@ -70,8 +70,13 @@ class CommandExecutor:
                 exceeded, and the read timeout is extended past it so the
                 result still arrives. The legacy runtime reports this as an
                 ExecutionResult with ``timed_out`` set (runtimes that predate
-                the field ignore the limit); sandboxd uses it as the gRPC
-                deadline and raises RuntimeError when it is exceeded.
+                the field ignore the limit). sandboxd uses it as the gRPC
+                deadline and reports an exceeded deadline the same way, with
+                exit code 124 and ``timed_out`` set; output written before the
+                deadline is not returned. Through the sandbox router a request
+                is also bounded by the router's ``--proxy-timeout`` (180s by
+                default), so a longer ``command_timeout`` ends in a 502/504
+                from the router instead of a ``timed_out`` result.
         """
         span = trace.get_current_span()
         if span.is_recording():
@@ -79,8 +84,11 @@ class CommandExecutor:
             span.set_attribute("sandbox.command.executable", executable)
 
         if self.connector.is_sandboxd():
-            result = self._run_sandboxd(
-                command, timeout if command_timeout is None else command_timeout)
+            if command_timeout is None:
+                result = self._run_sandboxd(command, timeout)
+            else:
+                result = self._run_sandboxd(
+                    command, command_timeout, report_timeout=True)
             if span.is_recording():
                 span.set_attribute("sandbox.exit_code", result.exit_code)
             return result
@@ -102,7 +110,9 @@ class CommandExecutor:
             span.set_attribute("sandbox.exit_code", result.exit_code)
         return result
 
-    def _run_sandboxd(self, command: str, timeout: float) -> ExecutionResult:
+    def _run_sandboxd(
+        self, command: str, timeout: float, report_timeout: bool = False
+    ) -> ExecutionResult:
         """Execute via sandboxd's gRPC ProcessService.
 
         The shell-string API is preserved by wrapping the command in
@@ -133,6 +143,12 @@ class CommandExecutor:
         try:
             response = stub.Execute(request, timeout=timeout)
         except grpc.RpcError as e:
+            if report_timeout and e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
+                return ExecutionResult(
+                    stderr=f"Command timed out after {timeout:g} seconds",
+                    exit_code=124,
+                    timed_out=True,
+                )
             if e.code() == grpc.StatusCode.UNAVAILABLE:
                 self.connector.invalidate_sandboxd_transport(channel)
             raise RuntimeError(

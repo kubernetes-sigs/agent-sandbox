@@ -58,8 +58,13 @@ class AsyncCommandExecutor:
                 exceeded, and the read timeout is extended past it so the
                 result still arrives. The legacy runtime reports this as an
                 ExecutionResult with ``timed_out`` set (runtimes that predate
-                the field ignore the limit); sandboxd uses it as the gRPC
-                deadline and raises RuntimeError when it is exceeded.
+                the field ignore the limit). sandboxd uses it as the gRPC
+                deadline and reports an exceeded deadline the same way, with
+                exit code 124 and ``timed_out`` set; output written before the
+                deadline is not returned. Through the sandbox router a request
+                is also bounded by the router's ``--proxy-timeout`` (180s by
+                default), so a longer ``command_timeout`` ends in a 502/504
+                from the router instead of a ``timed_out`` result.
         """
         span = trace.get_current_span()
         if span.is_recording():
@@ -67,9 +72,12 @@ class AsyncCommandExecutor:
             span.set_attribute("sandbox.command.executable", executable)
 
         if self.connector.is_sandboxd():
-            result = await self._run_sandboxd(
-                command, timeout if command_timeout is None else command_timeout
-            )
+            if command_timeout is None:
+                result = await self._run_sandboxd(command, timeout)
+            else:
+                result = await self._run_sandboxd(
+                    command, command_timeout, report_timeout=True
+                )
             if span.is_recording():
                 span.set_attribute("sandbox.exit_code", result.exit_code)
             return result
@@ -96,8 +104,14 @@ class AsyncCommandExecutor:
             span.set_attribute("sandbox.exit_code", result.exit_code)
         return result
 
-    async def _run_sandboxd(self, command: str, timeout: float) -> ExecutionResult:
-        """Execute through sandboxd while preserving the shell-string API."""
+    async def _run_sandboxd(
+        self, command: str, timeout: float, report_timeout: bool = False
+    ) -> ExecutionResult:
+        """Execute through sandboxd while preserving the shell-string API.
+
+        With report_timeout, an exceeded deadline is returned as a timed-out
+        ExecutionResult instead of raising.
+        """
         try:
             import grpc
             from k8s_agent_sandbox.commands._process_stubs import (
@@ -119,6 +133,12 @@ class AsyncCommandExecutor:
         try:
             response = await stub.Execute(request, timeout=timeout)
         except grpc.RpcError as e:
+            if report_timeout and e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
+                return ExecutionResult(
+                    stderr=f"Command timed out after {timeout:g} seconds",
+                    exit_code=124,
+                    timed_out=True,
+                )
             if e.code() == grpc.StatusCode.UNAVAILABLE:
                 await self.connector.invalidate_sandboxd_transport(channel)
             raise RuntimeError(

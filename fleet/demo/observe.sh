@@ -193,7 +193,9 @@ fail_modes() {
     | gcloud storage cp - "gs://$FLEET_BUCKET/fleet/assignments.json"
   echo "sleeping 45s; check fleet-member logs for parse error:"
   sleep 45
-  kubectl -n "$NS" logs deployment/fleet-member --tail=20 || true
+  # By label, with --prefix: two replicas, and only the Lease holder logs
+  # anything about reconciling. deployment/ would pick one pod at random.
+  kubectl -n "$NS" logs -l app=fleet-member --prefix --tail=20 || true
   echo
   read -rp "press enter to restore assignments (re-apply spec)..."
   fleetctl apply -f "$FLEET_SPEC"

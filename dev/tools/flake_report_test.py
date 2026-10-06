@@ -800,3 +800,11 @@ class HelperTest(unittest.TestCase):
             self.assertEqual(lookup("8"), ["a.py", "b.py"])
             self.assertIsNone(lookup("9"))
         self.assertEqual(len(calls), 2)
+
+    def test_make_pr_files_lookup_without_gh_binary(self):
+        # Report-only mode on a machine without gh: the lookup must degrade
+        # to "unknown", not raise and skip the tab.
+        with mock.patch.object(flake_report, "gh",
+                               side_effect=FileNotFoundError("gh")):
+            lookup = flake_report.make_pr_files_lookup("o/r")
+            self.assertIsNone(lookup("8"))

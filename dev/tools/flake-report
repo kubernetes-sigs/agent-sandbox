@@ -321,8 +321,9 @@ def touches(changed_files, paths):
 def make_pr_files_lookup(repo):
     """Returns lookup(pr) -> list of changed file paths, None if unknown.
 
-    One gh call per distinct PR per run, cached; a failed lookup disables
-    the self-regression exclusion for that PR rather than guessing.
+    One gh call per distinct PR per run, cached; a failed lookup (gh error,
+    or no gh binary at all in report-only mode) disables the self-regression
+    exclusion for that PR rather than guessing or failing the tab.
     """
     cache = {}
 
@@ -332,7 +333,7 @@ def make_pr_files_lookup(repo):
                 out = gh("pr", "view", str(pr), "--repo", repo,
                          "--json", "files", "--jq", ".files[].path")
                 cache[pr] = [line for line in out.splitlines() if line]
-            except RuntimeError:
+            except (RuntimeError, OSError):
                 cache[pr] = None
         return cache[pr]
 

@@ -14,10 +14,9 @@ This integration provides a standard [Gymnasium](https://gymnasium.farama.org/) 
 
 ### Installation
 
-Until a release includes the updated core SDK requirement, install the Gymnasium integration from the current Agent Sandbox source:
-
 ```bash
-pip install "git+https://github.com/kubernetes-sigs/agent-sandbox.git@main#subdirectory=clients/integrations/gymnasium"
+# Replace <tag> with a release tag from https://github.com/kubernetes-sigs/agent-sandbox/releases
+pip install "git+https://github.com/kubernetes-sigs/agent-sandbox.git@<tag>#subdirectory=clients/integrations/gymnasium"
 ```
 
 > **Note**: You will also need a running Kubernetes cluster with the Sandbox controller and warmpool deployed.

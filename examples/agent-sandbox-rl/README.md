@@ -97,7 +97,7 @@ raises a clear error if it's missing. (No `r2egym` extra for that reason.)
 
 The **OpenHands adapter** (`adapters.openhands`) likewise imports lazily and
 needs the [`openhands-k8s-agent-sandbox`](../../clients/integrations/openhands)
-integration (`pip install openhands-k8s-agent-sandbox`), which pulls the
+integration (`pip install -e clients/integrations/openhands`), which pulls the
 OpenHands agent SDK — note the SDK requires **Python >= 3.12**.
 
 ### 4. Verify

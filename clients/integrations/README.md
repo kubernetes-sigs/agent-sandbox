@@ -18,3 +18,4 @@ This directory contains specialized adapters and integration packages that bridg
 3. Include unit tests under `tests/unit/` using `pytest`.
 4. Register the test suite in [`dev/tools/test-unit`](../../dev/tools/test-unit) under `PYTHON_TEST_SUITES`.
 5. Exclude test packages from discovery (`[tool.setuptools.packages.find].exclude = ["tests*"]`) and configure `[tool.setuptools.exclude-package-data]` if using `setuptools_scm`.
+6. Do not add the package to the [PyPI publish workflow](../../.github/workflows/pypi-publish.yml); only the core SDK `k8s-agent-sandbox` is published. Document installing it with `pip install "git+https://github.com/kubernetes-sigs/agent-sandbox.git@<tag>#subdirectory=clients/integrations/<name>"`, keeping `<tag>` as a placeholder.

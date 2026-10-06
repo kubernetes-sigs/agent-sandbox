@@ -92,7 +92,7 @@ def temp_namespace(
     tc,
 ):
     """Creates and yields a temporary namespace for testing"""
-    namespace = request.config.getoption("--namespace")
+    namespace = request.config.getoption("--namespace-prefix")
     namespace = tc.create_temp_namespace(prefix=namespace)
     yield namespace
     tc.delete_namespace(namespace)

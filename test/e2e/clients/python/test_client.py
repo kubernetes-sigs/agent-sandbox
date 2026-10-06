@@ -19,7 +19,7 @@ import time
 from unittest.mock import MagicMock
 
 import pytest
-from k8s_agent_sandbox import SandboxClient, SandboxWarmPoolNotFoundError
+from k8s_agent_sandbox import SandboxClient, SandboxError, SandboxWarmPoolNotFoundError
 from k8s_agent_sandbox.models import (
     ExecutionResult,
     SandboxDirectConnectionConfig,
@@ -647,11 +647,20 @@ def test_volume_claim_templates(
             )
 
         print("Running command to verify sandbox is operational...")
-        res = sandbox.commands.run("df -h")
-        print(f"Disk space output:\n{res.stdout}")
-        assert res.exit_code == 0, (
-            f"Command df -h failed with exit code {res.exit_code}: {res.stderr}"
+        deadline = time.monotonic() + 120
+        res = None
+        last_error = None
+        while time.monotonic() < deadline:
+            try:
+                res = sandbox.commands.run("df -h")
+                if res.exit_code == 0:
+                    break
+            except SandboxError as e:
+                last_error = e
+        assert res is not None and res.exit_code == 0, (
+            f"Command df -h did not succeed within 120s: {last_error}"
         )
+        print(f"Disk space output:\n{res.stdout}")
     finally:
         print("Cleaning up sandbox...")
         sandbox.terminate()

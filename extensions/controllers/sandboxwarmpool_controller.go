@@ -447,13 +447,15 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	// Reconcile the pool (create or delete Sandboxes as needed)
 	requeueAfter, err := r.reconcilePool(ctx, warmPool)
-	if err != nil {
-		return ctrl.Result{}, err
+	// Update status if it has changed, even when reconcilePool encountered
+	// partial batch errors (e.g., APF throttling during slowStartBatch), so
+	// status.replicas and status.readyReplicas reflect already-observed
+	// sandboxes rather than freezing until all batches succeed (#1850).
+	if statusErr := r.updateStatus(ctx, oldStatus, warmPool); statusErr != nil {
+		logger.Error(statusErr, "Failed to update SandboxWarmPool status")
+		err = errors.Join(err, statusErr)
 	}
-
-	// Update status if it has changed
-	if err := r.updateStatus(ctx, oldStatus, warmPool); err != nil {
-		logger.Error(err, "Failed to update SandboxWarmPool status")
+	if err != nil {
 		return ctrl.Result{}, err
 	}
 

@@ -30,7 +30,10 @@
 # VERIFY -- publishing is wrapped in try/except so the member survives a broken
 # hub, which also means a misconfiguration is quiet. Check all three:
 #
-#   kubectl logs -n multi-cluster-fleet deploy/fleet-member | grep -i clusterprofile
+#   kubectl logs -n multi-cluster-fleet -l app=fleet-member --prefix | grep -i clusterprofile
+#     (by label, not deploy/: the Deployment runs two replicas and only the
+#     Lease holder publishes, so deploy/ can pick the idle follower and show
+#     nothing on a perfectly healthy member)
 #   kubectl --context hub get clusterprofile <cluster> -n fleet-system \
 #     -o jsonpath='{.status.properties}' | tr ',' '\n' | grep agents.x-k8s.io
 #   kubectl --context hub get clusterprofile <cluster> -n fleet-system \

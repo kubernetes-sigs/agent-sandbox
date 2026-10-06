@@ -52,6 +52,19 @@ spec:
           operator: Equal
           value: "true"
           effect: NoSchedule
+      # Keep the two replicas on different nodes when controller-pool has more
+      # than one. PREFERRED, not required: create-gke-standard-fleet.sh sizes
+      # that pool at a single node, and a hard rule would leave the standby
+      # Pending there. On one node the standby still covers a leader crash or
+      # an image roll, just not a node drain -- grow the pool for that.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels: {app: fleet-member}
+                topologyKey: kubernetes.io/hostname
       containers:
         - name: fleet-member
           image: ${FLEET_MEMBER_IMAGE}

@@ -763,3 +763,15 @@ def test_a_rejected_report_contributes_no_partial_state(caplog):
     )
     assert reg.clusters["b"] not in reg.fresh()
     assert any("skipping capacity report" in r.message for r in caplog.records)
+
+
+def test_claim_p90_is_none_when_the_member_did_not_measure_it():
+    # Same rule as active_claims / node_pressure_score: unmeasured is None,
+    # never 0.0 -- a zero would read as a measured sub-millisecond p90.
+    reg = GCSInventory(FakeGCS({
+        "b": {"cluster": "b", "warmpool_depth": 4, "updated_at": _now_iso()},
+        "c": {"cluster": "c", "warmpool_depth": 4, "claim_p90_ms": 530,
+              "updated_at": _now_iso()},
+    })).load({"b": 1.0, "c": 1.0})
+    assert reg.clusters["b"].claim_p90_ms is None
+    assert reg.clusters["c"].claim_p90_ms == 530.0

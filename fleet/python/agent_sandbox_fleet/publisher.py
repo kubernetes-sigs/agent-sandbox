@@ -200,7 +200,12 @@ class ClusterProfilePublisher:
         put(PROP_HEARTBEAT, report.get("updated_at", ""))
         put(PROP_WARMPOOL_DEPTH, int(report.get("warmpool_depth", 0) or 0))
         put(PROP_WARMPOOL_READY, int(report.get("warmpool_ready", 0) or 0))
-        put(PROP_CLAIM_P90_MS, float(report.get("claim_p90_ms", 0.0) or 0.0))
+        # Omit when unmeasured, like the two signals below: the member does not
+        # scrape claim latency yet, and a published 0.0 reads as a measured
+        # sub-millisecond p90.
+        p90 = report.get("claim_p90_ms")
+        if p90 is not None:
+            put(PROP_CLAIM_P90_MS, float(p90))
 
         # Same omit-don't-zero rule as pressure below: 0 in-flight claims is the
         # most attractive value LeastLoaded can see.

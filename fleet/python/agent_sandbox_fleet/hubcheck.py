@@ -191,9 +191,10 @@ def main(argv: list[str] | None = None) -> int:
             "warmpool_depth": 0,
             "warmpool_ready": 0,
             "active_claims": 0,
-            "claim_p90_ms": 0.0,
-            # Left as None on purpose: publishing 0.0 would read as "idle" and
-            # actively attract placement. Absent means unmeasured.
+            # Both left as None on purpose: a published 0.0 reads as a measured
+            # value -- a sub-millisecond p90, or "idle", which would actively
+            # attract placement. Absent means unmeasured.
+            "claim_p90_ms": None,
             "node_pressure_score": None,
         })
     except Exception as e:

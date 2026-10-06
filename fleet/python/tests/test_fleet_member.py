@@ -865,3 +865,11 @@ def test_election_failure_exits_two_instead_of_idling(monkeypatch):
     fm._run_election()
     assert fm._stop.is_set()
     assert fm._exit_code == 2
+
+
+def test_capacity_report_leaves_unmeasured_claim_latency_null():
+    from dataclasses import asdict
+    payload = asdict(fleet_member.CapacityReport(cluster="test"))
+    assert payload["claim_p90_ms"] is None
+    assert payload["active_claims"] is None
+    assert payload["node_pressure_score"] is None

@@ -55,7 +55,7 @@ class PlannerCluster:
     warmpool_ready: int = 0
     # None == the member could not measure it. Distinct from 0 == no claims.
     active_claims: int | None = None
-    claim_p90_ms: float = 0.0
+    claim_p90_ms: float | None = None  # None == unmeasured; nothing scores on it yet
     # None == the member could not measure it. Distinct from 0.0 == idle.
     node_pressure_score: float | None = None
     # Metadata

@@ -265,7 +265,13 @@ class GCSInventory:
                         None if r.get("active_claims") is None
                         else int(r["active_claims"])
                     ),
-                    claim_p90_ms=float(r.get("claim_p90_ms", 0.0)),
+                    # None (or absent) == unmeasured; the member does not scrape
+                    # claim latency yet. A non-numeric value still raises and
+                    # skips the whole report (see the malformed-field test).
+                    claim_p90_ms=(
+                        None if r.get("claim_p90_ms") is None
+                        else float(r["claim_p90_ms"])
+                    ),
                     # None (or absent) means the member could not measure pressure.
                     # Do NOT coerce to 0.0 — that reads as "idle" and CapacityAware
                     # would then prefer the cluster that failed to report.
@@ -453,7 +459,7 @@ class ClusterProfileInventory:
             warmpool_ready=_int_prop(props, PROP_WARMPOOL_READY) or 0,
             # Absent stays None, never 0 — see GCSInventory for why.
             active_claims=_int_prop(props, PROP_ACTIVE_CLAIMS),
-            claim_p90_ms=_float_prop(props, PROP_CLAIM_P90_MS) or 0.0,
+            claim_p90_ms=_float_prop(props, PROP_CLAIM_P90_MS),  # absent stays None
             # Absent stays None, never 0.0 — see GCSInventory for why.
             node_pressure_score=pressure,
             report_age_s=self._freshness(name, props, conds, now),

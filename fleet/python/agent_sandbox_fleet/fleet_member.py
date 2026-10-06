@@ -205,7 +205,11 @@ class CapacityReport:
     # publishes 0 because its list blew up wins every tiebreak and attracts
     # the placement it is least able to serve.
     active_claims: int | None = None
-    claim_p90_ms: float = 0.0  # v2 — Prometheus scrape deferred
+    # None == NOT MEASURED. The member does not scrape claim latency yet (a
+    # Prometheus read of the controller's metrics is a follow-up), and 0.0
+    # would read as a measured sub-millisecond p90. Same rule as the two
+    # fields below: unmeasured is omitted, never zeroed.
+    claim_p90_ms: float | None = None
     # None == NOT MEASURED, which is NOT the same as 0.0 == no pressure.
     # It was 0.0-on-failure, and that is actively dangerous: a cluster whose
     # pressure calc blew up published "completely idle" and CapacityAware

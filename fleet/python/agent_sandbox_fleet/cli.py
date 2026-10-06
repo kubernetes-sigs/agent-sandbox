@@ -208,7 +208,9 @@ def cmd_status(args) -> int:
         # (light mode, or the list failed), and 0 would read as a healthy idle.
         claims = "-" if c.active_claims is None else str(c.active_claims)
         print(fmt.format(name, str(age), c.warmpool_depth, c.warmpool_ready,
-                         claims, f"{c.claim_p90_ms:.1f}", n_pools))
+                         claims,
+                         "-" if c.claim_p90_ms is None else f"{c.claim_p90_ms:.1f}",
+                         n_pools))
 
     if assn is not None:
         frozen = sorted(n for n, ca in assn.clusters.items() if ca.stale_since)

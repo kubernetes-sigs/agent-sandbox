@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import logging
 import os
 import subprocess
 import sys
@@ -20,7 +19,6 @@ import time
 from unittest.mock import MagicMock
 
 import pytest
-import yaml
 from k8s_agent_sandbox import SandboxClient, SandboxWarmPoolNotFoundError
 from k8s_agent_sandbox.models import (
     ExecutionResult,
@@ -30,17 +28,6 @@ from k8s_agent_sandbox.models import (
     SandboxTracerConfig,
 )
 from k8s_agent_sandbox.sandbox import Sandbox
-
-from test.e2e.clients.python.framework.sdk_helpers import (
-    WARMPOOL_YAML_PATH,
-    TEMPLATE_YAML_PATH,
-    get_image_prefix,
-    get_image_tag,
-)
-
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", force=True
-)
 
 pytestmark = pytest.mark.example
 
@@ -152,8 +139,6 @@ def test_sandbox_cleanup_flag_true(
         raise RuntimeError(
             f"Could not parse claim name.\nSTDOUT: {res_true.stdout}\nSTDERR: {res_true.stderr}"
         )
-
-        print(f"Created sandbox '{claim_true}' in subprocess. Verifying deletion...")
 
     # Verify the claim was successfully deleted by the OS closing the subprocess
     start_time = time.monotonic()
@@ -469,7 +454,7 @@ def test_creation_get_and_list_sandboxes(
     sandbox_warmpool,
     temp_namespace,
     deploy_router,
-) -> tuple[Sandbox, Sandbox]:
+):
     print(
         f"Creating sandbox with warm pool '{sandbox_warmpool}' in namespace '{temp_namespace}'..."
     )
@@ -506,8 +491,6 @@ def test_creation_get_and_list_sandboxes(
     assert reattached_result.exit_code == 0
     assert reattached_result.stdout.strip() == "Re-attached"
     print("\n--- get_sandbox Test Passed ---")
-
-    return sandbox, sandbox2
 
 
 def test_claim_annotation(

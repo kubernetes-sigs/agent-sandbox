@@ -1,0 +1,80 @@
+# One NetworkPolicy for every sandbox pod an agent-sandbox-rl fleet creates in
+# this namespace. It selects the label the SDK puts on all of its pods
+# (app=agent-sandbox-rl), so it covers every template, every pool and every
+# claim, and it does not change when templates are created or deleted.
+#
+# It replaces the per-template policies the controller would otherwise create:
+# the fleet's templates are created with networkPolicyManagement: Unmanaged
+# (TemplateSpec.network_policy_management="Unmanaged"), and the controller then
+# creates none. Nothing selects on a per-template or per-pod label any more.
+#
+# Rules mirror the controller's secure-by-default policy (ingress from the
+# sandbox-router only, egress to public IPs only) with the two things an RL
+# fleet needs that the default assumes away: the trainer reaches sandboxes
+# directly (ingress 1), and Unmanaged pods keep cluster DNS (egress 1).
+#
+# Edit metadata.namespace to the fleet's namespace before applying.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-sandbox-rl-fleet
+  namespace: agent-sandbox-rl
+spec:
+  podSelector:
+    matchLabels:
+      app: agent-sandbox-rl
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # 1. The trainer: any pod in this namespace that is not itself a sandbox
+    #    (orchestrator, rollout workers). Sandboxes cannot reach each other.
+    #    If the trainer runs in another namespace, add a namespaceSelector peer
+    #    for it here. kubectl exec goes through the API server and the kubelet,
+    #    not through the pod network, so it needs no rule.
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: NotIn
+                values: ["agent-sandbox-rl"]
+    # 2. The sandbox-router, as in the controller's default policy.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: agent-sandbox-system
+          podSelector:
+            matchLabels:
+              app: sandbox-router
+  egress:
+    # 1. Cluster DNS. The controller points pods at public resolvers only in
+    #    secure-by-default (Managed, no custom rules) mode; Unmanaged pods keep
+    #    ClusterFirst DNS, so kube-dns has to be reachable.
+    #    With NodeLocal DNSCache, also allow the cache address (GKE: 169.254.20.10/32).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # 2. Public internet only. Same carve-outs as the controller's default: no
+    #    private ranges (cluster and VPC), no link-local (metadata server).
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+        - ipBlock:
+            cidr: ::/0
+            except:
+              - fc00::/7
+              - fe80::/10

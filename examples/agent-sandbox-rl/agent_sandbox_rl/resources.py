@@ -141,6 +141,7 @@ class Resources:
           return False
         raise OwnedByAnotherRunError("SandboxTemplate", template_name, cur_owner)
       self._reconcile_template_labels(template_name, existing)
+      self._reconcile_template_network_policy(template_name, existing, template)
       return False
     except client.ApiException as e:
       if e.status != 404:
@@ -245,6 +246,15 @@ class Resources:
           pod_spec["containers"] = merged_containers
       pod_spec.update(extra)
 
+    spec: dict = {
+        "podTemplate": {
+            # See _pod_template_labels: this is how pods carry the run id.
+            "metadata": {"labels": self._pod_template_labels(template_name)},
+            "spec": pod_spec,
+        }
+    }
+    if template.network_policy_management:
+      spec["networkPolicyManagement"] = template.network_policy_management
     return {
         "apiVersion": f"{constants.GROUP}/{constants.VERSION}",
         "kind": "SandboxTemplate",
@@ -253,13 +263,7 @@ class Resources:
             "namespace": self.namespace,
             "labels": dict(self.labels),
         },
-        "spec": {
-            "podTemplate": {
-                # See _pod_template_labels: this is how pods carry the run id.
-                "metadata": {"labels": self._pod_template_labels(template_name)},
-                "spec": pod_spec,
-            }
-        },
+        "spec": spec,
     }
 
   def _pod_template_labels(self, template_name: str) -> dict:
@@ -319,6 +323,38 @@ class Resources:
       logger.warning("Failed to reconcile labels on SandboxTemplate '%s'; the "
                      "circuit breaker/reaper may under-count this run's pods for "
                      "its image", template_name, exc_info=True)
+
+  def _reconcile_template_network_policy(self, template_name: str, existing: dict,
+                                         template: TemplateSpec) -> None:
+    """Patch a pre-existing template's ``spec.networkPolicyManagement`` to this
+    run's setting when it differs; the controller then deletes or recreates the
+    template's NetworkPolicy. Only when the run sets one: ``None`` means "keep
+    what the template has", so a run without an opinion never flips a template
+    an operator set to Unmanaged back to Managed. The field is outside the pod
+    template, so the patch does not roll the template's pools. Failures warn:
+    the run still works, under the template's current mode.
+
+    Same ownership rule as `_reconcile_template_labels`: callers reach this only
+    for templates that are this run's or nobody's."""
+    desired = template.network_policy_management
+    if not desired:
+      return
+    # The controller treats an absent field as Managed.
+    current = (existing.get("spec") or {}).get("networkPolicyManagement") or "Managed"
+    if current == desired:
+      return
+    try:
+      self.custom_api.patch_namespaced_custom_object(
+          group=constants.GROUP, version=constants.VERSION,
+          namespace=self.namespace, plural=constants.TEMPLATES_PLURAL,
+          name=template_name,
+          body={"spec": {"networkPolicyManagement": desired}})
+      logger.info("Set networkPolicyManagement=%s on pre-existing SandboxTemplate "
+                  "'%s' (was %s)", desired, template_name, current)
+    except client.ApiException:
+      logger.warning("Failed to set networkPolicyManagement=%s on SandboxTemplate "
+                     "'%s'; it keeps %s", desired, template_name, current,
+                     exc_info=True)
 
   def get_template(self, template_name: str) -> dict | None:
     """The live SandboxTemplate object, or None if it does not exist."""

@@ -404,8 +404,9 @@ if err := r.Update(ctx, claim); err != nil {
 // giving each claim a unique wall-clock deadline.
 // Note: ShutdownPolicy defaults to Retain via +kubebuilder:default on the
 // Lifecycle type. A CEL rule on ClaimDefaults requires shutdownPolicy in
-// {Delete, DeleteForeground} when ttlSecondsAfterFinished is set, so the
-// CRD default is overridden at validation time, not here.
+// {Delete, DeleteForeground} when ttlSecondsAfterFinished is set, so a
+// pool default with a TTL is rejected at validation time unless
+// shutdownPolicy is set explicitly.
 func resolvePoolLifecycle(pool *extensionsv1beta1.SandboxWarmPool, claim *extensionsv1beta1.SandboxClaim) *extensionsv1beta1.Lifecycle {
     if claim.Spec.Lifecycle != nil {
         return nil

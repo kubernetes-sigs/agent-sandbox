@@ -1,13 +1,13 @@
-# One NetworkPolicy per namespace for agent-sandbox-rl fleets
+# One NetworkPolicy per namespace for agent-sandbox-rl fleets on GKE
 
 The agent-sandbox controller creates one Kubernetes `NetworkPolicy` per
 `SandboxTemplate`, selecting pods by the template's hash label. That is the right
-shape for a handful of long-lived templates. An RL fleet is a different shape:
+shape for a handful of long-lived templates. A fleet is a different shape:
 [`agent-sandbox-rl`](../agent-sandbox-rl) creates a template per task image, so a
-namespace holds hundreds of templates, and recipes that warm the next step's pools
-create and delete dozens of templates per training step. Each one brings a policy
-create, a policy delete, and a per-template label that the CNI has to keep in its
-policy identity.
+namespace that runs a large task set holds hundreds of templates, and a fleet that
+warms and retires pools as its task set changes creates and deletes templates
+continuously. Each one brings a policy create, a policy delete, and a per-template
+label that the CNI has to keep in its policy identity.
 
 This example runs the fleet under **one `NetworkPolicy` per namespace**. The policy
 selects the label the SDK already puts on every sandbox pod, `app=agent-sandbox-rl`,
@@ -15,13 +15,13 @@ and the fleet creates its templates with `networkPolicyManagement: Unmanaged`, s
 controller creates no per-template policy at all. Nothing selects on a per-template
 or per-pod label any more.
 
-Measured on one 400-node sandbox pool during a four-job RL run: 480 per-template
-policies in a single namespace, 32 of them created and 32 retired at every step
-dispatch, and, on Dataplane V2 (Cilium), one security identity per sandbox pod,
-13,508 at the peak, because every pod carried unique labels. The identity allocator
-fell behind at about 2,000 pod creates per minute and took 232 nodes NotReady. The
-policy count is the part this example removes; the identity part needs one more
-cluster-side change, described [below](#cilium-and-dataplane-v2-identities).
+On GKE Dataplane V2 the cost goes beyond the policy count. Dataplane V2 is built on
+Cilium, which gives every distinct pod label set its own security identity,
+allocated through a single managed operator. Every sandbox pod carries labels unique
+to it, so every sandbox pod gets its own identity, and a fleet that creates pods
+quickly creates identities just as quickly. The policy count is the part this
+example removes; the identity part needs one more cluster-side change, described
+[below](#gke-dataplane-v2-identities).
 
 ## What changes and what stays the same
 
@@ -29,7 +29,7 @@ cluster-side change, described [below](#cilium-and-dataplane-v2-identities).
 | --- | --- | --- |
 | Policies in the namespace | one per `SandboxTemplate`, created and deleted with it | one, created once by the operator |
 | Pod selector | `agents.x-k8s.io/sandbox-template-ref-hash=<hash>` | `app=agent-sandbox-rl` |
-| Ingress | sandbox-router only | sandbox-router, plus pods in the namespace that are not sandboxes (the trainer) |
+| Ingress | sandbox-router only | sandbox-router, plus pods in the namespace that are not sandboxes (the fleet's clients) |
 | Egress | public IPs only; private, link-local and cluster ranges denied | same, plus UDP/TCP 53 to kube-dns |
 | Pod DNS | controller sets `dnsPolicy: None` with public resolvers | pod default (`ClusterFirst`), hence the kube-dns rule |
 | Sandbox-to-sandbox traffic | denied | denied |
@@ -42,9 +42,11 @@ kube-dns. If your pods must not see cluster DNS, set `dnsPolicy: None` and
 
 ## Prerequisites
 
-- A cluster with the agent-sandbox controller and extensions installed, and a CNI
-  that enforces Kubernetes `NetworkPolicy` (GKE Dataplane V2, Cilium, Calico, or
-  kube-network-policies).
+- A GKE cluster with the agent-sandbox controller and extensions installed, and
+  `NetworkPolicy` enforcement: Dataplane V2 enforces it natively; on the legacy
+  datapath, enable network policy enforcement (`--enable-network-policy`). The
+  manifest is plain Kubernetes `NetworkPolicy`, so any conformant implementation
+  works as well.
 - The RL SDK installed from this checkout, as in the
   [agent-sandbox-rl setup](../agent-sandbox-rl/README.md#3-install-the-python-packages-client-side).
 - `TemplateSpec.network_policy_management`, added together with this example.
@@ -111,12 +113,12 @@ Cilium cluster it also prints how many identities still carry per-pod keys.
 
 [`manifests/fleet-network-policy.yaml`](manifests/fleet-network-policy.yaml), rule by rule:
 
-- **Ingress from the trainer.** Any pod in the namespace whose `app` label is not
-  `agent-sandbox-rl`. For a tunix-style run that is the orchestrator and the rollout
-  workers, which talk to the OpenHands agent-server on port 8000 by pod IP. Sandboxes
-  do not match, so they cannot reach each other. If the trainer runs elsewhere, add a
-  `namespaceSelector` peer. `kubectl exec` and the Python SDK's exec path go through
-  the API server and the kubelet, not the pod network, so they need no rule.
+- **Ingress from the fleet's clients.** Any pod in the namespace whose `app` label
+  is not `agent-sandbox-rl`: the processes that create claims and connect to the
+  sandboxes over the pod network. Sandboxes do not match, so they cannot reach each
+  other. If the clients run in another namespace, add a `namespaceSelector` peer.
+  `kubectl exec` and the Python SDK's exec path go through the API server and the
+  kubelet, not the pod network, so they need no rule.
 - **Ingress from the sandbox-router**, as in the controller default.
 - **Egress to kube-dns** on 53/UDP and 53/TCP. With NodeLocal DNSCache, add the cache
   address too (GKE: `169.254.20.10/32`); it falls inside the link-local range the next
@@ -131,9 +133,10 @@ in a second policy in the same namespace with the same `podSelector`, and
 cluster-wide guardrails and FQDN allowlists go in `ClusterNetworkPolicy` objects as
 in [network-policy-api-sandbox](../network-policy-api-sandbox).
 
-## Cilium and Dataplane V2 identities
+## GKE Dataplane V2 identities
 
-Cilium keys a pod's security identity on its full label set. Every sandbox pod
+Dataplane V2 is built on Cilium, which keys a pod's security identity on its full
+label set. Every sandbox pod
 carries `agents.x-k8s.io/sandbox-name-hash` (unique per sandbox), and claimed pods
 carry `agents.x-k8s.io/claim-uid`; pool pods carry
 `agents.x-k8s.io/warm-pool-sandbox`, and the SDK adds `agent-sandbox-rl/run-id`.
@@ -177,7 +180,7 @@ sandbox is left without a policy in between.
 
 - Kubernetes `NetworkPolicy` is L3/L4. Domain-name egress and L7 need
   `ClusterNetworkPolicy` or a CNI-specific policy on top.
-- The ingress rule trusts every non-sandbox pod in the namespace. Give the trainer a
-  label of its own and select on it if other workloads share the namespace.
+- The ingress rule trusts every non-sandbox pod in the namespace. Give the client
+  pods a label of their own and select on it if other workloads share the namespace.
 - The `sandbox=<template>` pod label stays per template; the SDK uses it for the
   replica co-location affinity. No policy selects on it.

@@ -9,8 +9,8 @@
 # creates none. Nothing selects on a per-template or per-pod label any more.
 #
 # Rules mirror the controller's secure-by-default policy (ingress from the
-# sandbox-router only, egress to public IPs only) with the two things an RL
-# fleet needs that the default assumes away: the trainer reaches sandboxes
+# sandbox-router only, egress to public IPs only) with the two things a fleet
+# needs that the default assumes away: the fleet's clients reach sandboxes
 # directly (ingress 1), and Unmanaged pods keep cluster DNS (egress 1).
 #
 # Edit metadata.namespace to the fleet's namespace before applying.
@@ -27,9 +27,9 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # 1. The trainer: any pod in this namespace that is not itself a sandbox
-    #    (orchestrator, rollout workers). Sandboxes cannot reach each other.
-    #    If the trainer runs in another namespace, add a namespaceSelector peer
+    # 1. Clients: any pod in this namespace that is not itself a sandbox (the
+    #    processes that create claims and connect to sandboxes). Sandboxes cannot
+    #    reach each other. If clients run in another namespace, add a namespaceSelector peer
     #    for it here. kubectl exec goes through the API server and the kubelet,
     #    not through the pod network, so it needs no rule.
     - from:

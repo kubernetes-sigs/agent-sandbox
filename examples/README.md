@@ -4,7 +4,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 
 - [**agent-sandbox-gymnasium**](./agent-sandbox-gymnasium): A Gymnasium environment backed by Agent Sandbox warm pools for RL agent training and evaluation.
 - [**agent-sandbox-rl**](./agent-sandbox-rl): Generic, multi-cluster batch orchestration for running SWE-bench-style RL/eval workloads on Agent Sandbox warm pools.
-- [**agent-sandbox-rl-network-policy**](./agent-sandbox-rl-network-policy): One namespace-wide `NetworkPolicy` for every sandbox an agent-sandbox-rl fleet creates, instead of one per `SandboxTemplate`, for RL fleets with hundreds of templates per namespace and Cilium identity limits.
+- [**agent-sandbox-rl-network-policy**](./agent-sandbox-rl-network-policy): One namespace-wide `NetworkPolicy` for every sandbox an agent-sandbox-rl fleet creates, instead of one per `SandboxTemplate`, for fleets with hundreds of templates per namespace on GKE, including the Dataplane V2 identity cost of per-pod labels.
 - [**agentclientprotocol**](./agentclientprotocol): A simple Agent Client Protocol (ACP) client that drives an agent running inside a sandbox.
 - [**aider-sandbox**](./aider-sandbox): An example of running the Aider coding agent in a sandbox using the template/claim pattern.
 - [**aio-sandbox**](./aio-sandbox): An example of running All-in-One (AIO) Sandbox using agent-sandbox.

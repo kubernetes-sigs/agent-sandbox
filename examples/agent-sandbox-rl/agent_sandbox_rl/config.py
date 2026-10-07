@@ -68,10 +68,11 @@ class TemplateSpec(BaseModel):
   # the controller applies its default: Managed, one NetworkPolicy per template
   # selecting on the template-ref-hash pod label. "Unmanaged" asks the controller
   # to create none, for fleets that put ONE namespace-wide policy on the shared
-  # `app=agent-sandbox-rl` pod label instead: with a template per task image and
-  # templates churned every step, per-template policies add a policy create and
-  # delete per template per step, and keep a per-template label identity-relevant
-  # on Cilium. The SDK also patches the mode onto a pre-existing template it owns.
+  # `app=agent-sandbox-rl` pod label instead: with a template per task image,
+  # created and deleted as pools are warmed and retired, per-template policies add
+  # a policy create and delete per template, and keep a per-template label
+  # identity-relevant on GKE Dataplane V2 (Cilium). The SDK also patches the mode
+  # onto a pre-existing template it owns.
   # See examples/agent-sandbox-rl-network-policy.
   network_policy_management: str | None = None
 

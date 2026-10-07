@@ -1565,6 +1565,12 @@ func TestReconcile(t *testing.T) {
 				opts := []cmp.Option{
 					cmpopts.IgnoreFields(metav1.Condition{}, "LastTransitionTime"),
 				}
+				wantReady := meta.FindStatusCondition(tc.wantStatus.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+				if wantReady != nil && wantReady.Status == metav1.ConditionTrue {
+					// The first-ready timestamp is intentionally volatile for this broad
+					// reconciliation table; its persistence and value have focused coverage.
+					opts = append(opts, cmpopts.IgnoreFields(sandboxv1beta1.SandboxStatus{}, "FirstReadyTime"))
+				}
 				if diff := cmp.Diff(tc.wantStatus, liveSandbox.Status, opts...); diff != "" {
 					t.Fatalf("unexpected sandbox status (-want,+got):\n%s", diff)
 				}
@@ -5375,7 +5381,7 @@ func TestSandboxReconcile_ConditionsDoNotAccumulate(t *testing.T) {
 func TestRecordSandboxCreationMetrics(t *testing.T) {
 	asmetrics.SandboxCreationLatency.Reset()
 
-	createdAt := metav1.NewTime(time.Now().Add(-10 * time.Second))
+	createdAt := metav1.NewTime(time.Now().UTC().Add(-10 * time.Second).Truncate(time.Second))
 	readyAt := metav1.NewTime(createdAt.Add(5 * time.Second))
 	sandbox := &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
@@ -5398,7 +5404,7 @@ func TestRecordSandboxCreationMetrics(t *testing.T) {
 	latency, record := prepareSandboxCreationMetrics(sandbox, oldStatus)
 	require.True(t, record, "the initial transition to Ready should prepare one observation")
 	require.NotNil(t, sandbox.Status.FirstReadyTime)
-	assert.Equal(t, readyAt, *sandbox.Status.FirstReadyTime)
+	assert.True(t, readyAt.Time.Equal(sandbox.Status.FirstReadyTime.Time))
 	require.NoError(t, r.updateStatus(t.Context(), oldStatus, sandbox))
 	r.recordSandboxCreationMetrics(t.Context(), sandbox, latency)
 	assert.Equal(t, 1, testutil.CollectAndCount(asmetrics.SandboxCreationLatency), "first Ready transition should record creation latency")
@@ -5406,7 +5412,7 @@ func TestRecordSandboxCreationMetrics(t *testing.T) {
 	var persisted sandboxv1beta1.Sandbox
 	require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, &persisted))
 	require.NotNil(t, persisted.Status.FirstReadyTime)
-	assert.Equal(t, readyAt, *persisted.Status.FirstReadyTime)
+	assert.True(t, readyAt.Time.Equal(persisted.Status.FirstReadyTime.Time))
 
 	// A Sandbox that was already Ready before the guard existed is backfilled
 	// without recording its latest Ready transition as creation latency.
@@ -5415,7 +5421,8 @@ func TestRecordSandboxCreationMetrics(t *testing.T) {
 	readyBeforeReconcile := legacyReady.Status.DeepCopy()
 	_, record = prepareSandboxCreationMetrics(legacyReady, readyBeforeReconcile)
 	assert.False(t, record)
-	assert.Equal(t, readyAt, legacyReady.Status.FirstReadyTime)
+	require.NotNil(t, legacyReady.Status.FirstReadyTime)
+	assert.True(t, readyAt.Time.Equal(legacyReady.Status.FirstReadyTime.Time))
 
 	// A later transition back to Ready after a flap must not record creation latency again.
 	flappedReady := persisted.DeepCopy()
@@ -5424,7 +5431,7 @@ func TestRecordSandboxCreationMetrics(t *testing.T) {
 	oldNotReady.Conditions[0].Status = metav1.ConditionFalse
 	_, record = prepareSandboxCreationMetrics(flappedReady, oldNotReady)
 	assert.False(t, record, "the persisted first-ready time must suppress a second observation")
-	assert.Equal(t, readyAt, *flappedReady.Status.FirstReadyTime, "the original first-ready time must remain unchanged")
+	assert.True(t, readyAt.Time.Equal(flappedReady.Status.FirstReadyTime.Time), "the original first-ready time must remain unchanged")
 
 	metrics := make(chan prometheus.Metric, 1)
 	asmetrics.SandboxCreationLatency.Collect(metrics)

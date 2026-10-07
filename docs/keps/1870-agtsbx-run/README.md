@@ -1,4 +1,4 @@
-# KEP-1496: agtsbx, a docker-like CLI for running one command in a sandbox
+# KEP-1870: agtsbx, a docker-like CLI for running one command in a sandbox
 
 <!-- toc -->
 - [Summary](#summary)
@@ -21,7 +21,8 @@
 streams the output, tears the sandbox down and exits with the command's exit
 status. It works against a local container engine or a Kubernetes cluster by
 talking to the `sandboxd` contract from [KEP-539.2](../539.2-runtime-standardization/README.md).
-Tracking PR: [#1496](https://github.com/kubernetes-sigs/agent-sandbox/pull/1496).
+Tracking issue: [#1870](https://github.com/kubernetes-sigs/agent-sandbox/issues/1870).
+Implementation: [#1496](https://github.com/kubernetes-sigs/agent-sandbox/pull/1496).
 
 ## Motivation
 
@@ -69,8 +70,10 @@ backend-agnostic.
 Kubernetes backend uses the core `Sandbox` API rather than `SandboxClaim`,
 because only `Sandbox` accepts an image directly.
 
-Teardown removes only objects labelled `app.kubernetes.io/managed-by: agtsbx`,
-so a name collision never deletes a user's own object.
+Each run tags its object with a unique `app.kubernetes.io/instance` ID. Cleanup
+after an ambiguous start failure removes only an object carrying that ID, so a
+name collision never deletes a user's own object or a `--keep` one from an
+earlier run.
 
 #### API Changes
 
@@ -93,12 +96,17 @@ Security baseline, since `sandboxd` has no authentication of its own:
 
 ### Open Questions
 
-1. **Scope.** Should local container orchestration live in this repo, or should
-   the project stay on Kubernetes primitives and the client SDKs? If it stays,
-   the Kubernetes-only subset could move to an SDK example.
-2. **Kubernetes UX.** A raw `Sandbox` plus port-forward bypasses claims,
-   templates, warm pools and the router. Should `agtsbx` instead create a
-   `SandboxClaim` from a named template, at the cost of requiring a template?
+1. **Scope.** Proposed: keep local container orchestration in this repo. It
+   removes the cluster prerequisite named in Motivation, adds no module
+   dependency (it drives the engine CLI), and shares the `sandboxd` contract
+   and client code with the rest of the project. If approvers disagree, the
+   Kubernetes-only subset can move to an SDK example.
+2. **Kubernetes UX.** Proposed: start with a raw `Sandbox` plus port-forward,
+   because only `Sandbox` accepts an image directly and the goal is zero
+   setup. This path is for development and CI, not production traffic. A
+   follow-up `--template` flag can create a `SandboxClaim` instead, for users
+   who already have a template and want warm pools, template network policy
+   and the router.
 3. **Network isolation.** A raw `Sandbox` has no template-managed
    `NetworkPolicy`, and `sandboxd` binds `0.0.0.0` by default. Options: create
    an owned `NetworkPolicy` per run, or bind `sandboxd` to loopback and

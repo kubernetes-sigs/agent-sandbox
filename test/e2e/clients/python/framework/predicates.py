@@ -73,3 +73,28 @@ def gateway_address_ready():
         return len(addresses) > 0
 
     return check
+
+def httproute_accepted():
+    """Predicate to check if an HTTPRoute is accepted by all its parent Gateways."""
+
+    def check(obj: Dict[str, Any]) -> bool:
+        if not isinstance(obj, dict):
+            return False
+
+        status = obj.get("status") or {}
+        parents = status.get("parents") or []
+        if not parents:
+            return False
+
+        def condition_true(parent, cond_type):
+            return any(
+                c.get("type") == cond_type and c.get("status") == "True"
+                for c in (parent.get("conditions") or [])
+            )
+
+        return all(
+            condition_true(p, "Accepted") and condition_true(p, "ResolvedRefs")
+            for p in parents
+        )
+
+    return check

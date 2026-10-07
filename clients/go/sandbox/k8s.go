@@ -141,12 +141,13 @@ func stampClientRequestTime(annotations map[string]string, now time.Time) map[st
 }
 
 // claimLifecycle returns the lifecycle that expires a claim ttl after now, or
-// nil when ttl is unset.
+// nil when ttl is unset. The API keeps whole seconds and truncates, so the
+// deadline is rounded up to keep a short ttl from expiring early.
 func claimLifecycle(now time.Time, ttl time.Duration) *extv1beta1.Lifecycle {
 	if ttl <= 0 {
 		return nil
 	}
-	shutdownTime := metav1.NewTime(now.Add(ttl))
+	shutdownTime := metav1.NewTime(now.Add(ttl).Add(time.Second - 1).Truncate(time.Second))
 	return &extv1beta1.Lifecycle{
 		ShutdownTime:   &shutdownTime,
 		ShutdownPolicy: extv1beta1.ShutdownPolicyDelete,

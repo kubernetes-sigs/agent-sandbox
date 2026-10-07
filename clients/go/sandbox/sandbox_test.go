@@ -1528,11 +1528,33 @@ func TestOpen_CreateClaimSendsShutdownAfter(t *testing.T) {
 	if lifecycle == nil || lifecycle.ShutdownTime == nil {
 		t.Fatalf("expected spec.lifecycle.shutdownTime, got %+v", lifecycle)
 	}
-	if got := lifecycle.ShutdownTime.Time; got.Before(before.Add(opts.ShutdownAfter)) || got.After(after.Add(opts.ShutdownAfter)) {
-		t.Errorf("shutdownTime = %v, want within [%v, %v]", got, before.Add(opts.ShutdownAfter), after.Add(opts.ShutdownAfter))
+	// The deadline is rounded up to a whole second, so it may overshoot by under 1s.
+	lo, hi := before.Add(opts.ShutdownAfter), after.Add(opts.ShutdownAfter+time.Second)
+	if got := lifecycle.ShutdownTime.Time; got.Before(lo) || got.After(hi) {
+		t.Errorf("shutdownTime = %v, want within [%v, %v]", got, lo, hi)
 	}
 	if lifecycle.ShutdownPolicy != extv1beta1.ShutdownPolicyDelete {
 		t.Errorf("shutdownPolicy = %q, want %q", lifecycle.ShutdownPolicy, extv1beta1.ShutdownPolicyDelete)
+	}
+}
+
+func TestClaimLifecycle_RoundsUpToWholeSecond(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 100, time.UTC)
+	for _, tc := range []struct {
+		ttl  time.Duration
+		want time.Time
+	}{
+		{500 * time.Millisecond, now.Truncate(time.Second).Add(time.Second)},
+		{time.Hour, now.Truncate(time.Second).Add(time.Hour + time.Second)},
+		{time.Second - 100, now.Truncate(time.Second).Add(time.Second)},
+	} {
+		if got := claimLifecycle(now, tc.ttl).ShutdownTime.Time; !got.Equal(tc.want) {
+			t.Errorf("ttl %s: shutdownTime = %v, want %v", tc.ttl, got, tc.want)
+		}
+	}
+	whole := now.Truncate(time.Second)
+	if got := claimLifecycle(whole, time.Minute).ShutdownTime.Time; !got.Equal(whole.Add(time.Minute)) {
+		t.Errorf("whole-second deadline moved: %v", got)
 	}
 }
 

@@ -725,7 +725,7 @@ type Options struct {
     // ShutdownAfter expires every SandboxClaim this client creates that long
     // after creation, so a crashed client cannot leak sandboxes. The claim
     // gets spec.lifecycle.shutdownTime and the Delete shutdown policy; the
-    // API keeps whole seconds. Zero (the default) means no expiry.
+    // deadline is rounded up to a whole second. Zero (the default) means no expiry.
     ShutdownAfter time.Duration
 
     // SandboxReadyTimeout is how long to wait for the sandbox to become ready. Default: 180s.

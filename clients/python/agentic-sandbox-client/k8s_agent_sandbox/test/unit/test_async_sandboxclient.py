@@ -517,7 +517,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         Configuration reads them itself, so an unset async proxy must not clear the sync one."""
         with patch.dict(os.environ, {"HTTPS_PROXY": "http://env-proxy:3128", "NO_PROXY": "internal.example.com"}, clear=True):
             from_env = _sync_configuration_from_async(async_client.Configuration(host="https://tenant-a.example.com"))
-            sync_default = sync_client.Configuration()
+            sync_default = sync_client.Configuration(host="https://tenant-a.example.com")
             explicit_async_configuration = async_client.Configuration(host="https://tenant-a.example.com")
             explicit_async_configuration.proxy = "http://explicit-proxy:8080"
             explicit = _sync_configuration_from_async(explicit_async_configuration)

@@ -73,6 +73,25 @@ func TestApplyEnvDefaults(t *testing.T) {
 			want: func(c *Config) bool { return c.ClusterDomain == "cluster.local" },
 		},
 		{
+			name: "tls min version from env",
+			env:  map[string]string{EnvTLSMinVersion: "VersionTLS13"},
+			want: func(c *Config) bool { return c.TLSMinVersion == "VersionTLS13" },
+		},
+		{
+			name: "tls cipher suites from env",
+			env:  map[string]string{EnvTLSCipherSuites: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"},
+			want: func(c *Config) bool {
+				return len(c.TLSCipherSuites) == 2 &&
+					c.TLSCipherSuites[0] == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256" &&
+					c.TLSCipherSuites[1] == "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
+			},
+		},
+		{
+			name: "empty tls min version keeps default",
+			env:  map[string]string{EnvTLSMinVersion: ""},
+			want: func(c *Config) bool { return c.TLSMinVersion == "" },
+		},
+		{
 			name: "no env keeps defaults",
 			env:  map[string]string{},
 			want: func(c *Config) bool {
@@ -272,6 +291,33 @@ func TestValidate(t *testing.T) {
 			wantErr: "tls-client-ca-file",
 		},
 		{
+			name: "invalid tls min version",
+			mut: func(c *Config) {
+				c.HTTPSAddr = ":8443"
+				c.TLSCertFile = "/c"
+				c.TLSKeyFile = "/k"
+				c.TLSMinVersion = "TLS1.2"
+			},
+			wantErr: "invalid --tls-min-version",
+		},
+		{
+			name: "valid tls min version",
+			mut: func(c *Config) {
+				c.HTTPSAddr = ":8443"
+				c.TLSCertFile = "/c"
+				c.TLSKeyFile = "/k"
+				c.TLSMinVersion = "VersionTLS12"
+			},
+			wantErr: "",
+		},
+		{
+			name: "tls min version ignored without https",
+			mut: func(c *Config) {
+				c.TLSMinVersion = "VersionTLS12"
+			},
+			wantErr: "",
+		},
+		{
 			name:    "negative proxy timeout",
 			mut:     func(c *Config) { c.ProxyTimeout = -1 * time.Second },
 			wantErr: "proxy-timeout",
@@ -363,6 +409,53 @@ func TestValidate(t *testing.T) {
 				c.AuthzScopedTokenSecretFile = "/etc/scoped-token/secret"
 			},
 			wantErr: "",
+		},
+		{
+			name: "scoped-token v2 requires cache",
+			mut: func(c *Config) {
+				c.AuthzMode = AuthzScopedToken
+				c.AuthzScopedTokenVerificationKeysFile = "/etc/scoped-token/keys.json"
+			},
+			wantErr: "requires --cache-enabled",
+		},
+		{
+			name: "valid scoped-token v2 configuration",
+			mut: func(c *Config) {
+				c.AuthzMode = AuthzScopedToken
+				c.AuthzScopedTokenVerificationKeysFile = "/etc/scoped-token/keys.json"
+				c.CacheEnabled = true
+			},
+			wantErr: "",
+		},
+		{
+			name: "scoped-token v1 and v2 overlap requires cutoff",
+			mut: func(c *Config) {
+				c.AuthzMode = AuthzScopedToken
+				c.AuthzScopedTokenSecretFile = "/etc/scoped-token/secret"
+				c.AuthzScopedTokenVerificationKeysFile = "/etc/scoped-token/keys.json"
+				c.CacheEnabled = true
+			},
+			wantErr: "authz-scoped-token-v1-accept-until is required",
+		},
+		{
+			name: "valid scoped-token v1 and v2 overlap",
+			mut: func(c *Config) {
+				c.AuthzMode = AuthzScopedToken
+				c.AuthzScopedTokenSecretFile = "/etc/scoped-token/secret"
+				c.AuthzScopedTokenVerificationKeysFile = "/etc/scoped-token/keys.json"
+				c.AuthzScopedTokenV1AcceptUntil = "2026-09-01T00:00:00Z"
+				c.CacheEnabled = true
+			},
+			wantErr: "",
+		},
+		{
+			name: "scoped-token v1 cutoff must be RFC3339",
+			mut: func(c *Config) {
+				c.AuthzMode = AuthzScopedToken
+				c.AuthzScopedTokenSecretFile = "/etc/scoped-token/secret"
+				c.AuthzScopedTokenV1AcceptUntil = "tomorrow"
+			},
+			wantErr: "must be RFC3339",
 		},
 		{
 			name:    "empty path routing prefix is valid (disabled)",

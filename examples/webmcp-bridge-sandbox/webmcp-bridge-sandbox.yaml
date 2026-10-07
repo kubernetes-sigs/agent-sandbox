@@ -1,0 +1,35 @@
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: webmcp-bridge-sandbox
+spec:
+  podTemplate:
+    spec:
+      # No pod-level securityContext hardening here, unlike
+      # examples/mcp-server-sandbox — the image already runs as the base
+      # image's non-root pwuser (see Dockerfile), but bridge.py launches
+      # Chromium with its own sandbox disabled (Playwright's default),
+      # since Chromium's sandbox needs unprivileged user namespaces that
+      # plain `docker run` and most Kubernetes clusters don't grant without
+      # an explicit seccomp profile. If TARGET_PAGE_URL ever points at an
+      # untrusted page, harden this: enable chromium_sandbox=True in
+      # bridge.py and give the pod a seccompProfile that allows the
+      # clone/unshare/setns syscalls Chromium's sandbox needs.
+      containers:
+        - name: webmcp-bridge
+          image: webmcp-bridge-sandbox:local
+          imagePullPolicy: IfNotPresent
+          # bridge.py's MCP server defaults to stdio transport, which reads
+          # from the container's own stdin — without this, the container
+          # gets EOF immediately, bridge.py exits, and the pod goes
+          # Completed before the "kubectl exec -i" workflow below can attach.
+          stdin: true
+          env:
+            - name: TARGET_PAGE_URL
+              value: "http://localhost:8090/" # the bundled demo page
+          # No resources block here to keep the example minimal, but a
+          # real deployment should set one — headless Chromium's own
+          # footprint alone is comfortably in the hundreds-of-MB range
+          # (examples/gke-swap sizes Chrome pods around 2Gi as a working
+          # limit), before counting the target page's own memory use.
+      restartPolicy: Never

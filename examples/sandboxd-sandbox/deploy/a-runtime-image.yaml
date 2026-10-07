@@ -42,6 +42,7 @@ spec:
     spec:
       # The sandbox runs untrusted agent code; it needs no API access.
       automountServiceAccountToken: false
+      restartPolicy: "OnFailure"
       securityContext:
         runAsNonRoot: true
         # Ensure the shared emptyDir is writable by the non-root runtime user.

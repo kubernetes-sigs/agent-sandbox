@@ -17,7 +17,13 @@
 
 Pulls recent results from the TestGrid JSON API, classifies each failing test
 as flaky (intermittent), consistently failing, or an infrastructure failure
-(the job died before tests ran), and prints a markdown report.
+(the job died before tests ran), and prints a markdown report. Red runs with
+no failing testcase are resolved against the run's GCS artifacts first:
+aborted runs, stale-PR clone failures, and pre-test PR breakage (compile,
+vet, mypy gates) are reported separately instead of being counted as infra.
+Per-test failures are not counted when the run was aborted, when a whole
+suite failed at once (broken fixture), or when the failing PR modified the
+test's own sources; such PR-local failures are listed but never filed.
 
 With --update-issues it also files or refreshes one `kind/flake` GitHub issue
 per flaky test, so the issue tracker is the durable state: reruns are
@@ -57,7 +63,7 @@ ISSUE_MARKER_PREFIX = "<!-- flake-report:test="
 INFRA_MARKER_PREFIX = "<!-- flake-report:infra-tab="
 
 
-def fetch_json(url):
+def fetch_text(url):
     # curl rather than urllib: python installs without CA bundles (common on
     # macOS) fail TLS verification, and curl is already a repo-tooling
     # prerequisite alongside gh and jq.
@@ -67,7 +73,11 @@ def fetch_json(url):
     )
     if result.returncode != 0:
         raise RuntimeError(f"fetch {url} failed: {result.stderr.strip()}")
-    return json.loads(result.stdout)
+    return result.stdout
+
+
+def fetch_json(url):
+    return json.loads(fetch_text(url))
 
 
 def gh(*args, input_text=None):
@@ -97,15 +107,251 @@ def short_name(test_name):
     return test_name.rsplit(".", 1)[-1]
 
 
-def analyze_tab(dashboard, tab, window):
-    """Returns (flaky, consistent, infra) findings for one TestGrid tab."""
+GCS_HTTP = "https://storage.googleapis.com"
+
+
+def column_build_id(column_ids, i):
+    """Extracts the prow build ID TestGrid encodes into a column ID.
+
+    Column IDs observed on live dashboards look like '\ue000<build-id>';
+    the build ID is always the final U+E000-separated part, so take the last
+    non-empty segment (robust also to a '<name>\ue000<build-id>' layout).
+    Returns None when the column has no ID.
+    """
+    if i >= len(column_ids) or not column_ids[i]:
+        return None
+    for part in reversed(column_ids[i].split("\ue000")):
+        if part:
+            return part
+    return None
+
+
+def make_artifact_fetcher(gcs_query, build_id):
+    """Returns fetch(name) -> parsed JSON artifact of one prow run, or None.
+
+    pr-logs/directory tab queries don't contain the run dirs themselves;
+    each build has a pointer file naming the real gs:// location. The pointer
+    is resolved lazily and cached so a run costs at most one extra fetch.
+    """
+    cache = {}
+
+    def resolve():
+        if not build_id or not gcs_query:
+            return None
+        if "dir" not in cache:
+            cache["dir"] = None
+            if "/pr-logs/directory/" in gcs_query:
+                try:
+                    pointer = fetch_text(
+                        f"{GCS_HTTP}/{gcs_query}/{build_id}.txt").strip()
+                except RuntimeError:
+                    return None
+                if pointer.startswith("gs://"):
+                    cache["dir"] = f"{GCS_HTTP}/{pointer[len('gs://'):]}"
+            else:
+                cache["dir"] = f"{GCS_HTTP}/{gcs_query}/{build_id}"
+        return cache["dir"]
+
+    def fetch(name):
+        base = resolve()
+        if not base:
+            return None
+        try:
+            return fetch_json(f"{base}/{name}")
+        except (RuntimeError, ValueError):
+            return None
+
+    # Callers that need the run's location (e.g. to read the PR number out
+    # of a pr-logs path) can reuse the cached pointer resolution.
+    fetch.resolved_dir = resolve
+    return fetch
+
+
+def clone_merge_conflict(record):
+    """True when a failed clone record shows a merge conflict — the stale-PR
+    shape — rather than a network or ref-fetch error. clonerefs logs the
+    git output per command; a conflicted merge always prints "CONFLICT ("
+    and "Automatic merge failed"."""
+    for cmd in record.get("commands") or []:
+        text = "%s\n%s" % (cmd.get("output", ""), cmd.get("error", ""))
+        if "Automatic merge failed" in text or "CONFLICT (" in text:
+            return True
+    return False
+
+
+def classify_red_run(has_failing_test, has_test_results, fetch_artifact):
+    """Classifies why one red Overall column went red.
+
+    A red Overall cell with no failing junit testcase is not necessarily an
+    infrastructure failure: aborted runs (superseded by a newer push), stale
+    PRs that no longer merge onto main, and PRs that break a pre-test gate
+    (compile, vet, mypy) all produce the same TestGrid shape. Returns one of:
+
+      "aborted"         -- run was cancelled, not a failure at all
+      "test_failure"    -- a junit testcase failed; the per-test rows tell
+                           the story
+      "pretest_failure" -- junit exists with zero failing testcases: the PR
+                           broke a pre-test gate, author-actionable
+      "clone_failure"   -- the PR no longer merges cleanly onto main: a
+                           merge conflict verified in clone-records.json
+                           (rebase needed)
+      "infra"           -- pod started, produced no junit, and none of the
+                           above explains the red run
+
+    fetch_artifact(name) returns the parsed JSON artifact from the run's GCS
+    dir, or None when unavailable; only artifacts needed for the verdict are
+    fetched.
+    """
+    finished = fetch_artifact("finished.json") or {}
+    # podutils writes "ABORTED" but crier writes "aborted" when the pod died
+    # before podutils could upload — exactly the junit-less runs classified
+    # here, so the comparison must be case-insensitive.
+    if (finished.get("result") or "").upper() == "ABORTED":
+        return "aborted"
+    if has_failing_test:
+        return "test_failure"
+    if has_test_results:
+        return "pretest_failure"
+    clone_records = fetch_artifact("clone-records.json")
+    if clone_records is not None:
+        failed = [r for r in clone_records if r.get("failed")]
+        if failed:
+            if any(clone_merge_conflict(r) for r in failed):
+                return "clone_failure"
+            # The clone failed without a merge conflict (network error,
+            # unreachable ref): that is infrastructure, not a stale PR.
+            return "infra"
+    # Without clone-records.json the cause of a junit-less red run cannot
+    # be proven benign, so it stays in the infra count.
+    return "infra"
+
+
+PR_LOGS_PULL_DIR = re.compile(r"/pr-logs/pull/[^/]+/(\d+)/")
+SETUP_ERROR_PREFIX = "failed on setup"
+GO_MODULE_PREFIX = "sigs.k8s.io/agent-sandbox/"
+
+
+def pr_number_from_dir(gcs_dir):
+    """Returns the PR number embedded in a resolved pr-logs run dir, or None.
+
+    Presubmit tabs report prow build IDs as "changelists", not PR numbers,
+    so several pushes to one PR look like several changelists. The run's
+    GCS dir (.../pr-logs/pull/<org>_<repo>/<pr>/<job>/<build>) is the only
+    place the PR number is available without another API round-trip.
+    """
+    m = PR_LOGS_PULL_DIR.search(gcs_dir or "")
+    return m.group(1) if m else None
+
+
+def align_messages(statuses, messages):
+    """Maps TestGrid's per-row messages onto column indexes.
+
+    TestGrid emits one message per cell the row actually has a result in,
+    in column order, so a test that only ran in a few columns carries a
+    short list that is not index-aligned with its statuses. When the two
+    lengths match the list is already aligned.
+    """
+    messages = messages or []
+    if len(messages) == len(statuses):
+        return {i: m for i, m in enumerate(messages) if m}
+    out = {}
+    it = iter(messages)
+    for i, status in enumerate(statuses):
+        if status == 0:
+            continue
+        try:
+            m = next(it)
+        except StopIteration:
+            break
+        if m:
+            out[i] = m
+    return out
+
+
+def suite_of(name):
+    """Returns the junit suite a TestGrid row belongs to.
+
+    One prow lane aggregates several suites (Go packages, pytest, vitest
+    files). A broken fixture takes down a whole suite at once while the
+    rest of the lane stays green, so mass-failure detection has to look at
+    the suite, not the lane.
+    """
+    if name.startswith("pytest."):
+        return "pytest"
+    m = re.match(r"(.*?\.test\.ts)", name)
+    if m:
+        return m.group(1)
+    m = re.match(r"^(.*?)\.(Test\w+)(/|$)", name)
+    if m:
+        return m.group(1)
+    return "other"
+
+
+def test_source_paths(name):
+    """Repo paths whose modification by the failing PR makes a failure of
+    this test the PR's own regression rather than a flake. SDK suites
+    (pytest, vitest) match their whole SDK and e2e trees, since a change to
+    the SDK implementation or harness breaks tests in any file; Go suites
+    match their package."""
+    if name.startswith("pytest."):
+        return ["test/e2e/clients/python/", "clients/python/"]
+    if re.match(r"(.*?\.test\.ts)", name):
+        return ["test/e2e/clients/typescript/",
+                "clients/typescript/agentic-sandbox-client/"]
+    m = re.match(r"^(.*?)\.(Test\w+)(/|$)", name)
+    if m:
+        pkg = m.group(1)
+        if pkg.startswith(GO_MODULE_PREFIX):
+            pkg = pkg[len(GO_MODULE_PREFIX):]
+        return [pkg.rstrip("/") + "/"]
+    return []
+
+
+def touches(changed_files, paths):
+    """True when any changed file is one of paths (exact) or under a path
+    that ends with "/" (directory prefix)."""
+    for f in changed_files or []:
+        for p in paths:
+            if (p.endswith("/") and f.startswith(p)) or f == p:
+                return True
+    return False
+
+
+def make_pr_files_lookup(repo):
+    """Returns lookup(pr) -> list of changed file paths, None if unknown.
+
+    One gh call per distinct PR per run, cached; a failed lookup (gh error,
+    or no gh binary at all in report-only mode) disables the self-regression
+    exclusion for that PR rather than guessing or failing the tab.
+    """
+    cache = {}
+
+    def lookup(pr):
+        if pr not in cache:
+            try:
+                out = gh("pr", "view", str(pr), "--repo", repo,
+                         "--json", "files", "--jq", ".files[].path")
+                cache[pr] = [line for line in out.splitlines() if line]
+            except (RuntimeError, OSError):
+                cache[pr] = None
+        return cache[pr]
+
+    return lookup
+
+
+def analyze_tab(dashboard, tab, window, pr_files=None):
+    """Returns (flaky, consistent, infra, pr_local) findings for one tab.
+
+    pr_files(pr_number) -> changed file paths enables the self-regression
+    exclusion on presubmit tabs; None disables it.
+    """
     table = fetch_json(
         f"{TESTGRID}/{urllib.parse.quote(dashboard)}/table?"
         + urllib.parse.urlencode({"tab": tab, "width": window})
     )
     tests = table.get("tests") or []
     if not tests:
-        return [], [], None
+        return [], [], None, []
 
     changelists = table.get("changelists") or []
     timestamps = table.get("timestamps") or []
@@ -114,32 +360,136 @@ def analyze_tab(dashboard, tab, window):
     job_history = f"https://prow.k8s.io/job-history/gs/{gcs_query}" if gcs_query else ""
 
     rows = {t["name"]: decode_statuses(t["statuses"]) for t in tests}
+    messages = {t["name"]: align_messages(rows[t["name"]], t.get("messages"))
+                for t in tests}
     overall = next((v for k, v in rows.items() if k.endswith(".Overall")), None)
     test_rows = {k: v for k, v in rows.items() if not JOB_LEVEL_ROW.search(k)}
     ncols = max((len(v) for v in rows.values()), default=0)
+    column_ids = table.get("column_ids") or []
 
     def cell(statuses, i):
         return statuses[i] if i < len(statuses) else 0
 
+    fetchers = {}
+
+    def fetcher(i):
+        if i not in fetchers:
+            fetchers[i] = make_artifact_fetcher(gcs_query, column_build_id(column_ids, i))
+        return fetchers[i]
+
+    def failing_in(i):
+        return any(cell(s, i) in FAIL_STATUSES or cell(s, i) == FLAKY_STATUS
+                   for s in test_rows.values())
+
+    def ran_in(i):
+        return any(cell(s, i) not in (0, RUNNING_STATUS) for s in test_rows.values())
+
+    # Resolve why each red Overall column went red from its GCS artifacts
+    # (col_class feeds the infra accounting, so it stays red-Overall only).
+    # Aborted runs are detected on every column that has a failing test
+    # cell, red Overall or not: a run cancelled mid-suite leaves junit
+    # errors in the test rows while its Overall cell never settles to a
+    # failure, and those errors must not count as flakes. Only meaningful
+    # on tabs that report per-test rows; on junit-less tabs (lint, autogen)
+    # a red run is indistinguishable from a legitimately failing PR.
+    col_class = {}
+    aborted_cols = set()
+    if test_rows:
+        for i in range(ncols):
+            red = overall is not None and cell(overall, i) in FAIL_STATUSES
+            has_fail = failing_in(i)
+            if red:
+                col_class[i] = classify_red_run(has_fail, ran_in(i), fetcher(i))
+                if col_class[i] == "aborted":
+                    aborted_cols.add(i)
+            elif has_fail:
+                finished = fetcher(i)("finished.json") or {}
+                if (finished.get("result") or "").upper() == "ABORTED":
+                    aborted_cols.add(i)
+
+    col_pr = {}
+
+    def pr_of(i):
+        """PR number of a presubmit column, resolved from the run dir the
+        artifact fetcher already located; None on periodic tabs."""
+        if i not in col_pr:
+            resolve = getattr(fetcher(i), "resolved_dir", None)
+            col_pr[i] = pr_number_from_dir(resolve()) if resolve else None
+        return col_pr[i]
+
     # Columns where a large fraction of tests failed at once are a broken PR
     # or an environment-wide breakage, not per-test flakiness; exclude them
-    # from flake counting so one bad run doesn't file dozens of issues.
+    # from flake counting so one bad run doesn't file dozens of issues. The
+    # lane-wide rule misses a broken fixture that only takes down one suite
+    # of a multi-suite lane, so the same rule is applied per suite, and a
+    # column where every failure in a suite is a fixture "failed on setup"
+    # error is a harness failure for that suite regardless of count.
     mass_cols = set()
+    suite_mass = set()
     if test_rows:
         threshold = max(3, len(test_rows) // 4)
         for i in range(ncols):
             failed = sum(1 for s in test_rows.values() if cell(s, i) in FAIL_STATUSES)
             if failed >= threshold:
                 mass_cols.add(i)
+        suites = {}
+        for name in test_rows:
+            suites.setdefault(suite_of(name), []).append(name)
+        for suite, names in suites.items():
+            size = len(names)
+            for i in range(ncols):
+                ran = [n for n in names if cell(test_rows[n], i) not in (0, RUNNING_STATUS)]
+                failed = [n for n in ran if cell(test_rows[n], i) in FAIL_STATUSES]
+                if len(failed) < 2:
+                    continue
+                # Small suites: every row that ran failed, and enough of
+                # them that a pair of genuinely broken tests is not mistaken
+                # for a fixture failure.
+                mass = len(failed) >= max(3, size // 4) or (
+                    size < 8 and len(failed) >= 3 and len(failed) == len(ran))
+                setup = all((messages[n].get(i) or "").startswith(SETUP_ERROR_PREFIX)
+                            for n in failed)
+                if mass or setup:
+                    suite_mass.add((suite, i))
 
-    flaky, consistent = [], []
+    flaky, consistent, pr_local = [], [], []
     for name, statuses in test_rows.items():
+        suite = suite_of(name)
+
+        def excluded(i):
+            return i in aborted_cols or i in mass_cols or (suite, i) in suite_mass
+
         fail_cols = [i for i in range(ncols)
-                     if cell(statuses, i) in FAIL_STATUSES and i not in mass_cols]
-        pass_cols = [i for i in range(ncols) if cell(statuses, i) in PASS_STATUSES]
-        flaky_cells = [i for i in range(ncols) if cell(statuses, i) == FLAKY_STATUS]
+                     if cell(statuses, i) in FAIL_STATUSES and not excluded(i)]
+        pass_cols = [i for i in range(ncols)
+                     if cell(statuses, i) in PASS_STATUSES
+                     and i not in aborted_cols]
+        flaky_cells = [i for i in range(ncols)
+                       if cell(statuses, i) == FLAKY_STATUS
+                       and i not in aborted_cols]
         if not fail_cols and not flaky_cells:
             continue
+
+        # A failure on a PR that modifies the test's own file or the
+        # harness driving its suite is that PR's regression, not a flake;
+        # drop those columns and remember how many were dropped.
+        self_regression = 0
+        if pr_files is not None and fail_cols:
+            paths = test_source_paths(name)
+            kept = []
+            for i in fail_cols:
+                pr = pr_of(i)
+                files = pr_files(pr) if pr else None
+                if files and touches(files, paths):
+                    self_regression += 1
+                else:
+                    kept.append(i)
+            fail_cols = kept
+            if not fail_cols and not flaky_cells:
+                pr_local.append({"tab": tab, "test": name,
+                                 "reason": "pr-touches-test-sources",
+                                 "runs": self_regression})
+                continue
 
         # Definite flake: the same changelist (PR) both failed and passed this
         # test across runs, i.e. a bare retest changed the outcome. Periodic
@@ -157,12 +507,19 @@ def analyze_tab(dashboard, tab, window):
             retest_flips = sum(1 for v in by_cl.values() if v == {"fail", "pass"})
 
         # On presubmit tabs a failure on a single PR is usually that PR's own
-        # bug; flakiness means failures spread across distinct changelists.
-        # Without usable changelists (periodics), every failing run is a
-        # distinct commit, so count the runs themselves.
+        # bug; flakiness means failures spread across distinct PRs. TestGrid's
+        # "changelists" are prow build IDs there, so several pushes to one PR
+        # would count as several changelists; prefer the PR numbers resolved
+        # from the run dirs when every failing column has one. Without usable
+        # changelists (periodics), every failing run is a distinct commit, so
+        # count the runs themselves.
+        fail_prs = {pr_of(i) for i in fail_cols}
         fail_cls = {changelists[i] for i in fail_cols
                     if i < len(changelists) and changelists[i]}
-        distinct_cls = len(fail_cls) if fail_cls else len(fail_cols)
+        if fail_cols and None not in fail_prs:
+            distinct_cls = len(fail_prs)
+        else:
+            distinct_cls = len(fail_cls) if fail_cls else len(fail_cols)
 
         finding = {
             "tab": tab,
@@ -173,6 +530,7 @@ def analyze_tab(dashboard, tab, window):
             "distinct_changelists": distinct_cls,
             "retest_flips": retest_flips,
             "flaky_cells": len(flaky_cells),
+            "self_regression_cols": self_regression,
             "last_failure_ts": max(
                 (timestamps[i] for i in fail_cols + flaky_cells if i < len(timestamps)),
                 default=0,
@@ -181,10 +539,22 @@ def analyze_tab(dashboard, tab, window):
         }
 
         # Recent completed results all failing => hard breakage, not a flake.
-        # RUNNING cells haven't finished, so they say nothing either way.
-        recent = [s for s in statuses if s not in (0, RUNNING_STATUS)][:3]
+        # RUNNING cells haven't finished, so they say nothing either way;
+        # aborted runs never finished, and lane- or suite-wide outages say
+        # nothing about this test in particular. Breakage at head shows up on
+        # more than one PR; a row whose recent failures all come from one
+        # PR (several pushes of it, or a test that only exists there) is
+        # that PR's own breakage and is reported as PR-local instead.
+        recent = [cell(statuses, i) for i in range(ncols)
+                  if not excluded(i)
+                  and cell(statuses, i) not in (0, RUNNING_STATUS)][:3]
         if recent and all(s in FAIL_STATUSES for s in recent):
-            consistent.append(finding)
+            if distinct_cls >= 2:
+                consistent.append(finding)
+            else:
+                pr_local.append({"tab": tab, "test": name,
+                                 "reason": "failing-only-on-one-pr",
+                                 "runs": len(fail_cols)})
         elif (
             retest_flips
             or flaky_cells
@@ -200,33 +570,31 @@ def analyze_tab(dashboard, tab, window):
         if not any(f["test"].startswith(p + "/") for p in parents if p != f["test"])
     ]
 
-    # Infra failure: the job went red but no individual test failed in that
-    # column (cluster bring-up, image push, timeouts before junit was written).
-    # Only meaningful on tabs that report per-test rows; on junit-less tabs
-    # (lint, autogen) a red run is indistinguishable from a legitimately
-    # failing PR.
+    # Infra failure: the job started a pod, produced no junit, and was not
+    # aborted or clone-failed (cluster bring-up, image push, timeouts before
+    # junit was written). Aborted runs, stale-PR clone failures, and pre-test
+    # PR breakage produce the same red-without-failing-test TestGrid shape
+    # but are not infra; report them separately.
     infra = None
-    if overall is not None and test_rows:
-        infra_cols = [
-            i
-            for i in range(ncols)
-            if cell(overall, i) in FAIL_STATUSES
-            and not any(cell(s, i) in FAIL_STATUSES for s in test_rows.values())
-        ]
-        total_red = sum(1 for i in range(ncols) if cell(overall, i) in FAIL_STATUSES)
-        if total_red:
-            infra = {
-                "tab": tab,
-                "red_runs": total_red,
-                "infra_runs": len(infra_cols),
-                "total_runs": sum(1 for i in range(ncols) if cell(overall, i) != 0),
-                "last_failure_ts": max(
-                    (timestamps[i] for i in infra_cols if i < len(timestamps)),
-                    default=0,
-                ),
-                "job_history": job_history,
-            }
-    return flaky, consistent, infra
+    if col_class:
+        infra_cols = [i for i, c in col_class.items() if c == "infra"]
+        infra = {
+            "tab": tab,
+            "red_runs": len(col_class),
+            "infra_runs": len(infra_cols),
+            "aborted_runs": sum(1 for c in col_class.values() if c == "aborted"),
+            "clone_failures": sum(
+                1 for c in col_class.values() if c == "clone_failure"),
+            "pretest_failures": sum(
+                1 for c in col_class.values() if c == "pretest_failure"),
+            "total_runs": sum(1 for i in range(ncols) if cell(overall, i) != 0),
+            "last_failure_ts": max(
+                (timestamps[i] for i in infra_cols if i < len(timestamps)),
+                default=0,
+            ),
+            "job_history": job_history,
+        }
+    return flaky, consistent, infra, pr_local
 
 
 def fmt_ts(ms):
@@ -235,7 +603,7 @@ def fmt_ts(ms):
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
-def render_report(dashboard, flaky, consistent, infra, window):
+def render_report(dashboard, flaky, consistent, infra, window, pr_local=()):
     lines = [
         f"# Flake report: {dashboard}",
         f"Window: last {window} runs per tab. Generated from {TESTGRID}/{dashboard}.",
@@ -249,6 +617,9 @@ def render_report(dashboard, flaky, consistent, infra, window):
                 f"{f['distinct_changelists']} PR(s)/commit(s), {f['passes']} pass(es), "
                 f"{f['retest_flips']} retest flip(s); "
                 f"last failed {fmt_ts(f['last_failure_ts'])}"
+                + (f"; {f['self_regression_cols']} more failure(s) excluded as "
+                   f"PR-local (the PR touched the test's own files)"
+                   if f.get("self_regression_cols") else "")
             )
     else:
         lines.append("- none detected")
@@ -258,16 +629,47 @@ def render_report(dashboard, flaky, consistent, infra, window):
             lines.append(f"- `{f['test']}` ({f['tab']}): failing at head")
     else:
         lines.append("- none")
+    lines += ["", "## PR-local failures (not flakes — the PR's own change)"]
+    if pr_local:
+        for p in pr_local:
+            why = ("PR touches the test's own sources"
+                   if p["reason"] == "pr-touches-test-sources"
+                   else "all recent failures come from a single PR")
+            lines.append(f"- `{p['test']}` ({p['tab']}): {p['runs']} run(s), {why}")
+    else:
+        lines.append("- none")
     lines += ["", "## Infrastructure failures (job failed before tests ran)"]
     infra_tabs = [i for i in infra if i and i["infra_runs"]]
     if infra_tabs:
         for i in infra_tabs:
             lines.append(
                 f"- {i['tab']}: {i['infra_runs']} of {i['red_runs']} red runs "
-                f"(out of {i['total_runs']} total) had no failing test — "
-                f"see {i['job_history']}"
+                f"(out of {i['total_runs']} total) died before junit was "
+                f"written — see {i['job_history']}"
             )
     else:
+        lines.append("- none")
+    lines += ["", "## Red runs excluded from infra (benign or author-actionable)"]
+    excluded_any = False
+    for i in infra:
+        if not i:
+            continue
+        if i.get("aborted_runs"):
+            lines.append(
+                f"- {i['tab']}: {i['aborted_runs']} red run(s) were aborted "
+                f"(superseded by a newer push or cancelled — not failures)")
+        if i.get("clone_failures"):
+            lines.append(
+                f"- {i['tab']}: {i['clone_failures']} red run(s) were "
+                f"stale-PR clone failures (rebase needed)")
+        if i.get("pretest_failures"):
+            lines.append(
+                f"- {i['tab']}: {i['pretest_failures']} red run(s) were "
+                f"pre-test PR breakage (compile/vet/mypy gates — "
+                f"author-actionable)")
+        excluded_any = excluded_any or any(
+            i.get(k) for k in ("aborted_runs", "clone_failures", "pretest_failures"))
+    if not excluded_any:
         lines.append("- none")
     return "\n".join(lines) + "\n"
 
@@ -290,6 +692,45 @@ def find_existing_issue(existing_issues, marker, test_name=None):
     return None
 
 
+def find_closed_issue(closed_issues, marker):
+    """Finds the most recently closed issue that tracked this marker, or None.
+
+    Only the HTML marker is matched (no title fallback): a closed issue may
+    only suppress re-filing for the exact finding it tracked.
+    """
+    matches = [i for i in closed_issues if marker in i.get("body", "")]
+    if not matches:
+        return None
+    return max(matches, key=lambda i: i.get("closedAt") or "")
+
+
+def should_skip_for_closed(closed_at, last_failure_ts):
+    """True when a finding has no failures newer than a prior issue's close.
+
+    A maintainer who closes a flake issue has judged the failures seen so
+    far (fixed, or a verified false positive). Those same failing columns
+    can sit in the TestGrid window for weeks, so re-filing on them would
+    just resurrect the closed issue. Only a failure strictly newer than
+    `closed_at` (ISO-8601, from GitHub) is evidence of a genuine recurrence.
+    An unparsable or missing close time files rather than suppresses.
+    """
+    if not closed_at:
+        return False
+    try:
+        closed_ms = datetime.fromisoformat(
+            closed_at.replace("Z", "+00:00")).timestamp() * 1000
+    except ValueError:
+        return False
+    return last_failure_ts <= closed_ms
+
+
+def lineage_note(prior):
+    return (
+        f"\nPreviously tracked in #{prior['number']} (closed); failures newer "
+        "than that close triggered this re-file.\n"
+    )
+
+
 def merge_flaky_by_test(flaky):
     """Merges findings for the same test across tabs into one entry.
 
@@ -303,7 +744,7 @@ def merge_flaky_by_test(flaky):
             merged[f["test"]] = dict(f, tabs=[f["tab"]],
                                      job_histories=[f["job_history"]])
             continue
-        for key in ("fails", "passes", "retest_flips", "flaky_cells"):
+        for key in ("fails", "passes", "retest_flips", "flaky_cells", "self_regression_cols"):
             m[key] += f[key]
         m["last_failure_ts"] = max(m["last_failure_ts"], f["last_failure_ts"])
         m["tabs"].append(f["tab"])
@@ -342,6 +783,16 @@ def update_issues(repo, flaky, infra, dry_run):
             "--state", "open", "--limit", "200", "--json", "number,title,body",
         )
     )
+    # Closed issues participate in dedup too: a maintainer closing a
+    # verified false positive must not have it re-filed while the stale
+    # failing columns are still inside the TestGrid window.
+    closed = json.loads(
+        gh(
+            "issue", "list", "--repo", repo, "--label", "kind/flake",
+            "--state", "closed", "--limit", "200",
+            "--json", "number,body,closedAt",
+        )
+    )
     actions = []
     for f in flaky:
         marker = f"{ISSUE_MARKER_PREFIX}{f['test']} -->"
@@ -370,7 +821,16 @@ def update_issues(repo, flaky, infra, dry_run):
                    "--title", f"[FLAKE] {f['short']} ({', '.join(f['tabs'])})",
                    "--body", body)
         else:
+            prior = find_closed_issue(closed, marker)
+            if prior and should_skip_for_closed(
+                    prior.get("closedAt"), f["last_failure_ts"]):
+                actions.append(
+                    f"skip (closed #{prior['number']}, no failures since "
+                    f"close): {f['short']}")
+                continue
             body = issue_body_for_flake(f, marker) + f"\n<!-- last-reported-failure={f['last_failure_ts']} -->\n"
+            if prior:
+                body += lineage_note(prior)
             actions.append(f"create: [FLAKE] {f['short']}")
             if not dry_run:
                 gh("issue", "create", "--repo", repo,
@@ -390,9 +850,9 @@ def update_issues(repo, flaky, infra, dry_run):
 Job history: {i['job_history']}
 
 These are not fixed by editing tests; look at `dev/ci/shared/runner.py` retries,
-image prepulls, or job resources. Note the count is an upper bound: a PR that
-fails before tests run (e.g. does not compile) also produces a red run with no
-junit failures.
+image prepulls, or job resources. Aborted runs, stale-PR clone failures, and
+PRs that break a pre-test gate (compile/vet/mypy) are already excluded from
+this count.
 
 /kind flake
 <!-- last-reported-failure={i['last_failure_ts']} -->
@@ -406,6 +866,15 @@ junit failures.
             if not dry_run:
                 gh("issue", "edit", str(issue["number"]), "--repo", repo, "--body", body)
         else:
+            prior = find_closed_issue(closed, marker)
+            if prior and should_skip_for_closed(
+                    prior.get("closedAt"), i["last_failure_ts"]):
+                actions.append(
+                    f"skip (closed #{prior['number']}, no failures since "
+                    f"close): infra {i['tab']}")
+                continue
+            if prior:
+                body += lineage_note(prior)
             actions.append(f"create: [FLAKE] {i['tab']}: infra failures before tests ran")
             if not dry_run:
                 gh("issue", "create", "--repo", repo,
@@ -431,14 +900,18 @@ def main():
                         help="with --update-issues, print planned issue actions only")
     parser.add_argument("--json", dest="json_out", metavar="PATH",
                         help="also write findings as JSON to PATH ('-' for stdout)")
+    parser.add_argument("--no-pr-files", action="store_true",
+                        help="skip the per-PR changed-files lookup that excludes "
+                             "a PR's own test regressions from flake counts")
     args = parser.parse_args()
 
     tabs = list_tabs(args.dashboard) if args.tabs == "all" else args.tabs.split(",")
-    flaky, consistent, infra = [], [], []
+    pr_files = None if args.no_pr_files else make_pr_files_lookup(args.repo)
+    flaky, consistent, infra, pr_local = [], [], [], []
     analyzed = 0
     for tab in tabs:
         try:
-            f, c, i = analyze_tab(args.dashboard, tab, args.window)
+            f, c, i, p = analyze_tab(args.dashboard, tab, args.window, pr_files)
         except Exception as e:  # a missing/renamed tab shouldn't kill the report
             print(f"warning: skipping tab {tab}: {e}", file=sys.stderr)
             continue
@@ -446,6 +919,7 @@ def main():
         flaky += f
         consistent += c
         infra.append(i)
+        pr_local += p
 
     if analyzed == 0:
         # An all-tabs failure is an outage (or a broken dashboard name), not
@@ -453,13 +927,13 @@ def main():
         print("error: no TestGrid tabs could be analyzed", file=sys.stderr)
         return 1
 
-    report = render_report(args.dashboard, flaky, consistent, infra, args.window)
+    report = render_report(args.dashboard, flaky, consistent, infra, args.window, pr_local)
     print(report)
 
     if args.json_out:
         payload = json.dumps(
             {"flaky": flaky, "consistent": consistent,
-             "infra": [i for i in infra if i]}, indent=2)
+             "infra": [i for i in infra if i], "pr_local": pr_local}, indent=2)
         if args.json_out == "-":
             print(payload)
         else:

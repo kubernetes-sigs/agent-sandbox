@@ -30,6 +30,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,6 +45,10 @@ import (
 type options struct {
 	// AgentCommand is the command line used to spawn the ACP agent subprocess.
 	AgentCommand string
+	// AgentAddress, if set, connects to an ACP agent listening on a TCP
+	// address (e.g. behind kubectl port-forward) instead of spawning a
+	// subprocess.
+	AgentAddress string
 	// WorkingDirectory is the session working directory; file system requests
 	// from the agent are confined to it. Empty means the current directory.
 	WorkingDirectory string
@@ -74,6 +79,7 @@ func main() {
 func run(ctx context.Context) error {
 	var opt options
 	flag.StringVar(&opt.AgentCommand, "cmd", "gemini --acp", "Command to start the ACP agent (e.g. 'gemini --acp')")
+	flag.StringVar(&opt.AgentAddress, "addr", "", "TCP address of an ACP agent to connect to (e.g. 'localhost:8090' behind kubectl port-forward); overrides -cmd")
 	flag.StringVar(&opt.WorkingDirectory, "cwd", "", "Working directory for the session (defaults to current directory)")
 	flag.StringVar(&opt.SessionID, "session-id", "", "Resume an existing session ID instead of creating a new one")
 	flag.StringVar(&opt.Prompt, "prompt", "", "Send a single prompt and exit instead of running interactively")
@@ -150,9 +156,20 @@ func run(ctx context.Context) error {
 	}
 }
 
-// connectAgent spawns the configured agent command and returns the reader
-// and writer connected to its stdout and stdin.
+// connectAgent connects to the ACP agent: over TCP if -addr is set,
+// otherwise by spawning the configured agent command and using its stdout
+// and stdin.
 func connectAgent(ctx context.Context, opt options, cwd string) (io.Reader, io.Writer, func(), error) {
+	if opt.AgentAddress != "" {
+		var dialer net.Dialer
+		conn, err := dialer.DialContext(ctx, "tcp", opt.AgentAddress)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("connecting to agent at %s: %w", opt.AgentAddress, err)
+		}
+		fmt.Printf("Connected to ACP agent at %s\n", opt.AgentAddress)
+		return conn, conn, func() { conn.Close() }, nil
+	}
+
 	args := strings.Fields(opt.AgentCommand)
 	if len(args) == 0 {
 		return nil, nil, nil, fmt.Errorf("empty agent command")

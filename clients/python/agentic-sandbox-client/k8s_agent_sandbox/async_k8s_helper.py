@@ -15,12 +15,11 @@
 import asyncio
 import logging
 import time
-from datetime import datetime, UTC
+from datetime import UTC, datetime
+from typing import Any
 
+import aiohttp
 from kubernetes_asyncio import client, config, watch
-
-logger = logging.getLogger(__name__)
-
 from .constants import (
     CLAIM_API_GROUP,
     CLAIM_API_VERSION,
@@ -43,26 +42,40 @@ from .utils import (
     select_pod_ip,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class AsyncK8sHelper:
     """Async helper class for Kubernetes API interactions using kubernetes_asyncio."""
 
-    def __init__(self):
+    def __init__(self, api_client: client.ApiClient | None = None) -> None:
         self._initialized = False
         self._init_lock = asyncio.Lock()
-        self._api_client: client.ApiClient | None = None
+        self._api_client: client.ApiClient | None = api_client
+        # An injected client is caller-owned; only close clients we create.
+        self._owns_api_client = api_client is None
 
-    async def _ensure_initialized(self):
+    @property
+    def injected_api_client(self) -> client.ApiClient | None:
+        """The caller-provided client, or None when the ambient config is used.
+
+        Kept so kubectl subprocesses can target the same cluster.
+        """
+        return None if self._owns_api_client else self._api_client
+
+    async def _ensure_initialized(self) -> None:
         if self._initialized:
             return
         async with self._init_lock:
             if self._initialized:
                 return
-            try:
-                config.load_incluster_config()
-            except config.ConfigException:
-                await config.load_kube_config()
-            self._api_client = client.ApiClient()
+            if self._api_client is None:
+                try:
+                    config.load_incluster_config()
+                except config.ConfigException:
+                    await config.load_kube_config()
+                self._api_client = client.ApiClient()
+                self._owns_api_client = True
             self.custom_objects_api = client.CustomObjectsApi(self._api_client)
             self.core_v1_api = client.CoreV1Api(self._api_client)
             self._initialized = True
@@ -102,7 +115,7 @@ class AsyncK8sHelper:
             }
         }
 
-        spec = {
+        spec: dict[str, Any] = {
             "warmPoolRef": {
                 "name": warmpool,
             }
@@ -137,7 +150,9 @@ class AsyncK8sHelper:
             body=manifest,
         )
 
-    async def resolve_sandbox_name(self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None) -> str:
+    async def resolve_sandbox_name(
+        self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None
+    ) -> str:
         """Resolves the actual Sandbox name from the SandboxClaim status.
         With warm pool adoption, the sandbox name may differ from the claim
         name. This method watches the SandboxClaim until the sandbox name
@@ -151,7 +166,10 @@ class AsyncK8sHelper:
         return await self._watch_claim(claim_name, namespace, timeout, require_ready=False,
                                        resource_version=resource_version)
 
-    async def wait_for_claim_ready(self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None) -> str:
+    async def wait_for_claim_ready(
+        self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None,
+        *, expected_uid: str | None = None, initial_claim: dict | None = None,
+    ) -> str:
         """Watches the SandboxClaim until it is bound to a sandbox AND its
         Ready condition is True, then returns the sandbox name.
 
@@ -166,12 +184,17 @@ class AsyncK8sHelper:
             resource_version: Optional resourceVersion to start the watch
                 from (e.g. ``metadata.resourceVersion`` of the create
                 response). Defaults to ``"0"`` — see ``_watch_claim``.
+            expected_uid: If provided, reject events for a same-name replacement.
+            initial_claim: Optional create/GET response to evaluate before
+                waiting for future watch events.
         """
         return await self._watch_claim(claim_name, namespace, timeout, require_ready=True,
-                                       resource_version=resource_version)
+                                       resource_version=resource_version,
+                                       expected_uid=expected_uid, initial_claim=initial_claim)
 
     async def _watch_claim(self, claim_name: str, namespace: str, timeout: int, require_ready: bool,
-                           resource_version: str | None = None) -> str:
+                           resource_version: str | None = None,
+                           *, expected_uid: str | None = None, initial_claim: dict | None = None) -> str:
         """Shared SandboxClaim watch loop.
 
         Returns the sandbox name once ``status.sandbox.name`` is populated;
@@ -206,16 +229,23 @@ class AsyncK8sHelper:
                 )
             w = watch.Watch()
             try:
-                async for event in w.stream(
-                    func=self.custom_objects_api.list_namespaced_custom_object,
-                    namespace=namespace,
-                    group=CLAIM_API_GROUP,
-                    version=CLAIM_API_VERSION,
-                    plural=CLAIM_PLURAL_NAME,
-                    field_selector=f"metadata.name={claim_name}",
-                    resource_version=rv,
-                    timeout_seconds=remaining,
-                ):
+                async def events():
+                    # An already-ready GET may never produce another watch event.
+                    if initial_claim is not None:
+                        yield {"type": "ADDED", "object": initial_claim}
+                    async for event in w.stream(
+                        func=self.custom_objects_api.list_namespaced_custom_object,
+                        namespace=namespace,
+                        group=CLAIM_API_GROUP,
+                        version=CLAIM_API_VERSION,
+                        plural=CLAIM_PLURAL_NAME,
+                        field_selector=f"metadata.name={claim_name}",
+                        resource_version=rv,
+                        timeout_seconds=remaining,
+                    ):
+                        yield event
+
+                async for event in events():
                     if event is None:
                         continue
                     if event["type"] == "DELETED":
@@ -224,6 +254,13 @@ class AsyncK8sHelper:
                         )
                     if event["type"] in ["ADDED", "MODIFIED"]:
                         claim_object = event["object"]
+                        metadata = claim_object.get("metadata") or {}
+                        if expected_uid is not None and metadata.get("uid") != expected_uid:
+                            raise SandboxNotFoundError(
+                                f"SandboxClaim '{claim_name}' was replaced while waiting for readiness."
+                            )
+                        if expected_uid is not None and metadata.get("deletionTimestamp"):
+                            raise SandboxNotFoundError(f"SandboxClaim '{claim_name}' is terminating.")
                         # Track the last-seen resourceVersion so a stream
                         # restart resumes instead of replaying history.
                         seen_rv = (claim_object.get("metadata") or {}).get("resourceVersion")
@@ -279,10 +316,26 @@ class AsyncK8sHelper:
                     rv = "0"
                     continue
                 raise
+            except aiohttp.ClientSSLError:
+                raise
+            except (
+                aiohttp.ClientConnectionError,
+                aiohttp.ClientPayloadError,
+                ConnectionError,
+            ) as e:
+                logger.warning(
+                    f"Watch on claim '{claim_name}' disconnected ({type(e).__name__}: {e}); "
+                    "reconnecting..."
+                )
+                await asyncio.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+                continue
             finally:
+                initial_claim = None
                 await w.close()
 
-    async def wait_for_sandbox_ready(self, name: str, namespace: str, timeout: int) -> str | None:
+    async def wait_for_sandbox_ready(
+        self, name: str, namespace: str, timeout: int
+    ) -> str | None:
         """Waits for the Sandbox custom resource to have a 'Ready' status.
 
         Returns the selected pod IP from the sandbox status when ready, or None if
@@ -295,7 +348,9 @@ class AsyncK8sHelper:
         while True:
             remaining = int(deadline - time.monotonic())
             if remaining <= 0:
-                raise TimeoutError(f"Sandbox {name} did not become ready within {timeout} seconds.")
+                raise TimeoutError(
+                    f"Sandbox {name} did not become ready within {timeout} seconds."
+                )
             w = watch.Watch()
             try:
                 async for event in w.stream(
@@ -314,22 +369,45 @@ class AsyncK8sHelper:
                         status = sandbox_object.get("status") or {}
                         conditions = status.get("conditions", [])
                         for cond in conditions:
-                            if cond.get("type") == "Ready" and cond.get("status") == "True":
+                            if (
+                                cond.get("type") == "Ready"
+                                and cond.get("status") == "True"
+                            ):
                                 logger.info(f"Sandbox {name} is ready.")
                                 pod_ips = status.get("podIPs", [])
                                 return select_pod_ip(pod_ips)
                     elif event["type"] == "DELETED":
-                        logger.error(f"Sandbox {name} was deleted before becoming ready.")
+                        logger.error(
+                            f"Sandbox {name} was deleted before becoming ready."
+                        )
                         raise SandboxNotFoundError(
                             f"Sandbox {name} was deleted before becoming ready."
                         )
+            except aiohttp.ClientSSLError:
+                raise
+            except (
+                aiohttp.ClientConnectionError,
+                aiohttp.ClientPayloadError,
+                ConnectionError,
+            ) as e:
+                logger.warning(
+                    f"Watch for Sandbox '{name}' disconnected ({type(e).__name__}: {e}); "
+                    "reconnecting..."
+                )
+                await asyncio.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+                continue
             finally:
                 await w.close()
 
-    async def delete_sandbox_claim(self, name: str, namespace: str):
-        """Deletes a SandboxClaim custom resource."""
+    async def delete_sandbox_claim(self, name: str, namespace: str, *, expected_uid: str | None = None) -> None:
+        """Deletes a SandboxClaim, optionally requiring a matching UID."""
         await self._ensure_initialized()
 
+        delete_kwargs: dict[str, Any] = {}
+        if expected_uid is not None:
+            delete_kwargs["body"] = client.V1DeleteOptions(
+                preconditions=client.V1Preconditions(uid=expected_uid)
+            )
         try:
             await self.custom_objects_api.delete_namespaced_custom_object(
                 group=CLAIM_API_GROUP,
@@ -337,6 +415,7 @@ class AsyncK8sHelper:
                 namespace=namespace,
                 plural=CLAIM_PLURAL_NAME,
                 name=name,
+                **delete_kwargs,
             )
             logger.info(f"Terminated SandboxClaim: {name}")
         except client.ApiException as e:
@@ -344,7 +423,7 @@ class AsyncK8sHelper:
                 logger.error(f"Error terminating SandboxClaim {name}: {e}")
                 raise
 
-    async def get_sandbox(self, name: str, namespace: str):
+    async def get_sandbox(self, name: str, namespace: str) -> dict[str, Any] | None:
         """Gets a Sandbox custom resource."""
         await self._ensure_initialized()
 
@@ -378,7 +457,9 @@ class AsyncK8sHelper:
                 return None
             raise
 
-    async def list_sandbox_claims(self, namespace: str, label_selector: str | None = None) -> list[str]:
+    async def list_sandbox_claims(
+        self, namespace: str, label_selector: str | None = None
+    ) -> list[str]:
         """Lists all SandboxClaim custom resources in a namespace.
 
         Args:
@@ -398,7 +479,9 @@ class AsyncK8sHelper:
             )
             if label_selector is not None:
                 kwargs["label_selector"] = label_selector
-            response = await self.custom_objects_api.list_namespaced_custom_object(**kwargs)
+            response = await self.custom_objects_api.list_namespaced_custom_object(
+                **kwargs
+            )
             return [
                 item.get("metadata", {}).get("name")
                 for item in response.get("items", [])
@@ -408,12 +491,16 @@ class AsyncK8sHelper:
             logger.error(f"Error listing sandbox claims in namespace {namespace}: {e}")
             raise
 
-    async def wait_for_gateway_ip(self, gateway_name: str, namespace: str, timeout: int) -> str:
+    async def wait_for_gateway_ip(
+        self, gateway_name: str, namespace: str, timeout: int
+    ) -> str:
         """Waits for the Gateway to be assigned an external IP."""
         await self._ensure_initialized()
 
         deadline = time.monotonic() + timeout
-        logger.info(f"Waiting for Gateway '{gateway_name}' in namespace '{namespace}'...")
+        logger.info(
+            f"Waiting for Gateway '{gateway_name}' in namespace '{namespace}'..."
+        )
         while True:
             remaining = int(deadline - time.monotonic())
             if remaining <= 0:
@@ -441,22 +528,28 @@ class AsyncK8sHelper:
                             ip_address = address.get("value")
                             if not ip_address:
                                 continue
-                            
-                            if not is_valid_ip(ip_address) and not is_valid_gateway_hostname(ip_address):
+
+                            if not is_valid_ip(
+                                ip_address
+                            ) and not is_valid_gateway_hostname(ip_address):
                                 logger.warning(
                                     "Gateway address rejected because %r is neither a valid IP address nor a valid gateway hostname.",
                                     ip_address,
                                 )
                                 continue
-                                
+
                             logger.info(f"Gateway ready. IP: {ip_address}")
                             return ip_address
             finally:
                 await w.close()
 
-    async def close(self):
-        """Closes the shared Kubernetes API client session."""
-        if self._api_client:
+    async def close(self) -> None:
+        """Closes the shared Kubernetes API client session.
+
+        A caller-injected ``api_client`` is left open and remains attached to
+        this helper. Only a client created internally is closed and cleared.
+        """
+        if self._api_client and self._owns_api_client:
             await self._api_client.close()
             self._api_client = None
             self._initialized = False

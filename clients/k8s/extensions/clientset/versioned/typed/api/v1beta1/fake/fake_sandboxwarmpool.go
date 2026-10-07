@@ -18,19 +18,20 @@ package fake
 
 import (
 	gentype "k8s.io/client-go/gentype"
-	apiv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/typed/api/v1beta1"
+	apiv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/applyconfiguration/api/v1beta1"
+	typedapiv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/typed/api/v1beta1"
 	v1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
 // fakeSandboxWarmPools implements SandboxWarmPoolInterface
 type fakeSandboxWarmPools struct {
-	*gentype.FakeClientWithList[*v1beta1.SandboxWarmPool, *v1beta1.SandboxWarmPoolList]
+	*gentype.FakeClientWithListAndApply[*v1beta1.SandboxWarmPool, *v1beta1.SandboxWarmPoolList, *apiv1beta1.SandboxWarmPoolApplyConfiguration]
 	Fake *FakeExtensionsV1beta1
 }
 
-func newFakeSandboxWarmPools(fake *FakeExtensionsV1beta1, namespace string) apiv1beta1.SandboxWarmPoolInterface {
+func newFakeSandboxWarmPools(fake *FakeExtensionsV1beta1, namespace string) typedapiv1beta1.SandboxWarmPoolInterface {
 	return &fakeSandboxWarmPools{
-		gentype.NewFakeClientWithList[*v1beta1.SandboxWarmPool, *v1beta1.SandboxWarmPoolList](
+		gentype.NewFakeClientWithListAndApply[*v1beta1.SandboxWarmPool, *v1beta1.SandboxWarmPoolList, *apiv1beta1.SandboxWarmPoolApplyConfiguration](
 			fake.Fake,
 			namespace,
 			v1beta1.SchemeGroupVersion.WithResource("sandboxwarmpools"),

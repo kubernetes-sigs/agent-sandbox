@@ -143,11 +143,32 @@ if err := sb.WriteReader(ctx, "model.bin", file); err != nil {
 // Read a file
 data, err := sb.Read(ctx, "script.py")
 
+// Stream a large download into a caller-owned destination. ReadTo never closes
+// the destination and writes at most MaxDownloadSize bytes.
+download, err := os.Create("model-copy.bin")
+if err != nil { log.Fatal(err) }
+defer download.Close()
+written, err := sb.ReadTo(ctx, "model.bin", download)
+if err != nil { log.Fatal(err) }
+fmt.Printf("downloaded %d bytes\n", written)
+
 // Check existence
 exists, err := sb.Exists(ctx, "script.py")
 ```
 
-`Run()` responses are capped at 16 MB; `List()`/`Exists()` at 8 MB.
+`Read()` and `ReadTo()` responses are capped by `MaxDownloadSize` (256 MB by
+default). `Run()` responses are capped at 16 MB; `List()`/`Exists()` at 8 MB.
+
+### Runtime Health and Metadata
+
+With `RuntimeSandboxd`, query the in-sandbox daemon. The legacy runtime returns
+`ErrUnsupportedByRuntime`. Neither call retries unless you pass
+`WithMaxAttempts`.
+
+```go
+health, err := sb.Health(ctx)   // health.Status, health.UptimeSeconds
+meta, err := sb.Metadata(ctx)   // meta.Env (non-sensitive, SANDBOX_-prefixed by default)
+```
 
 ### 5. Custom TLS / Transport
 
@@ -180,6 +201,23 @@ for _, key := range client.ListActiveSandboxes() {
 
 // Re-attach to existing sandbox by claim name
 sb, _ := client.GetSandbox(ctx, sb1.ClaimName(), "default")
+
+// Label the claims a client creates (Options.Labels), then list by label
+labeled, err := sandbox.NewClient(ctx, sandbox.Options{Labels: map[string]string{"app": "agent"}})
+if err != nil { log.Fatal(err) }
+defer labeled.DeleteAll(ctx)
+
+sb3, err := labeled.CreateSandbox(ctx, "python-pool", "default")
+if err != nil { log.Fatal(err) }
+
+names, err := labeled.ListAllSandboxes(ctx, "default", sandbox.WithLabelSelector("app=agent"))
+if err != nil { log.Fatal(err) }
+fmt.Println(names) // includes sb3.ClaimName()
+
+// Expire claims on their own (Options.ShutdownAfter)
+ttl, err := sandbox.NewClient(ctx, sandbox.Options{ShutdownAfter: time.Hour})
+if err != nil { log.Fatal(err) }
+defer ttl.DeleteAll(ctx)
 ```
 
 ## Configuration
@@ -191,6 +229,9 @@ All options are documented on the `Options` struct in
 - `Env`: environment variables to inject into the `SandboxClaim`. Setting this
   forces a cold start from the warm pool template instead of adopting a
   pre-warmed pod, which may increase startup latency.
+- `Labels`: labels added to every `SandboxClaim` the client creates.
+- `ShutdownAfter`: expire every claim this client creates after this long, so a
+  crashed client does not leak sandboxes. Unset by default (no expiry).
 - `GatewayName`: set to enable Gateway mode.
 - `APIURL`: set for Direct URL mode (takes precedence over `GatewayName`).
 - `TracerProvider`: OpenTelemetry integration.
@@ -202,6 +243,16 @@ or `WithMaxAttempts` to control retry behavior:
 result, err := client.Run(ctx, "make build", sandbox.WithTimeout(10*time.Minute))
 ```
 
+`Run` also takes `WithEnv` and `WithWorkingDir` (RuntimeSandboxd only; the
+legacy runtime returns `ErrUnsupportedByRuntime`). `WithEnv` is merged over the
+sandbox's environment, and the directory is relative to the sandbox root:
+
+```go
+result, err := client.Run(ctx, "make build",
+    sandbox.WithEnv(map[string]string{"CI": "1"}),
+    sandbox.WithWorkingDir("project"))
+```
+
 ## Retry Behavior
 
 File operations (`Read`, `Write`, `List`, `Exists`) are automatically retried (up to
@@ -210,6 +261,12 @@ File operations (`Read`, `Write`, `List`, `Exists`) are automatically retried (u
 reader cannot generally be replayed safely after a partial upload. Passing
 `WithMaxAttempts(n)` with `n > 1` returns an error rather than silently reducing
 the operation to a single attempt.
+
+`ReadTo` can retry before a successful response begins. Once response bytes have
+been written to the destination, a body-read or destination-write failure is
+returned without retrying because the destination cannot generally be rewound.
+The caller owns the destination and should decide whether to keep or remove any
+partially written data.
 
 **Important:** `Run()` defaults to a single attempt (no retries) because command
 execution is not idempotent. Use `WithMaxAttempts` to opt in to retries for
@@ -257,7 +314,7 @@ if err := client.Open(ctx); err != nil { ... }
 | `RequestTimeout` | 180 s | Total timeout per SDK method call (Run, Read, …) |
 | `PerAttemptTimeout` | 60 s | Time to receive response headers per attempt |
 | `MaxUploadSize` | 256 MB | Maximum content size for `Write()` and `WriteReader()` |
-| `MaxDownloadSize` | 256 MB | Maximum response body size for `Read()` |
+| `MaxDownloadSize` | 256 MB | Maximum response body size for `Read()` and `ReadTo()` |
 
 ## Port-Forward Recovery
 
@@ -301,7 +358,9 @@ Calling `Open()` on a client with an orphaned claim returns `ErrOrphanedClaim`.
 | `ErrAlreadyOpen` | `Open()` called on an already-open client. Call `Close()` first. |
 | `ErrOrphanedClaim` | A previous claim could not be cleaned up (failed `Close()`, failed `Open()` rollback, or sandbox disappeared during reconnect); call `Close()` to retry deletion. |
 | `ErrTimeout` | Sandbox or Gateway did not become ready within the configured timeout. |
-| `ErrClaimFailed` | SandboxClaim creation was rejected by the API server. |
+| `ErrClaimFailed` | SandboxClaim creation was rejected by the API server, or the claim reported a failure the controller does not retry (for example `InvalidMetadata` or `ClaimExpired`). |
+| `ErrWarmPoolNotFound` | The claim's SandboxWarmPool does not exist. |
+| `ErrTemplateNotFound` | The SandboxTemplate behind the warm pool does not exist. |
 | `ErrPortForwardDied` | The SPDY tunnel dropped. Call `Open()` to reconnect. |
 | `ErrRetriesExhausted` | All HTTP retry attempts failed. |
 | `ErrSandboxDeleted` | The Sandbox was deleted before becoming ready. |

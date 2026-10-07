@@ -20,13 +20,20 @@ command path, which requires generated stubs + the native grpcio extension.
 """
 
 import datetime
+import io
 import unittest
 from unittest.mock import MagicMock
 
+from k8s_agent_sandbox import (
+    SandboxdInClusterConnectionConfig as PublicInClusterConfig,
+    SandboxNoServiceError,
+    SandboxServiceUnavailableError,
+)
 from k8s_agent_sandbox.exceptions import SandboxRequestError
 from k8s_agent_sandbox.files.filesystem import Filesystem
 from k8s_agent_sandbox.models import (
     FileEntry,
+    SandboxdInClusterConnectionConfig,
     SandboxdPodTunnelConnectionConfig,
 )
 
@@ -70,6 +77,35 @@ class TestSandboxdConfig(unittest.TestCase):
         with self.assertRaises(ValueError):
             SandboxdPodTunnelConnectionConfig(rest_port=70000)
 
+    def test_direct_in_cluster_requires_mode_and_has_two_ports(self):
+        self.assertIs(PublicInClusterConfig, SandboxdInClusterConnectionConfig)
+        self.assertTrue(issubclass(SandboxNoServiceError, RuntimeError))
+        self.assertIs(SandboxServiceUnavailableError, SandboxNoServiceError)
+        with self.assertRaises(ValueError):
+            SandboxdInClusterConnectionConfig()
+        config = SandboxdInClusterConnectionConfig(mode="in-cluster-service")
+        self.assertEqual((config.rest_port, config.grpc_port), (8080, 9090))
+
+    def test_direct_in_cluster_maps_deprecated_modes(self):
+        for old, new in (
+            ("service-dns", "in-cluster-service"),
+            ("pod-ip", "in-cluster-pod-ip"),
+        ):
+            with self.subTest(mode=old):
+                with self.assertWarns(DeprecationWarning):
+                    config = SandboxdInClusterConnectionConfig(mode=old)
+                self.assertEqual(config.mode, new)
+
+    def test_direct_in_cluster_rejects_invalid_mode_and_ports(self):
+        for values in (
+            {"mode": "auto"},
+            {"mode": "in-cluster-pod-ip", "rest_port": 0},
+            {"mode": "in-cluster-pod-ip", "grpc_port": 65536},
+            {"mode": "in-cluster-pod-ip", "rest_port": 9090, "grpc_port": 9090},
+        ):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                SandboxdInClusterConnectionConfig(**values)
+
 
 class TestSandboxdFilesystem(unittest.TestCase):
     def setUp(self):
@@ -87,6 +123,18 @@ class TestSandboxdFilesystem(unittest.TestCase):
         self.assertEqual(args[1], "v1/files/dir%2Fscript.py")
         self.assertEqual(kwargs["data"], b"print(1)")
         self.assertEqual(kwargs["headers"]["Content-Type"], "application/octet-stream")
+
+    def test_write_streams_raw_body_once(self):
+        source = io.BytesIO(b"skip-streamed payload")
+        source.seek(5)
+
+        self._fs.write("dir/data.bin", source)
+
+        args, kwargs = self._last_call()
+        self.assertEqual(args[0], "PUT")
+        self.assertEqual(b"".join(kwargs["data"]), b"streamed payload")
+        self.assertTrue(kwargs["_disable_retries"])
+        self.assertFalse(source.closed)
 
     def test_read_gets_files_endpoint(self):
         resp = MagicMock()
@@ -151,6 +199,11 @@ class TestSandboxdFilesystem(unittest.TestCase):
         self._fs.delete("f.txt")
         args, _ = self._last_call()
         self.assertEqual(args[1], "v1/files/f.txt")
+
+    def test_delete_rejects_empty_path(self):
+        with self.assertRaisesRegex(ValueError, "path must not be empty"):
+            self._fs.delete("")
+        self._connector.send_request.assert_not_called()
 
 
 class TestLegacyDeleteUnsupported(unittest.TestCase):

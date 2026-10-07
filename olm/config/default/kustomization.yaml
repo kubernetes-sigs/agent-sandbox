@@ -8,6 +8,12 @@ resources:
 - ../rbac
 - ../manager
 - ../sandbox-router
+# [Optional] Prometheus ServiceMonitor: uncomment to include a ServiceMonitor
+# in the OLM bundle so Prometheus can scrape the controller's metrics endpoint.
+# When --metrics-secure-serving is enabled, also update scheme and tlsConfig in
+# config/prometheus/monitor.yaml (see docs/configuration.md "Enabling secure
+# metrics end-to-end").
+# - ../prometheus
 images:
 - name: registry.k8s.io/agent-sandbox/sandbox-router-go
   newName: registry.k8s.io/agent-sandbox/sandbox-router-go

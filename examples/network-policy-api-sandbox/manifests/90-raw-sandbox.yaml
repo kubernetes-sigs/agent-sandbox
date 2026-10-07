@@ -1,0 +1,20 @@
+# A Sandbox created directly, without a SandboxTemplate.
+#
+# The controller creates no NetworkPolicy for it and applies no DNS override
+# (it resolves via CoreDNS). It still gets the agents.x-k8s.io/sandbox-name-hash
+# label, so the ClusterNetworkPolicies select it. Used to show what the
+# Baseline tier adds (80-cnp-baseline-default-deny.yaml).
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: raw-sandbox
+  namespace: sandbox-team-a
+spec:
+  podTemplate:
+    spec:
+      # Templates get this from the controller's secure defaults; a raw Sandbox does not.
+      automountServiceAccountToken: false
+      containers:
+        - name: agent
+          image: python:3.12-slim
+          command: ["sleep", "infinity"]

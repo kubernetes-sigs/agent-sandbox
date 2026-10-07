@@ -610,3 +610,46 @@ def test_resolver_never_routes_to_a_frozen_cluster():
     assert [m.cluster for m in r.list_matches("shared")] == ["cluster-a", "cluster-c"]
     picks = {r.resolve("shared", strategy="round-robin").cluster for _ in range(6)}
     assert picks == {"cluster-a", "cluster-c"}
+
+
+# --------------------------------------------------------------------------- #
+# Pinning the SDK client to one cluster, including the exec/files tunnel.
+# --------------------------------------------------------------------------- #
+
+def test_pinned_client_passes_api_client_to_an_sdk_that_accepts_it(caplog):
+    from agent_sandbox_fleet import resolver as r
+    seen = {}
+
+    class NewSDK:
+        def __init__(self, connection_config=None, tracer_config=None,
+                     cleanup=False, api_client=None):
+            seen["api_client"] = api_client
+            self.k8s_helper = type("H", (), {})()
+
+    sentinel = object()
+    with caplog.at_level("WARNING"):
+        r._pinned_sandbox_client(NewSDK, sentinel, "ctx-a")
+    assert seen["api_client"] is sentinel, "api_client must be forwarded"
+    assert "AMBIENT" not in caplog.text
+
+
+def test_pinned_client_rebinds_and_warns_once_on_an_old_sdk(caplog, monkeypatch):
+    # Old SDK: no api_client kwarg. Control-plane objects are rebound, and the
+    # unpinned-tunnel hazard is logged once per context, not once per build.
+    from agent_sandbox_fleet import resolver as r
+    monkeypatch.setattr(r, "_UNPINNED_TUNNEL_WARNED", set())
+
+    class OldSDK:
+        def __init__(self, connection_config=None, tracer_config=None, cleanup=False):
+            self.k8s_helper = type("H", (), {"custom_objects_api": None,
+                                             "core_v1_api": None})()
+
+    from kubernetes import client as k8s_client
+    api_client = k8s_client.ApiClient(configuration=k8s_client.Configuration())
+    with caplog.at_level("WARNING"):
+        c1 = r._pinned_sandbox_client(OldSDK, api_client, "ctx-b")
+        c2 = r._pinned_sandbox_client(OldSDK, api_client, "ctx-b")
+    assert c1.k8s_helper.custom_objects_api.api_client is api_client
+    assert c2.k8s_helper.core_v1_api.api_client is api_client
+    assert caplog.text.count("AMBIENT kubeconfig context") == 1
+    assert "#1830" in caplog.text

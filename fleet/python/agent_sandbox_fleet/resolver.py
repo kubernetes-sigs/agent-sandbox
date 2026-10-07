@@ -364,6 +364,65 @@ class ClusterResolver:
         ) from last_exc
 
 
+def _pinned_sandbox_client(sandbox_client_cls: Any, api_client: Any,
+                           context_name: str) -> Any:
+    """Construct a SandboxClient whose EVERY path -- control-plane calls AND
+    the exec/files tunnel -- goes to the cluster behind ``api_client``.
+
+    Two SDK generations have to be handled:
+
+    * `k8s-agent-sandbox` with `SandboxClient(api_client=...)` (main since
+      #1830, after v1.0.5): pass it through. The SDK builds its API objects
+      from it and points the kubectl port-forward tunnel at the same cluster.
+    * Older SDKs: the only hook is rebinding the two API objects after the
+      fact. That pins claims, templates and pools, but NOT the tunnel --
+      `kubectl port-forward` still follows the ambient kubeconfig context, so
+      a command or file transfer for a claim on cluster X can go through
+      cluster Y's router. Claim-only callers (the fleet member, the planner
+      bench) are unaffected; anything that execs through this client is, so
+      say so once, loudly, rather than let it surface as "exec hangs on two
+      of three clusters".
+    """
+    import inspect
+
+    from kubernetes import client as k8s_client
+
+    try:
+        accepts = "api_client" in inspect.signature(sandbox_client_cls).parameters
+    except (TypeError, ValueError):
+        accepts = False
+    if accepts:
+        return sandbox_client_cls(api_client=api_client)
+
+    sandbox_client = sandbox_client_cls()
+    sandbox_client.k8s_helper.custom_objects_api = k8s_client.CustomObjectsApi(api_client)
+    sandbox_client.k8s_helper.core_v1_api = k8s_client.CoreV1Api(api_client)
+    if context_name not in _UNPINNED_TUNNEL_WARNED:
+        _UNPINNED_TUNNEL_WARNED.add(context_name)
+        log.warning(
+            "k8s-agent-sandbox %s predates SandboxClient(api_client=...): "
+            "control-plane calls for context %s are pinned, but the exec/files "
+            "tunnel follows the AMBIENT kubeconfig context and may reach the "
+            "wrong cluster. Claims are unaffected; exec and file transfer need "
+            "an SDK that includes #1830 (newer than v1.0.5).",
+            _sdk_version(), context_name,
+        )
+    return sandbox_client
+
+
+# Contexts already warned about, so a multi-cluster harness logs once per
+# cluster rather than once per client build.
+_UNPINNED_TUNNEL_WARNED: set[str] = set()
+
+
+def _sdk_version() -> str:
+    try:
+        from importlib.metadata import version
+        return version("k8s-agent-sandbox")
+    except Exception:  # noqa: BLE001 -- best-effort label for a log line
+        return "(unknown version)"
+
+
 def resolve_cluster(
     template: str,
     bucket: str,
@@ -691,16 +750,13 @@ class FleetSandboxClient:
             # SDK's internal load is only used for the discarded default apis.
             pass
 
-        sandbox_client = SandboxClient()
-
-        # 3. Rebind the SDK's internal API objects to an ApiClient tied to
-        #    our explicit per-context Configuration. This is the load-bearing
-        #    step — without it, every SandboxClient across the fleet would
-        #    route to the same cluster (see docstring).
+        # 3. Pin the SDK client to an ApiClient tied to our explicit
+        #    per-context Configuration. This is the load-bearing step --
+        #    without it, every SandboxClient across the fleet would route to
+        #    the same cluster (see docstring).
         api_client = k8s_client.ApiClient(configuration=cfg)
-        sandbox_client.k8s_helper.custom_objects_api = k8s_client.CustomObjectsApi(api_client)
-        sandbox_client.k8s_helper.core_v1_api = k8s_client.CoreV1Api(api_client)
-
+        sandbox_client = _pinned_sandbox_client(SandboxClient, api_client,
+                                                context_name)
         log.debug("built pinned SandboxClient for context=%s host=%s",
                   context_name, cfg.host)
         return sandbox_client

@@ -121,8 +121,10 @@ CLI/batch job.
 4. **Capacity reporter** every 30 s:
    - Lists all `SandboxWarmPool` in the cluster with the fleet-managed label.
    - Sums `Status.Replicas` and `Status.ReadyReplicas` → `warmpool_depth`.
-   - Queries the local `agent_sandbox_claim_startup_latency_ms` metric via
-     the sandbox controller's `/metrics` endpoint → `claim_p90_ms`.
+   - `claim_p90_ms` is **not measured yet** and is published as `null`
+     (follow-up: scrape `agent_sandbox_claim_startup_latency_ms` from the
+     sandbox controller's `/metrics` endpoint). Readers treat `null` as
+     unmeasured, never as `0`.
    - Lists nodes, computes crude `node_pressure_score` (allocatable-vs-used
      CPU/memory ratio, averaged).
    - Writes `fleet/capacity/<cluster>.json`.
@@ -241,7 +243,7 @@ whole fleet the first time an archive write failed after a successful publish.
   "warmpool_depth": 15,
   "warmpool_ready": 14,
   "active_claims": 3,
-  "claim_p90_ms": 220.5,
+  "claim_p90_ms": null,
   "node_pressure_score": 0.42,
   "reported_pools": ["django-pool", "sympy-pool"]
 }

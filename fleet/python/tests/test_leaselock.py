@@ -129,6 +129,25 @@ def test_a_concurrent_writer_makes_update_return_false():
     assert a.update("fleet-member", "ns", _record("pod-a")) is False
 
 
+def test_transport_errors_are_a_failed_attempt_not_a_crash():
+    # urllib3 errors are not ApiException and used to escape the election
+    # loop into the exit-2 path, restarting the leader on an apiserver blip.
+    from urllib3.exceptions import MaxRetryError, ReadTimeoutError
+    api = FakeCoordination()
+    lock = LeaseLock("fleet-member", "ns", "pod-a", api=api)
+    lock.create("fleet-member", "ns", _record())
+    api.fail_reads_with = ReadTimeoutError(None, "/leases", "read timed out")
+    status, err = lock.get("fleet-member", "ns")
+    assert status is False
+    assert json.loads(err.body)["code"] != 404, "must not look like 'create me'"
+    api.fail_reads_with = None
+    # update/create surface the same way
+    api.replace_namespaced_lease = lambda *a, **k: (_ for _ in ()).throw(
+        MaxRetryError(None, "/leases", "boom"))
+    lock.get("fleet-member", "ns")
+    assert lock.update("fleet-member", "ns", _record()) is False
+
+
 def test_rbac_denial_raises_instead_of_retrying_forever():
     api = FakeCoordination()
     api.fail_reads_with = _api_exc(403)

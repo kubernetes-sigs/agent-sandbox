@@ -37,6 +37,10 @@ dependencies = [
   # Agent Sandbox SDK — used by fleet-member for claim listing and by the
   # stress test for the full claim lifecycle. Install
   # from the local sibling path so the PoC tracks the in-tree SDK version.
+  # exec/files through FleetSandboxClient need SandboxClient(api_client=...)
+  # (#1830, newer than v1.0.5); older SDKs still work for claim-only use and
+  # the resolver warns once per cluster. Floor raised when the next release
+  # ships it.
   "k8s-agent-sandbox",
 ]
 

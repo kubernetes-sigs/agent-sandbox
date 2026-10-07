@@ -834,15 +834,57 @@ def test_run_without_election_starts_loops_and_exits_zero_on_stop():
     assert sorted(started) == ["capacity", "reconcile"]
 
 
-def test_start_loops_is_idempotent_and_resets_the_selfdefense_stamp():
-    fm = _election_member()
+def test_start_loops_is_idempotent_and_leaves_selfdefense_armed():
+    fm = _election_member(_capacity_ok_at=time.monotonic())  # stale standby stamp
     fm._reconcile_loop = lambda: None
     fm._capacity_loop = lambda: None
     fm._start_loops()
     fm._start_loops()
     assert fm._loops_started is True
-    assert time.monotonic() - fm._capacity_ok_at < 5, (
-        "a new leader must not inherit a stale stamp from its standby period")
+    assert fm._capacity_ok_at is None, (
+        "a new term starts with NO evidence of a working publish path; seeding "
+        "the stamp would disarm self-defense for the first 90s of the term")
+
+
+def test_a_fresh_leader_refuses_an_empty_entry_before_its_first_publish(caplog):
+    # THE RESTART CASE (janetkuo, #1394): the publish path has been broken
+    # long enough for the planner to empty this cluster's entry. The running
+    # leader refuses -- but then it restarts (OOM, rollout, drain, lost
+    # lease). The fresh leader must refuse too, on its very first pass, even
+    # though it has no history of failed publishes: it has no history of
+    # SUCCESSFUL ones either, and that is what the check has to key on.
+    body = json.dumps({
+        "schema_version": 1, "generation": 7,
+        "clusters": {"test": {"pools": []},
+                     "other": {"pools": [{"template": "t", "warmpool":
+                                          "t-pool", "replicas": 1}]}},
+    }).encode()
+    gcs = _FakeGCS(); gcs.obj = (body, "etag-1")
+    fm = _election_member(gcs=gcs, leader_elect=True)
+    deleted: list[str] = []
+    fm.custom_objects = _DeleteRecorder(deleted)
+    fm._template_exists = lambda t: True
+    fm._ensure_warmpool = lambda g, p: None
+    fm._list_managed_pool_names = lambda: ["survivor-pool"]
+    fm._reconcile_loop = lambda: None
+    fm._capacity_loop = lambda: None
+
+    fm._start_loops()                      # new term begins
+    with caplog.at_level(logging.ERROR):
+        fm._reconcile_once()               # first pass of the new leader
+    assert deleted == [], "fresh leader drained the cluster on its first pass"
+    assert "REFUSING" in caplog.text
+
+    # Only a real successful publish in this term lifts the hold.
+    class _GoodGCS(_FakeGCS):
+        def put_json(self, path, obj):
+            pass
+    fm.gcs = _GoodGCS(); fm.gcs.obj = gcs.obj
+    fm._collect_capacity = lambda: fleet_member.CapacityReport(cluster="test")
+    fm._capacity_once()
+    assert fm._capacity_ok_at is not None
+    fm._reconcile_once()
+    assert deleted == ["survivor-pool"], "a genuine drain must still land"
 
 
 def test_losing_the_lease_stops_loops_and_exits_one():

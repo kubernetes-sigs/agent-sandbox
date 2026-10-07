@@ -28,8 +28,12 @@ election loop produces and compares (`str(datetime)` for the two timestamps,
 `str(int)` for the duration); the Lease stores them as typed fields and this
 class converts at the boundary.
 
-One deliberate deviation from `ConfigMapLock`: a 401/403 on the Lease is
-raised, not swallowed. The election loop treats a failed `get` as "retry
+Two deliberate deviations from `ConfigMapLock`. A 401/403 on the Lease is
+raised, not swallowed. And urllib3 transport errors (`MaxRetryError`,
+`ReadTimeoutError` -- the client does not wrap these in ApiException) are
+treated as a failed attempt, not a crash: the election loop retries inside
+its renew deadline, so an apiserver blip costs a retry rather than a leader
+restart. The election loop treats a failed `get` as "retry
 later" forever, which for a missing RBAC rule means a member that never
 leads and never says why. Raising makes the pod crash-loop with the rule it
 needs in its logs.
@@ -44,6 +48,7 @@ from typing import Any
 from kubernetes import client
 from kubernetes.client.exceptions import ApiException
 from kubernetes.leaderelection.leaderelectionrecord import LeaderElectionRecord
+from urllib3.exceptions import HTTPError as _TransportError
 
 log = logging.getLogger("agent_sandbox_fleet.leaselock")
 
@@ -95,6 +100,9 @@ class LeaseLock:
                     f"cannot read Lease {namespace}/{name} ({e.status}): "
                     f"{_RBAC_HINT}") from e
             return False, e
+        except _TransportError as e:
+            log.info("transient error reading lease %s/%s: %s", namespace, name, e)
+            return False, _as_api_exception(e)
         self._lease = lease
         spec = lease.spec
         if spec is None or spec.holder_identity is None:
@@ -123,6 +131,9 @@ class LeaseLock:
                     f"{_RBAC_HINT}") from e
             log.info("failed to create lease %s/%s: %s", namespace, name, e.reason)
             return False
+        except _TransportError as e:
+            log.info("transient error creating lease %s/%s: %s", namespace, name, e)
+            return False
 
     def update(self, name: str, namespace: str,
                updated_record: LeaderElectionRecord) -> bool:
@@ -141,8 +152,12 @@ class LeaseLock:
             # 409 == someone else wrote since we read; the loop re-gets.
             log.info("failed to update lease %s/%s: %s", namespace, name, e.reason)
             return False
+        except _TransportError as e:
+            log.info("transient error updating lease %s/%s: %s", namespace, name, e)
+            return False
 
     # -- helpers -----------------------------------------------------------
+
 
     @staticmethod
     def _spec_from(record: LeaderElectionRecord) -> Any:
@@ -153,3 +168,12 @@ class LeaseLock:
             acquire_time=_to_datetime(record.acquire_time),
             renew_time=_to_datetime(record.renew_time),
         )
+
+
+def _as_api_exception(err: Exception) -> ApiException:
+    """The election loop inspects a failed get's `.body` for a 404 code; give a
+    transport error a body it can parse (and that is NOT 404, so it retries
+    rather than trying to create)."""
+    e = ApiException(status=503, reason=f"transport error: {err}")
+    e.body = '{"code": 503}'
+    return e

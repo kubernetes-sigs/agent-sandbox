@@ -289,10 +289,15 @@ class FleetMember:
         # Armed whenever a reconcile pass does not fully apply, so the etag
         # short-circuit below does not strand a half-reconciled cluster.
         self._retry_pending = False
-        # Monotonic time of the last capacity report that reached a sink.
-        # Starts "fresh" so the capacity loop gets one full window before the
-        # self-defense check in _reconcile_once can arm.
-        self._capacity_ok_at = time.monotonic()
+        # Monotonic time of the last capacity report that reached a sink in
+        # THIS term, or None before the first one. None is deliberate: a
+        # process (or a new leader) that has not yet published has no
+        # evidence its publish path works, so the self-defense check below
+        # stays armed until it does. Seeding this with the start time would
+        # disarm the check for the first 90 s of every term -- exactly the
+        # window in which a restarted member, whose entry the planner has
+        # already emptied, would delete every pool on its first pass.
+        self._capacity_ok_at: float | None = None
         self._stop = threading.Event()
 
     # -- Lifecycle -----------------------------------------------------------
@@ -324,10 +329,11 @@ class FleetMember:
         if self._loops_started:
             return
         self._loops_started = True
-        # A replica that becomes leader long after it started must not read
-        # its own startup time as "last successful capacity publish" and
-        # refuse its first empty assignment; the stamp belongs to this term.
-        self._capacity_ok_at = time.monotonic()
+        # The stamp belongs to this term: whatever happened while standing
+        # by is not evidence that THIS leader's publish path works. None, not
+        # now() -- see __init__ -- so the first reconcile cannot act on an
+        # empty pool set before the first capacity report has landed.
+        self._capacity_ok_at = None
         for target, name in ((self._reconcile_loop, "reconcile"),
                              (self._capacity_loop, "capacity")):
             threading.Thread(target=target, name=name, daemon=True).start()
@@ -443,8 +449,9 @@ class FleetMember:
             self._last_etag = ""
             return
         if (local_entry is not None and not local_entry.pools
-                and time.monotonic() - self._capacity_ok_at
-                    > CAPACITY_STALENESS_S):
+                and (self._capacity_ok_at is None
+                     or time.monotonic() - self._capacity_ok_at
+                        > CAPACITY_STALENESS_S)):
             # Self-defense. An empty entry is a teardown order, and the
             # planner issues one for any cluster whose capacity report went
             # stale. If OUR OWN publishes have been failing for longer than
@@ -461,7 +468,9 @@ class FleetMember:
                 "Fix the capacity publish path, or scale this member down to "
                 "drain deliberately.",
                 assignments.generation,
-                time.monotonic() - self._capacity_ok_at, CAPACITY_STALENESS_S,
+                (float("inf") if self._capacity_ok_at is None
+                 else time.monotonic() - self._capacity_ok_at),
+                CAPACITY_STALENESS_S,
             )
             # Forget the etag so the hold re-evaluates every tick: the drain
             # must land the moment the publish path recovers, without a new

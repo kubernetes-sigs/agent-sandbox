@@ -871,17 +871,20 @@ class FleetMember:
         for pool in self._iter_managed_pools():
             report.reported_pools.append(pool["metadata"]["name"])
             status = pool.get("status") or {}
-            # Both from the controller's aggregated status, deliberately. The
-            # pair can FREEZE together when a create/delete batch partly fails
-            # (kubernetes-sigs/agent-sandbox#1850: the controller skips its
-            # status update on a reconcile error), which makes the planner's
-            # ready_ratio stale -- mid-fill, "less ready than reality", the
-            # conservative error. Counting pod Ready conditions here instead
-            # was rejected: a per-tick pod list is O(sandboxes) on the very
-            # control plane that is already failing batches, and a pod count
-            # cannot separate warm replicas from adopted ones, so it is not the
-            # same quantity. The fix belongs in the controller; nothing here
-            # changes when it lands.
+            # Both from the controller's aggregated status, deliberately. On
+            # controllers before kubernetes-sigs/agent-sandbox#1852 (merged
+            # 2026-10-06, after v1.0.5) the pair could FREEZE together when a
+            # create/delete batch partly failed -- the reconciler skipped its
+            # status update on a reconcile error (#1850) -- which made the
+            # planner's ready_ratio stale: mid-fill, "less ready than
+            # reality", the conservative error. #1852 flushes status before
+            # returning the error, so on a fixed controller both fields track
+            # the informer snapshot every pass. Counting pod Ready conditions
+            # here instead was rejected either way: a per-tick pod list is
+            # O(sandboxes) on the very control plane that is failing batches,
+            # and a pod count cannot separate warm replicas from adopted ones,
+            # so it is not the same quantity. Nothing here changes with the
+            # controller version.
             report.warmpool_depth += int(status.get("replicas", 0) or 0)
             report.warmpool_ready += int(status.get("readyReplicas", 0) or 0)
             gen_annot = (pool["metadata"].get("annotations") or {}).get(GENERATION_ANNOTATION)

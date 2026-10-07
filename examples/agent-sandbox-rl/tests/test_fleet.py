@@ -698,3 +698,23 @@ def test_warm_entries_sequential_continues_on_failure(make_cluster):
 
   # i2 was still attempted despite i1 failure
   assert c.resources.create_warmpool.call_count == 2
+
+
+def test_preflight_passes_fleet_pod_labels_only_when_unmanaged(make_cluster, monkeypatch):
+  from agent_sandbox_rl import TemplateSpec
+  seen = []
+
+  def capture(cluster, **kw):
+    seen.append(kw.get("unmanaged_pod_labels"))
+    r = PreflightReport(cluster.name)
+    r.add("stub", True)
+    return r
+  monkeypatch.setattr("agent_sandbox_rl.preflight.preflight_cluster", capture)
+
+  c = make_cluster("solo")
+  c.resources.fleet_pod_labels.return_value = {"app": "agent-sandbox-rl"}
+  _fleet(ClusterRegistry([c])).preflight()
+  _fleet(ClusterRegistry([c]), template=TemplateSpec(
+      network_policy_management="Unmanaged")).preflight()
+  assert seen == [None, {"app": "agent-sandbox-rl"}]
+

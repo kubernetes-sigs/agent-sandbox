@@ -511,3 +511,15 @@ def test_ensure_template_does_not_touch_foreign_template_policy_mode():
                               owner_run_id="this-run", share_foreign=True)
   assert created is False
   r.custom_api.patch_namespaced_custom_object.assert_not_called()
+
+
+def test_fleet_pod_labels_drop_the_per_template_key():
+  r = Resources(MagicMock(), MagicMock(), "ns",
+                labels={constants.RUN_ID_LABEL: "run-1"})
+  labels = r.fleet_pod_labels()
+  assert labels[constants.MANAGED_BY_LABEL] == constants.MANAGED_BY_VALUE
+  assert labels[constants.POD_RUN_ID_LABEL] == "run-1"
+  assert "sandbox" not in labels
+  # exactly the pod-template labels, minus the template name
+  assert labels == {k: v for k, v in r._pod_template_labels(TNAME).items() if k != "sandbox"}
+

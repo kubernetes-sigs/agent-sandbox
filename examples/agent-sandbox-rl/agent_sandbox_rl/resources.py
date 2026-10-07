@@ -285,6 +285,14 @@ class Resources:
       labels[constants.POD_RUN_ID_LABEL] = run_id
     return labels
 
+  def fleet_pod_labels(self) -> dict:
+    """The labels every sandbox pod of this fleet carries, whatever its
+    template: `_pod_template_labels` without the per-template ``sandbox`` key.
+    A NetworkPolicy that selects these selects all of the fleet's pods."""
+    labels = self._pod_template_labels("")
+    labels.pop("sandbox", None)
+    return labels
+
   def _reconcile_template_labels(self, template_name: str, existing: dict) -> None:
     """Patch a pre-existing template's metadata + pod-template labels up to this
     run's labels when they differ, so a reused/leftover template doesn't attribute
@@ -330,9 +338,14 @@ class Resources:
     run's setting when it differs; the controller then deletes or recreates the
     template's NetworkPolicy. Only when the run sets one: ``None`` means "keep
     what the template has", so a run without an opinion never flips a template
-    an operator set to Unmanaged back to Managed. The field is outside the pod
-    template, so the patch does not roll the template's pools. Failures warn:
-    the run still works, under the template's current mode.
+    an operator set to Unmanaged back to Managed. Failures warn: the run still
+    works, under the template's current mode.
+
+    The field sits outside the SandboxBlueprint the warm pool hashes, so existing
+    pool members are not treated as stale and the patch does not roll the pools.
+    Those members keep the pod spec they were created with, including the DNS
+    settings the controller derives from the mode; orphaned pool sandboxes, which
+    the pool compares field by field, are replaced.
 
     Same ownership rule as `_reconcile_template_labels`: callers reach this only
     for templates that are this run's or nobody's."""

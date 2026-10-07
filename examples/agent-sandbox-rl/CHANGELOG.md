@@ -15,8 +15,10 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
   on has to stay identity-relevant on GKE Dataplane V2 (Cilium). With `"Unmanaged"` the controller creates none and
   a single policy on the shared `app=agent-sandbox-rl` pod label covers every
   sandbox in the namespace; `examples/agent-sandbox-rl-network-policy` has that
-  policy and a verify script. Unset (the default) leaves the field out and never
-  flips an existing template, so behavior is unchanged.
+  policy and a verify script. `preflight()` warns when the templates are
+  Unmanaged and no NetworkPolicy in the namespace selects the fleet's pods.
+  Unset (the default) leaves the field out and never flips an existing template,
+  so behavior is unchanged.
 
 ### Added (one job, several processes —
 [#1808](https://github.com/kubernetes-sigs/agent-sandbox/issues/1808))

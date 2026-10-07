@@ -83,14 +83,14 @@ PYTHON_TEST_SUITES = [
     },
     {
         "name": "fleet",
-        "dir": os.path.join("fleet", "python"),
+        "dir": os.path.join("examples", "multi-cluster-fleet", "python"),
         # Editable installs (in order): the in-repo SDK first — fleet_member
         # imports k8s_agent_sandbox at module scope — then the fleet package,
         # which pulls its own deps (pydantic, pyyaml, kubernetes,
         # google-cloud-storage). The suite is hermetic: no bucket, no cluster.
         "editable_installs": [
             (os.path.join("clients", "python", "agentic-sandbox-client"), ""),
-            (os.path.join("fleet", "python"), ""),
+            (os.path.join("examples", "multi-cluster-fleet", "python"), ""),
         ],
     },
     {

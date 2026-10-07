@@ -35,7 +35,7 @@ RUN pip install --no-cache-dir /src/sdk
 # the package needs google-cloud-storage, pydantic, pyyaml and kubernetes from
 # PyPI. Its k8s-agent-sandbox requirement is unpinned and already satisfied by
 # the local install above, so pip resolves it without reaching for PyPI.
-COPY fleet/python /src/fleet
+COPY examples/multi-cluster-fleet/python /src/fleet
 RUN pip install --no-cache-dir /src/fleet
 
 # Final runtime image — slim, non-root user.

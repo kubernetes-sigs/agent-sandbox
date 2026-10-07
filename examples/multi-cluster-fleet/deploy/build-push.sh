@@ -69,8 +69,8 @@ fi
 # happens to be checked out. Both the NAME stream and the CONTENT stream are
 # hashed: contents alone would miss a pure rename, which changes imports.
 sources() {
-  find fleet/python \
-       fleet/deploy/Dockerfile \
+  find examples/multi-cluster-fleet/python \
+       examples/multi-cluster-fleet/deploy/Dockerfile \
        clients/python/agentic-sandbox-client \
        -type f \
        ! -path '*/.venv/*' ! -path '*/__pycache__/*' \

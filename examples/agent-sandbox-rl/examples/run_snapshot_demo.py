@@ -103,8 +103,8 @@ def main():
   fleet.load_tasks([_env("IMAGE", "python:3.12-slim")])
 
   timings = {}
+  # Entering `fleet` runs setup(); the report records only the primitive calls.
   with fleet, fleet.recording("snapshot-demo") as report:
-    fleet.setup()
     h = fleet.acquire(fleet.tasks[0])
     log.info("claimed %s (pod %s)", h.sandbox_id, h.pod_name)
     log.info("probe start: %s", h.exec(PROBE_START).strip())

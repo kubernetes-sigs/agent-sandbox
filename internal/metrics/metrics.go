@@ -230,12 +230,14 @@ var (
 	// - ready_condition: "true" | "false"
 	// - expired: "true" | "false"
 	// - launch_type: "warm" | "cold"
+	// - sandbox_template: the SandboxTemplateRef, or "unknown" when the Sandbox carries no
+	//   template annotation.
 	// - owned_by: "SandboxClaim" | "SandboxWarmPool" | "None".
 	// - created_by: the component that created the sandbox (e.g. "go-client", "python-client", "controller", "unknown").
 	AgentSandboxesDesc = prometheus.NewDesc(
 		"agent_sandboxes",
 		"Monitor the point-in-time number of sandboxes in the cluster.",
-		[]string{"namespace", "ready_condition", "expired", "launch_type", "owned_by", "created_by"},
+		[]string{"namespace", "ready_condition", "expired", "launch_type", "sandbox_template", "owned_by", "created_by"},
 		nil,
 	)
 

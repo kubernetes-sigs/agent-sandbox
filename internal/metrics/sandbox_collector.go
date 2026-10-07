@@ -41,6 +41,7 @@ type AgentSandboxesMetricKey struct {
 	ReadyCondition string
 	Expired        string
 	LaunchType     string
+	Template       string
 	OwnedBy        string
 	CreatedBy      string
 }
@@ -55,6 +56,7 @@ func NewAgentSandboxesConstMetric(count int, key AgentSandboxesMetricKey) promet
 		key.ReadyCondition,
 		key.Expired,
 		key.LaunchType,
+		key.Template,
 		key.OwnedBy,
 		key.CreatedBy,
 	)
@@ -141,12 +143,17 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 		if val, ok := sandbox.Labels[sandboxv1beta1.CreatedByLabel]; ok {
 			createdByStr = NormalizeCreatedBy(val)
 		}
+		sandboxTemplateStr := "unknown"
+		if template, ok := sandbox.Annotations[sandboxv1beta1.SandboxTemplateRefAnnotation]; ok && template != "" {
+			sandboxTemplateStr = template
+		}
 
 		key := AgentSandboxesMetricKey{
 			Namespace:      sandbox.Namespace,
 			ReadyCondition: readyConditionStr,
 			Expired:        expiredStr,
 			LaunchType:     launchTypeStr,
+			Template:       sandboxTemplateStr,
 			OwnedBy:        ownedByStr,
 			CreatedBy:      createdByStr,
 		}

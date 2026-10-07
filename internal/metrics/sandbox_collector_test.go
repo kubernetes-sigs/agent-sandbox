@@ -65,7 +65,7 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:true": 1,
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:true sandbox_template:unknown": 1,
 			},
 		},
 		{
@@ -83,7 +83,7 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:false": 1,
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:false sandbox_template:unknown": 1,
 			},
 		},
 		{
@@ -101,7 +101,7 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"created_by:unknown expired:false launch_type:warm namespace:default owned_by:None ready_condition:false": 1,
+				"created_by:unknown expired:false launch_type:warm namespace:default owned_by:None ready_condition:false sandbox_template:unknown": 1,
 			},
 		},
 		{
@@ -173,9 +173,9 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 3, // We expect 3 distinct metric series for the 4 sandboxes
 			expectedLabels: map[string]int{
-				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:true":  1,
-				"created_by:unknown expired:true launch_type:warm namespace:test-ns owned_by:None ready_condition:false":  1,
-				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:false": 2,
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:true sandbox_template:unknown":  1,
+				"created_by:unknown expired:true launch_type:warm namespace:test-ns owned_by:None ready_condition:false sandbox_template:my-template":  1,
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:false sandbox_template:unknown": 2,
 			},
 		},
 		{
@@ -207,7 +207,7 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:SandboxClaim ready_condition:true": 1,
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:SandboxClaim ready_condition:true sandbox_template:unknown": 1,
 			},
 		},
 		{
@@ -239,7 +239,7 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:SandboxWarmPool ready_condition:true": 1,
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:SandboxWarmPool ready_condition:true sandbox_template:unknown": 1,
 			},
 		},
 		{
@@ -274,7 +274,7 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:SandboxWarmPool ready_condition:true": 1,
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:SandboxWarmPool ready_condition:true sandbox_template:unknown": 1,
 			},
 		},
 		{
@@ -300,7 +300,7 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"created_by:go-client expired:false launch_type:cold namespace:default owned_by:None ready_condition:true": 1,
+				"created_by:go-client expired:false launch_type:cold namespace:default owned_by:None ready_condition:true sandbox_template:unknown": 1,
 			},
 		},
 		{
@@ -326,7 +326,7 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"created_by:python-client expired:false launch_type:cold namespace:default owned_by:None ready_condition:true": 1,
+				"created_by:python-client expired:false launch_type:cold namespace:default owned_by:None ready_condition:true sandbox_template:unknown": 1,
 			},
 		},
 		{
@@ -352,7 +352,7 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:true": 1,
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:true sandbox_template:unknown": 1,
 			},
 		},
 	}

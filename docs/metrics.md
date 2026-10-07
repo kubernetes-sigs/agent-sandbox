@@ -19,4 +19,4 @@ are not listed here.
 | `agent_sandbox_stage_latency_ms` | Histogram | Latency from Sandbox controller first-observed time to each Ready-path stage in milliseconds. Stages reached before first observation (warm launch or pre-existing sandboxes) are omitted to avoid near-zero samples. | `namespace`, `launch_type`, `owned_by`, `stage` |
 | `agent_sandbox_template_reconcile_errors_total` | Counter | Total number of SandboxTemplate reconcile failures, labeled by namespace and allowlisted reason. | `namespace`, `reason` |
 | `agent_sandbox_warmpool_size` | Gauge | Number of sandboxes currently in each warm pool, labeled by sandbox status. | `namespace`, `warmpool_name`, `sandbox_template`, `sandbox_status` |
-| `agent_sandboxes` | Gauge | Monitor the point-in-time number of sandboxes in the cluster. | `namespace`, `ready_condition`, `expired`, `launch_type`, `owned_by`, `created_by` |
+| `agent_sandboxes` | Gauge | Monitor the point-in-time number of sandboxes in the cluster. | `namespace`, `ready_condition`, `expired`, `launch_type`, `sandbox_template`, `owned_by`, `created_by` |

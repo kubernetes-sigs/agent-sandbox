@@ -19,6 +19,7 @@ from kubernetes import client
 
 from agent_sandbox_rl import constants
 from agent_sandbox_rl.config import TemplateSpec
+from agent_sandbox_rl.exceptions import OwnedByAnotherRunError
 from agent_sandbox_rl.resources import Resources
 
 IMG = "slimshetty/swebench-verified:sweb.eval.x86_64.astropy__astropy-12907"
@@ -554,10 +555,47 @@ def test_policy_mode_patch_is_conditioned_on_the_label_patch_result():
                                      "metadata": {"resourceVersion": "42"}}
 
 
-def test_policy_mode_patch_conflict_leaves_the_template_alone():
+def test_policy_mode_patch_conflict_rereads_once_then_leaves_the_template_alone():
   r = _resources()
   r.custom_api.get_namespaced_custom_object.return_value = _existing_template()
   r.custom_api.patch_namespaced_custom_object.side_effect = client.ApiException(status=409)
   assert r.ensure_template(IMG, TNAME, TemplateSpec(network_policy_management="Unmanaged")) is False
-  r.custom_api.patch_namespaced_custom_object.assert_called_once()
+  assert r.custom_api.get_namespaced_custom_object.call_count == 2
+  assert r.custom_api.patch_namespaced_custom_object.call_count == 2
+
+
+def test_label_patch_is_conditioned_on_the_inspected_template():
+  r = _resources()
+  stale = _existing_template()
+  stale["metadata"]["labels"] = {}
+  r.custom_api.get_namespaced_custom_object.return_value = stale
+  r.ensure_template(IMG, TNAME, TemplateSpec())
+  body = r.custom_api.patch_namespaced_custom_object.call_args.kwargs["body"]
+  assert body["metadata"]["resourceVersion"] == "41"
+
+
+def test_conflict_rechecks_ownership_before_writing_again():
+  r = _resources()
+  ours = _existing_template()
+  ours["metadata"]["labels"] = {}                       # stale: label patch first
+  replacement = _existing_template()
+  replacement["metadata"]["resourceVersion"] = "77"
+  replacement["metadata"]["labels"] = {constants.RUN_ID_LABEL: "other-run"}
+  r.custom_api.get_namespaced_custom_object.side_effect = [ours, replacement]
+  r.custom_api.patch_namespaced_custom_object.side_effect = client.ApiException(status=409)
+  with pytest.raises(OwnedByAnotherRunError):
+    r.ensure_template(IMG, TNAME, TemplateSpec(network_policy_management="Unmanaged"),
+                      owner_run_id="this-run")
+  r.custom_api.patch_namespaced_custom_object.assert_called_once()   # nothing after
+
+
+def test_conflict_then_deleted_template_is_created_fresh():
+  r = _resources()
+  stale = _existing_template()
+  stale["metadata"]["labels"] = {}
+  r.custom_api.get_namespaced_custom_object.side_effect = [stale, client.ApiException(status=404)]
+  r.custom_api.patch_namespaced_custom_object.side_effect = client.ApiException(status=409)
+  assert r.ensure_template(IMG, TNAME, TemplateSpec(network_policy_management="Unmanaged")) is True
+  body = r.custom_api.create_namespaced_custom_object.call_args.kwargs["body"]
+  assert body["spec"]["networkPolicyManagement"] == "Unmanaged"
 

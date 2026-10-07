@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"time"
 )
 
@@ -80,6 +81,8 @@ type CallOption func(*callOptions)
 type callOptions struct {
 	timeout     time.Duration
 	maxAttempts int // 0 = use default (maxAttempts const); 1 = no retry
+	env         map[string]string
+	cwd         string
 }
 
 // WithTimeout sets the total timeout for a single operation, overriding
@@ -100,6 +103,31 @@ func WithMaxAttempts(n int) CallOption {
 		if n > 0 {
 			o.maxAttempts = n
 		}
+	}
+}
+
+// WithEnv sets environment variables for a single Run, merged over the
+// sandbox's own environment (a key given here wins). Repeated calls
+// accumulate. Run returns ErrUnsupportedByRuntime on the legacy
+// python-runtime, which cannot carry them. Other operations ignore it.
+//
+//	result, err := client.Run(ctx, "echo $GREETING", sandbox.WithEnv(map[string]string{"GREETING": "hi"}))
+func WithEnv(env map[string]string) CallOption {
+	return func(o *callOptions) {
+		if o.env == nil {
+			o.env = make(map[string]string, len(env))
+		}
+		maps.Copy(o.env, env)
+	}
+}
+
+// WithWorkingDir sets the working directory for a single Run, relative to the
+// sandbox root (the default). sandboxd rejects a directory that resolves
+// outside the root. Run returns ErrUnsupportedByRuntime on the legacy
+// python-runtime. Other operations ignore it.
+func WithWorkingDir(dir string) CallOption {
+	return func(o *callOptions) {
+		o.cwd = dir
 	}
 }
 

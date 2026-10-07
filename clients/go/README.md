@@ -236,6 +236,16 @@ or `WithMaxAttempts` to control retry behavior:
 result, err := client.Run(ctx, "make build", sandbox.WithTimeout(10*time.Minute))
 ```
 
+`Run` also takes `WithEnv` and `WithWorkingDir` (RuntimeSandboxd only; the
+legacy runtime returns `ErrUnsupportedByRuntime`). `WithEnv` is merged over the
+sandbox's environment, and the directory is relative to the sandbox root:
+
+```go
+result, err := client.Run(ctx, "make build",
+    sandbox.WithEnv(map[string]string{"CI": "1"}),
+    sandbox.WithWorkingDir("project"))
+```
+
 ## Retry Behavior
 
 File operations (`Read`, `Write`, `List`, `Exists`) are automatically retried (up to

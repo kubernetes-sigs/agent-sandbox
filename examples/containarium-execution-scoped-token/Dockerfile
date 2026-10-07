@@ -28,7 +28,7 @@ ARG CONTAINARIUM_REF=v0.78.1
 # The gateway is a standalone credential proxy: it imports no Kubernetes
 # client and needs no build tags, so this stays a small static binary. (The
 # golang image ships git, needed to clone the tag.)
-FROM golang:1.26.6-bookworm AS build
+FROM golang:1.27.1-bookworm AS build
 ARG CONTAINARIUM_REF
 WORKDIR /src
 RUN git clone --depth 1 --branch "${CONTAINARIUM_REF}" \

@@ -68,6 +68,11 @@ const (
 	// sub-second deferral cannot realistically lose the race), hence pod
 	// patches always flush within min(window, 1s).
 	podMetadataFlushBound = time.Second
+
+	// Event reasons for Sandbox events that have no matching Ready condition reason to reuse.
+	eventReasonSandboxReady           = "SandboxReady"
+	eventReasonSandboxPodCreated      = "SandboxPodCreated"
+	eventReasonSandboxPodCreateFailed = "SandboxPodCreateFailed"
 )
 
 // PodCacheTransform is a client-go informer transform for the manager's Pod
@@ -637,7 +642,7 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 			readyCondition.Message = err.Error()
 			return readyCondition
 		}
-		readyCondition.Reason = "ReconcilerError"
+		readyCondition.Reason = sandboxv1beta1.SandboxReasonReconcilerError
 		readyCondition.Message = "Error seen: " + err.Error()
 		return readyCondition
 	}
@@ -851,29 +856,31 @@ func (r *SandboxReconciler) recordReadyTransitionEvent(sandbox *sandboxv1beta1.S
 	if r.Recorder == nil {
 		return
 	}
-	var oldReason string
-	if oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionReady)); oldReady != nil {
-		oldReason = oldReady.Reason
-	}
+	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionReady))
 	newReady := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
-	if newReady == nil || newReady.Reason == oldReason {
+	if newReady == nil || (oldReady != nil && oldReady.Status == newReady.Status && oldReady.Reason == newReady.Reason) {
 		return
 	}
-	switch newReady.Reason {
-	case sandboxv1beta1.SandboxReasonDependenciesReady:
-		r.Recorder.Eventf(sandbox, nil, corev1.EventTypeNormal, "SandboxReady", "Ready", "Sandbox is ready")
-	case sandboxv1beta1.SandboxReasonExpired:
-		// This event should only be emitted when ShutdownPolicy=Retain since in the Delete case, the Sandbox is torn down immediately on expiry.
-		// The ShutdownPolicy is checked here because updateStatus is called before handleSandboxExpiry's later policy check.
-		if sandbox.Spec.ShutdownPolicy == nil || *sandbox.Spec.ShutdownPolicy != sandboxv1beta1.ShutdownPolicyDelete {
-			r.Recorder.Eventf(sandbox, nil, corev1.EventTypeNormal, sandboxv1beta1.SandboxReasonExpired, "Expiry", "Sandbox has expired")
+	switch newReady.Status {
+	case metav1.ConditionTrue:
+		if newReady.Reason == sandboxv1beta1.SandboxReasonDependenciesReady {
+			r.Recorder.Eventf(sandbox, nil, corev1.EventTypeNormal, eventReasonSandboxReady, "Ready", "Sandbox is ready")
 		}
-	case sandboxv1beta1.SandboxReasonSuspended:
-		r.Recorder.Eventf(sandbox, nil, corev1.EventTypeNormal, sandboxv1beta1.SandboxReasonSuspended, "Suspension", "Sandbox is suspended")
-	case sandboxv1beta1.SandboxReasonPodSucceeded:
-		r.Recorder.Eventf(sandbox, nil, corev1.EventTypeNormal, sandboxv1beta1.SandboxReasonPodSucceeded, "PodCompletion", "Pod completed successfully")
-	case sandboxv1beta1.SandboxReasonPodFailed:
-		r.Recorder.Eventf(sandbox, nil, corev1.EventTypeWarning, sandboxv1beta1.SandboxReasonPodFailed, "PodCompletion", "Pod failed")
+	case metav1.ConditionFalse:
+		switch newReady.Reason {
+		case sandboxv1beta1.SandboxReasonExpired:
+			// This event should only be emitted when ShutdownPolicy=Retain since in the Delete case, the Sandbox is torn down immediately on expiry.
+			// The ShutdownPolicy is checked here because updateStatus is called before handleSandboxExpiry's later policy check.
+			if sandbox.Spec.ShutdownPolicy == nil || *sandbox.Spec.ShutdownPolicy != sandboxv1beta1.ShutdownPolicyDelete {
+				r.Recorder.Eventf(sandbox, nil, corev1.EventTypeNormal, sandboxv1beta1.SandboxReasonExpired, "Expiry", "Sandbox has expired")
+			}
+		case sandboxv1beta1.SandboxReasonSuspended:
+			r.Recorder.Eventf(sandbox, nil, corev1.EventTypeNormal, sandboxv1beta1.SandboxReasonSuspended, "Suspension", "Sandbox is suspended")
+		case sandboxv1beta1.SandboxReasonPodSucceeded:
+			r.Recorder.Eventf(sandbox, nil, corev1.EventTypeNormal, sandboxv1beta1.SandboxReasonPodSucceeded, "PodCompletion", "Pod completed successfully")
+		case sandboxv1beta1.SandboxReasonPodFailed:
+			r.Recorder.Eventf(sandbox, nil, corev1.EventTypeWarning, sandboxv1beta1.SandboxReasonPodFailed, "PodCompletion", "Pod failed")
+		}
 	}
 }
 
@@ -1131,7 +1138,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 			if err != nil {
 				if k8serrors.IsInvalid(err) {
 					logger.V(4).Info("Refusing to create Service: invalid configuration",
-						"Service.Namespace", service.Namespace, "Service.Name", service.Name, "error", err.Error())
+						"Service.Namespace", service.Namespace, "Service.Name", service.Name, "error", err)
 					return nil, err
 				}
 				logger.Error(err, "Failed to create", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
@@ -1578,13 +1585,13 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		}
 		logger.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 		if r.Recorder != nil {
-			r.Recorder.Eventf(sandbox, nil, corev1.EventTypeWarning, "SandboxPodCreateFailed", "PodCreation", "Failed to create Pod %q: %s", pod.Name, err.Error())
+			r.Recorder.Eventf(sandbox, nil, corev1.EventTypeWarning, eventReasonSandboxPodCreateFailed, "PodCreation", "Failed to create Pod %q: %s", pod.Name, err.Error())
 		}
 		return nil, err
 	}
 
 	if r.Recorder != nil {
-		r.Recorder.Eventf(sandbox, pod, corev1.EventTypeNormal, "SandboxPodCreated", "PodCreation", "Created Pod %q", pod.Name)
+		r.Recorder.Eventf(sandbox, pod, corev1.EventTypeNormal, eventReasonSandboxPodCreated, "PodCreation", "Created Pod %q", pod.Name)
 	}
 
 	if r.Tracer.IsRecording(ctx) {

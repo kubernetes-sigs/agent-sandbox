@@ -2,7 +2,7 @@ module sigs.k8s.io/agent-sandbox/examples/chrome-sandbox
 
 go 1.26
 
-toolchain go1.26.4
+toolchain go1.27.1
 
 require k8s.io/klog/v2 v2.140.0
 

@@ -349,6 +349,34 @@ class TestK8sHelperResolveSandboxName(unittest.TestCase):
         self.assertIn("VolumeClaimTemplatesError", str(context.exception))
 
     @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
+    def test_wait_for_claim_ready_invalid_configuration_fails_fast(self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls):
+        """InvalidConfiguration (forwarded from the Sandbox) fails fast too."""
+        mock_watch = MagicMock()
+        mock_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-claim"},
+                "status": {
+                    "conditions": [
+                        {
+                            "type": "Ready",
+                            "status": "False",
+                            "reason": "InvalidConfiguration",
+                            "message": "Service 'test-claim' is invalid: must be no more than 63 characters",
+                        }
+                    ]
+                },
+            },
+        }
+        mock_watch.stream.return_value = [mock_event]
+        mock_watch_class.return_value = mock_watch
+
+        helper = K8sHelper()
+        with self.assertRaises(SandboxClaimFailedError) as context:
+            helper.wait_for_claim_ready("test-claim", "default", timeout=5)
+        self.assertIn("InvalidConfiguration", str(context.exception))
+
+    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
     def test_wait_for_claim_ready_transient_reason_keeps_waiting(self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls):
         """Transient Ready=False reasons (controller retries) do not abort the wait."""
         mock_watch = MagicMock()
@@ -970,6 +998,29 @@ class TestK8sHelperWatchResourceVersion(unittest.TestCase):
         ip = helper.wait_for_sandbox_ready("test-sandbox", "default", timeout=5)
         self.assertEqual(ip, "10.244.0.5")
         self.assertEqual(mock_watch.stream.call_count, 2)
+
+
+@patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
+@patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")
+@patch("k8s_agent_sandbox.k8s_helper.config")
+class TestK8sHelperApiClientInjection(unittest.TestCase):
+
+    def test_injected_api_client_used_and_no_config_loaded(
+        self, mock_config, mock_custom_cls, mock_core_cls
+    ):
+        sentinel = MagicMock(name="ApiClient")
+        K8sHelper(api_client=sentinel)
+        mock_custom_cls.assert_called_once_with(sentinel)
+        mock_core_cls.assert_called_once_with(sentinel)
+        mock_config.load_incluster_config.assert_not_called()
+        mock_config.load_kube_config.assert_not_called()
+
+    def test_injected_api_client_is_exposed_only_when_injected(
+        self, mock_config, mock_custom_cls, mock_core_cls
+    ):
+        sentinel = MagicMock(name="ApiClient")
+        self.assertIs(K8sHelper(api_client=sentinel).injected_api_client, sentinel)
+        self.assertIsNone(K8sHelper().injected_api_client)
 
 
 if __name__ == '__main__':

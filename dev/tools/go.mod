@@ -2,7 +2,7 @@ module sigs.k8s.io/agent-sandbox/dev/tools
 
 go 1.26.0
 
-toolchain go1.26.4
+toolchain go1.27.1
 
 tool (
 	github.com/golangci/golangci-lint/v2/cmd/golangci-lint
@@ -235,7 +235,7 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	gotest.tools/gotestsum v1.13.0 // indirect
 	honnef.co/go/tools v0.8.1 // indirect
-	k8s.io/apimachinery v0.37.0 // indirect
+	k8s.io/apimachinery v0.37.1 // indirect
 	k8s.io/gengo/v2 v2.0.0-20250922181213-ec3ebc5fd46b // indirect
 	k8s.io/utils v0.0.0-20260626114624-be93311217bd // indirect
 	mvdan.cc/gofumpt v0.11.0 // indirect

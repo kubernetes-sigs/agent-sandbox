@@ -23,7 +23,7 @@ ARG CONTAINARIUM_REF=v0.52.1
 # No `k8s` build tag: agent-box is the in-box MCP and never imports
 # client-go, so this stays a small static binary. (golang's own image
 # ships git, needed to clone the tag.)
-FROM golang:1.26.5-bookworm AS build
+FROM golang:1.27.1-bookworm AS build
 ARG CONTAINARIUM_REF
 WORKDIR /src
 RUN git clone --depth 1 --branch "${CONTAINARIUM_REF}" \

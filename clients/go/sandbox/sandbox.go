@@ -16,10 +16,12 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"maps"
+	"net/http"
 	"sync"
 	"time"
 
@@ -181,11 +183,7 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 
 	errPrefix := s.errPrefix
 	trackOp := s.trackOp
-	getLifecycleCtx := func() context.Context {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		return s.lifecycleCtx
-	}
+	getLifecycleCtx := s.currentLifecycleCtx
 
 	s.commands = &Commands{
 		connector:    conn,
@@ -296,7 +294,7 @@ func (s *Sandbox) Open(ctx context.Context) (retErr error) {
 	}
 
 	// Create claim.
-	claimName, err := s.k8s.createClaim(openCtx, s.opts.Namespace, s.opts.WarmPoolName, s.opts.Env, s.tracer, s.traceServiceName)
+	claimName, err := s.k8s.createClaim(openCtx, s.opts.Namespace, s.opts.WarmPoolName, s.opts.Env, s.opts.Labels, s.tracer, s.traceServiceName)
 	if err != nil {
 		return err
 	}
@@ -625,6 +623,64 @@ func (s *Sandbox) Delete(ctx context.Context, path string, recursive bool, opts 
 	return s.files.Delete(ctx, path, recursive, opts...)
 }
 
+// Health returns sandboxd's report from GET /v1/health. It returns an
+// HTTPError while sandboxd is shutting down, and ErrUnsupportedByRuntime on
+// the legacy python-runtime. It does not retry unless WithMaxAttempts is set.
+// Not part of the Handle interface to avoid breaking existing implementers.
+func (s *Sandbox) Health(ctx context.Context, opts ...CallOption) (*Health, error) {
+	return getSandboxdJSON[Health](ctx, s, "health", opts)
+}
+
+// Metadata returns the workload-scoped configuration sandboxd serves from
+// GET /v1/metadata (sandboxd runtime only; the legacy python-runtime returns
+// ErrUnsupportedByRuntime). It does not retry unless WithMaxAttempts is set.
+// Not part of the Handle interface to avoid breaking existing implementers.
+func (s *Sandbox) Metadata(ctx context.Context, opts ...CallOption) (*Metadata, error) {
+	md, err := getSandboxdJSON[Metadata](ctx, s, "metadata", opts)
+	if err != nil {
+		return nil, err
+	}
+	if md.Env == nil {
+		md.Env = map[string]string{}
+	}
+	return md, nil
+}
+
+// getSandboxdJSON GETs the sandboxd REST endpoint /v1/<op> and decodes its
+// JSON body into a T. op doubles as the span and error-message operation name.
+func getSandboxdJSON[T any](ctx context.Context, s *Sandbox, op string, opts []CallOption) (*T, error) {
+	defer s.trackOp()()
+	ctx, callCancel, maxAttempts := applyCallOptsNoRetry(ctx, opts)
+	defer callCancel()
+	ctx, span := startSpan(withLifecycleSpan(ctx, s.currentLifecycleCtx()), s.tracer, s.traceServiceName, op)
+	defer span.End()
+
+	fail := func(err error) (*T, error) {
+		recordError(span, err)
+		return nil, err
+	}
+
+	if s.opts.Runtime != RuntimeSandboxd {
+		return fail(fmt.Errorf("%s: %s: %w: the legacy python-runtime has no %s endpoint", s.errPrefix(), op, ErrUnsupportedByRuntime, op))
+	}
+	resp, err := s.connector.SendRequest(ctx, http.MethodGet, "v1/"+op, nil, "", maxAttempts)
+	if err != nil {
+		return fail(fmt.Errorf("%s: %s failed: %w", s.errPrefix(), op, err))
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fail(fmt.Errorf("%s: %s: %w", s.errPrefix(), op, newHTTPError(resp, op, RuntimeSandboxd)))
+	}
+	defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes)) }()
+
+	var out T
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxMetadataResponseSize)).Decode(&out); err != nil {
+		return fail(fmt.Errorf("%s: failed to decode %s response: %w", s.errPrefix(), op, err))
+	}
+	return &out, nil
+}
+
 // Info accessors.
 
 func (s *Sandbox) ClaimName() string {
@@ -669,6 +725,12 @@ func (s *Sandbox) Annotations() map[string]string {
 	cp := make(map[string]string, len(s.annotations))
 	maps.Copy(cp, s.annotations)
 	return cp
+}
+
+func (s *Sandbox) currentLifecycleCtx() context.Context {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lifecycleCtx
 }
 
 func (s *Sandbox) errPrefix() string {

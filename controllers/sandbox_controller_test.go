@@ -589,6 +589,7 @@ func TestReconcileInvalidServiceNameSurfacesConditionWithoutRequeue(t *testing.T
 	require.Equal(t, metav1.ConditionFalse, ready.Status)
 	require.Equal(t, sandboxv1beta1.SandboxReasonInvalidConfiguration, ready.Reason)
 	require.Contains(t, ready.Message, "must be no more than 63 characters")
+	require.Empty(t, updated.Status.Service, "a rejected Service create must not be reflected in status.Service")
 }
 
 func TestResolvePodName(t *testing.T) {
@@ -5927,23 +5928,27 @@ func TestReconcileEvents_ReadyTransitions(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
+		newReconciler := func() (*SandboxReconciler, ctrl.Request) {
 			sandbox := &sandboxv1beta1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Name: "sandbox-name", Namespace: "default", UID: sandboxUID},
 				Spec:       tc.sandboxSpec,
 			}
 			objs := []runtime.Object{sandbox}
 			if tc.pod != nil {
-				objs = append(objs, tc.pod)
+				objs = append(objs, tc.pod.DeepCopy())
 			}
-			recorder := events.NewFakeRecorder(10)
 			r := &SandboxReconciler{
-				Client:   newFakeClient(objs...),
-				Scheme:   Scheme,
-				Recorder: recorder,
-				Tracer:   asmetrics.NewNoOp(),
+				Client: newFakeClient(objs...),
+				Scheme: Scheme,
+				Tracer: asmetrics.NewNoOp(),
 			}
-			req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}}
+			return r, ctrl.Request{NamespacedName: types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}}
+		}
+
+		t.Run(tc.name, func(t *testing.T) {
+			r, req := newReconciler()
+			recorder := events.NewFakeRecorder(10)
+			r.Recorder = recorder
 
 			_, err := r.Reconcile(t.Context(), req)
 			require.NoError(t, err)
@@ -5956,6 +5961,15 @@ func TestReconcileEvents_ReadyTransitions(t *testing.T) {
 			_, err = r.Reconcile(t.Context(), req)
 			require.NoError(t, err)
 			assertNoEvent(t, recorder)
+		})
+
+		// Verify that --disable-sandbox-events (sets recorder nil) executes all reconcile paths safely without panic
+		t.Run(tc.name+", events disabled", func(t *testing.T) {
+			r, req := newReconciler()
+			require.NotPanics(t, func() {
+				_, err := r.Reconcile(t.Context(), req)
+				require.NoError(t, err)
+			})
 		})
 	}
 }

@@ -1411,6 +1411,7 @@ class SandboxFleet:
         task=task, cluster_name=cluster.name, claim_name=sandbox.claim_name,
         sandbox_id=sandbox.sandbox_id, pod_name=pod, hostname=sandbox.sandbox_id,
         pod_ip=pod_ip, sandbox=sandbox, _cluster=cluster)
+    handle.record_pod_identity()
     # The remote create ran outside the lock, and the breaker thread can tear
     # the fleet down in that window. _teardown flips _torndown under this same
     # lock before it sweeps, so exactly one of two things is true here: the

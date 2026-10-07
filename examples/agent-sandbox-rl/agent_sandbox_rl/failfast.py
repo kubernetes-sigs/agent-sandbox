@@ -80,16 +80,23 @@ def _get(d: dict, snake: str, camel: str):
 
 
 def classify_pod(pod: Any, *, now: float, first_seen: dict[str, float],
-                 policy: "FailFastPolicy") -> StartVerdict | None:
+                 policy: "FailFastPolicy",
+                 last_seen: dict[str, float] | None = None) -> StartVerdict | None:
   """Decide whether ``pod`` (a ``V1Pod``, its ``to_dict()`` or an API dict) is stuck.
 
-  Pure apart from ``first_seen``, which the caller keeps between polls: it maps
-  a condition key to the monotonic time it was first observed, so retryable
-  reasons only count once they have persisted for the policy's grace period.
-  Keys for conditions no longer present are dropped, so a reason that clears
-  and comes back starts its grace again. Returns None while the pod may still
-  come up.
+  Pure apart from ``first_seen`` and ``last_seen``, which the caller keeps
+  between polls: they map a condition key to the monotonic time it was first
+  and last observed, so retryable reasons only count once they have persisted
+  for the policy's grace period. All retryable waiting reasons of a container
+  share one key: kubelet flips a failing pull between ``ErrImagePull`` and
+  ``ImagePullBackOff`` on every retry, and that must not restart the grace. A
+  key is dropped only after its condition has been absent for a full grace
+  period, so a crash loop seen while the container is briefly running between
+  restarts keeps its grace too. Without ``last_seen`` a key is dropped as soon
+  as its condition is absent. Returns None while the pod may still come up.
   """
+  if last_seen is None:
+    last_seen = {}
   d = _as_dict(pod)
   meta = _as_dict(d.get("metadata"))
   status = _as_dict(d.get("status"))
@@ -99,6 +106,7 @@ def classify_pod(pod: Any, *, now: float, first_seen: dict[str, float],
   def _held_for(key: str, grace: float) -> float | None:
     present.add(key)
     first = first_seen.setdefault(key, now)
+    last_seen[key] = now
     held = now - first
     return held if held >= grace else None
 
@@ -121,7 +129,11 @@ def classify_pod(pod: Any, *, now: float, first_seen: dict[str, float],
     state = _as_dict(cs.get("state"))
     term = _as_dict(state.get("terminated"))
     last = _as_dict(_as_dict(_get(cs, "last_state", "lastState")).get("terminated"))
-    if term.get("reason") == "OOMKilled" or last.get("reason") == "OOMKilled":
+    # lastState describes the previous instance: an earlier OOM kill counts only
+    # while the container is not running again. Test the value, not the key:
+    # a V1Pod's to_dict() carries every state key, with None for the unset ones.
+    if (term.get("reason") == "OOMKilled"
+        or (last.get("reason") == "OOMKilled" and not state.get("running"))):
       verdict = StartVerdict(
           "OOMKilled", f"container '{cname}' was OOM-killed while starting; "
           "the template's memory limit is too small for this image", name)
@@ -134,7 +146,7 @@ def classify_pod(pod: Any, *, now: float, first_seen: dict[str, float],
     if reason in constants.TERMINAL_WAITING_REASONS:
       verdict = StartVerdict(reason, f"container '{cname}': {msg}", name)
     elif reason in constants.RETRYABLE_WAITING_REASONS:
-      held = _held_for(f"{cname}:{reason}", policy.grace_s)
+      held = _held_for(f"{cname}:retryable", policy.grace_s)
       if held is not None:
         verdict = StartVerdict(
             reason, f"container '{cname}' has been in {reason} for {int(held)}s: {msg}",
@@ -154,8 +166,13 @@ def classify_pod(pod: Any, *, now: float, first_seen: dict[str, float],
         break
 
   for key in list(first_seen):
-    if key not in present:
+    if key in present:
+      continue
+    grace = (policy.unschedulable_grace_s if key == "Unschedulable"
+             else policy.grace_s)
+    if now - last_seen.get(key, float("-inf")) >= grace:
       del first_seen[key]
+      last_seen.pop(key, None)
   return verdict
 
 
@@ -183,6 +200,7 @@ class ClaimWatchdog(threading.Thread):
     self._decide_lock = threading.Lock()
     self.deleted_claim = False
     self._first_seen: dict[str, float] = {}
+    self._last_seen: dict[str, float] = {}
 
   def stop(self) -> StartVerdict | None:
     """Stop polling. Blocks while a verdict is being committed, so on return
@@ -232,6 +250,7 @@ class ClaimWatchdog(threading.Thread):
     if pod is None:
       return None                        # pod not created yet; the claim watch owns "gone"
     return classify_pod(pod, now=time.monotonic(), first_seen=self._first_seen,
+                        last_seen=self._last_seen,
                         policy=self.policy)
 
   def _resolve_pod_name(self) -> str | None:

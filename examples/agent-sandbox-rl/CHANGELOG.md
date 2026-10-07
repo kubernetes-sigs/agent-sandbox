@@ -62,7 +62,12 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
   `acquire()` raises **`SandboxStartError`** with the Kubernetes reason, the pod and
   the image. Reasons that never clear fail at once; transient-looking ones fail
   after `FailFastPolicy.grace_s` (60 s); `Unschedulable` after
-  `unschedulable_grace_s` (180 s). Off with `FleetConfig(fail_fast=FailFastPolicy(enabled=False))`.
+  `unschedulable_grace_s` (180 s). The retryable reasons of a container share one
+  grace clock, which resets only after the condition has been gone for a full
+  grace period, so a pull flipping between `ErrImagePull` and `ImagePullBackOff`
+  or a crash loop seen between restarts is not restarted on every poll. An
+  earlier OOM kill fails a container only while it is not running again. Off with
+  `FleetConfig(fail_fast=FailFastPolicy(enabled=False))`.
 - **`FleetConfig.claim_timeout`** bounds one claim's readiness wait separately from
   `ready_timeout`, which also bounds whole-pool fills and is sized for those.
   `None` (default) keeps the old behaviour.
@@ -70,13 +75,24 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
   because the pod is gone (deleted, evicted, OOM-killed, finished) now raises
   `SandboxLostError` instead of the raw transport error, after one pod read, so an
   RL loop can release and re-acquire at once instead of spending its step timeout.
+  `acquire()` records the pod's UID and the runtime container's restart count, so
+  `is_alive()` also reports a pod recreated under the same name (eviction,
+  deletion) and an in-place restart (OOM kill). Only the runtime container is
+  judged; a sidecar that exits does not mark the sandbox lost.
 - **`reap_orphans(alive_run_ids)`** / `python -m agent_sandbox_rl.reaper --orphans
   --alive-run-ids a,b`: reap every run in the namespace whose driver the caller
   does not list as alive, discovered through the run-id label on its claims,
   pools and templates (pods and Sandboxes are reached through those).
   This is the sweep an external reaper should call rather than matching names or
   ages itself; `--min-age-s` (300) protects runs that just started, `--dry-run`
-  reports only.
+  reports only. Runs with only pods or Sandboxes left are not discovered (neither
+  carries the run-id label everywhere). Pools, and their templates, that a claim of
+  a run not being reaped still points at are kept, here and in `reap(run_id)`.
+- **`reap("")`** and `--run-id ""` are rejected; an empty id used to select every
+  managed run.
+- The core SDK's `SandboxClient.delete_sandbox` (sync and async) forgets an
+  explicitly named claim once it is deleted. `acquire()` names its claims, and
+  the set used to grow by one per claim for the life of the process.
 - `OwnedByAnotherRunError` is now exported from the package root.
 
 ### Fixed

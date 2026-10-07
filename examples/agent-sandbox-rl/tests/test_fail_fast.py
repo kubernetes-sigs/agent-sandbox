@@ -380,12 +380,18 @@ def test_reap_orphans_reaps_each_orphan_and_honours_dry_run(monkeypatch):
   monkeypatch.setattr(reaper_mod, "find_orphan_runs",
                       lambda cluster, alive, min_age_s: {"r1": {"objects": 2}, "r2": {"objects": 1}})
   reaped = []
+  protect = {}
   monkeypatch.setattr(reaper_mod, "_reap_with_cluster",
-                      lambda cluster, rid, delete_pods: reaped.append((rid, delete_pods)) or {"claims": 1})
+                      lambda cluster, rid, delete_pods, protect_claims_of=None: (
+                          protect.__setitem__(rid, protect_claims_of),
+                          reaped.append((rid, delete_pods)))[1] or {"claims": 1})
   out = reaper_mod.reap_orphans(["a"], namespace="ns", dry_run=True)
   assert out == {"r1": {"objects": 2}, "r2": {"objects": 1}} and reaped == []
   out = reaper_mod.reap_orphans(["a"], namespace="ns", delete_pods=False)
   assert reaped == [("r1", False), ("r2", False)] and out == {"r1": {"claims": 1}, "r2": {"claims": 1}}
+  # claims of runs being reaped do not protect; anyone else's (or unlabelled) do
+  assert protect["r1"]("r2") is False and protect["r1"]("a") is True
+  assert protect["r1"](None) is True
 
 
 def test_reaper_cli_orphans_flags(monkeypatch, capsys):
@@ -568,3 +574,125 @@ def test_reaper_cli_rejects_dry_run_outside_orphan_mode(monkeypatch):
     with pytest.raises(SystemExit):
       reaper_mod.main(argv)
   assert called == []
+
+
+# --- review round 2 ----------------------------------------------------------- #
+
+def test_pull_reason_flips_share_one_grace():
+  seen, last = {}, {}
+  flips = ["ImagePullBackOff", "ErrImagePull", "ImagePullBackOff", "ErrImagePull",
+           "ImagePullBackOff", "ErrImagePull", "ImagePullBackOff"]
+  verdicts = [classify_pod(_pod(waiting=r), now=10 * i, first_seen=seen,
+                           last_seen=last, policy=POLICY) for i, r in enumerate(flips)]
+  assert verdicts[:6] == [None] * 6
+  assert verdicts[6] is not None and verdicts[6].reason == "ImagePullBackOff"   # at 60 s
+
+
+def test_crash_loop_keeps_its_grace_across_a_running_blip():
+  seen, last = {}, {}
+  assert classify_pod(_pod(waiting="CrashLoopBackOff"), now=0, first_seen=seen,
+                      last_seen=last, policy=POLICY) is None
+  running = _pod(phase="Running")
+  running["status"]["container_statuses"][0]["state"] = {"running": {"startedAt": "x"}}
+  assert classify_pod(running, now=20, first_seen=seen, last_seen=last, policy=POLICY) is None
+  v = classify_pod(_pod(waiting="CrashLoopBackOff"), now=60, first_seen=seen,
+                   last_seen=last, policy=POLICY)
+  assert v is not None and v.reason == "CrashLoopBackOff"
+
+
+def test_a_condition_absent_for_a_full_grace_period_clears():
+  seen, last = {}, {}
+  classify_pod(_pod(waiting="ImagePullBackOff"), now=0, first_seen=seen, last_seen=last,
+               policy=POLICY)
+  classify_pod(_pod(waiting="ContainerCreating"), now=61, first_seen=seen, last_seen=last,
+               policy=POLICY)
+  assert seen == {} and last == {}
+  assert classify_pod(_pod(waiting="ImagePullBackOff"), now=100, first_seen=seen,
+                      last_seen=last, policy=POLICY) is None      # grace starts over
+
+
+def test_earlier_oom_kill_does_not_fail_a_running_container():
+  pod = _pod(phase="Running", last_terminated="OOMKilled")
+  pod["status"]["container_statuses"][0]["state"] = {"running": {"startedAt": "x"}}
+  assert classify_pod(pod, now=0, first_seen={}, policy=POLICY) is None
+  # a V1Pod's to_dict() carries every state key, with None for the unset ones
+  model_like = _pod(waiting="CrashLoopBackOff", last_terminated="OOMKilled")
+  model_like["status"]["container_statuses"][0]["state"].update(running=None, terminated=None)
+  v = classify_pod(model_like, now=0, first_seen={}, policy=POLICY)
+  assert v is not None and v.reason == "OOMKilled"
+
+
+def test_reap_rejects_an_empty_run_id(monkeypatch):
+  monkeypatch.setattr(reaper_mod, "_cluster", lambda **kw: pytest.fail("must not connect"))
+  with pytest.raises(ValueError, match="non-empty run_id"):
+    reaper_mod.reap("", namespace="ns")
+  with pytest.raises(ValueError):
+    reaper_mod._reap_with_cluster(MagicMock(), "", delete_pods=False)
+  with pytest.raises(SystemExit):
+    reaper_mod.main(["--run-id", "", "--namespace", "ns"])
+
+
+def test_run_scoped_reap_keeps_pools_another_runs_claims_use():
+  c = _linked_cluster()
+  base = c.resources._list_objects.side_effect
+  def _list(plural, sel=None, **kw):
+    if plural == "sandboxclaims" and sel is None:    # every claim in the namespace
+      return [{"metadata": {"name": "theirs", "labels": {constants.RUN_ID_LABEL: "live"}},
+               "spec": {"warmPoolRef": {"name": "pool-a"}}},
+              {"metadata": {"name": "ours", "labels": {constants.RUN_ID_LABEL: "r"}},
+               "spec": {"warmPoolRef": {"name": "pool-b"}}}]
+    if plural == "sandboxwarmpools" and sel is None:
+      return [{"metadata": {"name": "pool-a"}, "spec": {"sandboxTemplateRef": {"name": "tpl-1"}}}]
+    return base(plural, sel, **kw)
+  c.resources._list_objects.side_effect = _list
+  counts = reaper_mod._reap_with_cluster(c, "r", delete_pods=True,
+                                         protect_claims_of=lambda rid: rid != "r")
+  assert [k.args[0] for k in c.resources.delete_warmpool.call_args_list] == ["pool-b"]
+  c.resources.delete_template.assert_not_called()                  # tpl-1 backs pool-a
+  swept = [k.kwargs["label_selector"] for k in c.core_api.delete_collection_namespaced_pod.call_args_list]
+  assert "agents.x-k8s.io/warm-pool-sandbox=aaaa" not in swept     # pool-a's pods stay
+  deleted_sb = {k.args[0] for k in c.resources.delete_sandbox.call_args_list}
+  assert "sb-pool-a" not in deleted_sb
+  assert counts["kept_in_use"] == 2
+
+
+def _lhandle(pod, uid="u-1", restarts=0):
+  core = MagicMock()
+  core.read_namespaced_pod_status.return_value = pod
+  h = _handle(core)
+  h.pod_uid, h.runtime_restarts = uid, restarts
+  return h
+
+
+def _running(uid="u-1", restarts=0, name="agent-runtime", extra=()):
+  return {"metadata": {"name": "p", "uid": uid},
+          "status": {"phase": "Running", "container_statuses": [
+              {"name": name, "restart_count": restarts, "state": {"running": {}}}, *extra]}}
+
+
+def test_is_alive_detects_a_same_name_replacement_pod():
+  assert _lhandle(_running("u-1")).is_alive() is True
+  assert _lhandle(_running("u-2")).is_alive() is False
+
+
+def test_is_alive_detects_an_in_place_restart():
+  assert _lhandle(_running(restarts=1), restarts=0).is_alive() is False
+
+
+def test_is_alive_ignores_sidecars_when_the_runtime_container_is_unknown():
+  sidecar_done = {"name": "log-shipper", "state": {"terminated": {"reason": "Completed"}}}
+  pod = _running(name="something-else", extra=[sidecar_done])
+  assert _lhandle(pod, uid=None, restarts=None).is_alive() is True
+
+
+def test_record_pod_identity_at_acquire_and_best_effort():
+  core = MagicMock()
+  core.read_namespaced_pod_status.return_value = _running("u-7", restarts=2)
+  h = _handle(core)
+  h.record_pod_identity()
+  assert (h.pod_uid, h.runtime_restarts) == ("u-7", 2)
+  core.read_namespaced_pod_status.side_effect = client.ApiException(status=500)
+  h2 = _handle(core)
+  h2.record_pod_identity()                       # never raises
+  assert (h2.pod_uid, h2.runtime_restarts) == (None, None)
+

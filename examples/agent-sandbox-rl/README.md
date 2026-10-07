@@ -549,7 +549,10 @@ before that key existed, so the reaper also reaches them through each pool's
 `status.selector` and each claim's Sandbox. An external reaper that knows which
 drivers are still up calls **`reap_orphans(alive_run_ids)`** (`--orphans
 --alive-run-ids a,b`) to sweep every run it does not list, with `min_age_s` (300)
-protecting runs that just started. `plan()` also emits **advisory** `plan.warnings` (never fatal)
+protecting runs that just started. A run-scoped reap (and `reap_orphans`) keeps any pool,
+with its template, Sandboxes and pods, that a claim of another live run still points at,
+so a run that adopted an older run's pool keeps it. `reap("")` is rejected rather than
+treated as "all runs". `plan()` also emits **advisory** `plan.warnings` (never fatal)
 for footprint/concurrency beyond what the control plane comfortably absorbs.
 
 **ClusterConfig:** `name`, `kubeconfig`, `context`, `in_cluster`, `namespace`,
@@ -586,10 +589,17 @@ fleet.load_tasks(source, image_rewrite=make_rewriter(
   controller will not recover from: at once for reasons that never clear, after
   `FailFastPolicy.grace_s` (60 s) for ones that can be transient, after
   `unschedulable_grace_s` (180 s) for scheduling. `FleetConfig.claim_timeout`
-  bounds one claim's wait separately from the pool-fill `ready_timeout`. Mid-episode,
+  bounds one claim's wait separately from the pool-fill `ready_timeout`. A pull
+  that flips between `ErrImagePull` and `ImagePullBackOff`, or a crash loop seen
+  between restarts, keeps one grace clock per container. Mid-episode,
   `handle.exec()` raises **`SandboxLostError`** when the pod is gone (one pod read
-  after a transport error; `handle.is_alive()` asks directly), so a loop can
-  release and re-acquire instead of spending its step timeout on a dead pod.
+  after a transport error), so a loop can release and re-acquire instead of
+  spending its step timeout on a dead pod. **`handle.is_alive()`** also reports a
+  pod the controller recreated under the same name, or a runtime container that
+  restarted in place: `acquire()` records the pod's UID and restart count. A
+  one-shot `exec()` against such a replacement succeeds without a transport
+  error, so call `is_alive()` at step boundaries when lost state must not go
+  unnoticed.
 - **Pre-pull** (`fleet.prepull()` / `setup(prepull=True)`): a DaemonSet caches
   task images on every node so warm pools skip the multi-GB pull. This is where
   cold-start time goes — `wait_pool_ready` dominates a cold run (the sample report

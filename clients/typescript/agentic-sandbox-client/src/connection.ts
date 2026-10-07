@@ -202,19 +202,46 @@ export function createConnectionStrategy(
 }
 
 /**
- * Picks the pod IP to dial from status.podIPs: the first valid IPv4 address,
- * otherwise the first valid address of any family. Mirrors the Go client's
- * selectPodIP so both SDKs pick the same address on dual-stack clusters.
+ * Returns the canonical form of a valid IP literal, or "" when it is not one.
+ * IPv6 is canonicalized through the WHATWG URL serializer (net.isIP only
+ * validates), and IPv4-mapped IPv6 collapses to dotted-quad IPv4, matching
+ * Go's To4().String() and Python's ipv4_mapped.
+ */
+function canonicalIP(raw: string): string {
+  const family = net.isIP(raw);
+  if (family === 4) return raw;
+  if (family !== 6) return "";
+  let host: string;
+  try {
+    host = new URL(`http://[${raw}]`).hostname.slice(1, -1);
+  } catch {
+    // Zone IDs ("fe80::1%eth0") are valid for net.isIP but not for URLs.
+    return "";
+  }
+  // The URL serializer renders IPv4-mapped addresses as ::ffff:<hex>:<hex>.
+  const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host);
+  if (!mapped) return host;
+  const hi = Number.parseInt(mapped[1] as string, 16);
+  const lo = Number.parseInt(mapped[2] as string, 16);
+  return `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
+}
+
+/**
+ * Picks the pod IP to dial from status.podIPs: the first valid IPv4 address
+ * (IPv4-mapped IPv6 counts as IPv4), otherwise the first valid address of any
+ * family, always in canonical form. Mirrors the Go client's selectPodIP and
+ * Python's select_pod_ip so all SDKs pick the same address on dual-stack
+ * clusters. Returns "" when there is no usable address.
  * @internal
  */
 export function selectPodIP(ips: readonly unknown[]): string {
   let firstValid = "";
   for (const raw of ips) {
     if (typeof raw !== "string") continue;
-    const ip = raw.trim();
-    const family = net.isIP(ip);
-    if (family === 4) return ip;
-    if (family === 6 && firstValid === "") firstValid = ip;
+    const ip = canonicalIP(raw.trim());
+    if (ip === "") continue;
+    if (net.isIPv4(ip)) return ip;
+    if (firstValid === "") firstValid = ip;
   }
   return firstValid;
 }

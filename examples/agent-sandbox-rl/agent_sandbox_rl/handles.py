@@ -20,18 +20,23 @@ import logging
 import shlex
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from kubernetes.stream import stream
 
 from . import snapshots as _snap
-from .exceptions import SnapshotsUnavailable
+from .exceptions import FleetError, SnapshotsUnavailable
 from .sources import Task
 
 if TYPE_CHECKING:
   from .cluster import Cluster
 
 logger = logging.getLogger("agent_sandbox_rl.handles")
+
+# refresh(): how often to try reading the new pod's name before giving up, and the
+# linear backoff between tries (a just-resumed pod can lag the Sandbox status).
+_REFRESH_ATTEMPTS = 3
+_REFRESH_BACKOFF_S = 0.5
 
 
 def exec_in_pod(core_api, pod: str, namespace: str, command) -> str:
@@ -259,16 +264,31 @@ class SandboxHandle:
     Any persistent exec session was bound to the old pod, so it is dropped
     (``exec()`` falls back to one-shot; call ``open_session()`` again to
     re-attach). Safe to call at any time.
+
+    Raises `FleetError` when the pod name cannot be read after a few tries. The
+    handle then still names the previous pod, which no longer exists after a
+    resume or restore, so call ``refresh()`` again before ``exec()``.
     """
     self.close_session()
     sb = self.sandbox
     if sb is None:
       return
-    try:
-      self.pod_name = sb.get_pod_name() or self.pod_name
-    except Exception:  # noqa: BLE001 — keep the last known name
-      logger.warning("refresh: could not re-read pod name for %s", self.sandbox_id,
-                     exc_info=True)
+    last_error: Optional[BaseException] = None
+    for attempt in range(_REFRESH_ATTEMPTS):
+      try:
+        name = sb.get_pod_name()
+      except Exception as e:  # noqa: BLE001 — retried, then raised below
+        name, last_error = None, e
+      if name:
+        self.pod_name = name
+        break
+      if attempt + 1 < _REFRESH_ATTEMPTS:
+        time.sleep(_REFRESH_BACKOFF_S * (attempt + 1))
+    else:
+      raise FleetError(
+          f"refresh: could not read the pod name of sandbox {self.sandbox_id!r} "
+          f"after {_REFRESH_ATTEMPTS} tries; the handle still names {self.pod_name!r}, "
+          "which may be gone. Call refresh() again before exec().") from last_error
     try:
       self.pod_ip = sb.get_pod_ip()
     except Exception:  # noqa: BLE001
@@ -294,15 +314,31 @@ class SandboxHandle:
                 "delete snapshot")
 
   def delete_snapshots(self, *, timeout: int = 180) -> None:
-    """Delete every snapshot of this sandbox (they outlive the claim otherwise)."""
+    """Delete every snapshot of this sandbox (they outlive the claim otherwise).
+
+    Finds them through the live pod, so it only works while the claim exists;
+    after a release use `snapshot_deleter()` with uids listed beforehand."""
     _snap.check(self._snapshot_engine().delete_all(timeout=timeout), "delete snapshots")
+
+  def snapshot_deleter(self) -> Callable[..., None]:
+    """A delete-by-uid function that keeps working after this handle is
+    released. Deleting one snapshot addresses its PodSnapshot by name and needs
+    no pod, but releasing the sandbox drops its snapshot engine, so bind it first."""
+    engine = self._snapshot_engine()
+
+    def delete(snapshot_uid: str, *, timeout: int = 180) -> None:
+      _snap.check(engine.delete(snapshot_uid, timeout=timeout), "delete snapshot")
+    return delete
 
   def suspend(self, *, snapshot: bool = True, timeout: int = 180) -> Optional[str]:
     """Suspend the sandbox: the pod is deleted, the claim (and identity) kept.
 
     With ``snapshot`` (default) the live state is captured first so ``resume()``
-    brings back memory + filesystem; returns that snapshot's uid. Without it,
-    resume is a cold boot of the template. Quiesce the sandbox before calling
+    brings back memory + filesystem; returns that snapshot's uid. Without it no
+    new snapshot is taken, but ``resume()`` still restores the latest existing
+    one, so any changes made since that snapshot are lost; it cold-boots the
+    template only when the sandbox has no snapshots. To guarantee a cold boot,
+    call ``delete_snapshots()`` before suspending. Quiesce the sandbox before calling
     (an in-flight command is frozen inside the snapshot). Blocks up to
     ``timeout`` seconds for the pod to terminate. The persistent exec session
     (if any) is closed first, even when the suspend then fails — ``exec()``
@@ -318,8 +354,8 @@ class SandboxHandle:
   def resume(self, *, timeout: int = 180) -> bool:
     """Resume a suspended sandbox, restoring its **latest** snapshot if any.
 
-    Returns whether it came back from a snapshot (False = cold boot, or it was
-    not suspended). Waits up to ``timeout`` seconds for the new pod to be Ready,
+    Returns whether it came back from a snapshot (False = cold boot because
+    no snapshot exists, or it was not suspended). Waits up to ``timeout`` seconds for the new pod to be Ready,
     then ``refresh()``es this handle.
     """
     r = _snap.check(self._snapshot_sandbox().resume(wait_timeout=timeout), "resume")

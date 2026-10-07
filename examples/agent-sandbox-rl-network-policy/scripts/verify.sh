@@ -16,7 +16,8 @@
 # Checks that a namespace runs on the one-policy-per-namespace layout:
 #   1. the namespace-wide policy exists and selects app=agent-sandbox-rl;
 #   2. every agent-sandbox-rl SandboxTemplate is Unmanaged;
-#   3. no template-owned NetworkPolicy is left (the controller deletes them);
+#   3. no NetworkPolicy owned by an agent-sandbox-rl template is left (the
+#      controller deletes them); other teams' templates are not counted;
 #   4. (Cilium only, informational) how many identities still carry per-pod keys.
 # Usage: NAMESPACE=agent-sandbox-rl [KUBE_CONTEXT=...] scripts/verify.sh
 # Exits non-zero if 1 to 3 fail.
@@ -49,28 +50,35 @@ managed="$(printf '%s' "$templates" | python3 -c '
 import sys,json
 items=json.load(sys.stdin)["items"]
 bad=[t["metadata"]["name"] for t in items if (t.get("spec") or {}).get("networkPolicyManagement")!="Unmanaged"]
-print(" ".join(bad))')"
+print(f"{len(bad)} (first: {chr(32).join(bad[:5])})" if bad else "")')"
 if [[ "$total" == "0" ]]; then
   info "no agent-sandbox-rl SandboxTemplates in $NAMESPACE yet (warm a pool, then rerun)"
 elif [[ -z "$managed" ]]; then
   ok "all $total agent-sandbox-rl SandboxTemplates are Unmanaged"
 else
-  bad "SandboxTemplates still Managed: $managed"
+  bad "agent-sandbox-rl SandboxTemplates still Managed: $managed"
 fi
 
-# 3. No template-owned NetworkPolicies remain.
-owned="$("${K[@]}" get networkpolicies -n "$NAMESPACE" -o json 2>/dev/null | python3 -c '
+# 3. No policy owned by an agent-sandbox-rl template remains. Policies of other
+#    templates in the namespace (other teams, Managed on purpose) are not counted.
+rl_templates="$(printf '%s' "$templates" | python3 -c '
 import sys,json
+print(" ".join(t["metadata"]["name"] for t in json.load(sys.stdin)["items"]))')"
+owned="$("${K[@]}" get networkpolicies -n "$NAMESPACE" -o json 2>/dev/null \
+  | RL_TEMPLATES="$rl_templates" python3 -c '
+import os,sys,json
+rl=set(os.environ.get("RL_TEMPLATES","").split())
 names=[]
 for np in json.load(sys.stdin)["items"]:
     for o in np["metadata"].get("ownerReferences") or []:
-        if o.get("kind")=="SandboxTemplate": names.append(np["metadata"]["name"])
+        if o.get("kind")=="SandboxTemplate" and o.get("name") in rl:
+            names.append(np["metadata"]["name"])
 print(len(names), " ".join(names[:5]))')"
 count="${owned%% *}"
 if [[ "$count" == "0" ]]; then
-  ok "no SandboxTemplate-owned NetworkPolicies in $NAMESPACE"
+  ok "no NetworkPolicies owned by agent-sandbox-rl templates in $NAMESPACE"
 else
-  bad "$count SandboxTemplate-owned NetworkPolicies still present (first: ${owned#* }); wait for the controller or check the template mode"
+  bad "$count NetworkPolicies owned by agent-sandbox-rl templates still present (first: ${owned#* }); wait for the controller or check the template mode"
 fi
 all_np="$("${K[@]}" get networkpolicies -n "$NAMESPACE" --no-headers 2>/dev/null | wc -l | tr -d ' ')"
 info "NetworkPolicies in $NAMESPACE: $all_np"

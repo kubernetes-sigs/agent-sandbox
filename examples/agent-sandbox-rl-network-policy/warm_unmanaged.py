@@ -20,8 +20,10 @@ Apply manifests/fleet-network-policy.yaml first (see README). Env-configured:
   NODE_SELECTOR_KEY=cloud.google.com/gke-nodepool NODE_SELECTOR_VAL=<pool> \
   RUNTIME_CLASS=gvisor python warm_unmanaged.py
 
-Exits 1 if the template is not Unmanaged, a template-owned policy exists for it,
-or the namespace-wide policy is missing.
+Checks for the namespace-wide policy before it warms anything and exits 1 without
+creating a pod if it is missing: an Unmanaged sandbox with no policy is not
+isolated. After the warm it exits 1 if the template is not Unmanaged or a
+template-owned policy exists for it.
 """
 import json
 import logging
@@ -41,6 +43,20 @@ POLICY_NAME = os.getenv("POLICY_NAME", "agent-sandbox-rl-fleet")
 
 def _env(name, default):
   return os.getenv(name, default)
+
+
+def fleet_policy_present(fleet: SandboxFleet, namespace: str) -> bool:
+  """Whether the namespace-wide policy exists, read through the fleet's own
+  cluster client so it checks the cluster the fleet will warm on."""
+  cluster = next(iter(fleet.registry))
+  try:
+    client.NetworkingV1Api(cluster.api_client).read_namespaced_network_policy(
+        POLICY_NAME, namespace)
+    return True
+  except client.ApiException as e:
+    if e.status == 404:
+      return False
+    raise
 
 
 def report(fleet: SandboxFleet, namespace: str) -> dict:
@@ -92,6 +108,11 @@ def main() -> int:
           node_selector=node_selector)))
   fleet.load_tasks(ListSource([Task(id="network-policy-smoke",
                                     image=_env("IMAGE", "python:3.12-slim"))]))
+  if not fleet_policy_present(fleet, namespace):
+    print(f"FAIL NetworkPolicy {namespace}/{POLICY_NAME} is missing; apply "
+          "manifests/fleet-network-policy.yaml before warming Unmanaged templates",
+          file=sys.stderr)
+    return 1
   try:
     fleet.setup()  # preflight -> plan -> warm the one pool and wait for Ready
     result = report(fleet, namespace)

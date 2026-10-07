@@ -83,10 +83,18 @@ fleet = SandboxFleet(FleetConfig(
 Every template the fleet creates carries `spec.networkPolicyManagement: Unmanaged`.
 For a template that already exists and belongs to this run (or to no run), the SDK
 patches the field; the controller then deletes the policy it owned. Templates
-labelled with another run's id are never touched. The field sits outside the pod
-template, so the patch does not roll existing pools. Leaving
+labelled with another run's id are never touched. Leaving
 `network_policy_management` unset (the default) writes nothing and never flips a
 template back, so existing fleets are unaffected.
+
+`fleet.preflight()` (and `setup()`, which calls it) logs a `networkpolicy` warning
+when the templates are Unmanaged and no NetworkPolicy in the namespace selects the
+fleet's pods, or when the fleet's identity cannot list policies.
+
+The mode sits outside the part of the template the warm pool hashes, so switching
+it does not replace existing pool members. They keep the pod spec they were created
+with: members created under Managed keep the controller's public DNS resolvers,
+which the policy's public egress rule still allows, and new members use cluster DNS.
 
 ### 3. Warm a pool and verify
 
@@ -136,29 +144,61 @@ in [network-policy-api-sandbox](../network-policy-api-sandbox).
 ## GKE Dataplane V2 identities
 
 Dataplane V2 is built on Cilium, which keys a pod's security identity on its full
-label set. Every sandbox pod
-carries `agents.x-k8s.io/sandbox-name-hash` (unique per sandbox), and claimed pods
-carry `agents.x-k8s.io/claim-uid`; pool pods carry
+label set. Every sandbox pod carries `agents.x-k8s.io/sandbox-name-hash` (unique per
+sandbox); claimed pods carry `agents.x-k8s.io/claim-uid`, pool pods carry
 `agents.x-k8s.io/warm-pool-sandbox`, and the SDK adds `agent-sandbox-rl/run-id`.
-Unless the agent is told otherwise, each pod therefore gets its own identity, and
-identities are allocated through a single operator.
+Unless the agent is told otherwise, each pod therefore gets its own identity.
 
-With this example in place no policy selects on any of those keys, so they can be
-dropped from identity computation with Cilium's `labels` option (exclusion form,
-space separated, leading `!` excludes a prefix):
+Cilium's `labels` option drops keys from identity computation (exclusion form, space
+separated, a leading `!` excludes a prefix). The option is **cluster-wide**, and
+Cilium resolves policy selectors against identity labels, so a NetworkPolicy that
+selects on an excluded key stops selecting its pods, in every namespace, and those
+pods lose the isolation it gave them. Work through the steps in order.
 
-```yaml
-# cilium-config, key "labels"
-labels: "!k8s:agents.x-k8s.io/sandbox-name-hash !k8s:agents.x-k8s.io/claim-uid !k8s:agents.x-k8s.io/warm-pool-sandbox !k8s:agent-sandbox-rl/run-id !k8s:agents.x-k8s.io/sandbox-template-ref-hash"
-```
+1. **List the label keys on the sandbox pods and how many values each has.** Keys
+   with one value per pod, claim, pool or run are the ones that mint identities.
+   Other integrations, such as a queueing system that admits sandbox pods, can add
+   keys of their own; exclude any that are per pod as well.
 
-The agent reads this at startup, so it needs a rolling restart in a quiet window.
-Afterwards the sandboxes in a namespace collapse to one identity (the labels that
-remain are `app`, `sandbox=<template>` and the namespace label; exclude
-`k8s:sandbox` as well if you do not need per-template identities). On GKE
-Dataplane V2 the ConfigMap is managed and reverts on edit; the change has to be
-requested from GKE. Keep `sandbox-template-ref-hash` identity-relevant on any cluster
-that still runs Managed templates, because their policies select on it.
+   ```bash
+   kubectl get pods -A -l app=agent-sandbox-rl -o json \
+     | jq -r '[.items[].metadata.labels | to_entries[]] | group_by(.key)[]
+              | "\(.[0].key) \(map(.value) | unique | length)"'
+   ```
+
+2. **Confirm no NetworkPolicy, in any namespace, selects on a key you plan to
+   exclude.** The output must not contain any of them:
+
+   ```bash
+   kubectl get networkpolicies -A -o json \
+     | jq -r '.items[].spec.podSelector | (.matchLabels // {} | keys[]), (.matchExpressions // [] | .[].key)' \
+     | sort | uniq -c
+   kubectl get ciliumnetworkpolicies,ciliumclusterwidenetworkpolicies -A
+   ```
+
+3. **Request the exclusion list.** It keeps `agents.x-k8s.io/sandbox-template-ref-hash`
+   identity-relevant, because every Managed template's policy selects on it:
+
+   ```yaml
+   # cilium-config, key "labels"
+   labels: "!k8s:agents.x-k8s.io/sandbox-name-hash !k8s:agents.x-k8s.io/claim-uid !k8s:agents.x-k8s.io/warm-pool-sandbox !k8s:agent-sandbox-rl/run-id"
+   ```
+
+   Add `!k8s:agents.x-k8s.io/sandbox-template-ref-hash` only if step 2 shows no
+   policy uses it, which means no namespace on the cluster runs Managed templates.
+   The same goes for `!k8s:sandbox`: other workloads, including several examples in
+   this repository, select single sandboxes by that key.
+
+4. **Roll it out.** On GKE Dataplane V2 the Cilium ConfigMap is managed and reverts
+   on edit, so request the change from GKE. Elsewhere, restart the agents, and the
+   operators as well when the operator manages identities. Existing identity
+   objects are not rewritten: pods get the filtered identity as their endpoints are
+   regenerated, and unused identities are garbage-collected.
+
+With the list from step 3, sandbox pods share identities per template: the keys that
+remain per template are `sandbox` and `agents.x-k8s.io/sandbox-template-ref-hash`,
+and `agents.x-k8s.io/created-by` takes one of a few values. Identities grow with the
+number of templates, not with the number of pods.
 
 Verify with:
 
@@ -167,14 +207,29 @@ kubectl get ciliumidentities --no-headers | wc -l
 kubectl get ciliumidentities -o json | jq '[.items[]["security-labels"] | keys[]] | unique'
 ```
 
-Before this change the second command lists the per-pod keys; after it, it does not.
+Before the change the second command lists the per-pod keys; after it, it does not.
 
 ## Rolling back
 
-Set `TemplateSpec(network_policy_management="Managed")` and run the fleet once, or
-patch the templates by hand; the controller recreates its per-template policies on
-the next reconcile. Then delete the namespace-wide policy. Do it in that order, so no
-sandbox is left without a policy in between.
+1. Set `TemplateSpec(network_policy_management="Managed")` and run the fleet once,
+   or patch the templates by hand. The controller recreates its per-template
+   policies on the next reconcile.
+2. Keep the namespace-wide policy until every pod created while the templates were
+   Unmanaged is gone. Switching the mode does not replace pool members, and those
+   pods use cluster DNS, which the controller's default policy blocks; they never
+   got the public resolvers the controller sets for Managed templates. While both
+   policies select them, the allows add up and DNS keeps working. Recycle the pools
+   (scale them to zero and back, or let the fleet retire them), then check that no
+   such pod is left; the command prints nothing when none is:
+
+   ```bash
+   kubectl get pods -n agent-sandbox-rl -l app=agent-sandbox-rl \
+     -o jsonpath='{range .items[*]}{.metadata.name} {.spec.dnsPolicy}{"\n"}{end}' | grep -v ' None$'
+   ```
+
+   Pods from templates with custom `networkPolicy` rules or an explicit `dnsPolicy`
+   also show up here; they are not affected by the switch.
+3. Delete the namespace-wide policy.
 
 ## Limitations
 

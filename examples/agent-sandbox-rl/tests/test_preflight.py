@@ -111,3 +111,83 @@ def test_controller_down_is_warning_only(monkeypatch):
   rep = pf.preflight_cluster(c)
   assert rep.ok                                   # controller is warn-only
   assert any(w.name == "controller" for w in rep.warnings)
+
+
+# --- Unmanaged templates: a NetworkPolicy must select the fleet's pods -------
+FLEET_LABELS = {"app": "agent-sandbox-rl", "agent-sandbox-rl/run-id": "r1"}
+
+
+def _policy(name, match_labels=None, match_expressions=None):
+  exprs = [client.V1LabelSelectorRequirement(key=k, operator=op, values=v)
+           for k, op, v in (match_expressions or [])]
+  return client.V1NetworkPolicy(
+      metadata=client.V1ObjectMeta(name=name),
+      spec=client.V1NetworkPolicySpec(pod_selector=client.V1LabelSelector(
+          match_labels=match_labels, match_expressions=exprs or None)))
+
+
+def _patch_policies(monkeypatch, policies=None, error=None):
+  api = MagicMock()
+  if error is not None:
+    api.list_namespaced_network_policy.side_effect = error
+  else:
+    api.list_namespaced_network_policy.return_value = types.SimpleNamespace(
+        items=list(policies or []))
+  monkeypatch.setattr(pf, "_networking_api", lambda c: api)
+  return api
+
+
+def test_networkpolicy_check_skipped_when_not_unmanaged(monkeypatch):
+  _patch(monkeypatch)
+  api = _patch_policies(monkeypatch)
+  rep = pf.preflight_cluster(_healthy_cluster())
+  assert not any(ch.name == "networkpolicy" for ch in rep.checks)
+  api.list_namespaced_network_policy.assert_not_called()
+
+
+def test_networkpolicy_check_ok_when_a_policy_selects_the_fleet(monkeypatch):
+  _patch(monkeypatch)
+  api = _patch_policies(monkeypatch, [
+      _policy("other-team", {"app": "web"}),
+      _policy("agent-sandbox-rl-fleet", {"app": "agent-sandbox-rl"})])
+  rep = pf.preflight_cluster(_healthy_cluster(), unmanaged_pod_labels=FLEET_LABELS)
+  check = next(ch for ch in rep.checks if ch.name == "networkpolicy")
+  assert check.ok and check.detail == "agent-sandbox-rl-fleet"
+  api.list_namespaced_network_policy.assert_called_once_with("ns")
+
+
+def test_networkpolicy_check_warns_when_nothing_selects_the_fleet(monkeypatch):
+  _patch(monkeypatch)
+  _patch_policies(monkeypatch, [_policy("other-team", {"app": "web"})])
+  rep = pf.preflight_cluster(_healthy_cluster(), unmanaged_pod_labels=FLEET_LABELS)
+  assert rep.ok                                   # warning, not a failure
+  warning = next(w for w in rep.warnings if w.name == "networkpolicy")
+  assert "not isolated" in warning.detail and "app=agent-sandbox-rl" in warning.detail
+
+
+def test_networkpolicy_check_list_forbidden_is_warning(monkeypatch):
+  _patch(monkeypatch)
+  _patch_policies(monkeypatch, error=client.ApiException(status=403))
+  rep = pf.preflight_cluster(_healthy_cluster(), unmanaged_pod_labels=FLEET_LABELS)
+  assert rep.ok
+  warning = next(w for w in rep.warnings if w.name == "networkpolicy")
+  assert "HTTP 403" in warning.detail
+
+
+def test_selects_label_selector_semantics():
+  labels = {"app": "agent-sandbox-rl", "tier": "sbx"}
+  sel = lambda **kw: _policy("p", **kw).spec.pod_selector  # noqa: E731
+  assert pf._selects(sel(), labels)                                    # {} selects all
+  assert pf._selects(sel(match_labels={"app": "agent-sandbox-rl"}), labels)
+  assert not pf._selects(sel(match_labels={"app": "web"}), labels)
+  assert not pf._selects(sel(match_labels={"missing": "x"}), labels)
+  assert pf._selects(sel(match_expressions=[("app", "In", ["agent-sandbox-rl"])]), labels)
+  assert not pf._selects(sel(match_expressions=[("app", "In", ["web"])]), labels)
+  assert not pf._selects(sel(match_expressions=[("app", "NotIn", ["agent-sandbox-rl"])]), labels)
+  # NotIn also matches pods that lack the key
+  assert pf._selects(sel(match_expressions=[("missing", "NotIn", ["x"])]), labels)
+  assert pf._selects(sel(match_expressions=[("tier", "Exists", None)]), labels)
+  assert not pf._selects(sel(match_expressions=[("missing", "Exists", None)]), labels)
+  assert pf._selects(sel(match_expressions=[("missing", "DoesNotExist", None)]), labels)
+  assert not pf._selects(sel(match_expressions=[("tier", "DoesNotExist", None)]), labels)
+

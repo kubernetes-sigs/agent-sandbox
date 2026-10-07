@@ -556,7 +556,8 @@ for footprint/concurrency beyond what the control plane comfortably absorbs.
 (False — prefer scheduling a pool's replicas on one node for cache reuse),
 `extra_pod_spec`, `network_policy_management` (None — the controller's default, one
 NetworkPolicy per template; `"Unmanaged"` to run one namespace-wide policy on the
-shared `app=agent-sandbox-rl` pod label instead, see
+shared `app=agent-sandbox-rl` pod label instead, and `preflight()` warns if no policy
+selects the fleet's pods; see
 [examples/agent-sandbox-rl-network-policy](../agent-sandbox-rl-network-policy)).
 
 **Image rewriting (optional):** redirect task images at an in-region mirror /

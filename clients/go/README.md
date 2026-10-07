@@ -213,6 +213,11 @@ if err != nil { log.Fatal(err) }
 names, err := labeled.ListAllSandboxes(ctx, "default", sandbox.WithLabelSelector("app=agent"))
 if err != nil { log.Fatal(err) }
 fmt.Println(names) // includes sb3.ClaimName()
+
+// Expire claims on their own (Options.ShutdownAfter)
+ttl, err := sandbox.NewClient(ctx, sandbox.Options{ShutdownAfter: time.Hour})
+if err != nil { log.Fatal(err) }
+defer ttl.DeleteAll(ctx)
 ```
 
 ## Configuration
@@ -225,6 +230,8 @@ All options are documented on the `Options` struct in
   forces a cold start from the warm pool template instead of adopting a
   pre-warmed pod, which may increase startup latency.
 - `Labels`: labels added to every `SandboxClaim` the client creates.
+- `ShutdownAfter`: expire every claim this client creates after this long, so a
+  crashed client does not leak sandboxes. Unset by default (no expiry).
 - `GatewayName`: set to enable Gateway mode.
 - `APIURL`: set for Direct URL mode (takes precedence over `GatewayName`).
 - `TracerProvider`: OpenTelemetry integration.

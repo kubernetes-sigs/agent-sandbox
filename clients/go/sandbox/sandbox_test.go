@@ -1148,7 +1148,7 @@ func TestCreateClaim_Labels(t *testing.T) {
 			})
 			h := &K8sHelper{ExtensionsClient: extensionsCS.ExtensionsV1beta1(), Log: logr.Discard()}
 
-			if _, err := h.createClaim(context.Background(), "default", "pool", nil, tc.labels, otel.GetTracerProvider().Tracer("test"), "test"); err != nil {
+			if _, err := h.createClaim(context.Background(), "default", "pool", nil, tc.labels, 0, otel.GetTracerProvider().Tracer("test"), "test"); err != nil {
 				t.Fatalf("createClaim() error: %v", err)
 			}
 			if !reflect.DeepEqual(created.Labels, tc.want) {
@@ -1472,15 +1472,13 @@ func TestOpen_CreateClaimSendsCorrectTemplate(t *testing.T) {
 	}
 }
 
-func TestOpen_CreateClaimSendsEnv(t *testing.T) {
-	opts := defaultTestOpts()
-	opts.Env = []extv1beta1.EnvVar{
-		{Name: "FOO", Value: "bar"},
-		{Name: "DEBUG", Value: "true"},
-	}
+// openAndCaptureClaim opens a sandbox with opts and returns the SandboxClaim
+// it created.
+func openAndCaptureClaim(t *testing.T, opts Options) *extv1beta1.SandboxClaim {
+	t.Helper()
 	c, agentsCS, extensionsCS := newTestSandbox(opts)
 
-	var capturedEnv []extv1beta1.EnvVar
+	var captured *extv1beta1.SandboxClaim
 	fakeWatcher := watch.NewFake()
 
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
@@ -1490,7 +1488,7 @@ func TestOpen_CreateClaimSendsEnv(t *testing.T) {
 			if claim.Name == "" && claim.GenerateName != "" {
 				claim.Name = claim.GenerateName + "test12345"
 			}
-			capturedEnv = claim.Spec.Env
+			captured = claim
 			go fakeWatcher.Add(readySandbox(claim.Name))
 		}
 		return false, nil, nil
@@ -1501,10 +1499,46 @@ func TestOpen_CreateClaimSendsEnv(t *testing.T) {
 	if err := c.Open(context.Background()); err != nil {
 		t.Fatalf("Open() error: %v", err)
 	}
-	defer c.Close(context.Background())
+	t.Cleanup(func() { _ = c.Close(context.Background()) })
+	return captured
+}
 
-	if !reflect.DeepEqual(capturedEnv, opts.Env) {
-		t.Errorf("expected env %+v, got %+v", opts.Env, capturedEnv)
+func TestOpen_CreateClaimSendsEnv(t *testing.T) {
+	opts := defaultTestOpts()
+	opts.Env = []extv1beta1.EnvVar{
+		{Name: "FOO", Value: "bar"},
+		{Name: "DEBUG", Value: "true"},
+	}
+
+	claim := openAndCaptureClaim(t, opts)
+	if !reflect.DeepEqual(claim.Spec.Env, opts.Env) {
+		t.Errorf("expected env %+v, got %+v", opts.Env, claim.Spec.Env)
+	}
+}
+
+func TestOpen_CreateClaimSendsShutdownAfter(t *testing.T) {
+	opts := defaultTestOpts()
+	opts.ShutdownAfter = time.Hour
+
+	before := time.Now()
+	claim := openAndCaptureClaim(t, opts)
+	after := time.Now()
+
+	lifecycle := claim.Spec.Lifecycle
+	if lifecycle == nil || lifecycle.ShutdownTime == nil {
+		t.Fatalf("expected spec.lifecycle.shutdownTime, got %+v", lifecycle)
+	}
+	if got := lifecycle.ShutdownTime.Time; got.Before(before.Add(opts.ShutdownAfter)) || got.After(after.Add(opts.ShutdownAfter)) {
+		t.Errorf("shutdownTime = %v, want within [%v, %v]", got, before.Add(opts.ShutdownAfter), after.Add(opts.ShutdownAfter))
+	}
+	if lifecycle.ShutdownPolicy != extv1beta1.ShutdownPolicyDelete {
+		t.Errorf("shutdownPolicy = %q, want %q", lifecycle.ShutdownPolicy, extv1beta1.ShutdownPolicyDelete)
+	}
+}
+
+func TestOpen_CreateClaimWithoutShutdownAfterHasNoLifecycle(t *testing.T) {
+	if claim := openAndCaptureClaim(t, defaultTestOpts()); claim.Spec.Lifecycle != nil {
+		t.Errorf("expected no spec.lifecycle, got %+v", claim.Spec.Lifecycle)
 	}
 }
 
@@ -1674,6 +1708,7 @@ func TestValidation_NegativeTimeouts(t *testing.T) {
 		{"negative RequestTimeout", Options{WarmPoolName: "pool", RequestTimeout: -1}},
 		{"negative PerAttemptTimeout", Options{WarmPoolName: "pool", PerAttemptTimeout: -1}},
 		{"negative MaxDownloadSize", Options{WarmPoolName: "pool", MaxDownloadSize: -1}},
+		{"negative ShutdownAfter", Options{WarmPoolName: "pool", ShutdownAfter: -time.Second}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

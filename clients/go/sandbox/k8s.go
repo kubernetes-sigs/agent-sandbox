@@ -140,8 +140,21 @@ func stampClientRequestTime(annotations map[string]string, now time.Time) map[st
 	return annotations
 }
 
+// claimLifecycle returns the lifecycle that expires a claim ttl after now, or
+// nil when ttl is unset.
+func claimLifecycle(now time.Time, ttl time.Duration) *extv1beta1.Lifecycle {
+	if ttl <= 0 {
+		return nil
+	}
+	shutdownTime := metav1.NewTime(now.Add(ttl))
+	return &extv1beta1.Lifecycle{
+		ShutdownTime:   &shutdownTime,
+		ShutdownPolicy: extv1beta1.ShutdownPolicyDelete,
+	}
+}
+
 // createClaim creates a SandboxClaim and returns its generated name.
-func (h *K8sHelper) createClaim(ctx context.Context, namespace, warmPoolName string, env []extv1beta1.EnvVar, labels map[string]string, tracer trace.Tracer, svcName string) (string, error) {
+func (h *K8sHelper) createClaim(ctx context.Context, namespace, warmPoolName string, env []extv1beta1.EnvVar, labels map[string]string, shutdownAfter time.Duration, tracer trace.Tracer, svcName string) (string, error) {
 	ctx, span := startSpan(ctx, tracer, svcName, "create_claim")
 	defer span.End()
 
@@ -151,7 +164,8 @@ func (h *K8sHelper) createClaim(ctx context.Context, namespace, warmPoolName str
 			"opentelemetry.io/trace-context": traceCtx,
 		}
 	}
-	annotations = stampClientRequestTime(annotations, time.Now())
+	now := time.Now()
+	annotations = stampClientRequestTime(annotations, now)
 
 	claimLabels := make(map[string]string, len(labels)+1)
 	maps.Copy(claimLabels, labels)
@@ -168,7 +182,8 @@ func (h *K8sHelper) createClaim(ctx context.Context, namespace, warmPoolName str
 			WarmPoolRef: extv1beta1.SandboxWarmPoolRef{
 				Name: warmPoolName,
 			},
-			Env: env,
+			Env:       env,
+			Lifecycle: claimLifecycle(now, shutdownAfter),
 		},
 	}
 

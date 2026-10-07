@@ -41,8 +41,8 @@ except ModuleNotFoundError as _e:
         raise
     sys.exit(
         "agent_sandbox_fleet is not importable. This script needs the fleet "
-        "python package (fleet/python, shipped in part 1 of the series): run "
-        "it from a checkout that includes it, or `pip install -e fleet/python`."
+        "python package (examples/multi-cluster-fleet/python, shipped in part 1 of the series): run "
+        "it from a checkout that includes it, or `pip install -e examples/multi-cluster-fleet/python`."
     )
 
 from agent_sandbox_fleet import inventory  # noqa: E402

@@ -11,6 +11,7 @@ For the benchmark data and sizing rationale behind these settings — including 
 * `--sandbox-warm-pool-concurrent-workers` (default: 1): The maximum number of concurrent reconciles for the SandboxWarmPool controller. Reconciles for a given pool key are serialized by the workqueue, so workers provide concurrency across distinct warm pools rather than within a single pool. Size this to the number of active warm pools in the cluster and available API capacity (e.g. 1 is sufficient if managing a single warm pool).
 * `--sandbox-template-concurrent-workers` (default: 1): The maximum number of concurrent reconciles for the SandboxTemplate controller.
 * `--sandbox-warm-pool-max-batch-size` (default: 300): The maximum number of sandboxes the SandboxWarmPool controller will create/delete in a single batch. Creates advance one observed batch per watch round-trip (the expectations gate waits for a batch's add events before issuing the next), so a large pool fills in about `ceil(replicas/batchSize)` round-trips; raising this trades round-trips for burst size and is safe at any value under the gate.
+* `--sandbox-claim-warm-candidate-grace-period` (default: `2s`): How long a newly created SandboxClaim waits for a warm pool candidate to report a Pod IP before falling back to cold creation. Raise this on clusters where warm pool members take longer than 2s to report a Pod IP (e.g. slow CNI, image pull, or virtual-kubelet status push) to avoid unnecessary cold creations during claim bursts. While waiting, a claim is requeued every 100ms and its status is not updated; if every pool member lacks a Pod IP (e.g. unschedulable Pods), each claim waits the full period before cold creation. Must be a positive duration.
 * `--sandbox-warm-pool-readiness-grace-period` (default: `5m`): How long a warm pool sandbox may stay non-Ready before the SandboxWarmPool controller considers it stuck and replaces it (or holds it, if its pod is unschedulable). Raise this for images with long initialization or clusters with slow node auto-provisioning. Must be a positive duration.
 * `--sandbox-warm-pool-unschedulable-recheck-interval` (default: `1m`): Requeue interval at which the SandboxWarmPool controller re-checks a pool holding unschedulable sandboxes past the readiness grace period. Must be a positive duration.
 * `--kube-api-qps` (default: -1, no client-side rate limiting): Client-side QPS limit for the Kubernetes API client.
@@ -29,6 +30,7 @@ For the benchmark data and sizing rationale behind these settings — including 
 
 ## API Write and Cache Optimization
 
+* `--disable-sandbox-events` (default: `false`): Disable Kubernetes Event emission from the Sandbox controller (its `Eventf` calls become no-ops), reducing API server and etcd write volume during large warm-pool fills and high-churn workloads.
 * `--disable-claim-events` (default: `false`): Disable Kubernetes Event emission from the SandboxClaim controller (its `Eventf` calls become no-ops), reducing API server and etcd write volume during large claim bursts.
 * `--disable-claim-observability-annotations` (default: `false`): Skip persisting the SandboxClaim observability annotations (controller first-observed timestamp, trace context), removing one API write per claim. The values are still stamped on the in-memory object, so startup-latency metrics and trace propagation keep working within the controller process.
 * `--cache-label-selectors` (default: `false`): Scope the manager's Pod and Service informer caches to objects carrying the sandbox tracking label (`agents.x-k8s.io/sandbox-name-hash`). The controller only ever creates/looks up Pods and Services it labeled itself, so on shared or high-churn clusters this cuts informer list/watch volume, JSON decode CPU, and cache memory from O(cluster) to O(sandboxes). CAVEAT: externally pre-provisioned resources that rely on the `agents.x-k8s.io/adoptable=true` adoption path MUST also carry the tracking label (value = the owning sandbox's name hash) to remain visible to the controller when this flag is enabled.
@@ -112,7 +114,7 @@ If using the core controller, update `sandbox.yaml`:
         image: ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller 
         args:
         - --leader-elect=true
-        - --sandbox-concurrent-workers=10
+        - --sandbox-concurrent-workers=200
 ```
 
 If you are deploying the extensions controller (which includes the core controllers + extensions), update the args in `extensions.yaml` instead:
@@ -124,10 +126,10 @@ If you are deploying the extensions controller (which includes the core controll
         args:
         - --leader-elect=true
         - --extensions
-        - --sandbox-concurrent-workers=10
-        - --sandbox-claim-concurrent-workers=100
-        - --sandbox-warm-pool-concurrent-workers=10
-        - --sandbox-warm-pool-max-batch-size=500
+        - --sandbox-concurrent-workers=200
+        - --sandbox-claim-concurrent-workers=150
+        - --sandbox-warm-pool-concurrent-workers=4
+        - --sandbox-warm-pool-max-batch-size=300
 ```
 **Using `kubectl patch` (Live Cluster):**
 If you have already deployed the controller (e.g., via `make deploy-kind`) and want to apply these concurrency flags dynamically to the running cluster, you can use a JSON patch:
@@ -137,10 +139,10 @@ kubectl patch deployment agent-sandbox-controller \
   -n agent-sandbox-system \
   --type='json' \
   -p='[
-    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-concurrent-workers=10"},
-    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-claim-concurrent-workers=100"},
-    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-warm-pool-concurrent-workers=10"},
-    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-warm-pool-max-batch-size=500"}
+    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-concurrent-workers=200"},
+    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-claim-concurrent-workers=150"},
+    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-warm-pool-concurrent-workers=4"},
+    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-warm-pool-max-batch-size=300"}
   ]'
 ```
 This method safely appends the new flags without overwriting existing necessary arguments like `--leader-elect=true` or `--extensions=true`.
@@ -161,10 +163,12 @@ spec:
       containers:
       - name: agent-sandbox-controller
         args:
-        - --sandbox-concurrent-workers=10
-        - --sandbox-claim-concurrent-workers=100
-        - --sandbox-warm-pool-concurrent-workers=10
-        - --sandbox-warm-pool-max-batch-size=500
+        - --leader-elect=true
+        - --extensions
+        - --sandbox-concurrent-workers=200
+        - --sandbox-claim-concurrent-workers=150
+        - --sandbox-warm-pool-concurrent-workers=4
+        - --sandbox-warm-pool-max-batch-size=300
 ```
 Then include the patch in your `kustomization.yaml`:
 ```yaml
@@ -174,21 +178,22 @@ patches:
 
 ## High-Throughput & Scale Tuning
 
-When running high sustained claim rates (e.g., 10–20+ claims/second) or managing large warm pools (e.g., 1,000–2,500+ replicas), standard controller deployments can experience API server bottlenecks and warm-pool replenishment stalls. The benchmark evidence behind the recommendations below, plus burst-vs-sustained profile guidance, is in [Performance Tuning](performance-tuning.md). The main bottlenecks and fixes:
+When running high sustained claim rates (e.g., 10–20+ claims/second) or managing large warm pools (e.g., 1,000–2,500+ replicas), standard controller deployments can experience API server bottlenecks and warm-pool replenishment stalls. The benchmark evidence behind the recommendations below, plus burst-vs-sustained profile guidance, multi-pool sharding, and managed control plane considerations, is in [Performance Tuning](performance-tuning.md). The main bottlenecks and fixes:
 
 1. **Watch Stream Starvation & The Expectations Gate**:
    The `SandboxWarmPool` reconciler gates sandbox creation using an in-flight expectations tracker (`warmPoolExpectations`). When creating replacement sandboxes, it waits for the informer cache to observe all watch `ADD` events before issuing further creates.
    If writes and watch streams share a single HTTP/2 connection (`--separate-watch-connection=false`), large write bursts queue or drop watch frames. This causes create expectations to remain unsatisfied, wedging the warm pool until the 5-minute fallback timeout (`expectationsTimeout = 5m`) expires.
    * **Fix**: Enable `--separate-watch-connection=true` and shard write traffic with `--api-connections=4` (or `8`).
 
-2. **Replenishment Pacing**:
-   By default, replenishment is unpaced (`--sandbox-warm-pool-max-refill-rate=0`), causing the controller to attempt to satisfy the entire deficit at once in giant batches. This floods the API server with parallel POST requests, triggering API Priority & Fairness (APF) throttling.
-   * **Fix**: Set `--sandbox-warm-pool-max-refill-rate` (e.g. `25`–`30` for a sustained 20 claims/s workload) to pace replenishment smoothly, and bound `--sandbox-warm-pool-max-batch-size=200`.
+2. **Replenishment Pacing & Warm Pool Sharding**:
+   By default, replenishment is unpaced (`--sandbox-warm-pool-max-refill-rate=0`), causing the controller to create replacement sandboxes in repeated bursts bounded only by `--sandbox-warm-pool-max-batch-size` (default `300`), waiting for observed `ADD` events between batches. Firing up to 300 parallel `POST` requests per batch floods the API server, triggering API Priority & Fairness (APF) throttling and saturating watch delivery. Additionally, because reconciles and expectations gates are serialized per `SandboxWarmPool`, a single pool's sustained refill ceiling is ~70–85 sandboxes/s.
+   * **Fix**: Set `--sandbox-warm-pool-max-refill-rate` (e.g. `25`–`30` for a sustained 20 claims/s workload, or `80`–`100` for higher rates) to pace replenishment smoothly, bound `--sandbox-warm-pool-max-batch-size=200`, and shard large warm pools (>500–1,000 replicas or >30 claims/s sustained) across multiple `SandboxWarmPool` resources with `--sandbox-warm-pool-concurrent-workers` matched to the pool count.
 
 3. **Reducing API Server & etcd Pressure**:
    At high throughput, routine event generation and annotation updates write heavily to etcd:
-   * **Fix**: Enable `--disable-claim-events=true` and `--disable-claim-observability-annotations=true` to eliminate ~40 write QPS at 20 claims/s.
+   * **Fix**: Enable `--disable-sandbox-events=true`, `--disable-claim-events=true`, and `--disable-claim-observability-annotations=true` to eliminate redundant event and annotation writes per claim/sandbox lifecycle transition.
    * **Fix**: Enable `--cache-label-selectors=true` to avoid caching non-sandbox pods and services across the cluster.
+   * **Fix**: Apply the APF insulation manifest ([`examples/apf-insulation/apf-insulation.yaml`](../examples/apf-insulation/apf-insulation.yaml); see [APF Insulation](apf-insulation.md)) so warm-pool refill creates do not queue out latency-critical claim adoption patches.
    * **Fix**: If using client-side rate limiting (`--kube-api-qps`), ensure `--kube-api-burst` (e.g. `200`) is sized to match or exceed worker concurrency to prevent client-side throttling. By default, `--kube-api-qps=-1` (client-side rate limiting is disabled).
 
 ### High-Throughput Deployment Example
@@ -225,6 +230,7 @@ spec:
         - --sandbox-warm-pool-max-refill-rate=25
         - --sandbox-warm-pool-max-batch-size=200
         # Write and cache optimization
+        - --disable-sandbox-events=true
         - --disable-claim-events=true
         - --disable-claim-observability-annotations=true
         - --cache-label-selectors=true

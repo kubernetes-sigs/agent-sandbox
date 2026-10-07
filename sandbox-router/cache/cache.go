@@ -76,6 +76,11 @@ const (
 // (e.g. ready timestamp, ownership labels for authz) can be added without
 // breaking call sites.
 type Entry struct {
+	// SandboxUID is the canonical UID of the Sandbox that owns the Pod.
+	// Authorization consumes this value from the cache rather than
+	// trusting the caller's routing header.
+	SandboxUID types.UID
+
 	// PodUID identifies the Pod that supplied PodIP. It fences delayed
 	// delete and NotReady events from an older Pod after the Sandbox has
 	// been recreated with the same owner UID.
@@ -86,14 +91,30 @@ type Entry struct {
 	// upstream target.
 	PodIP string
 
-	// SandboxName is the human-readable Sandbox CR name (== Pod.Name).
-	// Together with Namespace it is the key material for the byName
-	// index; also used for logging.
+	// SandboxName is the human-readable Sandbox CR name, taken from the
+	// Pod's controller OwnerReference. It usually equals Pod.Name, but not
+	// for a Pod adopted from a warm pool before warm pools created Sandbox
+	// objects. Together with Namespace it is the key material for the
+	// byName index; also used for logging.
 	SandboxName string
 
 	// Namespace is the K8s namespace of the Sandbox / Pod.
 	Namespace string
 }
+
+// ResolutionSource identifies the cache index that selected an entry.
+type ResolutionSource uint8
+
+const (
+	// ResolutionByUID means the requested UID selected the entry. This
+	// includes unclaimed warm-pool members, which intentionally have no
+	// name-index entry until adoption.
+	ResolutionByUID ResolutionSource = iota + 1
+	// ResolutionByName means the canonical namespace/name index selected
+	// the entry. When a requested UID differs, the name index wins so a
+	// stale incarnation can never override the current Sandbox owner.
+	ResolutionByName
+)
 
 // Cache is a thread-safe Sandbox-UID → Entry map kept up to date by a
 // background Pod informer. Lookups are O(1) and lock-free for the common
@@ -166,7 +187,7 @@ func New(o Options) (*Cache, error) {
 
 	if _, err := podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    c.onAddOrUpdate,
-		UpdateFunc: func(_, newObj any) { c.onAddOrUpdate(newObj) },
+		UpdateFunc: c.onUpdate,
 		DeleteFunc: c.onDelete,
 	}); err != nil {
 		return nil, err
@@ -201,8 +222,8 @@ func (c *Cache) Get(uid types.UID) (Entry, bool) {
 	return e, ok
 }
 
-// GetByName looks up the cached entry by sandbox namespace and name
-// (== Pod name). Resolution path for callers that send only
+// GetByName looks up the cached entry by sandbox namespace and Sandbox
+// name (see Entry.SandboxName). Resolution path for callers that send only
 // X-Sandbox-Id / X-Sandbox-Namespace; see byName.
 func (c *Cache) GetByName(namespace, name string) (Entry, bool) {
 	c.mu.RLock()
@@ -213,6 +234,36 @@ func (c *Cache) GetByName(namespace, name string) (Entry, bool) {
 	}
 	e, ok := c.entries[uid]
 	return e, ok
+}
+
+// Resolve returns one canonical entry for a sandbox request under a
+// single read lock. The current namespace/name owner wins whenever the
+// name is indexed, including while an older UID entry still exists after
+// replacement. When the name is not indexed, an exact UID may select an
+// unclaimed warm-pool member after its namespace and name are verified.
+func (c *Cache) Resolve(namespace, name string, requestedUID types.UID) (Entry, ResolutionSource, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if currentUID, ok := c.byName[nameKey(namespace, name)]; ok {
+		e, exists := c.entries[currentUID]
+		if !exists || e.Namespace != namespace || e.SandboxName != name {
+			return Entry{}, 0, false
+		}
+		if requestedUID != "" && requestedUID == currentUID {
+			return e, ResolutionByUID, true
+		}
+		return e, ResolutionByName, true
+	}
+
+	if requestedUID == "" {
+		return Entry{}, 0, false
+	}
+	e, ok := c.entries[requestedUID]
+	if !ok || e.Namespace != namespace || e.SandboxName != name {
+		return Entry{}, 0, false
+	}
+	return e, ResolutionByUID, true
 }
 
 // Len returns the current number of cached entries. Primarily for tests
@@ -239,10 +290,11 @@ func (c *Cache) onAddOrUpdate(obj any) {
 	if !ok {
 		return
 	}
-	uid, ok := sandboxUIDOf(pod)
+	owner, ok := sandboxOwnerOf(pod)
 	if !ok {
 		return
 	}
+	uid := owner.UID
 	if !podReady(pod) || pod.Status.PodIP == "" {
 		c.removePod(uid, pod.UID)
 		return
@@ -257,9 +309,32 @@ func (c *Cache) onAddOrUpdate(obj any) {
 	c.upsert(uid, Entry{
 		PodUID:      pod.UID,
 		PodIP:       pod.Status.PodIP,
-		SandboxName: pod.Name,
+		SandboxName: owner.Name,
 		Namespace:   pod.Namespace,
 	}, !unclaimed)
+}
+
+func (c *Cache) onUpdate(oldObj, newObj any) {
+	newPod, ok := newObj.(*corev1.Pod)
+	if !ok {
+		return
+	}
+	c.onAddOrUpdate(newPod)
+
+	oldPod, ok := oldObj.(*corev1.Pod)
+	if !ok {
+		return
+	}
+	oldUID, oldOwned := sandboxUIDOf(oldPod)
+	newUID, newOwned := sandboxUIDOf(newPod)
+	if oldOwned && (!newOwned || oldUID != newUID) {
+		// Publish the new owner first, then remove the old UID. The guarded
+		// name-index delete keeps the new owner canonical in either event
+		// order while preventing the old UID entry from leaking. The Pod
+		// UID fence leaves the old owner's entry alone when a different
+		// Pod already supplies it.
+		c.removePod(oldUID, oldPod.UID)
+	}
 }
 
 func (c *Cache) onDelete(obj any) {
@@ -282,6 +357,7 @@ func (c *Cache) onDelete(obj any) {
 // pass false so they stay UID-only.
 func (c *Cache) upsert(uid types.UID, e Entry, indexName bool) {
 	c.mu.Lock()
+	e.SandboxUID = uid
 	prev, existed := c.entries[uid]
 	c.entries[uid] = e
 	// Drop a stale name key only when it still points at this UID, so a
@@ -299,9 +375,9 @@ func (c *Cache) upsert(uid types.UID, e Entry, indexName bool) {
 	}
 	c.mu.Unlock()
 	if !existed {
-		c.log.V(1).Info("cache add", "uid", uid, "pod", e.SandboxName, "ip", e.PodIP, "ns", e.Namespace)
+		c.log.V(1).Info("cache add", "uid", uid, "pod", e.SandboxName, "pod_uid", e.PodUID, "ip", e.PodIP, "ns", e.Namespace)
 	} else if prev.PodIP != e.PodIP {
-		c.log.V(1).Info("cache update", "uid", uid, "pod", e.SandboxName, "ip", e.PodIP, "ns", e.Namespace, "prev_ip", prev.PodIP)
+		c.log.V(1).Info("cache update", "uid", uid, "pod", e.SandboxName, "pod_uid", e.PodUID, "ip", e.PodIP, "ns", e.Namespace, "prev_ip", prev.PodIP)
 	}
 }
 
@@ -309,22 +385,28 @@ func (c *Cache) remove(uid types.UID) {
 	c.removePod(uid, "")
 }
 
-// removePod removes the entry for uid only when podUID is empty (an internal
-// unconditional eviction) or matches the Pod that currently supplies the
-// entry. Matching the Pod UID prevents a delayed delete or NotReady event for
-// an older Pod from evicting a replacement Pod with the same Sandbox owner.
+// removePod removes the entry for uid only when either Pod UID is empty
+// (unknown Pod identity or an internal unconditional eviction) or podUID
+// matches the Pod that currently supplies the entry. Matching the Pod UID
+// prevents a delayed delete or NotReady event for an older Pod from evicting
+// a replacement Pod with the same Sandbox owner, while falling back to
+// unconditional removal when either UID is empty ensures an entry is never
+// stranded with nothing able to evict it.
 func (c *Cache) removePod(uid, podUID types.UID) {
 	c.mu.Lock()
-	if podUID != "" {
-		if entry, ok := c.entries[uid]; !ok || entry.PodUID != podUID {
-			c.mu.Unlock()
-			return
-		}
+	cur, found := c.entries[uid]
+	stale := found && cur.PodUID != "" && podUID != "" && cur.PodUID != podUID
+	var existed bool
+	if !stale {
+		existed = c.removeLocked(uid)
 	}
-	existed := c.removeLocked(uid)
 	c.mu.Unlock()
-	if existed {
-		c.log.V(1).Info("cache remove", "uid", uid)
+	switch {
+	case stale:
+		c.log.V(1).Info("cache remove ignored: event from a replaced pod",
+			"uid", uid, "event_pod_uid", podUID, "cached_pod_uid", cur.PodUID)
+	case existed:
+		c.log.V(1).Info("cache remove", "uid", uid, "pod_uid", podUID)
 	}
 }
 
@@ -343,54 +425,40 @@ func (c *Cache) removeLocked(uid types.UID) bool {
 	return existed
 }
 
-// Invalidate evicts the entry for uid if present, returning true when an
-// entry was actually removed. This is the public hook the KEP's "active
-// cache invalidation on connection error" calls for: the proxy invokes it
-// from its ErrorHandler when a dispatch using the cached IP fails, so
-// the next request for the same UID falls through to DNS while the
-// informer catches up.
+// Invalidate evicts the entry that dialed describes, returning true when
+// an entry was actually removed. This is the public hook the KEP's
+// "active cache invalidation on connection error" calls for: the proxy
+// invokes it from its ErrorHandler when a dispatch using the cached IP
+// fails, so the next request for the same sandbox falls through to DNS
+// while the informer catches up.
+//
+// dialed is the entry the failed dispatch resolved. Eviction requires the
+// cached entry for dialed.SandboxUID to still carry the same Pod UID and
+// Pod IP, so an entry refreshed while the dial was failing, by a
+// replacement Pod or a new address, survives.
 //
 // Safe to call for an unknown UID — the operation is a no-op.
-func (c *Cache) Invalidate(uid types.UID) bool {
+func (c *Cache) Invalidate(dialed Entry) bool {
 	c.mu.Lock()
-	existed := c.removeLocked(uid)
-	c.mu.Unlock()
-	if existed {
-		c.log.V(1).Info("cache invalidated by caller", "uid", uid)
-	}
-	return existed
-}
-
-// InvalidateByName is Invalidate for name-resolved targets, which carry
-// no UID to evict by. Eviction is conditional on the entry still holding
-// podIP (the IP the failed dial targeted): the name resolves at eviction
-// time, and a Pod recreated while the stale dial was timing out may have
-// already refreshed the entry — evicting it would leave the name
-// unroutable until the next resync. Safe no-op for unknown names or a
-// non-matching IP.
-func (c *Cache) InvalidateByName(namespace, name, podIP string) bool {
-	k := nameKey(namespace, name)
-	c.mu.Lock()
+	cur, found := c.entries[dialed.SandboxUID]
+	refreshed := found && (cur.PodUID != dialed.PodUID || cur.PodIP != dialed.PodIP)
 	var existed bool
-	if uid, ok := c.byName[k]; ok {
-		if e, ok := c.entries[uid]; ok {
-			if e.PodIP == podIP {
-				existed = c.removeLocked(uid)
-			}
-		} else {
-			// Dangling key (should not happen): drop it so lookups
-			// fail fast to DNS instead of resolving nothing forever.
-			delete(c.byName, k)
-		}
+	if found && !refreshed {
+		existed = c.removeLocked(dialed.SandboxUID)
 	}
 	c.mu.Unlock()
-	if existed {
-		c.log.V(1).Info("cache invalidated by caller", "ns", namespace, "pod", name, "ip", podIP)
+	switch {
+	case refreshed:
+		c.log.V(1).Info("cache invalidation ignored: entry refreshed after the failed dial",
+			"uid", dialed.SandboxUID, "failed_pod_uid", dialed.PodUID, "failed_ip", dialed.PodIP,
+			"cached_pod_uid", cur.PodUID, "cached_ip", cur.PodIP)
+	case existed:
+		c.log.V(1).Info("cache invalidated by caller", "uid", dialed.SandboxUID, "pod_uid", dialed.PodUID, "ip", dialed.PodIP)
 	}
 	return existed
 }
 
-// nameKey builds the byName index key. Namespace and Pod names are
+// nameKey builds the byName index key. Namespace and Sandbox names are
 // DNS labels (no "/"), so the separator is unambiguous.
 func nameKey(namespace, name string) string {
 	return namespace + "/" + name
@@ -401,6 +469,18 @@ func nameKey(namespace, name string) string {
 // (which shouldn't reach us thanks to the label filter, but the check is
 // cheap insurance against stray events).
 func sandboxUIDOf(pod *corev1.Pod) (types.UID, bool) {
+	ref, ok := sandboxOwnerOf(pod)
+	if !ok {
+		return "", false
+	}
+	return ref.UID, true
+}
+
+// sandboxOwnerOf returns the Pod's controlling Sandbox OwnerReference.
+// Its Name is the canonical Sandbox name: a Pod adopted from a warm pool
+// before warm pools created Sandbox objects keeps its own name, so
+// Pod.Name is not always the Sandbox name.
+func sandboxOwnerOf(pod *corev1.Pod) (*metav1.OwnerReference, bool) {
 	for i := range pod.OwnerReferences {
 		ref := &pod.OwnerReferences[i]
 		if ref.Controller == nil || !*ref.Controller {
@@ -414,9 +494,9 @@ func sandboxUIDOf(pod *corev1.Pod) (types.UID, bool) {
 		if !apiVersionInGroup(ref.APIVersion, SandboxAPIGroup) {
 			continue
 		}
-		return ref.UID, true
+		return ref, true
 	}
-	return "", false
+	return nil, false
 }
 
 // apiVersionInGroup reports whether apiVersion ("group/version") is in

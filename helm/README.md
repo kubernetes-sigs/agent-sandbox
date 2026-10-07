@@ -71,7 +71,7 @@ helm uninstall agent-sandbox --namespace agent-sandbox-system
 
 ## Configuration
 
-The following table lists the configurable parameters and their defaults.
+The following table lists the configurable parameters and their defaults. For flag details and recommended profiles at high scale, see [`docs/configuration.md`](../docs/configuration.md) and [`docs/performance-tuning.md`](../docs/performance-tuning.md).
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
@@ -87,14 +87,24 @@ The following table lists the configurable parameters and their defaults.
 | `controller.clusterDomain` | Kubernetes cluster domain for service FQDN generation | `"cluster.local"` |
 | `controller.kubeApiQps` | Client-side QPS limit for the Kubernetes API client (`-1` = unlimited) | `-1.0` |
 | `controller.kubeApiBurst` | Burst limit for the Kubernetes API client | `10` |
-| `controller.sandboxConcurrentWorkers` | Max concurrent reconciles for the Sandbox controller | `1` |
-| `controller.sandboxClaimConcurrentWorkers` | Max concurrent reconciles for the SandboxClaim controller (extensions only) | `1` |
+| `controller.apiConnections` | Number of independent HTTP/2 connections to `kube-apiserver` for non-watch traffic | unset (controller default `1`) |
+| `controller.separateWatchConnection` | Give the manager's informer cache (list/watch streams) a dedicated HTTP/2 connection | unset (controller default `false`) |
+| `controller.sandboxConcurrentWorkers` | Max concurrent reconciles for the Sandbox controller | unset (controller default `100`) |
+| `controller.cacheLabelSelectors` | Scope Pod and Service informer caches to sandbox-labeled objects | unset (controller default `false`) |
+| `controller.disableSandboxEvents` | Disable Kubernetes `Event` emission from the Sandbox controller | unset (controller default `false`) |
+| `controller.sandboxWriteBehindWindow` | Coalescing window for recoverable metadata-only writes on Sandbox objects (`0` disables) | unset (controller default `0s`) |
+| `controller.sandboxClaimConcurrentWorkers` | Max concurrent reconciles for the SandboxClaim controller (extensions only) | unset (controller default `50`) |
 | `controller.sandboxWarmPoolConcurrentWorkers` | Max concurrent reconciles for the SandboxWarmPool controller (extensions only) | `1` |
 | `controller.sandboxTemplateConcurrentWorkers` | Max concurrent reconciles for the SandboxTemplate controller (extensions only) | `1` |
 | `controller.sandboxWarmPoolMaxBatchSize` | Max batch size for parallel sandbox create/delete in the SandboxWarmPool controller (extensions only) | `300` |
+| `controller.sandboxWarmPoolReplenishDelay` | Defer replacement sandbox creation after warm pool members drop out during claim bursts (extensions only) | unset (controller default `0s`) |
+| `controller.sandboxWarmPoolMaxRefillRate` | Max rate (sandboxes/second, per pool) for warm pool replenishment (`0` = unpaced, extensions only) | unset (controller default `0`) |
+| `controller.sandboxClaimWarmCandidateGracePeriod` | How long a newly created SandboxClaim waits for a warm pool candidate to report a Pod IP before falling back to cold creation (extensions only) | unset (controller default `2s`) |
 | `controller.sandboxWarmPoolReadinessGracePeriod` | How long a warm pool sandbox may stay non-Ready before it is considered stuck and replaced, or held if unschedulable (extensions only) | unset (controller default `5m`) |
 | `controller.sandboxWarmPoolUnschedulableRecheckInterval` | Re-check interval for pools holding unschedulable sandboxes past the readiness grace period (extensions only) | unset (controller default `1m`) |
 | `controller.enableWarmPoolEviction` | Mark pods created by a warm pool as safe to evict (extensions only) | `true` |
+| `controller.disableClaimEvents` | Disable Kubernetes `Event` emission from the SandboxClaim controller (extensions only) | unset (controller default `false`) |
+| `controller.disableClaimObservabilityAnnotations` | Skip persisting SandboxClaim observability annotations to save one API write per claim (extensions only) | unset (controller default `false`) |
 | `controller.enableTracing` | Enable OpenTelemetry tracing via OTLP | `false` |
 | `controller.enablePprof` | Enable CPU profiling endpoint on the metrics server | `false` |
 | `controller.enablePprofDebug` | Enable all pprof endpoints (implies enablePprof) | `false` |

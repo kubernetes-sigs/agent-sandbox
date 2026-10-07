@@ -60,11 +60,12 @@ import (
 
 const (
 	immediateRequeueDelay = time.Millisecond
-	// warmCandidateGracePeriod gives a newly created claim two seconds for a
-	// warm candidate to receive a Pod IP. This covers short IPAM delays without
-	// allowing an unavailable warm pool to postpone cold creation indefinitely.
-	warmCandidateGracePeriod   = 2 * time.Second
-	warmCandidateRetryInterval = 100 * time.Millisecond
+	// DefaultWarmCandidateGracePeriod gives a newly created claim two seconds for a
+	// warm candidate to receive a Pod IP, unless overridden via
+	// SandboxClaimReconciler.WarmCandidateGracePeriod. This covers short IPAM delays
+	// without allowing an unavailable warm pool to postpone cold creation indefinitely.
+	DefaultWarmCandidateGracePeriod = 2 * time.Second
+	warmCandidateRetryInterval      = 100 * time.Millisecond
 )
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
@@ -99,13 +100,82 @@ var errSandboxAlreadyExists = errors.New("sandbox already exists (cache lag)")
 
 // cacheLagRequeueDelay bounds the wait before re-checking that a just-created
 // sandbox is visible in the informer cache (a fallback for the window before
-// the Owns(&Sandbox{}) watch, the primary trigger, delivers it).
-//
-// TODO(#1313): a persistently lagging informer re-issues Create at this flat
-// rate, since the sentinel returns nil and resets the failure counter each
-// pass. The real fix is a per-claim attempt counter that grows the delay on
-// repeated misses (kept on the nil-error path).
+// the Owns(&Sandbox{}) watch, the primary trigger, delivers it). Kept as the
+// delay for the first cache-lag attempt so the common single-pass race sees
+// no change; see cacheLagRequeueDelayFor for repeated attempts.
 const cacheLagRequeueDelay = 200 * time.Millisecond
+
+// maxCacheLagRequeueDelay caps the geometric backoff in cacheLagRequeueDelayFor,
+// so a persistently lagging informer settles at a bounded flat rate instead of
+// growing the requeue delay without limit (#1313).
+const maxCacheLagRequeueDelay = 5 * time.Second
+
+// cacheLagRequeueDelayFor grows the requeue delay geometrically with the
+// number of consecutive errSandboxAlreadyExists attempts seen for one claim,
+// capped at maxCacheLagRequeueDelay. The first attempt returns
+// cacheLagRequeueDelay unchanged, so the common single-pass cache lag is not
+// slowed down. Values below 1 are treated as the first attempt, since a
+// negative shift count would panic.
+func cacheLagRequeueDelayFor(attempts int) time.Duration {
+	if attempts <= 1 {
+		return cacheLagRequeueDelay
+	}
+	delay := cacheLagRequeueDelay << (attempts - 1)
+	if delay <= 0 || delay > maxCacheLagRequeueDelay {
+		return maxCacheLagRequeueDelay
+	}
+	return delay
+}
+
+// cacheLagAttemptEntry pairs the consecutive cache-lag attempt count with the
+// UID of the SandboxClaim it was observed for. We store the UID to protect
+// against stale data when a claim is deleted and a new one is created with
+// the same name, mirroring observedTimeEntry above.
+type cacheLagAttemptEntry struct {
+	attempts int
+	uid      types.UID
+}
+
+// cacheLagAttemptMap is a type-safe wrapper around sync.Map that tracks the
+// number of consecutive errSandboxAlreadyExists requeues seen for a claim.
+// Read by cacheLagRequeueDelayFor to grow the requeue delay on a persistently
+// lagging informer (#1313), instead of resetting to the flat
+// cacheLagRequeueDelay on every pass.
+type cacheLagAttemptMap struct {
+	inner sync.Map
+}
+
+// Increment records another consecutive cache-lag attempt for the claim
+// identified by key and uid, and returns the new attempt count. A uid that
+// differs from the stored entry (a same-named replacement claim) starts the
+// count fresh at 1 instead of inheriting the earlier claim's backoff.
+func (m *cacheLagAttemptMap) Increment(key types.NamespacedName, uid types.UID) int {
+	entry := cacheLagAttemptEntry{uid: uid}
+	if val, ok := m.inner.Load(key); ok {
+		if existing := val.(cacheLagAttemptEntry); existing.uid == uid {
+			entry = existing
+		}
+	}
+	entry.attempts++
+	m.inner.Store(key, entry)
+	return entry.attempts
+}
+
+// Delete clears key, so a later cache-lag streak starts fresh at the flat
+// cacheLagRequeueDelay.
+func (m *cacheLagAttemptMap) Delete(key types.NamespacedName) {
+	m.inner.Delete(key)
+}
+
+// Load returns the current consecutive cache-lag attempt count for key,
+// without incrementing it.
+func (m *cacheLagAttemptMap) Load(key types.NamespacedName) (int, bool) {
+	val, ok := m.inner.Load(key)
+	if !ok {
+		return 0, false
+	}
+	return val.(cacheLagAttemptEntry).attempts, true
+}
 
 var restrictedDomains = []string{"kubernetes.io", "k8s.io", "agents.x-k8s.io"}
 var exemptedMetadataKeys = []string{autoscalerSafeToEvictAnnotation}
@@ -186,7 +256,11 @@ type SandboxClaimReconciler struct {
 	Tracer                  asmetrics.Instrumenter
 	MaxConcurrentReconciles int
 	observedTimes           observedTimeMap
-	AllowedLabelDomains     []string
+	// cacheLagAttempts counts consecutive errSandboxAlreadyExists requeues per
+	// claim, so a persistently lagging informer backs off instead of
+	// re-issuing Create at a flat rate forever (#1313).
+	cacheLagAttempts    cacheLagAttemptMap
+	AllowedLabelDomains []string
 	// DisableObservabilityAnnotations skips persisting the observability
 	// annotations (first-observed timestamp, trace context) onto the claim,
 	// removing one API write per claim. The values are still stamped on the
@@ -196,6 +270,11 @@ type SandboxClaimReconciler struct {
 	// startup-latency metric for claims first observed by the previous
 	// process. Wired to --disable-claim-observability-annotations.
 	DisableObservabilityAnnotations bool
+	// WarmCandidateGracePeriod is how long a newly created claim waits for a
+	// warm pool candidate without an observed Pod IP before falling back to
+	// cold creation. Zero-value construction falls back to DefaultWarmCandidateGracePeriod.
+	// The CLI flag requires a positive duration and rejects <= 0 at startup.
+	WarmCandidateGracePeriod time.Duration
 }
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
@@ -219,11 +298,24 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if k8errors.IsNotFound(err) {
 			// Fallback cleanup to prevent memory leaks if the delete predicate was missed or a stale request is processed.
 			r.observedTimes.Delete(req.NamespacedName)
+			r.cacheLagAttempts.Delete(req.NamespacedName)
 			logger.V(1).Info("SandboxClaim not found, ignoring", "request", req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("failed to get sandbox claim %q: %w", req.NamespacedName, err)
 	}
+
+	// Clear the cache-lag attempt counter as soon as a pass reconciles to
+	// anything other than errSandboxAlreadyExists, so a later race starts a
+	// fresh backoff instead of picking up where an unrelated earlier streak
+	// left off. The one branch below that hits the sentinel flips this back
+	// on before returning.
+	hitCacheLag := false
+	defer func() {
+		if !hitCacheLag {
+			r.cacheLagAttempts.Delete(req.NamespacedName)
+		}
+	}()
 
 	// Unconditionally clean up legacy per-claim NetworkPolicies.
 	// We log the error but do not block the main reconcile flow so
@@ -400,9 +492,14 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// Cache-lag AlreadyExists: bounded requeue with nil error to reset the
 	// failure counter instead of engaging the exponential backoff (#1042).
+	// The requeue delay itself grows with consecutive attempts for this claim
+	// so a persistently lagging informer settles at a bounded flat rate
+	// instead of re-issuing Create at cacheLagRequeueDelay forever (#1313).
 	if errors.Is(reconcileErr, errSandboxAlreadyExists) {
-		logger.V(4).Info("Sandbox already exists; requeueing to let cache converge", "claim", claim.Name, "error", reconcileErr)
-		requeueDelay := cacheLagRequeueDelay
+		hitCacheLag = true
+		attempts := r.cacheLagAttempts.Increment(req.NamespacedName, claim.UID)
+		requeueDelay := cacheLagRequeueDelayFor(attempts)
+		logger.V(4).Info("Sandbox already exists; requeueing to let cache converge", "claim", claim.Name, "error", reconcileErr, "attempt", attempts, "requeueAfter", requeueDelay)
 		if result.RequeueAfter > 0 && result.RequeueAfter < requeueDelay {
 			requeueDelay = result.RequeueAfter
 		}
@@ -689,7 +786,7 @@ func (r *SandboxClaimReconciler) updateStatus(ctx context.Context, oldStatus *ex
 
 func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.SandboxClaim, sandbox *v1beta1.Sandbox, err error, isClaimExpired bool) metav1.Condition {
 	if err != nil {
-		reason := "ReconcilerError"
+		reason := v1beta1.SandboxReasonReconcilerError
 		if errors.Is(err, ErrTemplateNotFound) {
 			reason = "TemplateNotFound"
 			msg := strings.TrimSuffix(err.Error(), ": "+ErrTemplateNotFound.Error())
@@ -1933,11 +2030,20 @@ func (r *SandboxClaimReconciler) migrateLegacyAssignedSandboxLabel(ctx context.C
 	return r.Patch(ctx, claim, patch)
 }
 
-func warmCandidateRetryAfter(claim *extensionsv1beta1.SandboxClaim, now time.Time) (time.Duration, bool) {
+// warmCandidateGracePeriod returns the configured warm-candidate grace period,
+// falling back to the default for zero-value construction (tests, bare literals).
+func (r *SandboxClaimReconciler) warmCandidateGracePeriod() time.Duration {
+	if r.WarmCandidateGracePeriod > 0 {
+		return r.WarmCandidateGracePeriod
+	}
+	return DefaultWarmCandidateGracePeriod
+}
+
+func (r *SandboxClaimReconciler) warmCandidateRetryAfter(claim *extensionsv1beta1.SandboxClaim, now time.Time) (time.Duration, bool) {
 	if claim.CreationTimestamp.IsZero() {
 		return 0, false
 	}
-	remaining := claim.CreationTimestamp.Add(warmCandidateGracePeriod).Sub(now)
+	remaining := claim.CreationTimestamp.Add(r.warmCandidateGracePeriod()).Sub(now)
 	if remaining <= 0 {
 		return 0, false
 	}
@@ -2124,17 +2230,17 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 		return adopted, nil
 	}
 	if pendingNetworkCandidates > 0 {
-		if retryAfter, ok := warmCandidateRetryAfter(claim, time.Now()); ok {
+		if retryAfter, ok := r.warmCandidateRetryAfter(claim, time.Now()); ok {
 			return nil, &warmCandidatesPendingError{
 				pendingCandidates: pendingNetworkCandidates,
 				retryAfter:        retryAfter,
 			}
 		}
-		logger.Info("Warm pool candidates did not report Pod IPs within the grace period; falling back to cold creation",
+		logger.V(4).Info("Warm pool candidates did not report Pod IPs within the grace period; falling back to cold creation",
 			"claim", claim.Name,
 			"warmPool", claim.Spec.WarmPoolRef.Name,
 			"pendingCandidates", pendingNetworkCandidates,
-			"gracePeriod", warmCandidateGracePeriod,
+			"gracePeriod", r.warmCandidateGracePeriod(),
 			"reason", "warm_candidates_network_pending",
 		)
 	}

@@ -5,6 +5,52 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 
 ## [0.1.0.dev0] — unreleased
 
+### Added (one job, several processes —
+[#1808](https://github.com/kubernetes-sigs/agent-sandbox/issues/1808))
+- **`FleetConfig.run_id`** sets the fleet's run id instead of a random one, so the
+  processes of one job (an orchestrator that warms pools, workers that claim from
+  them) share the job's templates and pools. Before, each process was its own
+  run: a worker that went on demand before the orchestrator warmed an image
+  created the template under its id, and the orchestrator's `warm_image` then
+  raised. With a shared id, a pool is resized and deleted only by the process
+  that created it: warming an image another process already warmed borrows its
+  pool, and the first warm of an on-demand pool (marked with
+  `agent-sandbox-rl/on-demand`) takes it over. `teardown()` deletes only the
+  pools this fleet created, a per-run namespace is kept unless
+  `delete_namespace=True` and is never rolled back after a failed setup hook,
+  and the pod-count circuit breaker is off (`max_live_sandboxes` still caps each
+  process's claims). The default is unchanged.
+- **The resolved template name must be at most 63 characters**, since it is the
+  `sandbox=<template>` pod label value; a longer one (a long prefix or `run_id`)
+  passed validation and then failed every pod at the first warm.
+
+### Fixed (run-id pod safeguards —
+[#1807](https://github.com/kubernetes-sigs/agent-sandbox/issues/1807))
+- **The circuit breaker and the reaper's pod force-delete see this run's pods
+  again.** Both selected pods by `agents.x-k8s.io/asrl-run-id`, but since #894 the
+  Sandbox controller strips `agents.x-k8s.io/*` labels from the pod template before
+  it reaches the pod, so `live_owned_count()` was always 0 (the breaker could never
+  trip on pod count) and `reap(run_id=…)`'s grace-0 pod delete matched nothing. The
+  pod template now also carries the run id as `agent-sandbox-rl/run-id`
+  (`POD_RUN_ID_LABEL`), which the controller leaves alone, and
+  `live_owned_count()` / the reaper's pod sweep select on it
+  (`fleet.pod_run_selector()`). Claims, pools and templates keep
+  `agents.x-k8s.io/asrl-run-id`, and the ownership checks still read it. Warm pods
+  created before the upgrade don't gain the new label (changing a template's
+  pod-template labels doesn't replace pool members), so `reap(run_id=…)` misses
+  them until they cycle.
+- **No provisioning path relabels another run's template** (the relabel half of
+  [#1808](https://github.com/kubernetes-sigs/agent-sandbox/issues/1808)). The
+  on-demand path in `acquire()` and `ensure_templates()` called `ensure_template`
+  without an owner check, so an existing template was relabelled to the calling
+  run even when another live run owned it. That run's teardown and
+  `reap(run_id=…)` then deleted the owner's template, the owner's unwarm skipped
+  it and its next warm raised, and — with the pod label above — the calling
+  run's reap force-deleted the owner's pods. The on-demand path now reuses
+  another run's template as it finds it (as it already did with the pool), and
+  `ensure_templates()` raises a `FleetError` naming the owning run, like the
+  warm path.
+
 ### Fixed (concurrent runs in one namespace —
 [#1736](https://github.com/kubernetes-sigs/agent-sandbox/issues/1736))
 - **`teardown()` is scoped to this run.** It listed claims, pools and templates by

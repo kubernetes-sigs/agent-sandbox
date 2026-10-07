@@ -43,6 +43,8 @@ var (
 	ErrNotReady         = errors.New("sandbox is not ready")
 	ErrTimeout          = errors.New("operation timed out")
 	ErrClaimFailed      = errors.New("claim creation failed")
+	ErrWarmPoolNotFound = errors.New("sandbox warm pool not found")
+	ErrTemplateNotFound = errors.New("sandbox template not found")
 	ErrPortForwardDied  = errors.New("port-forward connection lost")
 	ErrNoSandboxService = errors.New("sandbox has no headless Service")
 	ErrAlreadyOpen      = errors.New("sandbox is already open; call Close first")
@@ -52,7 +54,8 @@ var (
 	ErrGatewayDeleted   = errors.New("gateway was deleted during address discovery")
 	ErrResponseTooLarge = errors.New("response exceeded 16 MB limit")
 	// ErrUnsupportedByRuntime is returned by operations the selected
-	// runtime cannot perform (e.g. Delete on the legacy python-runtime).
+	// runtime or connection cannot perform (e.g. Delete on the legacy
+	// python-runtime, or Run with RuntimeSandboxd and APIURL).
 	ErrUnsupportedByRuntime = errors.New("operation not supported by the sandbox runtime")
 )
 
@@ -100,6 +103,22 @@ func WithMaxAttempts(n int) CallOption {
 	}
 }
 
+// ListOption configures Client.ListAllSandboxes.
+type ListOption func(*listOptions)
+
+type listOptions struct {
+	labelSelector string
+}
+
+// WithLabelSelector restricts the listing to claims matching a Kubernetes
+// label selector, for example "app=agent,tier!=dev". Pair it with
+// Options.Labels, which stamps labels on the claims the client creates.
+func WithLabelSelector(selector string) ListOption {
+	return func(o *listOptions) {
+		o.labelSelector = selector
+	}
+}
+
 // Handle provides high-level interaction with a sandbox instance.
 // Sandbox implements this interface; consumers should accept Handle
 // in their APIs to enable testing with mocks. For sub-object access
@@ -131,6 +150,22 @@ type ExecutionResult struct {
 	Stdout   string `json:"stdout"`
 	Stderr   string `json:"stderr"`
 	ExitCode int    `json:"exit_code"`
+}
+
+// Health is the sandboxd runtime's report from GET /v1/health.
+type Health struct {
+	Status string `json:"status"`
+	// UptimeSeconds is how long sandboxd has been running.
+	UptimeSeconds int64 `json:"uptime_seconds"`
+}
+
+// Metadata is the non-sensitive, workload-scoped configuration sandboxd
+// serves from GET /v1/metadata.
+type Metadata struct {
+	// Env holds the environment variables sandboxd exposes: only names
+	// matching its --metadata-env-prefix, minus anything that looks like a
+	// credential. It is never nil.
+	Env map[string]string `json:"env"`
 }
 
 // FileType represents the type of a file entry.

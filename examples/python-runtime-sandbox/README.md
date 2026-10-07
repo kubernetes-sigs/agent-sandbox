@@ -18,18 +18,26 @@ The `main.py` file defines the following Pydantic models to ensure type-safe dat
 ### `ExecuteRequest`
 This class models the request body for the `/execute` endpoint.
 - **`command: str`**: The shell command to be executed in the sandbox.
+- **`timeout_seconds: float | None`** (optional): Per-request time limit, in
+  seconds. Must be greater than `0`. It can only shorten
+  `SANDBOX_EXEC_TIMEOUT_SECONDS`, never extend it; when omitted, the
+  server-wide limit applies.
 
 ### `ExecuteResponse`
 This class models the response body for the `/execute` endpoint.
 - **`stdout: str`**: The standard output from the executed command.
 - **`stderr: str`**: The standard error from the executed command.
-- **`exit_code: int`**: The exit code of the executed command.
+- **`exit_code: int`**: The exit code of the executed command, or `124` if it
+  was killed for exceeding its time limit (the GNU `timeout` convention).
+- **`timed_out: bool`**: `true` when the command was killed for exceeding its
+  time limit. `stdout` and `stderr` then hold whatever it wrote before it was
+  killed, followed by a note on `stderr`.
 
 ### Configuration
 
 - **`SANDBOX_EXEC_TIMEOUT_SECONDS`**: Maximum time, in seconds, a command
   submitted to `/execute` is allowed to run before it (and any processes it
-  spawned) are killed and the request reports a failed execution. Defaults
+  spawned) are killed and the response reports `timed_out: true`. Defaults
   to `300`. If set to a value that isn't a finite number greater than `0`,
   the default is used instead and a warning is logged.
 - **`SANDBOX_BASE_DIR`**: Directory that commands run from and that file
@@ -41,7 +49,11 @@ This class models the response body for the `/execute` endpoint.
 ### File paths
 
 URL-encode the relative path once for `/download`, `/list`, and `/exists`.
-A filename containing literal `%20` uses `%2520` in the request URL.
+Use `urllib.parse.quote(path, safe="/")` to leave directory separators readable.
+Encoding the separators with `safe=""` also works: the HTTP server decodes
+`%2F` to `/` before routing. A literal `%2F` in a file or directory name must
+be sent as `%252F`, so it remains part of the name rather than a separator.
+Likewise, a filename containing literal `%20` uses `%2520` in the request URL.
 
 ## Testing on a local kind cluster using agent-sandbox
 

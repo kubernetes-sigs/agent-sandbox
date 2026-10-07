@@ -181,6 +181,9 @@ class FleetConfig(BaseModel):
   # rollback delete gets the hook again until it succeeds once. Teardown only
   # ever sweeps this run's resources, in every mode.
   run_isolation: str = "none"
+  # Run id shared by a job's processes (None: random per fleet). Setting it changes
+  # teardown and the circuit breaker; see "Concurrent runs on one cluster" in the README.
+  run_id: str | None = None
   run_namespace_labels: dict[str, str] = Field(default_factory=dict)
   run_namespace_setup: Callable[..., Any] | None = None
   labels: dict[str, str] = Field(default_factory=lambda: dict(constants.DEFAULT_LABELS))
@@ -230,6 +233,16 @@ class FleetConfig(BaseModel):
     if v not in constants.RUN_ISOLATION_MODES:
       raise ValueError(f"unknown run_isolation '{v}'; choose from "
                        f"{list(constants.RUN_ISOLATION_MODES)}")
+    return v
+
+  @field_validator("run_id")
+  @classmethod
+  def _valid_run_id(cls, v: str | None) -> str | None:
+    # Goes into label values and, per run_isolation, object and namespace names.
+    if v is not None and not _DNS1123_LABEL.match(v):
+      raise ValueError(
+          f"run_id {v!r} must be a DNS-1123 label (lowercase alphanumerics and "
+          "'-', starting and ending with an alphanumeric, 63 chars max)")
     return v
 
   @field_validator("template_name_prefix")
@@ -362,6 +375,12 @@ class FleetConfig(BaseModel):
             f"resolved {kind} name {name!r} ({len(name)} chars) is not a valid "
             "DNS-1123 subdomain after the run id was added; shorten "
             "template_name_prefix / pool_name_format")
+    # Also the `sandbox=<template>` pod label value, so at most 63 or every pod fails.
+    if len(template) > 63:
+      raise ValueError(
+          f"resolved template name {template!r} is {len(template)} chars; it is "
+          "used as a pod label value, so it must be at most 63. Shorten "
+          "template_name_prefix or run_id")
 
 
 _DNS1123_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")

@@ -19,18 +19,19 @@ package fake
 import (
 	gentype "k8s.io/client-go/gentype"
 	v1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
-	apiv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/typed/api/v1beta1"
+	apiv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/applyconfiguration/api/v1beta1"
+	typedapiv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/typed/api/v1beta1"
 )
 
 // fakeSandboxes implements SandboxInterface
 type fakeSandboxes struct {
-	*gentype.FakeClientWithList[*v1beta1.Sandbox, *v1beta1.SandboxList]
+	*gentype.FakeClientWithListAndApply[*v1beta1.Sandbox, *v1beta1.SandboxList, *apiv1beta1.SandboxApplyConfiguration]
 	Fake *FakeAgentsV1beta1
 }
 
-func newFakeSandboxes(fake *FakeAgentsV1beta1, namespace string) apiv1beta1.SandboxInterface {
+func newFakeSandboxes(fake *FakeAgentsV1beta1, namespace string) typedapiv1beta1.SandboxInterface {
 	return &fakeSandboxes{
-		gentype.NewFakeClientWithList[*v1beta1.Sandbox, *v1beta1.SandboxList](
+		gentype.NewFakeClientWithListAndApply[*v1beta1.Sandbox, *v1beta1.SandboxList, *apiv1beta1.SandboxApplyConfiguration](
 			fake.Fake,
 			namespace,
 			v1beta1.SchemeGroupVersion.WithResource("sandboxes"),

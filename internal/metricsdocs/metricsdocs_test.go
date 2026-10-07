@@ -86,6 +86,13 @@ func TestExtractControllerMetrics(t *testing.T) {
 			Labels: []string{"namespace", "reason"},
 		},
 		{
+			// Bare descriptor; Gauge type comes from the MustNewConstMetric
+			// call in warmpool_collector.go.
+			Name:   "agent_sandbox_warmpool_size",
+			Type:   typeGauge,
+			Labels: []string{"namespace", "warmpool_name", "sandbox_template", "sandbox_status"},
+		},
+		{
 			// Declared as a bare descriptor, so its Gauge type comes from the
 			// MustNewConstMetric call in sandbox_collector.go.
 			Name:   "agent_sandboxes",

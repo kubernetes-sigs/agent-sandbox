@@ -101,7 +101,8 @@ class Resources:
   # --- templates --------------------------------------------------------- #
   def ensure_template(self, image: str, template_name: str,
                       template: TemplateSpec, *, dry_run: bool = False,
-                      owner_run_id: str | None = None) -> bool:
+                      owner_run_id: str | None = None,
+                      share_foreign: bool = False) -> bool:
     """Create the SandboxTemplate for ``image`` if absent. Idempotent.
 
     Returns True if it created the template, False if it already existed.
@@ -112,6 +113,9 @@ class Resources:
     id raises `OwnedByAnotherRunError` — including one created concurrently and
     found at the 409 — instead of returning False like an ordinary "already
     existed": the caller must not build its pool on it, and nothing is written.
+    ``share_foreign=True`` returns False for such a template instead of raising,
+    still without writing to it — for callers that reuse another run's template
+    and pool as they find them (the on-demand acquire path).
     """
     try:
       existing = self.custom_api.get_namespaced_custom_object(
@@ -131,6 +135,10 @@ class Resources:
           constants.RUN_ID_LABEL)
       if (owner_run_id and isinstance(cur_owner, str) and cur_owner
           and cur_owner != owner_run_id):
+        if share_foreign:
+          logger.info("SandboxTemplate '%s' belongs to run %s; reusing it without "
+                      "relabelling.", template_name, cur_owner)
+          return False
         raise OwnedByAnotherRunError("SandboxTemplate", template_name, cur_owner)
       self._reconcile_template_labels(template_name, existing)
       return False
@@ -150,7 +158,7 @@ class Resources:
       # Created concurrently, between our get and create: possibly by another
       # run using the same name, so it gets the same owner check as the get.
       logger.info("SandboxTemplate '%s' already exists (409).", template_name)
-      if owner_run_id and not dry_run:
+      if owner_run_id and not dry_run and not share_foreign:
         winner = self.get_template(template_name) or {}
         cur_owner = (((winner.get("metadata") or {}).get("labels")) or {}).get(
             constants.RUN_ID_LABEL)
@@ -247,17 +255,31 @@ class Resources:
         },
         "spec": {
             "podTemplate": {
-                # Propagate the fleet labels (incl. the per-run RUN_ID_LABEL) onto
-                # the pod template so every sandbox POD carries them — the Sandbox
-                # controller does not copy the claim/pool run-id label onto Sandbox
-                # CRs, so pods are how a run attributes its live footprint (circuit
-                # breaker count + reaper pod sweep). `sandbox=<template>` is kept for
-                # the colocation affinity above.
-                "metadata": {"labels": {**self.labels, "sandbox": template_name}},
+                # See _pod_template_labels: this is how pods carry the run id.
+                "metadata": {"labels": self._pod_template_labels(template_name)},
                 "spec": pod_spec,
             }
         },
     }
+
+  def _pod_template_labels(self, template_name: str) -> dict:
+    """Labels for a template's pod template, so every sandbox POD carries them —
+    the Sandbox controller does not copy the claim/pool run-id label onto Sandbox
+    CRs, so pods are how a run attributes its live footprint (circuit breaker
+    count + reaper pod sweep). The controller drops `agents.x-k8s.io/*` keys
+    (RUN_ID_LABEL included) on the way to the pod, so the run id is repeated under
+    POD_RUN_ID_LABEL, which survives. `sandbox=<template>` is kept for the
+    colocation affinity.
+
+    A pod takes its run id from the template it was created from, not from the
+    run that claims it: a run claiming from another run's pool gets pods labelled
+    with the pool owner's id, which its own breaker does not count and its own
+    reap does not force-delete (the claim-delete cascade still removes them)."""
+    labels = {**self.labels, "sandbox": template_name}
+    run_id = self.labels.get(constants.RUN_ID_LABEL)
+    if run_id:
+      labels[constants.POD_RUN_ID_LABEL] = run_id
+    return labels
 
   def _reconcile_template_labels(self, template_name: str, existing: dict) -> None:
     """Patch a pre-existing template's metadata + pod-template labels up to this
@@ -265,12 +287,13 @@ class Resources:
     this run's pods to a stale run-id (breaker/reaper correctness, #1215). Only
     patches on mismatch; failures warn (the safeguards degrade, not the run).
 
-    Two concurrent runs sharing an image (same deterministic template name) take
-    turns re-labeling this template — pod attribution between their breakers/reapers
-    is last-writer-wins. Both directions are safe: a breaker under-counts and fails
-    open, and a per-run reap misses the other run's pods rather than deleting them."""
+    Callers that may meet another live run's template must pass ``owner_run_id``
+    to `ensure_template` (every fleet path does), so this never relabels one:
+    pods created after such a relabel would carry the relabelling run's id, so
+    its breaker would count them and its `reap(run_id=…)` force-delete them,
+    including ones the owning run has claimed (#1808)."""
     desired_meta = dict(self.labels)
-    desired_pod = {**self.labels, "sandbox": template_name}
+    desired_pod = self._pod_template_labels(template_name)
     cur_meta = ((existing.get("metadata") or {}).get("labels")) or {}
     cur_pod = ((((existing.get("spec") or {}).get("podTemplate") or {})
                 .get("metadata") or {}).get("labels")) or {}
@@ -316,16 +339,16 @@ class Resources:
                  uid=uid)
 
   # --- warm pools -------------------------------------------------------- #
-  def _warmpool_manifest(self, name: str, template_name: str,
-                         replicas: int) -> dict:
+  def _warmpool_manifest(self, name: str, template_name: str, replicas: int,
+                         annotations: dict | None = None) -> dict:
+    metadata: dict = {"name": name, "namespace": self.namespace,
+                      "labels": dict(self.labels)}
+    if annotations:
+      metadata["annotations"] = dict(annotations)
     return {
         "apiVersion": f"{constants.GROUP}/{constants.VERSION}",
         "kind": "SandboxWarmPool",
-        "metadata": {
-            "name": name,
-            "namespace": self.namespace,
-            "labels": dict(self.labels),
-        },
+        "metadata": metadata,
         "spec": {
             "replicas": replicas,
             "sandboxTemplateRef": {"name": template_name},
@@ -335,7 +358,9 @@ class Resources:
   def create_warmpool(self, name: str, template_name: str,
                       replicas: int, *, dry_run: bool = False,
                       reconcile: bool = False,
-                      owner_run_id: str | None = None) -> bool:
+                      owner_run_id: str | None = None,
+                      share_foreign: bool = False,
+                      annotations: dict | None = None) -> bool:
     """Create a SandboxWarmPool (v1beta1: ``replicas`` + ``sandboxTemplateRef``).
 
     Idempotent on 409 (already exists). With ``reconcile=True`` a 409 instead
@@ -359,7 +384,7 @@ class Resources:
       self.custom_api.create_namespaced_custom_object(
           group=constants.GROUP, version=constants.VERSION,
           namespace=self.namespace, plural=constants.WARMPOOLS_PLURAL,
-          body=self._warmpool_manifest(name, template_name, replicas),
+          body=self._warmpool_manifest(name, template_name, replicas, annotations),
           dry_run="All" if dry_run else None)
       logger.info("Created SandboxWarmPool '%s' (replicas=%d)", name, replicas)
       return True
@@ -411,6 +436,62 @@ class Resources:
         f"SandboxWarmPool '{name}' kept changing under {_RECONCILE_ATTEMPTS} "
         "reconcile attempts; not resizing it")
 
+  def warm_shared_pool(self, name: str, template_name: str, replicas: int, *,
+                       run_id: str) -> str:
+    """Warm-path create under a shared run id. Returns "created" or "taken" (an
+    on-demand pool resized and unmarked; the caller owns it), "borrowed" (another
+    process's; don't resize or delete), or "foreign" (another run's). The takeover
+    patch carries the inspected resourceVersion, so only one racing process wins."""
+    try:
+      self.custom_api.create_namespaced_custom_object(
+          group=constants.GROUP, version=constants.VERSION,
+          namespace=self.namespace, plural=constants.WARMPOOLS_PLURAL,
+          body=self._warmpool_manifest(name, template_name, replicas))
+      logger.info("Created SandboxWarmPool '%s' (replicas=%d)", name, replicas)
+      return "created"
+    except client.ApiException as e:
+      if e.status != 409:
+        raise
+    for _ in range(_RECONCILE_ATTEMPTS):
+      existing = self.get_warmpool(name)
+      if existing is None:
+        try:
+          self.custom_api.create_namespaced_custom_object(
+              group=constants.GROUP, version=constants.VERSION,
+              namespace=self.namespace, plural=constants.WARMPOOLS_PLURAL,
+              body=self._warmpool_manifest(name, template_name, replicas))
+        except client.ApiException as e:
+          if e.status != 409:
+            raise
+          continue
+        logger.info("Created SandboxWarmPool '%s' (replicas=%d)", name, replicas)
+        return "created"
+      meta = existing.get("metadata") or {}
+      owner = (meta.get("labels") or {}).get(constants.RUN_ID_LABEL)
+      if isinstance(owner, str) and owner and owner != run_id:
+        return "foreign"
+      if (meta.get("annotations") or {}).get(constants.ON_DEMAND_ANNOTATION) != "true":
+        logger.info("SandboxWarmPool '%s' was warmed by another process of run %s; "
+                    "borrowing it as it is.", name, run_id)
+        return "borrowed"
+      body: dict = {"metadata": {"annotations": {constants.ON_DEMAND_ANNOTATION: None}},
+                    "spec": {"replicas": replicas}}
+      rv = meta.get("resourceVersion")
+      if isinstance(rv, str) and rv:
+        body["metadata"]["resourceVersion"] = rv
+      try:
+        self.custom_api.patch_namespaced_custom_object(
+            group=constants.GROUP, version=constants.VERSION,
+            namespace=self.namespace, plural=constants.WARMPOOLS_PLURAL,
+            name=name, body=body)
+      except client.ApiException as e:
+        if e.status != 409:
+          raise
+        continue                          # changed since read: re-inspect
+      logger.info("Took over on-demand SandboxWarmPool '%s' (replicas=%d).",
+                  name, replicas)
+      return "taken"
+    raise RuntimeError(f"SandboxWarmPool '{name}' kept changing while being warmed")
   def validate_manifests(self, sample_image: str, template: TemplateSpec,
                          *, name: str = "asrl-validate") -> None:
     """Server-side dry-run the hand-built Template + WarmPool manifests against

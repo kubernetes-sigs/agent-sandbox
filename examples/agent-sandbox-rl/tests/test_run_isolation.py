@@ -580,7 +580,7 @@ def test_ensure_template_refuses_another_runs_template():
     r.ensure_template(IMG, "tmpl", TemplateSpec(), owner_run_id="mine")
   assert ei.value.owner == "other"
   r.custom_api.patch_namespaced_custom_object.assert_not_called()   # no relabel
-  # Without owner_run_id (the bulk / on-demand callers) it is still "existed".
+  # Without owner_run_id it is still "existed".
   r.custom_api.get_namespaced_custom_object.return_value = {
       "metadata": {"labels": {constants.RUN_ID_LABEL: "mine"}},
       "spec": {"podTemplate": {"metadata": {"labels": {}}}}}
@@ -598,6 +598,35 @@ def test_ensure_template_owner_checks_a_template_created_in_the_race():
       status=409)                                      # ... another run won the create
   with pytest.raises(OwnedByAnotherRunError):
     r.ensure_template(IMG, "tmpl", TemplateSpec(), owner_run_id="mine")
+
+
+def test_ensure_template_share_foreign_reuses_without_relabel():
+  # #1808: the on-demand path reuses another run's template; relabelling it
+  # handed it to this run's teardown/reap while the owner's pool still used it.
+  from agent_sandbox_rl import TemplateSpec
+  r = Resources(MagicMock(), MagicMock(), "ns",
+                labels={constants.RUN_ID_LABEL: "mine"})
+  r.custom_api.get_namespaced_custom_object.return_value = {
+      "metadata": {"labels": {constants.RUN_ID_LABEL: "other"}},
+      "spec": {"podTemplate": {"metadata": {"labels": {
+          constants.RUN_ID_LABEL: "other"}}}}}
+  assert r.ensure_template(IMG, "tmpl", TemplateSpec(), owner_run_id="mine",
+                           share_foreign=True) is False
+  r.custom_api.patch_namespaced_custom_object.assert_not_called()   # no relabel
+  r.custom_api.create_namespaced_custom_object.assert_not_called()
+
+
+def test_ensure_template_share_foreign_tolerates_the_race():
+  from agent_sandbox_rl import TemplateSpec
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = [
+      client.ApiException(status=404),
+      {"metadata": {"labels": {constants.RUN_ID_LABEL: "other"}}}]
+  r.custom_api.create_namespaced_custom_object.side_effect = client.ApiException(
+      status=409)
+  assert r.ensure_template(IMG, "tmpl", TemplateSpec(), owner_run_id="mine",
+                           share_foreign=True) is False
+  r.custom_api.patch_namespaced_custom_object.assert_not_called()
 
 
 def test_unwarm_deletes_exactly_the_inspected_pool(make_cluster):
@@ -745,6 +774,31 @@ def test_on_demand_rollback_leaves_another_runs_pool_and_template(make_cluster):
   c.resources.delete_template.assert_not_called()
 
 
+def test_on_demand_acquire_shares_another_runs_template_without_relabel(make_cluster):
+  c = make_cluster("solo")
+  f = _fleet(c)
+  f.plan()                                               # empty plan: on-demand
+  f.acquire(f.load_tasks([IMG])[0])
+  _, kw = c.resources.ensure_template.call_args
+  assert kw["owner_run_id"] == f.run_id and kw["share_foreign"] is True
+
+
+def test_ensure_templates_refuses_another_runs_template(make_cluster):
+  # Unguarded, the bulk path relabelled another run's template to this run, and
+  # the warm path's owner check then saw this run's id and passed.
+  from agent_sandbox_rl.exceptions import OwnedByAnotherRunError
+  c = make_cluster("solo")
+  f = _fleet(c)
+  f.load_tasks([IMG])
+  f.plan()
+  c.resources.ensure_template.side_effect = OwnedByAnotherRunError(
+      "SandboxTemplate", f.config.template_name(IMG), "other-run-0001")
+  with pytest.raises(FleetError, match="other-run-0001"):
+    f.ensure_templates()
+  _, kw = c.resources.ensure_template.call_args
+  assert kw["owner_run_id"] == f.run_id
+
+
 def test_template_helpers():
   r = _resources()
   r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
@@ -753,3 +807,232 @@ def test_template_helpers():
   _, kw = r.custom_api.delete_namespaced_custom_object.call_args
   assert kw["body"].preconditions.uid == "u-1"
 
+
+
+# --- caller-supplied run_id: one job, several processes (#1808) ------------ #
+def test_supplied_run_id_drives_labels_names_and_namespace(make_cluster):
+  f = _fleet(make_cluster("solo"), run_id="job-7", run_isolation="names",
+             template_name_prefix="oh-")
+  assert f.run_id == "job-7"
+  assert f.config.labels[constants.RUN_ID_LABEL] == "job-7"
+  assert f.run_selector() == f"{constants.RUN_ID_LABEL}=job-7"
+  assert f.config.template_name(IMG).startswith("oh-job-7-")
+  c = make_cluster("solo", namespace="rl")
+  g = SandboxFleet(FleetConfig(run_id="job-7", run_isolation="namespace",
+                               clusters=[ClusterConfig(namespace="rl")]),
+                   registry=ClusterRegistry([c]))
+  assert c.namespace == "rl-job-7" and g.run_id == "job-7"
+
+
+def test_default_run_id_is_still_random_per_fleet(make_cluster):
+  f1, f2 = _fleet(make_cluster("a")), _fleet(make_cluster("b"))
+  assert f1.run_id != f2.run_id and len(f1.run_id) == 12
+
+
+@pytest.mark.parametrize("bad", ["Job-7", "job_7", "-job", "job-", "j" * 64, ""])
+def test_supplied_run_id_must_be_a_dns_label(bad):
+  with pytest.raises(ValueError, match="run_id"):
+    FleetConfig(run_id=bad)
+
+
+def test_shared_run_id_teardown_unwarms_only_what_this_fleet_warmed(make_cluster):
+  # A worker's exit must not sweep the orchestrator's pools or other workers'
+  # claims, which all carry the same id.
+  c = make_cluster("solo")
+  c.resources.warm_shared_pool.return_value = "created"
+  f = _fleet(c, run_id="job-7")
+  f.load_tasks([IMG, "registry.example/repo/other:tag"])
+  f.plan()
+  f.warm_image(IMG, wait=False)
+  pool, tmpl = f.config.pool_name(IMG), f.config.template_name(IMG)
+  f.teardown()
+  c.resources.list_claims.assert_not_called()
+  c.resources.list_warmpools.assert_not_called()
+  c.resources.list_templates.assert_not_called()
+  assert [a.args[0] for a in c.resources.delete_warmpool.call_args_list] == [pool]
+  assert [a.args[0] for a in c.resources.delete_template.call_args_list] == [tmpl]
+
+
+def test_shared_run_id_teardown_keeps_the_namespace_unless_asked(make_cluster):
+  c = make_cluster("solo", namespace="rl")
+  c.resources.ensure_namespace.return_value = True        # this process created it
+  cfg = FleetConfig(run_id="job-7", run_isolation="namespace",
+                    clusters=[ClusterConfig(namespace="rl")])
+  f = SandboxFleet(cfg, registry=ClusterRegistry([c]))
+  f.load_tasks([IMG]); f.plan()
+  f.teardown()
+  c.resources.delete_namespace.assert_not_called()
+  g = SandboxFleet(cfg, registry=ClusterRegistry([c]))
+  g.load_tasks([IMG]); g.plan()
+  g.teardown(delete_namespace=True)
+  c.resources.delete_namespace.assert_called_once_with("rl-job-7")
+
+
+def test_shared_run_id_turns_the_pod_count_breaker_off(make_cluster, monkeypatch):
+  # The pod count covers every process sharing the id, which neither this
+  # process's intent nor its claim cap describes.
+  f = _fleet(make_cluster("solo"), run_id="job-7", breaker_poll_s=0.02,
+             max_live_sandboxes=10)
+  monkeypatch.setattr(f, "live_owned_count", lambda: 500)
+  with f.overcommit_guard(expected=1):
+    time.sleep(0.2)                                        # no trip
+
+
+def test_shared_run_id_keeps_the_per_process_claim_cap(make_cluster):
+  from agent_sandbox_rl.exceptions import FleetOvercommitError
+  c = make_cluster("solo")
+  c.resources.warm_shared_pool.return_value = "created"
+  f = _fleet(c, run_id="job-7", max_live_sandboxes=1)
+  task = f.load_tasks([IMG])[0]
+  f.plan()
+  f.acquire(task)
+  with pytest.raises(FleetOvercommitError):
+    f.acquire(task)
+
+
+def test_warm_shared_pool_created():
+  r = _resources()
+  assert r.warm_shared_pool("pool-x", "tmpl", 3, run_id="job-7") == "created"
+
+
+def _pool(run_id, *, on_demand=False, rv="7"):
+  meta = {"labels": {constants.RUN_ID_LABEL: run_id}, "resourceVersion": rv}
+  if on_demand:
+    meta["annotations"] = {constants.ON_DEMAND_ANNOTATION: "true"}
+  return {"metadata": meta}
+
+
+def test_warm_shared_pool_borrows_a_pool_another_process_warmed():
+  r = _resources()
+  r.custom_api.create_namespaced_custom_object.side_effect = client.ApiException(status=409)
+  r.custom_api.get_namespaced_custom_object.return_value = _pool("job-7")
+  assert r.warm_shared_pool("pool-x", "tmpl", 3, run_id="job-7") == "borrowed"
+  r.custom_api.patch_namespaced_custom_object.assert_not_called()  # not resized
+
+
+def test_warm_shared_pool_takes_over_an_on_demand_pool():
+  r = _resources()
+  r.custom_api.create_namespaced_custom_object.side_effect = client.ApiException(status=409)
+  r.custom_api.get_namespaced_custom_object.return_value = _pool("job-7", on_demand=True)
+  assert r.warm_shared_pool("pool-x", "tmpl", 3, run_id="job-7") == "taken"
+  body = r.custom_api.patch_namespaced_custom_object.call_args.kwargs["body"]
+  assert body["spec"]["replicas"] == 3
+  assert body["metadata"]["annotations"] == {constants.ON_DEMAND_ANNOTATION: None}
+  assert body["metadata"]["resourceVersion"] == "7"        # one taker wins
+
+
+def test_warm_shared_pool_loses_the_takeover_race_and_borrows():
+  r = _resources()
+  r.custom_api.create_namespaced_custom_object.side_effect = client.ApiException(status=409)
+  r.custom_api.get_namespaced_custom_object.side_effect = [
+      _pool("job-7", on_demand=True), _pool("job-7", rv="8")]
+  r.custom_api.patch_namespaced_custom_object.side_effect = client.ApiException(status=409)
+  assert r.warm_shared_pool("pool-x", "tmpl", 3, run_id="job-7") == "borrowed"
+
+
+def test_warm_shared_pool_reports_another_runs_pool():
+  r = _resources()
+  r.custom_api.create_namespaced_custom_object.side_effect = client.ApiException(status=409)
+  r.custom_api.get_namespaced_custom_object.return_value = _pool("other", on_demand=True)
+  assert r.warm_shared_pool("pool-x", "tmpl", 3, run_id="job-7") == "foreign"
+  r.custom_api.patch_namespaced_custom_object.assert_not_called()
+
+
+def test_shared_run_id_borrowed_pool_is_never_resized_or_deleted(make_cluster):
+  c = make_cluster("solo")
+  c.resources.warm_shared_pool.return_value = "borrowed"
+  f = _fleet(c, run_id="job-7")
+  f.load_tasks([IMG]); f.plan()
+  f.warm_image(IMG, wait=True)
+  c.resources.wait_for_pool_ready.assert_called_with(
+      f.config.pool_name(IMG), 1, timeout=f.config.ready_timeout)
+  assert IMG not in f._warmed and c.active_replicas == 0
+  f.set_pool_replicas(IMG, 5)
+  c.resources.create_warmpool.assert_not_called()
+  f.unwarm_image(IMG)
+  f.teardown()
+  c.resources.delete_warmpool.assert_not_called()
+  c.resources.delete_template.assert_not_called()
+
+
+def test_shared_run_id_owner_can_grow_its_own_pool(make_cluster):
+  # A pool this fleet created has no on-demand mark, so asking warm_shared_pool
+  # again would call it borrowed and skip the resize.
+  c = make_cluster("solo")
+  c.resources.warm_shared_pool.return_value = "created"
+  f = _fleet(c, run_id="job-7")
+  f.load_tasks([IMG]); f.plan()
+  f.warm_image(IMG, replicas_override=1, wait=False)
+  f.warm_image(IMG, replicas_override=3, wait=False)
+  c.resources.warm_shared_pool.assert_called_once()
+  args, kw = c.resources.create_warmpool.call_args
+  assert args[2] == 3 and kw["reconcile"] is True and kw["owner_run_id"] == "job-7"
+  assert f._warmed[IMG] == 3 and c.active_replicas == 3
+
+
+def test_shared_run_id_warm_onto_another_runs_pool_still_raises(make_cluster):
+  c = make_cluster("solo")
+  c.resources.warm_shared_pool.return_value = "foreign"
+  f = _fleet(c, run_id="job-7")
+  f.load_tasks([IMG]); f.plan()
+  with pytest.raises(FleetError):
+    f.warm_image(IMG, wait=False)
+
+
+def test_shared_run_id_on_demand_pool_is_marked_and_never_rolled_back(make_cluster):
+  c = make_cluster("solo")
+  f = _fleet(c, run_id="job-7")
+  f.plan()
+  c.sandbox_client.create_sandbox.side_effect = RuntimeError("claim failed")
+  with pytest.raises(RuntimeError, match="claim failed"):
+    f.acquire(f.load_tasks([IMG])[0])
+  _, kw = c.resources.create_warmpool.call_args
+  assert kw["annotations"] == {constants.ON_DEMAND_ANNOTATION: "true"}
+  c.resources.delete_warmpool.assert_not_called()          # may be a peer's by now
+  c.resources.delete_template.assert_not_called()
+  assert c.active_replicas == 0 and not f._ondemand        # bookkeeping undone
+
+
+def test_unshared_on_demand_pool_is_not_marked(make_cluster):
+  c = make_cluster("solo")
+  f = _fleet(c)
+  f.plan()
+  f.acquire(f.load_tasks([IMG])[0])
+  _, kw = c.resources.create_warmpool.call_args
+  assert kw["annotations"] is None
+
+
+def test_shared_run_id_namespace_setup_failure_keeps_the_namespace(make_cluster):
+  c = make_cluster("solo", namespace="rl")
+  c.resources.ensure_namespace.return_value = True        # this process created it
+  def boom(cl, ns):
+    raise RuntimeError("quota")
+  f = SandboxFleet(FleetConfig(run_id="job-7", run_isolation="namespace",
+                               clusters=[ClusterConfig(namespace="rl")],
+                               run_namespace_setup=boom),
+                   registry=ClusterRegistry([c]))
+  f.load_tasks([IMG])
+  with pytest.raises(FleetError, match="run_namespace_setup"):
+    f.plan()
+  c.resources.delete_namespace.assert_not_called()         # peers may be using it
+
+
+def test_shared_run_id_peer_runs_the_namespace_setup_hook(make_cluster):
+  # The creator's hook may have failed; the job's other processes finish it.
+  c = make_cluster("solo", namespace="rl")
+  c.resources.ensure_namespace.return_value = False       # someone else created it
+  calls = []
+  f = SandboxFleet(FleetConfig(run_id="job-7", run_isolation="namespace",
+                               clusters=[ClusterConfig(namespace="rl")],
+                               run_namespace_setup=lambda cl, ns: calls.append(ns)),
+                   registry=ClusterRegistry([c]))
+  f.load_tasks([IMG]); f.plan(); f.plan()
+  assert calls == ["rl-job-7"]                             # once per process
+
+
+def test_template_name_over_63_chars_is_rejected():
+  # It is the pod label value `sandbox=<template>`; a longer one fails every pod.
+  with pytest.raises(ValueError, match="at most 63"):
+    SandboxFleet(FleetConfig(run_id="j" * 50, run_isolation="names",
+                             template_name_prefix="oh-"),
+                 registry=ClusterRegistry([]))

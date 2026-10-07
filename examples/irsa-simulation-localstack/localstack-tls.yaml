@@ -1,0 +1,26 @@
+# TLS for the sts-trust-verifier -> LocalStack hop: gives LocalStack a
+# certificate matching its real Service DNS name, issued by the same
+# selfsigned ClusterIssuer as sts-trust-verifier-tls.yaml, so the verifier
+# can genuinely verify it (see LOCALSTACK_CA_FILE in
+# trust-verifier-configmap.yaml) instead of connecting with verify=False.
+#
+# LocalStack reads CUSTOM_SSL_CERT_PATH as a single PEM file containing both
+# the private key and certificate concatenated together (see
+# localstack/utils/crypto.py's generate_ssl_cert, which parses both blocks
+# out of one file) -- cert-manager's Secret keeps them as separate
+# tls.key/tls.crt entries, so localstack.yaml's initContainer concatenates
+# them into that combined file on a shared emptyDir before the main
+# container starts.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: localstack-tls
+  namespace: irsa-sim-ns
+spec:
+  secretName: localstack-tls
+  dnsNames:
+    - localstack.irsa-sim-ns.svc.cluster.local
+    - localstack.irsa-sim-ns.svc
+  issuerRef:
+    name: selfsigned
+    kind: ClusterIssuer

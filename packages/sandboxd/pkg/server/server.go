@@ -38,9 +38,10 @@ const (
 	// processShutdownGrace is how long managed processes get to exit after
 	// SIGTERM before being SIGKILLed during daemon shutdown.
 	processShutdownGrace = 2 * time.Second
-	// pipeDrainGrace bounds how long Start waits for non-PTY stdout/stderr
-	// pipe readers to reach EOF after cmd.Wait has reaped the child process
-	// (a grandchild may still hold the write end).
+	// pipeDrainGrace bounds how long Start waits for the stdout/stderr pipe
+	// readers, or the PTY reader, to reach EOF after cmd.Wait has reaped the
+	// child process (a grandchild may still hold the write end or the PTY
+	// slave).
 	pipeDrainGrace = 5 * time.Second
 	// waitDelay bounds how long cmd.Wait blocks on I/O drain after the
 	// child exits. Without it, a grandchild holding the stdout/stderr

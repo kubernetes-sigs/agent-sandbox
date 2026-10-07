@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import asyncio
 import os
-import shlex
 import signal
 import subprocess
+import tempfile
+import time
+from collections.abc import AsyncIterator
 from http import HTTPStatus
 from pathlib import Path
 from urllib.parse import quote
@@ -91,11 +92,13 @@ def test_execute_command_success(mock_popen):
         response = client.post("/execute", json={"command": "echo hello"})
 
     assert response.status_code == 200
-    assert response.json() == {"stdout": "hello\n", "stderr": "", "exit_code": 0}
+    assert response.json() == {
+        "stdout": "hello\n", "stderr": "", "exit_code": 0, "timed_out": False,
+    }
 
     mock_popen.assert_called_once()
     called_args, called_kwargs = mock_popen.call_args
-    assert called_args[0] == shlex.split("echo hello")
+    assert called_args[0] == ["/bin/sh", "-c", "echo hello"]
     assert called_kwargs["cwd"] == "/app"
     assert called_kwargs["start_new_session"] is True
     mock_popen.return_value.__enter__.return_value.communicate.assert_called_once_with(timeout=300.0)
@@ -137,33 +140,141 @@ def test_execute_command_runs_from_configured_base_dir(mock_popen, tmp_path):
 @patch('main.os.killpg')
 @patch('main.os.getpgid', return_value=4321)
 @patch('main.subprocess.Popen')
-def test_execute_command_timeout_returns_failed_execution(mock_popen, mock_getpgid, mock_killpg):
+def test_execute_command_timeout_reports_timed_out(mock_popen, mock_getpgid, mock_killpg):
     mock_process = _mock_process(mock_popen, pid=4321)
     mock_process.communicate.side_effect = [
         subprocess.TimeoutExpired(cmd="sleep infinity", timeout=300),
-        ("", ""),
+        ("partial out", "partial err"),
     ]
 
     response = client.post("/execute", json={"command": "sleep infinity"})
 
     assert response.status_code == 200
     body = response.json()
-    assert body["exit_code"] == 1
-    assert "Failed to execute command" in body["stderr"]
-    assert "timed out" in body["stderr"]
+    assert body["timed_out"] is True
+    assert body["exit_code"] == 124
+    assert body["stdout"] == "partial out"
+    assert body["stderr"].startswith("partial err")
+    assert "timed out after 300" in body["stderr"]
     mock_getpgid.assert_called_once_with(4321)
     mock_killpg.assert_called_once_with(4321, signal.SIGKILL)
 
 
+@patch('main.subprocess.Popen')
+def test_execute_command_request_timeout_shortens_server_limit(mock_popen):
+    mock_process = _mock_process(mock_popen)
+
+    with patch.dict(os.environ, {"SANDBOX_EXEC_TIMEOUT_SECONDS": "300"}):
+        response = client.post(
+            "/execute", json={"command": "echo hello", "timeout_seconds": 2.5}
+        )
+
+    assert response.status_code == 200
+    assert response.json()["timed_out"] is False
+    mock_process.communicate.assert_called_once_with(timeout=2.5)
+
+
+@patch('main.subprocess.Popen')
+def test_execute_command_request_timeout_cannot_extend_server_limit(mock_popen):
+    mock_process = _mock_process(mock_popen)
+
+    with patch.dict(os.environ, {"SANDBOX_EXEC_TIMEOUT_SECONDS": "5"}):
+        response = client.post(
+            "/execute", json={"command": "echo hello", "timeout_seconds": 3600}
+        )
+
+    assert response.status_code == 200
+    mock_process.communicate.assert_called_once_with(timeout=5.0)
+
+
+@pytest.mark.parametrize("timeout_seconds", [0, -1, "soon"])
+def test_execute_command_rejects_invalid_request_timeout(timeout_seconds):
+    response = client.post(
+        "/execute", json={"command": "echo hello", "timeout_seconds": timeout_seconds}
+    )
+
+    assert response.status_code == 422
+
+
+def test_execute_command_request_timeout_kills_process_group(tmp_path):
+    # A real command that outlives its deadline: the backgrounded sleep shares
+    # the shell's process group, so it must be gone once the request returns.
+    pid_file = tmp_path / "child.pid"
+    with patch.dict(os.environ, {"SANDBOX_BASE_DIR": str(tmp_path)}):
+        start = time.monotonic()
+        response = client.post(
+            "/execute",
+            json={
+                "command": "echo started; sleep 30 & echo $! > child.pid; wait",
+                "timeout_seconds": 1,
+            },
+        )
+        elapsed = time.monotonic() - start
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["timed_out"] is True
+    assert body["exit_code"] == 124
+    assert body["stdout"] == "started\n"
+    assert elapsed < 10
+    # The orphaned child may stay a zombie (killed, not yet reaped) when no
+    # init process reaps orphans, e.g. in a container; that counts as exited.
+    child_pid = int(pid_file.read_text())
+    reap_deadline = time.monotonic() + 5
+    while time.monotonic() < reap_deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        child_state = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(child_pid)],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if child_state.startswith("Z"):
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail(f"child process {child_pid} survived the timeout")
+
+
+def test_execute_command_failure_is_not_timed_out(tmp_path):
+    with patch.dict(os.environ, {"SANDBOX_BASE_DIR": str(tmp_path)}):
+        response = client.post("/execute", json={"command": "exit 3", "timeout_seconds": 5})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["exit_code"] == 3
+    assert body["timed_out"] is False
+
+
 def test_execute_command_invalid_syntax_returns_error():
-    # An unterminated quote makes shlex.split raise, which the handler
-    # catches and reports as a failed execution rather than a 500.
+    # An unterminated quote is a shell syntax error, reported by sh on
+    # stderr with a non-zero exit code, not a 500.
     response = client.post("/execute", json={"command": "echo 'unterminated"})
 
     assert response.status_code == 200
     body = response.json()
-    assert body["exit_code"] == 1
-    assert "Failed to execute command" in body["stderr"]
+    assert body["exit_code"] != 0
+    assert "unterminated" not in body["stdout"]
+
+
+def test_execute_command_runs_shell_operators():
+    # Without a shell, "&&" and ">" are passed as literal argv to the first
+    # command instead of being interpreted: mkdir -p would then create
+    # directories literally named "&&", "echo", "hi", ">" and "a/f.txt".
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        with patch.dict(os.environ, {"SANDBOX_BASE_DIR": tmp_dir}):
+            response = client.post(
+                "/execute",
+                json={"command": "mkdir -p a && echo hi > a/f.txt"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["exit_code"] == 0
+        target = os.path.join(tmp_dir, "a", "f.txt")
+        assert os.path.isfile(target)
+        assert open(target).read() == "hi\n"
 
 
 def test_upload_file_writes_to_safe_path(tmp_path):
@@ -203,6 +314,19 @@ def test_download_file_returns_existing_file(tmp_path):
 
     assert response.status_code == 200
     assert response.content == b"contents"
+
+
+def test_download_uses_basename(tmp_path, monkeypatch):
+    monkeypatch.setenv("SANDBOX_BASE_DIR", str(tmp_path))
+    target = tmp_path / "nested" / "report.txt"
+    target.parent.mkdir()
+    target.write_text("contents")
+
+    response = client.get("/download/nested/report.txt")
+
+    assert response.status_code == 200
+    assert response.content == b"contents"
+    assert response.headers["content-disposition"] == 'attachment; filename="report.txt"'
 
 
 def test_download_file_missing_returns_404(tmp_path):
@@ -278,71 +402,106 @@ def test_exists_rejects_path_traversal():
     assert response.status_code == 403
 
 
-async def _get_runtime_path(path: str) -> httpx.Response:
+@pytest.fixture(scope="module")
+def anyio_backend() -> str:
+    return "asyncio"
+
+
+@pytest.fixture(scope="module")
+async def runtime_client(anyio_backend: str) -> AsyncIterator[httpx.AsyncClient]:
     # TestClient unquotes an already-decoded path, hiding literal percent escapes.
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://testserver"
-    ) as runtime_client:
-        return await runtime_client.get(path)
+    ) as async_client:
+        yield async_client
 
 
+@pytest.mark.anyio
 @pytest.mark.parametrize("name", ["file%20name.txt", "file%2Fname.txt", "file%25name.txt"])
-def test_download_preserves_literal_percent_sequences(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+async def test_download_preserves_literal_percent_sequences(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str,
+    runtime_client: httpx.AsyncClient,
 ) -> None:
     monkeypatch.setenv("SANDBOX_BASE_DIR", str(tmp_path))
     (tmp_path / name).write_bytes(b"literal")
 
-    response: httpx.Response = asyncio.run(
-        _get_runtime_path(path=f"/download/{quote(name, safe='')}")
-    )
+    response = await runtime_client.get(f"/download/{quote(name, safe='')}")
 
     assert response.status_code == HTTPStatus.OK
     assert response.content == b"literal"
     assert response.headers["content-disposition"] == f"attachment; filename*=utf-8''{quote(name)}"
 
 
+@pytest.mark.anyio
 @pytest.mark.parametrize("name", ["dir%20name", "dir%2Fname", "dir%25name"])
-def test_list_preserves_literal_percent_sequences(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+async def test_list_preserves_literal_percent_sequences(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str,
+    runtime_client: httpx.AsyncClient,
 ) -> None:
     monkeypatch.setenv("SANDBOX_BASE_DIR", str(tmp_path))
     directory: Path = tmp_path / name
     directory.mkdir()
     (directory / "literal.txt").write_text("literal")
 
-    response: httpx.Response = asyncio.run(
-        _get_runtime_path(path=f"/list/{quote(name, safe='')}")
-    )
+    response = await runtime_client.get(f"/list/{quote(name, safe='')}")
 
     assert response.status_code == HTTPStatus.OK
     assert [entry["name"] for entry in response.json()] == ["literal.txt"]
 
 
+@pytest.mark.anyio
 @pytest.mark.parametrize("name", ["file%20name.txt", "file%2Fname.txt", "file%25name.txt"])
-def test_exists_preserves_literal_percent_sequences(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+async def test_exists_preserves_literal_percent_sequences(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str,
+    runtime_client: httpx.AsyncClient,
 ) -> None:
     monkeypatch.setenv("SANDBOX_BASE_DIR", str(tmp_path))
     (tmp_path / name).write_bytes(b"literal")
 
-    response: httpx.Response = asyncio.run(
-        _get_runtime_path(path=f"/exists/{quote(name, safe='')}")
-    )
+    response = await runtime_client.get(f"/exists/{quote(name, safe='')}")
 
     assert response.status_code == HTTPStatus.OK
     assert response.json() == {"path": name, "exists": True}
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("safe", ["", "/"])
+async def test_nested_paths_preserve_literal_percent_sequences(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, safe: str,
+    runtime_client: httpx.AsyncClient,
+) -> None:
+    monkeypatch.setenv("SANDBOX_BASE_DIR", str(tmp_path))
+    directory = "parent%20dir/child%2Fdir"
+    name = "report%25name.txt"
+    path = f"{directory}/{name}"
+
+    upload = await runtime_client.post("/upload", files={"file": (path, b"literal")})
+    assert upload.status_code == HTTPStatus.OK
+    assert (tmp_path / path).read_bytes() == b"literal"
+
+    listing = await runtime_client.get(f"/list/{quote(directory, safe=safe)}")
+    assert listing.status_code == HTTPStatus.OK
+    assert [entry["name"] for entry in listing.json()] == [name]
+
+    exists = await runtime_client.get(f"/exists/{quote(path, safe=safe)}")
+    assert exists.status_code == HTTPStatus.OK
+    assert exists.json() == {"path": path, "exists": True}
+
+    download = await runtime_client.get(f"/download/{quote(path, safe=safe)}")
+    assert download.status_code == HTTPStatus.OK
+    assert download.content == b"literal"
+    assert download.headers["content-disposition"] == f"attachment; filename*=utf-8''{quote(name)}"
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("endpoint", ["download", "list", "exists"])
-def test_encoded_paths_stay_within_base_dir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, endpoint: str
+async def test_encoded_paths_stay_within_base_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, endpoint: str,
+    runtime_client: httpx.AsyncClient,
 ) -> None:
     monkeypatch.setenv("SANDBOX_BASE_DIR", str(tmp_path))
 
-    response: httpx.Response = asyncio.run(
-        _get_runtime_path(path=f"/{endpoint}/{quote('../outside', safe='')}")
-    )
+    response = await runtime_client.get(f"/{endpoint}/{quote('../outside', safe='')}")
 
     assert response.status_code == HTTPStatus.FORBIDDEN
     assert response.json() == {"message": "Access denied"}

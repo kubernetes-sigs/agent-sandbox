@@ -53,7 +53,8 @@ class AsyncSandbox:
             raise ValueError(
                 "connection_config is required for AsyncSandbox. "
                 "Use SandboxDirectConnectionConfig, SandboxGatewayConnectionConfig, "
-                "SandboxInClusterConnectionConfig, or SandboxdPodTunnelConnectionConfig."
+                "SandboxInClusterConnectionConfig, SandboxdPodTunnelConnectionConfig, "
+                "or SandboxdInClusterConnectionConfig."
             )
 
         self.claim_name: str | None = claim_name
@@ -70,6 +71,7 @@ class AsyncSandbox:
             k8s_helper=self.k8s_helper,
             get_pod_ip=self.get_pod_ip,
             get_pod_name=self.get_pod_name,
+            get_service_fqdn=self.get_service_fqdn,
         )
 
         self.tracer_config = tracer_config or SandboxTracerConfig()
@@ -127,6 +129,13 @@ class AsyncSandbox:
         status_data = sandbox_object.get("status") or {}
         pod_ips = status_data.get("podIPs", [])
         return select_pod_ip(pod_ips)
+
+    async def get_service_fqdn(self) -> str | None:
+        """Return the controller-reported Service FQDN, when available."""
+        sandbox_object = await self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
+        status_data = sandbox_object.get("status") or {}
+        fqdn = status_data.get("serviceFQDN")
+        return fqdn if isinstance(fqdn, str) and fqdn else None
 
     async def status(self) -> tuple[str, str]:
         """

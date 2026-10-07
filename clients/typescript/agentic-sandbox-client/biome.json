@@ -7,7 +7,7 @@
     "root": "../../.."
   },
   "files": {
-    "includes": ["**", "!dist/**", "!coverage/**", "!package-lock.json"]
+    "includes": ["**", "!dist/**", "!coverage/**", "!package-lock.json", "!src/_proto/**"]
   },
   "formatter": {
     "enabled": true,

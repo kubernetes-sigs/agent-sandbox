@@ -360,7 +360,6 @@ type StartResponse struct {
 	unknownFields protoimpl.UnknownFields
 
 	// Types that are assignable to Event:
-	//
 	//	*StartResponse_Init
 	//	*StartResponse_Stdout
 	//	*StartResponse_Stderr
@@ -584,7 +583,6 @@ type WriteStdinRequest struct {
 
 	ProcessId int32 `protobuf:"varint,1,opt,name=process_id,json=processId,proto3" json:"process_id,omitempty"`
 	// Types that are assignable to Payload:
-	//
 	//	*WriteStdinRequest_Input
 	//	*WriteStdinRequest_Eof
 	Payload isWriteStdinRequest_Payload `protobuf_oneof:"payload"`

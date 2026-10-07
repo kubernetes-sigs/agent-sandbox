@@ -16,6 +16,7 @@ spec:
         dev.gvisor.empty-dir.workspace-volume.force-shared: "true"
     spec:
       runtimeClassName: gvisor
+      restartPolicy: "OnFailure"
       automountServiceAccountToken: false
       nodeSelector: {sandbox.gke.io/runtime: gvisor}
       tolerations:

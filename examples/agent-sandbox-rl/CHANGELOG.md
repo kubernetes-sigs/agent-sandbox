@@ -5,6 +5,132 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 
 ## [0.1.0.dev0] — unreleased
 
+### Added (one job, several processes —
+[#1808](https://github.com/kubernetes-sigs/agent-sandbox/issues/1808))
+- **`FleetConfig.run_id`** sets the fleet's run id instead of a random one, so the
+  processes of one job (an orchestrator that warms pools, workers that claim from
+  them) share the job's templates and pools. Before, each process was its own
+  run: a worker that went on demand before the orchestrator warmed an image
+  created the template under its id, and the orchestrator's `warm_image` then
+  raised. With a shared id, a pool is resized and deleted only by the process
+  that created it: warming an image another process already warmed borrows its
+  pool, and the first warm of an on-demand pool (marked with
+  `agent-sandbox-rl/on-demand`) takes it over. `teardown()` deletes only the
+  pools this fleet created, a per-run namespace is kept unless
+  `delete_namespace=True` and is never rolled back after a failed setup hook,
+  and the pod-count circuit breaker is off (`max_live_sandboxes` still caps each
+  process's claims). The default is unchanged.
+- **The resolved template name must be at most 63 characters**, since it is the
+  `sandbox=<template>` pod label value; a longer one (a long prefix or `run_id`)
+  passed validation and then failed every pod at the first warm.
+
+### Fixed (run-id pod safeguards —
+[#1807](https://github.com/kubernetes-sigs/agent-sandbox/issues/1807))
+- **The circuit breaker and the reaper's pod force-delete see this run's pods
+  again.** Both selected pods by `agents.x-k8s.io/asrl-run-id`, but since #894 the
+  Sandbox controller strips `agents.x-k8s.io/*` labels from the pod template before
+  it reaches the pod, so `live_owned_count()` was always 0 (the breaker could never
+  trip on pod count) and `reap(run_id=…)`'s grace-0 pod delete matched nothing. The
+  pod template now also carries the run id as `agent-sandbox-rl/run-id`
+  (`POD_RUN_ID_LABEL`), which the controller leaves alone, and
+  `live_owned_count()` / the reaper's pod sweep select on it
+  (`fleet.pod_run_selector()`). Claims, pools and templates keep
+  `agents.x-k8s.io/asrl-run-id`, and the ownership checks still read it. Warm pods
+  created before the upgrade don't gain the new label (changing a template's
+  pod-template labels doesn't replace pool members), so `reap(run_id=…)` misses
+  them until they cycle.
+- **No provisioning path relabels another run's template** (the relabel half of
+  [#1808](https://github.com/kubernetes-sigs/agent-sandbox/issues/1808)). The
+  on-demand path in `acquire()` and `ensure_templates()` called `ensure_template`
+  without an owner check, so an existing template was relabelled to the calling
+  run even when another live run owned it. That run's teardown and
+  `reap(run_id=…)` then deleted the owner's template, the owner's unwarm skipped
+  it and its next warm raised, and — with the pod label above — the calling
+  run's reap force-deleted the owner's pods. The on-demand path now reuses
+  another run's template as it finds it (as it already did with the pool), and
+  `ensure_templates()` raises a `FleetError` naming the owning run, like the
+  warm path.
+
+### Fixed (concurrent runs in one namespace —
+[#1736](https://github.com/kubernetes-sigs/agent-sandbox/issues/1736))
+- **`teardown()` is scoped to this run.** It listed claims, pools and templates by
+  the namespace-wide managed label (`app=agent-sandbox-rl`), which also matches
+  every other agent-sandbox-rl run in the namespace; one run finishing deleted a
+  concurrent tenant's entire warm fleet. Teardown now selects by this run's id
+  label (`run_selector()`), as the reaper and the breaker already did. Leftovers
+  of a run that crashed without tearing down are the reaper's job
+  (`reap(run_id=…)`; the namespace-wide sweep is only `reap(all_managed=True)`).
+- **`wait_for_pool_ready()` fails fast when the pool disappears.** A `DELETED`
+  watch event was read as `0/N ready` and the wait idled until `ready_timeout`
+  (900 s by default); a 404 on the dropped-watch re-check did the same. Both now
+  return `False` immediately, with an error log naming the pool.
+- **A pool carrying another run's id label is never written to** (image-derived
+  names collide across runs). Warming it raises a `FleetError` naming the owning
+  run and pointing at `run_isolation="names"` / `adopt_existing=True` / the
+  reaper, instead of quietly consuming a pool whose depth and lifetime belong to
+  someone else. `unwarm_image()` and `set_pool_replicas()` leave it alone with a
+  warning (erroring mid-cleanup would be worse). An unwarm that cannot read the
+  pool keeps the image and its reserved replicas and raises, so a retry releases
+  them exactly once. The writes are conditional on what was inspected: deletes
+  carry the pool's uid as a precondition (and a pool already gone gets no delete
+  by name), the reconcile patch carries its resourceVersion and re-inspects on a
+  conflict, a 409 on create re-checks who owns the existing pool before resizing
+  it. Templates get the same treatment: warming onto a template labelled with
+  another run's id raises the same `FleetError` (even when that run's pool is
+  already gone, so no 409 would fire), and template deletes, on unwarm and on
+  an on-demand claim's rollback, skip another run's template and carry the
+  inspected uid as a precondition.
+  **Behaviour change:** a run whose image-derived pool name is held by another
+  run (including a crashed run's leftover) now fails at warm instead of sharing
+  and resizing that pool.
+
+### Added (concurrent runs — #1736)
+- **`FleetConfig.run_isolation`** (`"none"` default, naming unchanged): `"names"`
+  bakes the run id into every template/pool name for runs sharing a namespace;
+  `"namespace"` gives each run `<namespace>-<run id>`, created on first use and
+  deleted at teardown if the fleet created it, with `run_namespace_labels` and a
+  `run_namespace_setup(cluster, namespace)` hook for a `LocalQueue`, quota or pull
+  secret. Namespace creation is all-or-nothing per attempt (a create or hook
+  failure rolls back what that attempt created, and a namespace still Terminating
+  is an error, not "existing"). A namespace whose rollback or teardown delete
+  fails stays owned, so the next attempt re-runs a hook that has not yet
+  succeeded and the next teardown retries the delete; the hook must therefore
+  tolerate a re-run. `adopt_existing` is rejected with this mode. A
+  `{run_id}` placeholder is accepted in `template_name_prefix` and
+  `pool_name_format` in any mode.
+
+### Added (warm-pool adoption —
+[#1533](https://github.com/kubernetes-sigs/agent-sandbox/issues/1533))
+- **`FleetConfig.pool_name_format`** (default `pool-{template}`, unchanged
+  behaviour): the pool name is an interface, not an internal detail. `{template}`
+  and `{image_hash}` are the placeholders; `"{template}-pool"` lines up with the
+  multi-cluster fleet layer's convention. Validated to render a DNS-1123 name and
+  **rejected if it has no per-image part** — a constant name silently collapses
+  every image onto one pool. `FleetConfig.pool_name(image)` is the single place
+  the SDK names a pool; override it in a subclass for anything the format string
+  can't express.
+- **`FleetConfig.adopt_existing`** (default `False`): plan against the warm pools
+  already in the namespace instead of creating any. Discovery is **by image**
+  (`Resources.discover_pools` resolves each pool's `sandboxTemplateRef` to its
+  template's container image), so it does not depend on the provisioner and this
+  SDK agreeing on a naming scheme. In adopt mode nothing is written — no template
+  create or label reconcile, no pool create/scale/delete, and teardown skips both
+  while still releasing this run's claims. Readiness is ≥1 ready replica, not the
+  observed depth, which belongs to the provisioner.
+- **`PoolNotFoundError`**: raised by `plan()` for a task image no pool serves, and
+  by `acquire()` for an image added after planning. The message names the missing
+  images, the pool name this SDK looked for, and the pool count found per cluster
+  and namespace.
+
+### Fixed
+- **The on-demand fallthrough is no longer silent.** `acquire()` on an unplanned
+  image builds a size-1 pool, which is correct as a fallback and wrong as a
+  surprise: pointed at a cluster whose warm pools are named differently, a harness
+  found none of them and reported a healthy — but far slower — run over the top of
+  a warm fleet it never touched. It now warns once per (cluster, image), naming
+  the pool it created and pointing at `pool_name_format` / `adopt_existing`. The
+  provisioning behaviour itself is unchanged.
+
 ### Changed (docs / guidance)
 - **Warm-pool worker guidance updated for Agent Sandbox v0.5.4**: the #1215
   over-creation churn is fixed upstream by

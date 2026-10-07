@@ -10,25 +10,34 @@ This guide covers the tools and techniques available for assessing the performan
 
 ## Controller Performance Tuning
 
-The `agent-sandbox-controller` exposes several flags that directly affect throughput and API server pressure. Raising these is the first step before running any load test. The table below is kept in sync with [`docs/configuration.md`](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/configuration.md), which is the canonical flag reference — check there first if the two ever disagree.
+The `agent-sandbox-controller` exposes several flags that directly affect throughput and API server pressure. Raising these is the first step before running any load test. The table below is kept in sync with [`docs/configuration.md`](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/configuration.md), which is the canonical flag reference — check there first if the two ever disagree. For benchmark evidence, burst-vs-sustained traffic profiles, warm-pool sharding guidance, and managed control-plane tuning, see [`docs/performance-tuning.md`](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/performance-tuning.md) and [`docs/apf-insulation.md`](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/apf-insulation.md).
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--sandbox-concurrent-workers` | `100` | Max concurrent reconciles for the Sandbox controller |
 | `--sandbox-claim-concurrent-workers` | `50` | Max concurrent reconciles for the SandboxClaim controller |
-| `--sandbox-warm-pool-concurrent-workers` | `1` | Max concurrent reconciles for the SandboxWarmPool controller |
+| `--sandbox-warm-pool-concurrent-workers` | `1` | Max concurrent reconciles for the SandboxWarmPool controller. Reconciles are serialized per pool key by the workqueue, so workers provide concurrency across distinct pools. Size to the number of active warm pools in the cluster. |
 | `--sandbox-template-concurrent-workers` | `1` | Max concurrent reconciles for the SandboxTemplate controller |
 | `--sandbox-warm-pool-max-batch-size` | `300` | Max sandboxes the SandboxWarmPool controller creates or deletes in a single batch |
 | `--kube-api-qps` | `-1` (no client-side throttling) | Disables client-side rate limiting to the Kubernetes API server. Server-side throttling (API Priority and Fairness) still applies. When setting a positive value, use at least the sum of all `--*-concurrent-workers` flags to avoid starving reconcile loops. |
 | `--kube-api-burst` | `10` | Max burst for API server throttle requests. Ignored when `--kube-api-qps` is `-1`. When `--kube-api-qps` is set to a positive value, set this to equal or greater than `--kube-api-qps`. Must stay a positive integer even when unused — the controller exits on startup if it's `<= 0`. |
+| `--separate-watch-connection` | `false` | Dedicates an isolated HTTP/2 connection to the API server for list/watch streams, preventing write traffic from starving informer watch frames |
+| `--api-connections` | `1` | Number of independent HTTP/2 connections for non-watch requests, sharding writes to bypass the API server's per-connection concurrency limit (`SETTINGS_MAX_CONCURRENT_STREAMS`) |
+| `--sandbox-warm-pool-max-refill-rate` | `0` (unpaced) | Max sandboxes/sec created per pool to pace replenishment and prevent API server write bursts |
+| `--sandbox-warm-pool-replenish-delay` | `0` | Defer warm pool replenishment after claims adopt members so burst adoptions get API server priority |
+| `--disable-sandbox-events` | `false` | Suppresses Kubernetes Event emission from the Sandbox controller to cut API and etcd write traffic during large warm-pool fills and high-churn workloads |
+| `--disable-claim-events` | `false` | Suppresses Kubernetes Event emission from the SandboxClaim controller to cut API and etcd write traffic |
+| `--disable-claim-observability-annotations` | `false` | Skips persisting first-observed timestamp and trace annotations to etcd while preserving in-memory metrics |
+| `--cache-label-selectors` | `false` | Scopes Pod and Service informer caches to sandbox tracking labels, avoiding caching unrelated cluster resources. Caveat: externally pre-provisioned Pods and Services relying on adoption must carry `agents.x-k8s.io/sandbox-name-hash` set to the owning sandbox's name hash to be visible to the controller. |
+| `--sandbox-write-behind-window` | `0` | Coalescing window for recoverable metadata-only writes on Sandboxes |
 
 ### Choosing worker counts
 
-Each `--*-concurrent-workers` flag controls the number of independent goroutines the corresponding controller runs. For example, setting `--sandbox-claim-concurrent-workers=10` allows the SandboxClaim controller to process up to 10 SandboxClaims in parallel.
+Each `--*-concurrent-workers` flag controls the number of independent goroutines the corresponding controller runs. For example, setting `--sandbox-claim-concurrent-workers=150` allows the SandboxClaim controller to process up to 150 SandboxClaims in parallel.
 
-A good starting point is to size each value to the expected steady-state object count for that type, or to a calculated fraction of your maximum burst load. A cluster with a single WarmPool only needs `--sandbox-warm-pool-concurrent-workers=1`.
+A good starting point for high-throughput clusters is `--sandbox-concurrent-workers=200` and `--sandbox-claim-concurrent-workers=150` (validated in [`docs/performance-tuning.md`](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/performance-tuning.md)). Because `SandboxWarmPool` reconciles are serialized per pool key, a cluster with a single WarmPool only needs `--sandbox-warm-pool-concurrent-workers=1`; for sustained claim rates above ~30/s or pools >500–1,000 replicas, shard capacity across multiple `SandboxWarmPool` resources and match `--sandbox-warm-pool-concurrent-workers` to the pool count.
 
-**Important caveat:** increasing worker counts only improves throughput when the controller itself is the bottleneck. If the bottleneck is the kube-apiserver or the container runtime (e.g., slow pod startup), adding more workers can actually *increase* latency by creating additional API server contention. Use the metrics in the [Metrics Collected](#metrics-collected) section and APF dashboards to confirm where the bottleneck lies before tuning these values.
+**Important caveat:** increasing worker counts only improves throughput when the controller itself is the bottleneck. If the bottleneck is the kube-apiserver or the container runtime (e.g., slow pod startup), adding more workers (such as 1,000+ workers) can actually *increase* latency by creating additional API server seat contention and optimistic-concurrency (`409 Conflict`) retries. Use the metrics in the [Metrics Collected](#metrics-collected) section and APF dashboards to confirm where the bottleneck lies before tuning these values.
 
 ### Applying Flags
 
@@ -42,14 +51,10 @@ containers:
   image: ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller
   args:
   - --leader-elect=true
-  - --sandbox-concurrent-workers=10
-  - --sandbox-claim-concurrent-workers=10
-  - --sandbox-warm-pool-concurrent-workers=10
-  - --kube-api-qps=50
-  - --kube-api-burst=100
+  - --sandbox-concurrent-workers=200
 ```
 
-*Extensions install (`k8s/extensions.controller.yaml`) — note the additional `--extensions` flag, which enables the SandboxTemplate controller and its associated RBAC. (`k8s/extensions.yaml` is RBAC only — the Deployment lives in `k8s/extensions.controller.yaml`, a second copy of the core Deployment applied after `sandbox.yaml` so the sequential `sandbox.yaml` → `extensions.yaml` install path lands a Deployment with `--extensions` set. Kustomize consumers get the same result via the patch in `k8s/kustomization.yaml`, which excludes this file.):*
+*Extensions install (`k8s/extensions.controller.yaml`) — note the additional `--extensions` flag, which enables the SandboxTemplate, SandboxWarmPool, and SandboxClaim controllers and their associated RBAC. (`k8s/extensions.yaml` is RBAC only — the Deployment lives in `k8s/extensions.controller.yaml`, a second copy of the core Deployment applied after `sandbox.yaml` so the sequential `sandbox.yaml` → `extensions.yaml` install path lands a Deployment with `--extensions` set. Kustomize consumers get the same result via the patch in `k8s/kustomization.yaml`, which excludes this file.):*
 
 ```yaml
 containers:
@@ -58,12 +63,10 @@ containers:
   args:
   - --leader-elect=true
   - --extensions
-  - --sandbox-concurrent-workers=10
-  - --sandbox-claim-concurrent-workers=10
-  - --sandbox-warm-pool-concurrent-workers=10
-  - --sandbox-template-concurrent-workers=10
-  - --kube-api-qps=50
-  - --kube-api-burst=100
+  - --sandbox-concurrent-workers=200
+  - --sandbox-claim-concurrent-workers=150
+  - --sandbox-warm-pool-concurrent-workers=4
+  - --sandbox-template-concurrent-workers=2
 ```
 
 **Via `kubectl patch`** on a live cluster:
@@ -73,12 +76,10 @@ kubectl patch deployment agent-sandbox-controller \
   -n agent-sandbox-system \
   --type='json' \
   -p='[
-    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-concurrent-workers=10"},
-    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-claim-concurrent-workers=10"},
-    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-warm-pool-concurrent-workers=10"},
-    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-template-concurrent-workers=10"},
-    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--kube-api-qps=50"},
-    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--kube-api-burst=100"}
+    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-concurrent-workers=200"},
+    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-claim-concurrent-workers=150"},
+    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-warm-pool-concurrent-workers=4"},
+    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-template-concurrent-workers=2"}
   ]'
 ```
 
@@ -92,43 +93,25 @@ kubectl patch deployment agent-sandbox-controller \
 # patch-args.yaml
 - op: add
   path: /spec/template/spec/containers/0/args/-
-  value: "--sandbox-concurrent-workers=10"
-- op: add
-  path: /spec/template/spec/containers/0/args/-
-  value: "--sandbox-claim-concurrent-workers=10"
-- op: add
-  path: /spec/template/spec/containers/0/args/-
-  value: "--sandbox-warm-pool-concurrent-workers=10"
-- op: add
-  path: /spec/template/spec/containers/0/args/-
-  value: "--kube-api-qps=50"
-- op: add
-  path: /spec/template/spec/containers/0/args/-
-  value: "--kube-api-burst=100"
+  value: "--sandbox-concurrent-workers=200"
 ```
 
-*Extensions install — also tune `--sandbox-template-concurrent-workers`:*
+*Extensions install — also tune extension controller workers:*
 
 ```yaml
 # patch-args.yaml
 - op: add
   path: /spec/template/spec/containers/0/args/-
-  value: "--sandbox-concurrent-workers=10"
+  value: "--sandbox-concurrent-workers=200"
 - op: add
   path: /spec/template/spec/containers/0/args/-
-  value: "--sandbox-claim-concurrent-workers=10"
+  value: "--sandbox-claim-concurrent-workers=150"
 - op: add
   path: /spec/template/spec/containers/0/args/-
-  value: "--sandbox-warm-pool-concurrent-workers=10"
+  value: "--sandbox-warm-pool-concurrent-workers=4"
 - op: add
   path: /spec/template/spec/containers/0/args/-
-  value: "--sandbox-template-concurrent-workers=10"
-- op: add
-  path: /spec/template/spec/containers/0/args/-
-  value: "--kube-api-qps=50"
-- op: add
-  path: /spec/template/spec/containers/0/args/-
-  value: "--kube-api-burst=100"
+  value: "--sandbox-template-concurrent-workers=2"
 ```
 
 Reference the patch from `kustomization.yaml` using `patches` with an explicit `target`:
@@ -142,6 +125,22 @@ patches:
       name: agent-sandbox-controller
       namespace: agent-sandbox-system
 ```
+
+### High-Throughput & Scale Tuning
+
+For high-throughput workloads (such as sustained claim rates of 10–30+ claims/sec or large warm pools with >1,000 replicas), standard worker tuning alone can lead to API server throttling, HTTP/2 stream saturation, or watch frame starvation behind unpaced warm-pool refill bursts (which can hold the warm pool's expectations gate closed and drain the pool).
+
+In addition to worker sizing, high-throughput deployments should:
+1. **Pace warm-pool refills** with `--sandbox-warm-pool-max-refill-rate=100` (prevents 300-create refill bursts from saturating `etcd` and `kube-apiserver`).
+2. **Isolate watch streams and shard connections** with `--separate-watch-connection=true` and `--api-connections=4`.
+3. **Shard large warm pools** across multiple `SandboxWarmPool` CRs (a single pool's sustained refill ceiling is ~70–85 sandboxes/s).
+4. **Suppress non-essential writes and scope caches** with `--disable-sandbox-events=true`, `--disable-claim-events=true`, `--disable-claim-observability-annotations=true`, and `--cache-label-selectors=true`.
+5. **Apply API Priority and Fairness (APF) insulation** (`examples/apf-insulation/apf-insulation.yaml`) so bulk refill creates cannot starve latency-critical claim adoption patches.
+
+For benchmark results, burst-vs-sustained profiles, symptom troubleshooting, and managed Kubernetes control-plane guidance, see:
+- **[Performance Tuning Guide (`docs/performance-tuning.md`)](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/performance-tuning.md)**
+- **[APF Insulation Guide (`docs/apf-insulation.md`)](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/apf-insulation.md)**
+- **[High-Throughput & Scale Tuning (`docs/configuration.md`)](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/configuration.md#high-throughput--scale-tuning)**
 
 ---
 
@@ -339,6 +338,8 @@ The controller exposes all metrics at its `/metrics` endpoint; a Prometheus `Ser
 
 ## See Also
 
+- [Controller Metrics Reference]({{< ref "/docs/metrics" >}}) — every metric family the controller exposes, with types, labels, and availability conditions
 - [Configuration reference](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/configuration.md) — full flag reference for the controller
+- [Performance tuning](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/performance-tuning.md) — benchmark data and sizing rationale for high-throughput deployments
 - [Running tests](../contribution-guidelines/testing/) — unit, integration and e2e test commands
 - [ClusterLoader2 getting started](https://github.com/kubernetes/perf-tests/blob/master/clusterloader2/docs/GETTING_STARTED.md)

@@ -1,0 +1,32 @@
+# Warm pool of pre-started OpenClaw spares. A SandboxClaim adopts one with
+# 2-3 API metadata writes against an already-running pod — that is the
+# sub-second claim path (test-checklist item 1). Spares idle at the
+# template's spin-wait, so an adoption only pays: label/ownership patch +
+# storage bind + OpenClaw process start.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: openclaw-fleet-pool
+  namespace: openclaw-fleet
+spec:
+  # Demo-sized. Sizing for a 9,000-seat fleet is a claim-RATE question, not
+  # a seat-count question: the pool only needs to cover the peak
+  # claims/minute (morning login surge, batch rebuilds) plus replenishment
+  # lag. Controller-side throughput math (see the warm pool controller
+  # docs): sandbox creates sustain ~85/s under default API priority &
+  # fairness, so high claim rates shard across MULTIPLE pools with
+  # --sandbox-warm-pool-concurrent-workers >= pool count, and
+  # MaxRefillRate/ReplenishDelay shape the refill burst. The pool also
+  # exposes /scale, so an HPA or KEDA scaler can follow the daily curve
+  # (see ../hpa-swp-scaling and ../keda-scale-to-zero).
+  replicas: 5
+  sandboxTemplateRef:
+    name: openclaw-fleet-template
+  updateStrategy:
+    # Recreate: on any template change (image, CPU/memory), stale UNCLAIMED
+    # spares are deleted and rebuilt immediately, and stale spares are never
+    # handed to new claims — so after a template bump, every new claim gets
+    # the new image (test-checklist item 4). Already-claimed sandboxes are
+    # intentionally never touched by the pool; roll those with
+    # ../70-rolling-update.sh.
+    type: Recreate

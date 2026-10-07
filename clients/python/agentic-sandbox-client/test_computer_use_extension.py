@@ -14,7 +14,6 @@
 
 import unittest
 import os
-import subprocess
 import time
 import logging
 from k8s_agent_sandbox.extensions.computer_use import ComputerUseSandboxClient

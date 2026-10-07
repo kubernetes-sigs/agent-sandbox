@@ -45,7 +45,7 @@ class Sandbox:
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
         k8s_helper: K8sHelper | None = None,
-    ):
+    ) -> None:
         # Sandbox Related Configuration
         self.claim_name = claim_name
         self.sandbox_id = sandbox_id
@@ -62,6 +62,7 @@ class Sandbox:
             k8s_helper=self.k8s_helper,
             get_pod_ip=self.get_pod_ip,
             get_pod_name=self.get_pod_name,
+            get_service_fqdn=self.get_service_fqdn,
         )
 
         # Tracer initialization
@@ -70,13 +71,13 @@ class Sandbox:
         self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
 
         # Initialisation of namespaced engines
-        self._commands = CommandExecutor(self.connector, self.tracer, self.trace_service_name)
-        self._files = Filesystem(self.connector, self.tracer, self.trace_service_name)
+        self._commands: CommandExecutor | None = CommandExecutor(self.connector, self.tracer, self.trace_service_name)
+        self._files: Filesystem | None = Filesystem(self.connector, self.tracer, self.trace_service_name)
         
         # Internal state tracking
         self._is_closed = False
-        self._pod_name = None
-        self._sandbox_name_hash = None
+        self._pod_name: str | None = None
+        self._sandbox_name_hash: str | None = None
         
     def get_pod_name(self) -> str:
         """Fetches the Sandbox object from Kubernetes and retrieves its current pod name."""
@@ -119,6 +120,13 @@ class Sandbox:
         pod_ips = status_data.get('podIPs', [])
         return select_pod_ip(pod_ips)
 
+    def get_service_fqdn(self) -> str | None:
+        """Return the controller-reported Service FQDN, when available."""
+        sandbox_object = self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
+        status_data = sandbox_object.get("status") or {}
+        fqdn = status_data.get("serviceFQDN")
+        return fqdn if isinstance(fqdn, str) and fqdn else None
+
     def status(self) -> tuple[str, str]:
         """
         Retrieves the current status of the Sandbox by inspecting its Kubernetes conditions.
@@ -158,7 +166,7 @@ class Sandbox:
         """
         return not self._is_closed and self._commands is not None and self._files is not None
 
-    def close_connection(self):
+    def close_connection(self) -> None:
         """
         Closes the client-side connection and disables execution engines locally,
         but leaves the remote Kubernetes Sandbox infrastructure running.

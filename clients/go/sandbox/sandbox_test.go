@@ -960,6 +960,32 @@ func TestOpen_RollbackDeletesClaim(t *testing.T) {
 	}
 }
 
+func TestOpen_TerminalClaimFailsFastAndRollsBack(t *testing.T) {
+	opts := defaultTestOpts()
+	c, _, extensionsCS := newTestSandbox(opts)
+	extensionsCS.PrependReactor("get", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		return true, claimNotReady("test-claim", "WarmPoolNotFound"), nil
+	})
+
+	err := c.Open(context.Background())
+	if !errors.Is(err, ErrWarmPoolNotFound) {
+		t.Fatalf("expected ErrWarmPoolNotFound, got: %v", err)
+	}
+	if c.ClaimName() != "" {
+		t.Errorf("expected empty ClaimName after rollback, got %q", c.ClaimName())
+	}
+
+	deleted := false
+	for _, action := range extensionsCS.Actions() {
+		if action.GetVerb() == "delete" && action.GetResource().Resource == "sandboxclaims" {
+			deleted = true
+		}
+	}
+	if !deleted {
+		t.Error("expected the SandboxClaim to be deleted during rollback")
+	}
+}
+
 func TestClose_DeleteClaim_NotFound(t *testing.T) {
 	opts := defaultTestOpts()
 	c, agentsCS, extensionsCS := newTestSandbox(opts)
@@ -1091,6 +1117,47 @@ func TestOpen_CreateClaimFailure(t *testing.T) {
 	}
 }
 
+func TestCreateClaim_Labels(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		labels map[string]string
+		want   map[string]string
+	}{
+		{
+			name: "none",
+			want: map[string]string{sandboxv1beta1.CreatedByLabel: "go-client"},
+		},
+		{
+			name:   "user labels are kept",
+			labels: map[string]string{"app": "agent", "example.com/tier": ""},
+			want:   map[string]string{"app": "agent", "example.com/tier": "", sandboxv1beta1.CreatedByLabel: "go-client"},
+		},
+		{
+			name:   "created-by label cannot be overridden",
+			labels: map[string]string{sandboxv1beta1.CreatedByLabel: "someone-else"},
+			want:   map[string]string{sandboxv1beta1.CreatedByLabel: "go-client"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+			var created *extv1beta1.SandboxClaim
+			extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+				created = action.(ktesting.CreateAction).GetObject().(*extv1beta1.SandboxClaim)
+				created.Name = created.GenerateName + "test12345"
+				return true, created, nil
+			})
+			h := &K8sHelper{ExtensionsClient: extensionsCS.ExtensionsV1beta1(), Log: logr.Discard()}
+
+			if _, err := h.createClaim(context.Background(), "default", "pool", nil, tc.labels, 0, otel.GetTracerProvider().Tracer("test"), "test"); err != nil {
+				t.Fatalf("createClaim() error: %v", err)
+			}
+			if !reflect.DeepEqual(created.Labels, tc.want) {
+				t.Errorf("claim labels = %v, want %v", created.Labels, tc.want)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // drainSandboxWatch tests (K8sHelper method)
 // ---------------------------------------------------------------------------
@@ -1109,7 +1176,7 @@ func TestDrainSandboxWatch_ErrorTriggersRelist(t *testing.T) {
 			go func() { fw.Error(&tc.status) }()
 
 			var lastCond string
-			_, done, err := h.drainSandboxWatch(context.Background(), fw, "test-claim", 5*time.Second, &lastCond)
+			_, done, err := h.drainSandboxWatch(context.Background(), fw, "test-claim", &lastCond)
 			if done {
 				t.Error("expected done=false")
 			}
@@ -1129,7 +1196,7 @@ func TestDrainSandboxWatch_Deleted(t *testing.T) {
 	}()
 
 	var lastCond string
-	_, done, err := h.drainSandboxWatch(context.Background(), fw, "test-claim", 5*time.Second, &lastCond)
+	_, done, err := h.drainSandboxWatch(context.Background(), fw, "test-claim", &lastCond)
 	if done {
 		t.Error("expected done=false for Deleted event")
 	}
@@ -1405,15 +1472,13 @@ func TestOpen_CreateClaimSendsCorrectTemplate(t *testing.T) {
 	}
 }
 
-func TestOpen_CreateClaimSendsEnv(t *testing.T) {
-	opts := defaultTestOpts()
-	opts.Env = []extv1beta1.EnvVar{
-		{Name: "FOO", Value: "bar"},
-		{Name: "DEBUG", Value: "true"},
-	}
+// openAndCaptureClaim opens a sandbox with opts and returns the SandboxClaim
+// it created.
+func openAndCaptureClaim(t *testing.T, opts Options) *extv1beta1.SandboxClaim {
+	t.Helper()
 	c, agentsCS, extensionsCS := newTestSandbox(opts)
 
-	var capturedEnv []extv1beta1.EnvVar
+	var captured *extv1beta1.SandboxClaim
 	fakeWatcher := watch.NewFake()
 
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
@@ -1423,7 +1488,7 @@ func TestOpen_CreateClaimSendsEnv(t *testing.T) {
 			if claim.Name == "" && claim.GenerateName != "" {
 				claim.Name = claim.GenerateName + "test12345"
 			}
-			capturedEnv = claim.Spec.Env
+			captured = claim
 			go fakeWatcher.Add(readySandbox(claim.Name))
 		}
 		return false, nil, nil
@@ -1434,10 +1499,68 @@ func TestOpen_CreateClaimSendsEnv(t *testing.T) {
 	if err := c.Open(context.Background()); err != nil {
 		t.Fatalf("Open() error: %v", err)
 	}
-	defer c.Close(context.Background())
+	t.Cleanup(func() { _ = c.Close(context.Background()) })
+	return captured
+}
 
-	if !reflect.DeepEqual(capturedEnv, opts.Env) {
-		t.Errorf("expected env %+v, got %+v", opts.Env, capturedEnv)
+func TestOpen_CreateClaimSendsEnv(t *testing.T) {
+	opts := defaultTestOpts()
+	opts.Env = []extv1beta1.EnvVar{
+		{Name: "FOO", Value: "bar"},
+		{Name: "DEBUG", Value: "true"},
+	}
+
+	claim := openAndCaptureClaim(t, opts)
+	if !reflect.DeepEqual(claim.Spec.Env, opts.Env) {
+		t.Errorf("expected env %+v, got %+v", opts.Env, claim.Spec.Env)
+	}
+}
+
+func TestOpen_CreateClaimSendsShutdownAfter(t *testing.T) {
+	opts := defaultTestOpts()
+	opts.ShutdownAfter = time.Hour
+
+	before := time.Now()
+	claim := openAndCaptureClaim(t, opts)
+	after := time.Now()
+
+	lifecycle := claim.Spec.Lifecycle
+	if lifecycle == nil || lifecycle.ShutdownTime == nil {
+		t.Fatalf("expected spec.lifecycle.shutdownTime, got %+v", lifecycle)
+	}
+	// The deadline is rounded up to a whole second, so it may overshoot by under 1s.
+	lo, hi := before.Add(opts.ShutdownAfter), after.Add(opts.ShutdownAfter+time.Second)
+	if got := lifecycle.ShutdownTime.Time; got.Before(lo) || got.After(hi) {
+		t.Errorf("shutdownTime = %v, want within [%v, %v]", got, lo, hi)
+	}
+	if lifecycle.ShutdownPolicy != extv1beta1.ShutdownPolicyDelete {
+		t.Errorf("shutdownPolicy = %q, want %q", lifecycle.ShutdownPolicy, extv1beta1.ShutdownPolicyDelete)
+	}
+}
+
+func TestClaimLifecycle_RoundsUpToWholeSecond(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 100, time.UTC)
+	for _, tc := range []struct {
+		ttl  time.Duration
+		want time.Time
+	}{
+		{500 * time.Millisecond, now.Truncate(time.Second).Add(time.Second)},
+		{time.Hour, now.Truncate(time.Second).Add(time.Hour + time.Second)},
+		{time.Second - 100, now.Truncate(time.Second).Add(time.Second)},
+	} {
+		if got := claimLifecycle(now, tc.ttl).ShutdownTime.Time; !got.Equal(tc.want) {
+			t.Errorf("ttl %s: shutdownTime = %v, want %v", tc.ttl, got, tc.want)
+		}
+	}
+	whole := now.Truncate(time.Second)
+	if got := claimLifecycle(whole, time.Minute).ShutdownTime.Time; !got.Equal(whole.Add(time.Minute)) {
+		t.Errorf("whole-second deadline moved: %v", got)
+	}
+}
+
+func TestOpen_CreateClaimWithoutShutdownAfterHasNoLifecycle(t *testing.T) {
+	if claim := openAndCaptureClaim(t, defaultTestOpts()); claim.Spec.Lifecycle != nil {
+		t.Errorf("expected no spec.lifecycle, got %+v", claim.Spec.Lifecycle)
 	}
 }
 
@@ -1607,6 +1730,7 @@ func TestValidation_NegativeTimeouts(t *testing.T) {
 		{"negative RequestTimeout", Options{WarmPoolName: "pool", RequestTimeout: -1}},
 		{"negative PerAttemptTimeout", Options{WarmPoolName: "pool", PerAttemptTimeout: -1}},
 		{"negative MaxDownloadSize", Options{WarmPoolName: "pool", MaxDownloadSize: -1}},
+		{"negative ShutdownAfter", Options{WarmPoolName: "pool", ShutdownAfter: -time.Second}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1626,6 +1750,8 @@ func TestValidation_InvalidNames(t *testing.T) {
 		{"uppercase GatewayName", Options{WarmPoolName: "pool", GatewayName: "MyGateway"}},
 		{"uppercase Namespace", Options{WarmPoolName: "pool", Namespace: "MyNS"}},
 		{"uppercase WarmPoolName", Options{WarmPoolName: "MyWarmPool"}},
+		{"Labels key with a space", Options{WarmPoolName: "pool", Labels: map[string]string{"bad key": "v"}}},
+		{"Labels value with a slash", Options{WarmPoolName: "pool", Labels: map[string]string{"k": "a/b"}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1885,7 +2011,7 @@ func TestDrainSandboxWatch_NonSandboxObject(t *testing.T) {
 	}()
 
 	var lastCond string
-	_, done, err := h.drainSandboxWatch(context.Background(), fw, "test-claim", 5*time.Second, &lastCond)
+	_, done, err := h.drainSandboxWatch(context.Background(), fw, "test-claim", &lastCond)
 	if done {
 		t.Error("expected done=false for non-sandbox object")
 	}
@@ -2698,9 +2824,16 @@ func TestValidation_InvalidGatewayScheme(t *testing.T) {
 func TestClose_DrainsInflightBeforeDelete(t *testing.T) {
 	requestReceived := make(chan struct{})
 	unblock := make(chan struct{})
+	// responseSent is closed before the handler writes the response, so it is
+	// ordered before the client finishes the request and before the deferred
+	// trackOp release. It is the drain-safe signal for the delete reactor:
+	// opDone closes in the test goroutine strictly after the tracked region
+	// ends, so checking opDone there raced with Close's post-drain delete.
+	responseSent := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		close(requestReceived)
 		<-unblock
+		close(responseSent)
 		_, _ = w.Write([]byte(`{"exists":true}`))
 	}))
 	defer server.Close()
@@ -2720,7 +2853,7 @@ func TestClose_DrainsInflightBeforeDelete(t *testing.T) {
 	opDone := make(chan struct{})
 	extensionsCS.PrependReactor("delete", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
 		select {
-		case <-opDone:
+		case <-responseSent:
 		default:
 			t.Error("claim deleted while in-flight operation still running")
 		}
@@ -2739,9 +2872,12 @@ func TestClose_DrainsInflightBeforeDelete(t *testing.T) {
 		t.Fatalf("Close error: %v", err)
 	}
 
+	// Close returning means the drain completed, so Exists has finished its
+	// HTTP call; the goroutine only needs to be scheduled to close opDone.
+	// A bounded wait avoids racing that scheduling.
 	select {
 	case <-opDone:
-	default:
+	case <-time.After(5 * time.Second):
 		t.Error("operation did not complete")
 	}
 }
@@ -3099,6 +3235,59 @@ func TestConnector_SetPodIP(t *testing.T) {
 			c.mu.Unlock()
 			if gotPodIP != tc.expected {
 				t.Errorf("expected podIP %q, got %q", tc.expected, gotPodIP)
+			}
+		})
+	}
+}
+
+// TestWaitForSandboxReady_Public covers the context-only API without tracing setup.
+func TestWaitForSandboxReady_Public(t *testing.T) {
+	for _, scenario := range []string{"ready", "becomes ready", "canceled", "deadline", "deleted"} {
+		t.Run(scenario, func(t *testing.T) {
+			opts := defaultTestOpts()
+			s, agentsCS, _ := newTestSandbox(opts)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ready := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "target", Namespace: opts.Namespace},
+				Status: sandboxv1beta1.SandboxStatus{Conditions: []metav1.Condition{
+					{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue},
+				}},
+			}
+			agentsCS.PrependReactor("list", "sandboxes", func(_ ktesting.Action) (bool, runtime.Object, error) {
+				list := &sandboxv1beta1.SandboxList{}
+				if scenario == "ready" {
+					list.Items = append(list.Items, *ready)
+				}
+				return true, list, nil
+			})
+			fw := watch.NewRaceFreeFake()
+			defer fw.Stop()
+			agentsCS.PrependWatchReactor("sandboxes", func(_ ktesting.Action) (bool, watch.Interface, error) {
+				switch scenario {
+				case "becomes ready":
+					fw.Modify(ready)
+				case "canceled":
+					cancel()
+				case "deleted":
+					fw.Delete(ready)
+				}
+				return true, fw, nil
+			})
+			var want error
+			switch scenario {
+			case "canceled":
+				want = context.Canceled
+			case "deadline":
+				var deadlineCancel context.CancelFunc
+				ctx, deadlineCancel = context.WithDeadline(ctx, time.Now().Add(-time.Second))
+				defer deadlineCancel()
+				want = context.DeadlineExceeded
+			case "deleted":
+				want = ErrSandboxDeleted
+			}
+			if err := s.k8s.WaitForSandboxReady(ctx, "target", opts.Namespace); !errors.Is(err, want) {
+				t.Fatalf("got %v, want %v", err, want)
 			}
 		})
 	}

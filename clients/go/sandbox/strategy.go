@@ -16,7 +16,8 @@ package sandbox
 
 import "context"
 
-// ConnectionStrategy defines how the SDK discovers the sandbox-router URL.
+// ConnectionStrategy defines how the SDK discovers or reaches a runtime's
+// HTTP endpoint, either directly or through the sandbox-router.
 type ConnectionStrategy interface {
 	Connect(ctx context.Context) (baseURL string, err error)
 	Close() error

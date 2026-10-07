@@ -315,6 +315,80 @@ func TestIntegration_CacheInvalidationOnDialError(t *testing.T) {
 	}
 }
 
+// replacingLookup publishes a replacement Pod for the same Sandbox right
+// after resolving a request, the informer update a slow dial can race.
+type replacingLookup struct {
+	*stubLookup
+	replacementPodUID types.UID
+}
+
+func (r replacingLookup) Resolve(namespace, name string, requestedUID types.UID) (cache.Entry, cache.ResolutionSource, bool) {
+	e, source, ok := r.stubLookup.Resolve(namespace, name, requestedUID)
+	r.mu.Lock()
+	if cur, found := r.entries[e.SandboxUID]; found {
+		cur.PodUID = r.replacementPodUID
+		r.entries[e.SandboxUID] = cur
+	}
+	r.mu.Unlock()
+	return e, source, ok
+}
+
+// TestIntegration_CacheInvalidationSparesReplacementPod: the eviction
+// carries the UID of the Pod the failed dial targeted, so a replacement
+// cached while the dial was failing keeps its entry, even when it reuses
+// the address. Covers both cache paths: UID header and name only.
+func TestIntegration_CacheInvalidationSparesReplacementPod(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		uidHeader string
+	}{
+		{name: "uid header", uidHeader: "sandbox-uid-xyz"},
+		{name: "name only"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Defaults()
+			cfg.ProxyTimeout = time.Second
+			cfg.ResponseHeaderTimeout = time.Second
+			cfg.UpstreamMaxRetries = 0
+
+			stub := &stubLookup{entries: map[types.UID]cache.Entry{
+				"sandbox-uid-xyz": {PodUID: "old-pod", PodIP: "255.255.255.255", SandboxName: "s", Namespace: "ns"},
+			}}
+			router := httptest.NewServer(NewHandler(Options{
+				Config: &cfg,
+				Cache:  replacingLookup{stubLookup: stub, replacementPodUID: "replacement-pod"},
+				Logger: logr.Discard(),
+			}))
+			defer router.Close()
+
+			req, _ := http.NewRequest("GET", router.URL+"/x", nil)
+			req.Header.Set(HeaderSandboxID, "s")
+			req.Header.Set(HeaderSandboxNamespace, "ns")
+			req.Header.Set(HeaderSandboxPort, "8888")
+			if tc.uidHeader != "" {
+				req.Header.Set(HeaderSandboxUID, tc.uidHeader)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("do: %v", err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusBadGateway {
+				t.Fatalf("status: got %d want 502", resp.StatusCode)
+			}
+
+			stub.mu.Lock()
+			defer stub.mu.Unlock()
+			if len(stub.invalidatedPods) != 1 || stub.invalidatedPods[0] != "old-pod" {
+				t.Fatalf("invalidation must name the dialed Pod, got %v", stub.invalidatedPods)
+			}
+			if e, ok := stub.entries["sandbox-uid-xyz"]; !ok || e.PodUID != "replacement-pod" {
+				t.Fatalf("replacement entry must survive, got %+v found=%v", e, ok)
+			}
+		})
+	}
+}
+
 // TestIntegration_NoInvalidationOnDNSDialError ensures we do NOT
 // invalidate when the dial failure was on the DNS path — there is no
 // cache entry to evict, and calling Invalidate would still trigger the
@@ -354,8 +428,8 @@ func TestIntegration_NoInvalidationOnDNSDialError(t *testing.T) {
 	}
 	lookup.mu.Lock()
 	defer lookup.mu.Unlock()
-	if len(lookup.invalidated) != 0 || len(lookup.invalidatedByName) != 0 {
-		t.Fatalf("expected no invalidations, got %v / %v", lookup.invalidated, lookup.invalidatedByName)
+	if len(lookup.invalidated) != 0 {
+		t.Fatalf("expected no invalidations, got %v", lookup.invalidated)
 	}
 }
 
@@ -440,7 +514,7 @@ func TestIntegration_CacheInvalidationOnNameDialError(t *testing.T) {
 
 	// 255.255.255.255: instant ENETUNREACH (dead host).
 	lookup := &stubLookup{entries: map[types.UID]cache.Entry{
-		"warm-uid-1": {PodIP: "255.255.255.255", SandboxName: "warm-sandbox", Namespace: "tenants"},
+		"warm-uid-1": {PodUID: "warm-pod", PodIP: "255.255.255.255", SandboxName: "warm-sandbox", Namespace: "tenants"},
 	}}
 
 	router := httptest.NewServer(NewHandler(Options{
@@ -465,10 +539,10 @@ func TestIntegration_CacheInvalidationOnNameDialError(t *testing.T) {
 	}
 	lookup.mu.Lock()
 	defer lookup.mu.Unlock()
-	// The handler must pass the IP it actually dialed so the cache can
-	// refuse the eviction if the entry was refreshed mid-dial.
-	if len(lookup.invalidatedByName) != 1 || lookup.invalidatedByName[0] != "tenants/warm-sandbox=255.255.255.255" {
-		t.Fatalf("expected one name invalidation for tenants/warm-sandbox=255.255.255.255, got %v", lookup.invalidatedByName)
+	// The handler must name the Pod it actually dialed so the cache can
+	// refuse the eviction if a replacement refreshed the entry mid-dial.
+	if len(lookup.invalidated) != 1 || lookup.invalidated[0] != "warm-uid-1" || lookup.invalidatedPods[0] != "warm-pod" {
+		t.Fatalf("expected one invalidation for warm-uid-1/warm-pod, got %v / %v", lookup.invalidated, lookup.invalidatedPods)
 	}
 	if len(lookup.entries) != 0 {
 		t.Fatalf("entry should have been removed from cache, still have %v", lookup.entries)
@@ -531,9 +605,9 @@ func TestIntegration_NoEvictionOnConnectionRefused(t *testing.T) {
 		t.Fatalf("wrong-port status: got %d want 502", resp.StatusCode)
 	}
 	lookup.mu.Lock()
-	if len(lookup.invalidated) != 0 || len(lookup.invalidatedByName) != 0 {
+	if len(lookup.invalidated) != 0 {
 		lookup.mu.Unlock()
-		t.Fatalf("refusal must not evict, got %v / %v", lookup.invalidated, lookup.invalidatedByName)
+		t.Fatalf("refusal must not evict, got %v", lookup.invalidated)
 	}
 	lookup.mu.Unlock()
 

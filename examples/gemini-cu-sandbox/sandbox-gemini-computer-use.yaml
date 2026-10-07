@@ -11,6 +11,7 @@ spec:
       annotations:
         test: "yes"
     spec:
+      restartPolicy: "OnFailure"
       containers:
       - name: sandbox-python-computeruse
         image: sandbox-gemini-runtime:latest

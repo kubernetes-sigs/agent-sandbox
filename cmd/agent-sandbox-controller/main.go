@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -77,13 +78,19 @@ func main() {
 	var sandboxWarmPoolReplenishDelay time.Duration
 	var sandboxWarmPoolMaxRefillRate float64
 	var sandboxWriteBehindWindow time.Duration
+	var sandboxClaimWarmCandidateGracePeriod time.Duration
 	var sandboxWarmPoolReadinessGracePeriod time.Duration
 	var sandboxWarmPoolUnschedulableRecheckInterval time.Duration
 	var enableWarmPoolEviction bool
 	var cacheLabelSelectors bool
 	var printVersion bool
+	var disableSandboxEvents bool
 	var disableClaimEvents bool
 	var disableClaimObservabilityAnnotations bool
+	var metricsSecureServing bool
+	var metricsCertDir string
+	var tlsMinVersion string
+	var tlsCipherSuites string
 
 	flag.BoolVar(&printVersion, "version", false, "Print version information and exit.")
 	flag.StringVar(&clusterDomain, "cluster-domain", "cluster.local", "Kubernetes cluster domain for service FQDN generation")
@@ -135,6 +142,7 @@ func main() {
 			"pacing refill into a smooth stream instead of full-deficit bursts that flood the write path and compete with claim adoption. "+
 			"Composes with --sandbox-warm-pool-replenish-delay: the delay defers the start of refill, the rate shapes its flow. "+
 			"0 (default) leaves refill unpaced (whole deficit per reconcile).")
+	flag.DurationVar(&sandboxClaimWarmCandidateGracePeriod, "sandbox-claim-warm-candidate-grace-period", extensionscontrollers.DefaultWarmCandidateGracePeriod, "How long a newly created SandboxClaim waits for a warm pool candidate to report a Pod IP before falling back to cold creation. Must be a positive duration.")
 	flag.DurationVar(&sandboxWarmPoolReadinessGracePeriod, "sandbox-warm-pool-readiness-grace-period", extensionscontrollers.DefaultWarmPoolReadinessGracePeriod, "How long a warm pool sandbox may stay non-Ready before the SandboxWarmPool controller considers it stuck and replaces it (or holds it, if its pod is unschedulable). Raise this for images with long initialization or clusters with slow node auto-provisioning. Must be a positive duration.")
 	flag.DurationVar(&sandboxWarmPoolUnschedulableRecheckInterval, "sandbox-warm-pool-unschedulable-recheck-interval", extensionscontrollers.DefaultUnschedulableRecheckInterval, "Requeue interval at which the SandboxWarmPool controller re-checks a pool holding unschedulable sandboxes past the readiness grace period. Must be a positive duration.")
 	flag.BoolVar(&enableWarmPoolEviction, "enable-warm-pool-eviction", true, "Mark pods created by a warm pool as ready-to-evict by default.")
@@ -146,6 +154,9 @@ func main() {
 			"that rely on the "+sandboxv1beta1.SandboxAdoptableLabel+"=true adoption path MUST also carry the "+
 			"tracking label (value = the owning sandbox's name hash) to remain visible to the controller when "+
 			"this flag is enabled.")
+	flag.BoolVar(&disableSandboxEvents, "disable-sandbox-events", false,
+		"Disable Kubernetes Event emission from the Sandbox controller (its Eventf calls become no-ops), "+
+			"reducing API server writes during large warm-pool fills. Default false (events enabled).")
 	flag.BoolVar(&disableClaimEvents, "disable-claim-events", false,
 		"Disable Kubernetes Event emission from the SandboxClaim controller (its Eventf calls become no-ops), "+
 			"reducing API server writes during large claim bursts. Default false (events enabled).")
@@ -157,6 +168,22 @@ func main() {
 			"by the previous process. Default false (annotations persisted).")
 	flag.DurationVar(&sandboxWriteBehindWindow, "sandbox-write-behind-window", 0,
 		"Coalescing window for the Sandbox controller's recoverable metadata-only writes. 0 disables coalescing.")
+	flag.BoolVar(&metricsSecureServing, "metrics-secure-serving", false,
+		"Serve metrics over HTTPS instead of HTTP. When enabled without --metrics-cert-dir, "+
+			"a self-signed certificate is generated automatically. Conventional HTTPS metrics port is :8443.")
+	flag.StringVar(&metricsCertDir, "metrics-cert-dir", "",
+		"Directory containing tls.crt and tls.key for the metrics server. "+
+			"Only used when --metrics-secure-serving is enabled.")
+	flag.StringVar(&tlsMinVersion, "tls-min-version", "",
+		"Minimum TLS version for the metrics server. "+
+			"Accepted values: VersionTLS10, VersionTLS11, VersionTLS12, VersionTLS13. "+
+			"If not set, the Go default applies (TLS 1.2). "+
+			"A downstream operator can use this flag to inject the cluster TLS profile.")
+	flag.StringVar(&tlsCipherSuites, "tls-cipher-suites", "",
+		"Comma-separated list of cipher suites for the metrics server, "+
+			"using Go cipher-suite names (e.g. TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256). "+
+			"If not set, the Go default applies. TLS 1.3 cipher suites are not configurable. "+
+			"A downstream operator can use this flag to inject the cluster TLS profile.")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -169,6 +196,10 @@ func main() {
 	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	if sandboxClaimWarmCandidateGracePeriod <= 0 {
+		setupLog.Error(nil, "--sandbox-claim-warm-candidate-grace-period must be a positive duration", "value", sandboxClaimWarmCandidateGracePeriod)
+		os.Exit(1)
+	}
 	if sandboxWarmPoolReadinessGracePeriod <= 0 {
 		setupLog.Error(nil, "--sandbox-warm-pool-readiness-grace-period must be a positive duration", "value", sandboxWarmPoolReadinessGracePeriod)
 		os.Exit(1)
@@ -280,6 +311,40 @@ func main() {
 	metricsOpts := metricsserver.Options{
 		BindAddress: metricsAddr,
 	}
+	if metricsSecureServing {
+		metricsOpts.SecureServing = true
+		if metricsCertDir != "" {
+			certPath := filepath.Join(metricsCertDir, "tls.crt")
+			keyPath := filepath.Join(metricsCertDir, "tls.key")
+			if _, err := os.Stat(certPath); err != nil {
+				setupLog.Error(err, "metrics cert not found", "path", certPath)
+				os.Exit(1)
+			}
+			if _, err := os.Stat(keyPath); err != nil {
+				setupLog.Error(err, "metrics key not found", "path", keyPath)
+				os.Exit(1)
+			}
+			metricsOpts.CertDir = metricsCertDir
+		}
+		setupLog.Info("metrics server TLS enabled (--metrics-secure-serving)")
+		metricsOpts.TLSOpts = append(metricsOpts.TLSOpts, alpnOpt)
+		tlsOpts, err := buildMetricsTLSOpts(tlsMinVersion, tlsCipherSuites)
+		if err != nil {
+			setupLog.Error(err, "invalid TLS configuration")
+			os.Exit(1)
+		}
+		if len(tlsOpts) > 0 {
+			metricsOpts.TLSOpts = append(metricsOpts.TLSOpts, tlsOpts...)
+			kv := []any{"minVersion", tlsMinVersion}
+			if tlsCipherSuites != "" && tlsMinVersion != "VersionTLS13" {
+				kv = append(kv, "cipherSuites", tlsCipherSuites)
+			}
+			setupLog.Info("TLS configuration applied to metrics server", kv...)
+		}
+	} else if metricsCertDir != "" || tlsMinVersion != "" || tlsCipherSuites != "" {
+		setupLog.Error(nil, "TLS flags require --metrics-secure-serving")
+		os.Exit(1)
+	}
 	if enablePprof || enablePprofDebug {
 		setupLog.Info("pprof enabled", "debug", enablePprofDebug)
 		metricsOpts.ExtraHandlers = map[string]http.Handler{
@@ -389,10 +454,19 @@ func main() {
 			"window", sandboxWriteBehindWindow, "podPatchBound", "1s")
 	}
 
+	// Every Eventf site in the sandbox controller is nil-guarded on the
+	// recorder, so a nil recorder cleanly disables event emission.
+	var sandboxRecorder events.EventRecorder
+	if disableSandboxEvents {
+		setupLog.Info("Sandbox controller event emission disabled (--disable-sandbox-events)")
+	} else {
+		sandboxRecorder = mgr.GetEventRecorder("sandbox-controller")
+	}
+
 	if err = (&controllers.SandboxReconciler{
 		Client:            mgr.GetClient(),
 		Scheme:            mgr.GetScheme(),
-		Recorder:          mgr.GetEventRecorder("sandbox-controller"),
+		Recorder:          sandboxRecorder,
 		Tracer:            instrumenter,
 		ClusterDomain:     clusterDomain,
 		WriteBehindWindow: sandboxWriteBehindWindow,
@@ -402,6 +476,11 @@ func main() {
 	}
 
 	if extensions {
+		// Warm-pool collector lists extensionsv1beta1.SandboxWarmPoolList, whose
+		// scheme is only registered when extensions are enabled. Register here so
+		// scrapes don't fail with "no kind is registered" in non-extensions builds.
+		asmetrics.RegisterWarmPoolCollector(mgr.GetClient(), mgr.GetLogger().WithName("warmpool-collector"))
+
 		warmSandboxQueue := queue.NewSimpleSandboxQueue()
 
 		var allowedDomains []string
@@ -445,6 +524,7 @@ func main() {
 			Tracer:                          instrumenter,
 			AllowedLabelDomains:             allowedDomains,
 			DisableObservabilityAnnotations: disableClaimObservabilityAnnotations,
+			WarmCandidateGracePeriod:        sandboxClaimWarmCandidateGracePeriod,
 		}).SetupWithManager(mgr, sandboxClaimConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxClaim")
 			os.Exit(1)

@@ -12,20 +12,109 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
+"""Synchronous filesystem operations for legacy and sandboxd runtimes."""
+
+import io
 import logging
-import os
 import posixpath
+import secrets
 import urllib.parse
-from typing import List
+from collections.abc import Iterator
+from typing import Any, BinaryIO, List, Protocol
+
+from urllib3.fields import RequestField
+
+import requests
+
 from k8s_agent_sandbox.connector import SandboxConnector
+from k8s_agent_sandbox.exceptions import SandboxRequestError
 from k8s_agent_sandbox.models import FileEntry
-from k8s_agent_sandbox.trace_manager import trace_span, trace
+from k8s_agent_sandbox.trace_manager import trace, trace_span
+
+
+
+_STREAM_CHUNK_SIZE = 64 * 1024
+
+
+class BinaryWriter(Protocol):
+    """A synchronous destination that accepts binary file content."""
+
+    def write(self, content: bytes) -> int:
+        """Write content and return the number of accepted bytes."""
+        ...
+
+
+def _write_all(destination: BinaryWriter, content: bytes) -> int:
+    """Write all content, including to destinations that perform partial writes."""
+    written = 0
+    while written < len(content):
+        count = destination.write(content[written:])
+        if count is None or count <= 0:
+            raise OSError("Download destination did not accept file content.")
+        if count > len(content) - written:
+            raise OSError("Download destination reported an invalid write count.")
+        written += count
+    return written
+
+
+def _validate_binary_stream(content: BinaryIO) -> None:
+    """Reject text streams and objects that do not provide a read method."""
+    if isinstance(content, (io.StringIO, io.TextIOBase)):
+        raise TypeError("File content must be opened in binary mode.")
+    if not callable(getattr(content, "read", None)):
+        raise TypeError("File content must be bytes, str, or a binary file object.")
+
+
+def _read_binary_chunk(content: BinaryIO) -> bytes:
+    """Read one bounded chunk and enforce the BinaryIO return contract."""
+    chunk = content.read(_STREAM_CHUNK_SIZE)
+    if isinstance(chunk, str):
+        raise TypeError("File content must be opened in binary mode.")
+    if not isinstance(chunk, (bytes, bytearray, memoryview)):
+        raise TypeError("Binary file objects must return bytes from read().")
+    return bytes(chunk)
+
+
+def _iter_binary_chunks(content: BinaryIO) -> Iterator[bytes]:
+    while chunk := _read_binary_chunk(content):
+        yield chunk
+
+
+def _multipart_framing(path: str) -> tuple[bytes, bytes, str]:
+    """Build the framing for a streaming, single-file multipart request."""
+    boundary = secrets.token_hex(16)
+    field = RequestField(name="file", data=b"", filename=path)
+    field.make_multipart(content_disposition="form-data")
+    prefix = (
+        f"--{boundary}\r\n".encode()
+        + field.render_headers().encode("utf-8")
+    )
+    suffix = f"\r\n--{boundary}--\r\n".encode()
+    content_type = f"multipart/form-data; boundary={boundary}"
+    return prefix, suffix, content_type
+
+
+def _iter_multipart_body(
+    prefix: bytes,
+    content: BinaryIO,
+    suffix: bytes,
+) -> Iterator[bytes]:
+    yield prefix
+    yield from _iter_binary_chunks(content)
+    yield suffix
 
 
 def _sandboxd_files_endpoint(path: str) -> str:
     """Return the sandboxd REST path for a sandbox-relative file path."""
-    return f"v1/files/{urllib.parse.quote(path, safe='')}"
+    encoded = []
+    for segment in path.split("/"):
+        if segment == ".":
+            encoded.append("%2E")
+        elif segment == "..":
+            encoded.append("%2E%2E")
+        else:
+            encoded.append(urllib.parse.quote(segment, safe=""))
+    return f"v1/files/{'%2F'.join(encoded)}"
 
 
 class Filesystem:
@@ -36,7 +125,9 @@ class Filesystem:
     Filesystem & Runtime REST API, selected by the connection config
     (``connector.is_sandboxd()``).
     """
-    def __init__(self, connector: SandboxConnector, tracer, trace_service_name: str):
+    def __init__(
+        self, connector: SandboxConnector, tracer: Any, trace_service_name: str
+    ) -> None:
         self.connector = connector
         self.tracer = tracer
         self.trace_service_name = trace_service_name
@@ -44,17 +135,29 @@ class Filesystem:
     @trace_span("write")
     def write(
         self,
-        path: str, content: bytes | str,
+        path: str,
+        content: bytes | str | BinaryIO,
         timeout: int = 60,
         allow_unsafe_paths: bool = False,
-    ):
+    ) -> None:
+        """Upload content to a sandbox-relative path.
+
+        Binary file objects are read in chunks from their current position and
+        sent once without retries. The caller must close the file object; its
+        position may advance if the upload fails.
+        """
+        if isinstance(content, str):
+            content = content.encode("utf-8")
+        elif isinstance(content, (bytearray, memoryview)):
+            content = bytes(content)
+        elif not isinstance(content, bytes):
+            _validate_binary_stream(content)
+
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
-            span.set_attribute("sandbox.file.size", len(content))
-
-        if isinstance(content, str):
-            content = content.encode('utf-8')
+            if isinstance(content, bytes):
+                span.set_attribute("sandbox.file.size", len(content))
 
         # The sandbox runtime uses the multipart ``filename`` field as a
         # relative destination path under its base directory (e.g. /app).
@@ -69,11 +172,31 @@ class Filesystem:
         if self.connector.is_sandboxd():
             # sandboxd write is an idempotent PUT of the raw bytes; parent
             # directories are created server-side (temp-file + rename).
+            data: bytes | Iterator[bytes]
+            if isinstance(content, bytes):
+                data = content
+                disable_retries = False
+            else:
+                data = _iter_binary_chunks(content)
+                disable_retries = True
             self.connector.send_request(
                 "PUT", _sandboxd_files_endpoint(path),
-                data=content,
+                data=data,
                 headers={"Content-Type": "application/octet-stream"},
                 timeout=timeout,
+                _disable_retries=disable_retries,
+            )
+        elif not isinstance(content, bytes):
+            prefix, suffix, content_type = _multipart_framing(path)
+            # POST is intentionally absent from RETRYABLE_METHODS. Making it
+            # retryable would replay this consumed generator as an empty body.
+            self.connector.send_request(
+                "POST",
+                "upload",
+                data=_iter_multipart_body(prefix, content, suffix),
+                headers={"Content-Type": content_type},
+                timeout=timeout,
+                _disable_retries=True,
             )
         else:
             files_payload = {'file': (path, content)}
@@ -97,11 +220,10 @@ class Filesystem:
             raise ValueError(
                 f"Upload path contains ASCII control characters: {path!r}"
             )
-        stripped = path.strip()
-        if not stripped:
+        if not path.strip():
             raise ValueError("Upload path cannot be empty.")
 
-        normalized = posixpath.normpath(stripped).lstrip("/")
+        normalized = posixpath.normpath(path).lstrip("/")
         if not normalized or normalized == ".":
             raise ValueError(f"Upload path '{path}' does not name a file.")
         parts = normalized.split("/")
@@ -119,6 +241,7 @@ class Filesystem:
         allow_unsafe_paths: bool = False,
 
     ) -> bytes:
+        """Read a sandbox-relative file and return its raw bytes."""
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
@@ -138,8 +261,93 @@ class Filesystem:
 
         return content
 
+    @trace_span("read_to")
+    def read_to(
+        self,
+        path: str,
+        destination: BinaryWriter,
+        timeout: int = 60,
+        allow_unsafe_paths: bool = False,
+        max_bytes: int | None = None,
+    ) -> int:
+        """Stream a sandbox file into a caller-owned binary destination.
+
+        The destination is never closed. If ``max_bytes`` is set, at most that
+        many bytes are written before an oversized download raises
+        ``RuntimeError``. Data written before an error remains in the
+        destination. The returned value is the number of bytes written.
+        """
+        if destination is None or not callable(getattr(destination, "write", None)):
+            raise TypeError("Download destination must provide a write(bytes) method.")
+        if max_bytes is not None:
+            if type(max_bytes) is not int:
+                raise ValueError("max_bytes must be an integer or None.")
+            if max_bytes < 0:
+                raise ValueError("max_bytes must be greater than or equal to zero.")
+
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", path)
+
+        if not allow_unsafe_paths:
+            path = self._safe_upload_path(path)
+
+        if self.connector.is_sandboxd():
+            endpoint = _sandboxd_files_endpoint(path)
+        else:
+            endpoint = f"download/{urllib.parse.quote(path, safe='')}"
+
+        response = self.connector.send_request(
+            "GET", endpoint, timeout=timeout, stream=True
+        )
+        total = 0
+        try:
+            if not 200 <= response.status_code < 300:
+                raise SandboxRequestError(
+                    f"Unexpected status downloading sandbox file: {response.status_code}",
+                    status_code=response.status_code,
+                    response=response,
+                )
+            content_length = response.headers.get("Content-Length")
+            if max_bytes is not None and content_length is not None:
+                try:
+                    declared_size = int(content_length)
+                except (TypeError, ValueError):
+                    declared_size = None
+                if declared_size is not None and declared_size > max_bytes:
+                    raise RuntimeError(
+                        f"File size exceeds limit of {max_bytes} bytes."
+                    )
+
+            for chunk in response.iter_content(chunk_size=_STREAM_CHUNK_SIZE):
+                if not chunk:
+                    continue
+                if max_bytes is not None:
+                    remaining = max_bytes - total
+                    if len(chunk) > remaining:
+                        if remaining > 0:
+                            total += _write_all(destination, chunk[:remaining])
+                        raise RuntimeError(
+                            f"File size exceeds limit of {max_bytes} bytes."
+                        )
+                total += _write_all(destination, chunk)
+        except requests.exceptions.RequestException:
+            transport_token = getattr(response, "_sandboxd_transport_token", None)
+            if transport_token is not None:
+                self.connector.invalidate_sandboxd_transport(
+                    None, transport_token=transport_token
+                )
+            raise
+        finally:
+            response.close()
+
+        if span.is_recording():
+            span.set_attribute("sandbox.file.size", total)
+        return total
+
     @trace_span("list")
     def list(self, path: str, timeout: int = 60) -> List[FileEntry]:
+        """List files and directories at a sandbox-relative path."""
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
@@ -157,17 +365,17 @@ class Filesystem:
             if not isinstance(listing, dict) or "entries" not in listing:
                 raise RuntimeError(f"Server returned invalid directory listing: {listing}")
             file_entries = []
-            for e in listing.get("entries") or []:
+            for entry in listing.get("entries") or []:
                 # Skip entry types the SDK model does not represent (e.g. a
                 # stray "symlink") so one unknown entry does not fail the
                 # whole listing.
-                if e.get("type") not in ("file", "directory"):
-                    logging.info(f"Skipping unsupported file entry type: {e.get('type')!r}")
+                if entry.get("type") not in ("file", "directory"):
+                    logging.info(f"Skipping unsupported file entry type: {entry.get('type')!r}")
                     continue
                 try:
-                    file_entries.append(FileEntry.from_sandboxd(e))
+                    file_entries.append(FileEntry.from_sandboxd(entry))
                 except Exception as ex:
-                    raise RuntimeError(f"Server returned invalid file entry format: {e}") from ex
+                    raise RuntimeError(f"Server returned invalid file entry format: {entry}") from ex
         else:
             response = self.connector.send_request("GET", f"list/{encoded_path}", timeout=timeout)
             try:
@@ -187,6 +395,7 @@ class Filesystem:
 
     @trace_span("exists")
     def exists(self, path: str, timeout: int = 60) -> bool:
+        """Return whether a path exists without downloading its contents."""
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
@@ -195,8 +404,8 @@ class Filesystem:
         if self.connector.is_sandboxd():
             # sandboxd has no exists endpoint: HEAD answers existence
             # (200 vs 404) without transferring the body. 404 is passed via
-            # allowed_statuses so it is returned instead of raising — a raise
-            # would tear down the connection (connector closes on error).
+            # allowed_statuses so it is returned instead of becoming a
+            # SandboxRequestError.
             response = self.connector.send_request(
                 "HEAD", _sandboxd_files_endpoint(path),
                 timeout=timeout, allowed_statuses={404})
@@ -232,6 +441,8 @@ class Filesystem:
                 "delete() is only supported by the sandboxd runtime; the legacy "
                 "python-runtime has no delete endpoint"
             )
+        if path == "":
+            raise ValueError("delete: path must not be empty")
         endpoint = _sandboxd_files_endpoint(path)
         if recursive:
             endpoint += "?recursive=true"

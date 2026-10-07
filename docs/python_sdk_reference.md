@@ -30,7 +30,8 @@ type: ignore
 ```python
 def __init__(connection_config: SandboxConnectionConfig | None = None,
              tracer_config: SandboxTracerConfig | None = None,
-             cleanup: bool = False)
+             cleanup: bool = False,
+             api_client: client.ApiClient | None = None) -> None
 ```
 
 Initializes the SandboxClient.
@@ -39,12 +40,15 @@ Initializes the SandboxClient.
 
 - `connection_config` - Configuration for connecting to the sandboxes.
   Defaults to SandboxLocalTunnelConnectionConfig() which uses
-  kubectl port-forwarding. Can also be SandboxDirectConnectionConfig
-  or SandboxGatewayConnectionConfig.
+  kubectl port-forwarding. Sandboxd supports a pod tunnel or the
+  explicit Service DNS / Pod IP in-cluster connection config.
 - `tracer_config` - Configuration for OpenTelemetry tracing.
   Defaults to an empty SandboxTracerConfig (tracing disabled).
 - `cleanup` - If True, registers an atexit hook to automatically delete
-  all tracked sandboxes when the program terminates. Defaults to False.
+  tracked sandboxes when the program terminates, excluding claims
+  explicitly named through create_sandbox(). Defaults to False.
+- `api_client` - Optional pre-configured Kubernetes ``ApiClient`` forwarded
+  to the underlying ``K8sHelper`` to target a specific cluster/context.
 
 <a id="k8s_agent_sandbox.sandbox_client.SandboxClient.create_sandbox"></a>
 
@@ -56,6 +60,8 @@ def create_sandbox(warmpool: str,
                    sandbox_ready_timeout: int = 180,
                    labels: dict[str, str] | None = None,
                    *,
+                   claim_name: str | None = None,
+                   adopt_existing: bool = False,
                    shutdown_after_seconds: int | None = None,
                    volume_claim_templates: list[dict] | None = None,
                    pod_labels: dict[str, str] | None = None,
@@ -73,6 +79,12 @@ the underlying infrastructure.
 - `sandbox_ready_timeout` - Seconds to wait for the sandbox to be ready.
 - `labels` - Optional Kubernetes labels to attach to the claim object
   (``SandboxClaim.metadata.labels``).
+- `claim_name` - Optional DNS-1123 Claim name. Explicit names remain
+  caller-owned and are excluded from automatic cleanup.
+- `adopt_existing` - On 409, attach to the existing named Claim after
+  checking its warm pool and that it is not terminating. Requires
+  claim_name. Creation options are not reapplied on adoption;
+  an existing shutdownTime is preserved.
 - `shutdown_after_seconds` - Optional TTL in seconds. When set, the
   claim's ``spec.lifecycle`` is populated with a ``shutdownTime``
   of *now + shutdown_after_seconds* (UTC) and a ``shutdownPolicy``
@@ -178,7 +190,7 @@ for the given namespace.
 ##### delete\_sandbox
 
 ```python
-def delete_sandbox(claim_name: str, namespace: str = "default")
+def delete_sandbox(claim_name: str, namespace: str = "default") -> None
 ```
 
 Stops the client side connection and deletes the Kubernetes resources.
@@ -195,7 +207,7 @@ Stops the client side connection and deletes the Kubernetes resources.
 ##### delete\_all
 
 ```python
-def delete_all()
+def delete_all() -> None
 ```
 
 Cleanup all tracked sandboxes managed by this client.
@@ -249,6 +261,34 @@ Standard error from the command.
 ##### exit\_code
 
 Exit code of the command.
+
+<a id="k8s_agent_sandbox.models.ExecutionResult.timed_out"></a>
+
+##### timed\_out
+
+True if the runtime killed the command for exceeding its time limit.
+
+<a id="k8s_agent_sandbox.models.LegacyExecuteRequest"></a>
+
+### LegacyExecuteRequest Objects
+
+```python
+class LegacyExecuteRequest(BaseModel)
+```
+
+Request body for the legacy python-runtime /execute endpoint.
+
+<a id="k8s_agent_sandbox.models.LegacyExecuteRequest.command"></a>
+
+##### command
+
+Shell command to run.
+
+<a id="k8s_agent_sandbox.models.LegacyExecuteRequest.timeout_seconds"></a>
+
+##### timeout\_seconds
+
+Limit on how long the command may run; omitted when unset.
 
 <a id="k8s_agent_sandbox.models.FileEntry"></a>
 
@@ -349,6 +389,9 @@ class SandboxDirectConnectionConfig(BaseModel)
 
 Configuration for connecting directly to a Sandbox URL.
 
+``extra_headers`` and ``client_cert``/``ca_cert`` (mTLS) support a router
+behind an authenticating gateway.
+
 <a id="k8s_agent_sandbox.models.SandboxDirectConnectionConfig.api_url"></a>
 
 ##### api\_url
@@ -360,6 +403,24 @@ Direct URL to the router.
 ##### server\_port
 
 Port the sandbox container listens on.
+
+<a id="k8s_agent_sandbox.models.SandboxDirectConnectionConfig.extra_headers"></a>
+
+##### extra\_headers
+
+Sent on every request.
+
+<a id="k8s_agent_sandbox.models.SandboxDirectConnectionConfig.client_cert"></a>
+
+##### client\_cert
+
+(certificate path, private key path) for mTLS.
+
+<a id="k8s_agent_sandbox.models.SandboxDirectConnectionConfig.ca_cert"></a>
+
+##### ca\_cert
+
+CA bundle path used to verify the router; default trust store if unset.
 
 <a id="k8s_agent_sandbox.models.SandboxGatewayConnectionConfig"></a>
 
@@ -454,6 +515,22 @@ sandboxd gRPC ProcessService port on the pod.
 ##### port\_forward\_ready\_timeout
 
 Seconds to wait for port-forward readiness.
+
+<a id="k8s_agent_sandbox.models.SandboxdInClusterConnectionConfig"></a>
+
+### SandboxdInClusterConnectionConfig Objects
+
+```python
+class SandboxdInClusterConnectionConfig(BaseModel)
+```
+
+Connect to sandboxd directly over the selected in-cluster address.
+
+``in-cluster-service`` requires ``Sandbox.status.serviceFQDN`` and a Service
+enabled on the Sandbox template. ``in-cluster-pod-ip`` uses
+``Sandbox.status.podIPs``. Neither mode falls back to the other. sandboxd's
+REST filesystem listener defaults to port 8080 and its gRPC ProcessService
+listener to port 9090.
 
 <a id="k8s_agent_sandbox.models.SandboxInClusterConnectionConfig"></a>
 

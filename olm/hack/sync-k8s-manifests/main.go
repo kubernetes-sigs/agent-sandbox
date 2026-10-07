@@ -83,8 +83,8 @@ func run(controllerPath, extensionsPath, supportOut, managerOut, image string) e
 	if err != nil {
 		return fmt.Errorf("read controller: %w", err)
 	}
-	var ns map[string]interface{}
-	var support []map[string]interface{}
+	var ns map[string]any
+	var support []map[string]any
 	for _, doc := range controllerDocs {
 		kind, _ := doc["kind"].(string)
 		switch kind {
@@ -114,7 +114,7 @@ func run(controllerPath, extensionsPath, supportOut, managerOut, image string) e
 	if err != nil {
 		return fmt.Errorf("read extensions: %w", err)
 	}
-	var dep map[string]interface{}
+	var dep map[string]any
 	for _, doc := range extDocs {
 		if doc["kind"] == "Deployment" {
 			if dep != nil {
@@ -133,21 +133,21 @@ func run(controllerPath, extensionsPath, supportOut, managerOut, image string) e
 	if err := writeMultiDoc(supportOut, support); err != nil {
 		return fmt.Errorf("write support: %w", err)
 	}
-	if err := writeMultiDoc(managerOut, []map[string]interface{}{ns, dep}); err != nil {
+	if err := writeMultiDoc(managerOut, []map[string]any{ns, dep}); err != nil {
 		return fmt.Errorf("write manager: %w", err)
 	}
 	return nil
 }
 
-func readDocuments(path string) ([]map[string]interface{}, error) {
+func readDocuments(path string) ([]map[string]any, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 	dec := yamlutil.NewYAMLOrJSONDecoder(bytes.NewReader(data), 4096)
-	var out []map[string]interface{}
+	var out []map[string]any
 	for {
-		var doc map[string]interface{}
+		var doc map[string]any
 		if err := dec.Decode(&doc); err != nil {
 			if err == io.EOF {
 				break
@@ -164,25 +164,25 @@ func readDocuments(path string) ([]map[string]interface{}, error) {
 
 const koControllerImage = "ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller"
 
-func replaceControllerImage(dep map[string]interface{}, replacement string) error {
-	spec, ok := dep["spec"].(map[string]interface{})
+func replaceControllerImage(dep map[string]any, replacement string) error {
+	spec, ok := dep["spec"].(map[string]any)
 	if !ok {
 		return fmt.Errorf("extensions deployment: missing spec")
 	}
-	tpl, ok := spec["template"].(map[string]interface{})
+	tpl, ok := spec["template"].(map[string]any)
 	if !ok {
 		return fmt.Errorf("extensions deployment: missing spec.template")
 	}
-	pod, ok := tpl["spec"].(map[string]interface{})
+	pod, ok := tpl["spec"].(map[string]any)
 	if !ok {
 		return fmt.Errorf("extensions deployment: missing spec.template.spec")
 	}
-	raw, ok := pod["containers"].([]interface{})
+	raw, ok := pod["containers"].([]any)
 	if !ok || len(raw) == 0 {
 		return fmt.Errorf("extensions deployment: missing or empty spec.template.spec.containers")
 	}
 	for _, c := range raw {
-		cm, ok := c.(map[string]interface{})
+		cm, ok := c.(map[string]any)
 		if !ok {
 			continue
 		}
@@ -262,7 +262,7 @@ func rewriteRouterNamespace(dir, namespace string) error {
 	return writeResourcesKustomization(filepath.Join(dir, "kustomization.yaml"), resources)
 }
 
-func writeMultiDoc(path string, docs []map[string]interface{}) error {
+func writeMultiDoc(path string, docs []map[string]any) error {
 	var buf bytes.Buffer
 	for i, doc := range docs {
 		if i > 0 {

@@ -1,0 +1,115 @@
+# The credential proxy: Containarium's standalone model gateway.
+#
+# This is the ONLY pod in the example that holds a real provider API key. It
+# verifies the caller's short-lived, run-scoped gateway token (HS256 over the
+# shared secret below), swaps in the real key, and proxies to the provider —
+# so the sandbox never holds a provider credential at all, only a token that
+# is worthless outside this gateway and dead the moment the run ends.
+#
+# Two Secrets, created by run-test-kind.sh (never committed):
+#   model-gateway-auth          jwt.secret            — HMAC secret; the runner
+#                                                       mints tokens with it and
+#                                                       the gateway verifies them
+#                               gateway-admin.token   — bearer for the admin
+#                                                       revoke endpoint
+#   model-gateway-provider-keys ANTHROPIC_API_KEY     — the real provider key
+#
+# The image is the published release of the OSS gateway, pinned by digest —
+# this pod is the one place in the example that holds the real provider key,
+# so a mutable tag is not good enough: anyone who could repoint
+# ghcr.io/footprintai/containarium-model-gateway:v0.78.1 would gain it.
+# `Dockerfile` in this directory builds the same binary from source at the
+# same tag if you would rather not run a prebuilt image (README: "Building
+# the gateway from source").
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-gateway
+  labels:
+    app: model-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: model-gateway
+  template:
+    metadata:
+      labels:
+        app: model-gateway
+    spec:
+      # The gateway talks to the provider and to nothing in the cluster; it has
+      # no reason to hold a kube-apiserver token either.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        # The Secret below is mounted 0440 root:fsGroup, so the non-root
+        # gateway reads it by group. Without fsGroup the files land
+        # root:root and the gateway exits with "permission denied".
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: model-gateway
+          image: ghcr.io/footprintai/containarium-model-gateway:v0.78.1@sha256:f0ab45dfc41fca84158e99d9494d9f7ffad834902c6e45127c3dc41addd7a5d2
+          imagePullPolicy: IfNotPresent
+          args:
+            - serve
+            - --addr=:8866
+            - --secret-file=/etc/containarium/jwt.secret
+            # Registers POST /__gateway/revoke. Without this flag the route is
+            # not registered at all and there is no way to kill an issued
+            # token early — which is exactly the gap this example closes.
+            - --admin-token-file=/etc/containarium/gateway-admin.token
+          env:
+            # The real provider key enters ONLY here, in the gateway's own env.
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: model-gateway-provider-keys
+                  key: ANTHROPIC_API_KEY
+          ports:
+            - name: http
+              containerPort: 8866
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: gateway-auth
+              mountPath: /etc/containarium
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /__gateway/healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      volumes:
+        - name: gateway-auth
+          secret:
+            secretName: model-gateway-auth
+            defaultMode: 0440
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-gateway
+  labels:
+    app: model-gateway
+spec:
+  selector:
+    app: model-gateway
+  ports:
+    - name: http
+      port: 8866
+      targetPort: http

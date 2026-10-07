@@ -49,7 +49,7 @@ func BenchmarkResolveUIDCacheHit(b *testing.B) {
 
 	b.ReportAllocs()
 	for b.Loop() {
-		u, src := tgt.Resolve("http", "cluster.local", "/run", "", lookup)
+		u, src, _ := tgt.Resolve("http", "cluster.local", "/run", "", lookup)
 		if src != SourceCache {
 			b.Fatalf("source: got %q want %q", src, SourceCache)
 		}
@@ -67,7 +67,7 @@ func BenchmarkResolveNameCacheHit(b *testing.B) {
 
 	b.ReportAllocs()
 	for b.Loop() {
-		u, src := tgt.Resolve("http", "cluster.local", "/run", "", lookup)
+		u, src, _ := tgt.Resolve("http", "cluster.local", "/run", "", lookup)
 		if src != SourceCacheName {
 			b.Fatalf("source: got %q want %q", src, SourceCacheName)
 		}
@@ -89,7 +89,7 @@ func BenchmarkResolveDNSFallback(b *testing.B) {
 
 	b.ReportAllocs()
 	for b.Loop() {
-		u, src := tgt.Resolve("http", "cluster.local", "/run", "", nil)
+		u, src, _ := tgt.Resolve("http", "cluster.local", "/run", "", nil)
 		if src != SourceDNS {
 			b.Fatalf("source: got %q want %q", src, SourceDNS)
 		}

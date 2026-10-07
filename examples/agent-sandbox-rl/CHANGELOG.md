@@ -9,10 +9,10 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 - **`TemplateSpec.network_policy_management`** sets `spec.networkPolicyManagement`
   on the SandboxTemplates a fleet creates, and patches it onto a pre-existing
   template the run owns when it differs. The controller creates one NetworkPolicy
-  per template; a fleet has a template per task image and RL recipes recreate
-  templates every step, so a namespace ends up with hundreds of policies that
-  churn with the pools, and the per-template label they select on has to stay
-  identity-relevant on Cilium. With `"Unmanaged"` the controller creates none and
+  per template; a fleet has a template per task image and creates and deletes
+  templates as it warms and retires pools, so a namespace ends up with hundreds
+  of policies that churn with the pools, and the per-template label they select
+  on has to stay identity-relevant on GKE Dataplane V2 (Cilium). With `"Unmanaged"` the controller creates none and
   a single policy on the shared `app=agent-sandbox-rl` pod label covers every
   sandbox in the namespace; `examples/agent-sandbox-rl-network-policy` has that
   policy and a verify script. Unset (the default) leaves the field out and never

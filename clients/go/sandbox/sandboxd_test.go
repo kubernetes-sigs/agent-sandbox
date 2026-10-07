@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -481,6 +482,191 @@ func TestSandboxdRun_DirectURLUnsupported(t *testing.T) {
 	}
 	if errors.Is(err, ErrNotReady) {
 		t.Errorf("a permanent failure must not look retryable, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Runtime reports: GET /v1/health and /v1/metadata
+// ---------------------------------------------------------------------------
+
+// runtimeReports lists each sandboxd report call so every behavior below is
+// checked for both without repeating the test body.
+var runtimeReports = []struct {
+	name string
+	call func(context.Context, *Sandbox, ...CallOption) error
+}{
+	{"Health", func(ctx context.Context, s *Sandbox, o ...CallOption) error {
+		_, err := s.Health(ctx, o...)
+		return err
+	}},
+	{"Metadata", func(ctx context.Context, s *Sandbox, o ...CallOption) error {
+		_, err := s.Metadata(ctx, o...)
+		return err
+	}},
+}
+
+func TestSandboxdHealth_ParsesReport(t *testing.T) {
+	var gotMethod, gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.EscapedPath()
+		_, _ = io.WriteString(w, `{"status":"ok","uptime_seconds":42}`)
+	}))
+	defer server.Close()
+
+	got, err := newReadySandboxdTestSandbox(server.URL).Health(context.Background())
+	if err != nil {
+		t.Fatalf("Health() error: %v", err)
+	}
+	if gotMethod != http.MethodGet || gotPath != "/v1/health" {
+		t.Errorf("unexpected request: %s %s", gotMethod, gotPath)
+	}
+	if got.Status != "ok" || got.UptimeSeconds != 42 {
+		t.Errorf("unexpected health: %+v", got)
+	}
+}
+
+func TestSandboxdMetadata_ParsesEnv(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want map[string]string
+	}{
+		{"values", `{"env":{"SANDBOX_ID":"abc","SANDBOX_REGION":"us"}}`, map[string]string{"SANDBOX_ID": "abc", "SANDBOX_REGION": "us"}},
+		{"empty object", `{}`, map[string]string{}},
+		{"null env", `{"env":null}`, map[string]string{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotMethod, gotPath string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotMethod, gotPath = r.Method, r.URL.EscapedPath()
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer server.Close()
+
+			got, err := newReadySandboxdTestSandbox(server.URL).Metadata(context.Background())
+			if err != nil {
+				t.Fatalf("Metadata() error: %v", err)
+			}
+			if gotMethod != http.MethodGet || gotPath != "/v1/metadata" {
+				t.Errorf("unexpected request: %s %s", gotMethod, gotPath)
+			}
+			if got.Env == nil || len(got.Env) != len(tt.want) {
+				t.Fatalf("unexpected env: %#v (want %#v)", got.Env, tt.want)
+			}
+			for k, v := range tt.want {
+				if got.Env[k] != v {
+					t.Errorf("env[%q] = %q, want %q", k, got.Env[k], v)
+				}
+			}
+		})
+	}
+}
+
+func TestSandboxdRuntimeReports_HTTPErrors(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   int
+		code     string
+		wantBody string
+		wantErr  error
+	}{
+		{"decodes API error", http.StatusForbidden, "PERMISSION_DENIED", "PERMISSION_DENIED: nope", nil},
+		{"shutting down", http.StatusServiceUnavailable, "UNAVAILABLE", "UNAVAILABLE", ErrRetriesExhausted},
+	}
+	for _, report := range runtimeReports {
+		for _, tt := range tests {
+			t.Run(report.name+"/"+tt.name, func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(tt.status)
+					_ = json.NewEncoder(w).Encode(sandboxdAPIError{Code: tt.code, Message: "nope"})
+				}))
+				defer server.Close()
+
+				err := report.call(context.Background(), newReadySandboxdTestSandbox(server.URL))
+				var httpErr *HTTPError
+				if !errors.As(err, &httpErr) {
+					t.Fatalf("expected HTTPError, got: %v", err)
+				}
+				if httpErr.StatusCode != tt.status || !strings.Contains(httpErr.Body, tt.wantBody) {
+					t.Errorf("unexpected HTTPError: %+v", httpErr)
+				}
+				if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+					t.Errorf("expected %v, got: %v", tt.wantErr, err)
+				}
+			})
+		}
+	}
+}
+
+func TestSandboxdRuntimeReports_RetriesOnlyWhenAsked(t *testing.T) {
+	for _, report := range runtimeReports {
+		for _, tt := range []struct {
+			name string
+			opts []CallOption
+			want int32
+		}{
+			{"default is one attempt", nil, 1},
+			{"opt in to retries", []CallOption{WithMaxAttempts(3)}, 3},
+		} {
+			t.Run(report.name+"/"+tt.name, func(t *testing.T) {
+				var requests atomic.Int32
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					requests.Add(1)
+					w.WriteHeader(http.StatusServiceUnavailable)
+				}))
+				defer server.Close()
+
+				_ = report.call(context.Background(), newReadySandboxdTestSandbox(server.URL), tt.opts...)
+				if got := requests.Load(); got != tt.want {
+					t.Errorf("requests = %d, want %d", got, tt.want)
+				}
+			})
+		}
+	}
+}
+
+func TestSandboxdRuntimeReports_BadBody(t *testing.T) {
+	for _, report := range runtimeReports {
+		t.Run(report.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, "not json")
+			}))
+			defer server.Close()
+
+			err := report.call(context.Background(), newReadySandboxdTestSandbox(server.URL))
+			if err == nil || !strings.Contains(err.Error(), "failed to decode") {
+				t.Fatalf("expected decode error, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestSandboxdRuntimeReports_LegacyRuntimeUnsupported(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("legacy runtime must not reach the server")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	for _, report := range runtimeReports {
+		t.Run(report.name, func(t *testing.T) {
+			err := report.call(context.Background(), newReadyTestSandbox(server.URL))
+			if !errors.Is(err, ErrUnsupportedByRuntime) {
+				t.Fatalf("expected ErrUnsupportedByRuntime, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestSandboxdRuntimeReports_NotConnected(t *testing.T) {
+	for _, report := range runtimeReports {
+		t.Run(report.name, func(t *testing.T) {
+			c, _, _ := newTestSandbox(inClusterTestOpts())
+			if err := report.call(context.Background(), c); !errors.Is(err, ErrNotReady) {
+				t.Fatalf("expected ErrNotReady, got: %v", err)
+			}
+		})
 	}
 }
 

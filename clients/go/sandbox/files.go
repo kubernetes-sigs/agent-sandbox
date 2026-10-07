@@ -35,7 +35,7 @@ import (
 )
 
 const maxErrorBodySize = 512            // limits untrusted server content in error chains
-const maxMetadataResponseSize = 8 << 20 // 8 MB; bounds List/Exists JSON decode
+const maxMetadataResponseSize = 8 << 20 // 8 MB; bounds small JSON decodes (List, Exists, Health, Metadata)
 
 const upperHex = "0123456789ABCDEF"
 
@@ -91,6 +91,16 @@ func applyCallOpts(ctx context.Context, opts []CallOption) (context.Context, con
 	return ctx, func() {}, co.maxAttempts
 }
 
+// applyCallOptsNoRetry is applyCallOpts for operations that do not retry
+// unless the caller opts in with WithMaxAttempts.
+func applyCallOptsNoRetry(ctx context.Context, opts []CallOption) (context.Context, context.CancelFunc, int) {
+	ctx, cancel, maxAttempts := applyCallOpts(ctx, opts)
+	if maxAttempts == 0 {
+		maxAttempts = 1
+	}
+	return ctx, cancel, maxAttempts
+}
+
 // Files provides file operations on a sandbox.
 type Files struct {
 	connector    *connector
@@ -114,8 +124,14 @@ func filesEndpoint(path string) string {
 // sandboxd runtime the body is an APIError JSON document; its message is
 // surfaced directly when it decodes cleanly.
 func (f *Files) httpErrorFromResponse(resp *http.Response, op string) *HTTPError {
+	return newHTTPError(resp, op, f.runtime)
+}
+
+// newHTTPError builds an HTTPError from a non-2xx response. It is shared by
+// every call that talks to sandboxd's REST API.
+func newHTTPError(resp *http.Response, op string, runtime Runtime) *HTTPError {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
-	if f.runtime == RuntimeSandboxd {
+	if runtime == RuntimeSandboxd {
 		var apiErr sandboxdAPIError
 		if err := json.Unmarshal(body, &apiErr); err == nil && apiErr.Code != "" {
 			return &HTTPError{StatusCode: resp.StatusCode, Body: apiErr.Code + ": " + apiErr.Message, Operation: op}

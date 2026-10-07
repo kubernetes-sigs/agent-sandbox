@@ -4,44 +4,26 @@ on:
   push:
     tags:
       - "v*"
+  # Exercise test and build before a release tag does. publish-to-pypi is
+  # skipped for non-push events.
+  pull_request:
+    paths:
+      - ".github/workflows/pypi-publish.yml"
+      - "clients/python/agentic-sandbox-client/pyproject.toml"
 
 permissions:
   contents: read
 
 jobs:
   test:
-    name: >-
-      Run Unit Tests 🧪 (${{ matrix.package-name }}, Python ${{ matrix.python-version }})
+    name: Run Unit Tests 🧪
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        include:
-          - package-name: k8s-agent-sandbox
-            package-directory: clients/python/agentic-sandbox-client
-            python-version: "3.11"
-            resolver-requirement: ""
-          - package-name: k8s-agent-sandbox
-            package-directory: clients/python/agentic-sandbox-client
-            python-version: "3.13"
-            resolver-requirement: ""
-          - package-name: deepagents-k8s-agent-sandbox (Deep Agents 0.7.10)
-            package-directory: clients/integrations/deepagents
-            python-version: "3.11"
-            resolver-requirement: deepagents==0.7.10
-          # Keep this upper endpoint aligned with the latest supported published
-          # Deep Agents 0.7 release when preparing a repository release.
-          - package-name: deepagents-k8s-agent-sandbox (Deep Agents 0.7.16)
-            package-directory: clients/integrations/deepagents
-            python-version: "3.11"
-            resolver-requirement: deepagents==0.7.16
-          - package-name: deepagents-k8s-agent-sandbox (Deep Agents 0.7.10)
-            package-directory: clients/integrations/deepagents
-            python-version: "3.13"
-            resolver-requirement: deepagents==0.7.10
-          - package-name: deepagents-k8s-agent-sandbox (Deep Agents 0.7.16)
-            package-directory: clients/integrations/deepagents
-            python-version: "3.13"
-            resolver-requirement: deepagents==0.7.16
+        python-version: ["3.11", "3.13"]
+    defaults:
+      run:
+        working-directory: clients/python/agentic-sandbox-client
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -56,26 +38,20 @@ jobs:
       - name: Display Python version
         run: python -c "import sys; print(sys.version)"
 
-      - name: Install SDK dependencies (including tests)
-        if: matrix.resolver-requirement == ''
-        working-directory: ${{ matrix.package-directory }}
+      - name: Install dependencies (including tests)
         run: python3 -m pip install ".[test]"
 
-      - name: Install adapter dependencies (including tests)
-        if: matrix.resolver-requirement != ''
-        working-directory: ${{ matrix.package-directory }}
-        run: >-
-          python3 -m pip install "${{ matrix.resolver-requirement }}" ".[test]"
-
       - name: Run Unit Tests
-        working-directory: ${{ matrix.package-directory }}
         run: python3 -m pytest
 
   build:
-    name: Build distributions 📦
+    name: Build distribution 📦
     needs: test
 
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/python/agentic-sandbox-client
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -91,77 +67,47 @@ jobs:
         run: >-
           python3 -m pip install build==1.4.3 twine==6.2.0
 
-      - name: Build k8s-agent-sandbox
-        run: >-
-          python3 -m build clients/python/agentic-sandbox-client --outdir dist
-
-      - name: Build deepagents-k8s-agent-sandbox
-        run: >-
-          python3 -m build clients/integrations/deepagents --outdir dist
+      - name: Build a binary wheel and a source tarball
+        run: python3 -m build
 
       - name: Check distribution packages
         run: python3 -m twine check dist/*
+
+      # Trusted publishing cannot create a new PyPI project, so an upload for
+      # an unregistered distribution fails at release time and aborts the whole
+      # upload. Catch that here instead.
+      - name: Verify every distribution is a registered PyPI project
+        run: |
+          for whl in dist/*.whl; do
+            name="$(basename "$whl" | cut -d- -f1)"
+            if ! code="$(curl -sSL --retry 3 --max-time 30 -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/${name}/json")"; then
+              echo "::error::Could not verify ${name} on PyPI after retries; refusing to continue."
+              exit 1
+            fi
+            if [ "$code" = "404" ]; then
+              echo "::error::${name} is not a PyPI project. Register it with a Trusted Publisher before adding it to this workflow."
+              exit 1
+            elif [ "$code" != "200" ]; then
+              echo "::error::PyPI returned HTTP ${code} while verifying ${name}; refusing to continue."
+              exit 1
+            fi
+          done
 
       - name: Store the distribution packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: python-package-distributions
-          path: dist/
-
-  validate-distributions:
-    name: >-
-      Validate distributions 📦 (Deep Agents ${{ matrix.deepagents-version }},
-      Python ${{ matrix.python-version }})
-    needs: build
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.11", "3.13"]
-        # Keep this synchronized with the test job and dev/tools/test-unit.
-        deepagents-version: ["0.7.10", "0.7.16"]
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Download the distribution packages
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: python-package-distributions
-          path: dist/
-
-      - name: Install the co-published distributions
-        run: >-
-          python3 -m pip install
-          "deepagents==${{ matrix.deepagents-version }}"
-          dist/k8s_agent_sandbox-*.whl
-          dist/deepagents_k8s_agent_sandbox-*.whl
-          "pytest>=7.0"
-          "pytest-asyncio>=0.21.0"
-
-      - name: Check installed dependencies
-        run: python3 -m pip check
-
-      - name: Run adapter unit tests from the installed wheel
-        run: >-
-          python3 -m pytest --import-mode=importlib
-          clients/integrations/deepagents/tests
+          path: clients/python/agentic-sandbox-client/dist/
 
   publish-to-pypi:
     name: >-
       Publish Python 🐍 distribution 📦 to PyPI
     needs:
-      - validate-distributions
+      - build
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/
+      url: https://pypi.org/p/k8s-agent-sandbox
     permissions:
       id-token: write # IMPORTANT: mandatory for trusted publishing
       contents: read

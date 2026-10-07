@@ -62,11 +62,9 @@ type Commands struct {
 func (c *Commands) Run(ctx context.Context, command string, opts ...CallOption) (*ExecutionResult, error) {
 	defer c.trackOp()()
 	co := resolveCallOpts(opts)
-	ctx, callCancel, maxAttempts := applyCallOpts(ctx, opts)
+	// No retries by default: commands are not idempotent.
+	ctx, callCancel, maxAttempts := applyCallOptsNoRetry(ctx, opts)
 	defer callCancel()
-	if maxAttempts == 0 {
-		maxAttempts = 1 // safe default: no retries for non-idempotent commands
-	}
 	ctx = withLifecycleSpan(ctx, c.lifecycleCtx())
 	ctx, span := startSpan(ctx, c.tracer, c.svcName, "run", AttrCommandExecutable.String(commandExecutable(command)))
 	defer func() { span.End() }()

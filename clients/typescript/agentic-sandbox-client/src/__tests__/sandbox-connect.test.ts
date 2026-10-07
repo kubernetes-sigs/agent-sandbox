@@ -16,7 +16,7 @@ import * as http from "node:http";
 import * as http2 from "node:http2";
 import * as net from "node:net";
 import { create } from "@bufbuild/protobuf";
-import type { ConnectRouter } from "@connectrpc/connect";
+import { Code, ConnectError, type ConnectRouter } from "@connectrpc/connect";
 import { connectNodeAdapter } from "@connectrpc/connect-node";
 import * as k8s from "@kubernetes/client-node";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -24,12 +24,20 @@ import type { WebSocket as WSType } from "ws";
 import { WebSocketServer } from "ws";
 import {
   ExecuteResponseSchema,
+  InitEventSchema,
   type ProcessConfig,
   ProcessService,
+  type ResizeTTYRequest,
+  type SendSignalRequest,
+  type StartRequest,
+  StartResponseSchema,
+  type WriteStdinRequest,
+  WriteStdinResponseSchema,
 } from "../_proto/process/v1/process_pb.js";
 import {
   SandboxClosedError,
   SandboxConnectionError,
+  SandboxdRpcError,
   SandboxError,
   SandboxTimeoutError,
 } from "../exceptions.js";
@@ -37,7 +45,7 @@ import { noopLogger } from "../logger.js";
 import type { SandboxInit } from "../sandbox.js";
 import { normalizeSandboxdOptions, Sandbox } from "../sandbox.js";
 import type { Span, Tracer, TracerManager } from "../trace-manager.js";
-import type { SandboxdConnectivity } from "../types.js";
+import type { ProcessEvent, SandboxdConnectivity } from "../types.js";
 
 // ---------- fake apiserver: routes by the requested target port to one of
 // two real backends (REST / gRPC), mirroring how sandboxd exposes both ports
@@ -1228,5 +1236,560 @@ describe("Sandbox streaming integration", () => {
       SandboxError,
     );
     expect(restBackend.healthHits).toBe(0);
+  });
+});
+
+// ---------- commands.start() ----------
+
+interface ProcessServerLog {
+  starts: StartRequest[];
+  stdin: WriteStdinRequest[];
+  signals: SendSignalRequest[];
+  resizes: ResizeTTYRequest[];
+  /** Start streams whose request context was aborted (client tore them down). */
+  aborted: number;
+  /** Artificial latency of every WriteStdin call. */
+  stdinDelayMs?: number;
+}
+
+const START_PID = 7;
+
+/**
+ * A fake ProcessService whose Start behavior is picked by `command[0]`:
+ * "output" (stdout, stderr, exit 3), "no-exit" (Init, then a clean end),
+ * "hang" (Init, then idle until aborted), "chatty-hang" (Init, one stdout
+ * chunk, then idle until aborted), "slow-init" (never sends Init),
+ * "missing" (NOT_FOUND before Init), "unknown-event" (Init, an event with
+ * no known case, then like "output").
+ */
+function processRoutes(log: ProcessServerLog): (router: ConnectRouter) => void {
+  const encode = (text: string) => new TextEncoder().encode(text);
+  return (router) => {
+    router.service(ProcessService, {
+      async *start(req, ctx) {
+        log.starts.push(req);
+        const untilAborted = () =>
+          new Promise<void>((resolve) => {
+            const onAbort = () => {
+              log.aborted++;
+              resolve();
+            };
+            if (ctx.signal.aborted) onAbort();
+            else ctx.signal.addEventListener("abort", onAbort, { once: true });
+          });
+        const scenario = req.config?.command[0];
+        if (scenario === "missing") {
+          throw new ConnectError("no such command", Code.NotFound);
+        }
+        if (scenario === "slow-init") {
+          await untilAborted();
+          return;
+        }
+        yield create(StartResponseSchema, {
+          event: {
+            case: "init",
+            value: create(InitEventSchema, { processId: START_PID }),
+          },
+        });
+        if (scenario === "unknown-event") {
+          // What a newer sandboxd's unknown oneof case decodes to here.
+          yield create(StartResponseSchema, {});
+        }
+        if (scenario === "output" || scenario === "unknown-event") {
+          yield create(StartResponseSchema, {
+            event: { case: "stdout", value: encode("hello ") },
+          });
+          yield create(StartResponseSchema, {
+            event: { case: "stderr", value: encode("warn") },
+          });
+          yield create(StartResponseSchema, {
+            event: { case: "exit", value: { exitCode: 3 } },
+          });
+        } else if (scenario === "chatty-hang") {
+          yield create(StartResponseSchema, {
+            event: { case: "stdout", value: encode("first") },
+          });
+          await untilAborted();
+        } else if (scenario === "hang") {
+          await untilAborted();
+        }
+      },
+      writeStdin: async (req) => {
+        log.stdin.push(req);
+        if (log.stdinDelayMs) {
+          await new Promise((r) => setTimeout(r, log.stdinDelayMs));
+        }
+        return create(WriteStdinResponseSchema, {});
+      },
+      sendSignal: (req) => {
+        log.signals.push(req);
+        return {};
+      },
+      resizeTTY: (req) => {
+        log.resizes.push(req);
+        return {};
+      },
+      execute: () => create(ExecuteResponseSchema, { exitCode: 0 }),
+    });
+  };
+}
+
+async function eventually(check: () => boolean, ms = 2000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error("condition not met in time");
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
+async function collectEvents(
+  events: AsyncIterable<ProcessEvent>,
+): Promise<ProcessEvent[]> {
+  const out: ProcessEvent[] = [];
+  for await (const event of events) out.push(event);
+  return out;
+}
+
+describe("Sandbox commands.start()", () => {
+  let log: ProcessServerLog;
+
+  async function startSandbox(opts?: {
+    disruptFirstExecute?: "session" | "socket";
+  }): Promise<Sandbox> {
+    log = { starts: [], stdin: [], signals: [], resizes: [], aborted: 0 };
+    restBackend = await startRestBackend();
+    grpcBackend = await startGrpcBackend(processRoutes(log), opts);
+    sandbox = makeSandbox({
+      apiServerPort: UNUSED_API_SERVER_PORT,
+      restPort: restBackend.port,
+      grpcPort: grpcBackend.port,
+      connectivity: "in-cluster-pod-ip",
+      podIP: "127.0.0.1",
+    });
+    return sandbox;
+  }
+
+  it("streams stdout/stderr/exit events and passes argv, env, cwd, and pty through", async () => {
+    const s = await startSandbox();
+
+    const handle = await s.commands.start("output", ["a b"], {
+      env: { FOO: "bar" },
+      cwd: "work",
+      pty: { cols: 100, rows: 30 },
+    });
+
+    expect(handle.pid).toBe(START_PID);
+    const events = await collectEvents(handle.events);
+    expect(events.map((e) => e.type)).toEqual(["stdout", "stderr", "exit"]);
+    const decoder = new TextDecoder();
+    expect(events[0]?.type === "stdout" && decoder.decode(events[0].data)).toBe(
+      "hello ",
+    );
+    expect(events[2]).toEqual({ type: "exit", exitCode: 3 });
+    await expect(handle.wait()).resolves.toEqual({ exitCode: 3 });
+
+    const config = log.starts[0]?.config;
+    expect(config?.command).toEqual(["output", "a b"]);
+    expect(config?.envVars).toEqual({ FOO: "bar" });
+    expect(config?.cwd).toBe("work");
+    expect(log.starts[0]?.pty).toMatchObject({ cols: 100, rows: 30 });
+  });
+
+  it("accepts (command) and (command, opts)", async () => {
+    const s = await startSandbox();
+
+    await s.commands.start("no-exit");
+    await s.commands.start("no-exit", { cwd: "work" });
+
+    expect(log.starts.map((r) => r.config?.command)).toEqual([
+      ["no-exit"],
+      ["no-exit"],
+    ]);
+    expect(log.starts[0]?.pty).toBeUndefined();
+    expect(log.starts[1]?.config?.cwd).toBe("work");
+  });
+
+  it("delivers output to onStdout/onStderr and resolves wait()", async () => {
+    const s = await startSandbox();
+    const out: string[] = [];
+    const err: string[] = [];
+    const decoder = new TextDecoder();
+
+    const handle = await s.commands.start("output", {
+      onStdout: (chunk) => out.push(decoder.decode(chunk)),
+      onStderr: (chunk) => err.push(decoder.decode(chunk)),
+    });
+
+    await expect(handle.wait()).resolves.toEqual({ exitCode: 3 });
+    expect(out).toEqual(["hello "]);
+    expect(err).toEqual(["warn"]);
+  });
+
+  it("lets wait() alone drain the stream, and makes the consumers mutually exclusive", async () => {
+    const s = await startSandbox();
+
+    const viaWait = await s.commands.start("output");
+    await expect(viaWait.wait()).resolves.toEqual({ exitCode: 3 });
+    expect(() => viaWait.events).toThrow(/already consumed/);
+
+    const viaCallback = await s.commands.start("output", {
+      onStdout: () => {},
+    });
+    expect(() => viaCallback.events).toThrow(/already consumed/);
+    await viaCallback.wait();
+
+    // Iterating first is fine, and wait() then resolves from the iteration.
+    const viaEvents = await s.commands.start("output");
+    await collectEvents(viaEvents.events);
+    await expect(viaEvents.wait()).resolves.toEqual({ exitCode: 3 });
+  });
+
+  it("lets wait() take over draining once an events loop has been left", async () => {
+    const s = await startSandbox();
+    const handle = await s.commands.start("output");
+
+    for await (const _event of handle.events) break;
+    const iterator = handle.events[Symbol.asyncIterator]();
+    await iterator.return?.();
+
+    await expect(handle.wait()).resolves.toEqual({ exitCode: 3 });
+    expect(() => handle.events).toThrow(/already consumed/);
+    await expect(iterator.next()).rejects.toMatchObject({
+      telemetryCode: "invalid_argument",
+    });
+  });
+
+  it("resumes events after an early break when wait() was not called", async () => {
+    const s = await startSandbox();
+    const handle = await s.commands.start("output");
+
+    const first: string[] = [];
+    for await (const event of handle.events) {
+      first.push(event.type);
+      break;
+    }
+    const rest = await collectEvents(handle.events);
+
+    expect(first).toEqual(["stdout"]);
+    expect(rest.map((e) => e.type)).toEqual(["stderr", "exit"]);
+    await expect(handle.wait()).resolves.toEqual({ exitCode: 3 });
+  });
+
+  it("does not let wait() steal events from a loop whose body is still awaiting", async () => {
+    const s = await startSandbox();
+    const handle = await s.commands.start("output");
+
+    const seen: string[] = [];
+    let waiting: Promise<{ exitCode: number }> | undefined;
+    for await (const event of handle.events) {
+      seen.push(event.type);
+      if (!waiting) {
+        waiting = handle.wait();
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    }
+
+    expect(seen).toEqual(["stdout", "stderr", "exit"]);
+    await expect(waiting).resolves.toEqual({ exitCode: 3 });
+  });
+
+  it("kills the process and rejects wait() with the error a callback threw", async () => {
+    const s = await startSandbox();
+    const boom = new Error("callback failed");
+
+    const handle = await s.commands.start("output", {
+      onStdout: () => {
+        throw boom;
+      },
+    });
+
+    await expect(handle.wait()).rejects.toBe(boom);
+    // The handle is closed as well, so the stream is torn down.
+    await expect(handle.write("x")).rejects.toBeInstanceOf(SandboxClosedError);
+  });
+
+  it("rejects a missing executable with SandboxdRpcError not_found before returning a handle", async () => {
+    const s = await startSandbox();
+
+    const err = await s.commands.start("missing").catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(SandboxdRpcError);
+    expect((err as SandboxdRpcError).code).toBe("not_found");
+  });
+
+  it("reports a stream that ends without an ExitEvent as a protocol error", async () => {
+    const s = await startSandbox();
+
+    const handle = await s.commands.start("no-exit");
+
+    await expect(collectEvents(handle.events)).rejects.toMatchObject({
+      name: "SandboxConnectionError",
+      kind: "protocol",
+    });
+    await expect(handle.wait()).rejects.toBeInstanceOf(SandboxConnectionError);
+  });
+
+  it("keeps one stream's protocol error from failing the shared connection", async () => {
+    const s = await startSandbox();
+    const other = await s.commands.start("hang");
+    const otherWait = other.wait();
+    otherWait.catch(() => {});
+
+    const broken = await s.commands.start("no-exit");
+    await expect(broken.wait()).rejects.toMatchObject({
+      name: "SandboxConnectionError",
+      kind: "protocol",
+    });
+
+    // Invalidating the generation would have failed both of these.
+    await other.write("still here");
+    await expect(s.commands.run("echo")).resolves.toMatchObject({
+      exitCode: 0,
+    });
+    await other.close();
+    await expect(otherWait).rejects.toBeInstanceOf(SandboxClosedError);
+  });
+
+  it("skips Start events it does not know", async () => {
+    const s = await startSandbox();
+    const handle = await s.commands.start("unknown-event");
+
+    const events = await collectEvents(handle.events);
+
+    expect(events.map((e) => e.type)).toEqual(["stdout", "stderr", "exit"]);
+  });
+
+  it("validates arguments before connecting", async () => {
+    const s = await startSandbox();
+
+    await expect(s.commands.start("")).rejects.toMatchObject({
+      telemetryCode: "invalid_argument",
+    });
+    await expect(
+      s.commands.start("sh", { pty: { cols: 0, rows: 24 } }),
+    ).rejects.toMatchObject({ telemetryCode: "invalid_argument" });
+    await expect(
+      s.commands.start("sh", { pty: { cols: 80, rows: 70000 } }),
+    ).rejects.toMatchObject({ telemetryCode: "invalid_argument" });
+    await expect(
+      s.commands.start("sh", { onStdout: "nope" as never }),
+    ).rejects.toMatchObject({ telemetryCode: "invalid_argument" });
+    expect(log.starts).toHaveLength(0);
+  });
+
+  it("sends stdin, EOF, signals, and resizes for the process's pid", async () => {
+    const s = await startSandbox();
+    const handle = await s.commands.start("hang");
+    const pty = await s.commands.start("hang", { pty: { cols: 80, rows: 24 } });
+
+    await handle.write("hello");
+    await handle.closeStdin();
+    await handle.signal("SIGTERM");
+    await handle.kill();
+    await pty.resize({ cols: 120, rows: 40 });
+
+    expect(log.stdin.map((r) => r.processId)).toEqual([START_PID, START_PID]);
+    const first = log.stdin[0]?.payload;
+    expect(first?.case).toBe("input");
+    expect(new TextDecoder().decode(first?.value as Uint8Array)).toBe("hello");
+    expect(log.stdin[1]?.payload.case).toBe("eof");
+    // SIGTERM = 15, SIGKILL = 9.
+    expect(log.signals.map((r) => r.signal)).toEqual([15, 9]);
+    expect(log.resizes).toHaveLength(1);
+    expect(log.resizes[0]).toMatchObject({
+      processId: START_PID,
+      cols: 120,
+      rows: 40,
+    });
+  });
+
+  it("splits a large write into ordered chunks", async () => {
+    const s = await startSandbox();
+    const handle = await s.commands.start("hang");
+    const data = new Uint8Array(2.5 * 1024 * 1024).map((_, i) => i % 251);
+
+    await handle.write(data);
+
+    expect(
+      log.stdin.map((r) => (r.payload.value as Uint8Array).length),
+    ).toEqual([1024 * 1024, 1024 * 1024, 0.5 * 1024 * 1024]);
+    const joined = Buffer.concat(
+      log.stdin.map((r) => r.payload.value as Uint8Array),
+    );
+    expect(joined.equals(Buffer.from(data))).toBe(true);
+  });
+
+  it("shares one timeoutMs budget across the chunks of a large write", async () => {
+    const s = await startSandbox();
+    const handle = await s.commands.start("hang");
+    // Three chunks at ~300ms each: every RPC fits in 700ms on its own (so
+    // per-chunk timers would let the whole write succeed after ~900ms), but
+    // the call as a whole does not.
+    log.stdinDelayMs = 300;
+
+    const startedAt = Date.now();
+    await expect(
+      handle.write(new Uint8Array(2.5 * 1024 * 1024), { timeoutMs: 700 }),
+    ).rejects.toBeInstanceOf(SandboxTimeoutError);
+
+    expect(Date.now() - startedAt).toBeLessThan(850);
+  });
+
+  it("rejects a malformed write() timeoutMs as invalid_argument, not a timeout", async () => {
+    const s = await startSandbox();
+    const handle = await s.commands.start("hang");
+
+    for (const timeoutMs of [0, -1, Number.NaN, 1.5, 2147483648]) {
+      for (const data of ["x", ""]) {
+        const err = await handle.write(data, { timeoutMs }).catch((e) => e);
+        expect(err).not.toBeInstanceOf(SandboxTimeoutError);
+        expect(err).toMatchObject({ telemetryCode: "invalid_argument" });
+      }
+    }
+    expect(log.stdin).toHaveLength(0);
+  });
+
+  it("rejects bad control calls client-side, including closeStdin() on a PTY", async () => {
+    const s = await startSandbox();
+    const plain = await s.commands.start("hang");
+    const pty = await s.commands.start("hang", { pty: { cols: 80, rows: 24 } });
+
+    await expect(pty.closeStdin()).rejects.toMatchObject({
+      telemetryCode: "invalid_argument",
+      // The hint spells out the escape, not a raw EOT byte.
+      message: expect.stringContaining('write("\\x04")'),
+    });
+    await expect(plain.signal("SIGHUP" as never)).rejects.toMatchObject({
+      telemetryCode: "invalid_argument",
+    });
+    await expect(plain.resize({ cols: 80, rows: 0 })).rejects.toMatchObject({
+      telemetryCode: "invalid_argument",
+    });
+    expect(log.stdin).toHaveLength(0);
+    expect(log.signals).toHaveLength(0);
+    expect(log.resizes).toHaveLength(0);
+  });
+
+  it("handle.close() tears the stream down and leaves the connection generation valid", async () => {
+    const s = await startSandbox();
+    const handle = await s.commands.start("hang");
+    const pending = collectEvents(handle.events);
+    expect(restBackend?.healthHits).toBe(1);
+
+    await handle.close();
+
+    await expect(pending).rejects.toBeInstanceOf(SandboxClosedError);
+    await eventually(() => log.aborted === 1);
+    await expect(handle.write("x")).rejects.toBeInstanceOf(SandboxClosedError);
+    await expect(handle.wait()).rejects.toBeInstanceOf(SandboxClosedError);
+    // The shared connection was not invalidated by closing one process:
+    // REST and gRPC both keep working without a reconnect.
+    await s.files.read("a.txt");
+    await s.commands.run("echo");
+    expect(restBackend?.healthHits).toBe(1);
+  });
+
+  it("bounds only the startup with timeoutMs, not the process's lifetime", async () => {
+    const s = await startSandbox();
+
+    await expect(
+      s.commands.start("slow-init", { timeoutMs: 150 }),
+    ).rejects.toBeInstanceOf(SandboxTimeoutError);
+    await eventually(() => log.aborted === 1);
+
+    const handle = await s.commands.start("hang", { timeoutMs: 150 });
+    await new Promise((r) => setTimeout(r, 400));
+    await handle.write("still alive");
+    expect(log.aborted).toBe(1);
+  });
+
+  it("aborting the caller's signal after start kills the stream with the caller's reason", async () => {
+    const s = await startSandbox();
+    const controller = new AbortController();
+    const reason = new Error("stop it");
+    const handle = await s.commands.start("hang", {
+      signal: controller.signal,
+    });
+    const waiting = handle.wait();
+
+    controller.abort(reason);
+
+    await expect(waiting).rejects.toBe(reason);
+    await eventually(() => log.aborted === 1);
+  });
+
+  it("settles wait() on cancellation even after the caller stopped iterating events", async () => {
+    const s = await startSandbox();
+    const controller = new AbortController();
+    const reason = new Error("stop it");
+    const handle = await s.commands.start("chatty-hang", {
+      signal: controller.signal,
+    });
+    for await (const _event of handle.events) break;
+    const waiting = handle.wait();
+
+    controller.abort(reason);
+
+    await expect(waiting).rejects.toBe(reason);
+  });
+
+  it("settles wait() when the Sandbox or the handle is closed after the caller stopped iterating", async () => {
+    const s = await startSandbox();
+    const viaHandle = await s.commands.start("chatty-hang");
+    for await (const _event of viaHandle.events) break;
+    const viaSandbox = await s.commands.start("chatty-hang");
+    for await (const _event of viaSandbox.events) break;
+
+    await viaHandle.close();
+    await expect(viaHandle.wait()).rejects.toBeInstanceOf(SandboxClosedError);
+
+    const waiting = viaSandbox.wait();
+    await s.closeLocal();
+    await expect(waiting).rejects.toBeInstanceOf(SandboxClosedError);
+  });
+
+  it("keeps a clean exit resolved when the Sandbox is closed afterwards", async () => {
+    const s = await startSandbox();
+    const handle = await s.commands.start("output");
+    await collectEvents(handle.events);
+
+    await s.closeLocal();
+
+    await expect(handle.wait()).resolves.toEqual({ exitCode: 3 });
+  });
+
+  it("does not hold up close() for a long-lived process, and ends it with SandboxClosedError", async () => {
+    const s = await startSandbox();
+    const handle = await s.commands.start("hang");
+    const waiting = handle.wait();
+
+    const startedAt = Date.now();
+    await s.close();
+
+    expect(Date.now() - startedAt).toBeLessThan(2000);
+    await expect(waiting).rejects.toBeInstanceOf(SandboxClosedError);
+    await eventually(() => log.aborted === 1);
+    await expect(handle.write("x")).rejects.toBeInstanceOf(SandboxClosedError);
+  });
+
+  it("fails control calls with SandboxConnectionError once the process's connection was replaced", async () => {
+    const s = await startSandbox({ disruptFirstExecute: "session" });
+    const handle = await s.commands.start("hang");
+    const waiting = handle.wait();
+    waiting.catch(() => {});
+
+    // Tearing down the gRPC session under a concurrent call invalidates the
+    // whole generation, including the process's stream.
+    await expect(s.commands.run("echo")).rejects.toBeInstanceOf(
+      SandboxConnectionError,
+    );
+    await expect(waiting).rejects.toBeInstanceOf(SandboxConnectionError);
+
+    // Even after the next call reconnects, the old pid is not addressable.
+    await s.commands.run("echo");
+    await expect(handle.write("x")).rejects.toBeInstanceOf(
+      SandboxConnectionError,
+    );
+    expect(log.stdin).toHaveLength(0);
   });
 });

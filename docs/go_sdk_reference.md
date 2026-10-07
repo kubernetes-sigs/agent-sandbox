@@ -45,6 +45,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 - [type HTTPError](<#HTTPError>)
   - [func \(e \*HTTPError\) Error\(\) string](<#HTTPError.Error>)
 - [type Handle](<#Handle>)
+- [type Health](<#Health>)
 - [type Info](<#Info>)
 - [type K8sHelper](<#K8sHelper>)
   - [func NewK8sHelper\(restConfig \*rest.Config, log logr.Logger\) \(\*K8sHelper, error\)](<#NewK8sHelper>)
@@ -52,6 +53,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 - [type Key](<#Key>)
 - [type ListOption](<#ListOption>)
   - [func WithLabelSelector\(selector string\) ListOption](<#WithLabelSelector>)
+- [type Metadata](<#Metadata>)
 - [type Options](<#Options>)
 - [type Runtime](<#Runtime>)
 - [type Sandbox](<#Sandbox>)
@@ -64,8 +66,10 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(s \*Sandbox\) Disconnect\(ctx context.Context\) error](<#Sandbox.Disconnect>)
   - [func \(s \*Sandbox\) Exists\(ctx context.Context, path string, opts ...CallOption\) \(bool, error\)](<#Sandbox.Exists>)
   - [func \(s \*Sandbox\) Files\(\) \*Files](<#Sandbox.Files>)
+  - [func \(s \*Sandbox\) Health\(ctx context.Context, opts ...CallOption\) \(\*Health, error\)](<#Sandbox.Health>)
   - [func \(s \*Sandbox\) IsReady\(\) bool](<#Sandbox.IsReady>)
   - [func \(s \*Sandbox\) List\(ctx context.Context, path string, opts ...CallOption\) \(\[\]FileEntry, error\)](<#Sandbox.List>)
+  - [func \(s \*Sandbox\) Metadata\(ctx context.Context, opts ...CallOption\) \(\*Metadata, error\)](<#Sandbox.Metadata>)
   - [func \(s \*Sandbox\) Open\(ctx context.Context\) \(retErr error\)](<#Sandbox.Open>)
   - [func \(s \*Sandbox\) PodIP\(\) string](<#Sandbox.PodIP>)
   - [func \(s \*Sandbox\) PodName\(\) string](<#Sandbox.PodName>)
@@ -567,6 +571,19 @@ type Handle interface {
 }
 ```
 
+<a name="Health"></a>
+### type [Health](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+Health is the sandboxd runtime's report from GET /v1/health.
+
+```go
+type Health struct {
+    Status string `json:"status"`
+    // UptimeSeconds is how long sandboxd has been running.
+    UptimeSeconds int64 `json:"uptime_seconds"`
+}
+```
+
 <a name="Info"></a>
 ### type [Info](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
 
@@ -647,6 +664,20 @@ func WithLabelSelector(selector string) ListOption
 ```
 
 WithLabelSelector restricts the listing to claims matching a Kubernetes label selector, for example "app=agent,tier\!=dev". Pair it with Options.Labels, which stamps labels on the claims the client creates.
+
+<a name="Metadata"></a>
+### type [Metadata](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+Metadata is the non\-sensitive, workload\-scoped configuration sandboxd serves from GET /v1/metadata.
+
+```go
+type Metadata struct {
+    // Env holds the environment variables sandboxd exposes: only names
+    // matching its --metadata-env-prefix, minus anything that looks like a
+    // credential. It is never nil.
+    Env map[string]string `json:"env"`
+}
+```
 
 <a name="Options"></a>
 ### type [Options](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/options.go>)
@@ -913,6 +944,15 @@ func (s *Sandbox) Files() *Files
 
 Files returns the file operations sub\-object.
 
+<a name="Sandbox.Health"></a>
+#### func \(\*Sandbox\) [Health](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
+
+```go
+func (s *Sandbox) Health(ctx context.Context, opts ...CallOption) (*Health, error)
+```
+
+Health returns sandboxd's report from GET /v1/health. It returns an HTTPError while sandboxd is shutting down, and ErrUnsupportedByRuntime on the legacy python\-runtime. It does not retry unless WithMaxAttempts is set. Not part of the Handle interface to avoid breaking existing implementers.
+
 <a name="Sandbox.IsReady"></a>
 #### func \(\*Sandbox\) [IsReady](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
 
@@ -930,6 +970,15 @@ func (s *Sandbox) List(ctx context.Context, path string, opts ...CallOption) ([]
 ```
 
 
+
+<a name="Sandbox.Metadata"></a>
+#### func \(\*Sandbox\) [Metadata](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
+
+```go
+func (s *Sandbox) Metadata(ctx context.Context, opts ...CallOption) (*Metadata, error)
+```
+
+Metadata returns the workload\-scoped configuration sandboxd serves from GET /v1/metadata \(sandboxd runtime only; the legacy python\-runtime returns ErrUnsupportedByRuntime\). It does not retry unless WithMaxAttempts is set. Not part of the Handle interface to avoid breaking existing implementers.
 
 <a name="Sandbox.Open"></a>
 #### func \(\*Sandbox\) [Open](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)

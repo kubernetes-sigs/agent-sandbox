@@ -80,7 +80,8 @@ policy, per-pod resource limits) for the model-driven code the agent executes.
 ## Install
 
 ```bash
-pip install openhands-k8s-agent-sandbox
+# Replace <tag> with a release tag from https://github.com/kubernetes-sigs/agent-sandbox/releases
+pip install "git+https://github.com/kubernetes-sigs/agent-sandbox.git@<tag>#subdirectory=clients/integrations/openhands"
 # for the agent half of the example (tool presets):
 pip install openhands-tools
 ```

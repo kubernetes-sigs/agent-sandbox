@@ -25,6 +25,12 @@ class ExecutionResult(BaseModel):
     stdout: str = ""  # Standard output from the command.
     stderr: str = ""  # Standard error from the command.
     exit_code: int = -1  # Exit code of the command.
+    timed_out: bool = False  # True if the runtime killed the command for exceeding its time limit.
+
+class LegacyExecuteRequest(BaseModel):
+    """Request body for the legacy python-runtime /execute endpoint."""
+    command: str  # Shell command to run.
+    timeout_seconds: Optional[float] = None  # Limit on how long the command may run; omitted when unset.
 
 class FileEntry(BaseModel):
     """Represents a file or directory entry in the sandbox.

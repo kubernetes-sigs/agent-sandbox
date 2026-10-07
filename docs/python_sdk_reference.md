@@ -526,10 +526,11 @@ class SandboxdInClusterConnectionConfig(BaseModel)
 
 Connect to sandboxd directly over the selected in-cluster address.
 
-``service-dns`` requires ``Sandbox.status.serviceFQDN`` and a Service
-enabled on the Sandbox template. ``pod-ip`` uses ``Sandbox.status.podIPs``.
-Neither mode falls back to the other. sandboxd's REST filesystem listener
-defaults to port 8080 and its gRPC ProcessService listener to port 9090.
+``in-cluster-service`` requires ``Sandbox.status.serviceFQDN`` and a Service
+enabled on the Sandbox template. ``in-cluster-pod-ip`` uses
+``Sandbox.status.podIPs``. Neither mode falls back to the other. sandboxd's
+REST filesystem listener defaults to port 8080 and its gRPC ProcessService
+listener to port 9090.
 
 <a id="k8s_agent_sandbox.models.SandboxInClusterConnectionConfig"></a>
 

@@ -23,8 +23,12 @@ class SandboxNotReadyError(SandboxError):
     """Raised when the sandbox is not ready for communication."""
 
 
-class SandboxServiceUnavailableError(SandboxError):
-    """Raised when Service DNS was selected but the Sandbox has no Service FQDN."""
+class SandboxNoServiceError(SandboxError):
+    """Raised in ``in-cluster-service`` mode if the Sandbox has no Service FQDN."""
+
+
+# Deprecated alias; use SandboxNoServiceError.
+SandboxServiceUnavailableError = SandboxNoServiceError
 
 
 class SandboxNotFoundError(SandboxError):

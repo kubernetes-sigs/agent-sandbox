@@ -813,7 +813,7 @@ class TestAsyncSandboxClientInCluster(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_sandboxd_in_cluster_config_accepted(self):
-        config = SandboxdInClusterConnectionConfig(mode="pod-ip")
+        config = SandboxdInClusterConnectionConfig(mode="in-cluster-pod-ip")
         client = AsyncSandboxClient(connection_config=config, cleanup=False)
         self.assertIs(client.connection_config, config)
 

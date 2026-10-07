@@ -832,7 +832,7 @@ class TestSandboxClientInClusterConfig(unittest.TestCase):
 
     @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
     def test_sandboxd_in_cluster_config_stored(self, _):
-        config = SandboxdInClusterConnectionConfig(mode="service-dns")
+        config = SandboxdInClusterConnectionConfig(mode="in-cluster-service")
         client = SandboxClient(connection_config=config)
         self.assertIs(client.connection_config, config)
 

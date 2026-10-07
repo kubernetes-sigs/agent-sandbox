@@ -350,9 +350,9 @@ either explicit mode:
 from k8s_agent_sandbox.models import SandboxdInClusterConnectionConfig
 
 client = SandboxClient(
-    connection_config=SandboxdInClusterConnectionConfig(mode="service-dns")
+    connection_config=SandboxdInClusterConnectionConfig(mode="in-cluster-service")
 )
-# Use mode="pod-ip" to select status.podIPs instead; neither mode falls back.
+# Use mode="in-cluster-pod-ip" to select status.podIPs instead; neither mode falls back.
 ```
 
 The client ServiceAccount needs `get` permission on the namespaced Sandbox,

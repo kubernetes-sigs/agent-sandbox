@@ -30,7 +30,7 @@ Local: `python` 3.11+ (the in-repo SDK requires it), `kubectl` 1.31+, `docker` 2
 ## 1. Unit tests — no infra
 
 ```bash
-cd fleet/python
+cd examples/multi-cluster-fleet/python
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e '.[test]'
 pytest -v
@@ -193,7 +193,7 @@ export FLEET_MEMBER_IMAGE=$(REGION=$REGION REPO=fleet-images ./deploy/build-push
 stdout — capture it, don't hand it a full `ref:tag`.
 
 The build context is the **repo root**, not `fleet/` — the Dockerfile copies
-both `clients/python/agentic-sandbox-client` (the SDK) and `fleet/python`.
+both `clients/python/agentic-sandbox-client` (the SDK) and `examples/multi-cluster-fleet/python`.
 
 ### 3e. Deploy one member per cluster
 
@@ -384,7 +384,7 @@ of the fleet.
 
 ## 6. Acceptance checklist
 
-- [ ] `pytest -v` in `fleet/python` — 100% pass
+- [ ] `pytest -v` in `examples/multi-cluster-fleet/python` — 100% pass
 - [ ] `python -m agent_sandbox_fleet.fleet_member --help` — entrypoint works
 - [ ] `./deploy/build-push.sh` — image builds from the repo root and prints
       the pushed ref on stdout

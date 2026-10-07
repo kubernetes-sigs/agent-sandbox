@@ -24,6 +24,7 @@ import inspect
 import logging
 import math
 import socket
+import ssl
 from collections.abc import Callable
 from typing import Any, Awaitable
 
@@ -46,6 +47,7 @@ from .models import (
     SandboxdPodTunnelConnectionConfig,
     SandboxdInClusterConnectionConfig,
 )
+from .utils import async_kubectl_kubeconfig_args, merge_headers
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +99,18 @@ def _router_timeout_header_value(timeout) -> str | None:
     if value is None or not math.isfinite(value) or value <= 0:
         return None
     return str(value)
+
+
+def _build_ssl_context(config: SandboxDirectConnectionConfig) -> ssl.SSLContext:
+    """Build the TLS context (httpx deprecates verify/cert paths)."""
+    if config.ca_cert:
+        context = ssl.create_default_context(cafile=config.ca_cert)
+    else:
+        # Same trust store as the default client.
+        context = httpx.create_ssl_context()
+    if config.client_cert:
+        context.load_cert_chain(*config.client_cert)
+    return context
 
 
 class AsyncSandboxConnector:
@@ -155,6 +169,7 @@ class AsyncSandboxConnector:
                 namespace=namespace,
                 config=connection_config,
                 get_pod_name=get_pod_name,
+                api_client=k8s_helper.injected_api_client,
             )
         elif isinstance(connection_config, SandboxdInClusterConnectionConfig):
             self._sandboxd_strategy = AsyncSandboxdInClusterStrategy(
@@ -190,7 +205,14 @@ class AsyncSandboxConnector:
             ),
         )
 
-        transport = httpx.AsyncHTTPTransport()
+        self._extra_headers: dict[str, str] = {}
+        verify: ssl.SSLContext | bool = True
+        if isinstance(connection_config, SandboxDirectConnectionConfig):
+            self._extra_headers = connection_config.extra_headers
+            if connection_config.ca_cert or connection_config.client_cert:
+                verify = _build_ssl_context(connection_config)
+
+        transport = httpx.AsyncHTTPTransport(verify=verify)
         self.client = httpx.AsyncClient(
             transport=transport, timeout=httpx.Timeout(60.0)
         )
@@ -301,7 +323,8 @@ class AsyncSandboxConnector:
 
         allowed_statuses = kwargs.pop("allowed_statuses", None)
         disable_retries = kwargs.pop("_disable_retries", False)
-        headers = kwargs.pop("headers", {}).copy()
+        # Precedence: config < caller < SDK routing headers.
+        headers = merge_headers(self._extra_headers, kwargs.pop("headers", None))
         # For security and SSRF mitigation, the SDK explicitly mandates blocking all HTTP redirects
         # to the internal sandbox endpoints. Any user-provided redirect settings are overridden and
         # ignored. We pop 'follow_redirects' here to prevent a TypeError due to duplicate keyword
@@ -621,11 +644,14 @@ class AsyncSandboxdPodTunnelStrategy:
         namespace: str,
         config: SandboxdPodTunnelConnectionConfig,
         get_pod_name: Callable[[], Awaitable[str | None]] | None = None,
+        api_client: Any | None = None,
     ) -> None:
         self.sandbox_id = sandbox_id
         self.namespace = namespace
         self.config = config
         self._get_pod_name = get_pod_name
+        # Injected client whose cluster kubectl must target instead of the ambient one.
+        self._api_client = api_client
         self.port_forward_process: asyncio.subprocess.Process | None = None
         self.base_url: str | None = None
         self.grpc_target: str | None = None
@@ -681,6 +707,13 @@ class AsyncSandboxdPodTunnelStrategy:
                 "sandbox pod name not resolved yet; cannot port-forward to sandboxd"
             )
 
+        async with async_kubectl_kubeconfig_args(self._api_client) as kube_args:
+            return await self._start_tunnel_locked(pod_name, kube_args)
+
+    async def _start_tunnel_locked(
+        self, pod_name: str, kube_args: list[str]
+    ) -> tuple[str, str]:
+        """Start ``kubectl`` while the caller holds ``_lifecycle_lock``."""
         rest_local = self._get_free_port()
         grpc_local = self._get_free_port()
         try:
@@ -693,6 +726,7 @@ class AsyncSandboxdPodTunnelStrategy:
                     f"{grpc_local}:{self.config.grpc_port}",
                     "-n",
                     self.namespace,
+                    *kube_args,
                     # kubectl logs each forwarded connection. Discard the
                     # long-lived subprocess output because this SDK has no log
                     # consumer for the forwarding process.

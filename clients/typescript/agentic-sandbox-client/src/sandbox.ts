@@ -13,7 +13,13 @@
 // limitations under the License.
 
 import type * as k8s from "@kubernetes/client-node";
-import { SandboxCommands } from "./commands.js";
+import {
+  ProcessHandle,
+  type ProcessSession,
+  SandboxCommands,
+  validatePtySize,
+  validateTimeoutMs,
+} from "./commands.js";
 import {
   createConnectionStrategy,
   type SandboxdConnectionStrategy,
@@ -28,10 +34,12 @@ import {
   DEFAULT_MAX_DOWNLOAD_SIZE,
   DEFAULT_MAX_METADATA_RESPONSE_SIZE,
   DEFAULT_MAX_UPLOAD_SIZE,
-  DEFAULT_OPERATION_TIMEOUT_MS,
   DEFAULT_PORT_FORWARD_READY_TIMEOUT_MS,
   DEFAULT_SANDBOXD_GRPC_PORT,
   DEFAULT_SANDBOXD_REST_PORT,
+  SANDBOX_API_GROUP,
+  SANDBOX_API_VERSION,
+  SANDBOX_PLURAL_NAME,
 } from "./constants.js";
 import {
   isK8s404,
@@ -43,7 +51,11 @@ import {
 } from "./exceptions.js";
 import { SandboxFiles } from "./files.js";
 import { noopLogger } from "./logger.js";
-import { ProcessClient, type ProcessSpec } from "./process.js";
+import {
+  ProcessClient,
+  type ProcessSpec,
+  StreamLocalFailure,
+} from "./process.js";
 import {
   resolveSandboxPath,
   SandboxdRestClient,
@@ -57,6 +69,7 @@ import type {
   ExecutionResult,
   FileCallOptions,
   Logger,
+  ProcessCallOptions,
   ProcessOptions,
   RunOptions,
   RuntimeCallOptions,
@@ -64,8 +77,32 @@ import type {
   SandboxdOptions,
   SandboxHealth,
   SandboxMetadata,
+  SandboxStatus,
+  StartOptions,
   WriteOptions,
 } from "./types.js";
+
+/**
+ * `status.conditions` of a Kubernetes object, or [] when it has none.
+ * @internal Not part of the public API.
+ */
+export function readConditions(
+  obj: Record<string, unknown> | undefined,
+): Array<Record<string, string>> {
+  const status = (obj?.status as Record<string, unknown>) ?? {};
+  return (status.conditions as Array<Record<string, string>>) ?? [];
+}
+
+/**
+ * The `Ready` condition of a Kubernetes object, if the controller has
+ * reported one.
+ * @internal Not part of the public API.
+ */
+export function findReadyCondition(
+  obj: Record<string, unknown> | undefined,
+): Record<string, string> | undefined {
+  return readConditions(obj).find((c) => c.type === "Ready");
+}
 
 /**
  * Races an operation against a timeout and always releases the timeout timer.
@@ -202,12 +239,6 @@ function validateConnectivity(
     );
   }
   return value;
-}
-
-function validateTimeoutMs(name: string, value: number | undefined): number {
-  return (
-    validateBoundedInt(name, value, 2147483647) ?? DEFAULT_OPERATION_TIMEOUT_MS
-  );
 }
 
 /**
@@ -412,6 +443,8 @@ export class Sandbox {
     if (!this._commands) {
       this._commands = new SandboxCommands({
         run: (command, args, opts) => this.runCommandImpl(command, args, opts),
+        start: (command, args, opts) =>
+          this.startCommandImpl(command, args, opts),
       });
     }
     return this._commands;
@@ -456,6 +489,49 @@ export class Sandbox {
    */
   metadata(opts?: RuntimeCallOptions): Promise<SandboxMetadata> {
     return this.metadataImpl(opts);
+  }
+
+  /**
+   * Reads the Sandbox's `Ready` condition from Kubernetes. Resolves with
+   * `SandboxNotFound` when the Sandbox object is gone, including after
+   * `close()`, and with `SandboxNotReady` when it has no `Ready` condition
+   * yet. Any other failure to read it rejects with a {@link SandboxError}.
+   * Unlike `health()`, this does not connect to sandboxd.
+   */
+  async status(): Promise<SandboxStatus> {
+    let sandboxObj: Record<string, unknown>;
+    try {
+      sandboxObj = (await this.customObjectsApi.getNamespacedCustomObject({
+        group: SANDBOX_API_GROUP,
+        version: SANDBOX_API_VERSION,
+        namespace: this.namespace,
+        plural: SANDBOX_PLURAL_NAME,
+        name: this.sandboxName,
+      })) as Record<string, unknown>;
+    } catch (err: unknown) {
+      if (isK8s404(err)) {
+        return {
+          status: "SandboxNotFound",
+          message: "Sandbox object not found in Kubernetes.",
+        };
+      }
+      throw new SandboxError(
+        `Failed to read Sandbox '${this.sandboxName}' in namespace '${this.namespace}'.`,
+        { cause: err },
+      );
+    }
+
+    const ready = findReadyCondition(sandboxObj);
+    if (!ready) {
+      return {
+        status: "SandboxNotReady",
+        message: "Ready condition not reported yet.",
+      };
+    }
+    return {
+      status: ready.status === "True" ? "SandboxReady" : "SandboxNotReady",
+      message: ready.message ?? "",
+    };
   }
 
   /**
@@ -782,6 +858,7 @@ export class Sandbox {
     timeoutMs: number,
     userSignal: AbortSignal | undefined,
     fn: (gen: ConnectionGeneration, signal: AbortSignal) => Promise<T>,
+    pinned?: ConnectionGeneration,
   ): Promise<T> {
     if (!this.isActive) {
       throw new SandboxClosedError("Sandbox handle is closed");
@@ -805,12 +882,23 @@ export class Sandbox {
     const totalSignal = AbortSignal.any(signals);
 
     try {
-      const gen = await this.ensureConnected(totalSignal);
+      // A pinned operation belongs to one specific connection generation
+      // (e.g. a process id is only meaningful on the connection that started
+      // it) and must never reconnect and land on a different one.
+      const gen = pinned ?? (await this.ensureConnected(totalSignal));
       // No await between here and the in-flight increment: close()'s drain
       // must not observe a gap where this operation is neither "waiting to
       // connect" nor "counted in-flight".
-      if (!this.isActive || this.currentGeneration !== gen) {
+      if (!this.isActive) {
         throw new SandboxClosedError("Sandbox handle is closed");
+      }
+      if (this.currentGeneration !== gen) {
+        throw pinned
+          ? new SandboxConnectionError(
+              "sandboxd connection for this process is no longer current",
+              "protocol",
+            )
+          : new SandboxClosedError("Sandbox handle is closed");
       }
       this._inflightCount++;
       try {
@@ -851,10 +939,11 @@ export class Sandbox {
   private classifyOperationFailure(
     err: unknown,
     gen: ConnectionGeneration,
-    timeoutController: AbortController,
+    timeoutController: AbortController | undefined,
     userSignal: AbortSignal | undefined,
+    processHandleSignal?: AbortSignal,
   ): unknown {
-    if (timeoutController.signal.aborted) {
+    if (timeoutController?.signal.aborted) {
       return timeoutController.signal.reason;
     }
     if (this.lifecycleAbortController.signal.aborted) {
@@ -862,6 +951,12 @@ export class Sandbox {
     }
     if (userSignal?.aborted) {
       return userSignal.reason;
+    }
+    // Closing one process handle only ends that process's stream. Keep it
+    // out of generation invalidation, or it would fail every other
+    // operation sharing the connection.
+    if (processHandleSignal?.aborted) {
+      return new SandboxClosedError("Process handle is closed");
     }
     if (gen.abortController.signal.aborted) {
       return new SandboxConnectionError(
@@ -876,6 +971,10 @@ export class Sandbox {
     // untouched for writeStreamImpl() to unwrap.
     if (err instanceof SourceFailure) {
       return err;
+    }
+    // A protocol violation on one Start stream ends only that stream.
+    if (err instanceof StreamLocalFailure) {
+      return err.error;
     }
     if (err instanceof SandboxConnectionError) {
       this.invalidateGeneration(gen, err);
@@ -984,6 +1083,121 @@ export class Sandbox {
           );
       },
       (gen, signal) => gen.rest.metadata(signal),
+    );
+  }
+
+  /**
+   * Starts a process and returns its handle once sandboxd reports it
+   * running. Only that startup phase is an in-flight operation with a
+   * deadline (runOperation()); after that the process's lifetime is bound to
+   * the stream, so it is not counted in-flight — a long-lived process must
+   * not hold up close() — and close()/closeLocal() end it through the
+   * lifecycle abort and generation teardown instead.
+   */
+  private async startCommandImpl(
+    command: string,
+    args: readonly string[],
+    opts?: StartOptions,
+  ): Promise<ProcessHandle> {
+    const spec = validateProcessSpec(command, args, opts);
+    const pty =
+      opts?.pty === undefined ? undefined : validatePtySize(opts.pty, "pty");
+    for (const name of ["onStdout", "onStderr"] as const) {
+      if (opts?.[name] !== undefined && typeof opts[name] !== "function") {
+        throw invalidArgumentError(`${name} must be a function`);
+      }
+    }
+    const timeoutMs = validateTimeoutMs("timeoutMs", opts?.timeoutMs);
+    const userSignal = opts?.signal;
+    return this.operate<ProcessHandle>(
+      "command.start",
+      timeoutMs,
+      userSignal,
+      (span) => {
+        if (span.isRecording()) {
+          span.setAttribute(
+            "sandbox.command.executable",
+            executableName(command),
+          );
+          span.setAttribute("sandbox.command.pty", pty !== undefined);
+        }
+      },
+      undefined,
+      async (gen, startupSignal) => {
+        const handleAbort = new AbortController();
+        // `startupSignal` includes the startup deadline, whose timer
+        // runOperation() clears as soon as this returns, so from then on
+        // only the caller's signal, close, and a connection failure can
+        // end the stream.
+        const streamSignal = AbortSignal.any([
+          startupSignal,
+          handleAbort.signal,
+        ]);
+        const started = await gen.process.start(spec, pty, streamSignal);
+        const classify = (err: unknown): unknown =>
+          this.classifyOperationFailure(
+            err,
+            gen,
+            undefined,
+            userSignal,
+            handleAbort.signal,
+          );
+        const session: ProcessSession = {
+          pid: started.pid,
+          pty: pty !== undefined,
+          next: async () => {
+            try {
+              return await started.events.next();
+            } catch (err) {
+              throw classify(err);
+            }
+          },
+          writeStdin: (data, callOpts) =>
+            this.processCall(gen, callOpts, (ms, signal) =>
+              gen.process.writeStdin(started.pid, data, ms, signal),
+            ),
+          signal: (sig, callOpts) =>
+            this.processCall(gen, callOpts, (ms, signal) =>
+              gen.process.sendSignal(started.pid, sig, ms, signal),
+            ),
+          resize: (size, callOpts) =>
+            this.processCall(gen, callOpts, (ms, signal) =>
+              gen.process.resizeTty(started.pid, size, ms, signal),
+            ),
+          cancel: () =>
+            handleAbort.abort(
+              new SandboxClosedError("Process handle is closed"),
+            ),
+          onAbort: (cb) => {
+            const fire = (): void => cb(classify(streamSignal.reason));
+            if (streamSignal.aborted) {
+              fire();
+              return () => {};
+            }
+            streamSignal.addEventListener("abort", fire, { once: true });
+            return () => streamSignal.removeEventListener("abort", fire);
+          },
+        };
+        return new ProcessHandle(session, {
+          onStdout: opts?.onStdout,
+          onStderr: opts?.onStderr,
+        });
+      },
+    );
+  }
+
+  /** One unary RPC against the process's own connection generation. */
+  private processCall(
+    gen: ConnectionGeneration,
+    opts: ProcessCallOptions | undefined,
+    fn: (timeoutMs: number, signal: AbortSignal) => Promise<void>,
+  ): Promise<void> {
+    const timeoutMs = validateTimeoutMs("timeoutMs", opts?.timeoutMs);
+    return this.runOperation(
+      timeoutMs,
+      opts?.signal,
+      (_gen, signal) => fn(timeoutMs, signal),
+      gen,
     );
   }
 

@@ -16,6 +16,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -26,6 +27,7 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/watch"
 	ktesting "k8s.io/client-go/testing"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
@@ -165,6 +167,34 @@ func TestClient_ListAllSandboxes(t *testing.T) {
 	}
 	if len(names) != 2 {
 		t.Fatalf("expected 2 claims, got %d", len(names))
+	}
+}
+
+func TestClient_ListAllSandboxes_LabelSelector(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []ListOption
+		want string
+	}{
+		{name: "no selector"},
+		{name: "selector", opts: []ListOption{WithLabelSelector("app=agent,tier!=dev")}, want: "app=agent,tier!=dev"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, extensionsCS := newTestClient(t)
+
+			var got string
+			extensionsCS.PrependReactor("list", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+				got = action.(ktesting.ListAction).GetListRestrictions().Labels.String()
+				return true, &extv1beta1.SandboxClaimList{}, nil
+			})
+
+			if _, err := c.ListAllSandboxes(context.Background(), "default", tc.opts...); err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("label selector = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -566,6 +596,181 @@ func TestResolveSandboxName_FromClaimStatus(t *testing.T) {
 	}
 	if name != "warm-pool-sandbox-xyz" {
 		t.Errorf("expected warm-pool-sandbox-xyz, got %s", name)
+	}
+}
+
+// claimNotReady returns a claim whose Ready condition is False for reason.
+func claimNotReady(name, reason string) *extv1beta1.SandboxClaim {
+	return &extv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Status: extv1beta1.SandboxClaimStatus{
+			Conditions: []metav1.Condition{{
+				Type:    string(sandboxv1beta1.SandboxConditionReady),
+				Status:  metav1.ConditionFalse,
+				Reason:  reason,
+				Message: "detail",
+			}},
+		},
+	}
+}
+
+func TestClaimFailure(t *testing.T) {
+	for _, tc := range []struct {
+		reason string
+		want   error
+	}{
+		{"TemplateNotFound", ErrTemplateNotFound},
+		{"WarmPoolNotFound", ErrWarmPoolNotFound},
+		{"InvalidMetadata", ErrClaimFailed},
+		{"EnvVarsInjectionRejected", ErrClaimFailed},
+		{"VolumeClaimTemplatesError", ErrClaimFailed},
+		{"ClaimExpired", ErrClaimFailed},
+		{"SandboxExpired", ErrClaimFailed},
+		{"InvalidConfiguration", ErrClaimFailed},
+		{"PodFailed", ErrClaimFailed},
+		{"PodSucceeded", ErrClaimFailed},
+		// The controller retries these, so waiting can still succeed.
+		{"AdoptionPending", nil},
+		{"SandboxMissing", nil},
+		{"SandboxNotReady", nil},
+		{"ReconcilerError", nil},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			err := claimFailure(claimNotReady("c", tc.reason))
+			if tc.want == nil {
+				if err != nil {
+					t.Fatalf("expected no failure, got: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("expected %v, got: %v", tc.want, err)
+			}
+		})
+	}
+
+	t.Run("no conditions", func(t *testing.T) {
+		if err := claimFailure(&extv1beta1.SandboxClaim{}); err != nil {
+			t.Fatalf("expected no failure, got: %v", err)
+		}
+	})
+	t.Run("ready", func(t *testing.T) {
+		claim := claimNotReady("c", "ClaimExpired")
+		claim.Status.Conditions[0].Status = metav1.ConditionTrue
+		if err := claimFailure(claim); err != nil {
+			t.Fatalf("expected no failure for Ready=True, got: %v", err)
+		}
+	})
+	t.Run("stale generation", func(t *testing.T) {
+		claim := claimNotReady("c", "WarmPoolNotFound")
+		claim.Generation = 2
+		claim.Status.Conditions[0].ObservedGeneration = 1
+		if err := claimFailure(claim); err != nil {
+			t.Fatalf("expected no failure for a stale condition, got: %v", err)
+		}
+		claim.Status.Conditions[0].ObservedGeneration = 2
+		if err := claimFailure(claim); !errors.Is(err, ErrWarmPoolNotFound) {
+			t.Fatalf("expected ErrWarmPoolNotFound for a current condition, got: %v", err)
+		}
+	})
+}
+
+// A claim that can never become ready must fail fast instead of waiting out
+// the timeout, whether it is seen by the initial get or by the watch.
+func TestResolveSandboxName_FailsFastOnTerminalClaim(t *testing.T) {
+	newHelper := func() (*K8sHelper, *fakeextensions.Clientset) {
+		extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+		return &K8sHelper{ExtensionsClient: extensionsCS.ExtensionsV1beta1(), Log: logr.Discard()}, extensionsCS
+	}
+	tracer := noop.NewTracerProvider().Tracer("test")
+
+	t.Run("get", func(t *testing.T) {
+		k8s, extensionsCS := newHelper()
+		extensionsCS.PrependReactor("get", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+			return true, claimNotReady("c", "WarmPoolNotFound"), nil
+		})
+
+		_, err := k8s.resolveSandboxName(context.Background(), "c", "default", 5*time.Second, tracer, "test")
+		if !errors.Is(err, ErrWarmPoolNotFound) {
+			t.Fatalf("expected ErrWarmPoolNotFound, got: %v", err)
+		}
+	})
+
+	t.Run("watch", func(t *testing.T) {
+		k8s, extensionsCS := newHelper()
+		extensionsCS.PrependReactor("get", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+			return true, &extv1beta1.SandboxClaim{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "default"}}, nil
+		})
+		fw := watch.NewFake()
+		extensionsCS.PrependWatchReactor("sandboxclaims", ktesting.DefaultWatchReactor(fw, nil))
+		go fw.Modify(claimNotReady("c", "InvalidMetadata"))
+
+		_, err := k8s.resolveSandboxName(context.Background(), "c", "default", 5*time.Second, tracer, "test")
+		if !errors.Is(err, ErrClaimFailed) {
+			t.Fatalf("expected ErrClaimFailed, got: %v", err)
+		}
+	})
+}
+
+func TestSandboxFailure(t *testing.T) {
+	notReady := func(reason string) *sandboxv1beta1.Sandbox {
+		return &sandboxv1beta1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: "sb", Generation: 2},
+			Status: sandboxv1beta1.SandboxStatus{Conditions: []metav1.Condition{{
+				Type:               string(sandboxv1beta1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				Reason:             reason,
+				ObservedGeneration: 2,
+			}}},
+		}
+	}
+	if err := sandboxFailure(notReady("PodFailed")); !errors.Is(err, ErrClaimFailed) {
+		t.Fatalf("expected ErrClaimFailed, got: %v", err)
+	}
+	if err := sandboxFailure(notReady("DependenciesNotReady")); err != nil {
+		t.Fatalf("expected no failure for a transient reason, got: %v", err)
+	}
+	stale := notReady("PodFailed")
+	stale.Status.Conditions[0].ObservedGeneration = 1
+	if err := sandboxFailure(stale); err != nil {
+		t.Fatalf("expected no failure for a stale condition, got: %v", err)
+	}
+}
+
+// A Sandbox that can never become ready must fail fast instead of waiting out
+// the timeout, whether it is seen by the initial list or by the watch.
+func TestWaitForSandboxReady_FailsFastOnTerminalSandbox(t *testing.T) {
+	failed := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "target", Namespace: "default"},
+		Status: sandboxv1beta1.SandboxStatus{Conditions: []metav1.Condition{{
+			Type:   string(sandboxv1beta1.SandboxConditionReady),
+			Status: metav1.ConditionFalse,
+			Reason: sandboxv1beta1.SandboxReasonPodFailed,
+		}}},
+	}
+	for _, scenario := range []string{"list", "watch"} {
+		t.Run(scenario, func(t *testing.T) {
+			agentsCS := fakeagents.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+			k8s := &K8sHelper{AgentsClient: agentsCS.AgentsV1beta1(), Log: logr.Discard()}
+			agentsCS.PrependReactor("list", "sandboxes", func(_ ktesting.Action) (bool, runtime.Object, error) {
+				list := &sandboxv1beta1.SandboxList{}
+				if scenario == "list" {
+					list.Items = append(list.Items, *failed)
+				}
+				return true, list, nil
+			})
+			fw := watch.NewRaceFreeFake()
+			defer fw.Stop()
+			agentsCS.PrependWatchReactor("sandboxes", func(_ ktesting.Action) (bool, watch.Interface, error) {
+				fw.Modify(failed)
+				return true, fw, nil
+			})
+
+			_, err := k8s.waitForSandboxReady(context.Background(), "target", "default", 5*time.Second, noop.NewTracerProvider().Tracer("test"), "test")
+			if !errors.Is(err, ErrClaimFailed) {
+				t.Fatalf("expected ErrClaimFailed, got: %v", err)
+			}
+		})
 	}
 }
 

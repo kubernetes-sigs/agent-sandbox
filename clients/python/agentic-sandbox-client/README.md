@@ -226,6 +226,19 @@ finally:
     sandbox.terminate()
 ```
 
+If the router sits behind an authenticating gateway, add headers to every request
+with `extra_headers`, and enable mTLS with `client_cert` and `ca_cert`. The TLS
+options require an `https://` URL, and `X-Sandbox-*` header names are reserved.
+
+```python
+SandboxDirectConnectionConfig(
+    api_url="https://sandbox.example.com",
+    extra_headers={"Authorization": "Bearer <token>"},
+    client_cert=("/path/to/client.crt", "/path/to/client.key"),
+    ca_cert="/path/to/ca.crt",  # omit to use the default trust store
+)
+```
+
 ### 5. Custom Ports
 
 If your sandbox runtime listens on a port other than 8888 (e.g., a Node.js app on 3000), specify `server_port`.
@@ -592,7 +605,7 @@ Latency guidance:
 
 By default, `SandboxClient` and `AsyncSandboxClient` load their Kubernetes credentials via an in-cluster config if running inside a pod, otherwise `KUBECONFIG`, falling back to `~/.kube/config`'s `current-context` if unset. To target a different cluster/context instead, pass a pre-configured `api_client`.
 
-> **Warning:** In local-tunnel mode, `api_client` only affects Kubernetes API calls. The `kubectl` calls that reach the sandbox-router (the service check and the port-forward) still use your ambient kubeconfig context, so make sure it points at the same cluster as `api_client`, or they will target the wrong cluster.
+> **Note:** The `kubectl` calls in the local-tunnel and sandboxd pod-tunnel modes target the same cluster as `api_client`. The SDK gives `kubectl` a short-lived kubeconfig built from the client's host, CA, client certificate and bearer token. Basic auth is not carried over.
 
 **A kubeconfig file outside the default location** (e.g. a `pytest-kind` cluster):
 

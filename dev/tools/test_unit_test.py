@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for Go package selection in the unit test runner."""
+"""Unit tests for the unit test runner."""
 
 import importlib.util
 import os
@@ -70,6 +70,62 @@ class RunGoTestsTest(unittest.TestCase):
                 "--", "-race", f"{module}/dev/tools/mdtoc",
             ), cwd=os.path.join(repo_root, "dev", "tools")),
         ])
+
+
+class RunTypeScriptTestsTest(unittest.TestCase):
+    def test_runs_static_checks_before_unit_tests(self):
+        repo_root = "/repo"
+        artifact_dir = "/artifacts"
+        npm_path = "/tools/npm"
+        npx_path = "/tools/npx"
+
+        with (
+            mock.patch.object(test_unit.os.path, "isdir", return_value=True),
+            mock.patch.object(
+                test_unit, "ensure_node", return_value=(npm_path, npx_path)),
+            mock.patch.object(test_unit.subprocess, "check_call") as check_call,
+            mock.patch.object(test_unit.subprocess, "run") as run,
+        ):
+            run.return_value.returncode = 0
+            self.assertEqual(
+                test_unit.run_typescript_tests(repo_root, artifact_dir), 0)
+
+        ts_dir = os.path.join(
+            repo_root, "clients", "typescript", "agentic-sandbox-client")
+        check_call.assert_called_once_with(
+            [npm_path, "install", "--prefer-offline"],
+            cwd=ts_dir,
+            env=mock.ANY,
+        )
+        self.assertEqual(run.call_args_list, [
+            mock.call(
+                [npm_path, "run", "check"], cwd=ts_dir, env=mock.ANY),
+            mock.call(
+                [npm_path, "run", "typecheck"], cwd=ts_dir, env=mock.ANY),
+            mock.call([
+                npx_path, "vitest", "run",
+                "--reporter=verbose",
+                "--reporter=junit",
+                "--outputFile.junit=/artifacts/junit_unit-typescript.xml",
+            ], cwd=ts_dir, env=mock.ANY),
+        ])
+
+    def test_propagates_static_check_failure_after_running_all_checks(self):
+        with (
+            mock.patch.object(test_unit.os.path, "isdir", return_value=True),
+            mock.patch.object(
+                test_unit, "ensure_node", return_value=("npm", "npx")),
+            mock.patch.object(test_unit.subprocess, "check_call"),
+            mock.patch.object(test_unit.subprocess, "run") as run,
+        ):
+            run.side_effect = [
+                mock.Mock(returncode=1),
+                mock.Mock(returncode=0),
+                mock.Mock(returncode=0),
+            ]
+            self.assertEqual(
+                test_unit.run_typescript_tests("/repo", "/artifacts"), 1)
+            self.assertEqual(run.call_count, 3)
 
 
 if __name__ == "__main__":

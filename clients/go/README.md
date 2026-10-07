@@ -159,6 +159,17 @@ exists, err := sb.Exists(ctx, "script.py")
 `Read()` and `ReadTo()` responses are capped by `MaxDownloadSize` (256 MB by
 default). `Run()` responses are capped at 16 MB; `List()`/`Exists()` at 8 MB.
 
+### Runtime Health and Metadata
+
+With `RuntimeSandboxd`, query the in-sandbox daemon. The legacy runtime returns
+`ErrUnsupportedByRuntime`. Neither call retries unless you pass
+`WithMaxAttempts`.
+
+```go
+health, err := sb.Health(ctx)   // health.Status, health.UptimeSeconds
+meta, err := sb.Metadata(ctx)   // meta.Env (non-sensitive, SANDBOX_-prefixed by default)
+```
+
 ### 5. Custom TLS / Transport
 
 If your Gateway uses HTTPS with a private CA, provide a custom transport:
@@ -190,6 +201,18 @@ for _, key := range client.ListActiveSandboxes() {
 
 // Re-attach to existing sandbox by claim name
 sb, _ := client.GetSandbox(ctx, sb1.ClaimName(), "default")
+
+// Label the claims a client creates (Options.Labels), then list by label
+labeled, err := sandbox.NewClient(ctx, sandbox.Options{Labels: map[string]string{"app": "agent"}})
+if err != nil { log.Fatal(err) }
+defer labeled.DeleteAll(ctx)
+
+sb3, err := labeled.CreateSandbox(ctx, "python-pool", "default")
+if err != nil { log.Fatal(err) }
+
+names, err := labeled.ListAllSandboxes(ctx, "default", sandbox.WithLabelSelector("app=agent"))
+if err != nil { log.Fatal(err) }
+fmt.Println(names) // includes sb3.ClaimName()
 ```
 
 ## Configuration
@@ -201,6 +224,7 @@ All options are documented on the `Options` struct in
 - `Env`: environment variables to inject into the `SandboxClaim`. Setting this
   forces a cold start from the warm pool template instead of adopting a
   pre-warmed pod, which may increase startup latency.
+- `Labels`: labels added to every `SandboxClaim` the client creates.
 - `GatewayName`: set to enable Gateway mode.
 - `APIURL`: set for Direct URL mode (takes precedence over `GatewayName`).
 - `TracerProvider`: OpenTelemetry integration.
@@ -317,7 +341,9 @@ Calling `Open()` on a client with an orphaned claim returns `ErrOrphanedClaim`.
 | `ErrAlreadyOpen` | `Open()` called on an already-open client. Call `Close()` first. |
 | `ErrOrphanedClaim` | A previous claim could not be cleaned up (failed `Close()`, failed `Open()` rollback, or sandbox disappeared during reconnect); call `Close()` to retry deletion. |
 | `ErrTimeout` | Sandbox or Gateway did not become ready within the configured timeout. |
-| `ErrClaimFailed` | SandboxClaim creation was rejected by the API server. |
+| `ErrClaimFailed` | SandboxClaim creation was rejected by the API server, or the claim reported a failure the controller does not retry (for example `InvalidMetadata` or `ClaimExpired`). |
+| `ErrWarmPoolNotFound` | The claim's SandboxWarmPool does not exist. |
+| `ErrTemplateNotFound` | The SandboxTemplate behind the warm pool does not exist. |
 | `ErrPortForwardDied` | The SPDY tunnel dropped. Call `Open()` to reconnect. |
 | `ErrRetriesExhausted` | All HTTP retry attempts failed. |
 | `ErrSandboxDeleted` | The Sandbox was deleted before becoming ready. |

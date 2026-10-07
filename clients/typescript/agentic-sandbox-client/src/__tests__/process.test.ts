@@ -20,15 +20,17 @@ import { connectNodeAdapter } from "@connectrpc/connect-node";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   ExecuteResponseSchema,
+  InitEventSchema,
   type ProcessConfig,
   ProcessService,
+  StartResponseSchema,
 } from "../_proto/process/v1/process_pb.js";
 import {
   SandboxClosedError,
   SandboxConnectionError,
   SandboxdRpcError,
 } from "../exceptions.js";
-import { ProcessClient } from "../process.js";
+import { ProcessClient, StreamLocalFailure } from "../process.js";
 
 /**
  * `disruptFirstExecute` severs the transport on the first Execute request
@@ -39,7 +41,7 @@ import { ProcessClient } from "../process.js";
  */
 async function startH2Server(
   routes: (router: ConnectRouter) => void,
-  opts?: { disruptFirstExecute?: "session" | "socket" },
+  opts?: { disruptFirstExecute?: "session" | "socket" | "stream" },
 ): Promise<{ baseUrl: string; close(): Promise<void> }> {
   const inner = connectNodeAdapter({ routes });
   let triggered = false;
@@ -53,6 +55,10 @@ async function startH2Server(
       triggered = true;
       if (opts.disruptFirstExecute === "session") {
         req.stream.session?.destroy();
+      } else if (opts.disruptFirstExecute === "stream") {
+        // How macOS delivers a session teardown.
+        req.stream.session?.goaway(http2.constants.NGHTTP2_NO_ERROR);
+        req.stream.close(http2.constants.NGHTTP2_NO_ERROR);
       } else {
         // req.stream.session.socket is a Proxy that throws
         // ERR_HTTP2_NO_SOCKET_MANIPULATION on destroy(); use the raw socket
@@ -68,12 +74,23 @@ async function startH2Server(
   server.on("connection", (socket: net.Socket) => {
     lastRawSocket = socket;
   });
+  // After a GOAWAY the client may leave its session open, which would make
+  // server.close() wait on it; destroy sessions ourselves on close.
+  const sessions = new Set<http2.ServerHttp2Session>();
+  server.on("session", (session) => {
+    sessions.add(session);
+    session.once("close", () => sessions.delete(session));
+  });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const addr = server.address();
   if (!addr || typeof addr === "string") throw new Error("failed to bind");
   return {
     baseUrl: `http://127.0.0.1:${addr.port}`,
-    close: () => new Promise((resolve) => server.close(() => resolve())),
+    close: () =>
+      new Promise((resolve) => {
+        server.close(() => resolve());
+        for (const session of sessions) session.destroy();
+      }),
   };
 }
 
@@ -305,6 +322,34 @@ describe("ProcessClient.run", () => {
     );
   });
 
+  it("classifies a clean stream close with no response as a connection error", async () => {
+    activeServer = await startH2Server(
+      (router) => {
+        router.service(ProcessService, {
+          execute: () => create(ExecuteResponseSchema, {}),
+        });
+      },
+      { disruptFirstExecute: "stream" },
+    );
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+    await expect(
+      activeClient.run(
+        { command: ["echo", "hi"] },
+        2_000,
+        new AbortController().signal,
+      ),
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof SandboxConnectionError &&
+        err.kind === "socket" &&
+        err.cause instanceof ConnectError &&
+        err.cause.code === Code.Canceled,
+    );
+  });
+
   it("classifies a server-side raw socket reset (ECONNRESET) as a connection error", async () => {
     activeServer = await startH2Server(
       (router) => {
@@ -356,5 +401,125 @@ describe("ProcessClient.run", () => {
         new AbortController().signal,
       ),
     ).rejects.toBeInstanceOf(SandboxClosedError);
+  });
+});
+
+describe("ProcessClient.start", () => {
+  const initMsg = () =>
+    create(StartResponseSchema, {
+      event: {
+        case: "init",
+        value: create(InitEventSchema, { processId: 42 }),
+      },
+    });
+  const exitMsg = (exitCode: number) =>
+    create(StartResponseSchema, {
+      event: { case: "exit", value: { exitCode } },
+    });
+
+  async function startClient(
+    start: (req: never, ctx: { signal: AbortSignal }) => AsyncIterable<never>,
+  ): Promise<ProcessClient> {
+    activeServer = await startH2Server((router) => {
+      router.service(ProcessService, { start: start as never });
+    });
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+    return activeClient;
+  }
+
+  it("returns the pid, then events ending with exit and a clean end", async () => {
+    const client = await startClient(async function* () {
+      yield initMsg() as never;
+      yield exitMsg(0) as never;
+    });
+
+    const started = await client.start(
+      { command: ["true"] },
+      undefined,
+      new AbortController().signal,
+    );
+
+    expect(started.pid).toBe(42);
+    expect(await started.events.next()).toEqual({
+      done: false,
+      value: { type: "exit", exitCode: 0 },
+    });
+    expect((await started.events.next()).done).toBe(true);
+  });
+
+  it("rejects a stream whose first message is not an InitEvent", async () => {
+    const client = await startClient(async function* () {
+      yield exitMsg(0) as never;
+    });
+
+    const err = await client
+      .start({ command: ["true"] }, undefined, new AbortController().signal)
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(StreamLocalFailure);
+    expect((err as StreamLocalFailure).error).toMatchObject({
+      name: "SandboxConnectionError",
+      kind: "protocol",
+    });
+  });
+
+  it("rejects output that arrives after the ExitEvent", async () => {
+    const client = await startClient(async function* () {
+      yield initMsg() as never;
+      yield exitMsg(0) as never;
+      yield create(StartResponseSchema, {
+        event: { case: "stdout", value: new Uint8Array([1]) },
+      }) as never;
+    });
+    const started = await client.start(
+      { command: ["true"] },
+      undefined,
+      new AbortController().signal,
+    );
+
+    await started.events.next();
+
+    const err = await started.events.next().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(StreamLocalFailure);
+    expect((err as StreamLocalFailure).error).toMatchObject({
+      kind: "protocol",
+    });
+  });
+
+  it("throws the signal's own reason when the caller aborts the stream", async () => {
+    const client = await startClient(async function* (_req, ctx) {
+      yield initMsg() as never;
+      await new Promise<void>((resolve) =>
+        ctx.signal.addEventListener("abort", () => resolve(), { once: true }),
+      );
+    });
+    const controller = new AbortController();
+    const reason = new Error("caller gave up");
+    const started = await client.start(
+      { command: ["sleep"] },
+      undefined,
+      controller.signal,
+    );
+    const next = started.events.next();
+
+    controller.abort(reason);
+
+    await expect(next).rejects.toBe(reason);
+  });
+
+  it("surfaces an application error before Init as SandboxdRpcError", async () => {
+    const client = await startClient(() => {
+      throw new ConnectError("nope", Code.PermissionDenied);
+    });
+
+    await expect(
+      client.start({ command: ["x"] }, undefined, new AbortController().signal),
+    ).rejects.toMatchObject({
+      name: "SandboxdRpcError",
+      code: "permission_denied",
+    });
   });
 });

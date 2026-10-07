@@ -21,17 +21,27 @@ import logging
 
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+# Exit code reported when a command is killed for exceeding its timeout. It
+# follows GNU coreutils `timeout` rather than reporting the SIGKILL status,
+# which a cgroup OOM kill would also produce.
+TIMEOUT_EXIT_CODE = 124
 
 class ExecuteRequest(BaseModel):
     """Request model for the /execute endpoint."""
     command: str
+    # Optional per-request limit. It can only shorten the server-wide
+    # SANDBOX_EXEC_TIMEOUT_SECONDS, never extend it, so the operator's limit
+    # stays the upper bound for every caller.
+    timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
 class ExecuteResponse(BaseModel):
     """Response model for the /execute endpoint."""
     stdout: str
     stderr: str
     exit_code: int
+    timed_out: bool = False
 
 def get_base_dir() -> str:
     """Reads SANDBOX_BASE_DIR, falling back to /app when it's unset or blank.
@@ -100,8 +110,8 @@ def _run_command(args: list, timeout: float) -> subprocess.CompletedProcess:
                 os.killpg(os.getpgid(process.pid), signal.SIGKILL)
             except (ProcessLookupError, OSError):
                 pass
-            process.communicate()
-            raise
+            stdout, stderr = process.communicate()
+            raise subprocess.TimeoutExpired(args, timeout, output=stdout, stderr=stderr)
         return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 @app.get("/", summary="Health Check")
@@ -130,15 +140,27 @@ async def execute_command(request: ExecuteRequest):
         # event loop (and with it, the health check and file endpoints), and
         # enforce a timeout so a runaway command can't wedge the sandbox
         # forever.
-        process = await asyncio.to_thread(
-            _run_command,
-            args,
-            _get_exec_timeout_seconds(),
-        )
+        timeout = _get_exec_timeout_seconds()
+        if request.timeout_seconds is not None:
+            timeout = min(timeout, request.timeout_seconds)
+        process = await asyncio.to_thread(_run_command, args, timeout)
         return ExecuteResponse(
             stdout=process.stdout,
             stderr=process.stderr,
             exit_code=process.returncode
+        )
+    except subprocess.TimeoutExpired as e:
+        # Report the timeout as data rather than a generic failure, so callers
+        # can tell it apart from a command that exited non-zero on its own,
+        # and keep whatever output the command produced before it was killed.
+        stderr = e.stderr or ""
+        if stderr and not stderr.endswith("\n"):
+            stderr += "\n"
+        return ExecuteResponse(
+            stdout=e.output or "",
+            stderr=f"{stderr}Command timed out after {e.timeout:g} seconds",
+            exit_code=TIMEOUT_EXIT_CODE,
+            timed_out=True,
         )
     except Exception as e:
         return ExecuteResponse(

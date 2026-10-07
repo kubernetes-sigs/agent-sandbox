@@ -499,6 +499,65 @@ describe("SandboxClient (registry)", () => {
       expect(mockWatchFn).not.toHaveBeenCalled();
     });
 
+    it("passes volumeClaimTemplates as spec.volumeClaimTemplates", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-with-volume");
+
+      const volumeClaimTemplates = [
+        {
+          metadata: { name: "my-volume" },
+          spec: {
+            accessModes: ["ReadWriteOnce"],
+            resources: { requests: { storage: "1Gi" } },
+          },
+        },
+      ];
+      const client = new SandboxClient();
+      await client.createSandbox("tpl", "default", { volumeClaimTemplates });
+
+      const createArgs = mockCreateNamespacedCustomObject.mock.calls[0][0];
+      expect(createArgs.body.spec).toEqual({
+        warmPoolRef: { name: "tpl" },
+        volumeClaimTemplates,
+      });
+    });
+
+    it("sends volumeClaimTemplates beside pod metadata and a deadline", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-combined-spec");
+
+      const volumeClaimTemplates = [
+        {
+          metadata: { name: "data" },
+          spec: { accessModes: ["ReadWriteOnce"] },
+        },
+      ];
+      const client = new SandboxClient();
+      await client.createSandbox("tpl", "default", {
+        podLabels: { app: "x" },
+        shutdownAfterSeconds: 60,
+        volumeClaimTemplates,
+      });
+
+      const spec = mockCreateNamespacedCustomObject.mock.calls[0][0].body.spec;
+      expect(spec.volumeClaimTemplates).toEqual(volumeClaimTemplates);
+      expect(spec.additionalPodMetadata).toEqual({ labels: { app: "x" } });
+      expect(spec.lifecycle.shutdownPolicy).toBe("Delete");
+    });
+
+    it("omits volumeClaimTemplates when the list is empty", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-empty-volumes");
+
+      const client = new SandboxClient();
+      await client.createSandbox("tpl", "default", {
+        volumeClaimTemplates: [],
+      });
+
+      const createArgs = mockCreateNamespacedCustomObject.mock.calls[0][0];
+      expect(createArgs.body.spec).toEqual({ warmPoolRef: { name: "tpl" } });
+    });
+
     it("sets a deletion deadline from the create call, preserving namespace and labels", async () => {
       vi.useFakeTimers();
       try {

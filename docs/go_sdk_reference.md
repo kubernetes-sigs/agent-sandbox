@@ -21,7 +21,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(c \*Client\) EnableAutoCleanup\(\) \(stop func\(\)\)](<#Client.EnableAutoCleanup>)
   - [func \(c \*Client\) GetSandbox\(ctx context.Context, claimName, namespace string\) \(\*Sandbox, error\)](<#Client.GetSandbox>)
   - [func \(c \*Client\) ListActiveSandboxes\(\) \[\]Key](<#Client.ListActiveSandboxes>)
-  - [func \(c \*Client\) ListAllSandboxes\(ctx context.Context, namespace string\) \(\[\]string, error\)](<#Client.ListAllSandboxes>)
+  - [func \(c \*Client\) ListAllSandboxes\(ctx context.Context, namespace string, opts ...ListOption\) \(\[\]string, error\)](<#Client.ListAllSandboxes>)
 - [type Commands](<#Commands>)
   - [func \(c \*Commands\) Run\(ctx context.Context, command string, opts ...CallOption\) \(\*ExecutionResult, error\)](<#Commands.Run>)
 - [type ConnectionStrategy](<#ConnectionStrategy>)
@@ -43,11 +43,15 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 - [type HTTPError](<#HTTPError>)
   - [func \(e \*HTTPError\) Error\(\) string](<#HTTPError.Error>)
 - [type Handle](<#Handle>)
+- [type Health](<#Health>)
 - [type Info](<#Info>)
 - [type K8sHelper](<#K8sHelper>)
   - [func NewK8sHelper\(restConfig \*rest.Config, log logr.Logger\) \(\*K8sHelper, error\)](<#NewK8sHelper>)
   - [func \(h \*K8sHelper\) WaitForSandboxReady\(ctx context.Context, sandboxName, namespace string\) error](<#K8sHelper.WaitForSandboxReady>)
 - [type Key](<#Key>)
+- [type ListOption](<#ListOption>)
+  - [func WithLabelSelector\(selector string\) ListOption](<#WithLabelSelector>)
+- [type Metadata](<#Metadata>)
 - [type Options](<#Options>)
 - [type Runtime](<#Runtime>)
 - [type Sandbox](<#Sandbox>)
@@ -60,8 +64,10 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(s \*Sandbox\) Disconnect\(ctx context.Context\) error](<#Sandbox.Disconnect>)
   - [func \(s \*Sandbox\) Exists\(ctx context.Context, path string, opts ...CallOption\) \(bool, error\)](<#Sandbox.Exists>)
   - [func \(s \*Sandbox\) Files\(\) \*Files](<#Sandbox.Files>)
+  - [func \(s \*Sandbox\) Health\(ctx context.Context, opts ...CallOption\) \(\*Health, error\)](<#Sandbox.Health>)
   - [func \(s \*Sandbox\) IsReady\(\) bool](<#Sandbox.IsReady>)
   - [func \(s \*Sandbox\) List\(ctx context.Context, path string, opts ...CallOption\) \(\[\]FileEntry, error\)](<#Sandbox.List>)
+  - [func \(s \*Sandbox\) Metadata\(ctx context.Context, opts ...CallOption\) \(\*Metadata, error\)](<#Sandbox.Metadata>)
   - [func \(s \*Sandbox\) Open\(ctx context.Context\) \(retErr error\)](<#Sandbox.Open>)
   - [func \(s \*Sandbox\) PodIP\(\) string](<#Sandbox.PodIP>)
   - [func \(s \*Sandbox\) PodName\(\) string](<#Sandbox.PodName>)
@@ -113,6 +119,8 @@ var (
     ErrNotReady         = errors.New("sandbox is not ready")
     ErrTimeout          = errors.New("operation timed out")
     ErrClaimFailed      = errors.New("claim creation failed")
+    ErrWarmPoolNotFound = errors.New("sandbox warm pool not found")
+    ErrTemplateNotFound = errors.New("sandbox template not found")
     ErrPortForwardDied  = errors.New("port-forward connection lost")
     ErrNoSandboxService = errors.New("sandbox has no headless Service")
     ErrAlreadyOpen      = errors.New("sandbox is already open; call Close first")
@@ -122,7 +130,8 @@ var (
     ErrGatewayDeleted   = errors.New("gateway was deleted during address discovery")
     ErrResponseTooLarge = errors.New("response exceeded 16 MB limit")
     // ErrUnsupportedByRuntime is returned by operations the selected
-    // runtime cannot perform (e.g. Delete on the legacy python-runtime).
+    // runtime or connection cannot perform (e.g. Delete on the legacy
+    // python-runtime, or Run with RuntimeSandboxd and APIURL).
     ErrUnsupportedByRuntime = errors.New("operation not supported by the sandbox runtime")
 )
 ```
@@ -245,10 +254,10 @@ ListActiveSandboxes returns tracked sandboxes, pruning inactive handles.
 #### func \(\*Client\) [ListAllSandboxes](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go>)
 
 ```go
-func (c *Client) ListAllSandboxes(ctx context.Context, namespace string) ([]string, error)
+func (c *Client) ListAllSandboxes(ctx context.Context, namespace string, opts ...ListOption) ([]string, error)
 ```
 
-ListAllSandboxes lists all SandboxClaim names in the given namespace.
+ListAllSandboxes lists SandboxClaim names in the given namespace, optionally narrowed with WithLabelSelector.
 
 <a name="Commands"></a>
 ### type [Commands](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/commands.go>)
@@ -536,6 +545,19 @@ type Handle interface {
 }
 ```
 
+<a name="Health"></a>
+### type [Health](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+Health is the sandboxd runtime's report from GET /v1/health.
+
+```go
+type Health struct {
+    Status string `json:"status"`
+    // UptimeSeconds is how long sandboxd has been running.
+    UptimeSeconds int64 `json:"uptime_seconds"`
+}
+```
+
 <a name="Info"></a>
 ### type [Info](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
 
@@ -585,7 +607,7 @@ NewK8sHelper creates a K8sHelper by loading kubeconfig and constructing all requ
 func (h *K8sHelper) WaitForSandboxReady(ctx context.Context, sandboxName, namespace string) error
 ```
 
-WaitForSandboxReady waits until the named Sandbox has a true Ready condition. sandboxName is the backing Sandbox name, not the SandboxClaim name. It does not connect to the runtime. Use a context deadline to bound the wait; cancellation and deadline errors are detectable with errors.Is. A missing Sandbox is waited for, while deletion observed during the watch returns ErrSandboxDeleted. API list/watch failures are retried until ctx ends.
+WaitForSandboxReady waits until the named Sandbox has a true Ready condition. sandboxName is the backing Sandbox name, not the SandboxClaim name. It does not connect to the runtime. Use a context deadline to bound the wait; cancellation and deadline errors are detectable with errors.Is. A missing Sandbox is waited for, while deletion observed during the watch returns ErrSandboxDeleted. A terminal Ready=False reason such as PodFailed returns ErrClaimFailed. API list/watch failures are retried until ctx ends.
 
 <a name="Key"></a>
 ### type [Key](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go>)
@@ -596,6 +618,38 @@ Key identifies a tracked sandbox in the registry.
 type Key struct {
     Namespace string
     ClaimName string
+}
+```
+
+<a name="ListOption"></a>
+### type [ListOption](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+ListOption configures Client.ListAllSandboxes.
+
+```go
+type ListOption func(*listOptions)
+```
+
+<a name="WithLabelSelector"></a>
+#### func [WithLabelSelector](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithLabelSelector(selector string) ListOption
+```
+
+WithLabelSelector restricts the listing to claims matching a Kubernetes label selector, for example "app=agent,tier\!=dev". Pair it with Options.Labels, which stamps labels on the claims the client creates.
+
+<a name="Metadata"></a>
+### type [Metadata](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+Metadata is the non\-sensitive, workload\-scoped configuration sandboxd serves from GET /v1/metadata.
+
+```go
+type Metadata struct {
+    // Env holds the environment variables sandboxd exposes: only names
+    // matching its --metadata-env-prefix, minus anything that looks like a
+    // credential. It is never nil.
+    Env map[string]string `json:"env"`
 }
 ```
 
@@ -616,7 +670,8 @@ type Options struct {
     // Runtime selects the in-sandbox runtime API. Default: RuntimeLegacyPython.
     // RuntimeSandboxd talks to the sandbox pod rather than the sandbox-router,
     // so GatewayName is not supported with it. APIURL remains available as an
-    // advanced/testing escape hatch for the REST endpoint.
+    // advanced/testing escape hatch for the REST endpoint only: Run needs the
+    // gRPC endpoint and returns ErrUnsupportedByRuntime with it.
     Runtime Runtime
 
     // Connectivity selects the transport. Default: ConnectivityPortForward.
@@ -661,6 +716,11 @@ type Options struct {
     // Env is the list of environment variables to inject into the SandboxClaim.
     // Setting Env forces a cold start from the warm pool template.
     Env []extv1beta1.EnvVar
+
+    // Labels are added to every SandboxClaim this client creates, so they can
+    // be selected later (see WithLabelSelector). The SDK's own created-by label
+    // always wins over a colliding key.
+    Labels map[string]string
 
     // SandboxReadyTimeout is how long to wait for the sandbox to become ready. Default: 180s.
     SandboxReadyTimeout time.Duration
@@ -858,6 +918,15 @@ func (s *Sandbox) Files() *Files
 
 Files returns the file operations sub\-object.
 
+<a name="Sandbox.Health"></a>
+#### func \(\*Sandbox\) [Health](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
+
+```go
+func (s *Sandbox) Health(ctx context.Context, opts ...CallOption) (*Health, error)
+```
+
+Health returns sandboxd's report from GET /v1/health. It returns an HTTPError while sandboxd is shutting down, and ErrUnsupportedByRuntime on the legacy python\-runtime. It does not retry unless WithMaxAttempts is set. Not part of the Handle interface to avoid breaking existing implementers.
+
 <a name="Sandbox.IsReady"></a>
 #### func \(\*Sandbox\) [IsReady](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
 
@@ -875,6 +944,15 @@ func (s *Sandbox) List(ctx context.Context, path string, opts ...CallOption) ([]
 ```
 
 
+
+<a name="Sandbox.Metadata"></a>
+#### func \(\*Sandbox\) [Metadata](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
+
+```go
+func (s *Sandbox) Metadata(ctx context.Context, opts ...CallOption) (*Metadata, error)
+```
+
+Metadata returns the workload\-scoped configuration sandboxd serves from GET /v1/metadata \(sandboxd runtime only; the legacy python\-runtime returns ErrUnsupportedByRuntime\). It does not retry unless WithMaxAttempts is set. Not part of the Handle interface to avoid breaking existing implementers.
 
 <a name="Sandbox.Open"></a>
 #### func \(\*Sandbox\) [Open](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)

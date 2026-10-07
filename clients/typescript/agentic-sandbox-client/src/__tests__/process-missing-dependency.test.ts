@@ -57,4 +57,24 @@ describe("ProcessClient missing optional dependency", () => {
       ),
     ).rejects.toThrow(/npm install @bufbuild\/protobuf/);
   });
+
+  it("reports the same actionable error for start() and the control calls", async () => {
+    const { ProcessClient } = await import("../process.js");
+    const client = new ProcessClient({
+      grpcBaseUrl: "http://127.0.0.1:1",
+      maxCommandOutputSize: 1024,
+    });
+    const signal = new AbortController().signal;
+
+    for (const call of [
+      client.start({ command: ["sh"] }, undefined, signal),
+      client.writeStdin(1, null, 1000, signal),
+      client.sendSignal(1, "SIGTERM", 1000, signal),
+      client.resizeTty(1, { cols: 80, rows: 24 }, 1000, signal),
+    ]) {
+      await expect(call).rejects.toMatchObject({
+        telemetryCode: "missing_dependency",
+      } satisfies Partial<SandboxError>);
+    }
+  });
 });

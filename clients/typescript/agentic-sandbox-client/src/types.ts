@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import type * as k8s from "@kubernetes/client-node";
+
 export interface SandboxClientOptions {
   namespace?: string;
   sandboxReadyTimeout?: number;
@@ -157,6 +159,61 @@ export interface ProcessOptions {
 /** Options accepted by sandbox.commands.run(). */
 export interface RunOptions extends ProcessOptions, RuntimeCallOptions {}
 
+/** POSIX signals sandboxd's SendSignal accepts. */
+export type ProcessSignal = "SIGINT" | "SIGTERM" | "SIGKILL";
+
+/** Terminal dimensions; each value must be an integer in [1, 65535]. */
+export interface PtySize {
+  cols: number;
+  rows: number;
+}
+
+/**
+ * One event of a process started with sandbox.commands.start(). Output is
+ * raw bytes rather than text because a multi-byte character can be split
+ * across two chunks; decode with one `TextDecoder` and `{ stream: true }`.
+ */
+export type ProcessEvent =
+  | { type: "stdout"; data: Uint8Array }
+  /** Never sent for a PTY process: the terminal merges stderr into stdout. */
+  | { type: "stderr"; data: Uint8Array }
+  /**
+   * Final event. `exitCode` is -1 when the process was killed by a signal
+   * (sandboxd reports Go's ExitCode(), not the shell's 128+N convention).
+   */
+  | { type: "exit"; exitCode: number };
+
+/** Options accepted by sandbox.commands.start(). */
+export interface StartOptions extends ProcessOptions {
+  /** Allocates a pseudo-terminal of this size; stderr is then merged into stdout. */
+  pty?: PtySize;
+  /**
+   * Budget (ms) from the call until sandboxd reports the process started
+   * (including any time spent waiting on the shared connect). It does NOT
+   * bound the process's lifetime. Default: 60000.
+   */
+  timeoutMs?: number;
+  /**
+   * Aborting this signal, before or after the process started, tears the
+   * stream down, which makes sandboxd SIGKILL the process group.
+   */
+  signal?: AbortSignal;
+  /**
+   * Receive output as it arrives, instead of iterating `handle.events`. If
+   * a callback throws, the process is killed and `wait()` rejects with that
+   * error.
+   */
+  onStdout?(chunk: Uint8Array): void;
+  onStderr?(chunk: Uint8Array): void;
+}
+
+/** Options accepted by ProcessHandle's write/signal/resize calls. */
+export interface ProcessCallOptions {
+  /** Total budget (ms) for this one call. Default: 60000. */
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
 export interface WriteOptions extends RuntimeCallOptions {
   /** POSIX file mode, e.g. "0644". Must match `^0[0-7]{3}$`. */
   mode?: string;
@@ -189,6 +246,16 @@ export interface FileEntry {
 export interface DirectoryListing {
   path: string;
   entries: FileEntry[];
+}
+
+/**
+ * Result of sandbox.status(): the Sandbox's `Ready` condition. Values match
+ * the Python SDK's `Sandbox.status()`.
+ */
+export interface SandboxStatus {
+  status: "SandboxReady" | "SandboxNotReady" | "SandboxNotFound";
+  /** The condition's message; a fixed note when there is no condition. */
+  message: string;
 }
 
 /** Result of sandbox.health(). */
@@ -229,6 +296,16 @@ export interface PodMetadata {
   annotations?: Record<string, string>;
 }
 
+/** One entry of a SandboxClaim's `spec.volumeClaimTemplates`. */
+export interface VolumeClaimTemplate {
+  metadata?: {
+    name?: string;
+    labels?: Record<string, string>;
+    annotations?: Record<string, string>;
+  };
+  spec: k8s.V1PersistentVolumeClaimSpec;
+}
+
 export interface CreateSandboxOptions {
   sandboxReadyTimeout?: number;
   labels?: Record<string, string>;
@@ -253,4 +330,11 @@ export interface CreateSandboxOptions {
    * `spec.additionalPodMetadata.annotations`.
    */
   podAnnotations?: Record<string, string>;
+  /**
+   * PersistentVolumeClaims to create for the sandbox, sent as the claim's
+   * `spec.volumeClaimTemplates`. Setting this forces a cold start, because
+   * warm pool Pods do not have these volumes. The controller validates the
+   * templates against the SandboxTemplate's volume policy.
+   */
+  volumeClaimTemplates?: VolumeClaimTemplate[];
 }

@@ -216,15 +216,21 @@ func (c *connector) GRPCConn() (*grpc.ClientConn, error) {
 	if c.grpcConn != nil {
 		return c.grpcConn, nil
 	}
+	prefix := fmt.Sprintf("sandbox[%s/%s]", c.namespace, c.sandboxID)
 	if c.grpcTarget == "" {
-		if c.lastError != nil {
-			return nil, fmt.Errorf("sandbox[%s/%s]: %w: %w", c.namespace, c.sandboxID, ErrNotReady, c.lastError)
+		// A direct URL names only the REST endpoint, so no target will ever
+		// be published. Say so rather than report ErrNotReady forever.
+		if _, direct := c.strategy.(*DirectStrategy); direct {
+			return nil, fmt.Errorf("%s: %w: APIURL reaches only the sandboxd REST API, so Run needs port-forward or in-cluster connectivity", prefix, ErrUnsupportedByRuntime)
 		}
-		return nil, fmt.Errorf("sandbox[%s/%s]: %w: sandboxd gRPC endpoint not connected", c.namespace, c.sandboxID, ErrNotReady)
+		if c.lastError != nil {
+			return nil, fmt.Errorf("%s: %w: %w", prefix, ErrNotReady, c.lastError)
+		}
+		return nil, fmt.Errorf("%s: %w: sandboxd gRPC endpoint not connected", prefix, ErrNotReady)
 	}
 	conn, err := grpc.NewClient(c.grpcTarget, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		return nil, fmt.Errorf("sandbox[%s/%s]: failed to create gRPC client: %w", c.namespace, c.sandboxID, err)
+		return nil, fmt.Errorf("%s: failed to create gRPC client: %w", prefix, err)
 	}
 	c.grpcConn = conn
 	return conn, nil

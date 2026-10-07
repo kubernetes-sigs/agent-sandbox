@@ -40,8 +40,10 @@ import {
 import { resolveLogger } from "./logger.js";
 import type { ResolvedSandboxdOptions, SandboxInit } from "./sandbox.js";
 import {
+  findReadyCondition,
   normalizeSandboxdOptions,
   raceWithTimeout,
+  readConditions,
   Sandbox,
 } from "./sandbox.js";
 import type { Tracer } from "./trace-manager.js";
@@ -56,6 +58,7 @@ import type {
   Logger,
   PodMetadata,
   SandboxClientOptions,
+  VolumeClaimTemplate,
 } from "./types.js";
 
 // Kubernetes label validation constraints
@@ -146,6 +149,36 @@ function buildPodMetadata(
   return Object.keys(podMetadata).length > 0 ? podMetadata : undefined;
 }
 
+/** The optional SandboxClaim `spec` fields a caller can request. */
+interface ClaimSpecExtras {
+  additionalPodMetadata?: PodMetadata;
+  volumeClaimTemplates?: VolumeClaimTemplate[];
+  lifecycle?: { shutdownTime: string; shutdownPolicy: "Delete" };
+}
+
+/**
+ * Collects the optional claim spec fields in one object so they travel through
+ * provisioning as a unit. Fields with nothing to send are left out, so the
+ * manifest carries no empty blocks.
+ */
+function buildClaimSpecExtras(
+  opts: CreateSandboxOptions | undefined,
+  shutdownTime: string | undefined,
+): ClaimSpecExtras {
+  const extras: ClaimSpecExtras = {};
+  const podMetadata = buildPodMetadata(opts?.podLabels, opts?.podAnnotations);
+  if (podMetadata) {
+    extras.additionalPodMetadata = podMetadata;
+  }
+  if (opts?.volumeClaimTemplates?.length) {
+    extras.volumeClaimTemplates = opts.volumeClaimTemplates;
+  }
+  if (shutdownTime) {
+    extras.lifecycle = { shutdownTime, shutdownPolicy: "Delete" };
+  }
+  return extras;
+}
+
 /**
  * Inspects SandboxClaim status conditions and throws a typed error when the
  * controller has signalled a failure it will not recover from on its own
@@ -211,13 +244,9 @@ interface ReadySandbox {
 function readReadySandbox(
   obj: Record<string, unknown> | undefined,
 ): ReadySandbox | "unnamed" | undefined {
-  const status = (obj?.status as Record<string, unknown>) ?? {};
-  const conditions = (status.conditions as Array<Record<string, string>>) ?? [];
-  const isReady = conditions.some(
-    (c) => c.type === "Ready" && c.status === "True",
-  );
-  if (!isReady) return undefined;
+  if (findReadyCondition(obj)?.status !== "True") return undefined;
 
+  const status = (obj?.status as Record<string, unknown>) ?? {};
   const metadata = (obj?.metadata as Record<string, unknown>) ?? {};
   const sandboxName = metadata.name as string | undefined;
   if (!sandboxName) return "unnamed";
@@ -399,7 +428,7 @@ export class SandboxClient {
     }
 
     // Like the deadline above, checked before any provisioning work starts.
-    const podMetadata = buildPodMetadata(opts?.podLabels, opts?.podAnnotations);
+    const specExtras = buildClaimSpecExtras(opts, shutdownTime);
 
     // Empty string normalizes to defaultNamespace (matches Go client behaviour).
     const ns = namespace || this.defaultNamespace;
@@ -418,8 +447,7 @@ export class SandboxClient {
       warmpool,
       ns,
       opts,
-      shutdownTime,
-      podMetadata,
+      specExtras,
     ).finally(() => {
       this.attaching.delete(key);
       this.provisioning.delete(key);
@@ -439,8 +467,7 @@ export class SandboxClient {
     warmpool: string,
     ns: string,
     opts?: CreateSandboxOptions,
-    shutdownTime?: string,
-    podMetadata?: PodMetadata,
+    specExtras: ClaimSpecExtras = {},
   ): Promise<Sandbox> {
     const sandboxReadyTimeout =
       opts?.sandboxReadyTimeout ?? this.defaultSandboxReadyTimeout;
@@ -470,8 +497,7 @@ export class SandboxClient {
         traceContextStr,
         sandboxTracer,
         sandboxTracingManager?.parentContext,
-        shutdownTime,
-        podMetadata,
+        specExtras,
       );
       // deleteAll() may have swept this key while the claim was being created;
       // it could not delete a claim the apiserver had not accepted yet, so fail
@@ -1051,8 +1077,7 @@ export class SandboxClient {
     traceContextStr: string = "",
     tracer: Tracer | null = null,
     parentContext?: unknown,
-    shutdownTime?: string,
-    podMetadata?: PodMetadata,
+    specExtras: ClaimSpecExtras = {},
   ): Promise<void> {
     if (labels) {
       validateLabels(labels);
@@ -1080,10 +1105,7 @@ export class SandboxClient {
         },
         spec: {
           warmPoolRef: { name: warmpool },
-          ...(podMetadata ? { additionalPodMetadata: podMetadata } : {}),
-          ...(shutdownTime
-            ? { lifecycle: { shutdownTime, shutdownPolicy: "Delete" } }
-            : {}),
+          ...specExtras,
         },
       };
 
@@ -1169,10 +1191,8 @@ export class SandboxClient {
             }
             if (type === "ADDED" || type === "MODIFIED") {
               const status = (obj.status as Record<string, unknown>) ?? {};
-              const conditions =
-                (status.conditions as Array<Record<string, string>>) ?? [];
               try {
-                inspectClaimConditions(conditions);
+                inspectClaimConditions(readConditions(obj));
               } catch (err) {
                 settle({
                   type: "error",
@@ -1273,9 +1293,7 @@ export class SandboxClient {
         const metadata = (claimObj?.metadata as Record<string, unknown>) ?? {};
         resourceVersion = metadata.resourceVersion as string | undefined;
         const status = (claimObj?.status as Record<string, unknown>) ?? {};
-        const conditions =
-          (status.conditions as Array<Record<string, string>>) ?? [];
-        inspectClaimConditions(conditions); // throws SandboxTemplateNotFoundError / SandboxWarmPoolNotFoundError / SandboxClaimFailedError
+        inspectClaimConditions(readConditions(claimObj)); // throws SandboxTemplateNotFoundError / SandboxWarmPoolNotFoundError / SandboxClaimFailedError
         const sandboxStatus = (status.sandbox as Record<string, unknown>) ?? {};
         const name = sandboxStatus.name as string | undefined;
         if (name) {

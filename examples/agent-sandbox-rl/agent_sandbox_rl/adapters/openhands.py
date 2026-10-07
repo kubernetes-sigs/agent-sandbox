@@ -49,8 +49,8 @@ import logging
 logger = logging.getLogger("agent_sandbox_rl.adapters.openhands")
 
 _HINT = (
-    "requires the OpenHands integration — `pip install openhands-k8s-agent-sandbox` "
-    "(or `pip install -e clients/integrations/openhands` from the repo root)."
+    "requires the OpenHands integration (openhands-k8s-agent-sandbox) — "
+    "`pip install -e clients/integrations/openhands` from the repo root."
 )
 
 # Workspace kwargs that would fight the fleet over pod lifecycle/identity.

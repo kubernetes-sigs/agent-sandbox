@@ -15,6 +15,8 @@
 """Unit tests for synchronous sandbox connectivity."""
 
 import io
+import json
+import os
 import subprocess
 import sys
 import threading
@@ -26,6 +28,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import requests
+from kubernetes import client as k8s_client
+from pydantic import ValidationError
 
 from k8s_agent_sandbox.connector import (
     DirectConnectionStrategy,
@@ -782,6 +786,131 @@ class TestSandboxConnectorHeaderInjection(unittest.TestCase):
 
         connector.send_request("GET", "/execute")
 
+class TestSandboxDirectConnectionConfigExtras(unittest.TestCase):
+    """Validation of extra_headers and the mTLS options."""
+
+    def test_reserved_routing_header_is_rejected_case_insensitively(self):
+        for name in ("X-Sandbox-ID", "x-sandbox-port", "X-SANDBOX-Timeout"):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValidationError, "reserved"):
+                    SandboxDirectConnectionConfig(
+                        api_url="https://router", extra_headers={name: "v"}
+                    )
+
+    def test_tls_options_require_https(self):
+        for options in ({"ca_cert": "/ca.pem"}, {"client_cert": ("/c.crt", "/c.key")}):
+            with self.subTest(options=options):
+                with self.assertRaisesRegex(ValidationError, "https://"):
+                    SandboxDirectConnectionConfig(api_url="http://router", **options)
+
+    def test_tls_options_accepted_on_https(self):
+        config = SandboxDirectConnectionConfig(
+            api_url="HTTPS://router",
+            client_cert=["/c.crt", "/c.key"],
+            ca_cert="/ca.pem",
+        )
+        self.assertEqual(config.client_cert, ("/c.crt", "/c.key"))
+        self.assertEqual(config.ca_cert, "/ca.pem")
+
+    def test_repr_hides_header_values(self):
+        config = SandboxDirectConnectionConfig(
+            api_url="https://router", extra_headers={"Authorization": "Bearer secret"}
+        )
+        self.assertNotIn("secret", repr(config))
+
+
+class TestSandboxConnectorExtraHeadersAndTLS(unittest.TestCase):
+    def _make_connector(self, config):
+        connector = SandboxConnector(
+            sandbox_id="my-sb",
+            namespace="my-ns",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+        )
+        mock_resp = MagicMock(spec=requests.Response)
+        mock_resp.status_code = 200
+        mock_resp.is_redirect = False
+        mock_resp.raise_for_status.return_value = None
+        connector.session = MagicMock()
+        connector.session.request.return_value = mock_resp
+        return connector
+
+    def test_extra_headers_are_sent_with_routing_headers(self):
+        config = SandboxDirectConnectionConfig(
+            api_url="https://router", extra_headers={"Authorization": "Bearer t"}
+        )
+        connector = self._make_connector(config)
+
+        connector.send_request("GET", "/execute")
+
+        sent = connector.session.request.call_args.kwargs["headers"]
+        self.assertEqual(sent["Authorization"], "Bearer t")
+        self.assertEqual(sent["X-Sandbox-ID"], "my-sb")
+        # Must not mutate the config.
+        self.assertEqual(config.extra_headers, {"Authorization": "Bearer t"})
+
+    def test_caller_headers_override_extra_headers(self):
+        config = SandboxDirectConnectionConfig(
+            api_url="https://router", extra_headers={"Authorization": "Bearer t"}
+        )
+        connector = self._make_connector(config)
+
+        connector.send_request("GET", "/execute", headers={"authorization": "Bearer other"})
+
+        sent = connector.session.request.call_args.kwargs["headers"]
+        self.assertEqual(sent["authorization"], "Bearer other")
+        self.assertNotIn("Authorization", sent)
+
+    def test_explicit_none_headers_are_accepted(self):
+        config = SandboxDirectConnectionConfig(
+            api_url="https://router", extra_headers={"Authorization": "Bearer t"}
+        )
+        connector = self._make_connector(config)
+
+        connector.send_request("GET", "/execute", headers=None)
+
+        sent = connector.session.request.call_args.kwargs["headers"]
+        self.assertEqual(sent["Authorization"], "Bearer t")
+
+    def test_tls_options_are_passed_on_each_request(self):
+        config = SandboxDirectConnectionConfig(
+            api_url="https://router",
+            client_cert=("/c.crt", "/c.key"),
+            ca_cert="/ca.pem",
+        )
+        connector = self._make_connector(config)
+
+        connector.send_request("GET", "/execute")
+
+        kwargs = connector.session.request.call_args.kwargs
+        self.assertEqual(kwargs["verify"], "/ca.pem")
+        self.assertEqual(kwargs["cert"], ("/c.crt", "/c.key"))
+
+    def test_no_tls_kwargs_without_tls_options(self):
+        connector = self._make_connector(SandboxDirectConnectionConfig(api_url="https://router"))
+
+        connector.send_request("GET", "/execute")
+
+        kwargs = connector.session.request.call_args.kwargs
+        self.assertNotIn("verify", kwargs)
+        self.assertNotIn("cert", kwargs)
+
+    def test_ca_cert_wins_over_requests_ca_bundle_env(self):
+        # requests prefers REQUESTS_CA_BUNDLE over a session-level verify.
+        config = SandboxDirectConnectionConfig(api_url="https://router", ca_cert="/ca.pem")
+        connector = self._make_connector(config)
+        connector.session = requests.Session()
+        ok = MagicMock(spec=requests.Response)
+        ok.status_code = 200
+        ok.is_redirect = False
+        connector.session.send = MagicMock(return_value=ok)
+
+        with patch.dict(os.environ, {"REQUESTS_CA_BUNDLE": "/env-bundle.pem"}):
+            connector.send_request("GET", "/execute")
+
+        self.assertEqual(connector.session.send.call_args.kwargs["verify"], "/ca.pem")
+
+
 class TestSandboxConnectorErrorHandling(unittest.TestCase):
     def _make_connector(self):
         config = SandboxDirectConnectionConfig(api_url="http://router")
@@ -1145,6 +1274,149 @@ class TestTunnelConcurrency(unittest.TestCase):
         self._connect_concurrently(strategy)
 
         self.assertEqual(mock_popen.call_count, 1)
+
+
+class TestTunnelTargetsInjectedApiClient(unittest.TestCase):
+    """kubectl must reach the cluster an injected ApiClient targets, not the ambient one."""
+
+    def _api_client(self):
+        cfg = k8s_client.Configuration()
+        cfg.host = "https://cluster-b:6443"
+        cfg.api_key = {"authorization": "secret"}
+        cfg.api_key_prefix = {"authorization": "Bearer"}
+        return k8s_client.ApiClient(configuration=cfg)
+
+    def _recording_popen(self, calls):
+        def popen(cmd, **kwargs):
+            # kubectl reads the kubeconfig at startup, so capture it here.
+            path = cmd[cmd.index("--kubeconfig") + 1] if "--kubeconfig" in cmd else None
+            content = None
+            if path:
+                with open(path) as f:
+                    content = json.load(f)
+            calls.append((cmd, path, content))
+            process = MagicMock()
+            process.poll.return_value = None
+            return process
+        return popen
+
+    def _assert_targets_cluster_b(self, calls):
+        cmd, path, content = calls[0]
+        self.assertEqual(content["clusters"][0]["cluster"]["server"], "https://cluster-b:6443")
+        self.assertEqual(content["users"][0]["user"]["token"], "secret")
+        self.assertFalse(os.path.exists(path), "kubeconfig must not outlive the connect")
+        return cmd
+
+    @patch.object(LocalTunnelConnectionStrategy, "_is_port_open", return_value=True)
+    @patch("subprocess.run", return_value=MagicMock(returncode=0, stderr=b""))
+    @patch("subprocess.Popen")
+    def test_local_tunnel_preflight_and_port_forward_use_injected_cluster(
+        self, mock_popen, mock_run, _
+    ):
+        popen_calls = []
+        mock_popen.side_effect = self._recording_popen(popen_calls)
+        strategy = LocalTunnelConnectionStrategy(
+            "sb", "ns", SandboxLocalTunnelConnectionConfig(), self._api_client()
+        )
+
+        strategy.connect()
+
+        cmd = self._assert_targets_cluster_b(popen_calls)
+        self.assertEqual(cmd[:3], ["kubectl", "port-forward", "svc/sandbox-router-svc"])
+        preflight = mock_run.call_args.args[0]
+        self.assertEqual(preflight[:3], ["kubectl", "get", "svc/sandbox-router-svc"])
+        self.assertEqual(
+            preflight[preflight.index("--kubeconfig") + 1],
+            cmd[cmd.index("--kubeconfig") + 1],
+            "preflight and port-forward must share one kubeconfig",
+        )
+
+    @patch.object(LocalTunnelConnectionStrategy, "_get_free_port", return_value=18080)
+    @patch.object(LocalTunnelConnectionStrategy, "_is_port_open", return_value=True)
+    @patch("subprocess.run", return_value=MagicMock(returncode=0, stderr=b""))
+    @patch("subprocess.Popen")
+    def test_local_tunnel_without_api_client_adds_no_flags(self, mock_popen, mock_run, *_):
+        calls = []
+        mock_popen.side_effect = self._recording_popen(calls)
+        strategy = LocalTunnelConnectionStrategy("sb", "ns", SandboxLocalTunnelConnectionConfig())
+
+        strategy.connect()
+
+        self.assertEqual(
+            calls[0][0],
+            ["kubectl", "port-forward", "svc/sandbox-router-svc", "18080:8080",
+             "-n", "agent-sandbox-system"],
+        )
+        self.assertEqual(
+            mock_run.call_args.args[0],
+            ["kubectl", "get", "svc/sandbox-router-svc", "-n", "agent-sandbox-system"],
+        )
+
+    @patch.object(LocalTunnelConnectionStrategy, "_preflight_check_router_service")
+    @patch("subprocess.Popen")
+    def test_local_tunnel_removes_kubeconfig_when_port_forward_crashes(self, mock_popen, _):
+        process = MagicMock()
+        process.poll.return_value = 1
+        process.communicate.return_value = (b"", b"boom")
+        calls = []
+
+        def popen(cmd, **kwargs):
+            calls.append(cmd[cmd.index("--kubeconfig") + 1])
+            return process
+
+        mock_popen.side_effect = popen
+        strategy = LocalTunnelConnectionStrategy(
+            "sb", "ns", SandboxLocalTunnelConnectionConfig(), self._api_client()
+        )
+
+        with self.assertRaises(SandboxPortForwardError):
+            strategy.connect()
+
+        self.assertFalse(os.path.exists(calls[0]))
+
+    @patch.object(SandboxdPodTunnelStrategy, "_is_port_open", return_value=True)
+    @patch("subprocess.Popen")
+    def test_sandboxd_pod_tunnel_uses_injected_cluster(self, mock_popen, _):
+        calls = []
+        mock_popen.side_effect = self._recording_popen(calls)
+        strategy = SandboxdPodTunnelStrategy(
+            "sb", "ns", SandboxdPodTunnelConnectionConfig(),
+            get_pod_name=lambda: "sb-pod", api_client=self._api_client(),
+        )
+
+        strategy.connect()
+
+        cmd = self._assert_targets_cluster_b(calls)
+        self.assertEqual(cmd[:3], ["kubectl", "port-forward", "pod/sb-pod"])
+
+    @patch.object(SandboxdPodTunnelStrategy, "_is_port_open", return_value=True)
+    @patch("subprocess.Popen")
+    def test_reused_tunnel_does_not_write_another_kubeconfig(self, mock_popen, _):
+        calls = []
+        mock_popen.side_effect = self._recording_popen(calls)
+        strategy = SandboxdPodTunnelStrategy(
+            "sb", "ns", SandboxdPodTunnelConnectionConfig(),
+            get_pod_name=lambda: "sb-pod", api_client=self._api_client(),
+        )
+
+        strategy.connect()
+        strategy.connect()
+
+        self.assertEqual(len(calls), 1)
+
+    def test_connector_passes_the_helpers_injected_client_to_tunnels(self):
+        injected = self._api_client()
+        helper = MagicMock(injected_api_client=injected)
+
+        for config, expected in (
+            (SandboxLocalTunnelConnectionConfig(), LocalTunnelConnectionStrategy),
+            (SandboxdPodTunnelConnectionConfig(), SandboxdPodTunnelStrategy),
+        ):
+            connector = SandboxConnector(
+                sandbox_id="sb", namespace="ns", connection_config=config, k8s_helper=helper,
+            )
+            self.assertIsInstance(connector.strategy, expected)
+            self.assertIs(connector.strategy._api_client, injected)
 
 
 class TestSandboxConnectorTransportRetry(unittest.TestCase):

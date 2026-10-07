@@ -218,7 +218,11 @@ describe("PodTunnel", () => {
     await done;
     expect(Buffer.concat(chunks).subarray(0, payload.length)).toEqual(payload);
     client.destroy();
-  });
+    // Relaying 2 MiB through the fake apiserver takes ~2 s on a laptop and
+    // has exceeded vitest's 5 s default on loaded CI runners; the test is
+    // throughput-bound, not waiting on an event, so give it headroom like
+    // the slow-reader test below.
+  }, 30_000);
 
   it("flushes data already queued for a slow local reader after the WS closes normally", async () => {
     const payload = Buffer.alloc(8 * 1024 * 1024);

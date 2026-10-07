@@ -35,7 +35,7 @@ import sys
 from kubernetes import client
 
 from agent_sandbox_rl import ClusterConfig, FleetConfig, SandboxFleet, TemplateSpec, constants
-from agent_sandbox_rl.preflight import pod_selector_matches
+from agent_sandbox_rl.preflight import pod_selector_covers
 from agent_sandbox_rl.sources import ListSource, Task
 
 logging.basicConfig(level=logging.INFO,
@@ -56,7 +56,7 @@ def covering_policies(fleet: SandboxFleet, namespace: str) -> list[str]:
   policies = client.NetworkingV1Api(cluster.api_client).list_namespaced_network_policy(
       namespace).items
   return [p.metadata.name for p in policies
-          if pod_selector_matches(p.spec.pod_selector, labels)]
+          if pod_selector_covers(p.spec.pod_selector, labels)]
 
 
 def report(fleet: SandboxFleet, namespace: str) -> dict:

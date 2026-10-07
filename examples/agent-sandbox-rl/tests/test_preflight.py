@@ -174,20 +174,20 @@ def test_networkpolicy_check_list_forbidden_is_warning(monkeypatch):
   assert "HTTP 403" in warning.detail
 
 
-def test_selects_label_selector_semantics():
-  labels = {"app": "agent-sandbox-rl", "tier": "sbx"}
+def test_pod_selector_covers_only_what_known_labels_confirm():
+  known = {"app": "agent-sandbox-rl", "tier": "sbx"}
   sel = lambda **kw: _policy("p", **kw).spec.pod_selector  # noqa: E731
-  assert pf.pod_selector_matches(sel(), labels)                                    # {} selects all
-  assert pf.pod_selector_matches(sel(match_labels={"app": "agent-sandbox-rl"}), labels)
-  assert not pf.pod_selector_matches(sel(match_labels={"app": "web"}), labels)
-  assert not pf.pod_selector_matches(sel(match_labels={"missing": "x"}), labels)
-  assert pf.pod_selector_matches(sel(match_expressions=[("app", "In", ["agent-sandbox-rl"])]), labels)
-  assert not pf.pod_selector_matches(sel(match_expressions=[("app", "In", ["web"])]), labels)
-  assert not pf.pod_selector_matches(sel(match_expressions=[("app", "NotIn", ["agent-sandbox-rl"])]), labels)
-  # NotIn also matches pods that lack the key
-  assert pf.pod_selector_matches(sel(match_expressions=[("missing", "NotIn", ["x"])]), labels)
-  assert pf.pod_selector_matches(sel(match_expressions=[("tier", "Exists", None)]), labels)
-  assert not pf.pod_selector_matches(sel(match_expressions=[("missing", "Exists", None)]), labels)
-  assert pf.pod_selector_matches(sel(match_expressions=[("missing", "DoesNotExist", None)]), labels)
-  assert not pf.pod_selector_matches(sel(match_expressions=[("tier", "DoesNotExist", None)]), labels)
-
+  assert pf.pod_selector_covers(sel(), known)                          # {} selects all
+  assert pf.pod_selector_covers(sel(match_labels={"app": "agent-sandbox-rl"}), known)
+  assert not pf.pod_selector_covers(sel(match_labels={"app": "web"}), known)
+  assert not pf.pod_selector_covers(sel(match_labels={"missing": "x"}), known)
+  assert pf.pod_selector_covers(sel(match_expressions=[("app", "In", ["agent-sandbox-rl"])]), known)
+  assert not pf.pod_selector_covers(sel(match_expressions=[("app", "In", ["web"])]), known)
+  assert pf.pod_selector_covers(sel(match_expressions=[("app", "NotIn", ["web"])]), known)
+  assert not pf.pod_selector_covers(sel(match_expressions=[("app", "NotIn", ["agent-sandbox-rl"])]), known)
+  assert pf.pod_selector_covers(sel(match_expressions=[("tier", "Exists", None)]), known)
+  assert not pf.pod_selector_covers(sel(match_expressions=[("tier", "DoesNotExist", None)]), known)
+  # Keys outside the known set may still be on the pods (the per-template
+  # `sandbox` label, controller labels): no requirement on them confirms coverage.
+  for op, values in (("DoesNotExist", None), ("NotIn", ["x"]), ("Exists", None), ("In", ["x"])):
+    assert not pf.pod_selector_covers(sel(match_expressions=[("sandbox", op, values)]), known), op

@@ -49,24 +49,31 @@ def _networking_api(cluster):
   return client.NetworkingV1Api(cluster.api_client)
 
 
-def pod_selector_matches(selector, labels: dict) -> bool:
-  """Whether a NetworkPolicy ``podSelector`` (a `V1LabelSelector`) selects a
-  pod carrying ``labels``. An empty selector selects every pod in the namespace."""
+def pod_selector_covers(selector, known_labels: dict) -> bool:
+  """Whether a NetworkPolicy ``podSelector`` (a `V1LabelSelector`) is certain to
+  select every pod whose labels include ``known_labels``.
+
+  Pods also carry keys outside ``known_labels`` (the per-template ``sandbox``
+  label, the controller's own labels, keys other integrations add), so any
+  requirement on such a key, positive or negative, cannot be confirmed and counts
+  as not covering. An empty selector selects every pod in the namespace."""
   if selector is None:
     return True
   for key, value in (selector.match_labels or {}).items():
-    if labels.get(key) != value:
+    if known_labels.get(key) != value:
       return False
   for req in selector.match_expressions or []:
-    present = req.key in labels
+    if req.key not in known_labels:
+      return False
+    value = known_labels[req.key]
     values = req.values or []
-    if req.operator == "In" and not (present and labels[req.key] in values):
+    if req.operator == "In" and value not in values:
       return False
-    if req.operator == "NotIn" and present and labels[req.key] in values:
+    if req.operator == "NotIn" and value in values:
       return False
-    if req.operator == "Exists" and not present:
+    if req.operator == "DoesNotExist":
       return False
-    if req.operator == "DoesNotExist" and present:
+    if req.operator not in ("In", "NotIn", "Exists", "DoesNotExist"):
       return False
   return True
 
@@ -207,7 +214,7 @@ def preflight_cluster(cluster, *, require_runtime_class: str | None = None,
     try:
       policies = _networking_api(cluster).list_namespaced_network_policy(ns).items
       selecting = [p.metadata.name for p in policies
-                   if pod_selector_matches(p.spec.pod_selector, unmanaged_pod_labels)]
+                   if pod_selector_covers(p.spec.pod_selector, unmanaged_pod_labels)]
       if selecting:
         r.add("networkpolicy", True, ", ".join(selecting))
       else:

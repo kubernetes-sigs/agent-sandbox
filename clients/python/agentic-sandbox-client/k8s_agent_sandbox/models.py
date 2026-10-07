@@ -137,6 +137,8 @@ class SandboxdPodTunnelConnectionConfig(BaseModel):
     sandboxd (KEP-539.2) exposes two listeners: the Filesystem & Runtime REST
     API and the gRPC ProcessService. This config port-forwards directly to the
     sandbox pod, reaching both.
+
+    Doesn't work on Kata or gVisor; use SandboxdInClusterConnectionConfig for those.
     """
     rest_port: int = 8080  # sandboxd REST filesystem port on the pod.
     grpc_port: int = 9090  # sandboxd gRPC ProcessService port on the pod.

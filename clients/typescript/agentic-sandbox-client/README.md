@@ -139,6 +139,10 @@ uses the client's configured default namespace.
 | `"in-cluster-service"` | Dials the Sandbox's headless Service by DNS name (`status.serviceFQDN`) | The process runs inside the cluster, and the template sets `spec.service: true`. |
 | `"in-cluster-pod-ip"` | Dials the pod IP (`status.podIPs`, IPv4 preferred) | The process runs inside the cluster. |
 
+`"port-forward"` doesn't work on Kata or gVisor: their workload runs in a separate
+kernel, so the pod's host-side network namespace has nothing for the port-forward to
+reach — use an in-cluster mode (the Sandbox NetworkPolicy must admit the client).
+
 ```ts
 const client = new SandboxClient({
   sandboxd: { connectivity: "in-cluster-service" },

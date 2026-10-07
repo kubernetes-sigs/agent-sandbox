@@ -4127,6 +4127,9 @@ spec:
                   - type
                   type: object
                 type: array
+              firstReadyTime:
+                format: date-time
+                type: string
               nodeName:
                 type: string
               podIPs:

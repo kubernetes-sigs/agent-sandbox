@@ -209,7 +209,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `firstReadyTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | firstReadyTime is the best-known time when this Sandbox first reached Ready=True.<br />If the controller first observes the Sandbox already Ready, it uses the Ready<br />condition's current transition time and does not emit a creation-latency sample.<br />It is set once and retained across later readiness transitions. |  | Format: date-time <br />Optional: \{\} <br /> |
+| `firstReadyTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | firstReadyTime is the best-known time when this Sandbox first reached Ready=True.<br />If the controller first observes the Sandbox already Ready, it uses the Ready<br />condition's current transition time and does not emit a creation-latency sample.<br />It is set once and retained across later readiness transitions. |  | Optional: \{\} <br /> |
 | `serviceFQDN` _string_ | serviceFQDN that is valid for default cluster settings<br />The domain defaults to cluster.local but is configurable via the controller's --cluster-domain flag. |  | Optional: \{\} <br /> |
 | `service` _string_ | service is the name of the headless Service created for this Sandbox. It is empty<br />when no Service exists for the Sandbox (for example when spec.service is false, or<br />unset with no pre-existing Service). See serviceFQDN for the fully qualified<br />in-cluster DNS name of this Service. |  | Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | conditions defines the status conditions array |  | Optional: \{\} <br /> |
@@ -621,4 +621,5 @@ _Appears in:_
 | `Disallowed` | VolumeClaimTemplatesPolicyDisallowed prevents a SandboxClaim from specifying any volume claim templates.<br /> |
 | `Allowed` | VolumeClaimTemplatesPolicyAllowed allows a SandboxClaim to inject new volume claim templates, but not override existing ones.<br /> |
 | `Overrides` | VolumeClaimTemplatesPolicyOverrides allows a SandboxClaim to inject new and override existing volume claim templates.<br /> |
+
 

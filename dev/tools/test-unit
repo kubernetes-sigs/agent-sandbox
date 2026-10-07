@@ -183,9 +183,10 @@ PYTHON_TEST_SUITES = [
         "dir": os.path.join("examples", "agent-sandbox-gymnasium", "rllib"),
         # The adaptation tests do not import Ray or contact Kubernetes. Keep
         # this unit-test environment small by installing only the two in-repo
-        # client packages; cluster-backed verification is run explicitly.
+        # client packages and gRPC for local channel readiness regression;
+        # cluster-backed verification is run explicitly.
         "editable_installs": [
-            (PYTHON_SDK_DIR, ""),
+            (PYTHON_SDK_DIR, "[grpc]"),
             (os.path.join("clients", "integrations", "gymnasium"), "[test]"),
         ],
         "extra_packages": ["gymnasium==1.2.2"],

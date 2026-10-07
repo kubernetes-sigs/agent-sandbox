@@ -118,7 +118,8 @@ bin/python-venv-rllib/bin/python \
 ```
 
 When the driver and EnvRunners execute inside a RayCluster or RayJob, use an
-in-cluster connection and the cluster's Ray address:
+in-cluster connection and the cluster's Ray address. Run this command from
+the directory containing `train.py` inside your Ray application environment:
 
 ```bash
 python train.py \
@@ -127,9 +128,198 @@ python train.py \
   --num-env-runners 4
 ```
 
-The Ray pods' service account must be allowed to create, get, list, watch, and
-delete `SandboxClaim` objects and to get, list, and watch `Sandbox` objects in
-the selected namespace.
+Here `in-cluster` is the legacy Python runtime transport, not sandboxd. For a
+complete direct-sandboxd deployment, use the RayJob below. The Ray pods need
+namespace-scoped Claim create/get/watch/delete and Sandbox get/watch; they do
+not need list, Pod, Service, Secret or PVC permissions.
+
+## Run a sandboxd RayJob on Kubernetes
+
+The manifests in [kuberay/](kuberay/) use one namespace, a CPU-only Ray head,
+one worker with two independent EnvRunner actors, a two-replica warm pool and
+a head-only checkpoint PVC. Commands use sandboxd gRPC on port 9090; the
+preflight also tests REST file write/read on port 8080. Each Sandbox has its
+own Service DNS address. Neither the Sandbox Router nor port-forwarding is used.
+
+Prerequisites:
+
+- Agent Sandbox core **and extensions**, with the SandboxTemplate `service`
+  and `networkPolicy` fields supported. Use the project's
+  [installation/development instructions](../../../docs/development.md).
+- KubeRay **1.7.0**, a default dynamic StorageClass and enough allocatable
+  capacity. The initial Ray head/worker budget is 2 CPU / 4Gi **each**; reserve
+  additional capacity for the operators, Sandbox Pods and transient overlap.
+  A warm pool of two means two *unclaimed* spares, not a two-Pod total limit.
+- A CNI implementing NetworkPolicy for isolation. Default kind networking can
+  test functionality but does not prove the policy blocks other callers.
+- A selected Kubernetes context and an image registry reachable from every
+  node, or locally loaded images when using kind.
+
+The shared image uses Ray/RLlib 2.58.0, Python 3.11, Gymnasium 1.2.2 and CPU
+Torch 2.9.0. SDK and Gymnasium integration are installed from full source SHA
+`82d410efd5a279e887cdcf8c01e742a345fef63d`, which contains the sandboxd
+in-cluster transport (SDK release 1.0.4 does not). A digest-pinned ARM64 Ray
+base and the application overlay are frozen in `Dockerfile.rllib` and
+`requirements.lock`. The image dependency/Jobs/remote-import checks were tested
+on Linux ARM64. For another platform, provide `--build-arg RAY_BASE_IMAGE=...`
+with a verified immutable Ray 2.58.0 / Python 3.11 CPU base of that platform;
+the default is **not** a multi-architecture image.
+
+### Build and choose images
+
+Run from this repository's root. The example source is copied from this
+checkout; SDK/integration source pins are installed at build time, never in
+running Pods. This example does not publish an official RLlib image.
+
+```bash
+export RLLIB_IMAGE=kind.local/rllib-sandbox:local
+export SANDBOXD_IMAGE=kind.local/sandboxd:82d410e
+docker build -f examples/agent-sandbox-gymnasium/rllib/kuberay/Dockerfile.rllib \
+  -t "$RLLIB_IMAGE" .
+docker run --rm "$RLLIB_IMAGE" python -m pip check
+```
+
+Build sandboxd from the same fixed source revision in a separate checkout if
+your working checkout has unrelated runtime changes:
+
+```bash
+# In a checkout of 82d410efd5a279e887cdcf8c01e742a345fef63d:
+docker build -f packages/sandboxd/Dockerfile -t "$SANDBOXD_IMAGE" .
+```
+
+For kind, load both images into **your selected test cluster**:
+
+```bash
+kind load docker-image "$RLLIB_IMAGE" "$SANDBOXD_IMAGE" --name YOUR_KIND_CLUSTER
+```
+
+For another cluster, instead build/tag/push to your own registry and set the
+two image variables to those immutable references. Push is an explicit user
+operation. All three Ray containers (head, worker and submitter) must use the
+same example image; do not mix interpreter or Ray versions. Avoid `latest-main`
+for sandboxd.
+
+### Deploy in order
+
+Check your context before writing resources. The namespace is intentionally
+dedicated; do not mix the example with unrelated workloads.
+
+```bash
+kubectl config current-context
+export KUBE_CONTEXT=YOUR_VERIFIED_CONTEXT
+export EXAMPLE=examples/agent-sandbox-gymnasium/rllib/kuberay
+kubectl --context "$KUBE_CONTEXT" get storageclass
+kubectl --context "$KUBE_CONTEXT" apply -f "$EXAMPLE/namespace.yaml"
+kubectl --context "$KUBE_CONTEXT" apply -f "$EXAMPLE/rbac.yaml"
+sed "s|REPLACE_WITH_YOUR_SANDBOXD_IMAGE|$SANDBOXD_IMAGE|g" "$EXAMPLE/sandbox.yaml" \
+  | kubectl --context "$KUBE_CONTEXT" apply -f -
+kubectl --context "$KUBE_CONTEXT" apply -f "$EXAMPLE/checkpoint-pvc.yaml"
+kubectl --context "$KUBE_CONTEXT" -n rllib-sandbox-example wait \
+  --for=jsonpath='{.status.readyReplicas}'=2 \
+  sandboxwarmpool/rllib-sandboxd-warmpool --timeout=180s
+```
+
+The PVC uses the default StorageClass; set `storageClassName` explicitly if
+your cluster has none. With `WaitForFirstConsumer`, Pending is expected until
+the head Pod is scheduled: **do not wait for Bound before submitting the job**.
+Storage must support the head's UID 1000 / GID 100 and `fsGroup: 100`. The
+driver probes actual writability before training; it does not assume fsGroup
+works with every CSI driver.
+
+```bash
+sed "s|REPLACE_WITH_YOUR_RLLIB_IMAGE|$RLLIB_IMAGE|g" "$EXAMPLE/rayjob.yaml" \
+  | kubectl --context "$KUBE_CONTEXT" apply -f -
+kubectl --context "$KUBE_CONTEXT" -n rllib-sandbox-example wait \
+  --for=jsonpath='{.status.rayClusterName}' \
+  rayjob/rllib-sandbox-training --timeout=180s
+kubectl --context "$KUBE_CONTEXT" -n rllib-sandbox-example wait \
+  --for=jsonpath='{.status.phase}'=Bound pvc/rllib-checkpoints --timeout=180s
+kubectl --context "$KUBE_CONTEXT" -n rllib-sandbox-example get rayjob,pods,jobs
+```
+
+The Ray ServiceAccount has only namespace-scoped Sandbox permissions. The
+submitter has no Sandbox RoleBinding and no mounted API token; the Sandbox
+Pods also have no token. Template ingress admits same-namespace Ray Pods with
+the example label, only on 8080/9090; Sandbox egress is denied. Existing policies
+that restrict Ray's DNS/API/internal traffic must be handled by the deployer,
+not by granting cluster-wide access to this application.
+
+### Observe and retrieve results
+
+Replace `SUBMITTER_JOB_NAME` below with the exact Job name from the preceding
+listing. KubeRay 1.7 follows the Ray driver logs:
+
+```bash
+kubectl --context "$KUBE_CONTEXT" -n rllib-sandbox-example logs \
+  job/SUBMITTER_JOB_NAME -f
+```
+
+Before the 300-second cleanup TTL, also capture Ray Pod logs and namespace
+events for troubleshooting:
+
+```bash
+kubectl --context "$KUBE_CONTEXT" -n rllib-sandbox-example logs \
+  -l app.kubernetes.io/part-of=rllib-sandbox-example --all-containers --prefix
+kubectl --context "$KUBE_CONTEXT" -n rllib-sandbox-example get events \
+  --sort-by=.metadata.creationTimestamp
+kubectl --context "$KUBE_CONTEXT" -n rllib-sandbox-example wait \
+  --for=jsonpath='{.status.jobStatus}'=SUCCEEDED \
+  rayjob/rllib-sandbox-training --timeout=900s
+kubectl --context "$KUBE_CONTEXT" -n rllib-sandbox-example wait \
+  --for=jsonpath='{.status.jobDeploymentStatus}'=Complete \
+  rayjob/rllib-sandbox-training --timeout=180s
+```
+
+`--verify-run` performs deterministic command/REST preflight, five real PPO
+iterations, complete per-EnvRunner evidence collection, checkpoint save,
+original Algorithm stop and named Claim deletion checks, then a **new**
+Algorithm restore/evaluation and final cleanup. It fails for missing remote
+actors, shared Claim/Sandbox identities, task execution errors, missing positive
+sample/train counters, bad checkpoints or Claim GET/cleanup failures. It does
+not assert a training score: a valid policy episode with `success=False` is
+not a transport failure. Automatic EnvRunner/environment restarts are disabled
+because they would lose this example's in-memory evidence.
+
+Look for JSON events `PREFLIGHT_OK`, `PPO_ITERATION`, `ENV_RUNNER_EVIDENCE`,
+`CHECKPOINT_SAVED`, `CHECKPOINT_RESTORED`, `CLAIMS_DELETED`, then
+`RUN_SUCCEEDED`. Before TTL, use the head Pod's `ray-head` container to inspect
+or copy `/checkpoints/<run-id>/verification.json` and `algorithm/`. Each run has
+its own directory. The checkpoint preserves RLlib state, **not** Sandbox files
+or processes; workers do not mount the PVC.
+
+After completion, RayCluster is removed after about 300 seconds; the independent
+PVC remains. RayJob and submitter logs remain with the normal operator setting;
+`DELETE_RAYJOB_CR_AFTER_JOB_FINISHES` changes that retention. Failed jobs may
+also lose Ray Pods at TTL, so collect logs promptly. Re-run by deleting the old
+RayJob and applying it again; the retained PVC uses a new run directory.
+
+### Cleanup and failures
+
+`RUN_FAILED` reports the root error, known Claims and cleanup errors. Named
+GET checks have a shared 120-second deadline and bounded request timeouts;
+only 404 proves deletion. For leftover Claims, inspect the exact namespace/name
+from the report and delete those names normally. Do not use `--all`, force
+deletion or a namespace sweep. The example does not guarantee cleanup after
+SIGKILL, driver/Pod crashes or actor replacement, nor wait for background Pod GC.
+
+Remove computation/configuration without deleting retained data:
+
+```bash
+kubectl --context "$KUBE_CONTEXT" delete -f "$EXAMPLE/rayjob.yaml" --ignore-not-found
+# Inspect any remaining RayCluster and delete only this example's cluster.
+kubectl --context "$KUBE_CONTEXT" delete -f "$EXAMPLE/sandbox.yaml" --ignore-not-found
+kubectl --context "$KUBE_CONTEXT" delete -f "$EXAMPLE/rbac.yaml" --ignore-not-found
+```
+
+Do **not** delete the namespace while retaining the PVC. After backing up the
+checkpoint, an optional separate data-deletion step is:
+
+```bash
+kubectl --context "$KUBE_CONTEXT" -n rllib-sandbox-example delete pvc/rllib-checkpoints
+```
+
+Depending on the PV reclaim policy, this can irreversibly delete the underlying
+storage. Delete the namespace only after deciding to discard all its data.
 
 ## Cleanup behavior
 
@@ -142,6 +332,6 @@ the selected namespace.
 - `SandboxClient(cleanup=True)` supplies best-effort process-exit cleanup for
   abrupt worker termination.
 
-The example never asserts a fixed training score in CI. Unit tests cover only
-the deterministic action/observation adaptation and cleanup behavior;
-cluster-backed verification is explicit.
+The example never asserts a fixed training score in CI. Lightweight tests cover
+the deterministic adaptation, evidence/cleanup validators and cross-manifest
+contracts without importing Ray or Torch; cluster-backed verification is explicit.

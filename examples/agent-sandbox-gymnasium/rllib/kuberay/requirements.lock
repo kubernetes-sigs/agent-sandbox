@@ -1,0 +1,28 @@
+# Application overlay resolved against the immutable Ray base in Dockerfile.rllib.
+# The base digest freezes its inherited dependencies; pins below freeze every
+# added/replaced distribution, plus the application's Ray/Gymnasium versions.
+--index-url https://pypi.org/simple
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+ray[rllib,default]==2.58.0
+gymnasium==1.2.2
+torch==2.9.0+cpu
+grpcio==1.83.0
+protobuf==7.36.1
+# Base OTel API/SDK/exporter remain compatible at 1.39 / 0.60b0. Its old proto
+# distribution disallows protobuf 7, required by the sandboxd generated stubs.
+opentelemetry-proto==1.43.0
+# The base's conda-lockfiles requires >=2.12.5, but ships Pydantic 2.12.3.
+pydantic==2.12.5
+pydantic-core==2.41.5
+
+k8s-agent-sandbox[grpc] @ git+https://github.com/kubernetes-sigs/agent-sandbox.git@82d410efd5a279e887cdcf8c01e742a345fef63d#subdirectory=clients/python/agentic-sandbox-client
+k8s-agent-sandbox-gymnasium @ git+https://github.com/kubernetes-sigs/agent-sandbox.git@82d410efd5a279e887cdcf8c01e742a345fef63d#subdirectory=clients/integrations/gymnasium
+kubernetes==36.0.3
+durationpy==0.11
+websocket-client==1.9.2
+requests-oauthlib==2.0.0
+oauthlib==4.0.0
+networkx==3.6.1
+sympy==1.14.0
+mpmath==1.3.0

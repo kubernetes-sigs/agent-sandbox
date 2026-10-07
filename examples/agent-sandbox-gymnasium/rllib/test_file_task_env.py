@@ -18,6 +18,7 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 import pytest
+import file_task_env
 
 from file_task_env import (
     CREATE_DIRECTORY,
@@ -39,12 +40,18 @@ class FakeSandboxEnv(gym.Env):
         self.closed = False
         self.step_count = 0
         self.state = [0, 0, 0]
+        self.resets = 0
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         self.step_count = 0
         self.state = [0, 0, 0]
-        return "Sandbox ready.", {"claim_name": "sandbox-claim-test"}
+        self.resets += 1
+        suffix = "test" if self.resets == 1 else str(self.resets)
+        return "Sandbox ready.", {
+            "claim_name": f"sandbox-claim-{suffix}",
+            "sandbox_id": f"sandbox-{suffix}",
+        }
 
     def step(self, command):
         self.commands.append(command)
@@ -64,7 +71,7 @@ class FakeSandboxEnv(gym.Env):
             reward,
             terminated,
             self.step_count >= 4 and not terminated,
-            {"step": self.step_count, "env_error": False},
+            {"step": self.step_count, "env_error": False, "exit_code": 0},
         )
 
     def close(self):
@@ -72,11 +79,34 @@ class FakeSandboxEnv(gym.Env):
 
 
 class FakeClient:
-    def __init__(self):
+    def __init__(self, process_channel=None):
         self.delete_all_calls = 0
+        self.process_channel = process_channel
 
     def delete_all(self):
         self.delete_all_calls += 1
+
+    def get_sandbox(self, *args, **kwargs):
+        from types import SimpleNamespace
+        return SimpleNamespace(connector=SimpleNamespace(
+            connect=lambda: None, grpc_channel=lambda: self.process_channel,
+        ))
+
+
+@pytest.fixture
+def process_channel():
+    from concurrent.futures import ThreadPoolExecutor
+    import grpc
+
+    server = grpc.server(ThreadPoolExecutor(max_workers=1))
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    channel = grpc.insecure_channel(f"127.0.0.1:{port}")
+    try:
+        yield channel
+    finally:
+        server.stop(0).wait()
+        channel.close()
 
 
 def test_parse_file_task_state():
@@ -223,3 +253,190 @@ def test_reward_and_termination_follow_encoded_state():
     assert not termination("FILE_TASK_STATE=1,0,0\n", info, "task")
     assert reward("command", "FILE_TASK_STATE=1,1,1\n", info, "task") == 1.0
     assert termination("FILE_TASK_STATE=1,1,1\n", info, "task")
+
+
+def test_evidence_retains_every_episode_and_returns_a_copy():
+    env = DiscreteFileTaskWrapper(FakeSandboxEnv(), namespace="training")
+    env.reset()
+    env.step(CREATE_DIRECTORY)
+    env.reset()
+    env.step(WRITE_FILE)
+
+    evidence = env.get_claim_evidence()
+    assert evidence["claims"] == [
+        {"namespace": "training", "claim_name": "sandbox-claim-test", "sandbox_id": "sandbox-test"},
+        {"namespace": "training", "claim_name": "sandbox-claim-2", "sandbox_id": "sandbox-2"},
+    ]
+    assert evidence["steps"] == evidence["successful_steps"] == 2
+    assert evidence["errors"] == 0
+    assert evidence["env_id"] != DiscreteFileTaskWrapper(FakeSandboxEnv()).get_claim_evidence()["env_id"]
+    evidence["claims"][0]["claim_name"] = "mutated"
+    assert env.get_claim_evidence()["claims"][0]["claim_name"] == "sandbox-claim-test"
+
+
+@pytest.mark.parametrize("exit_code,env_error,output", [
+    (1, False, "FILE_TASK_STATE=1,1,1\n"),
+    (0, True, "FILE_TASK_STATE=1,1,1\n"),
+    (0, False, "malformed"),
+])
+def test_failed_execution_is_not_successful_evidence(exit_code, env_error, output):
+    base_env = FakeSandboxEnv()
+    env = DiscreteFileTaskWrapper(base_env)
+    env.reset()
+    base_env.step = lambda command: (output, 1.0, True, False, {
+        "step": 1, "exit_code": exit_code, "env_error": env_error,
+    })
+    _, _, terminated, truncated, info = env.step(WRITE_FILE)
+    assert truncated
+    assert not terminated
+    assert not info["success"]
+    assert env.get_claim_evidence()["errors"] == 1
+    assert env.get_claim_evidence()["successful_steps"] == 0
+
+
+@pytest.mark.parametrize("mode,config_type", [
+    ("tunnel", "SandboxLocalTunnelConnectionConfig"),
+    ("in-cluster", "SandboxInClusterConnectionConfig"),
+    ("sandboxd-in-cluster", "SandboxdInClusterConnectionConfig"),
+])
+def test_environment_constructs_an_independent_client_with_selected_transport(monkeypatch, process_channel, mode, config_type):
+    configs = []
+    def make_client(*, connection_config, cleanup):
+        assert cleanup
+        configs.append(connection_config)
+        return FakeClient(process_channel)
+    monkeypatch.setattr(file_task_env, "SandboxClient", make_client)
+    monkeypatch.setattr(file_task_env, "SandboxEnv", lambda **kwargs: FakeSandboxEnv())
+    first = file_task_env.SandboxFileTaskEnv({"connection_mode": mode, "namespace": "training"})
+    second = file_task_env.SandboxFileTaskEnv({"connection_mode": mode})
+    assert type(configs[0]).__name__ == config_type
+    assert configs[0] is not configs[1]
+    if mode == "sandboxd-in-cluster":
+        assert configs[0].mode == "service-dns"
+    first.reset()
+    assert first.get_claim_evidence()["claims"][0]["namespace"] == "training"
+    first.close()
+    second.close()
+
+
+def test_environment_rejects_unknown_transport_before_creating_client():
+    with pytest.raises(ValueError, match="Unsupported connection mode"):
+        file_task_env.SandboxFileTaskEnv({"connection_mode": "unknown"})
+
+
+def test_sandboxd_reset_waits_for_the_process_channel_to_be_ready(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event, Timer
+    from types import SimpleNamespace
+    import socket
+    import grpc
+
+    server = grpc.server(ThreadPoolExecutor(max_workers=1))
+    reserved = socket.socket()
+    reserved.bind(("127.0.0.1", 0))
+    port = reserved.getsockname()[1]
+    channel = grpc.insecure_channel(f"127.0.0.1:{port}")
+    started = Event()
+    def start_server():
+        reserved.close()
+        started.set()
+        server.add_insecure_port(f"127.0.0.1:{port}")
+        server.start()
+    client = FakeClient()
+    client.get_sandbox = lambda *args, **kwargs: SimpleNamespace(
+        connector=SimpleNamespace(connect=lambda: None, grpc_channel=lambda: channel),
+    )
+    monkeypatch.setattr(file_task_env, "SandboxClient", lambda **kwargs: client)
+    monkeypatch.setattr(file_task_env, "SandboxEnv", lambda **kwargs: FakeSandboxEnv())
+    env = file_task_env.SandboxFileTaskEnv({"connection_mode": "sandboxd-in-cluster"})
+    timer = Timer(0.1, start_server)
+    timer.start()
+    try:
+        _, info = env.reset()
+        assert started.is_set(), "reset returned before the process service was available"
+        grpc.channel_ready_future(channel).result(timeout=5)
+        assert info["claim_name"] == "sandbox-claim-test"
+        assert env.get_claim_evidence()["steps"] == 0
+    finally:
+        timer.join()
+        env.close()
+        server.stop(0).wait()
+        channel.close()
+
+
+def test_sandboxd_reset_times_out_and_keeps_the_claim_available_for_cleanup(monkeypatch):
+    from types import SimpleNamespace
+    import socket
+    import grpc
+
+    reserved = socket.socket()
+    reserved.bind(("127.0.0.1", 0))
+    channel = grpc.insecure_channel(f"127.0.0.1:{reserved.getsockname()[1]}")
+    client = FakeClient()
+    client.get_sandbox = lambda *args, **kwargs: SimpleNamespace(
+        connector=SimpleNamespace(connect=lambda: None, grpc_channel=lambda: channel),
+    )
+    base_env = FakeSandboxEnv()
+    monkeypatch.setattr(file_task_env, "SandboxClient", lambda **kwargs: client)
+    monkeypatch.setattr(file_task_env, "SandboxEnv", lambda **kwargs: base_env)
+    env = file_task_env.SandboxFileTaskEnv({
+        "connection_mode": "sandboxd-in-cluster", "step_timeout_seconds": 1,
+    })
+    try:
+        with pytest.raises(grpc.FutureTimeoutError):
+            env.reset()
+        evidence = env.get_claim_evidence()
+        assert evidence["claims"][0]["claim_name"] == "sandbox-claim-test"
+        assert evidence["steps"] == 0
+    finally:
+        env.close()
+        channel.close()
+        reserved.close()
+    assert base_env.closed
+    assert client.delete_all_calls == 1
+
+
+def test_preflight_runs_real_wrapper_commands_and_rest_on_the_same_claim(monkeypatch, process_channel):
+    from types import SimpleNamespace
+    from verify_sandbox_task import verify_file_task
+    stored = {}
+    lookups = []
+    client = FakeClient(process_channel)
+    connector = client.get_sandbox("sandbox-claim-test", namespace="training").connector
+    def get_sandbox(name, namespace):
+        lookups.append((namespace, name))
+        return SimpleNamespace(connector=connector, files=SimpleNamespace(
+            write=lambda path, content: stored.update({path: content.encode("utf-8")}),
+            read=lambda path: stored[path],
+        ))
+    client.get_sandbox = get_sandbox
+    base_env = FakeSandboxEnv()
+    monkeypatch.setattr(file_task_env, "SandboxClient", lambda **kwargs: client)
+    monkeypatch.setattr(file_task_env, "SandboxEnv", lambda **kwargs: base_env)
+    evidence = []
+    verify_file_task({"namespace": "training", "connection_mode": "sandboxd-in-cluster"},
+                     evidence=evidence, verify_rest=True)
+    assert evidence[0]["successful_steps"] == 2
+    assert evidence[0]["errors"] == 0
+    assert set(lookups) == {("training", "sandbox-claim-test")}
+    assert stored == {"rllib-preflight.txt": b"sandbox-ready"}
+    assert base_env.closed
+    assert client.delete_all_calls == 1
+
+
+def test_finalization_retains_evidence_without_masking_the_task_error():
+    from verify_sandbox_task import close_environment
+    base_env = FakeSandboxEnv()
+    env = DiscreteFileTaskWrapper(base_env)
+    env.reset()
+    def failed_close():
+        raise RuntimeError("secondary close error")
+    base_env.close = failed_close
+    evidence = []
+    with pytest.raises(ValueError, match="primary task error") as error:
+        try:
+            raise ValueError("primary task error")
+        finally:
+            close_environment(env, evidence=evidence)
+    assert evidence[0]["claims"][0]["claim_name"] == "sandbox-claim-test"
+    assert isinstance(error.value.__cause__, RuntimeError)

@@ -1,0 +1,23 @@
+# Build from the repository root. This image is built by the example user, not
+# the project's image-discovery/release scripts.
+# The default is the verified ARM64 Ray 2.58 CPU image. Override with an
+# immutable Ray 2.58 / Python 3.11 CPU image for another node architecture.
+ARG RAY_BASE_IMAGE=rayproject/ray:2.58.0-py311-cpu-aarch64@sha256:28e025725fb64e5ed8f2c4a9cda6d3e0278d292cb21260adefb449e3c197d4f1
+FROM ${RAY_BASE_IMAGE}
+
+COPY --chown=1000:100 examples/agent-sandbox-gymnasium/rllib/kuberay/requirements.lock /tmp/rllib-requirements.lock
+# Keep Ray CLI, the dashboard, the driver and actors in the base interpreter.
+# Fixed build tools avoid an independently resolved build-isolation environment
+# when setuptools_scm reads the pinned monorepo checkouts.
+RUN python -m pip install --no-cache-dir setuptools==80.9.0 setuptools-scm==9.2.2 \
+    && python -m pip install --no-cache-dir --no-build-isolation -r /tmp/rllib-requirements.lock \
+    && python -m pip check
+
+COPY --chown=1000:100 examples/agent-sandbox-gymnasium/rllib/train.py \
+    examples/agent-sandbox-gymnasium/rllib/file_task_env.py \
+    examples/agent-sandbox-gymnasium/rllib/verify_sandbox_task.py \
+    /opt/agent-sandbox/rllib/
+ENV PYTHONPATH=/opt/agent-sandbox/rllib
+WORKDIR /opt/agent-sandbox/rllib
+
+RUN python -c "import file_task_env, verify_sandbox_task, torch, ray.rllib; from k8s_agent_sandbox.commands._process_stubs import process_pb2_grpc; import opentelemetry.proto"

@@ -1,0 +1,123 @@
+# One SandboxTemplate per tenant, each with a warm pool and a claim. Both use
+# networkPolicyManagement: Managed, so the controller creates a NetworkPolicy
+# named <template>-network-policy in each namespace.
+#
+# team-a: no networkPolicy block, so it gets the Secure-by-Default policy
+#   (ingress from the sandbox-router only, egress to the public internet only,
+#   pod DNS set to 8.8.8.8 / 1.1.1.1).
+# team-b: custom networkPolicy that keeps the secure default and adds egress to
+#   the shared-tools namespace. Custom rules disable the DNS override, so this
+#   template resolves through CoreDNS and has to allow it.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: agent-runtime
+  namespace: sandbox-team-a
+spec:
+  networkPolicyManagement: Managed
+  podTemplate:
+    spec:
+      containers:
+        - name: agent
+          image: python:3.12-slim
+          command: ["sleep", "infinity"]
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: agent-pool
+  namespace: sandbox-team-a
+spec:
+  replicas: 1
+  sandboxTemplateRef:
+    name: agent-runtime
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: agent
+  namespace: sandbox-team-a
+spec:
+  warmPoolRef:
+    name: agent-pool
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: agent-runtime
+  namespace: sandbox-team-b
+spec:
+  networkPolicyManagement: Managed
+  networkPolicy:
+    ingress:
+      # Custom rules replace the secure default entirely, so the sandbox-router
+      # has to be allowed again here.
+      - from:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: agent-sandbox-system
+            podSelector:
+              matchLabels:
+                app: sandbox-router
+    egress:
+      # Cluster DNS (this template resolves through CoreDNS, see above).
+      - to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: kube-system
+            podSelector:
+              matchLabels:
+                k8s-app: kube-dns
+        ports:
+          - protocol: UDP
+            port: 53
+          - protocol: TCP
+            port: 53
+      # The in-cluster tool server. 70-cnp-admin-pass-shared-tools.yaml
+      # delegates the decision for this traffic to this rule.
+      - to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: shared-tools
+        ports:
+          - protocol: TCP
+            port: 8080
+      # Public internet with the same carve-outs as the secure default.
+      - to:
+          - ipBlock:
+              cidr: 0.0.0.0/0
+              except:
+                - 10.0.0.0/8
+                - 172.16.0.0/12
+                - 192.168.0.0/16
+                - 169.254.0.0/16
+          - ipBlock:
+              cidr: "::/0"
+              except:
+                - "fc00::/7"
+                - "fe80::/10"
+  podTemplate:
+    spec:
+      containers:
+        - name: agent
+          image: python:3.12-slim
+          command: ["sleep", "infinity"]
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: agent-pool
+  namespace: sandbox-team-b
+spec:
+  replicas: 1
+  sandboxTemplateRef:
+    name: agent-runtime
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: agent
+  namespace: sandbox-team-b
+spec:
+  warmPoolRef:
+    name: agent-pool

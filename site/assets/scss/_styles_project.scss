@@ -62,8 +62,16 @@ footer {
     margin: 0 1rem;
     padding: 0;
 
-    .text-uppercase {
-      display: none;
+    // Docsy prints the site title next to the logo. The logo already carries
+    // the brand, so hide the text visually but keep it for screen readers,
+    // which would otherwise find an unlabelled link.
+    .navbar-brand__name {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
     }
 
     svg {
@@ -71,7 +79,16 @@ footer {
     }
   }
 
+  .td-navbar-nav-scroll {
+    min-width: 0;
+  }
+
   .navbar-nav {
+    // Docsy stops scrolling at lg; wrap links without clipping dropdowns.
+    @include media-breakpoint-up(lg) {
+      flex-wrap: wrap;
+    }
+
     @include media-breakpoint-down(md) {
       font-size: 0.875rem;
 
@@ -92,7 +109,7 @@ footer {
   background-attachment: fixed;
   color: $white;
 
-  .navbar {
+  .td-navbar {
     background-color: transparent;
   }
 
@@ -314,6 +331,12 @@ div.feature-state-notice {
   padding-top: 8rem;
 }
 
+@include media-breakpoint-down(md) {
+  .td-cover-block--height-full {
+    padding-top: 2rem;
+  }
+}
+
 .mx-auto>.container {
   display: flex;
   flex-direction: row;
@@ -351,9 +374,15 @@ div.feature-state-notice {
   }
 }
 
-.link-card:hover {
+.link-card:hover,
+.link-card:focus-visible {
   cursor: pointer;
   background: rgba($primary, 0.2);
+}
+
+.link-card:focus-visible {
+  outline: 3px solid $primary;
+  outline-offset: 3px;
 }
 
 .link-card>.title {
@@ -448,9 +477,15 @@ h1.text-center {
     max-width: 100%;
   }
 
-  &:hover {
+  &:hover,
+  &:focus-visible {
     background: rgba($primary, 0.15);
     border-color: rgba($primary, 0.5);
+  }
+
+  &:focus-visible {
+    outline: 3px solid $primary;
+    outline-offset: 3px;
   }
 
   >.label {
@@ -485,6 +520,12 @@ h1.text-center {
   font-size: 2rem;
   font-weight: 400;
   text-align: center;
+}
+
+@include media-breakpoint-down(md) {
+  .quickstart-heading {
+    margin-top: 1rem;
+  }
 }
 
 .quickstart-subtitle {
@@ -709,7 +750,6 @@ h1.text-center {
   border-spacing: 0 !important;
   border: none !important;
   border-radius: 0 !important;
-  overflow: visible !important;
   margin: 1.5rem 0 !important;
 
   >thead {
@@ -816,7 +856,7 @@ h1.text-center {
 
 .section-index .list .entry .title {
   color: #bc3fff;
-  font-size: 0.84rem;
+  font-size: 1.25rem;
   font-weight: 700;
 }
 
@@ -829,13 +869,13 @@ h1.text-center {
 @media (min-width: 768px) {
   .section-index .list .entry .title {
     color: #bc3fff;
-    font-size: 1.12rem;
+    font-size: 1.5rem;
     font-weight: 700;
   }
 
   .section-index .list .entry .description {
     color: #eee;
-    font-size: 1.96rem;
+    font-size: 1.12rem;
   }
 
 }

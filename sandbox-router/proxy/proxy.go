@@ -21,13 +21,13 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/propagation"
 	"golang.org/x/net/http/httpguts"
-	"k8s.io/apimachinery/pkg/types"
 
 	"sigs.k8s.io/agent-sandbox/sandbox-router/authz"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
@@ -164,13 +164,45 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Resolve once per request, before authorization: the cache returns
+	// the Sandbox UID and Pod IP together, so the UID a scoped token is
+	// checked against is the incarnation this request will dial. The
+	// ErrorHandler also needs src to invalidate the cache entry on
+	// dial-class failures, and the Rewrite callback re-uses the URL.
+	target0 := target // capture for closures
+	upstreamURL, src, resolved := target0.Resolve("http", h.cfg.ClusterDomain, upstreamPath, r.URL.RawQuery, h.cache)
+	if upstreamRawPath != "" {
+		// Only ever set for a path-routed request (see resolveTarget).
+		// Target.Resolve only assigns URL.Path, so without this a path-
+		// routed request carrying an encoded separator in its upstream
+		// portion (e.g. a filename containing "/", sent as "%2F") would
+		// reach the sandbox already decoded, silently renaming the
+		// resource it addresses. net/url only honors RawPath when it is
+		// a valid encoding of Path (see url.URL.EscapedPath's doc) —
+		// resolveTarget/ParsePathRoute guarantee that pairing holds.
+		upstreamURL.RawPath = upstreamRawPath
+	}
+
 	// Authorization. Implementations are expected to pull whatever
 	// credential they need (TLS cert, Bearer token, custom header) off
 	// the request and either allow or return one of the sentinel
 	// errors in package authz. The default AllowAll authorizer wired in
 	// by NewHandler always permits, preserving the Python router's
 	// no-auth contract.
-	if err := h.authz.Authorize(r.Context(), r, target.Namespace, target.ID); err != nil {
+	upstreamPathURL := url.URL{Path: upstreamPath, RawPath: upstreamRawPath}
+	authorizationTarget, err := authz.NormalizeAuthorizationTarget(authz.AuthorizationTarget{
+		Namespace:   target.Namespace,
+		SandboxName: target.ID,
+		SandboxUID:  string(resolved.SandboxUID),
+		Port:        target.Port,
+		Method:      r.Method,
+		Path:        upstreamPathURL.EscapedPath(),
+	})
+	if err != nil {
+		WriteJSONError(w, &Error{Status: http.StatusInternalServerError, Detail: err.Error()})
+		return
+	}
+	if err := h.authz.Authorize(r.Context(), r, authorizationTarget); err != nil {
 		status := authz.HTTPStatusFor(err)
 		observability.LoggerFromContext(r.Context(), h.log).Info("authorization denied",
 			"sandbox", target.ID,
@@ -199,7 +231,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target0 := target // capture for closures
 	outboundRawQuery := r.URL.RawQuery
 	if h.cfg.AuthzCookieQueryParam != "" {
 		// Never forward the bootstrap credential to the sandbox itself.
@@ -208,21 +239,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// normal flow already returned above.
 		outboundRawQuery = stripQueryParam(outboundRawQuery, h.cfg.AuthzCookieQueryParam)
 	}
-	// Resolve once per request so the ErrorHandler can see which path
-	// produced the IP (cache vs DNS vs override) and invalidate the cache
-	// entry on dial-class failures. The Rewrite callback re-uses the URL.
-	upstreamURL, src := target0.Resolve("http", h.cfg.ClusterDomain, upstreamPath, outboundRawQuery, h.cache)
-	if upstreamRawPath != "" {
-		// Only ever set for a path-routed request (see resolveTarget).
-		// Target.Resolve only assigns URL.Path, so without this a path-
-		// routed request carrying an encoded separator in its upstream
-		// portion (e.g. a filename containing "/", sent as "%2F") would
-		// reach the sandbox already decoded, silently renaming the
-		// resource it addresses. net/url only honors RawPath when it is
-		// a valid encoding of Path (see url.URL.EscapedPath's doc) —
-		// resolveTarget/ParsePathRoute guarantee that pairing holds.
-		upstreamURL.RawPath = upstreamRawPath
-	}
+	upstreamURL.RawQuery = outboundRawQuery
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL = upstreamURL
@@ -312,22 +329,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// working route for a warm-pool sandbox until resync. We only
 			// invalidate when the IP we tried actually came from the
 			// cache — a DNS or PodIP-header failure means the cache had
-			// nothing useful to evict — and evict by the same key the
-			// entry was resolved with: UID for the fast path,
-			// namespace/name (plus the failed IP, so a recreated Pod's
-			// fresh entry survives) for the name index.
-			if h.cache != nil && isDeadHostDialError(err) {
-				invalidated := false
-				switch {
-				case src == SourceCache && target0.UID != "":
-					invalidated = h.cache.Invalidate(types.UID(target0.UID))
-				case src == SourceCacheName:
-					// SplitHostPort strips the port and the brackets
-					// JoinHostPort added around IPv6 literals.
-					if ip, _, sperr := net.SplitHostPort(upstreamURL.Host); sperr == nil {
-						invalidated = h.cache.InvalidateByName(target0.Namespace, target0.ID, ip)
-					}
-				}
+			// nothing useful to evict. Either cache path resolved a full
+			// entry, so evict exactly that entry: one a recreated Pod
+			// refreshed mid-dial survives, even if it reused the IP.
+			if h.cache != nil && isDeadHostDialError(err) && (src == SourceCache || src == SourceCacheName) {
+				invalidated := h.cache.Invalidate(resolved)
 				if invalidated && h.metrics != nil {
 					h.metrics.CacheInvalidationsTotal.WithLabelValues(target0.Namespace).Inc()
 				}

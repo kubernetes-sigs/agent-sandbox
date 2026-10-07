@@ -46,6 +46,7 @@ spec:
   podTemplate:
     spec:
       automountServiceAccountToken: false
+      restartPolicy: "OnFailure"
       securityContext:
         runAsNonRoot: true
         fsGroup: 1000

@@ -1,0 +1,37 @@
+# Allow GitHub over HTTPS for every sandbox, by domain name.
+#
+# domainNames is only valid in Accept rules (a Deny based on incomplete DNS
+# knowledge would fail open), so the deny stays in the priority-100 policy and
+# this one only adds the allowed names.
+#
+# Wildcards are prefix-only: *.github.com matches api.github.com but not
+# github.com, hence both entries. *.githubusercontent.com covers raw files
+# and release assets.
+#
+# domainNames requires the experimental-channel CRD of network-policy-api.
+apiVersion: policy.networking.k8s.io/v1alpha2
+kind: ClusterNetworkPolicy
+metadata:
+  name: sandbox-egress-allow-github
+spec:
+  tier: Admin
+  priority: 20
+  subject:
+    pods:
+      namespaceSelector: {}
+      podSelector:
+        matchExpressions:
+          - key: agents.x-k8s.io/sandbox-name-hash
+            operator: Exists
+  egress:
+    - name: github-https
+      action: Accept
+      to:
+        - domainNames:
+            - github.com
+            - "*.github.com"
+            - "*.githubusercontent.com"
+      protocols:
+        - tcp:
+            destinationPort:
+              number: 443

@@ -6,6 +6,7 @@ spec:
   podTemplate:
     spec:
       runtimeClassName: kata-qemu
+      restartPolicy: Never
       containers:
       - name: hello-kata
         image: busybox

@@ -17,6 +17,7 @@ package authz
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -29,20 +30,16 @@ import (
 )
 
 // untrustedRoutingHeaders mirror proxy header names (proxy depends on
-// this package, so they can't be imported). ScopedTokenAuthorizer
-// refuses any request that carries one: each overrides how the proxy
-// picks the dial target *after* authorization, decoupling the address
-// the token was checked against (namespace, name) from the pod the
-// request actually reaches.
+// this package, so they can't be imported). Scoped-token v1 refuses any
+// request that carries one because its claims bind neither override.
 //
 //   - X-Sandbox-Pod-Ip routes straight to a caller-supplied IP.
 //   - X-Sandbox-Uid routes via the router's UID→IP cache, so a token
 //     for box-a plus box-b's UID (with X-Sandbox-Id still box-a, to
 //     pass the claim check) would land on box-b.
 //
-// Rejecting both leaves DNS resolution by (namespace, name) — which is
-// exactly the identity the token authorizes — as the only path, so the
-// dial target always matches what was authorized.
+// Scoped-token v2 binds the UID and permits that header, but continues
+// to reject a raw Pod IP.
 var untrustedRoutingHeaders = []string{"X-Sandbox-Pod-Ip", "X-Sandbox-Uid"}
 
 // scopedTokenVersion is the token format version. It is both the
@@ -151,15 +148,21 @@ func signScopedToken(secret []byte, encPayload string) []byte {
 
 // ScopedTokenOptions configures a ScopedTokenAuthorizer.
 type ScopedTokenOptions struct {
-	// Secret is the shared HMAC-SHA256 key used to verify scoped
-	// tokens. Required, at least MinScopedTokenSecretLen bytes after
+	// Secret is the shared HMAC-SHA256 key used to verify legacy v1
+	// tokens. Optional when VerificationKeys enables v2. When set, it
+	// must be at least MinScopedTokenSecretLen bytes after
 	// whitespace trimming, and must match whatever minted the token
 	// (see MintScopedToken; both sides trim identically, so a mounted
-	// Secret with a trailing newline still interoperates). Rotate by
-	// restarting the router with a new secret; multi-key rotation
-	// without downtime is a follow-up (mirrors how TLSCertFile started
-	// single-cert before hot-reload was added).
+	// Secret with a trailing newline still interoperates).
 	Secret []byte
+	// VerificationKeys selects scoped-token v2 verification by protected
+	// key ID. Multiple public keys may overlap during a reader-first key
+	// rotation. The authorizer copies the map and every key.
+	VerificationKeys map[string]ed25519.PublicKey
+	// V1AcceptUntil bounds legacy HMAC token verification while v2
+	// issuers drain. It is required when VerificationKeys and Secret are
+	// configured together. At and after this instant, v1 is rejected.
+	V1AcceptUntil time.Time
 	// Clock returns the current time; nil defaults to time.Now. Tests
 	// override this to exercise expiry deterministically.
 	Clock func() time.Time
@@ -172,11 +175,9 @@ type ScopedTokenOptions struct {
 }
 
 // ScopedTokenAuthorizer authenticates and authorizes a request in one
-// step: it verifies the Bearer token's HMAC signature and expiry, then
-// checks the token's (namespace, name) claims against the sandbox the
-// request is actually targeting. A verified token for one sandbox is
-// rejected with ErrForbidden against any other — the per-sandbox
-// scoping TokenReviewAuthorizer explicitly leaves out of its v1 scope.
+// step. V1 verifies an HMAC and binds namespace plus name. V2 verifies
+// Ed25519 and binds the complete AuthorizationTarget. A verified token
+// for one target is rejected with ErrForbidden against any other.
 //
 // This gives an agent a single-purpose credential scoped to its own
 // sandbox instead of a cluster-verifiable K8s Bearer token, without a
@@ -186,50 +187,113 @@ type ScopedTokenOptions struct {
 // agent-sandbox (the router's Authorizer contract on this side; the
 // Sandbox controller as the natural minter on the other).
 type ScopedTokenAuthorizer struct {
-	secret []byte
-	clock  func() time.Time
-	locs   TokenLocations
+	secret           []byte
+	verificationKeys map[string]ed25519.PublicKey
+	v1AcceptUntil    time.Time
+	clock            func() time.Time
+	locs             TokenLocations
 }
 
 // NewScopedTokenAuthorizer builds an authorizer from o.
 func NewScopedTokenAuthorizer(o ScopedTokenOptions) (*ScopedTokenAuthorizer, error) {
-	key, err := normalizeScopedSecret(o.Secret)
-	if err != nil {
-		return nil, err
+	var secret []byte
+	if len(bytes.TrimSpace(o.Secret)) > 0 {
+		key, err := normalizeScopedSecret(o.Secret)
+		if err != nil {
+			return nil, err
+		}
+		secret = key
+	}
+	verificationKeys := make(map[string]ed25519.PublicKey, len(o.VerificationKeys))
+	for keyID, key := range o.VerificationKeys {
+		if !validScopedTokenKeyID(keyID) {
+			return nil, fmt.Errorf("scopedtoken: invalid key ID %q", keyID)
+		}
+		if len(key) != ed25519.PublicKeySize {
+			return nil, fmt.Errorf("scopedtoken: public key %q must be %d bytes, got %d", keyID, ed25519.PublicKeySize, len(key))
+		}
+		verificationKeys[keyID] = append(ed25519.PublicKey(nil), key...)
+	}
+	if len(secret) == 0 && len(verificationKeys) == 0 {
+		return nil, errors.New("scopedtoken: a v1 secret or v2 verification key is required")
+	}
+	if len(verificationKeys) > 0 && len(secret) > 0 && o.V1AcceptUntil.IsZero() {
+		return nil, errors.New("scopedtoken: V1AcceptUntil is required when v1 and v2 verification are both enabled")
+	}
+	if !o.V1AcceptUntil.IsZero() && len(secret) == 0 {
+		return nil, errors.New("scopedtoken: V1AcceptUntil requires a v1 secret")
 	}
 	clock := o.Clock
 	if clock == nil {
 		clock = time.Now
 	}
-	return &ScopedTokenAuthorizer{secret: key, clock: clock, locs: o.TokenLocations}, nil
+	return &ScopedTokenAuthorizer{
+		secret:           secret,
+		verificationKeys: verificationKeys,
+		v1AcceptUntil:    o.V1AcceptUntil,
+		clock:            clock,
+		locs:             o.TokenLocations,
+	}, nil
 }
 
 // Authorize implements the Authorizer interface.
-func (a *ScopedTokenAuthorizer) Authorize(_ context.Context, r *http.Request, sandboxNamespace, sandboxName string) error {
+func (a *ScopedTokenAuthorizer) Authorize(_ context.Context, r *http.Request, target AuthorizationTarget) error {
 	token, _, ok := TokenFromRequest(r, a.locs)
 	if !ok {
 		return ErrUnauthenticated
 	}
-	claims, err := a.verify(token)
-	if err != nil {
-		return ErrUnauthenticated
-	}
-	// Reject any caller-supplied override of the dial target (see
-	// untrustedRoutingHeaders): they would let a valid token reach a
-	// pod other than the (namespace, name) it authorizes. Scoped-token
-	// routing is by (namespace, name) only.
-	for _, h := range untrustedRoutingHeaders {
-		if r.Header.Get(h) != "" {
+	version, _, _ := strings.Cut(token, ".")
+	switch version {
+	case scopedTokenVersion:
+		claims, err := a.verifyV1(token)
+		if err != nil {
+			return ErrUnauthenticated
+		}
+		for _, header := range untrustedRoutingHeaders {
+			if r.Header.Get(header) != "" {
+				return ErrForbidden
+			}
+		}
+		if claims.Namespace != target.Namespace || claims.Name != target.SandboxName {
 			return ErrForbidden
 		}
+		return nil
+	case scopedTokenV2Version:
+		claims, err := a.verifyV2(token)
+		if err != nil {
+			return ErrUnauthenticated
+		}
+		if r.Header.Get("X-Sandbox-Pod-Ip") != "" {
+			return ErrForbidden
+		}
+		normalized, err := NormalizeAuthorizationTarget(target)
+		if err != nil {
+			return ErrForbidden
+		}
+		if normalized.SandboxUID == "" || r == nil || r.Method != normalized.Method {
+			return ErrForbidden
+		}
+		if claims.Namespace != normalized.Namespace ||
+			claims.SandboxName != normalized.SandboxName ||
+			claims.SandboxUID != normalized.SandboxUID ||
+			claims.Port != normalized.Port ||
+			claims.Method != normalized.Method ||
+			claims.Path != normalized.Path {
+			return ErrForbidden
+		}
+		return nil
+	default:
+		return ErrUnauthenticated
 	}
-	if claims.Namespace != sandboxNamespace || claims.Name != sandboxName {
-		return ErrForbidden
-	}
-	return nil
 }
 
-func (a *ScopedTokenAuthorizer) verify(token string) (*scopedClaims, error) {
+func (a *ScopedTokenAuthorizer) verifyV1(token string) (*scopedClaims, error) {
+	if len(a.secret) == 0 {
+		return nil, errors.New("scopedtoken: v1 verification is disabled")
+	}
+	if !a.v1AcceptUntil.IsZero() && !a.clock().Before(a.v1AcceptUntil) {
+		return nil, errors.New("scopedtoken: v1 acceptance window expired")
+	}
 	// Wire format is version.payload.signature. Switch on the version
 	// prefix before anything else so a future format can be handled (or
 	// cleanly rejected) here without breaking outstanding v1 tokens.
@@ -258,6 +322,42 @@ func (a *ScopedTokenAuthorizer) verify(token string) (*scopedClaims, error) {
 	}
 	// >= : exp is exclusive — a token is invalid from its exp second
 	// onward, rather than staying valid for the whole exp second.
+	if a.clock().Unix() >= claims.Exp {
+		return nil, errors.New("scopedtoken: token expired")
+	}
+	return &claims, nil
+}
+
+func (a *ScopedTokenAuthorizer) verifyV2(token string) (*scopedTokenV2Claims, error) {
+	if len(a.verificationKeys) == 0 {
+		return nil, errors.New("scopedtoken: v2 verification is disabled")
+	}
+	parts := strings.Split(token, ".")
+	if len(parts) != 4 || parts[0] != scopedTokenV2Version {
+		return nil, errors.New("scopedtoken: malformed v2 token")
+	}
+	key, ok := a.verificationKeys[parts[1]]
+	if !ok {
+		return nil, errors.New("scopedtoken: unknown key ID")
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(parts[3])
+	if err != nil {
+		return nil, fmt.Errorf("scopedtoken: decode v2 signature: %w", err)
+	}
+	if !ed25519.Verify(key, scopedTokenV2SigningInput(parts[1], parts[2]), signature) {
+		return nil, errors.New("scopedtoken: v2 signature mismatch")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return nil, fmt.Errorf("scopedtoken: decode v2 payload: %w", err)
+	}
+	var claims scopedTokenV2Claims
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return nil, fmt.Errorf("scopedtoken: unmarshal v2 claims: %w", err)
+	}
+	if claims.SandboxUID == "" {
+		return nil, errors.New("scopedtoken: v2 Sandbox UID is required")
+	}
 	if a.clock().Unix() >= claims.Exp {
 		return nil, errors.New("scopedtoken: token expired")
 	}

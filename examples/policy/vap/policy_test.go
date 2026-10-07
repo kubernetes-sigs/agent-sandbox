@@ -331,7 +331,7 @@ func TestSecureSandboxVAP(t *testing.T) {
 				Spec: sandboxv1beta1.SandboxSpec{
 					SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
 						Spec: *secureSpec.DeepCopy(),
-					},},
+					}},
 				},
 			}
 

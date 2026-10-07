@@ -45,6 +45,7 @@ func SanitizePath(rootDir, userPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid sandbox root dir: %w", err)
 	}
+	lexicalRoot := cleanRoot
 
 	cleanRootSymlink, err := filepath.EvalSymlinks(cleanRoot)
 	if err == nil {
@@ -53,12 +54,14 @@ func SanitizePath(rootDir, userPath string) (string, error) {
 
 	// Join root with user path directly to preserve relative ".." components
 	// so they are neutralized by Clean before symlink evaluation. Trim
-	// cleanRoot prefix with separator boundary if user supplied a full
-	// absolute path under cleanRoot.
+	// either root prefix with a separator boundary if the user supplied a
+	// full absolute path through the lexical or resolved root.
 	userPathClean := filepath.Clean(userPath)
-	if userPathClean == cleanRoot {
+	if userPathClean == cleanRoot || userPathClean == lexicalRoot {
 		userPathClean = "."
 	} else if after, found := strings.CutPrefix(userPathClean, cleanRoot+string(os.PathSeparator)); found {
+		userPathClean = after
+	} else if after, found := strings.CutPrefix(userPathClean, lexicalRoot+string(os.PathSeparator)); found {
 		userPathClean = after
 	}
 	joined := filepath.Clean(filepath.Join(cleanRoot, userPathClean))

@@ -56,6 +56,7 @@ spec:
       # the sum of container requests/limits. Always set explicit requests
       # and limits — leaving them unset is a common cause of OOM kills under
       # Kata.
+      restartPolicy: "OnFailure"
       containers:
       - name: agent
         # Built from ./agent/ in this directory and pushed to an ACR you

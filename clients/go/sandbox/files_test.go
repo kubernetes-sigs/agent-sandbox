@@ -15,6 +15,7 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -212,6 +213,208 @@ func TestRead_ReturnsContent(t *testing.T) {
 	}
 	if string(data) != "file content here" {
 		t.Errorf("expected 'file content here', got %q", string(data))
+	}
+}
+
+func TestRead_EmptyFileReturnsNonNilSlice(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer server.Close()
+
+	c := newReadyTestSandbox(server.URL)
+	data, err := c.Read(context.Background(), "empty.txt")
+	if err != nil {
+		t.Fatalf("Read() error: %v", err)
+	}
+	if data == nil || len(data) != 0 {
+		t.Fatalf("Read() = %#v, want a non-nil empty slice", data)
+	}
+}
+
+type chunkRecordingWriter struct {
+	data       bytes.Buffer
+	writes     int
+	maxRequest int
+}
+
+func (w *chunkRecordingWriter) Write(p []byte) (int, error) {
+	w.writes++
+	if len(p) > w.maxRequest {
+		w.maxRequest = len(p)
+	}
+	return w.data.Write(p)
+}
+
+type failAfterWriter struct {
+	remaining int
+	written   int
+}
+
+type closeTrackingBody struct {
+	io.Reader
+	reads  int
+	closed bool
+}
+
+func (b *closeTrackingBody) Read(p []byte) (int, error) {
+	b.reads++
+	return b.Reader.Read(p)
+}
+
+func (b *closeTrackingBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+type cancelAfterFirstReadBody struct {
+	ctx     context.Context
+	cancel  context.CancelFunc
+	emitted bool
+	closed  bool
+}
+
+func (b *cancelAfterFirstReadBody) Read(p []byte) (int, error) {
+	if !b.emitted {
+		b.emitted = true
+		n := copy(p, "partial")
+		b.cancel()
+		return n, nil
+	}
+	<-b.ctx.Done()
+	return 0, b.ctx.Err()
+}
+
+func (b *cancelAfterFirstReadBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+func (w *failAfterWriter) Write(p []byte) (int, error) {
+	if w.remaining == 0 {
+		return 0, errors.New("destination failed")
+	}
+	if len(p) > w.remaining {
+		n := w.remaining
+		w.remaining = 0
+		w.written += n
+		return n, errors.New("destination failed")
+	}
+	w.remaining -= len(p)
+	w.written += len(p)
+	return len(p), nil
+}
+
+func TestReadTo_StreamsContent(t *testing.T) {
+	payload := bytes.Repeat([]byte("streamed-content-"), 64*1024)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+
+	c := newReadyTestSandbox(server.URL)
+	destination := &chunkRecordingWriter{}
+	written, err := c.ReadTo(context.Background(), "large.bin", destination)
+	if err != nil {
+		t.Fatalf("ReadTo() error: %v", err)
+	}
+	if written != int64(len(payload)) {
+		t.Fatalf("ReadTo() wrote %d bytes, want %d", written, len(payload))
+	}
+	if !bytes.Equal(destination.data.Bytes(), payload) {
+		t.Fatal("ReadTo() destination content does not match response")
+	}
+	if destination.writes < 2 || destination.maxRequest >= len(payload) {
+		t.Fatalf("ReadTo() did not stream in chunks: writes=%d max-request=%d", destination.writes, destination.maxRequest)
+	}
+}
+
+func TestReadTo_DestinationErrorClosesResponse(t *testing.T) {
+	body := &closeTrackingBody{Reader: bytes.NewReader(bytes.Repeat([]byte("x"), 4096))}
+	c := newReadyTestSandbox("http://sandbox.invalid")
+	c.connector.httpClient.Transport = roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode:    http.StatusOK,
+			Header:        make(http.Header),
+			Body:          body,
+			ContentLength: -1,
+		}, nil
+	})
+	destination := &failAfterWriter{remaining: 17}
+	written, err := c.ReadTo(context.Background(), "file.bin", destination)
+	if err == nil || !strings.Contains(err.Error(), "destination failed") {
+		t.Fatalf("ReadTo() error = %v, want destination failure", err)
+	}
+	if written != 17 || destination.written != 17 {
+		t.Fatalf("ReadTo() wrote %d bytes (destination recorded %d), want 17", written, destination.written)
+	}
+	if !body.closed {
+		t.Fatal("ReadTo() did not close the response body after destination failure")
+	}
+	if body.reads != 1 {
+		t.Fatalf("ReadTo() read the response body %d times after destination failure, want 1", body.reads)
+	}
+}
+
+func TestReadTo_CancellationClosesResponse(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	body := &cancelAfterFirstReadBody{ctx: ctx, cancel: cancel}
+	c := newReadyTestSandbox("http://sandbox.invalid")
+	c.connector.httpClient.Transport = roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode:    http.StatusOK,
+			Header:        make(http.Header),
+			Body:          body,
+			ContentLength: -1,
+		}, nil
+	})
+
+	var destination bytes.Buffer
+	written, err := c.ReadTo(ctx, "file.bin", &destination)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReadTo() error = %v, want context.Canceled", err)
+	}
+	if written != int64(len("partial")) || destination.String() != "partial" {
+		t.Fatalf("ReadTo() = (%d, %q), want partial data", written, destination.String())
+	}
+	if !body.closed {
+		t.Fatal("ReadTo() did not close the response body after cancellation")
+	}
+}
+
+func TestReadTo_UnknownLengthResponseEnforcesMaxDownloadSize(t *testing.T) {
+	payload := []byte("0123456789")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+
+	c := newReadyTestSandbox(server.URL)
+	c.files.maxDownload = 6
+	var destination bytes.Buffer
+	written, err := c.ReadTo(context.Background(), "large.bin", &destination)
+	if err == nil || !strings.Contains(err.Error(), "exceeds limit") {
+		t.Fatalf("ReadTo() error = %v, want size limit error", err)
+	}
+	if written != 6 || destination.String() != "012345" {
+		t.Fatalf("ReadTo() wrote %d bytes with content %q, want 6 bytes", written, destination.String())
+	}
+}
+
+func TestReadTo_RejectsNilDestination(t *testing.T) {
+	c := newReadyTestSandbox("http://unused.invalid")
+	if _, err := c.ReadTo(context.Background(), "file.bin", nil); err == nil || !strings.Contains(err.Error(), "must not be nil") {
+		t.Fatalf("ReadTo() error = %v, want nil destination error", err)
+	}
+}
+
+func TestReadTo_RejectsTypedNilDestination(t *testing.T) {
+	c := newReadyTestSandbox("http://unused.invalid")
+	var destination *bytes.Buffer
+	if _, err := c.ReadTo(context.Background(), "file.bin", destination); err == nil || !strings.Contains(err.Error(), "must not be nil") {
+		t.Fatalf("ReadTo() error = %v, want typed nil destination error", err)
 	}
 }
 
@@ -653,8 +856,8 @@ func TestOperations_NonOKStatus(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected error for non-OK status")
 			}
-			var httpErr *HTTPError
-			if !errors.As(err, &httpErr) {
+			httpErr, ok := errors.AsType[*HTTPError](err)
+			if !ok {
 				t.Fatalf("expected HTTPError, got: %v", err)
 			}
 			if httpErr.StatusCode != tc.status {

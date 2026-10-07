@@ -17,6 +17,7 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"os"
@@ -110,6 +111,17 @@ func TestIntegration_FullLifecycle(t *testing.T) {
 		}
 		if string(data) != content {
 			t.Errorf("expected %q, got %q", content, string(data))
+		}
+	})
+
+	t.Run("ReadTo", func(t *testing.T) {
+		var destination bytes.Buffer
+		written, err := client.ReadTo(ctx, "streamed.txt", &destination)
+		if err != nil {
+			t.Fatalf("ReadTo() error: %v", err)
+		}
+		if written != int64(destination.Len()) || destination.String() != "This file was streamed." {
+			t.Errorf("ReadTo() = (%d, %q), want streamed file content", written, destination.String())
 		}
 	})
 

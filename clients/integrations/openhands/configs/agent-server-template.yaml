@@ -11,7 +11,11 @@ metadata:
 spec:
   podTemplate:
     spec:
-      runtimeClassName: gvisor          # recommended: model-driven code runs here
+      # Strongly recommended: agents execute model-generated code. Uncomment on
+      # clusters with the gVisor RuntimeClass installed (see the repo's gVisor
+      # quickstart); left commented so the template admits on clusters without
+      # it. Kata works the same way (runtimeClassName: kata-qemu).
+      # runtimeClassName: gvisor
       containers:
       - name: agent-server
         # Pin to the openhands-sdk release you install client-side; the SDK and
@@ -47,4 +51,11 @@ spec:
             cpu: "500m"
             memory: "1Gi"
             ephemeral-storage: "2Gi"
+          # Limits are part of the isolation posture: the controller copies
+          # this template into every pod, so caps must live here (or in a
+          # namespace LimitRange).
+          limits:
+            cpu: "2"
+            memory: "4Gi"
+            ephemeral-storage: "4Gi"
       restartPolicy: "OnFailure"

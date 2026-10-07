@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"time"
 )
 
@@ -43,7 +44,10 @@ var (
 	ErrNotReady         = errors.New("sandbox is not ready")
 	ErrTimeout          = errors.New("operation timed out")
 	ErrClaimFailed      = errors.New("claim creation failed")
+	ErrWarmPoolNotFound = errors.New("sandbox warm pool not found")
+	ErrTemplateNotFound = errors.New("sandbox template not found")
 	ErrPortForwardDied  = errors.New("port-forward connection lost")
+	ErrNoSandboxService = errors.New("sandbox has no headless Service")
 	ErrAlreadyOpen      = errors.New("sandbox is already open; call Close first")
 	ErrOrphanedClaim    = errors.New("orphaned claim; call Close() to retry deletion")
 	ErrRetriesExhausted = errors.New("retries exhausted")
@@ -51,7 +55,8 @@ var (
 	ErrGatewayDeleted   = errors.New("gateway was deleted during address discovery")
 	ErrResponseTooLarge = errors.New("response exceeded 16 MB limit")
 	// ErrUnsupportedByRuntime is returned by operations the selected
-	// runtime cannot perform (e.g. Delete on the legacy python-runtime).
+	// runtime or connection cannot perform (e.g. Delete on the legacy
+	// python-runtime, or Run with RuntimeSandboxd and APIURL).
 	ErrUnsupportedByRuntime = errors.New("operation not supported by the sandbox runtime")
 )
 
@@ -76,6 +81,8 @@ type CallOption func(*callOptions)
 type callOptions struct {
 	timeout     time.Duration
 	maxAttempts int // 0 = use default (maxAttempts const); 1 = no retry
+	env         map[string]string
+	cwd         string
 }
 
 // WithTimeout sets the total timeout for a single operation, overriding
@@ -96,6 +103,47 @@ func WithMaxAttempts(n int) CallOption {
 		if n > 0 {
 			o.maxAttempts = n
 		}
+	}
+}
+
+// WithEnv sets environment variables for a single Run, merged over the
+// sandbox's own environment (a key given here wins). Repeated calls
+// accumulate. Run returns ErrUnsupportedByRuntime on the legacy
+// python-runtime, which cannot carry them. Other operations ignore it.
+//
+//	result, err := client.Run(ctx, "echo $GREETING", sandbox.WithEnv(map[string]string{"GREETING": "hi"}))
+func WithEnv(env map[string]string) CallOption {
+	return func(o *callOptions) {
+		if o.env == nil {
+			o.env = make(map[string]string, len(env))
+		}
+		maps.Copy(o.env, env)
+	}
+}
+
+// WithWorkingDir sets the working directory for a single Run, relative to the
+// sandbox root (the default). sandboxd rejects a directory that resolves
+// outside the root. Run returns ErrUnsupportedByRuntime on the legacy
+// python-runtime. Other operations ignore it.
+func WithWorkingDir(dir string) CallOption {
+	return func(o *callOptions) {
+		o.cwd = dir
+	}
+}
+
+// ListOption configures Client.ListAllSandboxes.
+type ListOption func(*listOptions)
+
+type listOptions struct {
+	labelSelector string
+}
+
+// WithLabelSelector restricts the listing to claims matching a Kubernetes
+// label selector, for example "app=agent,tier!=dev". Pair it with
+// Options.Labels, which stamps labels on the claims the client creates.
+func WithLabelSelector(selector string) ListOption {
+	return func(o *listOptions) {
+		o.labelSelector = selector
 	}
 }
 
@@ -130,6 +178,22 @@ type ExecutionResult struct {
 	Stdout   string `json:"stdout"`
 	Stderr   string `json:"stderr"`
 	ExitCode int    `json:"exit_code"`
+}
+
+// Health is the sandboxd runtime's report from GET /v1/health.
+type Health struct {
+	Status string `json:"status"`
+	// UptimeSeconds is how long sandboxd has been running.
+	UptimeSeconds int64 `json:"uptime_seconds"`
+}
+
+// Metadata is the non-sensitive, workload-scoped configuration sandboxd
+// serves from GET /v1/metadata.
+type Metadata struct {
+	// Env holds the environment variables sandboxd exposes: only names
+	// matching its --metadata-env-prefix, minus anything that looks like a
+	// credential. It is never nil.
+	Env map[string]string `json:"env"`
 }
 
 // FileType represents the type of a file entry.

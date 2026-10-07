@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+	k8scache "k8s.io/client-go/tools/cache"
 )
 
 const (
@@ -356,6 +357,12 @@ func TestCache_UnclaimedWarmPoolPodNotInNameIndex(t *testing.T) {
 	if _, ok := c.GetByName(testPodNS, testPodName); ok {
 		t.Fatalf("unclaimed warm-pool pod must not be name-routable")
 	}
+	if _, _, ok := c.Resolve(testPodNS, testPodName, ""); ok {
+		t.Fatalf("unclaimed warm-pool pod must not resolve without its UID")
+	}
+	if e, source, ok := c.Resolve(testPodNS, testPodName, testUID); !ok || source != ResolutionByUID || e.SandboxUID != testUID {
+		t.Fatalf("unclaimed warm-pool pod must resolve by exact UID: entry=%+v source=%v ok=%v", e, source, ok)
+	}
 
 	// Adoption: the label is removed → the update indexes the entry.
 	adopted := pod.DeepCopy()
@@ -365,6 +372,9 @@ func TestCache_UnclaimedWarmPoolPodNotInNameIndex(t *testing.T) {
 	}
 	if !waitFor(t, func() bool { _, ok := c.GetByName(testPodNS, testPodName); return ok }) {
 		t.Fatalf("adopted pod was not added to the name index")
+	}
+	if e, source, ok := c.Resolve(testPodNS, testPodName, ""); !ok || source != ResolutionByName || e.SandboxUID != testUID {
+		t.Fatalf("adopted pod must resolve by canonical name: entry=%+v source=%v ok=%v", e, source, ok)
 	}
 }
 
@@ -438,6 +448,9 @@ func TestCache_PodRecreationNewUIDSameName(t *testing.T) {
 	c.upsert(testUID, Entry{PodIP: testPodIP, SandboxName: testPodName, Namespace: testPodNS}, true)
 	// New Pod claims the name first (add before delete)...
 	c.upsert(testUID2, Entry{PodIP: testPodIP2, SandboxName: testPodName, Namespace: testPodNS}, true)
+	if e, source, ok := c.Resolve(testPodNS, testPodName, testUID); !ok || source != ResolutionByName || e.SandboxUID != testUID2 {
+		t.Fatalf("new add must supersede stale requested UID before old delete: entry=%+v source=%v ok=%v", e, source, ok)
+	}
 	// ...then the old Pod's delete arrives late.
 	c.remove(testUID)
 
@@ -458,82 +471,283 @@ func TestCache_PodRecreationNewUIDSameName(t *testing.T) {
 	if e, ok := c.GetByName(testPodNS, testPodName); !ok || e.PodIP != testPodIP {
 		t.Fatalf("delete-then-add must repopulate the name index: %+v ok=%v", e, ok)
 	}
-}
-
-func TestCache_InvalidateByName(t *testing.T) {
-	pod := makePod(testPodName, testPodNS, testUID, testPodIP, true)
-	c, _, cancel := newCache(t, pod)
-	defer cancel()
-
-	if !waitFor(t, func() bool { _, ok := c.GetByName(testPodNS, testPodName); return ok }) {
-		t.Fatalf("initial cache add failed")
-	}
-	if !c.InvalidateByName(testPodNS, testPodName, testPodIP) {
-		t.Fatalf("InvalidateByName must report eviction of a live entry")
-	}
-	if _, ok := c.GetByName(testPodNS, testPodName); ok {
-		t.Fatalf("entry must be gone from name index after InvalidateByName")
-	}
-	if _, ok := c.Get(testUID); ok {
-		t.Fatalf("entry must be gone from UID map after InvalidateByName")
-	}
-	if c.InvalidateByName(testPodNS, testPodName, testPodIP) {
-		t.Fatalf("second InvalidateByName must be a no-op")
+	if e, source, ok := c.Resolve(testPodNS, testPodName, testUID2); !ok || source != ResolutionByName || e.SandboxUID != testUID {
+		t.Fatalf("delete-then-add must reject the stale requested UID: entry=%+v source=%v ok=%v", e, source, ok)
 	}
 }
 
-func TestCache_InvalidateByNameIPMismatchPreservesFreshEntry(t *testing.T) {
-	// The scenario the IP condition exists for: a dial to the OLD Pod's
-	// IP is timing out while the informer caches the recreated Pod (same
-	// name, new UID). By the time the ErrorHandler fires, the name key
-	// resolves to the FRESH entry — evicting it would leave the name
-	// index empty until resync and reintroduce the issue #883 NXDOMAIN
-	// 502s. The eviction must be a no-op when the IPs don't match.
+func TestCache_UpdateOwnerUIDRemovesOldEntryAfterPublishingNew(t *testing.T) {
 	c := &Cache{
 		log:     logr.Discard(),
 		entries: make(map[types.UID]Entry),
 		byName:  make(map[string]types.UID),
 	}
-	c.upsert(testUID2, Entry{PodIP: testPodIP2, SandboxName: testPodName, Namespace: testPodNS}, true)
+	oldPod := makePod(testPodName, testPodNS, testUID, testPodIP, true)
+	newPod := makePod(testPodName, testPodNS, testUID2, testPodIP2, true)
+	c.onAddOrUpdate(oldPod)
+	c.onUpdate(oldPod, newPod)
 
-	if c.InvalidateByName(testPodNS, testPodName, testPodIP) {
-		t.Fatalf("IP mismatch must not report an eviction")
+	if _, ok := c.Get(testUID); ok {
+		t.Fatal("owner-UID update must remove the old entry")
 	}
-	e, ok := c.GetByName(testPodNS, testPodName)
-	if !ok || e.PodIP != testPodIP2 {
-		t.Fatalf("fresh entry must survive a mismatched-IP invalidation: %+v ok=%v", e, ok)
-	}
-	if e2, ok := c.Get(testUID2); !ok || e2.PodIP != testPodIP2 {
-		t.Fatalf("UID entry must survive too: %+v ok=%v", e2, ok)
-	}
-
-	// Matching IP still evicts.
-	if !c.InvalidateByName(testPodNS, testPodName, testPodIP2) {
-		t.Fatalf("matching IP must evict")
-	}
-	if _, ok := c.GetByName(testPodNS, testPodName); ok {
-		t.Fatalf("entry must be gone after matching-IP invalidation")
+	entry, source, ok := c.Resolve(testPodNS, testPodName, testUID)
+	if !ok || source != ResolutionByName || entry.SandboxUID != testUID2 {
+		t.Fatalf("owner-UID update must publish the new canonical entry: entry=%+v source=%v ok=%v", entry, source, ok)
 	}
 }
 
-func TestCache_InvalidateByNameCleansDanglingKey(t *testing.T) {
-	// entries and byName move in lock-step, so a byName key pointing at a
-	// missing entry shouldn't happen — but if it ever does, the key can
-	// never resolve and InvalidateByName must drop it (and report no
-	// eviction) rather than leave it dangling.
+func TestCache_UpdateOwnerUIDKeepsOldOwnerEntryFromAnotherPod(t *testing.T) {
 	c := &Cache{
 		log:     logr.Discard(),
 		entries: make(map[types.UID]Entry),
-		byName:  map[string]types.UID{nameKey(testPodNS, testPodName): testUID},
+		byName:  make(map[string]types.UID),
 	}
-	if c.InvalidateByName(testPodNS, testPodName, testPodIP) {
-		t.Fatalf("dangling key must not report an eviction")
+	current := makePod(testPodName, testPodNS, testUID, testPodIP, true)
+	current.UID = types.UID("current-pod")
+	c.onAddOrUpdate(current)
+
+	movedOld := makePod(testPodName, testPodNS, testUID, testPodIP2, true)
+	movedOld.UID = types.UID("moved-pod")
+	movedNew := movedOld.DeepCopy()
+	movedNew.OwnerReferences[0].UID = testUID2
+	c.onUpdate(movedOld, movedNew)
+
+	if e, ok := c.Get(testUID); !ok || e.PodUID != current.UID {
+		t.Fatalf("owner change for another Pod must not evict the old owner's entry: %+v, found=%v", e, ok)
 	}
-	c.mu.RLock()
-	_, still := c.byName[nameKey(testPodNS, testPodName)]
-	c.mu.RUnlock()
-	if still {
-		t.Fatalf("dangling byName key must be deleted")
+}
+
+func TestCache_IndexesLegacyAdoptedPodBySandboxName(t *testing.T) {
+	// A Pod adopted from a warm pool before warm pools created Sandbox
+	// objects keeps its own name; only the OwnerReference carries the
+	// Sandbox name that callers address.
+	c := &Cache{
+		log:     logr.Discard(),
+		entries: make(map[types.UID]Entry),
+		byName:  make(map[string]types.UID),
+	}
+	pod := makePod("warmpool-abc-xyz", testPodNS, testUID, testPodIP, true)
+	pod.OwnerReferences[0].Name = testPodName
+	c.onAddOrUpdate(pod)
+
+	entry, source, ok := c.Resolve(testPodNS, testPodName, testUID)
+	if !ok || source != ResolutionByUID || entry.SandboxName != testPodName || entry.PodIP != testPodIP {
+		t.Fatalf("adopted Pod must resolve by its Sandbox name and UID: entry=%+v source=%v ok=%v", entry, source, ok)
+	}
+	if _, ok := c.GetByName(testPodNS, "warmpool-abc-xyz"); ok {
+		t.Fatal("adopted Pod must not be indexed under its own Pod name")
+	}
+}
+
+func TestCache_InvalidateKeepsEntryRefreshedAfterTheDial(t *testing.T) {
+	const sandboxUID = types.UID("sandbox-recreated")
+	dialed := Entry{SandboxUID: sandboxUID, PodUID: "old-pod", PodIP: testPodIP, SandboxName: testPodName, Namespace: testPodNS}
+	unknownDialed := Entry{SandboxUID: sandboxUID, PodIP: testPodIP, SandboxName: testPodName, Namespace: testPodNS}
+	cases := []struct {
+		name    string
+		dialed  Entry
+		current Entry
+	}{
+		{name: "replacement Pod reusing the IP", dialed: dialed, current: Entry{PodUID: "replacement-pod", PodIP: testPodIP, SandboxName: testPodName, Namespace: testPodNS}},
+		{name: "unknown Pod UID at a new IP", dialed: dialed, current: Entry{PodIP: testPodIP2, SandboxName: testPodName, Namespace: testPodNS}},
+		{name: "same unknown Pod UID at a new IP", dialed: unknownDialed, current: Entry{PodIP: testPodIP2, SandboxName: testPodName, Namespace: testPodNS}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Cache{
+				log:     logr.Discard(),
+				entries: make(map[types.UID]Entry),
+				byName:  make(map[string]types.UID),
+			}
+			c.upsert(sandboxUID, tc.current, true)
+			if c.Invalidate(tc.dialed) {
+				t.Fatal("a failed dial must not evict an entry refreshed after it resolved")
+			}
+			if e, _, ok := c.Resolve(testPodNS, testPodName, ""); !ok || e.PodUID != tc.current.PodUID || e.PodIP != tc.current.PodIP {
+				t.Fatalf("refreshed entry lost: %+v, found=%v", e, ok)
+			}
+		})
+	}
+
+	t.Run("entry the dial used", func(t *testing.T) {
+		c := &Cache{
+			log:     logr.Discard(),
+			entries: make(map[types.UID]Entry),
+			byName:  make(map[string]types.UID),
+		}
+		c.upsert(sandboxUID, dialed, true)
+		if !c.Invalidate(dialed) {
+			t.Fatal("a failed dial must evict the entry it used")
+		}
+		if _, ok := c.GetByName(testPodNS, testPodName); ok {
+			t.Fatal("eviction must drop the name index entry")
+		}
+	})
+}
+
+func TestCache_ResolveRejectsUIDForDifferentSandboxName(t *testing.T) {
+	c := &Cache{
+		log:     logr.Discard(),
+		entries: make(map[types.UID]Entry),
+		byName:  make(map[string]types.UID),
+	}
+	c.upsert(testUID, Entry{PodIP: testPodIP, SandboxName: "other", Namespace: testPodNS}, false)
+
+	if _, _, ok := c.Resolve(testPodNS, testPodName, testUID); ok {
+		t.Fatal("UID entry for a different sandbox name must not resolve")
+	}
+}
+
+func TestCache_StaleDeleteDoesNotEvictReplacementForSameSandbox(t *testing.T) {
+	const sandboxUID = types.UID("sandbox-recreated")
+	c := &Cache{
+		log:     logr.Discard(),
+		entries: make(map[types.UID]Entry),
+		byName:  make(map[string]types.UID),
+	}
+
+	oldPod := makePod(testPodName, testPodNS, sandboxUID, testPodIP, true)
+	oldPod.UID = types.UID("old-pod")
+	replacementPod := makePod(testPodName, testPodNS, sandboxUID, testPodIP2, true)
+	replacementPod.UID = types.UID("replacement-pod")
+
+	c.onAddOrUpdate(oldPod)
+	c.onAddOrUpdate(replacementPod)
+	c.onDelete(oldPod)
+
+	e, ok := c.Get(sandboxUID)
+	if !ok || e.PodUID != replacementPod.UID || e.PodIP != testPodIP2 {
+		t.Fatalf("stale delete evicted replacement entry: %+v, found=%v", e, ok)
+	}
+	if byName, ok := c.GetByName(testPodNS, testPodName); !ok || byName.PodIP != testPodIP2 {
+		t.Fatalf("name index lost the replacement after stale delete: %+v, found=%v", byName, ok)
+	}
+}
+
+func TestCache_StaleTombstoneDeleteDoesNotEvictReplacementForSameSandbox(t *testing.T) {
+	const sandboxUID = types.UID("sandbox-recreated")
+	c := &Cache{
+		log:     logr.Discard(),
+		entries: make(map[types.UID]Entry),
+		byName:  make(map[string]types.UID),
+	}
+
+	oldPod := makePod(testPodName, testPodNS, sandboxUID, testPodIP, true)
+	oldPod.UID = types.UID("old-pod")
+	replacementPod := makePod(testPodName, testPodNS, sandboxUID, testPodIP2, true)
+	replacementPod.UID = types.UID("replacement-pod")
+
+	c.onAddOrUpdate(oldPod)
+	c.onAddOrUpdate(replacementPod)
+	c.onDelete(k8scache.DeletedFinalStateUnknown{Key: nameKey(testPodNS, testPodName), Obj: oldPod})
+
+	e, ok := c.Get(sandboxUID)
+	if !ok || e.PodUID != replacementPod.UID || e.PodIP != testPodIP2 {
+		t.Fatalf("stale tombstone delete evicted replacement entry: %+v, found=%v", e, ok)
+	}
+	if byName, ok := c.GetByName(testPodNS, testPodName); !ok || byName.PodIP != testPodIP2 {
+		t.Fatalf("name index lost the replacement after stale tombstone delete: %+v, found=%v", byName, ok)
+	}
+}
+
+func TestCache_StaleNotReadyDoesNotEvictReplacementForSameSandbox(t *testing.T) {
+	const sandboxUID = types.UID("sandbox-recreated")
+	c := &Cache{
+		log:     logr.Discard(),
+		entries: make(map[types.UID]Entry),
+		byName:  make(map[string]types.UID),
+	}
+
+	oldPod := makePod(testPodName, testPodNS, sandboxUID, testPodIP, true)
+	oldPod.UID = types.UID("old-pod")
+	replacementPod := makePod(testPodName, testPodNS, sandboxUID, testPodIP2, true)
+	replacementPod.UID = types.UID("replacement-pod")
+
+	c.onAddOrUpdate(oldPod)
+	c.onAddOrUpdate(replacementPod)
+	oldPodNotReady := oldPod.DeepCopy()
+	oldPodNotReady.Status.Conditions[0].Status = corev1.ConditionFalse
+	c.onAddOrUpdate(oldPodNotReady)
+
+	e, ok := c.Get(sandboxUID)
+	if !ok || e.PodUID != replacementPod.UID || e.PodIP != testPodIP2 {
+		t.Fatalf("stale NotReady event evicted replacement entry: %+v, found=%v", e, ok)
+	}
+	if byName, ok := c.GetByName(testPodNS, testPodName); !ok || byName.PodIP != testPodIP2 {
+		t.Fatalf("name index lost the replacement after stale NotReady event: %+v, found=%v", byName, ok)
+	}
+}
+
+func TestCache_CurrentPodDeleteEvictsEntry(t *testing.T) {
+	const sandboxUID = types.UID("sandbox-current")
+	c := &Cache{
+		log:     logr.Discard(),
+		entries: make(map[types.UID]Entry),
+		byName:  make(map[string]types.UID),
+	}
+
+	pod := makePod(testPodName, testPodNS, sandboxUID, testPodIP, true)
+	pod.UID = types.UID("current-pod")
+	c.onAddOrUpdate(pod)
+	c.onDelete(pod)
+
+	if _, ok := c.Get(sandboxUID); ok {
+		t.Fatal("current Pod delete must evict the cache entry")
+	}
+	if _, ok := c.GetByName(testPodNS, testPodName); ok {
+		t.Fatal("current Pod delete must evict the name index entry")
+	}
+}
+
+func TestCache_CurrentPodNotReadyEvictsEntry(t *testing.T) {
+	const sandboxUID = types.UID("sandbox-current")
+	c := &Cache{
+		log:     logr.Discard(),
+		entries: make(map[types.UID]Entry),
+		byName:  make(map[string]types.UID),
+	}
+
+	pod := makePod(testPodName, testPodNS, sandboxUID, testPodIP, true)
+	pod.UID = types.UID("current-pod")
+	c.onAddOrUpdate(pod)
+	podNotReady := pod.DeepCopy()
+	podNotReady.Status.Conditions[0].Status = corev1.ConditionFalse
+	c.onAddOrUpdate(podNotReady)
+
+	if _, ok := c.Get(sandboxUID); ok {
+		t.Fatal("current Pod NotReady update must evict the cache entry")
+	}
+	if _, ok := c.GetByName(testPodNS, testPodName); ok {
+		t.Fatal("current Pod NotReady update must evict the name index entry")
+	}
+}
+
+func TestCache_EmptyCachedPodUIDFallsBackToEviction(t *testing.T) {
+	// If a cached entry has an empty PodUID (unknown Pod identity at upsert
+	// time), a subsequent delete or NotReady event carrying a PodUID must
+	// still evict the entry rather than stranding it forever.
+	const sandboxUID = types.UID("sandbox-unknown-pod-uid")
+	c := &Cache{
+		log:     logr.Discard(),
+		entries: make(map[types.UID]Entry),
+		byName:  make(map[string]types.UID),
+	}
+
+	c.upsert(sandboxUID, Entry{
+		PodIP:       testPodIP,
+		SandboxName: testPodName,
+		Namespace:   testPodNS,
+	}, true)
+
+	pod := makePod(testPodName, testPodNS, sandboxUID, testPodIP, true)
+	pod.UID = types.UID("pod-with-uid")
+	c.onDelete(pod)
+
+	if _, ok := c.Get(sandboxUID); ok {
+		t.Fatal("delete event must evict entry whose cached PodUID is empty")
+	}
+	if _, ok := c.GetByName(testPodNS, testPodName); ok {
+		t.Fatal("delete event must evict name index entry whose cached PodUID is empty")
 	}
 }
 

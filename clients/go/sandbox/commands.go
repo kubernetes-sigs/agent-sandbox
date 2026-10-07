@@ -56,19 +56,26 @@ type Commands struct {
 //
 // WithMaxAttempts applies only to the legacy runtime. With RuntimeSandboxd,
 // Run issues a single gRPC Execute regardless of the configured attempts.
+//
+// WithEnv and WithWorkingDir apply only to RuntimeSandboxd; the legacy runtime
+// returns ErrUnsupportedByRuntime rather than silently ignoring them.
 func (c *Commands) Run(ctx context.Context, command string, opts ...CallOption) (*ExecutionResult, error) {
 	defer c.trackOp()()
-	ctx, callCancel, maxAttempts := applyCallOpts(ctx, opts)
+	co := resolveCallOpts(opts)
+	// No retries by default: commands are not idempotent.
+	ctx, callCancel, maxAttempts := applyCallOptsNoRetry(ctx, opts)
 	defer callCancel()
-	if maxAttempts == 0 {
-		maxAttempts = 1 // safe default: no retries for non-idempotent commands
-	}
 	ctx = withLifecycleSpan(ctx, c.lifecycleCtx())
 	ctx, span := startSpan(ctx, c.tracer, c.svcName, "run", AttrCommandExecutable.String(commandExecutable(command)))
 	defer func() { span.End() }()
 
 	if c.runtime == RuntimeSandboxd {
-		return c.runSandboxd(ctx, span, command)
+		return c.runSandboxd(ctx, span, command, co)
+	}
+	if len(co.env) > 0 || co.cwd != "" {
+		err := fmt.Errorf("%s: run: %w: the legacy python-runtime ignores WithEnv and WithWorkingDir", c.errPrefix(), ErrUnsupportedByRuntime)
+		recordError(span, err)
+		return nil, err
 	}
 
 	payload, err := json.Marshal(map[string]string{"command": command})
@@ -111,7 +118,23 @@ func (c *Commands) Run(ctx context.Context, command string, opts ...CallOption) 
 // runSandboxd executes the command through sandboxd's gRPC ProcessService.
 // The shell-string API is preserved by wrapping the command in "/bin/sh -c",
 // matching what the legacy python-runtime did server-side.
-func (c *Commands) runSandboxd(ctx context.Context, span trace.Span, command string) (*ExecutionResult, error) {
+func (c *Commands) runSandboxd(ctx context.Context, span trace.Span, command string, co callOptions) (*ExecutionResult, error) {
+	for k := range co.env {
+		// sandboxd joins these as KEY=value, so such a key would corrupt it.
+		if k == "" || strings.Contains(k, "=") {
+			err := fmt.Errorf("%s: run: invalid env key %q: must be non-empty and contain no '='", c.errPrefix(), k)
+			recordError(span, err)
+			return nil, err
+		}
+	}
+	config := &processv1.ProcessConfig{
+		Command: []string{"/bin/sh", "-c", command},
+		EnvVars: co.env,
+	}
+	if co.cwd != "" {
+		config.Cwd = &co.cwd
+	}
+
 	conn, err := c.connector.GRPCConn()
 	if err != nil {
 		recordError(span, err)
@@ -119,11 +142,7 @@ func (c *Commands) runSandboxd(ctx context.Context, span trace.Span, command str
 	}
 	client := processv1.NewProcessServiceClient(conn)
 
-	resp, err := client.Execute(ctx, &processv1.ExecuteRequest{
-		Config: &processv1.ProcessConfig{
-			Command: []string{"/bin/sh", "-c", command},
-		},
-	})
+	resp, err := client.Execute(ctx, &processv1.ExecuteRequest{Config: config})
 	if err != nil {
 		if st, ok := status.FromError(err); ok {
 			err = fmt.Errorf("%s: run: process service returned %s: %s: %w", c.errPrefix(), st.Code(), st.Message(), err)

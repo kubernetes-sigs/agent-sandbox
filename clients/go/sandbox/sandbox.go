@@ -16,10 +16,12 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"maps"
+	"net/http"
 	"sync"
 	"time"
 
@@ -42,6 +44,7 @@ type Sandbox struct {
 	sandboxName string
 	podName     string
 	podIP       string
+	serviceFQDN string
 	annotations map[string]string
 
 	lifecycleSem chan struct{}
@@ -86,10 +89,26 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 	switch {
 	case opts.APIURL != "":
 		strategy = &DirectStrategy{URL: opts.APIURL}
+	case opts.Connectivity.isInCluster():
+		// Caller is on the pod network and has opted to dial
+		// the runtime on the pod IP.
+		ics := &inClusterStrategy{
+			httpPort:      opts.ServerPort,
+			useServiceDNS: opts.Connectivity == ConnectivityInClusterService,
+			log:           opts.Logger,
+			tracer:        tracer,
+			svcName:       svcName,
+		}
+		if opts.Runtime == RuntimeSandboxd {
+			ics.httpPort = opts.SandboxdRESTPort
+			ics.grpcPort = opts.SandboxdGRPCPort
+		}
+		strategy = ics
 	case opts.Runtime == RuntimeSandboxd:
-		// sandboxd binds loopback-only inside the pod, so the only viable
-		// external transport is a port-forward directly to the sandbox pod
-		// (validated earlier: GatewayName is rejected with RuntimeSandboxd).
+		// sandboxd talks to the sandbox pod, not the sandbox-router, and the
+		// default transport reaches it without pod-network access: a
+		// port-forward directly to the pod (validated earlier: GatewayName is
+		// rejected with RuntimeSandboxd).
 		strategy = &podTunnelStrategy{
 			coreClient: k8s.CoreClient,
 			restConfig: k8s.RestConfig,
@@ -129,7 +148,7 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 		Strategy:            strategy,
 		Namespace:           opts.Namespace,
 		ServerPort:          opts.ServerPort,
-		RouterHeaders:       opts.Runtime != RuntimeSandboxd,
+		RouterHeaders:       opts.Runtime != RuntimeSandboxd && !opts.Connectivity.isInCluster(),
 		RequestTimeout:      opts.RequestTimeout,
 		PerAttemptTimeout:   opts.PerAttemptTimeout,
 		HTTPTransport:       opts.HTTPTransport,
@@ -147,6 +166,9 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 	if pts, ok := strategy.(*podTunnelStrategy); ok {
 		pts.connector = conn
 	}
+	if ics, ok := strategy.(*inClusterStrategy); ok {
+		ics.connector = conn
+	}
 
 	s := &Sandbox{
 		k8s:              k8s,
@@ -161,11 +183,7 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 
 	errPrefix := s.errPrefix
 	trackOp := s.trackOp
-	getLifecycleCtx := func() context.Context {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		return s.lifecycleCtx
-	}
+	getLifecycleCtx := s.currentLifecycleCtx
 
 	s.commands = &Commands{
 		connector:    conn,
@@ -191,8 +209,13 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 	}
 
 	// The pod tunnel needs the resolved pod name at Connect time.
+	// The in-cluster strategy needs the pod IP.
 	if pts, ok := strategy.(*podTunnelStrategy); ok {
 		pts.getPodName = s.PodName
+	}
+	if ics, ok := strategy.(*inClusterStrategy); ok {
+		ics.getServiceFQDN = s.ServiceFQDN
+		ics.getPodIP = s.PodIP
 	}
 
 	return s, nil
@@ -271,7 +294,7 @@ func (s *Sandbox) Open(ctx context.Context) (retErr error) {
 	}
 
 	// Create claim.
-	claimName, err := s.k8s.createClaim(openCtx, s.opts.Namespace, s.opts.WarmPoolName, s.opts.Env, s.tracer, s.traceServiceName)
+	claimName, err := s.k8s.createClaim(openCtx, s.opts.Namespace, s.opts.WarmPoolName, s.opts.Env, s.opts.Labels, s.opts.ShutdownAfter, s.tracer, s.traceServiceName)
 	if err != nil {
 		return err
 	}
@@ -330,6 +353,8 @@ func (s *Sandbox) reconnect(ctx context.Context) error {
 			s.claimName = ""
 			s.sandboxName = ""
 			s.podName = ""
+			s.podIP = ""
+			s.serviceFQDN = ""
 			s.annotations = nil
 			s.mu.Unlock()
 			retErr := fmt.Errorf("%w: %w", ErrSandboxDeleted, err)
@@ -338,6 +363,8 @@ func (s *Sandbox) reconnect(ctx context.Context) error {
 		}
 		s.sandboxName = ""
 		s.podName = ""
+		s.podIP = ""
+		s.serviceFQDN = ""
 		s.annotations = nil
 		s.mu.Unlock()
 		recordError(span, err)
@@ -350,6 +377,8 @@ func (s *Sandbox) reconnect(ctx context.Context) error {
 		if k8serrors.IsNotFound(err) {
 			s.sandboxName = ""
 			s.podName = ""
+			s.podIP = ""
+			s.serviceFQDN = ""
 			s.annotations = nil
 		}
 		// Non-NotFound: sandboxName preserved so the next Open() can re-verify
@@ -387,6 +416,7 @@ func (s *Sandbox) rollbackOpen(originalErr error) error {
 	s.sandboxName = ""
 	s.podName = ""
 	s.podIP = ""
+	s.serviceFQDN = ""
 	s.annotations = nil
 	if cleanupErr == nil {
 		s.claimName = ""
@@ -474,6 +504,7 @@ func (s *Sandbox) Close(ctx context.Context) error {
 	s.sandboxName = ""
 	s.podName = ""
 	s.podIP = ""
+	s.serviceFQDN = ""
 	s.annotations = nil
 	if err != nil && s.claimName != "" {
 		s.log.Error(err, "orphaned claim during Close, could not delete; retry Close() to clean up", "claim", s.claimName)
@@ -571,6 +602,13 @@ func (s *Sandbox) WriteReader(ctx context.Context, path string, content io.Reade
 func (s *Sandbox) Read(ctx context.Context, path string, opts ...CallOption) ([]byte, error) {
 	return s.files.Read(ctx, path, opts...)
 }
+
+// ReadTo streams a file into a caller-owned io.Writer without buffering the
+// complete response. The destination is never closed.
+func (s *Sandbox) ReadTo(ctx context.Context, path string, destination io.Writer, opts ...CallOption) (int64, error) {
+	return s.files.ReadTo(ctx, path, destination, opts...)
+}
+
 func (s *Sandbox) List(ctx context.Context, path string, opts ...CallOption) ([]FileEntry, error) {
 	return s.files.List(ctx, path, opts...)
 }
@@ -583,6 +621,64 @@ func (s *Sandbox) Exists(ctx context.Context, path string, opts ...CallOption) (
 // interface to avoid breaking existing implementers.
 func (s *Sandbox) Delete(ctx context.Context, path string, recursive bool, opts ...CallOption) error {
 	return s.files.Delete(ctx, path, recursive, opts...)
+}
+
+// Health returns sandboxd's report from GET /v1/health. It returns an
+// HTTPError while sandboxd is shutting down, and ErrUnsupportedByRuntime on
+// the legacy python-runtime. It does not retry unless WithMaxAttempts is set.
+// Not part of the Handle interface to avoid breaking existing implementers.
+func (s *Sandbox) Health(ctx context.Context, opts ...CallOption) (*Health, error) {
+	return getSandboxdJSON[Health](ctx, s, "health", opts)
+}
+
+// Metadata returns the workload-scoped configuration sandboxd serves from
+// GET /v1/metadata (sandboxd runtime only; the legacy python-runtime returns
+// ErrUnsupportedByRuntime). It does not retry unless WithMaxAttempts is set.
+// Not part of the Handle interface to avoid breaking existing implementers.
+func (s *Sandbox) Metadata(ctx context.Context, opts ...CallOption) (*Metadata, error) {
+	md, err := getSandboxdJSON[Metadata](ctx, s, "metadata", opts)
+	if err != nil {
+		return nil, err
+	}
+	if md.Env == nil {
+		md.Env = map[string]string{}
+	}
+	return md, nil
+}
+
+// getSandboxdJSON GETs the sandboxd REST endpoint /v1/<op> and decodes its
+// JSON body into a T. op doubles as the span and error-message operation name.
+func getSandboxdJSON[T any](ctx context.Context, s *Sandbox, op string, opts []CallOption) (*T, error) {
+	defer s.trackOp()()
+	ctx, callCancel, maxAttempts := applyCallOptsNoRetry(ctx, opts)
+	defer callCancel()
+	ctx, span := startSpan(withLifecycleSpan(ctx, s.currentLifecycleCtx()), s.tracer, s.traceServiceName, op)
+	defer span.End()
+
+	fail := func(err error) (*T, error) {
+		recordError(span, err)
+		return nil, err
+	}
+
+	if s.opts.Runtime != RuntimeSandboxd {
+		return fail(fmt.Errorf("%s: %s: %w: the legacy python-runtime has no %s endpoint", s.errPrefix(), op, ErrUnsupportedByRuntime, op))
+	}
+	resp, err := s.connector.SendRequest(ctx, http.MethodGet, "v1/"+op, nil, "", maxAttempts)
+	if err != nil {
+		return fail(fmt.Errorf("%s: %s failed: %w", s.errPrefix(), op, err))
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fail(fmt.Errorf("%s: %s: %w", s.errPrefix(), op, newHTTPError(resp, op, RuntimeSandboxd)))
+	}
+	defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes)) }()
+
+	var out T
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxMetadataResponseSize)).Decode(&out); err != nil {
+		return fail(fmt.Errorf("%s: failed to decode %s response: %w", s.errPrefix(), op, err))
+	}
+	return &out, nil
 }
 
 // Info accessors.
@@ -611,6 +707,15 @@ func (s *Sandbox) PodIP() string {
 	return s.podIP
 }
 
+// ServiceFQDN returns the in-cluster DNS name of the Sandbox's headless
+// Service, or "" when it has none (spec.service unset or false). Not part of
+// the Info interface, which is frozen for backward compatibility.
+func (s *Sandbox) ServiceFQDN() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.serviceFQDN
+}
+
 func (s *Sandbox) Annotations() map[string]string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -620,6 +725,12 @@ func (s *Sandbox) Annotations() map[string]string {
 	cp := make(map[string]string, len(s.annotations))
 	maps.Copy(cp, s.annotations)
 	return cp
+}
+
+func (s *Sandbox) currentLifecycleCtx() context.Context {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lifecycleCtx
 }
 
 func (s *Sandbox) errPrefix() string {
@@ -654,5 +765,6 @@ func (s *Sandbox) setState(state *sandboxState) {
 	s.sandboxName = state.SandboxName
 	s.podName = state.PodName
 	s.podIP = state.PodIP
+	s.serviceFQDN = state.ServiceFQDN
 	s.annotations = state.Annotations
 }

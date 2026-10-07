@@ -7,8 +7,9 @@ By reusing a sandbox and automatically extending its inactivity timeout, we avoi
 ## Architecture & Key Concepts
 
 1. **Minimal OpenAI-Compatible Client (`pkg/llm`)**: A lightweight Go client built on `net/http` without a third-party OpenAI SDK that interacts with OpenAI-compatible API endpoints (such as the Gemini API via its OpenAI compatibility layer). It supports function calling (tools) and tool call responses.
-2. **Sandbox Reuse**: The application provisions a sandbox pod on the first tool call of a session, and reuses it for subsequent tool calls. This keeps the execution overhead low.
-3. **Session Persistence via Snapshots**: To maintain continuity across conversation turns and protect against inactivity cleanups or CLI restarts:
+2. **Pluggable Toolsets (`pkg/toolsets`)**: The tools and the system prompt are bundled into a *toolset*, selected with the `-toolset` flag. A toolset also declares the sandbox image it expects, so switching toolsets switches the whole agent profile. Two toolsets are provided: `basic` (the original minimal tools) and `geminicli` (the [gemini-cli](https://github.com/google-gemini/gemini-cli) tool surface, reimplemented in Go — see below).
+3. **Sandbox Reuse**: The application provisions a sandbox pod on the first tool call of a session, and reuses it for subsequent tool calls. This keeps the execution overhead low.
+4. **Session Persistence via Snapshots**: To maintain continuity across conversation turns and protect against inactivity cleanups or CLI restarts:
    - The application automatically snapshots the sandbox's home directory (`/home/clawtainer` by default) after tool executions at conversation boundaries.
    - These snapshots are saved as local tarball files on the host machine under `~/.local/sandboxed-tools/<session>/fs/backup-*.tar.gz`.
    - Only the last 5 backups are retained per session; older backups are automatically pruned.
@@ -22,7 +23,8 @@ The application accepts the following command-line flags:
 | :--- | :--- | :--- |
 | `-session` | **Required**. A unique alphanumeric name (max 40 characters) to identify this agent session and store/restore its filesystem snapshots. | None |
 | `-namespace`| The Kubernetes namespace where sandbox pods are created. | `default` (overrides `SANDBOX_NAMESPACE` env var) |
-| `-image` | The container image used for the temporary sandbox pod. | `debian:bookworm-slim` (overrides `SANDBOX_IMAGE` env var) |
+| `-toolset` | The toolset (tools + system prompt) to expose to the LLM: `basic` or `geminicli`. | `basic` (overrides `TOOLSET` env var) |
+| `-image` | The container image used for the temporary sandbox pod. Precedence: this flag, then `SANDBOX_IMAGE`, then the toolset's default image, then `debian:bookworm-slim`. | Toolset default |
 | `-homedir` | The directory inside the sandbox that is persisted via snapshot/restore. | `/home/clawtainer` (overrides `SANDBOX_HOME_DIR` env var) |
 | `-tool-timeout` | Maximum duration a single tool invocation (`run_command`, `ls`, `read`, or `write`) may run before it is cancelled. Accepts Go duration syntax, e.g. `30s`, `2m`, `1h`. `<= 0` disables the timeout. | `2m` |
 
@@ -37,18 +39,48 @@ The application is configured via environment variables (usually for API keys an
 | `GEMINI_API_KEY` | Your Gemini API key (or `OPENAI_API_KEY`). | **Required** |
 | `OPENAI_BASE_URL` | The base URL for the OpenAI-compatible API. | `https://generativelanguage.googleapis.com/v1beta/openai` |
 | `OPENAI_MODEL` | The model name to use for chat completions (or `MODEL`). | `gemini-3.5-flash` |
-| `SANDBOX_IMAGE` | Fallback container image if `-image` flag is not set. | `debian:bookworm-slim` |
+| `SANDBOX_IMAGE` | Fallback container image if `-image` flag is not set. | Toolset default |
 | `SANDBOX_NAMESPACE`| Fallback Kubernetes namespace if `-namespace` flag is not set. | `default` |
 | `SANDBOX_HOME_DIR` | Fallback persisted directory if `-homedir` flag is not set. | `/home/clawtainer` |
+| `TOOLSET` | Fallback toolset if `-toolset` flag is not set. | `basic` |
 
-## Available Tools
+## Toolsets
 
-The LLM has access to a powerful suite of tools configured in the registry (`pkg/tools`):
+The tools and the system prompt are pluggable: each *toolset* (`pkg/toolsets`) bundles a system prompt, a set of LLM-callable tools, and the sandbox image those tools need. Select one with `-toolset`.
+
+### `basic` (default)
+
+A minimal, image-agnostic toolset (`pkg/toolsets/basic`) that works on any sandbox image with standard POSIX utilities:
 
 * **`run_command`**: Executes an arbitrary shell command inside the sandbox container, returning `stdout`, `stderr`, and the `exit_code`.
 * **`ls`**: Lists the files and directories inside a specific folder (defaults to the current directory).
 * **`read`**: Reads the full contents of a file from the sandbox.
 * **`write`**: Writes specified content to a file, automatically creating parent directories if they do not exist and overwriting the file if it does.
+
+### `geminicli`
+
+A toolset (`pkg/toolsets/geminicli`) that reproduces the tool surface and system prompt of [gemini-cli](https://github.com/google-gemini/gemini-cli) (Apache-2.0), so models tuned for gemini-cli behave the same way inside an Agent Sandbox. The tools are reimplemented in Go — no Node.js runtime is required in the sandbox:
+
+* **`run_shell_command`**: Executes a bash command (with background-process support via `is_background`).
+* **`list_directory`**: Lists a directory (directories first, with sizes and ignore globs).
+* **`read_file`**: Reads a file, with `start_line`/`end_line` ranges and truncation hints for large files.
+* **`write_file`**: Writes full file content, creating parent directories.
+* **`replace`**: Exact-literal-string edits, failing loudly on ambiguous or missing `old_string`.
+* **`glob`**: Finds files by glob pattern (`**`, `{a,b}` supported), newest first.
+* **`grep_search`**: Regex content search with include globs, context lines, and match caps.
+* **`read_many_files`**: Bulk-reads files matching glob patterns into one response.
+
+The filesystem tools are implemented by a small Go helper binary, **`geminicli-toolbox`** (`cmd/geminicli-toolbox` + `pkg/toolsets/geminicli/toolbox`), which runs *inside* the sandbox: the agent execs `geminicli-toolbox <tool-name>` with the tool arguments as JSON on stdin and reads the result from stdout. This keeps tool semantics (glob matching, exact-string edits, truncation) deterministic and fast, without depending on which utilities the base image ships.
+
+The sandbox image for this toolset therefore has to include the `geminicli-toolbox` binary. Build it from the repository root and make it available to your cluster (for kind):
+
+```bash
+docker build -t kind.local/geminicli-toolbox:dev -f examples/sandboxed-tools/images/geminicli-toolbox/Dockerfile .
+kind load docker-image kind.local/geminicli-toolbox:dev --name agent-sandbox
+
+cd examples/sandboxed-tools
+go run ./cmd/sandboxed-tools-cli -session mysession -toolset geminicli -image kind.local/geminicli-toolbox:dev
+```
 
 ## Fake LLM for Testing
 
@@ -60,6 +92,106 @@ one trick for testing the tool path end to end: a message of the form `run: <com
 makes it request a `run_command` tool call and report the result. Note that the `run:` tool
 path still needs Kubernetes connectivity: the command executes in an Agent Sandbox.
 
+## ACP Server (server-side agent)
+
+`cmd/acp-server` is a server-side version of this example: it exposes the same agent loop
+over the [Agent Client Protocol](https://agentclientprotocol.com) (JSON-RPC 2.0 as
+newline-delimited JSON over TCP) so that it can run **inside** the cluster, where it creates
+Agent Sandboxes for tool execution, while any ACP client drives it remotely — creating
+sessions, sending prompts, and approving or rejecting each tool call
+(`session/request_permission`).
+
+The server reads the same environment variables as the CLI (see [Configuration](#configuration)),
+but in the cluster they come from a Secret named `sandboxed-tools-acp-server` that the
+Deployment loads with `envFrom`. The manifest does not create that Secret, so you choose the
+model when you create it; the pod waits in `CreateContainerConfigError` until it exists.
+
+**Security.** The server does not authenticate its clients: ACP's `initialize` exchange
+advertises no auth methods and the TCP listener is plain text. Anything that can reach it can
+create sessions, approve its own tool calls (including `run_command`), run commands in Agent
+Sandboxes under the server's RBAC, and spend the API key in the Secret. For that reason the
+manifest deliberately creates no Service: you reach the server with `kubectl port-forward` to
+the Deployment, so access is gated by your kubeconfig. The pod is still reachable by pod IP
+from inside the cluster network, so use a NetworkPolicy if that matters in your cluster. Do
+not add a Service, Ingress or Gateway in front of it without an authenticating proxy. Adding
+ACP authentication to the server itself is future work.
+
+The walkthrough below deploys to the `default` namespace, which is what the manifest
+hard-codes, so every `kubectl` command passes `-n default` explicitly rather than relying on
+your context's namespace. To run it elsewhere, edit the `namespace` fields in the manifest and
+use that namespace throughout.
+
+### 1. Build the server image
+
+From the repository root, for a kind cluster such as the one `make deploy-kind` creates
+(named `agent-sandbox`). The `kind.local/` prefix is not a real registry: the image is
+loaded straight into the cluster's nodes, and `imagePullPolicy: IfNotPresent` uses it from
+there.
+
+```bash
+export IMAGE=kind.local/sandboxed-tools-acp-server:latest
+docker build -t ${IMAGE} -f examples/sandboxed-tools/cmd/acp-server/Dockerfile .
+kind load docker-image ${IMAGE} --name agent-sandbox
+```
+
+For any other cluster, tag the image for a registry it can pull from and push instead of
+loading:
+
+```bash
+export IMAGE=<registry>/sandboxed-tools-acp-server:latest
+docker build -t ${IMAGE} -f examples/sandboxed-tools/cmd/acp-server/Dockerfile .
+docker push ${IMAGE}
+```
+
+### 2. Start with the fake LLM (no API key)
+
+`fake-eliza` (see [Fake LLM for Testing](#fake-llm-for-testing)) exercises the whole path:
+session creation, prompting, tool permission approval, sandbox creation, and command execution
+in the sandbox.
+
+```bash
+kubectl -n default create secret generic sandboxed-tools-acp-server \
+  --from-literal=OPENAI_MODEL=fake-eliza \
+  --from-literal=TOOLSET=basic
+
+# Deploy the server (the manifest reads the image from ${IMAGE})
+envsubst < examples/sandboxed-tools/cmd/acp-server/k8s/acp-server.yaml | kubectl apply -f -
+kubectl -n default rollout status deployment/sandboxed-tools-acp-server
+kubectl -n default port-forward deployment/sandboxed-tools-acp-server 8090:8090
+```
+
+Then, in another terminal, chat with it using the ACP client example. Try `run: uname -a`:
+the fake LLM asks for a `run_command` tool call, the client prompts you to allow it, and the
+command runs in a freshly created Agent Sandbox.
+
+```bash
+cd examples/agentclientprotocol
+go run . -addr localhost:8090
+```
+
+### 3. Switch to Gemini
+
+Replace the Secret with a real model and API key, then restart the Deployment so the pod
+picks up the new environment (`envFrom` is read at container start):
+
+```bash
+kubectl -n default delete secret sandboxed-tools-acp-server
+kubectl -n default create secret generic sandboxed-tools-acp-server \
+  --from-literal=OPENAI_MODEL=gemini-3.5-flash \
+  "--from-literal=GEMINI_API_KEY=${GEMINI_API_KEY}" \
+  --from-literal=TOOLSET=basic
+kubectl -n default rollout restart deployment/sandboxed-tools-acp-server
+kubectl -n default rollout status deployment/sandboxed-tools-acp-server
+kubectl -n default port-forward deployment/sandboxed-tools-acp-server 8090:8090
+```
+
+Reconnect the client as above; the agent now answers with Gemini and still runs its tools in
+Agent Sandboxes. Any other variable from the [Configuration](#configuration) table goes in the
+same Secret, for example `OPENAI_BASE_URL` for a different OpenAI-compatible endpoint, or
+`TOOLSET=geminicli` together with `SANDBOX_IMAGE` pointing at an image that contains
+`geminicli-toolbox` (see [Toolsets](#toolsets)). Sandboxes are created in the namespace the
+server runs in.
+
 ## Running the Example
 
 Make sure your Kubernetes cluster is running and accessible via your active `kubeconfig` context.
@@ -68,8 +200,10 @@ Make sure your Kubernetes cluster is running and accessible via your active `kub
 # Set your API key
 export GEMINI_API_KEY="your-api-key-here"
 
-# Run the chat interface, specifying a session name
-go run ./examples/sandboxed-tools/cmd/sandboxed-tools-cli -session myfirstsession
+# Run the chat interface, specifying a session name (from this example's
+# directory: it is its own Go module)
+cd examples/sandboxed-tools
+go run ./cmd/sandboxed-tools-cli -session myfirstsession
 ```
 
 ## Session Persistence, Sandbox Reuse & Inactivity Expiry
@@ -107,7 +241,7 @@ When I listed the files inside `/home/clawtainer`, I found:
 User> /exit
 
 # (Later, resuming the same session after the sandbox was deleted)
-go run ./examples/sandboxed-tools/cmd/sandboxed-tools-cli -session myfirstsession
+go run ./cmd/sandboxed-tools-cli -session myfirstsession
 
 ================================================================================
 Resumed session "myfirstsession" with 4 messages in history:

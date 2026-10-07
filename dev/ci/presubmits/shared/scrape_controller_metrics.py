@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import urllib.request
+import xml.etree.ElementTree as ET
 
 
 def parse_histogram(metric_name, data):
@@ -64,6 +65,32 @@ def parse_histogram(metric_name, data):
     return get_percentile(0.50), get_percentile(0.90), get_percentile(0.99), int(total)
 
 
+def write_junit(path, testcases):
+    """Writes a JUnit XML report with one testcase per validated metric.
+
+    Without this, a perf-gate violation is only visible in the job stdout: the
+    ClusterLoader2 junit reports zero failures, so Spyglass/TestGrid render the
+    run as "failed before tests ran". Each entry in testcases is a
+    (name, failure_message) tuple where failure_message is None on pass.
+    """
+    failures = sum(1 for _, failure in testcases if failure)
+    suite = ET.Element(
+        "testsuite",
+        name="controller-metrics",
+        tests=str(len(testcases)),
+        failures=str(failures),
+        errors="0",
+    )
+    for name, failure in testcases:
+        case = ET.SubElement(suite, "testcase", classname="controller-metrics", name=name)
+        if failure:
+            ET.SubElement(case, "failure", message=failure).text = failure
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    ET.ElementTree(suite).write(path, encoding="utf-8", xml_declaration=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Scrape and validate Agent Sandbox controller metrics.")
     parser.add_argument(
@@ -89,9 +116,15 @@ def main():
         default=float(os.environ.get("CL2_THRESHOLD_99_MS", 500)),
         help="Target P99 latency threshold in ms for claim adoption",
     )
+    parser.add_argument(
+        "--junit-out",
+        default=None,
+        help="Optional path for a JUnit XML report of the validated metrics",
+    )
     args = parser.parse_args()
 
     all_passed = True
+    testcases = []
 
     try:
         raw = urllib.request.urlopen(args.metrics_url, timeout=5).read().decode("utf-8")
@@ -108,6 +141,17 @@ def main():
             print(f"      P50: ~{p50:.1f} ms (Target: <= {args.threshold_50:.1f} ms){v50}")
             print(f"      P90: ~{p90:.1f} ms (Target: <= {args.threshold_90:.1f} ms){v90}")
             print(f"      P99: ~{p99:.1f} ms (Target: <= {args.threshold_99:.1f} ms){v99}")
+            for label, value, threshold in (
+                ("p50", p50, args.threshold_50),
+                ("p90", p90, args.threshold_90),
+                ("p99", p99, args.threshold_99),
+            ):
+                failure = None
+                if value > threshold:
+                    failure = (
+                        f"{label.upper()}: ~{value:.1f} ms exceeded target <= {threshold:.1f} ms"
+                    )
+                testcases.append((f"claim-adoption-latency-{label}", failure))
             if p50 > args.threshold_50 or p90 > args.threshold_90 or p99 > args.threshold_99:
                 print("      Status: [FAILED] ❌ (Latency exceeded threshold)")
                 all_passed = False
@@ -115,6 +159,9 @@ def main():
                 print("      Status: [PASSED] ✅")
         else:
             print("      Status: [FAILED] ❌ (No metrics recorded)")
+            testcases.append(
+                ("claim-adoption-latency", "No claim adoption latency metrics recorded")
+            )
             all_passed = False
 
         print("")
@@ -129,7 +176,13 @@ def main():
 
     except Exception as e:
         print(f"  Warning: Could not fetch metrics from controller: {e}")
+        testcases.append(
+            ("claim-adoption-latency", f"Could not fetch metrics from controller: {e}")
+        )
         all_passed = False
+
+    if args.junit_out:
+        write_junit(args.junit_out, testcases)
 
     if not all_passed:
         sys.exit(1)

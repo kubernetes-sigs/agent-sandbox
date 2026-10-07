@@ -60,6 +60,10 @@ echo "  Burst Duration:    ${DURATION}s"
 echo "  Controller QPS:    ${CONTROLLER_QPS} (Workers: ${CONTROLLER_WORKERS})"
 echo "======================================================="
 
+# Prow pins GOPROXY to proxy.golang.org only; keep |direct so transient proxy
+# incidents (stream errors mid-download) fall back to fetching modules directly.
+export GOPROXY="https://proxy.golang.org|direct"
+
 CACHE_DIR="${HOME}/.cache/agent-sandbox-test-bin"
 mkdir -p "${CACHE_DIR}"
 BINDIR="${CACHE_DIR}"
@@ -117,12 +121,28 @@ trap cleanup EXIT
 echo "Ensuring clean start for kwok simulated cluster..."
 "${KWOKCTL}" delete cluster --name="${CLUSTER_NAME}" 2>/dev/null || true
 
-"${KWOKCTL}" create cluster --name="${CLUSTER_NAME}" --wait=5m \
-  --runtime=binary \
-  --disable-qps-limits \
-  --extra-args="kube-apiserver=max-requests-inflight=2000" \
-  --extra-args="kube-apiserver=max-mutating-requests-inflight=1000" \
-  --extra-args="etcd=unsafe-no-fsync=true"
+# On a cold cache, `kwokctl create cluster` downloads etcd/kubernetes release
+# binaries from GitHub without retrying, so a transient 503 fails the job.
+# Retry the create (deleting the partial cluster in between) a few times.
+CREATE_OK=false
+for attempt in 1 2 3; do
+  if "${KWOKCTL}" create cluster --name="${CLUSTER_NAME}" --wait=5m \
+    --runtime=binary \
+    --disable-qps-limits \
+    --extra-args="kube-apiserver=max-requests-inflight=2000" \
+    --extra-args="kube-apiserver=max-mutating-requests-inflight=1000" \
+    --extra-args="etcd=unsafe-no-fsync=true"; then
+    CREATE_OK=true
+    break
+  fi
+  echo "kwokctl create cluster failed (attempt ${attempt}/3); retrying..."
+  "${KWOKCTL}" delete cluster --name="${CLUSTER_NAME}" 2>/dev/null || true
+  sleep 10
+done
+if [[ "${CREATE_OK}" != "true" ]]; then
+  echo "Error: kwokctl create cluster failed after 3 attempts."
+  exit 1
+fi
 
 KUBECONFIG="${WORKDIR}/kubeconfig"
 "${KWOKCTL}" get kubeconfig --name="${CLUSTER_NAME}" > "${KUBECONFIG}"
@@ -159,7 +179,33 @@ go run ./cmd/agent-sandbox-controller \
   --sandbox-template-concurrent-workers="${CONTROLLER_TEMPLATE_WORKERS}" \
   --sandbox-warm-pool-max-batch-size="${CONTROLLER_BATCH}" > "${WORKDIR}/controller.log" 2>&1 &
 CONTROLLER_PID=$!
-sleep 3
+
+# `go run` compiles the controller first, which can take well over a fixed
+# sleep on a cold pod. If ClusterLoader2 starts creating claims before the
+# controller is serving, the early samples inflate the adoption-latency gate.
+# /readyz only proves the probe server is up (it is a healthz.Ping check);
+# reconcilers serve once leader election and cache sync finish, which
+# controller-runtime logs as "Starting workers" — wait for both. Each curl
+# probe is bounded so a wedged connection cannot outlive the loop's budget.
+echo "Waiting for controller readiness (:8082/readyz + worker startup)..."
+CONTROLLER_READY=false
+for _ in $(seq 1 60); do
+  if ! kill -0 "${CONTROLLER_PID}" 2>/dev/null; then
+    break
+  fi
+  if curl --connect-timeout 1 --max-time 1 -fsS "http://127.0.0.1:8082/readyz" >/dev/null 2>&1 \
+      && grep -q "Starting workers" "${WORKDIR}/controller.log"; then
+    CONTROLLER_READY=true
+    break
+  fi
+  sleep 2
+done
+if [[ "${CONTROLLER_READY}" != "true" ]]; then
+  echo "Error: controller did not become ready within 120s. Controller log:"
+  cat "${WORKDIR}/controller.log" || true
+  exit 1
+fi
+echo "Controller is ready."
 
 CL2_REPORT_DIR="${ARTIFACTS:-.}/kwok-cl2-report"
 mkdir -p "${CL2_REPORT_DIR}"
@@ -207,7 +253,8 @@ python3 "${repo_root}/dev/ci/presubmits/shared/scrape_controller_metrics.py" \
   --metrics-url="http://127.0.0.1:8081/metrics" \
   --threshold-50="${THRESHOLD_50_MS}" \
   --threshold-90="${THRESHOLD_90_MS}" \
-  --threshold-99="${THRESHOLD_99_MS}" || SCRAPE_RC=$?
+  --threshold-99="${THRESHOLD_99_MS}" \
+  --junit-out="${ARTIFACTS:-.}/junit_controller-metrics.xml" || SCRAPE_RC=$?
 echo "======================================================="
 
 if [[ ${CL2_RC} -ne 0 ]]; then

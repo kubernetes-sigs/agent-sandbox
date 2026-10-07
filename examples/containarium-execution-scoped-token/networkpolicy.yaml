@@ -1,0 +1,70 @@
+# Egress for the sandbox: the gateway and DNS. Nothing else.
+#
+# This is the half of the design that makes the token worth minting. A
+# run-scoped token stops a *stolen credential* from outliving its run; pinning
+# egress stops the process from bypassing the credential broker altogether and
+# talking to the provider (or anything else) directly. Either one alone leaves
+# a hole:
+#
+#   - token without egress policy: the process can still reach any host it
+#     likes, so an agent that finds a key elsewhere is unconstrained.
+#   - egress policy without a run-scoped token: the process can only reach the
+#     gateway, but whatever token it holds keeps working after the run ends.
+#
+# NOTE: a plain NetworkPolicy is only enforced if the cluster's CNI enforces
+# it. kind's default CNI (kindnet) does NOT — it accepts the object and drops
+# nothing. kind-config.yaml therefore disables the default CNI and
+# run-test-kind.sh installs Cilium. On a cluster whose CNI ignores
+# NetworkPolicy this file is decoration and the egress check is vacuous.
+#
+# NOTE: a podSelector is a label match, not an identity check — it is not
+# who the destination pod IS, only what it is LABELED. Anyone who can create
+# a pod in this namespace can label it `app: model-gateway` too, and that
+# pod becomes BOTH a valid destination under this policy AND, since the
+# `model-gateway` Service selects on the same label, a real endpoint that
+# service DNS can route to — meaning it can receive the sandbox's token and
+# replay it to the actual gateway. This is a namespace-scoped trust
+# assumption ("nothing else in this namespace is hostile or compromised"),
+# not a guarantee this policy enforces on its own. See the README's
+# "Give this its own namespace" hardening note for what closing that gap
+# actually requires.
+#
+# Only Egress is restricted. Ingress is left alone deliberately: the runner
+# reaches sandboxd over `kubectl port-forward`, and pinning down who may talk
+# *to* the box is a separate concern from what the box may talk to.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: execution-scoped-token-sandbox-egress
+spec:
+  podSelector:
+    matchLabels:
+      sandbox: execution-scoped-token-sandbox
+  policyTypes:
+    - Egress
+  egress:
+    # 1. The credential proxy. The only route to a model provider.
+    #
+    # A LABEL match, not an identity check — see the file-level NOTE above on
+    # what this selector does and does not guarantee within the namespace.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: model-gateway
+      ports:
+        - protocol: TCP
+          port: 8866
+    # 2. Cluster DNS, so `model-gateway.<namespace>.svc` resolves. Without
+    #    this the process cannot even find the gateway.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

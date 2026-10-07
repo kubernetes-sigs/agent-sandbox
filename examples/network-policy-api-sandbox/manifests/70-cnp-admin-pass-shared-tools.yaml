@@ -1,0 +1,36 @@
+# Delegate traffic to shared-tools to the NetworkPolicy tier.
+#
+# Pass stops Admin-tier evaluation for the matching traffic and lets the next
+# tier decide. Here that is the NetworkPolicy the agent-sandbox controller
+# manages for each SandboxTemplate:
+#   - team-b's template lists shared-tools in networkPolicy.egress => allowed
+#   - team-a's template uses the secure default (RFC1918 blocked)   => denied
+# If no NetworkPolicy selects the pod, evaluation continues to the Baseline
+# tier (80-cnp-baseline-default-deny.yaml).
+#
+# Priority 5 so the Pass is evaluated before the priority-100 Deny.
+apiVersion: policy.networking.k8s.io/v1alpha2
+kind: ClusterNetworkPolicy
+metadata:
+  name: sandbox-egress-pass-shared-tools
+spec:
+  tier: Admin
+  priority: 5
+  subject:
+    pods:
+      namespaceSelector: {}
+      podSelector:
+        matchExpressions:
+          - key: agents.x-k8s.io/sandbox-name-hash
+            operator: Exists
+  egress:
+    - name: let-the-namespace-networkpolicy-decide
+      action: Pass
+      to:
+        - namespaces:
+            matchLabels:
+              kubernetes.io/metadata.name: shared-tools
+      protocols:
+        - tcp:
+            destinationPort:
+              number: 8080

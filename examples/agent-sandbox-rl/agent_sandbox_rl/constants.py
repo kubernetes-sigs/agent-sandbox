@@ -38,6 +38,15 @@ SANDBOX_NAME_HASH_LABEL = "agents.x-k8s.io/sandbox-name-hash"
 # have their own entrypoint, so we override it to idle.
 KEEPALIVE_COMMAND = ["sleep", "infinity"]
 
+# Name of the container holding the task image in a SandboxTemplate's pod
+# template. Also the container `discover_pools` reads back to work out which
+# image an existing pool serves; a template written by something else (the fleet
+# layer, a platform team) may name it differently, in which case the first
+# container is used — but only when it is the ONLY container. A multi-container
+# template with no container by this name gives no way to tell the task image
+# from a sidecar, and is skipped for adoption rather than guessed at.
+RUNTIME_CONTAINER = "agent-runtime"
+
 # Default label applied to every resource this package creates (for listing +
 # scoped cleanup).
 MANAGED_BY_LABEL = "app"
@@ -46,3 +55,22 @@ DEFAULT_LABELS = {MANAGED_BY_LABEL: MANAGED_BY_VALUE}
 # Per-run label stamped on every resource a fleet creates, so an orphaned run's
 # resources can always be swept by the reaper (`reap(run_id=…)`).
 RUN_ID_LABEL = "agents.x-k8s.io/asrl-run-id"
+# The same run id, on sandbox pods (via the pod template). The Sandbox controller
+# strips every `agents.x-k8s.io/*` key from a pod template before it reaches the
+# pod (system-reserved since #894), so RUN_ID_LABEL never lands on pods; the
+# circuit breaker's pod count and the reaper's pod sweep select on this key.
+POD_RUN_ID_LABEL = "agent-sandbox-rl/run-id"
+# Marks an on-demand pool under a shared run id; the job's first warm of the image
+# takes it over (see `Resources.warm_shared_pool`).
+ON_DEMAND_ANNOTATION = "agent-sandbox-rl/on-demand"
+# How a fleet keeps concurrent runs apart (`FleetConfig.run_isolation`):
+#   "none"      — historical behaviour: stable per-image names in the configured
+#                 namespace. Safe only when nothing else runs there.
+#   "names"     — shared namespace; the run id is baked into template and pool
+#                 names so runs on the same image never share (or delete) a pool.
+#   "namespace" — a per-run namespace `<namespace>-<run id>` is created on first
+#                 use and deleted at teardown; names stay stable per image.
+RUN_ISOLATION_MODES = ("none", "names", "namespace")
+# Placeholder accepted in `template_name_prefix` / `pool_name_format`; the fleet
+# substitutes its run id at construction.
+RUN_ID_PLACEHOLDER = "{run_id}"

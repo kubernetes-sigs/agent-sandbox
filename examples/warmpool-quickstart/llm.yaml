@@ -13,6 +13,7 @@ spec:
         - "llm.internal"
         - "ollama.local"
       
+      restartPolicy: "OnFailure"
       containers:
       - name: agent
         # Replace with your actual agent image.

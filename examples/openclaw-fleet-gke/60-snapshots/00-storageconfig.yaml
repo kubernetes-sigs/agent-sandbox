@@ -1,0 +1,41 @@
+# Where GKE stores the fleet's pod snapshots (Tier 2 hibernate/wake,
+# see 30-snapshot-hibernate.md). Substitute ${SNAPSHOT_BUCKET} before
+# applying (envsubst).
+#
+# The bucket must:
+#   - have hierarchical namespace enabled (--enable-hierarchical-namespace),
+#   - have soft delete disabled (--soft-delete-duration=0 — soft delete plus
+#     the parallel composite uploads snapshots use inflates storage cost),
+#   - live in the SAME REGION as the cluster.
+#
+#   gcloud storage buckets create "gs://$SNAPSHOT_BUCKET" \
+#       --location=<cluster-region> --uniform-bucket-level-access \
+#       --enable-hierarchical-namespace --soft-delete-duration=0
+#
+# The POD's Kubernetes ServiceAccount — the one named by serviceAccountName
+# in the openclaw-fleet-template pod spec — reads and writes snapshots
+# through Workload Identity (tokenSource: podKSA below). Grant it on the
+# bucket:
+#
+#   PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
+#   MEMBER="principal://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/$PROJECT_ID.svc.id.goog/subject/ns/openclaw-fleet/sa/<template-ksa-name>"
+#   gcloud storage buckets add-iam-policy-binding "gs://$SNAPSHOT_BUCKET" --member="$MEMBER" --role=roles/storage.bucketViewer
+#   gcloud storage buckets add-iam-policy-binding "gs://$SNAPSHOT_BUCKET" --member="$MEMBER" --role=roles/storage.objectUser
+#
+# GKE's service agent deletes snapshot objects (retention pruning and
+# `kubectl delete podsnapshots`) — without this grant, deleted PodSnapshots
+# hang in Terminating on their finalizer:
+#
+#   gcloud storage buckets add-iam-policy-binding "gs://$SNAPSHOT_BUCKET" \
+#       --member="serviceAccount:service-$PROJECT_NUMBER@container-engine-robot.iam.gserviceaccount.com" \
+#       --role=roles/storage.objectUser
+apiVersion: podsnapshot.gke.io/v1
+kind: PodSnapshotStorageConfig
+metadata:
+  name: openclaw-fleet-snapshot-storage
+spec:
+  snapshotStorageConfig:
+    gcs:
+      bucket: ${SNAPSHOT_BUCKET}
+      path: openclaw-fleet
+      tokenSource: podKSA

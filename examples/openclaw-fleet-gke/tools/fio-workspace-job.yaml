@@ -1,0 +1,45 @@
+# I/O performance harness for the shared Filestore volume (test-checklist
+# item 10 — handed to the Test Team). Runs fio against a scratch
+# subdirectory of the same RWX volume the fleet's workspaces live on, so
+# the numbers reflect exactly what an OpenClaw sandbox sees.
+#
+#   kubectl apply -f tools/fio-workspace-job.yaml
+#   kubectl -n openclaw-fleet logs -f job/fio-workspace
+#
+# Re-run against premium-rwx / zonal-rwx StorageClasses (see 10-storage.yaml)
+# to build the tier comparison the storage decision needs. Vary FIO_ARGS for
+# the customer's own profiles (e.g. small-file metadata-heavy workloads are
+# where NFS tiers differ most).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fio-workspace
+  namespace: openclaw-fleet
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: fio
+          image: nixery.dev/shell/fio # small image with fio; any fio image works
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              mkdir -p /mnt/master/fio-scratch
+              cd /mnt/master/fio-scratch
+              echo "=== sequential write 1G ==="
+              fio --name=seqwrite --rw=write --bs=1M --size=1G --direct=1 --numjobs=1 --group_reporting
+              echo "=== sequential read 1G ==="
+              fio --name=seqread --rw=read --bs=1M --size=1G --direct=1 --numjobs=1 --group_reporting
+              echo "=== random 4k rw (agent-like small I/O) ==="
+              fio --name=randrw --rw=randrw --bs=4k --size=256M --direct=1 --numjobs=4 --runtime=60 --time_based --group_reporting
+              rm -rf /mnt/master/fio-scratch
+          volumeMounts:
+            - name: master
+              mountPath: /mnt/master
+      volumes:
+        - name: master
+          persistentVolumeClaim:
+            claimName: fleet-master-pvc

@@ -31,6 +31,7 @@ spec:
       # runtimeClassName: gvisor on GKE Sandbox nodes for kernel-syscall
       # isolation; this demo stays on runc because kubectl port-forward
       # (used in the walkthrough) is not supported to gVisor-sandboxed pods.
+      restartPolicy: "OnFailure"
       securityContext:
         runAsUser: 10000
         runAsGroup: 10000

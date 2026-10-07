@@ -21,6 +21,7 @@ spec:
           storage: 10Gi
   podTemplate:
     spec:
+      restartPolicy: "OnFailure"
       # Ensures the volume files are group-owned by GID 1000
       securityContext:
         fsGroup: 1000

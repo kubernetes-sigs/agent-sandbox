@@ -177,17 +177,17 @@ def test_networkpolicy_check_list_forbidden_is_warning(monkeypatch):
 def test_selects_label_selector_semantics():
   labels = {"app": "agent-sandbox-rl", "tier": "sbx"}
   sel = lambda **kw: _policy("p", **kw).spec.pod_selector  # noqa: E731
-  assert pf._selects(sel(), labels)                                    # {} selects all
-  assert pf._selects(sel(match_labels={"app": "agent-sandbox-rl"}), labels)
-  assert not pf._selects(sel(match_labels={"app": "web"}), labels)
-  assert not pf._selects(sel(match_labels={"missing": "x"}), labels)
-  assert pf._selects(sel(match_expressions=[("app", "In", ["agent-sandbox-rl"])]), labels)
-  assert not pf._selects(sel(match_expressions=[("app", "In", ["web"])]), labels)
-  assert not pf._selects(sel(match_expressions=[("app", "NotIn", ["agent-sandbox-rl"])]), labels)
+  assert pf.pod_selector_matches(sel(), labels)                                    # {} selects all
+  assert pf.pod_selector_matches(sel(match_labels={"app": "agent-sandbox-rl"}), labels)
+  assert not pf.pod_selector_matches(sel(match_labels={"app": "web"}), labels)
+  assert not pf.pod_selector_matches(sel(match_labels={"missing": "x"}), labels)
+  assert pf.pod_selector_matches(sel(match_expressions=[("app", "In", ["agent-sandbox-rl"])]), labels)
+  assert not pf.pod_selector_matches(sel(match_expressions=[("app", "In", ["web"])]), labels)
+  assert not pf.pod_selector_matches(sel(match_expressions=[("app", "NotIn", ["agent-sandbox-rl"])]), labels)
   # NotIn also matches pods that lack the key
-  assert pf._selects(sel(match_expressions=[("missing", "NotIn", ["x"])]), labels)
-  assert pf._selects(sel(match_expressions=[("tier", "Exists", None)]), labels)
-  assert not pf._selects(sel(match_expressions=[("missing", "Exists", None)]), labels)
-  assert pf._selects(sel(match_expressions=[("missing", "DoesNotExist", None)]), labels)
-  assert not pf._selects(sel(match_expressions=[("tier", "DoesNotExist", None)]), labels)
+  assert pf.pod_selector_matches(sel(match_expressions=[("missing", "NotIn", ["x"])]), labels)
+  assert pf.pod_selector_matches(sel(match_expressions=[("tier", "Exists", None)]), labels)
+  assert not pf.pod_selector_matches(sel(match_expressions=[("missing", "Exists", None)]), labels)
+  assert pf.pod_selector_matches(sel(match_expressions=[("missing", "DoesNotExist", None)]), labels)
+  assert not pf.pod_selector_matches(sel(match_expressions=[("tier", "DoesNotExist", None)]), labels)
 

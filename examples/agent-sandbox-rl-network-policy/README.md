@@ -29,7 +29,7 @@ example removes; the identity part needs one more cluster-side change, described
 | --- | --- | --- |
 | Policies in the namespace | one per `SandboxTemplate`, created and deleted with it | one, created once by the operator |
 | Pod selector | `agents.x-k8s.io/sandbox-template-ref-hash=<hash>` | `app=agent-sandbox-rl` |
-| Ingress | sandbox-router only | sandbox-router, plus pods in the namespace that are not sandboxes (the fleet's clients) |
+| Ingress | sandbox-router only | sandbox-router, plus pods in the namespace labelled `agent-sandbox-rl/client=true` (the fleet's clients) |
 | Egress | public IPs only; private, link-local and cluster ranges denied | same, plus UDP/TCP 53 to kube-dns |
 | Pod DNS | controller sets `dnsPolicy: None` with public resolvers | pod default (`ClusterFirst`), hence the kube-dns rule |
 | Sandbox-to-sandbox traffic | denied | denied |
@@ -55,13 +55,15 @@ kube-dns. If your pods must not see cluster DNS, set `dnsPolicy: None` and
 
 ### 1. Create the namespace and the policy
 
-Edit `metadata.namespace` in the manifest if your fleet does not use
-`agent-sandbox-rl`, then:
-
 ```bash
-kubectl create namespace agent-sandbox-rl
-kubectl apply -f manifests/fleet-network-policy.yaml
+NAMESPACE=agent-sandbox-rl     # the fleet's namespace
+kubectl create namespace "$NAMESPACE"
+kubectl apply -n "$NAMESPACE" -f manifests/fleet-network-policy.yaml
 ```
+
+Label the pods that create claims and connect to the sandboxes
+`agent-sandbox-rl/client=true` in their pod template; the policy admits ingress only
+from those and from the sandbox-router.
 
 Apply the policy before the first warm. A Kubernetes `NetworkPolicy` is additive:
 until one selects a pod, that pod is open; with the per-template policy gone, this
@@ -121,12 +123,15 @@ Cilium cluster it also prints how many identities still carry per-pod keys.
 
 [`manifests/fleet-network-policy.yaml`](manifests/fleet-network-policy.yaml), rule by rule:
 
-- **Ingress from the fleet's clients.** Any pod in the namespace whose `app` label
-  is not `agent-sandbox-rl`: the processes that create claims and connect to the
-  sandboxes over the pod network. Sandboxes do not match, so they cannot reach each
-  other. If the clients run in another namespace, add a `namespaceSelector` peer.
-  `kubectl exec` and the Python SDK's exec path go through the API server and the
-  kubelet, not the pod network, so they need no rule.
+- **Ingress from the fleet's clients.** Pods in the namespace labelled
+  `agent-sandbox-rl/client=true`: the processes that create claims and connect to
+  the sandboxes over the pod network. Other pods in the namespace, sandboxes
+  included, get nothing from this rule, so sandboxes cannot reach each other.
+  The label is a trust boundary only if untrusted users cannot create pods in the
+  namespace, because anyone who can create a pod can set it. If they can, run the
+  clients in their own namespace and replace the `podSelector` with a
+  `namespaceSelector` for it. `kubectl exec` and the Python SDK's exec path go
+  through the API server and the kubelet, not the pod network, so they need no rule.
 - **Ingress from the sandbox-router**, as in the controller default.
 - **Egress to kube-dns** on 53/UDP and 53/TCP. With NodeLocal DNSCache, add the cache
   address too (GKE: `169.254.20.10/32`); it falls inside the link-local range the next
@@ -166,15 +171,22 @@ pods lose the isolation it gave them. Work through the steps in order.
               | "\(.[0].key) \(map(.value) | unique | length)"'
    ```
 
-2. **Confirm no NetworkPolicy, in any namespace, selects on a key you plan to
-   exclude.** The output must not contain any of them:
+2. **Confirm no policy, in any namespace, selects on a key you plan to exclude.**
+   Check the pods a policy applies to and the peers its rules allow, since a peer
+   selector on an excluded key stops matching too. The output must not contain any
+   of the keys:
 
    ```bash
    kubectl get networkpolicies -A -o json \
-     | jq -r '.items[].spec.podSelector | (.matchLabels // {} | keys[]), (.matchExpressions // [] | .[].key)' \
+     | jq -r '.items[].spec
+              | ([.podSelector] + [.ingress[]?.from[]?.podSelector] + [.egress[]?.to[]?.podSelector])[]
+              | select(. != null) | (.matchLabels // {} | keys[]), (.matchExpressions // [] | .[].key)' \
      | sort | uniq -c
    kubectl get ciliumnetworkpolicies,ciliumclusterwidenetworkpolicies -A
    ```
+
+   If the Network Policy API is installed, check its `ClusterNetworkPolicy` objects
+   the same way: their subjects and peers select pods by label as well.
 
 3. **Request the exclusion list.** It keeps `agents.x-k8s.io/sandbox-template-ref-hash`
    identity-relevant, because every Managed template's policy selects on it:
@@ -223,7 +235,7 @@ Before the change the second command lists the per-pod keys; after it, it does n
    such pod is left; the command prints nothing when none is:
 
    ```bash
-   kubectl get pods -n agent-sandbox-rl -l app=agent-sandbox-rl \
+   kubectl get pods -n "$NAMESPACE" -l app=agent-sandbox-rl \
      -o jsonpath='{range .items[*]}{.metadata.name} {.spec.dnsPolicy}{"\n"}{end}' | grep -v ' None$'
    ```
 
@@ -235,7 +247,8 @@ Before the change the second command lists the per-pod keys; after it, it does n
 
 - Kubernetes `NetworkPolicy` is L3/L4. Domain-name egress and L7 need
   `ClusterNetworkPolicy` or a CNI-specific policy on top.
-- The ingress rule trusts every non-sandbox pod in the namespace. Give the client
-  pods a label of their own and select on it if other workloads share the namespace.
+- Client ingress rests on the `agent-sandbox-rl/client` label, which anyone who can
+  create pods in the namespace can set. Where that includes untrusted users, use a
+  separate client namespace and a `namespaceSelector`.
 - The `sandbox=<template>` pod label stays per template; the SDK uses it for the
   replica co-location affinity. No policy selects on it.

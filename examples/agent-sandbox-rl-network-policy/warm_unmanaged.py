@@ -14,16 +14,18 @@
 """Warm one image under the one-policy-per-namespace layout and report what the
 cluster shows: the template's networkPolicyManagement, the NetworkPolicies in the
 namespace and which of them a SandboxTemplate owns. Tears the pool down at the end.
-Apply manifests/fleet-network-policy.yaml first (see README). Env-configured:
+Apply manifests/fleet-network-policy.yaml into NAMESPACE first (see README).
+Env-configured:
 
   KUBE_CONTEXT=<ctx> NAMESPACE=agent-sandbox-rl IMAGE=python:3.12-slim \
   NODE_SELECTOR_KEY=cloud.google.com/gke-nodepool NODE_SELECTOR_VAL=<pool> \
   RUNTIME_CLASS=gvisor python warm_unmanaged.py
 
-Checks for the namespace-wide policy before it warms anything and exits 1 without
-creating a pod if it is missing: an Unmanaged sandbox with no policy is not
-isolated. After the warm it exits 1 if the template is not Unmanaged or a
-template-owned policy exists for it.
+Before it warms anything it checks that some NetworkPolicy's podSelector covers the
+labels the fleet's pods carry, and exits 1 without creating a pod if none does: an
+Unmanaged sandbox with no policy is not isolated, and a policy that exists but
+selects other pods does not help. After the warm it exits 1 if the template is not
+Unmanaged or a template-owned policy exists for it.
 """
 import json
 import logging
@@ -33,30 +35,28 @@ import sys
 from kubernetes import client
 
 from agent_sandbox_rl import ClusterConfig, FleetConfig, SandboxFleet, TemplateSpec, constants
+from agent_sandbox_rl.preflight import pod_selector_matches
 from agent_sandbox_rl.sources import ListSource, Task
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
-POLICY_NAME = os.getenv("POLICY_NAME", "agent-sandbox-rl-fleet")
 
 
 def _env(name, default):
   return os.getenv(name, default)
 
 
-def fleet_policy_present(fleet: SandboxFleet, namespace: str) -> bool:
-  """Whether the namespace-wide policy exists, read through the fleet's own
-  cluster client so it checks the cluster the fleet will warm on."""
+def covering_policies(fleet: SandboxFleet, namespace: str) -> list[str]:
+  """Names of the NetworkPolicies in ``namespace`` whose podSelector selects the
+  labels every fleet pod carries. Read through the fleet's own cluster client, so
+  it checks the cluster the fleet warms on."""
   cluster = next(iter(fleet.registry))
-  try:
-    client.NetworkingV1Api(cluster.api_client).read_namespaced_network_policy(
-        POLICY_NAME, namespace)
-    return True
-  except client.ApiException as e:
-    if e.status == 404:
-      return False
-    raise
+  labels = cluster.resources.fleet_pod_labels()
+  policies = client.NetworkingV1Api(cluster.api_client).list_namespaced_network_policy(
+      namespace).items
+  return [p.metadata.name for p in policies
+          if pod_selector_matches(p.spec.pod_selector, labels)]
 
 
 def report(fleet: SandboxFleet, namespace: str) -> dict:
@@ -73,7 +73,6 @@ def report(fleet: SandboxFleet, namespace: str) -> dict:
   template_owned = [
       p.metadata.name for p in policies
       if any(o.kind == "SandboxTemplate" for o in (p.metadata.owner_references or []))]
-  fleet_policy = next((p for p in policies if p.metadata.name == POLICY_NAME), None)
   return {
       "run_id": fleet.run_id,
       "templates": [{"name": t["metadata"]["name"],
@@ -84,9 +83,7 @@ def report(fleet: SandboxFleet, namespace: str) -> dict:
       "template_owned_policies": template_owned,
       "template_owned_policies_for_this_run": [
           n for n in template_owned if n.removesuffix("-network-policy") in mine],
-      "fleet_policy_present": fleet_policy is not None,
-      "fleet_policy_selector":
-          (fleet_policy.spec.pod_selector.match_labels if fleet_policy else None),
+      "policies_covering_fleet_pods": covering_policies(fleet, namespace),
   }
 
 
@@ -108,8 +105,8 @@ def main() -> int:
           node_selector=node_selector)))
   fleet.load_tasks(ListSource([Task(id="network-policy-smoke",
                                     image=_env("IMAGE", "python:3.12-slim"))]))
-  if not fleet_policy_present(fleet, namespace):
-    print(f"FAIL NetworkPolicy {namespace}/{POLICY_NAME} is missing; apply "
+  if not covering_policies(fleet, namespace):
+    print(f"FAIL no NetworkPolicy in {namespace} selects the fleet's pods; apply "
           "manifests/fleet-network-policy.yaml before warming Unmanaged templates",
           file=sys.stderr)
     return 1
@@ -129,9 +126,9 @@ def main() -> int:
   if result["template_owned_policies_for_this_run"]:
     problems.append("the controller still owns a policy for this run's template: "
                     + ", ".join(result["template_owned_policies_for_this_run"]))
-  if not result["fleet_policy_present"]:
-    problems.append(f"NetworkPolicy {namespace}/{POLICY_NAME} is missing; apply "
-                    "manifests/fleet-network-policy.yaml")
+  if not result["policies_covering_fleet_pods"]:
+    problems.append(f"no NetworkPolicy in {namespace} selects the fleet's pods; "
+                    "apply manifests/fleet-network-policy.yaml")
   for p in problems:
     print("FAIL", p, file=sys.stderr)
   if not problems:

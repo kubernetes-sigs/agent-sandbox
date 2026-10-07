@@ -79,7 +79,7 @@ ClusterProfile path assumes it.
 ## Install
 
 ```bash
-cd fleet
+cd examples/multi-cluster-fleet
 export FLEET_BUCKET=agent-sandbox-fleet-$USER
 
 pip install -e ./python                        # provides `fleetctl`
@@ -94,7 +94,7 @@ variable is the bare image *name* inside the composed reference (override
 `REGION`/`REPO`/`IMAGE` individually if the defaults don't fit).
 
 The image build context is the **repo root**, not `fleet/` — the Dockerfile
-copies both the in-repo Python SDK and `fleet/python`.
+copies both the in-repo Python SDK and `examples/multi-cluster-fleet/python`.
 
 Deploy one member per cluster. `CLUSTER_NAME` must match the context it is
 applied to — it is the identity the member reports capacity under, so a

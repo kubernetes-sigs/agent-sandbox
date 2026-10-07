@@ -5422,7 +5422,7 @@ func TestRecordSandboxCreationMetrics(t *testing.T) {
 	flappedReady.Status.Conditions[0].LastTransitionTime = metav1.NewTime(readyAt.Add(20 * time.Second))
 	oldNotReady := persisted.Status.DeepCopy()
 	oldNotReady.Conditions[0].Status = metav1.ConditionFalse
-	latency, record = prepareSandboxCreationMetrics(flappedReady, oldNotReady)
+	_, record = prepareSandboxCreationMetrics(flappedReady, oldNotReady)
 	assert.False(t, record, "the persisted first-ready time must suppress a second observation")
 	assert.Equal(t, readyAt, *flappedReady.Status.FirstReadyTime, "the original first-ready time must remain unchanged")
 

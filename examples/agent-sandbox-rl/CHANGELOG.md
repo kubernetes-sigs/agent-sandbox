@@ -137,11 +137,14 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
   check, so multi-context fleets check the right cluster). Everything else is unchanged
   when unset.
 - **`SandboxHandle.snapshot() / suspend() / resume() / restore(uid) / list_snapshots()
-  / delete_snapshot(uid) / delete_snapshots() / is_suspended / refresh()`** — thin
-  wrappers over the SDK
+  / delete_snapshot(uid) / delete_snapshots() / snapshot_deleter() / is_suspended /
+  refresh()`** — thin wrappers over the SDK
   extension. Resume/restore bring up a new pod: the handle refreshes `pod_name` /
   `pod_ip` and drops its exec session; identity (`hostname` / `sandbox_id` /
-  `claim_name`) is stable. Extension result objects map to `SnapshotError`
+  `claim_name`) is stable. `refresh()` retries reading the new pod name and raises if
+  it cannot, rather than keeping the old pod's name. `suspend(snapshot=False)` skips
+  the capture only: `resume()` still restores the latest older snapshot, and
+  cold-boots only when none exists (delete the snapshots first for a cold boot). Extension result objects map to `SnapshotError`
   (`error_reason` preserved); a non-snapshot sandbox raises `SnapshotsUnavailable`.
 - **`SandboxFleet.snapshot / suspend / resume / restore`** — timed wrappers (run-report
   phases `snapshot` / `suspend` / `resume` / `restore`, plus a `restored` / `cold`
@@ -149,7 +152,9 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
   pod_annotations=…)`** pins a claim's pod to one snapshot
   (`podsnapshot.gke.io/ps-name`) — honored on cold start. **`fleet.release(handle,
   delete_snapshots=True)`** cleans up the sandbox's snapshots (they outlive the claim
-  otherwise; failures are logged, never block release).
+  otherwise): it lists them first, releases, and deletes them by uid only after the
+  release succeeds, so a failed release keeps them. Cleanup failures are logged,
+  never raised.
 - **Preflight** (only for clusters with `snapshots=True`): PodSnapshot CRDs served and
   a gVisor runtime class configured are hard failures; a missing `PodSnapshotPolicy`
   in the namespace is a warning. `agent_sandbox_rl.snapshots.pod_restore_status()`

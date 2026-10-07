@@ -1423,8 +1423,10 @@ class SandboxFleet:
 
   def release(self, handle: SandboxHandle, *, delete_snapshots: bool = False) -> None:
     """Release ``handle`` (delete its claim). With ``delete_snapshots`` also
-    delete the sandbox's GKE Pod Snapshots first — they outlive the claim (and
-    cost storage) otherwise; a failure there is logged, never blocks release."""
+    delete the sandbox's GKE Pod Snapshots, which outlive the claim (and cost
+    storage) otherwise. They are listed before the release and deleted only after
+    it succeeds, so a failed release leaves a live sandbox with its checkpoints
+    intact for the retry. Snapshot cleanup failures are logged, never raised."""
     # Claim the handle under the lock first, so a concurrent double-release of the
     # same handle issues the remote delete (and counter decrement) exactly once.
     with self._lock:
@@ -1432,11 +1434,16 @@ class SandboxFleet:
         return
       self._handles.remove(handle)
       c = self.registry.get(handle.cluster_name)
+    snapshot_uids: list = []
+    delete_snapshot = None
     if delete_snapshots:
+      # Only read here: listing goes through the live pod, which the release
+      # removes, and deleting is irreversible, so it waits for the release.
       try:
-        handle.delete_snapshots()
+        snapshot_uids = [s.snapshot_uid for s in handle.list_snapshots()]
+        delete_snapshot = handle.snapshot_deleter()
       except Exception:  # noqa: BLE001 — best-effort hygiene, release must proceed
-        logger.warning("release: could not delete snapshots of %s",
+        logger.warning("release: could not list snapshots of %s; they are kept",
                        handle.sandbox_id, exc_info=True)
     try:
       with self._obs.phase("release", cluster=handle.cluster_name):
@@ -1452,6 +1459,12 @@ class SandboxFleet:
     c.release_claim()
     with self._lock:
       self._claims_reserved = max(0, self._claims_reserved - 1)
+    for uid in snapshot_uids:
+      try:
+        delete_snapshot(uid)
+      except Exception:  # noqa: BLE001 — the claim is gone; report and move on
+        logger.warning("release: could not delete snapshot %s of %s", uid,
+                       handle.sandbox_id, exc_info=True)
 
   # --- GKE Pod Snapshots (opt-in: ClusterConfig(snapshots=True)) ----------- #
   # Thin, timed wrappers over the SandboxHandle primitives so the run report
@@ -1466,7 +1479,9 @@ class SandboxFleet:
   def suspend(self, handle: SandboxHandle, *, snapshot: bool = True,
               timeout: int = 180) -> Optional[str]:
     """Suspend ``handle``'s sandbox (pod deleted, claim kept); returns the
-    pre-suspend snapshot uid (None when ``snapshot=False``). The handle stays
+    pre-suspend snapshot uid (None when ``snapshot=False``, in which case
+    ``resume`` restores the latest older snapshot if one exists; see
+    `SandboxHandle.suspend`). The handle stays
     tracked and its claim counted — capacity freed by suspension is not
     modeled in this version."""
     with self._obs.phase("suspend", cluster=handle.cluster_name,

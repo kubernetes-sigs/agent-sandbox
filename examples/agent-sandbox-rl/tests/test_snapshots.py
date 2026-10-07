@@ -31,6 +31,8 @@ from agent_sandbox_rl import (
     constants,
 )
 from agent_sandbox_rl import snapshots as snap
+from agent_sandbox_rl import handles as handles_mod
+from agent_sandbox_rl.exceptions import FleetError
 from agent_sandbox_rl.handles import SandboxHandle
 from agent_sandbox_rl.preflight import PreflightReport
 from agent_sandbox_rl.sources import Task
@@ -125,6 +127,10 @@ class FakeSnapSandbox:
 
   def terminate(self):
     self.calls.append(("terminate",))
+    if self.fail_next == "terminate":
+      self.fail_next = None
+      raise RuntimeError("apiserver unavailable")
+    self.snapshots = None          # the real SDK drops its engine on terminate
 
 
 class FakeSession:
@@ -218,11 +224,32 @@ def test_plain_sandbox_raises_snapshots_unavailable():
     h.is_suspended  # noqa: B018 — property access is the call under test
 
 
-def test_refresh_keeps_last_pod_name_when_reread_fails():
+def test_refresh_raises_when_the_new_pod_name_cannot_be_read(monkeypatch):
+  monkeypatch.setattr(handles_mod, "_REFRESH_BACKOFF_S", 0)
   h = _handle()
-  h.sandbox.get_pod_name = lambda: (_ for _ in ()).throw(RuntimeError("api down"))
+  tries = []
+  def down():
+    tries.append(1)
+    raise RuntimeError("api down")
+  h.sandbox.get_pod_name = down
+  with pytest.raises(FleetError, match="Call refresh\\(\\) again"):
+    h.refresh()
+  assert len(tries) == handles_mod._REFRESH_ATTEMPTS
+  assert h.pod_name == "pod-1"          # unchanged, and the error says so
+
+
+def test_refresh_retries_a_transient_failure_and_an_empty_name(monkeypatch):
+  monkeypatch.setattr(handles_mod, "_REFRESH_BACKOFF_S", 0)
+  h = _handle()
+  answers = iter([RuntimeError("blip"), "", "pod-9"])
+  def flaky():
+    a = next(answers)
+    if isinstance(a, Exception):
+      raise a
+    return a
+  h.sandbox.get_pod_name = flaky
   h.refresh()
-  assert h.pod_name == "pod-1" and h.pod_ip == "10.0.0.1"
+  assert h.pod_name == "pod-9"
 
 
 # ------------------------------------------------------------------- fleet
@@ -276,11 +303,32 @@ def test_release_deletes_snapshots_only_when_asked(make_cluster):
   f.load_tasks(["img", "img"])
   keep, drop = f.acquire(f.tasks[0]), f.acquire(f.tasks[1])
   keep.sandbox, drop.sandbox = FakeSnapSandbox(), FakeSnapSandbox()
+  keep_engine, drop_engine = keep.sandbox.snapshots, drop.sandbox.snapshots
   f.release(keep)
-  assert keep.sandbox.snapshots.deleted_all == 0 and ("terminate",) in keep.sandbox.calls
+  assert keep_engine.deleted == [] and ("terminate",) in keep.sandbox.calls
+  # delete by uid only after the claim is gone (terminate dropped the engine)
+  order = []
+  real_delete = drop_engine.delete
+  drop_engine.delete = lambda uid, timeout=180: (
+      order.append(("delete", ("terminate",) in drop.sandbox.calls)), real_delete(uid, timeout))[1]
   f.release(drop, delete_snapshots=True)
-  assert drop.sandbox.snapshots.deleted_all == 1 and ("terminate",) in drop.sandbox.calls
+  assert drop_engine.deleted == [("uid-1", 180)] and drop_engine.deleted_all == 0
+  assert order == [("delete", True)]
   assert f.handles() == []
+
+
+def test_failed_release_keeps_the_snapshots(make_cluster):
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]))
+  f.load_tasks(["img"])
+  h = f.acquire(f.tasks[0])
+  h.sandbox = FakeSnapSandbox()
+  engine = h.sandbox.snapshots
+  h.sandbox.fail_next = "terminate"
+  with pytest.raises(RuntimeError, match="apiserver unavailable"):
+    f.release(h, delete_snapshots=True)
+  assert engine.deleted == [] and engine.deleted_all == 0
+  assert h in f.handles()                       # back for the retry
 
 
 def test_release_snapshot_cleanup_failure_does_not_block_release(make_cluster, caplog):
@@ -289,11 +337,24 @@ def test_release_snapshot_cleanup_failure_does_not_block_release(make_cluster, c
   f.load_tasks(["img"])
   h = f.acquire(f.tasks[0])
   h.sandbox = FakeSnapSandbox()
-  h.sandbox.snapshots.delete_all = lambda **kw: _fail("bucket gone")
+  h.sandbox.snapshots.delete = lambda uid, timeout=180: _fail("bucket gone")
   f.release(h, delete_snapshots=True)
   assert ("terminate",) in h.sandbox.calls
   assert f.handles() == []
-  assert any("could not delete snapshots" in r.message for r in caplog.records)
+  assert any("could not delete snapshot uid-1" in r.message for r in caplog.records)
+
+
+def test_release_snapshot_list_failure_keeps_them_and_still_releases(make_cluster, caplog):
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]))
+  f.load_tasks(["img"])
+  h = f.acquire(f.tasks[0])
+  h.sandbox = FakeSnapSandbox()
+  engine = h.sandbox.snapshots
+  engine.list = lambda filter_by=None: _fail("pod name not found")
+  f.release(h, delete_snapshots=True)
+  assert ("terminate",) in h.sandbox.calls and engine.deleted == []
+  assert any("could not list snapshots" in r.message for r in caplog.records)
 
 
 # --------------------------------------------------------------- restore status
@@ -478,6 +539,7 @@ async def test_async_fleet_mirrors_snapshot_wrappers(make_cluster):
     kw = c.sandbox_client.create_sandbox.call_args.kwargs
     assert kw["pod_annotations"] == {"k": "v", PIN: "uid-a"}
     h.sandbox = FakeSnapSandbox()
+    engine = h.sandbox.snapshots        # terminate() drops it, as in the SDK
     with af._fleet.recording("async") as rep:
       assert await af.snapshot(h, "pre") == "uid-1"
       assert await af.suspend(h, timeout=30) == "uid-s"
@@ -486,7 +548,7 @@ async def test_async_fleet_mirrors_snapshot_wrappers(make_cluster):
       await af.restore(h, "uid-1", timeout=45)
       await af.release(h, delete_snapshots=True)
     assert h.sandbox.calls[-2:] == [("restore", "uid-1", 45), ("terminate",)]
-    assert h.sandbox.snapshots.deleted_all == 1
+    assert engine.deleted == [("uid-1", 180)]  # by uid, after the release
     assert rep.snap_restored == 2
     assert {"snapshot", "suspend", "resume", "restore"} <= set(rep.phases)
     assert af.handles() == []

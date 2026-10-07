@@ -627,10 +627,16 @@ uid = fleet.snapshot(h, "checkpoint")      # memory + filesystem, sandbox keeps 
 fleet.suspend(h)                           # snapshot again, then delete the pod (claim kept)
 fleet.resume(h)                            # new pod restored from the LATEST snapshot
 h.exec("cat /tmp/state")                   # -> hello ; the loop is still running
-fleet.suspend(h, snapshot=False)
+fleet.suspend(h, snapshot=False)           # no new snapshot; resume() would restore the latest one
 fleet.restore(h, uid)                      # roll back to the named checkpoint
 fleet.release(h, delete_snapshots=True)    # snapshots outlive the claim otherwise
 ```
+
+`suspend(snapshot=False)` skips the capture but does not discard older snapshots:
+`resume()` restores the latest one and cold-boots the template only when none exists.
+For a guaranteed cold boot, call `h.delete_snapshots()` before suspending.
+`release(delete_snapshots=True)` deletes the snapshots only after the claim is gone, so
+a failed release keeps them for the retry.
 
 The same methods exist on the handle (`h.snapshot()`, `h.suspend()`, `h.resume()`,
 `h.restore(uid)`, `h.list_snapshots()`, `h.delete_snapshots()`, `h.is_suspended`); the

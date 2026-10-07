@@ -41,6 +41,7 @@ func TestBuildSandbox(t *testing.T) {
 		Name:     "agtsbx-abc123",
 		GRPCPort: 9090,
 		RESTPort: 8080,
+		RunID:    "run1",
 	}
 
 	sb := buildSandbox(spec, "agents")
@@ -48,8 +49,9 @@ func TestBuildSandbox(t *testing.T) {
 	t.Run("sets identity", func(t *testing.T) {
 		assert.Equal(t, "agtsbx-abc123", sb.Name)
 		assert.Equal(t, "agents", sb.Namespace)
-		// Failed-create cleanup deletes only labelled objects.
+		// Failed-create cleanup deletes only objects carrying the run ID.
 		assert.Equal(t, managedByValue, sb.Labels[managedByLabel])
+		assert.Equal(t, "run1", sb.Labels[runIDLabel])
 	})
 
 	t.Run("runs the requested image in a single container", func(t *testing.T) {
@@ -334,17 +336,18 @@ func TestKubeInstanceStop(t *testing.T) {
 }
 
 func TestKubeBackendDeleteIfOurs(t *testing.T) {
-	ourSandbox := func() *sandboxv1beta1.Sandbox {
+	spec := Spec{Name: "box", RunID: "run1"}
+	sandboxFrom := func(runID string) *sandboxv1beta1.Sandbox {
 		sb := newSandbox(metav1.ConditionTrue)
-		sb.Labels = map[string]string{managedByLabel: managedByValue}
+		sb.Labels = map[string]string{managedByLabel: managedByValue, runIDLabel: runID}
 		return sb
 	}
 
 	t.Run("deletes a sandbox left behind by an ambiguous create", func(t *testing.T) {
 		// The API server can persist the object and still fail the call.
-		backend, client := newFakeKubeBackend(t, time.Second, ourSandbox())
+		backend, client := newFakeKubeBackend(t, time.Second, sandboxFrom("run1"))
 
-		backend.deleteIfOurs("box")
+		backend.deleteIfOurs(spec)
 
 		_, err := client.AgentsV1beta1().Sandboxes("default").Get(t.Context(), "box", metav1.GetOptions{})
 		assert.True(t, k8serrors.IsNotFound(err))
@@ -353,7 +356,26 @@ func TestKubeBackendDeleteIfOurs(t *testing.T) {
 	t.Run("leaves a sandbox it did not create", func(t *testing.T) {
 		backend, client := newFakeKubeBackend(t, time.Second, newSandbox(metav1.ConditionTrue))
 
-		backend.deleteIfOurs("box")
+		backend.deleteIfOurs(spec)
+
+		_, err := client.AgentsV1beta1().Sandboxes("default").Get(t.Context(), "box", metav1.GetOptions{})
+		require.NoError(t, err)
+	})
+
+	t.Run("leaves a kept sandbox from an earlier run that reused the name", func(t *testing.T) {
+		// It carries our managed-by label too, but not this run's ID.
+		backend, client := newFakeKubeBackend(t, time.Second, sandboxFrom("run0"))
+
+		backend.deleteIfOurs(spec)
+
+		_, err := client.AgentsV1beta1().Sandboxes("default").Get(t.Context(), "box", metav1.GetOptions{})
+		require.NoError(t, err)
+	})
+
+	t.Run("deletes nothing without a run ID", func(t *testing.T) {
+		backend, client := newFakeKubeBackend(t, time.Second, sandboxFrom(""))
+
+		backend.deleteIfOurs(Spec{Name: "box"})
 
 		_, err := client.AgentsV1beta1().Sandboxes("default").Get(t.Context(), "box", metav1.GetOptions{})
 		require.NoError(t, err)

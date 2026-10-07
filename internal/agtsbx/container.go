@@ -18,15 +18,17 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// managedByLabel marks containers agtsbx created. See managedByValue.
+// managedByLabel marks sandboxes agtsbx created. See managedByValue.
 const managedByLabel = "app.kubernetes.io/managed-by"
 
 // containerBackend runs the sandbox as a local container.
@@ -113,7 +115,7 @@ func (b *containerBackend) Start(ctx context.Context, spec Spec) (Instance, erro
 		// A failed `run` does not prove the engine created nothing: it may
 		// have accepted the request before the CLI lost its answer, and --rm
 		// never fires while sandboxd keeps running.
-		b.removeIfOurs(spec.Name)
+		b.removeIfOurs(spec)
 		return nil, fmt.Errorf("starting sandbox container: %w", err)
 	}
 
@@ -166,19 +168,19 @@ func (b *containerBackend) cleanup(name string) {
 }
 
 // removeIfOurs cleans up after an ambiguous `run`, but only if the container
-// carries our label, so a name that collided with the user's own container
-// leaves theirs alone.
-func (b *containerBackend) removeIfOurs(name string) {
+// carries this invocation's run ID, so one that merely shares the name (the
+// user's own, or a --keep one from an earlier run) is left alone.
+func (b *containerBackend) removeIfOurs(spec Spec) {
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
 
 	out, err := b.runner.run(ctx, b.engine, "inspect", "--format",
-		fmt.Sprintf("{{index .Config.Labels %q}}", managedByLabel), name)
-	if err != nil || strings.TrimSpace(string(out)) != managedByValue {
+		fmt.Sprintf("{{index .Config.Labels %q}}", runIDLabel), spec.Name)
+	if err != nil || !spec.owns(strings.TrimSpace(string(out))) {
 		return
 	}
-	if err := b.remove(ctx, name); err != nil {
-		fmt.Fprintf(b.progress, "agtsbx: warning: could not remove container %s: %v\n", name, err)
+	if err := b.remove(ctx, spec.Name); err != nil {
+		fmt.Fprintf(b.progress, "agtsbx: warning: could not remove container %s: %v\n", spec.Name, err)
 	}
 }
 
@@ -235,8 +237,11 @@ func containerRunArgs(spec Spec) []string {
 		// clean up, the engine still reaps the container once it stops.
 		args = append(args, "--rm")
 	}
+	labels := spec.labels()
+	for _, key := range slices.Sorted(maps.Keys(labels)) {
+		args = append(args, "--label", key+"="+labels[key])
+	}
 	return append(args,
-		"--label", managedByLabel+"="+managedByValue,
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges",
 		"--publish", fmt.Sprintf("127.0.0.1::%d", spec.GRPCPort),

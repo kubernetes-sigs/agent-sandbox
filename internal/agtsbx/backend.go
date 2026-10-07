@@ -56,9 +56,13 @@ const (
 // context is already cancelled and so needs a deadline of its own.
 const cleanupTimeout = 30 * time.Second
 
-// managedByValue marks the sandboxes agtsbx created, so failed-start cleanup
-// never removes an object that merely shares the requested name.
+// managedByValue marks the sandboxes agtsbx created, so they are easy to find.
 const managedByValue = "agtsbx"
+
+// runIDLabel carries Spec.RunID. Failed-start cleanup matches on it rather
+// than on managedByValue, which every run shares: otherwise a failed run could
+// remove a --keep sandbox from an earlier run that reused its --name.
+const runIDLabel = "app.kubernetes.io/instance"
 
 // Endpoints locates a running sandbox's sandboxd listeners, as addresses
 // reachable from the caller: published loopback ports for a container
@@ -87,6 +91,20 @@ type Spec struct {
 	RESTPort int
 	// Remove requests that the sandbox be torn down once the command exits.
 	Remove bool
+	// RunID is unique per invocation. Without it, cleanup after an ambiguous
+	// start failure leaves everything alone.
+	RunID string
+}
+
+// labels are the labels every backend puts on the sandbox it creates.
+func (s Spec) labels() map[string]string {
+	return map[string]string{managedByLabel: managedByValue, runIDLabel: s.RunID}
+}
+
+// owns reports whether an existing object, whose run ID label read back as
+// runID, was created by this invocation.
+func (s Spec) owns(runID string) bool {
+	return s.RunID != "" && runID == s.RunID
 }
 
 // Instance is a sandbox that has been started and is reachable.

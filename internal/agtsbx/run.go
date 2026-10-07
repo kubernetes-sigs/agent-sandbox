@@ -206,11 +206,19 @@ func validatePort(flagName string, port int) error {
 // generateName produces a unique, DNS-label-safe sandbox name: it is used as
 // both a container name and a Kubernetes object name.
 func generateName() (string, error) {
-	suffix := make([]byte, 6)
-	if _, err := rand.Read(suffix); err != nil {
+	suffix, err := randomHex(6)
+	if err != nil {
 		return "", fmt.Errorf("generating sandbox name: %w", err)
 	}
-	return generatedNamePrefix + hex.EncodeToString(suffix), nil
+	return generatedNamePrefix + suffix, nil
+}
+
+func randomHex(n int) (string, error) {
+	buf := make([]byte, n)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 // Run executes `agtsbx run` and returns the exit code the process should use.
@@ -265,12 +273,17 @@ func runOnBackend(ctx context.Context, backend Backend, run sandboxCommandRunner
 	// opts.Env is not part of the spec: it reaches the sandbox with the
 	// command below, so no credential lands in the engine argv or the
 	// Sandbox object.
+	runID, err := randomHex(8)
+	if err != nil {
+		return 1, fmt.Errorf("generating run ID: %w", err)
+	}
 	spec := Spec{
 		Image:    opts.Image,
 		Name:     opts.Name,
 		GRPCPort: opts.GRPCPort,
 		RESTPort: opts.RESTPort,
 		Remove:   !opts.Keep,
+		RunID:    runID,
 	}
 
 	fmt.Fprintf(progress, "agtsbx: starting %s on %s as %s\n", spec.Image, backend.Name(), spec.Name)

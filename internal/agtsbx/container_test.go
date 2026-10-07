@@ -116,10 +116,11 @@ func TestContainerRunArgs(t *testing.T) {
 		assert.NotContains(t, args, "-e")
 	})
 
-	t.Run("labels the container as ours", func(t *testing.T) {
-		// Failed-start cleanup removes only labelled containers.
-		args := containerRunArgs(Spec{Image: "i", Name: "n"})
-		assert.Contains(t, strings.Join(args, " "), "--label "+managedByLabel+"="+managedByValue)
+	t.Run("labels the container with this run", func(t *testing.T) {
+		// Failed-start cleanup removes only containers carrying the run ID.
+		args := strings.Join(containerRunArgs(Spec{Image: "i", Name: "n", RunID: "run1"}), " ")
+		assert.Contains(t, args, "--label "+managedByLabel+"="+managedByValue)
+		assert.Contains(t, args, "--label "+runIDLabel+"=run1")
 	})
 
 	t.Run("adds --rm only when the sandbox is ephemeral", func(t *testing.T) {
@@ -287,13 +288,40 @@ func TestContainerBackendStart(t *testing.T) {
 		runner := newFakeRunner()
 		backend, _ := newTestContainerBackend(t, runner, func(http.ResponseWriter, *http.Request) {})
 		runner.errs["run"] = context.DeadlineExceeded
-		runner.responses["inspect"] = managedByValue + "\n"
+		runner.responses["inspect"] = "run1\n"
 
 		_, err := backend.Start(context.Background(), Spec{
-			Image: "sandboxd:latest", Name: "agtsbx-test", GRPCPort: 9090, RESTPort: 8080, Remove: true,
+			Image: "sandboxd:latest", Name: "agtsbx-test", GRPCPort: 9090, RESTPort: 8080, Remove: true, RunID: "run1",
 		})
 		require.Error(t, err)
 		require.Len(t, runner.callsFor("rm"), 1)
+	})
+
+	t.Run("leaves a kept container from an earlier run that reused the name", func(t *testing.T) {
+		// It carries our managed-by label too, but not this run's ID.
+		runner := newFakeRunner()
+		backend, _ := newTestContainerBackend(t, runner, func(http.ResponseWriter, *http.Request) {})
+		runner.errs["run"] = errors.New("container name already in use")
+		runner.responses["inspect"] = "run0\n"
+
+		_, err := backend.Start(context.Background(), Spec{
+			Image: "sandboxd:latest", Name: "box", GRPCPort: 9090, RESTPort: 8080, Remove: true, RunID: "run1",
+		})
+		require.Error(t, err)
+		assert.Empty(t, runner.callsFor("rm"))
+	})
+
+	t.Run("removes nothing without a run ID", func(t *testing.T) {
+		runner := newFakeRunner()
+		backend, _ := newTestContainerBackend(t, runner, func(http.ResponseWriter, *http.Request) {})
+		runner.errs["run"] = context.DeadlineExceeded
+		runner.responses["inspect"] = "\n"
+
+		_, err := backend.Start(context.Background(), Spec{
+			Image: "sandboxd:latest", Name: "box", GRPCPort: 9090, RESTPort: 8080, Remove: true,
+		})
+		require.Error(t, err)
+		assert.Empty(t, runner.callsFor("rm"))
 	})
 
 	t.Run("leaves a container that is not ours after a failed run", func(t *testing.T) {

@@ -110,7 +110,7 @@ func (b *kubeBackend) Start(ctx context.Context, spec Spec) (Instance, error) {
 		// already persisted, which would then run unattended. AlreadyExists
 		// is somebody else's object, so leave that one alone.
 		if !k8serrors.IsAlreadyExists(err) {
-			b.deleteIfOurs(spec.Name)
+			b.deleteIfOurs(spec)
 		}
 		return nil, fmt.Errorf("creating sandbox %s/%s: %w", b.namespace, spec.Name, err)
 	}
@@ -169,16 +169,17 @@ func (b *kubeBackend) cleanup(name string) {
 }
 
 // deleteIfOurs cleans up after an ambiguous create, but only if the object
-// carries our label, so a Sandbox that happens to share the name survives.
-func (b *kubeBackend) deleteIfOurs(name string) {
+// carries this invocation's run ID, so a Sandbox that merely shares the name
+// (someone else's, or a --keep one from an earlier run) survives.
+func (b *kubeBackend) deleteIfOurs(spec Spec) {
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
 
-	existing, err := b.helper.AgentsClient.Sandboxes(b.namespace).Get(ctx, name, metav1.GetOptions{})
-	if err != nil || existing.Labels[managedByLabel] != managedByValue {
+	existing, err := b.helper.AgentsClient.Sandboxes(b.namespace).Get(ctx, spec.Name, metav1.GetOptions{})
+	if err != nil || !spec.owns(existing.Labels[runIDLabel]) {
 		return
 	}
-	b.cleanup(name)
+	b.cleanup(spec.Name)
 }
 
 // errWatchEnded means a watch stopped for a reason that does not affect the
@@ -374,7 +375,7 @@ func buildSandbox(spec Spec, namespace string) *sandboxv1beta1.Sandbox {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      spec.Name,
 			Namespace: namespace,
-			Labels:    map[string]string{managedByLabel: managedByValue},
+			Labels:    spec.labels(),
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
 			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{

@@ -47,11 +47,13 @@ type fakeBackend struct {
 	name     string
 	instance *fakeInstance
 	startErr error
+	specs    []Spec
 }
 
 func (f *fakeBackend) Name() string { return f.name }
 
-func (f *fakeBackend) Start(context.Context, Spec) (Instance, error) {
+func (f *fakeBackend) Start(_ context.Context, spec Spec) (Instance, error) {
+	f.specs = append(f.specs, spec)
 	if f.startErr != nil {
 		return nil, f.startErr
 	}
@@ -281,6 +283,23 @@ func TestRunOnBackendSuccess(t *testing.T) {
 	assert.Equal(t, "127.0.0.1:9090", gotAddr)
 	// The sandbox must be torn down even though the command succeeded.
 	assert.True(t, instance.stopped)
+}
+
+func TestRunOnBackendGivesEachRunItsOwnID(t *testing.T) {
+	// Start-failure cleanup is scoped by this ID, so a reused --name must
+	// still yield a different one.
+	backend := &fakeBackend{name: "fake", instance: &fakeInstance{}}
+	run := func(context.Context, string, execRequest) (int, error) { return 0, nil }
+	opts := runOptions{Image: "img", Name: "box", Command: []string{"true"}}
+
+	for range 2 {
+		_, err := runOnBackend(t.Context(), backend, run, opts, io.Discard, IO{Stdout: io.Discard, Stderr: io.Discard})
+		require.NoError(t, err)
+	}
+
+	require.Len(t, backend.specs, 2)
+	assert.NotEmpty(t, backend.specs[0].RunID)
+	assert.NotEqual(t, backend.specs[0].RunID, backend.specs[1].RunID)
 }
 
 func TestRunOnBackendStartFailure(t *testing.T) {

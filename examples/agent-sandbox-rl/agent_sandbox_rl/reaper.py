@@ -65,14 +65,19 @@ def reap(run_id: str | None = None, *, context: str | None = None,
   *healthy concurrent runs* too, so it must never be the accidental default of a
   "clean up my killed run" invocation. Returns per-kind deletion counts;
   idempotent."""
-  if run_id is None and not all_managed:
+  if all_managed:
+    run_id = None
+  elif not run_id:
+    # An empty id is not "no id": it would turn into the all-managed selector.
     raise ValueError(
-        "reap requires a run_id; to sweep EVERY agent-sandbox-rl run in the "
-        "namespace (including healthy concurrent ones) pass all_managed=True "
+        "reap requires a non-empty run_id; to sweep EVERY agent-sandbox-rl run in "
+        "the namespace (including healthy concurrent ones) pass all_managed=True "
         "(CLI: --all)")
   cluster = _cluster(context=context, namespace=namespace, kubeconfig=kubeconfig,
                      in_cluster=in_cluster)
-  return _reap_with_cluster(cluster, run_id, delete_pods=delete_pods)
+  return _reap_with_cluster(
+      cluster, run_id, delete_pods=delete_pods,
+      protect_claims_of=(None if run_id is None else (lambda rid: rid != run_id)))
 
 
 def _cluster(*, context, namespace, kubeconfig, in_cluster) -> Cluster:
@@ -83,7 +88,14 @@ def _cluster(*, context, namespace, kubeconfig, in_cluster) -> Cluster:
 
 
 def _reap_with_cluster(cluster: Cluster, run_id: str | None, *,
-                       delete_pods: bool) -> dict:
+                       delete_pods: bool,
+                       protect_claims_of=None) -> dict:
+  """``run_id=None`` sweeps every managed run. ``protect_claims_of(rid)`` (rid
+  may be None for an unlabelled claim) says whether a claim belongs to a run
+  that must keep working: pools such a claim points at, their templates, and
+  their Sandboxes and pods are left alone even if they carry ``run_id``."""
+  if run_id is not None and not run_id:
+    raise ValueError("an empty run_id would select every managed run")
   namespace = cluster.namespace
   selector = (f"{constants.RUN_ID_LABEL}={run_id}" if run_id
               else f"{constants.MANAGED_BY_LABEL}={constants.MANAGED_BY_VALUE}")
@@ -93,12 +105,25 @@ def _reap_with_cluster(cluster: Cluster, run_id: str | None, *,
   r = cluster.resources
   counts: dict[str, int | str] = {}
 
+  # A pool keeps the run id of the run that created it, so a live run that
+  # adopted it (adopt_existing, or a shared namespace) would lose its pool and
+  # template here. Those still referenced by a protected run's claims stay.
+  protected_pools, protected_templates = (
+      _in_use_elsewhere(cluster, protect_claims_of) if protect_claims_of
+      else (set(), set()))
+  if protected_pools:
+    logger.warning("reap(%s): keeping pool(s) %s and template(s) %s, still used by "
+                   "another run's claims", run_id, sorted(protected_pools),
+                   sorted(protected_templates))
+    counts["kept_in_use"] = len(protected_pools) + len(protected_templates)
+
   # Sandboxes and pods are reached through the pools and claims (see the module
   # docstring), so record how before those are deleted.
-  pod_selectors, sandbox_names = _sandbox_links(cluster, selector)
+  pod_selectors, sandbox_names = _sandbox_links(cluster, selector,
+                                                skip_pools=protected_pools)
 
-  def _sweep(kind, lister, deleter):
-    names = lister(label_selector=selector)
+  def _sweep(kind, lister, deleter, keep=frozenset()):
+    names = [n for n in lister(label_selector=selector) if n not in keep]
     for n in names:
       try:
         deleter(n)
@@ -107,7 +132,7 @@ def _reap_with_cluster(cluster: Cluster, run_id: str | None, *,
     counts[kind] = len(names)
 
   _sweep("claims", r.list_claims, r.delete_claim)
-  _sweep("warmpools", r.list_warmpools, r.delete_warmpool)
+  _sweep("warmpools", r.list_warmpools, r.delete_warmpool, keep=protected_pools)
   # Sandboxes reachable by label (none today; kept for a controller that copies
   # the label) plus the ones the claims and pools pointed at.
   labelled = r.list_sandboxes(label_selector=selector)
@@ -117,7 +142,7 @@ def _reap_with_cluster(cluster: Cluster, run_id: str | None, *,
     except Exception:  # noqa: BLE001
       logger.warning("reap: failed to delete sandbox %s", n, exc_info=True)
   counts["sandboxes"] = len(set(labelled) | sandbox_names)
-  _sweep("templates", r.list_templates, r.delete_template)
+  _sweep("templates", r.list_templates, r.delete_template, keep=protected_templates)
 
   if delete_pods:
     swept = 0
@@ -135,7 +160,8 @@ def _reap_with_cluster(cluster: Cluster, run_id: str | None, *,
   return counts
 
 
-def _sandbox_links(cluster: Cluster, selector: str) -> tuple[set[str], set[str]]:
+def _sandbox_links(cluster: Cluster, selector: str, *,
+                   skip_pools: set[str] | frozenset = frozenset()) -> tuple[set[str], set[str]]:
   """Pod label selectors and Sandbox names that belong to the objects matching
   ``selector``: every pool's ``status.selector`` (its Sandboxes and pods carry
   that label), every claim's ``status.sandbox.name``, and for those claimed
@@ -147,6 +173,8 @@ def _sandbox_links(cluster: Cluster, selector: str) -> tuple[set[str], set[str]]
   pool_selectors: set[str] = set()
   try:
     for pool in r._list_objects(constants.WARMPOOLS_PLURAL, selector):  # noqa: SLF001
+      if (pool.get("metadata") or {}).get("name") in skip_pools:
+        continue
       sel = (pool.get("status") or {}).get("selector")
       if sel:
         pool_selectors.add(sel)
@@ -193,6 +221,39 @@ def _sandbox_links(cluster: Cluster, selector: str) -> tuple[set[str], set[str]]
   return pod_selectors, sandbox_names
 
 
+def _in_use_elsewhere(cluster: Cluster, protect_claims_of) -> tuple[set[str], set[str]]:
+  """Pools referenced by a claim for which ``protect_claims_of(claim_run_id)``
+  is true, and the templates of those pools. Any claim in the namespace counts,
+  managed or not. A failed list protects nothing and is logged; the run-scoped
+  label sweep still applies."""
+  r = cluster.resources
+  pools: set[str] = set()
+  try:
+    for claim in r._list_objects(constants.CLAIMS_PLURAL, None):  # noqa: SLF001
+      rid = ((claim.get("metadata") or {}).get("labels") or {}).get(constants.RUN_ID_LABEL)
+      if not protect_claims_of(rid):
+        continue
+      ref = ((claim.get("spec") or {}).get("warmPoolRef") or {}).get("name")
+      if ref:
+        pools.add(ref)
+  except Exception:  # noqa: BLE001
+    logger.warning("reap: could not list claims to find pools still in use",
+                   exc_info=True)
+    return set(), set()
+  templates: set[str] = set()
+  if pools:
+    try:
+      for pool in r._list_objects(constants.WARMPOOLS_PLURAL, None):  # noqa: SLF001
+        if (pool.get("metadata") or {}).get("name") in pools:
+          ref = ((pool.get("spec") or {}).get("sandboxTemplateRef") or {}).get("name")
+          if ref:
+            templates.add(ref)
+    except Exception:  # noqa: BLE001
+      logger.warning("reap: could not list warm pools to find templates still in "
+                     "use", exc_info=True)
+  return pools, templates
+
+
 def _created_at(obj: dict) -> datetime | None:
   ts = (obj.get("metadata") or {}).get("creationTimestamp")
   if not ts:
@@ -237,12 +298,17 @@ def reap_orphans(alive_run_ids: Iterable[str], *, min_age_s: float = 300.0,
   """Reap every run in the namespace that is not in ``alive_run_ids``.
 
   This is the sweep an external reaper (a CronJob that knows which drivers are
-  still running) should call instead of matching names or ages itself: the run
-  id label is on every object a fleet creates, and `reap(run_id=...)` deletes in
-  the right order and handles pods and finalizers. ``alive_run_ids`` is the
-  caller's list of runs whose driver is still up; passing an empty list reaps
-  everything older than ``min_age_s``. ``dry_run`` reports without deleting.
-  Returns ``{run_id: counts}`` (or the discovery record under ``dry_run``)."""
+  still running) should call instead of matching names or ages itself. Runs are
+  discovered through the run-id label on their claims, pools and templates;
+  Sandbox CRs never carry it and pods created before `POD_RUN_ID_LABEL` existed
+  do not either, so a run with only pods or Sandboxes left is not found here.
+  For each run found, the sweep reaches its Sandboxes and pods through its pools
+  and claims, as `reap(run_id=...)` does. Pools (and their templates) that a
+  claim of a run not being reaped still points at are kept, so a live run that
+  adopted an older run's pool keeps it. ``alive_run_ids`` is the caller's list
+  of runs whose driver is still up; passing an empty list reaps everything older
+  than ``min_age_s``. ``dry_run`` reports without deleting. Returns
+  ``{run_id: counts}`` (or the discovery record under ``dry_run``)."""
   cluster = _cluster(context=context, namespace=namespace, kubeconfig=kubeconfig,
                      in_cluster=in_cluster)
   orphans = find_orphan_runs(cluster, alive_run_ids, min_age_s=min_age_s)
@@ -254,7 +320,9 @@ def reap_orphans(alive_run_ids: Iterable[str], *, min_age_s: float = 300.0,
     return orphans
   results: dict[str, dict] = {}
   for rid in sorted(orphans):
-    results[rid] = _reap_with_cluster(cluster, rid, delete_pods=delete_pods)
+    results[rid] = _reap_with_cluster(
+        cluster, rid, delete_pods=delete_pods,
+        protect_claims_of=lambda claim_rid: claim_rid not in orphans)
   return results
 
 

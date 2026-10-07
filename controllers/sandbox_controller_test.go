@@ -25,7 +25,9 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -5390,18 +5392,51 @@ func TestRecordSandboxCreationMetrics(t *testing.T) {
 		},
 	}
 
-	r := &SandboxReconciler{}
-	r.recordSandboxCreationMetrics(t.Context(), sandbox, &sandboxv1beta1.SandboxStatus{})
+	fc := newFakeClient(sandbox)
+	r := &SandboxReconciler{Client: fc}
+	oldStatus := &sandboxv1beta1.SandboxStatus{}
+	latency, record := prepareSandboxCreationMetrics(sandbox, oldStatus)
+	require.True(t, record, "the initial transition to Ready should prepare one observation")
+	require.NotNil(t, sandbox.Status.FirstReadyTime)
+	assert.Equal(t, readyAt, *sandbox.Status.FirstReadyTime)
+	require.NoError(t, r.updateStatus(t.Context(), oldStatus, sandbox))
+	r.recordSandboxCreationMetrics(t.Context(), sandbox, latency)
 	assert.Equal(t, 1, testutil.CollectAndCount(asmetrics.SandboxCreationLatency), "first Ready transition should record creation latency")
 
-	oldReady := &sandboxv1beta1.SandboxStatus{
-		Conditions: []metav1.Condition{{
-			Type:   string(sandboxv1beta1.SandboxConditionReady),
-			Status: metav1.ConditionTrue,
-		}},
+	var persisted sandboxv1beta1.Sandbox
+	require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, &persisted))
+	require.NotNil(t, persisted.Status.FirstReadyTime)
+	assert.Equal(t, readyAt, *persisted.Status.FirstReadyTime)
+
+	// A Sandbox that was already Ready before the guard existed is backfilled
+	// without recording its latest Ready transition as creation latency.
+	legacyReady := persisted.DeepCopy()
+	legacyReady.Status.FirstReadyTime = nil
+	readyBeforeReconcile := legacyReady.Status.DeepCopy()
+	_, record = prepareSandboxCreationMetrics(legacyReady, readyBeforeReconcile)
+	assert.False(t, record)
+	assert.Equal(t, readyAt, legacyReady.Status.FirstReadyTime)
+
+	// A later transition back to Ready after a flap must not record creation latency again.
+	flappedReady := persisted.DeepCopy()
+	flappedReady.Status.Conditions[0].LastTransitionTime = metav1.NewTime(readyAt.Add(20 * time.Second))
+	oldNotReady := persisted.Status.DeepCopy()
+	oldNotReady.Conditions[0].Status = metav1.ConditionFalse
+	latency, record = prepareSandboxCreationMetrics(flappedReady, oldNotReady)
+	assert.False(t, record, "the persisted first-ready time must suppress a second observation")
+	assert.Equal(t, readyAt, *flappedReady.Status.FirstReadyTime, "the original first-ready time must remain unchanged")
+
+	metrics := make(chan prometheus.Metric, 1)
+	asmetrics.SandboxCreationLatency.Collect(metrics)
+	metric := <-metrics
+	collected := &dto.Metric{}
+	require.NoError(t, metric.Write(collected))
+	assert.Equal(t, uint64(1), collected.GetHistogram().GetSampleCount(), "a readiness flap must not add another creation-latency observation")
+	labelValues := make(map[string]string, len(collected.GetLabel()))
+	for _, label := range collected.GetLabel() {
+		labelValues[label.GetName()] = label.GetValue()
 	}
-	r.recordSandboxCreationMetrics(t.Context(), sandbox, oldReady)
-	assert.Equal(t, 1, testutil.CollectAndCount(asmetrics.SandboxCreationLatency), "an already-Ready sandbox should not be recorded again")
+	assert.Equal(t, "__unknown__", labelValues["sandbox_template"], "creation latency should preserve its existing template sentinel")
 }
 
 type mockTracer struct {

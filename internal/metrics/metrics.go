@@ -111,15 +111,17 @@ var (
 	// Labels:
 	// - namespace: the namespace of the sandbox
 	// - launch_type: "warm" | "cold" (defaults to cold when the launch-type label is absent)
-	// - sandbox_template: the SandboxTemplateRef, or "unknown" when the Sandbox carries no template annotation.
+	// - sandbox_template: the SandboxTemplateRef, or "__unknown__" when the Sandbox carries no template annotation.
 	//
-	// Recorded by the core Sandbox reconciler on first Ready. For warm-pool
-	// sandboxes this fires when the pool member becomes Ready (including
-	// sandboxes that are never claimed), not at claim adoption time.
+	// Recorded once by the core Sandbox reconciler when a Sandbox first reaches
+	// Ready. The status.firstReadyTime field prevents readiness flaps from
+	// recording another sample. For warm-pool sandboxes this fires when the pool
+	// member becomes Ready (including sandboxes that are never claimed), not at
+	// claim adoption time.
 	SandboxCreationLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "agent_sandbox_creation_latency_ms",
-			Help:    "Latency from Sandbox creation to the Sandbox Ready condition in milliseconds; source timestamps have second-level Kubernetes precision. For warm-pool sandboxes, observed at pool-member Ready (including unclaimed pool sandboxes), not at claim adoption.",
+			Help:    "Latency from Sandbox creation to its first transition to Ready in milliseconds; source timestamps have second-level Kubernetes precision. The status.firstReadyTime field prevents readiness flaps from recording another sample. For warm-pool sandboxes, observed at pool-member Ready (including unclaimed pool sandboxes), not at claim adoption.",
 			Buckets: []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000, 300000, 600000},
 		},
 		[]string{"namespace", "launch_type", "sandbox_template"},

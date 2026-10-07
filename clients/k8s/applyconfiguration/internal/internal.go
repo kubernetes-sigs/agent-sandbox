@@ -2533,6 +2533,9 @@ var schemaYAML = typed.YAMLObject(`types:
           elementType:
             namedType: Condition.v1.meta.apis.pkg.apimachinery.k8s.io
           elementRelationship: atomic
+    - name: firstReadyTime
+      type:
+        namedType: Time.v1.meta.apis.pkg.apimachinery.k8s.io
     - name: nodeName
       type:
         scalar: string

@@ -383,12 +383,13 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	if !sandboxDeleted {
+		creationLatency, recordCreationLatency := prepareSandboxCreationMetrics(sandbox, oldStatus)
 		// Update status
 		if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
 			// Surface update error
 			err = errors.Join(err, statusUpdateErr)
-		} else {
-			r.recordSandboxCreationMetrics(ctx, sandbox, oldStatus)
+		} else if recordCreationLatency {
+			r.recordSandboxCreationMetrics(ctx, sandbox, creationLatency)
 		}
 	}
 
@@ -815,23 +816,49 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 	return nil
 }
 
-// recordSandboxCreationMetrics detects the first transition to Ready=True and records
-// the Sandbox creation latency using Kubernetes' persisted lifecycle timestamps.
-func (r *SandboxReconciler) recordSandboxCreationMetrics(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, oldStatus *sandboxv1beta1.SandboxStatus) {
-	logger := log.FromContext(ctx)
+// prepareSandboxCreationMetrics records the first Ready time in status and returns
+// whether this transition has a valid creation latency to observe after status is
+// persisted. Sandboxes already Ready before firstReadyTime was introduced are
+// backfilled without attributing their current condition timestamp to creation.
+func prepareSandboxCreationMetrics(sandbox *sandboxv1beta1.Sandbox, oldStatus *sandboxv1beta1.SandboxStatus) (time.Duration, bool) {
+	if sandbox.Status.FirstReadyTime != nil {
+		return 0, false
+	}
 
-	// Only record on the first transition to Ready=True.
-	newReady := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
 	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionReady))
 	wasReady := oldReady != nil && oldReady.Status == metav1.ConditionTrue
-
-	if newReady == nil || newReady.Status != metav1.ConditionTrue {
-		return
-	}
-
 	if wasReady {
-		return
+		firstReadyTime := oldReady.LastTransitionTime
+		if firstReadyTime.IsZero() {
+			firstReadyTime = metav1.NewTime(time.Now().UTC())
+		}
+		sandbox.Status.FirstReadyTime = &firstReadyTime
+		return 0, false
 	}
+
+	newReady := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	if newReady == nil || newReady.Status != metav1.ConditionTrue {
+		return 0, false
+	}
+
+	firstReadyTime := newReady.LastTransitionTime
+	if firstReadyTime.IsZero() {
+		firstReadyTime = metav1.NewTime(time.Now().UTC())
+	}
+	sandbox.Status.FirstReadyTime = &firstReadyTime
+
+	if sandbox.CreationTimestamp.IsZero() || newReady.LastTransitionTime.IsZero() {
+		return 0, false
+	}
+
+	latency := newReady.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
+	return latency, latency >= 0
+}
+
+// recordSandboxCreationMetrics records a prepared creation latency after the
+// corresponding firstReadyTime status update has succeeded.
+func (r *SandboxReconciler) recordSandboxCreationMetrics(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, latency time.Duration) {
+	logger := log.FromContext(ctx)
 
 	// Resolve metric labels.
 	launchType := asmetrics.LaunchTypeCold
@@ -839,17 +866,13 @@ func (r *SandboxReconciler) recordSandboxCreationMetrics(ctx context.Context, sa
 		launchType = asmetrics.LaunchTypeWarm
 	}
 
-	templateName := "unknown"
+	templateName := "__unknown__"
 	if tmpl, ok := sandbox.Annotations[sandboxv1beta1.SandboxTemplateRefAnnotation]; ok && tmpl != "" {
 		templateName = tmpl
 	}
 
 	logger.V(1).Info("Sandbox reached Ready state", "sandbox", sandbox.Name, "launchType", launchType)
-
-	if !sandbox.CreationTimestamp.IsZero() && !newReady.LastTransitionTime.IsZero() {
-		latency := newReady.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
-		asmetrics.RecordSandboxCreationLatency(latency, sandbox.Namespace, launchType, templateName)
-	}
+	asmetrics.RecordSandboxCreationLatency(latency, sandbox.Namespace, launchType, templateName)
 }
 
 func (r *SandboxReconciler) recordReadyTransitionEvent(sandbox *sandboxv1beta1.Sandbox, oldStatus *sandboxv1beta1.SandboxStatus) {

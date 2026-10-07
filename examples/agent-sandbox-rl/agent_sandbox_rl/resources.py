@@ -140,8 +140,13 @@ class Resources:
                       "relabelling.", template_name, cur_owner)
           return False
         raise OwnedByAnotherRunError("SandboxTemplate", template_name, cur_owner)
-      self._reconcile_template_labels(template_name, existing)
-      self._reconcile_template_network_policy(template_name, existing, template)
+      if dry_run:
+        # Validation only: nothing may be written, including the label and
+        # policy-mode reconciles below.
+        return False
+      updated = self._reconcile_template_labels(template_name, existing)
+      self._reconcile_template_network_policy(template_name, updated or existing,
+                                              template)
       return False
     except client.ApiException as e:
       if e.status != 404:
@@ -286,14 +291,17 @@ class Resources:
     return labels
 
   def fleet_pod_labels(self) -> dict:
-    """The labels every sandbox pod of this fleet carries, whatever its
-    template: `_pod_template_labels` without the per-template ``sandbox`` key.
-    A NetworkPolicy that selects these selects all of the fleet's pods."""
-    labels = self._pod_template_labels("")
-    labels.pop("sandbox", None)
-    return labels
+    """The labels every sandbox pod of this fleet actually carries, whatever its
+    template: `_pod_template_labels` without the per-template ``sandbox`` key and
+    without the keys the controller drops on the way to the pod (RUN_ID_LABEL
+    among them). A NetworkPolicy that selects these selects all of the fleet's
+    pods; one that selects on a dropped key would select none."""
+    return {k: v for k, v in self._pod_template_labels("").items()
+            if k != "sandbox"
+            and not k.startswith(constants.RESERVED_POD_LABEL_PREFIXES)}
 
-  def _reconcile_template_labels(self, template_name: str, existing: dict) -> None:
+  def _reconcile_template_labels(self, template_name: str,
+                                 existing: dict) -> dict | None:
     """Patch a pre-existing template's metadata + pod-template labels up to this
     run's labels when they differ, so a reused/leftover template doesn't attribute
     this run's pods to a stale run-id (breaker/reaper correctness, #1215). Only
@@ -312,14 +320,14 @@ class Resources:
     stale = (any(cur_meta.get(k) != v for k, v in desired_meta.items())
              or any(cur_pod.get(k) != v for k, v in desired_pod.items()))
     if not stale:
-      return
+      return None
     try:
       # patch_namespaced_custom_object sends a JSON Merge Patch (RFC 7386;
       # the client's only content-type for CRD patch is merge-patch+json), which
       # merges nested objects — so this UPSERTS the managed label keys and leaves
       # any pre-existing/operator labels on the template + podTemplate intact. It
       # does not replace the label maps.
-      self.custom_api.patch_namespaced_custom_object(
+      updated = self.custom_api.patch_namespaced_custom_object(
           group=constants.GROUP, version=constants.VERSION,
           namespace=self.namespace, plural=constants.TEMPLATES_PLURAL,
           name=template_name,
@@ -327,10 +335,13 @@ class Resources:
                 "spec": {"podTemplate": {"metadata": {"labels": desired_pod}}}})
       logger.info("Reconciled labels on pre-existing SandboxTemplate '%s' "
                   "(run-id refresh)", template_name)
+      # The patched object, so a follow-up write can be conditioned on it.
+      return updated if isinstance(updated, dict) else None
     except client.ApiException:
       logger.warning("Failed to reconcile labels on SandboxTemplate '%s'; the "
                      "circuit breaker/reaper may under-count this run's pods for "
                      "its image", template_name, exc_info=True)
+      return None
 
   def _reconcile_template_network_policy(self, template_name: str, existing: dict,
                                          template: TemplateSpec) -> None:
@@ -348,7 +359,10 @@ class Resources:
     the pool compares field by field, are replaced.
 
     Same ownership rule as `_reconcile_template_labels`: callers reach this only
-    for templates that are this run's or nobody's."""
+    for templates that are this run's or nobody's. The patch carries the
+    ``resourceVersion`` of ``existing`` (the object the ownership check read, or
+    the label patch's result), so a template deleted and recreated under the same
+    name in between, possibly by another run, is left alone (409)."""
     desired = template.network_policy_management
     if not desired:
       return
@@ -356,15 +370,22 @@ class Resources:
     current = (existing.get("spec") or {}).get("networkPolicyManagement") or "Managed"
     if current == desired:
       return
+    body: dict = {"spec": {"networkPolicyManagement": desired}}
+    resource_version = (existing.get("metadata") or {}).get("resourceVersion")
+    if resource_version:
+      body["metadata"] = {"resourceVersion": resource_version}
     try:
       self.custom_api.patch_namespaced_custom_object(
           group=constants.GROUP, version=constants.VERSION,
           namespace=self.namespace, plural=constants.TEMPLATES_PLURAL,
-          name=template_name,
-          body={"spec": {"networkPolicyManagement": desired}})
+          name=template_name, body=body)
       logger.info("Set networkPolicyManagement=%s on pre-existing SandboxTemplate "
                   "'%s' (was %s)", desired, template_name, current)
-    except client.ApiException:
+    except client.ApiException as e:
+      if e.status == 409:
+        logger.warning("SandboxTemplate '%s' changed since it was read; left its "
+                       "networkPolicyManagement (%s) alone", template_name, current)
+        return
       logger.warning("Failed to set networkPolicyManagement=%s on SandboxTemplate "
                      "'%s'; it keeps %s", desired, template_name, current,
                      exc_info=True)

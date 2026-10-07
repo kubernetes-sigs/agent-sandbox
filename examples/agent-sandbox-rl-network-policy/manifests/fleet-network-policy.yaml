@@ -13,12 +13,12 @@
 # needs that the default assumes away: the fleet's clients reach sandboxes
 # directly (ingress 1), and Unmanaged pods keep cluster DNS (egress 1).
 #
-# Edit metadata.namespace to the fleet's namespace before applying.
+# No namespace here: apply it into the fleet's namespace with
+#   kubectl apply -n <namespace> -f fleet-network-policy.yaml
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: agent-sandbox-rl-fleet
-  namespace: agent-sandbox-rl
 spec:
   podSelector:
     matchLabels:
@@ -27,17 +27,17 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # 1. Clients: any pod in this namespace that is not itself a sandbox (the
-    #    processes that create claims and connect to sandboxes). Sandboxes cannot
-    #    reach each other. If clients run in another namespace, add a namespaceSelector peer
-    #    for it here. kubectl exec goes through the API server and the kubelet,
-    #    not through the pod network, so it needs no rule.
+    # 1. Clients: pods in this namespace labelled agent-sandbox-rl/client=true
+    #    (the processes that create claims and connect to sandboxes). Other pods
+    #    in the namespace, sandboxes included, get nothing from this rule. The
+    #    label is only a trust boundary if untrusted users cannot create pods in
+    #    this namespace; otherwise run the clients in their own namespace and use
+    #    a namespaceSelector for it instead. kubectl exec goes through the API
+    #    server and the kubelet, not through the pod network, so it needs no rule.
     - from:
         - podSelector:
-            matchExpressions:
-              - key: app
-                operator: NotIn
-                values: ["agent-sandbox-rl"]
+            matchLabels:
+              agent-sandbox-rl/client: "true"
     # 2. The sandbox-router, as in the controller's default policy.
     - from:
         - namespaceSelector:

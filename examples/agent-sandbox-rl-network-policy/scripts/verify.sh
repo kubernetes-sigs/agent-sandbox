@@ -42,30 +42,41 @@ else
   bad "NetworkPolicy $NAMESPACE/$POLICY_NAME missing or not selecting app=agent-sandbox-rl (got '${selector}')"
 fi
 
-# 2. Templates created by the SDK are Unmanaged.
-templates="$("${K[@]}" get sandboxtemplates.extensions.agents.x-k8s.io -n "$NAMESPACE" \
-  -l app=agent-sandbox-rl -o json 2>/dev/null || echo '{"items":[]}')"
-total="$(printf '%s' "$templates" | python3 -c 'import sys,json; print(len(json.load(sys.stdin)["items"]))')"
-managed="$(printf '%s' "$templates" | python3 -c '
+# 2. Templates created by the SDK are Unmanaged. A failed list is a failure, not
+#    an empty fleet: an empty list would skip this check and the next one.
+templates_ok=1
+if ! templates="$("${K[@]}" get sandboxtemplates.extensions.agents.x-k8s.io -n "$NAMESPACE" \
+    -l app=agent-sandbox-rl -o json 2>&1)"; then
+  templates_ok=0
+  bad "could not list SandboxTemplates in $NAMESPACE: ${templates//$'\n'/ }"
+fi
+if [[ "$templates_ok" == "1" ]]; then
+  total="$(printf '%s' "$templates" | python3 -c 'import sys,json; print(len(json.load(sys.stdin)["items"]))')"
+  managed="$(printf '%s' "$templates" | python3 -c '
 import sys,json
 items=json.load(sys.stdin)["items"]
 bad=[t["metadata"]["name"] for t in items if (t.get("spec") or {}).get("networkPolicyManagement")!="Unmanaged"]
 print(f"{len(bad)} (first: {chr(32).join(bad[:5])})" if bad else "")')"
-if [[ "$total" == "0" ]]; then
-  info "no agent-sandbox-rl SandboxTemplates in $NAMESPACE yet (warm a pool, then rerun)"
-elif [[ -z "$managed" ]]; then
-  ok "all $total agent-sandbox-rl SandboxTemplates are Unmanaged"
-else
-  bad "agent-sandbox-rl SandboxTemplates still Managed: $managed"
+  if [[ "$total" == "0" ]]; then
+    info "no agent-sandbox-rl SandboxTemplates in $NAMESPACE yet (warm a pool, then rerun)"
+  elif [[ -z "$managed" ]]; then
+    ok "all $total agent-sandbox-rl SandboxTemplates are Unmanaged"
+  else
+    bad "agent-sandbox-rl SandboxTemplates still Managed: $managed"
+  fi
 fi
 
 # 3. No policy owned by an agent-sandbox-rl template remains. Policies of other
 #    templates in the namespace (other teams, Managed on purpose) are not counted.
-rl_templates="$(printf '%s' "$templates" | python3 -c '
+if [[ "$templates_ok" == "0" ]]; then
+  bad "skipped the policy ownership check: it needs the SandboxTemplate list"
+elif ! policies="$("${K[@]}" get networkpolicies -n "$NAMESPACE" -o json 2>&1)"; then
+  bad "could not list NetworkPolicies in $NAMESPACE: ${policies//$'\n'/ }"
+else
+  rl_templates="$(printf '%s' "$templates" | python3 -c '
 import sys,json
 print(" ".join(t["metadata"]["name"] for t in json.load(sys.stdin)["items"]))')"
-owned="$("${K[@]}" get networkpolicies -n "$NAMESPACE" -o json 2>/dev/null \
-  | RL_TEMPLATES="$rl_templates" python3 -c '
+  owned="$(printf '%s' "$policies" | RL_TEMPLATES="$rl_templates" python3 -c '
 import os,sys,json
 rl=set(os.environ.get("RL_TEMPLATES","").split())
 names=[]
@@ -74,11 +85,12 @@ for np in json.load(sys.stdin)["items"]:
         if o.get("kind")=="SandboxTemplate" and o.get("name") in rl:
             names.append(np["metadata"]["name"])
 print(len(names), " ".join(names[:5]))')"
-count="${owned%% *}"
-if [[ "$count" == "0" ]]; then
-  ok "no NetworkPolicies owned by agent-sandbox-rl templates in $NAMESPACE"
-else
-  bad "$count NetworkPolicies owned by agent-sandbox-rl templates still present (first: ${owned#* }); wait for the controller or check the template mode"
+  count="${owned%% *}"
+  if [[ "$count" == "0" ]]; then
+    ok "no NetworkPolicies owned by agent-sandbox-rl templates in $NAMESPACE"
+  else
+    bad "$count NetworkPolicies owned by agent-sandbox-rl templates still present (first: ${owned#* }); wait for the controller or check the template mode"
+  fi
 fi
 all_np="$("${K[@]}" get networkpolicies -n "$NAMESPACE" --no-headers 2>/dev/null | wc -l | tr -d ' ')"
 info "NetworkPolicies in $NAMESPACE: $all_np"

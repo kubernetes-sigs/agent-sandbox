@@ -49,7 +49,7 @@ def _networking_api(cluster):
   return client.NetworkingV1Api(cluster.api_client)
 
 
-def _selects(selector, labels: dict) -> bool:
+def pod_selector_matches(selector, labels: dict) -> bool:
   """Whether a NetworkPolicy ``podSelector`` (a `V1LabelSelector`) selects a
   pod carrying ``labels``. An empty selector selects every pod in the namespace."""
   if selector is None:
@@ -207,7 +207,7 @@ def preflight_cluster(cluster, *, require_runtime_class: str | None = None,
     try:
       policies = _networking_api(cluster).list_namespaced_network_policy(ns).items
       selecting = [p.metadata.name for p in policies
-                   if _selects(p.spec.pod_selector, unmanaged_pod_labels)]
+                   if pod_selector_matches(p.spec.pod_selector, unmanaged_pod_labels)]
       if selecting:
         r.add("networkpolicy", True, ", ".join(selecting))
       else:

@@ -108,6 +108,7 @@ The following table lists the configurable parameters and their defaults. For fl
 | `controller.enableTracing` | Enable OpenTelemetry tracing via OTLP | `false` |
 | `controller.enablePprof` | Enable CPU profiling endpoint on the metrics server | `false` |
 | `controller.enablePprofDebug` | Enable all pprof endpoints (implies enablePprof) | `false` |
+| `controller.enableRESTClientMetrics` | Enable client-go REST client histogram metrics (latency, size, DNS, rate-limiter, retries); default true, set false to disable the histogram overhead | `true` |
 | `controller.pprofBlockProfileRate` | Block profile sampling rate when pprof debug is enabled | `1000000` |
 | `controller.pprofMutexProfileFraction` | Mutex contention sampling rate when pprof debug is enabled | `10` |
 | `controller.extraArgs` | Additional flags not listed above (e.g. zap logging flags) | `[]` |

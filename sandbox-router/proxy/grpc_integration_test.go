@@ -172,6 +172,23 @@ func TestGRPCTLSInbound(t *testing.T) {
 	}
 }
 
+func TestGRPCTerminalCleanupPreventsRedial(t *testing.T) {
+	host, port := grpcBackend(t, &grpcEchoService{})
+	cfg := config.Defaults()
+	cfg.AllowLoopbackPodIP = true
+	handler := NewHandler(Options{Config: &cfg, Logger: logr.Discard()})
+	t.Cleanup(handler.Close)
+	client := grpc_testing.NewTestServiceClient(grpcConnToHandler(t, handler, false))
+	if _, err := client.UnaryCall(grpcTargetContext(t, host, port), &grpc_testing.SimpleRequest{}); err != nil {
+		t.Fatalf("RPC before cleanup: %v", err)
+	}
+	handler.Close()
+	handler.Close()
+	if _, err := client.UnaryCall(grpcTargetContext(t, host, port), &grpc_testing.SimpleRequest{}); status.Code(err) != codes.Unavailable {
+		t.Fatalf("RPC after terminal cleanup: %v, want UNAVAILABLE", err)
+	}
+}
+
 func grpcTargetContext(t *testing.T, host, port string) context.Context {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

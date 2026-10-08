@@ -111,6 +111,47 @@ func TestRun_ForcedShutdownCancelsActiveRequest(t *testing.T) {
 	}
 }
 
+func TestRun_ForcedShutdownDoesNotWaitForBlockedHandler(t *testing.T) {
+	addr := unusedTCPAddr(t)
+	release := make(chan struct{})
+	ended := make(chan struct{})
+	probes := NewProbes()
+	srv, err := New(Options{
+		Log: logr.Discard(), Probes: probes, HTTPAddr: addr, ShutdownTimeout: 50 * time.Millisecond,
+		ProxyHandler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			defer close(ended)
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			// A stuck handler must not turn forced shutdown into an
+			// unbounded wait for all request goroutines.
+			<-release
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel, wait := runTestServer(t, srv)
+	waitForReadiness(t, probes, true)
+	tr := &http.Transport{Protocols: new(http.Protocols)}
+	tr.Protocols.SetUnencryptedHTTP2(true)
+	defer tr.CloseIdleConnections()
+	client := &http.Client{Transport: tr, Timeout: 2 * time.Second}
+	resp, err := client.Get("http://" + addr + "/stream")
+	if err != nil {
+		close(release)
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	defer func() {
+		close(release)
+		awaitCompletion(t, ended, "blocked handler")
+	}()
+	cancel()
+	if err := wait(); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("forced shutdown while handler remains blocked: %v", err)
+	}
+}
+
 // TestRun_BindFailureSurfacesSynchronously verifies that Run() returns an
 // error if a listener can't bind, rather than crashing in a background
 // goroutine after MarkReady() has already flipped /readyz to 200.

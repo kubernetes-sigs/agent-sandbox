@@ -274,7 +274,7 @@ func run(cfg *config.Config, log logr.Logger) error {
 		proxyOpts.Cache = podCache
 	}
 	handler := proxy.NewHandler(proxyOpts)
-	defer handler.CloseIdleConnections()
+	defer handler.Close()
 
 	// Top-level mux: /healthz reuses the probes implementation so the
 	// Python router's contract (200 OK with {"status":"ok"}) is preserved.

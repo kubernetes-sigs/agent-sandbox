@@ -60,7 +60,7 @@ func TestRun_GRPCDrainsAndClosesUpstream(t *testing.T) {
 	if err := f.waitServer(); err != nil {
 		t.Fatalf("graceful shutdown: %v", err)
 	}
-	f.handler.CloseIdleConnections()
+	f.handler.Close()
 	awaitCompletion(t, f.backend.done, "upstream RPC handler")
 	awaitCompletion(t, f.proxyReturned, "proxy response reader/handler")
 	awaitCompletion(t, f.connectionEnded, "upstream pooled connection")
@@ -74,7 +74,7 @@ func TestRun_GRPCForcedShutdownReclaimsBothSides(t *testing.T) {
 	}
 	// Mirror the executable's pool cleanup immediately after Run returns,
 	// while canceled upstream work may still be unwinding.
-	f.handler.CloseIdleConnections()
+	f.handler.Close()
 	if _, err := f.stream.Recv(); err == nil || errors.Is(err, io.EOF) {
 		t.Fatalf("forced shutdown fabricated successful terminal status: %v", err)
 	}
@@ -83,6 +83,33 @@ func TestRun_GRPCForcedShutdownReclaimsBothSides(t *testing.T) {
 	awaitCompletion(t, f.backend.done, "upstream RPC handler")
 	awaitCompletion(t, f.proxyReturned, "proxy response reader/handler")
 	awaitCompletion(t, f.connectionEnded, "upstream pooled connection")
+}
+
+func TestGRPCTerminalCleanupClosesActiveUpstream(t *testing.T) {
+	f := newGRPCLifecycleFixture(t, 50*time.Millisecond)
+	// Keep the RPC active so cleanup cannot rely on asynchronous stream
+	// teardown having already made the HTTP/2 connection idle.
+	f.handler.Close()
+	awaitCompletion(t, f.connectionEnded, "active upstream connection")
+	if _, err := f.stream.Recv(); err == nil || errors.Is(err, io.EOF) {
+		t.Fatalf("terminal cleanup fabricated successful terminal status: %v", err)
+	}
+	awaitCompletion(t, f.backend.canceled, "upstream cancellation")
+	awaitCompletion(t, f.backend.done, "upstream RPC handler")
+	awaitCompletion(t, f.proxyReturned, "proxy response reader/handler")
+}
+
+func TestGRPCIdleCleanupPreservesActiveStream(t *testing.T) {
+	f := newGRPCLifecycleFixture(t, 50*time.Millisecond)
+	f.handler.CloseIdleConnections()
+	close(f.backend.release)
+	last, err := f.stream.Recv()
+	if err != nil || string(last.GetPayload().GetBody()) != "last" {
+		t.Fatalf("idle cleanup interrupted active RPC: %v, %v", last, err)
+	}
+	if _, err := f.stream.Recv(); !errors.Is(err, io.EOF) {
+		t.Fatalf("idle cleanup lost OK terminal status: %v", err)
+	}
 }
 
 type grpcLifecycleBackend struct {
@@ -166,7 +193,7 @@ func newGRPCLifecycleFixture(t *testing.T, grace time.Duration) *grpcLifecycleFi
 	cfg := config.Defaults()
 	cfg.AllowLoopbackPodIP = true
 	f.handler = proxy.NewHandler(proxy.Options{Config: &cfg, Logger: logr.Discard()})
-	t.Cleanup(f.handler.CloseIdleConnections)
+	t.Cleanup(f.handler.Close)
 	addr := unusedTCPAddr(t)
 	srv, err := New(Options{
 		Log: logr.Discard(), Probes: f.probes, HTTPAddr: addr, ShutdownTimeout: grace,

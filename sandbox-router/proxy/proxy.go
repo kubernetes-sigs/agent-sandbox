@@ -39,15 +39,16 @@ import (
 // HTTP request is parsed into a Target and proxied to the upstream sandbox
 // with the same body, headers (minus Host), and method.
 type Handler struct {
-	cfg           *config.Config
-	metrics       *observability.Metrics
-	propagator    propagation.TextMapPropagator
-	transport     http.RoundTripper
-	httpTransport *http.Transport
-	grpcTransport *http.Transport
-	cache         Lookup
-	authz         authz.Authorizer
-	log           logr.Logger
+	cfg             *config.Config
+	metrics         *observability.Metrics
+	propagator      propagation.TextMapPropagator
+	transport       http.RoundTripper
+	httpTransport   *http.Transport
+	grpcTransport   *http.Transport
+	grpcConnections *grpcConnections
+	cache           Lookup
+	authz           authz.Authorizer
+	log             logr.Logger
 }
 
 // Options bundles the dependencies NewHandler needs. Metrics, Propagator,
@@ -103,24 +104,36 @@ func NewHandler(o Options) *Handler {
 	if authorizer == nil {
 		authorizer = authz.AllowAll{}
 	}
+	grpcTr := grpcTransport(o.Config)
+	grpcConns := newGRPCConnections(grpcTr.DialContext)
+	grpcTr.DialContext = grpcConns.dialContext
 	return &Handler{
-		cfg:           o.Config,
-		metrics:       o.Metrics,
-		propagator:    o.Propagator,
-		transport:     tr,
-		httpTransport: httpTransport,
-		grpcTransport: grpcTransport(o.Config),
-		cache:         o.Cache,
-		authz:         authorizer,
-		log:           o.Logger,
+		cfg:             o.Config,
+		metrics:         o.Metrics,
+		propagator:      o.Propagator,
+		transport:       tr,
+		httpTransport:   httpTransport,
+		grpcTransport:   grpcTr,
+		grpcConnections: grpcConns,
+		cache:           o.Cache,
+		authz:           authorizer,
+		log:             o.Logger,
 	}
 }
 
-// CloseIdleConnections releases shared upstream pools after requests drain
-// or are canceled by the server. It does not cancel active RPCs itself.
+// CloseIdleConnections releases idle upstream connections without interrupting
+// active requests. Use Close for final cleanup after server shutdown.
 func (h *Handler) CloseIdleConnections() {
 	h.httpTransport.CloseIdleConnections()
 	h.grpcTransport.CloseIdleConnections()
+}
+
+// Close releases upstream resources after server shutdown. It also closes
+// native gRPC connections whose canceled streams are still unwinding, without
+// waiting for request handlers. The handler cannot be reused after Close.
+func (h *Handler) Close() {
+	h.grpcConnections.close()
+	h.CloseIdleConnections()
 }
 
 // ServeHTTP implements http.Handler.

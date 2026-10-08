@@ -44,6 +44,7 @@ class E2ETestRunner(TestRunner):
                 "--images",
                 "agent-sandbox-controller",
                 "sandbox-router",
+                "sandbox-router-go",
                 "sandboxd",
                 "python-runtime-sandbox",
                 "chrome-sandbox",

@@ -59,6 +59,19 @@ spec:
     ports:
     - protocol: TCP
       port: 8888
+  # Native sandboxd gRPC. Both selectors apply to the same peer: only
+  # labelled sandboxd pods in the example tenant namespace. Replace these
+  # selectors with your permitted Sandbox namespace/pod range.
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: grpc-router-demo
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: sandboxd-grpc
+    ports:
+    - protocol: TCP
+      port: 9090
   # OTel collector (if --enable-tracing or --enable-otel-metrics). Tighten
   # to your collector's namespace/pod selector.
   - to:

@@ -1,6 +1,6 @@
 # Sandbox Router (Go)
 
-A Go reimplementation of the Python [`sandbox-router`](../clients/python/agentic-sandbox-client/sandbox-router/README.md) — a small reverse proxy that fans HTTP traffic out to thousands of ephemeral agent sandbox pods in a Kubernetes cluster.
+A Go reimplementation of the Python [`sandbox-router`](../clients/python/agentic-sandbox-client/sandbox-router/README.md) — a small reverse proxy that fans HTTP and native gRPC traffic out to ephemeral agent sandbox pods in a Kubernetes cluster.
 
 It preserves the original `X-Sandbox-*` header contract (so existing clients and `Gateway` / `HTTPRoute` resources keep working) and adds the controls needed for enterprise deployments: TLS, mTLS, Prometheus metrics, OpenTelemetry tracing, hot-reloading certs, dial retries, structured logs, and graceful shutdown.
 
@@ -25,6 +25,9 @@ The SDKs (Go and Python) hard-code `sandbox-router-svc` as their routing target 
 The router **never** creates or looks up Sandbox resources. If the target sandbox doesn't exist, the request fails with 502 (after a short retry window — see [Behavior on missing sandboxes](#behavior-on-missing-sandboxes)).
 
 ## Request contract
+
+The table below describes HTTP requests. Native gRPC requires an explicit
+`X-Sandbox-Port`; see [Native gRPC](#native-grpc).
 
 | Header | Required | Default | Notes |
 |---|---|---|---|
@@ -65,7 +68,7 @@ The router validates the routing headers before constructing the upstream URL, m
 
 ### Error responses
 
-Errors are JSON with a single `detail` field — same shape as the Python router:
+HTTP errors are JSON with a single `detail` field — same shape as the Python router:
 
 | Cause | Status | Body |
 |---|---|---|
@@ -82,7 +85,55 @@ When the target sandbox can't be dialed (DNS doesn't resolve, or the pod isn't l
 
 Defaults: 3 retries (4 attempts total), 200 ms → 400 ms → 800 ms backoff. Tunable via `--upstream-max-retries`, `--upstream-retry-initial-delay`, `--upstream-retry-max-delay`. Set retries to `0` to disable.
 
-The retry budget never exceeds `--proxy-timeout`; the per-request context cuts it short.
+The HTTP retry budget never exceeds `--proxy-timeout`; the per-request context cuts
+it short. Native gRPC does not use this retry wrapper.
+
+## Native gRPC
+
+The same proxy listener accepts HTTP/1 and HTTP/2 prior-knowledge (h2c) on 8080;
+the optional TLS listener accepts HTTP/1 and TLS HTTP/2. Native gRPC is identified
+by HTTP/2 POST with `application/grpc` or `application/grpc+<codec>`. gRPC-Web is
+not supported. The router uses h2c to the backend and does not register or decode
+any business service. Unary and all three streaming forms are forwarded with
+immediate flush, preserving metadata, compression, headers, and terminal trailers.
+
+Send `x-sandbox-id` and **explicit** `x-sandbox-port` (9090 for default sandboxd)
+on every RPC; namespace defaults to `default`. Existing UID, Pod-IP, cache and
+authorizer restrictions apply unchanged. A ClientConn does not pin a target:
+follow-up stdin/signal/resize RPCs must send the same routing metadata. The native
+`/Service/Method` path bypasses browser path-prefix routing. Router-consumed
+Authorization/session credentials are stripped before forwarding.
+
+`--grpc-proxy-timeout=0s` (default) adds no router total-duration cap. A positive
+value caps the RPC; a negative value is invalid. The effective deadline is the
+earliest of caller/context deadline and that cap, starting before routing/authz.
+Only the remaining budget goes upstream. Legacy HTTP proxy/response-header
+timeouts do not truncate gRPC; dialing remains bounded. The flag also works as
+the same YAML key, with CLI precedence and no new environment variable.
+`--max-request-body-bytes` limits cumulative uploaded RPC bytes, not message size.
+
+Router errors use native codes: invalid input → `InvalidArgument`, missing auth →
+`Unauthenticated`, denied target → `PermissionDenied`, unreachable backend →
+`Unavailable`, deadline → `DeadlineExceeded`, cancellation → `Canceled`, body cap
+→ `ResourceExhausted`, and internal failure → `Internal`. Backend status/message/
+details pass through. A command's nonzero exit code is still a successful RPC's
+business result. Broken streams are aborted, never patched with JSON or fake OK.
+
+There is no router business-level gRPC replay/retry. Transport recovery proven
+unprocessed may still occur; neither cancellation nor this policy guarantees
+rollback or exactly-once execution. Configure client/Gateway retries accordingly.
+On shutdown, readiness drops, existing RPCs may finish within `--shutdown-timeout`,
+then remaining request contexts/connections are canceled and pools are closed.
+
+Access logs add `grpc_status`; traces add `grpc.status_code`. Missing/invalid final
+status is `unknown`. Existing HTTP metrics retain their meaning: HTTP 200 does not
+imply gRPC success. Payloads and consumed credentials are not logged.
+
+See the [runnable generated Go client and isolated TLS Gateway example](../examples/sandbox-router-grpc/README.md)
+for deployment, scoped-token auth, CA/server-name verification, long calls,
+NetworkPolicy boundaries, and explicit test/cleanup commands. No public SDK's
+connection modes are changed by this feature. Internal h2c is a trusted-network
+hop, not end-to-end encryption.
 
 ## WebSockets and other protocol upgrades
 
@@ -134,7 +185,8 @@ Run `sandbox-router --help` for the full list. The most relevant:
 | `--tls-cipher-suites` | `""` (Go defaults) | Comma-separated Go cipher-suite names. Honors `TLS_CIPHER_SUITES`. Ignored when min version is TLS 1.3. |
 | `--mtls-mode` | `off` | `off` / `optional` / `required`. |
 | `--cluster-domain` | `cluster.local` | Honors `CLUSTER_DOMAIN` env var (Python parity). |
-| `--proxy-timeout` | `180s` | Per-request upstream timeout. Honors `PROXY_TIMEOUT_SECONDS` (numeric seconds). |
+| `--proxy-timeout` | `180s` | HTTP per-request upstream timeout (not gRPC). Honors `PROXY_TIMEOUT_SECONDS` (numeric seconds). |
+| `--grpc-proxy-timeout` | `0s` | Native gRPC total-duration cap; zero means no router cap. CLI/YAML only. |
 | `--upstream-max-retries` | `3` | Dial retries. `0` disables. |
 | `--max-request-body-bytes` | `0` (unlimited) | Optional cap on inbound body size. |
 | `--allow-loopback-pod-ip` | `false` | Permit loopback addresses in `X-Sandbox-Pod-IP`. Default-off rejects the router's own loopback as an SSRF target. Enable only when the sandbox runs as a sidecar in the router's Pod, or for integration tests against a localhost backend. Link-local / multicast / unspecified stay rejected regardless. |

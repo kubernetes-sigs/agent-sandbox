@@ -116,11 +116,14 @@ type Config struct {
 	// ClusterDomain is the Kubernetes cluster DNS suffix used to build target
 	// service FQDNs (e.g. "cluster.local"). Honors CLUSTER_DOMAIN.
 	ClusterDomain string
-	// ProxyTimeout bounds the total time spent proxying a single request to
-	// an upstream sandbox. Honors PROXY_TIMEOUT_SECONDS (numeric seconds).
+	// ProxyTimeout bounds normal HTTP requests, not gRPC or upgrades.
+	// Honors PROXY_TIMEOUT_SECONDS (numeric seconds).
 	ProxyTimeout time.Duration
-	// ResponseHeaderTimeout bounds the time spent waiting for the upstream
-	// to start sending the response headers.
+	// GRPCProxyTimeout is an optional total RPC duration cap, including
+	// discovery and authorization. Zero leaves the caller's budget intact.
+	GRPCProxyTimeout time.Duration
+	// ResponseHeaderTimeout bounds the wait for HTTP upstream headers.
+	// gRPC uses its effective RPC budget instead.
 	ResponseHeaderTimeout time.Duration
 	// ShutdownTimeout bounds the time each HTTP server is allowed to drain
 	// in-flight requests on SIGTERM.
@@ -383,6 +386,9 @@ func (c *Config) Validate() error {
 
 	if c.ProxyTimeout <= 0 {
 		return fmt.Errorf("--proxy-timeout must be positive, got %s", c.ProxyTimeout)
+	}
+	if c.GRPCProxyTimeout < 0 {
+		return fmt.Errorf("--grpc-proxy-timeout must be non-negative, got %s", c.GRPCProxyTimeout)
 	}
 	if c.ResponseHeaderTimeout <= 0 {
 		return fmt.Errorf("--response-header-timeout must be positive, got %s", c.ResponseHeaderTimeout)

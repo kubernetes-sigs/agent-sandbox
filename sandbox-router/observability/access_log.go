@@ -18,6 +18,7 @@ import (
 	"bufio"
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -119,22 +120,49 @@ func AccessLogMiddleware(base logr.Logger, skip func(*http.Request) bool) func(h
 			start := time.Now()
 			ctx, labels := LabelsForRequest(r.Context())
 			rec := &accessLogRecorder{ResponseWriter: w, status: http.StatusOK}
+			// ReverseProxy aborts incomplete streams with ErrAbortHandler.
+			// Deferred logging must still run while that panic propagates.
+			defer func() {
+				log := LoggerFromContext(r.Context(), base)
+				fields := []any{
+					"method", r.Method,
+					"path", r.URL.Path,
+					"status", rec.status,
+					"duration_ms", time.Since(start).Milliseconds(),
+					"client_ip", clientIP(r),
+					"sandbox_id", labels.SandboxID,
+					"sandbox_namespace", labels.SandboxNamespace,
+					"bytes_out", rec.bytes,
+					"user_agent", r.UserAgent(),
+				}
+				if labels.GRPC {
+					fields = append(fields, "grpc_status", grpcStatus(w.Header()))
+				}
+				log.Info("request", fields...)
+			}()
 			next.ServeHTTP(rec, r.WithContext(ctx))
-
-			log := LoggerFromContext(r.Context(), base)
-			log.Info("request",
-				"method", r.Method,
-				"path", r.URL.Path,
-				"status", rec.status,
-				"duration_ms", time.Since(start).Milliseconds(),
-				"client_ip", clientIP(r),
-				"sandbox_id", labels.SandboxID,
-				"sandbox_namespace", labels.SandboxNamespace,
-				"bytes_out", rec.bytes,
-				"user_agent", r.UserAgent(),
-			)
 		})
 	}
+}
+
+func grpcStatus(headers http.Header) string {
+	values := headers.Values("Grpc-Status")
+	if len(values) == 0 {
+		values = headers.Values(http.TrailerPrefix + "Grpc-Status")
+	}
+	if len(values) != 1 {
+		return "unknown"
+	}
+	for _, digit := range values[0] {
+		if digit < '0' || digit > '9' {
+			return "unknown"
+		}
+	}
+	code, err := strconv.Atoi(values[0])
+	if err != nil || code < 0 || code > 16 {
+		return "unknown"
+	}
+	return strconv.Itoa(code)
 }
 
 // SkipHealthAndMetrics is a convenience skip function for the access log

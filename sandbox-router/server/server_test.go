@@ -16,14 +16,137 @@ package server
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
 )
+
+func TestRun_DrainsHTTP2RequestBeforeCanceling(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	release := make(chan struct{})
+	probes := NewProbes()
+	srv, err := New(Options{
+		Log: logr.Discard(), Probes: probes, HTTPAddr: addr, ShutdownTimeout: 3 * time.Second,
+		ProxyHandler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			select {
+			case <-release:
+				_, _ = io.WriteString(w, "completed during drain")
+			case <-r.Context().Done():
+				_, _ = io.WriteString(w, "canceled before grace expired")
+			}
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- srv.Run(ctx) }()
+	t.Cleanup(cancel)
+	deadline := time.Now().Add(2 * time.Second)
+	for !probes.ready.Load() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !probes.ready.Load() {
+		t.Fatal("router never ready")
+	}
+	tr := &http.Transport{Protocols: new(http.Protocols)}
+	tr.Protocols.SetUnencryptedHTTP2(true)
+	defer tr.CloseIdleConnections()
+	client := &http.Client{Transport: tr, Timeout: 4 * time.Second}
+	resp, err := client.Get("http://" + addr + "/stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	cancel()
+	deadline = time.Now().Add(time.Second)
+	for probes.ready.Load() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if probes.ready.Load() {
+		t.Fatal("readiness stayed true during shutdown")
+	}
+	close(release)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil || string(body) != "completed during drain" {
+		t.Fatalf("drained body=%q err=%v", body, err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("graceful shutdown: %v", err)
+	}
+}
+
+func TestRun_ForcedShutdownCancelsActiveRequest(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	ended := make(chan struct{})
+	probes := NewProbes()
+	srv, err := New(Options{
+		Log: logr.Discard(), Probes: probes, HTTPAddr: addr, ShutdownTimeout: 50 * time.Millisecond,
+		ProxyHandler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+			close(ended)
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- srv.Run(ctx) }()
+	deadline := time.Now().Add(time.Second)
+	for {
+		w := httptest.NewRecorder()
+		probes.Mux().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+		if w.Code == http.StatusOK {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("router not ready")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	tr := &http.Transport{Protocols: new(http.Protocols)}
+	tr.Protocols.SetUnencryptedHTTP2(true)
+	defer tr.CloseIdleConnections()
+	client := &http.Client{Transport: tr, Timeout: 2 * time.Second}
+	resp, err := client.Get("http://" + addr + "/stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	cancel()
+	if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown error: %v", err)
+	}
+	select {
+	case <-ended:
+	case <-time.After(time.Second):
+		t.Fatal("active upstream context survived forced shutdown")
+	}
+}
 
 // TestRun_BindFailureSurfacesSynchronously verifies that Run() returns an
 // error if a listener can't bind, rather than crashing in a background
@@ -64,6 +187,64 @@ func TestRun_BindFailureSurfacesSynchronously(t *testing.T) {
 	// the LB it's ready while the proxy port is unreachable.
 	if probes.ready.Load() {
 		t.Errorf("readiness must remain false when bind fails")
+	}
+}
+
+func TestRun_PlainHTTP1AndHTTP2(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	probes := NewProbes()
+	srv, err := New(Options{
+		Log: logr.Discard(), Probes: probes, HTTPAddr: addr, ShutdownTimeout: time.Second,
+		ProxyHandler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Protocol", r.Proto)
+			w.WriteHeader(http.StatusOK)
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		w := httptest.NewRecorder()
+		probes.Mux().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+		if w.Code == http.StatusOK {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("router never ready")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	for _, protocol := range []string{"HTTP/1.1", "HTTP/2.0"} {
+		t.Run(protocol, func(t *testing.T) {
+			tr := &http.Transport{Protocols: new(http.Protocols)}
+			tr.Protocols.SetHTTP1(protocol == "HTTP/1.1")
+			tr.Protocols.SetUnencryptedHTTP2(protocol == "HTTP/2.0")
+			defer tr.CloseIdleConnections()
+			client := &http.Client{Transport: tr, Timeout: time.Second}
+			resp, err := client.Get("http://" + addr + "/test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if got := resp.Header.Get("X-Protocol"); got != protocol {
+				t.Fatalf("protocol = %s, want %s", got, protocol)
+			}
+		})
 	}
 }
 

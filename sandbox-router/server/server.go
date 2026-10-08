@@ -90,9 +90,14 @@ func New(o Options) (*Server, error) {
 		probes:          o.Probes,
 		shutdownTimeout: o.ShutdownTimeout,
 	}
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetHTTP2(true)
+	protocols.SetUnencryptedHTTP2(true)
 
 	if o.HTTPAddr != "" {
 		s.proxy = &http.Server{
+			Protocols:         protocols,
 			Addr:              o.HTTPAddr,
 			Handler:           o.ProxyHandler,
 			ReadHeaderTimeout: o.ReadHeaderTimeout,
@@ -101,6 +106,7 @@ func New(o Options) (*Server, error) {
 	}
 	if o.HTTPSAddr != "" {
 		s.proxyTLS = &http.Server{
+			Protocols:         protocols,
 			Addr:              o.HTTPSAddr,
 			Handler:           o.ProxyHandler,
 			TLSConfig:         o.TLSConfig,
@@ -141,6 +147,10 @@ func New(o Options) (*Server, error) {
 // On exit Shutdown is called concurrently on every server with a shared
 // shutdownTimeout so one slow listener cannot consume the whole budget.
 func (s *Server) Run(ctx context.Context) error {
+	// Request lifetime is independent of the signal context: cancellation
+	// happens only after the drain window, not when SIGTERM is received.
+	requestCtx, stopRequests := context.WithCancel(context.Background())
+	defer stopRequests()
 	type listener struct {
 		name string
 		srv  *http.Server
@@ -162,6 +172,7 @@ func (s *Server) Run(ctx context.Context) error {
 		if l.srv == nil {
 			continue
 		}
+		l.srv.BaseContext = func(net.Listener) context.Context { return requestCtx }
 		ln, err := net.Listen("tcp", l.srv.Addr)
 		if err != nil {
 			for _, b := range bound {
@@ -222,6 +233,12 @@ func (s *Server) Run(ctx context.Context) error {
 		})
 	}
 	shutWg.Wait()
+	if shutErr != nil {
+		stopRequests()
+		for _, l := range bound {
+			_ = l.srv.Close()
+		}
+	}
 
 	if err := g.Wait(); err != nil {
 		// If a listener failed for any reason other than ErrServerClosed,

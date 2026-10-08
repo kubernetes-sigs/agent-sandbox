@@ -140,6 +140,7 @@ class K8sHelper:
     def wait_for_claim_ready(
         self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None,
         *, expected_uid: str | None = None, initial_claim: dict | None = None,
+        require_current_generation: bool = False,
     ) -> str:
         """Watches the SandboxClaim until it is bound to a sandbox AND its
         Ready condition is True, then returns the sandbox name.
@@ -158,14 +159,19 @@ class K8sHelper:
             expected_uid: If provided, reject events for a same-name replacement.
             initial_claim: Optional create/GET response to evaluate before
                 waiting for future watch events.
+            require_current_generation: If True, also require the Ready condition's
+                observedGeneration to equal metadata.generation in each snapshot.
+                Missing generation fields remain pending. Defaults to False.
         """
         return self._watch_claim(claim_name, namespace, timeout, require_ready=True,
                                  resource_version=resource_version,
-                                 expected_uid=expected_uid, initial_claim=initial_claim)
+                                 expected_uid=expected_uid, initial_claim=initial_claim,
+                                 require_current_generation=require_current_generation)
 
     def _watch_claim(self, claim_name: str, namespace: str, timeout: int, require_ready: bool,
                      resource_version: str | None = None,
-                     *, expected_uid: str | None = None, initial_claim: dict | None = None) -> str:
+                     *, expected_uid: str | None = None, initial_claim: dict | None = None,
+                     require_current_generation: bool = False) -> str:
         """Shared SandboxClaim watch loop.
 
         Returns the sandbox name once ``status.sandbox.name`` is populated;
@@ -258,7 +264,10 @@ class K8sHelper:
                                     f"SandboxClaim '{claim_name}' failed with terminal reason "
                                     f"{cond.get('reason')}: {cond.get('message', '')}"
                                 )
-                            if cond.get('type') == 'Ready' and cond.get('status') == 'True':
+                            if (cond.get('type') == 'Ready' and cond.get('status') == 'True'
+                                    and (not require_current_generation
+                                         or (metadata.get('generation') is not None
+                                             and cond.get('observedGeneration') == metadata['generation']))):
                                 ready = True
 
                         sandbox_status = status.get('sandbox', {})

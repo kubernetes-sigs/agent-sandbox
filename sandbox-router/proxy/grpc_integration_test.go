@@ -204,6 +204,33 @@ func TestGRPCTrailersOnlyStatus(t *testing.T) {
 	}
 }
 
+func TestGRPCTrailersOnlyMetadata(t *testing.T) {
+	want, err := status.New(codes.Aborted, "backend rejected 100% / +").WithDetails(&emptypb.Empty{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, port := grpcBackend(t, &grpcEchoService{unary: func(ctx context.Context, _ *grpc_testing.SimpleRequest) (*grpc_testing.SimpleResponse, error) {
+		if err := grpc.SetTrailer(ctx, metadata.Pairs("finish", "one", "finish", "two", "finish-bin", "\x00\xff")); err != nil {
+			return nil, err
+		}
+		// No initial headers or response message: all metadata belongs to
+		// the backend's single terminal HEADERS block.
+		return nil, want.Err()
+	}})
+	client := grpcRouterClient(t, Options{})
+	var headers, trailers metadata.MD
+	_, err = client.UnaryCall(grpcTargetContext(t, host, port), &grpc_testing.SimpleRequest{}, grpc.Header(&headers), grpc.Trailer(&trailers))
+	if !proto.Equal(status.Convert(err).Proto(), want.Proto()) {
+		t.Fatalf("trailers-only status/details = %v, want %v", err, want)
+	}
+	if len(headers.Get("finish")) != 0 || len(headers.Get("finish-bin")) != 0 {
+		t.Fatalf("terminal metadata leaked into initial headers: %v", headers)
+	}
+	if strings.Join(trailers.Get("finish"), ",") != "one,two" || strings.Join(trailers.Get("finish-bin"), "") != "\x00\xff" {
+		t.Fatalf("terminal metadata lost: %v", trailers)
+	}
+}
+
 func TestGRPCRoutingErrors(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -230,6 +257,25 @@ func TestGRPCRoutingErrors(t *testing.T) {
 				t.Fatalf("not a native error: %v", err)
 			}
 		})
+	}
+}
+
+func TestGRPCUnreachableBackend(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	client := grpcRouterClient(t, Options{})
+	_, err = client.UnaryCall(grpcTargetContext(t, host, port), &grpc_testing.SimpleRequest{})
+	if status.Code(err) != codes.Unavailable {
+		t.Fatalf("unreachable backend did not return native Unavailable: %v", err)
 	}
 }
 
@@ -585,29 +631,41 @@ func TestGRPCObservabilityReportsTerminalStatus(t *testing.T) {
 	}
 }
 
-func TestGRPCAdministratorDeadline(t *testing.T) {
-	backendDone := make(chan struct{})
-	host, port := grpcBackend(t, &grpcEchoService{unary: func(ctx context.Context, _ *grpc_testing.SimpleRequest) (*grpc_testing.SimpleResponse, error) {
-		<-ctx.Done()
-		close(backendDone)
-		return nil, status.FromContextError(ctx.Err()).Err()
-	}})
-	cfg := config.Defaults()
-	cfg.AllowLoopbackPodIP = true
-	cfg.GRPCProxyTimeout = 100 * time.Millisecond
-	client := grpcRouterClient(t, Options{Config: &cfg})
-	started := time.Now()
-	_, err := client.UnaryCall(grpcTargetContext(t, host, port), &grpc_testing.SimpleRequest{})
-	if status.Code(err) != codes.DeadlineExceeded {
-		t.Fatalf("administrator cap: %v", err)
-	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("administrator cap did not bound the call: %s", elapsed)
-	}
-	select {
-	case <-backendDone:
-	case <-time.After(time.Second):
-		t.Fatal("backend RPC did not terminate")
+func TestGRPCDeadlineCancelsUpstream(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		cap, caller time.Duration
+	}{
+		{"administrator cap", 100 * time.Millisecond, 3 * time.Second},
+		{"client deadline without administrator cap", 0, 100 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backendDone := make(chan struct{})
+			host, port := grpcBackend(t, &grpcEchoService{unary: func(ctx context.Context, _ *grpc_testing.SimpleRequest) (*grpc_testing.SimpleResponse, error) {
+				<-ctx.Done()
+				close(backendDone)
+				return nil, status.FromContextError(ctx.Err()).Err()
+			}})
+			cfg := config.Defaults()
+			cfg.AllowLoopbackPodIP = true
+			cfg.GRPCProxyTimeout = tc.cap
+			client := grpcRouterClient(t, Options{Config: &cfg})
+			ctx, cancel := context.WithTimeout(grpcTargetContext(t, host, port), tc.caller)
+			defer cancel()
+			started := time.Now()
+			_, err := client.UnaryCall(ctx, &grpc_testing.SimpleRequest{})
+			if status.Code(err) != codes.DeadlineExceeded {
+				t.Fatalf("deadline did not return native DeadlineExceeded: %v", err)
+			}
+			if elapsed := time.Since(started); elapsed > time.Second {
+				t.Fatalf("deadline did not bound the call: %s", elapsed)
+			}
+			select {
+			case <-backendDone:
+			case <-time.After(time.Second):
+				t.Fatal("backend RPC did not terminate")
+			}
+		})
 	}
 }
 

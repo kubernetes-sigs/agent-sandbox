@@ -187,17 +187,22 @@ func grpcTransport(cfg *config.Config) *http.Transport {
 func prepareGRPCResponse(resp *http.Response) error {
 	// ReverseProxy may flush initial headers before it knows the body is
 	// empty, losing the END_STREAM bit of a trailers-only backend reply.
-	// Put the terminal fields into real trailers so the client still sees
-	// them at END_STREAM, including with immediate streaming flush enabled.
+	// Put the status AND application metadata into real trailers so the
+	// client still sees the entire terminal block at END_STREAM, including
+	// with immediate streaming flush enabled.
 	if len(resp.Header.Values("Grpc-Status")) > 0 {
 		if resp.Trailer == nil {
 			resp.Trailer = make(http.Header)
 		}
-		for _, key := range []string{"Grpc-Status", "Grpc-Message", "Grpc-Status-Details-Bin"} {
-			if values := resp.Header.Values(key); len(values) > 0 {
-				resp.Trailer[key] = values
-				resp.Header.Del(key)
+		for key, values := range resp.Header {
+			switch key {
+			case "Content-Type", "Content-Length", "Trailer", "Grpc-Encoding", "Grpc-Accept-Encoding":
+				// Keep HTTP framing and gRPC representation headers separate
+				// from application metadata.
+				continue
 			}
+			resp.Trailer[key] = values
+			resp.Header.Del(key)
 		}
 	}
 	return nil

@@ -90,8 +90,10 @@ func run(parent context.Context, opts options, command []string, stdout, stderr 
 		if err != nil {
 			return 0, fmt.Errorf("mint demo scoped token: %w", err)
 		}
-		_, err = fmt.Fprintln(stdout, token)
-		return 0, err
+		if _, err := fmt.Fprintln(stdout, token); err != nil {
+			return 0, fmt.Errorf("write scoped token: %w", err)
+		}
+		return 0, nil
 	}
 	if opts.Timeout <= 0 {
 		return 0, fmt.Errorf("--timeout must be positive")
@@ -146,10 +148,12 @@ func run(parent context.Context, opts options, command []string, stdout, stderr 
 			return 0, fmt.Errorf("execute: %w", err)
 		}
 		if _, err := stdout.Write(resp.GetStdout()); err != nil {
-			return 0, err
+			return 0, fmt.Errorf("write command stdout: %w", err)
 		}
-		_, err = stderr.Write(resp.GetStderr())
-		return int(resp.GetExitCode()), err
+		if _, err := stderr.Write(resp.GetStderr()); err != nil {
+			return int(resp.GetExitCode()), fmt.Errorf("write command stderr: %w", err)
+		}
+		return int(resp.GetExitCode()), nil
 	}
 	switch opts.Mode {
 	case "interact":
@@ -179,14 +183,14 @@ func run(parent context.Context, opts options, command []string, stdout, stderr 
 		if init := event.GetInit(); init != nil {
 			pid = init.GetProcessId()
 			if _, err := fmt.Fprintf(stderr, "process_id=%d\n", pid); err != nil {
-				return 0, err
+				return 0, fmt.Errorf("write process ID: %w", err)
 			}
 		}
 		if _, err := stdout.Write(event.GetStdout()); err != nil {
-			return 0, err
+			return 0, fmt.Errorf("write process stdout: %w", err)
 		}
 		if _, err := stderr.Write(event.GetStderr()); err != nil {
-			return 0, err
+			return 0, fmt.Errorf("write process stderr: %w", err)
 		}
 		if !controlled && (opts.Mode == "interact" || opts.Mode == "signal") {
 			ready.Write(event.GetStdout())

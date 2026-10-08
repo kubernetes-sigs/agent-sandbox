@@ -16,6 +16,8 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"io"
 	"net"
@@ -29,12 +31,7 @@ import (
 )
 
 func TestRun_DrainsHTTP2RequestBeforeCanceling(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := ln.Addr().String()
-	_ = ln.Close()
+	addr := unusedTCPAddr(t)
 	release := make(chan struct{})
 	probes := NewProbes()
 	srv, err := New(Options{
@@ -53,17 +50,8 @@ func TestRun_DrainsHTTP2RequestBeforeCanceling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan error, 1)
-	go func() { done <- srv.Run(ctx) }()
-	t.Cleanup(cancel)
-	deadline := time.Now().Add(2 * time.Second)
-	for !probes.ready.Load() && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if !probes.ready.Load() {
-		t.Fatal("router never ready")
-	}
+	cancel, wait := runTestServer(t, srv)
+	waitForReadiness(t, probes, true)
 	tr := &http.Transport{Protocols: new(http.Protocols)}
 	tr.Protocols.SetUnencryptedHTTP2(true)
 	defer tr.CloseIdleConnections()
@@ -74,30 +62,19 @@ func TestRun_DrainsHTTP2RequestBeforeCanceling(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	cancel()
-	deadline = time.Now().Add(time.Second)
-	for probes.ready.Load() && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if probes.ready.Load() {
-		t.Fatal("readiness stayed true during shutdown")
-	}
+	waitForReadiness(t, probes, false)
 	close(release)
 	body, err := io.ReadAll(resp.Body)
 	if err != nil || string(body) != "completed during drain" {
 		t.Fatalf("drained body=%q err=%v", body, err)
 	}
-	if err := <-done; err != nil {
+	if err := wait(); err != nil {
 		t.Fatalf("graceful shutdown: %v", err)
 	}
 }
 
 func TestRun_ForcedShutdownCancelsActiveRequest(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := ln.Addr().String()
-	_ = ln.Close()
+	addr := unusedTCPAddr(t)
 	ended := make(chan struct{})
 	probes := NewProbes()
 	srv, err := New(Options{
@@ -112,22 +89,8 @@ func TestRun_ForcedShutdownCancelsActiveRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- srv.Run(ctx) }()
-	deadline := time.Now().Add(time.Second)
-	for {
-		w := httptest.NewRecorder()
-		probes.Mux().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
-		if w.Code == http.StatusOK {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("router not ready")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	cancel, wait := runTestServer(t, srv)
+	waitForReadiness(t, probes, true)
 	tr := &http.Transport{Protocols: new(http.Protocols)}
 	tr.Protocols.SetUnencryptedHTTP2(true)
 	defer tr.CloseIdleConnections()
@@ -138,7 +101,7 @@ func TestRun_ForcedShutdownCancelsActiveRequest(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	cancel()
-	if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
+	if err := wait(); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("shutdown error: %v", err)
 	}
 	select {
@@ -191,61 +154,137 @@ func TestRun_BindFailureSurfacesSynchronously(t *testing.T) {
 }
 
 func TestRun_PlainHTTP1AndHTTP2(t *testing.T) {
+	addr := unusedTCPAddr(t)
+	probes := NewProbes()
+	srv, err := New(Options{
+		Log: logr.Discard(), Probes: probes, HTTPAddr: addr, ShutdownTimeout: time.Second,
+		ProxyHandler: http.HandlerFunc(echoProtocol),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel, wait := runTestServer(t, srv)
+	t.Cleanup(func() {
+		cancel()
+		if err := wait(); err != nil {
+			t.Error(err)
+		}
+	})
+	waitForReadiness(t, probes, true)
+	assertListenerProtocols(t, "http://"+addr, nil)
+}
+
+func TestRun_TLSHTTP1AndHTTP2(t *testing.T) {
+	certFixture := httptest.NewTLSServer(http.NotFoundHandler())
+	certFixture.Close()
+	cert := &certFixture.TLS.Certificates[0]
+	roots := x509.NewCertPool()
+	roots.AddCert(certFixture.Certificate())
+	addr := unusedTCPAddr(t)
+	probes := NewProbes()
+	srv, err := New(Options{
+		Log: logr.Discard(), Probes: probes, HTTPSAddr: addr, ShutdownTimeout: time.Second,
+		TLSConfig: &tls.Config{
+			MinVersion:     tls.VersionTLS12,
+			GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return cert, nil },
+		},
+		ProxyHandler: http.HandlerFunc(echoProtocol),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel, wait := runTestServer(t, srv)
+	t.Cleanup(func() {
+		cancel()
+		if err := wait(); err != nil {
+			t.Error(err)
+		}
+	})
+	waitForReadiness(t, probes, true)
+	assertListenerProtocols(t, "https://"+addr, &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12})
+}
+
+func echoProtocol(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Protocol", r.Proto)
+	w.WriteHeader(http.StatusOK)
+}
+
+func assertListenerProtocols(t *testing.T, baseURL string, tlsConfig *tls.Config) {
+	t.Helper()
+	for _, protocol := range []string{"HTTP/1.1", "HTTP/2.0"} {
+		t.Run(protocol, func(t *testing.T) {
+			tr := &http.Transport{Protocols: new(http.Protocols), TLSClientConfig: tlsConfig}
+			tr.Protocols.SetHTTP1(protocol == "HTTP/1.1")
+			tr.Protocols.SetUnencryptedHTTP2(protocol == "HTTP/2.0" && tlsConfig == nil)
+			tr.Protocols.SetHTTP2(protocol == "HTTP/2.0" && tlsConfig != nil)
+			defer tr.CloseIdleConnections()
+			client := &http.Client{Transport: tr, Timeout: time.Second}
+			resp, err := client.Get(baseURL + "/test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if got := resp.Header.Get("X-Protocol"); got != protocol || resp.Proto != protocol {
+				t.Fatalf("backend protocol = %s, wire protocol = %s, want %s", got, resp.Proto, protocol)
+			}
+		})
+	}
+}
+
+func unusedTCPAddr(t *testing.T) string {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	addr := ln.Addr().String()
-	_ = ln.Close()
-	probes := NewProbes()
-	srv, err := New(Options{
-		Log: logr.Discard(), Probes: probes, HTTPAddr: addr, ShutdownTimeout: time.Second,
-		ProxyHandler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("X-Protocol", r.Proto)
-			w.WriteHeader(http.StatusOK)
-		}),
-	})
-	if err != nil {
+	if err := ln.Close(); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- srv.Run(ctx) }()
-	t.Cleanup(func() {
-		cancel()
-		if err := <-done; err != nil {
-			t.Error(err)
-		}
-	})
+	return addr
+}
+
+func waitForReadiness(t *testing.T, probes *Probes, ready bool) {
+	t.Helper()
+	want := http.StatusServiceUnavailable
+	if ready {
+		want = http.StatusOK
+	}
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		w := httptest.NewRecorder()
 		probes.Mux().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
-		if w.Code == http.StatusOK {
-			break
+		if w.Code == want {
+			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("router never ready")
+			t.Fatalf("readiness = %d, want %d", w.Code, want)
 		}
 		time.Sleep(time.Millisecond)
 	}
-	for _, protocol := range []string{"HTTP/1.1", "HTTP/2.0"} {
-		t.Run(protocol, func(t *testing.T) {
-			tr := &http.Transport{Protocols: new(http.Protocols)}
-			tr.Protocols.SetHTTP1(protocol == "HTTP/1.1")
-			tr.Protocols.SetUnencryptedHTTP2(protocol == "HTTP/2.0")
-			defer tr.CloseIdleConnections()
-			client := &http.Client{Transport: tr, Timeout: time.Second}
-			resp, err := client.Get("http://" + addr + "/test")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer resp.Body.Close()
-			if got := resp.Header.Get("X-Protocol"); got != protocol {
-				t.Fatalf("protocol = %s, want %s", got, protocol)
-			}
-		})
+}
+
+func runTestServer(t *testing.T, srv *Server) (context.CancelFunc, func() error) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	var runErr error
+	go func() {
+		runErr = srv.Run(ctx)
+		close(done)
+	}()
+	wait := func() error {
+		t.Helper()
+		select {
+		case <-done:
+			return runErr
+		case <-time.After(5 * time.Second):
+			t.Fatal("router server goroutine did not stop")
+			return nil
+		}
 	}
+	t.Cleanup(func() { cancel(); _ = wait() })
+	return cancel, wait
 }
 
 // TestRun_CleansUpPriorBindsOnLaterBindFailure ensures we don't leak a

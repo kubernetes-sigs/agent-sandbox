@@ -18,6 +18,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/pem"
+	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -110,6 +112,13 @@ func TestExampleThroughRouter(t *testing.T) {
 	if err := os.WriteFile(tokenPath, token.Bytes(), 0600); err != nil {
 		t.Fatal(err)
 	}
+	t.Run("token output error context", func(t *testing.T) {
+		sinkErr := errors.New("output closed")
+		_, err := run(t.Context(), options{Mode: "mint-token", Namespace: "default", Sandbox: "box-a", SecretFile: secretPath, TokenTTL: time.Minute}, nil, outputErrorWriter{sinkErr}, io.Discard)
+		if !errors.Is(err, sinkErr) || !strings.HasPrefix(err.Error(), "write scoped token:") {
+			t.Fatalf("token output error lost context or cause: %v", err)
+		}
+	})
 	opts := options{Address: strings.TrimPrefix(router.URL, "https://"), CAFile: caPath, Timeout: 3 * time.Second, Namespace: "default", Sandbox: "box-a", Port: port, TokenFile: tokenPath}
 	for _, mode := range []string{"execute", "start", "interact", "signal"} {
 		t.Run(mode, func(t *testing.T) {
@@ -140,6 +149,30 @@ func TestExampleThroughRouter(t *testing.T) {
 			}
 		})
 	}
+	for _, tc := range []struct {
+		mode, context string
+		stdout        bool
+	}{
+		{"execute", "write command stdout:", true},
+		{"execute", "write command stderr:", false},
+		{"start", "write process ID:", false},
+		{"start", "write process stdout:", true},
+	} {
+		t.Run(tc.context, func(t *testing.T) {
+			sinkErr := errors.New("output closed")
+			var stdout, stderr = io.Discard, io.Discard
+			if tc.stdout {
+				stdout = outputErrorWriter{sinkErr}
+			} else {
+				stderr = outputErrorWriter{sinkErr}
+			}
+			opts.Mode = tc.mode
+			_, err := run(t.Context(), opts, []string{"/bin/sh", "-c", "printf hello; printf warning >&2; exit 7"}, stdout, stderr)
+			if !errors.Is(err, sinkErr) || !strings.HasPrefix(err.Error(), tc.context) {
+				t.Fatalf("output error lost context or cause: %v", err)
+			}
+		})
+	}
 	t.Run("wrong TLS server name", func(t *testing.T) {
 		opts.Mode = "execute"
 		opts.ServerName = "not-the-router.invalid"
@@ -163,4 +196,13 @@ func TestExampleRequiresFiniteBudget(t *testing.T) {
 	if _, err := run(t.Context(), options{Mode: "execute", Address: "127.0.0.1:1", Plaintext: true}, nil, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
 		t.Fatal("example accepted an unlimited RPC")
 	}
+}
+
+type outputErrorWriter struct{ err error }
+
+func (w outputErrorWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return 0, w.err
 }

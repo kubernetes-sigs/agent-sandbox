@@ -25,6 +25,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -56,6 +58,21 @@ func newFakeClient(initialObjs ...runtime.Object) client.WithWatch {
 		WithIndex(&corev1.Pod{}, podSandboxNameHashIndex, podSandboxNameHashIndexer).
 		WithRuntimeObjects(initialObjs...).
 		Build()
+}
+
+type createTimestampClient struct {
+	client.WithWatch
+	now func() time.Time
+}
+
+func (c *createTimestampClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	if pod, ok := obj.(*corev1.Pod); ok && pod.CreationTimestamp.IsZero() {
+		pod.CreationTimestamp = metav1.NewTime(c.now())
+	}
+	if svc, ok := obj.(*corev1.Service); ok && svc.CreationTimestamp.IsZero() {
+		svc.CreationTimestamp = metav1.NewTime(c.now())
+	}
+	return c.WithWatch.Create(ctx, obj, opts...)
 }
 
 // invalidServiceNameError mirrors the apiserver's rejection of a Service whose
@@ -1561,6 +1578,7 @@ func TestReconcile(t *testing.T) {
 				require.NoError(t, err)
 				opts := []cmp.Option{
 					cmpopts.IgnoreFields(metav1.Condition{}, "LastTransitionTime"),
+					cmpopts.IgnoreFields(sandboxv1beta1.SandboxStatus{}, "Lifecycle"),
 				}
 				if diff := cmp.Diff(tc.wantStatus, liveSandbox.Status, opts...); diff != "" {
 					t.Fatalf("unexpected sandbox status (-want,+got):\n%s", diff)
@@ -3477,7 +3495,8 @@ func TestReconcileChildResourcesSurfacesMultipleOwnedPods(t *testing.T) {
 		ClusterDomain: "cluster.local",
 	}
 
-	require.NoError(t, r.reconcileChildResources(t.Context(), sandbox, nil))
+	_, err := r.reconcileChildResources(t.Context(), sandbox, nil)
+	require.NoError(t, err)
 	ready := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
 	require.NotNil(t, ready)
 	assert.Equal(t, metav1.ConditionFalse, ready.Status)
@@ -3487,7 +3506,7 @@ func TestReconcileChildResourcesSurfacesMultipleOwnedPods(t *testing.T) {
 	assert.Empty(t, sandbox.Status.NodeName)
 
 	service := &corev1.Service{}
-	err := r.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, service)
+	err = r.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, service)
 	require.True(t, k8serrors.IsNotFound(err), "must not create a routing Service for an ambiguous Pod mapping")
 
 	select {
@@ -3500,7 +3519,8 @@ func TestReconcileChildResourcesSurfacesMultipleOwnedPods(t *testing.T) {
 
 	// The conflict is watch-driven and does not return an error or emit a new
 	// Event on every reconcile while the Ready condition already reports it.
-	require.NoError(t, r.reconcileChildResources(t.Context(), sandbox, nil))
+	_, err = r.reconcileChildResources(t.Context(), sandbox, nil)
+	require.NoError(t, err)
 	select {
 	case event := <-recorder.Events:
 		t.Fatalf("unexpected duplicate Event: %s", event)
@@ -4844,7 +4864,8 @@ func TestReconcileChildResourcesSuspendedForeignPodDoesNotLeakIPOrNodeName(t *te
 	}
 
 	// Refusing to delete a foreign pod is a steady state, not an error.
-	require.NoError(t, r.reconcileChildResources(t.Context(), sandboxObj, nil))
+	_, err := r.reconcileChildResources(t.Context(), sandboxObj, nil)
+	require.NoError(t, err)
 
 	assert.Nil(t, sandboxObj.Status.PodIPs, "foreign pod IPs must NOT leak into sandbox status")
 	assert.Empty(t, sandboxObj.Status.NodeName, "foreign pod NodeName must NOT leak into sandbox status")
@@ -5583,6 +5604,800 @@ func TestReconcileCoalescesNodeNameStatusWrite(t *testing.T) {
 	assert.Equal(t, "node-2", live.Status.NodeName, "node changes on a Ready sandbox must be written immediately")
 }
 
+func lifecycleStatusWithObservedAt(t time.Time) *sandboxv1beta1.SandboxLifecycleStatus {
+	mt := metav1.NewTime(t)
+	return &sandboxv1beta1.SandboxLifecycleStatus{FirstObservedTime: &mt}
+}
+
+func recordedStages(sb *sandboxv1beta1.Sandbox) map[string]struct{} {
+	if sb.Status.Lifecycle == nil {
+		return map[string]struct{}{}
+	}
+	return asmetrics.RecordedStageSet(sb.Status.Lifecycle.RecordedStages)
+}
+
+func TestRecordStageLatenciesOneShot(t *testing.T) {
+	asmetrics.SandboxStageLatency.Reset()
+
+	observedAt := time.Now().Add(-2 * time.Second).UTC()
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "stage-sb",
+			Namespace: "default",
+			UID:       sandboxUID,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				Service: new(true),
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c", Image: "img"}},
+					},
+				},
+			},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			Lifecycle: lifecycleStatusWithObservedAt(observedAt),
+		},
+	}
+
+	ltt := metav1.NewTime(observedAt.Add(500 * time.Millisecond))
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "stage-sb",
+			Namespace:         "default",
+			UID:               "pod-uid",
+			CreationTimestamp: metav1.NewTime(observedAt.Add(100 * time.Millisecond)),
+			OwnerReferences:   []metav1.OwnerReference{sandboxControllerRef("stage-sb")},
+			Labels:            map[string]string{sandboxLabel: NameHash("stage-sb")},
+		},
+		Status: corev1.PodStatus{
+			Phase:  corev1.PodRunning,
+			PodIPs: []corev1.PodIP{{IP: "10.0.0.1"}},
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodScheduled, Status: corev1.ConditionTrue, LastTransitionTime: ltt},
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: ltt},
+			},
+			StartTime: &ltt,
+		},
+	}
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "stage-sb",
+			Namespace:         "default",
+			UID:               "svc-uid",
+			CreationTimestamp: metav1.NewTime(observedAt.Add(200 * time.Millisecond)),
+			OwnerReferences:   []metav1.OwnerReference{sandboxControllerRef("stage-sb")},
+		},
+	}
+
+	c := newFakeClient(sandbox, pod, svc)
+	r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+
+	pending := r.prepareStageLatencies(context.Background(), sandbox, pod, svc)
+	require.Equal(t, uint64(0), histogramSampleCount(t, asmetrics.SandboxStageLatency),
+		"metrics must not emit before status persist")
+	emitStageLatencies(context.Background(), sandbox, pending)
+	require.Equal(t, uint64(5), histogramSampleCount(t, asmetrics.SandboxStageLatency),
+		"expected pod_created, pod_scheduled, pod_running, pod_ready, service_ready")
+
+	recorded := recordedStages(sandbox)
+	require.Contains(t, recorded, asmetrics.StagePodCreated)
+	require.Contains(t, recorded, asmetrics.StagePodScheduled)
+	require.Contains(t, recorded, asmetrics.StagePodRunning)
+	require.Contains(t, recorded, asmetrics.StagePodReady)
+	require.Contains(t, recorded, asmetrics.StageServiceReady)
+	require.NotContains(t, recorded, asmetrics.StagePVCBound)
+
+	// Second call must not double-count observations (CollectAndCount only checks series).
+	pending = r.prepareStageLatencies(context.Background(), sandbox, pod, svc)
+	emitStageLatencies(context.Background(), sandbox, pending)
+	require.Equal(t, uint64(5), histogramSampleCount(t, asmetrics.SandboxStageLatency))
+}
+
+func TestRecordStageLatenciesSkipsPreObservationStages(t *testing.T) {
+	asmetrics.SandboxStageLatency.Reset()
+
+	// Warm launch / upgrade: children reached Ready before the controller first observed the Sandbox.
+	observedAt := time.Now().UTC()
+	readyAt := observedAt.Add(-5 * time.Second)
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "warm-sb",
+			Namespace: "default",
+			UID:       sandboxUID,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				Service: new(true),
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c", Image: "img"}},
+					},
+				},
+			},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			Lifecycle: lifecycleStatusWithObservedAt(observedAt),
+		},
+	}
+	ltt := metav1.NewTime(readyAt)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "warm-sb",
+			Namespace:         "default",
+			UID:               "pod-uid",
+			CreationTimestamp: metav1.NewTime(readyAt.Add(-time.Second)),
+			OwnerReferences:   []metav1.OwnerReference{sandboxControllerRef("warm-sb")},
+			Labels:            map[string]string{sandboxLabel: NameHash("warm-sb")},
+		},
+		Status: corev1.PodStatus{
+			Phase:  corev1.PodRunning,
+			PodIPs: []corev1.PodIP{{IP: "10.0.0.1"}},
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodScheduled, Status: corev1.ConditionTrue, LastTransitionTime: ltt},
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: ltt},
+			},
+			StartTime: &ltt,
+		},
+	}
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "warm-sb",
+			Namespace:         "default",
+			UID:               "svc-uid",
+			CreationTimestamp: metav1.NewTime(readyAt),
+			OwnerReferences:   []metav1.OwnerReference{sandboxControllerRef("warm-sb")},
+		},
+	}
+
+	c := newFakeClient(sandbox, pod, svc)
+	r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+
+	pending := r.prepareStageLatencies(context.Background(), sandbox, pod, svc)
+	emitStageLatencies(context.Background(), sandbox, pending)
+	require.Equal(t, 0, testutil.CollectAndCount(asmetrics.SandboxStageLatency),
+		"pre-observation stages must not emit near-zero samples")
+
+	recorded := recordedStages(sandbox)
+	require.Contains(t, recorded, asmetrics.StagePodCreated)
+	require.Contains(t, recorded, asmetrics.StagePodReady)
+	require.Contains(t, recorded, asmetrics.StageServiceReady)
+}
+
+func TestRecordStageLatenciesPVCBoundUsesObservationTime(t *testing.T) {
+	asmetrics.SandboxStageLatency.Reset()
+
+	observedAt := time.Now().Add(-10 * time.Second).UTC()
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pvc-sb",
+			Namespace: "default",
+			UID:       sandboxUID,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{{
+					EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+					Spec:                   corev1.PersistentVolumeClaimSpec{},
+				}},
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c", Image: "img"}},
+					},
+				},
+			},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			Lifecycle: lifecycleStatusWithObservedAt(observedAt),
+		},
+	}
+	// CreationTimestamp is near t0; if used as bind time, latency would be ~50ms.
+	// PVC phase transitions have no timestamp, so the observation time yields ~10s.
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "data-pvc-sb",
+			Namespace:         "default",
+			CreationTimestamp: metav1.NewTime(observedAt.Add(50 * time.Millisecond)),
+			OwnerReferences:   []metav1.OwnerReference{sandboxControllerRef("pvc-sb")},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+
+	c := newFakeClient(sandbox, pvc)
+	r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+
+	pending := r.prepareStageLatencies(context.Background(), sandbox, nil, nil)
+	emitStageLatencies(context.Background(), sandbox, pending)
+
+	require.Equal(t, uint64(1), histogramSampleCount(t, asmetrics.SandboxStageLatency))
+	require.Contains(t, recordedStages(sandbox), asmetrics.StagePVCBound)
+
+	// Second call must skip PVC Gets (stage already recorded) and not double-count.
+	pending = r.prepareStageLatencies(context.Background(), sandbox, nil, nil)
+	emitStageLatencies(context.Background(), sandbox, pending)
+	require.Equal(t, uint64(1), histogramSampleCount(t, asmetrics.SandboxStageLatency))
+}
+
+func TestMarkInitiallyBoundPVCStage(t *testing.T) {
+	testCases := []struct {
+		name         string
+		phase        corev1.PersistentVolumeClaimPhase
+		wantRecorded bool
+	}{
+		{name: "bound", phase: corev1.ClaimBound, wantRecorded: true},
+		{name: "pending", phase: corev1.ClaimPending, wantRecorded: false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			asmetrics.SandboxStageLatency.Reset()
+			sandbox := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "pvc-sb",
+					Namespace: "default",
+					UID:       sandboxUID,
+				},
+				Spec: sandboxv1beta1.SandboxSpec{
+					SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+						VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{{
+							EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+							Spec:                   corev1.PersistentVolumeClaimSpec{},
+						}},
+					},
+				},
+			}
+			pvc := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "data-pvc-sb",
+					Namespace:       "default",
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef("pvc-sb")},
+				},
+				Status: corev1.PersistentVolumeClaimStatus{Phase: tc.phase},
+			}
+
+			c := newFakeClient(sandbox, pvc)
+			r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+			require.True(t, ensureSandboxFirstObservedTime(sandbox))
+			r.markInitiallyBoundPVCStage(t.Context(), sandbox)
+
+			_, recorded := recordedStages(sandbox)[asmetrics.StagePVCBound]
+			require.Equal(t, tc.wantRecorded, recorded)
+			require.False(t, ensureSandboxFirstObservedTime(sandbox), "first observation must only be initialized once")
+
+			pending := r.prepareStageLatencies(t.Context(), sandbox, nil, nil)
+			emitStageLatencies(t.Context(), sandbox, pending)
+			require.Equal(t, uint64(0), histogramSampleCount(t, asmetrics.SandboxStageLatency))
+
+			if tc.phase == corev1.ClaimPending {
+				livePVC := &corev1.PersistentVolumeClaim{}
+				require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pvc), livePVC))
+				livePVC.Status.Phase = corev1.ClaimBound
+				require.NoError(t, c.Status().Update(t.Context(), livePVC))
+
+				pending = r.prepareStageLatencies(t.Context(), sandbox, nil, nil)
+				emitStageLatencies(t.Context(), sandbox, pending)
+				require.Equal(t, uint64(1), histogramSampleCount(t, asmetrics.SandboxStageLatency),
+					"a PVC first observed Pending must emit when it later becomes Bound")
+			}
+		})
+	}
+}
+
+func TestRecordStageLatenciesPVCBoundIgnoresForeignOwner(t *testing.T) {
+	asmetrics.SandboxStageLatency.Reset()
+
+	observedAt := time.Now().Add(-10 * time.Second).UTC()
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pvc-sb",
+			Namespace: "default",
+			UID:       sandboxUID,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{{
+					EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+					Spec:                   corev1.PersistentVolumeClaimSpec{},
+				}},
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c", Image: "img"}},
+					},
+				},
+			},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			Lifecycle: lifecycleStatusWithObservedAt(observedAt),
+		},
+	}
+	otherOwner := true
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "data-pvc-sb",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "apps/v1",
+				Kind:       "Deployment",
+				Name:       "other",
+				UID:        "other-uid",
+				Controller: &otherOwner,
+			}},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+
+	c := newFakeClient(sandbox, pvc)
+	r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+
+	pending := r.prepareStageLatencies(context.Background(), sandbox, nil, nil)
+	emitStageLatencies(context.Background(), sandbox, pending)
+
+	require.NotContains(t, recordedStages(sandbox), asmetrics.StagePVCBound)
+	require.Equal(t, uint64(0), histogramSampleCount(t, asmetrics.SandboxStageLatency))
+}
+
+func TestReconcileStampsFirstObservedTimeAndRecordsInitialStages(t *testing.T) {
+	asmetrics.SandboxStageLatency.Reset()
+
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "obs-sb",
+			Namespace:  "default",
+			UID:        sandboxUID,
+			Generation: 1,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{{
+					EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+					Spec:                   corev1.PersistentVolumeClaimSpec{},
+				}},
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c", Image: "img"}},
+					},
+				},
+			},
+		},
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "data-obs-sb",
+			Namespace:       "default",
+			OwnerReferences: []metav1.OwnerReference{sandboxControllerRef("obs-sb")},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	c := &createTimestampClient{
+		WithWatch: newFakeClient(sandbox, pvc),
+		now:       time.Now,
+	}
+	r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp(), ClusterDomain: "cluster.local"}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}})
+	require.NoError(t, err)
+
+	updated := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(sandbox), updated))
+	require.NotNil(t, updated.Status.Lifecycle)
+	require.NotNil(t, updated.Status.Lifecycle.FirstObservedTime)
+	require.False(t, updated.Status.Lifecycle.FirstObservedTime.IsZero())
+	require.Contains(t, recordedStages(updated), asmetrics.StagePodCreated)
+	require.Contains(t, recordedStages(updated), asmetrics.StagePVCBound)
+	require.Equal(t, uint64(1), histogramSampleCount(t, asmetrics.SandboxStageLatency),
+		"the initially Bound PVC must not emit alongside pod_created")
+}
+
+func TestReconcileDoesNotCreateChildrenBeforeFirstObservedTimePersist(t *testing.T) {
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "fot-retry-sb",
+			Namespace:  "default",
+			UID:        sandboxUID,
+			Generation: 1,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c", Image: "img"}},
+					},
+				},
+			},
+		},
+	}
+
+	failStatusPatch := true
+	childCreates := 0
+	inner := newFakeClient(sandbox)
+	fc := interceptor.NewClient(inner, interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if failStatusPatch && subResourceName == "status" {
+				return k8serrors.NewInternalError(errors.New("status persist failed"))
+			}
+			return c.SubResource(subResourceName).Patch(ctx, obj, patch, opts...)
+		},
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			switch obj.(type) {
+			case *corev1.Pod, *corev1.Service, *corev1.PersistentVolumeClaim:
+				childCreates++
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	})
+	r := &SandboxReconciler{Client: fc, Scheme: Scheme, Tracer: asmetrics.NewNoOp(), ClusterDomain: "cluster.local"}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}}
+
+	_, err := r.Reconcile(context.Background(), req)
+	require.Error(t, err)
+	require.Equal(t, 0, childCreates, "child resources must not be created before firstObservedTime is persisted")
+
+	got := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, r.Get(context.Background(), req.NamespacedName, got))
+	require.True(t, got.Status.Lifecycle == nil || got.Status.Lifecycle.FirstObservedTime == nil,
+		"failed status persist must not leave firstObservedTime on the Sandbox")
+
+	failStatusPatch = false
+	_, err = r.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	require.Positive(t, childCreates, "retry after a successful status write must create child resources")
+
+	require.NoError(t, r.Get(context.Background(), req.NamespacedName, got))
+	require.NotNil(t, got.Status.Lifecycle)
+	require.NotNil(t, got.Status.Lifecycle.FirstObservedTime)
+	require.False(t, got.Status.Lifecycle.FirstObservedTime.IsZero())
+}
+
+func TestPrepareStageLatenciesSkipsMissingFirstObservedTime(t *testing.T) {
+	asmetrics.SandboxStageLatency.Reset()
+
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "batch-sb",
+			Namespace: "default",
+			UID:       sandboxUID,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c", Image: "img"}},
+					},
+				},
+			},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "batch-sb",
+			Namespace:         "default",
+			UID:               "pod-uid",
+			CreationTimestamp: metav1.Now(),
+			OwnerReferences:   []metav1.OwnerReference{sandboxControllerRef("batch-sb")},
+			Labels:            map[string]string{sandboxLabel: NameHash("batch-sb")},
+		},
+	}
+
+	c := newFakeClient(sandbox, pod)
+	r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+
+	pending := r.prepareStageLatencies(context.Background(), sandbox, pod, nil)
+	emitStageLatencies(context.Background(), sandbox, pending)
+
+	require.Empty(t, recordedStages(sandbox))
+	require.Equal(t, uint64(0), histogramSampleCount(t, asmetrics.SandboxStageLatency))
+}
+
+func TestPrepareStageLatenciesDoesNotEmitUntilPersist(t *testing.T) {
+	asmetrics.SandboxStageLatency.Reset()
+
+	observedAt := time.Now().Add(-2 * time.Second).UTC()
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "fail-sb",
+			Namespace: "default",
+			UID:       sandboxUID,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c", Image: "img"}},
+					},
+				},
+			},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			Lifecycle: lifecycleStatusWithObservedAt(observedAt),
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "fail-sb",
+			Namespace:         "default",
+			UID:               "pod-uid",
+			CreationTimestamp: metav1.NewTime(observedAt.Add(100 * time.Millisecond)),
+			OwnerReferences:   []metav1.OwnerReference{sandboxControllerRef("fail-sb")},
+			Labels:            map[string]string{sandboxLabel: NameHash("fail-sb")},
+		},
+	}
+
+	c := newFakeClient(sandbox, pod)
+	r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+
+	pending := r.prepareStageLatencies(context.Background(), sandbox, pod, nil)
+	require.NotEmpty(t, pending)
+	require.Equal(t, 0, testutil.CollectAndCount(asmetrics.SandboxStageLatency),
+		"metrics must not emit until lifecycle status is persisted")
+}
+
+func TestSandboxLifecycleStatusStamping(t *testing.T) {
+	sandboxName := "sandbox-observe"
+	sandboxNs := "default"
+
+	t.Run("firstObservedTime set on first reconcile", func(t *testing.T) {
+		sb := &sandboxv1beta1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       sandboxName,
+				Namespace:  sandboxNs,
+				UID:        sandboxUID,
+				Generation: 1,
+			},
+			Spec: sandboxv1beta1.SandboxSpec{
+				SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodTemplate: sandboxv1beta1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test-container"}},
+						},
+					},
+				},
+			},
+		}
+
+		r := SandboxReconciler{
+			Client:        newFakeClient(sb),
+			Scheme:        Scheme,
+			Tracer:        asmetrics.NewNoOp(),
+			ClusterDomain: "cluster.local",
+		}
+
+		_, err := r.Reconcile(t.Context(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: sandboxName, Namespace: sandboxNs},
+		})
+		require.NoError(t, err)
+
+		var got sandboxv1beta1.Sandbox
+		require.NoError(t, r.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, &got))
+		require.NotNil(t, got.Status.Lifecycle)
+		require.NotNil(t, got.Status.Lifecycle.FirstObservedTime, "firstObservedTime should be set after first reconcile")
+	})
+
+	t.Run("firstObservedTime not overwritten on subsequent reconcile", func(t *testing.T) {
+		existingTime := metav1.NewTime(time.Now().Add(-1 * time.Hour).UTC())
+		sb := &sandboxv1beta1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       sandboxName,
+				Namespace:  sandboxNs,
+				UID:        sandboxUID,
+				Generation: 1,
+			},
+			Spec: sandboxv1beta1.SandboxSpec{
+				SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodTemplate: sandboxv1beta1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test-container"}},
+						},
+					},
+				},
+			},
+			Status: sandboxv1beta1.SandboxStatus{
+				Lifecycle: &sandboxv1beta1.SandboxLifecycleStatus{
+					FirstObservedTime: &existingTime,
+				},
+			},
+		}
+
+		r := SandboxReconciler{
+			Client:        newFakeClient(sb),
+			Scheme:        Scheme,
+			Tracer:        asmetrics.NewNoOp(),
+			ClusterDomain: "cluster.local",
+		}
+
+		_, err := r.Reconcile(t.Context(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: sandboxName, Namespace: sandboxNs},
+		})
+		require.NoError(t, err)
+
+		var got sandboxv1beta1.Sandbox
+		require.NoError(t, r.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, &got))
+		require.NotNil(t, got.Status.Lifecycle)
+		require.NotNil(t, got.Status.Lifecycle.FirstObservedTime)
+		assert.Equal(t,
+			existingTime.UTC().Format(time.RFC3339),
+			got.Status.Lifecycle.FirstObservedTime.UTC().Format(time.RFC3339),
+			"firstObservedTime should not be overwritten on subsequent reconcile")
+	})
+}
+
+func TestReconcileSuspendedStampsFirstObservedTime(t *testing.T) {
+	asmetrics.SandboxStageLatency.Reset()
+
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "obs-susp-sb",
+			Namespace:  "default",
+			UID:        sandboxUID,
+			Generation: 1,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			OperatingMode: sandboxv1beta1.SandboxOperatingModeSuspended,
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c", Image: "img"}},
+					},
+				},
+			},
+		},
+	}
+	c := newFakeClient(sandbox)
+	r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp(), ClusterDomain: "cluster.local"}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace},
+	})
+	require.NoError(t, err)
+
+	updated := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(sandbox), updated))
+	require.NotNil(t, updated.Status.Lifecycle)
+	require.NotNil(t, updated.Status.Lifecycle.FirstObservedTime,
+		"Suspended sandboxes stamp firstObservedTime")
+	require.Empty(t, updated.Status.Lifecycle.RecordedStages,
+		"stage latency is skipped while Suspended")
+	require.Equal(t, 0, testutil.CollectAndCount(asmetrics.SandboxStageLatency))
+}
+
+func TestReconcileChildResourcesStageLatencyDoesNotBlockReady(t *testing.T) {
+	asmetrics.SandboxStageLatency.Reset()
+
+	observedAt := time.Now().Add(-2 * time.Second).UTC()
+	ltt := metav1.NewTime(observedAt.Add(500 * time.Millisecond))
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "ready-sb",
+			Namespace:  "default",
+			UID:        sandboxUID,
+			Generation: 1,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				Service: new(true),
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c", Image: "img"}},
+					},
+				},
+			},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			Lifecycle: lifecycleStatusWithObservedAt(observedAt),
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "ready-sb",
+			Namespace:         "default",
+			UID:               "pod-uid",
+			CreationTimestamp: metav1.NewTime(observedAt.Add(100 * time.Millisecond)),
+			OwnerReferences:   []metav1.OwnerReference{sandboxControllerRef("ready-sb")},
+			Labels:            map[string]string{sandboxLabel: NameHash("ready-sb")},
+		},
+		Status: corev1.PodStatus{
+			Phase:  corev1.PodRunning,
+			PodIPs: []corev1.PodIP{{IP: "10.0.0.1"}},
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodScheduled, Status: corev1.ConditionTrue, LastTransitionTime: ltt},
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: ltt},
+			},
+			StartTime: &ltt,
+		},
+	}
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "ready-sb",
+			Namespace:         "default",
+			UID:               "svc-uid",
+			CreationTimestamp: metav1.NewTime(observedAt.Add(200 * time.Millisecond)),
+			OwnerReferences:   []metav1.OwnerReference{sandboxControllerRef("ready-sb")},
+			Labels:            map[string]string{sandboxLabel: NameHash("ready-sb")},
+		},
+		Spec: corev1.ServiceSpec{ClusterIP: "None"},
+	}
+
+	c := newFakeClient(sandbox, pod, svc)
+	r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp(), ClusterDomain: "cluster.local"}
+
+	_, err := r.reconcileChildResources(context.Background(), sandbox, nil)
+	require.NoError(t, err, "stage-latency bookkeeping must not fail reconcile")
+
+	ready := false
+	for _, cond := range sandbox.Status.Conditions {
+		if cond.Type == string(sandboxv1beta1.SandboxConditionReady) {
+			ready = cond.Status == metav1.ConditionTrue
+			require.NotEqual(t, "ReconcilerError", cond.Reason)
+		}
+	}
+	require.True(t, ready, "healthy sandbox must remain Ready when only telemetry bookkeeping is involved")
+}
+
+func TestRecordChildReconcileErrorOnOwnershipConflict(t *testing.T) {
+	asmetrics.ChildReconcileErrors.Reset()
+
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "own-sb",
+			Namespace: "default",
+			UID:       sandboxUID,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c", Image: "img"}},
+					},
+				},
+			},
+		},
+	}
+	otherOwner := true
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "own-sb",
+			Namespace: "default",
+			UID:       "pod-uid",
+			Labels:    map[string]string{sandboxLabel: NameHash("own-sb")},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "apps/v1",
+				Kind:       "ReplicaSet",
+				Name:       "rs",
+				UID:        "rs-uid",
+				Controller: &otherOwner,
+			}},
+		},
+	}
+	c := newFakeClient(sandbox, pod)
+	r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+
+	_, err := r.reconcilePod(context.Background(), sandbox, NameHash(sandbox.Name), nil)
+	require.Error(t, err)
+	require.InDelta(t, 1, testutil.ToFloat64(asmetrics.ChildReconcileErrors.WithLabelValues(
+		"default", asmetrics.ResourcePod, asmetrics.ReasonOwnershipConflict)), 0)
+}
+
+// histogramSampleCount sums observation counts across all series of a histogram
+// collector. testutil.CollectAndCount only counts series, so it cannot detect
+// duplicate observations into an existing series.
+func histogramSampleCount(t *testing.T, c prometheus.Collector) uint64 {
+	t.Helper()
+	reg := prometheus.NewPedanticRegistry()
+	if err := reg.Register(c); err != nil {
+		t.Fatalf("failed to register collector: %v", err)
+	}
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("failed to gather metrics: %v", err)
+	}
+	var total uint64
+	for _, mf := range mfs {
+		for _, m := range mf.GetMetric() {
+			total += m.GetHistogram().GetSampleCount()
+		}
+	}
+	return total
+}
 func TestReconcileNamespaceTerminatingRequeue(t *testing.T) {
 	testCases := []struct {
 		name      string

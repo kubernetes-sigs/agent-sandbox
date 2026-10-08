@@ -35,6 +35,9 @@ type SandboxStatusApplyConfiguration struct {
 	Service *string `json:"service,omitempty"`
 	// conditions defines the status conditions array
 	Conditions []v1.ConditionApplyConfiguration `json:"conditions,omitempty"`
+	// lifecycle stores controller-observed lifecycle timestamps and metric
+	// recording state for this Sandbox.
+	Lifecycle *SandboxLifecycleStatusApplyConfiguration `json:"lifecycle,omitempty"`
 	// selector is the label selector for pods.
 	LabelSelector *string `json:"selector,omitempty"`
 	// podIPs are the IP addresses of the underlying pod.
@@ -80,6 +83,14 @@ func (b *SandboxStatusApplyConfiguration) WithConditions(values ...*v1.Condition
 		}
 		b.Conditions = append(b.Conditions, *values[i])
 	}
+	return b
+}
+
+// WithLifecycle sets the Lifecycle field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the Lifecycle field is set to the value of the last call.
+func (b *SandboxStatusApplyConfiguration) WithLifecycle(value *SandboxLifecycleStatusApplyConfiguration) *SandboxStatusApplyConfiguration {
+	b.Lifecycle = value
 	return b
 }
 

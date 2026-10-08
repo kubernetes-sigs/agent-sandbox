@@ -156,34 +156,38 @@ Prerequisites:
   node, or locally loaded images when using kind.
 
 The shared image uses Ray/RLlib 2.58.0, Python 3.11, Gymnasium 1.2.2 and CPU
-Torch 2.9.0. SDK and Gymnasium integration are installed from full source SHA
-`82d410efd5a279e887cdcf8c01e742a345fef63d`, which contains the sandboxd
-in-cluster transport (SDK release 1.0.4 does not). A digest-pinned ARM64 Ray
-base and the application overlay are frozen in `Dockerfile.rllib` and
-`requirements.lock`. The image dependency/Jobs/remote-import checks were tested
-on Linux ARM64. For another platform, provide `--build-arg RAY_BASE_IMAGE=...`
-with a verified immutable Ray 2.58.0 / Python 3.11 CPU base of that platform;
-the default is **not** a multi-architecture image.
+Torch 2.9.0. The SDK, Gymnasium integration and example code are installed from
+the same local checkout. Builds do not need `.git`: setuptools-scm receives
+the local build version `1.0.0+local`, not a published SDK release version.
+The Ray CPU base is pinned to a multi-architecture image index supporting
+Linux AMD64 and ARM64; the external application dependencies are pinned in
+`requirements.lock`. Docker selects the base for the target platform. Build
+the example image for your cluster's node architecture, using `--platform
+linux/amd64` or `--platform linux/arm64` when it differs from the Docker host.
+A normal `docker build` produces one target-platform image, not a multi-platform
+example image. The earlier full RayJob validation ran on Linux ARM64; AMD64
+training has not been validated. To override the base, pass
+`--build-arg RAY_BASE_IMAGE=...` with an immutable Ray 2.58.0 / Python 3.11 CPU
+image for the target platform.
 
 ### Build and choose images
 
 Run from this repository's root. The example source is copied from this
-checkout; SDK/integration source pins are installed at build time, never in
-running Pods. This example does not publish an official RLlib image.
+checkout, including the SDK and Gymnasium integration. Dependencies are
+installed at build time, never in running Pods. This example does not publish
+an official RLlib image.
 
 ```bash
 export RLLIB_IMAGE=kind.local/rllib-sandbox:local
-export SANDBOXD_IMAGE=kind.local/sandboxd:82d410e
+export SANDBOXD_IMAGE=kind.local/sandboxd:local
 docker build -f examples/agent-sandbox-gymnasium/rllib/kuberay/Dockerfile.rllib \
   -t "$RLLIB_IMAGE" .
 docker run --rm "$RLLIB_IMAGE" python -m pip check
 ```
 
-Build sandboxd from the same fixed source revision in a separate checkout if
-your working checkout has unrelated runtime changes:
+Build sandboxd from the same checkout:
 
 ```bash
-# In a checkout of 82d410efd5a279e887cdcf8c01e742a345fef63d:
 docker build -f packages/sandboxd/Dockerfile -t "$SANDBOXD_IMAGE" .
 ```
 

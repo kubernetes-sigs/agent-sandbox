@@ -33,7 +33,8 @@ from file_task_env import (
 
 
 class FakeSandboxEnv(gym.Env):
-    def __init__(self):
+    def __init__(self, process_channel=None):
+        from types import SimpleNamespace
         self.action_space = spaces.Text(max_length=2048)
         self.observation_space = spaces.Text(max_length=4096)
         self.commands = []
@@ -41,6 +42,9 @@ class FakeSandboxEnv(gym.Env):
         self.step_count = 0
         self.state = [0, 0, 0]
         self.resets = 0
+        self._sandbox = SimpleNamespace(connector=SimpleNamespace(
+            connect=lambda: None, grpc_channel=lambda: process_channel,
+        ))
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -306,7 +310,7 @@ def test_environment_constructs_an_independent_client_with_selected_transport(mo
         configs.append(connection_config)
         return FakeClient(process_channel)
     monkeypatch.setattr(file_task_env, "SandboxClient", make_client)
-    monkeypatch.setattr(file_task_env, "SandboxEnv", lambda **kwargs: FakeSandboxEnv())
+    monkeypatch.setattr(file_task_env, "SandboxEnv", lambda **kwargs: FakeSandboxEnv(process_channel))
     first = file_task_env.SandboxFileTaskEnv({"connection_mode": mode, "namespace": "training"})
     second = file_task_env.SandboxFileTaskEnv({"connection_mode": mode})
     assert type(configs[0]).__name__ == config_type
@@ -324,10 +328,109 @@ def test_environment_rejects_unknown_transport_before_creating_client():
         file_task_env.SandboxFileTaskEnv({"connection_mode": "unknown"})
 
 
+@pytest.mark.parametrize("endpoint_state", ["ready", "unreachable", "no-service"])
+def test_sandboxd_readiness_reuses_the_episode_connection_until_reset_or_close(monkeypatch, endpoint_state):
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+    import grpc
+    from k8s_agent_sandbox.sandbox import Sandbox
+    from k8s_agent_sandbox.commands._process_stubs import process_pb2, process_pb2_grpc
+    from k8s_agent_sandbox.models import SandboxdInClusterConnectionConfig
+    from k8s_agent_sandbox.exceptions import SandboxServiceUnavailableError
+
+    class ProcessService(process_pb2_grpc.ProcessServiceServicer):
+        def Execute(self, request, context):
+            return process_pb2.ExecuteResponse(
+                stdout=b"FILE_TASK_STATE=1,0,0\n", exit_code=0,
+            )
+
+    server = grpc.server(ThreadPoolExecutor(max_workers=1))
+    process_pb2_grpc.add_ProcessServiceServicer_to_server(ProcessService(), server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    if endpoint_state == "ready":
+        server.start()
+    handles = []
+    deleted_claims = []
+    helper = SimpleNamespace(
+        get_sandbox=lambda *args: {
+            "status": {"serviceFQDN": None if endpoint_state == "no-service" else "127.0.0.1"},
+        },
+        delete_sandbox_claim=lambda name, namespace: deleted_claims.append((namespace, name)),
+    )
+
+    class EpisodeClient:
+        def create_sandbox(self, *, warmpool, namespace):
+            sandbox = Sandbox(
+                claim_name=f"claim-{len(handles)}", sandbox_id=f"sandbox-{len(handles)}",
+                namespace=namespace, k8s_helper=helper,
+                connection_config=SandboxdInClusterConnectionConfig(
+                    mode="service-dns", grpc_port=port,
+                ),
+            )
+            handles.append(sandbox)
+            return sandbox
+
+        def get_sandbox(self, *args, **kwargs):
+            raise AssertionError("readiness must reuse the episode's existing Sandbox")
+
+        def delete_sandbox(self, name, *, namespace):
+            for sandbox in handles:
+                if sandbox.claim_name == name and sandbox.namespace == namespace:
+                    sandbox.terminate()
+
+        def delete_all(self):
+            for sandbox in handles:
+                sandbox.terminate()
+
+    monkeypatch.setattr(file_task_env, "SandboxClient", lambda **kwargs: EpisodeClient())
+    # Keep the real Gym integration, SDK Sandbox, connector and gRPC transport.
+    env = file_task_env.SandboxFileTaskEnv({
+        "connection_mode": "sandboxd-in-cluster", "namespace": "training",
+        "step_timeout_seconds": 1,
+    })
+    try:
+        if endpoint_state != "ready":
+            error = grpc.FutureTimeoutError if endpoint_state == "unreachable" else SandboxServiceUnavailableError
+            with pytest.raises(error):
+                env.reset()
+            evidence = env.get_claim_evidence()
+            assert evidence["claims"][0]["claim_name"] == "claim-0"
+            assert evidence["steps"] == 0
+            channel = handles[0].connector.grpc_channel() if endpoint_state == "unreachable" else None
+            env.close()
+            assert deleted_claims == [("training", "claim-0")]
+            assert not handles[0].is_active
+            if channel is not None:
+                with pytest.raises(ValueError, match="closed"):
+                    channel.unary_unary("/unused")(b"", timeout=1)
+            return
+        env.reset()
+        first_channel = handles[0].connector.grpc_channel()
+        _, _, _, truncated, info = env.step(CREATE_DIRECTORY)
+        assert not truncated and not info["env_error"] and info["exit_code"] == 0
+
+        env.reset()
+        assert deleted_claims == [("training", "claim-0")]
+        assert not handles[0].is_active
+        with pytest.raises(ValueError, match="closed"):
+            first_channel.unary_unary("/unused")(b"", timeout=1)
+        second_channel = handles[1].connector.grpc_channel()
+        _, _, _, truncated, info = env.step(CREATE_DIRECTORY)
+        assert not truncated and not info["env_error"] and info["exit_code"] == 0
+
+        env.close()
+        assert deleted_claims == [("training", "claim-0"), ("training", "claim-1")]
+        assert not handles[1].is_active
+        with pytest.raises(ValueError, match="closed"):
+            second_channel.unary_unary("/unused")(b"", timeout=1)
+    finally:
+        env.close()
+        server.stop(0).wait()
+
+
 def test_sandboxd_reset_waits_for_the_process_channel_to_be_ready(monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Event, Timer
-    from types import SimpleNamespace
     import socket
     import grpc
 
@@ -343,18 +446,19 @@ def test_sandboxd_reset_waits_for_the_process_channel_to_be_ready(monkeypatch):
         server.add_insecure_port(f"127.0.0.1:{port}")
         server.start()
     client = FakeClient()
-    client.get_sandbox = lambda *args, **kwargs: SimpleNamespace(
-        connector=SimpleNamespace(connect=lambda: None, grpc_channel=lambda: channel),
-    )
     monkeypatch.setattr(file_task_env, "SandboxClient", lambda **kwargs: client)
-    monkeypatch.setattr(file_task_env, "SandboxEnv", lambda **kwargs: FakeSandboxEnv())
+    monkeypatch.setattr(file_task_env, "SandboxEnv", lambda **kwargs: FakeSandboxEnv(channel))
     env = file_task_env.SandboxFileTaskEnv({"connection_mode": "sandboxd-in-cluster"})
     timer = Timer(0.1, start_server)
     timer.start()
     try:
         _, info = env.reset()
         assert started.is_set(), "reset returned before the process service was available"
-        grpc.channel_ready_future(channel).result(timeout=5)
+        # Probe the live server without starting another connectivity watcher
+        # that could race the fixture's channel closure.
+        with pytest.raises(grpc.RpcError) as error:
+            channel.unary_unary("/readiness-probe")(b"", timeout=5)
+        assert error.value.code() == grpc.StatusCode.UNIMPLEMENTED
         assert info["claim_name"] == "sandbox-claim-test"
         assert env.get_claim_evidence()["steps"] == 0
     finally:
@@ -365,7 +469,6 @@ def test_sandboxd_reset_waits_for_the_process_channel_to_be_ready(monkeypatch):
 
 
 def test_sandboxd_reset_times_out_and_keeps_the_claim_available_for_cleanup(monkeypatch):
-    from types import SimpleNamespace
     import socket
     import grpc
 
@@ -373,10 +476,7 @@ def test_sandboxd_reset_times_out_and_keeps_the_claim_available_for_cleanup(monk
     reserved.bind(("127.0.0.1", 0))
     channel = grpc.insecure_channel(f"127.0.0.1:{reserved.getsockname()[1]}")
     client = FakeClient()
-    client.get_sandbox = lambda *args, **kwargs: SimpleNamespace(
-        connector=SimpleNamespace(connect=lambda: None, grpc_channel=lambda: channel),
-    )
-    base_env = FakeSandboxEnv()
+    base_env = FakeSandboxEnv(channel)
     monkeypatch.setattr(file_task_env, "SandboxClient", lambda **kwargs: client)
     monkeypatch.setattr(file_task_env, "SandboxEnv", lambda **kwargs: base_env)
     env = file_task_env.SandboxFileTaskEnv({
@@ -410,7 +510,7 @@ def test_preflight_runs_real_wrapper_commands_and_rest_on_the_same_claim(monkeyp
             read=lambda path: stored[path],
         ))
     client.get_sandbox = get_sandbox
-    base_env = FakeSandboxEnv()
+    base_env = FakeSandboxEnv(process_channel)
     monkeypatch.setattr(file_task_env, "SandboxClient", lambda **kwargs: client)
     monkeypatch.setattr(file_task_env, "SandboxEnv", lambda **kwargs: base_env)
     evidence = []

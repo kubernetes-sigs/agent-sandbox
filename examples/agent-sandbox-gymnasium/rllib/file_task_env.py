@@ -348,9 +348,11 @@ class SandboxFileTaskEnv(DiscreteFileTaskWrapper):
             # Claim Ready does not guarantee that Service DNS has propagated.
             # Wait for connectivity before issuing a command, never replay an
             # Execute RPC whose outcome may be unknown.
-            sandbox = self._client.get_sandbox(info["claim_name"], namespace=self._namespace)
-            sandbox.connector.connect()
-            ready = grpc.channel_ready_future(sandbox.connector.grpc_channel())
+            # Reuse the episode-owned connection used by step(). SandboxEnv
+            # releases it on the next reset or close, not after this wait.
+            connector = self.env._sandbox.connector
+            connector.connect()
+            ready = grpc.channel_ready_future(connector.grpc_channel())
             try:
                 ready.result(timeout=self._process_ready_timeout_seconds)
             finally:

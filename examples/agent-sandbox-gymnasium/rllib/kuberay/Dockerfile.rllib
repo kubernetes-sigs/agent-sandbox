@@ -1,16 +1,21 @@
 # Build from the repository root. This image is built by the example user, not
 # the project's image-discovery/release scripts.
-# The default is the verified ARM64 Ray 2.58 CPU image. Override with an
-# immutable Ray 2.58 / Python 3.11 CPU image for another node architecture.
-ARG RAY_BASE_IMAGE=rayproject/ray:2.58.0-py311-cpu-aarch64@sha256:28e025725fb64e5ed8f2c4a9cda6d3e0278d292cb21260adefb449e3c197d4f1
+# The pinned image index supports Linux AMD64 and ARM64. Docker selects the
+# base for the build's target platform; RAY_BASE_IMAGE can override that base.
+ARG RAY_BASE_IMAGE=rayproject/ray:2.58.0-py311-cpu@sha256:5b4128ad47050e80b08a9fac96187e04e7e6dd13abe3f074813818bc86460afe
 FROM ${RAY_BASE_IMAGE}
 
 COPY --chown=1000:100 examples/agent-sandbox-gymnasium/rllib/kuberay/requirements.lock /tmp/rllib-requirements.lock
+COPY --chown=1000:100 clients/python/agentic-sandbox-client /opt/agent-sandbox/clients/python/agentic-sandbox-client
+COPY --chown=1000:100 clients/integrations/gymnasium /opt/agent-sandbox/clients/integrations/gymnasium
 # Keep Ray CLI, the dashboard, the driver and actors in the base interpreter.
-# Fixed build tools avoid an independently resolved build-isolation environment
-# when setuptools_scm reads the pinned monorepo checkouts.
+# Install all application source from this checkout, without needing .git in
+# the image. The local version satisfies the integration's SDK dependency.
 RUN python -m pip install --no-cache-dir setuptools==80.9.0 setuptools-scm==9.2.2 \
-    && python -m pip install --no-cache-dir --no-build-isolation -r /tmp/rllib-requirements.lock \
+    && SETUPTOOLS_SCM_PRETEND_VERSION=1.0.0+local python -m pip install --no-cache-dir --no-build-isolation \
+        -r /tmp/rllib-requirements.lock \
+        "/opt/agent-sandbox/clients/python/agentic-sandbox-client[grpc]" \
+        /opt/agent-sandbox/clients/integrations/gymnasium \
     && python -m pip check
 
 COPY --chown=1000:100 examples/agent-sandbox-gymnasium/rllib/train.py \

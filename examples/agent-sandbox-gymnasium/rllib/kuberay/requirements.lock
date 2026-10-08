@@ -1,6 +1,7 @@
 # Application overlay resolved against the immutable Ray base in Dockerfile.rllib.
-# The base digest freezes its inherited dependencies; pins below freeze every
-# added/replaced distribution, plus the application's Ray/Gymnasium versions.
+# The base digest freezes each platform's inherited dependencies; pins below
+# fix the external application dependencies and Ray/Gymnasium versions.
+# Dockerfile.rllib installs the SDK/integration from the checkout.
 --index-url https://pypi.org/simple
 --extra-index-url https://download.pytorch.org/whl/cpu
 
@@ -16,8 +17,6 @@ opentelemetry-proto==1.43.0
 pydantic==2.12.5
 pydantic-core==2.41.5
 
-k8s-agent-sandbox[grpc] @ git+https://github.com/kubernetes-sigs/agent-sandbox.git@82d410efd5a279e887cdcf8c01e742a345fef63d#subdirectory=clients/python/agentic-sandbox-client
-k8s-agent-sandbox-gymnasium @ git+https://github.com/kubernetes-sigs/agent-sandbox.git@82d410efd5a279e887cdcf8c01e742a345fef63d#subdirectory=clients/integrations/gymnasium
 kubernetes==36.0.3
 durationpy==0.11
 websocket-client==1.9.2

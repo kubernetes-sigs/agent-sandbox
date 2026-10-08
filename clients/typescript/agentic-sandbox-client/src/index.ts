@@ -39,6 +39,7 @@ export type {
   ExecutionResult,
   FileCallOptions,
   FileEntry,
+  GetSandboxOptions,
   Logger,
   PodMetadata,
   ProcessCallOptions,

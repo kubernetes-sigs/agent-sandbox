@@ -55,6 +55,7 @@ import {
 } from "./trace-manager.js";
 import type {
   CreateSandboxOptions,
+  GetSandboxOptions,
   Logger,
   PodMetadata,
   SandboxClientOptions,
@@ -245,7 +246,13 @@ function readReadySandbox(
   obj: Record<string, unknown> | undefined,
 ): ReadySandbox | "unnamed" | undefined {
   if (findReadyCondition(obj)?.status !== "True") return undefined;
+  return readSandbox(obj);
+}
 
+/** Like readReadySandbox, but reads the connection details whether or not the Sandbox is Ready. */
+function readSandbox(
+  obj: Record<string, unknown> | undefined,
+): ReadySandbox | "unnamed" {
   const status = (obj?.status as Record<string, unknown>) ?? {};
   const metadata = (obj?.metadata as Record<string, unknown>) ?? {};
   const sandboxName = metadata.name as string | undefined;
@@ -574,8 +581,26 @@ export class SandboxClient {
   /**
    * Retrieves an existing sandbox handle by claim name.
    * Returns the cached handle if still active, otherwise re-attaches.
+   * `opts` applies only to a re-attach; a cached handle is returned without
+   * waiting. A concurrent call for the same claim joins the attach already in
+   * flight, including its options.
    */
-  async getSandbox(claimName: string, namespace?: string): Promise<Sandbox> {
+  async getSandbox(
+    claimName: string,
+    namespace?: string,
+    opts?: GetSandboxOptions,
+  ): Promise<Sandbox> {
+    // Same rule as sandboxReadyTimeout: NaN or Infinity would defeat the
+    // deadline checks in the resolve loop and hang the caller.
+    if (
+      opts?.resolveTimeout !== undefined &&
+      (!Number.isFinite(opts.resolveTimeout) || opts.resolveTimeout <= 0)
+    ) {
+      throw new SandboxError(
+        `resolveTimeout must be a positive number, got: ${opts.resolveTimeout}`,
+      );
+    }
+
     // normalize empty string to defaultNamespace (matches Go behaviour)
     const ns = namespace || this.defaultNamespace;
     const key = `${ns}/${claimName}`;
@@ -591,7 +616,7 @@ export class SandboxClient {
     if (inFlight) {
       return inFlight;
     }
-    const attach = this.attachSandbox(claimName, ns, key).finally(() => {
+    const attach = this.attachSandbox(claimName, ns, key, opts).finally(() => {
       this.attaching.delete(key);
     });
     this.attaching.set(key, attach);
@@ -602,6 +627,7 @@ export class SandboxClient {
     claimName: string,
     ns: string,
     key: string,
+    opts?: GetSandboxOptions,
   ): Promise<Sandbox> {
     const existing = this.registry.get(key);
     if (existing?.isActive) {
@@ -734,6 +760,10 @@ export class SandboxClient {
         this.defaultSandboxReadyTimeout * 1000,
         sandboxTracer,
         sandboxTracingManager?.parentContext,
+        opts?.resolveTimeout !== undefined
+          ? opts.resolveTimeout * 1000
+          : undefined,
+        opts?.waitForReady ?? true,
       );
     } catch (err) {
       sandboxTracingManager?.endLifecycleSpan();
@@ -1456,6 +1486,44 @@ export class SandboxClient {
   }
 
   /**
+   * Reads a Sandbox's current connection details without waiting for Ready,
+   * so getSandbox() can confirm the Sandbox exists the way Python does.
+   */
+  private async getSandboxSnapshot(
+    sandboxName: string,
+    namespace: string,
+  ): Promise<ReadySandbox> {
+    let obj: unknown;
+    try {
+      obj = await this.customObjectsApi.getNamespacedCustomObject({
+        group: SANDBOX_API_GROUP,
+        version: SANDBOX_API_VERSION,
+        namespace,
+        plural: SANDBOX_PLURAL_NAME,
+        name: sandboxName,
+      });
+    } catch (err) {
+      if (isK8s404(err)) {
+        throw new SandboxNotFoundError(
+          `Sandbox '${sandboxName}' not found in namespace '${namespace}'.`,
+          { cause: err },
+        );
+      }
+      throw new SandboxError(
+        `Failed to get Sandbox '${sandboxName}' in namespace '${namespace}'.`,
+        { cause: err },
+      );
+    }
+    const snapshot = readSandbox(obj as Record<string, unknown>);
+    if (snapshot === "unnamed") {
+      throw new SandboxMetadataError(
+        "Could not determine sandbox name from sandbox object.",
+      );
+    }
+    return snapshot;
+  }
+
+  /**
    * Watches a Sandbox resource until it becomes Ready.
    * Uses an initial GET followed by repeated watch passes with re-list on clean close,
    * mirroring the Go client's loop pattern.
@@ -1541,6 +1609,8 @@ export class SandboxClient {
     totalTimeoutMs: number,
     tracer: Tracer | null = null,
     parentContext?: unknown,
+    resolveTimeoutMs = totalTimeoutMs,
+    waitForReady = true,
   ): Promise<ReadySandbox> {
     const fn = async () => {
       const startTime = Date.now();
@@ -1549,8 +1619,17 @@ export class SandboxClient {
       const sandboxName = await this.resolveSandboxName(
         claimName,
         namespace,
-        totalTimeoutMs,
+        Math.min(resolveTimeoutMs, totalTimeoutMs),
       );
+
+      if (!waitForReady) {
+        // The in-cluster address check below is skipped too: a Sandbox that is
+        // not Ready may not have its pod IP or Service yet.
+        return {
+          ...(await this.getSandboxSnapshot(sandboxName, namespace)),
+          sandboxName,
+        };
+      }
 
       // Step 2: Watch sandbox with remaining budget
       const elapsed = Date.now() - startTime;

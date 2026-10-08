@@ -153,6 +153,7 @@ The in-cluster modes take the apiserver off the data path. Each uses exactly one
 
 - With `"in-cluster-service"`, `createSandbox()` / `getSandbox()` throw `SandboxNoServiceError` when the Sandbox has no Service, instead of falling back to the pod IP. Prefer this mode when sandboxes cross a trust boundary: the Service only selects its own Sandbox's pod, and deleting the Sandbox deletes the Service, so connections fail instead of reaching another pod that inherited the IP. DNS caching still leaves a TTL-bounded window.
 - With `"in-cluster-pod-ip"`, `createSandbox()` / `getSandbox()` throw `SandboxMetadataError` when the Sandbox reports no pod IP. This mode needs no template change, but nothing detects that the pod was rescheduled: a handle keeps dialing the address it saw when it was created, which Kubernetes may since have reassigned to an unrelated pod.
+- `getSandbox(claimName, namespace, { waitForReady: false })` skips both checks, because a Sandbox that is not Ready may not have its Service or pod IP yet. The error then surfaces on the first `files` / `commands` call; call `getSandbox()` again once the Sandbox is Ready.
 
 The addresses are available on the handle as `sandbox.podIP` and `sandbox.serviceFQDN`. They are `""` when unknown.
 

@@ -339,3 +339,22 @@ export interface CreateSandboxOptions {
    */
   volumeClaimTemplates?: VolumeClaimTemplate[];
 }
+
+export interface GetSandboxOptions {
+  /**
+   * Seconds to wait for the claim to report its Sandbox name. An existing
+   * claim is normally resolved already, so a short value fails fast on a claim
+   * that never binds instead of spending the full ready budget. Defaults to,
+   * and is capped at, the client's `sandboxReadyTimeout`.
+   */
+  resolveTimeout?: number;
+  /**
+   * Wait for the Sandbox to become Ready before returning (default `true`).
+   * With `false`, getSandbox() only resolves the claim and checks that the
+   * Sandbox exists, matching the Python SDK. The handle's `podIP` and
+   * `serviceFQDN` are then taken from the Sandbox as it is at attach time and
+   * may still be empty, in which case in-cluster connectivity fails on first
+   * use; call getSandbox() again once the Sandbox is Ready.
+   */
+  waitForReady?: boolean;
+}

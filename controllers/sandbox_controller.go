@@ -49,15 +49,9 @@ import (
 )
 
 const (
-	sandboxLabel = "agents.x-k8s.io/sandbox-name-hash"
-	// SandboxNameHashLabel is the tracking label the controller stamps on
-	// every Pod and Service it creates or adopts. Exported so the manager
-	// setup (cmd/agent-sandbox-controller) can scope the Pod/Service informer
-	// caches to labeled objects (--cache-label-selectors).
-	SandboxNameHashLabel = sandboxLabel
-	// podSandboxNameHashIndex is the cache field index over the sandboxLabel
-	// value on Pods, so per-reconcile pod lookups are O(1).
-	podSandboxNameHashIndex     = ".metadata.labels[" + sandboxLabel + "]"
+	// podSandboxNameHashIndex is the cache field index over the
+	// SandboxNameHashLabel value on Pods, so per-reconcile pod lookups are O(1).
+	podSandboxNameHashIndex     = ".metadata.labels[" + sandboxv1beta1.SandboxNameHashLabel + "]"
 	sandboxControllerFieldOwner = "sandbox-controller"
 	immediateRequeueDelay       = time.Millisecond
 	// podMetadataFlushBound caps how long a write-behind pod metadata patch
@@ -445,7 +439,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 		sandbox.Status.PodIPs = nil
 		sandbox.Status.NodeName = ""
 	} else {
-		sandbox.Status.LabelSelector = sandboxLabel + "=" + nameHash
+		sandbox.Status.LabelSelector = sandboxv1beta1.SandboxNameHashLabel + "=" + nameHash
 		if isOwnedBySandbox(pod, sandbox) {
 			sandbox.Status.PodIPs = podIPsFromStatus(pod.Status.PodIPs)
 			sandbox.Status.NodeName = pod.Spec.NodeName
@@ -1077,13 +1071,13 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 					Name:      sandbox.Name,
 					Namespace: sandbox.Namespace,
 					Labels: map[string]string{
-						sandboxLabel: nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 				},
 				Spec: corev1.ServiceSpec{
 					ClusterIP: "None",
 					Selector: map[string]string{
-						sandboxLabel: nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 					Ports: desiredPorts,
 				},
@@ -1146,13 +1140,13 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 		}
 		// desired is true + unowned service — adopt
 		isAdoptablePool := service.Labels != nil && service.Labels[sandboxv1beta1.SandboxAdoptableLabel] == "true"
-		hasTrackingLabel := service.Labels != nil && service.Labels[sandboxLabel] == nameHash
+		hasTrackingLabel := service.Labels != nil && service.Labels[sandboxv1beta1.SandboxNameHashLabel] == nameHash
 		if !isAdoptablePool && !hasTrackingLabel {
 			logger.V(4).Info("Refusing to adopt unowned service: missing pool authorization label or sandbox tracking label",
 				"Service.Name", service.Name, "Sandbox.Name", sandbox.Name,
-				"RequiredLabel", sandboxv1beta1.SandboxAdoptableLabel, "TrackingLabel", sandboxLabel)
+				"RequiredLabel", sandboxv1beta1.SandboxAdoptableLabel, "TrackingLabel", sandboxv1beta1.SandboxNameHashLabel)
 			return nil, fmt.Errorf("cannot adopt unowned service %q: missing required pool authorization label (%q) or sandbox tracking label (%q)",
-				service.Name, sandboxv1beta1.SandboxAdoptableLabel, sandboxLabel)
+				service.Name, sandboxv1beta1.SandboxAdoptableLabel, sandboxv1beta1.SandboxNameHashLabel)
 		}
 		if service.Spec.ClusterIP != corev1.ClusterIPNone && service.Spec.ClusterIP != "" {
 			logger.V(4).Info("Refusing to adopt service: ClusterIP mismatch (immutable, expected None)",
@@ -1167,9 +1161,9 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 		if service.Labels == nil {
 			service.Labels = make(map[string]string)
 		}
-		service.Labels[sandboxLabel] = nameHash
+		service.Labels[sandboxv1beta1.SandboxNameHashLabel] = nameHash
 		service.Spec.Selector = map[string]string{
-			sandboxLabel: nameHash,
+			sandboxv1beta1.SandboxNameHashLabel: nameHash,
 		}
 		service.Spec.Ports = desiredPorts
 
@@ -1182,7 +1176,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 
 	case resourceOwnedBySandbox:
 		desiredSelector := map[string]string{
-			sandboxLabel: nameHash,
+			sandboxv1beta1.SandboxNameHashLabel: nameHash,
 		}
 		patch := client.MergeFrom(service.DeepCopy())
 		needsUpdate := false
@@ -1190,8 +1184,8 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 		if service.Labels == nil {
 			service.Labels = make(map[string]string)
 		}
-		if service.Labels[sandboxLabel] != nameHash {
-			service.Labels[sandboxLabel] = nameHash
+		if service.Labels[sandboxv1beta1.SandboxNameHashLabel] != nameHash {
+			service.Labels[sandboxv1beta1.SandboxNameHashLabel] = nameHash
 			needsUpdate = true
 		}
 		if !apiequality.Semantic.DeepEqual(service.Spec.Selector, desiredSelector) {
@@ -1264,7 +1258,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	ctx, end := r.Tracer.StartSpan(ctx, nil, "reconcilePod", nil)
 	defer end()
 
-	// List all pods carrying this sandbox's tracking label (sandboxLabel),
+	// List all pods carrying this sandbox's tracking label (sandboxv1beta1.SandboxNameHashLabel),
 	// via the cache field index registered in SetupWithManager. The label only
 	// identifies candidates; controller owner UID establishes the mapping.
 	podList := &corev1.PodList{}
@@ -1386,13 +1380,13 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 		case resourceUnowned:
 			isAdoptablePool := pod.Labels != nil && pod.Labels[sandboxv1beta1.SandboxAdoptableLabel] == "true"
-			hasTrackingLabel := pod.Labels != nil && pod.Labels[sandboxLabel] == nameHash
+			hasTrackingLabel := pod.Labels != nil && pod.Labels[sandboxv1beta1.SandboxNameHashLabel] == nameHash
 			if !isAdoptablePool && !hasTrackingLabel {
 				logger.V(4).Info("Refusing to adopt unowned pod: missing pool authorization label or sandbox tracking label",
 					"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name,
-					"RequiredLabel", sandboxv1beta1.SandboxAdoptableLabel, "TrackingLabel", sandboxLabel)
+					"RequiredLabel", sandboxv1beta1.SandboxAdoptableLabel, "TrackingLabel", sandboxv1beta1.SandboxNameHashLabel)
 				return nil, fmt.Errorf("cannot adopt unowned pod %q: missing required pool authorization label (%q) or sandbox tracking label (%q)",
-					pod.Name, sandboxv1beta1.SandboxAdoptableLabel, sandboxLabel)
+					pod.Name, sandboxv1beta1.SandboxAdoptableLabel, sandboxv1beta1.SandboxNameHashLabel)
 			}
 
 			if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
@@ -1471,7 +1465,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		managedLabelKeys = append(managedLabelKeys, k)
 	}
 	// Assign system-owned labels after merging user input so they cannot be overridden.
-	podLabels[sandboxLabel] = nameHash
+	podLabels[sandboxv1beta1.SandboxNameHashLabel] = nameHash
 
 	// Propagate extension-owned labels from the Sandbox CR to the Pod, provided the Sandbox is
 	// owned by an extensions controller (SandboxClaim or SandboxWarmPool).
@@ -1569,8 +1563,8 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 	if pod.Labels == nil {
 		pod.Labels = make(map[string]string)
 	}
-	if pod.Labels[sandboxLabel] != nameHash {
-		pod.Labels[sandboxLabel] = nameHash
+	if pod.Labels[sandboxv1beta1.SandboxNameHashLabel] != nameHash {
+		pod.Labels[sandboxv1beta1.SandboxNameHashLabel] = nameHash
 		updated = true
 	}
 	// Propagate pod template labels to the existing pod (e.g., after warm pool adoption),
@@ -1598,7 +1592,7 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 				continue
 			}
 			if isSystemLabel(k) {
-				if k == sandboxLabel {
+				if k == sandboxv1beta1.SandboxNameHashLabel {
 					continue
 				}
 				if _, exists := pod.Labels[k]; exists {
@@ -1731,13 +1725,13 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 
 			case resourceUnowned:
 				isAdoptablePool := pvc.Labels != nil && pvc.Labels[sandboxv1beta1.SandboxAdoptableLabel] == "true"
-				hasTrackingLabel := pvc.Labels != nil && pvc.Labels[sandboxLabel] == nameHash
+				hasTrackingLabel := pvc.Labels != nil && pvc.Labels[sandboxv1beta1.SandboxNameHashLabel] == nameHash
 				if !isAdoptablePool && !hasTrackingLabel {
 					logger.V(4).Info("Refusing to adopt unowned PVC: missing pool authorization label or sandbox tracking label",
 						"PVC.Name", pvcName, "Sandbox.Name", sandbox.Name,
-						"RequiredLabel", sandboxv1beta1.SandboxAdoptableLabel, "TrackingLabel", sandboxLabel)
+						"RequiredLabel", sandboxv1beta1.SandboxAdoptableLabel, "TrackingLabel", sandboxv1beta1.SandboxNameHashLabel)
 					return fmt.Errorf("cannot adopt unowned PVC %q: missing required pool authorization label (%q) or sandbox tracking label (%q)",
-						pvcName, sandboxv1beta1.SandboxAdoptableLabel, sandboxLabel)
+						pvcName, sandboxv1beta1.SandboxAdoptableLabel, sandboxv1beta1.SandboxNameHashLabel)
 				}
 
 				logger.Info("Adopting unowned PVC", "PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)
@@ -1765,7 +1759,7 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 		if pvcLabels == nil {
 			pvcLabels = make(map[string]string)
 		}
-		pvcLabels[sandboxLabel] = nameHash
+		pvcLabels[sandboxv1beta1.SandboxNameHashLabel] = nameHash
 
 		logger.Info("Creating a new PVC", "PVC.Namespace", sandbox.Namespace, "PVC.Name", pvcName)
 		pvc = &corev1.PersistentVolumeClaim{
@@ -1909,11 +1903,11 @@ func sandboxMarkedExpired(sandbox *sandboxv1beta1.Sandbox) bool {
 	return cond != nil && (cond.Reason == sandboxv1beta1.SandboxReasonExpired)
 }
 
-// podSandboxNameHashIndexer extracts the sandboxLabel value for the
+// podSandboxNameHashIndexer extracts the sandboxv1beta1.SandboxNameHashLabel value for the
 // podSandboxNameHashIndex cache field index. Shared with tests so fake
 // clients register the same index the manager does.
 func podSandboxNameHashIndexer(obj client.Object) []string {
-	if v, ok := obj.GetLabels()[sandboxLabel]; ok {
+	if v, ok := obj.GetLabels()[sandboxv1beta1.SandboxNameHashLabel]; ok {
 		return []string{v}
 	}
 	return nil
@@ -1929,7 +1923,7 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers
 	labelSelectorPredicate, err := predicate.LabelSelectorPredicate(metav1.LabelSelector{
 		MatchExpressions: []metav1.LabelSelectorRequirement{
 			{
-				Key:      sandboxLabel,
+				Key:      sandboxv1beta1.SandboxNameHashLabel,
 				Operator: metav1.LabelSelectorOpExists,
 				Values:   []string{},
 			},

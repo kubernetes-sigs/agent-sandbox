@@ -19,7 +19,11 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"time"
+
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
 const (
@@ -144,6 +148,145 @@ type listOptions struct {
 func WithLabelSelector(selector string) ListOption {
 	return func(o *listOptions) {
 		o.labelSelector = selector
+	}
+}
+
+// CreateOption configures per-sandbox options for Client.CreateSandbox,
+// overriding or merging onto the Client's base Options for that call.
+type CreateOption func(*createOptions)
+
+// createOptions collects per-call overrides. It is unexported, like
+// callOptions and listOptions, so a CreateOption cannot reach the Client's
+// base Options.
+type createOptions struct {
+	claimLabels          map[string]string
+	podLabels            map[string]string
+	podAnnotations       map[string]string
+	env                  []extv1beta1.EnvVar
+	envSet               bool
+	volumeClaimTemplates []sandboxv1beta1.PersistentVolumeClaimTemplate
+	volumeClaimSet       bool
+	claimName            string
+	adoptExisting        bool
+	shutdownAfter        *time.Duration
+	sandboxReadyTimeout  time.Duration
+}
+
+// apply layers the per-call overrides onto o, a shallow copy of the Client's
+// base Options. It must not write into o's maps or slices: unless overridden
+// they alias the Client's until New's setDefaults copies them.
+func (co *createOptions) apply(o *Options) {
+	o.Labels = mergeStringMap(o.Labels, co.claimLabels)
+	o.PodLabels = mergeStringMap(o.PodLabels, co.podLabels)
+	o.PodAnnotations = mergeStringMap(o.PodAnnotations, co.podAnnotations)
+	if co.envSet {
+		o.Env = co.env
+	}
+	if co.volumeClaimSet {
+		o.VolumeClaimTemplates = co.volumeClaimTemplates
+	}
+	o.ClaimName = co.claimName
+	o.AdoptExisting = co.adoptExisting
+	if co.shutdownAfter != nil {
+		o.ShutdownAfter = *co.shutdownAfter
+	}
+	if co.sandboxReadyTimeout != 0 {
+		o.SandboxReadyTimeout = co.sandboxReadyTimeout
+	}
+}
+
+func mergeStringMap(base, override map[string]string) map[string]string {
+	if len(override) == 0 {
+		return base
+	}
+	merged := make(map[string]string, len(base)+len(override))
+	maps.Copy(merged, base)
+	maps.Copy(merged, override)
+	return merged
+}
+
+// WithClaimLabels merges labels onto the SandboxClaim metadata for a single
+// CreateSandbox call. Per-call keys override colliding Client-level Options.Labels
+// keys; the SDK's created-by label always wins. Repeated calls accumulate.
+func WithClaimLabels(labels map[string]string) CreateOption {
+	cloned := maps.Clone(labels)
+	return func(o *createOptions) {
+		o.claimLabels = mergeStringMap(o.claimLabels, cloned)
+	}
+}
+
+// WithPodLabels merges labels onto spec.additionalPodMetadata.labels for a
+// single CreateSandbox call. Per-call keys override colliding Client-level
+// Options.PodLabels keys. Repeated calls accumulate.
+func WithPodLabels(labels map[string]string) CreateOption {
+	cloned := maps.Clone(labels)
+	return func(o *createOptions) {
+		o.podLabels = mergeStringMap(o.podLabels, cloned)
+	}
+}
+
+// WithPodAnnotations merges annotations onto spec.additionalPodMetadata.annotations
+// for a single CreateSandbox call. Per-call keys override colliding Client-level
+// Options.PodAnnotations keys. Repeated calls accumulate.
+func WithPodAnnotations(annotations map[string]string) CreateOption {
+	cloned := maps.Clone(annotations)
+	return func(o *createOptions) {
+		o.podAnnotations = mergeStringMap(o.podAnnotations, cloned)
+	}
+}
+
+// WithClaimEnv sets the environment variables injected into the SandboxClaim
+// for a single CreateSandbox call, replacing Client-level Options.Env.
+func WithClaimEnv(env []extv1beta1.EnvVar) CreateOption {
+	cloned := slices.Clone(env)
+	return func(o *createOptions) {
+		o.env = cloned
+		o.envSet = true
+	}
+}
+
+// WithVolumeClaimTemplates sets spec.volumeClaimTemplates on the SandboxClaim
+// for a single CreateSandbox call, replacing Client-level Options.VolumeClaimTemplates.
+func WithVolumeClaimTemplates(templates []sandboxv1beta1.PersistentVolumeClaimTemplate) CreateOption {
+	cloned := cloneVolumeClaimTemplates(templates)
+	return func(o *createOptions) {
+		o.volumeClaimTemplates = cloned
+		o.volumeClaimSet = true
+	}
+}
+
+// WithShutdownAfter sets the claim lifetime for a single CreateSandbox call,
+// replacing Client-level Options.ShutdownAfter. Zero means no expiry.
+func WithShutdownAfter(d time.Duration) CreateOption {
+	return func(o *createOptions) {
+		o.shutdownAfter = &d
+	}
+}
+
+// WithSandboxReadyTimeout sets how long a single CreateSandbox call waits for
+// the sandbox to become ready, replacing Client-level Options.SandboxReadyTimeout.
+// Zero keeps the Client-level value.
+func WithSandboxReadyTimeout(d time.Duration) CreateOption {
+	return func(o *createOptions) {
+		o.sandboxReadyTimeout = d
+	}
+}
+
+// WithClaimName sets a deterministic SandboxClaim name for a single
+// CreateSandbox call. See Options.ClaimName.
+func WithClaimName(name string) CreateOption {
+	return func(o *createOptions) {
+		o.claimName = name
+	}
+}
+
+// WithAdoptExisting makes a single CreateSandbox call attach to an existing
+// SandboxClaim named by WithClaimName instead of failing when it already
+// exists. See Options.AdoptExisting for the checks applied to the existing
+// claim.
+func WithAdoptExisting() CreateOption {
+	return func(o *createOptions) {
+		o.adoptExisting = true
 	}
 }
 

@@ -271,7 +271,7 @@ The controller's metrics server can optionally serve over HTTPS with configurabl
    - Change `port` from `8080` to `8443` in `helm/templates/service.yaml`.
    - Change `scheme` to `https` and configure `tlsConfig` for the serving certificate in `helm/templates/servicemonitor.yaml`.
    - If supplying your own certificate (via `--metrics-cert-dir`), add the corresponding Secret volume and volumeMount to the Helm Deployment template. The chart does not include a metrics certificate mount by default.
-6. **NetworkPolicy** — if deploying the controller NetworkPolicy (`olm/config/network-policy/allow-metrics-traffic.yaml`), replace the `8080` ingress port with `8443`.
+6. **NetworkPolicy** — if deploying the controller NetworkPolicy (`k8s/hardening/networkpolicy.yaml`), replace the `8080` ingress port with `8443`.
 7. **OLM / kustomize** — `make bundle` regenerates `olm/` from `k8s/` and `olm/config/`, so the above changes propagate automatically. If you also enable the ServiceMonitor, update `scheme` from `http` to `https` and configure `tlsConfig` for the serving certificate in `olm/config/prometheus/monitor.yaml`.
 8. **TLS certificate** — if `--metrics-cert-dir` is used, create a Kubernetes Secret named `agent-sandbox-metrics-tls` containing `tls.crt` and `tls.key` in the controller namespace. How you provision this depends on your environment (cert-manager, service-serving-cert-signer on OpenShift, manual, etc.).
 

@@ -40,12 +40,9 @@ spec:
     - protocol: TCP
       port: 8081
   egress:
-  # DNS resolution.
-  - to:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: kube-system
-    ports:
+  # DNS resolution. Port-only (no namespace restriction) because DNS
+  # services may run outside kube-system on some distributions.
+  - ports:
     - protocol: UDP
       port: 53
     - protocol: TCP

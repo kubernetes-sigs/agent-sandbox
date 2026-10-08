@@ -91,7 +91,7 @@ Other `make` targets (`test`, `deploy`, `bundle`, …) depend on `manifests` and
 
 ### Operator-only config (safe to edit)
 
-OLM and kubebuilder scaffolding that are **not** overwritten by `copy-k8s-config` include, for example: `config/manifests/` (ClusterServiceVersion), `config/default/`, `config/prometheus/`, `config/network-policy/`, `config/scorecard/`, and `config/samples/`. Adjust those when changing catalog metadata, metrics wiring, or install UX—not when updating CRD schemas or controller RBAC.
+OLM and kubebuilder scaffolding that are **not** overwritten by `copy-k8s-config` include, for example: `config/manifests/` (ClusterServiceVersion), `config/default/`, `config/prometheus/`, `config/scorecard/`, and `config/samples/`. Adjust those when changing catalog metadata, metrics wiring, or install UX—not when updating CRD schemas or controller RBAC.
 
 ### Releasing a new operator version
 

@@ -12,10 +12,6 @@ spec:
       protocol: UDP
     - port: 53
       protocol: TCP
-    to:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: kube-system
   - ports:
     - protocol: TCP
     to:

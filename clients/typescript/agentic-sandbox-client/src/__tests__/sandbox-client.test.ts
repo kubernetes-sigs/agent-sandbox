@@ -989,6 +989,47 @@ describe("SandboxClient (registry)", () => {
       expect(client.listActiveSandboxes()).toEqual([]);
     });
 
+    it("replaces a handle attached before its in-cluster address existed", async () => {
+      const pending = {
+        metadata: { name: "sb-early", annotations: {} },
+        status: { conditions: [{ type: "Ready", status: "False" }] },
+      };
+      const resolved = { status: { sandbox: { name: "sb-early" } } };
+      // waitForReady: false attach: claim, resolve, Sandbox (no pod IP yet).
+      mockGetNamespacedCustomObject
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce(resolved)
+        .mockResolvedValueOnce(pending);
+
+      const client = new SandboxClient({
+        sandboxd: { connectivity: "in-cluster-pod-ip" },
+      });
+      const early = await client.getSandbox("claim-early", undefined, {
+        waitForReady: false,
+      });
+      expect(early.podIP).toBe("");
+
+      // Cache-hit checks (claim, Sandbox), then a full re-attach that now
+      // sees the Ready Sandbox with its pod IP.
+      mockGetNamespacedCustomObject
+        .mockResolvedValueOnce(resolved)
+        .mockResolvedValueOnce(pending)
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce(resolved)
+        .mockResolvedValueOnce({
+          metadata: { name: "sb-early", annotations: {} },
+          status: {
+            conditions: [{ type: "Ready", status: "True" }],
+            podIPs: ["10.0.0.9"],
+          },
+        });
+
+      const ready = await client.getSandbox("claim-early");
+      expect(ready).not.toBe(early);
+      expect(ready.podIP).toBe("10.0.0.9");
+      expect(early.isActive).toBe(false);
+    });
+
     it("bounds claim resolution by resolveTimeout instead of the ready timeout", async () => {
       // The claim exists but never reports a Sandbox name.
       mockGetNamespacedCustomObject.mockResolvedValue({ status: {} });

@@ -582,7 +582,8 @@ export class SandboxClient {
    * Retrieves an existing sandbox handle by claim name.
    * Returns the cached handle if still active, otherwise re-attaches.
    * `opts` applies only to a re-attach; a cached handle is returned without
-   * waiting. A concurrent call for the same claim joins the attach already in
+   * waiting, unless it was attached with `waitForReady: false` before the
+   * Sandbox had an in-cluster address, in which case it is closed and replaced. A concurrent call for the same claim joins the attach already in
    * flight, including its options.
    */
   async getSandbox(
@@ -701,14 +702,21 @@ export class SandboxClient {
             { cause: err },
           );
         }
-        return existing;
+        if (this.hasConnectionAddress(existing)) {
+          return existing;
+        }
+        // Attached with waitForReady: false before the Sandbox had an address.
+        // A handle's connection target is fixed when it is built, so replace it.
+        this.logger.info(
+          `Sandbox '${existing.sandboxName}' handle has no in-cluster address; re-attaching.`,
+        );
+      } else {
+        // The sandbox name has changed; evict and fall through to re-attach below.
+        this.logger.info(
+          `SandboxClaim '${claimName}' sandboxRef changed ` +
+            `from '${existing.sandboxName}' to '${currentSandboxName}'; re-attaching.`,
+        );
       }
-
-      // The sandbox name has changed; evict and fall through to re-attach below.
-      this.logger.info(
-        `SandboxClaim '${claimName}' sandboxRef changed ` +
-          `from '${existing.sandboxName}' to '${currentSandboxName}'; re-attaching.`,
-      );
       await existing.closeLocal().catch(() => {});
       this.registry.delete(key);
     }
@@ -1483,6 +1491,18 @@ export class SandboxClient {
           });
         });
     });
+  }
+
+  /** False when an in-cluster mode has no address to dial for this handle. */
+  private hasConnectionAddress(sandbox: Sandbox): boolean {
+    const { connectivity } = this.sandboxdOptions;
+    if (connectivity === "port-forward") return true;
+    try {
+      resolveInClusterHost(connectivity, sandbox.podIP, sandbox.serviceFQDN);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**

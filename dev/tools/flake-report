@@ -58,7 +58,7 @@ FLAKY_STATUS = 13  # failed, then passed on a rerun of the same column
 RUNNING_STATUS = 4  # still in flight: neither a pass nor a fail yet
 
 # How many of a test's newest completed results say whether it is failing at
-# head (all fail) or has recovered from a breakage (all pass).
+# head (all fail).
 RECENT_RUNS = 3
 
 # Inside a breakage window failures outnumber passes at least this many to
@@ -355,12 +355,12 @@ def is_recovered_breakage(fail_cols, pass_cols, recent):
     A genuine flake has passes spread between its failures; a breakage window
     is almost all failures. Columns are newest first, so the window is the
     span from the newest to the oldest failing column, and it has cleared
-    when the newest results are all passes.
+    when the newest completed result is a pass.
     """
     first, last = min(fail_cols), max(fail_cols)
     passes_inside = sum(1 for i in pass_cols if first < i < last)
     dense = len(fail_cols) >= BREAKAGE_FAIL_RATIO * passes_inside
-    return dense and all(s in PASS_STATUSES for s in recent)
+    return dense and bool(recent) and recent[0] in PASS_STATUSES
 
 
 def analyze_tab(dashboard, tab, window, pr_files=None):
@@ -581,11 +581,14 @@ def analyze_tab(dashboard, tab, window, pr_files=None):
                                  "runs": len(fail_cols)})
         elif retest_flips or flaky_cells:
             flaky.append(finding)
+        elif distinct_cls >= 2 and is_recovered_breakage(
+                fail_cols, pass_cols, recent):
+            # A breakage that was fixed leaves failures and later passes, so
+            # failures clustered in one window are not a flake, whatever the
+            # overall pass count.
+            recovered.append(finding)
         elif distinct_cls >= 2 and len(pass_cols) > len(fail_cols):
-            # Passes outnumbering failures also describes a breakage that was
-            # fixed, so failures clustered in one window are not a flake.
-            (recovered if is_recovered_breakage(fail_cols, pass_cols, recent)
-             else flaky).append(finding)
+            flaky.append(finding)
 
     # A flaky parent test drags all its failing subtests along; keep only the
     # parent so we file one issue, not one per subtest.

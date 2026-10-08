@@ -815,11 +815,22 @@ class FalsePositiveFilterTest(unittest.TestCase):
         self.assertEqual([f["test"] for f in flaky], ["pkg.TestA"])
         self.assertEqual(recovered, [])
 
-    def test_window_with_failures_in_recent_runs_is_not_recovered(self):
+    def test_newest_result_failing_is_not_recovered(self):
         flaky, _, _, _, recovered = self.analyze_breakage(
-            [1, 12, 12, 12, 1, 1, 1, 1])
+            [12, 1, 12, 12, 12, 12, 1, 1, 1, 1, 1])
         self.assertEqual([f["test"] for f in flaky], ["pkg.TestA"])
         self.assertEqual(recovered, [])
+
+    def test_one_pass_after_the_failures_is_recovered(self):
+        flaky, _, _, _, recovered = self.analyze_breakage([1, 12, 12, 1, 1])
+        self.assertEqual(flaky, [])
+        self.assertEqual([f["test"] for f in recovered], ["pkg.TestA"])
+
+    def test_recovered_breakage_is_reported_without_a_pass_majority(self):
+        flaky, _, _, _, recovered = self.analyze_breakage(
+            [1, 1, 1, 12, 12, 12, 12, 1])
+        self.assertEqual(flaky, [])
+        self.assertEqual([f["test"] for f in recovered], ["pkg.TestA"])
 
     def test_retest_flip_stays_flaky_even_when_the_window_cleared(self):
         # Changelist c1 failed in column 3 and passed on a bare retest in

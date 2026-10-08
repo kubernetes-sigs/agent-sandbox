@@ -1249,7 +1249,16 @@ func compareVolumeClaimTemplates(template *extensionsv1beta1.SandboxTemplate, ac
 func compareSandboxBlueprint(template *extensionsv1beta1.SandboxTemplate, actualSandboxSpec *sandboxv1beta1.SandboxBlueprint) bool {
 	return comparePodSpecs(template, &actualSandboxSpec.PodTemplate.Spec) &&
 		compareVolumeClaimTemplates(template, actualSandboxSpec.VolumeClaimTemplates) &&
-		equality.Semantic.DeepEqual(template.Spec.Service, actualSandboxSpec.Service)
+		equality.Semantic.DeepEqual(template.Spec.Service, actualSandboxSpec.Service) &&
+		normalizePodFailurePolicyAction(template.Spec.PodFailurePolicy) ==
+			normalizePodFailurePolicyAction(actualSandboxSpec.PodFailurePolicy)
+}
+
+func normalizePodFailurePolicyAction(policy *sandboxv1beta1.PodFailurePolicy) sandboxv1beta1.PodFailurePolicyAction {
+	if policy == nil || policy.Action == "" {
+		return sandboxv1beta1.PodFailurePolicyActionIgnore
+	}
+	return policy.Action
 }
 
 // sandboxWarmPoolLabelIndexer extracts the warmPoolSandboxLabel value for the

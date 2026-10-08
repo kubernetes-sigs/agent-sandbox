@@ -77,7 +77,7 @@ metadata:
     capabilities: Basic Install
     categories: AI/Machine Learning
     containerImage: registry.k8s.io/agent-sandbox/agent-sandbox-controller:v1.0.0
-    createdAt: "2026-09-08T20:42:18Z"
+    createdAt: "2026-10-04T11:34:14Z"
     operatorframework.io/suggested-namespace: agent-sandbox-system
     operators.operatorframework.io/builder: operator-sdk-v1.42.2
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4

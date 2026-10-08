@@ -32,7 +32,7 @@ Agent Sandbox provides isolated environments with graphical desktop capabilities
 
 1. **Deploy an AIO Sandbox** — this creates a pod with VNC, VSCode, Jupyter, and Terminal pre-installed.
 2. **Access via browser** — port-forward to the sandbox and open the unified web UI at `http://localhost:8080`.
-3. **Programmatic control** — use the [`agent-sandbox` Python SDK](https://github.com/agent-infra/sandbox/tree/main/sdk/python) (`pip install agent-sandbox`) to control tools inside the AIO sandbox (browser, shell, file system). Note: this SDK is for controlling tools *inside* the sandbox; for managing sandbox infrastructure, use the [`agentic-sandbox-client` SDK](/docs/python-client/).
+3. **Programmatic control** — use the [`agent-sandbox` Python SDK](https://github.com/agent-infra/sandbox/tree/main/sdk/python) (`pip install agent-sandbox`) to control tools inside the AIO sandbox (browser, shell, file system). Note: this SDK is for controlling tools *inside* the sandbox; for managing sandbox infrastructure, use the [`k8s-agent-sandbox` SDK](/docs/python-client/).
 
 ## Examples
 

@@ -149,6 +149,18 @@ class CheckInstallManifestDriftTest(unittest.TestCase):
             k8s_dir="k8s",
         )
 
+    def test_hardening_files_cause_drift_if_not_excluded_from_glob(self):
+        # hardening/ files are excluded from all_yaml_files in main() so they
+        # never reach the drift check. Verify the function itself does NOT
+        # silently ignore them — if they slip through, the check must fail.
+        kpath = self._kustomization("controller.yaml")
+        with self.assertRaises(SystemExit):
+            release.check_install_manifest_drift(
+                ["k8s/controller.yaml", "k8s/hardening/networkpolicy.yaml"],
+                kustomization_path=kpath,
+                k8s_dir="k8s",
+            )
+
     def test_missing_file_is_drift(self):
         kpath = self._kustomization("controller.yaml")
         with self.assertRaises(SystemExit):

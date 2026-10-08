@@ -54,7 +54,18 @@ generate-python-docs: # Generate Python SDK reference documentation
 	$(PYTHON) -m venv .venv
 	.venv/bin/python -m pip install --upgrade pip
 	.venv/bin/python -m pip install pydoc-markdown==$(PYDOC_MARKDOWN_VERSION)
-	.venv/bin/pydoc-markdown -I ./clients/python/agentic-sandbox-client/ -m k8s_agent_sandbox.sandbox_client -m k8s_agent_sandbox.models > $(REF_PYTHON_PATH).tmp1
+	.venv/bin/pydoc-markdown -I ./clients/python/agentic-sandbox-client/ \
+		-m k8s_agent_sandbox.sandbox_client \
+		-m k8s_agent_sandbox.async_sandbox_client \
+		-m k8s_agent_sandbox.sandbox \
+		-m k8s_agent_sandbox.async_sandbox \
+		-m k8s_agent_sandbox.models \
+		-m k8s_agent_sandbox.exceptions \
+		-m k8s_agent_sandbox.commands.command_executor \
+		-m k8s_agent_sandbox.commands.async_command_executor \
+		-m k8s_agent_sandbox.files.filesystem \
+		-m k8s_agent_sandbox.files.async_filesystem \
+		> $(REF_PYTHON_PATH).tmp1
 	sed 's/^#/##/' < $(REF_PYTHON_PATH).tmp1 > $(REF_PYTHON_PATH)
 	rm $(REF_PYTHON_PATH).tmp1
 

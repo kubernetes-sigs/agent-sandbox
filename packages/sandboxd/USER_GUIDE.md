@@ -70,8 +70,9 @@ A compatible proxy or router needs to route the REST and gRPC connections to
 the same sandbox, preserve HTTP/2 and gRPC trailers, and stream file bodies and
 `Start` responses without buffering them to completion. The Go SDK uses a
 direct pod port-forward by default and also supports in-cluster Pod IP or
-headless Service connectivity. The synchronous Python SDK uses a direct pod
-port-forward.
+headless Service connectivity. The Python SDK (both synchronous and
+asynchronous clients) likewise supports a direct pod port-forward and
+in-cluster Pod IP or headless Service connectivity.
 
 A useful smoke test is to run the SDK filesystem and command operations against
 the alternative implementation, followed by the reference integration scenario

@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -25,8 +26,11 @@ import (
 
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/trace/noop"
+	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 	ktesting "k8s.io/client-go/testing"
 
@@ -245,6 +249,206 @@ func TestClient_CreateSandbox_InvalidWarmPoolName(t *testing.T) {
 	}
 	if createCalled {
 		t.Error("CreateSandbox should reject invalid name before creating a claim")
+	}
+}
+
+func TestClient_CreateSandbox_CreateOptions(t *testing.T) {
+	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+
+	baseOpts := Options{
+		Namespace:           "default",
+		APIURL:              "http://localhost:9999",
+		SandboxReadyTimeout: 2 * time.Second,
+		Quiet:               true,
+		Labels:              map[string]string{"base": "keep", "override": "old"},
+		PodLabels:           map[string]string{"sandbox.users.io/base": "keep", "sandbox.users.io/override": "old"},
+		PodAnnotations:      map[string]string{"example.com/base": "keep", "example.com/override": "old"},
+		Env:                 []extv1beta1.EnvVar{{Name: "BASE", Value: "1"}},
+	}
+	baseOpts.setDefaults()
+	baseOpts.K8sHelper = &K8sHelper{
+		AgentsClient:     agentsCS.AgentsV1beta1(),
+		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
+		Log:              logr.Discard(),
+	}
+
+	extensionsCS.PrependReactor("get", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+		ga := action.(ktesting.GetAction)
+		return true, &extv1beta1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: ga.GetName(), Namespace: ga.GetNamespace()},
+			Status: extv1beta1.SandboxClaimStatus{
+				SandboxStatus: extv1beta1.SandboxStatus{Name: ga.GetName()},
+			},
+		}, nil
+	})
+	setupWatchWithReactor(agentsCS, extensionsCS, readySandbox("placeholder"))
+
+	var created *extv1beta1.SandboxClaim
+	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+		created = action.(ktesting.CreateAction).GetObject().(*extv1beta1.SandboxClaim)
+		return false, nil, nil
+	})
+
+	c, err := NewClient(context.Background(), baseOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	vct := []sandboxv1beta1.PersistentVolumeClaimTemplate{
+		{
+			EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+		},
+	}
+
+	sb, err := c.CreateSandbox(
+		context.Background(),
+		"test-warmpool",
+		"default",
+		WithClaimName("custom-claim"),
+		WithClaimLabels(map[string]string{"override": "new", "extra": "1"}),
+		WithPodLabels(map[string]string{"sandbox.users.io/override": "new", "sandbox.users.io/extra": "1"}),
+		WithPodAnnotations(map[string]string{"example.com/override": "new", "example.com/extra": "1"}),
+		WithClaimEnv([]extv1beta1.EnvVar{{Name: "CALL", Value: "2"}}),
+		WithVolumeClaimTemplates(vct),
+	)
+	if err != nil {
+		t.Fatalf("CreateSandbox with CreateOptions: %v", err)
+	}
+	if sb.ClaimName() != "custom-claim" {
+		t.Errorf("sb.ClaimName() = %q, want %q", sb.ClaimName(), "custom-claim")
+	}
+	if created == nil {
+		t.Fatal("expected SandboxClaim to be created")
+	}
+	wantLabels := map[string]string{
+		"base":                        "keep",
+		"override":                    "new",
+		"extra":                       "1",
+		sandboxv1beta1.CreatedByLabel: "go-client",
+	}
+	if !reflect.DeepEqual(created.Labels, wantLabels) {
+		t.Errorf("created.Labels = %v, want %v", created.Labels, wantLabels)
+	}
+	wantPodLabels := map[string]string{
+		"sandbox.users.io/base":     "keep",
+		"sandbox.users.io/override": "new",
+		"sandbox.users.io/extra":    "1",
+	}
+	if !reflect.DeepEqual(created.Spec.AdditionalPodMetadata.Labels, wantPodLabels) {
+		t.Errorf("AdditionalPodMetadata.Labels = %v, want %v", created.Spec.AdditionalPodMetadata.Labels, wantPodLabels)
+	}
+	wantPodAnnotations := map[string]string{
+		"example.com/base":     "keep",
+		"example.com/override": "new",
+		"example.com/extra":    "1",
+	}
+	if !reflect.DeepEqual(created.Spec.AdditionalPodMetadata.Annotations, wantPodAnnotations) {
+		t.Errorf("AdditionalPodMetadata.Annotations = %v, want %v", created.Spec.AdditionalPodMetadata.Annotations, wantPodAnnotations)
+	}
+	wantEnv := []extv1beta1.EnvVar{{Name: "CALL", Value: "2"}}
+	if !reflect.DeepEqual(created.Spec.Env, wantEnv) {
+		t.Errorf("created.Spec.Env = %v, want %v", created.Spec.Env, wantEnv)
+	}
+	if len(created.Spec.VolumeClaimTemplates) != 1 || created.Spec.VolumeClaimTemplates[0].Name != "data" {
+		t.Errorf("created.Spec.VolumeClaimTemplates = %+v, want [data]", created.Spec.VolumeClaimTemplates)
+	}
+
+	// Ensure Client base options were not mutated by per-call merges.
+	if c.opts.Labels["override"] != "old" {
+		t.Errorf("c.opts.Labels was mutated: %v", c.opts.Labels)
+	}
+	if c.opts.PodLabels["sandbox.users.io/override"] != "old" {
+		t.Errorf("c.opts.PodLabels was mutated: %v", c.opts.PodLabels)
+	}
+	if c.opts.PodAnnotations["example.com/override"] != "old" {
+		t.Errorf("c.opts.PodAnnotations was mutated: %v", c.opts.PodAnnotations)
+	}
+}
+
+func TestClient_CreateSandbox_WithClaimName_AdoptsExisting(t *testing.T) {
+	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+
+	opts := Options{
+		Namespace:           "default",
+		APIURL:              "http://localhost:9999",
+		SandboxReadyTimeout: 2 * time.Second,
+		Quiet:               true,
+	}
+	opts.setDefaults()
+	opts.K8sHelper = &K8sHelper{
+		AgentsClient:     agentsCS.AgentsV1beta1(),
+		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
+		Log:              logr.Discard(),
+	}
+
+	const (
+		claimName   = "adopted-claim"
+		sandboxName = "adopted-sandbox"
+	)
+
+	extensionsCS.PrependReactor("create", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, k8serrors.NewAlreadyExists(schema.GroupResource{Group: "extensions.agents.x-k8s.io", Resource: "sandboxclaims"}, claimName)
+	})
+	extensionsCS.PrependReactor("get", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		return true, &extv1beta1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: "default"},
+			Spec: extv1beta1.SandboxClaimSpec{
+				WarmPoolRef: extv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"},
+			},
+			Status: extv1beta1.SandboxClaimStatus{
+				SandboxStatus: extv1beta1.SandboxStatus{Name: sandboxName},
+			},
+		}, nil
+	})
+	agentsCS.PrependReactor("list", "sandboxes", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		return true, &sandboxv1beta1.SandboxList{Items: []sandboxv1beta1.Sandbox{*readySandbox(sandboxName)}}, nil
+	})
+
+	c, err := NewClient(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sb, err := c.CreateSandbox(context.Background(), "test-warmpool", "default", WithClaimName(claimName), WithAdoptExisting())
+	if err != nil {
+		t.Fatalf("CreateSandbox adopting existing claim: %v", err)
+	}
+	if sb.ClaimName() != claimName {
+		t.Errorf("sb.ClaimName() = %q, want %q", sb.ClaimName(), claimName)
+	}
+	if sb.SandboxName() != sandboxName {
+		t.Errorf("sb.SandboxName() = %q, want %q", sb.SandboxName(), sandboxName)
+	}
+}
+
+func TestClient_CreateSandbox_InvalidCreateOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opt  CreateOption
+	}{
+		{"invalid ClaimName", WithClaimName("Invalid_Name")},
+		{"invalid ClaimLabels", WithClaimLabels(map[string]string{"bad key": "v"})},
+		{"invalid PodLabels", WithPodLabels(map[string]string{"bad key": "v"})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, extensionsCS := newTestClient(t)
+			createCalled := false
+			extensionsCS.PrependReactor("create", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+				createCalled = true
+				return false, nil, nil
+			})
+			if _, err := c.CreateSandbox(context.Background(), "test-warmpool", "default", tc.opt); err == nil {
+				t.Fatalf("expected validation error for %s", tc.name)
+			}
+			if createCalled {
+				t.Errorf("CreateSandbox should fail validation before creating a claim for %s", tc.name)
+			}
+		})
 	}
 }
 

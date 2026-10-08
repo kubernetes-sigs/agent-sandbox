@@ -76,13 +76,19 @@ func NewClient(_ context.Context, opts Options) (*Client, error) {
 }
 
 // CreateSandbox provisions a new sandbox and returns a managed handle.
-// On failure, the orphaned claim is cleaned up.
-func (c *Client) CreateSandbox(ctx context.Context, warmPoolName, namespace string) (*Sandbox, error) {
+// Optional CreateOption values override or merge onto the Client's base
+// Options for this call. On failure, any newly created claim is cleaned up.
+func (c *Client) CreateSandbox(ctx context.Context, warmPoolName, namespace string, opts ...CreateOption) (*Sandbox, error) {
 	if namespace == "" {
 		namespace = defaultNamespace
 	}
 
 	sandboxOpts := c.opts
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&sandboxOpts)
+		}
+	}
 	sandboxOpts.WarmPoolName = warmPoolName
 	sandboxOpts.Namespace = namespace
 	sandboxOpts.K8sHelper = c.k8s
@@ -97,9 +103,9 @@ func (c *Client) CreateSandbox(ctx context.Context, warmPoolName, namespace stri
 	}
 
 	key := Key{Namespace: namespace, ClaimName: sb.ClaimName()}
-	// The registry key is built from the server-assigned (GenerateName) claim
-	// name, which is unique to this sb, so a hit means a concurrent GetSandbox
-	// attached to the very claim we just created and registered first.
+	// The registry key is built from the claim name. A hit means either a
+	// concurrent GetSandbox attached to the claim we just created, or an
+	// explicit ClaimName with AdoptExisting adopted an already-tracked claim.
 	return c.trackOrAdoptRace(key, sb), nil
 }
 

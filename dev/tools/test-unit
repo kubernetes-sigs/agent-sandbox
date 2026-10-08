@@ -196,6 +196,7 @@ PYTHON_TEST_SUITES = [
     {
         "name": "integrations-openai",
         "dir": os.path.join("clients", "integrations", "openai"),
+        "min_python": (3, 11),
         "editable_installs": [
             (PYTHON_SDK_DIR, "[async]"),
             (os.path.join("clients", "integrations", "openai"), "[test]"),

@@ -71,6 +71,14 @@ debug endpoints.
   for the collector endpoint or transport: the exporter reads the standard OpenTelemetry
   environment variables (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_INSECURE`). If the
   exporter cannot be initialized, the controller logs the error and exits at startup.
+* `--enable-rest-client-metrics` (default: `true`): Enable the opt-in client-go REST client
+  metric collectors (request latency, DNS resolution latency, request/response sizes,
+  rate-limiter latency, request retries). These metrics provide visibility into Kubernetes API
+  client health via the standard `rest_client_*` families on the metrics endpoint. Setting this
+  flag to `false` disables all six opt-in metric families, including `rest_client_request_retries_total`.
+  The latency and size collectors use histograms, which add per-request overhead; disable this flag
+  in clusters where that overhead is not acceptable. The default `rest_client_requests_total` counter
+  is always registered regardless of this flag.
 * `--enable-pprof` (default: `false`): Enable the CPU profile endpoint (`/debug/pprof/profile`)
   on the metrics server.
 * `--enable-pprof-debug` (default: `false`): Enable the remaining pprof endpoints — `/debug/pprof/`

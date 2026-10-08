@@ -123,10 +123,7 @@ def check_install_manifest_drift(
     flat assets automatically yet be silently missing from
     sandbox-with-extensions.yaml.
     """
-    globbed = {
-        os.path.relpath(f, k8s_dir) for f in all_yaml_files
-        if not os.path.relpath(f, k8s_dir).startswith("hardening/")
-    }
+    globbed = {os.path.relpath(f, k8s_dir) for f in all_yaml_files}
     globbed.discard("extensions.controller.yaml")
     listed = _kustomization_resource_paths(kustomization_path)
 
@@ -166,6 +163,7 @@ def main():
         f
         for f in glob.glob("k8s/**/*.yaml", recursive=True)
         if os.path.basename(f) not in ("kustomization.yaml", "kustomization.yml")
+        and not os.path.relpath(f, "k8s").startswith("hardening/")
     ]
     image_url = f"registry.k8s.io/agent-sandbox/agent-sandbox-controller:{args.tag}"
 

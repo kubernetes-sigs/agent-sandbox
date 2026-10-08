@@ -309,6 +309,12 @@ const (
     // ConnectivityPortForward reaches the sandbox over a SPDY port-forward
     // brokered by the apiserver. Works from anywhere a kubeconfig does,
     // including a laptop or CI runner. Default.
+    //
+    // With RuntimeSandboxd the forward targets the sandbox pod itself, which
+    // does not work for Kata or gVisor pods: their workload does not listen in
+    // the pod's host-side network namespace. Use an in-cluster mode for those.
+    // RuntimeLegacyPython forwards to the sandbox-router instead and is
+    // unaffected.
     ConnectivityPortForward Connectivity = "port-forward"
     // ConnectivityInClusterService dials the Sandbox's headless Service by
     // its in-cluster DNS name (Status.ServiceFQDN), taking the apiserver —

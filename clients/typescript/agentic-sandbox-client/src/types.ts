@@ -93,6 +93,7 @@ export interface SandboxdOptions {
  *
  * - `"port-forward"`: a WebSocket port-forward brokered by the apiserver.
  *   Works from anywhere a kubeconfig does, including a laptop or CI runner.
+ *   Doesn't work on Kata or gVisor; use an in-cluster mode for those.
  * - `"in-cluster-service"`: dials the Sandbox's headless Service by its
  *   in-cluster DNS name (status.serviceFQDN), taking the apiserver off the
  *   data path. The Service only ever selects its own Sandbox's pod, and a

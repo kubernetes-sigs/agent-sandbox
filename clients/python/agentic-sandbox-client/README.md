@@ -354,6 +354,11 @@ asyncio.run(main())
 process port directly from the sandbox Pod. The async client establishes and tears down
 both forwards without blocking the event loop.
 
+This doesn't work on Kata or gVisor: their workload runs in a separate kernel, so the
+pod's host-side network namespace has nothing listening for the port-forward to reach.
+Use `SandboxdInClusterConnectionConfig` for those, with the client running inside the
+cluster (the Sandbox NetworkPolicy must admit the client; see below).
+
 ```python
 import asyncio
 from k8s_agent_sandbox import AsyncSandboxClient

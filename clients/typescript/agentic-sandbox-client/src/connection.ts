@@ -81,6 +81,8 @@ function isTerminalPortForwardFailure(err: unknown): boolean {
 /**
  * Reaches sandboxd through a WebSocket port-forward brokered by the
  * apiserver. Works from anywhere a kubeconfig does.
+ *
+ * Doesn't work on Kata or gVisor; use InClusterStrategy for those.
  * @internal
  */
 export class PortForwardStrategy implements SandboxdConnectionStrategy {

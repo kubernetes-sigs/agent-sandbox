@@ -17,7 +17,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func WithWorkingDir\(dir string\) CallOption](<#WithWorkingDir>)
 - [type Client](<#Client>)
   - [func NewClient\(\_ context.Context, opts Options\) \(\*Client, error\)](<#NewClient>)
-  - [func \(c \*Client\) CreateSandbox\(ctx context.Context, warmPoolName, namespace string\) \(\*Sandbox, error\)](<#Client.CreateSandbox>)
+  - [func \(c \*Client\) CreateSandbox\(ctx context.Context, warmPoolName, namespace string, opts ...CreateOption\) \(\*Sandbox, error\)](<#Client.CreateSandbox>)
   - [func \(c \*Client\) DeleteAll\(ctx context.Context\)](<#Client.DeleteAll>)
   - [func \(c \*Client\) DeleteSandbox\(ctx context.Context, claimName, namespace string\) error](<#Client.DeleteSandbox>)
   - [func \(c \*Client\) EnableAutoCleanup\(\) \(stop func\(\)\)](<#Client.EnableAutoCleanup>)
@@ -28,6 +28,14 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(c \*Commands\) Run\(ctx context.Context, command string, opts ...CallOption\) \(\*ExecutionResult, error\)](<#Commands.Run>)
 - [type ConnectionStrategy](<#ConnectionStrategy>)
 - [type Connectivity](<#Connectivity>)
+- [type CreateOption](<#CreateOption>)
+  - [func WithAdoptExisting\(\) CreateOption](<#WithAdoptExisting>)
+  - [func WithClaimEnv\(env \[\]extv1beta1.EnvVar\) CreateOption](<#WithClaimEnv>)
+  - [func WithClaimLabels\(labels map\[string\]string\) CreateOption](<#WithClaimLabels>)
+  - [func WithClaimName\(name string\) CreateOption](<#WithClaimName>)
+  - [func WithPodAnnotations\(annotations map\[string\]string\) CreateOption](<#WithPodAnnotations>)
+  - [func WithPodLabels\(labels map\[string\]string\) CreateOption](<#WithPodLabels>)
+  - [func WithVolumeClaimTemplates\(templates \[\]sandboxv1beta1.PersistentVolumeClaimTemplate\) CreateOption](<#WithVolumeClaimTemplates>)
 - [type DirectStrategy](<#DirectStrategy>)
   - [func \(s \*DirectStrategy\) Close\(\) error](<#DirectStrategy.Close>)
   - [func \(s \*DirectStrategy\) Connect\(\_ context.Context\) \(string, error\)](<#DirectStrategy.Connect>)
@@ -224,10 +232,10 @@ NewClient creates a Client with shared configuration.
 #### func \(\*Client\) [CreateSandbox](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go>)
 
 ```go
-func (c *Client) CreateSandbox(ctx context.Context, warmPoolName, namespace string) (*Sandbox, error)
+func (c *Client) CreateSandbox(ctx context.Context, warmPoolName, namespace string, opts ...CreateOption) (*Sandbox, error)
 ```
 
-CreateSandbox provisions a new sandbox and returns a managed handle. On failure, the orphaned claim is cleaned up.
+CreateSandbox provisions a new sandbox and returns a managed handle. Optional CreateOption values override or merge onto the Client's base Options for this call. On failure, any newly created claim is cleaned up.
 
 <a name="Client.DeleteAll"></a>
 #### func \(\*Client\) [DeleteAll](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go>)
@@ -375,6 +383,78 @@ const (
     ConnectivityInClusterPodIP Connectivity = "in-cluster-pod-ip"
 )
 ```
+
+<a name="CreateOption"></a>
+### type [CreateOption](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+CreateOption configures per\-sandbox options for Client.CreateSandbox, overriding or merging onto the Client's base Options for that call.
+
+```go
+type CreateOption func(*Options)
+```
+
+<a name="WithAdoptExisting"></a>
+#### func [WithAdoptExisting](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithAdoptExisting() CreateOption
+```
+
+WithAdoptExisting makes a single CreateSandbox call attach to an existing SandboxClaim named by WithClaimName \(or Options.ClaimName\) instead of failing when it already exists. See Options.AdoptExisting for the checks applied to the existing claim.
+
+<a name="WithClaimEnv"></a>
+#### func [WithClaimEnv](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithClaimEnv(env []extv1beta1.EnvVar) CreateOption
+```
+
+WithClaimEnv sets the environment variables injected into the SandboxClaim for a single CreateSandbox call, overriding Client\-level Options.Env.
+
+<a name="WithClaimLabels"></a>
+#### func [WithClaimLabels](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithClaimLabels(labels map[string]string) CreateOption
+```
+
+WithClaimLabels merges labels onto the SandboxClaim metadata for a single CreateSandbox call. Per\-call keys override colliding Client\-level Options.Labels keys; the SDK's created\-by label always wins.
+
+<a name="WithClaimName"></a>
+#### func [WithClaimName](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithClaimName(name string) CreateOption
+```
+
+WithClaimName sets a deterministic SandboxClaim name for a single CreateSandbox call. If a claim with that name already exists in the namespace, CreateSandbox fails with ErrClaimFailed unless WithAdoptExisting is also given.
+
+<a name="WithPodAnnotations"></a>
+#### func [WithPodAnnotations](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithPodAnnotations(annotations map[string]string) CreateOption
+```
+
+WithPodAnnotations merges annotations onto spec.additionalPodMetadata.annotations for a single CreateSandbox call. Per\-call keys override colliding Client\-level Options.PodAnnotations keys.
+
+<a name="WithPodLabels"></a>
+#### func [WithPodLabels](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithPodLabels(labels map[string]string) CreateOption
+```
+
+WithPodLabels merges labels onto spec.additionalPodMetadata.labels for a single CreateSandbox call. Per\-call keys override colliding Client\-level Options.PodLabels keys.
+
+<a name="WithVolumeClaimTemplates"></a>
+#### func [WithVolumeClaimTemplates](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithVolumeClaimTemplates(templates []sandboxv1beta1.PersistentVolumeClaimTemplate) CreateOption
+```
+
+WithVolumeClaimTemplates sets spec.volumeClaimTemplates on the SandboxClaim for a single CreateSandbox call, overriding Client\-level Options.VolumeClaimTemplates.
 
 <a name="DirectStrategy"></a>
 ### type [DirectStrategy](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/strategy.go>)
@@ -699,6 +779,22 @@ type Options struct {
     // Must be a valid Kubernetes DNS subdomain (lowercase, [a-z0-9.-]).
     WarmPoolName string
 
+    // ClaimName is an optional deterministic name for the SandboxClaim.
+    // When empty, Kubernetes generates a unique name with prefix "sandbox-claim-".
+    // When set and a SandboxClaim with this name already exists in Namespace,
+    // Open fails with ErrClaimFailed unless AdoptExisting is also set.
+    // Must be a valid Kubernetes DNS subdomain (lowercase, [a-z0-9.-]).
+    ClaimName string
+
+    // AdoptExisting makes Open attach to an existing SandboxClaim named
+    // ClaimName when creating it returns HTTP 409 Conflict, instead of
+    // failing. The existing claim must reference the same WarmPoolName and
+    // must not be terminating. Creation options (Env, Labels, PodLabels,
+    // PodAnnotations, VolumeClaimTemplates, ShutdownAfter) are not reapplied
+    // to an adopted claim, and a failed Open does not delete it.
+    // Requires ClaimName.
+    AdoptExisting bool
+
     // Runtime selects the in-sandbox runtime API. Default: RuntimeLegacyPython.
     // RuntimeSandboxd talks to the sandbox pod rather than the sandbox-router,
     // so GatewayName is not supported with it. APIURL remains available as an
@@ -759,6 +855,22 @@ type Options struct {
     // gets spec.lifecycle.shutdownTime and the Delete shutdown policy; the
     // deadline is rounded up to a whole second. Zero (the default) means no expiry.
     ShutdownAfter time.Duration
+
+    // PodLabels are propagated to the backing Sandbox Pod via
+    // spec.additionalPodMetadata.labels (unlike Labels, which are placed on the
+    // SandboxClaim object itself). Label keys must carry a domain prefix from
+    // the controller's label-domain allowlist (default: sandbox.users.io).
+    PodLabels map[string]string
+
+    // PodAnnotations are propagated to the backing Sandbox Pod via
+    // spec.additionalPodMetadata.annotations.
+    PodAnnotations map[string]string
+
+    // VolumeClaimTemplates is a list of persistent volume claim templates to
+    // create for the sandbox via spec.volumeClaimTemplates. Setting
+    // VolumeClaimTemplates forces a cold start because warm pool pods do not
+    // have these volumes.
+    VolumeClaimTemplates []sandboxv1beta1.PersistentVolumeClaimTemplate
 
     // SandboxReadyTimeout is how long to wait for the sandbox to become ready. Default: 180s.
     SandboxReadyTimeout time.Duration

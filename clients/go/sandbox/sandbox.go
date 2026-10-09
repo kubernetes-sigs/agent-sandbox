@@ -292,9 +292,12 @@ func (s *Sandbox) Open(ctx context.Context) (retErr error) {
 	if err := validateWarmPoolName(s.opts.WarmPoolName); err != nil {
 		return err
 	}
+	if s.opts.AdoptExisting && s.opts.ClaimName == "" {
+		return errors.New("sandbox: AdoptExisting requires ClaimName")
+	}
 
 	// Create claim.
-	claimName, err := s.k8s.createClaim(openCtx, s.opts.Namespace, s.opts.WarmPoolName, s.opts.Env, s.opts.Labels, s.opts.ShutdownAfter, s.tracer, s.traceServiceName)
+	claimName, adopted, err := s.k8s.createClaim(openCtx, s.opts, s.tracer, s.traceServiceName)
 	if err != nil {
 		return err
 	}
@@ -306,27 +309,27 @@ func (s *Sandbox) Open(ctx context.Context) (retErr error) {
 	resolveStart := time.Now()
 	sandboxName, err := s.k8s.resolveSandboxName(openCtx, claimName, s.opts.Namespace, s.opts.SandboxReadyTimeout, s.tracer, s.traceServiceName)
 	if err != nil {
-		return s.rollbackOpen(err)
+		return s.rollbackOpen(err, !adopted)
 	}
 	s.connector.SetIdentity(sandboxName)
 
 	// Subtract resolution time from the ready timeout budget.
 	remainingTimeout := s.opts.SandboxReadyTimeout - time.Since(resolveStart)
 	if remainingTimeout <= 0 {
-		return s.rollbackOpen(fmt.Errorf("%w: sandbox name resolution consumed the entire timeout budget", ErrTimeout))
+		return s.rollbackOpen(fmt.Errorf("%w: sandbox name resolution consumed the entire timeout budget", ErrTimeout), !adopted)
 	}
 
 	// Wait for sandbox to be ready.
 	state, err := s.k8s.waitForSandboxReady(openCtx, sandboxName, s.opts.Namespace, remainingTimeout, s.tracer, s.traceServiceName)
 	if err != nil {
-		return s.rollbackOpen(err)
+		return s.rollbackOpen(err, !adopted)
 	}
 	s.setState(state)
 	s.connector.SetPodIP(state.PodIP)
 
 	// Connect transport.
 	if err := s.connector.Connect(openCtx); err != nil {
-		return s.rollbackOpen(err)
+		return s.rollbackOpen(err, !adopted)
 	}
 
 	return nil
@@ -400,17 +403,20 @@ func (s *Sandbox) reconnect(ctx context.Context) error {
 	return nil
 }
 
-func (s *Sandbox) rollbackOpen(originalErr error) error {
+func (s *Sandbox) rollbackOpen(originalErr error, deleteClaim bool) error {
 	_ = s.connector.Close()
 
 	s.mu.Lock()
 	name := s.claimName
 	s.mu.Unlock()
 
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), s.opts.CleanupTimeout)
-	defer cancel()
+	var cleanupErr error
+	if deleteClaim {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), s.opts.CleanupTimeout)
+		defer cancel()
 
-	cleanupErr := s.k8s.deleteClaim(cleanupCtx, name, s.opts.Namespace)
+		cleanupErr = s.k8s.deleteClaim(cleanupCtx, name, s.opts.Namespace)
+	}
 
 	s.mu.Lock()
 	s.sandboxName = ""

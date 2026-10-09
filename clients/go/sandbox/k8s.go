@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -154,8 +155,10 @@ func claimLifecycle(now time.Time, ttl time.Duration) *extv1beta1.Lifecycle {
 	}
 }
 
-// createClaim creates a SandboxClaim and returns its generated name.
-func (h *K8sHelper) createClaim(ctx context.Context, namespace, warmPoolName string, env []extv1beta1.EnvVar, labels map[string]string, shutdownAfter time.Duration, tracer trace.Tracer, svcName string) (string, error) {
+// createClaim creates a SandboxClaim and returns its name along with whether
+// an existing claim was adopted. Adoption only happens when opts.AdoptExisting
+// is set together with opts.ClaimName and the claim already exists.
+func (h *K8sHelper) createClaim(ctx context.Context, opts Options, tracer trace.Tracer, svcName string) (string, bool, error) {
 	ctx, span := startSpan(ctx, tracer, svcName, "create_claim")
 	defer span.End()
 
@@ -168,36 +171,71 @@ func (h *K8sHelper) createClaim(ctx context.Context, namespace, warmPoolName str
 	now := time.Now()
 	annotations = stampClientRequestTime(annotations, now)
 
-	claimLabels := make(map[string]string, len(labels)+1)
-	maps.Copy(claimLabels, labels)
+	claimLabels := make(map[string]string, len(opts.Labels)+1)
+	maps.Copy(claimLabels, opts.Labels)
 	claimLabels[sandboxv1beta1.CreatedByLabel] = "go-client"
 
-	claim := &extv1beta1.SandboxClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: "sandbox-claim-",
-			Namespace:    namespace,
-			Annotations:  annotations,
-			Labels:       claimLabels,
-		},
-		Spec: extv1beta1.SandboxClaimSpec{
-			WarmPoolRef: extv1beta1.SandboxWarmPoolRef{
-				Name: warmPoolName,
-			},
-			Env:       env,
-			Lifecycle: claimLifecycle(now, shutdownAfter),
-		},
+	meta := metav1.ObjectMeta{
+		Namespace:   opts.Namespace,
+		Annotations: annotations,
+		Labels:      claimLabels,
+	}
+	if opts.ClaimName != "" {
+		meta.Name = opts.ClaimName
+	} else {
+		meta.GenerateName = "sandbox-claim-"
 	}
 
-	created, err := h.ExtensionsClient.SandboxClaims(namespace).Create(ctx, claim, metav1.CreateOptions{})
+	spec := extv1beta1.SandboxClaimSpec{
+		WarmPoolRef: extv1beta1.SandboxWarmPoolRef{
+			Name: opts.WarmPoolName,
+		},
+		Env:                  slices.Clone(opts.Env),
+		Lifecycle:            claimLifecycle(now, opts.ShutdownAfter),
+		VolumeClaimTemplates: cloneVolumeClaimTemplates(opts.VolumeClaimTemplates),
+	}
+	if len(opts.PodLabels) > 0 {
+		spec.AdditionalPodMetadata.Labels = maps.Clone(opts.PodLabels)
+	}
+	if len(opts.PodAnnotations) > 0 {
+		spec.AdditionalPodMetadata.Annotations = maps.Clone(opts.PodAnnotations)
+	}
+
+	claim := &extv1beta1.SandboxClaim{
+		ObjectMeta: meta,
+		Spec:       spec,
+	}
+
+	created, err := h.ExtensionsClient.SandboxClaims(opts.Namespace).Create(ctx, claim, metav1.CreateOptions{})
 	if err != nil {
+		if opts.AdoptExisting && opts.ClaimName != "" && k8serrors.IsAlreadyExists(err) {
+			existing, getErr := h.ExtensionsClient.SandboxClaims(opts.Namespace).Get(ctx, opts.ClaimName, metav1.GetOptions{})
+			if getErr != nil {
+				recordError(span, getErr)
+				return "", false, fmt.Errorf("%w: getting existing claim %s in %s after conflict: %w", ErrClaimFailed, opts.ClaimName, opts.Namespace, getErr)
+			}
+			if existing.DeletionTimestamp != nil {
+				termErr := fmt.Errorf("%w: existing claim %s in %s is terminating", ErrClaimFailed, opts.ClaimName, opts.Namespace)
+				recordError(span, termErr)
+				return "", false, termErr
+			}
+			if existing.Spec.WarmPoolRef.Name != opts.WarmPoolName {
+				poolErr := fmt.Errorf("%w: existing claim %s in %s references warm pool %q, not %q", ErrClaimFailed, opts.ClaimName, opts.Namespace, existing.Spec.WarmPoolRef.Name, opts.WarmPoolName)
+				recordError(span, poolErr)
+				return "", false, poolErr
+			}
+			span.SetAttributes(AttrClaimName.String(opts.ClaimName))
+			h.Log.Info("SandboxClaim already exists; adopting existing claim", "claim", opts.ClaimName, "namespace", opts.Namespace)
+			return opts.ClaimName, true, nil
+		}
 		recordError(span, err)
-		return "", fmt.Errorf("%w: warmpool=%s namespace=%s: %w", ErrClaimFailed, warmPoolName, namespace, err)
+		return "", false, fmt.Errorf("%w: warmpool=%s namespace=%s: %w", ErrClaimFailed, opts.WarmPoolName, opts.Namespace, err)
 	}
 
 	name := created.Name
 	span.SetAttributes(AttrClaimName.String(name))
-	h.Log.Info("claim created", "claim", name, "namespace", namespace)
-	return name, nil
+	h.Log.Info("claim created", "claim", name, "namespace", opts.Namespace)
+	return name, false, nil
 }
 
 // deleteClaim deletes a SandboxClaim. Returns nil if the claim is already gone.

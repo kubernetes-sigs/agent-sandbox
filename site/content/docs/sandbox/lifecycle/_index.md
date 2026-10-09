@@ -11,6 +11,24 @@ In many agentic workflows, you don't need a sandbox running indefinitely. To pre
 
 While standard sandboxes run until manually deleted, configuring a `shutdownTime` allows you to schedule an exact expiration timestamp. Once this timestamp is reached, the sandbox and its associated resources are automatically garbage-collected by the control plane.
 
+## Default Behavior
+
+The lifecycle fields live at different paths in the two APIs: the `Sandbox` carries them inline (`spec.shutdownTime`, `spec.shutdownPolicy`), while the `SandboxClaim` nests them under `spec.lifecycle`. In both, `shutdownPolicy` defaults to `Retain` and only takes effect once the object expires; on expiry the controller always releases the underlying resources, and `shutdownPolicy` governs only the expired object itself.
+
+For a `Sandbox`:
+
+- If `shutdownTime` is unset, the sandbox has no expiry: it runs until it is explicitly deleted.
+- `Retain` (default): the `Sandbox` object is kept after its Pod and Service are torn down. Its live status fields (such as `status.podIPs`) are cleared, and its `Ready` condition is set to `False` with reason `SandboxExpired` so the expiry is observable.
+- `Delete`: the `Sandbox` object is deleted as well, along with its underlying resources. The controller issues the Pod/Service deletions and the `Sandbox` deletion in the same reconcile pass; it does not wait for the underlying resources to be fully removed first.
+
+For a `SandboxClaim` (`spec.lifecycle`):
+
+- If `shutdownTime` is unset, the claim never expires at a scheduled time, but `ttlSecondsAfterFinished` can still expire it once its sandbox has finished (the timer starts from the mirrored `Finished` condition's `lastTransitionTime`). An unset `shutdownTime` therefore does not mean the claim lives forever.
+- On expiry the underlying `Sandbox` (and with it the sandbox's Pod and Service) is released regardless of the policy; `shutdownPolicy` governs only the `SandboxClaim` object:
+  - `Retain` (default): the claim is kept after the underlying Sandbox is deleted, with its `Ready` condition set to `False` with reason `ClaimExpired` so the expiry is observable.
+  - `Delete`: the claim is deleted when expired, which cascades to the underlying Sandbox.
+  - `DeleteForeground`: like `Delete`, but with foreground cascade deletion so the claim remains (with a `deletionTimestamp`) until the underlying Sandbox and Pod are fully terminated. This policy exists only on the `SandboxClaim`; the `Sandbox` supports `Delete` and `Retain` only.
+
 ## Prerequisites
 
 This guide uses `kubectl` directly and is compatible with any Kubernetes environment (KinD, Minikube, Docker Desktop, GKE, etc.).

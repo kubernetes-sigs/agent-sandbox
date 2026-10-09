@@ -26,6 +26,8 @@ This guide requires a GKE Autopilot cluster with a gVisor node pool. See [GKE Cl
 
 Unlike automatic pausing, snapshots give you granular control over when state is saved. This is ideal for multi-turn agents where the environment needs to be "parked" between user prompts to save costs.
 
+Suspending a sandbox terminates its backing Pod. While the Pod is absent, the sandbox's live status fields — `status.podIPs` and `status.nodeName` — are cleared, and its `Ready` condition reports `False`. When the sandbox is resumed, a new Pod is created (with the snapshot state restored) and `status.podIPs` is repopulated from that new Pod.
+
 #### Basic Workflow Example
 
 The following example demonstrates creating a sandbox, modifying its filesystem, taking a snapshot, and suspending/resuming it to restore the state.

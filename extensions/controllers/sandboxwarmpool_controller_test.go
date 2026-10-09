@@ -434,6 +434,82 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 	}
 }
 
+// Several pools may share one SandboxTemplate (for example a small and a large
+// pool). Each must size, scale and clean up on its own.
+func TestReconcilePoolsSharingTemplate(t *testing.T) {
+	namespace := "default"
+	template := createTemplate(namespace)
+	scheme := newTestScheme()
+
+	newPool := func(name string, replicas int32) *extensionsv1beta1.SandboxWarmPool {
+		return &extensionsv1beta1.SandboxWarmPool{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, UID: types.UID(name + "-uid")},
+			Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+				Replicas:    &replicas,
+				TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+			},
+		}
+	}
+	poolA, poolB := newPool("pool-a", 3), newPool("pool-b", 2)
+	hashA, hashB := sandboxcontrollers.NameHash(poolA.Name), sandboxcontrollers.NameHash(poolB.Name)
+
+	r := SandboxWarmPoolReconciler{
+		Client:       newFakeClient(scheme, template),
+		Scheme:       scheme,
+		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+	}
+	ctx := context.Background()
+
+	// Two passes, as in TestReconcilePool, so each pool settles.
+	reconcile := func(pool *extensionsv1beta1.SandboxWarmPool) {
+		t.Helper()
+		for range 2 {
+			_, err := r.reconcilePool(ctx, pool)
+			require.NoError(t, err)
+			syncPoolExpectations(&r, pool)
+		}
+	}
+	// Names, not counts, so a pool deleting and recreating the other's
+	// sandboxes cannot go unnoticed.
+	sandboxNames := func(poolNameHash string) []string {
+		t.Helper()
+		list := &sandboxv1beta1.SandboxList{}
+		require.NoError(t, r.List(ctx, list, &client.ListOptions{Namespace: namespace}))
+		var names []string
+		for _, sb := range list.Items {
+			if sb.Labels[warmPoolSandboxLabel] == poolNameHash {
+				names = append(names, sb.Name)
+			}
+		}
+		return names
+	}
+
+	reconcile(poolA)
+	reconcile(poolB)
+	require.Equal(t, 3, countPoolOwnedSandboxes(ctx, t, r.Client, namespace, hashA, poolA.UID))
+	require.Equal(t, 2, countPoolOwnedSandboxes(ctx, t, r.Client, namespace, hashB, poolB.UID))
+	namesA, namesB := sandboxNames(hashA), sandboxNames(hashB)
+
+	// Reconciling an already converged pool leaves both pools untouched.
+	reconcile(poolA)
+	reconcile(poolB)
+	require.ElementsMatch(t, namesA, sandboxNames(hashA))
+	require.ElementsMatch(t, namesB, sandboxNames(hashB))
+
+	// Scaling one pool down does not touch the other.
+	poolA.Spec.Replicas = new(int32(1))
+	reconcile(poolA)
+	require.Equal(t, 1, countPoolOwnedSandboxes(ctx, t, r.Client, namespace, hashA, poolA.UID))
+	require.ElementsMatch(t, namesB, sandboxNames(hashB))
+	namesA = sandboxNames(hashA)
+
+	// Emptying one pool does not touch the other either.
+	poolB.Spec.Replicas = new(int32(0))
+	reconcile(poolB)
+	require.Empty(t, sandboxNames(hashB))
+	require.ElementsMatch(t, namesA, sandboxNames(hashA))
+}
+
 func TestPoolLabelValueInIntegration(t *testing.T) {
 	poolName := "test-pool"
 	poolNamespace := "default"

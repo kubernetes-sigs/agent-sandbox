@@ -33,6 +33,8 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(s \*DirectStrategy\) Connect\(\_ context.Context\) \(string, error\)](<#DirectStrategy.Connect>)
 - [type ExecutionResult](<#ExecutionResult>)
 - [type FileEntry](<#FileEntry>)
+- [type FileEvent](<#FileEvent>)
+- [type FileEventType](<#FileEventType>)
 - [type FileType](<#FileType>)
 - [type Files](<#Files>)
   - [func \(f \*Files\) Delete\(ctx context.Context, path string, recursive bool, opts ...CallOption\) error](<#Files.Delete>)
@@ -78,8 +80,13 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(s \*Sandbox\) Run\(ctx context.Context, command string, opts ...CallOption\) \(\*ExecutionResult, error\)](<#Sandbox.Run>)
   - [func \(s \*Sandbox\) SandboxName\(\) string](<#Sandbox.SandboxName>)
   - [func \(s \*Sandbox\) ServiceFQDN\(\) string](<#Sandbox.ServiceFQDN>)
+  - [func \(s \*Sandbox\) WatchDir\(ctx context.Context, path string, opts ...WatchOptions\) \(\<\-chan FileEvent, error\)](<#Sandbox.WatchDir>)
+  - [func \(s \*Sandbox\) Watchers\(\) \*Watchers](<#Sandbox.Watchers>)
   - [func \(s \*Sandbox\) Write\(ctx context.Context, path string, content \[\]byte, opts ...CallOption\) error](<#Sandbox.Write>)
   - [func \(s \*Sandbox\) WriteReader\(ctx context.Context, path string, content io.Reader, opts ...CallOption\) error](<#Sandbox.WriteReader>)
+- [type WatchOptions](<#WatchOptions>)
+- [type Watchers](<#Watchers>)
+  - [func \(w \*Watchers\) WatchDir\(ctx context.Context, path string, opts ...WatchOptions\) \(\_ \<\-chan FileEvent, retErr error\)](<#Watchers.WatchDir>)
 
 
 ### Constants
@@ -427,6 +434,53 @@ type FileEntry struct {
     // the sandboxd runtime; empty on legacy.
     Mode string
 }
+```
+
+<a name="FileEvent"></a>
+### type [FileEvent](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/watcher.go>)
+
+FileEvent describes a single filesystem change within a watched directory.
+
+```go
+type FileEvent struct {
+    // Type classifies the change.
+    Type FileEventType
+    // Path is the sandbox-relative path of the affected file or directory.
+    Path string
+    // OldPath is reserved for future use. Currently always empty because
+    // the server does not receive both rename endpoints from fsnotify.
+    OldPath string
+    // Error carries a human-readable message for Error events; empty otherwise.
+    Error string
+}
+```
+
+<a name="FileEventType"></a>
+### type [FileEventType](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/watcher.go>)
+
+FileEventType classifies a filesystem change observed by WatchDir.
+
+```go
+type FileEventType string
+```
+
+<a name="FileEventCreate"></a>
+
+```go
+const (
+    // FileEventCreate indicates a new file or directory was created.
+    FileEventCreate FileEventType = "create"
+    // FileEventWrite indicates an existing file's contents were modified.
+    FileEventWrite FileEventType = "write"
+    // FileEventRemove indicates a file or directory was removed.
+    FileEventRemove FileEventType = "remove"
+    // FileEventRename indicates a file or directory was renamed.
+    FileEventRename FileEventType = "rename"
+    // FileEventChmod indicates permissions or ownership changed.
+    FileEventChmod FileEventType = "chmod"
+    // FileEventError indicates a watch error; the stream is terminating.
+    FileEventError FileEventType = "error"
+)
 ```
 
 <a name="FileType"></a>
@@ -1058,6 +1112,24 @@ func (s *Sandbox) ServiceFQDN() string
 
 ServiceFQDN returns the in\-cluster DNS name of the Sandbox's headless Service, or "" when it has none \(spec.service unset or false\). Not part of the Info interface, which is frozen for backward compatibility.
 
+<a name="Sandbox.WatchDir"></a>
+#### func \(\*Sandbox\) [WatchDir](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
+
+```go
+func (s *Sandbox) WatchDir(ctx context.Context, path string, opts ...WatchOptions) (<-chan FileEvent, error)
+```
+
+WatchDir streams filesystem events for a sandbox\-relative directory path. The returned channel is closed when ctx is cancelled or the watch ends. Requires the sandboxd runtime. Convenience alias for Watchers\(\).WatchDir.
+
+<a name="Sandbox.Watchers"></a>
+#### func \(\*Sandbox\) [Watchers](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
+
+```go
+func (s *Sandbox) Watchers() *Watchers
+```
+
+Watchers returns the filesystem event streaming sub\-object. Requires the sandboxd runtime; WatchDir calls return an error on the legacy runtime.
+
 <a name="Sandbox.Write"></a>
 #### func \(\*Sandbox\) [Write](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
 
@@ -1075,5 +1147,45 @@ func (s *Sandbox) WriteReader(ctx context.Context, path string, content io.Reade
 ```
 
 WriteReader streams content from an io.Reader without buffering the entire payload. Streaming uploads use a single request attempt because a generic reader cannot be replayed safely. Passing WithMaxAttempts with a value greater than 1 returns an error; it is not silently reduced to one attempt.
+
+<a name="WatchOptions"></a>
+### type [WatchOptions](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/watcher.go>)
+
+WatchOptions configures a WatchDir call.
+
+```go
+type WatchOptions struct {
+    // Recursive watches subdirectories when true. New subdirectories
+    // created during the watch are automatically added; removed ones
+    // are dropped.
+    Recursive bool
+}
+```
+
+<a name="Watchers"></a>
+### type [Watchers](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/watcher.go>)
+
+Watchers provides filesystem event streaming on a sandbox.
+
+```go
+type Watchers struct {
+    // contains filtered or unexported fields
+}
+```
+
+<a name="Watchers.WatchDir"></a>
+#### func \(\*Watchers\) [WatchDir](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/watcher.go>)
+
+```go
+func (w *Watchers) WatchDir(ctx context.Context, path string, opts ...WatchOptions) (_ <-chan FileEvent, retErr error)
+```
+
+WatchDir streams filesystem events for the given sandbox\-relative directory path. Events are delivered on the returned channel until the context is cancelled, the watched directory is removed, or an error occurs. The channel is closed when no more events will arrive.
+
+A nil return does not mean the watch was established: server\-side rejections such as NOT\_FOUND \(path does not exist\) and PERMISSION\_DENIED \(path escapes the sandbox root\) arrive on the first Recv and are delivered as a terminal FileEvent with Type == FileEventError before the channel is closed. Callers must therefore consume the channel and inspect events even when WatchDir returns without error.
+
+The caller MUST consume events from the channel \(or cancel ctx\) to avoid leaking the background goroutine. When ctx is cancelled, the background goroutine exits and the channel is closed; events already buffered in the channel remain consumable, but events still in flight on the stream may be dropped.
+
+With the legacy runtime \(non\-sandboxd\), WatchDir returns an error because the legacy python\-runtime does not implement FileWatcherService.
 
 Generated by [gomarkdoc](<https://github.com/princjef/gomarkdoc>)

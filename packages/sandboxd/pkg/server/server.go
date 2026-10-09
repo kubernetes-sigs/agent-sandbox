@@ -13,8 +13,9 @@
 // limitations under the License.
 
 // Package server implements the sandboxd hybrid runtime API defined by
-// KEP-539.2: the ProcessService gRPC API (real-time process execution) and
-// the Filesystem & Runtime REST API (stateless file transfers and probes).
+// KEP-539.2: the ProcessService gRPC API (real-time process execution),
+// the Filesystem & Runtime REST API (stateless file transfers and probes),
+// and the FileWatcherService gRPC API (real-time filesystem event streaming).
 package server
 
 import (
@@ -29,6 +30,7 @@ import (
 
 	"sigs.k8s.io/agent-sandbox/packages/sandboxd/pkg/processmanager"
 	processv1 "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1"
+	watcherv1 "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/watcher/v1"
 )
 
 // Process-lifecycle timing knobs for the server package. Daemon-level knobs
@@ -64,11 +66,13 @@ type Options struct {
 	Log             logr.Logger
 }
 
-// Server bundles the gRPC ProcessService and REST FilesystemService behind a
-// shared process registry so shutdown can reach every child process.
+// Server bundles the gRPC ProcessService and FileWatcherService and the REST
+// FilesystemService behind a shared process registry so shutdown can reach
+// every child process.
 type Server struct {
 	registry      *processmanager.ProcessRegistry
 	processServer *ProcessServer
+	watcherServer *FileWatcherServer
 	restServer    *RESTServer
 }
 
@@ -81,13 +85,15 @@ func New(opts Options) (*Server, error) {
 	return &Server{
 		registry:      registry,
 		processServer: NewProcessServer(opts.RootDir, registry, opts.StreamChunkSize, opts.Log),
+		watcherServer: NewFileWatcherServer(opts.RootDir, opts.Log),
 		restServer:    NewRESTServer(opts.RootDir, opts.MetadataEnvPrefix, opts.Log),
 	}, nil
 }
 
-// RegisterGRPC attaches the ProcessService to grpcServer.
+// RegisterGRPC attaches the ProcessService and FileWatcherService to grpcServer.
 func (s *Server) RegisterGRPC(grpcServer *grpc.Server) {
 	processv1.RegisterProcessServiceServer(grpcServer, s.processServer)
+	watcherv1.RegisterFileWatcherServiceServer(grpcServer, s.watcherServer)
 }
 
 // RESTHandler returns the handler serving the Filesystem & Runtime REST API.

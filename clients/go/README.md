@@ -5,25 +5,31 @@ sandboxes managed by the Agent Sandbox controller. It handles the full SandboxCl
 (creation, readiness, cleanup) so callers only need to think about running commands and
 transferring files.
 
-It supports three connectivity modes: **Gateway** (Kubernetes Gateway API), **Port-Forward**
-(native SPDY tunnel), and **Direct URL** (in-cluster or custom domain).
+It supports two in-sandbox runtimes (`RuntimeLegacyPython` and `RuntimeSandboxd`) and multiple
+connectivity modes: **Port-Forward** (`ConnectivityPortForward`), **In-Cluster Service DNS**
+(`ConnectivityInClusterService`), **In-Cluster Pod IP** (`ConnectivityInClusterPodIP`),
+**Gateway** (Kubernetes Gateway API), and **Direct URL** (`APIURL`).
 
 ## Architecture
 
-The client operates in three connectivity modes:
+### Runtimes (`Options.Runtime`)
 
-1. **Gateway Mode:** Traffic flows from the Client -> Cloud Load Balancer (Gateway)
-   -> Router Service -> Sandbox Pod. The client watches the Gateway resource for an external IP.
-2. **Port-Forward Mode:** Traffic flows from the Client -> SPDY tunnel -> Router
-   Service -> Sandbox Pod. Uses `client-go/tools/portforward` natively, no `kubectl` required (ideal for local development and CI).
-3. **Direct URL Mode:** The client connects directly to a provided `APIURL`, bypassing
-   discovery. Useful for in-cluster agents or custom domains.
+- **`RuntimeLegacyPython` (default):** Speaks the `python-runtime` HTTP API on `ServerPort` (default `:8888`). Reached through `sandbox-router` by default, or directly on the pod when using in-cluster connectivity.
+- **`RuntimeSandboxd`:** Speaks the `sandboxd` hybrid API defined by KEP-539.2 — REST filesystem, health, and metadata (`/v1/files/...`, `/v1/health`, `/v1/metadata`) on `SandboxdRESTPort` (default `:8080`) plus gRPC `ProcessService` on `SandboxdGRPCPort` (default `:9090`). Reached directly on the sandbox pod (via pod port-forward or in-cluster connectivity, without `sandbox-router`).
+
+### Connectivity Modes (`Options.Connectivity`, `GatewayName`, `APIURL`)
+
+1. **Port-Forward Mode (`ConnectivityPortForward`, default):** Uses `client-go/tools/portforward` natively (no `kubectl` binary required; ideal for local development and CI). With `RuntimeLegacyPython`, tunnels to the `sandbox-router` Service; with `RuntimeSandboxd`, tunnels directly to the sandbox Pod's REST and gRPC ports.
+2. **In-Cluster Service Mode (`ConnectivityInClusterService`):** Dials the Sandbox's headless Service by its in-cluster DNS name (`Status.ServiceFQDN`), taking the API server and `sandbox-router` off the data path. Requires `spec.service: true` on the template and never silently falls back to Pod IP, preventing Pod IP reuse across tenants.
+3. **In-Cluster Pod IP Mode (`ConnectivityInClusterPodIP`):** Dials `Status.PodIP` directly from inside the cluster without requiring a headless Service. Prefer `ConnectivityInClusterService` when sandboxes cross a trust boundary.
+4. **Gateway Mode (`GatewayName`):** Traffic flows from Client -> Cloud Load Balancer (Gateway) -> Router Service -> Sandbox Pod (`RuntimeLegacyPython` only). The client watches the Gateway resource for an external IP.
+5. **Direct URL Mode (`APIURL`):** The client connects directly to a provided `APIURL`, bypassing discovery. Useful for custom domains or in-cluster router URLs.
 
 ## Prerequisites
 
-- A running Kubernetes cluster with a valid kubeconfig (or in-cluster config). This is required even in Direct URL mode because the client creates Kubernetes clientsets for SandboxClaim lifecycle management.
+- A running Kubernetes cluster with a valid kubeconfig (or in-cluster config). This is required even in Direct URL or in-cluster modes because the client creates Kubernetes clientsets for `SandboxClaim` lifecycle management.
 - The [**Agent Sandbox Controller**](https://github.com/kubernetes-sigs/agent-sandbox?tab=readme-ov-file#installation) installed.
-- The **Sandbox Router** deployed in the target namespace (see [sandbox-router](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/sandbox-router/README.md) and its [deployment manifests](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/sandbox-router/deploy)). *(Note: If you are using a specific tagged release, replace `main` in these URLs with your version tag.)*
+- The **Sandbox Router** deployed in the target namespace when using router-based modes (`RuntimeLegacyPython` with default port-forward, `GatewayName`, or router `APIURL`) — see [sandbox-router](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/sandbox-router/README.md) and its [deployment manifests](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/sandbox-router/deploy). *(Note: If you are using a specific tagged release, replace `main` in these URLs with your version tag. `RuntimeSandboxd` and in-cluster connectivity modes talk directly to the sandbox pod and do not require `sandbox-router`.)*
 - A `SandboxWarmPool` created in the target namespace.
 - Go 1.26+.
 
@@ -73,8 +79,9 @@ fmt.Println(result.Stdout)
 
 ### 2. Port-Forward Mode
 
-Use this for local development or CI. If you omit `GatewayName` and `APIURL`, the client
-automatically establishes an SPDY port-forward tunnel to the Router Service.
+Use this for local development or CI. If you omit `GatewayName`, `APIURL`, and `Connectivity`,
+the client defaults to `ConnectivityPortForward` and establishes an SPDY port-forward tunnel
+automatically.
 
 ```go
 client, err := sandbox.NewClient(ctx, sandbox.Options{})
@@ -89,11 +96,42 @@ if err != nil { log.Fatal(err) }
 fmt.Println(result.Stdout)
 ```
 
-### 3. Direct URL Mode
+### 3. `sandboxd` Runtime and In-Cluster Connectivity
+
+Select `RuntimeSandboxd` to use the `sandboxd` daemon's REST filesystem (`:8080`) and gRPC
+`ProcessService` (`:9090`). By default (`ConnectivityPortForward`), the SDK port-forwards
+directly to the sandbox pod. When running inside the cluster, set `Connectivity` to
+`ConnectivityInClusterService` (requires `spec.service: true` on the template) or
+`ConnectivityInClusterPodIP`:
+
+```go
+client, err := sandbox.NewClient(ctx, sandbox.Options{
+    Runtime:      sandbox.RuntimeSandboxd,
+    Connectivity: sandbox.ConnectivityInClusterService, // or ConnectivityPortForward / ConnectivityInClusterPodIP
+})
+if err != nil { log.Fatal(err) }
+defer client.DeleteAll(ctx)
+
+sb, err := client.CreateSandbox(ctx, "my-sandboxd-pool", "default")
+if err != nil { log.Fatal(err) }
+
+if err := sb.Write(ctx, "src/notes.txt", []byte("hello\n")); err != nil {
+    log.Fatal(err)
+}
+result, err := sb.Run(ctx, "cat src/notes.txt")
+if err != nil { log.Fatal(err) }
+fmt.Println(result.Stdout)
+
+if err := sb.Delete(ctx, "src", true); err != nil {
+    log.Fatal(err)
+}
+```
+
+### 4. Direct URL Mode
 
 Use `APIURL` to bypass discovery entirely. Useful for:
 
-- **Internal Agents:** Running inside the cluster (connect via K8s DNS).
+- **Internal Agents:** Running inside the cluster via the router Service DNS.
 - **Custom Domains:** Connecting via HTTPS (e.g., `https://sandbox.example.com`).
 
 ```go
@@ -111,9 +149,11 @@ if err != nil { log.Fatal(err) }
 fmt.Println(entries)
 ```
 
-### 4. Custom Ports
+### 5. Custom Ports
 
-If your sandbox runtime listens on a port other than 8888, specify `ServerPort`.
+If your legacy sandbox runtime listens on a port other than 8888, specify `ServerPort`. For
+`RuntimeSandboxd`, customize `SandboxdRESTPort` (default 8080) and `SandboxdGRPCPort`
+(default 9090).
 
 ```go
 client, err := sandbox.NewClient(ctx, sandbox.Options{
@@ -124,8 +164,10 @@ client, err := sandbox.NewClient(ctx, sandbox.Options{
 ### File Operations
 
 ```go
-// Write a file (must be a plain filename, no directory separators).
-// Paths like "dir/script.py" are rejected with an error.
+// Write a file. On RuntimeLegacyPython, the path must be a plain filename without
+// directory separators (e.g., "script.py", not "dir/script.py"). On RuntimeSandboxd,
+// relative paths like "src/script.py" are supported and parent directories are created
+// automatically.
 err := sb.Write(ctx, "script.py", []byte("print('hello')"))
 
 // Stream a large file without buffering it in memory. Streaming uploads use
@@ -154,6 +196,9 @@ fmt.Printf("downloaded %d bytes\n", written)
 
 // Check existence
 exists, err := sb.Exists(ctx, "script.py")
+
+// Delete a file or directory (RuntimeSandboxd only; returns ErrUnsupportedByRuntime on legacy)
+err = sb.Delete(ctx, "script.py", false)
 ```
 
 `Read()` and `ReadTo()` responses are capped by `MaxDownloadSize` (256 MB by
@@ -161,16 +206,16 @@ default). `Run()` responses are capped at 16 MB; `List()`/`Exists()` at 8 MB.
 
 ### Runtime Health and Metadata
 
-With `RuntimeSandboxd`, query the in-sandbox daemon. The legacy runtime returns
-`ErrUnsupportedByRuntime`. Neither call retries unless you pass
-`WithMaxAttempts`.
+With `RuntimeSandboxd`, query the in-sandbox daemon (`GET /v1/health` and
+`GET /v1/metadata`). The legacy runtime returns `ErrUnsupportedByRuntime`.
+Neither call retries unless you pass `WithMaxAttempts`.
 
 ```go
 health, err := sb.Health(ctx)   // health.Status, health.UptimeSeconds
 meta, err := sb.Metadata(ctx)   // meta.Env (non-sensitive, SANDBOX_-prefixed by default)
 ```
 
-### 5. Custom TLS / Transport
+### 6. Custom TLS / Transport
 
 If your Gateway uses HTTPS with a private CA, provide a custom transport:
 
@@ -225,14 +270,17 @@ defer ttl.DeleteAll(ctx)
 All options are documented on the `Options` struct in
 [options.go](sandbox/options.go). Key fields:
 
-- `WarmPoolName`: passed per-sandbox to `CreateSandbox`.
+- `WarmPoolName`: passed per-sandbox to `CreateSandbox` (or set on `Options` when calling `sandbox.New` directly).
+- `Runtime`: selects the in-sandbox runtime API — `RuntimeLegacyPython` (default) or `RuntimeSandboxd`.
+- `Connectivity`: selects the transport — `ConnectivityPortForward` (default), `ConnectivityInClusterService`, or `ConnectivityInClusterPodIP`.
+- `SandboxdRESTPort` / `SandboxdGRPCPort`: pod ports for `RuntimeSandboxd` (defaults: `8080` and `9090`).
 - `Env`: environment variables to inject into the `SandboxClaim`. Setting this
   forces a cold start from the warm pool template instead of adopting a
   pre-warmed pod, which may increase startup latency.
-- `Labels`: labels added to every `SandboxClaim` the client creates.
+- `Labels`: labels added to every `SandboxClaim` the client creates (queryable via `ListAllSandboxes` with `WithLabelSelector`).
 - `ShutdownAfter`: expire every claim this client creates after this long, so a
   crashed client does not leak sandboxes. Unset by default (no expiry).
-- `GatewayName`: set to enable Gateway mode.
+- `GatewayName`: set to enable Gateway mode (`RuntimeLegacyPython` only).
 - `APIURL`: set for Direct URL mode (takes precedence over `GatewayName`).
 - `TracerProvider`: OpenTelemetry integration.
 
@@ -255,7 +303,7 @@ result, err := client.Run(ctx, "make build",
 
 ## Retry Behavior
 
-File operations (`Read`, `Write`, `List`, `Exists`) are automatically retried (up to
+File operations (`Read`, `Write`, `List`, `Exists`, `Delete`) are automatically retried (up to
 6 attempts) on 500/502/503/504 responses and connection errors with exponential backoff.
 `WriteReader` streams from an `io.Reader` with a single request attempt because a
 reader cannot generally be replayed safely after a partial upload. Passing
@@ -269,8 +317,9 @@ The caller owns the destination and should decide whether to keep or remove any
 partially written data.
 
 **Important:** `Run()` defaults to a single attempt (no retries) because command
-execution is not idempotent. Use `WithMaxAttempts` to opt in to retries for
-idempotent commands:
+execution is not idempotent. On `RuntimeLegacyPython`, use `WithMaxAttempts` to
+opt in to retries for idempotent commands (`RuntimeSandboxd` always issues a
+single gRPC `Execute`):
 
 ```go
 result, err := client.Run(ctx, "cat /etc/hostname", sandbox.WithMaxAttempts(6))
@@ -362,9 +411,12 @@ Calling `Open()` on a client with an orphaned claim returns `ErrOrphanedClaim`.
 | `ErrWarmPoolNotFound` | The claim's SandboxWarmPool does not exist. |
 | `ErrTemplateNotFound` | The SandboxTemplate behind the warm pool does not exist. |
 | `ErrPortForwardDied` | The SPDY tunnel dropped. Call `Open()` to reconnect. |
+| `ErrNoSandboxService` | `ConnectivityInClusterService` was selected, but the Sandbox has no headless Service (`spec.service: true` is not set on the template). |
 | `ErrRetriesExhausted` | All HTTP retry attempts failed. |
 | `ErrSandboxDeleted` | The Sandbox was deleted before becoming ready. |
 | `ErrGatewayDeleted` | The Gateway was deleted during address discovery. |
+| `ErrResponseTooLarge` | Response body exceeded the 16 MB decode limit for `Run()`. |
+| `ErrUnsupportedByRuntime` | Operation is not supported by the selected runtime or transport (e.g., `Delete`, `Health`, or `Metadata` on `RuntimeLegacyPython`, or `Run` with `RuntimeSandboxd` and `APIURL`). |
 
 Non-OK HTTP responses are wrapped in `*HTTPError`, which can be extracted
 with `errors.As` to inspect the status code:
@@ -384,9 +436,9 @@ The package exports two interfaces:
   `List`, `Exists`, `IsReady`). Accept this in your APIs to enable testing with fakes. For
   sub-object access (`Commands()`, `Files()`), use the concrete `*Sandbox` type directly.
 - **`Info`**: read-only identity accessors (`ClaimName`, `SandboxName`,
-  `PodName`, `Annotations`). These are on the concrete `*Sandbox` (and the
-  `Info` interface) rather than `Handle`, so adding new accessors is not
-  a breaking change for mock implementors.
+  `PodName`, `PodIP`, `Annotations`). These are on the concrete `*Sandbox` (and the
+  `Info` interface) rather than `Handle`, so adding new accessors (such as
+  `ServiceFQDN()` on `*Sandbox`) is not a breaking change for mock implementors.
 
 ```go
 // Accept the narrow Handle interface for testability.

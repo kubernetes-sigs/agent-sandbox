@@ -41,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 // Create a test scheme with extensions types registered.
@@ -874,8 +875,9 @@ func TestUpdateStatusClearsZeroValues(t *testing.T) {
 	desired.Status.ReadyReplicas = 0
 
 	oldStatus := warmPool.Status
-	err := r.updateStatus(ctx, &oldStatus, desired)
+	requeue, err := r.updateStatus(ctx, &oldStatus, desired, false)
 	require.NoError(t, err)
+	require.Zero(t, requeue, "first status write after start must not be deferred")
 
 	var updated extensionsv1beta1.SandboxWarmPool
 	err = r.Get(ctx, types.NamespacedName{Name: warmPool.Name, Namespace: warmPool.Namespace}, &updated)
@@ -883,6 +885,189 @@ func TestUpdateStatusClearsZeroValues(t *testing.T) {
 	require.Equal(t, int32(0), updated.Status.Replicas)
 	require.Equal(t, int32(0), updated.Status.ReadyReplicas)
 	require.Equal(t, desired.Status.Selector, updated.Status.Selector)
+}
+
+func TestIsCounterOnlyStatusChange(t *testing.T) {
+	base := extensionsv1beta1.SandboxWarmPoolStatus{Replicas: 2, ReadyReplicas: 2, Selector: "a=b", ObservedGeneration: 1}
+	for _, tc := range []struct {
+		name string
+		mut  func(*extensionsv1beta1.SandboxWarmPoolStatus)
+		want bool
+	}{
+		{"replicas", func(s *extensionsv1beta1.SandboxWarmPoolStatus) { s.Replicas = 1 }, true},
+		{"readyReplicas", func(s *extensionsv1beta1.SandboxWarmPoolStatus) { s.ReadyReplicas = 0 }, true},
+		{"both counters", func(s *extensionsv1beta1.SandboxWarmPoolStatus) { s.Replicas, s.ReadyReplicas = 3, 1 }, true},
+		{"observedGeneration", func(s *extensionsv1beta1.SandboxWarmPoolStatus) { s.ObservedGeneration = 2 }, false},
+		{"selector", func(s *extensionsv1beta1.SandboxWarmPoolStatus) { s.Selector = "c=d" }, false},
+		{"counter plus observedGeneration", func(s *extensionsv1beta1.SandboxWarmPoolStatus) { s.Replicas, s.ObservedGeneration = 1, 2 }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := base.DeepCopy()
+			tc.mut(got)
+			require.Equal(t, tc.want, isCounterOnlyStatusChange(&base, got))
+		})
+	}
+}
+
+// TestReconcileStatusWriteDebounce covers the per-pool coalescing of
+// counter-only status writes: under per-member churn the pool status is
+// patched at most once per warmPoolStatusWriteInterval, deferred writes are
+// carried by a requeue and land with the latest counts, non-counter changes
+// and the first write after a controller start write through immediately,
+// and pool deletion drops the per-pool timestamp.
+func TestReconcileStatusWriteDebounce(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	poolNameHash := sandboxcontrollers.NameHash(poolName)
+	scheme := newTestScheme()
+	ctx := context.Background()
+	template := createTemplate(poolNamespace)
+	replicas := int32(2)
+	poolKey := types.NamespacedName{Namespace: poolNamespace, Name: poolName}
+	req := reconcile.Request{NamespacedName: poolKey}
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       poolName,
+			Namespace:  poolNamespace,
+			UID:        "warmpool-uid-debounce",
+			Generation: 1,
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+		},
+	}
+	readySandbox := func(suffix string) *sandboxv1beta1.Sandbox {
+		sb := createPoolSandbox(poolName, poolNamespace, poolNameHash, template, suffix)
+		sb.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: extensionsv1beta1.GroupVersion.String(),
+			Kind:       "SandboxWarmPool",
+			Name:       poolName,
+			UID:        warmPool.UID,
+			Controller: func() *bool { b := true; return &b }(),
+		}}
+		sb.Status.Conditions = []metav1.Condition{{
+			Type:   string(sandboxv1beta1.SandboxConditionReady),
+			Status: metav1.ConditionTrue,
+		}}
+		return sb
+	}
+
+	var statusPatches int
+	base := newFakeClient(scheme, template, warmPool, readySandbox("-a"), readySandbox("-b"))
+	c := interceptor.NewClient(base, interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if subResourceName == "status" {
+				statusPatches++
+			}
+			return c.SubResource(subResourceName).Patch(ctx, obj, patch, opts...)
+		},
+	})
+	now := time.Now()
+	r := &SandboxWarmPoolReconciler{
+		Client:       c,
+		Scheme:       scheme,
+		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+		now:          func() time.Time { return now },
+	}
+
+	setReady := func(t *testing.T, suffix string, ready metav1.ConditionStatus) {
+		t.Helper()
+		var sb sandboxv1beta1.Sandbox
+		require.NoError(t, c.Get(ctx, types.NamespacedName{Namespace: poolNamespace, Name: poolName + suffix}, &sb))
+		sb.Status.Conditions = []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: ready}}
+		require.NoError(t, c.Update(ctx, &sb))
+	}
+	storedStatus := func(t *testing.T) extensionsv1beta1.SandboxWarmPoolStatus {
+		t.Helper()
+		var got extensionsv1beta1.SandboxWarmPool
+		require.NoError(t, c.Get(ctx, poolKey, &got))
+		return got.Status
+	}
+
+	// First write after controller start: no timestamp for the pool yet, so
+	// it must not be deferred.
+	res, err := r.Reconcile(ctx, req)
+	require.NoError(t, err)
+	require.Zero(t, res.RequeueAfter)
+	require.Equal(t, 1, statusPatches)
+	require.Equal(t, int32(2), storedStatus(t).ReadyReplicas)
+
+	// Two counter-only changes inside the interval: neither is written; each
+	// pass schedules a requeue for the remainder of the window.
+	now = now.Add(100 * time.Millisecond)
+	setReady(t, "-a", metav1.ConditionFalse)
+	res, err = r.Reconcile(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, 900*time.Millisecond, res.RequeueAfter, "deferred write must be carried by a requeue")
+	require.Equal(t, 1, statusPatches, "counter-only change inside the interval must not be written")
+	require.Equal(t, int32(2), storedStatus(t).ReadyReplicas)
+
+	now = now.Add(400 * time.Millisecond)
+	setReady(t, "-b", metav1.ConditionFalse)
+	res, err = r.Reconcile(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, 500*time.Millisecond, res.RequeueAfter)
+	require.Equal(t, 1, statusPatches)
+
+	// At the interval boundary the write goes through with the latest counts
+	// (both changes coalesced into one patch).
+	now = now.Add(500 * time.Millisecond)
+	_, err = r.Reconcile(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, 2, statusPatches)
+	require.Equal(t, int32(0), storedStatus(t).ReadyReplicas)
+	require.Equal(t, int32(2), storedStatus(t).Replicas)
+
+	// A non-counter change (observedGeneration after a spec bump) writes
+	// through immediately even inside the interval, carrying the counters.
+	now = now.Add(100 * time.Millisecond)
+	setReady(t, "-a", metav1.ConditionTrue)
+	var current extensionsv1beta1.SandboxWarmPool
+	require.NoError(t, c.Get(ctx, poolKey, &current))
+	current.Generation = 2
+	require.NoError(t, c.Update(ctx, &current))
+	res, err = r.Reconcile(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, 3, statusPatches, "observedGeneration change must not be debounced")
+	require.Equal(t, int64(2), storedStatus(t).ObservedGeneration)
+	require.Equal(t, int32(1), storedStatus(t).ReadyReplicas)
+	require.NotEqual(t, 900*time.Millisecond, res.RequeueAfter, "write-through must not schedule a debounce requeue")
+
+	// A steady-state pass inside the interval has nothing to write and must
+	// not schedule a debounce requeue either.
+	now = now.Add(100 * time.Millisecond)
+	res, err = r.Reconcile(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, 3, statusPatches)
+
+	// A restarted controller (fresh reconciler, same cluster state) has no
+	// timestamp and writes a counter change immediately.
+	restarted := &SandboxWarmPoolReconciler{
+		Client:       c,
+		Scheme:       scheme,
+		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+		now:          func() time.Time { return now },
+	}
+	setReady(t, "-b", metav1.ConditionTrue)
+	res, err = restarted.Reconcile(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, 4, statusPatches, "first write after restart must be immediate")
+	require.Equal(t, int32(2), storedStatus(t).ReadyReplicas)
+
+	// Deleting the pool drops its debounce timestamp.
+	r.statusWriteMu.Lock()
+	_, tracked := r.lastStatusWrite[poolKey]
+	r.statusWriteMu.Unlock()
+	require.True(t, tracked, "pool should be tracked after a status write")
+	require.NoError(t, c.Delete(ctx, &current))
+	_, err = r.Reconcile(ctx, req)
+	require.NoError(t, err)
+	r.statusWriteMu.Lock()
+	_, tracked = r.lastStatusWrite[poolKey]
+	r.statusWriteMu.Unlock()
+	require.False(t, tracked, "deleted pool must not leak debounce state")
 }
 
 func TestReconcilePoolGCStuckSandboxes(t *testing.T) {
@@ -3124,4 +3309,38 @@ func TestReconcileFlushesStatusOnReconcilePoolError(t *testing.T) {
 		require.ErrorIs(t, err, listErr)
 		require.Zero(t, statusPatches.Load(), "updateStatus must be a no-op when reconcilePool fails before mutating status")
 	})
+}
+
+func TestUpdateStatusWritesThroughOnErrorPath(t *testing.T) {
+	// A counter-only change inside the debounce interval is deferred on the
+	// happy path, but Reconcile asks for write-through when reconcilePool
+	// returned an error: the next pass arrives under error backoff, so a
+	// deferred write could freeze the counters far longer than the interval
+	// (the #1850 shape #1852 fixed).
+	ctx := context.Background()
+	scheme := newTestScheme()
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default"},
+		Status:     extensionsv1beta1.SandboxWarmPoolStatus{Replicas: 3, ReadyReplicas: 3},
+	}
+	r := SandboxWarmPoolReconciler{Client: newFakeClient(scheme, warmPool), Scheme: scheme}
+
+	first := warmPool.DeepCopy()
+	first.Status.ReadyReplicas = 2
+	requeue, err := r.updateStatus(ctx, &warmPool.Status, first, false)
+	require.NoError(t, err)
+	require.Zero(t, requeue)
+
+	second := first.DeepCopy()
+	second.Status.ReadyReplicas = 1
+	requeue, err = r.updateStatus(ctx, &first.Status, second, false)
+	require.NoError(t, err)
+	require.Positive(t, requeue, "counter-only change inside the interval is deferred on the happy path")
+
+	requeue, err = r.updateStatus(ctx, &first.Status, second, true)
+	require.NoError(t, err)
+	require.Zero(t, requeue, "write-through must not defer")
+	var updated extensionsv1beta1.SandboxWarmPool
+	require.NoError(t, r.Get(ctx, types.NamespacedName{Name: warmPool.Name, Namespace: warmPool.Namespace}, &updated))
+	require.Equal(t, int32(1), updated.Status.ReadyReplicas)
 }

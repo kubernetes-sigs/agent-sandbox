@@ -23,6 +23,9 @@
 {{- if hasKey .Values.controller "enableRESTClientMetrics" }}
 - --enable-rest-client-metrics={{ .Values.controller.enableRESTClientMetrics }}
 {{- end }}
+{{- if hasKey .Values.controller "enableOpenMetrics" }}
+- --metrics-enable-openmetrics={{ .Values.controller.enableOpenMetrics }}
+{{- end }}
 {{- if hasKey .Values.controller "pprofBlockProfileRate" }}
 - --pprof-block-profile-rate={{ .Values.controller.pprofBlockProfileRate }}
 {{- end }}

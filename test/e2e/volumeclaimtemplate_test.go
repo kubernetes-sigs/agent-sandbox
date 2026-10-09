@@ -192,3 +192,45 @@ func TestSandboxVolumeClaimTemplatesImmutable(t *testing.T) {
 		})
 	}
 }
+
+func TestSandboxVolumeClaimTemplatesValidation(t *testing.T) {
+	newVCT := func(name string) sandboxv1beta1.PersistentVolumeClaimTemplate {
+		return sandboxv1beta1.PersistentVolumeClaimTemplate{
+			EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: name},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				Resources:   corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}},
+			},
+		}
+	}
+	var tooMany []sandboxv1beta1.PersistentVolumeClaimTemplate
+	for i := range 33 {
+		tooMany = append(tooMany, newVCT(fmt.Sprintf("vol-%d", i)))
+	}
+
+	cases := []struct {
+		name    string
+		vcts    []sandboxv1beta1.PersistentVolumeClaimTemplate
+		wantErr string
+	}{
+		{"empty name", []sandboxv1beta1.PersistentVolumeClaimTemplate{newVCT("")}, "metadata.name must not be empty"},
+		{"duplicate names", []sandboxv1beta1.PersistentVolumeClaimTemplate{newVCT("data"), newVCT("data")}, "volumeClaimTemplates names must be unique"},
+		{"too many", tooMany, "must have at most 32 items"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tc := framework.NewTestContext(t)
+			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("sandbox-vct-invalid-%d", time.Now().UnixNano())}}
+			require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
+
+			sb := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "vct-invalid", Namespace: ns.Name},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodTemplate:          sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "pause", Image: "registry.k8s.io/pause:3.10"}}}},
+					VolumeClaimTemplates: c.vcts,
+				}},
+			}
+			require.ErrorContains(t, tc.CreateWithCleanup(t.Context(), sb), c.wantErr)
+		})
+	}
+}

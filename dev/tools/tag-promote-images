@@ -16,10 +16,18 @@
 import os
 import sys
 import argparse
+import re
 import subprocess
 import time
 
-from shared.git_ops import run_command, validate_tag, check_tag_exists, check_local_repo_state, create_and_push_tag
+from shared.git_ops import (
+    run_command,
+    validate_tag,
+    check_tag_exists,
+    check_local_repo_state,
+    create_and_push_tag,
+    is_stable_release_tag,
+)
 
 # The local clone of k8s.io repo relative to where this script is executed (i.e. make release-promote)
 DEFAULT_K8S_IO_DIR = "../../kubernetes/k8s.io"
@@ -34,6 +42,10 @@ IMAGES_TO_PROMOTE = [
     "python-runtime-sandbox",
     "sandbox-router-go"
 ]
+
+# Chart artifact, promoted separately from IMAGES_TO_PROMOTE (stable releases only).
+CHART_ARTIFACT_NAME = "charts/agent-sandbox"
+STAGING_CHART_REPO = f"{STAGING_REPO_BASE}/charts/agent-sandbox"
 
 # Git Remotes defaults are controlled by CLI arguments
 
@@ -136,6 +148,38 @@ def get_latest_digest(image_name, tag):
     return None
 
 
+def get_chart_digest(chart_version):
+    """Polls the staging OCI chart repo for the digest of an exact version tag.
+
+    Unlike images, helm push tags the chart with the exact version, so this
+    looks up one exact tag instead of a date-pattern filter.
+    """
+    print(f"   Searching {STAGING_CHART_REPO} for tag: {chart_version}")
+
+    # Wait up to 90 minutes (90 * 60s)
+    for i in range(90):
+        try:
+            out = run_command(
+                [
+                    "gcloud", "container", "images", "list-tags",
+                    STAGING_CHART_REPO,
+                    f"--filter=tags~^{re.escape(chart_version)}$",
+                    "--format=get(digest)",
+                    "--limit=1",
+                ],
+                capture_output=True
+            )
+            if out:
+                return out
+        except subprocess.CalledProcessError:
+            pass
+
+        time.sleep(60)
+        print(f"   [Wait: {i+1}m] Still waiting for chart...", flush=True)
+
+    return None
+
+
 def parse_image_name(line):
     """Extracts the image name from a line starting with '- name:'.
 
@@ -152,8 +196,26 @@ def parse_image_name(line):
     return token.strip("'\"")
 
 
+def _digest_and_tags(value, default_tag):
+    """Normalizes a collected_digests value into (digest, destination_tags).
+
+    A value is either a bare digest string (tagged with default_tag), or a
+    (digest, extra_tags) pair for an artifact needing more than one tag --
+    e.g. the chart, tagged with both the release tag and its bare semver.
+    """
+    if isinstance(value, tuple):
+        digest, extra_tags = value
+        tags = [default_tag] + [t for t in extra_tags if t != default_tag]
+        return digest, tags
+    return value, [default_tag]
+
+
+def _format_tag_list(tags):
+    return "[" + ", ".join(f'"{t}"' for t in tags) + "]"
+
+
 def update_images_yaml(yaml_path, tag, collected_digests):
-    """Updates images.yaml with new digests for promoted images."""
+    """Updates images.yaml with new digests for promoted images/artifacts."""
     if not os.path.exists(yaml_path):
         print(f"❌ {yaml_path} does not exist.")
         sys.exit(1)
@@ -164,6 +226,7 @@ def update_images_yaml(yaml_path, tag, collected_digests):
 
     new_lines = []
     active_image_block = None
+    active_tags = [tag]
     existing_images = set()
     inserted_digests = set()
     all_target_images = set(IMAGES_TO_PROMOTE) | set(collected_digests.keys())
@@ -196,12 +259,15 @@ def update_images_yaml(yaml_path, tag, collected_digests):
         if img_name is not None:
             if img_name in all_target_images:
                 active_image_block = img_name
+                _, active_tags = _digest_and_tags(collected_digests.get(img_name), tag)
                 existing_images.add(img_name)
             else:
                 active_image_block = None
+                active_tags = [tag]
 
-        # If inside an active image block, skip old entries matching this tag to avoid duplicates
-        if active_image_block and (f'"{tag}"' in line or f"'{tag}'" in line):
+        # If inside an active image block, skip old entries matching any of
+        # this run's destination tags to avoid duplicates on reruns.
+        if active_image_block and any(f'"{t}"' in line or f"'{t}'" in line for t in active_tags):
             print(f"   Removing old tag entry in {active_image_block}: {line.strip()}")
             continue
 
@@ -209,10 +275,10 @@ def update_images_yaml(yaml_path, tag, collected_digests):
 
         # If inside active block, look for 'dmap:' and append new digest
         if active_image_block and "dmap:" in line and active_image_block not in inserted_digests:
-            digest = collected_digests.get(active_image_block)
+            digest, tags = _digest_and_tags(collected_digests.get(active_image_block), tag)
             if digest:
                 indent = line.find("dmap:") + 2
-                new_entry = f'{" " * indent}"{digest}": ["{tag}"]\n'
+                new_entry = f'{" " * indent}"{digest}": {_format_tag_list(tags)}\n'
                 new_lines.append(new_entry)
                 inserted_digests.add(active_image_block)
                 print(f"   Updated {active_image_block}")
@@ -224,14 +290,14 @@ def update_images_yaml(yaml_path, tag, collected_digests):
             images_to_append.append(img)
 
     for img in images_to_append:
-        digest = collected_digests.get(img)
+        digest, tags = _digest_and_tags(collected_digests.get(img), tag)
         if not digest:
             continue
         if new_lines and not new_lines[-1].endswith("\n"):
             new_lines[-1] += "\n"
         new_lines.append(f"{base_indent}- name: {img}\n")
         new_lines.append(f"{base_indent}  dmap:\n")
-        new_lines.append(f'{base_indent}    "{digest}": ["{tag}"]\n')
+        new_lines.append(f'{base_indent}    "{digest}": {_format_tag_list(tags)}\n')
         inserted_digests.add(img)
         print(f"   Added new image block for {img}")
 
@@ -309,6 +375,22 @@ def main():
             sys.exit(1)
         print(f"✅ Found {image}: {digest}")
         collected_digests[image] = digest
+
+    # --- Step 2b: Wait for the Staging Helm Chart (stable releases only) ---
+    # Charts are only published for stable tags; skip otherwise to avoid a
+    # pointless 90-minute timeout.
+    if is_stable_release_tag(tag):
+        chart_version = tag[1:]  # strip the leading 'v'
+        print(f"--- Step 2b: Waiting for Staging Chart ({CHART_ARTIFACT_NAME}) ---")
+        chart_digest = get_chart_digest(chart_version)
+        print("")
+        if not chart_digest:
+            print(f"❌ Timeout waiting for chart {CHART_ARTIFACT_NAME}:{chart_version}. Please check Cloud Build logs.")
+            sys.exit(1)
+        print(f"✅ Found {CHART_ARTIFACT_NAME}: {chart_digest}")
+        collected_digests[CHART_ARTIFACT_NAME] = (chart_digest, [chart_version])
+    else:
+        print(f"ℹ️  {tag} is not a stable release tag; skipping Helm chart promotion.")
 
     # --- Step 3: Create Promotion PR ---
     print(f"--- Step 3: Creating Promotion PR in {k8s_io_dir} ---")

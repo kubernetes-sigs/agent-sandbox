@@ -41,7 +41,7 @@
     "@types/node": "^22.0.0",
     "@types/ws": "^8.18.1",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.2"
+    "vitest": "^5.0.3"
   },
   "dependencies": {
     "@kubernetes/client-node": "^2.0.0",

@@ -98,6 +98,7 @@ spec:
                             type: string
                           type: object
                         name:
+                          maxLength: 253
                           type: string
                       type: object
                     spec:
@@ -191,8 +192,18 @@ spec:
                   required:
                   - spec
                   type: object
+                  x-kubernetes-validations:
+                  - message: metadata.name must not be empty
+                    rule: has(self.metadata) && has(self.metadata.name) && size(self.metadata.name)
+                      > 0
+                maxItems: 32
                 type: array
                 x-kubernetes-list-type: atomic
+                x-kubernetes-validations:
+                - message: volumeClaimTemplates names must be unique
+                  rule: self.all(a, !has(a.metadata) || !has(a.metadata.name) || self.exists_one(b,
+                    has(b.metadata) && has(b.metadata.name) && b.metadata.name ==
+                    a.metadata.name))
               warmPoolRef:
                 properties:
                   name:

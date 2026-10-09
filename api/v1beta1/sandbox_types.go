@@ -187,6 +187,7 @@ type EmbeddedObjectMetadata struct {
 	// definition.
 	// Cannot be updated.
 	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names#names
+	// +kubebuilder:validation:MaxLength=253
 	// +optional
 	Name string `json:"name,omitempty"`
 
@@ -215,6 +216,7 @@ type PodTemplate struct {
 	ObjectMeta PodMetadata `json:"metadata"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.metadata) && has(self.metadata.name) && size(self.metadata.name) > 0",message="metadata.name must not be empty"
 type PersistentVolumeClaimTemplate struct {
 	// metadata is the PVC's metadata.
 	// +optional
@@ -280,6 +282,9 @@ type SandboxBlueprint struct {
 	// object is deleted.
 	// On a Sandbox this list is immutable after creation.
 	// NOTE: This list is atomic. Updates to this field will replace the entire list rather than merging with existing entries.
+	// Each entry must have a unique, non-empty metadata.name.
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:XValidation:rule="self.all(a, !has(a.metadata) || !has(a.metadata.name) || self.exists_one(b, has(b.metadata) && has(b.metadata.name) && b.metadata.name == a.metadata.name))",message="volumeClaimTemplates names must be unique"
 	// +optional
 	// +listType=atomic
 	VolumeClaimTemplates []PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`

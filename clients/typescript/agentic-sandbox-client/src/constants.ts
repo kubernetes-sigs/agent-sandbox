@@ -69,6 +69,18 @@ export const ERROR_DETAIL_MAX_BYTES = 512;
 export const PORT_FORWARD_DATA_CHANNEL = 0;
 export const PORT_FORWARD_ERROR_CHANNEL = 1;
 
+// WebSocket subprotocols offered on the port-forward upgrade, newest first.
+// Matches @kubernetes/client-node's WebSocketHandler list (2.0.0) so the
+// apiserver negotiates the same channel protocol as client-node-based tools;
+// revisit if client-node changes its list.
+export const PORT_FORWARD_SUBPROTOCOLS: readonly string[] = [
+  "v5.channel.k8s.io",
+  "v4.channel.k8s.io",
+  "v3.channel.k8s.io",
+  "v2.channel.k8s.io",
+  "channel.k8s.io",
+];
+
 // Non-empty error-channel payloads are diagnostic text, not stream data; cap
 // how much of it is retained before the pair is torn down.
 export const MAX_ERROR_CHANNEL_PAYLOAD_BYTES = 4 * 1024;

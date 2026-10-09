@@ -15,7 +15,7 @@
 
 import re
 
-from .exceptions import SandboxNotFoundError
+from .exceptions import SandboxNotFoundError, SandboxWarmPoolMismatchError
 
 
 _DNS1123_SUBDOMAIN_RE = re.compile(
@@ -39,6 +39,16 @@ def validate_claim_name(name: str) -> None:
         )
 
 
+def validate_claim_warmpool(
+    claim_name: str, existing_pool: str | None, expected_pool: str
+) -> None:
+    """Validate that a SandboxClaim references the expected SandboxWarmPool."""
+    if existing_pool != expected_pool:
+        raise SandboxWarmPoolMismatchError(
+            f"SandboxClaim '{claim_name}' references warm pool '{existing_pool}', not '{expected_pool}'."
+        )
+
+
 def validate_claim_for_adoption(claim: dict | None, claim_name: str, warmpool: str) -> None:
     """Check the pool, deletion state and identity needed for a UID-pinned watch."""
     if claim is None:
@@ -49,10 +59,7 @@ def validate_claim_for_adoption(claim: dict | None, claim_name: str, warmpool: s
     if metadata.get("deletionTimestamp"):
         raise ValueError(f"SandboxClaim '{claim_name}' is terminating.")
     existing_pool = (claim.get("spec") or {}).get("warmPoolRef", {}).get("name")
-    if existing_pool != warmpool:
-        raise ValueError(
-            f"SandboxClaim '{claim_name}' references warm pool '{existing_pool}', not '{warmpool}'."
-        )
+    validate_claim_warmpool(claim_name, existing_pool, warmpool)
     for field in ("uid", "resourceVersion"):
         if not isinstance(metadata.get(field), str) or not metadata[field]:
             raise ValueError(f"SandboxClaim '{claim_name}' is missing metadata.{field}.")

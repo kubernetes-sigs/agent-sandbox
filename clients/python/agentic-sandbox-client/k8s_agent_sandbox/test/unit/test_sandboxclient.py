@@ -577,6 +577,76 @@ class TestSandboxClient(unittest.TestCase):
         with self.assertRaises(SandboxNotFoundError):
             self.client.get_sandbox_claim_warmpool_name("my-claim", "my-namespace")
 
+    def test_get_sandbox_with_matching_warmpool_name(self):
+        self.mock_k8s_helper.get_sandbox_claim.return_value = {
+            "spec": {"warmPoolRef": {"name": "my-warmpool"}},
+        }
+        self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
+        self.mock_k8s_helper.get_sandbox.return_value = {"metadata": {}}
+        mock_new_sandbox = MagicMock()
+        self.mock_sandbox_class.return_value = mock_new_sandbox
+
+        sandbox = self.client.get_sandbox(
+            "my-claim", "my-namespace", warmpool_name="my-warmpool"
+        )
+
+        self.assertEqual(sandbox, mock_new_sandbox)
+        self.mock_k8s_helper.get_sandbox_claim.assert_called_once_with(
+            "my-claim", "my-namespace"
+        )
+
+    def test_get_sandbox_with_mismatched_warmpool_name_raises_value_error(self):
+        from k8s_agent_sandbox.exceptions import SandboxWarmPoolMismatchError
+
+        self.mock_k8s_helper.get_sandbox_claim.return_value = {
+            "spec": {"warmPoolRef": {"name": "other-warmpool"}},
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "references warm pool 'other-warmpool', not 'expected-warmpool'",
+        ) as ctx:
+            self.client.get_sandbox(
+                "my-claim", "my-namespace", warmpool_name="expected-warmpool"
+            )
+
+        self.assertIsInstance(ctx.exception, SandboxWarmPoolMismatchError)
+        self.mock_k8s_helper.resolve_sandbox_name.assert_not_called()
+
+    def test_get_sandbox_lookup_value_error_closes_existing_and_wraps_not_found(self):
+        existing = MagicMock()
+        self.client._active_connection_sandboxes[("my-namespace", "my-claim")] = existing
+        self.mock_k8s_helper.resolve_sandbox_name.side_effect = ValueError("invalid parameter")
+
+        with self.assertRaises(SandboxNotFoundError):
+            self.client.get_sandbox("my-claim", "my-namespace")
+
+        existing.close_connection.assert_called_once()
+        self.assertIn(
+            ("my-namespace", "my-claim"),
+            self.client._active_connection_sandboxes,
+        )
+
+    def test_delete_sandbox_in_registry_reraises_on_error(self):
+        mock_sandbox = MagicMock()
+        mock_sandbox.terminate.side_effect = RuntimeError("apiserver 500")
+        self.client._active_connection_sandboxes[("test-namespace", "test-claim")] = mock_sandbox
+
+        with self.assertRaisesRegex(RuntimeError, "apiserver 500"):
+            self.client.delete_sandbox("test-claim", "test-namespace")
+
+        self.assertIn(
+            ("test-namespace", "test-claim"),
+            self.client._active_connection_sandboxes,
+        )
+
+    def test_delete_sandbox_not_in_registry_reraises_on_error(self):
+        with patch.object(
+            self.client, "_delete_claim", side_effect=RuntimeError("apiserver 500")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "apiserver 500"):
+                self.client.delete_sandbox("test-claim", "test-namespace")
+
 
 class SandboxHandler(BaseHTTPRequestHandler):
     """Minimal api handler with basic routing to exercise error paths."""

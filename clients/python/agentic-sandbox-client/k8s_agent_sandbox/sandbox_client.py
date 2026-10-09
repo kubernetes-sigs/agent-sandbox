@@ -26,7 +26,11 @@ from typing import List, Dict, Tuple, TypeVar, Generic, Type
 from kubernetes import client
 from kubernetes.client import ApiException
 
-from .claim_adoption import validate_claim_name, validate_claim_for_adoption
+from .claim_adoption import (
+    validate_claim_name,
+    validate_claim_for_adoption,
+    validate_claim_warmpool,
+)
 
 # Import all tracing components from the trace_manager module
 from .trace_manager import (
@@ -41,7 +45,7 @@ from .models import (
 from .k8s_helper import K8sHelper
 from .pod_metadata import build_pod_metadata, validate_labels
 from .utils import construct_sandbox_claim_lifecycle_spec
-from .exceptions import SandboxNotFoundError
+from .exceptions import SandboxNotFoundError, SandboxWarmPoolMismatchError
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -250,6 +254,7 @@ class SandboxClient(Generic[T]):
         claim_name: str,
         namespace: str = "default",
         resolve_timeout: int = 30,
+        warmpool_name: str | None = None,
     ) -> T:
         """
         Retrieves an existing sandbox handle given a sandbox claim name.
@@ -260,6 +265,11 @@ class SandboxClient(Generic[T]):
             namespace: Kubernetes namespace the claim lives in.
             resolve_timeout: Seconds to wait while resolving the sandbox
                 name from the claim status.
+            warmpool_name: Optional SandboxWarmPool name to validate against
+                the existing claim's ``spec.warmPoolRef.name``.
+                When supplied and the claim references a different
+                warmpool, ``ValueError`` is raised before returning a
+                handle.
         Example:
 
             >>> client = SandboxClient()
@@ -273,10 +283,20 @@ class SandboxClient(Generic[T]):
 
         # Check if the sandbox actually exists in Kubernetes
         try:
+            if warmpool_name is not None:
+                existing_warmpool = self.get_sandbox_claim_warmpool_name(
+                    claim_name, namespace
+                )
+                validate_claim_warmpool(claim_name, existing_warmpool, warmpool_name)
             sandbox_id = self.k8s_helper.resolve_sandbox_name(claim_name, namespace, timeout=resolve_timeout)
             sandbox_object = self.k8s_helper.get_sandbox(sandbox_id, namespace)
             if not sandbox_object:
                 raise SandboxNotFoundError(f"Underlying Sandbox '{sandbox_id}' not found.")
+        except SandboxWarmPoolMismatchError:
+            # Warmpool mismatch is a signed-off refusal — propagate
+            # untouched so the caller sees the security-relevant reason
+            # rather than a generic "not found" wrap.
+            raise
         except Exception as e:
             if existing:
                 # A failed lookup doesn't mean the claim is gone, and cleanup
@@ -351,14 +371,11 @@ class SandboxClient(Generic[T]):
         """
         key = (namespace, claim_name)
         sandbox = self._active_connection_sandboxes.get(key)
-        try:
-            if sandbox:
-                sandbox.terminate()
-                self._active_connection_sandboxes.pop(key, None)
-            else:
-                self._delete_claim(claim_name, namespace)
-        except Exception as e:
-            logging.error(f"Failed to delete sandbox '{claim_name}' in namespace '{namespace}': {e}")
+        if sandbox:
+            sandbox.terminate()
+            self._active_connection_sandboxes.pop(key, None)
+        else:
+            self._delete_claim(claim_name, namespace)
             
     def delete_all(self) -> None:
         """

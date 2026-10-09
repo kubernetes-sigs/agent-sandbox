@@ -300,6 +300,23 @@ func TestExtractRejectsPromautoImports(t *testing.T) {
 	require.ErrorContains(t, err, "importing github.com/prometheus/client_golang/prometheus/promauto is not supported")
 }
 
+// TestExtractAllowsPromhttpImports covers the prometheus subpackage allowlist:
+// a file that imports only an allowlisted subpackage (promhttp, which serves
+// metrics rather than declaring them) must be skipped silently, with no metric
+// extracted and no error raised.
+func TestExtractAllowsPromhttpImports(t *testing.T) {
+	dir := sourceDir(t, map[string]string{
+		"handler.go": "package fake\n\nimport (\n" +
+			"\t\"github.com/prometheus/client_golang/prometheus/promhttp\"\n" +
+			")\n\n" +
+			"var Handler = promhttp.Handler()\n",
+	})
+
+	got, err := extract(dir)
+	require.NoError(t, err)
+	require.Empty(t, got)
+}
+
 // TestExtractRejectsBuildConstraints carries the license header every file in
 // this repository starts with, so the directive is checked against the comment
 // layout the generator will actually meet rather than a bare fixture.

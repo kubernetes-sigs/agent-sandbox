@@ -323,3 +323,42 @@ kubectl -n agent-sandbox-system rollout restart deploy/agent-sandbox-controller
 Annotations in `additionalPodMetadata` are governed separately by a
 restricted-domain blocklist (with `cluster-autoscaler.kubernetes.io/safe-to-evict`
 exempted), not by this allowlist.
+
+## ConfigMap tuning overrides
+
+The controller reads tuning overrides from the same optional
+`agent-sandbox-config` ConfigMap described above. Keys that match a
+tunable flag name override the compiled default; explicit CLI flags
+always take precedence (CLI > ConfigMap > compiled default). The
+controller logs any ConfigMap key that is not in the allowlist below, so
+typos surface immediately instead of silently falling back to defaults.
+
+Restart the controller Deployment after changes.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `sandbox-concurrent-workers` | 100 | Max concurrent reconciles for the Sandbox controller |
+| `sandbox-claim-concurrent-workers` | 50 | Max concurrent reconciles for the SandboxClaim controller |
+| `sandbox-warm-pool-concurrent-workers` | 1 | Max concurrent reconciles for the SandboxWarmPool controller |
+| `sandbox-template-concurrent-workers` | 1 | Max concurrent reconciles for the SandboxTemplate controller |
+| `sandbox-warm-pool-max-batch-size` | 300 | Max batch size for parallel sandbox creation/deletion |
+| `sandbox-warm-pool-replenish-delay` | 0s | Defer replacement sandbox creation during claim bursts (0 = immediate) |
+| `sandbox-warm-pool-max-refill-rate` | 0 | Max replacement sandboxes/sec per pool (0 = unpaced) |
+| `sandbox-claim-warm-candidate-grace-period` | 2s | How long a SandboxClaim waits for a warm candidate Pod IP before cold creation |
+| `sandbox-warm-pool-readiness-grace-period` | 5m | How long a warm pool sandbox may stay non-Ready before it is considered stuck |
+| `sandbox-warm-pool-unschedulable-recheck-interval` | 1m | Re-check interval for pools holding unschedulable sandboxes past the grace period |
+| `enable-warm-pool-eviction` | true | Mark warm-pool pods as ready-to-evict |
+| `disable-sandbox-events` | false | Disable Event emission from the Sandbox controller |
+| `disable-claim-events` | false | Disable Event emission from the SandboxClaim controller |
+| `disable-claim-observability-annotations` | false | Skip persisting SandboxClaim observability annotations |
+| `sandbox-write-behind-window` | 0s | Coalescing window for Sandbox metadata-only writes (0 = disabled) |
+| `kube-api-qps` | -1 | Client-side QPS limit (-1 = no limit) |
+| `kube-api-burst` | 10 | Client-side burst limit |
+| `api-connections` | 1 | Number of independent HTTP/2 connections for non-watch API traffic |
+| `separate-watch-connection` | false | Give informer list/watch streams a dedicated HTTP/2 connection |
+| `pprof-block-profile-rate` | 1000000 | Block profile sampling rate (ns) |
+| `pprof-mutex-profile-fraction` | 10 | Mutex contention sampling fraction |
+
+Keys not in this list are ignored and logged as warnings. Documentation-only
+keys (prefixed with `_` or `.`) and the `allowed-label-domains` key (consumed
+via volume mount) are silently skipped.

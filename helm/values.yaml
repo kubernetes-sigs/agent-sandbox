@@ -101,6 +101,11 @@ podSecurityContext: null
 #     type: RuntimeDefault
 containerSecurityContext: null
 
+# The controller reads tuning overrides from an optional user-created
+# agent-sandbox-config ConfigMap (see docs/configuration.md). The chart
+# does not ship this ConfigMap to avoid ownership conflicts with existing
+# installs that already created it for allowed-label-domains.
+
 service:
   # name sets the name of the controller Service that exposes the metrics endpoint.
   name: agent-sandbox-controller

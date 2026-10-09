@@ -1132,10 +1132,10 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                 error_code=0,
             )
 
-            before_count = prometheus_client.REGISTRY.get_sample_value('sandbox_client_suspend_latency_ms_count', labels={'status': 'success'}) or 0.0
+            before_count = prometheus_client.REGISTRY.get_sample_value('sandbox_client_suspend_latency_seconds_count', labels={'status': 'success'}) or 0.0
             result = self.sandbox.suspend(snapshot_before_suspend=True)
 
-            after_count = prometheus_client.REGISTRY.get_sample_value('sandbox_client_suspend_latency_ms_count', labels={'status': 'success'}) or 0.0
+            after_count = prometheus_client.REGISTRY.get_sample_value('sandbox_client_suspend_latency_seconds_count', labels={'status': 'success'}) or 0.0
             self.assertEqual(after_count, before_count + 1.0)
             self.assertTrue(result.success)
             self.mock_k8s_helper.custom_objects_api.patch_namespaced_custom_object.assert_called_once_with(
@@ -1239,10 +1239,10 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                 "status": "patched"
             }
 
-            before_count = prometheus_client.REGISTRY.get_sample_value('sandbox_client_resume_latency_ms_count', labels={'status': 'success'}) or 0.0
+            before_count = prometheus_client.REGISTRY.get_sample_value('sandbox_client_resume_latency_seconds_count', labels={'status': 'success'}) or 0.0
             result = self.sandbox.resume()
 
-            after_count = prometheus_client.REGISTRY.get_sample_value('sandbox_client_resume_latency_ms_count', labels={'status': 'success'}) or 0.0
+            after_count = prometheus_client.REGISTRY.get_sample_value('sandbox_client_resume_latency_seconds_count', labels={'status': 'success'}) or 0.0
             self.assertEqual(after_count, before_count + 1.0)
             self.assertTrue(result.success)
             self.assertFalse(result.restored_from_snapshot)
@@ -1576,10 +1576,10 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             ]
         }
 
-        before_count = prometheus_client.REGISTRY.get_sample_value('sandbox_client_restore_latency_ms_count', labels={'status': 'success'}) or 0.0
+        before_count = prometheus_client.REGISTRY.get_sample_value('sandbox_client_restore_latency_seconds_count', labels={'status': 'success'}) or 0.0
         result = self.sandbox.restore(snapshot_uid="snap-uid-123")
         
-        after_count = prometheus_client.REGISTRY.get_sample_value('sandbox_client_restore_latency_ms_count', labels={'status': 'success'}) or 0.0
+        after_count = prometheus_client.REGISTRY.get_sample_value('sandbox_client_restore_latency_seconds_count', labels={'status': 'success'}) or 0.0
         self.assertEqual(after_count, before_count + 1.0)
         self.assertTrue(result.success)
         self.assertEqual(result.snapshot_uid, "snap-uid-123")

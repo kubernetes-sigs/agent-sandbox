@@ -28,7 +28,7 @@ from abc import ABC, abstractmethod
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from .metrics import sandbox_client_discovery_latency_ms
+from .metrics import sandbox_client_discovery_latency_seconds
 from .models import (
     SandboxConnectionConfig,
     SandboxDirectConnectionConfig,
@@ -175,8 +175,8 @@ class GatewayConnectionStrategy(ConnectionStrategy):
             status = "failure"
             raise
         finally:
-            latency = (time.monotonic() - start_time) * 1000
-            sandbox_client_discovery_latency_ms.labels(mode="gateway", status=status).observe(latency)
+            latency = time.monotonic() - start_time
+            sandbox_client_discovery_latency_seconds.labels(mode="gateway", status=status).observe(latency)
 
     def close(self) -> None:
         self.base_url = None
@@ -338,8 +338,8 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
             status = "failure"
             raise
         finally:
-            latency = (time.monotonic() - start_time) * 1000
-            sandbox_client_discovery_latency_ms.labels(mode="port_forward", status=status).observe(latency)
+            latency = time.monotonic() - start_time
+            sandbox_client_discovery_latency_seconds.labels(mode="port_forward", status=status).observe(latency)
 
     def close(self) -> None:
         with self._lock:
@@ -476,8 +476,8 @@ class SandboxdPodTunnelStrategy(ConnectionStrategy):
             status = "failure"
             raise
         finally:
-            latency = (time.monotonic() - start_time) * 1000
-            sandbox_client_discovery_latency_ms.labels(
+            latency = time.monotonic() - start_time
+            sandbox_client_discovery_latency_seconds.labels(
                 mode="sandboxd_pod_tunnel", status=status).observe(latency)
 
     def close(self):

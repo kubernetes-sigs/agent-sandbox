@@ -58,16 +58,16 @@ steps:
       unit: ms
       queries:
         - name: StartupLatency50
-          query: histogram_quantile(0.50, sum(rate(agent_sandbox_claim_startup_latency_ms_bucket{}[%v])) by (le))
-          threshold: 1000  # Equivalent to 1s
+          query: histogram_quantile(0.50, sum(rate(agent_sandbox_claim_startup_latency_seconds_bucket{}[%v])) by (le))
+          threshold: 1  # 1 second
           requireSamples: true
         - name: StartupLatency90
-          query: histogram_quantile(0.90, sum(rate(agent_sandbox_claim_startup_latency_ms_bucket{}[%v])) by (le))
-          threshold: 1000  # Equivalent to 1s
+          query: histogram_quantile(0.90, sum(rate(agent_sandbox_claim_startup_latency_seconds_bucket{}[%v])) by (le))
+          threshold: 1  # 1 second
           requireSamples: true
         - name: StartupLatency99
-          query: histogram_quantile(0.99, sum(rate(agent_sandbox_claim_startup_latency_ms_bucket{}[%v])) by (le))
-          threshold: 5000  # Equivalent to 5s
+          query: histogram_quantile(0.99, sum(rate(agent_sandbox_claim_startup_latency_seconds_bucket{}[%v])) by (le))
+          threshold: 5  # 5 seconds
           requireSamples: true
   - Identifier: SandboxClaimControllerStartupLatency
     Method: GenericPrometheusQuery
@@ -78,16 +78,16 @@ steps:
       unit: ms
       queries:
         - name: ControllerStartupLatency50
-          query: histogram_quantile(0.50, sum(rate(agent_sandbox_claim_controller_startup_latency_ms_bucket{}[%v])) by (le))
-          threshold: 1000
+          query: histogram_quantile(0.50, sum(rate(agent_sandbox_claim_controller_startup_latency_seconds_bucket{}[%v])) by (le))
+          threshold: 1  # 1 second
           requireSamples: true
         - name: ControllerStartupLatency90
-          query: histogram_quantile(0.90, sum(rate(agent_sandbox_claim_controller_startup_latency_ms_bucket{}[%v])) by (le))
-          threshold: 1000
+          query: histogram_quantile(0.90, sum(rate(agent_sandbox_claim_controller_startup_latency_seconds_bucket{}[%v])) by (le))
+          threshold: 1  # 1 second
           requireSamples: true
         - name: ControllerStartupLatency99
-          query: histogram_quantile(0.99, sum(rate(agent_sandbox_claim_controller_startup_latency_ms_bucket{}[%v])) by (le))
-          threshold: 5000
+          query: histogram_quantile(0.99, sum(rate(agent_sandbox_claim_controller_startup_latency_seconds_bucket{}[%v])) by (le))
+          threshold: 5  # 5 seconds
           requireSamples: true
 
 - name: Setup Sandbox Template

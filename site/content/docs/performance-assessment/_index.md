@@ -309,19 +309,19 @@ Only `rapid-burst-test.yaml` collects this metric. It measures the end-to-end ti
 
 | Metric | Prometheus query | Default threshold |
 |--------|-----------------|-------------------|
-| `StartupLatency50` | `histogram_quantile(0.50, sum(rate(agent_sandbox_claim_startup_latency_ms_bucket{}[%v])) by (le))` | 1 000 ms |
-| `StartupLatency90` | `histogram_quantile(0.90, sum(rate(agent_sandbox_claim_startup_latency_ms_bucket{}[%v])) by (le))` | 1 000 ms |
-| `StartupLatency99` | `histogram_quantile(0.99, sum(rate(agent_sandbox_claim_startup_latency_ms_bucket{}[%v])) by (le))` | 5 000 ms |
+| `StartupLatency50` | `histogram_quantile(0.50, sum(rate(agent_sandbox_claim_startup_latency_seconds_bucket{}[%v])) by (le))` | 1 000 ms |
+| `StartupLatency90` | `histogram_quantile(0.90, sum(rate(agent_sandbox_claim_startup_latency_seconds_bucket{}[%v])) by (le))` | 1 000 ms |
+| `StartupLatency99` | `histogram_quantile(0.99, sum(rate(agent_sandbox_claim_startup_latency_seconds_bucket{}[%v])) by (le))` | 5 000 ms |
 
 ### SandboxClaim controller startup latency
 
-Only `rapid-burst-test.yaml` collects this metric. It measures the time from when the SandboxClaim controller's informer first observes the SandboxClaim creation to when the controller marks it as Ready. Because the informer sees the resource only after it has been persisted by the API server, this is a subset of the `agent_sandbox_claim_startup_latency_ms_bucket` metric — the delta between the two represents time spent in the kube-apiserver plus network propagation delay (plus or minus any clock skew). This metric has no clock skew of its own, since both the start and end timestamps are recorded by the same controller. Unlike `agent_sandbox_claim_startup_latency_ms_bucket`, this metric requires no webhook and works out of the box.
+Only `rapid-burst-test.yaml` collects this metric. It measures the time from when the SandboxClaim controller's informer first observes the SandboxClaim creation to when the controller marks it as Ready. Because the informer sees the resource only after it has been persisted by the API server, this is a subset of the `agent_sandbox_claim_startup_latency_seconds_bucket` metric — the delta between the two represents time spent in the kube-apiserver plus network propagation delay (plus or minus any clock skew). This metric has no clock skew of its own, since both the start and end timestamps are recorded by the same controller. Unlike `agent_sandbox_claim_startup_latency_seconds_bucket`, this metric requires no webhook and works out of the box.
 
 | Metric | Prometheus query | Default threshold |
 |--------|-----------------|-------------------|
-| `ControllerStartupLatency50` | `histogram_quantile(0.50, sum(rate(agent_sandbox_claim_controller_startup_latency_ms_bucket{}[%v])) by (le))` | 1 000 ms |
-| `ControllerStartupLatency90` | `histogram_quantile(0.90, sum(rate(agent_sandbox_claim_controller_startup_latency_ms_bucket{}[%v])) by (le))` | 1 000 ms |
-| `ControllerStartupLatency99` | `histogram_quantile(0.99, sum(rate(agent_sandbox_claim_controller_startup_latency_ms_bucket{}[%v])) by (le))` | 5 000 ms |
+| `ControllerStartupLatency50` | `histogram_quantile(0.50, sum(rate(agent_sandbox_claim_controller_startup_latency_seconds_bucket{}[%v])) by (le))` | 1 000 ms |
+| `ControllerStartupLatency90` | `histogram_quantile(0.90, sum(rate(agent_sandbox_claim_controller_startup_latency_seconds_bucket{}[%v])) by (le))` | 1 000 ms |
+| `ControllerStartupLatency99` | `histogram_quantile(0.99, sum(rate(agent_sandbox_claim_controller_startup_latency_seconds_bucket{}[%v])) by (le))` | 5 000 ms |
 
 ### Scheduling throughput and pod startup latency
 

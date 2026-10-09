@@ -17,7 +17,20 @@
   "linter": {
     "enabled": true,
     "rules": {
-      "recommended": true
+      "recommended": true,
+      "style": {
+        "noRestrictedImports": {
+          "level": "error",
+          "options": {
+            "patterns": [
+              {
+                "group": ["@kubernetes/client-node/**"],
+                "message": "Import only from the @kubernetes/client-node package root: its dist/ internals are not public API and can disappear in any 2.x release."
+              }
+            ]
+          }
+        }
+      }
     }
   },
   "javascript": {

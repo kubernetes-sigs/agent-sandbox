@@ -59,12 +59,12 @@ def record_latency(metric):
             except Exception as e:
                 if not getattr(self, "_skip_latency_metric", False):
                     status = "failure"
-                    duration = (time.perf_counter() - start_time) * 1000.0
+                    duration = time.perf_counter() - start_time
                     metric.labels(status=status).observe(duration)
                 raise
             finally:
                 if response is not None and not getattr(self, "_skip_latency_metric", False):
-                    duration = (time.perf_counter() - start_time) * 1000.0
+                    duration = time.perf_counter() - start_time
                     status = "success" if getattr(response, "success", False) else "failure"
                     metric.labels(status=status).observe(duration)
         return wrapper

@@ -31,10 +31,10 @@ For continuous collection with the Prometheus Operator:
 Only two of the families above appear in every install; the rest depend on how the controller is run.
 
 - **Emitted by every install.** `agent_sandboxes`, recomputed on each scrape by a collector that lists every `Sandbox`, and `agent_sandbox_build_info`, a constant gauge present for the whole life of the process.
-- **Require `--extensions`.** Every `SandboxClaim` family — the `agent_sandbox_claim_*` metrics and `agent_sandbox_creation_latency_ms` — is recorded by the SandboxClaim controller, which the manager only starts when it is run with `--extensions`. Without that flag they are absent entirely, not zero. `agent_sandbox_creation_latency_ms` additionally waits for the backing `Sandbox` to reach Ready.
-- **Require a timestamp the controller does not write.** The end-to-end latency families measure from an annotation stamped by something upstream, and are not recorded when it is missing. `agent_sandbox_client_claim_startup_latency_ms` needs `agents.x-k8s.io/client-first-requested-at`, which the Go and Python SDKs stamp and hand-written manifests do not; a missing annotation is skipped silently, and only an unparseable one is logged, at `-v=1`. `agent_sandbox_claim_startup_latency_ms` needs `agents.x-k8s.io/webhook-first-observed-at` from the optional [timestamp-injection webhook](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/examples/webhook-inject-timestamp/testing_webhook_guide.md), and does log the skip at `-v=1` when it is absent.
+- **Require `--extensions`.** Every `SandboxClaim` family — the `agent_sandbox_claim_*` metrics and `agent_sandbox_creation_latency_seconds` — is recorded by the SandboxClaim controller, which the manager only starts when it is run with `--extensions`. Without that flag they are absent entirely, not zero. `agent_sandbox_creation_latency_seconds` additionally waits for the backing `Sandbox` to reach Ready.
+- **Require a timestamp the controller does not write.** The end-to-end latency families measure from an annotation stamped by something upstream, and are not recorded when it is missing. `agent_sandbox_client_claim_startup_latency_seconds` needs `agents.x-k8s.io/client-first-requested-at`, which the Go and Python SDKs stamp and hand-written manifests do not; a missing annotation is skipped silently, and only an unparseable one is logged, at `-v=1`. `agent_sandbox_claim_startup_latency_seconds` needs `agents.x-k8s.io/webhook-first-observed-at` from the optional [timestamp-injection webhook](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/examples/webhook-inject-timestamp/testing_webhook_guide.md), and does log the skip at `-v=1` when it is absent.
 
-Those last two measure across a process boundary and inherit any clock skew between the client or webhook and the controller; `agent_sandbox_claim_controller_startup_latency_ms` does not.
+Those last two measure across a process boundary and inherit any clock skew between the client or webhook and the controller; `agent_sandbox_claim_controller_startup_latency_seconds` does not.
 
 ## Label values
 
@@ -55,5 +55,5 @@ Those last two measure across a process boundary and inherit any clock skew betw
 
 ## See Also
 
-- [Performance Assessment]({{< ref "/docs/performance-assessment" >}}) — the load-test recipes that query `agent_sandbox_claim_startup_latency_ms` and `agent_sandbox_claim_controller_startup_latency_ms`, with the Prometheus queries and default thresholds they assert.
+- [Performance Assessment]({{< ref "/docs/performance-assessment" >}}) — the load-test recipes that query `agent_sandbox_claim_startup_latency_seconds` and `agent_sandbox_claim_controller_startup_latency_seconds`, with the Prometheus queries and default thresholds they assert.
 - [Sandbox Metrics]({{< ref "/docs/sandbox/metrics" >}}) — OpenTelemetry traces and metrics from the Python SDK, which are separate from the controller metrics on this page.

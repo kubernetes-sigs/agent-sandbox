@@ -49,7 +49,7 @@ trap cleanup EXIT
 ready_pods() {
   "${KUBECTL[@]}" get endpointslices \
     -l kubernetes.io/service-name=claimed-sandbox-entry \
-    -o jsonpath='{range .items[*].endpoints[?(@.conditions.ready==true)]}{.targetRef.name}{"\n"}{end}' \
+    -o go-template='{{range .items}}{{range .endpoints}}{{if .conditions.ready}}{{.targetRef.name}}{{"\n"}}{{end}}{{end}}{{end}}' \
     | sort -u
 }
 
@@ -119,6 +119,29 @@ request_hostname() {
     --connect-timeout 2 --max-time 5 --http1.1 -H 'Connection: close' "$url"
 }
 
+wait_for_service_pod() {
+  local expected="$1"
+  local deadline=$((SECONDS + 60))
+  local consecutive=0
+  local response
+  # EndpointSlice updates precede data-plane convergence. Require stable fresh connections.
+  while true; do
+    if response="$(request_hostname)" && [[ "$response" == "$expected" ]]; then
+      consecutive=$((consecutive + 1))
+    else
+      consecutive=0
+    fi
+    if [[ "$consecutive" -eq 5 ]]; then
+      return
+    fi
+    if (( SECONDS >= deadline )); then
+      echo "Service did not converge to the remaining ready Pod $expected." >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
 # Each curl uses a new connection; distribution is not strict per-request round robin.
 responses=""
 for ((i = 0; i < 30; i++)); do
@@ -140,13 +163,7 @@ if [[ "$(ready_pods)" != "$POD_B" ]]; then
   echo "The unready claimed Pod is still an eligible endpoint." >&2
   exit 1
 fi
-for ((i = 0; i < 5; i++)); do
-  response="$(request_hostname)"
-  if [[ "$response" != "$POD_B" ]]; then
-    echo "Service did not route exclusively to the remaining ready Pod." >&2
-    exit 1
-  fi
-done
+wait_for_service_pod "$POD_B"
 "${KUBECTL[@]}" exec "$POD_A" -c app -- rm /tmp/not-ready
 "${KUBECTL[@]}" --request-timeout=70s wait --for=condition=Ready "pod/$POD_A" --timeout=60s
 wait_for_ready_count 2
@@ -182,9 +199,5 @@ if [[ "$(ready_pods)" != "$POD_B" ]]; then
 fi
 "${KUBECTL[@]}" --request-timeout=190s wait --for=jsonpath='{.status.readyReplicas}'=2 \
   sandboxwarmpool/serving-pool --timeout=180s
-response="$(request_hostname)"
-if [[ "$response" != "$POD_B" ]]; then
-  echo "The remaining claimed Pod is not serving after Claim deletion." >&2
-  exit 1
-fi
+wait_for_service_pod "$POD_B"
 echo "PASS: Claim deletion leaves the remaining backend serving; the warm reserve stays excluded."

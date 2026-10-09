@@ -849,13 +849,9 @@ func (r *SandboxWarmPoolReconciler) setNotProgressing(warmPool *extensionsv1beta
 // fetching the Pod. Anything but False/Unschedulable takes the stuck-sandbox
 // path; SchedulingGated is a known gap in that set, tracked separately.
 //
-// Reading the mirror costs two things the Pod read gave us:
-//   - A Pod wedged terminating still reports Unschedulable, so it holds a slot
-//     until the Pod goes (#1748). LastTransitionTime cannot bound this --
-//     meta.SetStatusCondition only advances it when Status changes.
-//   - A sandbox controller predating the mirror writes no condition, making
-//     every member look stuck. Unreachable in-tree (both controllers ship in one
-//     binary), but possible if extensions ever runs as its own process.
+// A sandbox controller predating the mirror writes no condition, making every
+// member look stuck. Unreachable in-tree (both controllers ship in one binary),
+// but possible if extensions ever runs as its own process.
 func isSandboxPodUnschedulable(sb *sandboxv1beta1.Sandbox) bool {
 	// A terminating sandbox keeps its last mirrored condition until the sandbox
 	// controller observes the Pod's absence. Free the slot rather than holding it

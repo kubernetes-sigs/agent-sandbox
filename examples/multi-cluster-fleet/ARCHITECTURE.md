@@ -122,7 +122,7 @@ CLI/batch job.
    - Lists all `SandboxWarmPool` in the cluster with the fleet-managed label.
    - Sums `Status.Replicas` and `Status.ReadyReplicas` → `warmpool_depth`.
    - `claim_p90_ms` is **not measured yet** and is published as `null`
-     (follow-up: scrape `agent_sandbox_claim_startup_latency_ms` from the
+     (follow-up: scrape `agent_sandbox_claim_startup_latency_seconds` from the
      sandbox controller's `/metrics` endpoint). Readers treat `null` as
      unmeasured, never as `0`.
    - Lists nodes, computes crude `node_pressure_score` (allocatable-vs-used

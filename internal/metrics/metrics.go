@@ -86,12 +86,12 @@ var (
 	//   when the Sandbox carries no template annotation, or when no Sandbox was resolved at all.
 	ClaimStartupLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name: "agent_sandbox_claim_startup_latency_ms",
+			Name: "agent_sandbox_claim_startup_latency_seconds",
 			Help: "End-to-end latency from a mutating admission webhook first observing the SandboxClaim (the " +
-				"agents.x-k8s.io/webhook-first-observed-at annotation) to the claim reaching Ready in milliseconds. " +
+				"agents.x-k8s.io/webhook-first-observed-at annotation) to the claim reaching Ready in seconds. " +
 				"Note: Only recorded for claims carrying that annotation.",
 			// Buckets for latency from 100ms to 4 minutes
-			Buckets: []float64{100, 250, 500, 750, 1000, 1250, 1500, 2000, 2500, 5000, 10000, 30000, 60000, 120000, 240000},
+			Buckets: []float64{0.1, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 5, 10, 30, 60, 120, 240},
 		},
 		[]string{"launch_type", "sandbox_template"},
 	)
@@ -103,10 +103,10 @@ var (
 	//   when the Sandbox carries no template annotation, or when no Sandbox was resolved at all.
 	ClaimControllerStartupLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name: "agent_sandbox_claim_controller_startup_latency_ms",
-			Help: "Latency from the controller first observing the SandboxClaim to the claim reaching Ready in milliseconds.",
+			Name: "agent_sandbox_claim_controller_startup_latency_seconds",
+			Help: "Latency from the controller first observing the SandboxClaim to the claim reaching Ready in seconds.",
 			// Buckets for latency from 100ms to 4 minutes
-			Buckets: []float64{100, 250, 500, 750, 1000, 1250, 1500, 2000, 2500, 5000, 10000, 30000, 60000, 120000, 240000},
+			Buckets: []float64{0.1, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 5, 10, 30, 60, 120, 240},
 		},
 		[]string{"launch_type", "sandbox_template"},
 	)
@@ -118,13 +118,13 @@ var (
 	//   when the Sandbox carries no template annotation, or when no Sandbox was resolved at all.
 	ClientClaimStartupLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name: "agent_sandbox_client_claim_startup_latency_ms",
+			Name: "agent_sandbox_client_claim_startup_latency_seconds",
 			Help: "End-to-end latency from the client-recorded request time (the " +
-				"agents.x-k8s.io/client-first-requested-at annotation) to the claim reaching Ready in milliseconds. " +
+				"agents.x-k8s.io/client-first-requested-at annotation) to the claim reaching Ready in seconds. " +
 				"Note: Only recorded for claims carrying that annotation, and may be affected by clock skew " +
 				"between the client and controller.",
 			// Buckets for latency from 100ms to 4 minutes
-			Buckets: []float64{100, 250, 500, 750, 1000, 1250, 1500, 2000, 2500, 5000, 10000, 30000, 60000, 120000, 240000},
+			Buckets: []float64{0.1, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 5, 10, 30, 60, 120, 240},
 		},
 		[]string{"launch_type", "sandbox_template"},
 	)
@@ -143,9 +143,9 @@ var (
 	// claimed), not at claim adoption time.
 	SandboxCreationLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:    "agent_sandbox_creation_latency_ms",
-			Help:    "Latency from Sandbox creation to its first transition to Ready in milliseconds; source timestamps have second-level Kubernetes precision. Sandboxes in the controller's initial inventory are excluded, so startups spanning restarts, upgrades, or leader failover may be omitted. Readiness flaps do not record another sample. For warm-pool sandboxes, observed at pool-member Ready (including unclaimed pool sandboxes), not at claim adoption.",
-			Buckets: []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000, 300000, 600000},
+			Name:    "agent_sandbox_creation_latency_seconds",
+			Help:    "Latency from Sandbox creation to its first transition to Ready in seconds; source timestamps have second-level Kubernetes precision. Sandboxes in the controller's initial inventory are excluded, so startups spanning restarts, upgrades, or leader failover may be omitted. Readiness flaps do not record another sample. For warm-pool sandboxes, observed at pool-member Ready (including unclaimed pool sandboxes), not at claim adoption.",
+			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 240, 300, 600},
 		},
 		[]string{"namespace", "launch_type", "sandbox_template"},
 	)
@@ -174,12 +174,12 @@ var (
 	// - owned_by: "SandboxClaim" | "SandboxWarmPool" | "None".
 	SandboxSuspendLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name: "agent_sandbox_suspend_latency_ms",
+			Name: "agent_sandbox_suspend_latency_seconds",
 			Help: "Latency from the controller first observing operatingMode=Suspended to the Sandbox reaching " +
-				"Suspended=True (PodTerminated), in milliseconds. Note: Not recorded across controller restarts or " +
+				"Suspended=True (PodTerminated), in seconds. Note: Not recorded across controller restarts or " +
 				"leader changes, or for transitions that complete in the pass that starts them.",
 			// Buckets for latency from 50ms to 10 minutes
-			Buckets: []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000, 300000, 600000},
+			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 240, 300, 600},
 		},
 		[]string{"namespace", "sandbox_template", "owned_by"},
 	)
@@ -208,12 +208,12 @@ var (
 	// - owned_by: "SandboxClaim" | "SandboxWarmPool" | "None".
 	SandboxResumeLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name: "agent_sandbox_resume_latency_ms",
+			Name: "agent_sandbox_resume_latency_seconds",
 			Help: "Latency from the controller first observing operatingMode=Running (after a fully-suspended state) " +
-				"to Sandbox Ready, in milliseconds. Note: Not recorded across controller restarts or leader changes, " +
+				"to Sandbox Ready, in seconds. Note: Not recorded across controller restarts or leader changes, " +
 				"or for transitions that complete in the pass that starts them.",
 			// Buckets for latency from 50ms to 10 minutes; resume recreates the Pod.
-			Buckets: []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000, 300000, 600000},
+			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 240, 300, 600},
 		},
 		[]string{"namespace", "sandbox_template", "owned_by"},
 	)
@@ -347,7 +347,7 @@ func RecordClaimControllerStartupLatency(startTime time.Time, launchType, templa
 
 // RecordClientClaimStartupLatency records the duration since the client request time.
 func RecordClientClaimStartupLatency(ctx context.Context, startTime time.Time, launchType, templateName string) {
-	duration := float64(time.Since(startTime).Milliseconds())
+	duration := time.Since(startTime).Seconds()
 	if duration < 0 {
 		logger := log.FromContext(ctx)
 		logger.V(1).Info("negative latency", "duration", duration, "launchType", launchType, "templateName", templateName)
@@ -365,7 +365,7 @@ func recordLatencyDuration(histogram *prometheus.HistogramVec, duration time.Dur
 	if duration < 0 {
 		return
 	}
-	histogram.WithLabelValues(labelValues...).Observe(float64(duration.Milliseconds()))
+	histogram.WithLabelValues(labelValues...).Observe(duration.Seconds())
 }
 
 // NormalizeCreatedBy returns the createdBy label normalized to a known allow-list

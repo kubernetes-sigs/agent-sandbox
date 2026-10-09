@@ -14,7 +14,7 @@ steps:
 - name: Start Startup Latency Measurement
   measurements:
   # TODO: Replace PodStartupLatency with GenericPrometheusQuery 
-  # once agent_sandbox_creation_latency_ms metrics are available to measure 
+  # once agent_sandbox_creation_latency_seconds metrics are available to measure 
   # end-to-end controller overhead.  
   - Identifier: SandboxStartupLatency
     Method: PodStartupLatency # Warning: this only measures the downstream Pod latency, not the end-to-end Sandbox lifecycle

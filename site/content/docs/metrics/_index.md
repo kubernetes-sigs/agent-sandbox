@@ -30,11 +30,11 @@ For continuous collection with the Prometheus Operator:
 
 Three of the families above are available in every install; the rest depend on how the controller is run.
 
-- **Available in every install.** `agent_sandboxes`, recomputed on each scrape by a collector that lists every `Sandbox`; `agent_sandbox_build_info`, a constant gauge present for the whole life of the process; and `agent_sandbox_creation_latency_ms`, emitted after an eligible Sandbox first reaches Ready.
+- **Available in every install.** `agent_sandboxes`, recomputed on each scrape by a collector that lists every `Sandbox`; `agent_sandbox_build_info`, a constant gauge present for the whole life of the process; and `agent_sandbox_creation_latency_seconds`, emitted after an eligible Sandbox first reaches Ready.
 - **Require `--extensions`.** Every `SandboxClaim` family (`agent_sandbox_claim_*`) is recorded by the SandboxClaim controller, which the manager only starts when it is run with `--extensions`. Without that flag they are absent entirely, not zero.
-- **Require a timestamp the controller does not write.** The end-to-end latency families measure from an annotation stamped by something upstream, and are not recorded when it is missing. `agent_sandbox_client_claim_startup_latency_ms` needs `agents.x-k8s.io/client-first-requested-at`, which the Go and Python SDKs stamp and hand-written manifests do not; a missing annotation is skipped silently, and only an unparseable one is logged, at `-v=1`. `agent_sandbox_claim_startup_latency_ms` needs `agents.x-k8s.io/webhook-first-observed-at` from the optional [timestamp-injection webhook](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/examples/webhook-inject-timestamp/testing_webhook_guide.md), and does log the skip at `-v=1` when it is absent.
+- **Require a timestamp the controller does not write.** The end-to-end latency families measure from an annotation stamped by something upstream, and are not recorded when it is missing. `agent_sandbox_client_claim_startup_latency_seconds` needs `agents.x-k8s.io/client-first-requested-at`, which the Go and Python SDKs stamp and hand-written manifests do not; a missing annotation is skipped silently, and only an unparseable one is logged, at `-v=1`. `agent_sandbox_claim_startup_latency_seconds` needs `agents.x-k8s.io/webhook-first-observed-at` from the optional [timestamp-injection webhook](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/examples/webhook-inject-timestamp/testing_webhook_guide.md), and does log the skip at `-v=1` when it is absent.
 
-Those last two measure across a process boundary and inherit any clock skew between the client or webhook and the controller; `agent_sandbox_claim_controller_startup_latency_ms` does not.
+Those last two measure across a process boundary and inherit any clock skew between the client or webhook and the controller; `agent_sandbox_claim_controller_startup_latency_seconds` does not.
 
 ## Label values
 
@@ -42,7 +42,7 @@ Those last two measure across a process boundary and inherit any clock skew betw
 | --- | --- |
 | `namespace` | Namespace of the `Sandbox` or `SandboxClaim`. |
 | `launch_type` | `warm` when the Sandbox came from a `SandboxWarmPool`, `cold` otherwise. The claim latency histograms additionally report `unknown` when no Sandbox was resolved; `agent_sandboxes` never does, and reports a Sandbox carrying no launch-type label as `cold`. |
-| `sandbox_template` | Name of the `SandboxTemplate` resolved for the object. When none can be resolved the value is `unknown` on `agent_sandboxes` and `__unknown__` on the claim families and `agent_sandbox_creation_latency_ms`. |
+| `sandbox_template` | Name of the `SandboxTemplate` resolved for the object. When none can be resolved the value is `unknown` on `agent_sandboxes` and `__unknown__` on the claim families and `agent_sandbox_creation_latency_seconds`. |
 | `created_by` | Component that created the object, normalized to `go-client`, `python-client`, `controller`, or `unknown`. |
 | `owned_by` | `SandboxClaim` or `SandboxWarmPool` when one of those controls the `Sandbox`; `None` for any other controller, or for none at all. |
 | `ready_condition` | `true` or `false`, from the `Ready` condition of the `Sandbox`. |
@@ -54,11 +54,11 @@ Those last two measure across a process boundary and inherit any clock skew betw
 
 `agent_sandbox_claim_creation_total` is incremented once per Sandbox the controller creates or adopts for a claim, not once per claim reaching Ready. Claim latency histograms use the `agents.x-k8s.io/claim-first-ready-at` annotation to record only the first time a claim goes Ready.
 
-`agent_sandbox_creation_latency_ms` records the first Ready transition for Sandboxes newly observed after the controller's initial inventory. The controller keeps eligible Sandbox UIDs in memory until their first Ready observation or deletion; it stores no metric bookkeeping in Sandbox status or annotations. Readiness flaps, pod restarts, and suspension/resumption do not add another sample. All Sandboxes in the initial inventory are excluded, regardless of readiness, so controller restarts, upgrades, or leader failover may omit samples for Sandboxes still starting. For warm-pool members, the sample is recorded when the member first becomes Ready, including members that are never claimed.
+`agent_sandbox_creation_latency_seconds` records the first Ready transition for Sandboxes newly observed after the controller's initial inventory. The controller keeps eligible Sandbox UIDs in memory until their first Ready observation or deletion; it stores no metric bookkeeping in Sandbox status or annotations. Readiness flaps, pod restarts, and suspension/resumption do not add another sample. All Sandboxes in the initial inventory are excluded, regardless of readiness, so controller restarts, upgrades, or leader failover may omit samples for Sandboxes still starting. For warm-pool members, the sample is recorded when the member first becomes Ready, including members that are never claimed.
 
 `agent_sandboxes` needs no guard because the collector recomputes it from a live `Sandbox` list on every scrape, so its series disappear along with the sandboxes they describe, whereas every label combination the counters and histograms have observed stays in the process until it restarts.
 
 ## See Also
 
-- [Performance Assessment]({{< ref "/docs/performance-assessment" >}}) — the load-test recipes that query `agent_sandbox_claim_startup_latency_ms` and `agent_sandbox_claim_controller_startup_latency_ms`, with the Prometheus queries and default thresholds they assert.
+- [Performance Assessment]({{< ref "/docs/performance-assessment" >}}) — the load-test recipes that query `agent_sandbox_claim_startup_latency_seconds` and `agent_sandbox_claim_controller_startup_latency_seconds`, with the Prometheus queries and default thresholds they assert.
 - [Sandbox Metrics]({{< ref "/docs/sandbox/metrics" >}}) — OpenTelemetry traces and metrics from the Python SDK, which are separate from the controller metrics on this page.

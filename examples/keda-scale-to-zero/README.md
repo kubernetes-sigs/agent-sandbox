@@ -131,7 +131,7 @@ ready supply ahead of demand.
   claim→sandbox, so this is buffer sizing and `AverageValue` gives the right `pool ∝ rate`.
 - **Choosing `threshold`**: `pool = claim_rate / threshold`, so `1/threshold` = seconds of demand
   held as ready sandboxes. Set `threshold ≈ 1/T`, where `T` is the per-sandbox replenishment time
-  (pool member Sandbox → Pod `Ready`, from `agent_sandbox_creation_latency_ms_count{launch_type="warm"}`;
+  (pool member Sandbox → Pod `Ready`, from `agent_sandbox_creation_latency_seconds_count{launch_type="warm"}`;
   that series counts pool-fill Ready events, including unclaimed pool sandboxes). Lower
   `threshold` → bigger pool.
   Because `pool = rate × T`, cutting `T` (pre-pull the image) helps more than shrinking `threshold`.

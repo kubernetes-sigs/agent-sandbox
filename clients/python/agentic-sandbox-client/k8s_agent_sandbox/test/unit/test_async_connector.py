@@ -854,7 +854,7 @@ class TestAsyncDiscoveryLatencyMetric(unittest.IsolatedAsyncioTestCase):
 
     def _count(self, mode, status):
         return prometheus_client.REGISTRY.get_sample_value(
-            "sandbox_client_discovery_latency_ms_count",
+            "sandbox_client_discovery_latency_seconds_count",
             labels={"mode": mode, "status": status},
         ) or 0.0
 

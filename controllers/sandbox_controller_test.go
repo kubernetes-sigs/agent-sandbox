@@ -6753,7 +6753,7 @@ func TestRecordSandboxCreationMetrics(t *testing.T) {
 			collected := &dto.Metric{}
 			require.NoError(t, metric.Write(collected))
 			assert.Equal(t, uint64(1), collected.GetHistogram().GetSampleCount())
-			assert.InDelta(t, float64(5000), collected.GetHistogram().GetSampleSum(), 0.001)
+			assert.InDelta(t, float64(5), collected.GetHistogram().GetSampleSum(), 0.001)
 			labelValues := make(map[string]string)
 			for _, label := range collected.GetLabel() {
 				labelValues[label.GetName()] = label.GetValue()

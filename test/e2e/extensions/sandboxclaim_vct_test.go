@@ -138,8 +138,8 @@ func TestCreateSandboxClaimVolumeClaimTemplates(t *testing.T) {
 		{
 			name:                "policy=Allowed, too many VCTs rejected",
 			policy:              extensionsv1beta1.VolumeClaimTemplatesPolicyAllowed,
-			claimVCTs:           numberedVCTs(33),
-			expectedCreateError: "must have at most 32 items",
+			claimVCTs:           numberedVCTs(129),
+			expectedCreateError: "must have at most 128 items",
 		},
 	}
 

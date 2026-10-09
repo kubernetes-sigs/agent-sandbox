@@ -4257,7 +4257,7 @@ spec:
                   - message: metadata.name must not be empty
                     rule: has(self.metadata) && has(self.metadata.name) && size(self.metadata.name)
                       > 0
-                maxItems: 32
+                maxItems: 128
                 type: array
                 x-kubernetes-list-type: atomic
                 x-kubernetes-validations:

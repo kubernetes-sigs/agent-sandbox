@@ -283,7 +283,8 @@ type SandboxBlueprint struct {
 	// On a Sandbox this list is immutable after creation.
 	// NOTE: This list is atomic. Updates to this field will replace the entire list rather than merging with existing entries.
 	// Each entry must have a unique, non-empty metadata.name.
-	// +kubebuilder:validation:MaxItems=32
+	// At most 128 entries: the cap only bounds the CEL cost of the uniqueness rule.
+	// +kubebuilder:validation:MaxItems=128
 	// +kubebuilder:validation:XValidation:rule="self.all(a, !has(a.metadata) || !has(a.metadata.name) || self.exists_one(b, has(b.metadata) && has(b.metadata.name) && b.metadata.name == a.metadata.name))",message="volumeClaimTemplates names must be unique"
 	// +optional
 	// +listType=atomic

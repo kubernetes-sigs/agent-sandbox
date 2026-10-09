@@ -316,7 +316,7 @@ def test_environment_constructs_an_independent_client_with_selected_transport(mo
     assert type(configs[0]).__name__ == config_type
     assert configs[0] is not configs[1]
     if mode == "sandboxd-in-cluster":
-        assert configs[0].mode == "service-dns"
+        assert configs[0].mode == "in-cluster-service"
     first.reset()
     assert first.get_claim_evidence()["claims"][0]["namespace"] == "training"
     first.close()
@@ -364,7 +364,7 @@ def test_sandboxd_readiness_reuses_the_episode_connection_until_reset_or_close(m
                 claim_name=f"claim-{len(handles)}", sandbox_id=f"sandbox-{len(handles)}",
                 namespace=namespace, k8s_helper=helper,
                 connection_config=SandboxdInClusterConnectionConfig(
-                    mode="service-dns", grpc_port=port,
+                    mode="in-cluster-service", grpc_port=port,
                 ),
             )
             handles.append(sandbox)

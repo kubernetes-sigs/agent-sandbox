@@ -292,7 +292,7 @@ def _connection_config(mode: str, router_namespace: str):
     if mode == "in-cluster":
         return SandboxInClusterConnectionConfig()
     if mode == "sandboxd-in-cluster":
-        return SandboxdInClusterConnectionConfig(mode="service-dns")
+        return SandboxdInClusterConnectionConfig(mode="in-cluster-service")
     raise ValueError(
         f"Unsupported connection mode {mode!r}; expected 'tunnel', "
         "'in-cluster' (legacy runtime), or 'sandboxd-in-cluster'"
@@ -301,6 +301,8 @@ def _connection_config(mode: str, router_namespace: str):
 
 class SandboxFileTaskEnv(DiscreteFileTaskWrapper):
     """Construct an independent SandboxEnv inside each RLlib EnvRunner."""
+
+    env: SandboxEnv
 
     def __init__(self, config=None):
         config = dict(config or {})

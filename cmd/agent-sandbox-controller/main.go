@@ -153,7 +153,7 @@ func main() {
 	flag.BoolVar(&enableWarmPoolEviction, "enable-warm-pool-eviction", true, "Mark pods created by a warm pool as ready-to-evict by default.")
 	flag.BoolVar(&cacheLabelSelectors, "cache-label-selectors", false,
 		"Scope the manager's Pod and Service informer caches to objects carrying the sandbox tracking label ("+
-			controllers.SandboxNameHashLabel+"). The controller only ever creates/looks up Pods and Services it "+
+			sandboxv1beta1.SandboxNameHashLabel+"). The controller only ever creates/looks up Pods and Services it "+
 			"labeled itself, so on shared or high-churn clusters this cuts informer list/watch volume, JSON decode "+
 			"CPU, and cache memory from O(cluster) to O(sandboxes). CAVEAT: externally pre-provisioned resources "+
 			"that rely on the "+sandboxv1beta1.SandboxAdoptableLabel+"=true adoption path MUST also carry the "+
@@ -436,7 +436,7 @@ func main() {
 	mgrOpts.Cache = cacheOpts
 	if cacheLabelSelectors {
 		setupLog.Info("informer caches for Pods and Services scoped to the sandbox tracking label (--cache-label-selectors)",
-			"label", controllers.SandboxNameHashLabel)
+			"label", sandboxv1beta1.SandboxNameHashLabel)
 	}
 	if watchHTTPClient != nil {
 		// The manager cache builds its list/watch REST clients from this

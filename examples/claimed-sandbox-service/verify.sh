@@ -26,6 +26,15 @@ EXAMPLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KUBECTL=(kubectl "--context=$CONTEXT" "--namespace=$NAMESPACE" --request-timeout=15s)
 NAMESPACE_UID=""
 
+if ! command -v python3 >/dev/null; then
+  echo "Python 3 is required to bound kubectl exec streams on macOS/Linux." >&2
+  exit 2
+fi
+
+kubectl_exec() {
+  python3 "$EXAMPLE_DIR/exec_with_timeout.py" "${KUBECTL[@]}" exec "$@"
+}
+
 cleanup() {
   local status="$?"
   trap - EXIT
@@ -119,7 +128,7 @@ fi
 
 request_hostname() {
   local url="${1:-http://claimed-sandbox-entry/hostname}"
-  "${KUBECTL[@]}" exec allowed-client -- curl -fsS \
+  kubectl_exec allowed-client -- curl -fsS \
     --connect-timeout 2 --max-time 5 --http1.1 -H 'Connection: close' "$url"
 }
 
@@ -130,9 +139,17 @@ wait_for_service_pod() {
   local response
   # EndpointSlice updates precede data-plane convergence. Require stable fresh connections.
   while true; do
-    if response="$(request_hostname)" && [[ "$response" == "$expected" ]]; then
-      consecutive=$((consecutive + 1))
+    if response="$(request_hostname)"; then
+      if [[ "$response" == "$expected" ]]; then
+        consecutive=$((consecutive + 1))
+      else
+        consecutive=0
+      fi
     else
+      # A stalled exec stream is not an application convergence failure to retry.
+      if [[ "$?" -eq 124 ]]; then
+        return 1
+      fi
       consecutive=0
     fi
     if [[ "$consecutive" -eq 5 ]]; then
@@ -160,6 +177,8 @@ while true; do
     if [[ "$(printf '%s' "$responses" | sort -u)" == "$expected_pods" ]]; then
       break
     fi
+  elif [[ "$?" -eq 124 ]]; then
+    exit 1
   fi
   if (( SECONDS >= deadline )); then
     echo "Fresh Service connections did not reach both claimed Pods before timeout." >&2
@@ -170,7 +189,7 @@ done
 wait_for_warm_reserve
 echo "PASS: the shared Service reaches both claimed Pods and excludes the warm reserve."
 
-"${KUBECTL[@]}" exec "$POD_A" -c app -- touch /tmp/not-ready
+kubectl_exec "$POD_A" -c app -- touch /tmp/not-ready
 "${KUBECTL[@]}" --request-timeout=70s wait --for=condition=Ready=false "pod/$POD_A" --timeout=60s
 wait_for_ready_count 1
 if [[ "$(ready_pods)" != "$POD_B" ]]; then
@@ -178,7 +197,7 @@ if [[ "$(ready_pods)" != "$POD_B" ]]; then
   exit 1
 fi
 wait_for_service_pod "$POD_B"
-"${KUBECTL[@]}" exec "$POD_A" -c app -- rm /tmp/not-ready
+kubectl_exec "$POD_A" -c app -- rm /tmp/not-ready
 "${KUBECTL[@]}" --request-timeout=70s wait --for=condition=Ready "pod/$POD_A" --timeout=60s
 wait_for_ready_count 2
 echo "PASS: readiness removes and restores a claimed Pod without replacing it."
@@ -190,7 +209,7 @@ pod_ip="$("${KUBECTL[@]}" get pod "$POD_B" -o jsonpath='{.status.podIP}')"
 [[ "$pod_ip" != *:* ]] || pod_ip="[$pod_ip]"
 for target in "$service_ip:80" "$pod_ip:8000"; do
   request_hostname "http://$target/hostname" >/dev/null
-  if "${KUBECTL[@]}" exec denied-client -- curl -fsS \
+  if kubectl_exec denied-client -- curl -fsS \
     --connect-timeout 2 --max-time 5 "http://$target/hostname" >/dev/null; then
     echo "Denied caller reached $target; NetworkPolicy is not isolating the application." >&2
     exit 1

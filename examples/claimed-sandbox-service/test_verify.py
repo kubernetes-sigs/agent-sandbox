@@ -20,6 +20,7 @@ read kubeconfig or contact a cluster. They do not replace functional CNI tests.
 
 import os
 from pathlib import Path
+import signal
 import subprocess
 import tempfile
 import unittest
@@ -31,6 +32,18 @@ MOCK_KUBECTL = r"""() {
   local args=" $* "
   local count=0
   local test_dir="$VERIFIER_TEST_DIR"
+  if [[ "$VERIFIER_TEST_SCENARIO" == stalled-allowed && "$args" == *' exec allowed-client '* ]] ||
+     [[ "$VERIFIER_TEST_SCENARIO" == stalled-touch && "$args" == *'touch /tmp/not-ready '* ]] ||
+     [[ "$VERIFIER_TEST_SCENARIO" == stalled-remove && "$args" == *'rm /tmp/not-ready '* ]] ||
+     [[ "$VERIFIER_TEST_SCENARIO" == stalled-remaining && -f "$test_dir/not-ready" &&
+        "$args" == *' exec allowed-client '* ]] ||
+     [[ "$VERIFIER_TEST_SCENARIO" == stalled-denied && "$args" == *' exec denied-client '* ]]; then
+    /bin/sleep 120 &
+    printf '%s\n' "$!" > "$test_dir/stalled-pid"
+    ps -o pgid= -p "$$" > "$test_dir/stalled-group"
+    wait "$!"
+    return
+  fi
   case "$args" in
     *' get namespace '*'-o name '*) return 0 ;;
     *' get namespace '*) printf '%s' owned-test-namespace-uid ;;
@@ -66,7 +79,7 @@ MOCK_KUBECTL = r"""() {
         unavailable) return 7 ;;
         one-backend) printf '%s' pod-a; return 0 ;;
         unexpected-backend) printf '%s' unclaimed-reserve; return 0 ;;
-        converging) ;;
+        converging|stalled-*) ;;
         *) return 93 ;;
       esac
       if [[ -f "$test_dir/requests" ]]; then
@@ -119,10 +132,38 @@ class VerifyTest(unittest.TestCase):
                 "VERIFIER_TEST_DIR": directory,
                 "VERIFIER_TEST_SCENARIO": scenario,
             })
-            result = subprocess.run(
+            process = subprocess.Popen(
                 ["bash", str(VERIFY), "offline-test-context"], env=env,
-                capture_output=True, text=True, timeout=10,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                start_new_session=True,
             )
+            try:
+                stdout, stderr = process.communicate(timeout=25)
+                stalled_pid = Path(directory, "stalled-pid")
+                if stalled_pid.exists():
+                    descendant = subprocess.run(
+                        ["ps", "-o", "stat=", "-p", stalled_pid.read_text().strip()],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    self.assertTrue(
+                        descendant.returncode == 1 or descendant.stdout.strip().startswith("Z"),
+                        "The stalled exec left its local descendant running: " + descendant.stdout,
+                    )
+            except subprocess.TimeoutExpired:
+                self.fail("Verifier remained blocked instead of exiting and cleaning its namespace.")
+            finally:
+                # The failing pre-fix test must not leave its simulated exec running.
+                groups = [process.pid]
+                stalled_group = Path(directory, "stalled-group")
+                if stalled_group.exists():
+                    groups.append(int(stalled_group.read_text()))
+                for group in groups:
+                    try:
+                        os.killpg(group, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                process.communicate()
+            result = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
             self.assertTrue(Path(directory, "cleaned").exists(), result.stderr)
             return result
 
@@ -145,6 +186,29 @@ class VerifyTest(unittest.TestCase):
         result = self.run_scenario("unexpected-backend")
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("Service reached unexpected backend unclaimed-reserve", result.stderr)
+
+    def test_stalled_exec_fails_and_cleans_up(self):
+        result = self.run_scenario("stalled-allowed")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("kubectl exec exceeded its 15-second process deadline", result.stderr)
+
+    def test_stalled_readiness_marker_execs_fail_and_clean_up(self):
+        for scenario in ("stalled-touch", "stalled-remove"):
+            with self.subTest(scenario=scenario):
+                result = self.run_scenario(scenario)
+                self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
+                self.assertIn("kubectl exec exceeded its 15-second process deadline", result.stderr)
+
+    def test_stalled_remaining_backend_exec_is_not_retried(self):
+        result = self.run_scenario("stalled-remaining")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("kubectl exec exceeded its 15-second process deadline", result.stderr)
+
+    def test_stalled_denied_exec_is_not_treated_as_networkpolicy_denial(self):
+        result = self.run_scenario("stalled-denied")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("Expected a denied connection timeout, not curl/kubectl exit 124", result.stderr)
+        self.assertNotIn("PASS: ingress permits", result.stdout)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,8 @@ or persistent storage is needed for the example itself.
   [Cilium on kind](https://docs.cilium.io/en/stable/installation/kind/), before
   using the negative access checks.
 - `kubectl`, Bash, and permission to manage this example's dedicated namespace.
+- Python 3 on the local machine for automated verification (standard library
+  only; no extra packages).
 - Nodes able to pull `registry.k8s.io/e2e-test-images/agnhost:2.53`.
 
 All resources are in `claimed-sandbox-service`. Choose an explicit test context
@@ -175,6 +177,12 @@ both Service and Pod IP, and Claim deletion with continued serving. It cleans
 up only the namespace it created after checking its UID. An unenforced policy
 fails verification instead of silently skipping the denial checks.
 
+Every `kubectl exec` in the verifier has a local 15-second process deadline in
+addition to kubectl's API and curl's network timeouts. A stalled exec stream
+fails verification and terminates its local process group so cleanup can run;
+it does not count as a successful NetworkPolicy denial. Python 3 is a local
+verification dependency only, not a dependency of the application image.
+
 To run offline verifier regressions with Python's standard library (no cluster
 or Python packages required):
 
@@ -183,8 +191,8 @@ python3 test_verify.py
 ```
 
 These intercept kubectl and accelerate polling to check argument safety,
-initial forwarding convergence, bounded failures, and cleanup. They do not
-replace the functional verification against an enforcing CNI.
+initial forwarding convergence, bounded failures (including stalled exec), and
+cleanup. They do not replace the functional verification against an enforcing CNI.
 
 To remove a manually deployed example, after confirming the context and namespace:
 

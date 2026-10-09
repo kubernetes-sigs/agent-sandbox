@@ -1,0 +1,79 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: serving-template
+spec:
+  networkPolicyManagement: Managed
+  # Custom ingress and egress replace the default managed rules.
+  networkPolicy:
+    ingress:
+      - from:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: claimed-sandbox-service
+            podSelector:
+              matchLabels:
+                app.kubernetes.io/name: claimed-sandbox-client
+        ports:
+          - protocol: TCP
+            port: 8000
+    # This hostname-only application needs no outbound connections.
+    egress: []
+  podTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: claimed-sandbox-server
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: registry.k8s.io/e2e-test-images/agnhost:2.53
+          # Expose only hostname responses, not netexec's shell/upload handlers.
+          args:
+            - netexec
+            - --http-port=8000
+            - --udp-port=-1
+            - --http-override=/hostname
+          ports:
+            - name: http
+              containerPort: 8000
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          startupProbe:
+            httpGet:
+              path: /hostname
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                # The marker demonstrates an unhealthy application without replacing its Pod.
+                - test ! -f /tmp/not-ready && curl -fsS --max-time 1 http://127.0.0.1:8000/hostname >/dev/null
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 1
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

@@ -10,6 +10,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**analytics-tool**](./analytics-tool): An example of running an analytics workload in a sandbox with a companion service.
 - [**apf-insulation**](./apf-insulation): An opt-in API Priority and Fairness overlay giving the controller dedicated apiserver concurrency for high-rate claim workloads (claim path > bulk refill > events).
 - [**chrome-sandbox**](./chrome-sandbox): An example of running a Chrome browser in a sandbox.
+- [**claimed-sandbox-service**](./claimed-sandbox-service): Route application traffic through one Kubernetes Service to multiple claimed, ready Sandboxes while excluding the unclaimed warm reserve.
 - [**code-interpreter-agent-on-adk**](./code-interpreter-agent-on-adk): An example of using Agent Sandbox as a tool in Agent Development Kit (ADK).
 - [**composing-sandbox-nw-policies**](./composing-sandbox-nw-policies): An example of composing network policies for sandboxes.
 - [**containarium-execution-scoped-token**](./containarium-execution-scoped-token): An example of execution-scoped credentials in a reused Sandbox: a run-bound token delivered only through sandboxd's `ProcessConfig.env_vars`, egress pinned to a credential proxy with Cilium, and the token revoked when the process exits.

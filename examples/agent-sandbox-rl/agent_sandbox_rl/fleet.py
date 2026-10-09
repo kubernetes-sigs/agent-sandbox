@@ -42,6 +42,7 @@ from . import constants, sizing
 from .cluster import Cluster, ClusterRegistry
 from .config import ClusterConfig, FleetConfig, run_namespace
 from .exceptions import (
+    SandboxStartError,
     FleetError,
     FleetOvercommitError,
     OwnedByAnotherRunError,
@@ -49,6 +50,7 @@ from .exceptions import (
     PreflightError,
 )
 from .handles import SandboxHandle
+from .failfast import ClaimWatchdog
 from .observability import Observer, repo_family
 from .placement import get_placement
 from .sources import Task, to_tasks
@@ -1319,18 +1321,46 @@ class SandboxFleet:
 
     fam = repo_family(task)
     sandbox = None
+    # The claim is named here rather than by the SDK so the fail-fast watchdog
+    # can find its pod while the SDK's readiness wait is still blocking. The SDK
+    # does not roll back caller-named claims, so the except path deletes it.
+    claim_name = f"sandbox-claim-{uuid.uuid4().hex[:12]}"
+    watchdog = None
+    if self.config.fail_fast.enabled:
+      watchdog = ClaimWatchdog(cluster, claim_name, self.config.fail_fast)
+      watchdog.start()
     try:
       with self._obs.phase("claim", cluster=cluster.name, family=fam):
         sandbox = cluster.sandbox_client.create_sandbox(
             warmpool=pool, namespace=cluster.namespace,
-            sandbox_ready_timeout=self.config.ready_timeout,
-            labels=dict(self.config.labels))
+            sandbox_ready_timeout=self.config.effective_claim_timeout(),
+            labels=dict(self.config.labels), claim_name=claim_name)
+        if watchdog is not None and watchdog.stop() is not None:
+          # The watchdog committed a verdict (and deleted the claim) in the
+          # window where the SDK wait was already returning. The sandbox behind
+          # this handle is going away, so report the failed start instead.
+          v = watchdog.verdict
+          raise SandboxStartError(v.reason, v.message, claim_name=claim_name,
+                                  pod_name=v.pod_name, image=task.image)
         pod = sandbox.get_pod_name()
         try:
           pod_ip = sandbox.get_pod_ip()
         except Exception:  # noqa: BLE001
           pod_ip = None
-    except Exception:  # noqa: BLE001 — roll back partial state, then re-raise
+    except Exception as exc:  # noqa: BLE001 — roll back partial state, then re-raise
+      verdict = watchdog.stop() if watchdog is not None else None
+      claim_gone = watchdog is not None and watchdog.deleted_claim
+      if sandbox is None and not claim_gone and not (
+          isinstance(exc, client.ApiException) and exc.status == 409):
+        # create_sandbox raised before returning a handle. The SDK leaves a
+        # caller-named claim in place, so delete it here unless the watchdog
+        # confirmed its own delete (a verdict alone is not confirmation). A 409
+        # means the name is someone else's claim: leave that one alone.
+        try:
+          cluster.resources.delete_claim(claim_name)
+        except Exception:  # noqa: BLE001
+          logger.warning("failed to delete claim %s after acquire error",
+                         claim_name, exc_info=True)
       if sandbox is not None:
         try:
           sandbox.terminate()
@@ -1362,13 +1392,26 @@ class SandboxFleet:
         cluster.release_replicas(1)
         with self._lock:
           self._ondemand.discard(key)
+      if verdict is not None:
+        # The watchdog deleted the claim, which is what ended the SDK wait; the
+        # error the caller needs is the pod's, not "claim was deleted".
+        self._obs.claim(cluster.name, "start_failed")
+        if isinstance(exc, SandboxStartError):
+          raise
+        raise SandboxStartError(
+            verdict.reason, verdict.message, claim_name=claim_name,
+            pod_name=verdict.pod_name, image=task.image) from exc
       self._obs.claim(cluster.name, "error")
       raise
+    finally:
+      if watchdog is not None:
+        watchdog.stop()
 
     handle = SandboxHandle(
         task=task, cluster_name=cluster.name, claim_name=sandbox.claim_name,
         sandbox_id=sandbox.sandbox_id, pod_name=pod, hostname=sandbox.sandbox_id,
         pod_ip=pod_ip, sandbox=sandbox, _cluster=cluster)
+    handle.record_pod_identity()
     # The remote create ran outside the lock, and the breaker thread can tear
     # the fleet down in that window. _teardown flips _torndown under this same
     # lock before it sweeps, so exactly one of two things is true here: the

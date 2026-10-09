@@ -514,7 +514,7 @@ where it would sweep the other processes' resources too.
 
 **FleetConfig:** `clusters`, `placement`, `max_concurrent` (1), `max_warmpool_size`
 (8), `warm_per_task` (False — one warm replica per task for instant claims),
-`window_size` (None=auto), `ready_timeout` (900), `warm_create_budget` (1000 — stage
+`window_size` (None=auto), `ready_timeout` (900), `claim_timeout` (None = `ready_timeout`; bounds one claim's readiness wait), `fail_fast` (`FailFastPolicy`: `enabled` True, `initial_delay_s` 10, `poll_s` 5, `grace_s` 60, `unschedulable_grace_s` 180), `warm_create_budget` (1000 — stage
 the warm fill in waves of ≤ N sandbox creates in flight to bound the controller's
 create burst; on controllers ≤ v0.5.3 also pair with a low
 `--sandbox-warm-pool-concurrent-workers` to dodge #1215; `0` = warm all at once), `template`
@@ -544,7 +544,15 @@ agent_sandbox_rl.reaper` is the recovery path — sweeping an orphaned run by la
 Claims, pools and templates carry it as `RUN_ID_LABEL` (`agents.x-k8s.io/asrl-run-id`);
 pods carry it as `POD_RUN_ID_LABEL` (`agent-sandbox-rl/run-id`), because the Sandbox
 controller strips `agents.x-k8s.io/*` labels from pods — select pods by that key
-(`fleet.pod_run_selector()`). `plan()` also emits **advisory** `plan.warnings` (never fatal)
+(`fleet.pod_run_selector()`). Sandboxes carry no run id, and neither do pods created
+before that key existed, so the reaper also reaches them through each pool's
+`status.selector` and each claim's Sandbox. An external reaper that knows which
+drivers are still up calls **`reap_orphans(alive_run_ids)`** (`--orphans
+--alive-run-ids a,b`) to sweep every run it does not list, with `min_age_s` (300)
+protecting runs that just started. A run-scoped reap (and `reap_orphans`) keeps any pool,
+with its template, Sandboxes and pods, that a claim of another live run still points at,
+so a run that adopted an older run's pool keeps it. `reap("")` is rejected rather than
+treated as "all runs". `plan()` also emits **advisory** `plan.warnings` (never fatal)
 for footprint/concurrency beyond what the control plane comfortably absorbs.
 
 **ClusterConfig:** `name`, `kubeconfig`, `context`, `in_cluster`, `namespace`,
@@ -572,6 +580,26 @@ fleet.load_tasks(source, image_rewrite=make_rewriter(
 - **Preflight** (`fleet.preflight()`): per-cluster reachability, v1beta1 CRD
   versions, controller, namespace, and (if configured) runtime class + pull
   secret. Hard failures raise `PreflightError`; soft issues are warnings.
+- **Fail fast on claims that cannot start**: the SDK's claim wait sees only the
+  claim, so a pod stuck in `ImagePullBackOff`, `CreateContainerConfigError`,
+  `CrashLoopBackOff`, OOM-killed at start, or `Unschedulable` used to run out
+  `ready_timeout` (15 min) before the caller heard anything. `acquire()` now runs
+  a watchdog on the claim's pod and raises **`SandboxStartError`** (with the
+  Kubernetes reason, pod and image) as soon as the pod is in a state the
+  controller will not recover from: at once for reasons that never clear, after
+  `FailFastPolicy.grace_s` (60 s) for ones that can be transient, after
+  `unschedulable_grace_s` (180 s) for scheduling. `FleetConfig.claim_timeout`
+  bounds one claim's wait separately from the pool-fill `ready_timeout`. A pull
+  that flips between `ErrImagePull` and `ImagePullBackOff`, or a crash loop seen
+  between restarts, keeps one grace clock per container. Mid-episode,
+  `handle.exec()` raises **`SandboxLostError`** when the pod is gone (one pod read
+  after a transport error), so a loop can release and re-acquire instead of
+  spending its step timeout on a dead pod. **`handle.is_alive()`** also reports a
+  pod the controller recreated under the same name, or a runtime container that
+  restarted in place: `acquire()` records the pod's UID and restart count. A
+  one-shot `exec()` against such a replacement succeeds without a transport
+  error, so call `is_alive()` at step boundaries when lost state must not go
+  unnoticed.
 - **Pre-pull** (`fleet.prepull()` / `setup(prepull=True)`): a DaemonSet caches
   task images on every node so warm pools skip the multi-GB pull. This is where
   cold-start time goes — `wait_pool_ready` dominates a cold run (the sample report

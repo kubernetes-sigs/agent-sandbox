@@ -495,6 +495,9 @@ class AsyncSandboxClient(Generic[T]):
                     self._active_connection_sandboxes.pop(key, None)
             else:
                 await self._delete_claim(claim_name, namespace)
+            # The claim is gone: stop tracking its name, or a client that names
+            # a claim per sandbox grows this set for the life of the process.
+            self._explicit_claims.discard(key)
         except Exception as e:
             logger.error(
                 f"Failed to delete sandbox '{claim_name}' in namespace '{namespace}': {e}"

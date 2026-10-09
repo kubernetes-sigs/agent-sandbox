@@ -16,14 +16,20 @@
 
 from __future__ import annotations
 
+import logging
 import shlex
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
+from kubernetes import client
 from kubernetes.stream import stream
 
+from . import constants
+from .exceptions import SandboxLostError
 from .sources import Task
+
+logger = logging.getLogger("agent_sandbox_rl.handles")
 
 if TYPE_CHECKING:
   from .cluster import Cluster
@@ -59,6 +65,57 @@ def _as_script(command) -> str:
   # shell-quote each arg so argv round-trips through the bash session intact
   # (e.g. ['sh','-c','echo $(hostname)'] -> "sh -c 'echo $(hostname)'").
   return shlex.join(command)
+
+
+def _pod_dict(pod) -> dict:
+  return pod.to_dict() if hasattr(pod, "to_dict") else (pod or {})
+
+
+def _runtime_status(d: dict) -> dict | None:
+  """The runtime container's status, or None if no container has that name."""
+  status = d.get("status") or {}
+  for c in status.get("container_statuses") or status.get("containerStatuses") or []:
+    if (c or {}).get("name") == constants.RUNTIME_CONTAINER:
+      return c
+  return None
+
+
+def _pod_identity(pod) -> tuple[Optional[str], Optional[int]]:
+  """``(uid, runtime container restart count)``; either is None when unknown."""
+  d = _pod_dict(pod)
+  uid = (d.get("metadata") or {}).get("uid")
+  rs = _runtime_status(d)
+  restarts = None
+  if rs is not None:
+    restarts = rs.get("restart_count", rs.get("restartCount"))
+  return uid, restarts
+
+
+def _pod_is_live(pod, *, expected_uid: Optional[str] = None,
+                 expected_restarts: Optional[int] = None) -> bool:
+  """False once a pod is being deleted, has finished, its runtime container has
+  terminated, or it is no longer the pod the handle was acquired on: the Sandbox
+  controller recreates an evicted or deleted pod under the same name (new UID),
+  and kubelet restarts an OOM-killed container in place (higher restart count,
+  ``state.terminated`` cleared). Only the runtime container is judged; if none
+  has that name the answer is True (unknown is not dead), so a sidecar that
+  exits on its own does not count. Accepts a ``V1Pod`` or its ``to_dict()``."""
+  d = _pod_dict(pod)
+  meta = d.get("metadata") or {}
+  status = d.get("status") or {}
+  if meta.get("deletion_timestamp") or meta.get("deletionTimestamp"):
+    return False
+  if status.get("phase") in ("Failed", "Succeeded"):
+    return False
+  uid, restarts = _pod_identity(d)
+  if expected_uid and uid and uid != expected_uid:
+    return False
+  if expected_restarts is not None and restarts is not None and restarts > expected_restarts:
+    return False
+  rs = _runtime_status(d)
+  if rs is not None and (rs.get("state") or {}).get("terminated"):
+    return False
+  return True
 
 
 class SandboxSession:
@@ -183,6 +240,10 @@ class SandboxHandle:
   sandbox: object = None
   _cluster: "Cluster" = field(default=None, repr=False)
   _session: Optional["SandboxSession"] = field(default=None, repr=False)
+  # The pod this handle was acquired on (see record_pod_identity): a replacement
+  # pod under the same name, or an in-place restart, means the state is gone.
+  pod_uid: Optional[str] = field(default=None, repr=False)
+  runtime_restarts: Optional[int] = field(default=None, repr=False)
 
   def exec(self, command, timeout: float | None = None) -> str:
     """Run a command inside the sandbox (router-free, via the pod's exec API).
@@ -201,10 +262,72 @@ class SandboxHandle:
     client, so parallel one-shot execs stay isolated per thread while the client
     is cached per thread rather than rebuilt per call.
     """
-    if self._session is not None and self._session.is_open:
-      return self._session.run(command, timeout=timeout)
-    core = self._cluster.exec_core_api()
-    return exec_in_pod(core, self.pod_name, self._cluster.namespace, command)
+    try:
+      if self._session is not None and self._session.is_open:
+        return self._session.run(command, timeout=timeout)
+      core = self._cluster.exec_core_api()
+      return exec_in_pod(core, self.pod_name, self._cluster.namespace, command)
+    except Exception as e:  # noqa: BLE001 — re-raised below unless the pod is gone
+      self._raise_if_lost(e)
+      raise
+
+  def record_pod_identity(self) -> None:
+    """Remember which pod this handle is on: its UID and the runtime container's
+    restart count. Best-effort (one bounded ``GET``); `acquire()` calls it.
+    Without it, `is_alive()` cannot tell a replacement pod from the original."""
+    if self._cluster is None:
+      return
+    try:
+      pod = self._cluster.exec_core_api().read_namespaced_pod_status(
+          self.pod_name, self._cluster.namespace, _request_timeout=(3, 10))
+      self.pod_uid, self.runtime_restarts = _pod_identity(pod)
+    except Exception:  # noqa: BLE001 — liveness then falls back to presence checks
+      logger.debug("could not record pod identity for %s", self.pod_name,
+                   exc_info=True)
+
+  def is_alive(self) -> bool:
+    """Whether the sandbox's state is still there: the pod it was acquired on
+    still exists and is running.
+
+    One ``GET`` on the pod. False if the pod is not found, is being deleted, has
+    reached ``Failed``/``Succeeded``, its runtime container has terminated, or it
+    is not the same pod any more (a different UID: the controller recreated an
+    evicted or deleted pod under the same name; or a higher restart count: the
+    runtime container restarted in place, as after an OOM kill). A handle with
+    no cluster wiring answers True (unknown is not dead).
+
+    ``exec()`` consults this only after a transport error, so a live sandbox pays
+    nothing for it. A one-shot ``exec()`` against a same-name replacement pod
+    succeeds without a transport error, so a loop that must not continue on lost
+    state should call ``is_alive()`` at its step boundaries."""
+    if self._cluster is None:
+      return True
+    try:
+      # Bounded (connect, read): this runs on an error path and must not turn a
+      # stalled API server into a hang; on timeout the original error stands.
+      pod = self._cluster.exec_core_api().read_namespaced_pod_status(
+          self.pod_name, self._cluster.namespace, _request_timeout=(3, 10))
+    except client.ApiException as e:
+      if e.status == 404:
+        return False
+      raise
+    return _pod_is_live(pod, expected_uid=self.pod_uid,
+                        expected_restarts=self.runtime_restarts)
+
+  def _raise_if_lost(self, cause: BaseException) -> None:
+    """Raise `SandboxLostError` when an exec failure is explained by a dead pod.
+
+    A pod that was OOM-killed or evicted mid-episode surfaces as a 404 on the
+    exec handshake or as a closed session (``TimeoutError``). Both are also what
+    a slow command looks like, so the pod is checked before deciding. If the
+    check itself fails the original error stands."""
+    try:
+      alive = self.is_alive()
+    except Exception:  # noqa: BLE001
+      return
+    if not alive:
+      self.close_session()
+      raise SandboxLostError(self.pod_name, self.claim_name, cause) from cause
 
   def open_session(self) -> "SandboxSession":
     """Open (once) a persistent exec session so subsequent ``exec()`` calls reuse

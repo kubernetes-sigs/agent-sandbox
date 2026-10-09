@@ -186,6 +186,23 @@ class TestSandboxClient(unittest.TestCase):
         self.assertNotIn(("test-namespace", "test-claim"), self.client._active_connection_sandboxes)
         self.mock_k8s_helper.delete_sandbox_claim.assert_not_called()
 
+    def test_delete_sandbox_forgets_an_explicit_claim_name(self):
+        key = ("test-namespace", "named-claim")
+        self.client._explicit_claims.add(key)
+        self.client._active_connection_sandboxes[key] = MagicMock()
+
+        self.client.delete_sandbox("named-claim", "test-namespace")
+
+        self.assertNotIn(key, self.client._explicit_claims)
+
+    def test_failed_delete_keeps_the_explicit_claim_name(self):
+        key = ("test-namespace", "named-claim")
+        self.client._explicit_claims.add(key)
+        with patch.object(self.client, '_delete_claim', side_effect=RuntimeError("api down")):
+            self.client.delete_sandbox("named-claim", "test-namespace")
+
+        self.assertIn(key, self.client._explicit_claims)
+
     def test_delete_sandbox_not_in_registry_success(self):
         with patch.object(self.client, '_delete_claim') as mock_delete_claim:
             self.client.delete_sandbox("test-claim", "test-namespace")

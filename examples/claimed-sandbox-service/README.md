@@ -27,13 +27,12 @@ or persistent storage is needed for the example itself.
   [Cilium on kind](https://docs.cilium.io/en/stable/installation/kind/), before
   using the negative access checks.
 - `kubectl`, Bash, and permission to manage this example's dedicated namespace.
-- Python 3 on the local machine for automated verification (standard library
-  only; no extra packages).
 - Nodes able to pull `registry.k8s.io/e2e-test-images/agnhost:2.53`.
 
-All resources are in `claimed-sandbox-service`. Choose an explicit test context
-and use a fresh namespace; do not run the cleanup command against a namespace
-containing other work.
+All resources are in `claimed-sandbox-service`. Use a nonempty, explicit test
+context and a fresh namespace. Follow the checks below manually; this example
+does not provide an automated verifier or automatic cleanup. Do not run cleanup
+against a namespace containing other work.
 
 ## Deploy the warm reserve and group entry point
 
@@ -43,6 +42,13 @@ From this directory:
 CONTEXT=your-test-context
 NAMESPACE=claimed-sandbox-service
 
+kubectl --context="$CONTEXT" get namespace "$NAMESPACE" --ignore-not-found
+```
+
+Proceed only if that command succeeds without showing an existing namespace.
+If the namespace exists or the API request fails, stop before applying resources.
+
+```bash
 kubectl --context="$CONTEXT" apply -k .
 kubectl --context="$CONTEXT" -n "$NAMESPACE" wait \
   --for=jsonpath='{.status.readyReplicas}'=2 \
@@ -72,7 +78,8 @@ kubectl --context="$CONTEXT" -n "$NAMESPACE" get pods \
 kubectl --context="$CONTEXT" -n "$NAMESPACE" get endpointslices \
   -l kubernetes.io/service-name=claimed-sandbox-entry -o yaml
 
-for i in $(seq 1 10); do
+for request in $(seq 1 10); do
+  printf 'Request %s: ' "$request"
   kubectl --context="$CONTEXT" -n "$NAMESPACE" exec allowed-client -- \
     curl -fsS --connect-timeout 2 --max-time 5 -H 'Connection: close' \
     http://claimed-sandbox-entry/hostname
@@ -84,12 +91,15 @@ After reconciliation, the eligible endpoints are the two claimed Pods. The pool
 replenishes its reserve, but replacement reserve Pods do not inherit the
 Claim-only label. Claim metadata labels use the controller's default permitted
 domain, `sandbox.users.io`; no label-domain configuration change is necessary.
+Compare the returned hostnames with the claimed Pod names. The ten requests are
+only a sample, not a guaranteed split: repeat after forwarding converges if
+only one backend was observed, and investigate any unclaimed hostname.
 
 The request path is caller -> Service -> application port 8000. It does **not**
 pass through sandbox-router and needs no `X-Sandbox-ID`. This is not a shared
 endpoint for sandboxd's per-Sandbox process or filesystem management sessions.
 
-## Readiness and member removal
+## Readiness
 
 The startup probe checks the HTTP listener. The readiness probe checks the
 listener and a local `/tmp/not-ready` marker, giving the demo a deterministic
@@ -105,11 +115,18 @@ kubectl --context="$CONTEXT" -n "$NAMESPACE" wait \
   --for=condition=Ready=false "pod/$POD" --timeout=60s
 kubectl --context="$CONTEXT" -n "$NAMESPACE" get endpointslices \
   -l kubernetes.io/service-name=claimed-sandbox-entry -o yaml
+```
 
+Once forwarding converges, fresh requests from the previous section should reach
+only the other ready claimed Pod. Restore the selected Pod:
+
+```bash
 kubectl --context="$CONTEXT" -n "$NAMESPACE" exec "$POD" -c app -- \
   rm /tmp/not-ready
 kubectl --context="$CONTEXT" -n "$NAMESPACE" wait \
   --for=condition=Ready "pod/$POD" --timeout=60s
+kubectl --context="$CONTEXT" -n "$NAMESPACE" get endpointslices \
+  -l kubernetes.io/service-name=claimed-sandbox-entry -o yaml
 ```
 
 An unready endpoint may still appear in an EndpointSlice with `ready: false`;
@@ -117,10 +134,7 @@ inspect conditions, not only the address list. Readiness comes from the Pod,
 not directly from SandboxClaim status. Do not enable
 `publishNotReadyAddresses` for readiness-gated application serving.
 
-Deleting `serving-a` removes its owned Sandbox. The Service eventually retains
-only `serving-b`; its caller-facing address stays the same. Claim labels, Pod
-readiness and endpoint updates converge asynchronously, and existing connections
-are not guaranteed to migrate or drain without application-level handling.
+After restoration, both claimed Pods should again be eligible endpoints.
 
 ## Access policy and limitations
 
@@ -162,42 +176,67 @@ Gateway/HTTPRoute can reference this Service as its backend. Configure ingress
 for the Gateway's actual data-plane peers and use a compatible Gateway controller;
 Gateway installation and configuration are outside this example.
 
-## Automated verification and cleanup
+## Check allowed and denied access
 
-On a test cluster, **before** deploying the example manually:
+Compare both callers against the same Service IP so DNS failures cannot be
+mistaken for policy denial. For IPv6 addresses, enclose the address in brackets
+in `TARGET_URL`, for example `http://[$SERVICE_IP]:80/hostname`.
 
 ```bash
-bash verify.sh "$CONTEXT"
+SERVICE_IP="$(kubectl --context="$CONTEXT" -n "$NAMESPACE" get service \
+  claimed-sandbox-entry -o jsonpath='{.spec.clusterIP}')"
+TARGET_URL="http://$SERVICE_IP:80/hostname"
+
+kubectl --context="$CONTEXT" -n "$NAMESPACE" exec allowed-client -- \
+  curl -fsS --connect-timeout 2 --max-time 5 "$TARGET_URL"
+kubectl --context="$CONTEXT" -n "$NAMESPACE" exec denied-client -- \
+  curl -fsS --connect-timeout 2 --max-time 5 "$TARGET_URL"
+echo "Exit code: $?"
 ```
 
-The verifier refuses an existing example namespace, creates its own resources,
-and checks warm-only exclusion, two claimed backends, requests reaching both
-backends, readiness removal/restoration, allowed versus denied access through
-both Service and Pod IP, and Claim deletion with continued serving. It cleans
-up only the namespace it created after checking its UID. An unenforced policy
-fails verification instead of silently skipping the denial checks.
+The allowed request must succeed and return a claimed Pod hostname; otherwise
+stop and diagnose it before interpreting the denied result. The denied request
+is expected to time out with exit code `28` for this policy; a successful response
+means isolation is not working. Other failures, such as an exec error, are not
+proof of denial.
 
-Every `kubectl exec` in the verifier has a local 15-second process deadline in
-addition to kubectl's API and curl's network timeouts. A stalled exec stream
-fails verification and terminates its local process group so cleanup can run;
-it does not count as a successful NetworkPolicy denial. Python 3 is a local
-verification dependency only, not a dependency of the application image.
-
-To run offline verifier regressions with Python's standard library (no cluster
-or Python packages required):
+Repeat those two requests against the restored claimed Pod's application port:
 
 ```bash
-python3 test_verify.py
+POD_IP="$(kubectl --context="$CONTEXT" -n "$NAMESPACE" get pod "$POD" \
+  -o jsonpath='{.status.podIP}')"
+TARGET_URL="http://$POD_IP:8000/hostname"
 ```
 
-These intercept kubectl and accelerate polling to check argument safety,
-initial forwarding convergence, bounded failures (including stalled exec), and
-cleanup. They do not replace the functional verification against an enforcing CNI.
+Curl's limits bound the in-Pod HTTP request, not the entire kubectl exec stream;
+interrupt a stalled exec manually and check the cluster before continuing.
 
-To remove a manually deployed example, after confirming the context and namespace:
+## Remove a member
+
+Delete one Claim, then inspect the remaining serving Pods and endpoints:
 
 ```bash
-kubectl --context="$CONTEXT" delete namespace "$NAMESPACE"
+kubectl --context="$CONTEXT" -n "$NAMESPACE" delete sandboxclaim serving-a --wait=false
+kubectl --context="$CONTEXT" -n "$NAMESPACE" get pods \
+  -l sandbox.users.io/serving-group=demo
+kubectl --context="$CONTEXT" -n "$NAMESPACE" get endpointslices \
+  -l kubernetes.io/service-name=claimed-sandbox-entry -o yaml
+```
+
+Deleting `serving-a` removes its owned Sandbox. After reconciliation and
+forwarding convergence, the Service retains only `serving-b`; its caller-facing
+address stays the same. Repeat the fresh-connection requests to check continued
+serving by that remaining Pod. The pool replenishes its reserve, but reserve Pods
+remain outside the group. Endpoint updates are asynchronous, and existing
+connections are not guaranteed to migrate or drain without application handling.
+
+## Cleanup
+
+After confirming the explicit context and that the namespace contains only this
+example's resources, remove it. Cleanup is manual, including after a failed check:
+
+```bash
+kubectl --context="$CONTEXT" delete namespace "$NAMESPACE" --wait=false
 ```
 
 Related issue: [Routing requests across multiple claimed Sandboxes](https://github.com/kubernetes-sigs/agent-sandbox/issues/1615).

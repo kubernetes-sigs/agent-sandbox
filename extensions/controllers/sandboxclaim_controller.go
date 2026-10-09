@@ -177,6 +177,31 @@ func (m *cacheLagAttemptMap) Load(key types.NamespacedName) (int, bool) {
 	return val.(cacheLagAttemptEntry).attempts, true
 }
 
+// firstReadySet is the in-memory stand-in for the persistent
+// ClaimFirstReadyAnnotation readiness-flap guard when
+// DisableObservabilityAnnotations suppresses that write: it records, per
+// claim, that the startup-latency histograms were already observed for the
+// first Ready transition so later flaps within the process do not re-record
+// them. Entries carry the UID so a same-named replacement claim is not
+// mistaken for an already-recorded one; they are dropped when the claim is
+// gone (Reconcile's NotFound branch).
+type firstReadySet struct {
+	inner sync.Map
+}
+
+func (s *firstReadySet) Mark(key types.NamespacedName, uid types.UID) {
+	s.inner.Store(key, uid)
+}
+
+func (s *firstReadySet) Has(key types.NamespacedName, uid types.UID) bool {
+	val, ok := s.inner.Load(key)
+	return ok && val.(types.UID) == uid
+}
+
+func (s *firstReadySet) Delete(key types.NamespacedName) {
+	s.inner.Delete(key)
+}
+
 var restrictedDomains = []string{"kubernetes.io", "k8s.io", "agents.x-k8s.io"}
 var exemptedMetadataKeys = []string{autoscalerSafeToEvictAnnotation}
 
@@ -261,14 +286,20 @@ type SandboxClaimReconciler struct {
 	// re-issuing Create at a flat rate forever (#1313).
 	cacheLagAttempts    cacheLagAttemptMap
 	AllowedLabelDomains []string
+	// firstReadyRecorded replaces the persisted first-ready flap guard when
+	// DisableObservabilityAnnotations is set; see firstReadySet.
+	firstReadyRecorded firstReadySet
 	// DisableObservabilityAnnotations skips persisting the observability
-	// annotations (first-observed timestamp, trace context) onto the claim,
-	// removing one API write per claim. The values are still stamped on the
+	// annotations (first-observed timestamp, trace context, first-ready
+	// timestamp) onto the claim. The values are still stamped on the
 	// in-memory object, so same-process consumers (startup-latency metrics,
-	// trace propagation to the Sandbox) keep working. Costs the on-object
+	// trace propagation to the Sandbox) keep working, and the first-ready
+	// readiness-flap guard moves to firstReadyRecorded. Costs the on-object
 	// debugging breadcrumbs and, after a controller restart, the
 	// startup-latency metric for claims first observed by the previous
-	// process. Wired to --disable-claim-observability-annotations.
+	// process, plus a one-time metric re-record for a claim whose readiness
+	// flap straddles the restart. Wired to
+	// --disable-claim-observability-annotations.
 	DisableObservabilityAnnotations bool
 	// WarmCandidateGracePeriod is how long a newly created claim waits for a
 	// warm pool candidate without an observed Pod IP before falling back to
@@ -299,6 +330,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			// Fallback cleanup to prevent memory leaks if the delete predicate was missed or a stale request is processed.
 			r.observedTimes.Delete(req.NamespacedName)
 			r.cacheLagAttempts.Delete(req.NamespacedName)
+			r.firstReadyRecorded.Delete(req.NamespacedName)
 			logger.V(1).Info("SandboxClaim not found, ignoring", "request", req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
@@ -340,10 +372,11 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
-	// Initialize trace ID and observation time for active resources missing them.
-	if err := r.initializeAnnotations(ctx, claim); err != nil {
-		return ctrl.Result{}, err
-	}
+	// Initialize trace ID and observation time for active resources missing
+	// them. Persisting them is deferred to the flush after the reconcile body
+	// so a warm adoption in this pass can carry them on the claim write it
+	// has to make anyway, instead of paying a dedicated PATCH first.
+	pendingAnnotations := r.initializeAnnotations(ctx, claim)
 
 	originalClaimStatus := claim.Status.DeepCopy()
 
@@ -397,7 +430,15 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		sandbox, reconcileErr = r.reconcileExpired(ctx, claim)
 	} else {
 		// Ensure Sandbox exists and is configured.
-		sandbox, reconcileErr = r.reconcileActive(ctx, claim)
+		sandbox, reconcileErr = r.reconcileActive(ctx, claim, pendingAnnotations)
+	}
+
+	// Persist whatever the reconcile body did not fold into a claim write of
+	// its own. This runs regardless of reconcileErr so the stamped values
+	// still land on the first pass, as they did when the write was issued
+	// up front; a failure here ends the pass just like that write's did.
+	if err := r.flushPendingAnnotations(ctx, claim, pendingAnnotations); err != nil {
+		return ctrl.Result{}, errors.Join(reconcileErr, err)
 	}
 
 	// Pending warm candidates are expected transient state, not a claim failure.
@@ -522,24 +563,25 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	return result, errs
 }
 
-// initializeAnnotations initializes trace ID and observation time for active resources missing them.
+// pendingClaimAnnotations holds controller-owned annotations that are stamped
+// on the in-memory claim but not yet persisted. A claim write later in the
+// same pass may carry them and then clear the set, so the end-of-pass flush
+// only pays a dedicated PATCH when nothing else did. A nil set means there is
+// nothing to persist.
+type pendingClaimAnnotations map[string]string
+
+// initializeAnnotations stamps the trace ID and observation time on active
+// resources missing them and returns the stamped set for a later write to
+// persist (see pendingClaimAnnotations and flushPendingAnnotations).
 //
-// The persisted patch is built directly with rawpatch instead of the
-// historical DeepCopy+client.MergeFrom pattern: MergeFrom serialized the
-// entire claim twice and diffed the two documents just to emit this exact
-// {"metadata":{"annotations":{...}}} body (building that full-object patch
-// was measured at 15.8% of controller CPU in a 300-claim warm-adoption
-// benchmark). rawpatch's tests pin byte-equivalence with MergeFrom for
-// metadata-only set mutations, so nothing changes on the wire.
-//
-// When DisableObservabilityAnnotations is set the API write is skipped
-// entirely, but the annotations are still stamped on the in-memory object so
-// same-process consumers (startup-latency metrics, trace propagation to the
-// Sandbox) keep working.
-func (r *SandboxClaimReconciler) initializeAnnotations(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) error {
+// When DisableObservabilityAnnotations is set nothing is returned for
+// persistence, but the annotations are still stamped on the in-memory object
+// so same-process consumers (startup-latency metrics, trace propagation to
+// the Sandbox) keep working.
+func (r *SandboxClaimReconciler) initializeAnnotations(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) pendingClaimAnnotations {
 	traceContext := r.Tracer.GetTraceContext(ctx)
 
-	stamped := make(map[string]string, 2)
+	stamped := make(pendingClaimAnnotations, 2)
 	if claim.Annotations[asmetrics.ObservabilityAnnotation] == "" {
 		stamped[asmetrics.ObservabilityAnnotation] = r.getOrRecordObservedTime(claim).Format(time.RFC3339Nano)
 	}
@@ -558,12 +600,32 @@ func (r *SandboxClaimReconciler) initializeAnnotations(ctx context.Context, clai
 	if r.DisableObservabilityAnnotations {
 		return nil
 	}
+	return stamped
+}
 
-	patch, err := rawpatch.Annotations(stamped)
+// flushPendingAnnotations persists the annotations still pending after the
+// reconcile body, if any.
+//
+// The patch is built directly with rawpatch instead of the historical
+// DeepCopy+client.MergeFrom pattern: MergeFrom serialized the entire claim
+// twice and diffed the two documents just to emit this exact
+// {"metadata":{"annotations":{...}}} body (building that full-object patch
+// was measured at 15.8% of controller CPU in a 300-claim warm-adoption
+// benchmark). rawpatch's tests pin byte-equivalence with MergeFrom for
+// metadata-only set mutations, so nothing changes on the wire.
+func (r *SandboxClaimReconciler) flushPendingAnnotations(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, pending pendingClaimAnnotations) error {
+	if len(pending) == 0 {
+		return nil
+	}
+	patch, err := rawpatch.Annotations(pending)
 	if err != nil {
 		return err
 	}
-	return r.Patch(ctx, claim, patch)
+	if err := r.Patch(ctx, claim, patch); err != nil {
+		return err
+	}
+	clear(pending)
+	return nil
 }
 
 // checkExpiration calculates if the claim is expired and how much time is left.
@@ -577,7 +639,9 @@ func (r *SandboxClaimReconciler) checkExpiration(claim *extensionsv1beta1.Sandbo
 }
 
 // reconcileActive handles the creation and updates of running sandboxes.
-func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (*v1beta1.Sandbox, error) {
+// pendingAnnotations may be folded into a claim write made along the way (see
+// pendingClaimAnnotations); nil is fine when there is nothing to carry.
+func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, pendingAnnotations pendingClaimAnnotations) (*v1beta1.Sandbox, error) {
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Reconciling active claim", "claim", claim.Name)
 
@@ -587,7 +651,7 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 	}
 
 	// Fast path: try to find existing or adopt from warm pool before template lookup.
-	sandbox, err := r.getOrCreateSandbox(ctx, claim, nil)
+	sandbox, err := r.getOrCreateSandbox(ctx, claim, nil, pendingAnnotations)
 	logger.V(1).Info("getOrCreateSandbox result", "sandboxFound", sandbox != nil, "err", err, "claim", claim.Name)
 	if err != nil {
 		return nil, err
@@ -1203,7 +1267,10 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 	}
 }
 
-func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (*v1beta1.Sandbox, int, error) {
+// adoptSandboxFromCandidates adopts a warm sandbox for the claim, if one is
+// available. pendingAnnotations (nil-safe) ride along on the claim write
+// that records the adoption and are cleared once that write is committed.
+func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, pendingAnnotations pendingClaimAnnotations) (*v1beta1.Sandbox, int, error) {
 	logger := log.FromContext(ctx)
 	namespacedWarmPoolNameForQueue := queue.GetNamespacedWarmPoolName(claim.Namespace, claim.Spec.WarmPoolRef.Name)
 
@@ -1228,23 +1295,41 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 
 			logger.V(4).Info("Attempting sandbox adoption", "sandbox candidate", adopted.Name, "warm pool", poolName, "claim", claim.Name)
 
-			// Update claim to record adoption (optimistic lock)
+			// Record the adoption on the claim as a metadata-only merge patch
+			// under an optimistic lock on the cached base. Not an Update: a
+			// full-object PUT re-serializes the user-owned spec, and that
+			// round-trip is not byte-stable (the non-pointer
+			// additionalPodMetadata struct is emitted as {} even when the
+			// stored object omits it), which the API server counts as a spec
+			// change and answers with a metadata.generation bump on a claim
+			// the user never touched. The optimistic lock is what keeps a
+			// stale cached base from overwriting a committed assignment; a
+			// 409 is retried below against a fresh read. Annotations still
+			// pending from initializeAnnotations ride along so they do not
+			// cost a write of their own.
 			if claim.Annotations == nil {
 				claim.Annotations = make(map[string]string)
 			}
 			claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] = adopted.Name
-			if err := r.Update(ctx, claim); err != nil {
+			assignment := map[string]string{extensionsv1beta1.AssignedSandboxNameAnnotation: adopted.Name}
+			maps.Copy(assignment, pendingAnnotations)
+			patch, err := rawpatch.Annotations(assignment, rawpatch.WithOptimisticLock(claim.ResourceVersion))
+			if err != nil {
+				r.WarmSandboxQueue.Add(namespacedWarmPoolNameForQueue, adoptedKey)
+				return false, fmt.Errorf("failed to build adoption patch for claim %s: %w", claim.Name, err)
+			}
+			if err := r.Patch(ctx, claim, patch); err != nil {
 				if !k8errors.IsConflict(err) {
 					r.WarmSandboxQueue.Add(namespacedWarmPoolNameForQueue, adoptedKey)
 					logger.Error(err, "Failed to update claim for adoption", "claim", claim.Name, "sandbox", adopted.Name)
 					return false, err
 				}
-				// 409: the cached base was stale (typically behind a write this
-				// controller committed itself, e.g. the observability annotation
-				// patch). Retry in-pass against a fresh read instead of failing
-				// the pass — this resolves in single-digit milliseconds and
-				// keeps the popped candidate from being burned on a doomed pass.
-				if retryErr := r.retryAdoptionAnnotation(ctx, claim, adopted.Name); retryErr != nil {
+				// 409: the cached base was stale (behind a write this
+				// controller committed itself, or a user metadata edit).
+				// Retry in-pass against a fresh read instead of failing the
+				// pass — this resolves in single-digit milliseconds and keeps
+				// the popped candidate from being burned on a doomed pass.
+				if retryErr := r.retryAdoptionAnnotation(ctx, claim, adopted.Name, pendingAnnotations); retryErr != nil {
 					r.WarmSandboxQueue.Add(namespacedWarmPoolNameForQueue, adoptedKey)
 					if k8errors.IsConflict(retryErr) {
 						// Retries exhausted on persistent contention: surface it
@@ -1255,6 +1340,8 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 					return false, retryErr
 				}
 			}
+			// The assignment (and anything that rode along) is durable now.
+			clear(pendingAnnotations)
 
 			// Call helper to complete adoption (patch sandbox)
 			if err := r.completeAdoption(ctx, claim, adopted); err != nil {
@@ -1413,13 +1500,20 @@ func (r *SandboxClaimReconciler) authoritativeReader() client.Reader {
 	return r.Client
 }
 
-// updateClaimOnFreshBase applies a guarded mutation to the claim in the
-// shared fetch-fresh/guard/mutate/copy-back shape: inside a
+// updateClaimOnFreshBase applies a guarded metadata mutation to the claim in
+// the shared fetch-fresh/guard/mutate/copy-back shape: inside a
 // retry.RetryOnConflict loop, re-read the claim from the authoritative reader
 // (the informer cache is stale by definition when the caller conflicted), let
-// mutate inspect and modify the fresh object, persist it when mutate asks for
-// a write, and copy the server-accepted object back into claim so the rest of
-// the pass operates on the accepted base.
+// mutate inspect and modify the fresh object, persist the delta when mutate
+// asks for a write, and copy the server-accepted object back into claim so
+// the rest of the pass operates on the accepted base.
+//
+// The delta is persisted as an optimistically locked merge patch diffed
+// against the fresh base rather than an Update: the patch carries only what
+// mutate changed (metadata), never the user-owned spec, so unlike a
+// full-object PUT it cannot bump metadata.generation through a non-byte-stable
+// spec round-trip (see adoptSandboxFromCandidates). The lock keeps the write
+// conditional on the base actually being fresh.
 //
 // mutate returns (false, nil) to skip the write; the fresh base is still
 // copied back. Any error from the fresh read or from mutate aborts the
@@ -1433,12 +1527,13 @@ func (r *SandboxClaimReconciler) updateClaimOnFreshBase(ctx context.Context, cla
 		if err := reader.Get(ctx, key, fresh); err != nil {
 			return err
 		}
+		base := fresh.DeepCopy()
 		write, err := mutate(fresh)
 		if err != nil {
 			return err
 		}
 		if write {
-			if err := r.Update(ctx, fresh); err != nil {
+			if err := r.Patch(ctx, fresh, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 				return err
 			}
 		}
@@ -1466,13 +1561,15 @@ func retryOnConflictKeepingAttemptErr(fn func() error) error {
 	return err
 }
 
-// retryAdoptionAnnotation retries the optimistically locked claim update that
+// retryAdoptionAnnotation retries the optimistically locked claim patch that
 // records an adoption after a 409: verify on a fresh base that no other
-// sandbox has been assigned in the meantime, then re-apply the assignment. On
-// success the fresh, annotated object is copied back into claim so the rest
-// of the adoption pass (sandbox patch, status finalization) operates on the
-// object the server accepted.
-func (r *SandboxClaimReconciler) retryAdoptionAnnotation(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, sandboxName string) error {
+// sandbox has been assigned in the meantime, then re-apply the assignment
+// together with any still-pending observability annotations the fresh base
+// lacks (a value already on the server wins, so the copy-back below is what
+// the rest of the pass sees). On success the fresh, annotated object is
+// copied back into claim so the rest of the adoption pass (sandbox patch,
+// status finalization) operates on the object the server accepted.
+func (r *SandboxClaimReconciler) retryAdoptionAnnotation(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, sandboxName string, pendingAnnotations pendingClaimAnnotations) error {
 	return r.updateClaimOnFreshBase(ctx, claim, func(fresh *extensionsv1beta1.SandboxClaim) (bool, error) {
 		if fresh.UID != claim.UID {
 			return false, fmt.Errorf("%w: claim %s was deleted and recreated during adoption", errAdoptionConflict, claim.Name)
@@ -1487,6 +1584,11 @@ func (r *SandboxClaimReconciler) retryAdoptionAnnotation(ctx context.Context, cl
 			fresh.Annotations = make(map[string]string)
 		}
 		fresh.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] = sandboxName
+		for k, v := range pendingAnnotations {
+			if fresh.Annotations[k] == "" {
+				fresh.Annotations[k] = v
+			}
+		}
 		return true, nil
 	})
 }
@@ -2050,7 +2152,7 @@ func (r *SandboxClaimReconciler) warmCandidateRetryAfter(claim *extensionsv1beta
 	return min(warmCandidateRetryInterval, remaining), true
 }
 
-func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, _ *extensionsv1beta1.SandboxTemplate) (*v1beta1.Sandbox, error) {
+func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, _ *extensionsv1beta1.SandboxTemplate, pendingAnnotations pendingClaimAnnotations) (*v1beta1.Sandbox, error) {
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Executing getOrCreateSandbox", "claim", claim.Name)
 
@@ -2222,7 +2324,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	}
 
 	// Go to the custom queue instead of standard r.List()
-	adopted, pendingNetworkCandidates, err := r.adoptSandboxFromCandidates(ctx, claim)
+	adopted, pendingNetworkCandidates, err := r.adoptSandboxFromCandidates(ctx, claim, pendingAnnotations)
 	if err != nil {
 		return nil, err
 	}
@@ -2696,18 +2798,44 @@ func (r *SandboxClaimReconciler) drainObservedTime(claim *extensionsv1beta1.Sand
 // those Patches succeeds. The sentinel value is used instead of a timestamp to
 // signal that the actual first-ready time is unknown.
 func (r *SandboxClaimReconciler) backfillFirstReadyAnnotation(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) error {
-	if claim.Annotations[asmetrics.ClaimFirstReadyAnnotation] != "" {
+	if r.firstReadyGuardArmed(claim) {
 		return nil
 	}
-	patch := client.MergeFrom(claim.DeepCopy())
-	if claim.Annotations == nil {
-		claim.Annotations = make(map[string]string)
-	}
-	claim.Annotations[asmetrics.ClaimFirstReadyAnnotation] = asmetrics.ClaimFirstReadyUnknownSentinel
-	if err := r.Patch(ctx, claim, patch); err != nil {
+	if err := r.armFirstReadyGuard(ctx, claim, asmetrics.ClaimFirstReadyUnknownSentinel); err != nil {
 		return fmt.Errorf("backfill claim first-ready annotation: %w", err)
 	}
 	return nil
+}
+
+// firstReadyGuardArmed reports whether the startup-latency metrics were
+// already recorded for this claim's first Ready transition, via the
+// persistent annotation or its in-memory stand-in (see firstReadySet).
+func (r *SandboxClaimReconciler) firstReadyGuardArmed(claim *extensionsv1beta1.SandboxClaim) bool {
+	if claim.Annotations[asmetrics.ClaimFirstReadyAnnotation] != "" {
+		return true
+	}
+	return r.firstReadyRecorded.Has(client.ObjectKeyFromObject(claim), claim.UID)
+}
+
+// armFirstReadyGuard stamps the ClaimFirstReadyAnnotation with value, or,
+// when DisableObservabilityAnnotations suppresses that write, records the
+// claim in firstReadyRecorded instead. The in-memory guard does not survive a
+// restart, so a flap that straddles one can re-record once; the flag's doc
+// states that cost.
+func (r *SandboxClaimReconciler) armFirstReadyGuard(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, value string) error {
+	if claim.Annotations == nil {
+		claim.Annotations = make(map[string]string)
+	}
+	claim.Annotations[asmetrics.ClaimFirstReadyAnnotation] = value
+	if r.DisableObservabilityAnnotations {
+		r.firstReadyRecorded.Mark(client.ObjectKeyFromObject(claim), claim.UID)
+		return nil
+	}
+	patch, err := rawpatch.Annotations(map[string]string{asmetrics.ClaimFirstReadyAnnotation: value})
+	if err != nil {
+		return err
+	}
+	return r.Patch(ctx, claim, patch)
 }
 
 // recordClientClaimStartupLatency records the client claim startup latency based on annotation.
@@ -2761,10 +2889,10 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 		return r.backfillFirstReadyAnnotation(ctx, claim)
 	}
 
-	// Persistent guard: if the first-ready annotation is already set, metrics were
+	// Persistent guard: if the first-ready guard is already armed, metrics were
 	// already recorded for this claim on a previous reconcile. This prevents duplicate
 	// histogram observations when readiness flaps (Ready → NotReady → Ready).
-	if claim.Annotations[asmetrics.ClaimFirstReadyAnnotation] != "" {
+	if r.firstReadyGuardArmed(claim) {
 		r.drainObservedTime(claim)
 		return nil
 	}
@@ -2785,14 +2913,9 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	r.recordSandboxCreationLatency(sandbox, launchType, templateName)
 	r.recordClientClaimStartupLatency(ctx, claim, launchType, templateName)
 
-	// Stamp the first-ready annotation to prevent duplicate metric recording on
+	// Arm the first-ready guard to prevent duplicate metric recording on
 	// re-Ready events (e.g. readiness probe flaps).
-	patch := client.MergeFrom(claim.DeepCopy())
-	if claim.Annotations == nil {
-		claim.Annotations = make(map[string]string)
-	}
-	claim.Annotations[asmetrics.ClaimFirstReadyAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
-	if err := r.Patch(ctx, claim, patch); err != nil {
+	if err := r.armFirstReadyGuard(ctx, claim, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return fmt.Errorf("stamp claim first-ready annotation: %w", err)
 	}
 	return nil

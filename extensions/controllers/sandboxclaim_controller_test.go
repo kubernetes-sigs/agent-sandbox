@@ -19,6 +19,7 @@ package controllers
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -2663,7 +2664,7 @@ func TestSandboxClaimPreservesAssignedWarmPoolSandboxWithoutPodIPs(t *testing.T)
 		Tracer:           asmetrics.NewNoOp(),
 	}
 
-	assigned, err := reconciler.getOrCreateSandbox(ctx, claim, template)
+	assigned, err := reconciler.getOrCreateSandbox(ctx, claim, template, nil)
 	require.NoError(t, err)
 	require.Equal(t, rotatingSandbox.Name, assigned.Name)
 
@@ -3486,6 +3487,81 @@ func TestRecordCreationLatencyMetric_ClaimFirstReadyAnnotation(t *testing.T) {
 		// observedTimes entry should be drained.
 		_, loaded := r.observedTimes.Load(key)
 		require.False(t, loaded, "observedTimes entry should be drained after annotation guard")
+	})
+
+	t.Run("flag on: readiness flap is deduplicated in memory with no first-ready patch", func(t *testing.T) {
+		asmetrics.ClaimStartupLatency.Reset()
+		asmetrics.ClaimControllerStartupLatency.Reset()
+
+		claim := &extensionsv1beta1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "flap-flag-on",
+				Namespace:         "default",
+				UID:               "uid-flap-flag-on",
+				CreationTimestamp: pastTime,
+				Annotations: map[string]string{
+					asmetrics.WebhookAnnotation:       time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+					asmetrics.ObservabilityAnnotation: time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+				},
+			},
+			Spec: extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"}},
+			Status: extensionsv1beta1.SandboxClaimStatus{
+				Conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+			},
+		}
+
+		scheme := newScheme(t)
+		warmPool := &extensionsv1beta1.SandboxWarmPool{ObjectMeta: metav1.ObjectMeta{Name: "test-warmpool", Namespace: "default"}, Spec: extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "tpl"}}}
+		claimPatches := 0
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(warmPool, claim).
+			WithInterceptorFuncs(interceptor.Funcs{
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok {
+						claimPatches++
+					}
+					return c.Patch(ctx, obj, patch, opts...)
+				},
+			}).Build()
+		r := &SandboxClaimReconciler{Client: fakeClient, DisableObservabilityAnnotations: true}
+
+		key := types.NamespacedName{Name: "flap-flag-on", Namespace: "default"}
+		r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now().Add(-5 * time.Second), uid: "uid-flap-flag-on"})
+
+		// First Ready transition records, and arms the guard in memory only.
+		require.NoError(t, r.recordCreationLatencyMetric(ctx, claim, &extensionsv1beta1.SandboxClaimStatus{}, nil))
+		require.Equal(t, 1, testutil.CollectAndCount(asmetrics.ClaimStartupLatency))
+		require.Equal(t, 1, testutil.CollectAndCount(asmetrics.ClaimControllerStartupLatency))
+		require.Equal(t, 0, claimPatches, "the flag must suppress the first-ready stamp write")
+
+		persisted := &extensionsv1beta1.SandboxClaim{}
+		require.NoError(t, fakeClient.Get(ctx, key, persisted))
+		require.Empty(t, persisted.Annotations[asmetrics.ClaimFirstReadyAnnotation], "no first-ready annotation may land with the flag on")
+
+		// Flap back to Ready on a re-fetched object that carries no
+		// annotation guard: the in-memory guard must dedup the record.
+		r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now().Add(-5 * time.Second), uid: "uid-flap-flag-on"})
+		require.NoError(t, r.recordCreationLatencyMetric(ctx, persisted, &extensionsv1beta1.SandboxClaimStatus{}, nil))
+		require.Equal(t, 1, testutil.CollectAndCount(asmetrics.ClaimStartupLatency), "flap must not double-count claim startup latency")
+		require.Equal(t, 1, testutil.CollectAndCount(asmetrics.ClaimControllerStartupLatency), "flap must not double-count controller startup latency")
+		require.Equal(t, 0, claimPatches)
+
+		// The mid-flap NotReady pass (previously Ready) backfills the guard
+		// in memory as well, still without a write.
+		notReady := persisted.DeepCopy()
+		notReady.Status.Conditions = []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse}}
+		readyOldStatus := &extensionsv1beta1.SandboxClaimStatus{
+			Conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+		}
+		require.NoError(t, r.recordCreationLatencyMetric(ctx, notReady, readyOldStatus, nil))
+		require.Equal(t, 0, claimPatches)
+
+		// A same-named replacement claim (new UID) is not mistaken for the
+		// recorded one, and the NotFound cleanup drops the entry.
+		replacement := persisted.DeepCopy()
+		replacement.UID = "uid-flap-flag-on-replacement"
+		require.False(t, r.firstReadyGuardArmed(replacement), "the in-memory guard must be UID-scoped")
+		r.firstReadyRecorded.Delete(key)
+		require.False(t, r.firstReadyGuardArmed(persisted), "deleting the entry must disarm the guard")
 	})
 
 	t.Run("annotation patch failure returns error and metrics are still recorded", func(t *testing.T) {
@@ -4596,7 +4672,7 @@ func TestSandboxClaimClearsAssignedSandboxOwnedByAnotherClaim(t *testing.T) {
 				WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
 			}
 
-			sandbox, err := reconciler.getOrCreateSandbox(ctx, claim, nil)
+			sandbox, err := reconciler.getOrCreateSandbox(ctx, claim, nil, nil)
 			require.NoError(t, err)
 			require.Nil(t, sandbox)
 
@@ -7150,11 +7226,13 @@ func TestSandboxClaimAdoptionConflictRetriedInPass(t *testing.T) {
 		errors.New("the object has been modified; please apply your changes to the latest version and try again"),
 	)
 
-	// The first claim Update (the adoption annotation write) conflicts, as if
-	// the cached base predated an earlier write; the in-pass retry re-reads and
-	// succeeds.
+	// The first adoption annotation patch conflicts, as if the cached base
+	// predated an earlier write; the in-pass retry re-reads and succeeds. Every
+	// claim patch body is captured so the metadata-only contract of both the
+	// direct write and the fresh-base retry can be checked.
 	conflictOnce := true
 	claimUpdates := 0
+	var claimPatchBodies []string
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(template, warmPool, claim, candidate).
@@ -7162,13 +7240,25 @@ func TestSandboxClaimAdoptionConflictRetriedInPass(t *testing.T) {
 		WithInterceptorFuncs(interceptor.Funcs{
 			Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
 				if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok {
-					claimUpdates++
-					if conflictOnce {
-						conflictOnce = false
-						return conflict
-					}
+					t.Errorf("claim must never be written with a full-object Update (spec round-trip bumps generation)")
 				}
 				return c.Update(ctx, obj, opts...)
+			},
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok {
+					data, err := patch.Data(obj)
+					require.NoError(t, err)
+					body := string(data)
+					claimPatchBodies = append(claimPatchBodies, body)
+					if strings.Contains(body, extensionsv1beta1.AssignedSandboxNameAnnotation) {
+						claimUpdates++
+						if conflictOnce {
+							conflictOnce = false
+							return conflict
+						}
+					}
+				}
+				return c.Patch(ctx, obj, patch, opts...)
 			},
 		}).
 		Build()
@@ -7196,7 +7286,20 @@ func TestSandboxClaimAdoptionConflictRetriedInPass(t *testing.T) {
 		t.Fatalf("expected adoption to complete in this pass with no requeue, got %+v", res)
 	}
 	if claimUpdates < 2 {
-		t.Errorf("expected the conflicted update to be retried in-pass (>=2 claim updates), got %d", claimUpdates)
+		t.Errorf("expected the conflicted assignment patch to be retried in-pass (>=2 assignment patches), got %d", claimUpdates)
+	}
+	// Both the doomed direct patch and the fresh-base retry must be
+	// metadata-only and optimistically locked: no spec in the body (that is
+	// what bumped metadata.generation with the old Update) and a
+	// resourceVersion precondition on every assignment write.
+	for _, body := range claimPatchBodies {
+		var parsed map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal([]byte(body), &parsed), "claim patch body %s", body)
+		require.NotContains(t, parsed, "spec", "claim patch must never carry the user-owned spec: %s", body)
+		require.NotContains(t, parsed, "status", "claim main-resource patch must never carry status: %s", body)
+		if strings.Contains(body, extensionsv1beta1.AssignedSandboxNameAnnotation) {
+			require.Contains(t, body, `"resourceVersion":"`, "assignment patch must be optimistically locked: %s", body)
+		}
 	}
 
 	updatedClaim := &extensionsv1beta1.SandboxClaim{}
@@ -7215,6 +7318,16 @@ func TestSandboxClaimAdoptionConflictRetriedInPass(t *testing.T) {
 
 // newPoolCandidateSandbox builds a Ready, adoptable warm-pool member for the
 // default/test-pool + test-template fixtures.
+// isAssignmentReferencePatch reports whether a claim merge-patch body writes
+// the assigned-sandbox reference: setting the key, nulling the key, or
+// nulling the whole annotations map — the diff client.MergeFrom emits when
+// the reference was the last annotation on the fresh base (safe under the
+// optimistic lock, since the server object then equals that base).
+func isAssignmentReferencePatch(body string) bool {
+	return strings.Contains(body, extensionsv1beta1.AssignedSandboxNameAnnotation) ||
+		strings.Contains(body, `"annotations":null`)
+}
+
 func newPoolCandidateSandbox(name string) *sandboxv1beta1.Sandbox {
 	return &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
@@ -7630,6 +7743,9 @@ func TestSandboxClaimAdoptionCleanupFailureKeepsReferenceAndRetries(t *testing.T
 		WithStatusSubresource(claim).
 		Build()
 
+	// The reference cleanup is a metadata patch that nulls the assignment
+	// annotation; fail exactly that write (not the unrelated observability
+	// annotation patch) while claimUpdateFails is set.
 	claimUpdateFails := true
 	cachedClient := interceptor.NewClient(rawClient, interceptor.Funcs{
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -7639,11 +7755,15 @@ func TestSandboxClaimAdoptionCleanupFailureKeepsReferenceAndRetries(t *testing.T
 			}
 			return c.Get(ctx, key, obj, opts...)
 		},
-		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 			if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok && claimUpdateFails {
-				return k8errors.NewInternalError(errors.New("etcd hiccup"))
+				data, err := patch.Data(obj)
+				require.NoError(t, err)
+				if isAssignmentReferencePatch(string(data)) {
+					return k8errors.NewInternalError(errors.New("etcd hiccup"))
+				}
 			}
-			return c.Update(ctx, obj, opts...)
+			return c.Patch(ctx, obj, patch, opts...)
 		},
 	})
 
@@ -7718,24 +7838,25 @@ func TestSandboxClaimAdoptionAnnotationAndCompletionConflictsResolvedSamePass(t 
 		WithStatusSubresource(claim).
 		Build()
 
-	// First annotation Update 409s (stale claim base), then the first
-	// adoption patch 409s (concurrent candidate write): both in one pass.
+	// First assignment annotation patch 409s (stale claim base), then the
+	// first adoption patch 409s (concurrent candidate write): both in one pass.
 	claimConflictOnce := true
 	sandboxConflictOnce := true
 	claimUpdates := 0
 	sandboxPatches := 0
 	cachedClient := interceptor.NewClient(rawClient, interceptor.Funcs{
-		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 			if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok {
-				claimUpdates++
-				if claimConflictOnce {
-					claimConflictOnce = false
-					return claimConflict
+				data, err := patch.Data(obj)
+				require.NoError(t, err)
+				if strings.Contains(string(data), extensionsv1beta1.AssignedSandboxNameAnnotation) {
+					claimUpdates++
+					if claimConflictOnce {
+						claimConflictOnce = false
+						return claimConflict
+					}
 				}
 			}
-			return c.Update(ctx, obj, opts...)
-		},
-		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 			if sb, ok := obj.(*sandboxv1beta1.Sandbox); ok && sb.Name == "pool-sb-1" {
 				sandboxPatches++
 				if sandboxConflictOnce {
@@ -7771,7 +7892,7 @@ func TestSandboxClaimAdoptionAnnotationAndCompletionConflictsResolvedSamePass(t 
 		t.Fatalf("expected no requeue, got %+v", res)
 	}
 	if claimUpdates < 2 {
-		t.Errorf("expected the annotation write to be retried in-pass (>=2 claim updates), got %d", claimUpdates)
+		t.Errorf("expected the annotation write to be retried in-pass (>=2 assignment patches), got %d", claimUpdates)
 	}
 	if sandboxPatches != 2 {
 		t.Errorf("expected exactly one doomed adoption patch plus one fresh-base re-patch, got %d", sandboxPatches)
@@ -7823,11 +7944,15 @@ func TestSandboxClaimAdoptionCleanupCancellationPropagates(t *testing.T) {
 			}
 			return c.Get(ctx, key, obj, opts...)
 		},
-		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 			if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok {
-				return fmt.Errorf("client rate limiter wait: %w", context.Canceled)
+				data, err := patch.Data(obj)
+				require.NoError(t, err)
+				if isAssignmentReferencePatch(string(data)) {
+					return fmt.Errorf("client rate limiter wait: %w", context.Canceled)
+				}
 			}
-			return c.Update(ctx, obj, opts...)
+			return c.Patch(ctx, obj, patch, opts...)
 		},
 	})
 

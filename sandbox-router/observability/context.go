@@ -45,6 +45,8 @@ type Labels struct {
 	// for every browser-facing request. Empty when unset, same as
 	// SandboxNamespace before the "-" sentinel is applied.
 	SandboxID string
+	// GRPC distinguishes an RPC outcome from its HTTP transport status.
+	GRPC bool
 }
 
 type labelsKey struct{}

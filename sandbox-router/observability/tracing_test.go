@@ -26,6 +26,32 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
+func TestTracingMiddleware_GRPCAbortEndsSpanWithUnknownStatus(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	inner := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		LabelsFromContext(r.Context()).GRPC = true
+		panic(http.ErrAbortHandler)
+	})
+	h := TracingMiddleware(tp.Tracer("test"), propagation.TraceContext{}, logr.Discard())(inner)
+	func() {
+		defer func() {
+			if p := recover(); p != http.ErrAbortHandler {
+				t.Fatalf("abort did not propagate: %v", p)
+			}
+		}()
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/service/Method", nil))
+	}()
+	spans := recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans: %d", len(spans))
+	}
+	attrs := attribute.NewSet(spans[0].Attributes()...)
+	if code, ok := attrs.Value("grpc.status_code"); !ok || code.AsString() != "unknown" {
+		t.Fatalf("aborted stream status=%v", code)
+	}
+}
+
 // TestTracingMiddleware_UsesResolvedIdentityNotHeaders is the regression
 // test for the bug caught in review: sandbox.id/sandbox.namespace span
 // attributes used to be read straight from the X-Sandbox-* request

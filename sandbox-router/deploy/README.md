@@ -15,6 +15,20 @@ Drop-in starting point for running the Go sandbox-router in Kubernetes. These ma
 | `networkpolicy.yaml` | Locks down ingress to proxy/metrics/probe ports; egress to DNS, sandbox port, OTel collector. **Tighten the selectors for your tenancy model.** |
 | `examples/gateway-gke.yaml` | Optional GKE Gateway, HTTPRoute, and HealthCheckPolicy for external ingress in front of `sandbox-router-svc`. |
 
+Native gRPC is accepted on the same proxy ports, but needs an HTTP/2 path all the
+way to the router. The [separate generated-client example](../../examples/sandbox-router-grpc/README.md)
+provides ordinary-container sandboxd/router manifests and a pinned Envoy Gateway
+TLS `GRPCRoute` lane. Its own Service advertises `kubernetes.io/h2c` on 8080; the
+legacy HTTP Service/GKE resources above are not changed. Router-consumed scoped
+credentials and verified public TLS are required in that example; internal h2c
+does not encrypt the full chain.
+
+`networkpolicy.yaml` preserves legacy TCP 8888 and adds TCP 9090 only for labelled
+sandboxd Pods in `grpc-router-demo`. Replace those selectors with your allowed
+tenant range; add specific ports for other gRPC services rather than all ports.
+Verify both allowed and forbidden targets with an enforcing CNI. Applying a
+policy, especially on default kind networking, is not evidence of enforcement.
+
 ## Apply
 
 ```sh

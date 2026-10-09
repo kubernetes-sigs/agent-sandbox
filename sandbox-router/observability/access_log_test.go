@@ -22,6 +22,42 @@ import (
 	"github.com/go-logr/logr"
 )
 
+func TestAccessLogMiddleware_GRPCStatusAndAbort(t *testing.T) {
+	for _, tc := range []struct {
+		raw, want string
+		abort     bool
+	}{
+		{"0", "0", false}, {"7", "7", false}, {"", "unknown", false},
+		{"bogus", "unknown", false}, {"99", "unknown", false}, {"", "unknown", true},
+		{"+0", "unknown", false}, {"-0", "unknown", false},
+	} {
+		t.Run(tc.want+tc.raw, func(t *testing.T) {
+			var line capturedLine
+			inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				LabelsFromContext(r.Context()).GRPC = true
+				if tc.raw != "" {
+					w.Header().Set("Grpc-Status", tc.raw)
+				}
+				if tc.abort {
+					panic(http.ErrAbortHandler)
+				}
+			})
+			h := AccessLogMiddleware(newCapturingLogger(&line), nil)(inner)
+			func() {
+				defer func() {
+					if p := recover(); p != nil && p != http.ErrAbortHandler {
+						panic(p)
+					}
+				}()
+				h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/service/Method", nil))
+			}()
+			if got, ok := line.value("grpc_status"); !ok || got != tc.want {
+				t.Fatalf("logged grpc_status = %v, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
 // capturedLine is the last "request" log line recorded by capturingSink.
 type capturedLine struct {
 	msg        string

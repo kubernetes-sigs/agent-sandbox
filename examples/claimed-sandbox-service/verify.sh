@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-if [[ "$#" -ne 1 || "$1" == -* ]]; then
+if [[ "$#" -ne 1 || -z "${1:-}" || "$1" == -* ]]; then
   echo "Usage: bash verify.sh <kubectl-context>" >&2
   exit 2
 fi
@@ -71,6 +71,11 @@ wait_for_ready_count() {
   done
 }
 
+wait_for_warm_reserve() {
+  "${KUBECTL[@]}" --request-timeout=190s wait --for=jsonpath='{.status.readyReplicas}'=2 \
+    sandboxwarmpool/serving-pool --timeout=180s
+}
+
 # Do not take over or clean up resources from a separate run.
 existing="$("${KUBECTL[@]}" get namespace "$NAMESPACE" --ignore-not-found -o name)"
 if [[ -n "$existing" ]]; then
@@ -82,8 +87,7 @@ fi
   sandboxwarmpools.extensions.agents.x-k8s.io >/dev/null
 NAMESPACE_UID="$("${KUBECTL[@]}" create -f "$EXAMPLE_DIR/namespace.yaml" -o jsonpath='{.metadata.uid}')"
 "${KUBECTL[@]}" apply -k "$EXAMPLE_DIR"
-"${KUBECTL[@]}" --request-timeout=190s wait --for=jsonpath='{.status.readyReplicas}'=2 \
-  sandboxwarmpool/serving-pool --timeout=180s
+wait_for_warm_reserve
 wait_for_ready_count 0
 echo "PASS: ready, unclaimed warm-pool Pods are not Service backends."
 
@@ -142,18 +146,28 @@ wait_for_service_pod() {
   done
 }
 
+# EndpointSlice membership can converge before either forwarding rule does.
 # Each curl uses a new connection; distribution is not strict per-request round robin.
 responses=""
-for ((i = 0; i < 30; i++)); do
-  response="$(request_hostname)"
-  responses+="$response"$'\n'
+deadline=$((SECONDS + 60))
+while true; do
+  if response="$(request_hostname)"; then
+    if [[ "$response" != "$POD_A" && "$response" != "$POD_B" ]]; then
+      echo "Service reached unexpected backend $response." >&2
+      exit 1
+    fi
+    responses+="$response"$'\n'
+    if [[ "$(printf '%s' "$responses" | sort -u)" == "$expected_pods" ]]; then
+      break
+    fi
+  fi
+  if (( SECONDS >= deadline )); then
+    echo "Fresh Service connections did not reach both claimed Pods before timeout." >&2
+    exit 1
+  fi
+  sleep 1
 done
-if [[ "$(printf '%s' "$responses" | sort -u)" != "$expected_pods" ]]; then
-  echo "Fresh Service connections did not reach both claimed Pods." >&2
-  exit 1
-fi
-"${KUBECTL[@]}" --request-timeout=190s wait --for=jsonpath='{.status.readyReplicas}'=2 \
-  sandboxwarmpool/serving-pool --timeout=180s
+wait_for_warm_reserve
 echo "PASS: the shared Service reaches both claimed Pods and excludes the warm reserve."
 
 "${KUBECTL[@]}" exec "$POD_A" -c app -- touch /tmp/not-ready
@@ -197,7 +211,6 @@ if [[ "$(ready_pods)" != "$POD_B" ]]; then
   echo "Claim deletion did not remove the claimed Pod from the Service." >&2
   exit 1
 fi
-"${KUBECTL[@]}" --request-timeout=190s wait --for=jsonpath='{.status.readyReplicas}'=2 \
-  sandboxwarmpool/serving-pool --timeout=180s
+wait_for_warm_reserve
 wait_for_service_pod "$POD_B"
 echo "PASS: Claim deletion leaves the remaining backend serving; the warm reserve stays excluded."

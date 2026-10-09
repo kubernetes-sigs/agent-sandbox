@@ -175,6 +175,17 @@ both Service and Pod IP, and Claim deletion with continued serving. It cleans
 up only the namespace it created after checking its UID. An unenforced policy
 fails verification instead of silently skipping the denial checks.
 
+To run offline verifier regressions with Python's standard library (no cluster
+or Python packages required):
+
+```bash
+python3 test_verify.py
+```
+
+These intercept kubectl and accelerate polling to check argument safety,
+initial forwarding convergence, bounded failures, and cleanup. They do not
+replace the functional verification against an enforcing CNI.
+
 To remove a manually deployed example, after confirming the context and namespace:
 
 ```bash

@@ -19,6 +19,7 @@ from kubernetes import client
 
 from agent_sandbox_rl import constants
 from agent_sandbox_rl.config import TemplateSpec
+from agent_sandbox_rl.exceptions import OwnedByAnotherRunError
 from agent_sandbox_rl.resources import Resources
 
 IMG = "slimshetty/swebench-verified:sweb.eval.x86_64.astropy__astropy-12907"
@@ -426,3 +427,175 @@ def test_extra_pod_spec_merges_env_vars_in_container():
       {"name": "BASE_VAR", "value": "base"},
       {"name": "EXTRA_VAR", "value": "extra"},
   ]
+
+
+# --- networkPolicyManagement (one policy per namespace, see
+# examples/agent-sandbox-rl-network-policy) -----------------------------------
+def _existing_template(**spec):
+  """A live template whose labels already match this run's, so only a policy-mode
+  change can produce a patch."""
+  return {"metadata": {"name": TNAME, "resourceVersion": "41",
+                       "labels": dict(constants.DEFAULT_LABELS)},
+          "spec": {"podTemplate": {"metadata": {"labels": {
+              **constants.DEFAULT_LABELS, "sandbox": TNAME}}}, **spec}}
+
+
+def test_template_manifest_omits_network_policy_management_by_default():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  r.ensure_template(IMG, TNAME, TemplateSpec())
+  _, kwargs = r.custom_api.create_namespaced_custom_object.call_args
+  # absent -> the controller's default (Managed), exactly as before the knob existed
+  assert "networkPolicyManagement" not in kwargs["body"]["spec"]
+
+
+def test_template_manifest_network_policy_management_unmanaged():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  r.ensure_template(IMG, TNAME, TemplateSpec(network_policy_management="Unmanaged"))
+  _, kwargs = r.custom_api.create_namespaced_custom_object.call_args
+  assert kwargs["body"]["spec"]["networkPolicyManagement"] == "Unmanaged"
+  assert "podTemplate" in kwargs["body"]["spec"]
+
+
+def test_template_spec_rejects_unknown_network_policy_management():
+  with pytest.raises(ValueError, match="Managed|Unmanaged"):
+    TemplateSpec(network_policy_management="Cilium")
+
+
+def test_ensure_template_patches_network_policy_management_on_existing():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.return_value = _existing_template()
+  created = r.ensure_template(IMG, TNAME, TemplateSpec(network_policy_management="Unmanaged"))
+  assert created is False
+  r.custom_api.patch_namespaced_custom_object.assert_called_once()
+  _, kwargs = r.custom_api.patch_namespaced_custom_object.call_args
+  assert kwargs["name"] == TNAME
+  assert kwargs["plural"] == constants.TEMPLATES_PLURAL
+  # a merge patch on the one field, conditioned on the object that was read: the
+  # pod template (and so the pools) is untouched
+  assert kwargs["body"] == {"spec": {"networkPolicyManagement": "Unmanaged"},
+                            "metadata": {"resourceVersion": "41"}}
+
+
+def test_ensure_template_patches_back_to_managed_when_asked():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.return_value = _existing_template(
+      networkPolicyManagement="Unmanaged")
+  r.ensure_template(IMG, TNAME, TemplateSpec(network_policy_management="Managed"))
+  _, kwargs = r.custom_api.patch_namespaced_custom_object.call_args
+  assert kwargs["body"]["spec"] == {"networkPolicyManagement": "Managed"}
+
+
+def test_ensure_template_leaves_policy_mode_alone_when_unset_or_equal():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.return_value = _existing_template(
+      networkPolicyManagement="Unmanaged")
+  # no opinion: must not flip an operator's Unmanaged template back to Managed
+  r.ensure_template(IMG, TNAME, TemplateSpec())
+  # same value: nothing to do
+  r.ensure_template(IMG, TNAME, TemplateSpec(network_policy_management="Unmanaged"))
+  r.custom_api.patch_namespaced_custom_object.assert_not_called()
+
+
+def test_ensure_template_policy_mode_patch_failure_is_non_fatal():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.return_value = _existing_template()
+  r.custom_api.patch_namespaced_custom_object.side_effect = client.ApiException(status=403)
+  assert r.ensure_template(IMG, TNAME, TemplateSpec(network_policy_management="Unmanaged")) is False
+
+
+def test_ensure_template_does_not_touch_foreign_template_policy_mode():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.return_value = {
+      "metadata": {"name": TNAME, "labels": {**constants.DEFAULT_LABELS,
+                                             constants.RUN_ID_LABEL: "other-run"}},
+      "spec": {"podTemplate": {"metadata": {"labels": {}}}}}
+  created = r.ensure_template(IMG, TNAME, TemplateSpec(network_policy_management="Unmanaged"),
+                              owner_run_id="this-run", share_foreign=True)
+  assert created is False
+  r.custom_api.patch_namespaced_custom_object.assert_not_called()
+
+
+def test_fleet_pod_labels_are_the_labels_that_reach_pods():
+  r = Resources(MagicMock(), MagicMock(), "ns",
+                labels={constants.RUN_ID_LABEL: "run-1",
+                        "extensions.agents.x-k8s.io/other": "x", "team": "rl"})
+  labels = r.fleet_pod_labels()
+  assert labels == {constants.MANAGED_BY_LABEL: constants.MANAGED_BY_VALUE,
+                    constants.POD_RUN_ID_LABEL: "run-1", "team": "rl"}
+  # the controller drops reserved keys from pods, and `sandbox` is per template
+  assert constants.RUN_ID_LABEL in r._pod_template_labels(TNAME)
+  assert not any(k.startswith(constants.RESERVED_POD_LABEL_PREFIXES) for k in labels)
+
+
+def test_ensure_template_dry_run_never_writes_to_an_existing_template():
+  r = _resources()
+  # stale labels (no run id yet) and a different mode: both reconciles would patch
+  r.custom_api.get_namespaced_custom_object.return_value = {
+      "metadata": {"name": TNAME, "resourceVersion": "41", "labels": {}},
+      "spec": {"podTemplate": {"metadata": {"labels": {}}}}}
+  created = r.ensure_template(IMG, TNAME, TemplateSpec(network_policy_management="Unmanaged"),
+                              dry_run=True)
+  assert created is False
+  r.custom_api.patch_namespaced_custom_object.assert_not_called()
+
+
+def test_policy_mode_patch_is_conditioned_on_the_label_patch_result():
+  r = _resources()
+  stale = _existing_template()
+  stale["metadata"]["labels"] = {}                      # forces a label patch first
+  r.custom_api.get_namespaced_custom_object.return_value = stale
+  r.custom_api.patch_namespaced_custom_object.side_effect = [
+      {**stale, "metadata": {**stale["metadata"], "resourceVersion": "42"}}, {}]
+  r.ensure_template(IMG, TNAME, TemplateSpec(network_policy_management="Unmanaged"))
+  calls = r.custom_api.patch_namespaced_custom_object.call_args_list
+  assert len(calls) == 2
+  assert calls[1].kwargs["body"] == {"spec": {"networkPolicyManagement": "Unmanaged"},
+                                     "metadata": {"resourceVersion": "42"}}
+
+
+def test_policy_mode_patch_conflict_rereads_once_then_leaves_the_template_alone():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.return_value = _existing_template()
+  r.custom_api.patch_namespaced_custom_object.side_effect = client.ApiException(status=409)
+  assert r.ensure_template(IMG, TNAME, TemplateSpec(network_policy_management="Unmanaged")) is False
+  assert r.custom_api.get_namespaced_custom_object.call_count == 2
+  assert r.custom_api.patch_namespaced_custom_object.call_count == 2
+
+
+def test_label_patch_is_conditioned_on_the_inspected_template():
+  r = _resources()
+  stale = _existing_template()
+  stale["metadata"]["labels"] = {}
+  r.custom_api.get_namespaced_custom_object.return_value = stale
+  r.ensure_template(IMG, TNAME, TemplateSpec())
+  body = r.custom_api.patch_namespaced_custom_object.call_args.kwargs["body"]
+  assert body["metadata"]["resourceVersion"] == "41"
+
+
+def test_conflict_rechecks_ownership_before_writing_again():
+  r = _resources()
+  ours = _existing_template()
+  ours["metadata"]["labels"] = {}                       # stale: label patch first
+  replacement = _existing_template()
+  replacement["metadata"]["resourceVersion"] = "77"
+  replacement["metadata"]["labels"] = {constants.RUN_ID_LABEL: "other-run"}
+  r.custom_api.get_namespaced_custom_object.side_effect = [ours, replacement]
+  r.custom_api.patch_namespaced_custom_object.side_effect = client.ApiException(status=409)
+  with pytest.raises(OwnedByAnotherRunError):
+    r.ensure_template(IMG, TNAME, TemplateSpec(network_policy_management="Unmanaged"),
+                      owner_run_id="this-run")
+  r.custom_api.patch_namespaced_custom_object.assert_called_once()   # nothing after
+
+
+def test_conflict_then_deleted_template_is_created_fresh():
+  r = _resources()
+  stale = _existing_template()
+  stale["metadata"]["labels"] = {}
+  r.custom_api.get_namespaced_custom_object.side_effect = [stale, client.ApiException(status=404)]
+  r.custom_api.patch_namespaced_custom_object.side_effect = client.ApiException(status=409)
+  assert r.ensure_template(IMG, TNAME, TemplateSpec(network_policy_management="Unmanaged")) is True
+  body = r.custom_api.create_namespaced_custom_object.call_args.kwargs["body"]
+  assert body["spec"]["networkPolicyManagement"] == "Unmanaged"
+

@@ -64,12 +64,30 @@ class TemplateSpec(BaseModel):
   colocate_replicas: bool = False
   # Escape hatch: extra keys merged into the pod spec (e.g. tolerations).
   extra_pod_spec: dict = Field(default_factory=dict)
+  # SandboxTemplate `spec.networkPolicyManagement`. None leaves the field out, so
+  # the controller applies its default: Managed, one NetworkPolicy per template
+  # selecting on the template-ref-hash pod label. "Unmanaged" asks the controller
+  # to create none, for fleets that put ONE namespace-wide policy on the shared
+  # `app=agent-sandbox-rl` pod label instead: with a template per task image,
+  # created and deleted as pools are warmed and retired, per-template policies add
+  # a policy create and delete per template, and keep a per-template label
+  # identity-relevant on GKE Dataplane V2 (Cilium). The SDK also patches the mode
+  # onto a pre-existing template it owns.
+  # See examples/agent-sandbox-rl-network-policy.
+  network_policy_management: str | None = None
 
   @field_validator("image_pull_policy")
   @classmethod
   def _valid_pull_policy(cls, v: str) -> str:
     if v not in ("Always", "IfNotPresent", "Never"):
       raise ValueError("image_pull_policy must be Always|IfNotPresent|Never")
+    return v
+
+  @field_validator("network_policy_management")
+  @classmethod
+  def _valid_network_policy_management(cls, v: str | None) -> str | None:
+    if v is not None and v not in ("Managed", "Unmanaged"):
+      raise ValueError("network_policy_management must be Managed|Unmanaged")
     return v
 
 

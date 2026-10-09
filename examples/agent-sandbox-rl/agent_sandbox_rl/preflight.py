@@ -45,6 +45,39 @@ def _node_api(cluster):
   return client.NodeV1Api(cluster.api_client)
 
 
+def _networking_api(cluster):
+  return client.NetworkingV1Api(cluster.api_client)
+
+
+def pod_selector_covers(selector, known_labels: dict) -> bool:
+  """Whether a NetworkPolicy ``podSelector`` (a `V1LabelSelector`) is certain to
+  select every pod whose labels include ``known_labels``.
+
+  Pods also carry keys outside ``known_labels`` (the per-template ``sandbox``
+  label, the controller's own labels, keys other integrations add), so any
+  requirement on such a key, positive or negative, cannot be confirmed and counts
+  as not covering. An empty selector selects every pod in the namespace."""
+  if selector is None:
+    return True
+  for key, value in (selector.match_labels or {}).items():
+    if known_labels.get(key) != value:
+      return False
+  for req in selector.match_expressions or []:
+    if req.key not in known_labels:
+      return False
+    value = known_labels[req.key]
+    values = req.values or []
+    if req.operator == "In" and value not in values:
+      return False
+    if req.operator == "NotIn" and value in values:
+      return False
+    if req.operator == "DoesNotExist":
+      return False
+    if req.operator not in ("In", "NotIn", "Exists", "DoesNotExist"):
+      return False
+  return True
+
+
 @dataclass
 class Check:
   name: str
@@ -86,8 +119,14 @@ def preflight_cluster(cluster, *, require_runtime_class: str | None = None,
                       image_pull_secret: str | None = None,
                       namespace: str | None = None,
                       validate_template=None,
-                      sample_image: str = "busybox:latest") -> PreflightReport:
+                      sample_image: str = "busybox:latest",
+                      unmanaged_pod_labels: dict | None = None) -> PreflightReport:
   """Run all checks on one cluster and return a `PreflightReport`.
+
+  ``unmanaged_pod_labels`` (the labels every fleet pod carries) is passed when the
+  fleet creates its templates with ``networkPolicyManagement: Unmanaged``: the
+  controller then creates no NetworkPolicy, so the report warns unless some
+  policy in the namespace selects those pods.
 
   If ``validate_template`` (a `TemplateSpec`) is given, the hand-built
   SandboxTemplate + SandboxWarmPool manifests are server-side dry-run validated
@@ -166,6 +205,29 @@ def preflight_cluster(cluster, *, require_runtime_class: str | None = None,
       r.add("manifests", False, f"HTTP {e.status}: {e.reason}", warn_only=not hard)
     except Exception as e:  # noqa: BLE001 — connectivity / dry-run unsupported
       r.add("manifests", False, str(e), warn_only=True)
+
+  # 8. Unmanaged templates get no controller-made NetworkPolicy, so without one
+  #    of the operator's the fleet's pods are not isolated at all. Warning only:
+  #    listing policies may be forbidden for this identity, and the operator may
+  #    apply the policy after preflight.
+  if unmanaged_pod_labels is not None:
+    try:
+      policies = _networking_api(cluster).list_namespaced_network_policy(ns).items
+      selecting = [p.metadata.name for p in policies
+                   if pod_selector_covers(p.spec.pod_selector, unmanaged_pod_labels)]
+      if selecting:
+        r.add("networkpolicy", True, ", ".join(selecting))
+      else:
+        wanted = ",".join(f"{k}={v}" for k, v in sorted(unmanaged_pod_labels.items()))
+        r.add("networkpolicy", False,
+              f"templates are Unmanaged but no NetworkPolicy in {ns} selects the "
+              f"fleet's pods ({wanted}); they are not isolated", warn_only=True)
+    except client.ApiException as e:
+      r.add("networkpolicy", False,
+            f"could not list NetworkPolicies in {ns}: HTTP {e.status}", warn_only=True)
+    except Exception as e:  # noqa: BLE001 — connectivity
+      r.add("networkpolicy", False,
+            f"could not list NetworkPolicies in {ns}: {e}", warn_only=True)
 
   return r
 

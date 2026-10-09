@@ -60,6 +60,9 @@ RUN_ID_LABEL = "agents.x-k8s.io/asrl-run-id"
 # pod (system-reserved since #894), so RUN_ID_LABEL never lands on pods; the
 # circuit breaker's pod count and the reaper's pod sweep select on this key.
 POD_RUN_ID_LABEL = "agent-sandbox-rl/run-id"
+# Label prefixes the Sandbox controller drops from a pod template on its way to the
+# pod (hasSystemReservedPrefix); a key under them never reaches a pod.
+RESERVED_POD_LABEL_PREFIXES = ("agents.x-k8s.io/", "extensions.agents.x-k8s.io/")
 # Marks an on-demand pool under a shared run id; the job's first warm of the image
 # takes it over (see `Resources.warm_shared_pool`).
 ON_DEMAND_ANNOTATION = "agent-sandbox-rl/on-demand"

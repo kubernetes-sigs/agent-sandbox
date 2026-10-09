@@ -5,6 +5,21 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 
 ## [0.1.0.dev0] — unreleased
 
+### Added (one NetworkPolicy per namespace)
+- **`TemplateSpec.network_policy_management`** sets `spec.networkPolicyManagement`
+  on the SandboxTemplates a fleet creates, and patches it onto a pre-existing
+  template the run owns when it differs. The controller creates one NetworkPolicy
+  per template; a fleet has a template per task image and creates and deletes
+  templates as it warms and retires pools, so a namespace ends up with hundreds
+  of policies that churn with the pools, and the per-template label they select
+  on has to stay identity-relevant on GKE Dataplane V2 (Cilium). With `"Unmanaged"` the controller creates none and
+  a single policy on the shared `app=agent-sandbox-rl` pod label covers every
+  sandbox in the namespace; `examples/agent-sandbox-rl-network-policy` has that
+  policy and a verify script. `preflight()` warns when the templates are
+  Unmanaged and no NetworkPolicy in the namespace selects the fleet's pods.
+  Unset (the default) leaves the field out and never flips an existing template,
+  so behavior is unchanged.
+
 ### Added (one job, several processes —
 [#1808](https://github.com/kubernetes-sigs/agent-sandbox/issues/1808))
 - **`FleetConfig.run_id`** sets the fleet's run id instead of a random one, so the

@@ -204,7 +204,7 @@ func TestSandboxVolumeClaimTemplatesValidation(t *testing.T) {
 		}
 	}
 	var tooMany []sandboxv1beta1.PersistentVolumeClaimTemplate
-	for i := range 33 {
+	for i := range 129 {
 		tooMany = append(tooMany, newVCT(fmt.Sprintf("vol-%d", i)))
 	}
 
@@ -215,7 +215,7 @@ func TestSandboxVolumeClaimTemplatesValidation(t *testing.T) {
 	}{
 		{"empty name", []sandboxv1beta1.PersistentVolumeClaimTemplate{newVCT("")}, "metadata.name must not be empty"},
 		{"duplicate names", []sandboxv1beta1.PersistentVolumeClaimTemplate{newVCT("data"), newVCT("data")}, "volumeClaimTemplates names must be unique"},
-		{"too many", tooMany, "must have at most 32 items"},
+		{"too many", tooMany, "must have at most 128 items"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

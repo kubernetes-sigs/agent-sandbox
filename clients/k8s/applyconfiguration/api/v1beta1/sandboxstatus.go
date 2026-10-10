@@ -17,7 +17,8 @@
 package v1beta1
 
 import (
-	v1 "k8s.io/client-go/applyconfigurations/meta/v1"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1 "k8s.io/client-go/applyconfigurations/meta/v1"
 )
 
 // SandboxStatusApplyConfiguration represents a declarative configuration of the SandboxStatus type for use
@@ -25,6 +26,11 @@ import (
 //
 // SandboxStatus defines the observed state of Sandbox.
 type SandboxStatusApplyConfiguration struct {
+	// firstReadyTime is the best-known time when this Sandbox first reached Ready=True.
+	// If the controller first observes the Sandbox already Ready, it uses the Ready
+	// condition's current transition time and does not emit a creation-latency sample.
+	// It is set once and retained across later readiness transitions.
+	FirstReadyTime *v1.Time `json:"firstReadyTime,omitempty"`
 	// serviceFQDN that is valid for default cluster settings
 	// The domain defaults to cluster.local but is configurable via the controller's --cluster-domain flag.
 	ServiceFQDN *string `json:"serviceFQDN,omitempty"`
@@ -34,7 +40,7 @@ type SandboxStatusApplyConfiguration struct {
 	// in-cluster DNS name of this Service.
 	Service *string `json:"service,omitempty"`
 	// conditions defines the status conditions array
-	Conditions []v1.ConditionApplyConfiguration `json:"conditions,omitempty"`
+	Conditions []metav1.ConditionApplyConfiguration `json:"conditions,omitempty"`
 	// selector is the label selector for pods.
 	LabelSelector *string `json:"selector,omitempty"`
 	// podIPs are the IP addresses of the underlying pod.
@@ -52,6 +58,14 @@ type SandboxStatusApplyConfiguration struct {
 // apply.
 func SandboxStatus() *SandboxStatusApplyConfiguration {
 	return &SandboxStatusApplyConfiguration{}
+}
+
+// WithFirstReadyTime sets the FirstReadyTime field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the FirstReadyTime field is set to the value of the last call.
+func (b *SandboxStatusApplyConfiguration) WithFirstReadyTime(value v1.Time) *SandboxStatusApplyConfiguration {
+	b.FirstReadyTime = &value
+	return b
 }
 
 // WithServiceFQDN sets the ServiceFQDN field in the declarative configuration to the given value
@@ -73,7 +87,7 @@ func (b *SandboxStatusApplyConfiguration) WithService(value string) *SandboxStat
 // WithConditions adds the given value to the Conditions field in the declarative configuration
 // and returns the receiver, so that objects can be build by chaining "With" function invocations.
 // If called multiple times, values provided by each call will be appended to the Conditions field.
-func (b *SandboxStatusApplyConfiguration) WithConditions(values ...*v1.ConditionApplyConfiguration) *SandboxStatusApplyConfiguration {
+func (b *SandboxStatusApplyConfiguration) WithConditions(values ...*metav1.ConditionApplyConfiguration) *SandboxStatusApplyConfiguration {
 	for i := range values {
 		if values[i] == nil {
 			panic("nil value passed to WithConditions")

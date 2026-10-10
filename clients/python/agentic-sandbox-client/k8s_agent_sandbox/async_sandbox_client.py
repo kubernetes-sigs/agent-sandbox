@@ -69,8 +69,8 @@ def _sync_configuration_from_async(async_configuration) -> sync_client.Configura
     for field in _CONNECTION_FIELDS:
         if hasattr(async_configuration, field):
             setattr(sync_configuration, field, getattr(async_configuration, field))
-    # kubernetes_asyncio leaves proxy unset and lets aiohttp read HTTPS_PROXY/NO_PROXY, while the sync
-    # Configuration reads them itself, so only an explicit proxy may override that.
+    # Preserve the effective proxy from the async configuration for cleanup. It may have been loaded
+    # from the environment or set explicitly; dropping it can send cleanup through a different route.
     if async_configuration.proxy:
         sync_configuration.proxy = async_configuration.proxy
     # Copied so neither the refresh hook nor the alias below mutates the injected config.

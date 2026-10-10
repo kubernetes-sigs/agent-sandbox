@@ -349,6 +349,13 @@ type Lifecycle struct {
 
 // SandboxStatus defines the observed state of Sandbox.
 type SandboxStatus struct {
+	// firstReadyTime is the best-known time when this Sandbox first reached Ready=True.
+	// If the controller first observes the Sandbox already Ready, it uses the Ready
+	// condition's current transition time and does not emit a creation-latency sample.
+	// It is set once and retained across later readiness transitions.
+	// +optional
+	FirstReadyTime *metav1.Time `json:"firstReadyTime,omitempty"`
+
 	// serviceFQDN that is valid for default cluster settings
 	// The domain defaults to cluster.local but is configurable via the controller's --cluster-domain flag.
 	// +optional

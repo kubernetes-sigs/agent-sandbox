@@ -312,9 +312,12 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	// Initialize trace ID for active resources missing an ID (inline, no re-reconcile)
+	oldStatus := sandbox.Status.DeepCopy()
+
+	// Initialize trace ID annotation for active resources missing it.
 	tc := r.Tracer.GetTraceContext(ctx)
-	if tc != "" && (sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "") {
+	needTraceContextPatch := tc != "" && (sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "")
+	if needTraceContextPatch {
 		patch := client.MergeFrom(sandbox.DeepCopy())
 		if sandbox.Annotations == nil {
 			sandbox.Annotations = make(map[string]string)
@@ -326,7 +329,6 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	oldStatus := sandbox.Status.DeepCopy()
 	var err error
 	sandboxDeleted := false
 	result := ctrl.Result{}
@@ -381,10 +383,13 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	if !sandboxDeleted {
+		creationLatency, recordCreationLatency := prepareSandboxCreationMetrics(sandbox, oldStatus)
 		// Update status
 		if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
 			// Surface update error
 			err = errors.Join(err, statusUpdateErr)
+		} else if recordCreationLatency {
+			r.recordSandboxCreationMetrics(ctx, sandbox, creationLatency)
 		}
 	}
 
@@ -809,6 +814,65 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 
 	// Surface error
 	return nil
+}
+
+// prepareSandboxCreationMetrics records the first Ready time in status and returns
+// whether this transition has a valid creation latency to observe after status is
+// persisted. Sandboxes already Ready before firstReadyTime was introduced are
+// backfilled without attributing their current condition timestamp to creation.
+func prepareSandboxCreationMetrics(sandbox *sandboxv1beta1.Sandbox, oldStatus *sandboxv1beta1.SandboxStatus) (time.Duration, bool) {
+	if sandbox.Status.FirstReadyTime != nil {
+		return 0, false
+	}
+
+	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	wasReady := oldReady != nil && oldReady.Status == metav1.ConditionTrue
+	if wasReady {
+		firstReadyTime := oldReady.LastTransitionTime
+		if firstReadyTime.IsZero() {
+			firstReadyTime = metav1.NewTime(time.Now().UTC())
+		}
+		sandbox.Status.FirstReadyTime = &firstReadyTime
+		return 0, false
+	}
+
+	newReady := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	if newReady == nil || newReady.Status != metav1.ConditionTrue {
+		return 0, false
+	}
+
+	firstReadyTime := newReady.LastTransitionTime
+	if firstReadyTime.IsZero() {
+		firstReadyTime = metav1.NewTime(time.Now().UTC())
+	}
+	sandbox.Status.FirstReadyTime = &firstReadyTime
+
+	if sandbox.CreationTimestamp.IsZero() || newReady.LastTransitionTime.IsZero() {
+		return 0, false
+	}
+
+	latency := newReady.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
+	return latency, latency >= 0
+}
+
+// recordSandboxCreationMetrics records a prepared creation latency after the
+// corresponding firstReadyTime status update has succeeded.
+func (r *SandboxReconciler) recordSandboxCreationMetrics(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, latency time.Duration) {
+	logger := log.FromContext(ctx)
+
+	// Resolve metric labels.
+	launchType := asmetrics.LaunchTypeCold
+	if sandbox.Labels[sandboxv1beta1.SandboxLaunchTypeLabel] == sandboxv1beta1.SandboxLaunchTypeWarm {
+		launchType = asmetrics.LaunchTypeWarm
+	}
+
+	templateName := "__unknown__"
+	if tmpl, ok := sandbox.Annotations[sandboxv1beta1.SandboxTemplateRefAnnotation]; ok && tmpl != "" {
+		templateName = tmpl
+	}
+
+	logger.V(1).Info("Sandbox reached Ready state", "sandbox", sandbox.Name, "launchType", launchType)
+	asmetrics.RecordSandboxCreationLatency(latency, sandbox.Namespace, launchType, templateName)
 }
 
 func (r *SandboxReconciler) recordReadyTransitionEvent(sandbox *sandboxv1beta1.Sandbox, oldStatus *sandboxv1beta1.SandboxStatus) {
@@ -1851,9 +1915,14 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 	// If we reach here, sandbox is not deleted
 	// Only update "expired" status if cleanup was successful
 	if allErrors == nil {
-		// Drop live-resource status while retaining terminal conditions.
+		// Drop live-resource status while retaining terminal conditions and the
+		// historical first-ready time.
 		conditions := sandbox.Status.Conditions
-		sandbox.Status = sandboxv1beta1.SandboxStatus{Conditions: conditions}
+		firstReadyTime := sandbox.Status.FirstReadyTime
+		sandbox.Status = sandboxv1beta1.SandboxStatus{
+			Conditions:     conditions,
+			FirstReadyTime: firstReadyTime,
+		}
 		// Update status to mark as expired
 		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
 			Type:               string(sandboxv1beta1.SandboxConditionReady),

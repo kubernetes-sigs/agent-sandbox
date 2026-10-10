@@ -16,7 +16,7 @@ import logging
 import time
 from itertools import chain
 from datetime import UTC, datetime
-from typing import Any, List
+from typing import Any, List, cast
 from kubernetes import client, config, watch
 import urllib3.exceptions
 from .exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
@@ -355,7 +355,7 @@ class K8sHelper:
                 pair) forwarded to the underlying urllib3-based request.
             expected_uid: If provided, delete only the Claim with this UID.
         """
-        delete_kwargs = {}
+        delete_kwargs: dict[str, Any] = {}
         if expected_uid is not None:
             delete_kwargs["body"] = client.V1DeleteOptions(
                 preconditions=client.V1Preconditions(uid=expected_uid)
@@ -379,13 +379,15 @@ class K8sHelper:
     def get_sandbox(self, name: str, namespace: str) -> dict[str, Any] | None:
         """Gets a Sandbox custom resource."""
         try:
-            return self.custom_objects_api.get_namespaced_custom_object(
+            # The generated client types custom-object responses as ``object``
+            # (kubernetes >= 37); they are the decoded JSON dict at runtime.
+            return cast(dict[str, Any], self.custom_objects_api.get_namespaced_custom_object(
                 group=SANDBOX_API_GROUP,
                 version=SANDBOX_API_VERSION,
                 namespace=namespace,
                 plural=SANDBOX_PLURAL_NAME,
                 name=name,
-            )
+            ))
         except client.ApiException as e:
             if e.status == 404:
                 return None
@@ -435,7 +437,7 @@ class K8sHelper:
             )
             if label_selector is not None:
                 kwargs["label_selector"] = label_selector
-            response = self.custom_objects_api.list_namespaced_custom_object(**kwargs)
+            response = cast(dict[str, Any], self.custom_objects_api.list_namespaced_custom_object(**kwargs))
             return [
                 item.get("metadata", {}).get("name") 
                 for item in response.get("items", []) 

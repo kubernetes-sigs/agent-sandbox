@@ -18,6 +18,7 @@ import yaml
 from test.e2e.clients.python.framework.context import TestContext
 from test.e2e.clients.python.framework.sdk_helpers import (
     GATEWAY_NAME,
+    GATEWAY_ROUTE_NAME,
     GATEWAY_YAML_PATH,
     ROUTER_YAML_PATH,
     TEMPLATE_YAML_PATH,
@@ -148,6 +149,8 @@ def deploy_gateway(tc, temp_namespace):
     tc.apply_manifest_text(manifest, namespace=temp_namespace)
     print("Waiting for gateway to get an address...")
     tc.wait_for_gateway_address(GATEWAY_NAME, namespace=temp_namespace)
+    print("Waiting for HTTPRoute to be accepted...")
+    tc.wait_for_httproute_accepted(GATEWAY_ROUTE_NAME, namespace=temp_namespace)
 
 
 @pytest.fixture

@@ -41,10 +41,10 @@ from .models import (
 from .k8s_helper import K8sHelper
 from .utils import kubectl_kubeconfig_args, merge_headers
 from .exceptions import (
+    SandboxNoServiceError,
     SandboxNotReadyError,
     SandboxPortForwardError,
     SandboxRequestError,
-    SandboxServiceUnavailableError,
 )
 
 ROUTER_SERVICE_NAME = "svc/sandbox-router-svc"
@@ -528,14 +528,14 @@ class SandboxdInClusterStrategy(ConnectionStrategy):
     def connect(self) -> str:
         # A failed status refresh must not leave the previous target usable.
         self.grpc_target = None
-        if self.config.mode == "service-dns":
+        if self.config.mode == "in-cluster-service":
             fqdn = self._service_fqdn
             if fqdn is None:
                 fqdn = self._get_service_fqdn() if self._get_service_fqdn else None
                 if not fqdn:
-                    raise SandboxServiceUnavailableError(
+                    raise SandboxNoServiceError(
                         "Sandbox has no Service FQDN; enable spec.service: true "
-                        "on its template to use service-dns connectivity"
+                        "on its template to use in-cluster-service connectivity"
                     )
                 self._service_fqdn = fqdn
             host = fqdn

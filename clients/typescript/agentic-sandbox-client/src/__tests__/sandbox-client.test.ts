@@ -945,6 +945,121 @@ describe("SandboxClient (registry)", () => {
       expect(sandbox.isActive).toBe(true);
     });
 
+    it("with waitForReady false, attaches to a Sandbox that is not Ready yet", async () => {
+      // 1) claim verification, 2) resolveSandboxName, 3) Sandbox existence.
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({});
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        status: { sandbox: { name: "sandbox-pending" } },
+      });
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        metadata: {
+          name: "sandbox-pending",
+          annotations: { [POD_NAME_ANNOTATION]: "pod-pending" },
+        },
+        status: {
+          conditions: [{ type: "Ready", status: "False" }],
+          podIPs: ["10.0.0.7"],
+        },
+      });
+
+      const client = new SandboxClient();
+      const sandbox = await client.getSandbox("claim-pending", undefined, {
+        waitForReady: false,
+      });
+
+      expect(sandbox.sandboxName).toBe("sandbox-pending");
+      expect(sandbox.podName).toBe("pod-pending");
+      expect(sandbox.podIP).toBe("10.0.0.7");
+      expect(mockWatchFn).not.toHaveBeenCalled();
+    });
+
+    it("with waitForReady false, throws SandboxNotFoundError when the Sandbox is gone", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({});
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        status: { sandbox: { name: "sandbox-gone" } },
+      });
+      mockGetNamespacedCustomObject.mockRejectedValueOnce(
+        Object.assign(new Error("Not Found"), { code: 404 }),
+      );
+
+      const client = new SandboxClient();
+      await expect(
+        client.getSandbox("claim-gone", undefined, { waitForReady: false }),
+      ).rejects.toBeInstanceOf(SandboxNotFoundError);
+      expect(client.listActiveSandboxes()).toEqual([]);
+    });
+
+    it("replaces a handle attached before its in-cluster address existed", async () => {
+      const pending = {
+        metadata: { name: "sb-early", annotations: {} },
+        status: { conditions: [{ type: "Ready", status: "False" }] },
+      };
+      const resolved = { status: { sandbox: { name: "sb-early" } } };
+      // waitForReady: false attach: claim, resolve, Sandbox (no pod IP yet).
+      mockGetNamespacedCustomObject
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce(resolved)
+        .mockResolvedValueOnce(pending);
+
+      const client = new SandboxClient({
+        sandboxd: { connectivity: "in-cluster-pod-ip" },
+      });
+      const early = await client.getSandbox("claim-early", undefined, {
+        waitForReady: false,
+      });
+      expect(early.podIP).toBe("");
+
+      // Cache-hit checks (claim, Sandbox), then a full re-attach that now
+      // sees the Ready Sandbox with its pod IP.
+      mockGetNamespacedCustomObject
+        .mockResolvedValueOnce(resolved)
+        .mockResolvedValueOnce(pending)
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce(resolved)
+        .mockResolvedValueOnce({
+          metadata: { name: "sb-early", annotations: {} },
+          status: {
+            conditions: [{ type: "Ready", status: "True" }],
+            podIPs: ["10.0.0.9"],
+          },
+        });
+
+      const ready = await client.getSandbox("claim-early");
+      expect(ready).not.toBe(early);
+      expect(ready.podIP).toBe("10.0.0.9");
+      expect(early.isActive).toBe(false);
+    });
+
+    it("bounds claim resolution by resolveTimeout instead of the ready timeout", async () => {
+      // The claim exists but never reports a Sandbox name.
+      mockGetNamespacedCustomObject.mockResolvedValue({ status: {} });
+      mockWatchFn.mockImplementation(() =>
+        Promise.resolve(new AbortController()),
+      );
+
+      const client = new SandboxClient({ sandboxReadyTimeout: 180 });
+      const start = Date.now();
+      await expect(
+        client.getSandbox("claim-unbound", undefined, { resolveTimeout: 0.2 }),
+      ).rejects.toThrow("did not resolve within");
+      expect(Date.now() - start).toBeLessThan(5_000);
+    });
+
+    it("rejects a non-positive or non-finite resolveTimeout", async () => {
+      const client = new SandboxClient();
+      for (const resolveTimeout of [
+        0,
+        -1,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+      ]) {
+        await expect(
+          client.getSandbox("claim", undefined, { resolveTimeout }),
+        ).rejects.toBeInstanceOf(SandboxError);
+      }
+      expect(mockGetNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
     // empty namespace string should be normalized to defaultNamespace
     it("normalizes empty namespace string to default namespace", async () => {
       mockGetNamespacedCustomObject.mockRejectedValueOnce(

@@ -76,8 +76,8 @@ metadata:
       ]
     capabilities: Basic Install
     categories: AI/Machine Learning
-    containerImage: registry.k8s.io/agent-sandbox/agent-sandbox-controller:v1.0.0
-    createdAt: "2026-10-07T11:14:41Z"
+    containerImage: registry.k8s.io/agent-sandbox/agent-sandbox-controller:v1.0.5
+    createdAt: "2026-10-08T11:52:20Z"
     operatorframework.io/suggested-namespace: agent-sandbox-system
     operators.operatorframework.io/builder: operator-sdk-v1.42.2
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
@@ -86,7 +86,7 @@ metadata:
   labels:
     operatorframework.io/arch.amd64: supported
     operatorframework.io/os.linux: supported
-  name: agent-sandbox-operator.v1.0.0
+  name: agent-sandbox-operator.v1.0.5
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -316,7 +316,7 @@ spec:
               - args:
                 - --leader-elect=true
                 - --extensions
-                image: registry.k8s.io/agent-sandbox/agent-sandbox-controller:v1.0.0
+                image: registry.k8s.io/agent-sandbox/agent-sandbox-controller:v1.0.5
                 name: agent-sandbox-controller
                 ports:
                 - containerPort: 8080
@@ -368,7 +368,7 @@ spec:
                 - --proxy-timeout=180s
                 - --upstream-max-retries=3
                 - --cache-enabled=true
-                image: registry.k8s.io/agent-sandbox/sandbox-router-go:v1.0.0
+                image: registry.k8s.io/agent-sandbox/sandbox-router-go:v1.0.5
                 imagePullPolicy: IfNotPresent
                 livenessProbe:
                   failureThreshold: 3
@@ -450,4 +450,4 @@ spec:
   provider:
     name: kubernetes-sigs
     url: https://agent-sandbox.sigs.k8s.io/
-  version: 1.0.0
+  version: 1.0.5

@@ -69,6 +69,12 @@ const (
 	// ConnectivityPortForward reaches the sandbox over a SPDY port-forward
 	// brokered by the apiserver. Works from anywhere a kubeconfig does,
 	// including a laptop or CI runner. Default.
+	//
+	// With RuntimeSandboxd the forward targets the sandbox pod itself, which
+	// does not work for Kata or gVisor pods: their workload does not listen in
+	// the pod's host-side network namespace. Use an in-cluster mode for those.
+	// RuntimeLegacyPython forwards to the sandbox-router instead and is
+	// unaffected.
 	ConnectivityPortForward Connectivity = "port-forward"
 	// ConnectivityInClusterService dials the Sandbox's headless Service by
 	// its in-cluster DNS name (Status.ServiceFQDN), taking the apiserver —
@@ -166,6 +172,12 @@ type Options struct {
 	// be selected later (see WithLabelSelector). The SDK's own created-by label
 	// always wins over a colliding key.
 	Labels map[string]string
+
+	// ShutdownAfter expires every SandboxClaim this client creates that long
+	// after creation, so a crashed client cannot leak sandboxes. The claim
+	// gets spec.lifecycle.shutdownTime and the Delete shutdown policy; the
+	// deadline is rounded up to a whole second. Zero (the default) means no expiry.
+	ShutdownAfter time.Duration
 
 	// SandboxReadyTimeout is how long to wait for the sandbox to become ready. Default: 180s.
 	SandboxReadyTimeout time.Duration
@@ -382,6 +394,9 @@ func (o *Options) validateCommon() error {
 	}
 	if err := metav1validation.ValidateLabels(o.Labels, field.NewPath("Labels")).ToAggregate(); err != nil {
 		return fmt.Errorf("sandbox: invalid Labels: %w", err)
+	}
+	if o.ShutdownAfter < 0 {
+		return fmt.Errorf("sandbox: ShutdownAfter must not be negative, got %s", o.ShutdownAfter)
 	}
 	if !isValidDNSLabel(o.Namespace) {
 		return fmt.Errorf("sandbox: Namespace %q is not a valid Kubernetes namespace (DNS label)", o.Namespace)

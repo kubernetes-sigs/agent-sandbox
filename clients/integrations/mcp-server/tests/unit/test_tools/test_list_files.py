@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from datetime import datetime, timezone
+
 import pytest
 from fastmcp.exceptions import ToolError
 
@@ -19,6 +21,15 @@ from k8s_agent_sandbox.models import FileEntry
 
 from k8s_agent_sandbox_mcp_server.tools.list_files import MAX_ENTRIES_LIMIT
 from k8s_agent_sandbox_mcp_server.utils import TOOL_MAX_TIMEOUT
+
+
+def _entry(name: str, size: int, type: str, mod_time: float) -> FileEntry:
+    return FileEntry(
+        name=name,
+        size=size,
+        type=type,
+        modified=datetime.fromtimestamp(mod_time, tz=timezone.utc),
+    )
 
 
 @pytest.mark.anyio
@@ -29,8 +40,8 @@ async def test_call_list_files_tool_with_default_args(
     mock_sandbox
 ):
     mock_sandbox.files.list.return_value = [
-        FileEntry(name="a.txt", size=12, type="file", mod_time=1700000000.0),
-        FileEntry(name="sub", size=4096, type="directory", mod_time=1700000001.5),
+        _entry("a.txt", 12, "file", 1700000000.0),
+        _entry("sub", 4096, "directory", 1700000001.5),
     ]
 
     result = await mcp_client.call_tool(
@@ -153,7 +164,7 @@ async def test_call_list_files_tool_truncates_large_directory(
     mock_sandbox,
 ):
     mock_sandbox.files.list.return_value = [
-        FileEntry(name=f"f{i}.txt", size=1, type="file", mod_time=0.0)
+        _entry(f"f{i}.txt", 1, "file", 0.0)
         for i in range(5)
     ]
 
@@ -183,7 +194,7 @@ async def test_call_list_files_tool_not_truncated_at_exact_limit(
     mock_sandbox,
 ):
     mock_sandbox.files.list.return_value = [
-        FileEntry(name=f"f{i}.txt", size=1, type="file", mod_time=0.0)
+        _entry(f"f{i}.txt", 1, "file", 0.0)
         for i in range(3)
     ]
 

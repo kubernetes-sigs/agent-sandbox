@@ -11,8 +11,10 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 - [Variables](<#variables>)
 - [func NewTracerProvider\(ctx context.Context, serviceName string\) \(\*sdktrace.TracerProvider, error\)](<#NewTracerProvider>)
 - [type CallOption](<#CallOption>)
+  - [func WithEnv\(env map\[string\]string\) CallOption](<#WithEnv>)
   - [func WithMaxAttempts\(n int\) CallOption](<#WithMaxAttempts>)
   - [func WithTimeout\(d time.Duration\) CallOption](<#WithTimeout>)
+  - [func WithWorkingDir\(dir string\) CallOption](<#WithWorkingDir>)
 - [type Client](<#Client>)
   - [func NewClient\(\_ context.Context, opts Options\) \(\*Client, error\)](<#NewClient>)
   - [func \(c \*Client\) CreateSandbox\(ctx context.Context, warmPoolName, namespace string\) \(\*Sandbox, error\)](<#Client.CreateSandbox>)
@@ -154,6 +156,19 @@ CallOption configures per\-call behavior for SDK operations.
 type CallOption func(*callOptions)
 ```
 
+<a name="WithEnv"></a>
+#### func [WithEnv](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithEnv(env map[string]string) CallOption
+```
+
+WithEnv sets environment variables for a single Run, merged over the sandbox's own environment \(a key given here wins\). Repeated calls accumulate. Run returns ErrUnsupportedByRuntime on the legacy python\-runtime, which cannot carry them. Other operations ignore it.
+
+```
+result, err := client.Run(ctx, "echo $GREETING", sandbox.WithEnv(map[string]string{"GREETING": "hi"}))
+```
+
 <a name="WithMaxAttempts"></a>
 #### func [WithMaxAttempts](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
 
@@ -175,6 +190,15 @@ func WithTimeout(d time.Duration) CallOption
 ```
 
 WithTimeout sets the total timeout for a single operation, overriding the default RequestTimeout for that call.
+
+<a name="WithWorkingDir"></a>
+#### func [WithWorkingDir](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithWorkingDir(dir string) CallOption
+```
+
+WithWorkingDir sets the working directory for a single Run, relative to the sandbox root \(the default\). sandboxd rejects a directory that resolves outside the root. Run returns ErrUnsupportedByRuntime on the legacy python\-runtime. Other operations ignore it.
 
 <a name="Client"></a>
 ### type [Client](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go>)
@@ -287,6 +311,8 @@ result, err := client.Run(ctx, "cat /etc/hostname", sandbox.WithMaxAttempts(6))
 
 WithMaxAttempts applies only to the legacy runtime. With RuntimeSandboxd, Run issues a single gRPC Execute regardless of the configured attempts.
 
+WithEnv and WithWorkingDir apply only to RuntimeSandboxd; the legacy runtime returns ErrUnsupportedByRuntime rather than silently ignoring them.
+
 <a name="ConnectionStrategy"></a>
 ### type [ConnectionStrategy](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/strategy.go>)
 
@@ -315,6 +341,12 @@ const (
     // ConnectivityPortForward reaches the sandbox over a SPDY port-forward
     // brokered by the apiserver. Works from anywhere a kubeconfig does,
     // including a laptop or CI runner. Default.
+    //
+    // With RuntimeSandboxd the forward targets the sandbox pod itself, which
+    // does not work for Kata or gVisor pods: their workload does not listen in
+    // the pod's host-side network namespace. Use an in-cluster mode for those.
+    // RuntimeLegacyPython forwards to the sandbox-router instead and is
+    // unaffected.
     ConnectivityPortForward Connectivity = "port-forward"
     // ConnectivityInClusterService dials the Sandbox's headless Service by
     // its in-cluster DNS name (Status.ServiceFQDN), taking the apiserver —
@@ -721,6 +753,12 @@ type Options struct {
     // be selected later (see WithLabelSelector). The SDK's own created-by label
     // always wins over a colliding key.
     Labels map[string]string
+
+    // ShutdownAfter expires every SandboxClaim this client creates that long
+    // after creation, so a crashed client cannot leak sandboxes. The claim
+    // gets spec.lifecycle.shutdownTime and the Delete shutdown policy; the
+    // deadline is rounded up to a whole second. Zero (the default) means no expiry.
+    ShutdownAfter time.Duration
 
     // SandboxReadyTimeout is how long to wait for the sandbox to become ready. Default: 180s.
     SandboxReadyTimeout time.Duration

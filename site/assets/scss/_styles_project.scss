@@ -565,7 +565,9 @@ h1.text-center {
     overflow: hidden;
   }
 
-  pre {
+  // Nested under .highlight so it outranks Prism's pre[class*="language-"],
+  // which otherwise wins on equal specificity and inherits the cover's 1.25rem.
+  .highlight pre {
     margin: 0;
     padding: 1.5rem 1.75rem;
     border: 0;

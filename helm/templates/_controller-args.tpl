@@ -20,6 +20,9 @@
 {{- if hasKey .Values.controller "enablePprofDebug" }}
 - --enable-pprof-debug={{ .Values.controller.enablePprofDebug }}
 {{- end }}
+{{- if hasKey .Values.controller "enableRESTClientMetrics" }}
+- --enable-rest-client-metrics={{ .Values.controller.enableRESTClientMetrics }}
+{{- end }}
 {{- if hasKey .Values.controller "pprofBlockProfileRate" }}
 - --pprof-block-profile-rate={{ .Values.controller.pprofBlockProfileRate }}
 {{- end }}

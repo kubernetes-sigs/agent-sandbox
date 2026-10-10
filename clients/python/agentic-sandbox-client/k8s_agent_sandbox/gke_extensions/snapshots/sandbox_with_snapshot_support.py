@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 from kubernetes.client import ApiException
 from pydantic import BaseModel
@@ -135,14 +135,17 @@ class SandboxWithSnapshotSupport(Sandbox):
         A sandbox is considered suspended if the spec.operatingMode is set to Suspended.
         """
         try:
-            sandbox_cr = (
+            # Custom-object responses are typed ``object`` by the generated
+            # client (kubernetes >= 37); they are the decoded JSON dict.
+            sandbox_cr = cast(
+                dict[str, Any],
                 self.k8s_helper.custom_objects_api.get_namespaced_custom_object(
                     group=SANDBOX_API_GROUP,
                     version=SANDBOX_API_VERSION,
                     namespace=self.namespace,
                     plural=SANDBOX_PLURAL_NAME,
                     name=self.sandbox_id,
-                )
+                ),
             )
             spec_operating_mode = sandbox_cr.get("spec", {}).get(
                 "operatingMode", OPERATING_MODE_RUNNING
@@ -252,7 +255,7 @@ class SandboxWithSnapshotSupport(Sandbox):
                 pod = self.k8s_helper.core_v1_api.read_namespaced_pod(
                     pod_name_to_wait, self.namespace
                 )
-                pod_uid_to_wait = pod.metadata.uid
+                pod_uid_to_wait = pod.metadata.uid if pod.metadata else None
             except ApiException as e:
                 if e.status != 404:
                     logger.error(f"Error getting pod UID before suspend: {e}")

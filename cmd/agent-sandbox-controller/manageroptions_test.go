@@ -17,8 +17,10 @@ package main
 import (
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/runtime"
+	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
@@ -58,4 +60,40 @@ func TestBuildManagerOptionsPassThrough(t *testing.T) {
 			assert.Equal(t, ":8080", opts.Metrics.BindAddress)
 		}
 	}
+}
+
+// TestBuildManagerOptionsWithOpenMetrics verifies that when metricsOpts includes
+// HandlerOpts (for OpenMetrics), they are correctly passed through to the manager.
+func TestBuildManagerOptionsWithOpenMetrics(t *testing.T) {
+	scheme := runtime.NewScheme()
+
+	// Test with OpenMetrics enabled
+	metricsOptsEnabled := metricsserver.Options{
+		BindAddress: ":8080",
+		HandlerOpts: asmetrics.BuildMetricsHandlerOpts(true),
+	}
+	optsEnabled := buildManagerOptions(scheme, metricsOptsEnabled, ":8081", true, "")
+	assert.Equal(t, ":8080", optsEnabled.Metrics.BindAddress)
+	assert.NotNil(t, optsEnabled.Metrics.HandlerOpts, "HandlerOpts should be passed through")
+	assert.Len(t, optsEnabled.Metrics.HandlerOpts, 1, "HandlerOpts should contain one option function")
+	handlerOptsEnabled := &promhttp.HandlerOpts{}
+	for _, fn := range optsEnabled.Metrics.HandlerOpts {
+		fn(handlerOptsEnabled)
+	}
+	assert.True(t, handlerOptsEnabled.EnableOpenMetrics)
+
+	// Test with OpenMetrics disabled
+	metricsOptsDisabled := metricsserver.Options{
+		BindAddress: ":8080",
+		HandlerOpts: asmetrics.BuildMetricsHandlerOpts(false),
+	}
+	optsDisabled := buildManagerOptions(scheme, metricsOptsDisabled, ":8081", true, "")
+	assert.Equal(t, ":8080", optsDisabled.Metrics.BindAddress)
+	assert.NotNil(t, optsDisabled.Metrics.HandlerOpts, "HandlerOpts should be passed through even when disabled")
+	assert.Len(t, optsDisabled.Metrics.HandlerOpts, 1, "HandlerOpts should contain one option function")
+	handlerOptsDisabled := &promhttp.HandlerOpts{}
+	for _, fn := range optsDisabled.Metrics.HandlerOpts {
+		fn(handlerOptsDisabled)
+	}
+	assert.False(t, handlerOptsDisabled.EnableOpenMetrics)
 }

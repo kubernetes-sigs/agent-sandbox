@@ -98,6 +98,21 @@ debug endpoints.
   `--enable-pprof-debug` is set. `<=0` disables the mutex profile; `1` samples all events;
   `N>1` samples roughly `1/N` events (e.g. `10` ≈ 1/10, `100` ≈ 1/100). Negative values are
   clamped to `0` at startup.
+* `--metrics-enable-openmetrics` (default: `false`): Enable OpenMetrics format for the metrics
+  server. When enabled, Prometheus 2.5.0+ will negotiate OpenMetrics as the first priority
+  during content negotiation. This allows transmitting exemplars (trace samples attached to
+  metrics) but changes the formatting of `quantile` labels in Summaries and `le` labels in
+  Histograms (they get a trailing `.0` for integer values). Prometheus v3.0+ normalizes these
+  labels during ingestion, so stored series identity is unchanged on modern servers. On older
+  Prometheus versions (or other scrapers that do not normalize), the resulting series identity
+  changes and existing dashboards and alerting rules that depend on these labels may need to be
+  updated.
+
+**Forward compatibility note:** Starting with controller-runtime v0.26.0, OpenMetrics is enabled
+by default upstream. This controller explicitly sets the option based on this flag to ensure
+consistent behavior across versions—when the flag is `false` (default), OpenMetrics is disabled
+regardless of the controller-runtime version; when `true`, it is enabled. This allows operators
+to opt in or out independently of upstream defaults.
 
 The Helm chart exposes the same settings as `controller.enableTracing`, `controller.enablePprof`,
 `controller.enablePprofDebug`, `controller.pprofBlockProfileRate` and

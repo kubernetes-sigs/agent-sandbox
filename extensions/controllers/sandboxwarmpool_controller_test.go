@@ -450,10 +450,18 @@ func TestReconcilePool_MissingTemplate(t *testing.T) {
 		held := createPoolSandbox(poolName, poolNamespace, poolNameHash, nil, "-held")
 		held.UID = "uid-held"
 		held.CreationTimestamp = metav1.Time{Time: base.Add(-10 * time.Minute)}
-		held.Status.Conditions = []metav1.Condition{{
-			Type:   string(sandboxv1beta1.SandboxConditionReady),
-			Status: metav1.ConditionFalse,
-		}}
+		held.Status.Conditions = []metav1.Condition{
+			{
+				Type:   string(sandboxv1beta1.SandboxConditionReady),
+				Status: metav1.ConditionFalse,
+			},
+			{
+				Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+				Status:             metav1.ConditionFalse,
+				Reason:             corev1.PodReasonUnschedulable,
+				LastTransitionTime: metav1.NewTime(base),
+			},
+		}
 		held.OwnerReferences = []metav1.OwnerReference{{
 			APIVersion: extensionsv1beta1.GroupVersion.String(),
 			Kind:       extensionsv1beta1.SandboxWarmPoolKind,
@@ -461,20 +469,10 @@ func TestReconcilePool_MissingTemplate(t *testing.T) {
 			UID:        poolUID,
 			Controller: new(true),
 		}}
-		pod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: held.Name, Namespace: poolNamespace},
-			Status: corev1.PodStatus{
-				Conditions: []corev1.PodCondition{{
-					Type:   corev1.PodScheduled,
-					Status: corev1.ConditionFalse,
-					Reason: corev1.PodReasonUnschedulable,
-				}},
-			},
-		}
 
 		recorder := events.NewFakeRecorder(16)
 		r := SandboxWarmPoolReconciler{
-			Client:       newFakeClient(scheme, held, pod),
+			Client:       newFakeClient(scheme, held),
 			Scheme:       scheme,
 			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 			Recorder:     recorder,

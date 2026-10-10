@@ -8,6 +8,13 @@ description: >
 
 ## Prerequisites
 
+* A Kubernetes cluster running **1.29 or later**. The `Sandbox` CRD relies on
+  [CEL validation rules](https://kubernetes.io/docs/reference/using-api/cel/), which are
+  generally available as of Kubernetes 1.29, so older clusters are not supported. Each
+  release is built against the latest Kubernetes libraries and tested with the newest
+  Kubernetes release; versions in between are expected to work but are not regularly
+  tested.
+
 * [kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) CLI tool.
 
 * For KinD cluster you need:

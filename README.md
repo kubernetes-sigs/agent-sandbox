@@ -86,6 +86,8 @@ flowchart LR
 
 ## Installation
 
+Agent Sandbox requires Kubernetes **1.29 or later** (the `Sandbox` CRD uses [CEL validation](https://kubernetes.io/docs/reference/using-api/cel/), generally available in Kubernetes 1.29).
+
 ### Standard Install (Core + Extensions)
 
 Recommended for most users:

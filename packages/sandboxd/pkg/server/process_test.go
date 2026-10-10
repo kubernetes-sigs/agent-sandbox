@@ -197,6 +197,16 @@ func TestExecuteExitCode(t *testing.T) {
 	require.Equal(t, int32(3), resp.GetExitCode())
 }
 
+func TestExecuteSignalExitCode(t *testing.T) {
+	client := newProcessClient(t, t.TempDir())
+
+	resp, err := client.Execute(testCtx(t), &processv1.ExecuteRequest{
+		Config: &processv1.ProcessConfig{Command: []string{"sh", "-c", "kill -9 $$"}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(128+9), resp.GetExitCode())
+}
+
 func TestExecuteEnvAndCwd(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "sub"), 0o755))
@@ -324,7 +334,7 @@ func TestSendSignalUnspecifiedRejected(t *testing.T) {
 	})
 	require.NoError(t, err)
 	res := drainStart(t, stream)
-	require.NotEqual(t, int32(0), res.exitCode)
+	require.Equal(t, int32(128+9), res.exitCode)
 }
 
 func TestSendSignalTerminatesProcess(t *testing.T) {

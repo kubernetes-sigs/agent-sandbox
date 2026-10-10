@@ -110,6 +110,9 @@ Errors surface as standard gRPC status codes (`NOT_FOUND` for unknown
 process IDs, `PERMISSION_DENIED` for a `cwd` escaping the sandbox root,
 `FAILED_PRECONDITION` for `ResizeTTY` on a process without a PTY).
 
+`exit_code` is the process's exit status, or `128+n` when signal `n` killed
+it (e.g. `137` for `SIGKILL`), as a shell reports it.
+
 ### Filesystem & Runtime REST API (`:8080`)
 
 | Method | Endpoint | Purpose |

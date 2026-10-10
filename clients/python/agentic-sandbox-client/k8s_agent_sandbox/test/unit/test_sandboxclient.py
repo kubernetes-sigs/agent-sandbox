@@ -207,6 +207,35 @@ class TestSandboxClient(unittest.TestCase):
             mock_delete.assert_any_call("claim1", namespace="ns1")
             mock_delete.assert_any_call("claim2", namespace="ns2")
 
+    def _track_sandboxes(self):
+        automatic = MagicMock()
+        explicit = MagicMock()
+        self.client._active_connection_sandboxes[("ns", "auto")] = automatic
+        self.client._active_connection_sandboxes[("ns", "named")] = explicit
+        self.client._explicit_claims.add(("ns", "named"))
+        return automatic, explicit
+
+    def test_context_manager_cleans_up_on_exit(self):
+        automatic, explicit = self._track_sandboxes()
+
+        with self.client as c:
+            self.assertIs(c, self.client)
+            automatic.terminate.assert_not_called()
+
+        automatic.terminate.assert_called_once()
+        # Caller-owned claims keep their Claim and only lose the connection.
+        explicit.terminate.assert_not_called()
+        explicit.close_connection.assert_called_once()
+
+    def test_context_manager_cleans_up_on_exception(self):
+        automatic, _ = self._track_sandboxes()
+
+        with self.assertRaises(RuntimeError):
+            with self.client:
+                raise RuntimeError("boom")
+
+        automatic.terminate.assert_called_once()
+
     @patch('uuid.uuid4')
     def test_create_sandbox_with_labels(self, mock_uuid):
         mock_uuid.return_value.hex = '1234abcd'

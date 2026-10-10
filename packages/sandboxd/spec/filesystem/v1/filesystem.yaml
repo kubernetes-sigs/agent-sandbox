@@ -26,8 +26,14 @@ info:
     from environment variables. See KEP-539.2 for the endpoint and wire-format differences.
     Security note: sandboxd listens on the pod network by default. Protect both runtime ports with
     pod isolation and NetworkPolicy, or bind to loopback for local-only access. Never expose the
-    runtime API directly to an untrusted public network.
+    runtime API directly to an untrusted public network. When sandboxd runs with --auth-token-sha256 or --auth-token-file,
+    every request except GET /v1/health must carry "Authorization: Bearer <token>"; otherwise it
+    is refused with 401 UNAUTHENTICATED.
   version: "v1"
+
+security:
+  - {}
+  - bearerAuth: []
 
 servers:
   - url: http://localhost:8080/v1
@@ -149,6 +155,7 @@ paths:
 
   /health:
     get:
+      security: []
       summary: Sandbox readiness and heartbeat check
       description: >
         Used by orchestrators and Kubernetes liveness/readiness probes to verify sandboxd is healthy.
@@ -262,7 +269,23 @@ components:
           type: string
           example: "Path traversal outside sandbox root is forbidden."
 
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Required on every request except GET /v1/health when sandboxd runs with --auth-token-sha256 or --auth-token-file.
+
   responses:
+    Unauthorized:
+      description: Missing or invalid bearer token (only when sandboxd runs with --auth-token-sha256 or --auth-token-file)
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     BadRequest:
       description: Invalid request parameters or payload
       content:

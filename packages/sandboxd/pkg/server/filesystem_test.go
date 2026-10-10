@@ -387,3 +387,14 @@ func TestPutAbsolutePathWithFilesystemRoot(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "#!/bin/sh", rec.Body.String())
 }
+
+func TestDeleteFilesystemRootRefused(t *testing.T) {
+	handler := NewRESTServer("/", "SANDBOX_", logr.Discard()).Handler()
+	// Probe without recursive first: if the guard regresses this gets 409 and
+	// deletes nothing, so the recursive request below is never sent.
+	for _, path := range []string{"/v1/files/", "/v1/files/?recursive=true"} {
+		rec := doRequest(handler, http.MethodDelete, path, nil, nil)
+		require.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", path, rec.Body.String())
+		require.Equal(t, "PERMISSION_DENIED", decodeError(t, rec).Code)
+	}
+}

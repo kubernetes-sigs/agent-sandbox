@@ -74,3 +74,13 @@ RUN_ISOLATION_MODES = ("none", "names", "namespace")
 # Placeholder accepted in `template_name_prefix` / `pool_name_format`; the fleet
 # substitutes its run id at construction.
 RUN_ID_PLACEHOLDER = "{run_id}"
+
+# GKE Pod Snapshots (podsnapshot.gke.io) — used only when a cluster opts in with
+# ClusterConfig(snapshots=True). Mirrors the SDK's gke_extensions constants.
+PODSNAPSHOT_GROUP = "podsnapshot.gke.io"
+PODSNAPSHOT_VERSION = "v1"
+PODSNAPSHOTS_PLURAL = "podsnapshots"
+PODSNAPSHOT_TRIGGERS_PLURAL = "podsnapshotmanualtriggers"
+PODSNAPSHOT_POLICIES_PLURAL = "podsnapshotpolicies"
+# Pod annotation pinning a pod to one snapshot (opts out of "latest Ready wins").
+PODSNAPSHOT_NAME_ANNOTATION = "podsnapshot.gke.io/ps-name"

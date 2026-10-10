@@ -163,6 +163,7 @@ def main():
         f
         for f in glob.glob("k8s/**/*.yaml", recursive=True)
         if os.path.basename(f) not in ("kustomization.yaml", "kustomization.yml")
+        and not os.path.relpath(f, "k8s").startswith("hardening/")
     ]
     image_url = f"registry.k8s.io/agent-sandbox/agent-sandbox-controller:{args.tag}"
 

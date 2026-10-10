@@ -447,10 +447,20 @@ func TestReconcilePool_MissingTemplate(t *testing.T) {
 		held := createPoolSandbox(poolName, poolNamespace, poolNameHash, nil, "-held")
 		held.UID = "uid-held"
 		held.CreationTimestamp = metav1.Time{Time: base.Add(-10 * time.Minute)}
-		held.Status.Conditions = []metav1.Condition{{
-			Type:   string(sandboxv1beta1.SandboxConditionReady),
-			Status: metav1.ConditionFalse,
-		}}
+		held.Status.Conditions = []metav1.Condition{
+			{
+				Type:   string(sandboxv1beta1.SandboxConditionReady),
+				Status: metav1.ConditionFalse,
+			},
+			{
+				// The pool holds a member only when PodScheduled=False/Unschedulable
+				// is mirrored onto the Sandbox. The pod carries the same condition.
+				Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+				Status:             metav1.ConditionFalse,
+				Reason:             corev1.PodReasonUnschedulable,
+				LastTransitionTime: metav1.NewTime(base),
+			},
+		}
 		held.OwnerReferences = []metav1.OwnerReference{{
 			APIVersion: extensionsv1beta1.GroupVersion.String(),
 			Kind:       extensionsv1beta1.SandboxWarmPoolKind,

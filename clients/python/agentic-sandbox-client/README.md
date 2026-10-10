@@ -443,6 +443,8 @@ sandbox = client.create_sandbox(warmpool="sandboxd-warmpool", namespace="default
 try:
     sandbox.files.write("hello.txt", b"hello\n")
     print(sandbox.commands.run("cat hello.txt").stdout)
+    sandbox.commands.run("mkdir -p work")
+    sandbox.commands.run("echo $GREETING > hi.txt", env={"GREETING": "hi"}, cwd="work")
 finally:
     sandbox.terminate()
 ```
@@ -465,12 +467,9 @@ async def main():
 asyncio.run(main())
 ```
 
-With sandboxd, `commands.run` also takes `env` and `cwd`. `cwd` is confined to
-the sandbox root. The legacy runtime raises `NotImplementedError` for both.
-
-```python
-sandbox.commands.run("echo $GREETING", env={"GREETING": "hi"}, cwd="work")
-```
+With sandboxd, `commands.run` also takes `env` and `cwd`, as in the synchronous
+example. `cwd` is confined to the sandbox root. The legacy runtime raises
+`NotImplementedError` for both.
 
 ### 9. Labels and Pod Metadata
 

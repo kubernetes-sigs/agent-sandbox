@@ -33,6 +33,34 @@ def _extract_executable(command: str) -> str:
     return ""
 
 
+def _check_process_options(
+    env: dict[str, str] | None, cwd: str | None, sandboxd: bool
+) -> None:
+    """Rejects env/cwd the runtime cannot honor instead of silently dropping them."""
+    if not (env or cwd):
+        return
+    if not sandboxd:
+        raise NotImplementedError(
+            "env and cwd are only supported by the sandboxd runtime; the "
+            "legacy python-runtime ignores them"
+        )
+    for key in env or {}:
+        # sandboxd joins these as KEY=value, so such a key would corrupt it.
+        if not key or "=" in key:
+            raise ValueError(
+                f"invalid env key {key!r}: must be non-empty and contain no '='"
+            )
+
+
+def _process_config(
+    process_pb2: Any, command: str, env: dict[str, str] | None, cwd: str | None
+) -> Any:
+    """Builds the sandboxd ProcessConfig, keeping the shell-string API."""
+    return process_pb2.ProcessConfig(
+        command=["/bin/sh", "-c", command], env_vars=env, cwd=cwd or None
+    )
+
+
 def _execute_request(
     command: str, timeout: float, command_timeout: float | None
 ) -> tuple[dict[str, Any], float]:
@@ -58,7 +86,13 @@ class CommandExecutor:
 
     @trace_span("run")
     def run(
-        self, command: str, timeout: int = 60, command_timeout: float | None = None
+        self,
+        command: str,
+        timeout: int = 60,
+        command_timeout: float | None = None,
+        *,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
     ) -> ExecutionResult:
         """Run a shell command and return its output and exit code.
 
@@ -77,18 +111,26 @@ class CommandExecutor:
                 is also bounded by the router's ``--proxy-timeout`` (180s by
                 default), so a longer ``command_timeout`` ends in a 502/504
                 from the router instead of a ``timed_out`` result.
+            env: Extra environment variables for the command, overriding the
+                sandbox's own. Only the sandboxd runtime supports it; the
+                legacy runtime raises NotImplementedError.
+            cwd: Working directory for the command, confined to the sandbox
+                root. Only the sandboxd runtime supports it; the legacy
+                runtime raises NotImplementedError.
         """
+        sandboxd = self.connector.is_sandboxd()
+        _check_process_options(env, cwd, sandboxd)
         span = trace.get_current_span()
         if span.is_recording():
             executable = _extract_executable(command)
             span.set_attribute("sandbox.command.executable", executable)
 
-        if self.connector.is_sandboxd():
+        if sandboxd:
             if command_timeout is None:
-                result = self._run_sandboxd(command, timeout)
+                result = self._run_sandboxd(command, timeout, env=env, cwd=cwd)
             else:
                 result = self._run_sandboxd(
-                    command, command_timeout, report_timeout=True)
+                    command, command_timeout, report_timeout=True, env=env, cwd=cwd)
             if span.is_recording():
                 span.set_attribute("sandbox.exit_code", result.exit_code)
             return result
@@ -111,7 +153,12 @@ class CommandExecutor:
         return result
 
     def _run_sandboxd(
-        self, command: str, timeout: float, report_timeout: bool = False
+        self,
+        command: str,
+        timeout: float,
+        report_timeout: bool = False,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
     ) -> ExecutionResult:
         """Execute via sandboxd's gRPC ProcessService.
 
@@ -138,7 +185,7 @@ class CommandExecutor:
         channel = self.connector.grpc_channel()
         stub = process_pb2_grpc.ProcessServiceStub(channel)
         request = process_pb2.ExecuteRequest(
-            config=process_pb2.ProcessConfig(command=["/bin/sh", "-c", command]),
+            config=_process_config(process_pb2, command, env, cwd),
         )
         try:
             response = stub.Execute(request, timeout=timeout)

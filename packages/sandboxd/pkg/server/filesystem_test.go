@@ -370,3 +370,20 @@ func TestMetadataFiltersEnv(t *testing.T) {
 		"SANDBOX_WORKSPACE": "/workspace",
 	}, meta.Env)
 }
+
+func TestPutAbsolutePathWithFilesystemRoot(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	handler := NewRESTServer("/", "SANDBOX_", logr.Discard()).Handler()
+	target := filepath.Join(dir, "solution", "solve.sh")
+
+	rec := doRequest(handler, http.MethodPut, "/v1/files"+target+"?mode=0755", []byte("#!/bin/sh"), nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	info, err := os.Stat(target)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o755), info.Mode().Perm())
+
+	rec = doRequest(handler, http.MethodGet, "/v1/files"+target, nil, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "#!/bin/sh", rec.Body.String())
+}

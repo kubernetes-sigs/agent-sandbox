@@ -513,11 +513,11 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         mock_stderr.write.assert_called()
 
     def test_atexit_configuration_keeps_environment_proxy_unless_injected_one_is_explicit(self):
-        """kubernetes_asyncio leaves proxy unset and lets aiohttp read HTTPS_PROXY/NO_PROXY, while the sync
-        Configuration reads them itself, so an unset async proxy must not clear the sync one."""
+        """A resolved environment proxy is preserved, and an explicit proxy overrides it."""
         with patch.dict(os.environ, {"HTTPS_PROXY": "http://env-proxy:3128", "NO_PROXY": "internal.example.com"}, clear=True):
             from_env = _sync_configuration_from_async(async_client.Configuration(host="https://tenant-a.example.com"))
-            sync_default = sync_client.Configuration()
+            # Match the host scheme so Configuration resolves the same environment proxy.
+            sync_default = sync_client.Configuration(host="https://tenant-a.example.com")
             explicit_async_configuration = async_client.Configuration(host="https://tenant-a.example.com")
             explicit_async_configuration.proxy = "http://explicit-proxy:8080"
             explicit = _sync_configuration_from_async(explicit_async_configuration)

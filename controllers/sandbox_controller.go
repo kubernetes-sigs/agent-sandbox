@@ -1915,9 +1915,14 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 	// If we reach here, sandbox is not deleted
 	// Only update "expired" status if cleanup was successful
 	if allErrors == nil {
-		// Drop live-resource status while retaining terminal conditions.
+		// Drop live-resource status while retaining terminal conditions and the
+		// historical first-ready time.
 		conditions := sandbox.Status.Conditions
-		sandbox.Status = sandboxv1beta1.SandboxStatus{Conditions: conditions}
+		firstReadyTime := sandbox.Status.FirstReadyTime
+		sandbox.Status = sandboxv1beta1.SandboxStatus{
+			Conditions:     conditions,
+			FirstReadyTime: firstReadyTime,
+		}
 		// Update status to mark as expired
 		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
 			Type:               string(sandboxv1beta1.SandboxConditionReady),

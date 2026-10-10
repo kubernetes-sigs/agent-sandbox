@@ -94,10 +94,10 @@ func SanitizePath(rootDir, userPath string) (string, error) {
 		}
 	}
 
-	// Ensure the resolved path matches cleanRoot exactly or starts with
-	// cleanRoot + separator. This prevents prefix matching bugs
-	// (e.g. /workspace-evil vs /workspace).
-	if resolved != cleanRoot && !strings.HasPrefix(resolved, cleanRoot+string(os.PathSeparator)) {
+	// Keep one trailing separator so "/" stays "/" and sibling prefixes
+	// (e.g. /workspace-evil vs /workspace) cannot match.
+	rootPrefix := strings.TrimSuffix(cleanRoot, string(os.PathSeparator)) + string(os.PathSeparator)
+	if resolved != cleanRoot && !strings.HasPrefix(resolved, rootPrefix) {
 		return "", fmt.Errorf("access denied: path %q: %w", userPath, ErrPathEscapes)
 	}
 

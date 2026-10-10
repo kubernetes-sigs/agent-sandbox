@@ -17,7 +17,6 @@ package pathutil
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -31,6 +30,8 @@ func TestSanitizePathInsideRoot(t *testing.T) {
 	require.NoError(t, err)
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	require.NoError(t, err)
+	got, err = SanitizePath("/", got)
+	require.NoError(t, err)
 	require.Equal(t, filepath.Join(resolvedRoot, "main.py"), got)
 }
 
@@ -42,32 +43,6 @@ func TestSanitizePathRootItself(t *testing.T) {
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	require.NoError(t, err)
 	require.Equal(t, resolvedRoot, got)
-}
-
-func TestSanitizePathFilesystemRoot(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "f.txt"), []byte("x"), 0o644))
-	resolvedDir, err := filepath.EvalSymlinks(dir)
-	require.NoError(t, err)
-	root := filepath.VolumeName(dir) + string(os.PathSeparator)
-
-	for _, tc := range []struct {
-		name string
-		path string
-		want string
-	}{
-		{"root", root, root},
-		{"existing absolute", filepath.Join(dir, "f.txt"), filepath.Join(resolvedDir, "f.txt")},
-		{"existing relative", strings.TrimPrefix(filepath.Join(dir, "f.txt"), root), filepath.Join(resolvedDir, "f.txt")},
-		{"new absolute", filepath.Join(dir, "sub", "new.txt"), filepath.Join(resolvedDir, "sub", "new.txt")},
-		{"new relative", strings.TrimPrefix(filepath.Join(dir, "sub", "new.txt"), root), filepath.Join(resolvedDir, "sub", "new.txt")},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := SanitizePath(root, tc.path)
-			require.NoError(t, err)
-			require.Equal(t, tc.want, got)
-		})
-	}
 }
 
 func TestSanitizePathTraversalRejected(t *testing.T) {

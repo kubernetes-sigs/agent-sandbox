@@ -465,6 +465,13 @@ async def main():
 asyncio.run(main())
 ```
 
+With sandboxd, `commands.run` also takes `env` and `cwd`. `cwd` is confined to
+the sandbox root. The legacy runtime raises `NotImplementedError` for both.
+
+```python
+sandbox.commands.run("echo $GREETING", env={"GREETING": "hi"}, cwd="work")
+```
+
 ### 9. Labels and Pod Metadata
 
 `create_sandbox` lets you attach metadata at two different levels:

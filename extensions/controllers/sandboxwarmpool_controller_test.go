@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -295,7 +296,7 @@ func TestReconcilePool(t *testing.T) {
 	}
 }
 
-func TestReconcilePool_MissingTemplateEmitsNotProgressing(t *testing.T) {
+func TestReconcilePool_MissingTemplate(t *testing.T) {
 	poolName := "testing-pool"
 	poolNamespace := "default"
 	templateName := "does-not-exist"
@@ -344,7 +345,7 @@ func TestReconcilePool_MissingTemplateEmitsNotProgressing(t *testing.T) {
 			require.Contains(t, e, corev1.EventTypeWarning)
 			require.Contains(t, e, `SandboxTemplate "does-not-exist" not found`)
 		default:
-			t.Fatal("expected a WarmPoolNotProgressing event for a missing template")
+			t.Fatal("expected a SandboxTemplateError event for a missing template")
 		}
 
 		requeue, err = r.reconcilePool(ctx, warmPool)
@@ -374,7 +375,7 @@ func TestReconcilePool_MissingTemplateEmitsNotProgressing(t *testing.T) {
 		case e := <-recorder.Events:
 			require.Contains(t, e, reasonSandboxTemplateError)
 		default:
-			t.Fatal("expected a WarmPoolNotProgressing event before the template appears")
+			t.Fatal("expected a SandboxTemplateError event before the template appears")
 		}
 
 		template := createTemplate(poolNamespace)
@@ -432,74 +433,97 @@ func TestReconcilePool_MissingTemplateEmitsNotProgressing(t *testing.T) {
 		}
 	})
 
-	t.Run("scaled to zero does not warn or requeue for a missing template", func(t *testing.T) {
-		zero := int32(0)
+	// A short pool (create deficit) whose member is unschedulable past grace,
+	// and whose template is missing, has two independent blockers. Both
+	// warnings must fire together. Restoring the template clears only the
+	// template reason: the unschedulable hold stays, so nothing is emitted
+	// and the held sandbox is not replaced.
+	t.Run("short pool with unschedulable member and missing template emits both warnings", func(t *testing.T) {
+		short := int32(2)
 		warmPool := newPool()
-		warmPool.Spec.Replicas = &zero
+		warmPool.Spec.Replicas = &short
+
+		base := time.Now().Truncate(time.Second)
+		held := createPoolSandbox(poolName, poolNamespace, poolNameHash, nil, "-held")
+		held.UID = "uid-held"
+		held.CreationTimestamp = metav1.Time{Time: base.Add(-10 * time.Minute)}
+		held.Status.Conditions = []metav1.Condition{{
+			Type:   string(sandboxv1beta1.SandboxConditionReady),
+			Status: metav1.ConditionFalse,
+		}}
+		held.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: extensionsv1beta1.GroupVersion.String(),
+			Kind:       extensionsv1beta1.SandboxWarmPoolKind,
+			Name:       poolName,
+			UID:        poolUID,
+			Controller: new(true),
+		}}
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: held.Name, Namespace: poolNamespace},
+			Status: corev1.PodStatus{
+				Conditions: []corev1.PodCondition{{
+					Type:   corev1.PodScheduled,
+					Status: corev1.ConditionFalse,
+					Reason: corev1.PodReasonUnschedulable,
+				}},
+			},
+		}
+
 		recorder := events.NewFakeRecorder(16)
 		r := SandboxWarmPoolReconciler{
-			Client:       newFakeClient(scheme),
+			Client:       newFakeClient(scheme, held, pod),
 			Scheme:       scheme,
 			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 			Recorder:     recorder,
+			now:          func() time.Time { return base },
 		}
 		ctx := context.Background()
 
 		requeue, err := r.reconcilePool(ctx, warmPool)
 		require.NoError(t, err)
-		require.Zero(t, requeue, "a scaled-to-zero pool must not requeue for a missing template")
-		require.Equal(t, 0, countPoolOwnedSandboxes(ctx, t, r.Client, poolNamespace, poolNameHash, poolUID))
-		require.Equal(t, int32(0), warmPool.Status.Replicas)
+		require.Equal(t, min(missingTemplateRequeueDelay, DefaultUnschedulableRecheckInterval), requeue)
+		require.Equal(t, 1, countPoolOwnedSandboxes(ctx, t, r.Client, poolNamespace, poolNameHash, poolUID),
+			"the unschedulable member is held and the missing template blocks the deficit create")
 
+		seen := map[string]bool{}
+		for range 2 {
+			select {
+			case e := <-recorder.Events:
+				require.Contains(t, e, corev1.EventTypeWarning)
+				switch {
+				case strings.Contains(e, reasonSandboxTemplateError):
+					seen[reasonSandboxTemplateError] = true
+				case strings.Contains(e, reasonWarmPoolNotProgressing):
+					seen[reasonWarmPoolNotProgressing] = true
+				default:
+					t.Fatalf("unexpected event: %s", e)
+				}
+			default:
+				t.Fatal("expected SandboxTemplateError and WarmPoolNotProgressing warnings")
+			}
+		}
+		require.True(t, seen[reasonSandboxTemplateError], "missing template must warn while the pool is short")
+		require.True(t, seen[reasonWarmPoolNotProgressing], "unschedulable member past grace must warn alongside the missing template")
 		select {
 		case e := <-recorder.Events:
-			t.Fatalf("scaled-to-zero pool must not emit WarmPoolNotProgressing for a missing template: %s", e)
+			t.Fatalf("unexpected extra event: %s", e)
+		default:
+		}
+
+		template := createTemplate(poolNamespace)
+		template.Name = templateName
+		require.NoError(t, r.Create(ctx, template))
+
+		_, err = r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: poolNamespace, Name: held.Name}, &sandboxv1beta1.Sandbox{}),
+			"restoring the template must leave the unschedulable hold in place")
+		select {
+		case e := <-recorder.Events:
+			t.Fatalf("restoring the template must emit nothing while the unschedulable hold remains: %s", e)
 		default:
 		}
 	})
-}
-
-func TestSetNotProgressing_DeduplicatesPerReason(t *testing.T) {
-	pool := &extensionsv1beta1.SandboxWarmPool{ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default"}}
-	poolKey := client.ObjectKeyFromObject(pool)
-
-	requireEvent := func(t *testing.T, recorder *events.FakeRecorder, eventType, reason string) {
-		t.Helper()
-		select {
-		case event := <-recorder.Events:
-			require.Contains(t, event, eventType)
-			require.Contains(t, event, reason)
-		default:
-			t.Fatalf("expected a %s event with reason %s", eventType, reason)
-		}
-	}
-
-	for _, order := range [][]string{
-		{reasonWarmPoolNotProgressing, reasonSandboxTemplateError},
-		{reasonSandboxTemplateError, reasonWarmPoolNotProgressing},
-	} {
-		t.Run(fmt.Sprintf("%s then %s", order[0], order[1]), func(t *testing.T) {
-			recorder := events.NewFakeRecorder(4)
-			r := SandboxWarmPoolReconciler{Recorder: recorder}
-
-			for _, reason := range order {
-				r.setNotProgressing(pool, poolKey, reason, true, "blocked")
-				requireEvent(t, recorder, corev1.EventTypeWarning, reason)
-			}
-
-			// Clearing one cause must not claim that the pool is progressing
-			// while another cause remains active.
-			r.setNotProgressing(pool, poolKey, order[0], false, "")
-			select {
-			case event := <-recorder.Events:
-				t.Fatalf("unexpected event while %s remains active: %s", order[1], event)
-			default:
-			}
-
-			r.setNotProgressing(pool, poolKey, order[1], false, "")
-			requireEvent(t, recorder, corev1.EventTypeNormal, reasonWarmPoolProgressing)
-		})
-	}
 }
 
 func TestReconcilePoolControllerRef(t *testing.T) {

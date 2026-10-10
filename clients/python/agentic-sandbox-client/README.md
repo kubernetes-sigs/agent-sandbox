@@ -163,6 +163,15 @@ finally:
     sandbox.terminate()
 ```
 
+`SandboxClient` is also a context manager. On exit it deletes the sandboxes it
+created, so the `try`/`finally` above is not needed:
+
+```python
+with SandboxClient(connection_config=SandboxLocalTunnelConnectionConfig()) as client:
+    sandbox = client.create_sandbox(warmpool="python-sandbox-warmpool", namespace="default")
+    print(sandbox.commands.run("echo 'Hello from Local!'").stdout)
+```
+
 You can pass per-claim environment variables when creating a sandbox:
 
 ```python

@@ -19,7 +19,6 @@ file I/O) via the Sandbox resource handle.
 
 import uuid
 import atexit
-import sys
 import logging
 from typing import List, Dict, Tuple, TypeVar, Generic, Type
 
@@ -43,9 +42,7 @@ from .pod_metadata import build_pod_metadata, validate_labels
 from .utils import construct_sandbox_claim_lifecycle_spec
 from .exceptions import SandboxNotFoundError
 
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s',
-                    stream=sys.stdout)
+logger = logging.getLogger(__name__)
 
 T = TypeVar('T', bound=Sandbox)
 
@@ -236,7 +233,7 @@ class SandboxClient(Generic[T]):
                 try:
                     self._delete_claim(claim_name, namespace, **delete_kwargs)
                 except Exception as cleanup_error:
-                    logging.error(f"Failed to roll back SandboxClaim '{claim_name}': {cleanup_error}")
+                    logger.error(f"Failed to roll back SandboxClaim '{claim_name}': {cleanup_error}")
             raise
 
         previous = self._active_connection_sandboxes.get((namespace, claim_name))
@@ -358,7 +355,7 @@ class SandboxClient(Generic[T]):
             else:
                 self._delete_claim(claim_name, namespace)
         except Exception as e:
-            logging.error(f"Failed to delete sandbox '{claim_name}' in namespace '{namespace}': {e}")
+            logger.error(f"Failed to delete sandbox '{claim_name}' in namespace '{namespace}': {e}")
             
     def delete_all(self) -> None:
         """
@@ -375,7 +372,7 @@ class SandboxClient(Generic[T]):
             try:
                 self.delete_sandbox(claim_name, namespace=ns)
             except Exception as e:
-                logging.error(
+                logger.error(
                     f"Cleanup failed for {claim_name} in namespace {ns}: {e}"
                 )
 
@@ -388,7 +385,7 @@ class SandboxClient(Generic[T]):
                 else:
                     self.delete_sandbox(claim_name, namespace)
             except Exception as e:
-                logging.error(f"Cleanup failed for {claim_name} in namespace {namespace}: {e}")
+                logger.error(f"Cleanup failed for {claim_name} in namespace {namespace}: {e}")
 
     @trace_span("create_claim")
     def _create_claim(

@@ -25,6 +25,8 @@ from .models import SandboxConnectionConfig, SandboxTracerConfig
 from .trace_manager import create_tracer_manager
 from .utils import select_pod_ip, extract_sandbox_name_hash
 
+logger = logging.getLogger(__name__)
+
 
 class AsyncSandbox:
     """
@@ -196,10 +198,10 @@ class AsyncSandbox:
             try:
                 self.tracing_manager.end_lifecycle_span()
             except Exception as e:
-                logging.error(f"Failed to end tracing span: {e}")
+                logger.error(f"Failed to end tracing span: {e}")
 
         self._is_closed = True
-        logging.info(f"Connection to sandbox claim '{self.claim_name}' has been closed.")
+        logger.info(f"Connection to sandbox claim '{self.claim_name}' has been closed.")
 
     def _close_for_atexit(self) -> None:
         """Release local resources without touching the owning event loop."""

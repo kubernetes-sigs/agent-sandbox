@@ -99,9 +99,7 @@ func TestCommandsStart_StreamsBeforeExit(t *testing.T) {
 		}
 		return stream.Send(&processv1.StartResponse{Event: &processv1.StartResponse_Exit{Exit: &processv1.ExitEvent{ExitCode: 7}}})
 	}}
-	sb := newReadySandboxdTestSandbox("http://unused")
-	startFakeProcessServer(t, sb, svc)
-	t.Cleanup(func() { require.NoError(t, sb.Disconnect(context.Background())) })
+	sb := newStreamingSandbox(t, svc)
 	handle, err := sb.Commands().Start(ctx, "example")
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, handle.Close()) })
@@ -678,16 +676,68 @@ func TestProcessHandle_ParentAndIdleCleanup(t *testing.T) {
 	}
 }
 
+type terminalGateClientStream struct {
+	grpc.ClientStream
+	ready chan<- struct{}
+	gate  context.Context
+}
+
+func (s *terminalGateClientStream) RecvMsg(message any) error {
+	err := s.ClientStream.RecvMsg(message)
+	if err == nil {
+		return nil
+	}
+	// Hold the real terminal result at the public gRPC boundary: its context
+	// has finished, but the SDK's active Recv has not classified the result.
+	select {
+	case <-s.ClientStream.Context().Done():
+	case <-s.gate.Done():
+		return err
+	}
+	close(s.ready)
+	<-s.gate.Done()
+	return err
+}
+
 func TestProcessHandle_NormalEOFCleanupDoesNotBecomeCanceled(t *testing.T) {
 	for _, terminal := range []error{nil, status.Error(codes.Unavailable, "terminal failure")} {
 		t.Run(map[bool]string{true: "EOF", false: "RPC error"}[terminal == nil], func(t *testing.T) {
 			sb, recorder := newTracedProcessSandbox(t, scriptedProcessService([]*processv1.StartResponse{processInit(), processExit(0)}, terminal))
-			handle, err := sb.Commands().Start(processTestContext(t), "example")
+			ctx := processTestContext(t)
+			gate, release := context.WithCancel(ctx)
+			t.Cleanup(release)
+			ready := make(chan struct{})
+			conn, err := grpc.NewClient(sb.connector.grpcTarget, grpc.WithTransportCredentials(insecure.NewCredentials()),
+				grpc.WithStreamInterceptor(func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+					stream, err := streamer(ctx, desc, cc, method, opts...)
+					if err != nil {
+						return nil, err
+					}
+					return &terminalGateClientStream{ClientStream: stream, ready: ready, gate: gate}, nil
+				}))
+			require.NoError(t, err)
+			sb.connector.mu.Lock()
+			sb.connector.grpcConn = conn
+			sb.connector.mu.Unlock()
+			handle, err := sb.Commands().Start(ctx, "example")
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, handle.Close()) })
 			_, err = handle.Recv()
 			require.NoError(t, err)
-			_, err = handle.Recv()
+			received := make(chan error, 1)
+			go func() { _, err := handle.Recv(); received <- err }()
+			select {
+			case <-ready:
+			case <-ctx.Done():
+				t.Fatal("gRPC did not finish before SDK terminal classification")
+			}
+			require.Empty(t, recorder.Ended(), "internal gRPC cancellation must not classify the pending result")
+			release()
+			select {
+			case err = <-received:
+			case <-ctx.Done():
+				t.Fatal("the released terminal result was not received")
+			}
 			wantStatus := otelcodes.Unset
 			if terminal == nil {
 				require.ErrorIs(t, err, io.EOF)

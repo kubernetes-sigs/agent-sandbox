@@ -30,10 +30,28 @@ import (
 func newRealProcessSandbox(t *testing.T) (*Sandbox, *processmanager.ProcessRegistry) {
 	t.Helper()
 	registry := processmanager.NewProcessRegistry()
-	sb := newReadySandboxdTestSandbox("http://unused")
-	startFakeProcessServer(t, sb, server.NewProcessServer(t.TempDir(), registry, 0, logr.Discard()))
-	t.Cleanup(func() { require.NoError(t, sb.Disconnect(context.Background())) })
+	sb := newStreamingSandbox(t, server.NewProcessServer(t.TempDir(), registry, 0, logr.Discard()))
 	return sb, registry
+}
+
+func receiveProcessResult(t *testing.T, handle *ProcessHandle) *ExecutionResult {
+	t.Helper()
+	result := &ExecutionResult{}
+	for {
+		event, err := handle.Recv()
+		if err == io.EOF {
+			return result
+		}
+		require.NoError(t, err)
+		switch event.Type {
+		case ProcessEventStdout:
+			result.Stdout += string(event.Data)
+		case ProcessEventStderr:
+			result.Stderr += string(event.Data)
+		case ProcessEventExit:
+			result.ExitCode = event.ExitCode
+		}
+	}
 }
 
 func TestProcessHandle_RealIncrementalOutput(t *testing.T) {
@@ -51,26 +69,10 @@ func TestProcessHandle_RealIncrementalOutput(t *testing.T) {
 	require.False(t, proc.IsCompleted(), "output must arrive before command completion")
 	_, err = sb.Run(ctx, "touch released")
 	require.NoError(t, err)
-	var stdout, stderr []byte
-	var exitCode int
-	for {
-		event, err := handle.Recv()
-		if err == io.EOF {
-			break
-		}
-		require.NoError(t, err)
-		switch event.Type {
-		case ProcessEventStdout:
-			stdout = append(stdout, event.Data...)
-		case ProcessEventStderr:
-			stderr = append(stderr, event.Data...)
-		case ProcessEventExit:
-			exitCode = event.ExitCode
-		}
-	}
-	require.Equal(t, "late", string(stdout))
-	require.Equal(t, "problem", string(stderr))
-	require.Equal(t, 7, exitCode)
+	result := receiveProcessResult(t, handle)
+	require.Equal(t, "late", result.Stdout)
+	require.Equal(t, "problem", result.Stderr)
+	require.Equal(t, 7, result.ExitCode)
 }
 
 func TestProcessHandle_RealSignalAndExit(t *testing.T) {
@@ -84,23 +86,9 @@ func TestProcessHandle_RealSignalAndExit(t *testing.T) {
 	require.Equal(t, ProcessEventStdout, event.Type)
 	require.Equal(t, []byte("ready"), event.Data, "signal only after the trap is installed")
 	require.NoError(t, handle.SendSignal(ctx, SignalSIGTERM))
-	var output []byte
-	exitCode := 0
-	for {
-		event, err := handle.Recv()
-		if err == io.EOF {
-			break
-		}
-		require.NoError(t, err)
-		switch event.Type {
-		case ProcessEventStdout:
-			output = append(output, event.Data...)
-		case ProcessEventExit:
-			exitCode = event.ExitCode
-		}
-	}
-	require.Equal(t, "stopped", string(output))
-	require.Equal(t, 23, exitCode)
+	result := receiveProcessResult(t, handle)
+	require.Equal(t, "stopped", result.Stdout)
+	require.Equal(t, 23, result.ExitCode)
 }
 
 func TestProcessHandle_RealShortCommandWithEnvAndWorkingDir(t *testing.T) {
@@ -113,23 +101,9 @@ func TestProcessHandle_RealShortCommandWithEnvAndWorkingDir(t *testing.T) {
 		WithEnv(map[string]string{"STREAM_ENV": "overridden"}), WithWorkingDir("work"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, handle.Close()) })
-	var output []byte
-	var exitCode int
-	for {
-		event, err := handle.Recv()
-		if err == io.EOF {
-			break
-		}
-		require.NoError(t, err)
-		switch event.Type {
-		case ProcessEventStdout:
-			output = append(output, event.Data...)
-		case ProcessEventExit:
-			exitCode = event.ExitCode
-		}
-	}
-	require.Equal(t, "overridden:work\n", string(output))
-	require.Equal(t, 11, exitCode)
+	result := receiveProcessResult(t, handle)
+	require.Equal(t, "overridden:work\n", result.Stdout)
+	require.Equal(t, 11, result.ExitCode)
 }
 
 func TestProcessHandle_RealCancelAndCloseReapProcess(t *testing.T) {

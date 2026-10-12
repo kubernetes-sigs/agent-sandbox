@@ -8,12 +8,21 @@ description: >
 
 ## Prerequisites
 
-* A Kubernetes cluster running **1.29 or later**. The `Sandbox` CRD relies on
-  [CEL validation rules](https://kubernetes.io/docs/reference/using-api/cel/), which are
-  generally available as of Kubernetes 1.29, so older clusters are not supported. Each
-  release is built against the latest Kubernetes libraries and tested with the newest
-  Kubernetes release; versions in between are expected to work but are not regularly
-  tested.
+* A Kubernetes cluster running **1.25 or later** with
+  [CRD CEL validation rules](https://kubernetes.io/blog/2022/09/23/crd-validation-rules-beta/)
+  enabled. On Kubernetes 1.25 through 1.28, keep the
+  `CustomResourceValidationExpressions` feature gate enabled. If the gate is
+  disabled when CRDs are installed, the API server drops the CEL rules. Sandbox
+  name validation and volume claim template immutability are then not enforced.
+  **Kubernetes 1.29 or later is recommended** because CRD CEL validation is stable
+  and cannot be disabled. Each release is built against the latest Kubernetes
+  libraries and tested with the newest Kubernetes release. Intermediate versions
+  are expected to work but are not regularly tested.
+
+* For Gateway-based client connections, meet the Kubernetes version requirements
+  of the installed Gateway API CRDs and controller. The full
+  [Gateway API v1.5.0 CRD bundle](https://github.com/kubernetes-sigs/gateway-api/releases/tag/v1.5.0)
+  requires **Kubernetes 1.31 or later** because of its TLSRoute CEL validation.
 
 * [kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) CLI tool.
 

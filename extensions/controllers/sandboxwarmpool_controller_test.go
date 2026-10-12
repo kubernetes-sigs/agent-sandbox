@@ -1364,6 +1364,7 @@ func TestReconcilePool_TemplateRefUpdate_SameSpec(t *testing.T) {
 		// Sandboxes should be recreated (new names) because TemplateRef changed
 		require.False(t, initialSandboxNames[sb.Name], "Sandbox should have been recreated with new name")
 		require.Equal(t, sandboxcontrollers.NameHash(templateName2), sb.Labels[sandboxTemplateRefHash], "Sandbox should have updated template ref hash label")
+		require.Equal(t, templateName2, sb.Annotations[sandboxv1beta1.SandboxTemplateRefAnnotation], "Sandbox should have updated template ref annotation")
 		// The pod spec is identical, so the image remains image-v1
 		require.Equal(t, "image-v1", sb.Spec.PodTemplate.Spec.Containers[0].Image, "Sandbox should retain original image since spec is identical")
 	}

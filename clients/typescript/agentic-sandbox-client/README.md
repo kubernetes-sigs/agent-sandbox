@@ -98,6 +98,21 @@ These populate `spec.volumeClaimTemplates`, matching the Python SDK's
 this forces a cold start. The controller validates the templates against the
 SandboxTemplate's volume policy.
 
+### Environment variables
+
+Use `env` to inject environment variables into the sandbox's first container:
+
+```typescript
+const sandbox = await client.createSandbox("my-warm-pool", "default", {
+  env: { API_KEY: "secret" },
+});
+```
+
+These populate `spec.env`, matching the Python SDK's `env`. Warm pool Pods are
+already running without them, so setting this forces a cold start. The
+SandboxTemplate's `envVarsInjectionPolicy` decides whether the controller
+accepts them.
+
 ### Listing sandboxes
 
 With Kubernetes credentials configured and permission to list SandboxClaims, run

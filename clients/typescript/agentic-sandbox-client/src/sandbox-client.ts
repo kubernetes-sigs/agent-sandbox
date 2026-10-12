@@ -69,6 +69,9 @@ const LABEL_PREFIX_RE = /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/;
 const LABEL_NAME_MAX_LENGTH = 63;
 const LABEL_PREFIX_MAX_LENGTH = 253;
 
+// Kubernetes accepts these names for a container env var (same rule as the Python SDK).
+const ENV_VAR_NAME_RE = /^[-._a-zA-Z][-._a-zA-Z0-9]*$/;
+
 function validateLabelName(name: string, context: string): void {
   if (name.length > LABEL_NAME_MAX_LENGTH) {
     throw new SandboxError(
@@ -150,9 +153,36 @@ function buildPodMetadata(
   return Object.keys(podMetadata).length > 0 ? podMetadata : undefined;
 }
 
+/**
+ * Converts an env map to the claim's `spec.env` list, or undefined when it has
+ * no entries so the manifest carries no empty list.
+ */
+function buildClaimEnv(
+  env?: Record<string, string>,
+): Array<{ name: string; value: string }> | undefined {
+  const entries = Object.entries(env ?? {});
+  if (entries.length === 0) {
+    return undefined;
+  }
+  return entries.map(([name, value]) => {
+    if (!ENV_VAR_NAME_RE.test(name) || name === "." || name.startsWith("..")) {
+      throw new SandboxError(
+        `Invalid environment variable name '${name}': must consist of alphabetic characters, digits, '_', '-', or '.', must not start with a digit, and must not be '.', '..', or start with '..'.`,
+      );
+    }
+    if (typeof value !== "string") {
+      throw new SandboxError(
+        `Environment variable '${name}' must have a string value.`,
+      );
+    }
+    return { name, value };
+  });
+}
+
 /** The optional SandboxClaim `spec` fields a caller can request. */
 interface ClaimSpecExtras {
   additionalPodMetadata?: PodMetadata;
+  env?: Array<{ name: string; value: string }>;
   volumeClaimTemplates?: VolumeClaimTemplate[];
   lifecycle?: { shutdownTime: string; shutdownPolicy: "Delete" };
 }
@@ -170,6 +200,10 @@ function buildClaimSpecExtras(
   const podMetadata = buildPodMetadata(opts?.podLabels, opts?.podAnnotations);
   if (podMetadata) {
     extras.additionalPodMetadata = podMetadata;
+  }
+  const env = buildClaimEnv(opts?.env);
+  if (env) {
+    extras.env = env;
   }
   if (opts?.volumeClaimTemplates?.length) {
     extras.volumeClaimTemplates = opts.volumeClaimTemplates;

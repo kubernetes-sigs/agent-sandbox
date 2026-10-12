@@ -116,9 +116,10 @@ function mockSandboxReadyFlow(
       callback("MODIFIED", {
         metadata: {
           name: sandboxName,
-          annotations: podAnnotation
-            ? { [POD_NAME_ANNOTATION]: podAnnotation }
-            : {},
+          annotations:
+            podAnnotation !== undefined
+              ? { [POD_NAME_ANNOTATION]: podAnnotation }
+              : {},
         },
         status: {
           conditions: [{ type: "Ready", status: "True" }],
@@ -693,9 +694,12 @@ describe("SandboxClient (registry)", () => {
       }
     });
 
-    it("falls back to sandboxName when pod annotation is absent", async () => {
+    it.each([
+      undefined,
+      "",
+    ])("falls back to sandboxName when pod annotation is %j", async (podAnnotation) => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
-      mockSandboxReadyFlow("sandbox-xyz"); // no podAnnotation
+      mockSandboxReadyFlow("sandbox-xyz", podAnnotation);
 
       const client = new SandboxClient();
       const sandbox = await client.createSandbox("tpl");
@@ -945,7 +949,10 @@ describe("SandboxClient (registry)", () => {
       expect(sandbox.isActive).toBe(true);
     });
 
-    it("with waitForReady false, attaches to a Sandbox that is not Ready yet", async () => {
+    it.each([
+      ["pod-pending", "pod-pending"],
+      ["", "sandbox-pending"],
+    ])("with waitForReady false, resolves pod annotation %j to %j before Ready", async (podAnnotation, expectedPodName) => {
       // 1) claim verification, 2) resolveSandboxName, 3) Sandbox existence.
       mockGetNamespacedCustomObject.mockResolvedValueOnce({});
       mockGetNamespacedCustomObject.mockResolvedValueOnce({
@@ -954,7 +961,7 @@ describe("SandboxClient (registry)", () => {
       mockGetNamespacedCustomObject.mockResolvedValueOnce({
         metadata: {
           name: "sandbox-pending",
-          annotations: { [POD_NAME_ANNOTATION]: "pod-pending" },
+          annotations: { [POD_NAME_ANNOTATION]: podAnnotation },
         },
         status: {
           conditions: [{ type: "Ready", status: "False" }],
@@ -968,7 +975,7 @@ describe("SandboxClient (registry)", () => {
       });
 
       expect(sandbox.sandboxName).toBe("sandbox-pending");
-      expect(sandbox.podName).toBe("pod-pending");
+      expect(sandbox.podName).toBe(expectedPodName);
       expect(sandbox.podIP).toBe("10.0.0.7");
       expect(mockWatchFn).not.toHaveBeenCalled();
     });

@@ -263,8 +263,8 @@ function readSandbox(
   const podIPs = Array.isArray(status.podIPs) ? status.podIPs : [];
   return {
     sandboxName,
-    podName: podNameAnnotation ?? sandboxName,
-    podNameFromAnnotation: podNameAnnotation !== undefined,
+    podName: podNameAnnotation || sandboxName,
+    podNameFromAnnotation: Boolean(podNameAnnotation),
     podIP: selectPodIP(podIPs),
     serviceFQDN:
       typeof status.serviceFQDN === "string" ? status.serviceFQDN : "",

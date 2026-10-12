@@ -31,7 +31,7 @@ from k8s_agent_sandbox.exceptions import SandboxRequestError
 from k8s_agent_sandbox.models import FileEntry
 from k8s_agent_sandbox.trace_manager import trace, trace_span
 
-
+logger = logging.getLogger(__name__)
 
 _STREAM_CHUNK_SIZE = 64 * 1024
 
@@ -202,7 +202,7 @@ class Filesystem:
             files_payload = {'file': (path, content)}
             self.connector.send_request("POST", "upload",
                           files=files_payload, timeout=timeout)
-        logging.info(f"File '{path}' uploaded successfully.")
+        logger.info(f"File '{path}' uploaded successfully.")
 
     @staticmethod
     def _safe_upload_path(path: str) -> str:
@@ -370,7 +370,7 @@ class Filesystem:
                 # stray "symlink") so one unknown entry does not fail the
                 # whole listing.
                 if entry.get("type") not in ("file", "directory"):
-                    logging.info(f"Skipping unsupported file entry type: {entry.get('type')!r}")
+                    logger.info(f"Skipping unsupported file entry type: {entry.get('type')!r}")
                     continue
                 try:
                     file_entries.append(FileEntry.from_sandboxd(entry))
@@ -447,4 +447,4 @@ class Filesystem:
         if recursive:
             endpoint += "?recursive=true"
         self.connector.send_request("DELETE", endpoint, timeout=timeout)
-        logging.info(f"Path '{path}' deleted successfully.")
+        logger.info(f"Path '{path}' deleted successfully.")

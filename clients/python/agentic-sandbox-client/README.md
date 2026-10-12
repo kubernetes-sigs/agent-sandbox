@@ -664,6 +664,16 @@ The async client takes the same parameter with a `kubernetes_asyncio.client.ApiC
 
 An injected `api_client` is caller-owned: the SDK never closes it, so closing it is up to you.
 
+### 14. Logging
+
+The SDK logs through the `k8s_agent_sandbox` logger hierarchy and does not configure logging itself. To see its progress messages, configure logging in your application:
+
+```python
+import logging
+
+logging.basicConfig(level=logging.INFO)
+```
+
 ## Testing
 
 A test script is included to verify the full lifecycle (Creation -> Execution -> File I/O -> Cleanup).

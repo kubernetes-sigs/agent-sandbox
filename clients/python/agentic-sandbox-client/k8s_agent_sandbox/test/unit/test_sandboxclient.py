@@ -12,12 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ast
 import json
+import subprocess
+import sys
 import threading
 import unittest
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
 from unittest.mock import MagicMock, patch, ANY
 
 from requests.adapters import HTTPAdapter
@@ -942,6 +946,37 @@ class TestConnectionConfigValidation(unittest.TestCase):
         for ns in invalid_namespaces:
             with self.assertRaises(ValidationError):
                 SandboxLocalTunnelConnectionConfig(router_namespace=ns)
+
+
+class TestLibraryLogging(unittest.TestCase):
+    """The SDK must leave root logger configuration to the application."""
+
+    def test_import_leaves_root_logger_unconfigured(self):
+        # Fresh interpreter: pytest itself installs root handlers in-process.
+        code = (
+            "import logging, k8s_agent_sandbox.sandbox_client\n"
+            "root = logging.getLogger()\n"
+            "assert not root.handlers, root.handlers\n"
+            "assert root.level == logging.WARNING, root.level\n"
+        )
+        subprocess.run([sys.executable, "-c", code], check=True)
+
+    def test_no_root_logger_calls(self):
+        # logging.info() and friends call basicConfig() on a bare root logger.
+        root_calls = {"debug", "info", "warning", "error", "exception", "critical", "log"}
+        package_dir = Path(__file__).resolve().parents[2]
+        offenders = []
+        for path in package_dir.rglob("*.py"):
+            if "test" in path.relative_to(package_dir).parts:
+                continue
+            for node in ast.walk(ast.parse(path.read_text())):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == "logging"
+                        and node.func.attr in root_calls):
+                    offenders.append(f"{path.name}:{node.lineno}")
+        self.assertEqual(offenders, [])
 
 
 if __name__ == '__main__':

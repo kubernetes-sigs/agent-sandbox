@@ -161,9 +161,11 @@ selects on an excluded key stops selecting its pods, in every namespace, and tho
 pods lose the isolation it gave them. Work through the steps in order.
 
 1. **List the label keys on the sandbox pods and how many values each has.** Keys
-   with one value per pod, claim, pool or run are the ones that mint identities.
-   Other integrations, such as a queueing system that admits sandbox pods, can add
-   keys of their own; exclude any that are per pod as well.
+   with one value per pod or per claim grow identities with the number of pods;
+   those are the problem. Keys with one value per pool, template or run are
+   bounded by those counts and expected to remain. Other integrations, such as a
+   queueing system that admits sandbox pods, can add keys of their own; exclude
+   any that are per pod as well.
 
    ```bash
    kubectl get pods -A -l app=agent-sandbox-rl -o json \
@@ -188,14 +190,19 @@ pods lose the isolation it gave them. Work through the steps in order.
    If the Network Policy API is installed, check its `ClusterNetworkPolicy` objects
    the same way: their subjects and peers select pods by label as well.
 
-3. **Request the exclusion list.** It keeps `agents.x-k8s.io/sandbox-template-ref-hash`
-   identity-relevant, because every Managed template's policy selects on it:
+3. **Request the exclusion list.** Excluding the per-pod keys is the fix:
 
    ```yaml
    # cilium-config, key "labels"
-   labels: "!k8s:agents.x-k8s.io/sandbox-name-hash !k8s:agents.x-k8s.io/claim-uid !k8s:agents.x-k8s.io/warm-pool-sandbox !k8s:agent-sandbox-rl/run-id"
+   labels: "!k8s:agents.x-k8s.io/sandbox-name-hash !k8s:agents.x-k8s.io/claim-uid"
    ```
 
+   `agents.x-k8s.io/warm-pool-sandbox` (one value per pool) and
+   `agent-sandbox-rl/run-id` (one per run) can stay. Add
+   `!k8s:agents.x-k8s.io/warm-pool-sandbox !k8s:agent-sandbox-rl/run-id` only to
+   cut identities further, once step 2 shows no policy selects on them. The list
+   keeps `agents.x-k8s.io/sandbox-template-ref-hash` identity-relevant, because
+   every Managed template's policy selects on it.
    Add `!k8s:agents.x-k8s.io/sandbox-template-ref-hash` only if step 2 shows no
    policy uses it, which means no namespace on the cluster runs Managed templates.
    The same goes for `!k8s:sandbox`: other workloads, including several examples in
@@ -207,10 +214,11 @@ pods lose the isolation it gave them. Work through the steps in order.
    objects are not rewritten: pods get the filtered identity as their endpoints are
    regenerated, and unused identities are garbage-collected.
 
-With the list from step 3, sandbox pods share identities per template: the keys that
-remain per template are `sandbox` and `agents.x-k8s.io/sandbox-template-ref-hash`,
-and `agents.x-k8s.io/created-by` takes one of a few values. Identities grow with the
-number of templates, not with the number of pods.
+With the list from step 3, identities grow with the number of templates, pools and
+runs, not with the number of pods. The keys that remain are per template (`sandbox`,
+`agents.x-k8s.io/sandbox-template-ref-hash`), per pool
+(`agents.x-k8s.io/warm-pool-sandbox`, on unclaimed pool pods) and per run
+(`agent-sandbox-rl/run-id`), and `agents.x-k8s.io/created-by` takes one of a few values.
 
 Verify with:
 

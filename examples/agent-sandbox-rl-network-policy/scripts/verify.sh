@@ -18,7 +18,8 @@
 #   2. every agent-sandbox-rl SandboxTemplate is Unmanaged;
 #   3. no NetworkPolicy owned by an agent-sandbox-rl template is left (the
 #      controller deletes them); other teams' templates are not counted;
-#   4. (Cilium only, informational) how many identities still carry per-pod keys.
+#   4. (Cilium only, informational) identities carrying per-pod keys, and those
+#      carrying only per-pool or per-run keys (expected).
 # Usage: NAMESPACE=agent-sandbox-rl [KUBE_CONTEXT=...] scripts/verify.sh
 # Exits non-zero if 1 to 3 fail.
 set -uo pipefail
@@ -96,18 +97,32 @@ all_np="$("${K[@]}" get networkpolicies -n "$NAMESPACE" --no-headers 2>/dev/null
 info "NetworkPolicies in $NAMESPACE: $all_np"
 
 # 4. Cilium identities (informational: the label filter is a cluster-side change).
-if "${K[@]}" get crd ciliumidentities.cilium.io >/dev/null 2>&1; then
-  "${K[@]}" get ciliumidentities -o json 2>/dev/null | python3 -c '
+#    Per-pod keys grow identities with the number of pods (the cardinality
+#    problem); per-pool and per-run keys are bounded and expected to remain.
+#    A failed list is reported as skipped: on Dataplane V2 listing identities is
+#    often forbidden for non-admins, and an empty answer would look clean.
+if ! ids="$("${K[@]}" get ciliumidentities -o json 2>&1)"; then
+  if grep -q "doesn't have a resource type" <<<"$ids"; then
+    info "no CiliumIdentity resource on this cluster; identity check skipped"
+  else
+    info "identity check skipped: could not list CiliumIdentities: ${ids//$'\n'/ }"
+  fi
+else
+  printf '%s' "$ids" | python3 -c '
 import sys,json
 items=json.load(sys.stdin)["items"]
-keys=("k8s:agents.x-k8s.io/sandbox-name-hash","k8s:agents.x-k8s.io/claim-uid",
-      "k8s:agents.x-k8s.io/warm-pool-sandbox","k8s:agent-sandbox-rl/run-id")
-n=len(items); per_pod=sum(1 for i in items if any(k in (i.get("security-labels") or {}) for k in keys))
-print(f"INFO  CiliumIdentities: {n} total, {per_pod} carrying a per-pod or per-run sandbox key")
-if per_pod:
-    print("INFO  those keys are still identity-relevant; see the README section on Cilium")'
-else
-  info "no CiliumIdentity CRD on this cluster; identity check skipped"
+per_pod=("k8s:agents.x-k8s.io/sandbox-name-hash","k8s:agents.x-k8s.io/claim-uid")
+bounded=("k8s:agents.x-k8s.io/warm-pool-sandbox","k8s:agent-sandbox-rl/run-id")
+def has(i, keys):
+    return any(k in (i.get("security-labels") or {}) for k in keys)
+pod=sum(1 for i in items if has(i, per_pod))
+run=sum(1 for i in items if not has(i, per_pod) and has(i, bounded))
+print(f"INFO  CiliumIdentities: {len(items)} total")
+if pod:
+    print(f"INFO  {pod} carry a per-pod key (sandbox-name-hash, claim-uid): these grow with the number of pods; see the README section on Cilium")
+else:
+    print("INFO  none carry a per-pod key (sandbox-name-hash, claim-uid)")
+print(f"INFO  {run} carry only per-pool or per-run keys (warm-pool-sandbox, run-id): expected, bounded by pools and runs")'
 fi
 
 echo "== $pass passed, $fail failed =="

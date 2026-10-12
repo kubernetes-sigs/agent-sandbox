@@ -194,6 +194,8 @@ Complete, runnable manifests for both (plus an end-to-end SDK client) live in
 | `--shutdown-timeout` | `10s` | Grace period for in-flight requests and child processes. |
 | `--http-idle-timeout` | `60s` | Close idle HTTP keep-alive connections after this duration. |
 | `--stream-chunk-size` | `4096` | Buffer size in bytes for streaming process stdout/stderr chunks. |
+| `--auth-token-sha256` | (none) | Hex SHA-256 digest of the bearer token clients must send. See [Client authentication](#client-authentication). |
+| `--auth-token-file` | (none) | File holding the bearer token (e.g. a mounted Secret). Alternative to `--auth-token-sha256`; set at most one. Neither leaves the API unauthenticated. |
 | `--version` | | Print version info and exit. |
 
 ## Talking to sandboxd
@@ -368,10 +370,12 @@ The Python gRPC path requires the `grpc` extra: `pip install k8s-agent-sandbox[g
   Containment is provided by **pod isolation and NetworkPolicy**, not
   loopback binding; pass `--listen-host=127.0.0.1` to restrict to loopback
   for local development.
-- **Transport authentication:** `sandboxd` does not authenticate clients or
-  terminate TLS. Pod port-forward access is authorized by the Kubernetes API
-  server. Protect direct pod-network access with NetworkPolicy, a service mesh
-  or mTLS proxy, or another trusted transport boundary.
+- **Transport authentication:** `sandboxd` does not terminate TLS. By default
+  it does not authenticate clients either; `--auth-token-sha256` (or
+  `--auth-token-file`) adds a bearer token check (see [Client authentication](#client-authentication)). Pod
+  port-forward access is authorized by the Kubernetes API server. Protect
+  direct pod-network access with NetworkPolicy, a service mesh or mTLS proxy,
+  or another trusted transport boundary, with or without the token.
 - **Path confinement:** every file path (and process `cwd`) is resolved with
   symlink evaluation and rejected unless it stays under `--root-dir`.
 - **Metadata hygiene:** `/v1/metadata` only serves env vars matching
@@ -382,6 +386,56 @@ The Python gRPC path requires the `grpc` extra: `pip install k8s-agent-sandbox[g
   keys into the sandbox environment.
 - **Process hygiene:** children run in their own process groups; daemon
   shutdown SIGTERMs them, waits a grace period, then SIGKILLs stragglers.
+
+## Client authentication
+
+With `--auth-token-sha256=<hex>` sandboxd requires a bearer token whose SHA-256
+digest is `<hex>` on:
+
+- every gRPC call, as the `authorization` metadata value `Bearer <token>`.
+  Calls without it fail with `UNAUTHENTICATED`. This covers every service on
+  the gRPC port, server reflection included;
+- every REST request except `GET /v1/health`, `/v1/metadata` included, as the
+  header `Authorization: Bearer <token>`. Requests without it get `401` with
+  `{"code":"UNAUTHENTICATED"}` and `WWW-Authenticate: Bearer`.
+
+`/v1/health` stays open so a kubelet `httpGet` readiness probe works without
+the token. Comparison is constant time.
+
+Pass the digest, not the token. Whatever is in a pod's command line or
+environment is copied: into the pod spec, into objects other controllers
+derive from it (e.g. a Kueue `Workload`), and into the environment of every
+process sandboxd starts, where code in the sandbox can print it. A digest in
+those places reveals nothing. The orchestrator mints a token per sandbox,
+keeps it in memory, and puts only its digest in the pod:
+
+```yaml
+containers:
+- name: runtime
+  args: ["--auth-token-sha256=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"]
+```
+
+```bash
+TOKEN=$(head -c 32 /dev/urandom | base64)
+DIGEST=$(printf %s "$TOKEN" | sha256sum | cut -d' ' -f1)
+```
+
+Where a token must reach the daemon itself, mount it from a Secret and pass
+`--auth-token-file=<path>` instead; whitespace around the token is ignored,
+and a missing or empty file is a startup error. Set at most one of the two
+flags.
+
+The token authenticates the client that drives the sandbox. It is defense in
+depth beside NetworkPolicy, not a replacement for it: it covers traffic a
+policy does not see or no longer matches. Code running inside the sandbox
+already has the API's reach, so the token is not meant to stop it; give each
+sandbox its own token so one sandbox's token opens no other.
+
+```bash
+curl -sf -H "Authorization: Bearer $TOKEN" localhost:8080/v1/files/src/main.py
+grpcurl -plaintext -H "authorization: Bearer $TOKEN" \
+  -d '{"config":{"command":["echo","hello"]}}' localhost:9090 process.v1.ProcessService/Execute
+```
 
 ## Local development
 

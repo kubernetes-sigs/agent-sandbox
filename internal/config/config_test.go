@@ -16,6 +16,9 @@ package config
 
 import (
 	"flag"
+	"os"
+	"regexp"
+	"slices"
 	"testing"
 )
 
@@ -335,5 +338,36 @@ func TestApplyConfigMapData_KnownNonFlagKeyNotSkipped(t *testing.T) {
 	}
 	if workers != 200 {
 		t.Errorf("workers = %d, want 200", workers)
+	}
+}
+
+func TestTunableFlags_MatchDocs(t *testing.T) {
+	raw, err := os.ReadFile("../../docs/configuration.md")
+	if err != nil {
+		t.Fatalf("failed to read docs/configuration.md: %v", err)
+	}
+	re := regexp.MustCompile(`Settable flags:[^.]+\.`)
+	block := re.FindString(string(raw))
+	if block == "" {
+		t.Fatal("could not find 'Settable flags:' block in docs/configuration.md")
+	}
+	flagRe := regexp.MustCompile("`([a-z][a-z0-9-]+)`")
+	matches := flagRe.FindAllStringSubmatch(block, -1)
+
+	var docFlags []string
+	for _, m := range matches {
+		docFlags = append(docFlags, m[1])
+	}
+	slices.Sort(docFlags)
+
+	codeFlags := TunableFlagNames()
+
+	if len(docFlags) != len(codeFlags) {
+		t.Fatalf("docs list %d flags, code has %d:\n  docs: %v\n  code: %v", len(docFlags), len(codeFlags), docFlags, codeFlags)
+	}
+	for i := range codeFlags {
+		if docFlags[i] != codeFlags[i] {
+			t.Errorf("mismatch at index %d: docs=%q code=%q", i, docFlags[i], codeFlags[i])
+		}
 	}
 }

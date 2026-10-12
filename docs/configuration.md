@@ -364,10 +364,12 @@ exempted), not by this allowlist.
 
 Keys that match one of the tunable flag names below override the compiled
 default; explicit CLI flags always take precedence
-(CLI > ConfigMap > compiled default). The controller logs any ConfigMap key
-that is not in the list, so typos surface immediately instead of silently
-falling back to defaults. Keys set via CLI are also logged so the
-precedence decision is visible.
+(CLI > ConfigMap > compiled default). If a key has an invalid value (e.g. a
+non-numeric string for an integer flag), the controller logs the error but
+continues — valid keys are still applied. The controller also logs any
+ConfigMap key that is not in the list, so typos surface immediately instead
+of silently falling back to defaults. Keys set via CLI are also logged so
+the precedence decision is visible.
 
 Settable flags: `pprof-block-profile-rate`, `pprof-mutex-profile-fraction`,
 `kube-api-qps`, `kube-api-burst`, `api-connections`,
@@ -383,6 +385,6 @@ Settable flags: `pprof-block-profile-rate`, `pprof-mutex-profile-fraction`,
 `sandbox-write-behind-window`.
 
 See the flag descriptions earlier in this document for defaults and
-semantics. Keys not in this list are ignored and logged as warnings.
+semantics. Keys not in this list are ignored and logged.
 Documentation-only keys (prefixed with `_` or `.`) and the
 `allowed-label-domains` key are silently skipped.

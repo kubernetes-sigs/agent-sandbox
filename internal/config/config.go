@@ -24,16 +24,18 @@
 package config
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"slices"
 	"strings"
 )
 
-// TunableFlags is the explicit set of flags that may be overridden via
+// tunableFlags is the explicit set of flags that may be overridden via
 // the ConfigMap. Only flags in this allowlist are applied; everything
 // else is ignored and reported as skipped so typos surface immediately.
-var TunableFlags = map[string]bool{
+// Do not modify after init.
+var tunableFlags = map[string]bool{
 	"pprof-block-profile-rate":                         true,
 	"pprof-mutex-profile-fraction":                     true,
 	"kube-api-qps":                                     true,
@@ -57,9 +59,10 @@ var TunableFlags = map[string]bool{
 	"sandbox-write-behind-window":                      true,
 }
 
-// KnownNonFlagKeys are ConfigMap keys consumed by other mechanisms
+// knownNonFlagKeys are ConfigMap keys consumed by other mechanisms
 // (e.g. volume-mounted files) that should not be reported as skipped.
-var KnownNonFlagKeys = map[string]bool{
+// Do not modify after init.
+var knownNonFlagKeys = map[string]bool{
 	"allowed-label-domains": true,
 }
 
@@ -102,10 +105,10 @@ func ApplyConfigMapData(data map[string]string, fs *flag.FlagSet) (applied []Ove
 		if IsIgnoredConfigKey(name) {
 			continue
 		}
-		if KnownNonFlagKeys[name] {
+		if knownNonFlagKeys[name] {
 			continue
 		}
-		if !TunableFlags[name] {
+		if !tunableFlags[name] {
 			skipped = append(skipped, name)
 			continue
 		}
@@ -131,7 +134,7 @@ func ApplyConfigMapData(data map[string]string, fs *flag.FlagSet) (applied []Ove
 	}
 
 	if len(errs) > 0 {
-		return applied, skipped, cliOverridden, fmt.Errorf("configmap parse errors: %v", errs)
+		return applied, skipped, cliOverridden, errors.Join(errs...)
 	}
 	return applied, skipped, cliOverridden, nil
 }
@@ -140,4 +143,14 @@ func ApplyConfigMapData(data map[string]string, fs *flag.FlagSet) (applied []Ove
 type Override struct {
 	Key   string
 	Value string
+}
+
+// TunableFlagNames returns a sorted copy of the tunable flag name set.
+func TunableFlagNames() []string {
+	names := make([]string, 0, len(tunableFlags))
+	for k := range tunableFlags {
+		names = append(names, k)
+	}
+	slices.Sort(names)
+	return names
 }

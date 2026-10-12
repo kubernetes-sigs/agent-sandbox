@@ -58,6 +58,10 @@ var (
 	// runtime or connection cannot perform (e.g. Delete on the legacy
 	// python-runtime, or Run with RuntimeSandboxd and APIURL).
 	ErrUnsupportedByRuntime = errors.New("operation not supported by the sandbox runtime")
+	// ErrProcessProtocol indicates an invalid or incomplete process event stream.
+	ErrProcessProtocol = errors.New("invalid process event stream")
+	// ErrConcurrentRecv indicates that another Recv is already in progress.
+	ErrConcurrentRecv = errors.New("concurrent Recv on process handle")
 )
 
 // HTTPError represents a non-OK HTTP response from the sandbox.
@@ -85,8 +89,9 @@ type callOptions struct {
 	cwd         string
 }
 
-// WithTimeout sets the total timeout for a single operation, overriding
-// the default RequestTimeout for that call.
+// WithTimeout sets the total timeout for a single operation. HTTP operations
+// override their default RequestTimeout. For Commands.Start it covers the
+// entire stream, including startup; Start has no default timeout.
 func WithTimeout(d time.Duration) CallOption {
 	return func(o *callOptions) {
 		o.timeout = d
@@ -95,7 +100,8 @@ func WithTimeout(d time.Duration) CallOption {
 
 // WithMaxAttempts sets the maximum number of attempts for an operation.
 // Values ≤0 are ignored and the default is used (1 for Run, 6 for file
-// operations).
+// operations). Commands.Start rejects values greater than 1 because a
+// non-idempotent process creation cannot be safely replayed.
 //
 //	result, err := client.Run(ctx, "cat /etc/hostname", sandbox.WithMaxAttempts(6))
 func WithMaxAttempts(n int) CallOption {
@@ -106,9 +112,9 @@ func WithMaxAttempts(n int) CallOption {
 	}
 }
 
-// WithEnv sets environment variables for a single Run, merged over the
+// WithEnv sets environment variables for a single Run or Commands.Start, merged over the
 // sandbox's own environment (a key given here wins). Repeated calls
-// accumulate. Run returns ErrUnsupportedByRuntime on the legacy
+// accumulate. Both return ErrUnsupportedByRuntime on the legacy
 // python-runtime, which cannot carry them. Other operations ignore it.
 //
 //	result, err := client.Run(ctx, "echo $GREETING", sandbox.WithEnv(map[string]string{"GREETING": "hi"}))
@@ -121,9 +127,9 @@ func WithEnv(env map[string]string) CallOption {
 	}
 }
 
-// WithWorkingDir sets the working directory for a single Run, relative to the
+// WithWorkingDir sets the working directory for Run or Commands.Start, relative to the
 // sandbox root (the default). sandboxd rejects a directory that resolves
-// outside the root. Run returns ErrUnsupportedByRuntime on the legacy
+// outside the root. Both return ErrUnsupportedByRuntime on the legacy
 // python-runtime. Other operations ignore it.
 func WithWorkingDir(dir string) CallOption {
 	return func(o *callOptions) {
@@ -179,6 +185,35 @@ type ExecutionResult struct {
 	Stderr   string `json:"stderr"`
 	ExitCode int    `json:"exit_code"`
 }
+
+// ProcessEventType identifies an output or exit event from a streaming command.
+type ProcessEventType string
+
+const (
+	ProcessEventStdout ProcessEventType = "stdout"
+	ProcessEventStderr ProcessEventType = "stderr"
+	ProcessEventExit   ProcessEventType = "exit"
+)
+
+// ProcessEvent contains one raw output chunk or the command's exit code.
+// Output chunks need not be complete lines or valid UTF-8. Events from stdout
+// and stderr do not have a guaranteed global ordering.
+type ProcessEvent struct {
+	Type ProcessEventType
+	// Data is populated only for stdout/stderr and remains valid after Recv.
+	Data []byte
+	// ExitCode is populated only for exit events. A nonzero code is not an error.
+	ExitCode int
+}
+
+// ProcessSignal is a supported POSIX signal for a sandboxd process group.
+type ProcessSignal string
+
+const (
+	SignalSIGINT  ProcessSignal = "SIGINT"
+	SignalSIGTERM ProcessSignal = "SIGTERM"
+	SignalSIGKILL ProcessSignal = "SIGKILL"
+)
 
 // Health is the sandboxd runtime's report from GET /v1/health.
 type Health struct {

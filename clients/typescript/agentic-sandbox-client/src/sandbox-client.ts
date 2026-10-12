@@ -331,6 +331,28 @@ function isWatchCleanClose(err: unknown): boolean {
 }
 
 /**
+ * Loads the ambient Kubernetes configuration, failing fast when there is none:
+ * loadFromDefault() otherwise falls back to http://localhost:8080 and every
+ * later call would fail with a connection error instead of a clear message.
+ */
+function loadDefaultKubeConfig(): k8s.KubeConfig {
+  const kubeConfig = new k8s.KubeConfig();
+  kubeConfig.loadFromDefault();
+
+  const clusters = kubeConfig.clusters ?? [];
+  const isOnlyFallback =
+    clusters.length === 0 ||
+    clusters.every((c) => c.server === "http://localhost:8080");
+  if (isOnlyFallback) {
+    throw new SandboxError(
+      "No Kubernetes configuration found. " +
+        "Set KUBECONFIG, provide ~/.kube/config, or run inside a cluster.",
+    );
+  }
+  return kubeConfig;
+}
+
+/**
  * Registry-based client for managing multiple Sandbox handles.
  * Tracks all created sandboxes and supports creating, retrieving,
  * listing, and deleting them.
@@ -405,19 +427,7 @@ export class SandboxClient {
     this.logger = resolveLogger(options.logger, options.quiet);
     this.sandboxdOptions = normalizeSandboxdOptions(options.sandboxd);
 
-    this.kubeConfig = new k8s.KubeConfig();
-    this.kubeConfig.loadFromDefault();
-
-    const clusters = this.kubeConfig.clusters ?? [];
-    const isOnlyFallback =
-      clusters.length === 0 ||
-      clusters.every((c) => c.server === "http://localhost:8080");
-    if (isOnlyFallback) {
-      throw new SandboxError(
-        "No Kubernetes configuration found. " +
-          "Set KUBECONFIG, provide ~/.kube/config, or run inside a cluster.",
-      );
-    }
+    this.kubeConfig = options.kubeConfig ?? loadDefaultKubeConfig();
     this.customObjectsApi = this.kubeConfig.makeApiClient(k8s.CustomObjectsApi);
   }
 

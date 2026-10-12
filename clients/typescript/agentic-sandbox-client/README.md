@@ -137,6 +137,24 @@ not Pod labels. Omitting the selector or passing an empty string lists all claim
 in the namespace. Omitting the namespace or passing `undefined` or an empty string
 uses the client's configured default namespace.
 
+### Kubernetes credentials
+
+By default the client loads `KUBECONFIG`, then `~/.kube/config`, then the in-cluster
+service account. Pass `kubeConfig` to target a specific cluster or user instead:
+
+```typescript
+import { KubeConfig } from "@kubernetes/client-node";
+
+const kubeConfig = new KubeConfig();
+kubeConfig.loadFromFile("/path/to/other-cluster.yaml");
+
+const client = new SandboxClient({ kubeConfig });
+```
+
+The same config is used for every API call, watch, and port-forward. It is used
+as given, so the "no Kubernetes configuration found" error applies only to the
+default.
+
 ### Timeouts
 
 - `sandboxReadyTimeout` (constructor / `createSandbox()` options) is in **seconds** and bounds waiting for the `SandboxClaim`/`Sandbox` to become `Ready`. Default: 180.

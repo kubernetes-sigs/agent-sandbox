@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import * as k8s from "@kubernetes/client-node";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // ---------- hoisted mock fns (accessible inside vi.mock factories) ----------
@@ -2004,6 +2005,45 @@ describe("SandboxClient (registry)", () => {
         };
       });
       expect(() => new SandboxClient()).toThrow(SandboxError);
+    });
+  });
+
+  describe("injected kubeConfig", () => {
+    // Deliberately has no clusters: an injected config is used as given, so
+    // the ambient-config check must not reject it.
+    function injectedKubeConfig() {
+      return {
+        clusters: [],
+        makeApiClient: vi.fn().mockReturnValue({
+          createNamespacedCustomObject: mockCreateNamespacedCustomObject,
+          deleteNamespacedCustomObject: mockDeleteNamespacedCustomObject,
+          getNamespacedCustomObject: mockGetNamespacedCustomObject,
+          listNamespacedCustomObject: mockListNamespacedCustomObject,
+        }),
+      } as unknown as k8s.KubeConfig;
+    }
+
+    it("is used instead of loading the default configuration", () => {
+      const kubeConfig = injectedKubeConfig();
+
+      expect(() => new SandboxClient({ kubeConfig })).not.toThrow();
+
+      expect(MockKubeConfig).not.toHaveBeenCalled();
+      expect(kubeConfig.makeApiClient).toHaveBeenCalledWith(
+        k8s.CustomObjectsApi,
+      );
+    });
+
+    it("authenticates watches with the injected config", async () => {
+      const kubeConfig = injectedKubeConfig();
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("injected-sandbox");
+
+      const client = new SandboxClient({ kubeConfig });
+      await client.createSandbox("tpl", "default");
+
+      expect(k8s.Watch).toHaveBeenCalledWith(kubeConfig);
+      expect(MockKubeConfig).not.toHaveBeenCalled();
     });
   });
 

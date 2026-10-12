@@ -16,6 +16,7 @@
 handle liveness, and the reaper's orphan sweep."""
 
 import threading
+import types
 from unittest.mock import MagicMock
 
 import pytest
@@ -638,13 +639,27 @@ def test_run_scoped_reap_keeps_pools_another_runs_claims_use():
   def _list(plural, sel=None, **kw):
     if plural == "sandboxclaims" and sel is None:    # every claim in the namespace
       return [{"metadata": {"name": "theirs", "labels": {constants.RUN_ID_LABEL: "live"}},
-               "spec": {"warmPoolRef": {"name": "pool-a"}}},
+               "spec": {"warmPoolRef": {"name": "pool-a"}},
+               "status": {"sandbox": {"name": "sb-theirs"}}},
               {"metadata": {"name": "ours", "labels": {constants.RUN_ID_LABEL: "r"}},
                "spec": {"warmPoolRef": {"name": "pool-b"}}}]
     if plural == "sandboxwarmpools" and sel is None:
-      return [{"metadata": {"name": "pool-a"}, "spec": {"sandboxTemplateRef": {"name": "tpl-1"}}}]
+      return [{"metadata": {"name": "pool-a"}, "spec": {"sandboxTemplateRef": {"name": "tpl-1"}},
+               "status": {"selector": "agents.x-k8s.io/warm-pool-sandbox=aaaa"}}]
+    if plural == "sandboxes" and sel is None:
+      return base(plural, sel, **kw) + [
+          {"metadata": {"name": "sb-theirs"},
+           "status": {"labelSelector": "agents.x-k8s.io/sandbox-name-hash=7777"}}]
     return base(plural, sel, **kw)
   c.resources._list_objects.side_effect = _list
+  pods_by_selector = {
+      f"{constants.POD_RUN_ID_LABEL}=r": ["p-pool-a", "p-theirs", "p-own"],
+      "agents.x-k8s.io/warm-pool-sandbox=aaaa": ["p-pool-a"],
+      "agents.x-k8s.io/sandbox-name-hash=7777": ["p-theirs"],
+  }
+  c.core_api.list_namespaced_pod.side_effect = lambda ns, label_selector: types.SimpleNamespace(
+      items=[types.SimpleNamespace(metadata=types.SimpleNamespace(name=n))
+             for n in pods_by_selector.get(label_selector, [])])
   counts = reaper_mod._reap_with_cluster(c, "r", delete_pods=True,
                                          protect_claims_of=lambda rid: rid != "r")
   assert [k.args[0] for k in c.resources.delete_warmpool.call_args_list] == ["pool-b"]
@@ -654,6 +669,30 @@ def test_run_scoped_reap_keeps_pools_another_runs_claims_use():
   deleted_sb = {k.args[0] for k in c.resources.delete_sandbox.call_args_list}
   assert "sb-pool-a" not in deleted_sb
   assert counts["kept_in_use"] == 2
+  # the run-id sweep skips pods another run still uses: pool-a's warm pod and the
+  # pod that run claimed from it (adoption keeps the run-id label of the pool's run)
+  assert f"{constants.POD_RUN_ID_LABEL}=r" not in swept
+  assert [k.args[0] for k in c.core_api.delete_namespaced_pod.call_args_list] == ["p-own"]
+  assert "1 one by one, 2 kept for other runs" in counts["pods"]
+
+
+def test_run_scoped_reap_skips_the_forced_sweep_when_protected_pods_cannot_be_listed():
+  c = _linked_cluster()
+  base = c.resources._list_objects.side_effect
+  def _list(plural, sel=None, **kw):
+    if plural == "sandboxclaims" and sel is None:
+      return [{"metadata": {"name": "theirs", "labels": {constants.RUN_ID_LABEL: "live"}},
+               "spec": {"warmPoolRef": {"name": "pool-a"}}}]
+    if plural == "sandboxwarmpools" and sel is None:
+      return [{"metadata": {"name": "pool-a"},
+               "status": {"selector": "agents.x-k8s.io/warm-pool-sandbox=aaaa"}}]
+    return base(plural, sel, **kw)
+  c.resources._list_objects.side_effect = _list
+  c.core_api.list_namespaced_pod.side_effect = client.ApiException(status=403)
+  reaper_mod._reap_with_cluster(c, "r", delete_pods=True, protect_claims_of=lambda rid: rid != "r")
+  c.core_api.delete_namespaced_pod.assert_not_called()
+  swept = [k.kwargs["label_selector"] for k in c.core_api.delete_collection_namespaced_pod.call_args_list]
+  assert f"{constants.POD_RUN_ID_LABEL}=r" not in swept
 
 
 def _lhandle(pod, uid="u-1", restarts=0):

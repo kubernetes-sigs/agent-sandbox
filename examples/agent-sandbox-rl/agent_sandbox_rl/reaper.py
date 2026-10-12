@@ -108,9 +108,9 @@ def _reap_with_cluster(cluster: Cluster, run_id: str | None, *,
   # A pool keeps the run id of the run that created it, so a live run that
   # adopted it (adopt_existing, or a shared namespace) would lose its pool and
   # template here. Those still referenced by a protected run's claims stay.
-  protected_pools, protected_templates = (
+  protected_pools, protected_templates, protected_pod_selectors = (
       _in_use_elsewhere(cluster, protect_claims_of) if protect_claims_of
-      else (set(), set()))
+      else (set(), set(), set()))
   if protected_pools:
     logger.warning("reap(%s): keeping pool(s) %s and template(s) %s, still used by "
                    "another run's claims", run_id, sorted(protected_pools),
@@ -145,8 +145,16 @@ def _reap_with_cluster(cluster: Cluster, run_id: str | None, *,
   _sweep("templates", r.list_templates, r.delete_template, keep=protected_templates)
 
   if delete_pods:
-    swept = 0
+    swept = one_by_one = kept = 0
     for sel in [pod_selector, *sorted(pod_selectors)]:
+      if sel == pod_selector and protected_pod_selectors:
+        # Pool pods carry the run id of the run that created the pool, and keep it
+        # after another run claims them, so the run-id sweep would reach pods
+        # another run still uses. Delete this run's pods one by one, minus those.
+        deleted, skipped = _delete_pods_except(cluster, sel, protected_pod_selectors)
+        one_by_one += deleted
+        kept += skipped
+        continue
       try:
         cluster.core_api.delete_collection_namespaced_pod(
             namespace=namespace, label_selector=sel,
@@ -155,6 +163,8 @@ def _reap_with_cluster(cluster: Cluster, run_id: str | None, *,
       except Exception:  # noqa: BLE001
         logger.warning("reap: pod delete-collection failed for %s", sel, exc_info=True)
     counts["pods"] = f"requested (force) via {swept} selector(s)"
+    if protected_pod_selectors:
+      counts["pods"] += f", {one_by_one} one by one, {kept} kept for other runs"
 
   logger.info("reap(%s): %s", run_id or "all-managed", counts)
   return counts
@@ -221,13 +231,17 @@ def _sandbox_links(cluster: Cluster, selector: str, *,
   return pod_selectors, sandbox_names
 
 
-def _in_use_elsewhere(cluster: Cluster, protect_claims_of) -> tuple[set[str], set[str]]:
-  """Pools referenced by a claim for which ``protect_claims_of(claim_run_id)``
-  is true, and the templates of those pools. Any claim in the namespace counts,
-  managed or not. A failed list protects nothing and is logged; the run-scoped
-  label sweep still applies."""
+def _in_use_elsewhere(cluster: Cluster,
+                      protect_claims_of) -> tuple[set[str], set[str], set[str]]:
+  """What the claims for which ``protect_claims_of(claim_run_id)`` is true still
+  use: the pools they point at, those pools' templates, and the pod label
+  selectors of their pods (each such pool's ``status.selector`` and each such
+  claim's Sandbox ``status.labelSelector``). Any claim in the namespace counts,
+  managed or not. A failed claim list protects nothing and is logged; the
+  run-scoped label sweep still applies."""
   r = cluster.resources
   pools: set[str] = set()
+  claimed: set[str] = set()
   try:
     for claim in r._list_objects(constants.CLAIMS_PLURAL, None):  # noqa: SLF001
       rid = ((claim.get("metadata") or {}).get("labels") or {}).get(constants.RUN_ID_LABEL)
@@ -236,11 +250,16 @@ def _in_use_elsewhere(cluster: Cluster, protect_claims_of) -> tuple[set[str], se
       ref = ((claim.get("spec") or {}).get("warmPoolRef") or {}).get("name")
       if ref:
         pools.add(ref)
+      sb = (claim.get("status") or {}).get("sandbox") or {}
+      name = sb.get("name") or sb.get("Name")
+      if name:
+        claimed.add(name)
   except Exception:  # noqa: BLE001
     logger.warning("reap: could not list claims to find pools still in use",
                    exc_info=True)
-    return set(), set()
+    return set(), set(), set()
   templates: set[str] = set()
+  pod_selectors: set[str] = set()
   if pools:
     try:
       for pool in r._list_objects(constants.WARMPOOLS_PLURAL, None):  # noqa: SLF001
@@ -248,10 +267,61 @@ def _in_use_elsewhere(cluster: Cluster, protect_claims_of) -> tuple[set[str], se
           ref = ((pool.get("spec") or {}).get("sandboxTemplateRef") or {}).get("name")
           if ref:
             templates.add(ref)
+          sel = (pool.get("status") or {}).get("selector")
+          if sel:
+            pod_selectors.add(sel)
     except Exception:  # noqa: BLE001
       logger.warning("reap: could not list warm pools to find templates still in "
                      "use", exc_info=True)
-  return pools, templates
+  if claimed:
+    try:
+      for sb in r._list_objects(constants.SANDBOXES_PLURAL, None,  # noqa: SLF001
+                                group=constants.SANDBOX_GROUP,
+                                version=constants.SANDBOX_VERSION):
+        if (sb.get("metadata") or {}).get("name") in claimed:
+          sel = (sb.get("status") or {}).get("labelSelector")
+          if sel:
+            pod_selectors.add(sel)
+    except Exception:  # noqa: BLE001
+      logger.warning("reap: could not list sandboxes to find pods still in use",
+                     exc_info=True)
+  return pools, templates, pod_selectors
+
+
+def _delete_pods_except(cluster: Cluster, selector: str,
+                        protected_selectors: set[str]) -> tuple[int, int]:
+  """Force-delete the pods matching ``selector``, except those matching any of
+  ``protected_selectors``. Returns ``(deleted, kept)``. If the protected pods
+  cannot be listed nothing is deleted here: the claim and pool deletions still
+  cascade, and a forced delete must not guess which pods another run uses."""
+  ns = cluster.namespace
+  keep: set[str] = set()
+  for sel in sorted(protected_selectors):
+    try:
+      keep |= {p.metadata.name for p in
+               cluster.core_api.list_namespaced_pod(ns, label_selector=sel).items}
+    except Exception:  # noqa: BLE001
+      logger.warning("reap: could not list pods still in use (%s); skipping the "
+                     "forced delete of %s", sel, selector, exc_info=True)
+      return 0, 0
+  try:
+    pods = cluster.core_api.list_namespaced_pod(ns, label_selector=selector).items
+  except Exception:  # noqa: BLE001
+    logger.warning("reap: could not list pods for %s", selector, exc_info=True)
+    return 0, 0
+  deleted = kept = 0
+  for pod in pods:
+    name = pod.metadata.name
+    if name in keep:
+      kept += 1
+      continue
+    try:
+      cluster.core_api.delete_namespaced_pod(
+          name, ns, grace_period_seconds=0, propagation_policy="Background")
+      deleted += 1
+    except Exception:  # noqa: BLE001
+      logger.warning("reap: failed to delete pod %s", name, exc_info=True)
+  return deleted, kept
 
 
 def _created_at(obj: dict) -> datetime | None:

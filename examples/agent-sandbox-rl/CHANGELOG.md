@@ -102,7 +102,9 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
   ages itself; `--min-age-s` (300) protects runs that just started, `--dry-run`
   reports only. Runs with only pods or Sandboxes left are not discovered (neither
   carries the run-id label everywhere). Pools, and their templates, that a claim of
-  a run not being reaped still points at are kept, here and in `reap(run_id)`.
+  a run not being reaped still points at are kept, here and in `reap(run_id)`, and
+  so are their pods and the pods those runs claimed from them, which keep the
+  run-id label of the run that created the pool.
 - **`reap("")`** and `--run-id ""` are rejected; an empty id used to select every
   managed run.
 - The core SDK's `SandboxClient.delete_sandbox` (sync and async) forgets an

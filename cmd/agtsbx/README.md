@@ -175,6 +175,11 @@ Local engines have no `runAsNonRoot` equivalent, so on that path the image
 decides which user the command runs as; the `kubernetes` runtime rejects an
 image that would run as root.
 
+Not covered yet: a Kubernetes sandbox has no `NetworkPolicy`, so other pods can
+reach sandboxd; other containers on the same engine network can reach a
+container sandbox; and no CPU, memory or PID limits are set, so runs are
+unbounded. See the KEP for the proposed defaults.
+
 ## Building
 
 ```console

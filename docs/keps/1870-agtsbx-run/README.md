@@ -108,11 +108,19 @@ Security baseline, since `sandboxd` has no authentication of its own:
    who already have a template and want warm pools, template network policy
    and the router.
 3. **Network isolation.** A raw `Sandbox` has no template-managed
-   `NetworkPolicy`, and `sandboxd` binds `0.0.0.0` by default. Options: create
-   an owned `NetworkPolicy` per run, or bind `sandboxd` to loopback and
-   port-forward only.
+   `NetworkPolicy`, and `sandboxd` binds `0.0.0.0` by default. Proposed: an
+   owned deny-all-ingress `NetworkPolicy` per run on the Kubernetes backend,
+   removed with the `Sandbox`. Port-forward and kubelet probes keep working.
+   Binding `sandboxd` to loopback instead would fail the readiness probe,
+   which dials the pod IP. Until approvers accept a default, ship it as an
+   opt-in flag. Containers publish on host loopback only; other containers on
+   the same engine network can still reach `sandboxd`, which the README states.
 4. **Resource limits.** Neither backend sets CPU, memory or PID limits today.
-   Options: bounded defaults with overrides, or opt-in flags only.
+   Proposed: opt-in flags only (`--cpus`, `--memory`, `--pids-limit`) and no
+   defaults. The right values depend on the image, and a low default turns into
+   unexplained OOM kills of the user's command. Namespaces that need a ceiling
+   already get one from a `LimitRange` or quota. The README states that runs
+   are unbounded unless a flag is set.
 5. **Engine probing.** `auto` checks that the CLI exists, not that the engine
    is reachable. Should it probe liveness before choosing?
 

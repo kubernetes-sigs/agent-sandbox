@@ -131,7 +131,7 @@ ready supply ahead of demand.
   claim→sandbox, so this is buffer sizing and `AverageValue` gives the right `pool ∝ rate`.
 - **Choosing `threshold`**: `pool = claim_rate / threshold`, so `1/threshold` = seconds of demand
   held as ready sandboxes. Set `threshold ≈ 1/T`, where `T` is the per-sandbox replenishment time
-  (Sandbox → Pod `Ready`, from `agent_sandbox_creation_latency_ms`). Lower `threshold` → bigger pool.
+  (Sandbox → Pod `Ready`, from `agent_sandbox_creation_latency_seconds`). Lower `threshold` → bigger pool.
   Because `pool = rate × T`, cutting `T` (pre-pull the image) helps more than shrinking `threshold`.
 - **Activation is not instant; full size takes time too**: The first-ever activation takes ~1 scrape
   interval for the counter series to be born. KEDA wakes `0 → 1` once the metric is scraped and

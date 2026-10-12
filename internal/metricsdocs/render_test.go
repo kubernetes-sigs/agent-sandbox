@@ -32,13 +32,13 @@ func TestRenderRows(t *testing.T) {
 			// contract.
 			name: "variable labels keep declaration order and precede const labels",
 			metric: family{
-				Name:        "agent_sandbox_creation_latency_ms",
+				Name:        "agent_sandbox_creation_latency_seconds",
 				Type:        typeHistogram,
 				Help:        "Latency from Sandbox creation to Pod Ready state.",
 				Labels:      []string{"namespace", "launch_type", "sandbox_template"},
 				ConstLabels: []string{"build_date", "git_version"},
 			},
-			wantRow: "| `agent_sandbox_creation_latency_ms` | Histogram | Latency from Sandbox creation to Pod Ready state. | `namespace`, `launch_type`, `sandbox_template`, `build_date`, `git_version` |",
+			wantRow: "| `agent_sandbox_creation_latency_seconds` | Histogram | Latency from Sandbox creation to Pod Ready state. | `namespace`, `launch_type`, `sandbox_template`, `build_date`, `git_version` |",
 		},
 		{
 			name:    "metric without labels",

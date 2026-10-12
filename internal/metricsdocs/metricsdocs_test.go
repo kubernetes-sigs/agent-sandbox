@@ -46,7 +46,7 @@ func TestExtractControllerMetrics(t *testing.T) {
 			ConstLabels: []string{"build_date", "compiler", "git_commit", "git_version", "go_version", "platform"},
 		},
 		{
-			Name:   "agent_sandbox_claim_controller_startup_latency_ms",
+			Name:   "agent_sandbox_claim_controller_startup_latency_seconds",
 			Type:   typeHistogram,
 			Labels: []string{"launch_type", "sandbox_template"},
 		},
@@ -56,17 +56,17 @@ func TestExtractControllerMetrics(t *testing.T) {
 			Labels: []string{"namespace", "sandbox_template", "launch_type", "warmpool_name", "pod_condition", "created_by"},
 		},
 		{
-			Name:   "agent_sandbox_claim_startup_latency_ms",
+			Name:   "agent_sandbox_claim_startup_latency_seconds",
 			Type:   typeHistogram,
 			Labels: []string{"launch_type", "sandbox_template"},
 		},
 		{
-			Name:   "agent_sandbox_client_claim_startup_latency_ms",
+			Name:   "agent_sandbox_client_claim_startup_latency_seconds",
 			Type:   typeHistogram,
 			Labels: []string{"launch_type", "sandbox_template"},
 		},
 		{
-			Name:   "agent_sandbox_creation_latency_ms",
+			Name:   "agent_sandbox_creation_latency_seconds",
 			Type:   typeHistogram,
 			Labels: []string{"namespace", "launch_type", "sandbox_template"},
 		},

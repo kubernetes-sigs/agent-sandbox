@@ -35,43 +35,43 @@ class TestScrapeControllerMetrics(unittest.TestCase):
     def test_labels_containing_le_substring(self):
         """Verify that label names containing 'le' as a substring (like 'scale', 'idle') do not cause false matches or ValueError."""
         mock_data = """
-# HELP agent_sandbox_claim_controller_startup_latency_ms Latency
-# TYPE agent_sandbox_claim_controller_startup_latency_ms histogram
-agent_sandbox_claim_controller_startup_latency_ms_bucket{scale="large",idle="false",le="100"} 50
-agent_sandbox_claim_controller_startup_latency_ms_bucket{scale="large",idle="false",le="250"} 90
-agent_sandbox_claim_controller_startup_latency_ms_bucket{scale="large",idle="false",le="+Inf"} 100
+# HELP agent_sandbox_claim_controller_startup_latency_seconds Latency
+# TYPE agent_sandbox_claim_controller_startup_latency_seconds histogram
+agent_sandbox_claim_controller_startup_latency_seconds_bucket{scale="large",idle="false",le="0.1"} 50
+agent_sandbox_claim_controller_startup_latency_seconds_bucket{scale="large",idle="false",le="0.25"} 90
+agent_sandbox_claim_controller_startup_latency_seconds_bucket{scale="large",idle="false",le="+Inf"} 100
 """
-        res = parse_histogram("agent_sandbox_claim_controller_startup_latency_ms", mock_data)
+        res = parse_histogram("agent_sandbox_claim_controller_startup_latency_seconds", mock_data)
         self.assertIsNotNone(res)
         p50, p90, p99, count = res
         self.assertEqual(count, 100)
-        self.assertEqual(p50, 100.0)
+        self.assertAlmostEqual(p50, 0.1, places=2)
 
     def test_multiple_label_sets_aggregated(self):
         """Verify that bucket counts across multiple label combinations are correctly aggregated."""
         mock_data = """
-agent_sandbox_claim_controller_startup_latency_ms_bucket{launch_type="warm",le="100"} 40
-agent_sandbox_claim_controller_startup_latency_ms_bucket{launch_type="cold",le="100"} 10
-agent_sandbox_claim_controller_startup_latency_ms_bucket{launch_type="warm",le="300"} 80
-agent_sandbox_claim_controller_startup_latency_ms_bucket{launch_type="cold",le="300"} 20
-agent_sandbox_claim_controller_startup_latency_ms_bucket{launch_type="warm",le="+Inf"} 80
-agent_sandbox_claim_controller_startup_latency_ms_bucket{launch_type="cold",le="+Inf"} 20
+agent_sandbox_claim_controller_startup_latency_seconds_bucket{launch_type="warm",le="0.1"} 40
+agent_sandbox_claim_controller_startup_latency_seconds_bucket{launch_type="cold",le="0.1"} 10
+agent_sandbox_claim_controller_startup_latency_seconds_bucket{launch_type="warm",le="0.3"} 80
+agent_sandbox_claim_controller_startup_latency_seconds_bucket{launch_type="cold",le="0.3"} 20
+agent_sandbox_claim_controller_startup_latency_seconds_bucket{launch_type="warm",le="+Inf"} 80
+agent_sandbox_claim_controller_startup_latency_seconds_bucket{launch_type="cold",le="+Inf"} 20
 """
-        res = parse_histogram("agent_sandbox_claim_controller_startup_latency_ms", mock_data)
+        res = parse_histogram("agent_sandbox_claim_controller_startup_latency_seconds", mock_data)
         self.assertIsNotNone(res)
         p50, p90, p99, count = res
         self.assertEqual(count, 100)
-        self.assertEqual(p50, 100.0)
-        self.assertAlmostEqual(p90, 260.0)
+        self.assertAlmostEqual(p50, 0.1, places=2)
+        self.assertAlmostEqual(p90, 0.26, places=2)
 
     def test_empty_or_zero_counts(self):
         """Verify that empty data or 0-count histograms return None."""
         mock_data = """
-agent_sandbox_claim_controller_startup_latency_ms_bucket{le="100"} 0
-agent_sandbox_claim_controller_startup_latency_ms_bucket{le="+Inf"} 0
+agent_sandbox_claim_controller_startup_latency_seconds_bucket{le="0.1"} 0
+agent_sandbox_claim_controller_startup_latency_seconds_bucket{le="+Inf"} 0
 """
-        self.assertIsNone(parse_histogram("agent_sandbox_claim_controller_startup_latency_ms", mock_data))
-        self.assertIsNone(parse_histogram("agent_sandbox_claim_controller_startup_latency_ms", ""))
+        self.assertIsNone(parse_histogram("agent_sandbox_claim_controller_startup_latency_seconds", mock_data))
+        self.assertIsNone(parse_histogram("agent_sandbox_claim_controller_startup_latency_seconds", ""))
 
 
 class TestWriteJunit(unittest.TestCase):
@@ -123,13 +123,17 @@ class TestMainCLI(unittest.TestCase):
     """End-to-end tests of main(): fetch, validate, exit code, junit."""
 
     PASSING = (
-        'agent_sandbox_claim_controller_startup_latency_ms_bucket{le="100"} 100\n'
-        'agent_sandbox_claim_controller_startup_latency_ms_bucket{le="+Inf"} 100\n'
+        'agent_sandbox_claim_controller_startup_latency_seconds_bucket{le="0.1"} 50\n'
+        'agent_sandbox_claim_controller_startup_latency_seconds_bucket{le="0.2"} 80\n'
+        'agent_sandbox_claim_controller_startup_latency_seconds_bucket{le="0.3"} 95\n'
+        'agent_sandbox_claim_controller_startup_latency_seconds_bucket{le="0.4"} 99\n'
+        'agent_sandbox_claim_controller_startup_latency_seconds_bucket{le="+Inf"} 100\n'
     )
     VIOLATING = (
-        'agent_sandbox_claim_controller_startup_latency_ms_bucket{le="100"} 0\n'
-        'agent_sandbox_claim_controller_startup_latency_ms_bucket{le="1000"} 100\n'
-        'agent_sandbox_claim_controller_startup_latency_ms_bucket{le="+Inf"} 100\n'
+        'agent_sandbox_claim_controller_startup_latency_seconds_bucket{le="0.1"} 0\n'
+        'agent_sandbox_claim_controller_startup_latency_seconds_bucket{le="0.5"} 50\n'
+        'agent_sandbox_claim_controller_startup_latency_seconds_bucket{le="1.0"} 100\n'
+        'agent_sandbox_claim_controller_startup_latency_seconds_bucket{le="+Inf"} 100\n'
     )
 
     def serve(self, body):

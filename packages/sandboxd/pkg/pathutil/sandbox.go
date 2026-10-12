@@ -59,9 +59,9 @@ func SanitizePath(rootDir, userPath string) (string, error) {
 	userPathClean := filepath.Clean(userPath)
 	if userPathClean == cleanRoot || userPathClean == lexicalRoot {
 		userPathClean = "."
-	} else if after, found := strings.CutPrefix(userPathClean, cleanRoot+string(os.PathSeparator)); found {
+	} else if after, found := strings.CutPrefix(userPathClean, dirPrefix(cleanRoot)); found {
 		userPathClean = after
-	} else if after, found := strings.CutPrefix(userPathClean, lexicalRoot+string(os.PathSeparator)); found {
+	} else if after, found := strings.CutPrefix(userPathClean, dirPrefix(lexicalRoot)); found {
 		userPathClean = after
 	}
 	joined := filepath.Clean(filepath.Join(cleanRoot, userPathClean))
@@ -97,9 +97,20 @@ func SanitizePath(rootDir, userPath string) (string, error) {
 	// Ensure the resolved path matches cleanRoot exactly or starts with
 	// cleanRoot + separator. This prevents prefix matching bugs
 	// (e.g. /workspace-evil vs /workspace).
-	if resolved != cleanRoot && !strings.HasPrefix(resolved, cleanRoot+string(os.PathSeparator)) {
+	if resolved != cleanRoot && !strings.HasPrefix(resolved, dirPrefix(cleanRoot)) {
 		return "", fmt.Errorf("access denied: path %q: %w", userPath, ErrPathEscapes)
 	}
 
 	return resolved, nil
+}
+
+// dirPrefix returns dir with exactly one trailing separator, the prefix every
+// path strictly inside dir starts with. The filesystem root already ends in
+// one, so appending another would yield "//", which no cleaned path starts
+// with.
+func dirPrefix(dir string) string {
+	if strings.HasSuffix(dir, string(os.PathSeparator)) {
+		return dir
+	}
+	return dir + string(os.PathSeparator)
 }

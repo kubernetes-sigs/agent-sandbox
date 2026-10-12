@@ -591,3 +591,15 @@ func TestExecute_KillsGrandchildrenOnCancel(t *testing.T) {
 		return isProcessDead(grandchildPID)
 	}, 10*time.Second, 50*time.Millisecond, "grandchild process %d should have been killed", grandchildPID)
 }
+
+func TestExecuteAbsoluteCwdWithFilesystemRoot(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	client := newProcessClient(t, "/")
+
+	resp, err := client.Execute(testCtx(t), &processv1.ExecuteRequest{
+		Config: &processv1.ProcessConfig{Command: []string{"pwd"}, Cwd: &dir},
+	})
+	require.NoError(t, err)
+	require.Equal(t, dir, strings.TrimSpace(string(resp.GetStdout())))
+}

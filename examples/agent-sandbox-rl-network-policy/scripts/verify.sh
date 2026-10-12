@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # Checks that a namespace runs on the one-policy-per-namespace layout:
-#   1. the namespace-wide policy exists and selects app=agent-sandbox-rl;
+#   1. a NetworkPolicy's whole podSelector selects every app=agent-sandbox-rl pod;
 #   2. every agent-sandbox-rl SandboxTemplate is Unmanaged;
 #   3. no NetworkPolicy owned by an agent-sandbox-rl template is left (the
 #      controller deletes them); other teams' templates are not counted;
@@ -34,13 +34,38 @@ ok()   { echo "PASS  $*"; pass=$((pass+1)); }
 bad()  { echo "FAIL  $*"; fail=$((fail+1)); }
 info() { echo "INFO  $*"; }
 
-# 1. The namespace-wide policy.
-selector="$("${K[@]}" get networkpolicy "$POLICY_NAME" -n "$NAMESPACE" \
-  -o jsonpath='{.spec.podSelector.matchLabels.app}' 2>/dev/null || true)"
-if [[ "$selector" == "agent-sandbox-rl" ]]; then
-  ok "NetworkPolicy $NAMESPACE/$POLICY_NAME selects app=agent-sandbox-rl"
+# 1. Some NetworkPolicy in the namespace selects every agent-sandbox-rl pod. The
+#    whole podSelector is checked, as Kubernetes ANDs all of its requirements: a
+#    requirement on any label other than app=agent-sandbox-rl cannot be confirmed
+#    for every pod, so a policy carrying one does not count.
+if ! policies="$("${K[@]}" get networkpolicies -n "$NAMESPACE" -o json 2>&1)"; then
+  bad "could not list NetworkPolicies in $NAMESPACE: ${policies//$'\n'/ }"
+  policies=""
 else
-  bad "NetworkPolicy $NAMESPACE/$POLICY_NAME missing or not selecting app=agent-sandbox-rl (got '${selector}')"
+  covering="$(printf '%s' "$policies" | python3 -c '
+import sys,json
+known={"app": "agent-sandbox-rl"}
+def covers(sel):
+    sel = sel or {}
+    for k, v in (sel.get("matchLabels") or {}).items():
+        if known.get(k) != v:
+            return False
+    for r in sel.get("matchExpressions") or []:
+        k, op, vals = r.get("key"), r.get("operator"), r.get("values") or []
+        if k not in known:
+            return False
+        if op == "In" and known[k] not in vals: return False
+        if op == "NotIn" and known[k] in vals: return False
+        if op == "DoesNotExist": return False
+        if op not in ("In", "NotIn", "Exists", "DoesNotExist"): return False
+    return True
+print(" ".join(p["metadata"]["name"] for p in json.load(sys.stdin)["items"]
+               if covers((p.get("spec") or {}).get("podSelector"))))')"
+  if [[ -n "$covering" ]]; then
+    ok "NetworkPolicy selecting every app=agent-sandbox-rl pod in $NAMESPACE: $covering"
+  else
+    bad "no NetworkPolicy in $NAMESPACE selects every app=agent-sandbox-rl pod; apply manifests/fleet-network-policy.yaml (default name $POLICY_NAME)"
+  fi
 fi
 
 # 2. Templates created by the SDK are Unmanaged. A failed list is a failure, not
@@ -71,8 +96,8 @@ fi
 #    templates in the namespace (other teams, Managed on purpose) are not counted.
 if [[ "$templates_ok" == "0" ]]; then
   bad "skipped the policy ownership check: it needs the SandboxTemplate list"
-elif ! policies="$("${K[@]}" get networkpolicies -n "$NAMESPACE" -o json 2>&1)"; then
-  bad "could not list NetworkPolicies in $NAMESPACE: ${policies//$'\n'/ }"
+elif [[ -z "$policies" ]]; then
+  bad "skipped the policy ownership check: the NetworkPolicy list failed in check 1"
 else
   rl_templates="$(printf '%s' "$templates" | python3 -c '
 import sys,json

@@ -154,8 +154,13 @@ sandbox); claimed pods carry `agents.x-k8s.io/claim-uid`, pool pods carry
 `agents.x-k8s.io/warm-pool-sandbox`, and the SDK adds `agent-sandbox-rl/run-id`.
 Unless the agent is told otherwise, each pod therefore gets its own identity.
 
-Cilium's `labels` option drops keys from identity computation (exclusion form, space
-separated, a leading `!` excludes a prefix). The option is **cluster-wide**, and
+Cilium's `labels` option drops keys from identity computation. Its patterns are
+space-separated regular expressions on label keys. An exclusion puts `!` after the
+source prefix, as in `k8s:!^key$`, and dots are escaped. Every pattern must be an
+exclusion: a single pattern without `!`, including a misplaced one such as
+`!k8s:key`, switches Cilium to allowlist mode, where only matching labels count.
+That would drop `app` from identities and leave this example's policy selecting
+nothing. The option is **cluster-wide**, and
 Cilium resolves policy selectors against identity labels, so a NetworkPolicy that
 selects on an excluded key stops selecting its pods, in every namespace, and those
 pods lose the isolation it gave them. Work through the steps in order.
@@ -194,18 +199,20 @@ pods lose the isolation it gave them. Work through the steps in order.
 
    ```yaml
    # cilium-config, key "labels"
-   labels: "!k8s:agents.x-k8s.io/sandbox-name-hash !k8s:agents.x-k8s.io/claim-uid"
+   labels: "k8s:!^agents\\.x-k8s\\.io/sandbox-name-hash$ k8s:!^agents\\.x-k8s\\.io/claim-uid$"
    ```
 
+   The double backslash yields `\.` in the value. The `^` and `$` anchors keep a
+   pattern from matching longer keys that contain it.
    `agents.x-k8s.io/warm-pool-sandbox` (one value per pool) and
    `agent-sandbox-rl/run-id` (one per run) can stay. Add
-   `!k8s:agents.x-k8s.io/warm-pool-sandbox !k8s:agent-sandbox-rl/run-id` only to
+   `k8s:!^agents\\.x-k8s\\.io/warm-pool-sandbox$ k8s:!^agent-sandbox-rl/run-id$` only to
    cut identities further, once step 2 shows no policy selects on them. The list
    keeps `agents.x-k8s.io/sandbox-template-ref-hash` identity-relevant, because
    every Managed template's policy selects on it.
-   Add `!k8s:agents.x-k8s.io/sandbox-template-ref-hash` only if step 2 shows no
+   Add `k8s:!^agents\\.x-k8s\\.io/sandbox-template-ref-hash$` only if step 2 shows no
    policy uses it, which means no namespace on the cluster runs Managed templates.
-   The same goes for `!k8s:sandbox`: other workloads, including several examples in
+   The same goes for `k8s:!^sandbox$`: other workloads, including several examples in
    this repository, select single sandboxes by that key.
 
 4. **Roll it out.** On GKE Dataplane V2 the Cilium ConfigMap is managed and reverts

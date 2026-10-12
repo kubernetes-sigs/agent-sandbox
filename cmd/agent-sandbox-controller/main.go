@@ -210,16 +210,20 @@ func main() {
 		os.Exit(1)
 	}
 	if len(configData) > 0 {
+		// flag.CommandLine is the flag set used by main(); the allowlist in
+		// internalconfig gates which flags are touched, so imported-package
+		// flags (e.g. klog) are never modified.
 		overrides, skipped, cliOverridden, err := internalconfig.ApplyConfigMapData(configData, flag.CommandLine)
 		if err != nil {
-			setupLog.Error(err, "failed to parse controller config from ConfigMap")
-			os.Exit(1)
+			// Log but continue — valid keys were already applied; only the
+			// malformed keys are skipped.
+			setupLog.Error(err, "some ConfigMap keys had invalid values (valid keys were still applied)")
 		}
 		for _, o := range overrides {
 			setupLog.Info("ConfigMap override applied", "key", o.Key, "value", o.Value)
 		}
 		for _, key := range skipped {
-			setupLog.Info("ConfigMap key ignored (not a tunable flag)", "key", key)
+			setupLog.Info("ConfigMap key ignored (not a ConfigMap-tunable flag; see docs/configuration.md)", "key", key)
 		}
 		for _, key := range cliOverridden {
 			setupLog.Info("ConfigMap key ignored (CLI flag takes precedence)", "key", key)

@@ -163,6 +163,17 @@ finally:
     sandbox.terminate()
 ```
 
+`SandboxClient` is also a context manager. On exit it deletes the sandboxes it
+tracks, including ones attached with `get_sandbox()`, so the `try`/`finally`
+above is not needed. Claims created with an explicit `claim_name` are
+caller-owned and are only disconnected, not deleted:
+
+```python
+with SandboxClient(connection_config=SandboxLocalTunnelConnectionConfig()) as client:
+    sandbox = client.create_sandbox(warmpool="python-sandbox-warmpool", namespace="default")
+    print(sandbox.commands.run("echo 'Hello from Local!'").stdout)
+```
+
 You can pass per-claim environment variables when creating a sandbox:
 
 ```python

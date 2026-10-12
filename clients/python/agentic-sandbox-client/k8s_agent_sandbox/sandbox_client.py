@@ -21,6 +21,7 @@ import uuid
 import atexit
 import sys
 import logging
+from types import TracebackType
 from typing import List, Dict, Tuple, TypeVar, Generic, Type
 
 from kubernetes import client
@@ -99,6 +100,18 @@ class SandboxClient(Generic[T]):
         # Optional automatic cleanup of sandboxes on program termination
         if cleanup:
             atexit.register(self._delete_automatic_sandboxes)
+
+    def __enter__(self) -> "SandboxClient[T]":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        # Same cleanup as the atexit hook and AsyncSandboxClient.__aexit__.
+        self._delete_automatic_sandboxes()
 
     def create_sandbox(
         self,

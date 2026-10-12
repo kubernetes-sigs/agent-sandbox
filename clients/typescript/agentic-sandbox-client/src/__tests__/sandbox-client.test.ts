@@ -559,6 +559,65 @@ describe("SandboxClient (registry)", () => {
       expect(createArgs.body.spec).toEqual({ warmPoolRef: { name: "tpl" } });
     });
 
+    it("passes env as the spec.env name/value list", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-with-env");
+
+      const client = new SandboxClient();
+      await client.createSandbox("tpl", "default", {
+        env: { API_KEY: "secret", "my.var-1": "" },
+      });
+
+      const createArgs = mockCreateNamespacedCustomObject.mock.calls[0][0];
+      expect(createArgs.body.spec).toEqual({
+        warmPoolRef: { name: "tpl" },
+        env: [
+          { name: "API_KEY", value: "secret" },
+          { name: "my.var-1", value: "" },
+        ],
+      });
+    });
+
+    it("omits env when the map is empty", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-empty-env");
+
+      const client = new SandboxClient();
+      await client.createSandbox("tpl", "default", { env: {} });
+
+      const createArgs = mockCreateNamespacedCustomObject.mock.calls[0][0];
+      expect(createArgs.body.spec).toEqual({ warmPoolRef: { name: "tpl" } });
+    });
+
+    it.each([
+      ["a leading digit", "1BAD"],
+      ["an empty name", ""],
+      ["an equals sign", "A=B"],
+      ["a dot-dot prefix", "..hidden"],
+      ["a lone dot", "."],
+    ])("rejects an env name with %s before provisioning", async (_why, name) => {
+      mockSandboxReadyFlow("sandbox-invalid-env");
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", { env: { [name]: "v" } }),
+      ).rejects.toThrow("Invalid environment variable name");
+      expect(mockCreateNamespacedCustomObject).not.toHaveBeenCalled();
+      expect(mockWatchFn).not.toHaveBeenCalled();
+    });
+
+    it("rejects a non-string env value before provisioning", async () => {
+      mockSandboxReadyFlow("sandbox-bad-env-value");
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", {
+          env: { PORT: 8080 as unknown as string },
+        }),
+      ).rejects.toThrow("must have a string value");
+      expect(mockCreateNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
     it("sets a deletion deadline from the create call, preserving namespace and labels", async () => {
       vi.useFakeTimers();
       try {

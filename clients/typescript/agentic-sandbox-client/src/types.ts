@@ -338,6 +338,13 @@ export interface CreateSandboxOptions {
    * templates against the SandboxTemplate's volume policy.
    */
   volumeClaimTemplates?: VolumeClaimTemplate[];
+  /**
+   * Environment variables to inject into the sandbox's first container, sent
+   * as the claim's `spec.env`. Setting this forces a cold start, because warm
+   * pool Pods are already running without them. The SandboxTemplate's
+   * `envVarsInjectionPolicy` decides whether the controller accepts them.
+   */
+  env?: Record<string, string>;
 }
 
 export interface GetSandboxOptions {

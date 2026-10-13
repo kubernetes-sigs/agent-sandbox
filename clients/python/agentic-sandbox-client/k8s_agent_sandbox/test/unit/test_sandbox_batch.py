@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 import urllib3.exceptions
 from kubernetes import client as k8s_client
 
-from k8s_agent_sandbox import batch_state
+from k8s_agent_sandbox import batch_state, sandbox_batch
 from k8s_agent_sandbox.batch_utils import (
     BATCH_DEFAULT_LEASE_DURATION_SECONDS,
     CLOCK_SKEW_MARGIN,
@@ -117,6 +117,15 @@ class TestGetBatchLeaseCases(BaseBatchClientTest):
         self.mock_k8s_helper.list_sandbox_claim_objects.return_value = ([_claim("b1-0")], "5")
         with self.assertRaises(BatchInUseError):
             self.client.get_batch("b1")
+
+    def test_empty_holder_identity_counts_as_free(self):
+        # client-go releases a Lease by writing an empty holderIdentity.
+        self.mock_k8s_helper.read_batch_lease.return_value = _lease(
+            holder_identity="", renew_time=datetime.now(UTC)
+        )
+        self.mock_k8s_helper.list_sandbox_claim_objects.return_value = ([_claim("b1-0")], "5")
+        self.client.get_batch("b1")
+        self.mock_k8s_helper.replace_batch_lease.assert_called_once()
 
     def test_takeover_write_conflict_raises_in_use(self):
         now = datetime.now(UTC)
@@ -310,6 +319,7 @@ def _make_handle(
     namespace="default",
     groups=None,
     lease_duration=BATCH_DEFAULT_LEASE_DURATION_SECONDS,
+    lease_renewed_at=None,
 ):
     groups = groups if groups is not None else [BatchGroup(warmpool="pool-a", size=1)]
     state = batch_state.BatchState(batch_id, groups)
@@ -322,6 +332,8 @@ def _make_handle(
         holder_identity="host_1234_abcd1234",
         lease_duration=lease_duration,
         list_resource_version="5",
+        lease=_lease(holder_identity="host_1234_abcd1234"),
+        lease_renewed_at=time.monotonic() if lease_renewed_at is None else lease_renewed_at,
     )
 
 
@@ -351,6 +363,34 @@ class TestRequestTimeouts(BaseBatchClientTest):
         handle.detach()
         self.assertEqual(helper.read_batch_lease.call_args.kwargs["_request_timeout"], 30)
         self.assertEqual(helper.replace_batch_lease.call_args.kwargs["_request_timeout"], 30)
+
+
+class _FakeClock:
+    """Stands in for the handle's monotonic clock, so renewal timing is exact."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+
+class _ClockStopEvent:
+    """Stands in for ``_renew_stop``: each wait advances the fake clock instead of sleeping."""
+
+    def __init__(self, clock):
+        self._clock = clock
+        self._waits = 0
+
+    def wait(self, timeout):
+        self._waits += 1
+        if self._waits > 100:
+            raise AssertionError("the renewal loop never stopped")
+        self._clock.now += timeout
+        return False
+
+    def set(self):
+        pass
 
 
 class TestWatcher(BaseBatchClientTest):
@@ -597,71 +637,125 @@ class TestWatcher(BaseBatchClientTest):
 
 class TestRenewal(BaseBatchClientTest):
 
-    def test_renewal_uses_read_resource_version(self):
-        handle = _make_handle(self.client)
-        lease = _lease(holder_identity=handle._holder_identity, resource_version="123")
-        self.mock_k8s_helper.read_batch_lease.return_value = lease
-        self.assertTrue(handle._renew_once())
-        self.mock_k8s_helper.replace_batch_lease.assert_called_once_with(
-            handle._lease_name, handle.namespace, lease, _request_timeout=handle._renew_interval
-        )
-        self.assertEqual(lease.metadata.resource_version, "123")
+    def _run_renew_loop(self, handle, clock, replace):
+        handle._renew_stop = _ClockStopEvent(clock)
+        self.mock_k8s_helper.replace_batch_lease.side_effect = replace
+        with patch.object(sandbox_batch, "time", clock):
+            handle._renew_loop()
 
-    def test_renewal_requests_are_bounded_by_the_renew_interval(self):
-        handle = _make_handle(self.client, lease_duration=60)
+    def test_expiry_fires_a_lease_duration_after_the_last_successful_renewal_was_sent(self):
+        # A 10s Lease renews every 3s. The renewal sent at 3 succeeds with a 2s response, the
+        # next fails at once, and the one after hangs, so the Lease expires at 3 + 10 = 13.
+        clock = _FakeClock()
+        handle = _make_handle(self.client, lease_duration=10, lease_renewed_at=0.0)
+        outcomes = iter(["slow", "fail", "hang"])
+
+        def replace(name, namespace, body, _request_timeout):
+            outcome = next(outcomes)
+            if outcome == "slow":
+                clock.now += 2
+                return body
+            if outcome == "hang":
+                clock.now += _request_timeout
+                raise TimeoutError("timed out")
+            raise k8s_client.ApiException(status=503)
+
+        self._run_renew_loop(handle, clock, replace)
+        self.assertEqual(clock.now, 13)
+        self.assertIsInstance(handle.err(), BatchLeaseExpiredError)
+
+    def test_renewal_stops_on_expiry_and_lease_degraded_stays_true(self):
+        clock = _FakeClock()
+        handle = _make_handle(self.client, lease_duration=10, lease_renewed_at=0.0)
+
+        def replace(name, namespace, body, _request_timeout):
+            # Renewals fail until the Lease expires, and would succeed after it.
+            if clock.now < 10:
+                raise k8s_client.ApiException(status=503)
+            return body
+
+        self._run_renew_loop(handle, clock, replace)
+        self.assertEqual(self.mock_k8s_helper.replace_batch_lease.call_count, 3)
+        self.assertIsInstance(handle.err(), BatchLeaseExpiredError)
+        self.assertTrue(handle.lease_degraded())
+
+    @patch.object(SandboxBatch, "_start", lambda self: None)
+    def test_renewals_replace_the_last_written_lease_without_reading_it(self):
         self.mock_k8s_helper.read_batch_lease.return_value = _lease(
-            holder_identity=handle._holder_identity
+            holder_identity=None, renew_time=datetime.now(UTC)
         )
-        self.assertTrue(handle._renew_once())
-        self.assertEqual(
-            self.mock_k8s_helper.read_batch_lease.call_args.kwargs["_request_timeout"], 20
-        )
-        self.assertEqual(
-            self.mock_k8s_helper.replace_batch_lease.call_args.kwargs["_request_timeout"], 20
-        )
+        self.mock_k8s_helper.list_sandbox_claim_objects.return_value = ([_claim("b1-0")], "5")
+        written = [_lease(holder_identity=None, resource_version=rv) for rv in ("11", "12", "13")]
+        self.mock_k8s_helper.replace_batch_lease.side_effect = written
+        handle = self.client.get_batch("b1")
 
-    def test_first_failure_logs_degraded(self):
+        self.assertTrue(handle._renew_once())
+        self.assertTrue(handle._renew_once())
+        bodies = [c.args[2] for c in self.mock_k8s_helper.replace_batch_lease.call_args_list]
+        self.assertIs(bodies[1], written[0])
+        self.assertIs(bodies[2], written[1])
+        # Only get_batch read the Lease.
+        self.mock_k8s_helper.read_batch_lease.assert_called_once()
+
+    def test_conflict_reads_the_lease_and_renews_it_while_still_held(self):
         handle = _make_handle(self.client)
-        self.mock_k8s_helper.read_batch_lease.side_effect = RuntimeError("api down")
+        current = _lease(holder_identity=handle._holder_identity, resource_version="200")
+        self.mock_k8s_helper.replace_batch_lease.side_effect = [
+            k8s_client.ApiException(status=409),
+            current,
+        ]
+        self.mock_k8s_helper.read_batch_lease.return_value = current
+        self.assertTrue(handle._renew_once())
+        self.assertIs(self.mock_k8s_helper.replace_batch_lease.call_args.args[2], current)
+        self.assertFalse(handle.lease_degraded())
+        self.assertIsNone(handle.err())
+
+    def test_lease_degraded_from_the_first_failed_renewal_until_one_succeeds(self):
+        handle = _make_handle(self.client)
+        self.mock_k8s_helper.replace_batch_lease.side_effect = [
+            RuntimeError("api down"),
+            RuntimeError("api down"),
+            _lease(holder_identity=handle._holder_identity),
+        ]
+        self.assertFalse(handle.lease_degraded())
         with self.assertLogs(level="INFO") as ctx:
             handle._renew_once()
         self.assertTrue(any("degraded" in msg for msg in ctx.output))
-        self.assertTrue(handle._renewal_degraded)
+        self.assertTrue(handle.lease_degraded())
+        handle._renew_once()
+        self.assertTrue(handle.lease_degraded())
+        handle._renew_once()
+        self.assertFalse(handle.lease_degraded())
 
     def test_holder_mismatch_stops_renewal_without_writing(self):
         for other_holder in ("someone-else", None):
             with self.subTest(other_holder=other_holder):
                 self.mock_k8s_helper.reset_mock()
                 handle = _make_handle(self.client)
+                self.mock_k8s_helper.replace_batch_lease.side_effect = k8s_client.ApiException(
+                    status=409
+                )
                 self.mock_k8s_helper.read_batch_lease.return_value = _lease(
                     holder_identity=other_holder
                 )
                 self.assertFalse(handle._renew_once())
-                self.mock_k8s_helper.replace_batch_lease.assert_not_called()
+                self.mock_k8s_helper.replace_batch_lease.assert_called_once()
                 self.assertIsInstance(handle.err(), BatchInUseError)
+                self.assertTrue(handle.lease_degraded())
 
     def test_missing_lease_stops_renewal_and_records_expired(self):
-        handle = _make_handle(self.client)
-        self.mock_k8s_helper.read_batch_lease.return_value = None
-        self.assertFalse(handle._renew_once())
-        self.mock_k8s_helper.replace_batch_lease.assert_not_called()
-        self.assertIsInstance(handle.err(), BatchLeaseExpiredError)
-
-    def test_successful_renewal_clears_degraded(self):
-        handle = _make_handle(self.client)
-        handle._renewal_degraded = True
-        self.mock_k8s_helper.read_batch_lease.return_value = _lease(
-            holder_identity=handle._holder_identity
-        )
-        handle._renew_once()
-        self.assertFalse(handle._renewal_degraded)
-
-    def test_no_success_for_lease_duration_returns_expired(self):
-        handle = _make_handle(self.client, lease_duration=BATCH_DEFAULT_LEASE_DURATION_SECONDS)
-        handle._last_renew_success = time.monotonic() - (BATCH_DEFAULT_LEASE_DURATION_SECONDS + 1)
-        self.mock_k8s_helper.read_batch_lease.side_effect = RuntimeError("api down")
-        handle._renew_once()
-        self.assertIsInstance(handle.err(), BatchLeaseExpiredError)
+        # The Lease is gone if the replace finds nothing, or a conflict's read does.
+        for replace_status in (404, 409):
+            with self.subTest(replace_status=replace_status):
+                self.mock_k8s_helper.reset_mock()
+                handle = _make_handle(self.client)
+                self.mock_k8s_helper.replace_batch_lease.side_effect = k8s_client.ApiException(
+                    status=replace_status
+                )
+                self.mock_k8s_helper.read_batch_lease.return_value = None
+                self.assertFalse(handle._renew_once())
+                self.mock_k8s_helper.replace_batch_lease.assert_called_once()
+                self.assertIsInstance(handle.err(), BatchLeaseExpiredError)
 
 
 class TestMembers(unittest.TestCase):

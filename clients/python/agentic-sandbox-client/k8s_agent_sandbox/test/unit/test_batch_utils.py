@@ -14,13 +14,10 @@
 
 import unittest
 from unittest.mock import patch
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from k8s_agent_sandbox import batch_utils
-from k8s_agent_sandbox.batch_utils import (
-    BATCH_DEFAULT_LEASE_DURATION_SECONDS,
-    CLOCK_SKEW_MARGIN,
-)
+from k8s_agent_sandbox.batch_utils import CLOCK_SKEW_MARGIN
 from k8s_agent_sandbox.exceptions import BatchError
 
 
@@ -48,9 +45,6 @@ class TestBatchIdValidation(unittest.TestCase):
 
 class TestLeaseDurationValidation(unittest.TestCase):
 
-    def test_valid_int_accepted(self):
-        self.assertEqual(batch_utils.validate_lease_duration_value(90), 90)
-
     def test_boundary_equal_to_skew_margin_raises_exact_message(self):
         with self.assertRaises(ValueError) as ctx:
             batch_utils.validate_lease_duration_value(CLOCK_SKEW_MARGIN)
@@ -68,15 +62,6 @@ class TestLeaseDurationValidation(unittest.TestCase):
 
 class TestLeaseDurationAnnotation(unittest.TestCase):
 
-    def test_missing_annotation_defaults_to_60(self):
-        self.assertEqual(
-            batch_utils.parse_lease_duration_annotation(None),
-            BATCH_DEFAULT_LEASE_DURATION_SECONDS,
-        )
-
-    def test_valid_annotation_parsed(self):
-        self.assertEqual(batch_utils.parse_lease_duration_annotation("90"), 90)
-
     def test_boundary_annotation_of_skew_margin_plus_one_accepted(self):
         self.assertEqual(
             batch_utils.parse_lease_duration_annotation(str(CLOCK_SKEW_MARGIN + 1)),
@@ -90,25 +75,7 @@ class TestLeaseDurationAnnotation(unittest.TestCase):
                     batch_utils.parse_lease_duration_annotation(bad)
 
 
-class TestLeaseStaleness(unittest.TestCase):
-
-    def test_boundary_exactly_at_skew_margin_is_not_stale(self):
-        now = datetime(2026, 1, 1, tzinfo=UTC)
-        renew_time = now - timedelta(
-            seconds=BATCH_DEFAULT_LEASE_DURATION_SECONDS - CLOCK_SKEW_MARGIN
-        )
-        self.assertFalse(
-            batch_utils.is_lease_stale(renew_time, BATCH_DEFAULT_LEASE_DURATION_SECONDS, now)
-        )
-
-    def test_one_second_after_margin_is_stale(self):
-        now = datetime(2026, 1, 1, tzinfo=UTC)
-        renew_time = now - timedelta(
-            seconds=BATCH_DEFAULT_LEASE_DURATION_SECONDS - CLOCK_SKEW_MARGIN + 1
-        )
-        self.assertTrue(
-            batch_utils.is_lease_stale(renew_time, BATCH_DEFAULT_LEASE_DURATION_SECONDS, now)
-        )
+class TestLeaseNow(unittest.TestCase):
 
     def test_lease_now_never_has_a_zero_microsecond(self):
         for microsecond, expected in ((0, 1), (500, 500)):

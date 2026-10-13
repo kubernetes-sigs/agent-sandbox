@@ -336,7 +336,7 @@ class TestAsyncSandbox(unittest.IsolatedAsyncioTestCase):
         await self.sandbox.close_connection()
         self.mock_connector.close.assert_not_awaited()
 
-    @patch("logging.error")
+    @patch("k8s_agent_sandbox.async_sandbox.logger.error")
     async def test_close_connection_with_tracing_error(self, mock_logging_error):
         """Tests close_connection with an error in tracing."""
         self.mock_tracer_manager.end_lifecycle_span.side_effect = Exception(

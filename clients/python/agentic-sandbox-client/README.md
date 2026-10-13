@@ -163,6 +163,17 @@ finally:
     sandbox.terminate()
 ```
 
+`SandboxClient` is also a context manager. On exit it deletes the sandboxes it
+tracks, including ones attached with `get_sandbox()`, so the `try`/`finally`
+above is not needed. Claims created with an explicit `claim_name` are
+caller-owned and are only disconnected, not deleted:
+
+```python
+with SandboxClient(connection_config=SandboxLocalTunnelConnectionConfig()) as client:
+    sandbox = client.create_sandbox(warmpool="python-sandbox-warmpool", namespace="default")
+    print(sandbox.commands.run("echo 'Hello from Local!'").stdout)
+```
+
 You can pass per-claim environment variables when creating a sandbox:
 
 ```python
@@ -443,6 +454,8 @@ sandbox = client.create_sandbox(warmpool="sandboxd-warmpool", namespace="default
 try:
     sandbox.files.write("hello.txt", b"hello\n")
     print(sandbox.commands.run("cat hello.txt").stdout)
+    sandbox.commands.run("mkdir -p work")
+    sandbox.commands.run("echo $GREETING > hi.txt", env={"GREETING": "hi"}, cwd="work")
 finally:
     sandbox.terminate()
 ```
@@ -464,6 +477,10 @@ async def main():
 
 asyncio.run(main())
 ```
+
+With sandboxd, `commands.run` also takes `env` and `cwd`, as in the synchronous
+example. `cwd` is confined to the sandbox root. The legacy runtime raises
+`NotImplementedError` for both.
 
 ### 9. Labels and Pod Metadata
 
@@ -646,6 +663,16 @@ client_b = build_client("cluster-b")
 The async client takes the same parameter with a `kubernetes_asyncio.client.ApiClient`. If its credentials can expire, use `async with AsyncSandboxClient(...)` or call `delete_all()` before the event loop stops, since `atexit` cleanup can't run an async token-refresh hook and may delete with a stale token.
 
 An injected `api_client` is caller-owned: the SDK never closes it, so closing it is up to you.
+
+### 14. Logging
+
+The SDK logs through the `k8s_agent_sandbox` logger hierarchy and does not configure logging itself. To see its progress messages, configure logging in your application:
+
+```python
+import logging
+
+logging.basicConfig(level=logging.INFO)
+```
 
 ## Testing
 

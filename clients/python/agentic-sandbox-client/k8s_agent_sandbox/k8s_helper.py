@@ -41,6 +41,9 @@ from .constants import (
     CREATED_BY_LABEL,
 )
 
+logger = logging.getLogger(__name__)
+
+
 class K8sHelper:
     """Helper class for Kubernetes API interactions."""
 
@@ -114,7 +117,7 @@ class K8sHelper:
             "metadata": metadata,
             "spec": spec,
         }
-        logging.info(f"Creating SandboxClaim '{name}' in namespace '{namespace}' using warm pool '{warmpool}'...")
+        logger.info(f"Creating SandboxClaim '{name}' in namespace '{namespace}' using warm pool '{warmpool}'...")
         return self.custom_objects_api.create_namespaced_custom_object(
             group=CLAIM_API_GROUP,
             version=CLAIM_API_VERSION,
@@ -188,7 +191,7 @@ class K8sHelper:
                        f"SandboxClaim '{claim_name}' was deleted while resolving sandbox name")
         deadline = time.monotonic() + timeout
         rv = resource_version or "0"
-        logging.info(f"Watching claim '{claim_name}' for {wait_target} (from resourceVersion={rv})...")
+        logger.info(f"Watching claim '{claim_name}' for {wait_target} (from resourceVersion={rv})...")
         while True:
             remaining = int(deadline - time.monotonic())
             if remaining <= 0:
@@ -265,7 +268,7 @@ class K8sHelper:
                         # Support both 'name' (standard) and 'Name' (legacy, before CRD rename in #440)
                         name = sandbox_status.get('name', '') or sandbox_status.get('Name', '')
                         if name and (ready or not require_ready):
-                            logging.info(
+                            logger.info(
                                 f"Resolved sandbox name '{name}' from claim status"
                                 + (" (claim Ready)" if ready else ""))
                             return name
@@ -273,7 +276,7 @@ class K8sHelper:
                 if e.status == 410:
                     # The requested resourceVersion was compacted away:
                     # restart from the watch cache's current state.
-                    logging.info(
+                    logger.info(
                         f"Watch on claim '{claim_name}' expired (410 Gone at resourceVersion={rv}); "
                         "restarting from current state")
                     rv = "0"
@@ -284,7 +287,7 @@ class K8sHelper:
                 urllib3.exceptions.ReadTimeoutError,
                 ConnectionError,
             ) as e:
-                logging.warning(
+                logger.warning(
                     f"Watch on claim '{claim_name}' disconnected ({type(e).__name__}: {e}); "
                     "reconnecting..."
                 )
@@ -300,7 +303,7 @@ class K8sHelper:
         no valid IP can be selected.
         """
         deadline = time.monotonic() + timeout
-        logging.info(f"Watching for Sandbox {name} to become ready...")
+        logger.info(f"Watching for Sandbox {name} to become ready...")
         while True:
             remaining = int(deadline - time.monotonic())
             if remaining <= 0:
@@ -324,12 +327,12 @@ class K8sHelper:
                         conditions = status.get('conditions', [])
                         for cond in conditions:
                             if cond.get('type') == 'Ready' and cond.get('status') == 'True':
-                                logging.info(f"Sandbox {name} is ready.")
+                                logger.info(f"Sandbox {name} is ready.")
                                 w.stop()
                                 pod_ips = status.get('podIPs', [])
                                 return select_pod_ip(pod_ips)
                     elif event["type"] == "DELETED":
-                        logging.error(f"Sandbox {name} was deleted before becoming ready.")
+                        logger.error(f"Sandbox {name} was deleted before becoming ready.")
                         w.stop()
                         raise SandboxNotFoundError(f"Sandbox {name} was deleted before becoming ready.")
             except (
@@ -337,7 +340,7 @@ class K8sHelper:
                 urllib3.exceptions.ReadTimeoutError,
                 ConnectionError,
             ) as e:
-                logging.warning(
+                logger.warning(
                     f"Watch for Sandbox '{name}' disconnected ({type(e).__name__}: {e}); "
                     "reconnecting..."
                 )
@@ -370,10 +373,10 @@ class K8sHelper:
                 _request_timeout=_request_timeout,
                 **delete_kwargs,
             )
-            logging.info(f"Terminated SandboxClaim: {name}")
+            logger.info(f"Terminated SandboxClaim: {name}")
         except client.ApiException as e:
             if e.status != 404:
-                logging.error(f"Error terminating SandboxClaim {name}: {e}")
+                logger.error(f"Error terminating SandboxClaim {name}: {e}")
                 raise
 
     def get_sandbox(self, name: str, namespace: str) -> dict[str, Any] | None:
@@ -444,13 +447,13 @@ class K8sHelper:
                 if item.get("metadata", {}).get("name")
             ]
         except client.ApiException as e:
-            logging.error(f"Error listing sandbox claims in namespace {namespace}: {e}")
+            logger.error(f"Error listing sandbox claims in namespace {namespace}: {e}")
             raise
 
     def wait_for_gateway_ip(self, gateway_name: str, namespace: str, timeout: int) -> str:
         """Waits for the Gateway to be assigned an external IP."""
         deadline = time.monotonic() + timeout
-        logging.info(f"Waiting for Gateway '{gateway_name}' in namespace '{namespace}'...")
+        logger.info(f"Waiting for Gateway '{gateway_name}' in namespace '{namespace}'...")
         while True:
             remaining = int(deadline - time.monotonic())
             if remaining <= 0:
@@ -479,12 +482,12 @@ class K8sHelper:
                             continue
                         
                         if not is_valid_ip(ip_address) and not is_valid_gateway_hostname(ip_address):
-                            logging.warning(
+                            logger.warning(
                                 "Gateway address rejected because %r is neither a valid IP address nor a valid gateway hostname.",
                                 ip_address,
                             )
                             continue
                         
-                        logging.info(f"Gateway ready. IP: {ip_address}")
+                        logger.info(f"Gateway ready. IP: {ip_address}")
                         w.stop()
                         return ip_address

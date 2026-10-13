@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Checks that a namespace runs on the one-policy-per-namespace layout:
+#   1. a NetworkPolicy's whole podSelector selects every app=agent-sandbox-rl pod;
+#   2. every agent-sandbox-rl SandboxTemplate is Unmanaged;
+#   3. no NetworkPolicy owned by an agent-sandbox-rl template is left (the
+#      controller deletes them); other teams' templates are not counted;
+#   4. (Cilium only, informational) identities carrying per-pod keys, and those
+#      carrying only per-pool or per-run keys (expected).
+# Usage: NAMESPACE=agent-sandbox-rl [KUBE_CONTEXT=...] scripts/verify.sh
+# Exits non-zero if 1 to 3 fail.
+set -uo pipefail
+
+NAMESPACE="${NAMESPACE:-agent-sandbox-rl}"
+POLICY_NAME="${POLICY_NAME:-agent-sandbox-rl-fleet}"
+K=(kubectl)
+if [[ -n "${KUBE_CONTEXT:-}" ]]; then K+=(--context "$KUBE_CONTEXT"); fi
+
+pass=0; fail=0
+ok()   { echo "PASS  $*"; pass=$((pass+1)); }
+bad()  { echo "FAIL  $*"; fail=$((fail+1)); }
+info() { echo "INFO  $*"; }
+
+# 1. Some NetworkPolicy in the namespace selects every agent-sandbox-rl pod. The
+#    whole podSelector is checked, as Kubernetes ANDs all of its requirements: a
+#    requirement on any label other than app=agent-sandbox-rl cannot be confirmed
+#    for every pod, so a policy carrying one does not count.
+if ! policies="$("${K[@]}" get networkpolicies -n "$NAMESPACE" -o json 2>&1)"; then
+  bad "could not list NetworkPolicies in $NAMESPACE: ${policies//$'\n'/ }"
+  policies=""
+else
+  covering="$(printf '%s' "$policies" | python3 -c '
+import sys,json
+known={"app": "agent-sandbox-rl"}
+def covers(sel):
+    sel = sel or {}
+    for k, v in (sel.get("matchLabels") or {}).items():
+        if known.get(k) != v:
+            return False
+    for r in sel.get("matchExpressions") or []:
+        k, op, vals = r.get("key"), r.get("operator"), r.get("values") or []
+        if k not in known:
+            return False
+        if op == "In" and known[k] not in vals: return False
+        if op == "NotIn" and known[k] in vals: return False
+        if op == "DoesNotExist": return False
+        if op not in ("In", "NotIn", "Exists", "DoesNotExist"): return False
+    return True
+print(" ".join(p["metadata"]["name"] for p in json.load(sys.stdin)["items"]
+               if covers((p.get("spec") or {}).get("podSelector"))))')"
+  if [[ -n "$covering" ]]; then
+    ok "NetworkPolicy selecting every app=agent-sandbox-rl pod in $NAMESPACE: $covering"
+  else
+    bad "no NetworkPolicy in $NAMESPACE selects every app=agent-sandbox-rl pod; apply manifests/fleet-network-policy.yaml (default name $POLICY_NAME)"
+  fi
+fi
+
+# 2. Templates created by the SDK are Unmanaged. A failed list is a failure, not
+#    an empty fleet: an empty list would skip this check and the next one.
+templates_ok=1
+if ! templates="$("${K[@]}" get sandboxtemplates.extensions.agents.x-k8s.io -n "$NAMESPACE" \
+    -l app=agent-sandbox-rl -o json 2>&1)"; then
+  templates_ok=0
+  bad "could not list SandboxTemplates in $NAMESPACE: ${templates//$'\n'/ }"
+fi
+if [[ "$templates_ok" == "1" ]]; then
+  total="$(printf '%s' "$templates" | python3 -c 'import sys,json; print(len(json.load(sys.stdin)["items"]))')"
+  managed="$(printf '%s' "$templates" | python3 -c '
+import sys,json
+items=json.load(sys.stdin)["items"]
+bad=[t["metadata"]["name"] for t in items if (t.get("spec") or {}).get("networkPolicyManagement")!="Unmanaged"]
+print(f"{len(bad)} (first: {chr(32).join(bad[:5])})" if bad else "")')"
+  if [[ "$total" == "0" ]]; then
+    info "no agent-sandbox-rl SandboxTemplates in $NAMESPACE yet (warm a pool, then rerun)"
+  elif [[ -z "$managed" ]]; then
+    ok "all $total agent-sandbox-rl SandboxTemplates are Unmanaged"
+  else
+    bad "agent-sandbox-rl SandboxTemplates still Managed: $managed"
+  fi
+fi
+
+# 3. No policy owned by an agent-sandbox-rl template remains. Policies of other
+#    templates in the namespace (other teams, Managed on purpose) are not counted.
+if [[ "$templates_ok" == "0" ]]; then
+  bad "skipped the policy ownership check: it needs the SandboxTemplate list"
+elif [[ -z "$policies" ]]; then
+  bad "skipped the policy ownership check: the NetworkPolicy list failed in check 1"
+else
+  rl_templates="$(printf '%s' "$templates" | python3 -c '
+import sys,json
+print(" ".join(t["metadata"]["name"] for t in json.load(sys.stdin)["items"]))')"
+  owned="$(printf '%s' "$policies" | RL_TEMPLATES="$rl_templates" python3 -c '
+import os,sys,json
+rl=set(os.environ.get("RL_TEMPLATES","").split())
+names=[]
+for np in json.load(sys.stdin)["items"]:
+    for o in np["metadata"].get("ownerReferences") or []:
+        if o.get("kind")=="SandboxTemplate" and o.get("name") in rl:
+            names.append(np["metadata"]["name"])
+print(len(names), " ".join(names[:5]))')"
+  count="${owned%% *}"
+  if [[ "$count" == "0" ]]; then
+    ok "no NetworkPolicies owned by agent-sandbox-rl templates in $NAMESPACE"
+  else
+    bad "$count NetworkPolicies owned by agent-sandbox-rl templates still present (first: ${owned#* }); wait for the controller or check the template mode"
+  fi
+fi
+all_np="$("${K[@]}" get networkpolicies -n "$NAMESPACE" --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+info "NetworkPolicies in $NAMESPACE: $all_np"
+
+# 4. Cilium identities (informational: the label filter is a cluster-side change).
+#    Per-pod keys grow identities with the number of pods (the cardinality
+#    problem); per-pool and per-run keys are bounded and expected to remain.
+#    A failed list is reported as skipped: on Dataplane V2 listing identities is
+#    often forbidden for non-admins, and an empty answer would look clean.
+if ! ids="$("${K[@]}" get ciliumidentities -o json 2>&1)"; then
+  if grep -q "doesn't have a resource type" <<<"$ids"; then
+    info "no CiliumIdentity resource on this cluster; identity check skipped"
+  else
+    info "identity check skipped: could not list CiliumIdentities: ${ids//$'\n'/ }"
+  fi
+else
+  printf '%s' "$ids" | python3 -c '
+import sys,json
+items=json.load(sys.stdin)["items"]
+per_pod=("k8s:agents.x-k8s.io/sandbox-name-hash","k8s:agents.x-k8s.io/claim-uid")
+bounded=("k8s:agents.x-k8s.io/warm-pool-sandbox","k8s:agent-sandbox-rl/run-id")
+def has(i, keys):
+    return any(k in (i.get("security-labels") or {}) for k in keys)
+pod=sum(1 for i in items if has(i, per_pod))
+run=sum(1 for i in items if not has(i, per_pod) and has(i, bounded))
+print(f"INFO  CiliumIdentities: {len(items)} total")
+if pod:
+    print(f"INFO  {pod} carry a per-pod key (sandbox-name-hash, claim-uid): these grow with the number of pods; see the README section on Cilium")
+else:
+    print("INFO  none carry a per-pod key (sandbox-name-hash, claim-uid)")
+print(f"INFO  {run} carry only per-pool or per-run keys (warm-pool-sandbox, run-id): expected, bounded by pools and runs")'
+fi
+
+echo "== $pass passed, $fail failed =="
+[[ "$fail" -eq 0 ]]

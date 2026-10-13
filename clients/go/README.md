@@ -170,6 +170,92 @@ health, err := sb.Health(ctx)   // health.Status, health.UptimeSeconds
 meta, err := sb.Metadata(ctx)   // meta.Env (non-sensitive, SANDBOX_-prefixed by default)
 ```
 
+### Streaming Commands (sandboxd)
+
+`sb.Commands().Start` runs a command with the same shell-string semantics as
+`Run` (`/bin/sh -c`), but lets you read output before the command exits. It needs
+`RuntimeSandboxd` and a gRPC connection established through pod port-forward or
+in-cluster connectivity. The legacy runtime and a REST-only `APIURL` return
+`ErrUnsupportedByRuntime`; this does not add a Gateway+sandboxd connection mode.
+
+The example assumes `sb` is already open with `RuntimeSandboxd`. Import
+`context`, `io`, `os`, `time`, and the `sandbox` SDK package:
+
+```go
+func streamCommand(ctx context.Context, sb *sandbox.Sandbox) (int, error) {
+    handle, err := sb.Commands().Start(ctx,
+        "echo starting; sleep 1; echo done",
+        sandbox.WithTimeout(10*time.Minute))
+    if err != nil { return 0, err }
+    defer handle.Close()
+
+    exitCode := 0
+    for {
+        event, err := handle.Recv()
+        if err == io.EOF { return exitCode, nil }
+        if err != nil { return 0, err }
+        switch event.Type {
+        case sandbox.ProcessEventStdout:
+            if _, err := os.Stdout.Write(event.Data); err != nil { return 0, err }
+        case sandbox.ProcessEventStderr:
+            if _, err := os.Stderr.Write(event.Data); err != nil { return 0, err }
+        case sandbox.ProcessEventExit:
+            exitCode = event.ExitCode
+        }
+    }
+}
+```
+
+`Start` waits for the daemon's initial process ID, not the first output. A short
+command may already have exited by then. `ProcessID()` is a daemon-local virtual
+ID, not an OS PID or a durable identity across daemon restarts.
+
+Output events contain raw byte chunks, not necessarily complete lines or valid
+UTF-8. stdout and stderr remain separate and have no guaranteed global ordering;
+the SDK does not accumulate output. A nonzero exit code is a command result,
+not an SDK error. Continue reading **after the exit event to `io.EOF`** to check
+the final RPC status. Missing required events are protocol errors, and wrapped
+gRPC errors retain their status code.
+
+The caller context and a positive `WithTimeout` bound the **whole stream**,
+including startup. `Start` does not apply the default `RequestTimeout` and does
+not have a separate startup-only timeout. Close the handle or cancel its context
+when you stop reading; `Close` is idempotent and cancels only this session, not
+the shared connection or SandboxClaim. A nil Close error is local cleanup, not
+confirmation that the remote process has already been killed. This is not detach.
+
+To request graceful shutdown from another goroutine, keep the Start context
+alive and give the signal RPC its own bounded context:
+
+```go
+signalCtx, cancelSignal := context.WithTimeout(ctx, 5*time.Second)
+defer cancelSignal()
+err := handle.SendSignal(signalCtx, sandbox.SignalSIGTERM)
+```
+
+Only `SignalSIGINT`, `SignalSIGTERM`, and `SignalSIGKILL` are supported.
+Signal success is not an exit acknowledgement; continue the original receive
+loop through Exit + EOF. Signal failures, or cancelling only `signalCtx`, do not
+cancel that loop. SIGINT/SIGTERM may be trapped or ignored: the original process
+deadline or `Close` provides a final cancellation boundary. Do not cancel Start
+before trying to send a graceful-stop signal. The handle uses its original
+connection and process identity even if the Sandbox later reconnects.
+
+Each handle permits one active `Recv`; a concurrent second call returns
+`ErrConcurrentRecv` without ending the session. Signals and Close may run
+concurrently with the receive loop. Explicit cancellation, timeout, handle Close,
+and the parent Sandbox's Close/Disconnect release session resources even if
+nobody calls Recv again. Parent Close still deletes the claim; Disconnect does
+not. The SDK does not read, drain or discard output in the background, so a
+caller that stops consuming without cancelling can retain resources and block
+the process through backpressure. Unconsumed ordinary EOF or transport faults
+are not guaranteed to be discovered automatically.
+
+`Start` never retries non-idempotent process creation and rejects
+`WithMaxAttempts(n)` when `n > 1`. Transport attempts before a request reaches
+the service are not a guarantee of repeated command execution. stdin, PTY,
+reattachment, and automatic process recreation are not provided by this API.
+
 ### 5. Custom TLS / Transport
 
 If your Gateway uses HTTPS with a private CA, provide a custom transport:
@@ -236,16 +322,19 @@ All options are documented on the `Options` struct in
 - `APIURL`: set for Direct URL mode (takes precedence over `GatewayName`).
 - `TracerProvider`: OpenTelemetry integration.
 
-Any operation accepts `WithTimeout` to override the default request timeout,
-or `WithMaxAttempts` to control retry behavior:
+Operations accept `WithTimeout` for a total operation timeout. HTTP operations
+override their default request timeout; sandboxd gRPC commands use the caller
+context unless an explicit timeout is supplied. Retry options depend on the
+operation: in particular, streaming `Start` rejects attempts greater than one.
 
 ```go
 result, err := client.Run(ctx, "make build", sandbox.WithTimeout(10*time.Minute))
 ```
 
-`Run` also takes `WithEnv` and `WithWorkingDir` (RuntimeSandboxd only; the
-legacy runtime returns `ErrUnsupportedByRuntime`). `WithEnv` is merged over the
-sandbox's environment, and the directory is relative to the sandbox root:
+`Run` and `Commands.Start` also take `WithEnv` and `WithWorkingDir`
+(RuntimeSandboxd only; the legacy runtime returns `ErrUnsupportedByRuntime`).
+`WithEnv` is merged over the sandbox's environment, and the directory is relative
+to the sandbox root:
 
 ```go
 result, err := client.Run(ctx, "make build",
@@ -269,8 +358,9 @@ The caller owns the destination and should decide whether to keep or remove any
 partially written data.
 
 **Important:** `Run()` defaults to a single attempt (no retries) because command
-execution is not idempotent. Use `WithMaxAttempts` to opt in to retries for
-idempotent commands:
+execution is not idempotent. On the legacy runtime, use `WithMaxAttempts` to opt
+in to retries for idempotent commands; sandboxd `Run` always sends one Execute
+RPC. Streaming `Commands.Start` rejects attempts greater than one:
 
 ```go
 result, err := client.Run(ctx, "cat /etc/hostname", sandbox.WithMaxAttempts(6))
@@ -365,6 +455,11 @@ Calling `Open()` on a client with an orphaned claim returns `ErrOrphanedClaim`.
 | `ErrRetriesExhausted` | All HTTP retry attempts failed. |
 | `ErrSandboxDeleted` | The Sandbox was deleted before becoming ready. |
 | `ErrGatewayDeleted` | The Gateway was deleted during address discovery. |
+| `ErrProcessProtocol` | A streaming command returned invalid events or ended without the required Init/Exit. Missing-event EOF also matches `io.ErrUnexpectedEOF`. |
+| `ErrConcurrentRecv` | Another receive call is active on this process handle; the session remains open. |
+
+Streaming RPC and signal failures preserve their gRPC status code through
+wrapping; inspect them with `status.Code(err)` from `google.golang.org/grpc/status`.
 
 Non-OK HTTP responses are wrapped in `*HTTPError`, which can be extracted
 with `errors.As` to inspect the status code:

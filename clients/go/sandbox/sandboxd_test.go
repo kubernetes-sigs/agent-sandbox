@@ -84,7 +84,7 @@ func (f *fakeProcessService) Execute(_ context.Context, req *processv1.ExecuteRe
 
 // startFakeProcessServer runs a gRPC ProcessService on an ephemeral loopback
 // port and wires the sandbox's connector at it.
-func startFakeProcessServer(t *testing.T, sb *Sandbox, svc *fakeProcessService) {
+func startFakeProcessServer(t *testing.T, sb *Sandbox, svc processv1.ProcessServiceServer) {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

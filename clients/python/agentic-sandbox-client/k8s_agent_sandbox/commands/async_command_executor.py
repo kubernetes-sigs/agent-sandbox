@@ -16,22 +16,14 @@ from typing import Any
 """Non-blocking command execution for legacy and sandboxd runtimes."""
 
 from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
-from k8s_agent_sandbox.commands.command_executor import _execute_request
+from k8s_agent_sandbox.commands.command_executor import (
+    _check_process_options,
+    _execute_request,
+    _extract_executable,
+    _process_config,
+)
 from k8s_agent_sandbox.models import ExecutionResult
 from k8s_agent_sandbox.trace_manager import async_trace_span, trace
-
-
-def _extract_executable(command: str) -> str:
-    """Extract a low-cardinality executable name for tracing."""
-    if not command:
-        return ""
-    for field in command.split():
-        # Skip leading inline environment variables (e.g., KEY=VALUE)
-        if "=" in field:
-            continue
-        # Extract base executable name (strip directory paths)
-        return field.split("/")[-1]
-    return ""
 
 
 class AsyncCommandExecutor:
@@ -46,7 +38,13 @@ class AsyncCommandExecutor:
 
     @async_trace_span("run")
     async def run(
-        self, command: str, timeout: int = 60, command_timeout: float | None = None
+        self,
+        command: str,
+        timeout: int = 60,
+        command_timeout: float | None = None,
+        *,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
     ) -> ExecutionResult:
         """Run a shell command and return its output and exit code.
 
@@ -65,18 +63,26 @@ class AsyncCommandExecutor:
                 is also bounded by the router's ``--proxy-timeout`` (180s by
                 default), so a longer ``command_timeout`` ends in a 502/504
                 from the router instead of a ``timed_out`` result.
+            env: Extra environment variables for the command, overriding the
+                sandbox's own. Only the sandboxd runtime supports it; the
+                legacy runtime raises NotImplementedError.
+            cwd: Working directory for the command, confined to the sandbox
+                root. Only the sandboxd runtime supports it; the legacy
+                runtime raises NotImplementedError.
         """
+        sandboxd = self.connector.is_sandboxd()
+        _check_process_options(env, cwd, sandboxd)
         span = trace.get_current_span()
         if span.is_recording():
             executable = _extract_executable(command)
             span.set_attribute("sandbox.command.executable", executable)
 
-        if self.connector.is_sandboxd():
+        if sandboxd:
             if command_timeout is None:
-                result = await self._run_sandboxd(command, timeout)
+                result = await self._run_sandboxd(command, timeout, env=env, cwd=cwd)
             else:
                 result = await self._run_sandboxd(
-                    command, command_timeout, report_timeout=True
+                    command, command_timeout, report_timeout=True, env=env, cwd=cwd
                 )
             if span.is_recording():
                 span.set_attribute("sandbox.exit_code", result.exit_code)
@@ -105,7 +111,12 @@ class AsyncCommandExecutor:
         return result
 
     async def _run_sandboxd(
-        self, command: str, timeout: float, report_timeout: bool = False
+        self,
+        command: str,
+        timeout: float,
+        report_timeout: bool = False,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
     ) -> ExecutionResult:
         """Execute through sandboxd while preserving the shell-string API.
 
@@ -128,7 +139,7 @@ class AsyncCommandExecutor:
         channel = await self.connector.grpc_channel()
         stub = process_pb2_grpc.ProcessServiceStub(channel)
         request = process_pb2.ExecuteRequest(
-            config=process_pb2.ProcessConfig(command=["/bin/sh", "-c", command])
+            config=_process_config(process_pb2, command, env, cwd)
         )
         try:
             response = await stub.Execute(request, timeout=timeout)

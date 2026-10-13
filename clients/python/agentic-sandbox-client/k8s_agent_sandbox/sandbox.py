@@ -26,6 +26,8 @@ from .connector import SandboxConnector
 from .constants import POD_NAME_ANNOTATION
 from .utils import select_pod_ip, extract_sandbox_name_hash
 
+logger = logging.getLogger(__name__)
+
 
 class Sandbox:
     """
@@ -191,10 +193,10 @@ class Sandbox:
             try:
                 self.tracing_manager.end_lifecycle_span()
             except Exception as e:
-                logging.error(f"Failed to end tracing span: {e}")
+                logger.error(f"Failed to end tracing span: {e}")
         
         self._is_closed = True
-        logging.info(f"Connection to sandbox claim '{self.claim_name}' has been closed.")
+        logger.info(f"Connection to sandbox claim '{self.claim_name}' has been closed.")
     
     def terminate(self):
         """

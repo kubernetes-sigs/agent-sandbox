@@ -116,9 +116,10 @@ function mockSandboxReadyFlow(
       callback("MODIFIED", {
         metadata: {
           name: sandboxName,
-          annotations: podAnnotation
-            ? { [POD_NAME_ANNOTATION]: podAnnotation }
-            : {},
+          annotations:
+            podAnnotation !== undefined
+              ? { [POD_NAME_ANNOTATION]: podAnnotation }
+              : {},
         },
         status: {
           conditions: [{ type: "Ready", status: "True" }],
@@ -558,6 +559,65 @@ describe("SandboxClient (registry)", () => {
       expect(createArgs.body.spec).toEqual({ warmPoolRef: { name: "tpl" } });
     });
 
+    it("passes env as the spec.env name/value list", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-with-env");
+
+      const client = new SandboxClient();
+      await client.createSandbox("tpl", "default", {
+        env: { API_KEY: "secret", "my.var-1": "" },
+      });
+
+      const createArgs = mockCreateNamespacedCustomObject.mock.calls[0][0];
+      expect(createArgs.body.spec).toEqual({
+        warmPoolRef: { name: "tpl" },
+        env: [
+          { name: "API_KEY", value: "secret" },
+          { name: "my.var-1", value: "" },
+        ],
+      });
+    });
+
+    it("omits env when the map is empty", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-empty-env");
+
+      const client = new SandboxClient();
+      await client.createSandbox("tpl", "default", { env: {} });
+
+      const createArgs = mockCreateNamespacedCustomObject.mock.calls[0][0];
+      expect(createArgs.body.spec).toEqual({ warmPoolRef: { name: "tpl" } });
+    });
+
+    it.each([
+      ["a leading digit", "1BAD"],
+      ["an empty name", ""],
+      ["an equals sign", "A=B"],
+      ["a dot-dot prefix", "..hidden"],
+      ["a lone dot", "."],
+    ])("rejects an env name with %s before provisioning", async (_why, name) => {
+      mockSandboxReadyFlow("sandbox-invalid-env");
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", { env: { [name]: "v" } }),
+      ).rejects.toThrow("Invalid environment variable name");
+      expect(mockCreateNamespacedCustomObject).not.toHaveBeenCalled();
+      expect(mockWatchFn).not.toHaveBeenCalled();
+    });
+
+    it("rejects a non-string env value before provisioning", async () => {
+      mockSandboxReadyFlow("sandbox-bad-env-value");
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", {
+          env: { PORT: 8080 as unknown as string },
+        }),
+      ).rejects.toThrow("must have a string value");
+      expect(mockCreateNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
     it("sets a deletion deadline from the create call, preserving namespace and labels", async () => {
       vi.useFakeTimers();
       try {
@@ -693,9 +753,12 @@ describe("SandboxClient (registry)", () => {
       }
     });
 
-    it("falls back to sandboxName when pod annotation is absent", async () => {
+    it.each([
+      undefined,
+      "",
+    ])("falls back to sandboxName when pod annotation is %j", async (podAnnotation) => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
-      mockSandboxReadyFlow("sandbox-xyz"); // no podAnnotation
+      mockSandboxReadyFlow("sandbox-xyz", podAnnotation);
 
       const client = new SandboxClient();
       const sandbox = await client.createSandbox("tpl");
@@ -945,7 +1008,10 @@ describe("SandboxClient (registry)", () => {
       expect(sandbox.isActive).toBe(true);
     });
 
-    it("with waitForReady false, attaches to a Sandbox that is not Ready yet", async () => {
+    it.each([
+      ["pod-pending", "pod-pending"],
+      ["", "sandbox-pending"],
+    ])("with waitForReady false, resolves pod annotation %j to %j before Ready", async (podAnnotation, expectedPodName) => {
       // 1) claim verification, 2) resolveSandboxName, 3) Sandbox existence.
       mockGetNamespacedCustomObject.mockResolvedValueOnce({});
       mockGetNamespacedCustomObject.mockResolvedValueOnce({
@@ -954,7 +1020,7 @@ describe("SandboxClient (registry)", () => {
       mockGetNamespacedCustomObject.mockResolvedValueOnce({
         metadata: {
           name: "sandbox-pending",
-          annotations: { [POD_NAME_ANNOTATION]: "pod-pending" },
+          annotations: { [POD_NAME_ANNOTATION]: podAnnotation },
         },
         status: {
           conditions: [{ type: "Ready", status: "False" }],
@@ -968,7 +1034,7 @@ describe("SandboxClient (registry)", () => {
       });
 
       expect(sandbox.sandboxName).toBe("sandbox-pending");
-      expect(sandbox.podName).toBe("pod-pending");
+      expect(sandbox.podName).toBe(expectedPodName);
       expect(sandbox.podIP).toBe("10.0.0.7");
       expect(mockWatchFn).not.toHaveBeenCalled();
     });

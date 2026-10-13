@@ -77,7 +77,7 @@ A template with no `networkPolicy` gets the Secure-by-Default policy including p
 
 - docker, [kind](https://kind.sigs.k8s.io/), kubectl, openssl and perl
 - No account and no API key. Both images are public:
-  - `ghcr.io/polign/recall:0.17.0`
+  - `ghcr.io/polign/recall:0.18.0`
   - `ghcr.io/polign/polign-server:0.14.0`
 
 kind's default network plugin enforces NetworkPolicy, so the policy is real on a plain kind cluster.

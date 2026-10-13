@@ -178,12 +178,15 @@ spec:
           type: RuntimeDefault
       containers:
         - name: recall
-          image: ghcr.io/polign/recall:0.17.0
+          image: ghcr.io/polign/recall:0.18.0
           args:
             - -backend=polign
             - -url=http://polign-db.recall.svc:23000
             - serve
             - -listen=:8080
+            # The typed tools: the agent names subject, predicate and value.
+            # recall 0.18 serves the text tools without this.
+            - -typed
             - -agent=true
             - -kubernetes
             - -kubernetes-audience=recall

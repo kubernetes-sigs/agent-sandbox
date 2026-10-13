@@ -680,8 +680,8 @@ logging.basicConfig(level=logging.INFO)
 returning a `SandboxBatch` handle right away. Each `BatchGroup` names a warm pool, how many claims to
 create from it (`size`), and how many of them must become Ready for the group to count (`min_ready`,
 which defaults to `size`). The claims are named `<batch-id>-0` to `<batch-id>-<N-1>`, where `N` is the
-sum of the group sizes. They carry the `agents.x-k8s.io/batch-id` label, and are created in the
-background, paced at `create_rps` creates per second with at most `max_in_flight` in flight. The batch
+sum of the group sizes. They carry the `agents.x-k8s.io/batch-id` label and the `agents.x-k8s.io/batch-group`
+label, whose value is a hash of the warm pool's name, and are created in the background, paced at `create_rps` creates per second with at most `max_in_flight` in flight. The batch
 also has a `coordination.k8s.io/v1` Lease named `batch-<batch-id>`, which the handle renews while it is
 alive.
 
@@ -756,6 +756,14 @@ watch or Lease renewal stops with an error, so check `batch.err()` after the loo
 batch's claims and then its Lease; `detach(grace=None)` instead leaves everything in place and releases the
 Lease so `get_batch()` can take the batch over.
 
+Three methods free sandboxes before `release()`. `release_member(member)` deletes one member's claim.
+`release_group(warmpool)` deletes every claim of a group, pending ones included, for example a group that
+`iter_ready_groups()` yields with an error, whose claims are otherwise kept until `release()`.
+`release_not_ready()` stops creating claims and deletes every initial claim that isn't Ready and was never
+handed out, once you have what you need. Released members are never handed out, are dropped from `members()`, and
+count as unable to become Ready, so releasing members before a group or the quorum has been decided can make
+it unreachable. Read a failed member's `reason` before releasing it.
+
 The `claim_batch()` defaults are `create_rps=50`, `max_in_flight=20`, `quorum_timeout=600` seconds,
 `work_budget=3600` seconds, and `lease_duration=60` seconds. Every claim gets the same `shutdownTime`, the
 time of the `claim_batch()` call plus `N / create_rps` seconds (rounded up) plus `quorum_timeout` plus
@@ -779,6 +787,7 @@ supports all of the above.
 - `err()`: the error that stopped the background watch/renewal, or `None`. Once it is set, no more claims
   are created.
 - `lease_degraded()`: whether Lease renewal is failing, from the first failed renewal until one succeeds.
+- `release_member(member)`, `release_group(warmpool)`, and `release_not_ready()`, described above.
 - `release()` deletes the batch's claims, then its Lease. Idempotent.
 - `detach(grace=None)`: stops the background tasks and releases the Lease so another `get_batch` can take over; idempotent.
 
@@ -794,7 +803,7 @@ metadata:
 rules:
 - apiGroups: ["extensions.agents.x-k8s.io"]
   resources: ["sandboxclaims"]
-  verbs: ["create", "get", "list", "watch", "deletecollection"]
+  verbs: ["create", "get", "list", "watch", "delete", "deletecollection"]
 - apiGroups: ["extensions.agents.x-k8s.io"]
   resources: ["sandboxwarmpools", "sandboxtemplates"]
   verbs: ["get"]

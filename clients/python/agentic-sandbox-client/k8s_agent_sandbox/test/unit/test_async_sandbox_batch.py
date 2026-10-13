@@ -40,6 +40,7 @@ from k8s_agent_sandbox.batch_utils import (
     CLOCK_SKEW_MARGIN,
 )
 from k8s_agent_sandbox.constants import (
+    BATCH_GROUP_LABEL,
     BATCH_GROUP_MIN_READY_ANNOTATION,
     BATCH_GROUP_SIZE_ANNOTATION,
     BATCH_ID_LABEL,
@@ -1180,6 +1181,7 @@ class _Cluster:
         h.create_sandbox_claim = AsyncMock(side_effect=self._create)
         h.delete_sandbox_claims_by_label = AsyncMock(side_effect=lambda *a, **k: self.calls.append("deletecollection"))
         h.delete_batch_lease = AsyncMock(side_effect=lambda *a, **k: self.calls.append("delete_lease"))
+        h.delete_sandbox_claim = AsyncMock()
         h.read_batch_lease = AsyncMock()
         h.replace_batch_lease = AsyncMock()
 
@@ -1324,7 +1326,12 @@ class TestClaimBatchSetup(BaseClaimBatchTest):
             [("b1-0", "pool-a"), ("b1-1", "pool-a"), ("b1-2", "pool-b")],
         )
         kwargs = calls[0].kwargs
-        self.assertEqual(kwargs["labels"], {"team": "rl", BATCH_ID_LABEL: "b1"})
+        # The group label is a hash of the pool name, which other SDKs must compute the same way.
+        self.assertEqual(
+            [c.kwargs["labels"] for c in calls],
+            [{"team": "rl", BATCH_ID_LABEL: "b1", BATCH_GROUP_LABEL: "8934303dc131d111"}] * 2
+            + [{"team": "rl", BATCH_ID_LABEL: "b1", BATCH_GROUP_LABEL: "574c3c5032ce922a"}],
+        )
         self.assertEqual(
             kwargs["annotations"],
             {BATCH_GROUP_SIZE_ANNOTATION: "2", BATCH_GROUP_MIN_READY_ANNOTATION: "1"},
@@ -1748,6 +1755,86 @@ class TestRelease(BaseClaimBatchTest):
         self.assertLess(created, 20)
         self.cluster.helper.delete_sandbox_claims_by_label.assert_not_called()
         self.cluster.helper.delete_batch_lease.assert_not_called()
+
+
+class TestReleaseMembers(BaseClaimBatchTest):
+
+    @patch("k8s_agent_sandbox.batch_utils.retry_delay", return_value=0)
+    async def test_release_member_deletes_its_claim_with_the_shared_retry_policy(self, _):
+        unavailable = k8s_client.ApiException(status=503)
+        cases = {
+            "503 then success": ([unavailable, None], 2, None),
+            "403 raises at once": ([k8s_client.ApiException(status=403)], 1, k8s_client.ApiException),
+            "503 on every attempt raises": ([unavailable] * 3, 3, k8s_client.ApiException),
+        }
+        helper = self.cluster.helper
+        for name, (effects, attempts, error) in cases.items():
+            with self.subTest(name):
+                helper.delete_sandbox_claim = AsyncMock(side_effect=effects)
+                self.mock_sandbox_class.return_value = MagicMock(close_connection=AsyncMock())
+                handle = _make_handle(self.client)
+                handle._state.upsert_claim(_claim("b1-0", conditions=_READY, sandbox={"name": "sbx"}, annotations=_FILL))
+                sandbox = await handle.connect(handle.members()[0])
+                [member] = handle.members()
+                if error is None:
+                    await handle.release_member(member)
+                else:
+                    with self.assertRaises(error):
+                        await handle.release_member(member)
+                sandbox.close_connection.assert_called_once()
+                self.assertEqual(helper.delete_sandbox_claim.call_count, attempts)
+                kwargs = helper.delete_sandbox_claim.call_args.kwargs
+                self.assertEqual((kwargs["_request_timeout"], kwargs["log_level"]), (30, logging.DEBUG))
+        with self.assertRaises(ValueError):
+            await handle.release_member(MagicMock(claim_name="b1-9"))
+
+    async def test_release_not_ready_skips_unsent_creates_and_deletes_pending_members(self):
+        self.cluster.ready_on_create = False
+        # b1-1 waits for its pacing slot when the fill ends, and b1-2 and b1-3 are still planned.
+        batch = await self.claim([BatchGroup(warmpool="pool-a", size=4)], max_in_flight=2, create_rps=2)
+        await _wait_until(lambda: self.cluster.names() == ["b1-0"])
+        self.cluster.push("b1-0", ready=False)
+        await _wait_until(lambda: len(batch.members()) == 1)
+
+        await batch.release_not_ready()
+        await _wait_until(lambda: all(c.done() for c in batch._creators))
+        self.assertEqual(self.cluster.names(), ["b1-0"])
+        self.assertEqual([c.args[0] for c in self.cluster.helper.delete_sandbox_claim.call_args_list], ["b1-0"])
+
+    async def test_release_group_deletes_by_group_label_and_skips_only_its_creates(self):
+        gate = asyncio.Event()
+        self.addCleanup(gate.set)
+
+        async def hook(name):
+            if name == "b1-0":
+                await asyncio.wait_for(gate.wait(), 5)
+
+        self.cluster.create_hook = hook
+        # Creates go b1-0, b1-10, b1-1 to b1-4, b1-11, then the rest of pool-a.
+        batch = await self.claim(
+            [BatchGroup(warmpool="pool-a", size=10), BatchGroup(warmpool="pool-b", size=2)],
+            max_in_flight=1,
+            create_rps=5,
+        )
+        await _wait_until(lambda: self.cluster.helper.create_sandbox_claim.call_count == 1)
+        with self.assertRaises(ValueError):
+            await batch.release_group("pool-c")
+
+        await batch.release_group("pool-a")
+        gate.set()  # b1-0's create lands after its group was released.
+        await _wait_until(lambda: len(batch.members()) == 2)
+        helper = self.cluster.helper
+        self.assertEqual(
+            helper.delete_sandbox_claims_by_label.call_args.args,
+            ("default", f"{BATCH_ID_LABEL}=b1,{BATCH_GROUP_LABEL}=8934303dc131d111"),
+        )
+        await _wait_until(lambda: helper.delete_sandbox_claim.call_count == 1)
+        self.assertEqual(helper.delete_sandbox_claim.call_args.args[0], "b1-0")
+        self.assertEqual(self.cluster.names(), ["b1-0", "b1-10", "b1-11"])
+        self.assertEqual([m.claim_name for m in batch.members()], ["b1-10", "b1-11"])
+        # pool-a's skipped creates take no pacing slots, so b1-11 follows b1-10 by one slot.
+        created_at = dict(self.cluster.created)
+        self.assertLess(created_at["b1-11"] - created_at["b1-10"], 0.6)
 
 
 @patch.object(AsyncSandboxBatch, "_start", lambda self: None)

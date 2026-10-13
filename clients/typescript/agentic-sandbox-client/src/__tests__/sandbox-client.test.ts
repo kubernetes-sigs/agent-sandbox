@@ -963,6 +963,11 @@ describe("SandboxClient (registry)", () => {
         { ...claim(), spec: { warmPoolRef: { name: "other" } } },
         "references warm pool 'other', not 'tpl'",
       ],
+      [
+        "missing a UID",
+        { ...claim(), metadata: { resourceVersion: "1" } },
+        "has no metadata.uid",
+      ],
     ])("refuses to adopt a claim that is %s", async (_label, existing, message) => {
       mockCreateNamespacedCustomObject.mockRejectedValueOnce(conflict());
       mockGetNamespacedCustomObject.mockResolvedValueOnce(existing);

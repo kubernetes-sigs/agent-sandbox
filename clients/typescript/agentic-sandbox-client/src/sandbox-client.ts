@@ -280,7 +280,7 @@ function assertAdoptable(
   claim: Record<string, unknown>,
   claimName: string,
   warmpool: string,
-): string | undefined {
+): string {
   const metadata = (claim.metadata as Record<string, unknown>) ?? {};
   if (metadata.deletionTimestamp) {
     throw new SandboxError(`SandboxClaim '${claimName}' is terminating.`);
@@ -292,7 +292,11 @@ function assertAdoptable(
       `SandboxClaim '${claimName}' references warm pool '${warmPoolRef.name}', not '${warmpool}'.`,
     );
   }
-  return metadata.uid as string | undefined;
+  // Without a UID the replacement guard in assertClaimUid is silently off.
+  if (typeof metadata.uid !== "string" || metadata.uid === "") {
+    throw new SandboxError(`SandboxClaim '${claimName}' has no metadata.uid.`);
+  }
+  return metadata.uid;
 }
 
 /**

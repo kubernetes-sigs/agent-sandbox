@@ -14,6 +14,7 @@
 
 import asyncio
 import logging
+import math
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -221,7 +222,8 @@ class AsyncK8sHelper:
         rv = resource_version or "0"
         logger.info(f"Watching claim '{claim_name}' for {wait_target} (from resourceVersion={rv})...")
         while True:
-            remaining = int(deadline - time.monotonic())
+            # timeoutSeconds is integral; preserve a positive fractional budget.
+            remaining = math.ceil(deadline - time.monotonic())
             if remaining <= 0:
                 raise TimeoutError(
                     f"Could not resolve {wait_target} from claim "
@@ -346,7 +348,7 @@ class AsyncK8sHelper:
         deadline = time.monotonic() + timeout
         logger.info(f"Watching for Sandbox {name} to become ready...")
         while True:
-            remaining = int(deadline - time.monotonic())
+            remaining = math.ceil(deadline - time.monotonic())
             if remaining <= 0:
                 raise TimeoutError(
                     f"Sandbox {name} did not become ready within {timeout} seconds."
@@ -502,7 +504,7 @@ class AsyncK8sHelper:
             f"Waiting for Gateway '{gateway_name}' in namespace '{namespace}'..."
         )
         while True:
-            remaining = int(deadline - time.monotonic())
+            remaining = math.ceil(deadline - time.monotonic())
             if remaining <= 0:
                 raise TimeoutError(f"Gateway '{gateway_name}' did not get an IP.")
             w = watch.Watch()

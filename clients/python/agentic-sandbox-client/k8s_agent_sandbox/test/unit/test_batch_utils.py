@@ -21,7 +21,7 @@ from k8s_agent_sandbox.batch_utils import (
     BATCH_DEFAULT_LEASE_DURATION_SECONDS,
     CLOCK_SKEW_MARGIN,
 )
-from k8s_agent_sandbox.constants import BATCH_ID_LABEL
+from k8s_agent_sandbox.constants import BATCH_GROUP_LABEL, BATCH_ID_LABEL
 from k8s_agent_sandbox.exceptions import BatchError
 from k8s_agent_sandbox.models import BatchGroup
 
@@ -178,6 +178,7 @@ class TestValidateClaimBatchArgs(unittest.TestCase):
             "quorum_timeout 1.5": {"quorum_timeout": 1.5},
             "lease_duration 5": {"lease_duration": CLOCK_SKEW_MARGIN},
             "labels set batch id": {"labels": {BATCH_ID_LABEL: "b1"}},
+            "labels set batch group": {"labels": {BATCH_GROUP_LABEL: "x"}},
             "invalid label": {"labels": {"bad key!": "v"}},
             "invalid batch_id": {"batch_id": "1abc"},
         }

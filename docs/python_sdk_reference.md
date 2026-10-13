@@ -200,6 +200,10 @@ Resumes batch lease renewal and starts a label-scoped watch that keeps
 ``members()`` up to date. Only a batch released with ``detach()`` can be re-attached,
 within its grace window.
 
+The batch errors below are all ``BatchError``, so ``except BatchError`` handles a batch that
+can't be attached. ``ValueError`` means a bad batch id, and ``ApiException`` an API or
+network failure.
+
 **Raises**:
 
 - `ValueError` - If ``batch_id`` is not a valid batch id.
@@ -209,6 +213,8 @@ within its grace window.
 - `BatchInUseError` - If a live Lease is held by another handle, or another client
   takes it over while attaching.
 - `BatchError` - If the Lease's or the claims' batch annotations are invalid.
+- `ApiException` - For any other API error such as a 403, or the transport error if a
+  request fails.
   
 
 **Example**:
@@ -737,4 +743,5 @@ the Lease still held. Call ``detach`` again to retry; steps that already complet
 **Raises**:
 
 - `ValueError` - If ``grace`` is not a valid Lease duration.
+- `ApiException` - If the Lease release fails (an ``ApiException`` or a transport error).
 

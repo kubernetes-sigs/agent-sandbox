@@ -47,6 +47,23 @@ _WATCH_TIMEOUT_SECONDS = 30
 _WATCH_CLOSE_GRACE_SECONDS = 5
 _WATCH_REQUEST_TIMEOUT = _WATCH_TIMEOUT_SECONDS + _WATCH_CLOSE_GRACE_SECONDS
 
+# Network-level errors that are likely transient, so the watch retries them.
+_TRANSPORT_ERRORS = (
+    urllib3.exceptions.ProtocolError,
+    urllib3.exceptions.ReadTimeoutError,
+    urllib3.exceptions.MaxRetryError,
+    ConnectionError,
+)
+
+
+def _is_transport_error(error: BaseException) -> bool:
+    # SSLError is not transient
+    if isinstance(error, urllib3.exceptions.MaxRetryError) and isinstance(
+        error.reason, urllib3.exceptions.SSLError
+    ):
+        return False
+    return isinstance(error, _TRANSPORT_ERRORS)
+
 
 def _watch_backoff_delay(failures: int) -> float:
     return batch_utils.backoff_delay(
@@ -114,8 +131,12 @@ class SandboxBatch:
         lease_name = f"{BATCH_LEASE_NAME_PREFIX}{batch_id}"
         label_selector = f"{BATCH_ID_LABEL}={batch_id}"
 
-        lease = client.k8s_helper.read_batch_lease(lease_name, namespace)
-        claim_items, list_rv = client.k8s_helper.list_sandbox_claim_objects(namespace, label_selector)
+        lease = client.k8s_helper.read_batch_lease(
+            lease_name, namespace, _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
+        )
+        claim_items, list_rv = client.k8s_helper.list_sandbox_claim_objects(
+            namespace, label_selector, _request_timeout=batch_utils.BATCH_COLLECTION_REQUEST_TIMEOUT_SECONDS
+        )
 
         if lease is None and not claim_items:
             raise BatchNotFoundError(f"batch '{batch_id}' not found in namespace '{namespace}'")
@@ -154,7 +175,9 @@ class SandboxBatch:
         lease.spec.acquire_time = now
         lease.spec.lease_transitions = (lease.spec.lease_transitions or 0) + 1
         try:
-            client.k8s_helper.replace_batch_lease(lease_name, namespace, lease)
+            client.k8s_helper.replace_batch_lease(
+                lease_name, namespace, lease, _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
+            )
         except ApiException as e:
             if e.status == 409:
                 raise BatchInUseError(
@@ -236,6 +259,7 @@ class SandboxBatch:
 
         Raises:
             ValueError: If ``grace`` is not a valid Lease duration.
+            ApiException: If the Lease release fails (an ``ApiException`` or a transport error).
         """
         if grace is not None:
             batch_utils.validate_lease_duration_value(grace)
@@ -262,7 +286,9 @@ class SandboxBatch:
                     f"during detach: {e}"
                 )
 
-        lease = self._client.k8s_helper.read_batch_lease(self._lease_name, self.namespace)
+        lease = self._client.k8s_helper.read_batch_lease(
+            self._lease_name, self.namespace, _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
+        )
         if lease is not None:
             if lease.spec.holder_identity != self._holder_identity:
                 logging.info(
@@ -277,7 +303,12 @@ class SandboxBatch:
                 lease.spec.lease_duration_seconds = (
                     grace if grace is not None else self._lease_duration
                 )
-                self._client.k8s_helper.replace_batch_lease(self._lease_name, self.namespace, lease)
+                self._client.k8s_helper.replace_batch_lease(
+                    self._lease_name,
+                    self.namespace,
+                    lease,
+                    _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
+                )
 
         with self._lock:
             self._lease_released = True
@@ -306,7 +337,7 @@ class SandboxBatch:
             try:
                 if relist:
                     items, rv = self._client.k8s_helper.list_sandbox_claim_objects(
-                        self.namespace, label_selector
+                        self.namespace, label_selector, _request_timeout=batch_utils.BATCH_COLLECTION_REQUEST_TIMEOUT_SECONDS
                     )
                     if self._watch_stop.is_set():
                         return
@@ -352,16 +383,12 @@ class SandboxBatch:
                 with self._lock:
                     self._state.note_error(e)
                 return
-            except (
-                urllib3.exceptions.ProtocolError,
-                urllib3.exceptions.ReadTimeoutError,
-                ConnectionError,
-            ):
-                # Likely transient network-level failure so retry
-                failures += 1
-                self._watch_stop.wait(_watch_backoff_delay(failures))
-                continue
             except Exception as e:
+                if _is_transport_error(e):
+                    # Likely transient network-level failure so retry
+                    failures += 1
+                    self._watch_stop.wait(_watch_backoff_delay(failures))
+                    continue
                 # Anything else (e.g. an SSL error) is not known to be transient, so surface it
                 # via err() instead of leaving the thread dead with err() still None.
                 if self._watch_stop.is_set():

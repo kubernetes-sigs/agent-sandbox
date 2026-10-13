@@ -110,15 +110,19 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 		// port-forward directly to the pod (validated earlier: GatewayName is
 		// rejected with RuntimeSandboxd).
 		strategy = &podTunnelStrategy{
-			coreClient: k8s.CoreClient,
-			restConfig: k8s.RestConfig,
-			namespace:  opts.Namespace,
-			restPort:   opts.SandboxdRESTPort,
-			grpcPort:   opts.SandboxdGRPCPort,
-			pfTimeout:  opts.PortForwardReadyTimeout,
-			log:        opts.Logger,
-			tracer:     tracer,
-			svcName:    svcName,
+			restPort: opts.SandboxdRESTPort,
+			grpcPort: opts.SandboxdGRPCPort,
+			log:      opts.Logger,
+			tracer:   tracer,
+			svcName:  svcName,
+			tunnel: &portForwardTunnel{
+				name:       "sandboxd pod port-forward",
+				coreClient: k8s.CoreClient,
+				restConfig: k8s.RestConfig,
+				namespace:  opts.Namespace,
+				pfTimeout:  opts.PortForwardReadyTimeout,
+				log:        opts.Logger,
+			},
 		}
 	case opts.GatewayName != "":
 		strategy = &gatewayStrategy{
@@ -133,14 +137,19 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 		}
 	default:
 		strategy = &tunnelStrategy{
-			coreClient:      k8s.CoreClient,
 			discoveryClient: k8s.DiscoveryClient,
-			restConfig:      k8s.RestConfig,
 			namespace:       opts.Namespace,
-			pfTimeout:       opts.PortForwardReadyTimeout,
 			log:             opts.Logger,
 			tracer:          tracer,
 			svcName:         svcName,
+			tunnel: &portForwardTunnel{
+				name:       "port-forward",
+				coreClient: k8s.CoreClient,
+				restConfig: k8s.RestConfig,
+				namespace:  opts.Namespace,
+				pfTimeout:  opts.PortForwardReadyTimeout,
+				log:        opts.Logger,
+			},
 		}
 	}
 
@@ -161,10 +170,11 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 	// Wire strategy connector references for death notifications (and, for
 	// the pod tunnel, gRPC target publication).
 	if ts, ok := strategy.(*tunnelStrategy); ok {
-		ts.connector = conn
+		ts.tunnel.onDied = conn.SetLastError
 	}
 	if pts, ok := strategy.(*podTunnelStrategy); ok {
 		pts.connector = conn
+		pts.tunnel.onDied = conn.SetLastError
 	}
 	if ics, ok := strategy.(*inClusterStrategy); ok {
 		ics.connector = conn

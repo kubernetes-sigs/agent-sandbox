@@ -457,8 +457,12 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		if r.Recorder != nil {
 			r.Recorder.Eventf(warmPool, nil, corev1.EventTypeNormal, "TTLExpired", "TTLExpired", "Deleting SandboxWarmPool because ttlSecondsAfterCreated expired")
 		}
-		if err := r.Delete(ctx, warmPool, client.Preconditions{UID: &warmPool.UID}); err != nil && !k8serrors.IsNotFound(err) && !k8serrors.IsConflict(err) {
-			return ctrl.Result{}, err
+		// A TTL edit on the same object must also invalidate the cached deadline.
+		if err := r.Delete(ctx, warmPool, client.Preconditions{UID: &warmPool.UID, ResourceVersion: &warmPool.ResourceVersion}); err != nil {
+			if k8serrors.IsConflict(err) {
+				return ctrl.Result{RequeueAfter: immediateRequeueDelay}, nil
+			}
+			return ctrl.Result{}, client.IgnoreNotFound(err)
 		}
 		return ctrl.Result{}, nil
 	}

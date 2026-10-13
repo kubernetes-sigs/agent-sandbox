@@ -8710,3 +8710,88 @@ func TestCreateSandboxAlreadyExistsAuthoritativeReadFailure(t *testing.T) {
 	require.NoError(t, reconcileErr, "sentinel should be converted to nil error")
 	require.Equal(t, cacheLagRequeueDelay, result.RequeueAfter, "expected bounded requeue delay when the authoritative read fails")
 }
+
+// TestTTLDeleteRejectsConcurrentChanges pins the API-server preconditions that
+// prevent a cached expiration decision from deleting a replacement or TTL edit.
+func TestTTLDeleteRejectsConcurrentChanges(t *testing.T) {
+	for _, kind := range []string{"pool", "claim-delete", "claim-foreground"} {
+		for _, change := range []string{"replacement", "extend", "remove"} {
+			t.Run(kind+"/"+change, func(t *testing.T) {
+				ctx := context.Background()
+				scheme := newScheme(t)
+				now := time.Now().UTC().Truncate(time.Second)
+				metadata := metav1.ObjectMeta{Name: "ttl-race", Namespace: "default", UID: "original", ResourceVersion: "1", CreationTimestamp: metav1.NewTime(now.Add(-2 * time.Minute))}
+				var obj client.Object
+				if kind == "pool" {
+					obj = &extensionsv1beta1.SandboxWarmPool{ObjectMeta: metadata, Spec: extensionsv1beta1.SandboxWarmPoolSpec{Replicas: new(int32(0)), TTLSecondsAfterCreated: new(int32(60)), TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"}}}
+				} else {
+					policy := extensionsv1beta1.ShutdownPolicyDelete
+					if kind == "claim-foreground" {
+						policy = extensionsv1beta1.ShutdownPolicyDeleteForeground
+					}
+					obj = &extensionsv1beta1.SandboxClaim{ObjectMeta: metadata, Spec: extensionsv1beta1.SandboxClaimSpec{TTLSecondsAfterCreated: new(int32(60)), Lifecycle: &extensionsv1beta1.Lifecycle{ShutdownPolicy: policy}}, Status: extensionsv1beta1.SandboxClaimStatus{Conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: extensionsv1beta1.ClaimExpiredReason}}}}
+				}
+				base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(obj, createTemplate("default")).
+					WithStatusSubresource(&extensionsv1beta1.SandboxClaim{}, &extensionsv1beta1.SandboxWarmPool{}).
+					WithIndex(&sandboxv1beta1.Sandbox{}, sandboxWarmPoolLabelIndex, sandboxWarmPoolLabelIndexer).Build()
+				deleteCalls := 0
+				wrapped := interceptor.NewClient(base, interceptor.Funcs{Delete: func(ctx context.Context, c client.WithWatch, stale client.Object, opts ...client.DeleteOption) error {
+					deleteCalls++
+					options := (&client.DeleteOptions{}).ApplyOptions(opts)
+					require.NotNil(t, options.Preconditions)
+					require.NotNil(t, options.Preconditions.UID)
+					require.NotNil(t, options.Preconditions.ResourceVersion)
+					require.Equal(t, stale.GetUID(), *options.Preconditions.UID)
+					require.Equal(t, stale.GetResourceVersion(), *options.Preconditions.ResourceVersion)
+					if kind == "claim-foreground" {
+						require.Equal(t, metav1.DeletePropagationForeground, *options.PropagationPolicy)
+					}
+					latest := stale.DeepCopyObject().(client.Object)
+					var ttl *int32
+					if change != "remove" {
+						ttl = new(int32(300))
+					}
+					switch latest := latest.(type) {
+					case *extensionsv1beta1.SandboxClaim:
+						latest.Spec.TTLSecondsAfterCreated = ttl
+					case *extensionsv1beta1.SandboxWarmPool:
+						latest.Spec.TTLSecondsAfterCreated = ttl
+					}
+					if change == "replacement" {
+						require.NoError(t, c.Delete(ctx, stale))
+						latest.SetUID("replacement")
+						latest.SetResourceVersion("")
+						require.NoError(t, c.Create(ctx, latest))
+						// The fake client enforces RV but not UID preconditions.
+						return k8errors.NewConflict(schema.GroupResource{Group: extensionsv1beta1.GroupVersion.Group, Resource: "ttl-resource"}, stale.GetName(), errors.New("UID precondition failed"))
+					}
+					require.NoError(t, c.Update(ctx, latest))
+					err := c.Delete(ctx, stale, opts...)
+					require.True(t, k8errors.IsConflict(err), "resource-version precondition must reject the old TTL")
+					return err
+				}})
+				var reconciler reconcile.Reconciler
+				if kind == "pool" {
+					reconciler = &SandboxWarmPoolReconciler{Client: wrapped, Scheme: scheme, now: func() time.Time { return now }}
+				} else {
+					reconciler = &SandboxClaimReconciler{Client: wrapped, Scheme: scheme, Tracer: asmetrics.NewNoOp(), WarmSandboxQueue: queue.NewSimpleSandboxQueue(), DisableObservabilityAnnotations: true}
+				}
+				req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(obj)}
+				result, err := reconciler.Reconcile(ctx, req)
+				require.NoError(t, err)
+				require.Equal(t, immediateRequeueDelay, result.RequeueAfter)
+				require.Equal(t, 1, deleteCalls)
+				latest := obj.DeepCopyObject().(client.Object)
+				require.NoError(t, base.Get(ctx, req.NamespacedName, latest))
+				if change == "replacement" {
+					require.Equal(t, types.UID("replacement"), latest.GetUID())
+				}
+				// The retry must read and recompute against the new configuration.
+				_, err = reconciler.Reconcile(ctx, req)
+				require.NoError(t, err)
+				require.Equal(t, 1, deleteCalls)
+				require.NoError(t, base.Get(ctx, req.NamespacedName, latest))
+			})
+		}
+	}
+}

@@ -376,12 +376,16 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			r.Recorder.Eventf(claim, nil, corev1.EventTypeNormal, extensionsv1beta1.ClaimExpiredReason, "Deleting", fmt.Sprintf("Deleting Claim (ShutdownPolicy=%s)", policy))
 		}
 
-		deleteOpts := []client.DeleteOption{}
+		// Reject stale-cache deletion of a replacement or an edited lifecycle.
+		deleteOpts := []client.DeleteOption{client.Preconditions{UID: &claim.UID, ResourceVersion: &claim.ResourceVersion}}
 		if policy == extensionsv1beta1.ShutdownPolicyDeleteForeground {
 			deleteOpts = append(deleteOpts, client.PropagationPolicy(metav1.DeletePropagationForeground))
 		}
 
 		if err := r.Delete(ctx, claim, deleteOpts...); err != nil {
+			if k8errors.IsConflict(err) {
+				return ctrl.Result{RequeueAfter: immediateRequeueDelay}, nil
+			}
 			return ctrl.Result{}, client.IgnoreNotFound(err)
 		}
 		return ctrl.Result{}, nil

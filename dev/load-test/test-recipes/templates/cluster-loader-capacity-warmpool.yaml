@@ -1,0 +1,12 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: {{.Name}}
+  labels:
+    benchmark-run: "{{.RunID}}"
+spec:
+  replicas: {{.Replicas}}
+  sandboxTemplateRef:
+    name: capacity-template-0
+  updateStrategy:
+    type: Recreate

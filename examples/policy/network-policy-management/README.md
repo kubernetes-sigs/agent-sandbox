@@ -237,12 +237,12 @@ spec:
 ```
 
 
-**Example 4: In-cluster Services with Cluster DNS**
+**Example 4: In-cluster Service by DNS name**
 
-Agents often need a service that runs in the same cluster, such as a memory store, a model gateway, or a tool server, and they should reach it by its Service name (`memory-service.memory.svc.cluster.local`) rather than by a hard-coded IP. The Secure-by-Default posture cannot do this: it sends DNS to public resolvers, which cannot answer `*.svc.cluster.local` names, and it blocks the private ranges where the Service runs. A custom policy fixes both, with two details to get right:
+This template lets a sandbox call `memory-service` in the `memory` namespace by name. The Service listens on port 80 and forwards to container port 8080. The Secure-by-Default policy blocks this in two ways:
 
-1. **Use cluster DNS, and say so.** With custom rules the controller no longer overrides DNS, so the pod falls back to the Kubernetes default, `ClusterFirst`. Set `dnsPolicy: ClusterFirst` explicitly anyway. It documents the dependency, and it keeps Service names resolving if someone later removes the custom `networkPolicy` and the template returns to Secure-by-Default, because the controller only overrides DNS when `dnsPolicy` is unset.
-2. **Cluster DNS and the Service live in private address space.** CoreDNS and most pod and Service IPs fall inside the RFC1918 ranges that the public egress rule excludes, so both need their own egress rules. Select them by label rather than by IP: NetworkPolicy matches the destination pod, so a selector keeps working when pods are rescheduled or the Service IP changes.
+- It points the pod at 8.8.8.8 and 1.1.1.1, which return NXDOMAIN for `memory-service.memory.svc.cluster.local`.
+- It blocks egress to `10.0.0.0/8`, `172.16.0.0/12` and `192.168.0.0/16`, where CoreDNS and the `memory-service` pods have their IPs.
 
 ```yaml
 apiVersion: extensions.agents.x-k8s.io/v1beta1
@@ -262,7 +262,7 @@ spec:
             matchLabels:
               app: sandbox-router
     egress:
-      # 1. Allow DNS queries to cluster DNS (CoreDNS keeps the kube-dns label)
+      # 1. DNS to CoreDNS
       - to:
         - namespaceSelector:
             matchLabels:
@@ -276,8 +276,7 @@ spec:
           - protocol: TCP
             port: 53
 
-      # 2. Allow the in-cluster service's pods, selected by namespace and pod label.
-      #    The port is the container's port (targetPort), not the Service port.
+      # 2. The memory-service pods, on the container port (8080), not the Service port (80)
       - to:
         - namespaceSelector:
             matchLabels:
@@ -289,7 +288,7 @@ spec:
           - protocol: TCP
             port: 8080
 
-      # 3. Keep public internet access, blocking other private networks and the metadata server
+      # 3. Public internet, same excepts as the secure default
       - to:
         - ipBlock:
             cidr: 0.0.0.0/0
@@ -306,20 +305,25 @@ spec:
 
   podTemplate:
     spec:
-      # Cluster DNS resolves Service names such as memory-service.memory.svc.cluster.local.
-      # Setting it explicitly also stops the Secure-by-Default DNS override from applying
-      # if the custom networkPolicy above is ever removed.
       dnsPolicy: ClusterFirst
       # ... rest of the pod template spec (containers, volumes, etc.)
 ```
 
-- Selector, not IP: rule 2 admits only the `memory-service` pods in the `memory` namespace. Every other workload in the cluster stays blocked by the RFC1918 excepts in rule 3.
+- `dnsPolicy: ClusterFirst`: with a custom `networkPolicy` the controller does not override DNS, and `ClusterFirst` is the Kubernetes default. Set it anyway. If someone later deletes the `networkPolicy` block, the controller switches to public resolvers only when `dnsPolicy` is empty, so this line keeps Service names resolving.
 
-- Pod port: NetworkPolicy is evaluated after the Service is translated to a pod address, so list the port the container listens on. If the Service maps `80` to `8080`, the rule needs `8080`.
+- Port 8080 in rule 2: the CNI checks egress after the Service IP is translated to a pod IP, so the rule needs the container port. Port 80 here would block every request.
 
-- NodeLocal DNSCache: if your cluster runs it, pods send DNS to a link-local address (commonly `169.254.20.10`) instead of to CoreDNS pods. Add an `ipBlock` rule for that address on port 53, since rule 1 does not match it.
+- Selectors instead of IPs: rule 2 keeps matching when `memory-service` pods are rescheduled. Every other pod in the cluster is still blocked by the excepts in rule 3.
 
-- Verify from inside a sandbox: `getent hosts memory-service.memory.svc.cluster.local` should return the Service IP, and a request to the Service should succeed while a request to any other Service in the cluster times out.
+- NodeLocal DNSCache: pods send DNS to `169.254.20.10` instead of to CoreDNS, so rule 1 does not match. Add an `ipBlock` rule for `169.254.20.10/32` on port 53.
+
+To check from inside a sandbox:
+
+```bash
+getent hosts memory-service.memory.svc.cluster.local   # prints the ClusterIP
+curl -sS -m 5 http://memory-service.memory/            # gets a response
+curl -sS -m 5 http://<other-service>.<namespace>/      # times out
+```
 
 
 

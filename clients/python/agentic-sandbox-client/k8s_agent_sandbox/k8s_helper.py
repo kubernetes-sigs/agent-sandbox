@@ -50,26 +50,60 @@ from .constants import (
 logger = logging.getLogger(__name__)
 
 
+class _UnretriedApiClient(client.ApiClient):
+    """Wraps ``source`` with its own ``rest_client`` where ``configuration.retries`` is ``False``,
+    so batch Lease callers run their own deadline- and conflict-aware retry logic without disabling
+    retries on ``source``.
+
+    ``ApiClient.__init__`` builds ``rest_client`` from ``configuration.retries`` at construction
+    time, so Lease requests need a separate ``ApiClient`` rather than mutating ``source``. Copying
+    ``default_headers`` and ``cookie`` once at construction would miss later ``set_default_header``
+    calls or ``cookie`` updates on ``source``, so properties read them from ``source`` on each
+    request.
+    """
+
+    def __init__(self, source: client.ApiClient) -> None:
+        # ApiClient.__init__ assigns default_headers and cookie before __init__ sets _source.
+        self._source: client.ApiClient | None = None
+        self._default_headers: dict[Any, Any] = {}
+        self._cookie: Any = None
+        # A shallow copy shares the credential dicts, so a token the caller rotates in place on the
+        # injected configuration also reaches Lease requests, while only the copy disables retries.
+        configuration = copy.copy(source.configuration)
+        configuration.retries = False
+        super().__init__(configuration=configuration)
+        self._source = source
+
+    @property
+    def default_headers(self) -> dict[Any, Any]:
+        return self._source.default_headers if self._source is not None else self._default_headers
+
+    @default_headers.setter
+    def default_headers(self, value: dict[Any, Any]) -> None:
+        self._default_headers = value
+
+    @property
+    def cookie(self) -> Any:
+        return self._source.cookie if self._source is not None else self._cookie
+
+    @cookie.setter
+    def cookie(self, value: Any) -> None:
+        self._cookie = value
+
+
 def _api_client_without_retries(api_client: client.ApiClient | None) -> client.ApiClient:
-    """Returns an ``ApiClient`` like ``api_client`` (or the default one) whose requests urllib3 doesn't retry.
+    """Returns an ``ApiClient`` like ``api_client`` (or the default one) whose requests urllib3 doesn't retry,
+    so batch Lease callers can run their own deadline- and conflict-aware retry logic.
 
     urllib3 retries a timed-out request with a fresh timeout, which would stretch a Lease renewal
     past the Lease's expiry, and a retried Lease write that already landed comes back as a conflict.
     The async helper needs no counterpart, since aiohttp doesn't retry requests.
     """
-    if api_client is None:
-        configuration = client.Configuration.get_default_copy()
-    else:
-        # A shallow copy shares the credential dicts, so a token the caller rotates in place on the
-        # injected configuration also reaches Lease requests, while retries is set on the copy only.
-        configuration = copy.copy(api_client.configuration)
-    configuration.retries = False
-    no_retries = client.ApiClient(configuration=configuration)
     if api_client is not None:
-        no_retries.cookie = api_client.cookie
-        for name, value in dict(api_client.default_headers).items():
-            no_retries.set_default_header(name, value)
-    return no_retries
+        return _UnretriedApiClient(api_client)
+    configuration = client.Configuration.get_default_copy()
+    configuration.retries = False
+    return client.ApiClient(configuration=configuration)
 
 
 class K8sHelper:
@@ -392,7 +426,7 @@ class K8sHelper:
 
     def delete_sandbox_claim(
         self, name: str, namespace: str, _request_timeout: float | tuple[float, float] | None = None,
-        *, expected_uid: str | None = None,
+        *, expected_uid: str | None = None, log_level: int = logging.INFO,
     ) -> None:
         """Deletes a SandboxClaim custom resource.
 
@@ -400,6 +434,7 @@ class K8sHelper:
             _request_timeout: Optional timeout (seconds, or a ``(connect, read)``
                 pair) forwarded to the underlying urllib3-based request.
             expected_uid: If provided, delete only the Claim with this UID.
+            log_level: Log level for the logger during this function call.
         """
         delete_kwargs: dict[str, Any] = {}
         if expected_uid is not None:
@@ -416,7 +451,7 @@ class K8sHelper:
                 _request_timeout=_request_timeout,
                 **delete_kwargs,
             )
-            logger.info(f"Terminated SandboxClaim: {name}")
+            logger.log(log_level, f"Terminated SandboxClaim: {name}")
         except client.ApiException as e:
             if e.status != 404:
                 logger.error(f"Error terminating SandboxClaim {name}: {e}")

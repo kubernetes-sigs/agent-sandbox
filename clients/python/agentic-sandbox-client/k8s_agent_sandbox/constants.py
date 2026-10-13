@@ -63,6 +63,9 @@ TERMINAL_CLAIM_READY_REASONS = frozenset({
 BATCH_ID_LABEL = "agents.x-k8s.io/batch-id"
 BATCH_GROUP_SIZE_ANNOTATION = "agents.x-k8s.io/batch-group-size"
 BATCH_GROUP_MIN_READY_ANNOTATION = "agents.x-k8s.io/batch-group-min-ready"
+# Set on each fill claim to a hash of its pool name, since pool names can be longer than the
+# 63-character limit on label values. release_group deletes a group by this label.
+BATCH_GROUP_LABEL = "agents.x-k8s.io/batch-group"
 BATCH_LEASE_NAME_PREFIX = "batch-"
 # The batch's own Lease duration. After detach(grace), the Lease's leaseDurationSeconds holds
 # the grace instead, so get_batch reads this to restore the original on takeover.

@@ -98,8 +98,8 @@ metadata:
   name: recall
   namespace: recall
 ---
-# TokenReview to check a pod's token. get on pods, sandboxes and
-# sandboxclaims to follow the owner references from the pod to its claim.
+# TokenReview to check a pod's token. It is cluster-scoped, so it needs a
+# ClusterRole.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -108,6 +108,29 @@ rules:
   - apiGroups: [authentication.k8s.io]
     resources: [tokenreviews]
     verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: recall-token-exchange
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: recall-token-exchange
+subjects:
+  - kind: ServiceAccount
+    name: recall
+    namespace: recall
+---
+# get on pods, sandboxes and sandboxclaims to follow the owner references
+# from the pod to its claim, only in the agents namespace. Add the same Role
+# and RoleBinding to each namespace that runs sandboxes.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: recall-owner-lookup
+  namespace: agents
+rules:
   - apiGroups: [""]
     resources: [pods]
     verbs: [get]
@@ -119,13 +142,14 @@ rules:
     verbs: [get]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
-  name: recall-token-exchange
+  name: recall-owner-lookup
+  namespace: agents
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: recall-token-exchange
+  kind: Role
+  name: recall-owner-lookup
 subjects:
   - kind: ServiceAccount
     name: recall

@@ -105,7 +105,12 @@ warm="$(${KUBECTL} -n agents get sandbox --no-headers -o custom-columns=NAME:.me
 echo "warm pod: ${warm}"
 in_pod "${warm}" <<'EOF'
 [ -z "$KEY" ] || fail "a warm-pool sandbox got a key for $AGENT"
-echo "no key: $(echo "$ANSWER" | field message)"
+# Assert the refusal itself, so a failed request does not pass as one.
+ANSWER="$(curl -sS -w '\n%{http_code}' -H "Content-Type: application/json" -d "{\"token\":\"$(cat "$RECALL_TOKEN_FILE")\"}" "$RECALL_URL/v1/auth/kubernetes")" || fail "the exchange request failed"
+code="$(echo "$ANSWER" | tail -1)"
+[ "$code" = 401 ] || fail "exchange answered HTTP $code, want 401"
+echo "$ANSWER" | grep -q "still in warm pool" || fail "exchange refused for another reason: $(echo "$ANSWER" | field message)"
+echo "no key: HTTP $code, $(echo "$ANSWER" | field message)"
 EOF
 
 step "2. claim run-1, write memory and working state"

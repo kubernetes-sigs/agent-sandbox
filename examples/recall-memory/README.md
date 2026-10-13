@@ -6,7 +6,7 @@ The memory server is [Recall](https://github.com/Polign/recall) (Apache-2.0) on 
 
 ## The token exchange
 
-The sandbox pod carries one a projected service account token with audience `recall`. The service account does not mount a default token.
+The sandbox pod carries one projected service account token with audience `recall`. The service account does not mount a default token.
 
 ```yaml
 volumes:
@@ -29,7 +29,7 @@ When the key expires, the agent exchanges its token again. A key copied out of a
 
 ## Identity from the SandboxClaim
 
-A pod handed out by a warm pool has a generated name like `recall-agents-x7k2q` which changes every time, so we cannot use it for agent's identity. The claim's name however last across pod creation. The controllers already record the chain as controller owner reference.
+A pod handed out by a warm pool has a generated name like `recall-agents-x7k2q` which changes every time, so we cannot use it for agent's identity. The claim's name however lasts across pod creation. The controllers already record the chain as controller owner reference.
 
 ```
 Pod recall-agents-x7k2q
@@ -45,13 +45,19 @@ The server reads the pod, then the Sandbox, then the SandboxClaim, and uses `run
 | a `SandboxWarmPool` | none: refused until the sandbox is claimed |
 | nothing (a `Sandbox` created directly) | the pod's name |
 
-The RBAC for this is read-only, plus TokenReview:
+The RBAC for this is TokenReview, which is cluster-scoped and needs a ClusterRole:
 
 ```yaml
 rules:
   - apiGroups: [authentication.k8s.io]
     resources: [tokenreviews]
     verbs: [create]
+```
+
+plus read-only access to the owner chain, as a Role and RoleBinding in the namespace that runs the sandboxes (`agents`), so the server can read nothing outside it:
+
+```yaml
+rules:
   - apiGroups: [""]
     resources: [pods]
     verbs: [get]
@@ -65,7 +71,7 @@ rules:
 
 ## Network policy
 
-A template with no `networkPolicy` gets the Secure-by-Default policy including public egress only, and public DNS resolvers. The sandbox could not resolve or reach an in-cluster memory server. `sandboxtemplate.yaml` allows egress to cluster DNS, to the `recall` pods on port 8080, and to the public internet. Every other pod stay out of reach. (verified in `run-kind.sh`)
+A template with no `networkPolicy` gets the Secure-by-Default policy including public egress only, and public DNS resolvers. The sandbox could not resolve or reach an in-cluster memory server. `sandboxtemplate.yaml` allows egress to cluster DNS, to the `recall` pods on port 8080, and to the public internet. Every other pod stays out of reach. (verified in `run-kind.sh`)
 
 ## Prerequisites
 
@@ -84,7 +90,7 @@ kind's default network plugin enforces NetworkPolicy, so the policy is real on a
 
 The script creates a kind cluster named `recall-memory` (or reuses it), installs agent-sandbox v1.0.6, applies the files below, and checks from inside the sandboxes.
 
-1. A sandbox still in the warm pool is refused a key. It only gets the key when claim `run-1` takes that same pod.
+1. A sandbox still in the warm pool is refused a key (HTTP 401, "still in warm pool"). It only gets the key when claim `run-1` takes that same pod.
 2. Claim `run-1` gets a key for `agents:run-1`, remembers a preference twice, and saves working state.
 3. The claim is deleted and created again. The new pod gets a key for `agents:run-1` and resumes with the saved working state.
 4. Claim `run-2` cannot read `agents:run-1` (HTTP 403) or resume `run-1`. It errors out with `namespace_mismatch`.
@@ -117,7 +123,7 @@ curl -sS -H 'Content-Type: application/json' \
 | --- | --- |
 | `namespace.yaml` | Namespaces `agents` (the sandboxes) and `recall` (the server). |
 | `serviceaccount.yaml` | The `runner` service account, with no default token. |
-| `recall-server.yaml` | polign_db, `recall serve`, their Services, and the ClusterRole above. |
+| `recall-server.yaml` | polign_db, `recall serve`, their Services, and the RBAC above. |
 | `sandboxtemplate.yaml` | The projected token, `dnsPolicy: ClusterFirst`, and the network policy. |
 | `sandboxwarmpool.yaml` | Two warm sandboxes. |
 | `sandboxclaim.yaml` | Claim `run-1`. |
@@ -149,7 +155,7 @@ One recall call took 2.5 s in one run, right after the first writes. It did not 
 
 - **Key TTL.** `-kubernetes-key-ttl` is set to 15 minutes. For less exposure, this can be shortened.
 - **Audience.** The server only accepts tokens minted for audience `recall`. A token for the API server cannot be replayed against it, and a `recall` token is useless against the API server.
-- **Narrow the RBAC per tenant.** TokenReview needs a ClusterRoleBinding. The `get` on pods, sandboxes and sandboxclaims does not: bind those with a RoleBinding in each tenant namespace instead, so the server can read nothing outside them.
+- **One Role per tenant namespace.** The `get` on pods, sandboxes and sandboxclaims is bound only in `agents`. Each namespace that runs sandboxes needs its own copy of the `recall-owner-lookup` Role and RoleBinding. Never widen it to a ClusterRole.
 - **Fence the store.** The sandbox's egress policy already keeps it away from polign_db. An ingress policy on polign_db that admits only the `recall` pods adds a second wall for everything else in the cluster.
 - **Pin by digest.** The manifests pin tags. Pin digests in production.
 

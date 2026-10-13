@@ -214,12 +214,33 @@ class TestReconstructGroups(unittest.TestCase):
                 },
             ),
         ]
-        groups = batch_state.reconstruct_groups(items)
+        groups = batch_state.reconstruct_groups("b1", items)
         self.assertEqual(groups, [BatchGroup(warmpool="pool-a", size=3, min_ready=2)])
+
+    def test_groups_come_back_in_ordinal_order(self):
+        items = [
+            _claim("b1-2", warmpool="pool-a"),
+            _claim("b1-1", warmpool="pool-z"),
+            _claim("b1-0", warmpool="pool-z"),
+        ]
+        groups = batch_state.reconstruct_groups("b1", items)
+        self.assertEqual([g.warmpool for g in groups], ["pool-z", "pool-a"])
+
+    def test_claims_without_an_ordinal_sort_last_in_groups_and_members(self):
+        items = [
+            _claim("other", warmpool="pool-x"),
+            _claim("b1-1", warmpool="pool-a"),
+            _claim("b1-0", warmpool="pool-z"),
+        ]
+        groups = batch_state.reconstruct_groups("b1", items)
+        self.assertEqual([g.warmpool for g in groups], ["pool-z", "pool-a", "pool-x"])
+        state = batch_state.BatchState("b1", groups)
+        state.seed_from_claims(items)
+        self.assertEqual([m.claim_name for m in state.members()], ["b1-0", "b1-1", "other"])
 
     def test_unannotated_pool_becomes_size_zero(self):
         items = [_claim("b1-0", warmpool="pool-b")]
-        groups = batch_state.reconstruct_groups(items)
+        groups = batch_state.reconstruct_groups("b1", items)
         self.assertEqual(groups, [BatchGroup(warmpool="pool-b", size=0, min_ready=0)])
 
     def test_conflicting_annotations_raise(self):
@@ -240,12 +261,12 @@ class TestReconstructGroups(unittest.TestCase):
             ),
         ]
         with self.assertRaises(BatchError):
-            batch_state.reconstruct_groups(items)
+            batch_state.reconstruct_groups("b1", items)
 
     def test_partial_annotations_raise(self):
         items = [_claim("b1-0", annotations={"agents.x-k8s.io/batch-group-size": "3"})]
         with self.assertRaises(BatchError):
-            batch_state.reconstruct_groups(items)
+            batch_state.reconstruct_groups("b1", items)
 
     def test_invalid_annotation_values_raise_batch_error(self):
         for size, min_ready in (("2", "5"), ("x", "1"), ("-1", "0")):
@@ -260,7 +281,7 @@ class TestReconstructGroups(unittest.TestCase):
                     ),
                 ]
                 with self.assertRaises(BatchError):
-                    batch_state.reconstruct_groups(items)
+                    batch_state.reconstruct_groups("b1", items)
 
 
 class TestSnapshots(unittest.TestCase):

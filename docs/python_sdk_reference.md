@@ -724,6 +724,19 @@ def err() -> Exception | None
 Returns the error that stopped the batch's watch or background
 Lease renewal (e.g., ``BatchLeaseExpiredError``), or ``None`` while healthy.
 
+<a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.lease_degraded"></a>
+
+##### lease\_degraded
+
+```python
+def lease_degraded() -> bool
+```
+
+Returns whether background Lease renewal is failing.
+
+``True`` from the first failed renewal until a renewal succeeds. It stays ``True`` once
+renewal stops on an error, such as the Lease expiring, so it can be polled at any time.
+
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.detach"></a>
 
 ##### detach

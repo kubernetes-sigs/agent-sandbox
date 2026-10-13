@@ -403,6 +403,33 @@ class TestLeaseTakeoverWrites(BaseAsyncBatchClientTest):
         )
 
 
+@patch.object(AsyncSandboxBatch, "_start", lambda self: None)
+class TestRequestTimeouts(BaseAsyncBatchClientTest):
+
+    async def test_get_batch_relist_and_detach_requests_carry_request_timeouts(self):
+        helper = self.mock_k8s_helper
+        helper.read_batch_lease = AsyncMock(return_value=_lease(renew_time=datetime.now(UTC)))
+        helper.list_sandbox_claim_objects = AsyncMock(return_value=([_claim("b1-0")], "5"))
+        helper.replace_batch_lease = AsyncMock()
+        handle = await self.client.get_batch("b1")
+        self.assertEqual(helper.read_batch_lease.call_args.kwargs["_request_timeout"], 30)
+        self.assertEqual(helper.list_sandbox_claim_objects.call_args.kwargs["_request_timeout"], 90)
+        self.assertEqual(helper.replace_batch_lease.call_args.kwargs["_request_timeout"], 30)
+
+        helper.list_sandbox_claim_objects.reset_mock()
+        helper.watch_sandbox_claims = MagicMock(
+            side_effect=[k8s_client.ApiException(status=410), k8s_client.ApiException(status=403)]
+        )
+        await handle._watch_loop()
+        self.assertEqual(helper.list_sandbox_claim_objects.call_args.kwargs["_request_timeout"], 90)
+
+        helper.read_batch_lease = AsyncMock(return_value=_lease(holder_identity=handle._holder_identity))
+        helper.replace_batch_lease = AsyncMock()
+        await handle.detach()
+        self.assertEqual(helper.read_batch_lease.call_args.kwargs["_request_timeout"], 30)
+        self.assertEqual(helper.replace_batch_lease.call_args.kwargs["_request_timeout"], 30)
+
+
 class TestWatcher(BaseAsyncBatchClientTest):
 
     @staticmethod
@@ -537,6 +564,19 @@ class TestWatcher(BaseAsyncBatchClientTest):
         )
         await handle._watch_loop()
         self.assertIsInstance(handle.err(), aiohttp.ClientSSLError)
+
+    async def test_client_timeout_retries_from_last_resource_version(self):
+        handle = _make_handle(self.client)
+        self.mock_k8s_helper.watch_sandbox_claims = MagicMock(
+            side_effect=[TimeoutError(), _agen_then_raise([], asyncio.CancelledError())]
+        )
+        with patch("k8s_agent_sandbox.async_sandbox_batch._watch_backoff_delay", return_value=0):
+            with self.assertRaises(asyncio.CancelledError):
+                await handle._watch_loop()
+        self.assertIsNone(handle.err())
+        calls = self.mock_k8s_helper.watch_sandbox_claims.call_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1].args[2], "5")
 
     async def test_unexpected_error_surfaces_through_err_and_stops(self):
         handle = _make_handle(self.client)

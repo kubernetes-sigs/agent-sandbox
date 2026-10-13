@@ -325,6 +325,34 @@ def _make_handle(
     )
 
 
+@patch.object(SandboxBatch, "_start", lambda self: None)
+class TestRequestTimeouts(BaseBatchClientTest):
+
+    def test_get_batch_relist_and_detach_requests_carry_request_timeouts(self):
+        helper = self.mock_k8s_helper
+        helper.read_batch_lease.return_value = _lease(renew_time=datetime.now(UTC))
+        helper.list_sandbox_claim_objects.return_value = ([_claim("b1-0")], "5")
+        handle = self.client.get_batch("b1")
+        self.assertEqual(helper.read_batch_lease.call_args.kwargs["_request_timeout"], 30)
+        self.assertEqual(helper.list_sandbox_claim_objects.call_args.kwargs["_request_timeout"], 90)
+        self.assertEqual(helper.replace_batch_lease.call_args.kwargs["_request_timeout"], 30)
+
+        helper.list_sandbox_claim_objects.reset_mock()
+        helper.watch_sandbox_claims.side_effect = [
+            k8s_client.ApiException(status=410),
+            k8s_client.ApiException(status=403),
+        ]
+        handle._watch_loop()
+        self.assertEqual(helper.list_sandbox_claim_objects.call_args.kwargs["_request_timeout"], 90)
+
+        helper.read_batch_lease.reset_mock()
+        helper.replace_batch_lease.reset_mock()
+        helper.read_batch_lease.return_value = _lease(holder_identity=handle._holder_identity)
+        handle.detach()
+        self.assertEqual(helper.read_batch_lease.call_args.kwargs["_request_timeout"], 30)
+        self.assertEqual(helper.replace_batch_lease.call_args.kwargs["_request_timeout"], 30)
+
+
 class TestWatcher(BaseBatchClientTest):
 
     def _terminating_error(self, status=403):
@@ -477,6 +505,18 @@ class TestWatcher(BaseBatchClientTest):
         ]
         handle._watch_loop()
         self.assertIsInstance(handle.err(), urllib3.exceptions.SSLError)
+
+    def test_connection_failure_retries_unless_caused_by_ssl(self):
+        refused = urllib3.exceptions.NewConnectionError(None, "refused")
+        handle = _make_handle(self.client)
+        self.mock_k8s_helper.watch_sandbox_claims.side_effect = [
+            urllib3.exceptions.MaxRetryError(None, "/", reason=refused),
+            urllib3.exceptions.MaxRetryError(None, "/", reason=urllib3.exceptions.SSLError("boom")),
+        ]
+        with patch("k8s_agent_sandbox.sandbox_batch._watch_backoff_delay", return_value=0):
+            handle._watch_loop()
+        self.assertEqual(self.mock_k8s_helper.watch_sandbox_claims.call_count, 2)
+        self.assertIsInstance(handle.err().reason, urllib3.exceptions.SSLError)
 
     def test_unexpected_error_surfaces_through_err_and_stops(self):
         handle = _make_handle(self.client)

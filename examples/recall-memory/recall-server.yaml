@@ -1,0 +1,203 @@
+# The memory server and its store, in the recall namespace.
+#
+# recall serve takes a pod's projected token, checks it with TokenReview,
+# follows pod -> Sandbox -> SandboxClaim, and mints a 15 minute key for
+# agents:<claim name>. polign_db stores the records on a local volume here.
+# On a real cluster point it at a bucket.
+#
+# run-kind.sh creates the polign-key Secret before applying this file.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: polign-db
+  namespace: recall
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: polign-db
+  namespace: recall
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: polign-db
+  template:
+    metadata:
+      labels:
+        app: polign-db
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: polign-db
+          image: ghcr.io/polign/polign-server:0.14.0
+          args:
+            - -store=fs:/var/lib/polign
+            - -http=:23000
+            - -telemetry=false
+            - -bootstrap-key-file=/auth/api-key
+          ports:
+            - name: http
+              containerPort: 23000
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/polign}
+            - {name: cache, mountPath: /cache}
+            - {name: tmp, mountPath: /tmp}
+            - {name: key, mountPath: /auth, readOnly: true}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: polign-db
+        - name: cache
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: key
+          secret:
+            secretName: polign-key
+            defaultMode: 0400
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: polign-db
+  namespace: recall
+spec:
+  selector:
+    app: polign-db
+  ports:
+    - name: http
+      port: 23000
+      targetPort: http
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: recall
+  namespace: recall
+---
+# TokenReview to check a pod's token. get on pods, sandboxes and
+# sandboxclaims to follow the owner references from the pod to its claim.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: recall-token-exchange
+rules:
+  - apiGroups: [authentication.k8s.io]
+    resources: [tokenreviews]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get]
+  - apiGroups: [agents.x-k8s.io]
+    resources: [sandboxes]
+    verbs: [get]
+  - apiGroups: [extensions.agents.x-k8s.io]
+    resources: [sandboxclaims]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: recall-token-exchange
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: recall-token-exchange
+subjects:
+  - kind: ServiceAccount
+    name: recall
+    namespace: recall
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: recall
+  namespace: recall
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: recall
+  template:
+    metadata:
+      labels:
+        app: recall
+    spec:
+      serviceAccountName: recall
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: recall
+          image: ghcr.io/polign/recall:0.17.0
+          args:
+            - -backend=polign
+            - -url=http://polign-db.recall.svc:23000
+            - serve
+            - -listen=:8080
+            - -agent=true
+            - -kubernetes
+            - -kubernetes-audience=recall
+            - -kubernetes-key-ttl=15m
+            - -kubernetes-sandbox-claims
+          env:
+            - name: POLIGN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: polign-key
+                  key: api-key
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: recall
+  namespace: recall
+spec:
+  selector:
+    app: recall
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

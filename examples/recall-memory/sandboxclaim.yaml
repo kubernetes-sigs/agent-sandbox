@@ -1,0 +1,10 @@
+# The claim's name is the agent's name. Delete the claim and create it again
+# under the same name, and the new pod gets the same memory.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: run-1
+  namespace: agents
+spec:
+  warmPoolRef:
+    name: recall-agents

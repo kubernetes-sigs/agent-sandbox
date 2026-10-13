@@ -1,0 +1,11 @@
+# agents holds the sandboxes. The namespace name is the tenant, so every
+# sandbox here gets memory under agents claim name.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agents
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: recall

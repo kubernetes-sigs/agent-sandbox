@@ -19,10 +19,11 @@ import pytest
 
 pytest.importorskip("kubernetes_asyncio")
 
+import aiohttp
 from kubernetes_asyncio import client
 
 from k8s_agent_sandbox.async_k8s_helper import AsyncK8sHelper
-from k8s_agent_sandbox.exceptions import SandboxMetadataError, SandboxTemplateNotFoundError
+from k8s_agent_sandbox.exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxTemplateNotFoundError
 from k8s_agent_sandbox.constants import CLIENT_REQUEST_TIME_ANNOTATION
 
 
@@ -253,6 +254,38 @@ class TestAsyncK8sHelperResolveSandboxName(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(name, "cold-sandbox-1")
 
     @patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch")
+    async def test_async_wait_for_claim_ready_invalid_configuration_fails_fast(self, mock_watch_class):
+        """InvalidConfiguration (forwarded from the Sandbox) fails fast too."""
+        mock_watch = MagicMock()
+        mock_watch.close = AsyncMock()
+        mock_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-claim"},
+                "status": {
+                    "conditions": [
+                        {
+                            "type": "Ready",
+                            "status": "False",
+                            "reason": "InvalidConfiguration",
+                            "message": "Service 'test-claim' is invalid: must be no more than 63 characters",
+                        }
+                    ]
+                },
+            },
+        }
+
+        async def mock_stream(*args, **kwargs):
+            yield mock_event
+
+        mock_watch.stream = mock_stream
+        mock_watch_class.return_value = mock_watch
+
+        with self.assertRaises(SandboxClaimFailedError) as context:
+            await self.helper.wait_for_claim_ready("test-claim", "default", timeout=5)
+        self.assertIn("InvalidConfiguration", str(context.exception))
+
+    @patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch")
     async def test_async_watch_resource_version_passthrough(self, mock_watch_class):
         """The ready-wait watch starts from the supplied resourceVersion
         ("0" by default) so it never forces a quorum etcd read."""
@@ -320,6 +353,63 @@ class TestAsyncK8sHelperResolveSandboxName(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(name, "warm-sandbox-1")
         self.assertEqual(stream_rvs, ["12345", "0"])
 
+    @patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch")
+    async def test_async_watch_transient_disconnect_resumes_from_tracked_resource_version(self, mock_watch_class):
+        """A transient network disconnect (aiohttp.ClientError) resumes from the tracked
+        resourceVersion instead of resetting to '0'."""
+        mock_watch = MagicMock()
+        mock_watch.close = AsyncMock()
+        first_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-claim", "resourceVersion": "5555"},
+                "status": {"conditions": []},
+            },
+        }
+        ready_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-claim", "resourceVersion": "7777"},
+                "status": {
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                    "sandbox": {"name": "warm-sandbox-1"},
+                },
+            },
+        }
+
+        stream_rvs = []
+
+        async def mock_stream(*args, **kwargs):
+            stream_rvs.append(kwargs.get("resource_version"))
+            if len(stream_rvs) == 1:
+                yield first_event
+                raise aiohttp.ClientConnectionError("Connection reset by peer")
+            yield ready_event
+
+        mock_watch.stream = mock_stream
+        mock_watch_class.return_value = mock_watch
+
+        name = await self.helper.wait_for_claim_ready(
+            "test-claim", "default", timeout=5, resource_version="12345")
+        self.assertEqual(name, "warm-sandbox-1")
+        self.assertEqual(stream_rvs, ["12345", "5555"])
+
+    @patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch")
+    async def test_async_watch_non_transient_network_exception_reraises(self, mock_watch_class):
+        """Non-transient exceptions (such as ClientSSLError) must not be caught and retried."""
+        mock_watch = MagicMock()
+        mock_watch.close = AsyncMock()
+
+        async def mock_stream(*args, **kwargs):
+            raise aiohttp.ClientSSLError(MagicMock(), OSError("certificate verify failed"))
+            yield  # make this an async generator
+
+        mock_watch.stream = mock_stream
+        mock_watch_class.return_value = mock_watch
+
+        with self.assertRaises(aiohttp.ClientSSLError):
+            await self.helper.wait_for_claim_ready("test-claim", "default", timeout=5)
+
 
 class TestAsyncK8sHelperWaitForSandboxReady(unittest.IsolatedAsyncioTestCase):
 
@@ -370,6 +460,40 @@ class TestAsyncK8sHelperWaitForSandboxReady(unittest.IsolatedAsyncioTestCase):
             result = await self.helper.wait_for_sandbox_ready("my-sandbox", "default", timeout=10)
 
         self.assertIsNone(result)
+
+    async def test_wait_for_sandbox_ready_transient_disconnect_reconnects(self):
+        """wait_for_sandbox_ready reconnects upon transient aiohttp.ClientError."""
+        ready_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "my-sandbox"},
+                "status": {
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                    "podIPs": ["10.244.0.5"],
+                },
+            },
+        }
+
+        call_count = 0
+
+        async def _async_gen(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise aiohttp.ClientConnectionError("Connection lost")
+            yield ready_event
+
+        with patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch") as MockWatch:
+            mock_watch = MagicMock()
+            mock_watch.stream = _async_gen
+            mock_watch.close = AsyncMock()
+            MockWatch.return_value = mock_watch
+
+            result = await self.helper.wait_for_sandbox_ready("my-sandbox", "default", timeout=10)
+
+        self.assertEqual(result, "10.244.0.5")
+        self.assertEqual(call_count, 2)
+
 
 class TestAsyncK8sHelperDeleteSandboxClaim(unittest.IsolatedAsyncioTestCase):
 
@@ -790,6 +914,67 @@ class TestAsyncK8sHelperWaitForGatewayIP(unittest.IsolatedAsyncioTestCase):
 
             ip = await self.helper.wait_for_gateway_ip("test-gateway", "default", timeout=5)
             self.assertEqual(ip, "192.168.1.1")
+
+
+@patch("k8s_agent_sandbox.async_k8s_helper.client.CoreV1Api")
+@patch("k8s_agent_sandbox.async_k8s_helper.client.CustomObjectsApi")
+@patch("k8s_agent_sandbox.async_k8s_helper.client.ApiClient")
+@patch("k8s_agent_sandbox.async_k8s_helper.config")
+class TestAsyncK8sHelperApiClientInjection(unittest.IsolatedAsyncioTestCase):
+
+    async def test_injected_api_client_used_and_no_config_loaded(
+        self, mock_config, mock_api_client_cls, mock_custom_cls, mock_core_cls
+    ):
+        injected = AsyncMock(name="ApiClient")
+        helper = AsyncK8sHelper(api_client=injected)
+        await helper._ensure_initialized()
+        mock_config.load_incluster_config.assert_not_called()
+        mock_config.load_kube_config.assert_not_called()
+        mock_api_client_cls.assert_not_called()
+        mock_custom_cls.assert_called_once_with(injected)
+        mock_core_cls.assert_called_once_with(injected)
+
+        # A caller-injected client must not be closed by the helper.
+        await helper.close()
+        injected.close.assert_not_awaited()
+
+    async def test_injected_api_client_is_exposed_only_when_injected(
+        self, mock_config, mock_api_client_cls, mock_custom_cls, mock_core_cls
+    ):
+        injected = AsyncMock(name="ApiClient")
+        self.assertIs(AsyncK8sHelper(api_client=injected).injected_api_client, injected)
+
+        ambient = AsyncK8sHelper()
+        await ambient._ensure_initialized()
+        self.assertIsNone(ambient.injected_api_client)
+
+    async def test_injected_api_client_still_used_after_close(
+        self, mock_config, mock_api_client_cls, mock_custom_cls, mock_core_cls
+    ):
+        injected = AsyncMock(name="ApiClient")
+        helper = AsyncK8sHelper(api_client=injected)
+
+        await helper.close()
+        await helper._ensure_initialized()
+
+        mock_config.load_incluster_config.assert_not_called()
+        mock_config.load_kube_config.assert_not_called()
+        mock_api_client_cls.assert_not_called()
+        mock_custom_cls.assert_called_once_with(injected)
+        mock_core_cls.assert_called_once_with(injected)
+
+    async def test_internally_created_api_client_is_closed(
+        self, mock_config, mock_api_client_cls, mock_custom_cls, mock_core_cls
+    ):
+        created = AsyncMock(name="ApiClient")
+        mock_api_client_cls.return_value = created
+        helper = AsyncK8sHelper()
+        await helper._ensure_initialized()
+        mock_api_client_cls.assert_called_once_with()
+
+        # A client the helper created must be closed.
+        await helper.close()
+        created.close.assert_awaited_once()
 
 
 if __name__ == "__main__":

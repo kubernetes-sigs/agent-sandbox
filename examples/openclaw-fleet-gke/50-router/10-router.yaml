@@ -1,0 +1,293 @@
+# The sandbox-router: the data plane that lets a browser reach any
+# employee's OpenClaw UI through a single external endpoint. Adapted from
+# the upstream manifests in sandbox-router/deploy/ (see that directory's
+# README for every knob not exercised here, e.g. TLS/mTLS and the PDB).
+#
+# How a request finds its sandbox: the router's path-routing mode
+# (--path-routing-prefix=/router) turns a plain browser URL
+#
+#   https://<gateway-ip>/router/openclaw-fleet/oc-<employee-id>/18789/
+#
+# into <namespace>/<id>/<port> routing with zero client-side code — which
+# is the only way in for browser navigations and WebSocket handshakes,
+# since neither can set the router's X-Sandbox-* headers. The <id> segment
+# is the per-employee ExternalName Service `oc-<employee-id>` that the
+# fleet-portal maintains; it CNAMEs to the adopted sandbox's headless-
+# service FQDN, so the router's DNS-form fallback
+# (http://oc-<employee-id>.openclaw-fleet.svc.cluster.local:18789) lands on
+# the right pod even though the sandbox itself has a pool-generated name.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sandbox-router
+  namespace: openclaw-fleet
+  labels:
+    app.kubernetes.io/name: sandbox-router
+    app.kubernetes.io/component: sandbox-router
+---
+# RBAC for the router's Pod-IP cache. Upstream ships a ClusterRole
+# (sandbox-router/deploy/rbac.yaml) because sandboxes may live anywhere;
+# this fleet pins every sandbox to the openclaw-fleet namespace and sets
+# --cache-namespace on the router, so we take the README's advice and
+# narrow the grant to a namespaced Role — the router can never read Pods
+# outside this namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sandbox-router
+  namespace: openclaw-fleet
+  labels:
+    app.kubernetes.io/name: sandbox-router
+    app.kubernetes.io/component: sandbox-router
+rules:
+  # Pod read access for the informer cache. At runtime the informer
+  # additionally filters server-side on the agents.x-k8s.io/sandbox-name-hash
+  # label, so only sandbox-owned Pods are ever watched or stored.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sandbox-router
+  namespace: openclaw-fleet
+  labels:
+    app.kubernetes.io/name: sandbox-router
+    app.kubernetes.io/component: sandbox-router
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sandbox-router
+subjects:
+  - kind: ServiceAccount
+    name: sandbox-router
+    namespace: openclaw-fleet
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-router
+  namespace: openclaw-fleet
+  labels:
+    app: sandbox-router
+    app.kubernetes.io/name: sandbox-router
+    app.kubernetes.io/component: sandbox-router
+spec:
+  # Two replicas is the HA floor (see the router README's scaling
+  # guidance); a single replica handles low-thousands req/s, so capacity
+  # is rarely the reason to go higher for a fleet of employees.
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sandbox-router
+      app.kubernetes.io/component: sandbox-router
+  template:
+    metadata:
+      labels:
+        app: sandbox-router
+        app.kubernetes.io/name: sandbox-router
+        app.kubernetes.io/component: sandbox-router
+    spec:
+      serviceAccountName: sandbox-router
+      # Spread the two replicas so one node/zone failure doesn't take the
+      # whole data plane offline.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: sandbox-router
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: sandbox-router
+      containers:
+        - name: sandbox-router
+          # Same image as the upstream deploy manifests. The Go router
+          # image is `sandbox-router-go` (the plain `sandbox-router` name
+          # belongs to the legacy Python router).
+          # Pinned: registry.k8s.io publishes versioned tags only (no
+          # :latest). Bump alongside agent-sandbox releases.
+          image: registry.k8s.io/agent-sandbox/sandbox-router-go:v1.0.1
+          imagePullPolicy: IfNotPresent
+          args:
+            - --http-bind-address=:8080
+            - --metrics-bind-address=:9090
+            - --health-probe-bind-address=:8081
+            - --cluster-domain=cluster.local
+            # OpenClaw sessions hold long-lived WebSockets; the router
+            # exempts upgraded connections from this timeout by design,
+            # so 180s only bounds plain HTTP requests.
+            - --proxy-timeout=180s
+            - --upstream-max-retries=3
+            # Pod-IP cache: SDK/portal traffic that carries X-Sandbox-UID
+            # dials the live PodIP and skips DNS. Scoped to this namespace
+            # so the Role above (instead of a ClusterRole) is sufficient.
+            # Path-routed browser traffic uses names the cache doesn't
+            # index (the ExternalName alias, not the pod name), so it
+            # falls through to the DNS form — that fallback is the normal
+            # path here, not an error.
+            - --cache-enabled=true
+            - --cache-namespace=openclaw-fleet
+            # Browser way-in: /router/<namespace>/<id>/<port>/... routes
+            # by URL segments. Anything not under /router still falls
+            # through to X-Sandbox-* header routing, unchanged.
+            - --path-routing-prefix=/router
+            # Authorization is allow-all (the default) for this demo:
+            # anyone who reaches the router can reach any sandbox. For
+            # production, either enable IAP at the Gateway (see
+            # 30-iap-optional.yaml) or use the router's own authorizers:
+            # --authz-mode=tokenreview (K8s TokenReview of Bearer tokens;
+            # needs the system:auth-delegator binding from
+            # sandbox-router/deploy/rbac-tokenreview.yaml) or
+            # --authz-mode=scoped-token (per-sandbox capability tokens),
+            # plus --authz-cookie-name / --authz-cookie-query-param to
+            # bootstrap a session cookie for browser traffic that cannot
+            # send an Authorization header. See sandbox-router/README.md.
+          ports:
+            - name: proxy
+              containerPort: 8080
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+            - name: healthz
+              containerPort: 8081
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          # /readyz stays false until the cache's initial Pod LIST
+          # completes, so a broken Role above fails fast instead of
+          # silently degrading to DNS-only routing.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: healthz
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            failureThreshold: 2
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+      # Give in-flight requests a chance to drain before SIGKILL; the
+      # router's own --shutdown-timeout defaults to 30s, keep this larger.
+      terminationGracePeriodSeconds: 45
+---
+# Keep the well-known Service name `sandbox-router-svc`: the Go and Python
+# SDKs hard-code it as their routing target, so in-cluster tools (like the
+# fleet-portal's own SDK calls) work against this router unmodified.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-router-svc
+  namespace: openclaw-fleet
+  labels:
+    app.kubernetes.io/name: sandbox-router
+    app.kubernetes.io/component: sandbox-router
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: sandbox-router
+    app.kubernetes.io/component: sandbox-router
+  ports:
+    - name: proxy
+      port: 8080
+      targetPort: proxy
+      protocol: TCP
+---
+# NetworkPolicy adapted from sandbox-router/deploy/networkpolicy.yaml.
+# Enforcement requires GKE Dataplane V2 (or network policy enforcement
+# enabled on the cluster); without it this object is inert.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandbox-router
+  namespace: openclaw-fleet
+  labels:
+    app.kubernetes.io/name: sandbox-router
+    app.kubernetes.io/component: sandbox-router
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sandbox-router
+      app.kubernetes.io/component: sandbox-router
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    # Proxy traffic + LB health checks. The GKE Gateway (20-gateway.yaml)
+    # delivers traffic to the pod IPs via NEGs from Google's L7 proxy and
+    # health-check ranges — there is no in-cluster Gateway pod to select,
+    # so this is an ipBlock, not a namespaceSelector.
+    - from:
+        - ipBlock:
+            cidr: 130.211.0.0/22
+        - ipBlock:
+            cidr: 35.191.0.0/16
+        # In-namespace callers (the fleet-portal shelling out through the
+        # SDK's hard-coded sandbox-router-svc target).
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Metrics scrape — tighten to your monitoring namespace.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9090
+    # Kubelet probes hit the pod IP directly; allow all.
+    - ports:
+        - protocol: TCP
+          port: 8081
+  egress:
+    # DNS — every path-routed request resolves the per-employee
+    # ExternalName Service, so the router is a heavy DNS client.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # OpenClaw sandboxes in this namespace, on the OpenClaw port.
+    - to:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 18789
+    # Kubernetes API server — required because --cache-enabled=true (the
+    # informer LIST/WATCHes Pods). On GKE the control plane is off-cluster,
+    # so a namespaceSelector can't name it; replace the CIDR below with
+    # your cluster's control-plane endpoint (e.g. the private endpoint /
+    # master CIDR from `gcloud container clusters describe`). Without this
+    # rule the cache never syncs and /readyz never flips.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0 # TIGHTEN: your control-plane endpoint CIDR
+      ports:
+        - protocol: TCP
+          port: 443

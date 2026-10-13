@@ -1,0 +1,84 @@
+# The Sandbox: one long-lived box, reused across runs, holding NO credential
+# of its own.
+#
+# Note what is NOT here:
+#   - no `env:` block. The run's gateway token is never in the pod spec, so it
+#     is not in the Sandbox object, not in the SandboxClaim, not visible to
+#     anyone with `get pod`, and not inherited by the next run in this same
+#     box. It is handed to one process, at Start time, through
+#     ProcessConfig.env_vars (see runner/main.go).
+#   - no Secret volume. There is no provider key to mount: the real key lives
+#     only in the gateway pod (gateway.yaml).
+#   - no service-account token (`automountServiceAccountToken: false`). The
+#     agent process has no business talking to kube-apiserver.
+#
+# The container is sandboxd, the portable runtime daemon (KEP-539.2), which
+# exposes ProcessService over gRPC on :9090 and a filesystem REST API on
+# :8080. Everything the example runs inside the box goes through
+# ProcessService.
+#
+# Image: sandboxd has no released image yet — see the README section "Why
+# sandboxd is built locally". run-test-kind.sh builds packages/sandboxd/
+# Dockerfile and `kind load`s it under this exact tag before applying this
+# manifest; it is never pulled from a registry (imagePullPolicy: Never), so
+# applying this file outside that script needs the same build-and-load step
+# done by hand. The earlier approach pinned a k8s-staging-images digest, but
+# that registry is periodically garbage-collected — a digest pin there still
+# eventually 404s, so the example does not depend on it.
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: execution-scoped-token-sandbox
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        # networkpolicy.yaml selects on this label. Without it the policy
+        # matches nothing and the "direct provider egress is blocked" check
+        # would pass for the wrong reason.
+        sandbox: execution-scoped-token-sandbox
+    spec:
+      # Optional: uncomment to run under a hardened runtime class. The
+      # property this example demonstrates is orthogonal to pod isolation —
+      # combine them.
+      # runtimeClassName: gvisor
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: sandboxd
+          image: sandboxd:execution-scoped-token-local
+          imagePullPolicy: Never
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: rest
+              containerPort: 8080
+            - name: grpc
+              containerPort: 9090
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: rest
+            initialDelaySeconds: 2
+            periodSeconds: 3
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: workspace
+          emptyDir: {}

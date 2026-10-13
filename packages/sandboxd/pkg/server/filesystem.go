@@ -292,11 +292,10 @@ func requestFileBody(r *http.Request) (io.Reader, func(), error) {
 // strategy. Parent directories are created automatically.
 //
 // Concurrency: handlers run in parallel (one goroutine per request, no
-// cross-request locking) and rely on filesystem atomicity — rename(2)
-// guarantees readers see either the previous complete file or the new one,
-// never partial content (an already-open FD keeps the old inode alive), and
-// concurrent PUT/DELETE on one path resolve to last-syscall-wins with no
-// torn state.
+// cross-request locking). Each successful rename(2) publishes a complete file
+// atomically, so an already-open reader sees either the previous complete file
+// or the new one. A concurrent delete can remove the temporary file or its
+// parent directory before rename, in which case the write fails.
 func atomicWrite(target string, src io.Reader, mode os.FileMode) (err error) {
 	dir := filepath.Dir(target)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -358,6 +357,14 @@ func (s *RESTServer) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		recursive = parsed
+	}
+
+	// With --root-dir=/ the root is the whole filesystem; clearing it would
+	// remove the daemon, the runtime and every mount.
+	if target == string(filepath.Separator) {
+		s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED",
+			"refusing to delete the filesystem root")
+		return
 	}
 
 	if target == s.resolvedRoot {

@@ -43,10 +43,10 @@ type Target struct {
 	// component of the DNS form (and as a free-form label in logs/traces).
 	ID string
 	// UID is the Sandbox CR UID from X-Sandbox-UID. When the proxy is
-	// running with a Pod informer cache attached, this is the key used to
-	// look up the live PodIP — bypassing DNS resolution for the fast
-	// secure path described in KEP-NNNN. Empty when the client did not
-	// supply the header; DNS-form routing still works.
+	// running with a Pod informer cache attached, this is a requested
+	// incarnation. Canonical resolution checks it against the current
+	// namespace/name owner before authorization. Empty when the client
+	// did not supply the header; name and DNS routing still work.
 	UID string
 	// Namespace is the Kubernetes namespace of the sandbox.
 	Namespace string

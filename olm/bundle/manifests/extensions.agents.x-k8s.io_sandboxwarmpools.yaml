@@ -23,6 +23,10 @@ spec:
     - jsonPath: .spec.replicas
       name: Desired
       type: integer
+    - jsonPath: .spec.sandboxTemplateRef.name
+      name: Template
+      priority: 1
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date

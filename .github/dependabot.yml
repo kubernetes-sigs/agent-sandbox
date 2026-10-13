@@ -69,8 +69,14 @@ updates:
       patterns:
       - "*"
 
+# sandbox-router/ and packages/sandboxd/ build shipped images from the
+# repo root context, so their golang builder pins move with the root
+# Dockerfile in one grouped PR instead of drifting behind it.
 - package-ecosystem: "docker"
-  directory: "/"
+  directories:
+  - "/"
+  - "/sandbox-router"
+  - "/packages/sandboxd"
   schedule:
     interval: "weekly"
   labels:

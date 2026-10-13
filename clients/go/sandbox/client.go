@@ -201,12 +201,17 @@ func (c *Client) ListActiveSandboxes() []Key {
 	return active
 }
 
-// ListAllSandboxes lists all SandboxClaim names in the given namespace.
-func (c *Client) ListAllSandboxes(ctx context.Context, namespace string) ([]string, error) {
+// ListAllSandboxes lists SandboxClaim names in the given namespace, optionally
+// narrowed with WithLabelSelector.
+func (c *Client) ListAllSandboxes(ctx context.Context, namespace string, opts ...ListOption) ([]string, error) {
 	if namespace == "" {
 		namespace = defaultNamespace
 	}
-	list, err := c.k8s.ExtensionsClient.SandboxClaims(namespace).List(ctx, metav1.ListOptions{})
+	var lo listOptions
+	for _, opt := range opts {
+		opt(&lo)
+	}
+	list, err := c.k8s.ExtensionsClient.SandboxClaims(namespace).List(ctx, metav1.ListOptions{LabelSelector: lo.labelSelector})
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: failed to list claims in %q: %w", namespace, err)
 	}

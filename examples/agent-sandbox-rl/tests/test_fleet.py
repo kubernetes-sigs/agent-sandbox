@@ -518,6 +518,36 @@ def test_reap_deletes_by_run_id_selector(monkeypatch):
   assert counts["sandboxes"] == 2 and counts["claims"] == 1
 
 
+def test_reap_force_deletes_pods_by_pod_run_id_label(monkeypatch):
+  # Pods carry the run id under POD_RUN_ID_LABEL; the controller strips RUN_ID_LABEL
+  # from pods, so selecting on it matched nothing (#1807).
+  import unittest.mock as m
+  import agent_sandbox_rl.reaper as reap_mod
+  from agent_sandbox_rl.constants import POD_RUN_ID_LABEL
+  fake = m.MagicMock()
+  for lister in ("list_claims", "list_warmpools", "list_sandboxes", "list_templates"):
+    getattr(fake.resources, lister).return_value = []
+  monkeypatch.setattr(reap_mod, "Cluster", lambda *a, **k: fake)
+  reap_mod.reap(run_id="abc123", context="x", namespace="ns")
+  _, kw = fake.core_api.delete_collection_namespaced_pod.call_args
+  assert kw["label_selector"] == f"{POD_RUN_ID_LABEL}=abc123"
+  assert kw["grace_period_seconds"] == 0
+
+
+def test_reap_all_managed_force_deletes_pods_by_managed_label(monkeypatch):
+  import unittest.mock as m
+  import agent_sandbox_rl.reaper as reap_mod
+  from agent_sandbox_rl import constants
+  fake = m.MagicMock()
+  for lister in ("list_claims", "list_warmpools", "list_sandboxes", "list_templates"):
+    getattr(fake.resources, lister).return_value = []
+  monkeypatch.setattr(reap_mod, "Cluster", lambda *a, **k: fake)
+  reap_mod.reap(all_managed=True, context="x", namespace="ns")
+  _, kw = fake.core_api.delete_collection_namespaced_pod.call_args
+  assert kw["label_selector"] == (
+      f"{constants.MANAGED_BY_LABEL}={constants.MANAGED_BY_VALUE}")
+
+
 def test_unwarm_images_batch_and_error_propagation(make_cluster):
   c = make_cluster("solo")
   f = SandboxFleet(FleetConfig(max_concurrent=8), registry=ClusterRegistry([c]))
@@ -668,3 +698,23 @@ def test_warm_entries_sequential_continues_on_failure(make_cluster):
 
   # i2 was still attempted despite i1 failure
   assert c.resources.create_warmpool.call_count == 2
+
+
+def test_preflight_passes_fleet_pod_labels_only_when_unmanaged(make_cluster, monkeypatch):
+  from agent_sandbox_rl import TemplateSpec
+  seen = []
+
+  def capture(cluster, **kw):
+    seen.append(kw.get("unmanaged_pod_labels"))
+    r = PreflightReport(cluster.name)
+    r.add("stub", True)
+    return r
+  monkeypatch.setattr("agent_sandbox_rl.preflight.preflight_cluster", capture)
+
+  c = make_cluster("solo")
+  c.resources.fleet_pod_labels.return_value = {"app": "agent-sandbox-rl"}
+  _fleet(ClusterRegistry([c])).preflight()
+  _fleet(ClusterRegistry([c]), template=TemplateSpec(
+      network_policy_management="Unmanaged")).preflight()
+  assert seen == [None, {"app": "agent-sandbox-rl"}]
+

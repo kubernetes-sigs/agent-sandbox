@@ -2,7 +2,7 @@
 # docker push us-docker.pkg.dev/<project-id>/<repo-name>/webhook-image:latest
 
 # Build go binary
-FROM golang:1.26.2 AS builder
+FROM golang:1.27.1 AS builder
 
 WORKDIR /workspace
 

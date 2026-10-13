@@ -16,6 +16,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from kubernetes import client
+import urllib3.exceptions
 from pydantic import ValidationError
 from k8s_agent_sandbox.k8s_helper import K8sHelper
 from k8s_agent_sandbox.exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxTemplateNotFoundError
@@ -346,6 +347,34 @@ class TestK8sHelperResolveSandboxName(unittest.TestCase):
         with self.assertRaises(SandboxClaimFailedError) as context:
             helper.wait_for_claim_ready("test-claim", "default", timeout=5)
         self.assertIn("VolumeClaimTemplatesError", str(context.exception))
+
+    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
+    def test_wait_for_claim_ready_invalid_configuration_fails_fast(self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls):
+        """InvalidConfiguration (forwarded from the Sandbox) fails fast too."""
+        mock_watch = MagicMock()
+        mock_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-claim"},
+                "status": {
+                    "conditions": [
+                        {
+                            "type": "Ready",
+                            "status": "False",
+                            "reason": "InvalidConfiguration",
+                            "message": "Service 'test-claim' is invalid: must be no more than 63 characters",
+                        }
+                    ]
+                },
+            },
+        }
+        mock_watch.stream.return_value = [mock_event]
+        mock_watch_class.return_value = mock_watch
+
+        helper = K8sHelper()
+        with self.assertRaises(SandboxClaimFailedError) as context:
+            helper.wait_for_claim_ready("test-claim", "default", timeout=5)
+        self.assertIn("InvalidConfiguration", str(context.exception))
 
     @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
     def test_wait_for_claim_ready_transient_reason_keeps_waiting(self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls):
@@ -896,6 +925,102 @@ class TestK8sHelperWatchResourceVersion(unittest.TestCase):
         with self.assertRaises(client.ApiException) as ctx:
             helper.wait_for_claim_ready("test-claim", "default", timeout=5)
         self.assertEqual(ctx.exception.status, 403)
+
+    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
+    def test_watch_transient_disconnect_resumes_from_tracked_resource_version(
+        self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls
+    ):
+        """A transient network disconnect resumes from the tracked resourceVersion
+        instead of resetting to '0'."""
+        first_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-claim", "resourceVersion": "5555"},
+                "status": {"conditions": []},
+            },
+        }
+
+        def _first_stream(*args, **kwargs):
+            yield first_event
+            raise urllib3.exceptions.ProtocolError("Connection broken: RemoteDisconnected")
+
+        mock_watch = MagicMock()
+        mock_watch.stream.side_effect = [
+            _first_stream(),
+            [self._ready_event()],
+        ]
+        mock_watch_class.return_value = mock_watch
+
+        helper = K8sHelper()
+        name = helper.wait_for_claim_ready("test-claim", "default", timeout=5, resource_version="12345")
+
+        self.assertEqual(name, "warm-sandbox-1")
+        first_call, second_call = mock_watch.stream.call_args_list
+        self.assertEqual(first_call.kwargs["resource_version"], "12345")
+        self.assertEqual(second_call.kwargs["resource_version"], "5555")
+
+    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
+    def test_watch_non_transient_network_exception_reraises(
+        self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls
+    ):
+        """Non-transient exceptions (such as SSLError) must not be caught and retried."""
+        mock_watch = MagicMock()
+        mock_watch.stream.side_effect = urllib3.exceptions.SSLError("certificate verify failed")
+        mock_watch_class.return_value = mock_watch
+
+        helper = K8sHelper()
+        with self.assertRaises(urllib3.exceptions.SSLError):
+            helper.wait_for_claim_ready("test-claim", "default", timeout=5)
+
+    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
+    def test_wait_for_sandbox_ready_transient_disconnect_reconnects(
+        self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls
+    ):
+        """wait_for_sandbox_ready reconnects upon transient network disconnect."""
+        ready_sandbox_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-sandbox"},
+                "status": {
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                    "podIPs": ["10.244.0.5"],
+                },
+            },
+        }
+        mock_watch = MagicMock()
+        mock_watch.stream.side_effect = [
+            urllib3.exceptions.ProtocolError("Connection broken"),
+            [ready_sandbox_event],
+        ]
+        mock_watch_class.return_value = mock_watch
+
+        helper = K8sHelper()
+        ip = helper.wait_for_sandbox_ready("test-sandbox", "default", timeout=5)
+        self.assertEqual(ip, "10.244.0.5")
+        self.assertEqual(mock_watch.stream.call_count, 2)
+
+
+@patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
+@patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")
+@patch("k8s_agent_sandbox.k8s_helper.config")
+class TestK8sHelperApiClientInjection(unittest.TestCase):
+
+    def test_injected_api_client_used_and_no_config_loaded(
+        self, mock_config, mock_custom_cls, mock_core_cls
+    ):
+        sentinel = MagicMock(name="ApiClient")
+        K8sHelper(api_client=sentinel)
+        mock_custom_cls.assert_called_once_with(sentinel)
+        mock_core_cls.assert_called_once_with(sentinel)
+        mock_config.load_incluster_config.assert_not_called()
+        mock_config.load_kube_config.assert_not_called()
+
+    def test_injected_api_client_is_exposed_only_when_injected(
+        self, mock_config, mock_custom_cls, mock_core_cls
+    ):
+        sentinel = MagicMock(name="ApiClient")
+        self.assertIs(K8sHelper(api_client=sentinel).injected_api_client, sentinel)
+        self.assertIsNone(K8sHelper().injected_api_client)
 
 
 if __name__ == '__main__':

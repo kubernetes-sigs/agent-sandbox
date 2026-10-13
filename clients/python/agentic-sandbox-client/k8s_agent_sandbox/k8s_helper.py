@@ -14,9 +14,11 @@
 
 import logging
 import time
-from datetime import datetime, UTC
-from typing import List
+from itertools import chain
+from datetime import UTC, datetime
+from typing import Any, List, cast
 from kubernetes import client, config, watch
+import urllib3.exceptions
 from .exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
 from .utils import (
     construct_sandbox_claim_env_spec,
@@ -39,16 +41,24 @@ from .constants import (
     CREATED_BY_LABEL,
 )
 
+logger = logging.getLogger(__name__)
+
+
 class K8sHelper:
     """Helper class for Kubernetes API interactions."""
 
-    def __init__(self):
-        try:
-            config.load_incluster_config()
-        except config.ConfigException:
-            config.load_kube_config()
-        self.custom_objects_api = client.CustomObjectsApi()
-        self.core_v1_api = client.CoreV1Api()
+    def __init__(self, api_client: client.ApiClient | None = None) -> None:
+        """When ``api_client`` is provided it is used directly; otherwise the underlying Kubernetes client
+        config is loaded (in-cluster, then ``KUBECONFIG``, falling back to ``~/.kube/config`` if unset)."""
+        # Kept so kubectl subprocesses can target the same cluster.
+        self.injected_api_client = api_client
+        if api_client is None:
+            try:
+                config.load_incluster_config()
+            except config.ConfigException:
+                config.load_kube_config()
+        self.custom_objects_api = client.CustomObjectsApi(api_client)
+        self.core_v1_api = client.CoreV1Api(api_client)
 
     def create_sandbox_claim(
         self,
@@ -83,7 +93,7 @@ class K8sHelper:
             }
         }
 
-        spec = {
+        spec: dict[str, Any] = {
             "warmPoolRef": {
                 "name": warmpool
             }
@@ -107,7 +117,7 @@ class K8sHelper:
             "metadata": metadata,
             "spec": spec,
         }
-        logging.info(f"Creating SandboxClaim '{name}' in namespace '{namespace}' using warm pool '{warmpool}'...")
+        logger.info(f"Creating SandboxClaim '{name}' in namespace '{namespace}' using warm pool '{warmpool}'...")
         return self.custom_objects_api.create_namespaced_custom_object(
             group=CLAIM_API_GROUP,
             version=CLAIM_API_VERSION,
@@ -130,7 +140,10 @@ class K8sHelper:
         return self._watch_claim(claim_name, namespace, timeout, require_ready=False,
                                  resource_version=resource_version)
 
-    def wait_for_claim_ready(self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None) -> str:
+    def wait_for_claim_ready(
+        self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None,
+        *, expected_uid: str | None = None, initial_claim: dict | None = None,
+    ) -> str:
         """Watches the SandboxClaim until it is bound to a sandbox AND its
         Ready condition is True, then returns the sandbox name.
 
@@ -145,12 +158,17 @@ class K8sHelper:
             resource_version: Optional resourceVersion to start the watch
                 from (e.g. ``metadata.resourceVersion`` of the create
                 response). Defaults to ``"0"`` — see ``_watch_claim``.
+            expected_uid: If provided, reject events for a same-name replacement.
+            initial_claim: Optional create/GET response to evaluate before
+                waiting for future watch events.
         """
         return self._watch_claim(claim_name, namespace, timeout, require_ready=True,
-                                 resource_version=resource_version)
+                                 resource_version=resource_version,
+                                 expected_uid=expected_uid, initial_claim=initial_claim)
 
     def _watch_claim(self, claim_name: str, namespace: str, timeout: int, require_ready: bool,
-                     resource_version: str | None = None) -> str:
+                     resource_version: str | None = None,
+                     *, expected_uid: str | None = None, initial_claim: dict | None = None) -> str:
         """Shared SandboxClaim watch loop.
 
         Returns the sandbox name once ``status.sandbox.name`` is populated;
@@ -173,7 +191,7 @@ class K8sHelper:
                        f"SandboxClaim '{claim_name}' was deleted while resolving sandbox name")
         deadline = time.monotonic() + timeout
         rv = resource_version or "0"
-        logging.info(f"Watching claim '{claim_name}' for {wait_target} (from resourceVersion={rv})...")
+        logger.info(f"Watching claim '{claim_name}' for {wait_target} (from resourceVersion={rv})...")
         while True:
             remaining = int(deadline - time.monotonic())
             if remaining <= 0:
@@ -192,14 +210,25 @@ class K8sHelper:
                     resource_version=rv,
                     timeout_seconds=remaining
                 )
-                for event in event_iter:
+                # An already-ready GET may never produce another watch event.
+                initial_events = [] if initial_claim is None else [
+                    {"type": "ADDED", "object": initial_claim}
+                ]
+                initial_claim = None
+                for event in chain(initial_events, event_iter):
                     if event is None:
                         continue
                     if event["type"] == "DELETED":
-                        w.stop()
                         raise SandboxMetadataError(deleted_msg)
                     if event["type"] in ["ADDED", "MODIFIED"]:
                         claim_object = event['object']
+                        metadata = claim_object.get("metadata") or {}
+                        if expected_uid is not None and metadata.get("uid") != expected_uid:
+                            raise SandboxNotFoundError(
+                                f"SandboxClaim '{claim_name}' was replaced while waiting for readiness."
+                            )
+                        if expected_uid is not None and metadata.get("deletionTimestamp"):
+                            raise SandboxNotFoundError(f"SandboxClaim '{claim_name}' is terminating.")
                         # Track the last-seen resourceVersion so a stream
                         # restart resumes instead of replaying history.
                         seen_rv = (claim_object.get('metadata') or {}).get('resourceVersion')
@@ -214,12 +243,10 @@ class K8sHelper:
                                 and cond.get('status') == 'False'
                                 and cond.get('reason') == 'TemplateNotFound'
                             ):
-                                w.stop()
                                 raise SandboxTemplateNotFoundError(
                                     f"SandboxTemplate requested does not exist: {cond.get('message', 'Template not found')}"
                                 )
                             elif cond.get('reason') == 'WarmPoolNotFound':
-                                w.stop()
                                 raise SandboxWarmPoolNotFoundError(
                                     f"SandboxWarmPool requested does not exist: {cond.get('message', 'WarmPool not found')}"
                                 )
@@ -230,7 +257,6 @@ class K8sHelper:
                             ):
                                 # The controller reported a failure it will not
                                 # retry; waiting out the timeout cannot succeed.
-                                w.stop()
                                 raise SandboxClaimFailedError(
                                     f"SandboxClaim '{claim_name}' failed with terminal reason "
                                     f"{cond.get('reason')}: {cond.get('message', '')}"
@@ -242,21 +268,33 @@ class K8sHelper:
                         # Support both 'name' (standard) and 'Name' (legacy, before CRD rename in #440)
                         name = sandbox_status.get('name', '') or sandbox_status.get('Name', '')
                         if name and (ready or not require_ready):
-                            logging.info(
+                            logger.info(
                                 f"Resolved sandbox name '{name}' from claim status"
                                 + (" (claim Ready)" if ready else ""))
-                            w.stop()
                             return name
             except client.ApiException as e:
                 if e.status == 410:
                     # The requested resourceVersion was compacted away:
                     # restart from the watch cache's current state.
-                    logging.info(
+                    logger.info(
                         f"Watch on claim '{claim_name}' expired (410 Gone at resourceVersion={rv}); "
                         "restarting from current state")
                     rv = "0"
                     continue
                 raise
+            except (
+                urllib3.exceptions.ProtocolError,
+                urllib3.exceptions.ReadTimeoutError,
+                ConnectionError,
+            ) as e:
+                logger.warning(
+                    f"Watch on claim '{claim_name}' disconnected ({type(e).__name__}: {e}); "
+                    "reconnecting..."
+                )
+                time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+                continue
+            finally:
+                w.stop()
 
     def wait_for_sandbox_ready(self, name: str, namespace: str, timeout: int) -> str | None:
         """Waits for the Sandbox custom resource to have a 'Ready' status.
@@ -265,47 +303,66 @@ class K8sHelper:
         no valid IP can be selected.
         """
         deadline = time.monotonic() + timeout
-        logging.info(f"Watching for Sandbox {name} to become ready...")
+        logger.info(f"Watching for Sandbox {name} to become ready...")
         while True:
             remaining = int(deadline - time.monotonic())
             if remaining <= 0:
                 raise TimeoutError(f"Sandbox {name} did not become ready within {timeout} seconds.")
             w = watch.Watch()
-            for event in w.stream(
-                func=self.custom_objects_api.list_namespaced_custom_object,
-                namespace=namespace,
-                group=SANDBOX_API_GROUP,
-                version=SANDBOX_API_VERSION,
-                plural=SANDBOX_PLURAL_NAME,
-                field_selector=f"metadata.name={name}",
-                timeout_seconds=remaining
-            ):
-                if event is None:
-                    continue
-                if event["type"] in ["ADDED", "MODIFIED"]:
-                    sandbox_object = event['object']
-                    status = sandbox_object.get('status') or {}
-                    conditions = status.get('conditions', [])
-                    for cond in conditions:
-                        if cond.get('type') == 'Ready' and cond.get('status') == 'True':
-                            logging.info(f"Sandbox {name} is ready.")
-                            w.stop()
-                            pod_ips = status.get('podIPs', [])
-                            return select_pod_ip(pod_ips)
-                elif event["type"] == "DELETED":
-                    logging.error(f"Sandbox {name} was deleted before becoming ready.")
-                    w.stop()
-                    raise SandboxNotFoundError(f"Sandbox {name} was deleted before becoming ready.")
+            try:
+                for event in w.stream(
+                    func=self.custom_objects_api.list_namespaced_custom_object,
+                    namespace=namespace,
+                    group=SANDBOX_API_GROUP,
+                    version=SANDBOX_API_VERSION,
+                    plural=SANDBOX_PLURAL_NAME,
+                    field_selector=f"metadata.name={name}",
+                    timeout_seconds=remaining
+                ):
+                    if event is None:
+                        continue
+                    if event["type"] in ["ADDED", "MODIFIED"]:
+                        sandbox_object = event['object']
+                        status = sandbox_object.get('status') or {}
+                        conditions = status.get('conditions', [])
+                        for cond in conditions:
+                            if cond.get('type') == 'Ready' and cond.get('status') == 'True':
+                                logger.info(f"Sandbox {name} is ready.")
+                                w.stop()
+                                pod_ips = status.get('podIPs', [])
+                                return select_pod_ip(pod_ips)
+                    elif event["type"] == "DELETED":
+                        logger.error(f"Sandbox {name} was deleted before becoming ready.")
+                        w.stop()
+                        raise SandboxNotFoundError(f"Sandbox {name} was deleted before becoming ready.")
+            except (
+                urllib3.exceptions.ProtocolError,
+                urllib3.exceptions.ReadTimeoutError,
+                ConnectionError,
+            ) as e:
+                logger.warning(
+                    f"Watch for Sandbox '{name}' disconnected ({type(e).__name__}: {e}); "
+                    "reconnecting..."
+                )
+                time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+                continue
 
     def delete_sandbox_claim(
-        self, name: str, namespace: str, _request_timeout: float | tuple[float, float] | None = None
-    ):
+        self, name: str, namespace: str, _request_timeout: float | tuple[float, float] | None = None,
+        *, expected_uid: str | None = None,
+    ) -> None:
         """Deletes a SandboxClaim custom resource.
 
         Args:
             _request_timeout: Optional timeout (seconds, or a ``(connect, read)``
                 pair) forwarded to the underlying urllib3-based request.
+            expected_uid: If provided, delete only the Claim with this UID.
         """
+        delete_kwargs: dict[str, Any] = {}
+        if expected_uid is not None:
+            delete_kwargs["body"] = client.V1DeleteOptions(
+                preconditions=client.V1Preconditions(uid=expected_uid)
+            )
         try:
             self.custom_objects_api.delete_namespaced_custom_object(
                 group=CLAIM_API_GROUP,
@@ -314,23 +371,26 @@ class K8sHelper:
                 plural=CLAIM_PLURAL_NAME,
                 name=name,
                 _request_timeout=_request_timeout,
+                **delete_kwargs,
             )
-            logging.info(f"Terminated SandboxClaim: {name}")
+            logger.info(f"Terminated SandboxClaim: {name}")
         except client.ApiException as e:
             if e.status != 404:
-                logging.error(f"Error terminating SandboxClaim {name}: {e}")
+                logger.error(f"Error terminating SandboxClaim {name}: {e}")
                 raise
 
-    def get_sandbox(self, name: str, namespace: str):
+    def get_sandbox(self, name: str, namespace: str) -> dict[str, Any] | None:
         """Gets a Sandbox custom resource."""
         try:
-            return self.custom_objects_api.get_namespaced_custom_object(
+            # The generated client types custom-object responses as ``object``
+            # (kubernetes >= 37); they are the decoded JSON dict at runtime.
+            return cast(dict[str, Any], self.custom_objects_api.get_namespaced_custom_object(
                 group=SANDBOX_API_GROUP,
                 version=SANDBOX_API_VERSION,
                 namespace=namespace,
                 plural=SANDBOX_PLURAL_NAME,
-                name=name
-            )
+                name=name,
+            ))
         except client.ApiException as e:
             if e.status == 404:
                 return None
@@ -380,20 +440,20 @@ class K8sHelper:
             )
             if label_selector is not None:
                 kwargs["label_selector"] = label_selector
-            response = self.custom_objects_api.list_namespaced_custom_object(**kwargs)
+            response = cast(dict[str, Any], self.custom_objects_api.list_namespaced_custom_object(**kwargs))
             return [
                 item.get("metadata", {}).get("name") 
                 for item in response.get("items", []) 
                 if item.get("metadata", {}).get("name")
             ]
         except client.ApiException as e:
-            logging.error(f"Error listing sandbox claims in namespace {namespace}: {e}")
+            logger.error(f"Error listing sandbox claims in namespace {namespace}: {e}")
             raise
 
     def wait_for_gateway_ip(self, gateway_name: str, namespace: str, timeout: int) -> str:
         """Waits for the Gateway to be assigned an external IP."""
         deadline = time.monotonic() + timeout
-        logging.info(f"Waiting for Gateway '{gateway_name}' in namespace '{namespace}'...")
+        logger.info(f"Waiting for Gateway '{gateway_name}' in namespace '{namespace}'...")
         while True:
             remaining = int(deadline - time.monotonic())
             if remaining <= 0:
@@ -422,12 +482,12 @@ class K8sHelper:
                             continue
                         
                         if not is_valid_ip(ip_address) and not is_valid_gateway_hostname(ip_address):
-                            logging.warning(
+                            logger.warning(
                                 "Gateway address rejected because %r is neither a valid IP address nor a valid gateway hostname.",
                                 ip_address,
                             )
                             continue
                         
-                        logging.info(f"Gateway ready. IP: {ip_address}")
+                        logger.info(f"Gateway ready. IP: {ip_address}")
                         w.stop()
                         return ip_address

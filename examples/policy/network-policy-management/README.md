@@ -264,7 +264,9 @@ Look at the `SandboxTemplate` referenced by your claim's `SandboxWarmPool`.
 
 Not using the built-in `networkPolicy` field, as it relies on standard Kubernetes NetworkPolicies (L3/L4).
 
-However, admins can manage L7 policies by changing the template's management mode:
+For cluster-wide defaults and egress by domain name (FQDN) you still can use `Managed` mode. The [Network Policy API](https://network-policy-api.sigs.k8s.io/) `ClusterNetworkPolicy` works together with Kubernetes `NetworkPolicy`: Admin-tier rules are evaluated before the template-managed policy, `Pass` rules delegate to it, and Baseline-tier rules apply to pods that no `NetworkPolicy` selects. [examples/network-policy-api-sandbox](../../network-policy-api-sandbox/README.md) keeps the templates `Managed` and adds a default deny plus FQDN allowlists on top, using [kube-network-policies](https://kube-network-policies.sigs.k8s.io/) (the SIG Network reference implementation, which can run alongside any CNI) or any other implementation of the API. The FQDN rules use the experimental `domainNames` field, so an implementation that only supports the standard channel has to omit or replace them.
+
+For L7 inspection (HTTP paths, headers, gRPC methods) that only a CNI- or mesh-specific policy object provides, admins can change the template's management mode:
 
 ```yaml
 spec:

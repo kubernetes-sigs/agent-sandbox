@@ -53,8 +53,9 @@ var retryableStatusCodes = map[int]bool{
 	http.StatusGatewayTimeout:      true,
 }
 
-// connector manages HTTP connectivity to the sandbox-router. It owns the
-// HTTP client, retry logic, and delegates URL discovery to a ConnectionStrategy.
+// connector manages HTTP connectivity to the sandbox runtime, either directly
+// or through the sandbox-router. It owns the HTTP client, retry logic, and
+// delegates endpoint discovery to a ConnectionStrategy.
 type connector struct {
 	strategy   ConnectionStrategy
 	httpClient *http.Client
@@ -206,24 +207,30 @@ func (c *connector) SetGRPCTarget(target string) {
 
 // GRPCConn returns a (lazily dialed) client connection to sandboxd's
 // ProcessService. The connection is plaintext, and what protects it depends on
-// the strategy that published the target: podTunnelStrategy only ever traverses
-// the port-forward tunnel to the pod's loopback listener. While inClusterStrategy
-// sends it across the pod network, where NetworkPolicy (or a mesh) confines it.
+// the strategy that published the target: podTunnelStrategy traverses an
+// apiserver-authorized port-forward to the pod, while inClusterStrategy sends it
+// across the pod network, where NetworkPolicy (or a mesh) must confine it.
 func (c *connector) GRPCConn() (*grpc.ClientConn, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.grpcConn != nil {
 		return c.grpcConn, nil
 	}
+	prefix := fmt.Sprintf("sandbox[%s/%s]", c.namespace, c.sandboxID)
 	if c.grpcTarget == "" {
-		if c.lastError != nil {
-			return nil, fmt.Errorf("sandbox[%s/%s]: %w: %w", c.namespace, c.sandboxID, ErrNotReady, c.lastError)
+		// A direct URL names only the REST endpoint, so no target will ever
+		// be published. Say so rather than report ErrNotReady forever.
+		if _, direct := c.strategy.(*DirectStrategy); direct {
+			return nil, fmt.Errorf("%s: %w: APIURL reaches only the sandboxd REST API, so Run needs port-forward or in-cluster connectivity", prefix, ErrUnsupportedByRuntime)
 		}
-		return nil, fmt.Errorf("sandbox[%s/%s]: %w: sandboxd gRPC endpoint not connected", c.namespace, c.sandboxID, ErrNotReady)
+		if c.lastError != nil {
+			return nil, fmt.Errorf("%s: %w: %w", prefix, ErrNotReady, c.lastError)
+		}
+		return nil, fmt.Errorf("%s: %w: sandboxd gRPC endpoint not connected", prefix, ErrNotReady)
 	}
 	conn, err := grpc.NewClient(c.grpcTarget, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		return nil, fmt.Errorf("sandbox[%s/%s]: failed to create gRPC client: %w", c.namespace, c.sandboxID, err)
+		return nil, fmt.Errorf("%s: failed to create gRPC client: %w", prefix, err)
 	}
 	c.grpcConn = conn
 	return conn, nil

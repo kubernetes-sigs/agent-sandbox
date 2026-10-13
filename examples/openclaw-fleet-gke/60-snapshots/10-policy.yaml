@@ -1,0 +1,68 @@
+# Per-employee hibernate/wake policy for the OpenClaw fleet.
+#
+# Deliberately the OPPOSITE grouping choice from the golden-warmpool
+# example (examples/podsnapshot-golden-warmpool/05-podsnapshotpolicy.yaml):
+# that policy groups snapshots by a shared template label so ONE snapshot
+# seeds every pod the template produces. Here each employee's session is
+# private, so we group by agents.x-k8s.io/sandbox-name-hash — a label the
+# agent-sandbox controller stamps on every backing pod — which isolates
+# every sandbox to its own snapshot group. A sandbox can only ever restore
+# from ITS OWN previous snapshots; oc-alice can never wake into oc-bob's
+# memory image.
+#
+# Restore is automatic and "latest Ready wins" within the group: when a
+# suspended Sandbox is flipped back to operatingMode: Running, the recreated
+# pod matches this policy and restores from the newest Ready snapshot in its
+# per-sandbox group. No restore-side object is needed.
+#
+# Constraints to keep in mind (GKE Pod Snapshots, GA):
+#   - gVisor only: the pod must run with runtimeClassName: gvisor (the fleet
+#     template does).
+#   - Machine series: restore must land on the SAME machine series the
+#     snapshot was taken on, and E2 machines are not supported at all — keep
+#     the fleet node pool on a supported (non-E2) series and don't mix
+#     series under the fleet's scheduling constraints.
+#   - The pod spec is the cache key: GKE matches restores by a hash of the
+#     (distilled) pod spec. Editing openclaw-fleet-template invalidates every
+#     existing snapshot — new pods then SILENTLY cold-start (no error, no
+#     event). Treat template edits as "all hibernated sessions lose memory
+#     state" (disk on the Filestore workspace still survives).
+#   - The restored pod gets a NEW IP. The per-sandbox Service keeps routing
+#     (endpoints re-resolve), but anything that cached status.podIPs must
+#     re-read them.
+apiVersion: podsnapshot.gke.io/v1
+kind: PodSnapshotPolicy
+metadata:
+  name: openclaw-fleet-hibernate-policy
+  namespace: openclaw-fleet
+spec:
+  storageConfigName: openclaw-fleet-snapshot-storage
+  selector:
+    # Must match a label carried by the fleet's sandbox pods, i.e. one set in
+    # openclaw-fleet-template's podTemplate.metadata.labels. Use a dedicated
+    # key (not a generic one like "app") so no unrelated pod can accidentally
+    # fall under the snapshot policy.
+    matchLabels:
+      openclaw-fleet: sandbox
+  snapshotScope: whole-pod
+  triggerConfig:
+    # manual: snapshots happen only when a PodSnapshotManualTrigger is
+    # created (see 30-snapshot-hibernate.md). Anyone with trigger-creation
+    # RBAC in this namespace can snapshot any employee's live session, so
+    # treat that RBAC as the tenancy boundary.
+    type: manual
+    # resume: the pod keeps running after the checkpoint is written; the
+    # runbook suspends it separately once the snapshot is Ready.
+    postCheckpoint: resume
+  snapshotGroupingRules:
+    groupByLabelValue:
+      labels:
+        # THE per-sandbox grouping: stamped by the agent-sandbox controller
+        # on every backing pod, unique per Sandbox name. This is the default
+        # per-session pattern the golden-warmpool example deliberately
+        # overrides — here it is exactly what we want.
+        - agents.x-k8s.io/sandbox-name-hash
+      groupRetentionPolicy:
+        # keep the last few hibernation points per employee; oldest are
+        # pruned first
+        maxSnapshotCountPerGroup: 3

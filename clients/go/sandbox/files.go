@@ -18,12 +18,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"mime/multipart"
 	"net/http"
 	pathpkg "path"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -33,7 +35,7 @@ import (
 )
 
 const maxErrorBodySize = 512            // limits untrusted server content in error chains
-const maxMetadataResponseSize = 8 << 20 // 8 MB; bounds List/Exists JSON decode
+const maxMetadataResponseSize = 8 << 20 // 8 MB; bounds small JSON decodes (List, Exists, Health, Metadata)
 
 const upperHex = "0123456789ABCDEF"
 
@@ -69,18 +71,34 @@ func encodeFilePath(path string) string {
 	}
 }
 
-// applyCallOpts applies per-call options, returning a context with any
-// WithTimeout deadline and the configured max retry count (0 = default).
-func applyCallOpts(ctx context.Context, opts []CallOption) (context.Context, context.CancelFunc, int) {
+// resolveCallOpts folds opts into one callOptions value.
+func resolveCallOpts(opts []CallOption) callOptions {
 	var co callOptions
 	for _, o := range opts {
 		o(&co)
 	}
+	return co
+}
+
+// applyCallOpts applies per-call options, returning a context with any
+// WithTimeout deadline and the configured max retry count (0 = default).
+func applyCallOpts(ctx context.Context, opts []CallOption) (context.Context, context.CancelFunc, int) {
+	co := resolveCallOpts(opts)
 	if co.timeout > 0 {
 		ctx, cancel := context.WithTimeout(ctx, co.timeout)
 		return ctx, cancel, co.maxAttempts
 	}
 	return ctx, func() {}, co.maxAttempts
+}
+
+// applyCallOptsNoRetry is applyCallOpts for operations that do not retry
+// unless the caller opts in with WithMaxAttempts.
+func applyCallOptsNoRetry(ctx context.Context, opts []CallOption) (context.Context, context.CancelFunc, int) {
+	ctx, cancel, maxAttempts := applyCallOpts(ctx, opts)
+	if maxAttempts == 0 {
+		maxAttempts = 1
+	}
+	return ctx, cancel, maxAttempts
 }
 
 // Files provides file operations on a sandbox.
@@ -106,8 +124,14 @@ func filesEndpoint(path string) string {
 // sandboxd runtime the body is an APIError JSON document; its message is
 // surfaced directly when it decodes cleanly.
 func (f *Files) httpErrorFromResponse(resp *http.Response, op string) *HTTPError {
+	return newHTTPError(resp, op, f.runtime)
+}
+
+// newHTTPError builds an HTTPError from a non-2xx response. It is shared by
+// every call that talks to sandboxd's REST API.
+func newHTTPError(resp *http.Response, op string, runtime Runtime) *HTTPError {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
-	if f.runtime == RuntimeSandboxd {
+	if runtime == RuntimeSandboxd {
 		var apiErr sandboxdAPIError
 		if err := json.Unmarshal(body, &apiErr); err == nil && apiErr.Code != "" {
 			return &HTTPError{StatusCode: resp.StatusCode, Body: apiErr.Code + ": " + apiErr.Message, Operation: op}
@@ -346,8 +370,29 @@ func (f *Files) validateLegacyWritePath(path string) error {
 	return nil
 }
 
-// Read downloads a file from the sandbox.
+// Read downloads a file from the sandbox and returns its complete contents.
 func (f *Files) Read(ctx context.Context, path string, opts ...CallOption) ([]byte, error) {
+	var destination bytes.Buffer
+	if _, err := f.readTo(ctx, path, &destination, opts...); err != nil {
+		return nil, err
+	}
+	if destination.Len() == 0 {
+		// Preserve io.ReadAll's existing non-nil result for an empty response.
+		return []byte{}, nil
+	}
+	return destination.Bytes(), nil
+}
+
+// ReadTo downloads a file into a caller-owned destination without buffering
+// the complete response. It returns the number of bytes written. The destination
+// is never closed. If the response exceeds MaxDownloadSize, ReadTo writes at most
+// MaxDownloadSize bytes and returns an error. Data written before an error or
+// context cancellation remains in the destination.
+func (f *Files) ReadTo(ctx context.Context, path string, destination io.Writer, opts ...CallOption) (int64, error) {
+	return f.readTo(ctx, path, destination, opts...)
+}
+
+func (f *Files) readTo(ctx context.Context, path string, destination io.Writer, opts ...CallOption) (int64, error) {
 	defer f.trackOp()()
 	ctx, callCancel, maxAttempts := applyCallOpts(ctx, opts)
 	defer callCancel()
@@ -357,7 +402,12 @@ func (f *Files) Read(ctx context.Context, path string, opts ...CallOption) ([]by
 	if path == "" {
 		err := fmt.Errorf("%s: read: path must not be empty", f.errPrefix())
 		recordError(span, err)
-		return nil, err
+		return 0, err
+	}
+	if isNilWriter(destination) {
+		err := fmt.Errorf("%s: read(%q): destination writer must not be nil", f.errPrefix(), path)
+		recordError(span, err)
+		return 0, err
 	}
 
 	endpoint := "download/" + encodeFilePath(path)
@@ -367,29 +417,54 @@ func (f *Files) Read(ctx context.Context, path string, opts ...CallOption) ([]by
 	resp, err := f.connector.SendRequest(ctx, http.MethodGet, endpoint, nil, "", maxAttempts)
 	if err != nil {
 		recordError(span, err)
-		return nil, fmt.Errorf("%s: read(%q) failed: %w", f.errPrefix(), path, err)
+		return 0, fmt.Errorf("%s: read(%q) failed: %w", f.errPrefix(), path, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		retErr := fmt.Errorf("%s: read(%q): %w", f.errPrefix(), path, f.httpErrorFromResponse(resp, "read"))
 		recordError(span, retErr)
-		return nil, retErr
+		return 0, retErr
 	}
-	defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes)) }()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, f.maxDownload+1))
-	if err != nil {
-		recordError(span, err)
-		return nil, fmt.Errorf("%s: failed to read file content: %w", f.errPrefix(), err)
-	}
-	if int64(len(data)) > f.maxDownload {
+	if resp.ContentLength > f.maxDownload {
 		err := fmt.Errorf("%s: file size exceeds limit of %d bytes", f.errPrefix(), f.maxDownload)
 		recordError(span, err)
-		return nil, err
+		return 0, err
 	}
-	span.SetAttributes(AttrFileSize.Int(len(data)))
-	f.log.V(1).Info("read completed", "path", path, "size", len(data))
-	return data, nil
+
+	written, err := io.Copy(destination, io.LimitReader(resp.Body, f.maxDownload))
+	if err != nil {
+		recordError(span, err)
+		return written, fmt.Errorf("%s: failed to read file content: %w", f.errPrefix(), err)
+	}
+	var extra [1]byte
+	extraBytes, extraErr := io.ReadFull(resp.Body, extra[:])
+	if extraBytes > 0 {
+		err := fmt.Errorf("%s: file size exceeds limit of %d bytes", f.errPrefix(), f.maxDownload)
+		recordError(span, err)
+		return written, err
+	}
+	if extraErr != nil && !errors.Is(extraErr, io.EOF) {
+		recordError(span, extraErr)
+		return written, fmt.Errorf("%s: failed to read file content: %w", f.errPrefix(), extraErr)
+	}
+	span.SetAttributes(AttrFileSize.Int64(written))
+	f.log.V(1).Info("read completed", "path", path, "size", written)
+	return written, nil
+}
+
+func isNilWriter(writer io.Writer) bool {
+	if writer == nil {
+		return true
+	}
+
+	value := reflect.ValueOf(writer)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 // List returns the contents of a directory in the sandbox.

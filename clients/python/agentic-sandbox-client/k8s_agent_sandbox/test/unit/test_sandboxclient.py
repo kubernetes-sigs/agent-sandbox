@@ -12,12 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ast
 import json
+import subprocess
+import sys
 import threading
 import unittest
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
 from unittest.mock import MagicMock, patch, ANY
 
 from requests.adapters import HTTPAdapter
@@ -31,6 +35,7 @@ from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
     SandboxInClusterConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
+    SandboxdInClusterConnectionConfig,
 )
 from k8s_agent_sandbox.exceptions import (
     SandboxPortForwardError,
@@ -48,6 +53,12 @@ class TestSandboxClient(unittest.TestCase):
         self.mock_k8s_helper = self.client.k8s_helper
         self.mock_sandbox_class = MagicMock()
         self.client.sandbox_class = self.mock_sandbox_class
+
+    @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
+    def test_api_client_forwarded_to_k8s_helper(self, MockK8sHelper):
+        sentinel = MagicMock(name="ApiClient")
+        SandboxClient(api_client=sentinel)
+        MockK8sHelper.assert_called_once_with(api_client=sentinel)
 
     @patch('uuid.uuid4')
     def test_create_sandbox_success(self, mock_uuid):
@@ -199,6 +210,44 @@ class TestSandboxClient(unittest.TestCase):
             self.assertEqual(mock_delete.call_count, 2)
             mock_delete.assert_any_call("claim1", namespace="ns1")
             mock_delete.assert_any_call("claim2", namespace="ns2")
+
+    def _track_sandboxes(self):
+        automatic = MagicMock()
+        explicit = MagicMock()
+        self.client._active_connection_sandboxes[("ns", "auto")] = automatic
+        self.client._active_connection_sandboxes[("ns", "named")] = explicit
+        self.client._explicit_claims.add(("ns", "named"))
+        return automatic, explicit
+
+    def test_context_manager_cleans_up_on_exit(self):
+        automatic, explicit = self._track_sandboxes()
+
+        with self.client as c:
+            self.assertIs(c, self.client)
+            automatic.terminate.assert_not_called()
+
+        automatic.terminate.assert_called_once()
+        # Caller-owned claims keep their Claim and only lose the connection.
+        explicit.terminate.assert_not_called()
+        explicit.close_connection.assert_called_once()
+
+    def test_context_manager_cleans_up_on_exception(self):
+        automatic, _ = self._track_sandboxes()
+
+        with self.assertRaises(RuntimeError):
+            with self.client:
+                raise RuntimeError("boom")
+
+        automatic.terminate.assert_called_once()
+
+    def test_context_manager_deletes_attached_claim(self):
+        self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
+        self.mock_k8s_helper.get_sandbox.return_value = {"metadata": {}}
+
+        with self.client:
+            attached = self.client.get_sandbox("claim", "ns")
+
+        attached.terminate.assert_called_once()
 
     @patch('uuid.uuid4')
     def test_create_sandbox_with_labels(self, mock_uuid):
@@ -606,6 +655,9 @@ class SandboxHandler(BaseHTTPRequestHandler):
 
 class TestRequestExceptions(unittest.TestCase):
     """Integration tests: real HTTP server + SandboxConnector.send_request()."""
+    port: int
+    server: HTTPServer
+    server_thread: threading.Thread
 
     @classmethod
     def setUpClass(cls):
@@ -821,6 +873,12 @@ class TestSandboxClientInClusterConfig(unittest.TestCase):
         self.assertIsInstance(sc.connection_config, SandboxInClusterConnectionConfig)
 
     @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
+    def test_sandboxd_in_cluster_config_stored(self, _):
+        config = SandboxdInClusterConnectionConfig(mode="in-cluster-service")
+        client = SandboxClient(connection_config=config)
+        self.assertIs(client.connection_config, config)
+
+    @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
     def test_default_config_is_local_tunnel(self, _):
         sc = SandboxClient()
         self.assertIsInstance(sc.connection_config, SandboxLocalTunnelConnectionConfig)
@@ -888,6 +946,37 @@ class TestConnectionConfigValidation(unittest.TestCase):
         for ns in invalid_namespaces:
             with self.assertRaises(ValidationError):
                 SandboxLocalTunnelConnectionConfig(router_namespace=ns)
+
+
+class TestLibraryLogging(unittest.TestCase):
+    """The SDK must leave root logger configuration to the application."""
+
+    def test_import_leaves_root_logger_unconfigured(self):
+        # Fresh interpreter: pytest itself installs root handlers in-process.
+        code = (
+            "import logging, k8s_agent_sandbox.sandbox_client\n"
+            "root = logging.getLogger()\n"
+            "assert not root.handlers, root.handlers\n"
+            "assert root.level == logging.WARNING, root.level\n"
+        )
+        subprocess.run([sys.executable, "-c", code], check=True)
+
+    def test_no_root_logger_calls(self):
+        # logging.info() and friends call basicConfig() on a bare root logger.
+        root_calls = {"debug", "info", "warning", "error", "exception", "critical", "log"}
+        package_dir = Path(__file__).resolve().parents[2]
+        offenders = []
+        for path in package_dir.rglob("*.py"):
+            if "test" in path.relative_to(package_dir).parts:
+                continue
+            for node in ast.walk(ast.parse(path.read_text())):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == "logging"
+                        and node.func.attr in root_calls):
+                    offenders.append(f"{path.name}:{node.lineno}")
+        self.assertEqual(offenders, [])
 
 
 if __name__ == '__main__':

@@ -77,8 +77,34 @@ def test_pod_template_carries_run_and_managed_labels():
   _, kw = r.custom_api.create_namespaced_custom_object.call_args
   labels = kw["body"]["spec"]["podTemplate"]["metadata"]["labels"]
   assert labels["sandbox"] == TNAME                                   # colocation label kept
-  assert labels[constants.RUN_ID_LABEL] == "run123"                   # so pods are run-scoped
+  assert labels[constants.RUN_ID_LABEL] == "run123"
   assert labels[constants.MANAGED_BY_LABEL] == constants.MANAGED_BY_VALUE
+
+
+def test_pod_run_label_is_not_system_reserved():
+  # The Sandbox controller drops `agents.x-k8s.io/*` / `extensions.agents.x-k8s.io/*`
+  # pod-template labels before they reach the pod (#1807), so the key the breaker
+  # and reaper select pods by must be outside those prefixes.
+  assert constants.RUN_ID_LABEL.startswith("agents.x-k8s.io/")
+  assert not constants.POD_RUN_ID_LABEL.startswith(
+      ("agents.x-k8s.io/", "extensions.agents.x-k8s.io/"))
+  r = _res(labels={constants.RUN_ID_LABEL: "run123"})
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  r.ensure_template(IMG, TNAME, TemplateSpec())
+  _, kw = r.custom_api.create_namespaced_custom_object.call_args
+  labels = kw["body"]["spec"]["podTemplate"]["metadata"]["labels"]
+  assert labels[constants.POD_RUN_ID_LABEL] == "run123"               # so pods are run-scoped
+  assert constants.POD_RUN_ID_LABEL not in kw["body"]["metadata"]["labels"]
+
+
+def test_pod_template_has_no_pod_run_label_without_a_run_id():
+  # A Resources with no run id (e.g. the reaper's own) must not stamp an empty one.
+  r = _res()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  r.ensure_template(IMG, TNAME, TemplateSpec())
+  _, kw = r.custom_api.create_namespaced_custom_object.call_args
+  labels = kw["body"]["spec"]["podTemplate"]["metadata"]["labels"]
+  assert constants.POD_RUN_ID_LABEL not in labels
 
 
 # --- #1: count_pods + breaker counts pods --------------------------------- #
@@ -130,7 +156,9 @@ def test_live_owned_count_counts_pods_by_run_id(make_cluster):
   f = SandboxFleet(FleetConfig(), registry=ClusterRegistry([c]))
   assert f.live_owned_count() == 7
   _, kw = c.resources.count_pods.call_args
-  assert kw["label_selector"] == f.run_selector()   # keyed off run-id, which pods carry
+  # Keyed off the pod run-id label: the CR label (run_selector) never reaches pods.
+  assert kw["label_selector"] == f.pod_run_selector()
+  assert kw["label_selector"] == f"{constants.POD_RUN_ID_LABEL}={f.run_id}"
 
 
 # --- #9: enabled tripwire with a missing baseline quarantines (not skip) --- #

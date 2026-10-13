@@ -45,6 +45,7 @@ func SanitizePath(rootDir, userPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid sandbox root dir: %w", err)
 	}
+	lexicalRoot := cleanRoot
 
 	cleanRootSymlink, err := filepath.EvalSymlinks(cleanRoot)
 	if err == nil {
@@ -53,12 +54,14 @@ func SanitizePath(rootDir, userPath string) (string, error) {
 
 	// Join root with user path directly to preserve relative ".." components
 	// so they are neutralized by Clean before symlink evaluation. Trim
-	// cleanRoot prefix with separator boundary if user supplied a full
-	// absolute path under cleanRoot.
+	// either root prefix with a separator boundary if the user supplied a
+	// full absolute path through the lexical or resolved root.
 	userPathClean := filepath.Clean(userPath)
-	if userPathClean == cleanRoot {
+	if userPathClean == cleanRoot || userPathClean == lexicalRoot {
 		userPathClean = "."
-	} else if after, found := strings.CutPrefix(userPathClean, cleanRoot+string(os.PathSeparator)); found {
+	} else if after, found := strings.CutPrefix(userPathClean, dirPrefix(cleanRoot)); found {
+		userPathClean = after
+	} else if after, found := strings.CutPrefix(userPathClean, dirPrefix(lexicalRoot)); found {
 		userPathClean = after
 	}
 	joined := filepath.Clean(filepath.Join(cleanRoot, userPathClean))
@@ -94,9 +97,20 @@ func SanitizePath(rootDir, userPath string) (string, error) {
 	// Ensure the resolved path matches cleanRoot exactly or starts with
 	// cleanRoot + separator. This prevents prefix matching bugs
 	// (e.g. /workspace-evil vs /workspace).
-	if resolved != cleanRoot && !strings.HasPrefix(resolved, cleanRoot+string(os.PathSeparator)) {
+	if resolved != cleanRoot && !strings.HasPrefix(resolved, dirPrefix(cleanRoot)) {
 		return "", fmt.Errorf("access denied: path %q: %w", userPath, ErrPathEscapes)
 	}
 
 	return resolved, nil
+}
+
+// dirPrefix returns dir with exactly one trailing separator, the prefix every
+// path strictly inside dir starts with. The filesystem root already ends in
+// one, so appending another would yield "//", which no cleaned path starts
+// with.
+func dirPrefix(dir string) string {
+	if strings.HasSuffix(dir, string(os.PathSeparator)) {
+		return dir
+	}
+	return dir + string(os.PathSeparator)
 }

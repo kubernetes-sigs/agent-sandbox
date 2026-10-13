@@ -20,6 +20,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"syscall"
 	"time"
@@ -38,12 +39,14 @@ const (
 	// processShutdownGrace is how long managed processes get to exit after
 	// SIGTERM before being SIGKILLed during daemon shutdown.
 	processShutdownGrace = 2 * time.Second
-	// pipeDrainGrace bounds how long Start waits for non-PTY stdout/stderr
-	// pipe readers to reach EOF after cmd.Wait has reaped the child process
-	// (a grandchild may still hold the write end).
+	// pipeDrainGrace bounds how long Start waits for the stdout/stderr pipe
+	// readers, or the PTY reader, to reach EOF after cmd.Wait has reaped the
+	// child process (a grandchild may still hold the write end or the PTY
+	// slave).
 	pipeDrainGrace = 5 * time.Second
-	// waitDelay bounds cmd.Wait on I/O drain in Execute and on unkillable
-	// children in Start.
+	// waitDelay bounds how long cmd.Wait blocks on I/O drain after the
+	// child exits. Without it, a grandchild holding the stdout/stderr
+	// write ends keeps Wait blocked indefinitely.
 	waitDelay = 10 * time.Second
 )
 
@@ -59,6 +62,11 @@ type Options struct {
 	// StreamChunkSize is the stdout/stderr streaming buffer size in bytes
 	// for ProcessService.Start. Non-positive selects the 4096-byte default.
 	StreamChunkSize int
+	// AuthTokenSHA256, when set, is the SHA-256 digest of a bearer token
+	// required as "Authorization: Bearer <token>" on every gRPC call and
+	// every REST request except GET /v1/health. Nil leaves the API
+	// unauthenticated.
+	AuthTokenSHA256 []byte
 	Log             logr.Logger
 }
 
@@ -68,6 +76,7 @@ type Server struct {
 	registry      *processmanager.ProcessRegistry
 	processServer *ProcessServer
 	restServer    *RESTServer
+	auth          *tokenChecker
 }
 
 // New assembles a Server from opts.
@@ -76,11 +85,32 @@ func New(opts Options) (*Server, error) {
 		return nil, errors.New("RootDir is required: refusing to default to \"/\", which would disable sandbox confinement")
 	}
 	registry := processmanager.NewProcessRegistry()
-	return &Server{
+	s := &Server{
 		registry:      registry,
-		processServer: NewProcessServer(opts.RootDir, registry, opts.StreamChunkSize),
+		processServer: NewProcessServer(opts.RootDir, registry, opts.StreamChunkSize, opts.Log),
 		restServer:    NewRESTServer(opts.RootDir, opts.MetadataEnvPrefix, opts.Log),
-	}, nil
+	}
+	if opts.AuthTokenSHA256 != nil {
+		if len(opts.AuthTokenSHA256) != AuthTokenDigestSize {
+			return nil, fmt.Errorf("AuthTokenSHA256 must be %d bytes, got %d",
+				AuthTokenDigestSize, len(opts.AuthTokenSHA256))
+		}
+		s.auth = newTokenChecker(opts.AuthTokenSHA256)
+	}
+	return s, nil
+}
+
+// GRPCServerOptions returns the options the gRPC server must be built with:
+// the bearer-token interceptors when an auth token is configured. They apply
+// to every service on that server, reflection included.
+func (s *Server) GRPCServerOptions() []grpc.ServerOption {
+	if s.auth == nil {
+		return nil
+	}
+	return []grpc.ServerOption{
+		grpc.ChainUnaryInterceptor(s.auth.unaryInterceptor),
+		grpc.ChainStreamInterceptor(s.auth.streamInterceptor),
+	}
 }
 
 // RegisterGRPC attaches the ProcessService to grpcServer.
@@ -90,7 +120,10 @@ func (s *Server) RegisterGRPC(grpcServer *grpc.Server) {
 
 // RESTHandler returns the handler serving the Filesystem & Runtime REST API.
 func (s *Server) RESTHandler() http.Handler {
-	return s.restServer.Handler()
+	if s.auth == nil {
+		return s.restServer.Handler()
+	}
+	return s.auth.middleware(s.restServer.Handler(), s.restServer)
 }
 
 // SetReady toggles the /v1/health readiness response.

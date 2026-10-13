@@ -58,6 +58,12 @@ generate-python-docs: # Generate Python SDK reference documentation
 	sed 's/^#/##/' < $(REF_PYTHON_PATH).tmp1 > $(REF_PYTHON_PATH)
 	rm $(REF_PYTHON_PATH).tmp1
 
+.PHONY: generate-metrics-docs
+REF_METRICS_PATH := "./docs/metrics.md"
+generate-metrics-docs: # Generate controller metrics reference documentation
+	@echo "Generating Controller Metrics Documentation..."
+	go run ./cmd/metrics-docs-gen --source="./internal/metrics" --output=$(REF_METRICS_PATH)
+
 VERSION_PKG := sigs.k8s.io/agent-sandbox/internal/version
 
 GIT_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "unknown")

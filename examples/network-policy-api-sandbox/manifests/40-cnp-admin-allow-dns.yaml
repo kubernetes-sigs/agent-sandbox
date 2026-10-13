@@ -1,0 +1,62 @@
+# Allow DNS to known resolvers only.
+#
+# Priority 10 is evaluated before the default deny at 100. kube-network-policies
+# learns the IPs behind a domain from the DNS answers the pod receives, so the
+# FQDN policies (50-/60-) depend on this one.
+#
+# Two resolver paths, because the two templates differ:
+#  - team-a uses the Secure-by-Default DNS override (8.8.8.8 / 1.1.1.1). Its
+#    managed NetworkPolicy deliberately blocks CoreDNS so internal service
+#    names cannot be enumerated.
+#  - team-b has custom NetworkPolicy rules, which disables the override, so it
+#    resolves through CoreDNS and its NetworkPolicy allows kube-dns.
+# CoreDNS is therefore a Pass, not an Accept: an Admin-tier Accept is final and
+# would reopen the cluster resolver for team-a. Pass lets each template's
+# NetworkPolicy keep that decision. Only the public resolvers are Accepted, and
+# the destinations are restricted on purpose: UDP/53 to arbitrary hosts is an
+# easy exfiltration path.
+apiVersion: policy.networking.k8s.io/v1alpha2
+kind: ClusterNetworkPolicy
+metadata:
+  name: sandbox-egress-allow-dns
+spec:
+  tier: Admin
+  priority: 10
+  subject:
+    pods:
+      namespaceSelector: {}
+      podSelector:
+        matchExpressions:
+          - key: agents.x-k8s.io/sandbox-name-hash
+            operator: Exists
+  egress:
+    - name: cluster-dns-per-template-networkpolicy
+      action: Pass
+      to:
+        - pods:
+            namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: kube-system
+            podSelector:
+              matchLabels:
+                k8s-app: kube-dns
+      protocols:
+        - udp:
+            destinationPort:
+              number: 53
+        - tcp:
+            destinationPort:
+              number: 53
+    - name: public-resolvers-used-by-secure-default
+      action: Accept
+      to:
+        - networks:
+            - 8.8.8.8/32
+            - 1.1.1.1/32
+      protocols:
+        - udp:
+            destinationPort:
+              number: 53
+        - tcp:
+            destinationPort:
+              number: 53

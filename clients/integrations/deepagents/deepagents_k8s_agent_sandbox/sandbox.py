@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import logging
 import posixpath
 import textwrap
 import shlex
@@ -42,9 +41,6 @@ from .lifecycle_manager import (
     ExistingSandboxClaimLifecycleManager,
     LabelScopedLifecycleManager,
 )
-
-
-logger = logging.getLogger(__name__)
 
 
 class K8sAgentSandbox(BaseSandbox):
@@ -198,6 +194,9 @@ class K8sAgentSandbox(BaseSandbox):
     ) -> ExecuteResponse:
         """
         Execute a shell command in the sandbox.
+
+        Operational failures propagate because a failed request does not
+        establish the command's exit status.
         """
 
         inner_shell_command = f"cd {shlex.quote(self._root_dir)} && {command}"
@@ -205,15 +204,7 @@ class K8sAgentSandbox(BaseSandbox):
 
         effective_timeout = timeout or self._default_timeout_seconds
 
-        try:
-            result = self._sandbox.commands.run(wrapped, timeout=effective_timeout)
-        except Exception as e:
-            logger.error("execute failed: %s", e)
-            return ExecuteResponse(
-                output=f"Error: {e}",
-                exit_code=-1,
-                truncated=False,
-            )
+        result = self._sandbox.commands.run(wrapped, timeout=effective_timeout)
         combined = result.stdout
         if result.stderr:
             combined = f"{combined}\n<stderr>\n{result.stderr}\n</stderr>" if combined else result.stderr
@@ -371,4 +362,3 @@ def _map_file_error(error: Exception) -> FileOperationError | str:
         return FILE_NOT_FOUND
 
     return str(error)
-

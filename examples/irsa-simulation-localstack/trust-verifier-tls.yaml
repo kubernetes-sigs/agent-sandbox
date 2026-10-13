@@ -1,0 +1,23 @@
+# TLS for the sandbox <-> sts-trust-verifier hop: this is the leg that
+# carries the real WebIdentityToken outbound and the resulting AWS
+# credentials back, so it gets a certificate the sandbox pod actually
+# trusts and verifies (unlike the verifier -> LocalStack hop -- see the
+# verify=False comment in trust-verifier-configmap.yaml for why that one is
+# different).
+#
+# Uses the "selfsigned" ClusterIssuer that amazon-eks-pod-identity-webhook's
+# own install already creates (see README.md Prerequisites) rather than
+# introducing a second cert-manager issuer just for this.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: sts-trust-verifier-tls
+  namespace: irsa-sim-ns
+spec:
+  secretName: sts-trust-verifier-tls
+  dnsNames:
+    - sts-trust-verifier.irsa-sim-ns.svc.cluster.local
+    - sts-trust-verifier.irsa-sim-ns.svc
+  issuerRef:
+    name: selfsigned
+    kind: ClusterIssuer

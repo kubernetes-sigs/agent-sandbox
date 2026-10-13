@@ -105,6 +105,13 @@ type Config struct {
 	TLSClientCAFile string
 	// MTLSMode selects the client-certificate verification policy.
 	MTLSMode MTLSMode
+	// TLSMinVersion is the minimum TLS version for the HTTPS proxy listener.
+	// Accepted values: VersionTLS10, VersionTLS11, VersionTLS12, VersionTLS13.
+	// Empty defaults to VersionTLS12.
+	TLSMinVersion string
+	// TLSCipherSuites is an optional list of cipher suites for the HTTPS
+	// proxy listener, using Go cipher-suite names. Empty uses Go defaults.
+	TLSCipherSuites []string
 
 	// ClusterDomain is the Kubernetes cluster DNS suffix used to build target
 	// service FQDNs (e.g. "cluster.local"). Honors CLUSTER_DOMAIN.
@@ -363,6 +370,14 @@ func (c *Config) Validate() error {
 		}
 		if c.TLSClientCAFile == "" {
 			return fmt.Errorf("--mtls-mode=%s requires --tls-client-ca-file", c.MTLSMode)
+		}
+	}
+
+	if c.HTTPSAddr != "" && c.TLSMinVersion != "" {
+		switch c.TLSMinVersion {
+		case "VersionTLS10", "VersionTLS11", "VersionTLS12", "VersionTLS13":
+		default:
+			return fmt.Errorf("invalid --tls-min-version %q; must be one of: VersionTLS10, VersionTLS11, VersionTLS12, VersionTLS13", c.TLSMinVersion)
 		}
 	}
 

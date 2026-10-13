@@ -3,6 +3,23 @@
 # Rules are applied in the order they appear
 
 replacements:
+  # sandboxd user guide - redirect repository-relative links to canonical sources
+  - pattern: '\]\(\.\./\.\./docs/keps/539\.2-runtime-standardization/README\.md\)'
+    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/keps/539.2-runtime-standardization/README.md)'
+    description: "sandboxd KEP to GitHub"
+
+  - pattern: '\]\(spec/\)'
+    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/packages/sandboxd/spec/)'
+    description: "sandboxd spec directory to GitHub"
+
+  - pattern: '\]\(spec/([^)]+)\)'
+    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/packages/sandboxd/spec/$1)'
+    description: "sandboxd spec files to GitHub"
+
+  - pattern: '\]\(\.\./\.\./examples/sandboxd-sandbox/\)'
+    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/examples/sandboxd-sandbox/)'
+    description: "sandboxd example to GitHub"
+
   # Python SDK README - redirect to GitHub
   - pattern: '\]\(clients/python/agentic-sandbox-client/README\.md(#[^)]+)?\)'
     replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/README.md$1)'

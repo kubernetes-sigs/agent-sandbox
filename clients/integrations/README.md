@@ -7,8 +7,10 @@ This directory contains specialized adapters and integration packages that bridg
 | Integration | Distribution Name | Framework / Protocol | Description |
 | :--- | :--- | :--- | :--- |
 | [**`deepagents/`**](./deepagents) | `deepagents-k8s-agent-sandbox` | [LangChain DeepAgents](https://github.com/langchain-ai/deepagents) | Plugs into LangChain agent graphs as a secure, sandboxed execution backend (`K8sAgentSandbox`). |
+| [**`gymnasium/`**](./gymnasium) | `k8s-agent-sandbox-gymnasium` | [Gymnasium](https://gymnasium.farama.org/) | `SandboxEnv`: a standard `gym.Env` that claims a fresh sandbox from a warm pool for each episode, with shell commands as actions and pluggable reward and termination functions. |
 | [**`mcp-server/`**](./mcp-server) | `k8s-agent-sandbox-mcp-server` | [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) | Exposes Sandbox provisioning and execution tools over MCP for Antigravity, Claude Desktop, Cursor, and other MCP hosts. |
 | [**`nemo-gym/`**](./nemo-gym) | `nemo-gym-k8s-agent-sandbox` | [NVIDIA NeMo Gym](https://github.com/NVIDIA-NeMo/Gym) | Registers Agent Sandbox warm pools as the `agent_sandbox` sandbox provider for NeMo Gym RL training environments. |
+| [**`openai/`**](./openai) | `openai-agents-k8s-sandbox` | [OpenAI Agents SDK](https://github.com/openai/openai-agents-python) | Prototype. `K8sSandboxClient`: an out-of-tree sandbox provider that runs `SandboxAgent` workloads on Agent Sandbox warm pools. |
 | [**`openhands/`**](./openhands) | `openhands-k8s-agent-sandbox` | [OpenHands agent SDK](https://github.com/OpenHands/software-agent-sdk) | `AgentSandboxWorkspace`: runs OpenHands conversations on pre-warmed Agent Sandbox pods instead of cold-started Docker containers. |
 
 ## Adding a New Integration
@@ -18,3 +20,4 @@ This directory contains specialized adapters and integration packages that bridg
 3. Include unit tests under `tests/unit/` using `pytest`.
 4. Register the test suite in [`dev/tools/test-unit`](../../dev/tools/test-unit) under `PYTHON_TEST_SUITES`.
 5. Exclude test packages from discovery (`[tool.setuptools.packages.find].exclude = ["tests*"]`) and configure `[tool.setuptools.exclude-package-data]` if using `setuptools_scm`.
+6. Do not add the package to the [PyPI publish workflow](../../.github/workflows/pypi-publish.yml); only the core SDK `k8s-agent-sandbox` is published. Document installing it with `pip install "git+https://github.com/kubernetes-sigs/agent-sandbox.git@<tag>#subdirectory=clients/integrations/<name>"`, keeping `<tag>` as a placeholder.

@@ -14,15 +14,32 @@
 
 """Utility functions for the Kubernetes Agent Sandbox Python client."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+from contextlib import asynccontextmanager, contextmanager, suppress
 from datetime import datetime, timedelta, timezone
 import functools
+import inspect
 import ipaddress
+import json
+import os
+import tempfile
 import time
 from typing import Any
 
 from .constants import SANDBOX_NAME_HASH_LABEL
 from .models import SandboxClaimEnvVar
+
+
+def merge_headers(*layers: Mapping[str, str] | None) -> dict[str, str]:
+    """Merge header mappings case-insensitively; later layers win.
+
+    ``None`` layers are skipped. Returns a new dict.
+    """
+    merged: dict[str, tuple[str, str]] = {}
+    for layer in layers:
+        for name, value in (layer or {}).items():
+            merged[name.lower()] = (name, value)
+    return dict(merged.values())
 
 
 def record_latency(metric):
@@ -121,7 +138,7 @@ def select_pod_ip(ips: Sequence[object] | None) -> str | None:
             parsed = ipaddress.ip_address(cleaned)
             if parsed.version == 4:
                 return str(parsed)
-            if parsed.version == 6 and parsed.ipv4_mapped:
+            if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped:
                 return str(parsed.ipv4_mapped)
 
             if first_valid is None:
@@ -202,3 +219,121 @@ def construct_sandbox_claim_env_spec(env: Mapping[str, str] | None) -> list[Sand
         SandboxClaimEnvVar(name=name, value=value)
         for name, value in env.items()
     ]
+
+
+def kubeconfig_from_configuration(
+    configuration: Any,
+    authorization: str | None,
+    default_headers: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Build a kubeconfig for the cluster a Kubernetes ``Configuration`` targets.
+
+    ``authorization`` is the resolved ``Authorization`` header value, falling
+    back to the ``Authorization`` in ``default_headers``. Only a bearer token is
+    carried over; basic auth is not. ``default_headers`` are the
+    ``ApiClient``'s; besides that token, only the impersonation user and group
+    are carried over.
+    """
+    cluster: dict[str, Any] = {"server": configuration.host}
+    # kubectl rejects a CA with insecure-skip-tls-verify. The Python clients
+    # ignore the CA when verify_ssl is off, so do the same.
+    if not configuration.verify_ssl:
+        cluster["insecure-skip-tls-verify"] = True
+    elif configuration.ssl_ca_cert:
+        cluster["certificate-authority"] = configuration.ssl_ca_cert
+    if getattr(configuration, "tls_server_name", None):
+        cluster["tls-server-name"] = configuration.tls_server_name
+    if getattr(configuration, "proxy", None):
+        cluster["proxy-url"] = configuration.proxy
+
+    user: dict[str, Any] = {}
+    if configuration.cert_file:
+        user["client-certificate"] = configuration.cert_file
+    if configuration.key_file:
+        user["client-key"] = configuration.key_file
+    headers = {k.lower(): v for k, v in (default_headers or {}).items()}
+    # An ApiClient built with header_name/header_value has no api_key token.
+    scheme, _, credential = (authorization or headers.get("authorization") or "").partition(" ")
+    if scheme.lower() == "bearer" and credential:
+        user["token"] = credential
+    if headers.get("impersonate-user"):
+        user["as"] = headers["impersonate-user"]
+    if headers.get("impersonate-group"):
+        user["as-groups"] = [headers["impersonate-group"]]
+
+    return {
+        "apiVersion": "v1",
+        "kind": "Config",
+        "clusters": [{"name": "sandbox", "cluster": cluster}],
+        "users": [{"name": "sandbox", "user": user}],
+        "contexts": [
+            {"name": "sandbox", "context": {"cluster": "sandbox", "user": "sandbox"}}
+        ],
+        "current-context": "sandbox",
+    }
+
+
+# load_kube_config stores a token under BearerToken. Older kubernetes releases
+# and hand-built configurations use authorization.
+_AUTHORIZATION_KEYS = ("BearerToken", "authorization")
+
+
+@contextmanager
+def _temporary_kubeconfig(
+    api_client: Any, authorization: str | None
+) -> Iterator[list[str]]:
+    # mkstemp creates the file 0600, and it can hold a bearer token.
+    fd, path = tempfile.mkstemp(prefix="sandbox-kubeconfig-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(
+                kubeconfig_from_configuration(
+                    api_client.configuration, authorization, api_client.default_headers
+                ),
+                f,
+            )
+        yield ["--kubeconfig", path]
+    finally:
+        with suppress(FileNotFoundError):
+            os.unlink(path)
+
+
+@contextmanager
+def kubectl_kubeconfig_args(api_client: Any | None) -> Iterator[list[str]]:
+    """Yield the ``kubectl`` flags that target an injected ``ApiClient``'s cluster.
+
+    ``kubectl`` otherwise uses the ambient kubeconfig, which may be a different
+    cluster than the one ``api_client`` talks to. Yields no flags when
+    ``api_client`` is None. The kubeconfig is deleted on exit, which is safe
+    once ``kubectl`` has started because it reads the file only at startup.
+    """
+    if api_client is None:
+        yield []
+        return
+    configuration = api_client.configuration
+    authorization = None
+    for key in _AUTHORIZATION_KEYS:
+        authorization = configuration.get_api_key_with_prefix(key)
+        if authorization:
+            break
+    with _temporary_kubeconfig(api_client, authorization) as args:
+        yield args
+
+
+@asynccontextmanager
+async def async_kubectl_kubeconfig_args(api_client: Any | None) -> AsyncIterator[list[str]]:
+    """Async variant of :func:`kubectl_kubeconfig_args` for ``kubernetes_asyncio``."""
+    if api_client is None:
+        yield []
+        return
+    configuration = api_client.configuration
+    authorization = None
+    for key in _AUTHORIZATION_KEYS:
+        # kubernetes_asyncio runs a possibly async refresh hook here.
+        authorization = configuration.get_api_key_with_prefix(key)
+        if inspect.isawaitable(authorization):
+            authorization = await authorization
+        if authorization:
+            break
+    with _temporary_kubeconfig(api_client, authorization) as args:
+        yield args

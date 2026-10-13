@@ -33,6 +33,7 @@ from agent_sandbox_rl.resources import Resources
 IMG = "reg/swebench-verified@sha256:deadbeef"
 TNAME = "r2e-img-abc123"
 RID = constants.RUN_ID_LABEL
+POD_RID = constants.POD_RUN_ID_LABEL
 
 
 # --- template label reconciliation (blocking) ----------------------------- #
@@ -49,6 +50,7 @@ def test_ensure_template_reconciles_stale_run_label():
   body = r.custom_api.patch_namespaced_custom_object.call_args.kwargs["body"]
   assert body["metadata"]["labels"][RID] == "new"
   assert body["spec"]["podTemplate"]["metadata"]["labels"][RID] == "new"
+  assert body["spec"]["podTemplate"]["metadata"]["labels"][POD_RID] == "new"
   assert body["spec"]["podTemplate"]["metadata"]["labels"]["sandbox"] == TNAME
 
 
@@ -56,10 +58,26 @@ def test_ensure_template_no_patch_when_labels_current():
   r = Resources(MagicMock(), MagicMock(), "ns", labels={RID: "same"})
   r.custom_api.get_namespaced_custom_object.return_value = {
       "metadata": {"labels": dict(r.labels)},
-      "spec": {"podTemplate": {"metadata": {"labels": {**r.labels, "sandbox": TNAME}}}},
+      "spec": {"podTemplate": {"metadata": {"labels": {
+          **r.labels, POD_RID: "same", "sandbox": TNAME}}}},
   }
   r.ensure_template(IMG, TNAME, TemplateSpec())
   r.custom_api.patch_namespaced_custom_object.assert_not_called()
+
+
+def test_ensure_template_adds_pod_run_label_to_this_runs_template():
+  # A template this run already owns, written before pods carried the run id
+  # under a non-reserved key: the reconcile adds POD_RUN_ID_LABEL so its pods
+  # become visible to the breaker and the reaper's pod sweep (#1807).
+  r = Resources(MagicMock(), MagicMock(), "ns", labels={RID: "same"})
+  r.custom_api.get_namespaced_custom_object.return_value = {
+      "metadata": {"labels": dict(r.labels)},
+      "spec": {"podTemplate": {"metadata": {"labels": {**r.labels, "sandbox": TNAME}}}},
+  }
+  r.ensure_template(IMG, TNAME, TemplateSpec())
+  body = r.custom_api.patch_namespaced_custom_object.call_args.kwargs["body"]
+  assert body["spec"]["podTemplate"]["metadata"]["labels"][POD_RID] == "same"
+  assert POD_RID not in body["metadata"]["labels"]      # CRs keep RUN_ID_LABEL only
 
 
 # --- caller-supplied registry gets the run-id (blocking, related gap) ------ #

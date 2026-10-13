@@ -23,6 +23,14 @@ class SandboxNotReadyError(SandboxError):
     """Raised when the sandbox is not ready for communication."""
 
 
+class SandboxNoServiceError(SandboxError):
+    """Raised in ``in-cluster-service`` mode if the Sandbox has no Service FQDN."""
+
+
+# Deprecated alias; use SandboxNoServiceError.
+SandboxServiceUnavailableError = SandboxNoServiceError
+
+
 class SandboxNotFoundError(SandboxError):
     """Raised when the sandbox or sandbox claim cannot be found or was deleted."""
 
@@ -61,7 +69,7 @@ class SandboxRequestError(SandboxError):
         message: str,
         status_code: int | None = None,
         response: Any = None,
-    ):
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.response = response

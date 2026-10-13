@@ -1,0 +1,27 @@
+# Application overlay resolved against the immutable Ray base in Dockerfile.rllib.
+# The base digest freezes each platform's inherited dependencies; pins below
+# fix the external application dependencies and Ray/Gymnasium versions.
+# Dockerfile.rllib installs the SDK/integration from the checkout.
+--index-url https://pypi.org/simple
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+ray[rllib,default]==2.58.0
+gymnasium==1.2.2
+torch==2.9.0+cpu
+grpcio==1.83.0
+protobuf==7.36.1
+# Base OTel API/SDK/exporter remain compatible at 1.39 / 0.60b0. Its old proto
+# distribution disallows protobuf 7, required by the sandboxd generated stubs.
+opentelemetry-proto==1.43.0
+# The base's conda-lockfiles requires >=2.12.5, but ships Pydantic 2.12.3.
+pydantic==2.12.5
+pydantic-core==2.41.5
+
+kubernetes==36.0.3
+durationpy==0.11
+websocket-client==1.9.2
+requests-oauthlib==2.0.0
+oauthlib==4.0.0
+networkx==3.6.1
+sympy==1.14.0
+mpmath==1.3.0

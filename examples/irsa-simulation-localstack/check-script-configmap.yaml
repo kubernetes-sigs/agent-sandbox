@@ -6,12 +6,16 @@ metadata:
 data:
   check_irsa.py: |
     """Validates the IRSA credential-loading code path against a
-    LocalStack-mocked STS. Does NOT validate the real AWS OIDC trust
-    boundary (issuer/JWKS signature checks) -- LocalStack accepts any web
-    identity token without verifying it. This only proves the pod correctly
-    discovers AWS_ROLE_ARN / AWS_WEB_IDENTITY_TOKEN_FILE (injected by
+    LocalStack-mocked STS, reached through the sts-trust-verifier proxy
+    (see trust-verifier-configmap.yaml). The proxy verifies the
+    WebIdentityToken's signature against the cluster's own JWKS plus its
+    issuer/audience/expiry before forwarding to LocalStack -- the same
+    cryptographic check a real AWS IAM OIDC provider would perform. It does
+    NOT validate a real AWS account's IAM role trust policy; there is no
+    real AWS account involved here. This proves the pod correctly discovers
+    AWS_ROLE_ARN / AWS_WEB_IDENTITY_TOKEN_FILE (injected by
     amazon-eks-pod-identity-webhook) and can exchange the projected token
-    for credentials via the standard boto3 credential chain -- no
+    for verified credentials via the standard boto3 credential chain -- no
     application code changes needed.
     """
     import os

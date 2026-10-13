@@ -14,4 +14,4 @@
 
 package spec
 
-//go:generate sh -c "buf generate && buf generate --template buf.gen.python.yaml && ../../../dev/tools/fix-boilerplate"
+//go:generate sh -c "buf generate && buf generate --template buf.gen.python.yaml && buf generate --template buf.gen.typescript.yaml && ../../../dev/tools/fix-boilerplate"

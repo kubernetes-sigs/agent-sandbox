@@ -1,0 +1,79 @@
+# OPTIONAL: put Google Identity-Aware Proxy (IAP) in front of the fleet.
+#
+# Everything in this file is commented out on purpose — the demo runs with
+# the router's allow-all authorization and no IAP, so `kubectl apply -f`
+# of this directory works on a fresh project. Uncomment (and fill in the
+# placeholders) once the prerequisites below are in place.
+#
+# What IAP buys you here: authentication at the load balancer, before a
+# request ever reaches the router or the portal. Combined with the shared
+# /router URL namespace, that means "any signed-in, authorized employee
+# can reach any sandbox" — coarse, but a big step up from anonymous
+# access, and it covers browser WebSockets with zero router config.
+# For per-employee isolation you'd still layer the router's own
+# authorizers on top (see the router README's scoped-token section).
+#
+# Prerequisites (GKE Gateway IAP semantics):
+#
+#   1. An OAuth consent screen configured in the GCP project, and an
+#      OAuth 2.0 Client ID (type "Web application") created for IAP.
+#   2. The client secret stored as a Kubernetes Secret in THIS namespace
+#      (the GCPBackendPolicy can only reference Secrets in the Service's
+#      own namespace):
+#
+#        kubectl create secret generic openclaw-iap-oauth \
+#          --namespace openclaw-fleet \
+#          --from-literal=key='<OAUTH_CLIENT_SECRET>'
+#
+#   3. An HTTPS listener on the Gateway (20-gateway.yaml) — IAP's OAuth
+#      redirect flow requires TLS at the frontend.
+#   4. Every user who should get through needs the IAM role
+#      roles/iap.httpsResourceAccessor on the project (or on the IAP web
+#      resource). Signed-in-but-not-granted users get a 403 from IAP.
+#
+# External / corporate identity providers: IAP natively authenticates
+# Google identities. To sign users in against a SAML or OIDC IdP (Okta,
+# Entra ID, ...) instead, pair IAP with Workforce Identity Federation:
+# create a workforce pool + provider for the IdP and grant
+# roles/iap.httpsResourceAccessor to the workforce pool principals. Note
+# that automatic redirect to the IdP only works when the pool has exactly
+# one provider — with multiple providers users land on a picker page.
+#
+# One GCPBackendPolicy per target Service (a policy attaches to exactly
+# one Service via targetRef, and must live in that Service's namespace).
+# We attach IAP to BOTH services so there is no unauthenticated path:
+# the router (sandbox UIs) and the portal (signup/lifecycle API).
+#
+# apiVersion: networking.gke.io/v1
+# kind: GCPBackendPolicy
+# metadata:
+#   name: sandbox-router-iap
+#   namespace: openclaw-fleet
+# spec:
+#   targetRef:
+#     group: ""
+#     kind: Service
+#     name: sandbox-router-svc
+#   default:
+#     iap:
+#       enabled: true
+#       oauth2ClientSecret:
+#         name: openclaw-iap-oauth # Secret created in prerequisite 2
+#       clientID: <OAUTH_CLIENT_ID>.apps.googleusercontent.com
+# ---
+# apiVersion: networking.gke.io/v1
+# kind: GCPBackendPolicy
+# metadata:
+#   name: fleet-portal-iap
+#   namespace: openclaw-fleet
+# spec:
+#   targetRef:
+#     group: ""
+#     kind: Service
+#     name: fleet-portal
+#   default:
+#     iap:
+#       enabled: true
+#       oauth2ClientSecret:
+#         name: openclaw-iap-oauth # same OAuth client works for both
+#       clientID: <OAUTH_CLIENT_ID>.apps.googleusercontent.com

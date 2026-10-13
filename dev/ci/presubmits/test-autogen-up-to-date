@@ -19,18 +19,32 @@ import subprocess
 import sys
 import glob
 
+def git_status():
+    # --porcelain also lists untracked files, such as a newly generated file
+    # that was never committed.
+    return subprocess.check_output(["git", "status", "--porcelain"]).decode("utf-8").rstrip("\n")
+
+
+def ensure_clean_tree():
+    status = git_status()
+    if status:
+        print("ERROR: Working tree is not clean; any change would be reported as out-of-date generated files.")
+        print("Commit or stash (git stash -u) your changes first:")
+        print(status)
+        sys.exit(1)
+
+
 def run_and_verify_no_changes(command):
     subprocess.run(command, check=True)
 
-    # Use subprocess.check_output which will raise an exception if the command fails.
-    diff_output = subprocess.check_output(["git", "diff", "--name-only"]).decode("utf-8").strip()
-    if diff_output:
+    status = git_status()
+    if status:
         print("Full diff:")
         # Use subprocess.run to simply execute and print the output of git diff
         subprocess.run(["git", "--no-pager", "diff"])
         print("ERROR: Generated files out-of-date. Please run '{}' and update your PR.".format(" ".join(command)))
         print("Affected files:")
-        print(diff_output)
+        print(status)
         sys.exit(1)
 
 
@@ -39,6 +53,7 @@ def main():
 
     repo_root = subprocess.check_output(["git", "rev-parse", "--show-toplevel"]).strip().decode("utf-8")
     os.chdir(repo_root)
+    ensure_clean_tree()
 
     # Run each script in dev/tools/fix-*
     for script in sorted(glob.glob("dev/tools/fix-*")):

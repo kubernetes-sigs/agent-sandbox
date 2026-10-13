@@ -61,6 +61,20 @@ def _env_flag(name):
     return os.environ.get(name, "").strip().lower() in ("true", "1")
 
 
+def _bool_env_flag(name, default=False):
+    """Treat an env var as true when it is "true" or "1" (case-insensitive),
+    false if it is "false" or "0" (case-insensitive), and returns default if
+    empty or not set.  Other values are an error."""
+    v = os.environ.get(name, "").strip().lower()
+    if v in ("true", "1"):
+        return True
+    if v in ("false", "0"):
+        return False
+    if v == "":
+        return default
+    sys.exit(f"error: invalid value for {name}: {os.environ[name]}")
+
+
 def _run_tool(tool, *args):
     """Run a dev/tools script from the repo root with the current interpreter."""
     subprocess.run(
@@ -87,7 +101,7 @@ def main():
     container_engine = os.environ.get("CONTAINER_ENGINE", "docker")
     skip_build = _env_flag("SKIP_BUILD")
     extensions = _env_flag("EXTENSIONS")
-    controller_only = _env_flag("CONTROLLER_ONLY")
+    controller_only = _bool_env_flag("CONTROLLER_ONLY", default=True)
     controller_args = os.environ.get("CONTROLLER_ARGS", "")
     kubeconfig = os.path.join(utils.get_repo_root(), "bin", "KUBECONFIG")
 

@@ -28,8 +28,10 @@ then force-deletes any pods carrying the run-id label. Claims/warmpools/template
 carry the run-id label directly. Deleting claims + warmpools **cascades the Sandbox
 CRs** via owner refs — Sandbox CRs themselves don't carry the run-id label (the
 controller doesn't copy it), so the sandbox pass is a best-effort no-op unless a
-future controller propagates it. Sandbox **pods** do carry the label (via the pod
-template), so the pod delete-collection is a real, direct sweep.
+future controller propagates it. Sandbox **pods** carry the run id too (via the pod
+template), under ``POD_RUN_ID_LABEL`` because the controller strips
+``agents.x-k8s.io/*`` labels from pods, so the pod delete-collection is a real,
+direct sweep.
 """
 from __future__ import annotations
 
@@ -61,6 +63,7 @@ def reap(run_id: str | None = None, *, context: str | None = None,
         "(CLI: --all)")
   selector = (f"{constants.RUN_ID_LABEL}={run_id}" if run_id
               else f"{constants.MANAGED_BY_LABEL}={constants.MANAGED_BY_VALUE}")
+  pod_selector = (f"{constants.POD_RUN_ID_LABEL}={run_id}" if run_id else selector)
   cluster = Cluster(
       ClusterConfig(context=context, namespace=namespace, kubeconfig=kubeconfig,
                     in_cluster=in_cluster),
@@ -85,7 +88,7 @@ def reap(run_id: str | None = None, *, context: str | None = None,
   if delete_pods:
     try:
       cluster.core_api.delete_collection_namespaced_pod(
-          namespace=namespace, label_selector=selector,
+          namespace=namespace, label_selector=pod_selector,
           grace_period_seconds=0, propagation_policy="Background")
       counts["pods"] = "requested (force)"
     except Exception:  # noqa: BLE001

@@ -1,0 +1,65 @@
+# Demo FastAPI app that creates a Sandbox on demand.
+#
+# Tilt port-forwards straight to the pod, so no service is needed.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-sandbox-demo-app
+  namespace: default
+  labels:
+    app: agent-sandbox-demo-app
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agent-sandbox-demo-app
+  namespace: default
+  labels:
+    app: agent-sandbox-demo-app
+rules:
+- apiGroups: ["agents.x-k8s.io"]
+  resources: ["sandboxes"]
+  # Update if you update the app in a way that requires more permissions
+  verbs: ["create", "get", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agent-sandbox-demo-app
+  namespace: default
+  labels:
+    app: agent-sandbox-demo-app
+subjects:
+- kind: ServiceAccount
+  name: agent-sandbox-demo-app
+  namespace: default
+roleRef:
+  kind: Role
+  name: agent-sandbox-demo-app
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-sandbox-demo-app
+  namespace: default
+  labels:
+    app: agent-sandbox-demo-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent-sandbox-demo-app
+  template:
+    metadata:
+      labels:
+        app: agent-sandbox-demo-app
+    spec:
+      serviceAccountName: agent-sandbox-demo-app
+      containers:
+      - name: app
+        image: kind.local/agent-sandbox-demo-app:latest
+        ports:
+        - name: http
+          containerPort: 8080

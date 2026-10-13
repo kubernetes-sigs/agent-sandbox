@@ -15,7 +15,10 @@
 # limitations under the License.
 
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 import unittest
 
@@ -23,7 +26,7 @@ import unittest
 # pytest from any cwd, etc.).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from headers import _match_path_parts, is_path_excluded
+from headers import _match_path_parts, apply_headers_to_tree, is_path_excluded
 
 
 class MatchPathPartsTest(unittest.TestCase):
@@ -97,6 +100,41 @@ class IsPathExcludedTest(unittest.TestCase):
 
     def test_no_patterns(self):
         self.assertFalse(is_path_excluded("a/b/c", []))
+
+
+class ApplyHeadersToTreeTest(unittest.TestCase):
+    """Tests for which files apply_headers_to_tree stamps."""
+
+    def test_skips_git_ignored_files(self):
+        with tempfile.TemporaryDirectory() as root:
+            files = {
+                ".gitignore": "node_modules/\n",
+                "tracked.go": "package main\n",
+                "untracked.py": "print('new file')\n",
+                "lib/index.js": "module.exports = {};\n",
+                "pkg/node_modules/dep/index.js": "module.exports = {};\n",
+            }
+            for rel_path, content in files.items():
+                path = os.path.join(root, rel_path)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w") as f:
+                    f.write(content)
+            subprocess.run(["git", "init", "-q", root], check=True)
+            subprocess.run(["git", "-C", root, "add", ".gitignore", "tracked.go", "lib"], check=True)
+            # Replace the tracked lib/ with a symlink into the ignored tree, so
+            # writing through lib/index.js would stamp the ignored file.
+            shutil.rmtree(os.path.join(root, "lib"))
+            os.symlink("pkg/node_modules/dep", os.path.join(root, "lib"))
+
+            apply_headers_to_tree(root)
+
+            def has_header(rel_path):
+                with open(os.path.join(root, rel_path)) as f:
+                    return "Licensed under the Apache License" in f.read()
+
+            self.assertTrue(has_header("tracked.go"))
+            self.assertTrue(has_header("untracked.py"))
+            self.assertFalse(has_header("pkg/node_modules/dep/index.js"))
 
 
 if __name__ == "__main__":

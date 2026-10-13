@@ -1,0 +1,31 @@
+# Deny egress for sandbox pods that no NetworkPolicy selects.
+#
+# The Baseline tier is evaluated only after the Admin tier returned Pass (or
+# matched nothing) and no Kubernetes NetworkPolicy selected the pod. Without a
+# Baseline policy that case falls through to the Kubernetes default (allow).
+#
+# In this example that is a plain Sandbox created without a SandboxTemplate
+# (90-raw-sandbox.yaml): the controller creates no NetworkPolicy for it, so
+# the Admin-tier Pass for shared-tools would end in allow. This policy denies
+# it without affecting templates that do define a NetworkPolicy (team-b).
+apiVersion: policy.networking.k8s.io/v1alpha2
+kind: ClusterNetworkPolicy
+metadata:
+  name: sandbox-egress-baseline-deny
+spec:
+  tier: Baseline
+  priority: 100
+  subject:
+    pods:
+      namespaceSelector: {}
+      podSelector:
+        matchExpressions:
+          - key: agents.x-k8s.io/sandbox-name-hash
+            operator: Exists
+  egress:
+    - name: deny-unless-a-networkpolicy-allowed-it
+      action: Deny
+      to:
+        - networks:
+            - 0.0.0.0/0
+            - "::/0"

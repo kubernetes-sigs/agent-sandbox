@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -26,9 +27,9 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/propagation"
 	"golang.org/x/net/http/httpguts"
-	"k8s.io/apimachinery/pkg/types"
 
 	"sigs.k8s.io/agent-sandbox/sandbox-router/authz"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
@@ -95,6 +96,12 @@ func NewHandler(o Options) *Handler {
 			o.Config.UpstreamRetryMaxDelay,
 			onRetry,
 		)
+	}
+	// Wrap with metrics last (outermost) so every upstream byte —
+	// including those on the single successful attempt after dial-class
+	// retries — is counted exactly once.
+	if o.Metrics != nil {
+		tr = newMetricsTransport(tr, o.Metrics)
 	}
 	authorizer := o.Authorizer
 	if authorizer == nil {
@@ -165,6 +172,25 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Resolve once per request, before authorization: the cache returns
+	// the Sandbox UID and Pod IP together, so the UID a scoped token is
+	// checked against is the incarnation this request will dial. The
+	// ErrorHandler also needs src to invalidate the cache entry on
+	// dial-class failures, and the Rewrite callback re-uses the URL.
+	target0 := target // capture for closures
+	upstreamURL, src, resolved := target0.Resolve("http", h.cfg.ClusterDomain, upstreamPath, r.URL.RawQuery, h.cache)
+	if upstreamRawPath != "" {
+		// Only ever set for a path-routed request (see resolveTarget).
+		// Target.Resolve only assigns URL.Path, so without this a path-
+		// routed request carrying an encoded separator in its upstream
+		// portion (e.g. a filename containing "/", sent as "%2F") would
+		// reach the sandbox already decoded, silently renaming the
+		// resource it addresses. net/url only honors RawPath when it is
+		// a valid encoding of Path (see url.URL.EscapedPath's doc) —
+		// resolveTarget/ParsePathRoute guarantee that pairing holds.
+		upstreamURL.RawPath = upstreamRawPath
+	}
+
 	// Authorization. Implementations are expected to pull whatever
 	// credential they need (TLS cert, Bearer token, custom header) off
 	// the request and either allow or return one of the sentinel
@@ -175,7 +201,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	authorizationTarget, err := authz.NormalizeAuthorizationTarget(authz.AuthorizationTarget{
 		Namespace:   target.Namespace,
 		SandboxName: target.ID,
-		SandboxUID:  target.UID,
+		SandboxUID:  string(resolved.SandboxUID),
 		Port:        target.Port,
 		Method:      r.Method,
 		Path:        upstreamPathURL.EscapedPath(),
@@ -213,7 +239,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target0 := target // capture for closures
 	outboundRawQuery := r.URL.RawQuery
 	if h.cfg.AuthzCookieQueryParam != "" {
 		// Never forward the bootstrap credential to the sandbox itself.
@@ -222,21 +247,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// normal flow already returned above.
 		outboundRawQuery = stripQueryParam(outboundRawQuery, h.cfg.AuthzCookieQueryParam)
 	}
-	// Resolve once per request so the ErrorHandler can see which path
-	// produced the IP (cache vs DNS vs override) and invalidate the cache
-	// entry on dial-class failures. The Rewrite callback re-uses the URL.
-	upstreamURL, src := target0.Resolve("http", h.cfg.ClusterDomain, upstreamPath, outboundRawQuery, h.cache)
-	if upstreamRawPath != "" {
-		// Only ever set for a path-routed request (see resolveTarget).
-		// Target.Resolve only assigns URL.Path, so without this a path-
-		// routed request carrying an encoded separator in its upstream
-		// portion (e.g. a filename containing "/", sent as "%2F") would
-		// reach the sandbox already decoded, silently renaming the
-		// resource it addresses. net/url only honors RawPath when it is
-		// a valid encoding of Path (see url.URL.EscapedPath's doc) —
-		// resolveTarget/ParsePathRoute guarantee that pairing holds.
-		upstreamURL.RawPath = upstreamRawPath
-	}
+	upstreamURL.RawQuery = outboundRawQuery
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL = upstreamURL
@@ -326,22 +337,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// working route for a warm-pool sandbox until resync. We only
 			// invalidate when the IP we tried actually came from the
 			// cache — a DNS or PodIP-header failure means the cache had
-			// nothing useful to evict — and evict by the same key the
-			// entry was resolved with: UID for the fast path,
-			// namespace/name (plus the failed IP, so a recreated Pod's
-			// fresh entry survives) for the name index.
-			if h.cache != nil && isDeadHostDialError(err) {
-				invalidated := false
-				switch {
-				case src == SourceCache && target0.UID != "":
-					invalidated = h.cache.Invalidate(types.UID(target0.UID))
-				case src == SourceCacheName:
-					// SplitHostPort strips the port and the brackets
-					// JoinHostPort added around IPv6 literals.
-					if ip, _, sperr := net.SplitHostPort(upstreamURL.Host); sperr == nil {
-						invalidated = h.cache.InvalidateByName(target0.Namespace, target0.ID, ip)
-					}
-				}
+			// nothing useful to evict. Either cache path resolved a full
+			// entry, so evict exactly that entry: one a recreated Pod
+			// refreshed mid-dial survives, even if it reused the IP.
+			if h.cache != nil && isDeadHostDialError(err) && (src == SourceCache || src == SourceCacheName) {
+				invalidated := h.cache.Invalidate(resolved)
 				if invalidated && h.metrics != nil {
 					h.metrics.CacheInvalidationsTotal.WithLabelValues(target0.Namespace).Inc()
 				}
@@ -489,4 +489,87 @@ func classifyError(err error) string {
 		return "dial"
 	}
 	return "other"
+}
+
+// metricsTransport wraps an http.RoundTripper and increments Prometheus
+// counters for every byte flowing to / from the upstream sandbox. The
+// sandbox_namespace label is read from the per-request *Labels the proxy
+// handler attached to the request context earlier in ServeHTTP — same
+// mechanism the rest of the observability stack uses.
+//
+// The wrapping is applied outside retryTransport so retries that fail at
+// dial time (before any body bytes move) don't double-count; retries on
+// dial failures are safe here because http.Transport only consumes the
+// body after a successful connect.
+type metricsTransport struct {
+	base    http.RoundTripper
+	metrics *observability.Metrics
+}
+
+func newMetricsTransport(base http.RoundTripper, metrics *observability.Metrics) *metricsTransport {
+	return &metricsTransport{base: base, metrics: metrics}
+}
+
+// RoundTrip implements http.RoundTripper. The http.RoundTripper contract
+// forbids mutating the incoming request; ReverseProxy happens to hand us
+// an owned clone today, but a shallow copy before swapping Body keeps
+// this transport safe for reuse by other callers.
+func (t *metricsTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	namespace := observability.SandboxNamespaceFromContext(req.Context())
+
+	// Wrap the request body so bytes streamed to the upstream are
+	// counted toward upstream_tx_bytes_total. The counter is bound to
+	// the resolved namespace up front; WithLabelValues is a map lookup
+	// but the series is reused for the lifetime of the process so the
+	// per-call cost is trivial.
+	if req.Body != nil {
+		reqClone := req.Clone(req.Context())
+		reqClone.Body = &upstreamCountingReadCloser{
+			rc:      req.Body,
+			counter: t.metrics.UpstreamTxBytesTotal.WithLabelValues(namespace),
+		}
+		req = reqClone
+	}
+
+	resp, err := t.base.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Wrap the response body so bytes streamed back from the upstream
+	// are counted toward upstream_rx_bytes_total. httputil.ReverseProxy
+	// copies resp.Body to the client via io.Copy and then calls Close,
+	// so the counter is incremented lazily as bytes flow — SSE /
+	// streaming responses are accounted for correctly because the
+	// counting happens per Read, not per response.
+	if resp.Body != nil {
+		resp.Body = &upstreamCountingReadCloser{
+			rc:      resp.Body,
+			counter: t.metrics.UpstreamRxBytesTotal.WithLabelValues(namespace),
+		}
+	}
+
+	return resp, nil
+}
+
+// upstreamCountingReadCloser wraps an io.ReadCloser, counts bytes read,
+// and increments a Prometheus counter in real time. Incrementing per Read
+// (rather than accumulating locally and flushing at Close) keeps the
+// counters accurate even if a streaming response is abandoned mid-flight
+// — the bytes that did flow are still attributed.
+type upstreamCountingReadCloser struct {
+	rc      io.ReadCloser
+	counter prometheus.Counter
+}
+
+func (c *upstreamCountingReadCloser) Read(p []byte) (int, error) {
+	n, err := c.rc.Read(p)
+	if n > 0 {
+		c.counter.Add(float64(n))
+	}
+	return n, err
+}
+
+func (c *upstreamCountingReadCloser) Close() error {
+	return c.rc.Close()
 }

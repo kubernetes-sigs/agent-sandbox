@@ -1,0 +1,121 @@
+# The fleet portal: control plane for employee lifecycle (provision, sleep,
+# wake, rebuild, delete). Build the image first (README step 4):
+#   docker build -t fleet-portal:demo 40-fleet-portal/
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fleet-portal
+  namespace: openclaw-fleet
+---
+# Least privilege: claims are created/deleted per employee; sandboxes are
+# read and patched (operatingMode flips); pods are only read (to locate the
+# adopted pod and the storage daemon on its node); Services are managed for
+# the per-employee ExternalName aliases.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fleet-portal
+  namespace: openclaw-fleet
+rules:
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxclaims"]
+    verbs: ["get", "list", "create", "delete"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "create", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fleet-portal
+  namespace: openclaw-fleet
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: fleet-portal
+subjects:
+  - kind: ServiceAccount
+    name: fleet-portal
+    namespace: openclaw-fleet
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fleet-portal
+  namespace: openclaw-fleet
+spec:
+  replicas: 1 # in-memory idle clock => single replica by design
+  selector:
+    matchLabels:
+      app: fleet-portal
+  template:
+    metadata:
+      labels:
+        app: fleet-portal # matched by the storage daemon's NetworkPolicy
+    spec:
+      serviceAccountName: fleet-portal
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10000 # matches USER in 40-fleet-portal/Dockerfile
+        runAsGroup: 10000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: portal
+          image: fleet-portal:demo
+          # Always: the walkthrough iterates on this image under one tag;
+          # IfNotPresent would silently keep a stale cached build.
+          imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - containerPort: 8080
+          env:
+            - name: NAMESPACE
+              value: openclaw-fleet
+            - name: POOL
+              value: openclaw-fleet-pool
+            - name: DAEMON_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: storage-daemon-token
+                  key: token
+            # Optional fleet-admin token (SHA-256 of the bearer token) for
+            # bulk operations like 70-rolling-update.sh:
+            #   TOKEN=$(openssl rand -hex 24)
+            #   kubectl -n openclaw-fleet create secret generic fleet-admin \
+            #     --from-literal=sha256="$(printf %s "$TOKEN" | sha256sum | cut -d' ' -f1)"
+            - name: ADMIN_TOKEN_SHA256
+              valueFrom:
+                secretKeyRef:
+                  name: fleet-admin
+                  key: sha256
+                  optional: true
+            # 0 disables the idle sweeper; set e.g. "3600" to auto-suspend
+            # employees idle for an hour (cost profile, checklist item 7).
+            - name: IDLE_TIMEOUT
+              value: "0"
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fleet-portal
+  namespace: openclaw-fleet
+spec:
+  selector:
+    app: fleet-portal
+  ports:
+    - port: 8080
+      targetPort: 8080

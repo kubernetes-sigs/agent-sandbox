@@ -35,10 +35,11 @@ def main():
     make_targets = [
         "generate-api-docs",
         "generate-go-docs",
-        "generate-python-docs"
+        "generate-python-docs",
+        "generate-metrics-docs"
     ]
 
-    print("Regenerating API and SDK documentation...")
+    print("Regenerating generated documentation...")
 
     for target in make_targets:
         # Run `make <target>` from the root of the repository

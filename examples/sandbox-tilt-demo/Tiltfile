@@ -1,0 +1,79 @@
+# Local development for Agent Sandbox with Tilt.
+#
+#   1. Create a kind cluster that Tilt can drive, e.g.:
+#        kind create cluster --name agent-sandbox
+#   2. Run `tilt up` from this directory. Tilt will:
+#        - build the controller image and load it into kind,
+#        - install the Sandbox CRD, namespace, RBAC, and the controller,
+#        - build and run the demo FastAPI app, which creates a demo Sandbox on
+#          startup (the controller provisions a pod that prints "Hello Sandbox!").
+#      Tear everything down with `tilt down`.
+
+# Guard against deploying into whatever cluster happens to be current
+allow_k8s_contexts('kind-agent-sandbox')
+
+# Repo root, relative to this Tiltfile. The controller image builds from there
+# because its Dockerfile COPYs the Go module from the root of the repo.
+REPO_ROOT = '../..'
+CONTROLLER_IMAGE = 'kind.local/agent-sandbox-controller'
+
+# Build the controller from source. `only=` keeps the build context to the paths
+# the root Dockerfile actually COPYs
+docker_build(
+    CONTROLLER_IMAGE,
+    context=REPO_ROOT,
+    dockerfile=REPO_ROOT + '/Dockerfile',
+    only=[
+        'go.mod',
+        'go.sum',
+        'api/',
+        'cmd/',
+        'controllers/',
+        'extensions/',
+        'internal/',
+    ],
+)
+
+# Install the Sandbox CRD and the controller's ClusterRole
+k8s_yaml(REPO_ROOT + '/k8s/crds/agents.x-k8s.io_sandboxes.yaml')
+k8s_yaml(REPO_ROOT + '/k8s/rbac.generated.yaml')
+
+# Swap the placeholder for the ref we just built before handing over the YAML
+controller_yaml = read_file(REPO_ROOT + '/k8s/controller.yaml')
+k8s_yaml(blob(str(controller_yaml).replace(
+    'ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller',
+    CONTROLLER_IMAGE,
+)))
+
+# Fold the CRD, namespace and RBAC into the controller resource
+k8s_resource(
+    'agent-sandbox-controller',
+    objects=[
+        'agent-sandbox-system:namespace',
+        'sandboxes.agents.x-k8s.io:customresourcedefinition',
+        'agent-sandbox-controller:serviceaccount',
+        'agent-sandbox-controller:clusterrole',
+        'agent-sandbox-controller:clusterrolebinding',
+    ],
+    labels=['controller'],
+)
+
+# Build the demo FastAPI app and deploy it (Deployment + Service + RBAC)
+docker_build(
+    'kind.local/agent-sandbox-demo-app',
+    context='./demo',
+    dockerfile='./demo/Dockerfile',
+)
+k8s_yaml('manifests/app.yaml')
+
+k8s_resource(
+    'agent-sandbox-demo-app',
+    objects=[
+        'agent-sandbox-demo-app:serviceaccount',
+        'agent-sandbox-demo-app:role',
+        'agent-sandbox-demo-app:rolebinding',
+    ],
+    port_forwards='8080:8080',
+    resource_deps=['agent-sandbox-controller'],
+    labels=['demo'],
+)

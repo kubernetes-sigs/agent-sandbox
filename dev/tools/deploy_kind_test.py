@@ -69,7 +69,8 @@ class DeployKindTest(unittest.TestCase):
         self.assertEqual(self._find_call(calls, "push-images"),
                          ["--image-prefix=kind.local/",
                           "--kind-cluster-name=agent-sandbox",
-                          "--container-engine=docker"])
+                          "--container-engine=docker",
+                          "--controller-only"])
         self.assertEqual(self._find_call(calls, "deploy-to-kube"),
                          ["--image-prefix=kind.local/", "--image-tag="])
 

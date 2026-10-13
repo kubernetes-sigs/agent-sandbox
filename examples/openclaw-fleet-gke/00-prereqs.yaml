@@ -1,0 +1,56 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openclaw-fleet
+---
+# Base OpenClaw gateway configuration shared by every sandbox in the fleet.
+# This is the "unified sandbox template" half of the design: everything here
+# is identical for all employees and therefore safe to bake into warm-pool
+# spares. Anything PER-EMPLOYEE (profile, settings, assets, session state)
+# lives on the employee's Filestore workspace, which is late-bound into the
+# pod at claim time — never in pod env or per-claim volumes, because either
+# of those would force a cold start past the warm pool.
+#
+# controlUi.allowedOrigins must include the public origin the fleet is
+# served from. After `50-router/20-gateway.yaml` programs the Gateway and
+# you know its address, add it here (e.g. "http://GATEWAY_IP") and roll the
+# fleet with 70-rolling-update.sh — that doubles as the update drill for
+# test-checklist item 4.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openclaw-fleet-config
+  namespace: openclaw-fleet
+data:
+  openclaw.json: |
+    {
+      "gateway": {
+        "controlUi": {
+          "allowedOrigins": [
+            "http://localhost:18789",
+            "http://127.0.0.1:18789"
+          ]
+        }
+      }
+    }
+---
+# The storage node daemon requires a bearer token from callers (the fleet
+# portal). Deliberately NOT committed with a usable value — generate one per
+# install (run-test-gke.sh does the same with a throwaway value):
+#
+#   kubectl -n openclaw-fleet create secret generic storage-daemon-token \
+#     --from-literal=token="$(openssl rand -hex 24)"
+#
+# Optional: LLM provider keys for actual OpenClaw chat, injected into every
+# sandbox via envFrom. Warm pools require this shape — pod env is stamped
+# when the SPARE is created, before any employee exists, so only
+# fleet-shared credentials may live here. May start empty; all the
+# infrastructure in this example works without a real key.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openclaw-provider-keys
+  namespace: openclaw-fleet
+type: Opaque
+# stringData:
+#   ANTHROPIC_API_KEY: "your-key-here"

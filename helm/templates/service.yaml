@@ -10,6 +10,6 @@ spec:
     {{- include "agent-sandbox.selectorLabels" . | nindent 4 }}
   ports:
   - name: metrics
-    port: 8080
+    port: 8080   # Change to 8443 when --metrics-secure-serving is enabled.
     targetPort: metrics
     protocol: TCP

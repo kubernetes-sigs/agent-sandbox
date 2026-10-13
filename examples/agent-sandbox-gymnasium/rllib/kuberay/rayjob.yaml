@@ -1,0 +1,131 @@
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: rllib-sandbox-training
+  namespace: rllib-sandbox-example
+spec:
+  submissionMode: K8sJobMode
+  entrypoint: >-
+    python /opt/agent-sandbox/rllib/train.py
+    --connection-mode sandboxd-in-cluster
+    --verify-run
+    --checkpoint-dir /checkpoints
+    --ray-address auto
+    --namespace rllib-sandbox-example
+    --warmpool rllib-sandboxd-warmpool
+    --num-env-runners 2
+  # Keep time to collect Ray logs before releasing the compute resources.
+  shutdownAfterJobFinishes: true
+  ttlSecondsAfterFinished: 300
+  backoffLimit: 0
+  submitterConfig:
+    backoffLimit: 0
+  submitterPodTemplate:
+    spec:
+      serviceAccountName: rllib-submitter
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      containers:
+        - name: ray-job-submitter
+          # Replace all three Ray images with the SAME built example image.
+          image: REPLACE_WITH_YOUR_RLLIB_IMAGE
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+  rayClusterSpec:
+    rayVersion: "2.58.0"
+    enableInTreeAutoscaling: false
+    headGroupSpec:
+      rayStartParams:
+        dashboard-host: "0.0.0.0"
+        # Reserve worker CPUs for the two remote EnvRunner actors. The
+        # driver and local Learner still use the head's Kubernetes CPU.
+        num-cpus: "0"
+        object-store-memory: "536870912"
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/part-of: rllib-sandbox-example
+        spec:
+          serviceAccountName: rllib-sandbox
+          restartPolicy: Never
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 100
+            runAsNonRoot: true
+            fsGroup: 100
+            fsGroupChangePolicy: OnRootMismatch
+          containers:
+            - name: ray-head
+              image: REPLACE_WITH_YOUR_RLLIB_IMAGE
+              imagePullPolicy: IfNotPresent
+              ports:
+                - name: gcs-server
+                  containerPort: 6379
+                - name: dashboard
+                  containerPort: 8265
+                - name: client
+                  containerPort: 10001
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 4Gi
+                limits:
+                  cpu: "2"
+                  memory: 4Gi
+              volumeMounts:
+                - name: checkpoints
+                  mountPath: /checkpoints
+                - name: shared-memory
+                  mountPath: /dev/shm
+          volumes:
+            - name: checkpoints
+              persistentVolumeClaim:
+                claimName: rllib-checkpoints
+            - name: shared-memory
+              emptyDir:
+                medium: Memory
+                sizeLimit: 1Gi
+    workerGroupSpecs:
+      - groupName: env-runners
+        replicas: 1
+        minReplicas: 1
+        maxReplicas: 1
+        rayStartParams:
+          num-cpus: "2"
+          object-store-memory: "536870912"
+        template:
+          metadata:
+            labels:
+              app.kubernetes.io/part-of: rllib-sandbox-example
+          spec:
+            serviceAccountName: rllib-sandbox
+            restartPolicy: Never
+            securityContext:
+              runAsUser: 1000
+              runAsGroup: 100
+              runAsNonRoot: true
+            containers:
+              - name: ray-worker
+                image: REPLACE_WITH_YOUR_RLLIB_IMAGE
+                imagePullPolicy: IfNotPresent
+                resources:
+                  requests:
+                    cpu: "2"
+                    memory: 4Gi
+                  limits:
+                    cpu: "2"
+                    memory: 4Gi
+                volumeMounts:
+                  - name: shared-memory
+                    mountPath: /dev/shm
+            volumes:
+              - name: shared-memory
+                emptyDir:
+                  medium: Memory
+                  sizeLimit: 1Gi

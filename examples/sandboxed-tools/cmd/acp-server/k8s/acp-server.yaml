@@ -1,0 +1,133 @@
+# Deploys the sandboxed-tools ACP server.
+#
+# ${IMAGE} is the server image built from cmd/acp-server/Dockerfile (see its
+# header); set it and substitute before applying. Everything deploys to the
+# default namespace, so pass -n default to kubectl rather than relying on
+# the context's namespace (or edit the namespace fields to run elsewhere):
+#
+#   export IMAGE=kind.local/sandboxed-tools-acp-server:latest
+#   envsubst < examples/sandboxed-tools/cmd/acp-server/k8s/acp-server.yaml | kubectl apply -f -
+#   kubectl -n default port-forward deployment/sandboxed-tools-acp-server 8090:8090
+#   cd examples/agentclientprotocol && go run . -addr localhost:8090
+#
+# The server has no authentication: anything that can reach it can create
+# sessions, approve its own tool calls, and run commands in sandboxes under
+# the server's RBAC. That is why this manifest deliberately creates no
+# Service: the server is reached with kubectl port-forward to the
+# Deployment, so access is gated by your kubeconfig. See "Security" in the
+# README before adding a Service or exposing it any other way.
+#
+# The LLM and toolset configuration (OPENAI_MODEL, GEMINI_API_KEY, TOOLSET,
+# ...) comes from the sandboxed-tools-acp-server Secret, which this manifest
+# does not create: the pod waits in CreateContainerConfigError until it
+# exists. The README walks through creating it for the built-in fake LLM
+# (fake-eliza, no API key needed) and for Gemini.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sandboxed-tools-acp-server
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sandboxed-tools-acp-server
+  namespace: default
+rules:
+  # The server creates a Sandbox per session for tool execution, extends its
+  # shutdown time while in use, and deletes it on shutdown.
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["create", "get", "update", "delete"]
+  # Tools run via exec in the sandbox pod.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sandboxed-tools-acp-server
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sandboxed-tools-acp-server
+subjects:
+  - kind: ServiceAccount
+    name: sandboxed-tools-acp-server
+    namespace: default
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandboxed-tools-acp-server
+  namespace: default
+  labels:
+    app: sandboxed-tools-acp-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sandboxed-tools-acp-server
+  template:
+    metadata:
+      labels:
+        app: sandboxed-tools-acp-server
+    spec:
+      serviceAccountName: sandboxed-tools-acp-server
+      # Restricted Pod Security Standard. The image is distroless nonroot,
+      # so runAsNonRoot only asserts what is already true; the rest keeps
+      # the container minimal, which matters for a process that holds an
+      # LLM key and can exec into pods.
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+        # The image's non-root group (distroless nonroot is 65532:65532).
+        # An emptyDir is world-writable regardless, but this keeps /data
+        # writable if the volume is swapped for a PVC or another medium.
+        fsGroup: 65532
+      containers:
+        - name: acp-server
+          image: ${IMAGE}
+          imagePullPolicy: IfNotPresent
+          # All writes (session history, filesystem snapshots) go under
+          # $HOME=/data, the emptyDir below, so the root filesystem can be
+          # read-only.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          args:
+            - --listen=:8090
+          # LLM and toolset settings: the same environment variables the CLI
+          # reads (see the Configuration section of the README), e.g.
+          # OPENAI_MODEL, GEMINI_API_KEY, OPENAI_BASE_URL, TOOLSET,
+          # SANDBOX_IMAGE. They are loaded from a Secret since the API key
+          # is sensitive; the rest lives alongside it so one object holds the
+          # whole model/toolset choice.
+          envFrom:
+            - secretRef:
+                name: sandboxed-tools-acp-server
+          env:
+            # Sandboxes go in the server's own namespace, which is the one
+            # the Role above grants access to.
+            - name: SANDBOX_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: acp
+              containerPort: 8090
+          volumeMounts:
+            # Session state and filesystem snapshots ($HOME).
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}

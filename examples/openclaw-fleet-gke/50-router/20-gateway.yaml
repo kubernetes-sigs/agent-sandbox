@@ -1,0 +1,110 @@
+# The external front door: one GKE Gateway fans out to the two services
+# behind this example — the sandbox-router (per-employee OpenClaw UIs,
+# WebSockets included) and the fleet-portal (signup + lifecycle API).
+# Follows the shape of sandbox-router/deploy/examples/gateway-gke.yaml.
+#
+#   /router/...  -> sandbox-router-svc:8080  (path-routed sandbox traffic)
+#   /...         -> fleet-portal:8080        (everything else)
+#
+# Gateway API gives the more specific path match precedence, so splitting
+# these across two HTTPRoutes is safe: /router/* always wins over /.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: openclaw-fleet-gateway
+  namespace: openclaw-fleet
+spec:
+  # Specific to GKE; provisions a global external Application Load
+  # Balancer. Choose a different gateway class for other Gateway
+  # implementations.
+  gatewayClassName: gke-l7-global-external-managed
+  listeners:
+    # Plain HTTP keeps the demo copy-pasteable (no cert/domain needed).
+    # For production — and required if you enable IAP in
+    # 30-iap-optional.yaml — add an HTTPS listener with a
+    # certificateRefs/SSL-certificate setup and redirect HTTP to it.
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+# Sandbox traffic: everything under /router is the router's path-routing
+# namespace (it matches the --path-routing-prefix=/router flag set in
+# 10-router.yaml). The router itself parses the rest of the URL —
+# /router/<namespace>/<id>/<port>/... — so the Gateway only needs the
+# prefix match, no per-employee routes ever appear here.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: sandbox-router-route
+  namespace: openclaw-fleet
+spec:
+  parentRefs:
+    - name: openclaw-fleet-gateway # must match the Gateway above
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /router
+      backendRefs:
+        - name: sandbox-router-svc
+          port: 8080
+---
+# Portal traffic: the catch-all. Signup (/users) and lifecycle endpoints
+# (/u/<employee>/...) live on the fleet-portal, authored in an earlier
+# step of this example.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: fleet-portal-route
+  namespace: openclaw-fleet
+spec:
+  parentRefs:
+    - name: openclaw-fleet-gateway
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: fleet-portal
+          port: 8080
+---
+# HealthCheckPolicy tells the GKE load balancer to probe the router's
+# /healthz endpoint (part of the router's HTTP contract; see
+# sandbox-router/README.md) instead of the default "/" — which the router
+# would try to route as sandbox traffic and fail with 400.
+apiVersion: networking.gke.io/v1 # Specific to GKE
+kind: HealthCheckPolicy
+metadata:
+  name: sandbox-router-health-check-policy
+  namespace: openclaw-fleet
+spec:
+  targetRef:
+    group: ""
+    kind: Service
+    name: sandbox-router-svc # must match the router Service
+  default:
+    config:
+      type: HTTP
+      httpHealthCheck:
+        requestPath: /healthz
+---
+# Same for the portal: its health endpoint is GET /healthz.
+apiVersion: networking.gke.io/v1 # Specific to GKE
+kind: HealthCheckPolicy
+metadata:
+  name: fleet-portal-health-check-policy
+  namespace: openclaw-fleet
+spec:
+  targetRef:
+    group: ""
+    kind: Service
+    name: fleet-portal # must match the portal Service
+  default:
+    config:
+      type: HTTP
+      httpHealthCheck:
+        requestPath: /healthz

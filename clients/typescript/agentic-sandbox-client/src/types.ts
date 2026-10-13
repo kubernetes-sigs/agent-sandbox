@@ -15,6 +15,15 @@
 import type * as k8s from "@kubernetes/client-node";
 
 export interface SandboxClientOptions {
+  /**
+   * Kubernetes client configuration used for every API call, watch, and
+   * port-forward. Defaults to `loadFromDefault()` (KUBECONFIG, then
+   * ~/.kube/config, then in-cluster). An injected config is used as given:
+   * the "no Kubernetes configuration found" check applies only to the
+   * default. Mirrors the Python client's `api_client` and the Go client's
+   * `Options.RestConfig`.
+   */
+  kubeConfig?: k8s.KubeConfig;
   namespace?: string;
   sandboxReadyTimeout?: number;
   enableTracing?: boolean;

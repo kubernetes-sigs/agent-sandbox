@@ -111,9 +111,12 @@ Security baseline, since `sandboxd` has no authentication of its own:
    `NetworkPolicy`, and `sandboxd` binds `0.0.0.0` by default. Proposed: an
    owned deny-all-ingress `NetworkPolicy` per run on the Kubernetes backend,
    removed with the `Sandbox`. Port-forward and kubelet probes keep working.
-   Binding `sandboxd` to loopback instead would fail the readiness probe,
-   which dials the pod IP. Until approvers accept a default, ship it as an
-   opt-in flag. Containers publish on host loopback only; other containers on
+   A `NetworkPolicy` is only enforced when the CNI supports it (plain kindnet
+   ignores it), so this is best-effort. Binding `sandboxd` to loopback is the
+   CNI-independent option, but it fails the HTTP readiness probe, which dials
+   the pod IP. It would need an exec probe, and `sandboxd` has no health
+   subcommand for that today. Until approvers accept a default, ship the
+   policy as an opt-in flag. Containers publish on host loopback only; other containers on
    the same engine network can still reach `sandboxd`, which the README states.
 4. **Resource limits.** Neither backend sets CPU, memory or PID limits today.
    Proposed: opt-in flags only (`--cpus`, `--memory`, `--pids-limit`) and no

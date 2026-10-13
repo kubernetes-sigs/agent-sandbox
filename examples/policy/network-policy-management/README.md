@@ -311,9 +311,9 @@ spec:
 
 - `dnsPolicy: ClusterFirst`: with a custom `networkPolicy` the controller does not override DNS, and `ClusterFirst` is the Kubernetes default. Set it anyway. If someone later deletes the `networkPolicy` block, the controller switches to public resolvers only when `dnsPolicy` is empty, so this line keeps Service names resolving.
 
-- Port 8080 in rule 2: the CNI checks egress after the Service IP is translated to a pod IP, so the rule needs the container port. Port 80 here would block every request.
+- Port 8080 in rule 2: a `NetworkPolicyPort` is a port on the destination pod, not on the Service, so the rule needs the container port. Port 80 here would block every request.
 
-- Selectors instead of IPs: rule 2 keeps matching when `memory-service` pods are rescheduled. Every other pod in the cluster is still blocked by the excepts in rule 3.
+- Selectors instead of IPs: rule 2 keeps matching when `memory-service` pods are rescheduled. Every other pod in the cluster stays blocked only if the cluster's pod and Service CIDRs fall inside the excepts in rule 3. If they do not (for example, a pod range in `100.64.0.0/10`), add those CIDRs to the `except` lists.
 
 - NodeLocal DNSCache: pods send DNS to `169.254.20.10` instead of to CoreDNS, so rule 1 does not match. Add an `ipBlock` rule for `169.254.20.10/32` on port 53.
 
@@ -322,7 +322,7 @@ To check from inside a sandbox:
 ```bash
 getent hosts memory-service.memory.svc.cluster.local   # prints the ClusterIP
 curl -sS -m 5 http://memory-service.memory/            # gets a response
-curl -sS -m 5 http://<other-service>.<namespace>/      # times out
+curl -sS -m 5 http://other-service.other-namespace/    # any other Service: times out
 ```
 
 

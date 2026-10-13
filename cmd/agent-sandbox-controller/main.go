@@ -215,9 +215,8 @@ func main() {
 		// flags (e.g. klog) are never modified.
 		overrides, skipped, cliOverridden, err := internalconfig.ApplyConfigMapData(configData, flag.CommandLine)
 		if err != nil {
-			// Log but continue — valid keys were already applied; only the
-			// malformed keys are skipped.
-			setupLog.Error(err, "some ConfigMap keys had invalid values (valid keys were still applied)")
+			setupLog.Error(err, "failed to parse controller config from ConfigMap")
+			os.Exit(1)
 		}
 		for _, o := range overrides {
 			setupLog.Info("ConfigMap override applied", "key", o.Key, "value", o.Value)

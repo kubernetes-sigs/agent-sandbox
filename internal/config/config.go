@@ -67,19 +67,18 @@ var knownNonFlagKeys = map[string]bool{
 }
 
 // IsIgnoredConfigKey reports whether a ConfigMap key is documentation-only
-// (underscore or dot prefix) and should be skipped for both flag overrides
-// and change-detection hashing.
+// (underscore or dot prefix) and should be silently skipped.
 func IsIgnoredConfigKey(name string) bool {
 	return strings.HasPrefix(name, "_") || strings.HasPrefix(name, ".")
 }
 
 // ApplyConfigMapData applies overrides from a ConfigMap data map to the
-// given flag set. Only keys in the TunableFlags allowlist that match a
+// given flag set. Only keys in the tunableFlags allowlist that match a
 // registered flag name are applied. Explicit CLI flags always take
 // precedence over ConfigMap values (CLI > ConfigMap > compiled defaults).
 //
 // Keys that are not in the allowlist, not documentation-only, and not in
-// KnownNonFlagKeys are returned in the skipped slice so the caller can
+// knownNonFlagKeys are returned in the skipped slice so the caller can
 // log them (catches typos that would otherwise silently fall back to defaults).
 // Keys that match a tunable flag but were already set on the CLI are
 // returned in cliOverridden so the caller can log the precedence decision.

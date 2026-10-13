@@ -116,20 +116,24 @@ class QuorumUnreachableError(BatchError):
     """A group can no longer reach ``min_ready``: fewer than ``min_ready`` of its
     members can still become Ready.
 
-    ``failed`` counts terminal members, including failed creates, and ``lost`` counts
-    members whose claim was deleted, or was missing when the batch was re-attached.
+    ``failed`` counts terminal members, including failed creates, ``lost`` counts
+    members whose claim was deleted, or was missing when the batch was re-attached, and
+    ``released`` counts members the caller released, including creates they stopped.
     """
 
-    def __init__(self, *, warmpool: str, size: int, min_ready: int, failed: int, lost: int) -> None:
+    def __init__(
+        self, *, warmpool: str, size: int, min_ready: int, failed: int, lost: int, released: int
+    ) -> None:
         super().__init__(
             f"group '{warmpool}' can no longer reach min_ready={min_ready}: "
-            f"size={size}, failed={failed}, lost={lost}"
+            f"size={size}, failed={failed}, lost={lost}, released={released}"
         )
         self.warmpool = warmpool
         self.size = size
         self.min_ready = min_ready
         self.failed = failed
         self.lost = lost
+        self.released = released
 
 
 class BatchTimeoutError(BatchError, TimeoutError):

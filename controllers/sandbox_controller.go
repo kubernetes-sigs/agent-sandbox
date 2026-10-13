@@ -22,6 +22,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -39,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
@@ -260,6 +262,13 @@ type SandboxReconciler struct {
 	// for why this one piece of in-memory state is unavoidable and why
 	// losing it is harmless.
 	deferralClock deferredWriteClock
+
+	// Only Sandbox watch events admit new UIDs, excluding the initial inventory.
+	// Removing a UID after Ready consumes its eligibility, so subsequent readiness
+	// flaps cannot record again. A restart excludes even previously suspended
+	// Sandboxes, at the cost of missing startups that span controller runs.
+	creationMetricsMu      sync.Mutex
+	pendingCreationMetrics map[types.UID]struct{}
 }
 
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
@@ -309,6 +318,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if !sandbox.DeletionTimestamp.IsZero() {
 		logger.Info("Sandbox is being deleted")
 		r.deferralClock.clear(req.NamespacedName)
+		r.forgetSandboxCreationMetrics(sandbox.UID)
 		return ctrl.Result{}, nil
 	}
 
@@ -383,13 +393,12 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	if !sandboxDeleted {
-		creationLatency, recordCreationLatency := prepareSandboxCreationMetrics(sandbox, oldStatus)
 		// Update status
 		if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
 			// Surface update error
 			err = errors.Join(err, statusUpdateErr)
-		} else if recordCreationLatency {
-			r.recordSandboxCreationMetrics(ctx, sandbox, creationLatency)
+		} else {
+			r.recordSandboxCreationMetrics(ctx, sandbox, oldStatus)
 		}
 	}
 
@@ -802,6 +811,7 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 	if err := r.Status().Patch(ctx, sandbox, client.MergeFrom(base)); err != nil {
 		if k8serrors.IsNotFound(err) {
 			// Sandbox was deleted mid-reconcile
+			r.forgetSandboxCreationMetrics(sandbox.UID)
 			return nil
 		}
 		logger.Error(err, "Failed to patch sandbox status")
@@ -816,48 +826,71 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 	return nil
 }
 
-// prepareSandboxCreationMetrics records the first Ready time in status and returns
-// whether this transition has a valid creation latency to observe after status is
-// persisted. Sandboxes already Ready before firstReadyTime was introduced are
-// backfilled without attributing their current condition timestamp to creation.
-func prepareSandboxCreationMetrics(sandbox *sandboxv1beta1.Sandbox, oldStatus *sandboxv1beta1.SandboxStatus) (time.Duration, bool) {
-	if sandbox.Status.FirstReadyTime != nil {
-		return 0, false
+// sandboxCreationMetricsPredicate maintains eligibility before enqueueing a
+// reconcile. Every notification still reaches the normal reconciliation queue.
+func (r *SandboxReconciler) sandboxCreationMetricsPredicate() predicate.Funcs {
+	return predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool {
+			if !e.IsInInitialList {
+				r.trackSandboxCreationMetrics(e.Object.(*sandboxv1beta1.Sandbox))
+			}
+			return true
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			// A delete followed by creation under the same name can be delivered
+			// as an update when the informer misses the intermediate deletion.
+			if e.ObjectOld.GetUID() != e.ObjectNew.GetUID() {
+				r.forgetSandboxCreationMetrics(e.ObjectOld.GetUID())
+				r.trackSandboxCreationMetrics(e.ObjectNew.(*sandboxv1beta1.Sandbox))
+			}
+			return true
+		},
+		DeleteFunc: func(e event.DeleteEvent) bool {
+			r.forgetSandboxCreationMetrics(e.Object.GetUID())
+			return true
+		},
 	}
-
-	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionReady))
-	wasReady := oldReady != nil && oldReady.Status == metav1.ConditionTrue
-	if wasReady {
-		firstReadyTime := oldReady.LastTransitionTime
-		if firstReadyTime.IsZero() {
-			firstReadyTime = metav1.NewTime(time.Now().UTC())
-		}
-		sandbox.Status.FirstReadyTime = &firstReadyTime
-		return 0, false
-	}
-
-	newReady := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
-	if newReady == nil || newReady.Status != metav1.ConditionTrue {
-		return 0, false
-	}
-
-	firstReadyTime := newReady.LastTransitionTime
-	if firstReadyTime.IsZero() {
-		firstReadyTime = metav1.NewTime(time.Now().UTC())
-	}
-	sandbox.Status.FirstReadyTime = &firstReadyTime
-
-	if sandbox.CreationTimestamp.IsZero() || newReady.LastTransitionTime.IsZero() {
-		return 0, false
-	}
-
-	latency := newReady.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
-	return latency, latency >= 0
 }
 
-// recordSandboxCreationMetrics records a prepared creation latency after the
-// corresponding firstReadyTime status update has succeeded.
-func (r *SandboxReconciler) recordSandboxCreationMetrics(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, latency time.Duration) {
+func (r *SandboxReconciler) trackSandboxCreationMetrics(sandbox *sandboxv1beta1.Sandbox) {
+	if sandbox.UID == "" || !sandbox.DeletionTimestamp.IsZero() ||
+		meta.IsStatusConditionTrue(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady)) {
+		return
+	}
+	r.creationMetricsMu.Lock()
+	defer r.creationMetricsMu.Unlock()
+	if r.pendingCreationMetrics == nil {
+		r.pendingCreationMetrics = make(map[types.UID]struct{})
+	}
+	r.pendingCreationMetrics[sandbox.UID] = struct{}{}
+}
+
+func (r *SandboxReconciler) forgetSandboxCreationMetrics(uid types.UID) {
+	r.creationMetricsMu.Lock()
+	defer r.creationMetricsMu.Unlock()
+	delete(r.pendingCreationMetrics, uid)
+}
+
+// recordSandboxCreationMetrics consumes eligibility only after Ready status has
+// been persisted. Invalid timestamps also consume it to prevent a later recovery
+// or resume from being measured as initial creation latency.
+func (r *SandboxReconciler) recordSandboxCreationMetrics(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, oldStatus *sandboxv1beta1.SandboxStatus) {
+	ready := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	if ready == nil || ready.Status != metav1.ConditionTrue {
+		return
+	}
+	r.creationMetricsMu.Lock()
+	_, eligible := r.pendingCreationMetrics[sandbox.UID]
+	delete(r.pendingCreationMetrics, sandbox.UID)
+	r.creationMetricsMu.Unlock()
+	if !eligible || meta.IsStatusConditionTrue(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionReady)) ||
+		sandbox.CreationTimestamp.IsZero() || ready.LastTransitionTime.IsZero() {
+		return
+	}
+	latency := ready.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
+	if latency < 0 {
+		return
+	}
 	logger := log.FromContext(ctx)
 
 	// Resolve metric labels.
@@ -1915,14 +1948,9 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 	// If we reach here, sandbox is not deleted
 	// Only update "expired" status if cleanup was successful
 	if allErrors == nil {
-		// Drop live-resource status while retaining terminal conditions and the
-		// historical first-ready time.
+		// Drop live-resource status while retaining terminal conditions.
 		conditions := sandbox.Status.Conditions
-		firstReadyTime := sandbox.Status.FirstReadyTime
-		sandbox.Status = sandboxv1beta1.SandboxStatus{
-			Conditions:     conditions,
-			FirstReadyTime: firstReadyTime,
-		}
+		sandbox.Status = sandboxv1beta1.SandboxStatus{Conditions: conditions}
 		// Update status to mark as expired
 		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
 			Type:               string(sandboxv1beta1.SandboxConditionReady),
@@ -2009,7 +2037,7 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&sandboxv1beta1.Sandbox{}).
+		For(&sandboxv1beta1.Sandbox{}, builder.WithPredicates(r.sandboxCreationMetricsPredicate())).
 		Owns(&corev1.Pod{}, builder.WithPredicates(labelSelectorPredicate)).
 		Owns(&corev1.Service{}, builder.WithPredicates(labelSelectorPredicate)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).

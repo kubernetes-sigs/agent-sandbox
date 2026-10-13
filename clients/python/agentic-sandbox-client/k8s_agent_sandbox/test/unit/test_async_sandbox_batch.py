@@ -941,13 +941,13 @@ class TestDetach(unittest.IsolatedAsyncioTestCase):
         await self.handle.detach()
 
         mock_sandbox.close_connection.assert_called_once()
-        self.mock_client._unregister_batch.assert_called_once_with("default", "b1")
+        self.mock_client._unregister_batch.assert_called_once_with(self.handle)
         self.assertEqual(self.handle._connected, {})
 
         await self.handle.detach()
 
         mock_sandbox.close_connection.assert_called_once()
-        self.mock_client._unregister_batch.assert_called_once_with("default", "b1")
+        self.mock_client._unregister_batch.assert_called_once_with(self.handle)
         self.mock_client.k8s_helper.read_batch_lease.assert_called_once()
         self.mock_client.k8s_helper.replace_batch_lease.assert_called_once()
 
@@ -968,7 +968,7 @@ class TestDetach(unittest.IsolatedAsyncioTestCase):
         self.mock_client.k8s_helper.replace_batch_lease.side_effect = None
         await self.handle.detach()  # Retry: completes the release.
         self.assertTrue(self.handle._lease_released)
-        self.mock_client._unregister_batch.assert_called_once_with("default", "b1")
+        self.mock_client._unregister_batch.assert_called_once_with(self.handle)
 
     async def test_close_connection_failure_still_releases_lease(self):
         self.mock_client.k8s_helper.read_batch_lease = AsyncMock(
@@ -983,7 +983,7 @@ class TestDetach(unittest.IsolatedAsyncioTestCase):
             await self.handle.detach()  # Must not raise.
 
         self.mock_client.k8s_helper.replace_batch_lease.assert_called_once()
-        self.mock_client._unregister_batch.assert_called_once_with("default", "b1")
+        self.mock_client._unregister_batch.assert_called_once_with(self.handle)
 
     async def test_foreign_holder_lease_is_left_untouched(self):
         self.mock_client.k8s_helper.read_batch_lease = AsyncMock(
@@ -994,7 +994,7 @@ class TestDetach(unittest.IsolatedAsyncioTestCase):
         await self.handle.detach()  # Must not raise.
 
         self.mock_client.k8s_helper.replace_batch_lease.assert_not_called()
-        self.mock_client._unregister_batch.assert_called_once_with("default", "b1")
+        self.mock_client._unregister_batch.assert_called_once_with(self.handle)
 
     async def test_connect_after_detach_raises(self):
         self.mock_client.k8s_helper.read_batch_lease = AsyncMock(return_value=_lease())
@@ -1033,6 +1033,15 @@ class TestClientClose(BaseAsyncBatchClientTest):
 
         handle._stop_background_tasks.assert_called_once()
         self.assertEqual(self.client._active_batches, {})
+
+    def test_unregistering_an_old_handle_keeps_a_newer_one_registered(self):
+        old_handle = MagicMock(namespace="default", batch_id="b1")
+        new_handle = MagicMock(namespace="default", batch_id="b1")
+        self.client._active_batches[("default", "b1")] = new_handle
+
+        self.client._unregister_batch(old_handle)
+
+        self.assertEqual(self.client._active_batches, {("default", "b1"): new_handle})
 
 
 if __name__ == "__main__":

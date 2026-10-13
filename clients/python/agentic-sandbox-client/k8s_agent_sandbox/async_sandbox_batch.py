@@ -209,8 +209,8 @@ class AsyncSandboxBatch:
         return handle
 
     def _start(self) -> None:
-        self._watch_task = asyncio.ensure_future(self._watch_loop())
-        self._renew_task = asyncio.ensure_future(self._renew_loop())
+        self._watch_task = asyncio.create_task(self._watch_loop(), name=f"batch-{self.batch_id}-watch")
+        self._renew_task = asyncio.create_task(self._renew_loop(), name=f"batch-{self.batch_id}-renew")
 
     async def _stop_background_tasks(self) -> None:
         """Cancels the watcher and lease renewal loop."""
@@ -338,7 +338,7 @@ class AsyncSandboxBatch:
         async with self._lock:
             self._lease_released = True
 
-        self._client._unregister_batch(self.namespace, self.batch_id)
+        self._client._unregister_batch(self)
 
     async def _watch_loop(self) -> None:
         """Background watch loop which keeps ``self._state`` in sync with the batch's claims.

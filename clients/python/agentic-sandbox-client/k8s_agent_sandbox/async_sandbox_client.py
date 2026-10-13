@@ -525,8 +525,11 @@ class AsyncSandboxClient(Generic[T]):
             self._active_batches[key] = batch
         return batch
 
-    def _unregister_batch(self, namespace: str, batch_id: str) -> None:
-        self._active_batches.pop((namespace, batch_id), None)
+    def _unregister_batch(self, batch: AsyncSandboxBatch) -> None:
+        key = (batch.namespace, batch.batch_id)
+        # get_batch may have registered a newer handle for the same batch since.
+        if self._active_batches.get(key) is batch:
+            del self._active_batches[key]
 
     async def delete_sandbox(self, claim_name: str, namespace: str = "default") -> None:
         """Stops the client side connection and deletes the Kubernetes resources."""

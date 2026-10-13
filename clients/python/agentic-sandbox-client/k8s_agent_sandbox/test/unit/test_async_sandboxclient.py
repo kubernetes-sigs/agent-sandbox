@@ -2110,7 +2110,7 @@ class TestAsyncSandboxClientGetBatch(unittest.IsolatedAsyncioTestCase):
 
     @patch("k8s_agent_sandbox.async_sandbox_client.AsyncSandboxBatch._attach")
     async def test_get_batch_registers_and_unregisters(self, mock_attach):
-        mock_batch = MagicMock()
+        mock_batch = MagicMock(namespace="ns-a", batch_id="b1")
 
         async def _attach(*args, **kwargs):
             return mock_batch
@@ -2123,8 +2123,9 @@ class TestAsyncSandboxClientGetBatch(unittest.IsolatedAsyncioTestCase):
         self.assertIs(batch, mock_batch)
         self.assertEqual(self.client._active_batches, {("ns-a", "b1"): mock_batch})
 
-        self.client._unregister_batch("ns-a", "b1")
+        self.client._unregister_batch(mock_batch)
         self.assertEqual(self.client._active_batches, {})
+
 
 
 if __name__ == "__main__":

@@ -71,6 +71,7 @@ AGENT="$(printf '%s' "$ANSWER" | field agent)"
 rest() { curl -sS -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d "$2" "$RECALL_URL/v1/$1"; echo; }
 # MCP tools/call; prints the tool's result with the JSON escapes removed.
 tool() { curl -sS -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2}}" "$RECALL_URL/mcp" | tr -d '\\'; echo; }
+fail() { echo "FAIL: $*" >&2; exit 1; }
 EOF
 
 step "kind cluster ${KIND_CLUSTER_NAME}"
@@ -103,8 +104,8 @@ step "1. a sandbox still in the warm pool gets no key"
 warm="$(${KUBECTL} -n agents get sandbox --no-headers -o custom-columns=NAME:.metadata.name,OWNER:.metadata.ownerReferences[0].kind | awk '$2 == "SandboxWarmPool" {print $1; exit}')"
 echo "warm pod: ${warm}"
 in_pod "${warm}" <<'EOF'
-echo "key: ${KEY:-none}"
-echo "$ANSWER" | field message
+[ -z "$KEY" ] || fail "a warm-pool sandbox got a key for $AGENT"
+echo "no key: $(echo "$ANSWER" | field message)"
 EOF
 
 step "2. claim run-1, write memory and working state"
@@ -113,12 +114,15 @@ claim run-1
 pod1="$(claim_pod run-1)"
 echo "run-1 is pod ${pod1}, Ready $(since "${t0}") after the claim"
 in_pod "${pod1}" <<'EOF'
+[ "$AGENT" = run-1 ] || fail "want a key for run-1, got '$AGENT'"
 echo "key for agent $AGENT"
 rest remember '{"subject":"user","predicate":"prefers_editor","value":"vim"}' >/dev/null
-rest remember '{"subject":"user","predicate":"prefers_editor","value":"helix"}' | grep -o '"value":"[^"]*"' | cut -d'"' -f4 | paste -sd' ' - | awk '{print "remembered " $1 ", superseding " $2}'
-tool agent_resume '{"agent_id":"run-1"}' | grep -o '"briefing":"[^"]*' | cut -d'"' -f4 | cut -d. -f1
-tool update_working_state '{"agent_id":"run-1","goal":"migrate billing to v2","progress":"call sites listed"}' | grep -o '"goal":"[^"]*"'
-tool agent_release '{"agent_id":"run-1"}' | grep -o '"released":[a-z]*'
+rest remember '{"subject":"user","predicate":"prefers_editor","value":"helix"}' | grep -q '"value":"helix"' || fail "remember helix"
+echo "remembered vim, then helix"
+tool agent_resume '{"agent_id":"run-1"}' | grep -q '"isError":false' || fail "resume run-1"
+tool update_working_state '{"agent_id":"run-1","goal":"migrate billing to v2","progress":"call sites listed"}' | grep -q '"goal":"migrate billing to v2"' || fail "save working state"
+tool agent_release '{"agent_id":"run-1"}' | grep -q '"released":true' || fail "release run-1"
+echo "saved working state: goal 'migrate billing to v2', progress 'call sites listed'"
 echo "token exchange, 100 calls (s):"
 for i in $(seq 1 100); do curl -sS -o /dev/null -w '%{time_total}\n' -H "Content-Type: application/json" -d "{\"token\":\"$(cat "$RECALL_TOKEN_FILE")\"}" "$RECALL_URL/v1/auth/kubernetes"; done | sort -n | sed -n '50p;99p;100p' | paste -sd' ' - | sed 's/^/  p50 p99 max: /'
 echo "recall, 200 calls (s):"
@@ -132,10 +136,16 @@ claim run-1
 pod1b="$(claim_pod run-1)"
 echo "run-1 is now pod ${pod1b} (was ${pod1}), Ready $(since "${t0}") after the claim"
 in_pod "${pod1b}" <<'EOF'
+[ "$AGENT" = run-1 ] || fail "want a key for run-1, got '$AGENT'"
 echo "key for agent $AGENT"
-rest recall '{"subject":"user","predicate":"prefers_editor"}' > /tmp/recall.json
-echo "prefers_editor: $(grep -o '"value":"[^"]*"' /tmp/recall.json | tail -1 | cut -d'"' -f4), replaced: $(grep -o '"value":"[^"]*"' /tmp/recall.json | head -1 | cut -d'"' -f4)"
-tool agent_resume '{"agent_id":"run-1"}' | grep -o '"goal":"[^"]*"\|"progress":"[^"]*"'
+ANSWER="$(rest recall '{"subject":"user","predicate":"prefers_editor"}')"
+current="$(echo "$ANSWER" | grep -o '"value":"[^"]*"' | tail -1 | cut -d'"' -f4)"
+replaced="$(echo "$ANSWER" | grep -o '"value":"[^"]*"' | head -1 | cut -d'"' -f4)"
+[ "$current" = helix ] || fail "want prefers_editor helix, got '$current'"
+echo "prefers_editor: $current, replaced: $replaced"
+STATE="$(tool agent_resume '{"agent_id":"run-1"}')"
+echo "$STATE" | grep -q '"goal":"migrate billing to v2"' || fail "working state did not come back"
+echo "$STATE" | grep -o '"goal":"[^"]*"\|"progress":"[^"]*"'
 tool agent_release '{"agent_id":"run-1"}' >/dev/null
 EOF
 
@@ -143,17 +153,20 @@ step "4. run-2 cannot read or resume run-1"
 claim run-2
 pod2="$(claim_pod run-2)"
 in_pod "${pod2}" <<'EOF'
+[ "$AGENT" = run-2 ] || fail "want a key for run-2, got '$AGENT'"
 echo "key for agent $AGENT"
-printf 'recall in agents:run-1: '
-curl -sS -o /dev/null -w 'HTTP %{http_code}\n' -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"namespace":"agents:run-1","subject":"user","predicate":"prefers_editor"}' "$RECALL_URL/v1/recall"
-printf 'resume run-1: '
-tool agent_resume '{"agent_id":"run-1"}' | grep -o 'namespace_mismatch' | head -1
+code="$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"namespace":"agents:run-1","subject":"user","predicate":"prefers_editor"}' "$RECALL_URL/v1/recall")"
+[ "$code" = 403 ] || fail "recall in agents:run-1 answered HTTP $code, want 403"
+echo "recall in agents:run-1: HTTP $code"
+tool agent_resume '{"agent_id":"run-1"}' | grep -q namespace_mismatch || fail "run-2 resumed run-1"
+echo "resume run-1: namespace_mismatch"
 EOF
 
 step "5. the sandbox cannot reach polign_db"
 in_pod "${pod2}" <<'EOF'
-if curl -s -m 5 -o /dev/null http://polign-db.recall.svc:23000/readyz; then echo "polign_db: reachable"; else echo "polign_db: blocked (timed out after 5 s)"; fi
+curl -s -m 5 -o /dev/null http://polign-db.recall.svc:23000/readyz && fail "the sandbox reached polign_db"
+echo "polign_db: blocked (timed out after 5 s)"
 EOF
 
-step "done"
+step "all checks passed"
 echo "Delete the cluster with: kind delete cluster --name ${KIND_CLUSTER_NAME}"

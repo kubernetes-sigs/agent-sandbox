@@ -90,6 +90,8 @@ The script creates a kind cluster named `recall-memory` (or reuses it), installs
 4. Claim `run-2` cannot read `agents:run-1` (HTTP 403) or resume `run-1`. It errors out with `namespace_mismatch`.
 5. The sandbox cannot directly reach the database underneath Recall.
 
+Each check exits non-zero with a `FAIL:` line if the result is wrong.
+
 To apply the files by hand on a cluster that already runs agent-sandbox-
 
 ```sh
@@ -148,6 +150,7 @@ One recall call took 2.5 s in one run, right after the first writes. It did not 
 - **Key TTL.** `-kubernetes-key-ttl` is set to 15 minutes. For less exposure, this can be shortened.
 - **Audience.** The server only accepts tokens minted for audience `recall`. A token for the API server cannot be replayed against it, and a `recall` token is useless against the API server.
 - **Narrow the RBAC per tenant.** TokenReview needs a ClusterRoleBinding. The `get` on pods, sandboxes and sandboxclaims does not: bind those with a RoleBinding in each tenant namespace instead, so the server can read nothing outside them.
+- **Fence the store.** The sandbox's egress policy already keeps it away from polign_db. An ingress policy on polign_db that admits only the `recall` pods adds a second wall for everything else in the cluster.
 - **Pin by digest.** The manifests pin tags. Pin digests in production.
 
 ## See also

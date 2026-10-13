@@ -175,7 +175,7 @@ class SandboxBatch:
                 f"batch '{batch_id}' is held by '{lease.spec.holder_identity}'"
             )
 
-        groups = batch_state.reconstruct_groups(claim_items)
+        groups = batch_state.reconstruct_groups(batch_id, claim_items)
         state = batch_state.BatchState(batch_id, groups)
         state.seed_from_claims(claim_items)
 

@@ -42,19 +42,32 @@ def parse_ordinal(batch_id: str, claim_name: str) -> int | None:
     return int(suffix)
 
 
-def reconstruct_groups(claim_objs: Sequence[dict]) -> list[BatchGroup]:
+def ordinal_sort_key(ordinal: int | None) -> tuple[bool, int]:
+    """Sorts by ordinal, putting a claim name without an ordinal after every claim that has one."""
+    return (ordinal is None, ordinal or 0)
+
+
+def reconstruct_groups(batch_id: str, claim_objs: Sequence[dict]) -> list[BatchGroup]:
     """Rebuilds each pool's ``BatchGroup`` from its claims' group annotations.
 
-    A pool with no group annotations on any of its claims becomes ``BatchGroup(size=0, min_ready=0)``,
-    and claims that are detected with different or invalid annotation values in the same pool raise ``BatchError``.
+    Groups come back in the order the batch was created with, so a handle from ``get_batch``
+    lists ``groups`` in the same order as the handle that created the batch. The claims don't
+    record that order directly, but each group's claims are numbered consecutively in it, so
+    sorting the groups by the lowest ordinal among their remaining claims restores it. A pool with
+    no group annotations on any of its claims becomes ``BatchGroup(size=0, min_ready=0)``, and
+    claims that are detected with different or invalid annotation values in the same pool raise
+    ``BatchError``.
     """
     by_pool: dict[str, tuple[str, str]] = {}
-    pools_seen: set[str] = set()
+    # Each pool's sort key is its lowest ordinal.
+    pool_order: dict[str, tuple[bool, int]] = {}
     for claim_obj in claim_objs:
         spec = claim_obj.get("spec") or {}
         warmpool = (spec.get("warmPoolRef") or {}).get("name", "")
-        pools_seen.add(warmpool)
-        annotations = (claim_obj.get("metadata") or {}).get("annotations") or {}
+        metadata = claim_obj.get("metadata") or {}
+        key = ordinal_sort_key(parse_ordinal(batch_id, metadata.get("name", "")))
+        pool_order[warmpool] = min(pool_order.get(warmpool, key), key)
+        annotations = metadata.get("annotations") or {}
         size_str = annotations.get(BATCH_GROUP_SIZE_ANNOTATION)
         min_ready_str = annotations.get(BATCH_GROUP_MIN_READY_ANNOTATION)
         if size_str is None and min_ready_str is None:
@@ -73,7 +86,7 @@ def reconstruct_groups(claim_objs: Sequence[dict]) -> list[BatchGroup]:
         by_pool[warmpool] = pair
 
     groups = []
-    for pool in sorted(pools_seen):
+    for pool in sorted(pool_order, key=lambda p: (pool_order[p], p)):
         if pool in by_pool:
             size_str, min_ready_str = by_pool[pool]
             try:
@@ -138,7 +151,6 @@ class BatchState:
         self.size = sum(g.size for g in self.groups)
 
         self._members: dict[str, Member] = {}
-        self._ordinals: dict[str, int] = {}
         self._error: Exception | None = None
 
     def seed_from_claims(self, claim_objs: Sequence[dict]) -> None:
@@ -150,9 +162,6 @@ class BatchState:
         """Derives a ``Member`` from a claim and inserts or updates it."""
         metadata = claim_obj.get("metadata") or {}
         claim_name = metadata.get("name", "")
-        ordinal = parse_ordinal(self.batch_id, claim_name)
-        if ordinal is not None:
-            self._ordinals[claim_name] = ordinal
         member = derive_member(claim_obj)
         self._members[claim_name] = member
         return member
@@ -188,7 +197,7 @@ class BatchState:
     def members(self, warmpool: str | None = None) -> list[Member]:
         """Returns a snapshot of the batch's members, optionally filtered to one pool."""
         items = [
-            (self._ordinals.get(name, 0), member)
+            (ordinal_sort_key(parse_ordinal(self.batch_id, name)), member)
             for name, member in self._members.items()
             if warmpool is None or member.warmpool == warmpool
         ]

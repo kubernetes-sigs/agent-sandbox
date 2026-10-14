@@ -57,6 +57,9 @@ const (
 	warmPoolSandboxLabel            = sandboxv1beta1.SandboxWarmPoolLabel
 	sandboxCreateDeleteMaxBatchSize = 300
 	autoscalerSafeToEvictAnnotation = "cluster-autoscaler.kubernetes.io/safe-to-evict"
+	// Source survives ownership transfer; membership labels do not.
+	sourceWarmPoolNameAnnotation = "agents.x-k8s.io/source-warmpool-name"
+	sourceWarmPoolUIDAnnotation  = "agents.x-k8s.io/source-warmpool-uid"
 	// sandboxWarmPoolLabelIndex is the cache field index over the warmPoolSandboxLabel
 	// value on warm sandboxes, so reconcilePool's member lookup is O(pool members) instead
 	// of O(sandboxes-in-namespace).
@@ -1135,6 +1138,27 @@ func (r *SandboxWarmPoolReconciler) fetchTemplateAndHash(ctx context.Context, wa
 	return template, currentPodTemplateHash, currentSandboxBlueprintHash, tmplErr
 }
 
+// ensureWarmPoolSource never replaces a recorded incarnation with a same-name
+// pool. Its caller must supply the identity resolved for this operation, or a
+// still-present WarmPool controller owner before transferring ownership.
+func ensureWarmPoolSource(sandbox *sandboxv1beta1.Sandbox, name string, uid types.UID) error {
+	if uid == "" {
+		return nil
+	}
+	if recorded := sandbox.Annotations[sourceWarmPoolUIDAnnotation]; recorded != "" && recorded != string(uid) {
+		return fmt.Errorf("sandbox %q source pool UID conflicts with its owner", sandbox.Name)
+	}
+	if recorded := sandbox.Annotations[sourceWarmPoolNameAnnotation]; recorded != "" && recorded != name {
+		return fmt.Errorf("sandbox %q source pool name conflicts with its owner", sandbox.Name)
+	}
+	if sandbox.Annotations == nil {
+		sandbox.Annotations = make(map[string]string)
+	}
+	sandbox.Annotations[sourceWarmPoolNameAnnotation] = name
+	sandbox.Annotations[sourceWarmPoolUIDAnnotation] = string(uid)
+	return nil
+}
+
 // buildSandboxCR constructs the base Sandbox CR (with pod template and volume claim templates) for the warm pool.
 func (r *SandboxWarmPoolReconciler) buildSandboxCR(
 	warmPool *extensionsv1beta1.SandboxWarmPool,
@@ -1155,6 +1179,8 @@ func (r *SandboxWarmPoolReconciler) buildSandboxCR(
 	// Build annotations for the Sandbox CR
 	sandboxAnnotations := map[string]string{
 		sandboxv1beta1.SandboxTemplateRefAnnotation: warmPool.Spec.TemplateRef.Name,
+		sourceWarmPoolNameAnnotation:                warmPool.Name,
+		sourceWarmPoolUIDAnnotation:                 string(warmPool.UID),
 	}
 
 	sandbox := &sandboxv1beta1.Sandbox{

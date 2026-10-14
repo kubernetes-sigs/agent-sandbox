@@ -24,8 +24,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-func expKey(name string) types.NamespacedName {
-	return types.NamespacedName{Namespace: "default", Name: name}
+func expKey(name string) warmPoolIdentity {
+	return warmPoolIdentity{NamespacedName: types.NamespacedName{Namespace: "default", Name: name}, UID: types.UID(name + "-uid")}
 }
 
 func TestWarmPoolExpectations_CreateLifecycle(t *testing.T) {
@@ -36,48 +36,52 @@ func TestWarmPoolExpectations_CreateLifecycle(t *testing.T) {
 	require.True(t, e.SatisfiedExpectations(key))
 
 	// Record 2 creations.
-	require.True(t, e.TryExpectCreations(key, 2))
+	require.True(t, e.TryExpectCreations(key, []string{"one", "two"}))
 	require.False(t, e.SatisfiedExpectations(key), "unobserved creations must block")
 
 	// A second raise while the first is outstanding must be refused; this is
 	// the gate that prevents rapid re-reconciles from re-creating toward the
 	// target off a stale cache (#1215).
-	require.False(t, e.TryExpectCreations(key, 2))
+	require.False(t, e.TryExpectCreations(key, []string{"other"}))
 
 	// Observing both creations satisfies the pool again.
-	e.CreationObserved(key)
+	e.CreationObserved(key, "one")
 	require.False(t, e.SatisfiedExpectations(key))
-	e.CreationObserved(key)
+	e.CreationObserved(key, "two")
 	require.True(t, e.SatisfiedExpectations(key))
 
 	// And a new raise is allowed again.
-	require.True(t, e.TryExpectCreations(key, 1))
-	e.CreationObserved(key)
+	require.True(t, e.TryExpectCreations(key, []string{"next"}))
+	e.CreationObserved(key, "next")
 	require.True(t, e.SatisfiedExpectations(key))
 }
 
-func TestWarmPoolExpectations_TryExpectRejectsNonPositive(t *testing.T) {
+func TestWarmPoolExpectations_TryExpectRejectsInvalidTokens(t *testing.T) {
 	e := newWarmPoolExpectations()
 	key := expKey("pool-a")
-	require.False(t, e.TryExpectCreations(key, 0))
-	require.False(t, e.TryExpectCreations(key, -3))
+	require.False(t, e.TryExpectCreations(key, nil))
+	require.False(t, e.TryExpectCreations(key, []string{""}))
+	require.False(t, e.TryExpectCreations(key, []string{"duplicate", "duplicate"}))
 	require.True(t, e.SatisfiedExpectations(key), "rejected raises must not record state")
 }
 
-func TestWarmPoolExpectations_LowerCreationsForFailedCreates(t *testing.T) {
+func TestWarmPoolExpectations_CancelFailedCreates(t *testing.T) {
 	e := newWarmPoolExpectations()
 	key := expKey("pool-a")
 
-	require.True(t, e.TryExpectCreations(key, 3))
+	require.True(t, e.TryExpectCreations(key, []string{"one", "two", "three"}))
 	// Two creates failed: no watch event will ever arrive for them.
-	e.LowerCreations(key, 2)
+	e.CreationObserved(key, "one")
+	e.CreationObserved(key, "two")
 	require.False(t, e.SatisfiedExpectations(key))
-	e.CreationObserved(key)
+	e.CreationObserved(key, "three")
 	require.True(t, e.SatisfiedExpectations(key))
 
-	// Lowering below zero clamps and never underflows.
-	require.True(t, e.TryExpectCreations(key, 1))
-	e.LowerCreations(key, 5)
+	// Late/duplicate observations cannot consume a later operation.
+	require.True(t, e.TryExpectCreations(key, []string{"next"}))
+	e.CreationObserved(key, "one")
+	require.False(t, e.SatisfiedExpectations(key))
+	e.CreationObserved(key, "next")
 	require.True(t, e.SatisfiedExpectations(key))
 }
 
@@ -94,7 +98,7 @@ func TestWarmPoolExpectations_DeleteLifecycle(t *testing.T) {
 	require.False(t, e.IsPendingDeletion(key, types.UID("uid-other")))
 
 	// Creations cannot be raised while deletions are outstanding.
-	require.False(t, e.TryExpectCreations(key, 1))
+	require.False(t, e.TryExpectCreations(key, []string{"one"}))
 
 	e.DeletionObserved(key, uid1)
 	require.False(t, e.IsPendingDeletion(key, uid1))
@@ -125,7 +129,7 @@ func TestWarmPoolExpectations_Timeout(t *testing.T) {
 	now := time.Now()
 	e.now = func() time.Time { return now }
 
-	require.True(t, e.TryExpectCreations(key, 2))
+	require.True(t, e.TryExpectCreations(key, []string{"one", "two"}))
 	e.ExpectDeletion(key, "uid-1")
 	require.False(t, e.SatisfiedExpectations(key))
 
@@ -138,7 +142,7 @@ func TestWarmPoolExpectations_Timeout(t *testing.T) {
 	now = now.Add(time.Second)
 	require.True(t, e.SatisfiedExpectations(key))
 	require.False(t, e.IsPendingDeletion(key, "uid-1"), "expired records must not keep sandboxes counted as terminating")
-	require.True(t, e.TryExpectCreations(key, 1), "new raises are allowed after expiry")
+	require.True(t, e.TryExpectCreations(key, []string{"next"}), "new raises are allowed after expiry")
 }
 
 func TestWarmPoolExpectations_TimeoutRefreshedByNewRaises(t *testing.T) {
@@ -148,7 +152,7 @@ func TestWarmPoolExpectations_TimeoutRefreshedByNewRaises(t *testing.T) {
 	now := time.Now()
 	e.now = func() time.Time { return now }
 
-	require.True(t, e.TryExpectCreations(key, 1))
+	require.True(t, e.TryExpectCreations(key, []string{"one"}))
 	now = now.Add(expectationsTimeout - time.Minute)
 	// A new deletion raise refreshes the record's timestamp.
 	e.ExpectDeletion(key, "uid-1")
@@ -161,10 +165,10 @@ func TestWarmPoolExpectations_Forget(t *testing.T) {
 	key := expKey("pool-a")
 	other := expKey("pool-b")
 
-	require.True(t, e.TryExpectCreations(key, 3))
+	require.True(t, e.TryExpectCreations(key, []string{"one", "two", "three"}))
 	e.ExpectDeletion(other, "uid-1")
 
-	e.Forget(key)
+	e.Forget(key.NamespacedName)
 	require.True(t, e.SatisfiedExpectations(key))
 	require.False(t, e.SatisfiedExpectations(other), "Forget must only drop the given pool")
 }
@@ -183,7 +187,7 @@ func TestWarmPoolExpectations_ConcurrentTryExpect(t *testing.T) {
 	for range goroutines {
 		wg.Go(func() {
 			<-start
-			if e.TryExpectCreations(key, 3) {
+			if e.TryExpectCreations(key, []string{"one", "two", "three"}) {
 				wins.Add(1)
 			}
 		})
@@ -200,7 +204,7 @@ func TestWarmPoolExpectations_ConcurrentTryExpect(t *testing.T) {
 // asserted only loosely (no deadlock, satisfied after a final Forget).
 func TestWarmPoolExpectations_ConcurrentMixedOps(t *testing.T) {
 	e := newWarmPoolExpectations()
-	keys := []types.NamespacedName{expKey("pool-a"), expKey("pool-b"), expKey("pool-c")}
+	keys := []warmPoolIdentity{expKey("pool-a"), expKey("pool-b"), expKey("pool-c")}
 
 	var wg sync.WaitGroup
 	for i := range 16 {
@@ -212,9 +216,9 @@ func TestWarmPoolExpectations_ConcurrentMixedOps(t *testing.T) {
 			for j := range 500 {
 				switch j % 6 {
 				case 0:
-					e.TryExpectCreations(key, 2)
+					e.TryExpectCreations(key, []string{"one", "two"})
 				case 1:
-					e.CreationObserved(key)
+					e.CreationObserved(key, "one")
 				case 2:
 					e.ExpectDeletion(key, uid)
 				case 3:
@@ -230,7 +234,7 @@ func TestWarmPoolExpectations_ConcurrentMixedOps(t *testing.T) {
 	wg.Wait()
 
 	for _, key := range keys {
-		e.Forget(key)
+		e.Forget(key.NamespacedName)
 		require.True(t, e.SatisfiedExpectations(key))
 	}
 }

@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .models import Member
 
 
 class SandboxError(RuntimeError):
@@ -137,4 +140,21 @@ class QuorumUnreachableError(BatchError):
 
 
 class BatchTimeoutError(BatchError, TimeoutError):
-    """A group didn't reach ``min_ready`` within the batch's quorum timeout."""
+    """A group didn't reach ``min_ready`` within the batch's quorum timeout, or an acquired member
+    wasn't Ready within its timeout."""
+
+
+class TerminalMemberError(BatchError):
+    """A member added by ``acquire()`` failed, or was deleted, before it was Ready.
+
+    ``member`` is ``FAILED``, with reason ``CreateFailed`` if its create failed, or ``LOST`` if
+    someone else deleted its claim.
+    """
+
+    def __init__(self, member: "Member") -> None:
+        detail = f" ({member.reason}: {member.message})" if member.reason else ""
+        super().__init__(
+            f"acquired member '{member.claim_name}' of pool '{member.warmpool}' is "
+            f"{member.state.value} and won't become Ready{detail}"
+        )
+        self.member = member

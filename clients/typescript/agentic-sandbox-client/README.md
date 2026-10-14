@@ -324,6 +324,11 @@ With the in-cluster modes, REST and gRPC travel in plaintext across the pod netw
 - File paths are never recorded in tracing spans or logs (only counts/sizes/booleans are), and absolute paths / `..` segments are rejected by the client itself before any request is sent.
 - RuntimeClass (gVisor/Kata) is not observed or branched on anywhere in this layer; conformance on non-default runtimes is tracked separately and is not implied by this SDK's tests passing on a standard cluster.
 
+### Not supported
+
+- The legacy python-runtime. The SDK only talks to sandboxd.
+- The Gateway and Direct connection modes, and access to sandboxd through sandbox-router ([#1889](https://github.com/kubernetes-sigs/agent-sandbox/issues/1889)). Use one of the `sandboxd.connectivity` values above.
+
 ## Publishing status
 
 This package is **not currently distributed** in any form — there is no npm package and no git-based distribution channel today.

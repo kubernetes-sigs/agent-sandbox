@@ -15,6 +15,9 @@
 import io
 import os
 import tempfile
+import time
+
+from k8s_agent_sandbox.exceptions import SandboxRequestError
 
 TEST_MANIFESTS_DIR = "test/e2e/clients/python/test_manifests"
 TEMPLATE_YAML_PATH = os.path.join(TEST_MANIFESTS_DIR, "sandbox_template.yaml")
@@ -27,6 +30,7 @@ GATEWAY_YAML_PATH = (
     "clients/python/agentic-sandbox-client/gateway-kind/gateway-kind.yaml"
 )
 GATEWAY_NAME = "kind-gateway"
+GATEWAY_ROUTE_NAME = "sandbox-router-route"
 
 
 def get_image_tag(env_var="IMAGE_TAG", default="latest"):
@@ -39,13 +43,26 @@ def get_image_prefix(env_var="IMAGE_PREFIX", default="kind.local/"):
     return os.environ.get(env_var, default)
 
 
-def wait_until_sandbox_routable(sandbox):
+def wait_until_sandbox_routable(sandbox, timeout=60, interval=1.0):
     """Probe the data path with GET before the first POST /execute.
 
     Claim Ready does not mean the router can dial the runtime yet. GET is
-    still retried on 5xx; POST /execute is not.
+    still retried on 5xx by the SDK; POST /execute is not.
+
+    In Gateway mode the Gateway can answer 404 until the HTTPRoute is
+    programmed, which the fast warm-pool path can hit. Retry 404 here, with
+    a deadline, so a real routing bug still fails the test.
     """
-    sandbox.files.exists(".")
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            sandbox.files.exists(".")
+            return
+        except SandboxRequestError as e:
+            status = getattr(e, "status_code", None)
+            if status != 404 or time.monotonic() >= deadline:
+                raise
+            time.sleep(interval)
 
 
 

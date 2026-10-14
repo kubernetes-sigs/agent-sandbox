@@ -359,6 +359,14 @@ func (s *RESTServer) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 		recursive = parsed
 	}
 
+	// With --root-dir=/ the root is the whole filesystem; clearing it would
+	// remove the daemon, the runtime and every mount.
+	if target == string(filepath.Separator) {
+		s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED",
+			"refusing to delete the filesystem root")
+		return
+	}
+
 	if target == s.resolvedRoot {
 		if !recursive {
 			s.writeError(w, http.StatusConflict, "CONFLICT",

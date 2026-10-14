@@ -32,10 +32,10 @@ from k8s_agent_sandbox.async_connector import (
     MAX_RETRIES,
 )
 from k8s_agent_sandbox.exceptions import (
+    SandboxNoServiceError,
     SandboxNotReadyError,
     SandboxPortForwardError,
     SandboxRequestError,
-    SandboxServiceUnavailableError,
 )
 from k8s_agent_sandbox.models import (
     SandboxdInClusterConnectionConfig,
@@ -505,7 +505,7 @@ class TestAsyncTunnelTargetsInjectedApiClient(unittest.IsolatedAsyncioTestCase):
 
 
 class TestAsyncSandboxdInClusterConnector(unittest.IsolatedAsyncioTestCase):
-    def _build(self, mode="service-dns", pod_ip=None, service_fqdn=None,
+    def _build(self, mode="in-cluster-service", pod_ip=None, service_fqdn=None,
                rest_port=8080, grpc_port=9090):
         pod_ip = pod_ip or AsyncMock(return_value="10.0.0.1")
         service_fqdn = service_fqdn or AsyncMock(
@@ -550,7 +550,7 @@ class TestAsyncSandboxdInClusterConnector(unittest.IsolatedAsyncioTestCase):
             service_fqdn=AsyncMock(return_value=None)
         )
         try:
-            with self.assertRaisesRegex(SandboxServiceUnavailableError, "spec.service"):
+            with self.assertRaisesRegex(SandboxNoServiceError, "spec.service"):
                 await connector.connect()
             pod_ip.assert_not_awaited()
         finally:
@@ -559,7 +559,7 @@ class TestAsyncSandboxdInClusterConnector(unittest.IsolatedAsyncioTestCase):
     async def test_pod_mode_refreshes_ip_and_brackets_ipv6(self):
         pod_ip = AsyncMock(side_effect=["10.0.0.1", "2001:db8::5"])
         connector, _, service = self._build(
-            mode="pod-ip", pod_ip=pod_ip, rest_port=18080, grpc_port=19090
+            mode="in-cluster-pod-ip", pod_ip=pod_ip, rest_port=18080, grpc_port=19090
         )
         try:
             self.assertEqual(await connector.connect(), "http://10.0.0.1:18080")
@@ -574,7 +574,7 @@ class TestAsyncSandboxdInClusterConnector(unittest.IsolatedAsyncioTestCase):
         pod_ip = AsyncMock(
             side_effect=["10.0.0.1", PermissionError("status denied"), None]
         )
-        connector, _, service = self._build(mode="pod-ip", pod_ip=pod_ip)
+        connector, _, service = self._build(mode="in-cluster-pod-ip", pod_ip=pod_ip)
         try:
             await connector.connect()
             with self.assertRaisesRegex(PermissionError, "status denied"):
@@ -588,7 +588,7 @@ class TestAsyncSandboxdInClusterConnector(unittest.IsolatedAsyncioTestCase):
 
     @patch("k8s_agent_sandbox.async_connector.asyncio.create_subprocess_exec")
     async def test_rest_request_has_no_router_headers_or_subprocess(self, subprocess_exec):
-        connector, _, _ = self._build(mode="pod-ip")
+        connector, _, _ = self._build(mode="in-cluster-pod-ip")
         response = httpx.Response(
             200, request=httpx.Request("GET", "http://10.0.0.1:8080/v1/files/a.txt")
         )
@@ -604,7 +604,7 @@ class TestAsyncSandboxdInClusterConnector(unittest.IsolatedAsyncioTestCase):
 
     async def test_grpc_channel_reuse_replacement_and_close(self):
         pod_ip = AsyncMock(side_effect=["10.0.0.1", "10.0.0.1", "10.0.0.2"])
-        connector, _, _ = self._build(mode="pod-ip", pod_ip=pod_ip)
+        connector, _, _ = self._build(mode="in-cluster-pod-ip", pod_ip=pod_ip)
         first, second = MagicMock(), MagicMock()
         first.close = AsyncMock()
         second.close = AsyncMock()
@@ -677,7 +677,7 @@ class TestAsyncSandboxdInClusterConnector(unittest.IsolatedAsyncioTestCase):
             await connector.close()
 
     async def test_pod_transport_failure_discards_existing_grpc_channel(self):
-        connector, _, _ = self._build(mode="pod-ip")
+        connector, _, _ = self._build(mode="in-cluster-pod-ip")
         channel = MagicMock()
         channel.close = AsyncMock()
         request = httpx.Request("GET", "http://10.0.0.1:8080/v1/files/a.txt")

@@ -321,6 +321,86 @@ describe("Sandbox", () => {
     });
   });
 
+  describe("getPodIP()", () => {
+    const sandboxWithPodIPs = (podIPs: unknown) => ({ status: { podIPs } });
+
+    it("reads the Sandbox object with the Sandbox API coordinates", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValueOnce(
+        sandboxWithPodIPs([{ ip: "10.0.0.1" }]),
+      );
+
+      await new Sandbox(createTestInit()).getPodIP();
+
+      expect(mockGetNamespacedCustomObject).toHaveBeenCalledExactlyOnceWith({
+        group: SANDBOX_API_GROUP,
+        version: SANDBOX_API_VERSION,
+        namespace: "default",
+        plural: SANDBOX_PLURAL_NAME,
+        name: "test-sandbox",
+      });
+    });
+
+    it.each([
+      ["IPv4 only", ["10.0.0.1"], "10.0.0.1"],
+      ["dual-stack with IPv6 first", ["fd00::1", "10.0.0.2"], "10.0.0.2"],
+      ["IPv4-mapped IPv6", ["::ffff:10.0.0.3"], "10.0.0.3"],
+      ["IPv6 only", ["FD00::4"], "fd00::4"],
+    ])("selects the pod IP for %s", async (_name, podIPs, want) => {
+      mockGetNamespacedCustomObject.mockResolvedValueOnce(
+        sandboxWithPodIPs(podIPs),
+      );
+
+      await expect(new Sandbox(createTestInit()).getPodIP()).resolves.toBe(
+        want,
+      );
+    });
+
+    it.each([
+      ["an empty podIPs list", { status: { podIPs: [] } }],
+      ["only invalid podIPs", { status: { podIPs: ["bogus"] } }],
+      ["no podIPs", { status: {} }],
+      ["no status block", {}],
+    ])("resolves undefined for %s", async (_name, obj) => {
+      mockGetNamespacedCustomObject.mockResolvedValueOnce(obj);
+
+      await expect(
+        new Sandbox(createTestInit()).getPodIP(),
+      ).resolves.toBeUndefined();
+    });
+
+    it("resolves undefined on a 404", async () => {
+      mockGetNamespacedCustomObject.mockRejectedValueOnce(
+        Object.assign(new Error("not found"), { code: 404 }),
+      );
+
+      await expect(
+        new Sandbox(createTestInit()).getPodIP(),
+      ).resolves.toBeUndefined();
+    });
+
+    it("rejects with SandboxError (preserving the cause) on a non-404 error", async () => {
+      const cause = Object.assign(new Error("boom"), { code: 500 });
+      mockGetNamespacedCustomObject.mockRejectedValueOnce(cause);
+
+      const err = await new Sandbox(createTestInit())
+        .getPodIP()
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(SandboxError);
+      expect((err as Error).cause).toBe(cause);
+    });
+
+    it("queries Kubernetes on every call instead of caching", async () => {
+      mockGetNamespacedCustomObject
+        .mockResolvedValueOnce(sandboxWithPodIPs(["10.0.0.1"]))
+        .mockResolvedValueOnce(sandboxWithPodIPs(["10.0.0.9"]));
+      const sandbox = new Sandbox(createTestInit());
+
+      await expect(sandbox.getPodIP()).resolves.toBe("10.0.0.1");
+      await expect(sandbox.getPodIP()).resolves.toBe("10.0.0.9");
+      expect(mockGetNamespacedCustomObject).toHaveBeenCalledTimes(2);
+    });
+  });
+
   describe("[Symbol.asyncDispose]()", () => {
     it("closes the handle and deletes the claim", async () => {
       mockDeleteNamespacedCustomObject.mockResolvedValueOnce({});

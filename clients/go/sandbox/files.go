@@ -71,13 +71,19 @@ func encodeFilePath(path string) string {
 	}
 }
 
-// applyCallOpts applies per-call options, returning a context with any
-// WithTimeout deadline and the configured max retry count (0 = default).
-func applyCallOpts(ctx context.Context, opts []CallOption) (context.Context, context.CancelFunc, int) {
+// resolveCallOpts folds opts into one callOptions value.
+func resolveCallOpts(opts []CallOption) callOptions {
 	var co callOptions
 	for _, o := range opts {
 		o(&co)
 	}
+	return co
+}
+
+// applyCallOpts applies per-call options, returning a context with any
+// WithTimeout deadline and the configured max retry count (0 = default).
+func applyCallOpts(ctx context.Context, opts []CallOption) (context.Context, context.CancelFunc, int) {
+	co := resolveCallOpts(opts)
 	if co.timeout > 0 {
 		ctx, cancel := context.WithTimeout(ctx, co.timeout)
 		return ctx, cancel, co.maxAttempts

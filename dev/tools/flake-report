@@ -23,7 +23,9 @@ aborted runs, stale-PR clone failures, and pre-test PR breakage (compile,
 vet, mypy gates) are reported separately instead of being counted as infra.
 Per-test failures are not counted when the run was aborted, when a whole
 suite failed at once (broken fixture), or when the failing PR modified the
-test's own sources; such PR-local failures are listed but never filed.
+test's own sources; such PR-local failures are listed but never filed. A test
+whose failures cluster in one breakage window that has since cleared is
+recovered breakage, also listed but never filed.
 
 With --update-issues it also files or refreshes one `kind/flake` GitHub issue
 per flaky test, so the issue tracker is the durable state: reruns are
@@ -54,6 +56,14 @@ PASS_STATUSES = {1, 2, 3}  # PASS, PASS_WITH_ERRORS, PASS_WITH_SKIPS
 FAIL_STATUSES = {9, 10, 11, 12, 14}
 FLAKY_STATUS = 13  # failed, then passed on a rerun of the same column
 RUNNING_STATUS = 4  # still in flight: neither a pass nor a fail yet
+
+# How many of a test's newest completed results say whether it is failing at
+# head (all fail).
+RECENT_RUNS = 3
+
+# Inside a breakage window failures outnumber passes at least this many to
+# one. The few passes are PRs that carry the fix while main is still broken.
+BREAKAGE_FAIL_RATIO = 3
 
 # Rows like "<job>.Overall" and "<job>.Pod" describe the prow job itself, not
 # an individual test.
@@ -339,8 +349,22 @@ def make_pr_files_lookup(repo):
     return lookup
 
 
+def is_recovered_breakage(fail_cols, pass_cols, recent):
+    """True when a test's failures are one breakage window that has cleared.
+
+    A genuine flake has passes spread between its failures; a breakage window
+    is almost all failures. Columns are newest first, so the window is the
+    span from the newest to the oldest failing column, and it has cleared
+    when the newest completed result is a pass.
+    """
+    first, last = min(fail_cols), max(fail_cols)
+    passes_inside = sum(1 for i in pass_cols if first < i < last)
+    dense = len(fail_cols) >= BREAKAGE_FAIL_RATIO * passes_inside
+    return dense and bool(recent) and recent[0] in PASS_STATUSES
+
+
 def analyze_tab(dashboard, tab, window, pr_files=None):
-    """Returns (flaky, consistent, infra, pr_local) findings for one tab.
+    """Returns (flaky, consistent, infra, pr_local, recovered) for one tab.
 
     pr_files(pr_number) -> changed file paths enables the self-regression
     exclusion on presubmit tabs; None disables it.
@@ -351,7 +375,7 @@ def analyze_tab(dashboard, tab, window, pr_files=None):
     )
     tests = table.get("tests") or []
     if not tests:
-        return [], [], None, []
+        return [], [], None, [], []
 
     changelists = table.get("changelists") or []
     timestamps = table.get("timestamps") or []
@@ -452,7 +476,7 @@ def analyze_tab(dashboard, tab, window, pr_files=None):
                 if mass or setup:
                     suite_mass.add((suite, i))
 
-    flaky, consistent, pr_local = [], [], []
+    flaky, consistent, pr_local, recovered = [], [], [], []
     for name, statuses in test_rows.items():
         suite = suite_of(name)
 
@@ -547,7 +571,7 @@ def analyze_tab(dashboard, tab, window, pr_files=None):
         # that PR's own breakage and is reported as PR-local instead.
         recent = [cell(statuses, i) for i in range(ncols)
                   if not excluded(i)
-                  and cell(statuses, i) not in (0, RUNNING_STATUS)][:3]
+                  and cell(statuses, i) not in (0, RUNNING_STATUS)][:RECENT_RUNS]
         if recent and all(s in FAIL_STATUSES for s in recent):
             if distinct_cls >= 2:
                 consistent.append(finding)
@@ -555,11 +579,15 @@ def analyze_tab(dashboard, tab, window, pr_files=None):
                 pr_local.append({"tab": tab, "test": name,
                                  "reason": "failing-only-on-one-pr",
                                  "runs": len(fail_cols)})
-        elif (
-            retest_flips
-            or flaky_cells
-            or (distinct_cls >= 2 and len(pass_cols) > len(fail_cols))
-        ):
+        elif retest_flips or flaky_cells:
+            flaky.append(finding)
+        elif distinct_cls >= 2 and is_recovered_breakage(
+                fail_cols, pass_cols, recent):
+            # A breakage that was fixed leaves failures and later passes, so
+            # failures clustered in one window are not a flake, whatever the
+            # overall pass count.
+            recovered.append(finding)
+        elif distinct_cls >= 2 and len(pass_cols) > len(fail_cols):
             flaky.append(finding)
 
     # A flaky parent test drags all its failing subtests along; keep only the
@@ -594,7 +622,7 @@ def analyze_tab(dashboard, tab, window, pr_files=None):
             ),
             "job_history": job_history,
         }
-    return flaky, consistent, infra, pr_local
+    return flaky, consistent, infra, pr_local, recovered
 
 
 def fmt_ts(ms):
@@ -603,7 +631,8 @@ def fmt_ts(ms):
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
-def render_report(dashboard, flaky, consistent, infra, window, pr_local=()):
+def render_report(dashboard, flaky, consistent, infra, window, pr_local=(),
+                  recovered=()):
     lines = [
         f"# Flake report: {dashboard}",
         f"Window: last {window} runs per tab. Generated from {TESTGRID}/{dashboard}.",
@@ -627,6 +656,16 @@ def render_report(dashboard, flaky, consistent, infra, window, pr_local=()):
     if consistent:
         for f in consistent:
             lines.append(f"- `{f['test']}` ({f['tab']}): failing at head")
+    else:
+        lines.append("- none")
+    lines += ["", "## Recovered breakage (not flakes, failures clustered in "
+                  "one window and passing again)"]
+    if recovered:
+        for f in recovered:
+            lines.append(
+                f"- `{f['test']}` ({f['tab']}): {f['fails']} failure(s) across "
+                f"{f['distinct_changelists']} PR(s)/commit(s), "
+                f"last failed {fmt_ts(f['last_failure_ts'])}")
     else:
         lines.append("- none")
     lines += ["", "## PR-local failures (not flakes — the PR's own change)"]
@@ -907,11 +946,11 @@ def main():
 
     tabs = list_tabs(args.dashboard) if args.tabs == "all" else args.tabs.split(",")
     pr_files = None if args.no_pr_files else make_pr_files_lookup(args.repo)
-    flaky, consistent, infra, pr_local = [], [], [], []
+    flaky, consistent, infra, pr_local, recovered = [], [], [], [], []
     analyzed = 0
     for tab in tabs:
         try:
-            f, c, i, p = analyze_tab(args.dashboard, tab, args.window, pr_files)
+            f, c, i, p, r = analyze_tab(args.dashboard, tab, args.window, pr_files)
         except Exception as e:  # a missing/renamed tab shouldn't kill the report
             print(f"warning: skipping tab {tab}: {e}", file=sys.stderr)
             continue
@@ -920,6 +959,7 @@ def main():
         consistent += c
         infra.append(i)
         pr_local += p
+        recovered += r
 
     if analyzed == 0:
         # An all-tabs failure is an outage (or a broken dashboard name), not
@@ -927,13 +967,15 @@ def main():
         print("error: no TestGrid tabs could be analyzed", file=sys.stderr)
         return 1
 
-    report = render_report(args.dashboard, flaky, consistent, infra, args.window, pr_local)
+    report = render_report(args.dashboard, flaky, consistent, infra, args.window,
+                           pr_local, recovered)
     print(report)
 
     if args.json_out:
         payload = json.dumps(
             {"flaky": flaky, "consistent": consistent,
-             "infra": [i for i in infra if i], "pr_local": pr_local}, indent=2)
+             "infra": [i for i in infra if i], "pr_local": pr_local,
+             "recovered": recovered}, indent=2)
         if args.json_out == "-":
             print(payload)
         else:

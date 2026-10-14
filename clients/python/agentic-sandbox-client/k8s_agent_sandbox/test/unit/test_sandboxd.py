@@ -26,6 +26,7 @@ from unittest.mock import MagicMock
 
 from k8s_agent_sandbox import (
     SandboxdInClusterConnectionConfig as PublicInClusterConfig,
+    SandboxNoServiceError,
     SandboxServiceUnavailableError,
 )
 from k8s_agent_sandbox.exceptions import SandboxRequestError
@@ -78,18 +79,29 @@ class TestSandboxdConfig(unittest.TestCase):
 
     def test_direct_in_cluster_requires_mode_and_has_two_ports(self):
         self.assertIs(PublicInClusterConfig, SandboxdInClusterConnectionConfig)
-        self.assertTrue(issubclass(SandboxServiceUnavailableError, RuntimeError))
+        self.assertTrue(issubclass(SandboxNoServiceError, RuntimeError))
+        self.assertIs(SandboxServiceUnavailableError, SandboxNoServiceError)
         with self.assertRaises(ValueError):
             SandboxdInClusterConnectionConfig()
-        config = SandboxdInClusterConnectionConfig(mode="service-dns")
+        config = SandboxdInClusterConnectionConfig(mode="in-cluster-service")
         self.assertEqual((config.rest_port, config.grpc_port), (8080, 9090))
+
+    def test_direct_in_cluster_maps_deprecated_modes(self):
+        for old, new in (
+            ("service-dns", "in-cluster-service"),
+            ("pod-ip", "in-cluster-pod-ip"),
+        ):
+            with self.subTest(mode=old):
+                with self.assertWarns(DeprecationWarning):
+                    config = SandboxdInClusterConnectionConfig(mode=old)
+                self.assertEqual(config.mode, new)
 
     def test_direct_in_cluster_rejects_invalid_mode_and_ports(self):
         for values in (
             {"mode": "auto"},
-            {"mode": "pod-ip", "rest_port": 0},
-            {"mode": "pod-ip", "grpc_port": 65536},
-            {"mode": "pod-ip", "rest_port": 9090, "grpc_port": 9090},
+            {"mode": "in-cluster-pod-ip", "rest_port": 0},
+            {"mode": "in-cluster-pod-ip", "grpc_port": 65536},
+            {"mode": "in-cluster-pod-ip", "rest_port": 9090, "grpc_port": 9090},
         ):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 SandboxdInClusterConnectionConfig(**values)

@@ -960,7 +960,11 @@ func (r *SandboxClaimReconciler) syncFinishedCondition(claim *extensionsv1beta1.
 	if sandbox != nil {
 		finishedCondition := meta.FindStatusCondition(sandbox.Status.Conditions, string(v1beta1.SandboxConditionFinished))
 		if finishedCondition != nil {
-			meta.SetStatusCondition(&claim.Status.Conditions, *finishedCondition)
+			// Mirror a copy that reports the claim's own generation; the Sandbox's
+			// generation would make the condition look stale after a claim-only spec change.
+			condition := *finishedCondition
+			condition.ObservedGeneration = claim.Generation
+			meta.SetStatusCondition(&claim.Status.Conditions, condition)
 		} else {
 			meta.RemoveStatusCondition(&claim.Status.Conditions, string(v1beta1.SandboxConditionFinished))
 		}

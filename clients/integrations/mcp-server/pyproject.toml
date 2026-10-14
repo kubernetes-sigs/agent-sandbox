@@ -14,7 +14,7 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-  "k8s-agent-sandbox[async]~=0.5.0",
+  "k8s-agent-sandbox[async]>=1.0.0,<2.0",
   "pydantic-settings~=2.14.2",
   "fastapi~=0.139.0",
   "fastmcp[apps]~=3.4.4",

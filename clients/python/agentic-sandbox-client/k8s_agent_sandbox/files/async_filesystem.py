@@ -35,6 +35,8 @@ from k8s_agent_sandbox.files.filesystem import (
 from k8s_agent_sandbox.models import FileEntry
 from k8s_agent_sandbox.trace_manager import async_trace_span, trace
 
+logger = logging.getLogger(__name__)
+
 
 class AsyncBinaryWriter(Protocol):
     """An asynchronous destination that accepts binary file content."""
@@ -153,7 +155,7 @@ class AsyncFilesystem:
                 timeout=timeout,
                 _disable_retries=True,
             )
-        logging.info(f"File '{path}' uploaded successfully.")
+        logger.info(f"File '{path}' uploaded successfully.")
 
     @async_trace_span("read")
     async def read(
@@ -388,4 +390,4 @@ class AsyncFilesystem:
         if recursive:
             endpoint += "?recursive=true"
         await self.connector.send_request("DELETE", endpoint, timeout=timeout)
-        logging.info(f"Path '{path}' deleted successfully.")
+        logger.info(f"Path '{path}' deleted successfully.")

@@ -635,10 +635,13 @@ class SandboxFleet:
     sample_image = next(iter(self.image_counts()), "busybox:latest")
     for c in self.registry:
       ts = c.template_spec(self.config.template)
+      unmanaged_labels = (c.resources.fleet_pod_labels()
+                          if ts.network_policy_management == "Unmanaged" else None)
       rep = _pf.preflight_cluster(
           c, require_runtime_class=ts.runtime_class,
           image_pull_secret=ts.image_pull_secret, namespace=c.namespace,
-          validate_template=ts, sample_image=sample_image)
+          validate_template=ts, sample_image=sample_image,
+          unmanaged_pod_labels=unmanaged_labels)
       reports[c.name] = rep
       for w in rep.warnings:
         logger.warning("[%s] %s: %s", c.name, w.name, w.detail)

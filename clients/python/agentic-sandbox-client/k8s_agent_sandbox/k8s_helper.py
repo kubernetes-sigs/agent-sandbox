@@ -13,10 +13,11 @@
 # limitations under the License.
 
 import logging
+import math
 import time
 from itertools import chain
 from datetime import UTC, datetime
-from typing import Any, List
+from typing import Any, List, cast
 from kubernetes import client, config, watch
 import urllib3.exceptions
 from .exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
@@ -40,6 +41,9 @@ from .constants import (
     SANDBOX_PLURAL_NAME,
     CREATED_BY_LABEL,
 )
+
+logger = logging.getLogger(__name__)
+
 
 class K8sHelper:
     """Helper class for Kubernetes API interactions."""
@@ -114,7 +118,7 @@ class K8sHelper:
             "metadata": metadata,
             "spec": spec,
         }
-        logging.info(f"Creating SandboxClaim '{name}' in namespace '{namespace}' using warm pool '{warmpool}'...")
+        logger.info(f"Creating SandboxClaim '{name}' in namespace '{namespace}' using warm pool '{warmpool}'...")
         return self.custom_objects_api.create_namespaced_custom_object(
             group=CLAIM_API_GROUP,
             version=CLAIM_API_VERSION,
@@ -188,9 +192,10 @@ class K8sHelper:
                        f"SandboxClaim '{claim_name}' was deleted while resolving sandbox name")
         deadline = time.monotonic() + timeout
         rv = resource_version or "0"
-        logging.info(f"Watching claim '{claim_name}' for {wait_target} (from resourceVersion={rv})...")
+        logger.info(f"Watching claim '{claim_name}' for {wait_target} (from resourceVersion={rv})...")
         while True:
-            remaining = int(deadline - time.monotonic())
+            # timeoutSeconds is integral; preserve a positive fractional budget.
+            remaining = math.ceil(deadline - time.monotonic())
             if remaining <= 0:
                 raise TimeoutError(
                     f"Could not resolve {wait_target} from claim "
@@ -265,7 +270,7 @@ class K8sHelper:
                         # Support both 'name' (standard) and 'Name' (legacy, before CRD rename in #440)
                         name = sandbox_status.get('name', '') or sandbox_status.get('Name', '')
                         if name and (ready or not require_ready):
-                            logging.info(
+                            logger.info(
                                 f"Resolved sandbox name '{name}' from claim status"
                                 + (" (claim Ready)" if ready else ""))
                             return name
@@ -273,7 +278,7 @@ class K8sHelper:
                 if e.status == 410:
                     # The requested resourceVersion was compacted away:
                     # restart from the watch cache's current state.
-                    logging.info(
+                    logger.info(
                         f"Watch on claim '{claim_name}' expired (410 Gone at resourceVersion={rv}); "
                         "restarting from current state")
                     rv = "0"
@@ -284,7 +289,7 @@ class K8sHelper:
                 urllib3.exceptions.ReadTimeoutError,
                 ConnectionError,
             ) as e:
-                logging.warning(
+                logger.warning(
                     f"Watch on claim '{claim_name}' disconnected ({type(e).__name__}: {e}); "
                     "reconnecting..."
                 )
@@ -300,9 +305,9 @@ class K8sHelper:
         no valid IP can be selected.
         """
         deadline = time.monotonic() + timeout
-        logging.info(f"Watching for Sandbox {name} to become ready...")
+        logger.info(f"Watching for Sandbox {name} to become ready...")
         while True:
-            remaining = int(deadline - time.monotonic())
+            remaining = math.ceil(deadline - time.monotonic())
             if remaining <= 0:
                 raise TimeoutError(f"Sandbox {name} did not become ready within {timeout} seconds.")
             w = watch.Watch()
@@ -324,12 +329,12 @@ class K8sHelper:
                         conditions = status.get('conditions', [])
                         for cond in conditions:
                             if cond.get('type') == 'Ready' and cond.get('status') == 'True':
-                                logging.info(f"Sandbox {name} is ready.")
+                                logger.info(f"Sandbox {name} is ready.")
                                 w.stop()
                                 pod_ips = status.get('podIPs', [])
                                 return select_pod_ip(pod_ips)
                     elif event["type"] == "DELETED":
-                        logging.error(f"Sandbox {name} was deleted before becoming ready.")
+                        logger.error(f"Sandbox {name} was deleted before becoming ready.")
                         w.stop()
                         raise SandboxNotFoundError(f"Sandbox {name} was deleted before becoming ready.")
             except (
@@ -337,7 +342,7 @@ class K8sHelper:
                 urllib3.exceptions.ReadTimeoutError,
                 ConnectionError,
             ) as e:
-                logging.warning(
+                logger.warning(
                     f"Watch for Sandbox '{name}' disconnected ({type(e).__name__}: {e}); "
                     "reconnecting..."
                 )
@@ -355,7 +360,7 @@ class K8sHelper:
                 pair) forwarded to the underlying urllib3-based request.
             expected_uid: If provided, delete only the Claim with this UID.
         """
-        delete_kwargs = {}
+        delete_kwargs: dict[str, Any] = {}
         if expected_uid is not None:
             delete_kwargs["body"] = client.V1DeleteOptions(
                 preconditions=client.V1Preconditions(uid=expected_uid)
@@ -370,22 +375,24 @@ class K8sHelper:
                 _request_timeout=_request_timeout,
                 **delete_kwargs,
             )
-            logging.info(f"Terminated SandboxClaim: {name}")
+            logger.info(f"Terminated SandboxClaim: {name}")
         except client.ApiException as e:
             if e.status != 404:
-                logging.error(f"Error terminating SandboxClaim {name}: {e}")
+                logger.error(f"Error terminating SandboxClaim {name}: {e}")
                 raise
 
     def get_sandbox(self, name: str, namespace: str) -> dict[str, Any] | None:
         """Gets a Sandbox custom resource."""
         try:
-            return self.custom_objects_api.get_namespaced_custom_object(
+            # The generated client types custom-object responses as ``object``
+            # (kubernetes >= 37); they are the decoded JSON dict at runtime.
+            return cast(dict[str, Any], self.custom_objects_api.get_namespaced_custom_object(
                 group=SANDBOX_API_GROUP,
                 version=SANDBOX_API_VERSION,
                 namespace=namespace,
                 plural=SANDBOX_PLURAL_NAME,
                 name=name,
-            )
+            ))
         except client.ApiException as e:
             if e.status == 404:
                 return None
@@ -435,22 +442,22 @@ class K8sHelper:
             )
             if label_selector is not None:
                 kwargs["label_selector"] = label_selector
-            response = self.custom_objects_api.list_namespaced_custom_object(**kwargs)
+            response = cast(dict[str, Any], self.custom_objects_api.list_namespaced_custom_object(**kwargs))
             return [
                 item.get("metadata", {}).get("name") 
                 for item in response.get("items", []) 
                 if item.get("metadata", {}).get("name")
             ]
         except client.ApiException as e:
-            logging.error(f"Error listing sandbox claims in namespace {namespace}: {e}")
+            logger.error(f"Error listing sandbox claims in namespace {namespace}: {e}")
             raise
 
     def wait_for_gateway_ip(self, gateway_name: str, namespace: str, timeout: int) -> str:
         """Waits for the Gateway to be assigned an external IP."""
         deadline = time.monotonic() + timeout
-        logging.info(f"Waiting for Gateway '{gateway_name}' in namespace '{namespace}'...")
+        logger.info(f"Waiting for Gateway '{gateway_name}' in namespace '{namespace}'...")
         while True:
-            remaining = int(deadline - time.monotonic())
+            remaining = math.ceil(deadline - time.monotonic())
             if remaining <= 0:
                 raise TimeoutError(f"Gateway '{gateway_name}' did not get an IP.")
             w = watch.Watch()
@@ -477,12 +484,12 @@ class K8sHelper:
                             continue
                         
                         if not is_valid_ip(ip_address) and not is_valid_gateway_hostname(ip_address):
-                            logging.warning(
+                            logger.warning(
                                 "Gateway address rejected because %r is neither a valid IP address nor a valid gateway hostname.",
                                 ip_address,
                             )
                             continue
                         
-                        logging.info(f"Gateway ready. IP: {ip_address}")
+                        logger.info(f"Gateway ready. IP: {ip_address}")
                         w.stop()
                         return ip_address

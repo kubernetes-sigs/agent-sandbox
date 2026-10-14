@@ -13,18 +13,14 @@
 // limitations under the License.
 
 import * as net from "node:net";
-import { Readable, Writable } from "node:stream";
 import type * as k8s from "@kubernetes/client-node";
-// Not re-exported from the package root (see index.d.ts's export list), so
-// this reaches into the compiled output directly. @kubernetes/client-node
-// declares no "exports" map, so Node's default resolution allows it.
-import { WebSocketHandler } from "@kubernetes/client-node/dist/web-socket-handler.js";
 import WebSocket from "ws";
 import {
   ERROR_DETAIL_MAX_BYTES,
   MAX_ERROR_CHANNEL_PAYLOAD_BYTES,
   PORT_FORWARD_DATA_CHANNEL,
   PORT_FORWARD_ERROR_CHANNEL,
+  PORT_FORWARD_SUBPROTOCOLS,
   TUNNEL_BACKPRESSURE_THRESHOLD_BYTES,
 } from "./constants.js";
 import { SandboxConnectionError, SandboxTimeoutError } from "./exceptions.js";
@@ -87,22 +83,6 @@ class ChannelHeader {
     this.len += take;
     return data.subarray(take);
   }
-}
-
-/**
- * Minimal shape PodTunnel needs from a "WebSocket-handler-compatible" object:
- * exactly what @kubernetes/client-node's WebSocketHandler.connect() reads or
- * assigns on the object returned by the injected socketFactory. Kept
- * separate from the real `ws.WebSocket` type because PodTunnel intentionally
- * never lets WebSocketHandler's own onmessage run (see wrapForHandler below).
- */
-interface HandlerFacade {
-  onopen: (() => void) | null;
-  onerror: ((err: unknown) => void) | null;
-  onmessage: ((ev: { data: unknown }) => void) | null;
-  readyState: number;
-  protocol: string;
-  close(code?: number, reason?: string): void;
 }
 
 interface PairHandle {
@@ -243,6 +223,26 @@ export class PodTunnel {
     return `/api/v1/namespaces/${ns}/pods/${pod}/portforward?ports=${targetPort}`;
   }
 
+  /**
+   * Only the scheme of the cluster's server URL is swapped; any path prefix
+   * (e.g. an apiserver reached through an authenticating proxy) is kept in
+   * front of the port-forward path.
+   */
+  private portForwardUri(targetPort: number): string {
+    const cluster = this.opts.kubeConfig.getCurrentCluster();
+    if (!cluster) {
+      throw new SandboxConnectionError(
+        "kubeconfig has no current cluster to port-forward through",
+        "handshake",
+      );
+    }
+    const server = cluster.server;
+    const base = server.startsWith("https://")
+      ? `wss://${server.slice("https://".length)}`
+      : `ws://${server.slice("http://".length)}`;
+    return `${base}${this.portForwardPath(targetPort)}`;
+  }
+
   private handleAccept(socket: net.Socket, targetPort: number): void {
     if (this.closed) {
       socket.destroy();
@@ -284,27 +284,24 @@ export class PodTunnel {
 
     let real: WebSocket | undefined;
     let pairHandle: PairHandle | undefined;
-    const noopStream = {
-      stdin: new Readable({ read() {} }),
-      stdout: new Writable({
-        write(_c, _e, cb) {
-          cb();
-        },
-      }),
-      stderr: new Writable({
-        write(_c, _e, cb) {
-          cb();
-        },
-      }),
-    };
-    const factory = (
-      uri: string,
-      protocols: string[],
-      wsOpts: WebSocket.ClientOptions,
-    ): WebSocket => {
+    const dial = async (): Promise<void> => {
+      const uri = this.portForwardUri(targetPort);
+      const wsOpts: WebSocket.ClientOptions = {};
+      // The kubeconfig's public entry point for every credential kind it can
+      // express (client certs, bearer token, exec plugin, auth provider,
+      // basic auth) plus its TLS settings — PodTunnel never interprets
+      // credentials itself.
+      await this.opts.kubeConfig.applyToHTTPSOptions(wsOpts);
+      // applyToHTTPSOptions can take a while (an exec plugin runs a
+      // subprocess), so the attempt may already be doomed; don't open a
+      // network connection for it.
       if (this.closed || controller.signal.aborted || socket.destroyed) {
-        return this.inertSocket();
+        throw new SandboxConnectionError(
+          "port-forward attempt abandoned before dialing the apiserver",
+          "socket",
+        );
       }
+      const protocols = [...PORT_FORWARD_SUBPROTOCOLS];
       const created = this.opts.webSocketFactory
         ? this.opts.webSocketFactory(uri, protocols, wsOpts)
         : new WebSocket(uri, protocols, {
@@ -312,36 +309,22 @@ export class PodTunnel {
             handshakeTimeout: this.opts.handshakeTimeoutMs,
           });
       // Permanent safety net: Node throws on an unhandled EventEmitter
-      // "error" event. The handshake-scoped listener below is `once` and
-      // self-removes; this keeps the emitter safe for the object's whole
-      // life regardless of when a later error arrives.
+      // "error" event. The handshake-scoped listener in awaitOpen() is
+      // removed once the handshake settles; this keeps the emitter safe for
+      // the object's whole life regardless of when a later error arrives.
       created.on("error", () => {});
       real = created;
       this.pendingWebSockets.add(created);
-      if (this.closed || controller.signal.aborted || socket.destroyed) {
-        created.terminate();
-        this.pendingWebSockets.delete(created);
-        return this.inertSocket();
-      }
-      // Wired immediately, not after the handshake settles: the apiserver's
-      // per-channel port-number header (and any real data) can arrive before
-      // handler.connect()'s promise resolves, and a "message" event with no
-      // listener attached is lost forever, not queued.
+      // Wired immediately, not after "open": the apiserver's per-channel
+      // port-number header (and any real data) can arrive in the same read
+      // as the upgrade response, and a "message" event with no listener
+      // attached is lost forever, not queued.
       pairHandle = this.wireMessagePump(socket, created);
-      return this.wrapForHandler(created, controller);
+      await this.awaitOpen(created, controller.signal);
     };
 
-    const handler = new WebSocketHandler(
-      this.opts.kubeConfig,
-      factory as unknown as ConstructorParameters<typeof WebSocketHandler>[1],
-      noopStream,
-    );
-
     try {
-      await Promise.race([
-        handler.connect(this.portForwardPath(targetPort), null, null),
-        this.rejectOnAbort(controller.signal),
-      ]);
+      await Promise.race([dial(), this.rejectOnAbort(controller.signal)]);
     } catch (err) {
       this._lastHandshakeError = err;
       if (real) this.pendingWebSockets.delete(real);
@@ -396,81 +379,45 @@ export class PodTunnel {
     });
   }
 
-  private inertSocket(): WebSocket {
-    // Satisfies WebSocketHandler.connect()'s factory contract without
-    // starting a network connection for an attempt that is already doomed
-    // (tunnel closed / deadline expired / TCP peer gone). connect()'s
-    // promise simply never settles from this object; the caller is always
-    // racing it against its own deadline/abort rejection.
-    return {
-      onopen: null,
-      onerror: null,
-      onmessage: null,
-      readyState: WebSocket.CLOSED,
-      protocol: "",
-      close: () => {},
-    } as unknown as WebSocket;
-  }
-
   /**
-   * Wraps the real `ws` socket in a plain object satisfying
-   * WebSocketHandler's expectations (onopen/onerror assigned as plain
-   * properties, not addEventListener). `onmessage` is deliberately never
-   * invoked: WebSocketHandler's own onmessage reads bytes unconditionally
-   * (crashing on a short frame) and calls closeStream() against a
-   * stdin/stdout/stderr triple that has nothing to do with this tunnel.
-   * PodTunnel's pump (installed in wireMessagePump) listens on the real socket
-   * directly instead.
+   * Resolves on "open" and rejects on "error" — or on a "close" with no
+   * preceding error (e.g. the apiserver rejects the upgrade cleanly, or the
+   * Pod is gone), which would otherwise leave the handshake pending until
+   * the deadline. On abort it stops listening and never settles; the caller
+   * is always racing it against its own deadline/abort rejection.
    */
-  private wrapForHandler(
-    real: WebSocket,
-    controller: AbortController,
-  ): WebSocket {
-    const facade: HandlerFacade = {
-      onopen: null,
-      onerror: null,
-      onmessage: null,
-      readyState: real.readyState,
-      protocol: real.protocol,
-      close: (code, reason) => real.close(code, reason),
-    };
-    let settled = false;
-    const onOpen = () => {
-      if (settled) return;
-      settled = true;
-      facade.readyState = real.readyState;
-      facade.protocol = real.protocol;
-      facade.onopen?.();
-    };
-    // A close with no preceding "error" (e.g. the apiserver rejects the
-    // upgrade cleanly, or Pod 404) would otherwise leave connect()'s promise
-    // pending forever, since it only resolves on open and rejects on error.
-    const onCloseOrError = (err?: unknown) => {
-      if (settled) return;
-      settled = true;
-      facade.onerror?.(
-        err ?? new Error("port-forward WebSocket closed before opening"),
-      );
-    };
-    real.once("open", onOpen);
-    real.once("error", onCloseOrError);
-    real.once("close", () => onCloseOrError());
-    controller.signal.addEventListener(
-      "abort",
-      () => {
-        real.off("open", onOpen);
-        real.off("error", onCloseOrError);
-      },
-      { once: true },
-    );
-    return facade as unknown as WebSocket;
+  private awaitOpen(ws: WebSocket, signal: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const onOpen = () => {
+        stopListening();
+        resolve();
+      };
+      const onError = (err: Error) => {
+        stopListening();
+        reject(err);
+      };
+      const onClose = () => {
+        stopListening();
+        reject(new Error("port-forward WebSocket closed before opening"));
+      };
+      const stopListening = () => {
+        ws.off("open", onOpen);
+        ws.off("error", onError);
+        ws.off("close", onClose);
+        signal.removeEventListener("abort", stopListening);
+      };
+      ws.once("open", onOpen);
+      ws.once("error", onError);
+      ws.once("close", onClose);
+      signal.addEventListener("abort", stopListening, { once: true });
+    });
   }
 
   /**
    * Wires the WS->TCP direction and the pair's teardown handle, immediately
    * upon WS creation — before the handshake even settles. The apiserver's
    * per-channel port-number header (and, in principle, real data) can arrive
-   * before handler.connect()'s promise resolves; an EventEmitter "message"
+   * before awaitOpen() resolves; an EventEmitter "message"
    * event with no listener attached is dropped, not queued, so waiting until
    * pairing is confirmed would silently lose those bytes. Writing to `socket`
    * before wireSocketToWs()/resume() is safe: `pause()`/`resume()` only gate

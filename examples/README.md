@@ -4,12 +4,14 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 
 - [**agent-sandbox-gymnasium**](./agent-sandbox-gymnasium): A Gymnasium environment backed by Agent Sandbox warm pools for RL agent training and evaluation.
 - [**agent-sandbox-rl**](./agent-sandbox-rl): Generic, multi-cluster batch orchestration for running SWE-bench-style RL/eval workloads on Agent Sandbox warm pools.
+- [**agent-sandbox-rl-network-policy**](./agent-sandbox-rl-network-policy): One namespace-wide `NetworkPolicy` for every sandbox an agent-sandbox-rl fleet creates, instead of one per `SandboxTemplate`, for fleets with hundreds of templates per namespace on GKE, including the Dataplane V2 identity cost of per-pod labels.
 - [**agentclientprotocol**](./agentclientprotocol): A simple Agent Client Protocol (ACP) client that drives an agent running inside a sandbox.
 - [**aider-sandbox**](./aider-sandbox): An example of running the Aider coding agent in a sandbox using the template/claim pattern.
 - [**aio-sandbox**](./aio-sandbox): An example of running All-in-One (AIO) Sandbox using agent-sandbox.
 - [**analytics-tool**](./analytics-tool): An example of running an analytics workload in a sandbox with a companion service.
 - [**apf-insulation**](./apf-insulation): An opt-in API Priority and Fairness overlay giving the controller dedicated apiserver concurrency for high-rate claim workloads (claim path > bulk refill > events).
 - [**chrome-sandbox**](./chrome-sandbox): An example of running a Chrome browser in a sandbox.
+- [**claimed-sandbox-service**](./claimed-sandbox-service): Route application traffic through one Kubernetes Service to multiple claimed, ready Sandboxes while excluding the unclaimed warm reserve.
 - [**code-interpreter-agent-on-adk**](./code-interpreter-agent-on-adk): An example of using Agent Sandbox as a tool in Agent Development Kit (ADK).
 - [**composing-sandbox-nw-policies**](./composing-sandbox-nw-policies): An example of composing network policies for sandboxes.
 - [**containarium-execution-scoped-token**](./containarium-execution-scoped-token): An example of execution-scoped credentials in a reused Sandbox: a run-bound token delivered only through sandboxd's `ProcessConfig.env_vars`, egress pinned to a credential proxy with Cilium, and the token revoked when the process exits.

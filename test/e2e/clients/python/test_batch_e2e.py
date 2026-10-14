@@ -20,7 +20,7 @@ import kubernetes
 import pytest
 
 from k8s_agent_sandbox import SandboxClient, batch_utils
-from k8s_agent_sandbox.exceptions import BatchNotFoundError
+from k8s_agent_sandbox.exceptions import BatchNotFoundError, BatchTimeoutError
 from k8s_agent_sandbox.models import BatchEventType, BatchGroup, MemberState, SandboxLocalTunnelConnectionConfig
 
 MEMBERS_READY_TIMEOUT_SECONDS = 120
@@ -285,6 +285,38 @@ def test_claim_batch_release_not_ready_then_release_group(tc, temp_namespace, sa
         with pytest.raises(kubernetes.client.ApiException) as e:
             coordination_api.read_namespaced_lease(f"batch-{batch.batch_id}", temp_namespace)
         assert e.value.status == 404
+    finally:
+        client.delete_all()
+
+
+def test_acquire_adds_members_and_continues_ordinals_after_detach(tc, temp_namespace, sandbox_warmpool):
+    tc.apply_manifest_text(_UNREADY_POOL_MANIFEST, namespace=temp_namespace)
+    client = SandboxClient()
+    try:
+        batch = client.claim_batch(
+            [BatchGroup(warmpool=sandbox_warmpool, size=1), BatchGroup(warmpool="unready-warmpool", size=0)],
+            namespace=temp_namespace,
+        )
+        batch_id = batch.batch_id
+        batch_selector = f"agents.x-k8s.io/batch-id={batch_id}"
+        member = batch.acquire(sandbox_warmpool, timeout=MEMBERS_READY_TIMEOUT_SECONDS)
+        assert (member.claim_name, member.state) == (f"{batch_id}-1", MemberState.READY)
+        # It carries its pool's group label, so release_group() frees it with the pool's initial claim.
+        group_selector = batch_utils.group_label_selector(batch_id, sandbox_warmpool)
+        _wait_for_claims(tc, temp_namespace, group_selector, [f"{batch_id}-0", f"{batch_id}-1"])
+
+        with pytest.raises(BatchTimeoutError):
+            batch.acquire("unready-warmpool", timeout=10)
+        _wait_for_claims(tc, temp_namespace, batch_selector, [f"{batch_id}-0", f"{batch_id}-1"])
+
+        batch.detach()
+        batch = client.get_batch(batch_id, namespace=temp_namespace)
+        # Ordinal 2 went to the claim that timed out, so it isn't reused.
+        member = batch.acquire(sandbox_warmpool, timeout=MEMBERS_READY_TIMEOUT_SECONDS)
+        assert member.claim_name == f"{batch_id}-3"
+        assert batch.err() is None
+        batch.release()
+        _wait_for_claims(tc, temp_namespace, batch_selector, [])
     finally:
         client.delete_all()
 

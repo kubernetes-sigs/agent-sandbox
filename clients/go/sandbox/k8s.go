@@ -222,8 +222,7 @@ func (h *K8sHelper) deleteClaim(ctx context.Context, name, namespace string) err
 // extensions/controllers/sandboxclaim_controller.go). Transient reasons such as
 // AdoptionPending, SandboxMissing, SandboxNotReady and ReconcilerError are
 // left out because the controller recovers from them. Kept in sync with
-// TERMINAL_CLAIM_READY_REASONS in the Python and TypeScript SDKs, plus the
-// finished-Pod reasons, which the Sandbox controller never recovers from.
+// TERMINAL_CLAIM_READY_REASONS in the Python and TypeScript SDKs.
 var terminalReadyReasons = map[string]bool{
 	"InvalidMetadata":                                true,
 	"EnvVarsInjectionRejected":                       true,

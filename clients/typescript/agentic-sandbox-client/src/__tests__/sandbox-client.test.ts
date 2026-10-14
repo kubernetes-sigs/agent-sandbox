@@ -2896,7 +2896,15 @@ describe("SandboxClient (registry)", () => {
       expect(sandbox.sandboxName).toBe("sandbox-ok");
     });
 
-    it("GET path: throws SandboxClaimFailedError on a terminal Ready=False reason", async () => {
+    it.each([
+      ["VolumeClaimTemplatesError", "bad PVC template"],
+      [
+        "InvalidConfiguration",
+        "Service 'warmpool-bad' is invalid: must be no more than 63 characters",
+      ],
+      ["PodFailed", "Pod failed"],
+      ["PodSucceeded", "Pod completed successfully"],
+    ])("GET path: throws SandboxClaimFailedError on terminal reason %s", async (reason, message) => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
       mockGetNamespacedCustomObject.mockResolvedValueOnce({
         status: {
@@ -2904,40 +2912,17 @@ describe("SandboxClient (registry)", () => {
             {
               type: "Ready",
               status: "False",
-              reason: "VolumeClaimTemplatesError",
-              message: "bad PVC template",
+              reason,
+              message,
             },
           ],
         },
       });
 
       const client = new SandboxClient();
-      await expect(
-        client.createSandbox("warmpool-bad-pvc"),
-      ).rejects.toBeInstanceOf(SandboxClaimFailedError);
-      expect(mockWatchFn).not.toHaveBeenCalled();
-    });
-
-    it("GET path: throws SandboxClaimFailedError on InvalidConfiguration", async () => {
-      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
-      mockGetNamespacedCustomObject.mockResolvedValueOnce({
-        status: {
-          conditions: [
-            {
-              type: "Ready",
-              status: "False",
-              reason: "InvalidConfiguration",
-              message:
-                "Service 'warmpool-bad-name' is invalid: must be no more than 63 characters",
-            },
-          ],
-        },
-      });
-
-      const client = new SandboxClient();
-      await expect(
-        client.createSandbox("warmpool-bad-name"),
-      ).rejects.toBeInstanceOf(SandboxClaimFailedError);
+      await expect(client.createSandbox("warmpool-bad")).rejects.toBeInstanceOf(
+        SandboxClaimFailedError,
+      );
       expect(mockWatchFn).not.toHaveBeenCalled();
     });
 

@@ -103,4 +103,6 @@ export const TERMINAL_CLAIM_READY_REASONS: ReadonlySet<string> = new Set([
   "ClaimExpired", // extensions ClaimExpiredReason
   "SandboxExpired", // core SandboxReasonExpired, forwarded to the claim
   "InvalidConfiguration", // core SandboxReasonInvalidConfiguration, forwarded to the claim
+  "PodFailed", // core SandboxReasonPodFailed, forwarded to the claim
+  "PodSucceeded", // core SandboxReasonPodSucceeded, forwarded to the claim
 ]);

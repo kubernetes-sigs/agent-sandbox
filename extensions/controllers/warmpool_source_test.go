@@ -23,7 +23,6 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/utils/ptr"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
@@ -44,7 +43,7 @@ func TestWarmPoolCreationPreservesSource(t *testing.T) {
 	pool := &extensionsv1beta1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default", UID: "pool-uid"},
 		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
-			Replicas: ptr.To(int32(1)), TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+			Replicas: new(int32(1)), TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
 		},
 	}
 	scheme := newTestScheme()
@@ -67,7 +66,7 @@ func TestWarmPoolAmbiguousPOSTWaitsForObservation(t *testing.T) {
 	template := createTemplate("default")
 	pool := &extensionsv1beta1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default", UID: "pool-uid"},
-		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{Replicas: ptr.To(int32(1)), TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{Replicas: new(int32(1)), TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
 	}
 	var posts atomic.Int32
 	lostResponse := errors.New("connection lost after server accepted POST")
@@ -87,7 +86,7 @@ func TestWarmPoolAmbiguousPOSTWaitsForObservation(t *testing.T) {
 	_, err := r.Reconcile(ctx, request)
 	require.ErrorIs(t, err, lostResponse)
 	require.NoError(t, c.Get(ctx, request.NamespacedName, pool))
-	pool.Spec.Replicas = ptr.To(int32(2))
+	pool.Spec.Replicas = new(int32(2))
 	require.NoError(t, c.Update(ctx, pool))
 	_, err = r.Reconcile(ctx, request)
 	require.NoError(t, err)
@@ -108,7 +107,7 @@ func TestWarmCreationObservedAfterClaimTransfer(t *testing.T) {
 	template := createTemplate("default")
 	pool := &extensionsv1beta1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default", UID: "pool-uid"},
-		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{Replicas: ptr.To(int32(1)), TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{Replicas: new(int32(1)), TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
 	}
 	c := newFakeClient(scheme, pool, template)
 	r := &SandboxWarmPoolReconciler{Client: c, Scheme: scheme, MaxBatchSize: 1}
@@ -121,7 +120,7 @@ func TestWarmCreationObservedAfterClaimTransfer(t *testing.T) {
 	require.NoError(t, c.List(ctx, list))
 	require.Len(t, list.Items, 1)
 	sb := &list.Items[0]
-	sb.OwnerReferences = []metav1.OwnerReference{{APIVersion: extensionsv1beta1.GroupVersion.String(), Kind: "SandboxClaim", Name: "consumer", UID: "claim-uid", Controller: ptr.To(true)}}
+	sb.OwnerReferences = []metav1.OwnerReference{{APIVersion: extensionsv1beta1.GroupVersion.String(), Kind: "SandboxClaim", Name: "consumer", UID: "claim-uid", Controller: new(true)}}
 	q := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
 	defer q.ShutDown()
 	h := &warmPoolSandboxEventHandler{EventHandler: handler.Funcs{}, expectations: r.exp()}
@@ -214,7 +213,7 @@ func TestWarmClaimPreservesSourceFromOwner(t *testing.T) {
 		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: pool.Name}},
 	}
 	sb := createPoolSandbox(pool.Name, pool.Namespace, sandboxcontrollers.NameHash(pool.Name), template, "-warm")
-	sb.OwnerReferences = []metav1.OwnerReference{{APIVersion: extensionsv1beta1.GroupVersion.String(), Kind: "SandboxWarmPool", Name: pool.Name, UID: pool.UID, Controller: ptr.To(true)}}
+	sb.OwnerReferences = []metav1.OwnerReference{{APIVersion: extensionsv1beta1.GroupVersion.String(), Kind: "SandboxWarmPool", Name: pool.Name, UID: pool.UID, Controller: new(true)}}
 	sb.Status.PodIPs = []string{"10.0.0.1"}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(claim).WithObjects(pool, template, claim, sb).Build()
 	warmQueue := queue.NewSimpleSandboxQueue()

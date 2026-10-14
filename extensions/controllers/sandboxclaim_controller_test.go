@@ -8795,3 +8795,99 @@ func TestTTLDeleteRejectsConcurrentChanges(t *testing.T) {
 		}
 	}
 }
+
+// TestWarmPoolTTLTimelinePreservesClaimedSandbox exercises adoption and refill
+// before pool expiry; the fake client proves ownership, not garbage collection.
+func TestWarmPoolTTLTimelinePreservesClaimedSandbox(t *testing.T) {
+	ctx := t.Context()
+	start := time.Date(2026, 1, 1, 13, 0, 0, 0, time.UTC)
+	now := start
+	scheme := newTestScheme()
+	pool := newReplenishTestPool(2)
+	pool.CreationTimestamp = metav1.NewTime(start)
+	pool.Spec.TTLSecondsAfterCreated = new(int32(30 * 60))
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&extensionsv1beta1.SandboxWarmPool{}, &extensionsv1beta1.SandboxClaim{}, &sandboxv1beta1.Sandbox{}).
+		WithIndex(&sandboxv1beta1.Sandbox{}, sandboxWarmPoolLabelIndex, sandboxWarmPoolLabelIndexer).
+		WithObjects(pool, createTemplate(pool.Namespace)).Build()
+	poolReconciler := &SandboxWarmPoolReconciler{
+		Client: c, Scheme: scheme, MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+		now: func() time.Time { return now },
+	}
+	poolKey := client.ObjectKeyFromObject(pool)
+	reconcilePool := func() {
+		t.Helper()
+		_, err := poolReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: poolKey})
+		require.NoError(t, err)
+		syncPoolExpectations(poolReconciler, pool)
+	}
+	listSandboxes := func() []sandboxv1beta1.Sandbox {
+		t.Helper()
+		list := &sandboxv1beta1.SandboxList{}
+		require.NoError(t, c.List(ctx, list, client.InNamespace(pool.Namespace)))
+		return list.Items
+	}
+
+	// 13:00: the actual pool reconciler creates two pool-owned members.
+	reconcilePool()
+	members := listSandboxes()
+	require.Len(t, members, 2)
+	warmQueue := queue.NewSimpleSandboxQueue()
+	originalNames := make([]string, 0, len(members))
+	for i := range members {
+		sb := &members[i]
+		require.True(t, metav1.IsControlledBy(sb, pool))
+		originalNames = append(originalNames, sb.Name)
+		// Supply the readiness observation normally produced by the Sandbox
+		// controller and enqueue it as the informer would.
+		sb.Status.PodIPs = []string{testNetworkedPodIP}
+		sb.Status.Conditions = []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "DependenciesReady", LastTransitionTime: metav1.NewTime(now)}}
+		require.NoError(t, c.Status().Update(ctx, sb))
+		warmQueue.Add(queue.GetNamespacedWarmPoolName(sb.Namespace, pool.Name), queue.SandboxKey{Namespace: sb.Namespace, Name: sb.Name})
+	}
+
+	// 13:15: claim a real pool member, without a claim-level TTL.
+	now = start.Add(15 * time.Minute)
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "timeline-claim", Namespace: pool.Namespace, UID: "timeline-claim-uid", CreationTimestamp: metav1.NewTime(now)},
+		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: pool.Name}},
+	}
+	require.NoError(t, c.Create(ctx, claim))
+	claimReconciler := &SandboxClaimReconciler{Client: c, Scheme: scheme, WarmSandboxQueue: warmQueue, Tracer: asmetrics.NewNoOp(), DisableObservabilityAnnotations: true}
+	claimKey := client.ObjectKeyFromObject(claim)
+	_, err := claimReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: claimKey})
+	require.NoError(t, err)
+	var claimed *sandboxv1beta1.Sandbox
+	for _, sb := range listSandboxes() {
+		if metav1.IsControlledBy(&sb, claim) {
+			require.Nil(t, claimed, "exactly one member must transfer to the claim")
+			claimed = &sb
+		}
+	}
+	require.NotNil(t, claimed)
+	require.Contains(t, originalNames, claimed.Name, "claim must adopt, not cold-start")
+	require.NotContains(t, claimed.Labels, warmPoolSandboxLabel)
+	require.Len(t, claimed.OwnerReferences, 1)
+	require.Equal(t, 1, countPoolOwnedSandboxes(ctx, t, c, pool.Namespace, sandboxcontrollers.NameHash(pool.Name), pool.UID))
+
+	// Refill is normal pool behavior: two unclaimed members plus the claim.
+	reconcilePool()
+	require.Len(t, listSandboxes(), 3)
+	require.Equal(t, 2, countPoolOwnedSandboxes(ctx, t, c, pool.Namespace, sandboxcontrollers.NameHash(pool.Name), pool.UID))
+
+	// 13:35: pool age is 35 minutes, exceeding its 30-minute TTL.
+	now = start.Add(35 * time.Minute)
+	reconcilePool()
+	require.True(t, k8errors.IsNotFound(c.Get(ctx, poolKey, &extensionsv1beta1.SandboxWarmPool{})))
+	_, err = claimReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: claimKey})
+	require.NoError(t, err)
+	require.NoError(t, c.Get(ctx, claimKey, &extensionsv1beta1.SandboxClaim{}))
+	survivor := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(claimed), survivor))
+	require.True(t, metav1.IsControlledBy(survivor, claim))
+	require.True(t, survivor.DeletionTimestamp.IsZero())
+	require.Len(t, survivor.OwnerReferences, 1)
+	// No fake GC: the two unclaimed members still exist with the deleted
+	// pool's owner reference. A real cluster is needed to verify their removal.
+	require.Equal(t, 2, countPoolOwnedSandboxes(ctx, t, c, pool.Namespace, sandboxcontrollers.NameHash(pool.Name), pool.UID))
+}

@@ -252,8 +252,6 @@ def validate_claim_batch_args(
     for group in groups:
         if not isinstance(group, BatchGroup):
             raise ValueError(f"groups must contain BatchGroup items, got {type(group).__name__}")
-        if group.size < 1:
-            raise ValueError(f"group '{group.warmpool}' size must be at least 1")
         if group.warmpool in pools:
             raise ValueError(f"warm pool '{group.warmpool}' appears in more than one group")
         pools.add(group.warmpool)

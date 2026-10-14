@@ -1323,7 +1323,7 @@ func TestClose_CancelsBlockedOpen(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// monitorPortForward tests (TunnelStrategy)
+// monitorPortForward tests (portForwardTunnel)
 // ---------------------------------------------------------------------------
 
 func TestMonitorPortForward_ClearsStateOnDeath(t *testing.T) {
@@ -1343,8 +1343,8 @@ func TestMonitorPortForward_ClearsStateOnDeath(t *testing.T) {
 	errChan := make(chan error, 1)
 	stderrBuf := &syncBuffer{}
 
-	ts := &tunnelStrategy{
-		connector:           conn,
+	ts := &portForwardTunnel{
+		onDied:              conn.SetLastError,
 		log:                 logr.Discard(),
 		portForwardStopChan: stopChan,
 	}
@@ -1388,8 +1388,8 @@ func TestMonitorPortForward_StaleMonitorIgnored(t *testing.T) {
 	errChan := make(chan error, 1)
 	stderrBuf := &syncBuffer{}
 
-	ts := &tunnelStrategy{
-		connector:           conn,
+	ts := &portForwardTunnel{
+		onDied:              conn.SetLastError,
 		log:                 logr.Discard(),
 		portForwardStopChan: newStopChan,
 	}
@@ -2657,8 +2657,8 @@ func TestMonitorPortForward_Timeout(t *testing.T) {
 	errChan := make(chan error, 1)
 	stderrBuf := &syncBuffer{}
 
-	ts := &tunnelStrategy{
-		connector:           conn,
+	ts := &portForwardTunnel{
+		onDied:              conn.SetLastError,
 		log:                 logr.Discard(),
 		portForwardStopChan: stopChan,
 	}
@@ -2730,8 +2730,8 @@ func TestMonitorPortForward_Timeout_SetsLastError(t *testing.T) {
 	errChan := make(chan error, 1)
 	stderrBuf := &syncBuffer{}
 
-	ts := &tunnelStrategy{
-		connector:           conn,
+	ts := &portForwardTunnel{
+		onDied:              conn.SetLastError,
 		log:                 logr.Discard(),
 		portForwardStopChan: stopChan,
 	}

@@ -8525,7 +8525,7 @@ func TestCreateSandboxAlreadyExistsAuthoritativeReadFailure(t *testing.T) {
 	}
 
 	// Direct createSandbox call: the full error chain must stay inspectable.
-	_, err := reconciler.createSandbox(context.Background(), claim.DeepCopy(), template)
+	_, err := reconciler.createSandbox(context.Background(), claim.DeepCopy(), template, warmPool)
 	require.Error(t, err)
 	require.ErrorIs(t, err, errSandboxAlreadyExists, "sentinel must survive for the bounded-requeue conversion")
 	require.ErrorIs(t, err, readFailure, "read failure cause must stay identifiable via errors.Is")

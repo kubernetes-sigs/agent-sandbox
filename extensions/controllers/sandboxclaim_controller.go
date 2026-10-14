@@ -668,12 +668,16 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 	// Cold path: no existing sandbox or warm pool candidate.
 	// Need template to create from scratch.
 	logger.V(1).Info("Cold path: no sandbox found, creating from template", "claim", claim.Name)
-	template, templateErr := r.getTemplate(ctx, claim)
+	warmPool, err := r.getWarmPool(ctx, claim)
+	if err != nil {
+		return nil, err
+	}
+	template, templateErr := r.getTemplateForWarmPool(ctx, claim.Namespace, warmPool)
 	if templateErr != nil {
 		return nil, templateErr
 	}
 
-	return r.createSandbox(ctx, claim, template)
+	return r.createSandbox(ctx, claim, template, warmPool)
 }
 
 // reconcileExpired ensures the Sandbox is deleted for Retained claims.
@@ -1311,6 +1315,11 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, adopted *v1beta1.Sandbox) error {
 	// Take a snapshot of the sandbox BEFORE we mutate it to generate a clean JSON Patch.
 	originalAdopted := adopted.DeepCopy()
+	if owner := metav1.GetControllerOf(adopted); utils.MatchesGroupKind(owner, extensionsv1beta1.GroupVersion.Group, extensionsv1beta1.SandboxWarmPoolKind) {
+		if err := ensureWarmPoolSource(adopted, owner.Name, owner.UID); err != nil {
+			return err
+		}
+	}
 
 	templateHash := adopted.Labels[sandboxTemplateRefHash]
 
@@ -1766,7 +1775,7 @@ func (r *SandboxClaimReconciler) injectEnvs(logger logr.Logger, container *corev
 	return nil
 }
 
-func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, template *extensionsv1beta1.SandboxTemplate) (*v1beta1.Sandbox, error) {
+func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, template *extensionsv1beta1.SandboxTemplate, warmPool *extensionsv1beta1.SandboxWarmPool) (*v1beta1.Sandbox, error) {
 	logger := log.FromContext(ctx)
 
 	if template == nil {
@@ -1780,6 +1789,9 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 			Namespace: claim.Namespace,
 			Name:      claim.Name,
 		},
+	}
+	if err := ensureWarmPoolSource(sandbox, warmPool.Name, warmPool.UID); err != nil {
+		return nil, err
 	}
 
 	// Propagate the trace context annotation to the Sandbox resource

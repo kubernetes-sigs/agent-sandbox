@@ -113,6 +113,27 @@ already running without them, so setting this forces a cold start. The
 SandboxTemplate's `envVarsInjectionPolicy` decides whether the controller
 accepts them.
 
+### Named claims
+
+Use `claimName` to pick the SandboxClaim name, and `adoptExisting` to attach to
+the claim if it already exists, for example when a process restarts:
+
+```typescript
+const sandbox = await client.createSandbox("my-warm-pool", "default", {
+  claimName: "my-agent",
+  adoptExisting: true,
+});
+```
+
+This matches the Python SDK's `claim_name` and `adopt_existing`. The name must be
+a DNS-1123 subdomain. Without `adoptExisting`, a name conflict rejects. An
+adopted claim must not be terminating and must use the same warm pool; other
+options are not reapplied.
+
+A named claim belongs to the caller: a failed `createSandbox()` never deletes
+it, and `enableAutoCleanup()` only closes its handle. `deleteSandbox()` and
+`deleteAll()` still delete it.
+
 ### Listing sandboxes
 
 With Kubernetes credentials configured and permission to list SandboxClaims, run

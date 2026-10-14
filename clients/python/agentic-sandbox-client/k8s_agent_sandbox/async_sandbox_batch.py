@@ -39,7 +39,7 @@ from .exceptions import (
     BatchNotFoundError,
     SandboxNotReadyError,
 )
-from .models import BatchGroup, Member
+from .models import BatchGroup, Member, MemberState
 
 if TYPE_CHECKING:
     from .async_sandbox import AsyncSandbox
@@ -244,7 +244,7 @@ class AsyncSandboxBatch:
                 return cached
             # No name resolution or existence check as the batch's watch cache already knows the member's sandbox_name
             current = self._state.get_member(member.claim_name)
-            if current is None or not current.ready:
+            if current is None or current.state is not MemberState.READY:
                 raise SandboxNotReadyError(
                     f"batch member '{member.claim_name}' is not ready"
                 )

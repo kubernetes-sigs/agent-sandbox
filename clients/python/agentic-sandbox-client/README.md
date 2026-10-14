@@ -657,9 +657,11 @@ Lease (named `batch-<id>`) already exist. `claim_batch`, which creates both, is 
 addition to this SDK.
 
 ```python
+from k8s_agent_sandbox import MemberState
+
 batch = client.get_batch("b1234abcd12", namespace="default")
 
-ready = [m for m in batch.members() if m.ready]
+ready = [m for m in batch.members() if m.state is MemberState.READY]
 for member in ready:
     sandbox = batch.connect(member)
     sandbox.commands.run("echo hello")
@@ -670,7 +672,7 @@ batch.detach()
 `SandboxBatch` (and its async twin `AsyncSandboxBatch`) expose:
 
 - `batch_id`, `namespace`, `groups`, `size`: the batch's identity and its per-warmpool `BatchGroup`s.
-- `members(warmpool=None)`: a snapshot of every `Member`, sorted by ordinal.
+- `members(warmpool=None)`: a snapshot of every `Member`, sorted by ordinal. A member's `state` is `PENDING`, `READY`, `FAILED` or `LOST`.
 - `connect(member)`: a connected `Sandbox`/`AsyncSandbox` for a ready member.
 - `err()`: the error that stopped the background watch/renewal, or `None`.
 - `lease_degraded()`: whether Lease renewal is failing, from the first failed renewal until one succeeds.

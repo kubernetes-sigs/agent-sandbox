@@ -21,7 +21,7 @@ import pytest
 
 from k8s_agent_sandbox import SandboxClient
 from k8s_agent_sandbox.exceptions import BatchNotFoundError
-from k8s_agent_sandbox.models import SandboxLocalTunnelConnectionConfig
+from k8s_agent_sandbox.models import MemberState, SandboxLocalTunnelConnectionConfig
 
 MEMBERS_READY_TIMEOUT_SECONDS = 120
 
@@ -73,7 +73,7 @@ def test_batch_get_batch_members_connect_detach(
         deadline = time.monotonic() + MEMBERS_READY_TIMEOUT_SECONDS
         while True:
             members = batch.members()
-            if len(members) == 2 and all(m.ready for m in members):
+            if len(members) == 2 and all(m.state is MemberState.READY for m in members):
                 break
             if time.monotonic() > deadline:
                 pytest.fail(f"batch members did not become ready in time: {members}")

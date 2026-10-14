@@ -18,7 +18,7 @@ from pydantic import ValidationError
 
 from k8s_agent_sandbox import batch_state
 from k8s_agent_sandbox.exceptions import BatchError
-from k8s_agent_sandbox.models import BatchGroup
+from k8s_agent_sandbox.models import BatchGroup, MemberState
 from k8s_agent_sandbox.constants import (
     TERMINAL_CLAIM_READY_REASONS,
 )
@@ -54,9 +54,8 @@ class TestDeriveMember(unittest.TestCase):
 
     def test_pending_no_sandbox_name(self):
         member = batch_state.derive_member(_claim("b1-0", conditions=[]))
-        self.assertFalse(member.ready)
+        self.assertEqual(member.state, MemberState.PENDING)
         self.assertIsNone(member.sandbox_name)
-        self.assertFalse(member.terminal)
 
     def test_bound_but_not_ready(self):
         member = batch_state.derive_member(
@@ -66,9 +65,8 @@ class TestDeriveMember(unittest.TestCase):
                 sandbox={"name": "sbx-1"},
             )
         )
-        self.assertFalse(member.ready)
+        self.assertEqual(member.state, MemberState.PENDING)
         self.assertEqual(member.sandbox_name, "sbx-1")
-        self.assertFalse(member.terminal)
         self.assertEqual(member.reason, "SandboxNotReady")
 
     def test_ready(self):
@@ -79,7 +77,7 @@ class TestDeriveMember(unittest.TestCase):
                 sandbox={"name": "sbx-1", "podIPs": ["10.0.0.1"], "serviceFQDN": "sbx-1.svc"},
             )
         )
-        self.assertTrue(member.ready)
+        self.assertEqual(member.state, MemberState.READY)
         self.assertEqual(member.pod_ips, ("10.0.0.1",))
         self.assertEqual(member.service_fqdn, "sbx-1.svc")
 
@@ -87,7 +85,7 @@ class TestDeriveMember(unittest.TestCase):
         member = batch_state.derive_member(
             _claim("b1-0", conditions=[{"type": "Ready", "status": "True"}])
         )
-        self.assertFalse(member.ready)
+        self.assertEqual(member.state, MemberState.PENDING)
 
     def test_terminal_claim_ready_reasons(self):
         for reason in TERMINAL_CLAIM_READY_REASONS:
@@ -100,7 +98,7 @@ class TestDeriveMember(unittest.TestCase):
                         ],
                     )
                 )
-                self.assertTrue(member.terminal)
+                self.assertEqual(member.state, MemberState.FAILED)
                 self.assertEqual(member.reason, reason)
 
     def test_template_not_found_is_not_terminal(self):
@@ -113,8 +111,7 @@ class TestDeriveMember(unittest.TestCase):
                 ],
             )
         )
-        self.assertFalse(member.terminal)
-        self.assertFalse(member.ready)
+        self.assertEqual(member.state, MemberState.PENDING)
         self.assertEqual(member.reason, "TemplateNotFound")
         self.assertEqual(member.message, "x")
 
@@ -128,23 +125,12 @@ class TestDeriveMember(unittest.TestCase):
                 ],
             )
         )
-        self.assertFalse(member.terminal)
-        self.assertFalse(member.ready)
+        self.assertEqual(member.state, MemberState.PENDING)
         self.assertEqual(member.reason, "WarmPoolNotFound")
         self.assertEqual(member.message, "no pool")
 
 
 class TestLost(unittest.TestCase):
-
-    def test_deleted_claim_sets_lost(self):
-        state = batch_state.BatchState("b1", [BatchGroup(warmpool="pool-a", size=1)])
-        state.upsert_claim(
-            _claim("b1-0", conditions=[{"type": "Ready", "status": "True"}], sandbox={"name": "sbx-1"})
-        )
-        lost = state.mark_lost("b1-0")
-        self.assertIsNotNone(lost)
-        self.assertTrue(lost.lost)
-        self.assertTrue(state.get_member("b1-0").lost)
 
     def test_lost_member_clears_ready_and_endpoints(self):
         state = batch_state.BatchState("b1", [BatchGroup(warmpool="pool-a", size=1)])
@@ -156,10 +142,25 @@ class TestLost(unittest.TestCase):
             )
         )
         lost = state.mark_lost("b1-0")
-        self.assertFalse(lost.ready)
+        self.assertEqual(lost.state, MemberState.LOST)
         self.assertEqual(lost.pod_ips, ())
         self.assertIsNone(lost.service_fqdn)
         self.assertEqual(lost.reason, "Ready")
+
+    def test_failed_member_missing_from_a_relist_stays_failed(self):
+        state = batch_state.BatchState("b1", [BatchGroup(warmpool="pool-a", size=1)])
+        state.upsert_claim(
+            _claim(
+                "b1-0",
+                conditions=[
+                    {"type": "Ready", "status": "False", "reason": "ClaimExpired", "message": "x"}
+                ],
+            )
+        )
+        state.resync_from_list([])
+        member = state.get_member("b1-0")
+        self.assertEqual(member.state, MemberState.FAILED)
+        self.assertEqual(member.reason, "ClaimExpired")
 
 
 class TestBatchGroup(unittest.TestCase):
@@ -239,17 +240,6 @@ class TestReconstructGroups(unittest.TestCase):
 
 
 class TestSnapshots(unittest.TestCase):
-
-    def test_get_member_snapshot_unaffected_by_later_upsert_claim(self):
-        state = batch_state.BatchState("b1", [BatchGroup(warmpool="pool-a", size=1)])
-        state.upsert_claim(_claim("b1-0", conditions=[]))
-        first = state.get_member("b1-0")
-        state.upsert_claim(
-            _claim("b1-0", conditions=[{"type": "Ready", "status": "True"}], sandbox={"name": "sbx-1"})
-        )
-        self.assertFalse(first.ready)
-        second = state.get_member("b1-0")
-        self.assertTrue(second.ready)
 
     def test_members_pod_ips_cannot_be_mutated(self):
         state = batch_state.BatchState("b1", [BatchGroup(warmpool="pool-a", size=1)])

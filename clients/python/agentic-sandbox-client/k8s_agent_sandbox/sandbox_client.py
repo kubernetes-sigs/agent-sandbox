@@ -370,7 +370,7 @@ class SandboxClient(Generic[T]):
 
             >>> client = SandboxClient()
             >>> batch = client.get_batch("b1234abcd12")
-            >>> ready = [m for m in batch.members() if m.ready]
+            >>> ready = [m for m in batch.members() if m.state is MemberState.READY]
         """
         batch = SandboxBatch._attach(self, batch_id, namespace)
         self._active_batches[(namespace, batch_id)] = batch

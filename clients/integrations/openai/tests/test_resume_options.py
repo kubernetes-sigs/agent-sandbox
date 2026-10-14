@@ -168,7 +168,6 @@ async def test_unexpected_reattach_failure_is_not_swallowed(
     # The original sandbox is still live and must not have been abandoned.
     assert len(fake_client.created) == 1
 
-    fake_client.fail_get_sandbox = None
     await client.delete(session)
 
 
@@ -270,6 +269,22 @@ async def test_delete_accepts_an_already_deleted_claim(
     fake_client.drop_claim(session.state.claim_name, namespace=NAMESPACE)
 
     await client.delete(session)
+
+
+async def test_delete_frees_a_claim_whose_lookup_fails(
+    client: K8sSandboxClient, fake_client: FakeAsyncSandboxClient, workspace: Path
+) -> None:
+    """The SDK reports any failed lookup as SandboxNotFoundError, live claim or not."""
+
+    session = await client.create(
+        manifest=Manifest(root=str(workspace)), options=make_options()
+    )
+    sandbox = await fake_client.get_sandbox(session.state.claim_name, namespace=NAMESPACE)
+    fake_client.fail_get_sandbox = SandboxNotFoundError("resolution failed")
+
+    await client.delete(session)
+
+    assert sandbox.terminated
 
 
 async def test_delete_refuses_an_unwrapped_session(

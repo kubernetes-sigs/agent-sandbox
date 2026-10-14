@@ -119,15 +119,7 @@ class K8sSandboxClient(BaseSandboxClient[K8sSandboxClientOptions]):
 
         # delete_sandbox() logs a failed deletion and returns normally, reporting a leaked
         # pod and PVC as a clean delete. terminate() does the same work and raises.
-        try:
-            sandbox = await self._sandbox_client.get_sandbox(
-                inner.state.claim_name, namespace=inner.state.namespace
-            )
-        except SandboxNotFoundError:
-            # Claim already gone: nothing left to free. Anything else propagates.
-            return session
-
-        await sandbox.terminate()
+        await inner._sandbox.terminate()
         return session
 
     async def resume(self, state: SandboxSessionState) -> SandboxSession:
@@ -194,7 +186,7 @@ class K8sSandboxClient(BaseSandboxClient[K8sSandboxClientOptions]):
             file_transfer=state.file_transfer,
             default_timeout_s=state.exec_timeout_default_s,
         )
-        return K8sSandboxSession(transport=transport, state=state)
+        return K8sSandboxSession(sandbox=sandbox, transport=transport, state=state)
 
 
 def _options_from_state(state: K8sSandboxSessionState) -> K8sSandboxClientOptions:

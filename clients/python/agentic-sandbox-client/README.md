@@ -163,6 +163,17 @@ finally:
     sandbox.terminate()
 ```
 
+`SandboxClient` is also a context manager. On exit it deletes the sandboxes it
+tracks, including ones attached with `get_sandbox()`, so the `try`/`finally`
+above is not needed. Claims created with an explicit `claim_name` are
+caller-owned and are only disconnected, not deleted:
+
+```python
+with SandboxClient(connection_config=SandboxLocalTunnelConnectionConfig()) as client:
+    sandbox = client.create_sandbox(warmpool="python-sandbox-warmpool", namespace="default")
+    print(sandbox.commands.run("echo 'Hello from Local!'").stdout)
+```
+
 You can pass per-claim environment variables when creating a sandbox:
 
 ```python
@@ -354,6 +365,11 @@ asyncio.run(main())
 process port directly from the sandbox Pod. The async client establishes and tears down
 both forwards without blocking the event loop.
 
+This doesn't work on Kata or gVisor: their workload runs in a separate kernel, so the
+pod's host-side network namespace has nothing listening for the port-forward to reach.
+Use `SandboxdInClusterConnectionConfig` for those, with the client running inside the
+cluster (the Sandbox NetworkPolicy must admit the client; see below).
+
 ```python
 import asyncio
 from k8s_agent_sandbox import AsyncSandboxClient
@@ -400,18 +416,18 @@ must accept request bodies without a `Content-Length` header.
 ### 8. sandboxd In-Cluster Mode
 
 Use `SandboxdInClusterConnectionConfig` when the Python client runs in the same
-Kubernetes cluster as a sandboxd-backed Sandbox. Select `service-dns` or `pod-ip`
-explicitly. The SDK reads the selected address from Sandbox status, uses it for
-both the REST filesystem API and gRPC `ProcessService`, and never switches to
-the other mode. The default ports are 8080 and 9090; `rest_port` and
-`grpc_port` can be overridden independently. This mode uses no `kubectl`
-process or sandbox-router headers.
+Kubernetes cluster as a sandboxd-backed Sandbox. Select `in-cluster-service` or
+`in-cluster-pod-ip` explicitly. The SDK reads the selected address from Sandbox
+status, uses it for both the REST filesystem API and gRPC `ProcessService`, and
+never switches to the other mode. The default ports are 8080 and 9090;
+`rest_port` and `grpc_port` can be overridden independently. This mode uses no
+`kubectl` process or sandbox-router headers.
 Direct access bypasses the sandbox-router's authorization checks, so restrict
 network access to trusted client workloads.
 
 For Service DNS, set `spec.service: true` on the Sandbox template so the
 controller reports `status.serviceFQDN`. If it is absent, the SDK raises
-`SandboxServiceUnavailableError`. For Pod IP, the SDK reads `status.podIPs`
+`SandboxNoServiceError`. For Pod IP, the SDK reads `status.podIPs`
 before each operation; an unavailable address raises `SandboxNotReadyError`.
 Pod IPs can be recycled after a Pod is replaced, so prefer Service DNS when
 clients and Sandboxes cross trust boundaries.
@@ -432,12 +448,14 @@ Synchronous client (install `k8s-agent-sandbox[grpc]`):
 from k8s_agent_sandbox import SandboxClient, SandboxdInClusterConnectionConfig
 
 client = SandboxClient(
-    connection_config=SandboxdInClusterConnectionConfig(mode="service-dns")
+    connection_config=SandboxdInClusterConnectionConfig(mode="in-cluster-service")
 )
 sandbox = client.create_sandbox(warmpool="sandboxd-warmpool", namespace="default")
 try:
     sandbox.files.write("hello.txt", b"hello\n")
     print(sandbox.commands.run("cat hello.txt").stdout)
+    sandbox.commands.run("mkdir -p work")
+    sandbox.commands.run("echo $GREETING > hi.txt", env={"GREETING": "hi"}, cwd="work")
 finally:
     sandbox.terminate()
 ```
@@ -449,7 +467,7 @@ import asyncio
 from k8s_agent_sandbox import AsyncSandboxClient, SandboxdInClusterConnectionConfig
 
 async def main():
-    config = SandboxdInClusterConnectionConfig(mode="pod-ip")
+    config = SandboxdInClusterConnectionConfig(mode="in-cluster-pod-ip")
     async with AsyncSandboxClient(connection_config=config) as client:
         sandbox = await client.create_sandbox(
             warmpool="sandboxd-warmpool", namespace="default"
@@ -459,6 +477,10 @@ async def main():
 
 asyncio.run(main())
 ```
+
+With sandboxd, `commands.run` also takes `env` and `cwd`, as in the synchronous
+example. `cwd` is confined to the sandbox root. The legacy runtime raises
+`NotImplementedError` for both.
 
 ### 9. Labels and Pod Metadata
 
@@ -641,6 +663,16 @@ client_b = build_client("cluster-b")
 The async client takes the same parameter with a `kubernetes_asyncio.client.ApiClient`. If its credentials can expire, use `async with AsyncSandboxClient(...)` or call `delete_all()` before the event loop stops, since `atexit` cleanup can't run an async token-refresh hook and may delete with a stale token.
 
 An injected `api_client` is caller-owned: the SDK never closes it, so closing it is up to you.
+
+### 14. Logging
+
+The SDK logs through the `k8s_agent_sandbox` logger hierarchy and does not configure logging itself. To see its progress messages, configure logging in your application:
+
+```python
+import logging
+
+logging.basicConfig(level=logging.INFO)
+```
 
 ## Testing
 

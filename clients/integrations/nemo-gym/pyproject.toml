@@ -25,9 +25,9 @@ dependencies = [
     # SandboxExecResult, ...) and error classes; the SandboxProvider protocol and the
     # entry-point registry both ship in nemo-gym 0.5.0.
     "nemo-gym>=0.5.0",
-    # ~=0.5.1: create_sandbox(volume_claim_templates=...) landed in 0.5.1 and the
+    # create_sandbox(volume_claim_templates=...) landed in 0.5.1 and the
     # provider passes it unconditionally.
-    "k8s-agent-sandbox[async]~=0.5.1",
+    "k8s-agent-sandbox[async]>=1.0.0,<2.0",
 ]
 
 [project.urls]

@@ -262,6 +262,19 @@ class DockerfileOverridesTest(unittest.TestCase):
         self.assertEqual(context_dir, ".")
         self.assertEqual(dockerfile_path, os.path.join(acp_server_dir, "Dockerfile"))
 
+    def test_multi_cluster_fleet_deploy_builds_from_repo_root(self):
+        # Regression: discovery built this Dockerfile from its own directory
+        # as image "deploy", and every post-merge push-images run failed on
+        # its repo-root-relative COPY lines (2026-10-08 onward).
+        fleet_deploy_dir = os.path.join(
+            ".", "examples", "multi-cluster-fleet", "deploy")
+        calls = self._build_calls([(fleet_deploy_dir, [], ["Dockerfile"])])
+        self.assertEqual(len(calls), 1)
+        _, service_name, context_dir, dockerfile_path, _ = calls[0].args
+        self.assertEqual(service_name, "fleet-member")
+        self.assertEqual(context_dir, ".")
+        self.assertEqual(dockerfile_path, os.path.join(fleet_deploy_dir, "Dockerfile"))
+
     def test_geminicli_toolbox_builds_from_repo_root(self):
         toolbox_dir = os.path.join(
             ".", "examples", "sandboxed-tools", "images", "geminicli-toolbox")

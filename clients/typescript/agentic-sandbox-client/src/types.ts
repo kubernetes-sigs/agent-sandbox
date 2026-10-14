@@ -15,6 +15,15 @@
 import type * as k8s from "@kubernetes/client-node";
 
 export interface SandboxClientOptions {
+  /**
+   * Kubernetes client configuration used for every API call, watch, and
+   * port-forward. Defaults to `loadFromDefault()` (KUBECONFIG, then
+   * ~/.kube/config, then in-cluster). An injected config is used as given:
+   * the "no Kubernetes configuration found" check applies only to the
+   * default. Mirrors the Python client's `api_client` and the Go client's
+   * `Options.RestConfig`.
+   */
+  kubeConfig?: k8s.KubeConfig;
   namespace?: string;
   sandboxReadyTimeout?: number;
   enableTracing?: boolean;
@@ -93,6 +102,7 @@ export interface SandboxdOptions {
  *
  * - `"port-forward"`: a WebSocket port-forward brokered by the apiserver.
  *   Works from anywhere a kubeconfig does, including a laptop or CI runner.
+ *   Doesn't work on Kata or gVisor; use an in-cluster mode for those.
  * - `"in-cluster-service"`: dials the Sandbox's headless Service by its
  *   in-cluster DNS name (status.serviceFQDN), taking the apiserver off the
  *   data path. The Service only ever selects its own Sandbox's pod, and a
@@ -337,4 +347,30 @@ export interface CreateSandboxOptions {
    * templates against the SandboxTemplate's volume policy.
    */
   volumeClaimTemplates?: VolumeClaimTemplate[];
+  /**
+   * Environment variables to inject into the sandbox's first container, sent
+   * as the claim's `spec.env`. Setting this forces a cold start, because warm
+   * pool Pods are already running without them. The SandboxTemplate's
+   * `envVarsInjectionPolicy` decides whether the controller accepts them.
+   */
+  env?: Record<string, string>;
+}
+
+export interface GetSandboxOptions {
+  /**
+   * Seconds to wait for the claim to report its Sandbox name. An existing
+   * claim is normally resolved already, so a short value fails fast on a claim
+   * that never binds instead of spending the full ready budget. Defaults to,
+   * and is capped at, the client's `sandboxReadyTimeout`.
+   */
+  resolveTimeout?: number;
+  /**
+   * Wait for the Sandbox to become Ready before returning (default `true`).
+   * With `false`, getSandbox() only resolves the claim and checks that the
+   * Sandbox exists, matching the Python SDK. The handle's `podIP` and
+   * `serviceFQDN` are then taken from the Sandbox as it is at attach time and
+   * may still be empty, in which case in-cluster connectivity fails on first
+   * use; call getSandbox() again once the Sandbox is Ready.
+   */
+  waitForReady?: boolean;
 }

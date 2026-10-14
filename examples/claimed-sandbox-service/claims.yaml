@@ -1,0 +1,28 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: serving-a
+  namespace: claimed-sandbox-service
+spec:
+  warmPoolRef:
+    name: serving-pool
+  # Claim-only metadata keeps ready, unclaimed reserve Pods out of the Service.
+  additionalPodMetadata:
+    labels:
+      sandbox.users.io/serving-group: demo
+  lifecycle:
+    shutdownPolicy: Delete
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: serving-b
+  namespace: claimed-sandbox-service
+spec:
+  warmPoolRef:
+    name: serving-pool
+  additionalPodMetadata:
+    labels:
+      sandbox.users.io/serving-group: demo
+  lifecycle:
+    shutdownPolicy: Delete

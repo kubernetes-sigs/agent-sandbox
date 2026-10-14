@@ -15,9 +15,12 @@
 """Adapt the text-native SandboxEnv to finite spaces suitable for RLlib."""
 
 from dataclasses import dataclass
+from copy import deepcopy
 import operator
 import re
 import shlex
+from uuid import uuid4
+from typing import Any
 
 import gymnasium as gym
 from gymnasium import spaces
@@ -27,6 +30,7 @@ from k8s_agent_sandbox import SandboxClient
 from k8s_agent_sandbox.models import (
     SandboxInClusterConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
+    SandboxdInClusterConnectionConfig,
 )
 from k8s_agent_sandbox_gymnasium import RewardFn, SandboxEnv, TerminationFn
 
@@ -161,7 +165,7 @@ class FileTaskTermination(TerminationFn):
 class DiscreteFileTaskWrapper(gym.Wrapper):
     """Map fixed integer actions and text output to RLlib-friendly spaces."""
 
-    def __init__(self, env, *, client=None, max_episode_steps=4):
+    def __init__(self, env, *, client=None, max_episode_steps=4, namespace="gymnasium"):
         super().__init__(env)
         if max_episode_steps < 1:
             raise ValueError("max_episode_steps must be at least one")
@@ -175,6 +179,14 @@ class DiscreteFileTaskWrapper(gym.Wrapper):
         self._client = client
         self._max_episode_steps = int(max_episode_steps)
         self._last_state = EMPTY_STATE
+        self._namespace = namespace
+        self._evidence: dict[str, Any] = {
+            "env_id": uuid4().hex,
+            "claims": [],
+            "steps": 0,
+            "successful_steps": 0,
+            "errors": 0,
+        }
 
     def reset(self, *, seed=None, options=None):
         _, info = self.env.reset(
@@ -183,7 +195,27 @@ class DiscreteFileTaskWrapper(gym.Wrapper):
         )
         # SandboxEnv provisions a fresh claim, so the task starts empty.
         self._last_state = EMPTY_STATE
+        self._evidence["claims"].append({
+            "namespace": self._namespace,
+            "claim_name": info.get("claim_name"),
+            "sandbox_id": info.get("sandbox_id"),
+        })
         return self._last_state.observation(1.0), info
+
+    def get_claim_evidence(self):
+        """Return serializable, cumulative evidence without sharing state."""
+        return deepcopy(self._evidence)
+
+    def verify_rest_file(self):
+        """Exercise REST on the same Sandbox used by the command preflight."""
+        if not self._evidence["claims"] or self._client is None:
+            raise RuntimeError("reset() with a Sandbox client is required")
+        claim = self._evidence["claims"][-1]
+        sandbox = self._client.get_sandbox(claim["claim_name"], namespace=self._namespace)
+        # REST paths are relative to /workspace, not the command task's /tmp.
+        sandbox.files.write("rllib-preflight.txt", EXPECTED_CONTENT)
+        if sandbox.files.read("rllib-preflight.txt") != EXPECTED_CONTENT.encode("utf-8"):
+            raise RuntimeError("Sandbox REST file read did not match the write")
 
     def step(self, action):
         action_id = _action_id(action)
@@ -217,13 +249,24 @@ class DiscreteFileTaskWrapper(gym.Wrapper):
             }
         )
 
+        self._evidence["steps"] += 1
+        execution_ok = (
+            not info.get("env_error")
+            and not info["state_parse_error"]
+            and info.get("exit_code") == 0
+        )
+        self._evidence["successful_steps" if execution_ok else "errors"] += 1
+        if not execution_ok:
+            info["success"] = False
+            terminated = False
+            reward = -1.0
+
         # A connection or state-decoding failure cannot produce a useful next
         # action. Truncating forces RLlib to reset the episode and replace the
         # SandboxClaim.
         truncated = bool(
             truncated
-            or info.get("env_error")
-            or info["state_parse_error"]
+            or not execution_ok
         )
         return (
             state.observation(remaining_steps),
@@ -248,16 +291,23 @@ def _connection_config(mode: str, router_namespace: str):
         )
     if mode == "in-cluster":
         return SandboxInClusterConnectionConfig()
+    if mode == "sandboxd-in-cluster":
+        return SandboxdInClusterConnectionConfig(mode="in-cluster-service")
     raise ValueError(
-        f"Unsupported connection mode {mode!r}; expected 'tunnel' or 'in-cluster'"
+        f"Unsupported connection mode {mode!r}; expected 'tunnel', "
+        "'in-cluster' (legacy runtime), or 'sandboxd-in-cluster'"
     )
 
 
 class SandboxFileTaskEnv(DiscreteFileTaskWrapper):
     """Construct an independent SandboxEnv inside each RLlib EnvRunner."""
 
+    env: SandboxEnv
+
     def __init__(self, config=None):
         config = dict(config or {})
+        self._connection_mode = config.get("connection_mode", "tunnel")
+        self._process_ready_timeout_seconds = int(config.get("step_timeout_seconds", 60))
         max_episode_steps = int(config.get("max_episode_steps", 4))
         if max_episode_steps < 1:
             raise ValueError("max_episode_steps must be at least one")
@@ -265,7 +315,7 @@ class SandboxFileTaskEnv(DiscreteFileTaskWrapper):
         # every runner an independent Kubernetes client and claim lifecycle.
         client = SandboxClient(
             connection_config=_connection_config(
-                config.get("connection_mode", "tunnel"),
+                self._connection_mode,
                 config.get("router_namespace", "agent-sandbox-system"),
             ),
             cleanup=True,
@@ -278,9 +328,7 @@ class SandboxFileTaskEnv(DiscreteFileTaskWrapper):
                 client=client,
                 warmpool=config.get("warmpool", "simple-sandbox-warmpool"),
                 namespace=config.get("namespace", "gymnasium"),
-                step_timeout_seconds=int(
-                    config.get("step_timeout_seconds", 60)
-                ),
+                step_timeout_seconds=self._process_ready_timeout_seconds,
                 max_episode_steps=max_episode_steps,
             )
         except Exception:
@@ -291,4 +339,24 @@ class SandboxFileTaskEnv(DiscreteFileTaskWrapper):
             sandbox_env,
             client=client,
             max_episode_steps=max_episode_steps,
+            namespace=config.get("namespace", "gymnasium"),
         )
+
+    def reset(self, *, seed=None, options=None):
+        observation, info = super().reset(seed=seed, options=options)
+        if self._connection_mode == "sandboxd-in-cluster":
+            import grpc
+
+            # Claim Ready does not guarantee that Service DNS has propagated.
+            # Wait for connectivity before issuing a command, never replay an
+            # Execute RPC whose outcome may be unknown.
+            # Reuse the episode-owned connection used by step(). SandboxEnv
+            # releases it on the next reset or close, not after this wait.
+            connector = self.env._sandbox.connector
+            connector.connect()
+            ready = grpc.channel_ready_future(connector.grpc_channel())
+            try:
+                ready.result(timeout=self._process_ready_timeout_seconds)
+            finally:
+                ready.cancel()
+        return observation, info

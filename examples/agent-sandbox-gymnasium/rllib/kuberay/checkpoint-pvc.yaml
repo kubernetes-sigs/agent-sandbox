@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rllib-checkpoints
+  namespace: rllib-sandbox-example
+spec:
+  # Uses the default dynamic StorageClass. For WaitForFirstConsumer, this
+  # remains Pending until the RayJob's head Pod is created and scheduled.
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

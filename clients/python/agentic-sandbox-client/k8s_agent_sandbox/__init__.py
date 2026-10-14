@@ -21,6 +21,7 @@ from .exceptions import (
     SandboxTemplateNotFoundError,
     SandboxWarmPoolNotFoundError,
     SandboxNotReadyError,
+    SandboxNoServiceError,
     SandboxServiceUnavailableError,
     SandboxClaimFailedError,
     SandboxPortForwardError,

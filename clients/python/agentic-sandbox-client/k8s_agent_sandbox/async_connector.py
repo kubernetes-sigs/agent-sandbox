@@ -33,10 +33,10 @@ import httpx
 
 from .async_k8s_helper import AsyncK8sHelper
 from .exceptions import (
+    SandboxNoServiceError,
     SandboxNotReadyError,
     SandboxPortForwardError,
     SandboxRequestError,
-    SandboxServiceUnavailableError,
 )
 from .models import (
     SandboxConnectionConfig,
@@ -836,7 +836,7 @@ class AsyncSandboxdInClusterStrategy:
     async def connect(self) -> tuple[str, str]:
         """Resolve REST and gRPC endpoints from the selected Sandbox status field."""
         self.grpc_target = None
-        if self.config.mode == "service-dns":
+        if self.config.mode == "in-cluster-service":
             fqdn = self._service_fqdn
             if fqdn is None:
                 fqdn = (
@@ -844,9 +844,9 @@ class AsyncSandboxdInClusterStrategy:
                     if self._get_service_fqdn is not None else None
                 )
                 if not fqdn:
-                    raise SandboxServiceUnavailableError(
+                    raise SandboxNoServiceError(
                         "Sandbox has no Service FQDN; enable spec.service: true "
-                        "on its template to use service-dns connectivity"
+                        "on its template to use in-cluster-service connectivity"
                     )
                 self._service_fqdn = fqdn
             host = fqdn

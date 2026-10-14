@@ -324,7 +324,7 @@ class AnalyzeTabTest(unittest.TestCase):
                                return_value=table), \
              mock.patch.object(flake_report, "make_artifact_fetcher",
                                fake_fetcher):
-            flaky, consistent, _, _ = flake_report.analyze_tab("dash", "tab", 3)
+            flaky, consistent, _, _, _ = flake_report.analyze_tab("dash", "tab", 3)
         findings = {f["test"]: f for f in flaky + consistent}
         # TestP: one real failure on a single changelist. Before the fix the
         # aborted rerun's pass counted as a retest flip, promoting it to a
@@ -358,7 +358,7 @@ class AnalyzeTabTest(unittest.TestCase):
                                return_value=table), \
              mock.patch.object(flake_report, "make_artifact_fetcher",
                                fake_fetcher):
-            _, _, infra, _ = flake_report.analyze_tab("dash", "tab", 2)
+            _, _, infra, _, _ = flake_report.analyze_tab("dash", "tab", 2)
         self.assertEqual(infra["pretest_failures"], 0)
         self.assertEqual(infra["infra_runs"], 0)
 
@@ -554,7 +554,7 @@ if __name__ == "__main__":
 
 
 class FalsePositiveFilterTest(unittest.TestCase):
-    """The four filters that keep a PR's own breakage out of flake counts."""
+    """The filters that keep breakage, not flakiness, out of flake counts."""
 
     QUERY = "kubernetes-ci-logs/pr-logs/directory/job"
 
@@ -589,7 +589,7 @@ class FalsePositiveFilterTest(unittest.TestCase):
         }
         artifacts = {"b0": {"finished.json": {"result": "aborted"}},
                      "b2": {"finished.json": {"result": "FAILURE", "revision": "x"}}}
-        (flaky, consistent, infra, pr_local), fetched = self.analyze(table, artifacts)
+        (flaky, consistent, infra, pr_local, _), fetched = self.analyze(table, artifacts)
         self.assertEqual(flaky, [])
         # One failing column on one changelist with a pass in the window is
         # neither flaky nor consistent; nothing is reported.
@@ -619,7 +619,7 @@ class FalsePositiveFilterTest(unittest.TestCase):
                      for b in ("b0", "b1")}
         dirs = {"b0": "https://x/pr-logs/pull/o_r/10/job/b0",
                 "b1": "https://x/pr-logs/pull/o_r/11/job/b1"}
-        (flaky, consistent, _, pr_local), _ = self.analyze(table, artifacts, dirs=dirs)
+        (flaky, consistent, _, pr_local, _), _ = self.analyze(table, artifacts, dirs=dirs)
         names = {f["test"] for f in flaky}
         self.assertFalse(any(n.startswith("pytest.") for n in names), names)
         self.assertEqual(consistent, [])
@@ -647,7 +647,7 @@ class FalsePositiveFilterTest(unittest.TestCase):
             ],
         }
         artifacts = {"b0": {"finished.json": {"result": "FAILURE", "revision": "x"}}}
-        (flaky, consistent, _, pr_local), _ = self.analyze(table, artifacts)
+        (flaky, consistent, _, pr_local, _), _ = self.analyze(table, artifacts)
         self.assertEqual((flaky, consistent, pr_local), ([], [], []))
 
     def test_pr_touching_test_sources_is_not_a_flake(self):
@@ -672,7 +672,7 @@ class FalsePositiveFilterTest(unittest.TestCase):
             return {"4242": ["test/e2e/clients/python/conftest.py"],
                     "4343": ["README.md"]}[pr]
 
-        (flaky, consistent, _, pr_local), _ = self.analyze(
+        (flaky, consistent, _, pr_local, _), _ = self.analyze(
             table, artifacts, pr_files=pr_files, dirs=dirs)
         # 4242 touched the harness: excluded. 4343 did not: counted. One
         # genuine failure on one PR with a pass is not flaky.
@@ -682,7 +682,7 @@ class FalsePositiveFilterTest(unittest.TestCase):
         self.assertEqual(sorted(calls), ["4242", "4343"])
 
         # Both PRs touching the harness: everything is PR-local.
-        (flaky, consistent, _, pr_local), _ = self.analyze(
+        (flaky, consistent, _, pr_local, _), _ = self.analyze(
             table, artifacts, dirs=dirs,
             pr_files=lambda pr: ["test/e2e/clients/python/conftest.py"])
         self.assertEqual(flaky, [])
@@ -691,7 +691,7 @@ class FalsePositiveFilterTest(unittest.TestCase):
 
         # Without a lookup (--no-pr-files) both failures count and two
         # distinct PRs make it flaky; the counter stays at zero.
-        (flaky, _, _, _), _ = self.analyze(table, artifacts, dirs=dirs)
+        (flaky, _, _, _, _), _ = self.analyze(table, artifacts, dirs=dirs)
         (finding,) = flaky
         self.assertEqual(finding["self_regression_cols"], 0)
         self.assertEqual(finding["distinct_changelists"], 2)
@@ -713,7 +713,7 @@ class FalsePositiveFilterTest(unittest.TestCase):
         artifacts = {b: {"finished.json": {"result": "FAILURE", "revision": "x"}}
                      for b in ("b0", "b1", "b2")}
         dirs = {b: "https://x/pr-logs/pull/o_r/77/job/" + b for b in ("b0", "b1", "b2")}
-        (flaky, consistent, _, pr_local), _ = self.analyze(table, artifacts, dirs=dirs)
+        (flaky, consistent, _, pr_local, _), _ = self.analyze(table, artifacts, dirs=dirs)
         self.assertEqual(flaky, [])
         # Three pushes of one PR: PR-local, not "failing at head", even
         # though the test passed on another PR earlier in the window.
@@ -741,7 +741,7 @@ class FalsePositiveFilterTest(unittest.TestCase):
                      for b in ("b0", "b1", "b2", "b3")}
         dirs = {b: f"https://x/pr-logs/pull/o_r/{n}/job/{b}"
                 for n, b in enumerate(("b0", "b1", "b2", "b3"), start=1)}
-        (flaky, consistent, _, pr_local), _ = self.analyze(table, artifacts, dirs=dirs)
+        (flaky, consistent, _, pr_local, _), _ = self.analyze(table, artifacts, dirs=dirs)
         self.assertEqual(flaky, [])
         self.assertEqual(consistent, [])
         self.assertEqual(pr_local, [])
@@ -764,12 +764,82 @@ class FalsePositiveFilterTest(unittest.TestCase):
                      for b in ("b0", "b1")}
         dirs = {"b0": "https://x/pr-logs/pull/o_r/1/job/b0",
                 "b1": "https://x/pr-logs/pull/o_r/2/job/b1"}
-        (flaky, consistent, _, pr_local), _ = self.analyze(table, artifacts, dirs=dirs)
+        (flaky, consistent, _, pr_local, _), _ = self.analyze(table, artifacts, dirs=dirs)
         self.assertEqual([f["test"] for f in consistent], ["pkg.TestBroken"])
         self.assertEqual([p["test"] for p in pr_local], ["pkg.TestNew"])
         report = flake_report.render_report("dash", flaky, consistent, [], 3, pr_local)
         self.assertIn("PR-local failures", report)
         self.assertIn("pkg.TestNew", report)
+
+    def analyze_breakage(self, statuses, changelists=None):
+        """TestA fails wherever statuses is 12 (newest column first), each
+        failing run on its own PR; TestB always passes."""
+        ids = [f"b{i}" for i in range(len(statuses))]
+        table = {
+            "query": self.QUERY,
+            "changelists": changelists or ids,
+            "column_ids": ids,
+            "timestamps": [100 * (len(ids) - i) for i in range(len(ids))],
+            "tests": [
+                {"name": "job.Overall", "statuses": rle(statuses)},
+                {"name": "pkg.TestA", "statuses": rle(statuses)},
+                {"name": "pkg.TestB", "statuses": rle([1] * len(ids))},
+            ],
+        }
+        artifacts = {b: {"finished.json": {"result": "FAILURE", "revision": "x"}}
+                     for b, s in zip(ids, statuses) if s == 12}
+        dirs = {b: f"https://x/pr-logs/pull/o_r/{n}/job/{b}"
+                for n, b in enumerate(ids)}
+        result, _ = self.analyze(table, artifacts, dirs=dirs)
+        return result
+
+    def test_cleared_breakage_window_is_not_a_flake(self):
+        # Five PRs failed TestA until a fix landed; the PR carrying the fix
+        # passed mid-window (column 5). Passes outnumber failures overall,
+        # but inside the window failures dominate.
+        flaky, consistent, _, _, recovered = self.analyze_breakage(
+            [1, 1, 1, 12, 12, 1, 12, 12, 12, 1, 1])
+        self.assertEqual((flaky, consistent), ([], []))
+        (finding,) = recovered
+        self.assertEqual(
+            (finding["test"], finding["fails"], finding["distinct_changelists"]),
+            ("pkg.TestA", 5, 5))
+        report = flake_report.render_report(
+            "dash", flaky, consistent, [], 11, recovered=recovered)
+        self.assertIn("Recovered breakage", report)
+        self.assertIn("pkg.TestA", report)
+
+    def test_failures_interleaved_with_passes_stay_flaky(self):
+        flaky, _, _, _, recovered = self.analyze_breakage(
+            [1, 1, 1, 12, 1, 12, 1, 12, 1])
+        self.assertEqual([f["test"] for f in flaky], ["pkg.TestA"])
+        self.assertEqual(recovered, [])
+
+    def test_newest_result_failing_is_not_recovered(self):
+        flaky, _, _, _, recovered = self.analyze_breakage(
+            [12, 1, 12, 12, 12, 12, 1, 1, 1, 1, 1])
+        self.assertEqual([f["test"] for f in flaky], ["pkg.TestA"])
+        self.assertEqual(recovered, [])
+
+    def test_one_pass_after_the_failures_is_recovered(self):
+        flaky, _, _, _, recovered = self.analyze_breakage([1, 12, 12, 1, 1])
+        self.assertEqual(flaky, [])
+        self.assertEqual([f["test"] for f in recovered], ["pkg.TestA"])
+
+    def test_recovered_breakage_is_reported_without_a_pass_majority(self):
+        flaky, _, _, _, recovered = self.analyze_breakage(
+            [1, 1, 1, 12, 12, 12, 12, 1])
+        self.assertEqual(flaky, [])
+        self.assertEqual([f["test"] for f in recovered], ["pkg.TestA"])
+
+    def test_retest_flip_stays_flaky_even_when_the_window_cleared(self):
+        # Changelist c1 failed in column 3 and passed on a bare retest in
+        # column 1: a definite flake, whatever shape the failures take.
+        flaky, _, _, _, recovered = self.analyze_breakage(
+            [1, 1, 1, 12, 12, 12, 1, 1],
+            changelists=["c0", "c1", "c2", "c1", "c4", "c5", "c6", "c7"])
+        self.assertEqual([f["test"] for f in flaky], ["pkg.TestA"])
+        self.assertEqual(recovered, [])
 
 
 class HelperTest(unittest.TestCase):

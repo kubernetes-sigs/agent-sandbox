@@ -3,12 +3,12 @@ name = "openai-agents-k8s-sandbox"
 version = "0.1.0.dev0"
 description = "Kubernetes Agent Sandbox provider for the OpenAI Agents SDK sandbox API (prototype)"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 dependencies = [
     # The sandbox API is beta; pin to the minor we were built against.
     "openai-agents>=0.19,<0.20",
-    "k8s-agent-sandbox[async]>=0.5.3,<0.6",
+    "k8s-agent-sandbox[async]>=1.0.0,<2.0",
 ]
 
 [project.optional-dependencies]

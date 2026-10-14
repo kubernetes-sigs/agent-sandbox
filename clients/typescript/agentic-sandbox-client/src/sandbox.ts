@@ -24,6 +24,7 @@ import {
   createConnectionStrategy,
   type SandboxdConnectionStrategy,
   type SandboxdTransport,
+  selectPodIP,
 } from "./connection.js";
 import {
   CLAIM_API_GROUP,
@@ -532,6 +533,38 @@ export class Sandbox {
       status: ready.status === "True" ? "SandboxReady" : "SandboxNotReady",
       message: ready.message ?? "",
     };
+  }
+
+  /**
+   * Reads the Sandbox's current pod IP from `status.podIPs` (IPv4 preferred,
+   * canonical form). Unlike the `podIP` snapshot taken when the handle became
+   * ready, every call queries Kubernetes, because the pod IP changes when the
+   * pod restarts (e.g. a Suspended Sandbox resumed). Resolves with `undefined`
+   * when there is no usable IP yet or the Sandbox object is gone, including
+   * after `close()`. Any other failure to read it rejects with a
+   * {@link SandboxError}.
+   */
+  async getPodIP(): Promise<string | undefined> {
+    let sandboxObj: Record<string, unknown>;
+    try {
+      sandboxObj = (await this.customObjectsApi.getNamespacedCustomObject({
+        group: SANDBOX_API_GROUP,
+        version: SANDBOX_API_VERSION,
+        namespace: this.namespace,
+        plural: SANDBOX_PLURAL_NAME,
+        name: this.sandboxName,
+      })) as Record<string, unknown>;
+    } catch (err: unknown) {
+      if (isK8s404(err)) return undefined;
+      throw new SandboxError(
+        `Failed to read Sandbox '${this.sandboxName}' in namespace '${this.namespace}'.`,
+        { cause: err },
+      );
+    }
+
+    const status = (sandboxObj.status as Record<string, unknown>) ?? {};
+    const podIPs = Array.isArray(status.podIPs) ? status.podIPs : [];
+    return selectPodIP(podIPs) || undefined;
   }
 
   /**

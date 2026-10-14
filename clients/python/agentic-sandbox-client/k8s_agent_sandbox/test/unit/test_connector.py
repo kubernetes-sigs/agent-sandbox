@@ -41,10 +41,10 @@ from k8s_agent_sandbox.connector import (
     SandboxConnector,
 )
 from k8s_agent_sandbox.exceptions import (
+    SandboxNoServiceError,
     SandboxNotReadyError,
     SandboxPortForwardError,
     SandboxRequestError,
-    SandboxServiceUnavailableError,
 )
 from k8s_agent_sandbox.models import (
     SandboxdPodTunnelConnectionConfig,
@@ -129,7 +129,7 @@ class TestInClusterConnectionStrategy(unittest.TestCase):
 
 
 class TestSandboxdInClusterConnection(unittest.TestCase):
-    def _build(self, mode="service-dns", rest_port=8080, grpc_port=9090,
+    def _build(self, mode="in-cluster-service", rest_port=8080, grpc_port=9090,
                pod_ip=None, service_fqdn=None):
         pod_ip = pod_ip or MagicMock(return_value="10.0.0.1")
         service_fqdn = service_fqdn or MagicMock(
@@ -169,7 +169,7 @@ class TestSandboxdInClusterConnection(unittest.TestCase):
         connector, pod_ip, _ = self._build(
             service_fqdn=MagicMock(return_value=None)
         )
-        with self.assertRaisesRegex(SandboxServiceUnavailableError, "spec.service"):
+        with self.assertRaisesRegex(SandboxNoServiceError, "spec.service"):
             connector.connect()
         pod_ip.assert_not_called()
         connector.close()
@@ -177,7 +177,7 @@ class TestSandboxdInClusterConnection(unittest.TestCase):
     def test_pod_mode_refreshes_ip_and_brackets_ipv6(self):
         pod_ip = MagicMock(side_effect=["10.0.0.1", "2001:db8::5"])
         connector, _, service = self._build(
-            mode="pod-ip", pod_ip=pod_ip, rest_port=18080, grpc_port=19090
+            mode="in-cluster-pod-ip", pod_ip=pod_ip, rest_port=18080, grpc_port=19090
         )
         self.assertEqual(connector.connect(), "http://10.0.0.1:18080")
         self.assertEqual(connector.connect(), "http://[2001:db8::5]:18080")
@@ -188,7 +188,7 @@ class TestSandboxdInClusterConnection(unittest.TestCase):
 
     def test_pod_mode_missing_ip_never_falls_back(self):
         connector, _, service = self._build(
-            mode="pod-ip", pod_ip=MagicMock(return_value=None)
+            mode="in-cluster-pod-ip", pod_ip=MagicMock(return_value=None)
         )
         with self.assertRaises(SandboxNotReadyError):
             connector.connect()
@@ -197,7 +197,7 @@ class TestSandboxdInClusterConnection(unittest.TestCase):
 
     def test_pod_status_read_error_does_not_reuse_old_target(self):
         pod_ip = MagicMock(side_effect=["10.0.0.1", PermissionError("status denied")])
-        connector, _, _ = self._build(mode="pod-ip", pod_ip=pod_ip)
+        connector, _, _ = self._build(mode="in-cluster-pod-ip", pod_ip=pod_ip)
         connector.connect()
         with self.assertRaisesRegex(PermissionError, "status denied"):
             connector.connect()
@@ -206,7 +206,7 @@ class TestSandboxdInClusterConnection(unittest.TestCase):
 
     @patch("k8s_agent_sandbox.connector.subprocess.Popen")
     def test_rest_request_uses_direct_endpoint_without_router_headers(self, popen):
-        connector, _, _ = self._build(mode="pod-ip")
+        connector, _, _ = self._build(mode="in-cluster-pod-ip")
         response = MagicMock(spec=requests.Response)
         response.status_code = 200
         response.is_redirect = False
@@ -221,7 +221,7 @@ class TestSandboxdInClusterConnection(unittest.TestCase):
 
     def test_grpc_channel_reuses_target_and_replaces_changed_ip(self):
         pod_ip = MagicMock(side_effect=["10.0.0.1", "10.0.0.1", "10.0.0.2"])
-        connector, _, _ = self._build(mode="pod-ip", pod_ip=pod_ip)
+        connector, _, _ = self._build(mode="in-cluster-pod-ip", pod_ip=pod_ip)
         first, second = MagicMock(), MagicMock()
         dial = MagicMock(side_effect=[first, second])
         with patch.dict(sys.modules, {"grpc": SimpleNamespace(insecure_channel=dial)}):
@@ -285,7 +285,7 @@ class TestSandboxdInClusterConnection(unittest.TestCase):
 
     def test_pod_transport_failure_does_not_redial_stale_grpc_target(self):
         pod_ip = MagicMock(side_effect=["10.0.0.1", "10.0.0.2"])
-        connector, _, _ = self._build(mode="pod-ip", pod_ip=pod_ip)
+        connector, _, _ = self._build(mode="in-cluster-pod-ip", pod_ip=pod_ip)
         first, second = MagicMock(), MagicMock()
         dial = MagicMock(side_effect=[first, second])
         with patch.dict(sys.modules, {"grpc": SimpleNamespace(insecure_channel=dial)}):

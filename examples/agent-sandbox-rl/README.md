@@ -554,7 +554,11 @@ for footprint/concurrency beyond what the control plane comfortably absorbs.
 `runtime_class`, `node_selector`, `image_pull_secret`, `image_pull_policy`
 (`IfNotPresent` — reuses the node layer cache across epochs), `colocate_replicas`
 (False — prefer scheduling a pool's replicas on one node for cache reuse),
-`extra_pod_spec`.
+`extra_pod_spec`, `network_policy_management` (None — the controller's default, one
+NetworkPolicy per template; `"Unmanaged"` to run one namespace-wide policy on the
+shared `app=agent-sandbox-rl` pod label instead, and `preflight()` warns if no policy
+selects the fleet's pods; see
+[examples/agent-sandbox-rl-network-policy](../agent-sandbox-rl-network-policy)).
 
 **Image rewriting (optional):** redirect task images at an in-region mirror /
 pull-through cache without touching the source:

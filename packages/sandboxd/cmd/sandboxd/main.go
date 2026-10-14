@@ -22,7 +22,9 @@
 // reachable through the Pod IP or a Service like any other in-pod service.
 // The current sandbox-router cannot proxy the gRPC surface. Containment comes
 // from pod isolation and NetworkPolicy, not loopback binding; pass
-// --listen-host=127.0.0.1 to restrict to loopback for local development.
+// --listen-host=127.0.0.1 to restrict to loopback for local development, and
+// --auth-token-sha256 (or --auth-token-file) to require a bearer token from
+// clients.
 package main
 
 import (
@@ -79,6 +81,8 @@ type config struct {
 	shutdownTimeout   time.Duration
 	httpIdleTimeout   time.Duration
 	streamChunkSize   int
+	authTokenSHA256   string
+	authTokenFile     string
 	printVersion      bool
 }
 
@@ -102,6 +106,10 @@ func main() {
 		"Close idle HTTP keep-alive connections after this duration.")
 	flag.IntVar(&cfg.streamChunkSize, "stream-chunk-size", 0,
 		"Buffer size in bytes for streaming process stdout/stderr chunks. 0 selects the default (4096).")
+	flag.StringVar(&cfg.authTokenSHA256, "auth-token-sha256", "",
+		"Hex SHA-256 digest of a bearer token required on every gRPC call and REST request except GET /v1/health. The token itself never reaches the daemon. Mutually exclusive with --auth-token-file; both empty disables authentication.")
+	flag.StringVar(&cfg.authTokenFile, "auth-token-file", "",
+		"File holding a bearer token (e.g. a mounted Secret), required like --auth-token-sha256. Mutually exclusive with it.")
 	flag.BoolVar(&cfg.printVersion, "version", false, "Print version information and exit.")
 	zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -129,6 +137,20 @@ func validatePort(name string, port int) error {
 	return nil
 }
 
+// authTokenDigest returns the configured bearer token's SHA-256 digest, or
+// nil when authentication is off.
+func authTokenDigest(cfg *config) ([]byte, error) {
+	switch {
+	case cfg.authTokenSHA256 != "" && cfg.authTokenFile != "":
+		return nil, errors.New("--auth-token-sha256 and --auth-token-file are mutually exclusive")
+	case cfg.authTokenSHA256 != "":
+		return server.ParseAuthTokenSHA256(cfg.authTokenSHA256)
+	case cfg.authTokenFile != "":
+		return server.LoadAuthTokenFile(cfg.authTokenFile)
+	}
+	return nil, nil
+}
+
 func run(cfg *config, log logr.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -149,10 +171,16 @@ func run(cfg *config, log logr.Logger) error {
 		return fmt.Errorf("root dir %q: %w", cfg.rootDir, err)
 	}
 
+	authDigest, err := authTokenDigest(cfg)
+	if err != nil {
+		return err
+	}
+
 	srv, err := server.New(server.Options{
 		RootDir:           cfg.rootDir,
 		MetadataEnvPrefix: cfg.metadataEnvPrefix,
 		StreamChunkSize:   cfg.streamChunkSize,
+		AuthTokenSHA256:   authDigest,
 		Log:               log.WithName("rest"),
 	})
 	if err != nil {
@@ -172,7 +200,7 @@ func run(cfg *config, log logr.Logger) error {
 		return fmt.Errorf("listen rest %q: %w", restAddr, err)
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(srv.GRPCServerOptions()...)
 	srv.RegisterGRPC(grpcServer)
 	reflection.Register(grpcServer)
 	httpServer := &http.Server{
@@ -234,6 +262,7 @@ func run(cfg *config, log logr.Logger) error {
 		"grpc", grpcLis.Addr().String(),
 		"rest", restLis.Addr().String(),
 		"rootDir", cfg.rootDir,
+		"auth", authDigest != nil,
 	)
 	return g.Wait()
 }

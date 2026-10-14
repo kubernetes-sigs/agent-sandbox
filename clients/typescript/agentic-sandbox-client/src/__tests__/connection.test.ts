@@ -36,6 +36,16 @@ describe("selectPodIP", () => {
     ["all invalid", ["bogus", "999.1.1.1"], ""],
     ["trims whitespace", ["  10.0.0.4  "], "10.0.0.4"],
     ["ignores non-string entries", [42, null, "10.0.0.5"], "10.0.0.5"],
+    ["compresses IPv6", ["2001:db8:0:0:0:0:2:1"], "2001:db8::2:1"],
+    ["lowercases IPv6", ["2001:DB8::1"], "2001:db8::1"],
+    ["collapses IPv4-mapped IPv6", ["::ffff:10.0.0.1"], "10.0.0.1"],
+    ["collapses hex IPv4-mapped IPv6", ["::FFFF:a00:1"], "10.0.0.1"],
+    [
+      "treats IPv4-mapped IPv6 as IPv4 when ranking",
+      ["fd00::1", "::ffff:10.0.0.2"],
+      "10.0.0.2",
+    ],
+    ["skips IPv6 with a zone ID", ["fe80::1%eth0", "fd00::2"], "fd00::2"],
   ] as const)("%s", (_name, ips, want) => {
     expect(selectPodIP(ips)).toBe(want);
   });

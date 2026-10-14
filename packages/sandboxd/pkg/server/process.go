@@ -302,7 +302,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 	exitCode := int32(0)
 	if waitErr != nil {
 		if exitErr, ok := errors.AsType[*exec.ExitError](waitErr); ok {
-			exitCode = int32(exitErr.ExitCode())
+			exitCode = exitStatus(exitErr)
 		} else {
 			exitCode = -1
 		}
@@ -354,7 +354,7 @@ func (s *ProcessServer) Execute(ctx context.Context, req *processv1.ExecuteReque
 	exitCode := int32(0)
 	if runErr != nil {
 		if exitErr, ok := errors.AsType[*exec.ExitError](runErr); ok {
-			exitCode = int32(exitErr.ExitCode())
+			exitCode = exitStatus(exitErr)
 		} else {
 			return nil, mapCommandError(runErr, "failed to execute command")
 		}
@@ -569,4 +569,14 @@ func waitForReaders(wg *sync.WaitGroup, forceClose func()) {
 		forceClose()
 		<-done
 	}
+}
+
+// exitStatus returns the process's exit code, or 128+n when signal n killed
+// it, as a shell reports it. exec.ExitError.ExitCode returns -1 for a
+// signal, which is indistinguishable from sandboxd's own failure value.
+func exitStatus(exitErr *exec.ExitError) int32 {
+	if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+		return 128 + int32(ws.Signal())
+	}
+	return int32(exitErr.ExitCode())
 }

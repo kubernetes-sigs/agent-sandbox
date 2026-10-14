@@ -18,6 +18,7 @@ import * as k8s from "@kubernetes/client-node";
 import { afterEach, describe, expect, it } from "vitest";
 import type { WebSocket as WSType } from "ws";
 import { WebSocketServer } from "ws";
+import { SandboxConnectionError } from "../exceptions.js";
 import { noopLogger } from "../logger.js";
 import { PodTunnel } from "../tunnel.js";
 
@@ -30,12 +31,22 @@ interface FakeApiServerOptions {
   handshakeDelayMs?: number;
   sendErrorPayload?: Buffer;
   sendDataPayload?: Buffer;
+  /** Answer every upgrade with this HTTP status instead of accepting it. */
+  rejectUpgradeStatus?: number;
+}
+
+interface FakeApiServer {
+  port: number;
+  /** Every upgrade request received, in arrival order. */
+  upgradeRequests: http.IncomingMessage[];
+  close(): Promise<void>;
 }
 
 async function startFakeApiServer(
   opts: FakeApiServerOptions,
-): Promise<{ port: number; close(): Promise<void> }> {
+): Promise<FakeApiServer> {
   const httpServer = http.createServer();
+  const upgradeRequests: http.IncomingMessage[] = [];
   const wss = new WebSocketServer({ noServer: true });
   const openSockets = new Set<WSType>();
 
@@ -80,6 +91,13 @@ async function startFakeApiServer(
   };
 
   httpServer.on("upgrade", (req, socket, head) => {
+    upgradeRequests.push(req);
+    if (opts.rejectUpgradeStatus) {
+      socket.end(
+        `HTTP/1.1 ${opts.rejectUpgradeStatus} Rejected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`,
+      );
+      return;
+    }
     const doUpgrade = () => {
       wss.handleUpgrade(req, socket, head, handleConnection);
     };
@@ -98,6 +116,7 @@ async function startFakeApiServer(
     throw new Error("failed to bind fake apiserver");
   return {
     port: addr.port,
+    upgradeRequests,
     close: () =>
       new Promise((resolve) => {
         for (const ws of openSockets) ws.terminate();
@@ -121,18 +140,23 @@ async function startEchoServer(): Promise<{
   };
 }
 
-function makeTestKubeConfig(apiServerPort: number): k8s.KubeConfig {
+function makeTestKubeConfig(
+  apiServerPort: number,
+  overrides: { serverPath?: string; user?: k8s.User } = {},
+): k8s.KubeConfig {
   const kc = new k8s.KubeConfig();
   kc.loadFromOptions({
     clusters: [
       {
         name: "c",
-        server: `http://127.0.0.1:${apiServerPort}`,
+        server: `http://127.0.0.1:${apiServerPort}${overrides.serverPath ?? ""}`,
         skipTLSVerify: true,
       },
     ],
-    users: [{ name: "u" }],
-    contexts: [{ name: "ctx", cluster: "c", user: "u" }],
+    users: [overrides.user ?? { name: "u" }],
+    contexts: [
+      { name: "ctx", cluster: "c", user: overrides.user?.name ?? "u" },
+    ],
     currentContext: "ctx",
   });
   return kc;
@@ -344,5 +368,172 @@ describe("PodTunnel", () => {
     expect(new URL(endpoints.restBaseUrl).port).not.toBe(
       new URL(endpoints.grpcBaseUrl).port,
     );
+  });
+
+  describe("apiserver dial", () => {
+    function newTunnel(kubeConfig: k8s.KubeConfig): PodTunnel {
+      return new PodTunnel({
+        kubeConfig,
+        namespace: "ns1",
+        podName: "pod1",
+        restTargetPort: 8080,
+        grpcTargetPort: 9090,
+        handshakeTimeoutMs: 5000,
+        logger: noopLogger,
+      });
+    }
+
+    // Resolves once a byte has made it through the tunnel and back, i.e.
+    // the upgrade request has been received and accepted.
+    async function roundTrip(endpoints: { restBaseUrl: string }) {
+      const client = await connectClient(
+        Number(new URL(endpoints.restBaseUrl).port),
+      );
+      const received = new Promise<Buffer>((resolve) =>
+        client.once("data", resolve),
+      );
+      client.write("x");
+      expect((await received).toString()).toBe("x");
+      client.destroy();
+    }
+
+    async function waitForLocalClose(endpoints: { restBaseUrl: string }) {
+      const client = await connectClient(
+        Number(new URL(endpoints.restBaseUrl).port),
+      );
+      await new Promise<void>((resolve) =>
+        client.once("close", () => resolve()),
+      );
+    }
+
+    it("keeps the server URL's path prefix and offers the k8s channel subprotocols", async () => {
+      echo = await startEchoServer();
+      api = await startFakeApiServer({ targetPort: echo.port });
+      tunnel = newTunnel(
+        makeTestKubeConfig(api.port, { serverPath: "/k8s/clusters/c-1" }),
+      );
+      await roundTrip(await tunnel.start());
+
+      const req = api.upgradeRequests[0];
+      expect(req.url).toBe(
+        "/k8s/clusters/c-1/api/v1/namespaces/ns1/pods/pod1/portforward?ports=8080",
+      );
+      expect(req.headers["sec-websocket-protocol"]?.split(/,\s*/)).toEqual([
+        "v5.channel.k8s.io",
+        "v4.channel.k8s.io",
+        "v3.channel.k8s.io",
+        "v2.channel.k8s.io",
+        "channel.k8s.io",
+      ]);
+    });
+
+    it("sends the kubeconfig's bearer token on the upgrade", async () => {
+      echo = await startEchoServer();
+      api = await startFakeApiServer({ targetPort: echo.port });
+      tunnel = newTunnel(
+        makeTestKubeConfig(api.port, {
+          user: { name: "token-user", token: "static-token" },
+        }),
+      );
+      await roundTrip(await tunnel.start());
+
+      expect(api.upgradeRequests[0].headers.authorization).toBe(
+        "Bearer static-token",
+      );
+    });
+
+    it("sends credentials produced by a kubeconfig exec plugin on the upgrade", async () => {
+      echo = await startEchoServer();
+      api = await startFakeApiServer({ targetPort: echo.port });
+      const execCredential = JSON.stringify({
+        apiVersion: "client.authentication.k8s.io/v1",
+        kind: "ExecCredential",
+        status: { token: "exec-token" },
+      });
+      tunnel = newTunnel(
+        makeTestKubeConfig(api.port, {
+          user: {
+            name: "exec-user",
+            exec: {
+              apiVersion: "client.authentication.k8s.io/v1",
+              command: process.execPath,
+              args: [
+                "-e",
+                `process.stdout.write(${JSON.stringify(execCredential)})`,
+              ],
+            },
+          },
+        }),
+      );
+      await roundTrip(await tunnel.start());
+
+      expect(api.upgradeRequests[0].headers.authorization).toBe(
+        "Bearer exec-token",
+      );
+    });
+
+    it("does not dial the apiserver when the local client leaves during credential lookup", async () => {
+      api = await startFakeApiServer({ targetPort: 1 });
+      const execCredential = JSON.stringify({
+        apiVersion: "client.authentication.k8s.io/v1",
+        kind: "ExecCredential",
+        status: { token: "slow-token" },
+      });
+      tunnel = newTunnel(
+        makeTestKubeConfig(api.port, {
+          user: {
+            name: "slow-exec-user",
+            exec: {
+              apiVersion: "client.authentication.k8s.io/v1",
+              command: process.execPath,
+              args: [
+                "-e",
+                `setTimeout(() => process.stdout.write(${JSON.stringify(execCredential)}), 300)`,
+              ],
+            },
+          },
+        }),
+      );
+      const endpoints = await tunnel.start();
+      const client = await connectClient(
+        Number(new URL(endpoints.restBaseUrl).port),
+      );
+      client.destroy();
+      // Outlast the exec plugin so the post-credential check has run.
+      await new Promise((resolve) => setTimeout(resolve, 600));
+
+      expect(api.upgradeRequests).toHaveLength(0);
+    });
+
+    it("records a rejected upgrade in the form connection.ts classifies as terminal", async () => {
+      api = await startFakeApiServer({
+        targetPort: 1,
+        rejectUpgradeStatus: 403,
+      });
+      tunnel = newTunnel(makeTestKubeConfig(api.port));
+      await waitForLocalClose(await tunnel.start());
+
+      expect(tunnel.lastHandshakeError).toBeInstanceOf(Error);
+      expect((tunnel.lastHandshakeError as Error).message).toMatch(
+        /Unexpected server response: 403\b/,
+      );
+    });
+
+    it("fails the handshake when the kubeconfig has no current cluster", async () => {
+      const kc = new k8s.KubeConfig();
+      kc.loadFromOptions({
+        clusters: [],
+        users: [],
+        contexts: [],
+        currentContext: "",
+      });
+      tunnel = newTunnel(kc);
+      await waitForLocalClose(await tunnel.start());
+
+      expect(tunnel.lastHandshakeError).toBeInstanceOf(SandboxConnectionError);
+      expect((tunnel.lastHandshakeError as SandboxConnectionError).kind).toBe(
+        "handshake",
+      );
+    });
   });
 });

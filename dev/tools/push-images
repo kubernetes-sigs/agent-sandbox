@@ -235,6 +235,16 @@ def main(args):
                 context_dir = "."
                 service_name = "sandboxed-tools-acp-server"
 
+            # The multi-cluster-fleet image copies the Python SDK and the
+            # example's python/ tree with repo-root-relative paths, so it
+            # too builds from the repo root. Its directory is named after
+            # its role ("deploy"), not the image; the example's build-push.sh,
+            # README and demo scripts all call the image fleet-member.
+            fleet_deploy_dir = os.path.join(".", "examples", "multi-cluster-fleet", "deploy")
+            if root == fleet_deploy_dir:
+                context_dir = "."
+                service_name = "fleet-member"
+
             if args.controller_only and service_name != "agent-sandbox-controller":
                 continue
 

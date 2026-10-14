@@ -79,6 +79,13 @@ const (
 	// SandboxWarmPoolReconciler.UnschedulableRecheckInterval.
 	DefaultUnschedulableRecheckInterval = time.Minute
 
+	// missingTemplateRequeueDelay is the fallback requeue when the referenced
+	// SandboxTemplate does not exist. The SandboxTemplate watch normally
+	// retriggers the pool as soon as the template appears; this only guards
+	// against lost events. Same duration as the claim controller's
+	// missing-dependency fallback.
+	missingTemplateRequeueDelay = time.Minute
+
 	// graceRequeueSlack pads the self-scheduled post-grace requeue so the
 	// re-evaluation lands strictly after the deadline despite clock jitter.
 	graceRequeueSlack = 2 * time.Second
@@ -97,6 +104,7 @@ const (
 
 	// Event reasons surfaced on the SandboxWarmPool when the pool cannot make
 	// progress toward spec.replicas (and when progress resumes).
+	reasonSandboxTemplateError   = "SandboxTemplateError"
 	reasonWarmPoolNotProgressing = "WarmPoolNotProgressing"
 	reasonWarmPoolProgressing    = "WarmPoolProgressing"
 )
@@ -125,10 +133,10 @@ type SandboxWarmPoolReconciler struct {
 	expectations *warmPoolExpectations
 	expOnce      sync.Once
 
-	// notProgressingMu guards notProgressing, the set of pools currently held
-	// in a not-progressing state (used to emit transition events exactly once).
+	// notProgressingMu guards notProgressing, the active not-progressing
+	// reasons per pool (used to emit each transition event exactly once).
 	notProgressingMu sync.Mutex
-	notProgressing   map[types.NamespacedName]struct{}
+	notProgressing   map[types.NamespacedName]map[string]struct{}
 
 	// now is a test hook for the reconciler's clock; nil means time.Now.
 	now func() time.Time
@@ -768,17 +776,25 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		}
 	}
 
-	// Surface (and clear) the not-progressing signal. A pool with
-	// unschedulable sandboxes past the readiness grace period cannot make
-	// progress toward spec.replicas until cluster capacity frees up; degrade
-	// visibly instead of churning.
+	// Surface (and clear) independent not-progressing signals. A missing
+	// template cannot create sandboxes (#1570); unschedulable members past
+	// grace cannot make progress toward spec.replicas (#1215). A template is
+	// only needed when the pool has a create deficit, so a full pool does not
+	// warn or self-requeue merely because its template was deleted.
+	if totalReplicas < desiredReplicas && k8serrors.IsNotFound(tmplErr) {
+		r.setNotProgressing(warmPool, poolKey, reasonSandboxTemplateError, true, fmt.Sprintf(
+			"SandboxTemplate %q not found", warmPool.Spec.TemplateRef.Name))
+		requeueAfter = minNonZeroDuration(requeueAfter, missingTemplateRequeueDelay)
+	} else {
+		r.setNotProgressing(warmPool, poolKey, reasonSandboxTemplateError, false, "")
+	}
 	if unschedulableReplicas > 0 {
-		r.setNotProgressing(warmPool, poolKey, true, fmt.Sprintf(
+		r.setNotProgressing(warmPool, poolKey, reasonWarmPoolNotProgressing, true, fmt.Sprintf(
 			"%d/%d sandboxes are unschedulable past the %s readiness grace period; holding them instead of replacing (replacements would be equally unschedulable)",
 			unschedulableReplicas, desiredReplicas, r.readinessGracePeriod()))
 		requeueAfter = minNonZeroDuration(requeueAfter, r.unschedulableRecheckInterval())
 	} else {
-		r.setNotProgressing(warmPool, poolKey, false, "")
+		r.setNotProgressing(warmPool, poolKey, reasonWarmPoolNotProgressing, false, "")
 	}
 
 	// Self-schedule the post-grace evaluation for not-yet-Ready sandboxes so
@@ -810,33 +826,41 @@ func minNonZeroDuration(a, b time.Duration) time.Duration {
 	return min(a, b)
 }
 
-// setNotProgressing tracks the pool's not-progressing state and emits a
-// transition Event: a Warning when the pool stops progressing and a Normal
-// event once progress resumes. Repeated reconciles in the same state do not
-// re-emit.
-func (r *SandboxWarmPoolReconciler) setNotProgressing(warmPool *extensionsv1beta1.SandboxWarmPool, poolKey types.NamespacedName, notProgressing bool, message string) {
+// setNotProgressing tracks an individual reason that keeps a pool from
+// progressing. It emits one Warning per newly active reason and a Normal event
+// only once all reasons have cleared.
+func (r *SandboxWarmPoolReconciler) setNotProgressing(warmPool *extensionsv1beta1.SandboxWarmPool, poolKey types.NamespacedName, reason string, notProgressing bool, message string) {
 	r.notProgressingMu.Lock()
-	_, was := r.notProgressing[poolKey]
+	reasons := r.notProgressing[poolKey]
+	_, was := reasons[reason]
 	if notProgressing == was {
 		r.notProgressingMu.Unlock()
 		return
 	}
 	if notProgressing {
-		if r.notProgressing == nil {
-			r.notProgressing = make(map[types.NamespacedName]struct{})
+		if reasons == nil {
+			if r.notProgressing == nil {
+				r.notProgressing = make(map[types.NamespacedName]map[string]struct{})
+			}
+			reasons = make(map[string]struct{})
+			r.notProgressing[poolKey] = reasons
 		}
-		r.notProgressing[poolKey] = struct{}{}
+		reasons[reason] = struct{}{}
 	} else {
-		delete(r.notProgressing, poolKey)
+		delete(reasons, reason)
+		if len(reasons) == 0 {
+			delete(r.notProgressing, poolKey)
+		}
 	}
+	progressing := len(reasons) == 0
 	r.notProgressingMu.Unlock()
 
 	if r.Recorder == nil {
 		return
 	}
 	if notProgressing {
-		r.Recorder.Eventf(warmPool, nil, corev1.EventTypeWarning, reasonWarmPoolNotProgressing, "Reconciling", "%s", message)
-	} else {
+		r.Recorder.Eventf(warmPool, nil, corev1.EventTypeWarning, reason, "Reconciling", "%s", message)
+	} else if progressing {
 		r.Recorder.Eventf(warmPool, nil, corev1.EventTypeNormal, reasonWarmPoolProgressing, "Reconciling", "Warm pool is progressing again")
 	}
 }
@@ -1031,7 +1055,13 @@ func (r *SandboxWarmPoolReconciler) fetchTemplateAndHash(ctx context.Context, wa
 	}
 
 	if tmplErr != nil {
-		logger.Error(tmplErr, "Failed to get sandbox template and hash", "templateRef", warmPool.Spec.TemplateRef.Name)
+		if k8serrors.IsNotFound(tmplErr) {
+			// Expected until the referenced template exists; V(4) so a
+			// missing-template requeue does not Error-log every minute.
+			logger.V(4).Info("SandboxTemplate not found", "templateRef", warmPool.Spec.TemplateRef.Name)
+		} else {
+			logger.Error(tmplErr, "Failed to get sandbox template and hash", "templateRef", warmPool.Spec.TemplateRef.Name)
+		}
 	}
 	return template, currentPodTemplateHash, currentSandboxBlueprintHash, tmplErr
 }

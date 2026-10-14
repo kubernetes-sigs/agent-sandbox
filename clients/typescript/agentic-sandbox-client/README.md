@@ -98,6 +98,21 @@ These populate `spec.volumeClaimTemplates`, matching the Python SDK's
 this forces a cold start. The controller validates the templates against the
 SandboxTemplate's volume policy.
 
+### Environment variables
+
+Use `env` to inject environment variables into the sandbox's first container:
+
+```typescript
+const sandbox = await client.createSandbox("my-warm-pool", "default", {
+  env: { API_KEY: "secret" },
+});
+```
+
+These populate `spec.env`, matching the Python SDK's `env`. Warm pool Pods are
+already running without them, so setting this forces a cold start. The
+SandboxTemplate's `envVarsInjectionPolicy` decides whether the controller
+accepts them.
+
 ### Listing sandboxes
 
 With Kubernetes credentials configured and permission to list SandboxClaims, run
@@ -122,6 +137,24 @@ not Pod labels. Omitting the selector or passing an empty string lists all claim
 in the namespace. Omitting the namespace or passing `undefined` or an empty string
 uses the client's configured default namespace.
 
+### Kubernetes credentials
+
+By default the client loads `KUBECONFIG`, then `~/.kube/config`, then the in-cluster
+service account. Pass `kubeConfig` to target a specific cluster or user instead:
+
+```typescript
+import { KubeConfig } from "@kubernetes/client-node";
+
+const kubeConfig = new KubeConfig();
+kubeConfig.loadFromFile("/path/to/other-cluster.yaml");
+
+const client = new SandboxClient({ kubeConfig });
+```
+
+The same config is used for every API call, watch, and port-forward. It is used
+as given, so the "no Kubernetes configuration found" error applies only to the
+default.
+
 ### Timeouts
 
 - `sandboxReadyTimeout` (constructor / `createSandbox()` options) is in **seconds** and bounds waiting for the `SandboxClaim`/`Sandbox` to become `Ready`. Default: 180.
@@ -139,6 +172,10 @@ uses the client's configured default namespace.
 | `"in-cluster-service"` | Dials the Sandbox's headless Service by DNS name (`status.serviceFQDN`) | The process runs inside the cluster, and the template sets `spec.service: true`. |
 | `"in-cluster-pod-ip"` | Dials the pod IP (`status.podIPs`, IPv4 preferred) | The process runs inside the cluster. |
 
+`"port-forward"` doesn't work on Kata or gVisor: their workload runs in a separate
+kernel, so the pod's host-side network namespace has nothing for the port-forward to
+reach — use an in-cluster mode (the Sandbox NetworkPolicy must admit the client).
+
 ```ts
 const client = new SandboxClient({
   sandboxd: { connectivity: "in-cluster-service" },
@@ -149,6 +186,7 @@ The in-cluster modes take the apiserver off the data path. Each uses exactly one
 
 - With `"in-cluster-service"`, `createSandbox()` / `getSandbox()` throw `SandboxNoServiceError` when the Sandbox has no Service, instead of falling back to the pod IP. Prefer this mode when sandboxes cross a trust boundary: the Service only selects its own Sandbox's pod, and deleting the Sandbox deletes the Service, so connections fail instead of reaching another pod that inherited the IP. DNS caching still leaves a TTL-bounded window.
 - With `"in-cluster-pod-ip"`, `createSandbox()` / `getSandbox()` throw `SandboxMetadataError` when the Sandbox reports no pod IP. This mode needs no template change, but nothing detects that the pod was rescheduled: a handle keeps dialing the address it saw when it was created, which Kubernetes may since have reassigned to an unrelated pod.
+- `getSandbox(claimName, namespace, { waitForReady: false })` skips both checks, because a Sandbox that is not Ready may not have its Service or pod IP yet. The error then surfaces on the first `files` / `commands` call; call `getSandbox()` again once the Sandbox is Ready.
 
 The addresses are available on the handle as `sandbox.podIP` and `sandbox.serviceFQDN`. They are `""` when unknown.
 

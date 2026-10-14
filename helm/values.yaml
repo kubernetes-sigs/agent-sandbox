@@ -40,6 +40,7 @@ controller:
   # enableTracing: false
   # enablePprof: false
   # enablePprofDebug: false
+  # enableRESTClientMetrics: true  # client-go REST client histogram metrics (latency, size, DNS, rate-limiter, retries); default true, set false to disable the histogram overhead
   # pprofBlockProfileRate: 1000000
   # pprofMutexProfileFraction: 10
   # kubeApiQps: -1.0

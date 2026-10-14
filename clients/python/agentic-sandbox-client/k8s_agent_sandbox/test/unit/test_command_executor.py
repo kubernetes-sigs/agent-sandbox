@@ -143,7 +143,8 @@ class TestCommandExecutor(unittest.TestCase):
             run_sandboxd.return_value = ExecutionResult(exit_code=0)
             executor.run("echo hello", timeout=60, command_timeout=5)
 
-        run_sandboxd.assert_called_once_with("echo hello", 5, report_timeout=True)
+        run_sandboxd.assert_called_once_with(
+            "echo hello", 5, report_timeout=True, env=None, cwd=None)
 
     def test_sync_sandboxd_unavailable_invalidates_without_replaying(self):
         class UnavailableRpcError(Exception):
@@ -180,6 +181,45 @@ class TestCommandExecutor(unittest.TestCase):
         connector.invalidate_sandboxd_transport.assert_called_once_with(channel)
         stub.ProcessServiceStub.return_value.Execute.assert_called_once()
 
+
+    def test_sync_sandboxd_passes_env_and_cwd_to_process_config(self):
+        connector = MagicMock()
+        connector.is_sandboxd.return_value = True
+        stub = MagicMock()
+        stub.ProcessServiceStub.return_value.Execute.return_value = MagicMock(
+            stdout=b"", stderr=b"", exit_code=0)
+        process_pb2 = SimpleNamespace(
+            ProcessConfig=MagicMock(), ExecuteRequest=MagicMock())
+        with patch.dict(sys.modules, {
+            "grpc": SimpleNamespace(RpcError=Exception),
+            "k8s_agent_sandbox.commands._process_stubs": SimpleNamespace(
+                process_pb2=process_pb2, process_pb2_grpc=stub),
+        }):
+            executor = CommandExecutor(connector, MagicMock(), "sandbox-client")
+            executor.run("pwd", env={"A": "1"}, cwd="work")
+
+        process_pb2.ProcessConfig.assert_called_once_with(
+            command=["/bin/sh", "-c", "pwd"], env_vars={"A": "1"}, cwd="work")
+
+    def test_sync_legacy_runtime_rejects_env_and_cwd(self):
+        connector = MagicMock()
+        connector.is_sandboxd.return_value = False
+        executor = CommandExecutor(connector, MagicMock(), "sandbox-client")
+        for kwargs in ({"env": {"A": "1"}}, {"cwd": "work"}):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaisesRegex(NotImplementedError, "sandboxd"):
+                    executor.run("true", **kwargs)
+        connector.send_request.assert_not_called()
+
+    def test_sync_sandboxd_rejects_invalid_env_key(self):
+        connector = MagicMock()
+        connector.is_sandboxd.return_value = True
+        executor = CommandExecutor(connector, MagicMock(), "sandbox-client")
+        for key in ("", "A=B"):
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(ValueError, "invalid env key"):
+                    executor.run("true", env={key: "1"})
+        connector.connect.assert_not_called()
 
     def test_sync_sandboxd_deadline_with_command_timeout_reports_timed_out(self):
         connector = MagicMock()
@@ -279,7 +319,8 @@ class TestAsyncCommandExecutor(unittest.IsolatedAsyncioTestCase):
             run_sandboxd.return_value = ExecutionResult(exit_code=0)
             await executor.run("echo hello", timeout=60, command_timeout=5)
 
-        run_sandboxd.assert_awaited_once_with("echo hello", 5, report_timeout=True)
+        run_sandboxd.assert_awaited_once_with(
+            "echo hello", 5, report_timeout=True, env=None, cwd=None)
 
     async def test_async_sandboxd_executor_uses_grpc(self):
         mock_connector = MagicMock()
@@ -354,6 +395,49 @@ class TestAsyncCommandExecutor(unittest.IsolatedAsyncioTestCase):
                 await executor._run_sandboxd("echo hello", timeout=12)
         connector.invalidate_sandboxd_transport.assert_awaited_once_with(channel)
         stub.ProcessServiceStub.return_value.Execute.assert_awaited_once()
+
+    async def test_async_sandboxd_passes_env_and_cwd_to_process_config(self):
+        connector = MagicMock()
+        connector.is_sandboxd.return_value = True
+        connector.connect = AsyncMock()
+        connector.grpc_channel = AsyncMock(return_value=MagicMock())
+        stub = MagicMock()
+        stub.ProcessServiceStub.return_value.Execute = AsyncMock(
+            return_value=MagicMock(stdout=b"", stderr=b"", exit_code=0))
+        process_pb2 = SimpleNamespace(
+            ProcessConfig=MagicMock(), ExecuteRequest=MagicMock())
+        with patch.dict(sys.modules, {
+            "grpc": SimpleNamespace(RpcError=Exception),
+            "k8s_agent_sandbox.commands._process_stubs": SimpleNamespace(
+                process_pb2=process_pb2, process_pb2_grpc=stub),
+        }):
+            executor = AsyncCommandExecutor(connector, MagicMock(), "sandbox-client")
+            await executor.run("pwd", env={"A": "1"}, cwd="work")
+
+        process_pb2.ProcessConfig.assert_called_once_with(
+            command=["/bin/sh", "-c", "pwd"], env_vars={"A": "1"}, cwd="work")
+
+    async def test_async_legacy_runtime_rejects_env_and_cwd(self):
+        connector = MagicMock()
+        connector.is_sandboxd.return_value = False
+        connector.send_request = AsyncMock()
+        executor = AsyncCommandExecutor(connector, MagicMock(), "sandbox-client")
+        for kwargs in ({"env": {"A": "1"}}, {"cwd": "work"}):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaisesRegex(NotImplementedError, "sandboxd"):
+                    await executor.run("true", **kwargs)
+        connector.send_request.assert_not_awaited()
+
+    async def test_async_sandboxd_rejects_invalid_env_key(self):
+        connector = MagicMock()
+        connector.is_sandboxd.return_value = True
+        connector.connect = AsyncMock()
+        executor = AsyncCommandExecutor(connector, MagicMock(), "sandbox-client")
+        for key in ("", "A=B"):
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(ValueError, "invalid env key"):
+                    await executor.run("true", env={key: "1"})
+        connector.connect.assert_not_awaited()
 
     async def test_async_sandboxd_deadline_with_command_timeout_reports_timed_out(self):
         connector = MagicMock()

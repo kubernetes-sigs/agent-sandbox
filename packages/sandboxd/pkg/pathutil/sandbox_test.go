@@ -17,6 +17,7 @@ package pathutil
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -145,4 +146,30 @@ func TestSanitizePathNonExistentWriteTarget(t *testing.T) {
 	// Only the closest existing parent is resolved; the remaining
 	// components are preserved lexically.
 	require.Equal(t, filepath.Join(resolvedRoot, "sub", "dir", "new.txt"), got)
+}
+
+func TestSanitizePathFilesystemRoot(t *testing.T) {
+	dir := t.TempDir()
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(resolvedDir, "f.txt"), []byte("x"), 0o644))
+
+	// With "/" as the root, an absolute path is itself.
+	got, err := SanitizePath("/", filepath.Join(resolvedDir, "f.txt"))
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(resolvedDir, "f.txt"), got)
+
+	// So is a write target that does not exist yet.
+	got, err = SanitizePath("/", filepath.Join(resolvedDir, "new", "g.txt"))
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(resolvedDir, "new", "g.txt"), got)
+
+	// A relative path resolves against "/", and ".." cannot climb above it.
+	got, err = SanitizePath("/", strings.TrimPrefix(filepath.Join(resolvedDir, "f.txt"), "/"))
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(resolvedDir, "f.txt"), got)
+
+	got, err = SanitizePath("/", "../..")
+	require.NoError(t, err)
+	require.Equal(t, "/", got)
 }

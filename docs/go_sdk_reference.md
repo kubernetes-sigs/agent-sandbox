@@ -11,8 +11,10 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 - [Variables](<#variables>)
 - [func NewTracerProvider\(ctx context.Context, serviceName string\) \(\*sdktrace.TracerProvider, error\)](<#NewTracerProvider>)
 - [type CallOption](<#CallOption>)
+  - [func WithEnv\(env map\[string\]string\) CallOption](<#WithEnv>)
   - [func WithMaxAttempts\(n int\) CallOption](<#WithMaxAttempts>)
   - [func WithTimeout\(d time.Duration\) CallOption](<#WithTimeout>)
+  - [func WithWorkingDir\(dir string\) CallOption](<#WithWorkingDir>)
 - [type Client](<#Client>)
   - [func NewClient\(\_ context.Context, opts Options\) \(\*Client, error\)](<#NewClient>)
   - [func \(c \*Client\) CreateSandbox\(ctx context.Context, warmPoolName, namespace string\) \(\*Sandbox, error\)](<#Client.CreateSandbox>)
@@ -24,6 +26,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(c \*Client\) ListAllSandboxes\(ctx context.Context, namespace string, opts ...ListOption\) \(\[\]string, error\)](<#Client.ListAllSandboxes>)
 - [type Commands](<#Commands>)
   - [func \(c \*Commands\) Run\(ctx context.Context, command string, opts ...CallOption\) \(\*ExecutionResult, error\)](<#Commands.Run>)
+  - [func \(c \*Commands\) Start\(ctx context.Context, command string, opts ...CallOption\) \(handle \*ProcessHandle, err error\)](<#Commands.Start>)
 - [type ConnectionStrategy](<#ConnectionStrategy>)
 - [type Connectivity](<#Connectivity>)
 - [type DirectStrategy](<#DirectStrategy>)
@@ -53,6 +56,14 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func WithLabelSelector\(selector string\) ListOption](<#WithLabelSelector>)
 - [type Metadata](<#Metadata>)
 - [type Options](<#Options>)
+- [type ProcessEvent](<#ProcessEvent>)
+- [type ProcessEventType](<#ProcessEventType>)
+- [type ProcessHandle](<#ProcessHandle>)
+  - [func \(h \*ProcessHandle\) Close\(\) error](<#ProcessHandle.Close>)
+  - [func \(h \*ProcessHandle\) ProcessID\(\) int32](<#ProcessHandle.ProcessID>)
+  - [func \(h \*ProcessHandle\) Recv\(\) \(\*ProcessEvent, error\)](<#ProcessHandle.Recv>)
+  - [func \(h \*ProcessHandle\) SendSignal\(ctx context.Context, signal ProcessSignal\) error](<#ProcessHandle.SendSignal>)
+- [type ProcessSignal](<#ProcessSignal>)
 - [type Runtime](<#Runtime>)
 - [type Sandbox](<#Sandbox>)
   - [func New\(\_ context.Context, opts Options\) \(\*Sandbox, error\)](<#New>)
@@ -133,6 +144,10 @@ var (
     // runtime or connection cannot perform (e.g. Delete on the legacy
     // python-runtime, or Run with RuntimeSandboxd and APIURL).
     ErrUnsupportedByRuntime = errors.New("operation not supported by the sandbox runtime")
+    // ErrProcessProtocol indicates an invalid or incomplete process event stream.
+    ErrProcessProtocol = errors.New("invalid process event stream")
+    // ErrConcurrentRecv indicates that another Recv is already in progress.
+    ErrConcurrentRecv = errors.New("concurrent Recv on process handle")
 )
 ```
 
@@ -154,6 +169,19 @@ CallOption configures per\-call behavior for SDK operations.
 type CallOption func(*callOptions)
 ```
 
+<a name="WithEnv"></a>
+#### func [WithEnv](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithEnv(env map[string]string) CallOption
+```
+
+WithEnv sets environment variables for a single Run or Commands.Start, merged over the sandbox's own environment \(a key given here wins\). Repeated calls accumulate. Both return ErrUnsupportedByRuntime on the legacy python\-runtime, which cannot carry them. Other operations ignore it.
+
+```
+result, err := client.Run(ctx, "echo $GREETING", sandbox.WithEnv(map[string]string{"GREETING": "hi"}))
+```
+
 <a name="WithMaxAttempts"></a>
 #### func [WithMaxAttempts](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
 
@@ -161,7 +189,7 @@ type CallOption func(*callOptions)
 func WithMaxAttempts(n int) CallOption
 ```
 
-WithMaxAttempts sets the maximum number of attempts for an operation. Values ≤0 are ignored and the default is used \(1 for Run, 6 for file operations\).
+WithMaxAttempts sets the maximum number of attempts for an operation. Values ≤0 are ignored and the default is used \(1 for Run, 6 for file operations\). Commands.Start rejects values greater than 1 because a non\-idempotent process creation cannot be safely replayed.
 
 ```
 result, err := client.Run(ctx, "cat /etc/hostname", sandbox.WithMaxAttempts(6))
@@ -174,7 +202,16 @@ result, err := client.Run(ctx, "cat /etc/hostname", sandbox.WithMaxAttempts(6))
 func WithTimeout(d time.Duration) CallOption
 ```
 
-WithTimeout sets the total timeout for a single operation, overriding the default RequestTimeout for that call.
+WithTimeout sets the total timeout for a single operation. HTTP operations override their default RequestTimeout. For Commands.Start it covers the entire stream, including startup; Start has no default timeout.
+
+<a name="WithWorkingDir"></a>
+#### func [WithWorkingDir](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithWorkingDir(dir string) CallOption
+```
+
+WithWorkingDir sets the working directory for Run or Commands.Start, relative to the sandbox root \(the default\). sandboxd rejects a directory that resolves outside the root. Both return ErrUnsupportedByRuntime on the legacy python\-runtime. Other operations ignore it.
 
 <a name="Client"></a>
 ### type [Client](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go>)
@@ -287,6 +324,17 @@ result, err := client.Run(ctx, "cat /etc/hostname", sandbox.WithMaxAttempts(6))
 
 WithMaxAttempts applies only to the legacy runtime. With RuntimeSandboxd, Run issues a single gRPC Execute regardless of the configured attempts.
 
+WithEnv and WithWorkingDir apply only to RuntimeSandboxd; the legacy runtime returns ErrUnsupportedByRuntime rather than silently ignoring them.
+
+<a name="Commands.Start"></a>
+#### func \(\*Commands\) [Start](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/commands.go>)
+
+```go
+func (c *Commands) Start(ctx context.Context, command string, opts ...CallOption) (handle *ProcessHandle, err error)
+```
+
+Start starts a sandboxd command and returns after receiving its process ID. It preserves Run's shell\-string, WithEnv and WithWorkingDir semantics. The caller must Recv through the exit event to io.EOF, or Close the handle. The context and an explicit WithTimeout cover the entire stream; there is no default RequestTimeout. Start never retries and rejects WithMaxAttempts \> 1. The legacy runtime and REST\-only connections return ErrUnsupportedByRuntime.
+
 <a name="ConnectionStrategy"></a>
 ### type [ConnectionStrategy](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/strategy.go>)
 
@@ -315,6 +363,12 @@ const (
     // ConnectivityPortForward reaches the sandbox over a SPDY port-forward
     // brokered by the apiserver. Works from anywhere a kubeconfig does,
     // including a laptop or CI runner. Default.
+    //
+    // With RuntimeSandboxd the forward targets the sandbox pod itself, which
+    // does not work for Kata or gVisor pods: their workload does not listen in
+    // the pod's host-side network namespace. Use an in-cluster mode for those.
+    // RuntimeLegacyPython forwards to the sandbox-router instead and is
+    // unaffected.
     ConnectivityPortForward Connectivity = "port-forward"
     // ConnectivityInClusterService dials the Sandbox's headless Service by
     // its in-cluster DNS name (Status.ServiceFQDN), taking the apiserver —
@@ -722,6 +776,12 @@ type Options struct {
     // always wins over a colliding key.
     Labels map[string]string
 
+    // ShutdownAfter expires every SandboxClaim this client creates that long
+    // after creation, so a crashed client cannot leak sandboxes. The claim
+    // gets spec.lifecycle.shutdownTime and the Delete shutdown policy; the
+    // deadline is rounded up to a whole second. Zero (the default) means no expiry.
+    ShutdownAfter time.Duration
+
     // SandboxReadyTimeout is how long to wait for the sandbox to become ready. Default: 180s.
     SandboxReadyTimeout time.Duration
 
@@ -798,6 +858,106 @@ type Options struct {
     // Default: false (header is sent when router headers are enabled and a pod IP is present).
     DisablePodIPRouting bool
 }
+```
+
+<a name="ProcessEvent"></a>
+### type [ProcessEvent](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+ProcessEvent contains one raw output chunk or the command's exit code. Output chunks need not be complete lines or valid UTF\-8. Events from stdout and stderr do not have a guaranteed global ordering.
+
+```go
+type ProcessEvent struct {
+    Type ProcessEventType
+    // Data is populated only for stdout/stderr and remains valid after Recv.
+    Data []byte
+    // ExitCode is populated only for exit events. A nonzero code is not an error.
+    ExitCode int
+}
+```
+
+<a name="ProcessEventType"></a>
+### type [ProcessEventType](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+ProcessEventType identifies an output or exit event from a streaming command.
+
+```go
+type ProcessEventType string
+```
+
+<a name="ProcessEventStdout"></a>
+
+```go
+const (
+    ProcessEventStdout ProcessEventType = "stdout"
+    ProcessEventStderr ProcessEventType = "stderr"
+    ProcessEventExit   ProcessEventType = "exit"
+)
+```
+
+<a name="ProcessHandle"></a>
+### type [ProcessHandle](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/process.go>)
+
+ProcessHandle owns one Start stream, not the Sandbox or shared connection. Consume its events through io.EOF or call Close when abandoning the stream.
+
+```go
+type ProcessHandle struct {
+    // contains filtered or unexported fields
+}
+```
+
+<a name="ProcessHandle.Close"></a>
+#### func \(\*ProcessHandle\) [Close](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/process.go>)
+
+```go
+func (h *ProcessHandle) Close() error
+```
+
+Close cancels only this session and is idempotent. A nil error acknowledges local cleanup, not synchronous remote process termination. For graceful shutdown, send a signal before cancelling the stream instead.
+
+<a name="ProcessHandle.ProcessID"></a>
+#### func \(\*ProcessHandle\) [ProcessID](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/process.go>)
+
+```go
+func (h *ProcessHandle) ProcessID() int32
+```
+
+ProcessID returns the daemon\-local virtual ID, not an OS PID. It cannot identify a process across daemon restarts.
+
+<a name="ProcessHandle.Recv"></a>
+#### func \(\*ProcessHandle\) [Recv](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/process.go>)
+
+```go
+func (h *ProcessHandle) Recv() (*ProcessEvent, error)
+```
+
+Recv returns the next stdout, stderr or exit event. An exit event must be followed by io.EOF to confirm that the RPC also completed successfully. Nonzero exit codes are results; RPC and protocol failures remain errors. Only one Recv may be active; a second returns ErrConcurrentRecv without ending the stream. SendSignal and Close may run concurrently with Recv.
+
+<a name="ProcessHandle.SendSignal"></a>
+#### func \(\*ProcessHandle\) [SendSignal](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/process.go>)
+
+```go
+func (h *ProcessHandle) SendSignal(ctx context.Context, signal ProcessSignal) error
+```
+
+SendSignal sends SIGINT, SIGTERM or SIGKILL to this process group using its original connection. Success means the signal was sent, not that the process exited. Its context controls only this RPC; failure does not cancel Start. Keep receiving events to observe the exit and the final RPC status.
+
+<a name="ProcessSignal"></a>
+### type [ProcessSignal](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+ProcessSignal is a supported POSIX signal for a sandboxd process group.
+
+```go
+type ProcessSignal string
+```
+
+<a name="SignalSIGINT"></a>
+
+```go
+const (
+    SignalSIGINT  ProcessSignal = "SIGINT"
+    SignalSIGTERM ProcessSignal = "SIGTERM"
+    SignalSIGKILL ProcessSignal = "SIGKILL"
+)
 ```
 
 <a name="Runtime"></a>

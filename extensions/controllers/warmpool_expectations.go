@@ -38,6 +38,12 @@ import (
 // timeout than kube's, this constant is the single knob.
 const expectationsTimeout = 5 * time.Minute
 
+// A same-name recreated pool must not inherit outstanding writes.
+type warmPoolIdentity struct {
+	types.NamespacedName
+	UID types.UID
+}
+
 // warmPoolExpectations tracks in-flight Sandbox creations and deletions per
 // SandboxWarmPool, closing the read-after-write gap between the writes a
 // reconcile issues and the informer cache those writes are later read back
@@ -53,9 +59,9 @@ const expectationsTimeout = 5 * time.Minute
 // UIDTrackingControllerExpectations (which is internal to kube and not
 // importable here):
 //
-//   - Creations are counted: recorded before the creates are issued, lowered
-//     when the watch observes the resulting add events (or when a create
-//     fails, since no event will ever come).
+//   - Creations are operation-tracked: tokens are registered before POST and
+//     acknowledged only by matching observations or confirmed failed writes.
+//     Repeated events cannot consume another operation's credit.
 //   - Deletions are UID-tracked: recorded before each delete, cleared when the
 //     watch observes the delete event. UID tracking also lets the reconciler
 //     treat a sandbox it already deleted — but which the stale cache still
@@ -70,12 +76,12 @@ type warmPoolExpectations struct {
 	now func() time.Time
 
 	mu    sync.Mutex
-	pools map[types.NamespacedName]*poolExpectation
+	pools map[warmPoolIdentity]*poolExpectation
 }
 
 // poolExpectation is the outstanding expectation record for one pool.
 type poolExpectation struct {
-	pendingCreations int
+	pendingCreations map[string]struct{}
 	pendingDeletions map[types.UID]struct{}
 	// raisedAt is refreshed every time new expectations are recorded; the
 	// whole record expires expectationsTimeout after the last raise.
@@ -85,18 +91,18 @@ type poolExpectation struct {
 func newWarmPoolExpectations() *warmPoolExpectations {
 	return &warmPoolExpectations{
 		now:   time.Now,
-		pools: make(map[types.NamespacedName]*poolExpectation),
+		pools: make(map[warmPoolIdentity]*poolExpectation),
 	}
 }
 
 // satisfiedLocked reports whether the pool has no live expectations, garbage
 // collecting fulfilled or expired records. Callers must hold e.mu.
-func (e *warmPoolExpectations) satisfiedLocked(key types.NamespacedName) bool {
+func (e *warmPoolExpectations) satisfiedLocked(key warmPoolIdentity) bool {
 	entry, ok := e.pools[key]
 	if !ok {
 		return true
 	}
-	if entry.pendingCreations <= 0 && len(entry.pendingDeletions) == 0 {
+	if len(entry.pendingCreations) == 0 && len(entry.pendingDeletions) == 0 {
 		delete(e.pools, key)
 		return true
 	}
@@ -113,19 +119,29 @@ func (e *warmPoolExpectations) satisfiedLocked(key types.NamespacedName) bool {
 // SatisfiedExpectations reports whether all previously recorded creations and
 // deletions for the pool have been observed (or have timed out). The
 // reconciler must not issue new creates or excess deletes while this is false.
-func (e *warmPoolExpectations) SatisfiedExpectations(key types.NamespacedName) bool {
+func (e *warmPoolExpectations) SatisfiedExpectations(key warmPoolIdentity) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.satisfiedLocked(key)
 }
 
 // TryExpectCreations atomically checks that the pool's expectations are
-// satisfied and, if so, records n expected creations, returning true. If
+// satisfied and, if so, records the operation tokens, returning true. If
 // expectations are still outstanding it records nothing and returns false.
 // The check-and-record is a single critical section so that even overlapping
 // reconciles of the same pool cannot both pass the gate.
-func (e *warmPoolExpectations) TryExpectCreations(key types.NamespacedName, n int) bool {
-	if n <= 0 {
+func (e *warmPoolExpectations) TryExpectCreations(key warmPoolIdentity, tokens []string) bool {
+	if len(tokens) == 0 {
+		return false
+	}
+	pending := make(map[string]struct{}, len(tokens))
+	for _, token := range tokens {
+		if token == "" {
+			return false
+		}
+		pending[token] = struct{}{}
+	}
+	if len(pending) != len(tokens) {
 		return false
 	}
 	e.mu.Lock()
@@ -134,34 +150,24 @@ func (e *warmPoolExpectations) TryExpectCreations(key types.NamespacedName, n in
 		return false
 	}
 	e.pools[key] = &poolExpectation{
-		pendingCreations: n,
+		pendingCreations: pending,
 		pendingDeletions: make(map[types.UID]struct{}),
 		raisedAt:         e.now(),
 	}
 	return true
 }
 
-// CreationObserved lowers the pool's pending creation count by one. Called by
-// the watch handler when an owned sandbox add event is observed.
-func (e *warmPoolExpectations) CreationObserved(key types.NamespacedName) {
-	e.LowerCreations(key, 1)
-}
-
-// LowerCreations lowers the pool's pending creation count by n. Used for
-// observed adds and for creates that failed (no add event will ever arrive
-// for those).
-func (e *warmPoolExpectations) LowerCreations(key types.NamespacedName, n int) {
+// CreationObserved also cancels a token for an operation known not to have
+// happened. Unknown or duplicate observations cannot acknowledge another POST.
+func (e *warmPoolExpectations) CreationObserved(key warmPoolIdentity, token string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	entry, ok := e.pools[key]
 	if !ok {
 		return
 	}
-	entry.pendingCreations -= n
-	if entry.pendingCreations < 0 {
-		entry.pendingCreations = 0
-	}
-	if entry.pendingCreations == 0 && len(entry.pendingDeletions) == 0 {
+	delete(entry.pendingCreations, token)
+	if len(entry.pendingCreations) == 0 && len(entry.pendingDeletions) == 0 {
 		delete(e.pools, key)
 	}
 }
@@ -182,7 +188,7 @@ func (e *warmPoolExpectations) LowerCreations(key types.NamespacedName, n int) {
 //
 // Empty UIDs are ignored: they cannot be matched to a watch delete event and
 // would collide with each other in the pending set.
-func (e *warmPoolExpectations) ExpectDeletion(key types.NamespacedName, uid types.UID) {
+func (e *warmPoolExpectations) ExpectDeletion(key warmPoolIdentity, uid types.UID) {
 	if uid == "" {
 		return
 	}
@@ -200,7 +206,7 @@ func (e *warmPoolExpectations) ExpectDeletion(key types.NamespacedName, uid type
 // DeletionObserved clears a pending deletion. Called by the watch handler when
 // the delete event for the UID is observed, and by the reconciler to roll back
 // an expectation whose delete call failed.
-func (e *warmPoolExpectations) DeletionObserved(key types.NamespacedName, uid types.UID) {
+func (e *warmPoolExpectations) DeletionObserved(key warmPoolIdentity, uid types.UID) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	entry, ok := e.pools[key]
@@ -208,7 +214,7 @@ func (e *warmPoolExpectations) DeletionObserved(key types.NamespacedName, uid ty
 		return
 	}
 	delete(entry.pendingDeletions, uid)
-	if entry.pendingCreations <= 0 && len(entry.pendingDeletions) == 0 {
+	if len(entry.pendingCreations) == 0 && len(entry.pendingDeletions) == 0 {
 		delete(e.pools, key)
 	}
 }
@@ -216,7 +222,7 @@ func (e *warmPoolExpectations) DeletionObserved(key types.NamespacedName, uid ty
 // IsPendingDeletion reports whether the controller has issued a not yet
 // watch-observed delete for the given UID. Sandboxes in this state still
 // occupy capacity and must be counted as terminating, not active.
-func (e *warmPoolExpectations) IsPendingDeletion(key types.NamespacedName, uid types.UID) bool {
+func (e *warmPoolExpectations) IsPendingDeletion(key warmPoolIdentity, uid types.UID) bool {
 	if uid == "" {
 		return false
 	}
@@ -238,5 +244,9 @@ func (e *warmPoolExpectations) IsPendingDeletion(key types.NamespacedName, uid t
 func (e *warmPoolExpectations) Forget(key types.NamespacedName) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	delete(e.pools, key)
+	for identity := range e.pools {
+		if identity.NamespacedName == key {
+			delete(e.pools, identity)
+		}
+	}
 }

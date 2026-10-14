@@ -60,7 +60,7 @@ class TestSandboxClient(unittest.TestCase):
     def test_api_client_forwarded_to_k8s_helper(self, MockK8sHelper):
         sentinel = MagicMock(name="ApiClient")
         SandboxClient(api_client=sentinel)
-        MockK8sHelper.assert_called_once_with(api_client=sentinel)
+        MockK8sHelper.assert_called_once_with(api_client=sentinel, pool_size=None)
 
     @patch('uuid.uuid4')
     def test_create_sandbox_success(self, mock_uuid):

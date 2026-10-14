@@ -1131,6 +1131,7 @@ class _Cluster:
         # A Lease no handle holds, so release() takes it for its handle.
         h.read_batch_lease.return_value = _lease()
         h.create_batch_lease.return_value = _lease()
+        h.api_pool_size.return_value = None
         h.watch_sandbox_claims.side_effect = self._watch
         h.create_sandbox_claim.side_effect = self._create
         h.delete_sandbox_claims_by_label.side_effect = lambda *a, **k: self.calls.append("deletecollection")
@@ -1340,14 +1341,26 @@ class TestClaimBatchSetup(BaseClaimBatchTest):
     def test_precheck_failure_writes_nothing(self):
         helper = self.cluster.helper
         cases = {
-            "missing warm pool": ("get_sandbox_warmpool", None, SandboxWarmPoolNotFoundError),
-            "missing template": ("get_sandbox_template", None, SandboxTemplateNotFoundError),
-            "warm pool names no template": ("get_sandbox_warmpool", {"spec": {}}, SandboxTemplateNotFoundError),
-            "forbidden": ("get_sandbox_warmpool", k8s_client.ApiException(status=403), k8s_client.ApiException),
+            "missing warm pool": ("get_sandbox_warmpool", None, {}, SandboxWarmPoolNotFoundError),
+            "missing template": ("get_sandbox_template", None, {}, SandboxTemplateNotFoundError),
+            "warm pool names no template": (
+                "get_sandbox_warmpool", {"spec": {}}, {}, SandboxTemplateNotFoundError
+            ),
+            "forbidden": (
+                "get_sandbox_warmpool",
+                k8s_client.ApiException(status=403),
+                {},
+                k8s_client.ApiException,
+            ),
+            "explicit max_in_flight above pool_size - 2": (
+                "api_pool_size", 21, {"max_in_flight": 20}, ValueError
+            ),
+            "connection pool below 3": ("api_pool_size", 2, {}, ValueError),
         }
-        for name, (method, result, error) in cases.items():
+        for name, (method, result, kwargs, error) in cases.items():
             with self.subTest(name):
                 helper.reset_mock()
+                helper.api_pool_size.return_value = None
                 helper.get_sandbox_warmpool.return_value = {"spec": {"sandboxTemplateRef": {"name": "tmpl"}}}
                 helper.get_sandbox_template.return_value = {}
                 helper.get_sandbox_warmpool.side_effect = None
@@ -1356,7 +1369,9 @@ class TestClaimBatchSetup(BaseClaimBatchTest):
                 else:
                     getattr(helper, method).return_value = result
                 with self.assertRaises(error):
-                    self.client.claim_batch([BatchGroup(warmpool="pool-a", size=1)])
+                    self.client.claim_batch([BatchGroup(warmpool="pool-a", size=1)], **kwargs)
+                if method == "api_pool_size":
+                    helper.get_sandbox_warmpool.assert_not_called()
                 helper.create_batch_lease.assert_not_called()
 
     def test_setup_failure_deletes_only_a_lease_it_created(self):
@@ -1388,19 +1403,33 @@ class TestClaimBatchSetup(BaseClaimBatchTest):
 class TestClaimBatchCreation(BaseClaimBatchTest):
 
     def test_creates_are_bounded_by_max_in_flight_and_paced_by_create_rps(self):
-        gate = threading.Event()
-        self.cluster.create_hook = lambda name: gate.wait(5)
-        self.claim([BatchGroup(warmpool="pool-a", size=5)], max_in_flight=2)
-        _wait_until(lambda: self.cluster.helper.create_sandbox_claim.call_count == 2)
-        time.sleep(0.2)
-        self.assertEqual(self.cluster.helper.create_sandbox_claim.call_count, 2)
-        gate.set()
-        _wait_until(lambda: len(self.cluster.created) == 5)
+        for name, batch_id, pool_size, kwargs in (
+            ("explicit", "b1", None, {"max_in_flight": 2}),
+            ("clamped to pool_size - 2", "b2", 4, {}),
+        ):
+            with self.subTest(name):
+                self.cluster.created.clear()
+                self.cluster.helper.create_sandbox_claim.reset_mock()
+                self.cluster.helper.api_pool_size.return_value = pool_size
+                gate = threading.Event()
+                self.addCleanup(gate.set)
+                self.cluster.create_hook = lambda _: gate.wait(5)
+                log_check = self.assertNoLogs if pool_size is None else self.assertLogs
+                with log_check("k8s_agent_sandbox.batch_utils", level="INFO"):
+                    self.claim(
+                        [BatchGroup(warmpool="pool-a", size=5)], batch_id=batch_id, **kwargs
+                    )
+                _wait_until(lambda: self.cluster.helper.create_sandbox_claim.call_count >= 2)
+                time.sleep(0.2)
+                self.assertEqual(self.cluster.helper.create_sandbox_claim.call_count, 2)
+                gate.set()
+                _wait_until(lambda: len(self.cluster.created) == 5)
 
+        self.cluster.helper.api_pool_size.return_value = None
         self.cluster.create_hook = None
         self.cluster.created.clear()
         start = time.monotonic()
-        self.claim([BatchGroup(warmpool="pool-a", size=5)], batch_id="b2", create_rps=20)
+        self.claim([BatchGroup(warmpool="pool-a", size=5)], batch_id="b3", create_rps=20)
         _wait_until(lambda: len(self.cluster.created) == 5)
         starts = sorted(t for _, t in self.cluster.created)
         for k, t in enumerate(starts):

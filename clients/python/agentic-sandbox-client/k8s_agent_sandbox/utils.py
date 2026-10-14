@@ -104,6 +104,24 @@ def construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds: int) -> dict[
     }
 
 
+def validate_pool_size(pool_size: object, api_client: object) -> None:
+    """Checks a client's ``pool_size`` argument.
+
+    Raises:
+        ValueError: If ``pool_size`` is not a positive int, or is set together with ``api_client``,
+            whose pool already exists.
+    """
+    if pool_size is None:
+        return
+    if type(pool_size) is not int or pool_size <= 0:
+        raise ValueError(f"pool_size must be a positive int, got {pool_size!r}")
+    if api_client is not None:
+        raise ValueError(
+            "pool_size can't be combined with api_client; set connection_pool_maxsize on the "
+            "api_client's configuration instead"
+        )
+
+
 def select_pod_ip(ips: Sequence[object] | None) -> str | None:
     """Selects a prioritized and normalized Pod IP address from a list of IPs.
 

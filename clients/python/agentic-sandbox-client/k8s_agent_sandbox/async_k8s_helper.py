@@ -45,6 +45,7 @@ from .utils import (
     is_valid_gateway_hostname,
     is_valid_ip,
     select_pod_ip,
+    validate_pool_size,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,9 +54,14 @@ logger = logging.getLogger(__name__)
 class AsyncK8sHelper:
     """Async helper class for Kubernetes API interactions using kubernetes_asyncio."""
 
-    def __init__(self, api_client: client.ApiClient | None = None) -> None:
+    def __init__(self, api_client: client.ApiClient | None = None, pool_size: int | None = None) -> None:
+        """When ``api_client`` is provided it is used directly; otherwise the underlying Kubernetes client
+        config is loaded on first use. ``pool_size`` sets the loaded client's connection pool size and
+        can't be combined with ``api_client``."""
+        validate_pool_size(pool_size, api_client)
         self._initialized = False
         self._init_lock = asyncio.Lock()
+        self._pool_size = pool_size
         self._api_client: client.ApiClient | None = api_client
         # An injected client is caller-owned; only close clients we create.
         self._owns_api_client = api_client is None
@@ -79,12 +85,24 @@ class AsyncK8sHelper:
                     config.load_incluster_config()
                 except config.ConfigException:
                     await config.load_kube_config()
-                self._api_client = client.ApiClient()
+                if self._pool_size is None:
+                    self._api_client = client.ApiClient()
+                else:
+                    configuration = client.Configuration.get_default_copy()
+                    configuration.connection_pool_maxsize = self._pool_size
+                    self._api_client = client.ApiClient(configuration=configuration)
                 self._owns_api_client = True
             self.custom_objects_api = client.CustomObjectsApi(self._api_client)
             self.core_v1_api = client.CoreV1Api(self._api_client)
             self.coordination_v1_api = client.CoordinationV1Api(self._api_client)
             self._initialized = True
+
+    async def api_pool_size(self) -> int | None:
+        """Returns the size of the Kubernetes API connection pool that creates and the watch use, or
+        ``None`` if it is unbounded."""
+        await self._ensure_initialized()
+        # aiohttp treats a limit of 0 or None as no limit.
+        return cast(client.ApiClient, self._api_client).configuration.connection_pool_maxsize or None
 
     async def create_sandbox_claim(
         self,

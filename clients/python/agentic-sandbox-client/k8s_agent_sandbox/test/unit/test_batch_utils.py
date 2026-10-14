@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import unittest
 from unittest.mock import patch
 from datetime import UTC, datetime
@@ -203,6 +204,41 @@ class TestValidateClaimBatchArgs(unittest.TestCase):
         self.assertEqual(args.lease_duration, BATCH_DEFAULT_LEASE_DURATION_SECONDS)
         self.assertEqual(args.labels, {})
         batch_utils.validate_batch_id(args.batch_id)
+
+
+class TestCheckPoolSize(unittest.TestCase):
+
+    def test_pool_must_hold_max_in_flight_plus_the_watch_and_renewal(self):
+        cases = {
+            "unbounded": (None, True, 20, False),
+            "max_in_flight + 2": (22, True, 20, False),
+            "explicit overflow": (21, True, ValueError, False),
+            "default fits": (22, False, 20, False),
+            "default clamped": (10, False, 8, True),
+            "default clamped to 1": (3, False, 1, True),
+            "default with no create slot": (2, False, ValueError, False),
+        }
+        for name, (pool_size, explicit, expected, logs) in cases.items():
+            with self.subTest(name):
+                log_check = self.assertLogs if logs else self.assertNoLogs
+                with log_check("k8s_agent_sandbox.batch_utils", level="INFO") as captured:
+                    if expected is ValueError:
+                        with self.assertRaises(ValueError) as err_ctx:
+                            batch_utils.check_pool_size(pool_size, 20, explicit=explicit)
+                        msg = str(err_ctx.exception)
+                        if explicit:
+                            self.assertIn("Lower max_in_flight", msg)
+                            self.assertIn("pool_size=22", msg)
+                        else:
+                            self.assertNotIn("Lower max_in_flight", msg)
+                            self.assertIn("pool_size=3", msg)
+                    else:
+                        self.assertEqual(
+                            batch_utils.check_pool_size(pool_size, 20, explicit=explicit),
+                            expected,
+                        )
+                if logs:
+                    self.assertEqual([r.levelno for r in captured.records], [logging.INFO])
 
 
 class TestGenerateBatchId(unittest.TestCase):

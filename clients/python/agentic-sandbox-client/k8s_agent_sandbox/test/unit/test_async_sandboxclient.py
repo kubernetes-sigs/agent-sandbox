@@ -288,7 +288,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         sentinel = MagicMock(name="ApiClient")
         with patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper") as MockHelper:
             AsyncSandboxClient(connection_config=self.config, cleanup=False, api_client=sentinel)
-            MockHelper.assert_called_once_with(api_client=sentinel)
+            MockHelper.assert_called_once_with(api_client=sentinel, pool_size=None)
 
     def test_cleanup_default_registers_atexit(self):
         """Constructing without cleanup= should default to True and register the hook."""

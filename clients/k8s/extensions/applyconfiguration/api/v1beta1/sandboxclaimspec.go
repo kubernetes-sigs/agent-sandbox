@@ -33,7 +33,7 @@ type SandboxClaimSpecApplyConfiguration struct {
 	// lifecycle.shutdownPolicy just like shutdownTime does: the default Retain policy
 	// deletes the Sandbox and marks the claim Expired; set Delete or DeleteForeground
 	// to remove the claim itself. The deadline is computed by the controller and is
-	// not written back to the spec, so later edits to this field take effect immediately.
+	// not written back to the spec, so later edits to this field take effect on the next reconciliation.
 	TTLSecondsAfterCreated *int32 `json:"ttlSecondsAfterCreated,omitempty"`
 	// lifecycle defines when and how the SandboxClaim should be shut down.
 	Lifecycle *LifecycleApplyConfiguration `json:"lifecycle,omitempty"`

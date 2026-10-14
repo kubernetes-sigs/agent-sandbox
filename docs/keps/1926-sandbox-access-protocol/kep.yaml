@@ -1,0 +1,14 @@
+title: Sandbox Access Protocol
+kep-number: 1926
+authors:
+  - "@SkippySteve"
+status: provisional
+creation-date: "2026-10-13"
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+see-also:
+  - "/keps/539.2-runtime-standardization"
+  - "https://github.com/kubernetes-sigs/agent-sandbox/issues/1926"

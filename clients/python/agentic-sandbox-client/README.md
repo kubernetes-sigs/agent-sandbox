@@ -679,7 +679,8 @@ logging.basicConfig(level=logging.INFO)
 `SandboxClient.claim_batch()` claims a batch of `SandboxClaims` across one or more warm pools in one call,
 returning a `SandboxBatch` handle right away. Each `BatchGroup` names a warm pool, how many claims to
 create from it (`size`), and how many of them must become Ready for the group to count (`min_ready`,
-which defaults to `size`). The claims are named `<batch-id>-0` to `<batch-id>-<N-1>`, where `N` is the
+which defaults to `size`). A group with `size=0` creates no claims and gets its members from `acquire()`,
+and `wait_for_quorum()` and `group_outcomes()` skip it. The claims are named `<batch-id>-0` to `<batch-id>-<N-1>`, where `N` is the
 sum of the group sizes. They carry the `agents.x-k8s.io/batch-id` label and the `agents.x-k8s.io/batch-group`
 label, whose value is a hash of the warm pool's name, and are created in the background, paced at `create_rps` creates per second with at most `max_in_flight` in flight. The batch
 also has a `coordination.k8s.io/v1` Lease named `batch-<batch-id>`, which the handle renews while it is

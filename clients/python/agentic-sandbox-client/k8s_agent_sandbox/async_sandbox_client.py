@@ -558,7 +558,8 @@ class AsyncSandboxClient(Generic[T]):
         an error that stops the watch or Lease renewal shows in ``err()``.
 
         Args:
-            groups: One ``BatchGroup`` per warm pool, each with ``size`` at least 1.
+            groups: One ``BatchGroup`` per warm pool. A group with ``size`` 0 creates no claims
+                and gets its members from ``acquire()``, and the quorum consumers skip it.
             namespace: Kubernetes namespace for the claims and the Lease.
             labels: Optional labels for every claim. They are also set on the Lease, so a handle
                 from ``get_batch`` puts them on the claims it adds with ``acquire()``.

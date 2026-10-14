@@ -194,7 +194,9 @@ class BatchState:
         self._fill_claims: set[str] = set()
         self._error: Exception | None = None
 
-        self._group_by_pool: dict[str, BatchGroup] = {g.warmpool: g for g in self.groups}
+        # A group created with size 0 has no initial claims and gets its members from acquire(), so it
+        # is left out and the quorum consumers skip it.
+        self._group_by_pool: dict[str, BatchGroup] = {g.warmpool: g for g in self.groups if g.size > 0}
         # BatchGroup sets a min_ready of None to size, so we use ``or 0`` only to satisfy the type checker.
         self._min_ready: dict[str, int] = {g.warmpool: g.min_ready or 0 for g in self.groups}
         self._mode: ConsumerMode | None = None
@@ -678,6 +680,10 @@ class BatchState:
             case ConsumerMode.QUORUM:
                 for pool in self._group_by_pool:
                     self._check_quorum(pool)
+                # With every group size 0 there is no fill to wait for, and no watch event would
+                # ever decide the quorum, so it is reached with no members.
+                if not self._group_by_pool:
+                    self._quorum_members = []
                 if self._fill_expired:
                     self.fail_quorum(BatchTimeoutError("Batch quorum timed out"))
 

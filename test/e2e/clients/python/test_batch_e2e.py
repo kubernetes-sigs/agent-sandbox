@@ -19,11 +19,33 @@ from datetime import UTC, datetime
 import kubernetes
 import pytest
 
-from k8s_agent_sandbox import SandboxClient
+from k8s_agent_sandbox import SandboxClient, batch_utils
 from k8s_agent_sandbox.exceptions import BatchNotFoundError
 from k8s_agent_sandbox.models import BatchEventType, BatchGroup, MemberState, SandboxLocalTunnelConnectionConfig
 
 MEMBERS_READY_TIMEOUT_SECONDS = 120
+
+# A warm pool with no replicas whose template image never pulls, so its claims stay not Ready.
+_UNREADY_POOL_MANIFEST = """apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: unready-template
+spec:
+  podTemplate:
+    spec:
+      containers:
+      - name: unready
+        image: registry.invalid/unready:0
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: unready-warmpool
+spec:
+  replicas: 0
+  sandboxTemplateRef:
+    name: unready-template
+"""
 
 
 def _batch_manifest(batch_id: str, warmpool: str) -> str:
@@ -200,6 +222,66 @@ def test_claim_batch_wait_for_quorum_events_release(
             time.sleep(1)
 
         coordination_api = kubernetes.client.CoordinationV1Api(tc.get_api_client())
+        with pytest.raises(kubernetes.client.ApiException) as e:
+            coordination_api.read_namespaced_lease(f"batch-{batch.batch_id}", temp_namespace)
+        assert e.value.status == 404
+    finally:
+        client.delete_all()
+
+
+def _wait_for_claims(tc, namespace: str, label_selector: str, want: list[str]) -> None:
+    custom_objects_api = tc.get_custom_objects_api()
+    deadline = time.monotonic() + MEMBERS_READY_TIMEOUT_SECONDS
+    while True:
+        claims = custom_objects_api.list_namespaced_custom_object(
+            group="extensions.agents.x-k8s.io",
+            version="v1beta1",
+            namespace=namespace,
+            plural="sandboxclaims",
+            label_selector=label_selector,
+        )["items"]
+        names = sorted(c["metadata"]["name"] for c in claims)
+        if names == want:
+            return
+        if time.monotonic() > deadline:
+            pytest.fail(f"claims for '{label_selector}' are {names}, want {want}")
+        time.sleep(1)
+
+
+def test_claim_batch_release_not_ready_then_release_group(tc, temp_namespace, sandbox_warmpool):
+    tc.apply_manifest_text(_UNREADY_POOL_MANIFEST, namespace=temp_namespace)
+    client = SandboxClient()
+    try:
+        batch = client.claim_batch(
+            [BatchGroup(warmpool=sandbox_warmpool, size=2), BatchGroup(warmpool="unready-warmpool", size=1)],
+            namespace=temp_namespace,
+            quorum_timeout=MEMBERS_READY_TIMEOUT_SECONDS,
+        )
+        batch_selector = f"agents.x-k8s.io/batch-id={batch.batch_id}"
+        deadline = time.monotonic() + MEMBERS_READY_TIMEOUT_SECONDS
+        while True:
+            members = batch.members()
+            ready = sorted(m.claim_name for m in members if m.state is MemberState.READY)
+            if len(members) == 3 and len(ready) == 2:
+                break
+            if time.monotonic() > deadline:
+                pytest.fail(f"batch members did not become ready in time: {members}")
+            time.sleep(1)
+
+        batch.release_not_ready()
+        _wait_for_claims(tc, temp_namespace, batch_selector, ready)
+
+        # Selected by the hashed group label, as release_group's deletecollection is.
+        _wait_for_claims(
+            tc, temp_namespace, batch_utils.group_label_selector(batch.batch_id, sandbox_warmpool), ready
+        )
+        batch.release_group(sandbox_warmpool)
+        _wait_for_claims(tc, temp_namespace, batch_selector, [])
+        assert batch.err() is None
+
+        coordination_api = kubernetes.client.CoordinationV1Api(tc.get_api_client())
+        coordination_api.read_namespaced_lease(f"batch-{batch.batch_id}", temp_namespace)
+        batch.release()
         with pytest.raises(kubernetes.client.ApiException) as e:
             coordination_api.read_namespaced_lease(f"batch-{batch.batch_id}", temp_namespace)
         assert e.value.status == 404

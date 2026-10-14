@@ -595,7 +595,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 				"sandbox", sb.Name,
 				"age", age.Round(time.Second))
 			r.exp().ExpectDeletion(expectationKey, sb.UID)
-			if err := r.Delete(ctx, &sb); err != nil {
+			if err := r.Delete(ctx, &sb, client.Preconditions{UID: &sb.UID, ResourceVersion: &sb.ResourceVersion}); err != nil {
 				r.exp().DeletionObserved(expectationKey, sb.UID)
 				logger.Error(err, "Failed to delete stuck sandbox", "sandbox", sb.Name)
 				allErrors = errors.Join(allErrors, err)
@@ -797,7 +797,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			_, deleteErr := slowStartBatch(ctx, int(toDeleteCount), 1, func(idx int) error {
 				sb := &activeSandboxes[idx]
 				r.exp().ExpectDeletion(expectationKey, sb.UID)
-				err := r.Delete(ctx, sb)
+				err := r.Delete(ctx, sb, client.Preconditions{UID: &sb.UID, ResourceVersion: &sb.ResourceVersion})
 				if err == nil {
 					return nil
 				}
@@ -1093,12 +1093,18 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, p
 				if isControlledByPool {
 					r.exp().ExpectDeletion(expectationKey, sb.UID)
 				}
-				if err := r.Delete(ctx, &sb); err != nil {
+				if err := r.Delete(ctx, &sb, client.Preconditions{UID: &sb.UID, ResourceVersion: &sb.ResourceVersion}); err != nil {
 					if isControlledByPool {
 						r.exp().DeletionObserved(expectationKey, sb.UID)
 					}
 					logger.Error(err, "Failed to delete stale sandbox", "sandbox", sb.Name)
 					allErrors = errors.Join(allErrors, err)
+					if isControlledByPool {
+						// A failed DELETE leaves the observed member occupying
+						// capacity; dropping it here would create a replacement
+						// even when a Claim won the ownership race.
+						activeSandboxes = append(activeSandboxes, sb)
+					}
 				} else if isControlledByPool {
 					terminatingReplicas++
 				}

@@ -58,7 +58,7 @@ result = await Runner.run(agent, "summarize the repo", run_config=run_config)
 | --- | --- |
 | `create` | `AsyncSandboxClient.create_sandbox(warm_pool, …)`, TTL via `shutdown_after_seconds` |
 | `resume` | `get_sandbox(claim, warmpool_name=…)`; if the claim is gone, provision a replacement and let `start()` restore from `state.snapshot` |
-| `delete` | `delete_sandbox(claim)` — deletes the `SandboxClaim`, cascading to pod and PVC |
+| `delete` | `AsyncSandbox.terminate()` — deletes the `SandboxClaim`, cascading to pod and PVC |
 | `_exec_internal` | `commands.run()`; argv is `shlex.join`-ed and the pod's shell reconstructs it |
 | `read` / `write` | `files.read` / `files.write` (bytes-clean), or base64 over exec |
 | `persist_workspace` | `tar` inside the pod to a staging file, then download it |

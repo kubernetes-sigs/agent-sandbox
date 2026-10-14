@@ -1850,26 +1850,37 @@ class TestAcquire(BaseClaimBatchTest):
 
     async def test_creates_a_claim_outside_the_fill_from_any_pool_and_returns_it_ready(self):
         helper = self.cluster.helper
-        batch = await self.claim(labels={"team": "rl"}, quorum_timeout=90, work_budget=120)
+        # A size-0 group creates no claims.
+        groups = [BatchGroup(warmpool="pool-a", size=2), BatchGroup(warmpool="pool-b", size=0)]
+        batch = await self.claim(groups, labels={"team": "rl"}, quorum_timeout=90, work_budget=120)
         await _wait_until(lambda: len(batch.members()) == 2)
         _SteppingDatetime.calls = 0
         with patch("k8s_agent_sandbox.utils.datetime", _SteppingDatetime):
-            member = await batch.acquire("pool-b")
+            member = await batch.acquire("pool-c")
+        await batch.acquire("pool-c")
         await batch.acquire("pool-b")
-        await batch.acquire("pool-a")
 
-        self.assertEqual((member.claim_name, member.warmpool, member.state), ("b1-2", "pool-b", MemberState.READY))
+        self.assertEqual((member.claim_name, member.warmpool, member.state), ("b1-2", "pool-c", MemberState.READY))
         # A pool that isn't one of the batch's groups is checked, once.
-        self.assertEqual([c.args[0] for c in helper.get_sandbox_warmpool.call_args_list], ["pool-a", "pool-b"])
+        self.assertEqual(
+            [c.args[0] for c in helper.get_sandbox_warmpool.call_args_list], ["pool-a", "pool-b", "pool-c"]
+        )
         create = helper.create_sandbox_claim.call_args_list[2]
-        self.assertEqual(create.args[:2], ("b1-2", "pool-b"))
-        self.assertEqual(create.kwargs["labels"], {"team": "rl", BATCH_ID_LABEL: "b1"})
+        self.assertEqual(create.args[:2], ("b1-2", "pool-c"))
+        # The group label but no group annotations.
+        self.assertEqual(
+            create.kwargs["labels"],
+            {"team": "rl", BATCH_ID_LABEL: "b1", BATCH_GROUP_LABEL: batch_utils.group_label_value("pool-c")},
+        )
         self.assertEqual(create.kwargs["annotations"], {})
         # Its own shutdownTime, counted from its create.
         self.assertEqual(
             create.kwargs["lifecycle"], {"shutdownTime": "2026-01-01T01:13:30Z", "shutdownPolicy": "Delete"}
         )
         self.assertEqual([m.claim_name for m in batch.members()], ["b1-0", "b1-1", "b1-2", "b1-3", "b1-4"])
+        # release_group() also takes a pool that only acquire() used.
+        await batch.release_group("pool-c")
+        self.assertEqual([m.claim_name for m in batch.members()], ["b1-0", "b1-1", "b1-4"])
         self.assertEqual(
             [e.member.claim_name for e in await _drain(batch.events())], ["b1-0", "b1-1"]
         )
@@ -1960,6 +1971,37 @@ class TestAcquire(BaseClaimBatchTest):
             await asyncio.wait_for(batch.acquire("pool-b", timeout=0.1), timeout=2)
         release_check.set()
         self.assertEqual((await asyncio.wait_for(first, timeout=2)).claim_name, "b1-2")
+
+    async def test_release_group_frees_the_acquired_members_of_a_size_zero_group(self):
+        helper = self.cluster.helper
+        batch = await self.claim([BatchGroup(warmpool="pool-a", size=1), BatchGroup(warmpool="pool-b", size=0)])
+        await _wait_until(lambda: len(batch.members()) == 1)
+        await batch.acquire("pool-b")
+        self.cluster.ready_on_create = False
+        task = asyncio.create_task(batch.acquire("pool-b", timeout=5))
+        await _wait_until(lambda: helper.create_sandbox_claim.await_count == 3)
+        await batch.release_group("pool-b")
+        # An acquire still waiting on the pool raises at once.
+        with self.assertRaisesRegex(BatchError, "released before it was Ready"):
+            await asyncio.wait_for(task, 5)
+        self.assertEqual(
+            helper.delete_sandbox_claims_by_label.call_args.args,
+            ("default", f"{BATCH_ID_LABEL}=b1,{BATCH_GROUP_LABEL}={batch_utils.group_label_value('pool-b')}"),
+        )
+        # Its create may have landed after the label delete, so it is also deleted by name.
+        self.assertEqual([c.args[0] for c in helper.delete_sandbox_claim.call_args_list], ["b1-2"])
+        self.assertEqual([m.claim_name for m in batch.members()], ["b1-0"])
+
+        # An acquire whose pacing slot comes after the release sends no create and leaves nothing to delete.
+        batch._next_create_at = time.monotonic() + 0.3
+        task = asyncio.create_task(batch.acquire("pool-b", timeout=5))
+        await _wait_until(lambda: batch._state.next_ordinal == 4)
+        await batch.release_group("pool-b")
+        with self.assertRaisesRegex(BatchError, "released before it was Ready"):
+            await asyncio.wait_for(task, 5)
+        await batch.release_not_ready()
+        self.assertEqual(helper.create_sandbox_claim.await_count, 3)
+        self.assertEqual([c.args[0] for c in helper.delete_sandbox_claim.call_args_list], ["b1-2"])
 
     async def test_failures_drop_the_member_and_delete_a_claim_that_may_exist(self):
         terminal = [{"type": "Ready", "status": "False", "reason": "InvalidConfiguration"}]

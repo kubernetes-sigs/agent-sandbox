@@ -169,7 +169,6 @@ class TestValidateClaimBatchArgs(unittest.TestCase):
         pool_a = BatchGroup(warmpool="pool-a", size=1)
         cases = {
             "empty groups": {"groups": []},
-            "size 0": {"groups": [BatchGroup(warmpool="pool-a", size=0)]},
             "duplicate pool": {"groups": [pool_a, pool_a]},
             "not a BatchGroup": {"groups": [{"warmpool": "pool-a", "size": 1}]},
             "create_rps 0": {"create_rps": 0},

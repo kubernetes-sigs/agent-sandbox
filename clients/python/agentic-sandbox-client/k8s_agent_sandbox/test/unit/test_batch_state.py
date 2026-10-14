@@ -731,6 +731,31 @@ class TestRelease(unittest.TestCase):
         self.assertTrue(state.fill_settled())
 
 
+class TestSizeZeroGroups(unittest.TestCase):
+
+    def test_quorum_consumers_skip_a_size_zero_group(self):
+        groups = (BatchGroup(warmpool="pool-a", size=1), BatchGroup(warmpool="pool-b", size=0))
+        group_mode = _state(*groups, mode=batch_state.ConsumerMode.GROUP)
+        quorum_mode = _state(*groups, mode=batch_state.ConsumerMode.QUORUM)
+        for state in (group_mode, quorum_mode):
+            state.upsert_claim(_ready("b1-0"))
+            # A member acquire() adds to the size-0 group doesn't change either consumer.
+            state.upsert_claim(_ready("b1-1", warmpool="pool-b", fill=False))
+        self.assertEqual(
+            [(g.warmpool, [m.claim_name for m in g.members]) for g in _drain_groups(group_mode)],
+            [("pool-a", ["b1-0"])],
+        )
+        self.assertTrue(group_mode.groups_done())
+        self.assertEqual(_quorum(quorum_mode), ["b1-0"])
+
+        expired = _state(*groups, mode=batch_state.ConsumerMode.GROUP)
+        expired.expire_fill()
+        self.assertEqual([g.warmpool for g in _drain_groups(expired)], ["pool-a"])
+
+        only_size_zero = _state(BatchGroup(warmpool="pool-b", size=0), mode=batch_state.ConsumerMode.QUORUM)
+        self.assertEqual(_quorum(only_size_zero), [])
+
+
 class TestOrdinals(unittest.TestCase):
 
     def test_claim_names_continue_past_the_fill_listed_claims_and_a_recorded_ordinal(self):

@@ -525,7 +525,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `replicas` _integer_ | replicas is the desired number of sandboxes in the pool.<br />This field is controlled by an HPA if specified. | 1 | Minimum: 0 <br />Optional: \{\} <br /> |
+| `replicas` _integer_ | replicas is the desired standby count, or its ceiling when<br />replenishmentCapacity is set. HPA scaling is supported only when<br />replenishmentCapacity is unset. | 1 | Minimum: 0 <br />Optional: \{\} <br /> |
+| `replenishmentCapacity` _integer_ | replenishmentCapacity reduces the standby target by the number of<br />still-existing Sandboxes attributed to this pool that are no longer its<br />standby inventory. The target is the smaller of replicas and the remaining<br />capacity, with a minimum of zero. Unset preserves fixed-standby behavior;<br />zero maintains no standby. This is not an admission limit: cold creation<br />remains available. Presence is immutable after creation, but the value<br />may change. HPA/KEDA scaling is not supported with this field set. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `sandboxTemplateRef` _[SandboxTemplateRef](#sandboxtemplateref)_ | sandboxTemplateRef - name of the SandboxTemplate to be used for creating a Sandbox<br />Warning: Any change to the json tag "sandboxTemplateRef" must be synchronized with the TemplateRefField constant. |  | Required: \{\} <br /> |
 | `updateStrategy` _[SandboxWarmPoolUpdateStrategy](#sandboxwarmpoolupdatestrategy)_ | updateStrategy controls how the pool replaces its stale sandboxes. A sandbox is<br />considered stale when the effective SandboxBlueprint derived from the referenced<br />SandboxTemplate (or the sandboxTemplateRef name) changes; metadata-only edits<br />(annotations or labels) do not make a sandbox stale and never trigger replacement.<br />It applies only to sandboxes still owned by the pool (i.e. unclaimed). Once a sandbox<br />is claimed by a SandboxClaim, ownership transfers to the claim and the pool no longer<br />manages or replaces it.<br />Defaults to OnReplenish. |  | Optional: \{\} <br /> |
 
@@ -545,6 +546,8 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `replicas` _integer_ | replicas is the total number of sandboxes in the pool. |  | Optional: \{\} <br /> |
 | `readyReplicas` _integer_ | readyReplicas is the total number of sandboxes in the pool that are in a ready state. |  | Optional: \{\} <br /> |
+| `occupiedReplicas` _integer_ | occupiedReplicas counts still-existing Sandboxes attributed to this pool<br />UID that have left its standby inventory, including cold-created and<br />terminating instances. Absent means the policy is disabled or accounting<br />is unavailable, not zero occupancy. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `desiredStandbyReplicas` _integer_ | desiredStandbyReplicas is the last successfully calculated standby target.<br />Absent means the policy is disabled or accounting is unavailable; zero<br />is a valid target and does not imply a ready instance is available. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `selector` _string_ | selector is the label selector used to find the pods in the pool. |  | Optional: \{\} <br /> |
 | `observedGeneration` _integer_ | observedGeneration is the most recent generation observed by the controller.<br />It corresponds to the SandboxWarmPool's metadata.generation, which is bumped<br />on spec mutations such as replicas changes. Note that SandboxTemplate content<br />changes do not bump the pool's generation, so this does not track template<br />rollout progress. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 

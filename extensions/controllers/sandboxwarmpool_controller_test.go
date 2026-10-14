@@ -58,8 +58,13 @@ func newFakeClient(scheme *runtime.Scheme, initialObjs ...runtime.Object) client
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&extensionsv1beta1.SandboxWarmPool{}).
+		WithIndex(&sandboxv1beta1.Sandbox{}, sandboxSourcePoolUIDIndex, sandboxSourcePoolUIDIndexer).
+		WithIndex(&sandboxv1beta1.Sandbox{}, sandboxSourcePoolNameIndex, sandboxSourcePoolNameIndexer).
+		WithIndex(&sandboxv1beta1.Sandbox{}, sandboxClaimOwnerUIDIndex, sandboxClaimOwnerUIDIndexer).
+		WithIndex(&extensionsv1beta1.SandboxClaim{}, extensionsv1beta1.WarmPoolRefField, sandboxClaimWarmPoolRefIndexer).
 		WithIndex(&sandboxv1beta1.Sandbox{}, sandboxWarmPoolLabelIndex, sandboxWarmPoolLabelIndexer).
 		WithIndex(&extensionsv1beta1.SandboxWarmPool{}, extensionsv1beta1.TemplateRefField, sandboxTemplateRefNameIndexer).
+		WithIndex(&extensionsv1beta1.SandboxWarmPool{}, warmPoolNameHashIndex, warmPoolNameHashIndexer).
 		WithRuntimeObjects(initialObjs...).
 		Build()
 }

@@ -25,6 +25,15 @@ type SandboxWarmPoolStatusApplyConfiguration struct {
 	Replicas *int32 `json:"replicas,omitempty"`
 	// readyReplicas is the total number of sandboxes in the pool that are in a ready state.
 	ReadyReplicas *int32 `json:"readyReplicas,omitempty"`
+	// occupiedReplicas counts still-existing Sandboxes attributed to this pool
+	// UID that have left its standby inventory, including cold-created and
+	// terminating instances. Absent means the policy is disabled or accounting
+	// is unavailable, not zero occupancy.
+	OccupiedReplicas *int32 `json:"occupiedReplicas,omitempty"`
+	// desiredStandbyReplicas is the last successfully calculated standby target.
+	// Absent means the policy is disabled or accounting is unavailable; zero
+	// is a valid target and does not imply a ready instance is available.
+	DesiredStandbyReplicas *int32 `json:"desiredStandbyReplicas,omitempty"`
 	// selector is the label selector used to find the pods in the pool.
 	Selector *string `json:"selector,omitempty"`
 	// observedGeneration is the most recent generation observed by the controller.
@@ -54,6 +63,22 @@ func (b *SandboxWarmPoolStatusApplyConfiguration) WithReplicas(value int32) *San
 // If called multiple times, the ReadyReplicas field is set to the value of the last call.
 func (b *SandboxWarmPoolStatusApplyConfiguration) WithReadyReplicas(value int32) *SandboxWarmPoolStatusApplyConfiguration {
 	b.ReadyReplicas = &value
+	return b
+}
+
+// WithOccupiedReplicas sets the OccupiedReplicas field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the OccupiedReplicas field is set to the value of the last call.
+func (b *SandboxWarmPoolStatusApplyConfiguration) WithOccupiedReplicas(value int32) *SandboxWarmPoolStatusApplyConfiguration {
+	b.OccupiedReplicas = &value
+	return b
+}
+
+// WithDesiredStandbyReplicas sets the DesiredStandbyReplicas field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the DesiredStandbyReplicas field is set to the value of the last call.
+func (b *SandboxWarmPoolStatusApplyConfiguration) WithDesiredStandbyReplicas(value int32) *SandboxWarmPoolStatusApplyConfiguration {
+	b.DesiredStandbyReplicas = &value
 	return b
 }
 

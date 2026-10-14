@@ -2744,6 +2744,9 @@ var schemaYAML = typed.YAMLObject(`types:
 - name: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.SandboxWarmPoolSpec
   map:
     fields:
+    - name: replenishmentCapacity
+      type:
+        scalar: numeric
     - name: replicas
       type:
         scalar: numeric
@@ -2757,7 +2760,13 @@ var schemaYAML = typed.YAMLObject(`types:
 - name: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.SandboxWarmPoolStatus
   map:
     fields:
+    - name: desiredStandbyReplicas
+      type:
+        scalar: numeric
     - name: observedGeneration
+      type:
+        scalar: numeric
+    - name: occupiedReplicas
       type:
         scalar: numeric
     - name: readyReplicas

@@ -42,6 +42,10 @@ spec:
             type: object
           spec:
             properties:
+              replenishmentCapacity:
+                format: int32
+                minimum: 0
+                type: integer
               replicas:
                 default: 1
                 format: int32
@@ -66,10 +70,21 @@ spec:
             required:
             - sandboxTemplateRef
             type: object
+            x-kubernetes-validations:
+            - message: replenishmentCapacity must be enabled or disabled at pool creation
+              rule: has(self.replenishmentCapacity) == has(oldSelf.replenishmentCapacity)
           status:
             properties:
+              desiredStandbyReplicas:
+                format: int32
+                minimum: 0
+                type: integer
               observedGeneration:
                 format: int64
+                minimum: 0
+                type: integer
+              occupiedReplicas:
+                format: int32
                 minimum: 0
                 type: integer
               readyReplicas:

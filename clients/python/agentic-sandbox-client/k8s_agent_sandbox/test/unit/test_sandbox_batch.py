@@ -16,7 +16,7 @@
 import logging
 import queue
 import ssl
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 import threading
 import time
 import unittest
@@ -33,11 +33,13 @@ from k8s_agent_sandbox.batch_utils import (
     CLOCK_SKEW_MARGIN,
 )
 from k8s_agent_sandbox.constants import (
+    BATCH_CREATE_RPS_ANNOTATION,
     BATCH_GROUP_LABEL,
     BATCH_GROUP_MIN_READY_ANNOTATION,
     BATCH_GROUP_SIZE_ANNOTATION,
     BATCH_ID_LABEL,
     BATCH_LEASE_DURATION_ANNOTATION,
+    BATCH_NEXT_ORDINAL_ANNOTATION,
     BATCH_QUORUM_TIMEOUT_ANNOTATION,
     BATCH_WORK_BUDGET_ANNOTATION,
 )
@@ -52,6 +54,7 @@ from k8s_agent_sandbox.exceptions import (
     SandboxNotReadyError,
     SandboxTemplateNotFoundError,
     SandboxWarmPoolNotFoundError,
+    TerminalMemberError,
 )
 from k8s_agent_sandbox.models import BatchEventType, BatchGroup, MemberState
 from k8s_agent_sandbox.sandbox_batch import SandboxBatch
@@ -918,9 +921,13 @@ class TestDetach(unittest.TestCase):
         self.assertIsNone(written.spec.holder_identity)
         self.assertLess(abs((written.spec.renew_time - datetime.now(UTC)).total_seconds()), 5)
         self.assertEqual(written.spec.lease_duration_seconds, 10)
+        # The batch's one claim took ordinal 0, so a re-attached handle continues from 1.
         self.assertEqual(
             written.metadata.annotations,
-            {BATCH_LEASE_DURATION_ANNOTATION: str(BATCH_DEFAULT_LEASE_DURATION_SECONDS)},
+            {
+                BATCH_LEASE_DURATION_ANNOTATION: str(BATCH_DEFAULT_LEASE_DURATION_SECONDS),
+                BATCH_NEXT_ORDINAL_ANNOTATION: "1",
+            },
         )
 
     def test_grace_none_uses_handles_lease_duration(self):
@@ -1174,6 +1181,7 @@ class TestClaimBatchSetup(BaseClaimBatchTest):
         )
         batch = self.claim(
             [BatchGroup(warmpool="pool-a", size=1), BatchGroup(warmpool="pool-b", size=1)],
+            labels={"team": "rl"},
             quorum_timeout=90,
             work_budget=120,
             lease_duration=45,
@@ -1192,7 +1200,7 @@ class TestClaimBatchSetup(BaseClaimBatchTest):
         self.assertEqual(lease.metadata.name, "batch-b1")
         self.assertEqual(
             lease.metadata.labels,
-            {BATCH_ID_LABEL: "b1", "agents.x-k8s.io/created-by": "python-client"},
+            {"team": "rl", BATCH_ID_LABEL: "b1", "agents.x-k8s.io/created-by": "python-client"},
         )
         self.assertEqual(
             lease.metadata.annotations,
@@ -1200,6 +1208,7 @@ class TestClaimBatchSetup(BaseClaimBatchTest):
                 BATCH_LEASE_DURATION_ANNOTATION: "45",
                 BATCH_WORK_BUDGET_ANNOTATION: "120",
                 BATCH_QUORUM_TIMEOUT_ANNOTATION: "90",
+                BATCH_CREATE_RPS_ANNOTATION: "1000",
             },
         )
         self.assertEqual(lease.spec.holder_identity, batch._holder_identity)
@@ -1744,6 +1753,266 @@ class TestReleaseMembers(BaseClaimBatchTest):
         # pool-a's skipped creates take no pacing slots, so b1-11 follows b1-10 by one slot.
         created_at = dict(self.cluster.created)
         self.assertLess(created_at["b1-11"] - created_at["b1-10"], 0.6)
+
+
+class TestAcquire(BaseClaimBatchTest):
+
+    def test_creates_a_claim_outside_the_fill_from_any_pool_and_returns_it_ready(self):
+        helper = self.cluster.helper
+        batch = self.claim(labels={"team": "rl"}, quorum_timeout=90, work_budget=120)
+        _wait_until(lambda: len(batch.members()) == 2)
+        _SteppingDatetime.calls = 0
+        with patch("k8s_agent_sandbox.utils.datetime", _SteppingDatetime):
+            member = batch.acquire("pool-b")
+        batch.acquire("pool-b")
+        batch.acquire("pool-a")
+
+        self.assertEqual((member.claim_name, member.warmpool, member.state), ("b1-2", "pool-b", MemberState.READY))
+        # A pool that isn't one of the batch's groups is checked, once.
+        self.assertEqual([c.args[0] for c in helper.get_sandbox_warmpool.call_args_list], ["pool-a", "pool-b"])
+        create = helper.create_sandbox_claim.call_args_list[2]
+        self.assertEqual(create.args[:2], ("b1-2", "pool-b"))
+        self.assertEqual(create.kwargs["labels"], {"team": "rl", BATCH_ID_LABEL: "b1"})
+        self.assertEqual(create.kwargs["annotations"], {})
+        # Its own shutdownTime, counted from its create.
+        self.assertEqual(
+            create.kwargs["lifecycle"], {"shutdownTime": "2026-01-01T01:13:30Z", "shutdownPolicy": "Delete"}
+        )
+        self.assertEqual([m.claim_name for m in batch.members()], ["b1-0", "b1-1", "b1-2", "b1-3", "b1-4"])
+        self.assertEqual([e.member.claim_name for e in _drain(batch.events())], ["b1-0", "b1-1"])
+
+    def test_concurrent_first_acquires_check_a_pool_once_and_a_failed_check_is_not_kept(self):
+        helper = self.cluster.helper
+        pool = {"spec": {"sandboxTemplateRef": {"name": "tmpl"}}}
+        checked: list[str] = []
+        release_check = threading.Event()
+        pool_c_results = [None, pool]
+
+        def get_warmpool(name, *args, **kwargs):
+            checked.append(name)
+            if name != "pool-a":
+                release_check.wait(timeout=2)
+            if name == "pool-c":
+                return pool_c_results.pop(0)
+            if name == "pool-d":
+                raise TimeoutError("request timed out")
+            return pool
+
+        waiting: list[Future] = []
+
+        class _WaitedFuture(Future):
+            def result(self, timeout=None):
+                waiting.append(self)
+                return super().result(timeout)
+
+        helper.get_sandbox_warmpool.side_effect = get_warmpool
+        batch = self.claim()
+        _wait_until(lambda: len(batch.members()) == 2)
+
+        def acquire_three(warmpool):
+            waiting.clear()
+            release_check.clear()
+            with ThreadPoolExecutor(max_workers=3) as executor, \
+                 patch.object(sandbox_batch, "Future", _WaitedFuture):
+                acquires = [executor.submit(batch.acquire, warmpool) for _ in range(3)]
+                # The first check finishes only once the other two acquires wait on it.
+                _wait_until(lambda: len(waiting) == 2)
+                release_check.set()
+                return [a.exception(timeout=2) or a.result() for a in acquires]
+
+        self.assertEqual(sorted(m.claim_name for m in acquire_three("pool-b")), ["b1-2", "b1-3", "b1-4"])
+        errors = acquire_three("pool-c")
+        self.assertEqual([type(e) for e in errors], [SandboxWarmPoolNotFoundError] * 3)
+        self.assertEqual(batch.acquire("pool-c").warmpool, "pool-c")
+        # A check that times out itself reaches every acquire as its own error, not as a timeout of
+        # the wait for it.
+        errors = acquire_three("pool-d")
+        self.assertEqual([(type(e), str(e)) for e in errors], [(TimeoutError, "request timed out")] * 3)
+
+        self.assertEqual(checked, ["pool-a", "pool-b", "pool-c", "pool-c", "pool-d"])
+
+    def test_an_interrupted_pool_check_is_run_again_by_a_waiting_acquire(self):
+        checked: list[str] = []
+        release_check = threading.Event()
+        waiting: list[Future] = []
+
+        class _Interrupt(BaseException):
+            pass
+
+        class _WaitedFuture(Future):
+            def result(self, timeout=None):
+                waiting.append(self)
+                return super().result(timeout)
+
+        def get_warmpool(name, *args, **kwargs):
+            checked.append(name)
+            if name == "pool-b" and checked.count("pool-b") == 1:
+                release_check.wait(timeout=2)
+                raise _Interrupt()
+            return {"spec": {"sandboxTemplateRef": {"name": "tmpl"}}}
+
+        self.cluster.helper.get_sandbox_warmpool.side_effect = get_warmpool
+        batch = self.claim()
+        _wait_until(lambda: len(batch.members()) == 2)
+        with ThreadPoolExecutor(max_workers=2) as executor, patch.object(sandbox_batch, "Future", _WaitedFuture):
+            first = executor.submit(batch.acquire, "pool-b")
+            _wait_until(lambda: "pool-b" in checked)
+            second = executor.submit(batch.acquire, "pool-b")
+            _wait_until(lambda: len(waiting) == 1)
+            release_check.set()
+            self.assertIsInstance(first.exception(timeout=2), _Interrupt)
+            self.assertEqual(second.result(timeout=2).warmpool, "pool-b")
+        self.assertEqual(checked, ["pool-a", "pool-b", "pool-b"])
+
+    def test_an_acquire_waiting_on_another_acquires_pool_check_stops_at_its_timeout(self):
+        release_check = threading.Event()
+
+        def get_warmpool(name, *args, **kwargs):
+            if name == "pool-b":
+                release_check.wait(timeout=2)
+            return {"spec": {"sandboxTemplateRef": {"name": "tmpl"}}}
+
+        self.cluster.helper.get_sandbox_warmpool.side_effect = get_warmpool
+        batch = self.claim()
+        _wait_until(lambda: len(batch.members()) == 2)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            first = executor.submit(batch.acquire, "pool-b")
+            _wait_until(lambda: "pool-b" in batch._prechecks)
+            with self.assertRaisesRegex(BatchTimeoutError, "wasn't checked within 0.1s"):
+                batch.acquire("pool-b", timeout=0.1)
+            release_check.set()
+            self.assertEqual(first.result(timeout=2).claim_name, "b1-2")
+
+    def test_failures_drop_the_member_and_delete_a_claim_that_may_exist(self):
+        terminal = [{"type": "Ready", "status": "False", "reason": "InvalidConfiguration"}]
+        failure = RuntimeError("watch failed")
+
+        def push_terminal(batch):
+            self.cluster.watch_queue.put({"type": "MODIFIED", "object": _claim("b1-1", conditions=terminal)})
+
+        def delete(batch):
+            self.cluster.push("b1-1", ready=False, annotations=None)
+            _wait_until(lambda: batch.members()[-1].claim_name == "b1-1")
+            self.cluster.watch_queue.put({"type": "DELETED", "object": _claim("b1-1")})
+
+        def release(batch):
+            self.cluster.push("b1-1", ready=False, annotations=None)
+            _wait_until(lambda: batch.members()[-1].claim_name == "b1-1")
+            batch.release_member(batch.members()[-1])
+
+        def fail_batch(batch):
+            with batch._changed:
+                batch._state.note_error(failure)
+                batch._changed.notify_all()
+
+        def wait(batch):
+            pass
+
+        unavailable = k8s_client.ApiException(status=503)
+        unavailable.headers = {"Retry-After": "5"}
+        # Retried at once, so every attempt fails within the timeout.
+        always_unavailable = k8s_client.ApiException(status=503)
+        always_unavailable.headers = {"Retry-After": "0"}
+        cases = {
+            "create fails": (k8s_client.ApiException(status=403), wait, TerminalMemberError, MemberState.FAILED, False),
+            "last attempt unavailable": (always_unavailable, wait, TerminalMemberError, MemberState.FAILED, True),
+            "retry slot past the timeout": (unavailable, wait, BatchTimeoutError, None, True),
+            "terminal": (None, push_terminal, TerminalMemberError, MemberState.FAILED, True),
+            "deleted by someone else": (None, delete, TerminalMemberError, MemberState.LOST, False),
+            "timeout": (None, wait, BatchTimeoutError, None, True),
+            "err set": (None, fail_batch, BatchError, None, True),
+            "released while pending": (None, release, BatchError, None, True),
+            "interrupted": (KeyboardInterrupt(), wait, KeyboardInterrupt, None, True),
+        }
+        for name, (create_error, act, error, state, deleted) in cases.items():
+            with self.subTest(name):
+                # A fresh cluster, so the previous batch's watch can't take this one's events.
+                self.cluster = _Cluster()
+                self.client.k8s_helper = helper = self.cluster.helper
+                batch = self.claim([BatchGroup(warmpool="pool-a", size=1)])
+                _wait_until(lambda: len(batch.members()) == 1)
+                self.cluster.ready_on_create = False
+                # Past the fill deadline, like an acquire that replaces a member later, which must
+                # still wait for changes rather than spin.
+                batch._fill_deadline = time.monotonic()
+                waits = []
+                wait_for_change = batch._changed.wait
+                batch._changed.wait = lambda timeout=None: waits.append(timeout) or wait_for_change(timeout)
+
+                def hook(claim_name):
+                    if create_error is not None and claim_name == "b1-1":
+                        raise create_error
+
+                self.cluster.create_hook = hook
+                with ThreadPoolExecutor(1) as pool:
+                    future = pool.submit(batch.acquire, "pool-a", timeout=0.5)
+                    _wait_until(lambda: helper.create_sandbox_claim.call_count >= 2)
+                    act(batch)
+                    raised = future.exception(timeout=5)
+                self.assertIsInstance(raised, error)
+                self.assertLess(len(waits), 20)
+                if state is not None:
+                    self.assertEqual(raised.member.state, state)
+                if create_error is not None and state is not None:
+                    self.assertEqual(raised.member.reason, "CreateFailed")
+                if name == "err set":
+                    # err() keeps the original error.
+                    self.assertIs(batch.err(), failure)
+                    self.assertIs(raised.__cause__, failure)
+                if name == "released while pending":
+                    # It fails at once rather than waiting out its timeout.
+                    self.assertNotIsInstance(raised, BatchTimeoutError)
+                self.assertEqual([m.claim_name for m in batch.members()], ["b1-0"])
+                self.assertEqual(
+                    [c.args[0] for c in helper.delete_sandbox_claim.call_args_list], ["b1-1"] if deleted else []
+                )
+                batch._stop_background_threads()
+
+    def test_reattached_handle_reads_back_ordinals_labels_and_settings(self):
+        helper = self.cluster.helper
+        helper.list_sandbox_claim_objects.return_value = ([_claim("b1-0", annotations=_FILL)], "5")
+        lease = _lease(renew_time=datetime.now(UTC), annotations={
+            BATCH_NEXT_ORDINAL_ANNOTATION: "7",
+            BATCH_QUORUM_TIMEOUT_ANNOTATION: "90",
+            BATCH_WORK_BUDGET_ANNOTATION: "120",
+            BATCH_CREATE_RPS_ANNOTATION: "5",
+        })
+        lease.metadata.labels = {"team": "rl", BATCH_ID_LABEL: "b1", "agents.x-k8s.io/created-by": "python-client"}
+        helper.read_batch_lease.return_value = lease
+        batch = self.client.get_batch("b1")
+        self.addCleanup(batch._stop_background_threads)
+        _SteppingDatetime.calls = 0
+        with patch("k8s_agent_sandbox.utils.datetime", _SteppingDatetime):
+            member = batch.acquire("pool-a")
+        self.assertEqual(member.claim_name, "b1-7")
+        create = helper.create_sandbox_claim.call_args
+        self.assertEqual(create.kwargs["lifecycle"]["shutdownTime"], "2026-01-01T01:13:30Z")
+        self.assertEqual(
+            create.kwargs["labels"],
+            {"team": "rl", BATCH_ID_LABEL: "b1", BATCH_GROUP_LABEL: batch_utils.group_label_value("pool-a")},
+        )
+        # Paced at the batch's create_rps of 5, so concurrent creates start 0.2s apart.
+        with ThreadPoolExecutor(2) as pool:
+            list(pool.map(lambda _: batch.acquire("pool-a"), range(2)))
+        created_at = dict(self.cluster.created)
+        self.assertGreater(abs(created_at["b1-9"] - created_at["b1-8"]), 0.15)
+        # A create that pacing can't start before the timeout fails without a claim or an ordinal.
+        batch._next_create_at = time.monotonic() + 60
+        with self.assertRaises(BatchTimeoutError):
+            batch.acquire("pool-a", timeout=1)
+        self.assertEqual(helper.create_sandbox_claim.call_count, 3)
+        self.assertEqual(batch._state.next_ordinal, 10)
+        # Nor is a create whose slot comes after err() is set.
+        batch._next_create_at = time.monotonic() + 0.3
+        with ThreadPoolExecutor(1) as pool:
+            future = pool.submit(batch.acquire, "pool-a", timeout=5)
+            _wait_until(lambda: batch._state.next_ordinal == 11)
+            with batch._changed:
+                batch._state.note_error(RuntimeError("watch failed"))
+                batch._changed.notify_all()
+            self.assertIsInstance(future.exception(timeout=5), BatchError)
+        self.assertEqual(helper.create_sandbox_claim.call_count, 3)
+        self.assertEqual(helper.delete_sandbox_claim.call_count, 0)
 
 
 @patch.object(SandboxBatch, "_start", lambda self: None)

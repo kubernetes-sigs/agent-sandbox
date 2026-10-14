@@ -553,7 +553,8 @@ class AsyncSandboxClient(Generic[T]):
         Args:
             groups: One ``BatchGroup`` per warm pool, each with ``size`` at least 1.
             namespace: Kubernetes namespace for the claims and the Lease.
-            labels: Optional labels for every claim.
+            labels: Optional labels for every claim. They are also set on the Lease, so a handle
+                from ``get_batch`` puts them on the claims it adds with ``acquire()``.
             batch_id: Optional batch id; a DNS-1123 label starting with a letter, at most 52
                 characters. Generated if omitted.
             create_rps: Maximum claim creates started per second. Defaults to 50.

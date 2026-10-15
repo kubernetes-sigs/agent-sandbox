@@ -28,9 +28,9 @@ For continuous collection with the Prometheus Operator:
 
 ## Availability
 
-Only two of the families above appear in every install; the rest depend on how the controller is run.
+Three of the families above are available in every install; the rest depend on how the controller is run.
 
-- **Emitted by every install.** `agent_sandboxes`, recomputed on each scrape by a collector that lists every `Sandbox`, and `agent_sandbox_build_info`, a constant gauge present for the whole life of the process.
+- **Available in every install.** `agent_sandboxes`, recomputed on each scrape by a collector that lists every `Sandbox`; `agent_sandbox_build_info`, a constant gauge present for the whole life of the process; and `agent_sandbox_creation_latency_ms`, emitted after an eligible Sandbox first reaches Ready.
 - **Require `--extensions`.** Every `SandboxClaim` family (`agent_sandbox_claim_*`) is recorded by the SandboxClaim controller, which the manager only starts when it is run with `--extensions`. Without that flag they are absent entirely, not zero.
 - **Require a timestamp the controller does not write.** The end-to-end latency families measure from an annotation stamped by something upstream, and are not recorded when it is missing. `agent_sandbox_client_claim_startup_latency_ms` needs `agents.x-k8s.io/client-first-requested-at`, which the Go and Python SDKs stamp and hand-written manifests do not; a missing annotation is skipped silently, and only an unparseable one is logged, at `-v=1`. `agent_sandbox_claim_startup_latency_ms` needs `agents.x-k8s.io/webhook-first-observed-at` from the optional [timestamp-injection webhook](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/examples/webhook-inject-timestamp/testing_webhook_guide.md), and does log the skip at `-v=1` when it is absent.
 

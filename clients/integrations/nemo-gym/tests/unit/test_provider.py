@@ -14,6 +14,7 @@
 """Unit tests for the NeMo Gym agent_sandbox provider (fakes only — no cluster)."""
 
 import logging
+import re
 import shlex
 from collections import deque
 from types import SimpleNamespace
@@ -447,7 +448,9 @@ async def test_upload_file_stages_then_copies(tmp_path):
     assert data == b"\x00\x01binary"
     script = sandbox._commands.scripts()[0]
     assert script == f"mkdir -p /data/out && cp {staging} /data/out/artifact.bin && rm -f {staging}"
-    assert "cd " not in script
+    # Match a `cd` command, not the substring: the random staging name is hex and
+    # ends in "cd" about one time in 256, which made the plain substring check flaky.
+    assert not re.search(r"(^|[;&|]\s*)cd\b", script)
 
 
 async def test_upload_file_failure_raises_and_cleans_staging(tmp_path):

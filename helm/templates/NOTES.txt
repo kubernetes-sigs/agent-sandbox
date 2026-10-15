@@ -48,7 +48,7 @@ roleRef:
 {{- end }}
   EOF
 {{- end }}
-{{- if ne (default true .Values.controller.leaderElect) false }}
+{{- if or (not (hasKey .Values.controller "leaderElect")) .Values.controller.leaderElect }}
 {{- $leNs := include "agent-sandbox.leaderElectionNamespace" . }}
 {{- if ne $leNs $controllerNs }}
 

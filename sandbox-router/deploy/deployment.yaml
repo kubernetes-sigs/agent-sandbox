@@ -32,6 +32,9 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "9090"
         prometheus.io/path: "/metrics"
+        # Uncomment when --metrics-secure-serving is enabled so scrapers
+        # use HTTPS. The scraper must trust the metrics serving certificate.
+        # prometheus.io/scheme: "https"
     spec:
       serviceAccountName: sandbox-router
       # Spread replicas across nodes/zones so a single failure doesn't take
@@ -62,6 +65,7 @@ spec:
         # - --https-bind-address=:8443
         # - --tls-cert-file=/tls/tls.crt
         # - --tls-key-file=/tls/tls.key
+        # - --metrics-secure-serving
         - --metrics-bind-address=:9090
         - --health-probe-bind-address=:8081
         - --cluster-domain=cluster.local

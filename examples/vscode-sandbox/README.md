@@ -225,8 +225,8 @@ curl -v -H "X-Sandbox-ID: sandbox-example" \
 3.  **Access via Browser (UI):**
     To load the VSCode interface, your browser must send the routing headers.
     
-    1.  Install a browser extension that can set request headers. It sees your
-        traffic, so pick one you trust.
+    1.  Install a browser extension that can set request headers on HTTP and
+        WebSocket upgrade requests. It sees your traffic, so pick one you trust.
     2.  Configure the extension to send, only to the Gateway IP:
         * `X-Sandbox-ID`: `sandbox-example`
         * `X-Sandbox-Port`: `13337`

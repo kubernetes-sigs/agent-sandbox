@@ -93,6 +93,10 @@ type Config struct {
 	HTTPSAddr string
 	// MetricsAddr is the address for the Prometheus /metrics endpoint.
 	MetricsAddr string
+	// MetricsSecureServing enables TLS on the /metrics endpoint using the
+	// same certificate as the HTTPS proxy listener. Requires TLSCertFile
+	// and TLSKeyFile.
+	MetricsSecureServing bool
 	// ProbeAddr is the address for the /healthz and /readyz endpoints.
 	ProbeAddr string
 
@@ -361,6 +365,12 @@ func (c *Config) Validate() error {
 	if c.HTTPSAddr != "" {
 		if c.TLSCertFile == "" || c.TLSKeyFile == "" {
 			return errors.New("--tls-cert-file and --tls-key-file are required when --https-bind-address is set")
+		}
+	}
+
+	if c.MetricsSecureServing {
+		if c.TLSCertFile == "" || c.TLSKeyFile == "" {
+			return errors.New("--tls-cert-file and --tls-key-file are required when --metrics-secure-serving is set")
 		}
 	}
 

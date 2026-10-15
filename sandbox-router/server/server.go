@@ -45,16 +45,17 @@ type Server struct {
 
 // Options bundles the fields New needs to construct a Server.
 type Options struct {
-	Log             logr.Logger
-	Probes          *Probes
-	ProxyHandler    http.Handler
-	MetricsHandler  http.Handler
-	HTTPAddr        string
-	HTTPSAddr       string
-	MetricsAddr     string
-	ProbeAddr       string
-	TLSConfig       *tls.Config
-	ShutdownTimeout time.Duration
+	Log              logr.Logger
+	Probes           *Probes
+	ProxyHandler     http.Handler
+	MetricsHandler   http.Handler
+	HTTPAddr         string
+	HTTPSAddr        string
+	MetricsAddr      string
+	ProbeAddr        string
+	TLSConfig        *tls.Config
+	MetricsTLSConfig *tls.Config
+	ShutdownTimeout  time.Duration
 
 	// Optional tuning knobs applied to the proxy listeners.
 	ReadHeaderTimeout time.Duration
@@ -114,6 +115,7 @@ func New(o Options) (*Server, error) {
 		s.metrics = &http.Server{
 			Addr:              o.MetricsAddr,
 			Handler:           mux,
+			TLSConfig:         o.MetricsTLSConfig,
 			ReadHeaderTimeout: o.ReadHeaderTimeout,
 			IdleTimeout:       o.IdleTimeout,
 		}
@@ -150,7 +152,7 @@ func (s *Server) Run(ctx context.Context) error {
 	listeners := []listener{
 		{"proxy-http", s.proxy, nil, false},
 		{"proxy-https", s.proxyTLS, nil, true},
-		{"metrics", s.metrics, nil, false},
+		{"metrics", s.metrics, nil, s.metrics != nil && s.metrics.TLSConfig != nil},
 		{"health", s.healthSrv, nil, false},
 	}
 

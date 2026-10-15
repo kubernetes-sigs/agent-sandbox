@@ -127,6 +127,7 @@ Run `sandbox-router --help` for the full list. The most relevant:
 | `--http-bind-address` | `:8080` | Plain-HTTP proxy listener. Empty disables. |
 | `--https-bind-address` | `""` | TLS proxy listener. Empty disables. Requires `--tls-cert-file` and `--tls-key-file`. |
 | `--metrics-bind-address` | `:9090` | Prometheus `/metrics`. |
+| `--metrics-secure-serving` | `false` | Serve `/metrics` over TLS using the same certificate as the HTTPS proxy listener. Requires `--tls-cert-file` and `--tls-key-file`. |
 | `--health-probe-bind-address` | `:8081` | `/healthz` and `/readyz`. |
 | `--tls-cert-file` / `--tls-key-file` | — | PEM-encoded server cert and key. Hot-reloaded on file change (via fsnotify on the parent directory, so atomic Secret rotation just works). |
 | `--tls-client-ca-file` | — | CA bundle for verifying client certs when mTLS is on. |
@@ -289,6 +290,10 @@ The HTTPS listener is opt-in (set `--https-bind-address`). Cert and key are read
 
 `tls.Config.MinVersion` defaults to TLS 1.2 and is configurable via `--tls-min-version` (or the `TLS_MIN_VERSION` env var). Cipher suites can be set via `--tls-cipher-suites` (or `TLS_CIPHER_SUITES`); when omitted, Go defaults apply. ALPN advertises `h2` and `http/1.1`. A downstream operator can inject the cluster TLS profile via these flags or env vars.
 
+### Metrics endpoint TLS
+
+Set `--metrics-secure-serving` to serve the `/metrics` endpoint over TLS using the same certificate as the HTTPS proxy listener. The metrics TLS config shares the `--tls-min-version` and `--tls-cipher-suites` settings but does not enable mTLS (Prometheus scraping does not present client certs). Requires `--tls-cert-file` and `--tls-key-file`; `--https-bind-address` is not required — the metrics endpoint can be the only TLS listener.
+
 ## Metrics
 
 All metrics live under a private Prometheus registry (no controller-runtime metrics bleed-through) and serve on `--metrics-bind-address`. Per-sandbox `sandbox_id` labels are **intentionally absent** — a cluster can have 10k+ sandboxes, and exposing one series per sandbox would blow up Prometheus storage. Use traces for per-sandbox debugging.
@@ -343,6 +348,7 @@ tls-key-file: "/tls/tls.key"
 tls-client-ca-file: "/tls/ca.crt"
 tls-min-version: "VersionTLS12"
 tls-cipher-suites: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
+metrics-secure-serving: true
 mtls-mode: "required"
 cluster-domain: "cluster.local"
 proxy-timeout: "180s"

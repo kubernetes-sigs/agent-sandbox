@@ -302,7 +302,10 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
                     "-n", self.config.router_namespace,
                     *kube_args,
                 ],
-                stdout=subprocess.PIPE,
+                # kubectl writes a line to stdout for every forwarded connection;
+                # an undrained pipe fills up and blocks new connections. stderr
+                # stays piped for the crash message.
+                stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE
             )
 
@@ -457,7 +460,10 @@ class SandboxdPodTunnelStrategy(ConnectionStrategy):
                     "-n", self.namespace,
                     *kube_args,
                 ],
-                stdout=subprocess.PIPE,
+                # kubectl writes a line to stdout for every forwarded connection;
+                # an undrained pipe fills up and blocks new connections. stderr
+                # stays piped for the crash message.
+                stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
             )
             while time.monotonic() - start_time < self.config.port_forward_ready_timeout:

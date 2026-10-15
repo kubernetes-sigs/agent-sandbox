@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import logging
 import time
 from itertools import chain
@@ -41,6 +42,26 @@ from .constants import (
     CREATED_BY_LABEL,
 )
 
+
+def _api_client_without_retries(api_client: client.ApiClient | None) -> client.ApiClient:
+    """Returns an ``ApiClient`` like ``api_client`` (or the default one) whose requests urllib3 doesn't retry.
+
+    urllib3 retries a timed-out request with a fresh timeout, which would stretch a Lease renewal
+    past the Lease's expiry, and a retried Lease write that already landed comes back as a conflict.
+    """
+    if api_client is None:
+        configuration = client.Configuration.get_default_copy()
+    else:
+        configuration = copy.deepcopy(api_client.configuration)
+    configuration.retries = False
+    no_retries = client.ApiClient(configuration=configuration)
+    if api_client is not None:
+        no_retries.cookie = api_client.cookie
+        for name, value in dict(api_client.default_headers).items():
+            no_retries.set_default_header(name, value)
+    return no_retries
+
+
 class K8sHelper:
     """Helper class for Kubernetes API interactions."""
 
@@ -56,6 +77,7 @@ class K8sHelper:
                 config.load_kube_config()
         self.custom_objects_api = client.CustomObjectsApi(api_client)
         self.core_v1_api = client.CoreV1Api(api_client)
+        self.coordination_v1_api = client.CoordinationV1Api(_api_client_without_retries(api_client))
 
     def create_sandbox_claim(
         self,
@@ -488,3 +510,87 @@ class K8sHelper:
                         logging.info(f"Gateway ready. IP: {ip_address}")
                         w.stop()
                         return ip_address
+
+    def list_sandbox_claim_objects(
+        self,
+        namespace: str,
+        label_selector: str,
+        _request_timeout: float | tuple[float, float] | None = None,
+    ) -> tuple[List[dict], str]:
+        """Lists full SandboxClaim objects matching a label selector. Also return the list's
+        resourceVersion, so a subsequent watch does not miss any events.
+        """
+        response = cast(dict[str, Any], self.custom_objects_api.list_namespaced_custom_object(
+            group=CLAIM_API_GROUP,
+            version=CLAIM_API_VERSION,
+            namespace=namespace,
+            plural=CLAIM_PLURAL_NAME,
+            label_selector=label_selector,
+            _request_timeout=_request_timeout,
+        ))
+        items = response.get("items", [])
+        resource_version = (response.get("metadata") or {}).get("resourceVersion", "0")
+        return items, resource_version
+
+    def watch_sandbox_claims(
+        self, namespace: str, label_selector: str, resource_version: str, timeout_seconds: int,
+        _request_timeout: float | tuple[float, float] | None = None
+    ):
+        """Uses a single watch starting at ``resource_version`` to yield raw watch events for multiple
+        SandboxClaims matching a label selector.
+
+        Args:
+            _request_timeout: Optional timeout (seconds, or a ``(connect, read)``
+                pair) forwarded to the underlying urllib3 request.
+        """
+        w = watch.Watch()
+        try:
+            for event in w.stream(
+                func=self.custom_objects_api.list_namespaced_custom_object,
+                namespace=namespace,
+                group=CLAIM_API_GROUP,
+                version=CLAIM_API_VERSION,
+                plural=CLAIM_PLURAL_NAME,
+                label_selector=label_selector,
+                resource_version=resource_version,
+                timeout_seconds=timeout_seconds,
+                allow_watch_bookmarks=True,
+                _request_timeout=_request_timeout,
+            ):
+                if event is not None:
+                    yield event
+        finally:
+            w.stop()
+
+    def read_batch_lease(
+        self, name: str, namespace: str, _request_timeout: float | tuple[float, float] | None = None
+    ):
+        """Reads a batch Lease, or ``None`` if it doesn't exist.
+
+        Args:
+            _request_timeout: Optional timeout (seconds, or a ``(connect, read)``
+                pair) forwarded to the underlying urllib3 request.
+        """
+        try:
+            return self.coordination_v1_api.read_namespaced_lease(
+                name, namespace, _request_timeout=_request_timeout
+            )
+        except client.ApiException as e:
+            if e.status == 404:
+                return None
+            raise
+
+    def replace_batch_lease(
+        self, name: str, namespace: str, body, _request_timeout: float | tuple[float, float] | None = None
+    ):
+        """Replaces a batch Lease, then returns the updated object.
+
+        Args:
+            _request_timeout: Optional timeout (seconds, or a ``(connect, read)``
+                pair) forwarded to the underlying urllib3 request.
+        """
+        # Uses replace (PUT) over PATCH to have the apiserver reject stale resourceVersion updates
+        # to handle races and ensure two clients cannot simultaneously hold the same batch lease.
+        return self.coordination_v1_api.replace_namespaced_lease(
+            name, namespace, body, _request_timeout=_request_timeout
+        )

@@ -20,6 +20,8 @@ GATEWAY_PLURAL = "gateways"
 CLAIM_API_GROUP = "extensions.agents.x-k8s.io"
 CLAIM_API_VERSION = "v1beta1"
 CLAIM_PLURAL_NAME = "sandboxclaims"
+WARMPOOL_PLURAL_NAME = "sandboxwarmpools"
+TEMPLATE_PLURAL_NAME = "sandboxtemplates"
 
 SANDBOX_API_GROUP = "agents.x-k8s.io"
 SANDBOX_API_VERSION = "v1beta1"
@@ -54,3 +56,14 @@ TERMINAL_CLAIM_READY_REASONS = frozenset({
     "SandboxExpired",        # core SandboxReasonExpired, forwarded to the claim
     "InvalidConfiguration",  # core SandboxReasonInvalidConfiguration, forwarded to the claim
 })
+
+# Constants for Sandbox Batches
+BATCH_ID_LABEL = "agents.x-k8s.io/batch-id"
+BATCH_GROUP_SIZE_ANNOTATION = "agents.x-k8s.io/batch-group-size"
+BATCH_GROUP_MIN_READY_ANNOTATION = "agents.x-k8s.io/batch-group-min-ready"
+BATCH_LEASE_NAME_PREFIX = "batch-"
+# The batch's own Lease duration. After detach(grace), the Lease's leaseDurationSeconds holds
+# the grace instead, so get_batch reads this to restore the original on takeover.
+BATCH_LEASE_DURATION_ANNOTATION = "agents.x-k8s.io/batch-lease-duration"
+BATCH_WORK_BUDGET_ANNOTATION = "agents.x-k8s.io/batch-work-budget"
+BATCH_QUORUM_TIMEOUT_ANNOTATION = "agents.x-k8s.io/batch-quorum-timeout"

@@ -57,7 +57,7 @@ func (s *sandboxHasStatusPredicate) Matches(obj client.Object) (bool, error) {
 	}
 	opts := []cmp.Option{
 		cmpopts.IgnoreFields(metav1.Condition{}, "LastTransitionTime"),
-		cmpopts.IgnoreFields(sandboxv1beta1.SandboxStatus{}, "PodIPs", "NodeName"),
+		cmpopts.IgnoreFields(sandboxv1beta1.SandboxStatus{}, "PodIPs", "NodeName", "Lifecycle"),
 		// Condition order carries no meaning: conditions are addressed by type, and
 		// a condition removed and later re-added is appended at the end, so the
 		// order reflects history rather than state. Compare as a set by type.

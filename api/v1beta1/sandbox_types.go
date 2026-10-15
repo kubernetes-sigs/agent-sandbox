@@ -109,8 +109,10 @@ const (
 	// SandboxConditionPodScheduled mirrors the backing Pod's PodScheduled
 	// condition so consumers can see why a Sandbox is not scheduled (e.g.
 	// Unschedulable, SchedulingGated) without reading the Pod. The Pod
-	// condition's status, reason and message are copied through verbatim;
-	// the condition is absent while the Sandbox has no backing Pod.
+	// condition's status, reason and message are copied through verbatim,
+	// except when an unscheduled Pod is terminating (Status is False with
+	// reason PodTerminating); the condition is absent while the Sandbox has
+	// no backing Pod.
 	SandboxConditionPodScheduled ConditionType = "PodScheduled"
 	// SandboxReasonPodScheduled indicates the backing Pod has been scheduled
 	// to a node. Used when the Pod's PodScheduled condition carries no reason
@@ -120,6 +122,9 @@ const (
 	// determined: the Pod has not reported PodScheduled yet, reports it without a
 	// reason (and not True), or could not be read.
 	SandboxReasonPodSchedulingUnknown = "PodSchedulingUnknown"
+	// SandboxReasonPodTerminating indicates an unscheduled backing Pod is
+	// terminating (its DeletionTimestamp is set).
+	SandboxReasonPodTerminating = "PodTerminating"
 
 	// SandboxConditionFinished reports that the backing Pod reached a terminal phase.
 	// It is set (Status True) only after the Pod has Succeeded or Failed, with the reason

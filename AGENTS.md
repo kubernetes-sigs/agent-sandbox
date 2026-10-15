@@ -77,6 +77,7 @@ The Hugo site at [site/](site/) mounts these repo paths into `assets/additional/
 - [packages/sandboxd/USER_GUIDE.md](packages/sandboxd/USER_GUIDE.md) → `/docs/api/runtime/`
 - [clients/go/README.md](clients/go/README.md) → `/docs/go-client/`
 - [clients/python/agentic-sandbox-client/README.md](clients/python/agentic-sandbox-client/README.md) → `/docs/python-client/`
+- [clients/typescript/agentic-sandbox-client/README.md](clients/typescript/agentic-sandbox-client/README.md) → `/docs/typescript-client/`
 - [clients/integrations/nemo-gym/README.md](clients/integrations/nemo-gym/README.md) → `/docs/use-cases/examples/nemo-gym/` (the only `clients/integrations/` README currently mounted in [site/hugo.yaml](site/hugo.yaml))
 - Many `examples/*/README.md` files → pages under `/docs/use-cases/examples/`, `/docs/runtime-templates/`, and `/docs/getting_started/`
 

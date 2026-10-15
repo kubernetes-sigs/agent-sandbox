@@ -221,9 +221,9 @@ const client = new SandboxClient({
 });
 ```
 
-The SDK sends it as `Authorization: Bearer <token>` on every REST request and gRPC call, and never logs it or puts it in a trace or error. It must be non-empty printable ASCII with no spaces. A missing or wrong token fails the call with `SandboxdApiError` (`code: "UNAUTHENTICATED"`) for files, health and metadata, and `SandboxdRpcError` (`code: "unauthenticated"`) for commands. `GET /v1/health` needs no token, so the connect health check passes even with a wrong one and the first real call reports it.
+The SDK sends it as `Authorization: Bearer <token>` on every REST request and gRPC call, and never logs it or puts it in a trace or error. It must be non-empty printable ASCII with no spaces. A missing or wrong token fails the call with `SandboxdApiError` (`code: "UNAUTHENTICATED"`) for files and metadata, and `SandboxdRpcError` (`code: "unauthenticated"`) for commands. `GET /v1/health` needs no token, so the connect health check passes even with a wrong one and the first real call reports it.
 
-The token is not encrypted on the wire. See [Trust boundary](#trust-boundary).
+With `port-forward` the token rides the TLS connection to the apiserver. sandboxd has no TLS, so with the in-cluster modes it is sent in plaintext, and `in-cluster-pod-ip` can send it to an unrelated pod if the IP was reassigned. Prefer `in-cluster-service` or `port-forward`. See [Trust boundary](#trust-boundary).
 
 ### Streaming
 

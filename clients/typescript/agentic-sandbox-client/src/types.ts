@@ -94,6 +94,14 @@ export interface SandboxdOptions {
    * transport's receive limit (at most 0xffffffff). Default: 4 MiB.
    */
   maxCommandOutputSize?: number;
+  /**
+   * Bearer token for a sandboxd started with --auth-token-sha256 or
+   * --auth-token-file. Sent as `Authorization: Bearer <token>` on every REST
+   * request and gRPC call, and never logged or put in an error. It is not
+   * encrypted on the wire: with the in-cluster modes it travels in plaintext.
+   * Must be non-empty printable ASCII with no spaces. Default: none.
+   */
+  authToken?: string;
 }
 
 /**

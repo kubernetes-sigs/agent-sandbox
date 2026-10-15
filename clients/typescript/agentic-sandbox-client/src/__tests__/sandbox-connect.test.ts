@@ -146,7 +146,10 @@ function makeTestKubeConfig(apiServerPort: number): k8s.KubeConfig {
   return kc;
 }
 
-async function startRestBackend(listenPort = 0): Promise<{
+async function startRestBackend(
+  listenPort = 0,
+  requiredAuthorization?: string,
+): Promise<{
   port: number;
   healthHits: number;
   putBodies: Buffer[];
@@ -155,6 +158,21 @@ async function startRestBackend(listenPort = 0): Promise<{
   const counter = { healthHits: 0 };
   const putBodies: Buffer[] = [];
   const server = http.createServer((req, res) => {
+    // Like sandboxd's --auth-token-*: everything but /v1/health needs the token.
+    if (
+      requiredAuthorization !== undefined &&
+      req.url !== "/v1/health" &&
+      req.headers.authorization !== requiredAuthorization
+    ) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          code: "UNAUTHENTICATED",
+          message: "missing or invalid bearer token",
+        }),
+      );
+      return;
+    }
     if (req.url === "/v1/health") {
       counter.healthHits++;
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -278,6 +296,7 @@ function makeSandbox(overrides: {
   connectivity?: SandboxdConnectivity;
   podIP?: string;
   serviceFQDN?: string;
+  authToken?: string;
 }): Sandbox {
   const init: SandboxInit = {
     claimName: "test-claim",
@@ -296,6 +315,7 @@ function makeSandbox(overrides: {
       restPort: overrides.restPort,
       grpcPort: overrides.grpcPort,
       portForwardReadyTimeoutMs: 5000,
+      authToken: overrides.authToken,
     }),
     tracingManager: overrides.tracingManager ?? null,
     traceServiceName: "test",
@@ -655,6 +675,95 @@ describe("Sandbox health() and metadata()", () => {
     await sandbox.closeLocal();
     await expect(sandbox.health()).rejects.toThrow();
     await expect(sandbox.metadata()).rejects.toThrow();
+  });
+});
+
+describe("Sandbox sandboxd authToken", () => {
+  const TOKEN = "tok-sentinel-4d2a";
+
+  async function startAuthBackends(): Promise<void> {
+    restBackend = await startRestBackend(0, `Bearer ${TOKEN}`);
+    grpcBackend = await startGrpcBackend((router) => {
+      router.service(ProcessService, {
+        execute: (_req, ctx) => {
+          if (ctx.requestHeader.get("authorization") !== `Bearer ${TOKEN}`) {
+            throw new ConnectError(
+              "missing or invalid bearer token",
+              Code.Unauthenticated,
+            );
+          }
+          return create(ExecuteResponseSchema, {
+            exitCode: 0,
+            stdout: new TextEncoder().encode("ok\n"),
+            stderr: new Uint8Array(),
+          });
+        },
+      });
+    });
+    api = await startFakeApiServer({
+      18080: restBackend.port,
+      19090: grpcBackend.port,
+    });
+  }
+
+  it("authenticates REST and gRPC calls with the configured token", async () => {
+    await startAuthBackends();
+    sandbox = makeSandbox({
+      apiServerPort: (api as { port: number }).port,
+      restPort: 18080,
+      grpcPort: 19090,
+      authToken: TOKEN,
+    });
+
+    await expect(sandbox.metadata()).resolves.toEqual({
+      env: { SANDBOX_ID: "sb-1" },
+    });
+    expect(new TextDecoder().decode(await sandbox.files.read("a.txt"))).toBe(
+      "file contents",
+    );
+    await expect(sandbox.commands.run("echo", ["ok"])).resolves.toEqual({
+      exitCode: 0,
+      stdout: "ok\n",
+      stderr: "",
+    });
+  });
+
+  it("surfaces a wrong token as unauthenticated, never leaks it, and keeps the connection", async () => {
+    const WRONG = "wrong-sentinel-77b1";
+    await startAuthBackends();
+    const { tracingManager, events } = makeRecordingTracerManager();
+    sandbox = makeSandbox({
+      apiServerPort: (api as { port: number }).port,
+      restPort: 18080,
+      grpcPort: 19090,
+      authToken: WRONG,
+      tracingManager,
+    });
+
+    const restErr = await sandbox.files.read("a.txt").catch((e: unknown) => e);
+    expect(restErr).toMatchObject({ status: 401, code: "UNAUTHENTICATED" });
+    const rpcErr = await sandbox.commands
+      .run("echo", ["ok"])
+      .catch((e: unknown) => e);
+    expect(rpcErr).toBeInstanceOf(SandboxdRpcError);
+    expect(rpcErr).toMatchObject({ code: "unauthenticated" });
+
+    // An auth failure is the caller's problem, not a transport failure: the
+    // generation must not be invalidated and re-dialed.
+    expect(restBackend?.healthHits).toBe(1);
+    expect(api?.connectionsByRequestedPort[19090]).toBe(1);
+
+    expect(events.length).toBeGreaterThan(0);
+    for (const text of [
+      ...events,
+      ...[restErr, rpcErr].flatMap((e) => [
+        (e as Error).message,
+        JSON.stringify(e),
+      ]),
+    ]) {
+      expect(text).not.toContain(WRONG);
+      expect(text).not.toContain(TOKEN);
+    }
   });
 });
 

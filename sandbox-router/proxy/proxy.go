@@ -36,6 +36,7 @@ import (
 	"sigs.k8s.io/agent-sandbox/sandbox-router/authz"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/observability"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/tlsutil"
 )
 
 // Handler implements the request-routing core of the sandbox-router. Each
@@ -74,9 +75,9 @@ type Options struct {
 	// a TokenReview authorizer to enforce per-sandbox auth (KEP-NNNN).
 	Authorizer authz.Authorizer
 	// If UpstreamTLS is set, the handler connects to sandboxes over HTTPS
-	// with this configuration, which tlsutil.BuildUpstreamTLS builds.
+	// with these settings, which tlsutil.BuildUpstreamTLS builds.
 	// Otherwise it connects over plain HTTP.
-	UpstreamTLS *tls.Config
+	UpstreamTLS *tlsutil.UpstreamTLS
 	Logger      logr.Logger
 }
 
@@ -271,11 +272,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	upstreamURL.RawQuery = outboundRawQuery
 	// With upstream TLS the outbound URL's host is the Sandbox's DNS name,
-	// while new connections go to the resolved address, which DialContext
-	// reads from a value stored on the request context (dialAddrKey).
-	// net/http sends that name as the TLS ServerName, and the
-	// configuration from tlsutil.BuildUpstreamTLS verifies the sandbox
-	// certificate against it. Pooled connections are keyed by that name
+	// while new connections go to the resolved address, which the dial
+	// hooks in defaultTransport read from a value stored on the request
+	// context (dialAddrKey). The TLS dial hook sends that name as the TLS
+	// ServerName and verifies the sandbox certificate against it. Pooled
+	// connections are keyed by that name
 	// too, so a connection verified as one sandbox is not reused for a
 	// request routed to another that happens to resolve to the same Pod IP
 	// (a recycled IP, or a caller-supplied X-Sandbox-Pod-IP). Conversely,
@@ -490,23 +491,25 @@ func isUpgradeRequest(r *http.Request) bool {
 // in the worst case Pod-IP traffic leaves the cluster. Defaulting to
 // no proxy makes "router goes direct to the sandbox" the guarantee.
 //
-// If upstreamTLS is set, the transport uses it for TLS connections to
-// sandboxes. With ForceAttemptHTTP2 false, net/http does not negotiate
-// HTTP/2 when a custom TLSClientConfig is set, so the router speaks
-// HTTP/1.1 to sandboxes with or without TLS.
-func defaultTransport(cfg *config.Config, upstreamTLS *tls.Config) *http.Transport {
+// If upstreamTLS is set, connections to sandboxes use TLS, set up by the
+// DialTLSContext hook with a fresh tls.Config per connection (see
+// tlsutil.UpstreamTLS.ClientConfig). With that hook set, the transport
+// ignores TLSClientConfig and TLSHandshakeTimeout, so the hook applies
+// the handshake timeout itself. The hook offers no ALPN protocols, so the
+// router speaks HTTP/1.1 to sandboxes with or without TLS.
+func defaultTransport(cfg *config.Config, upstreamTLS *tlsutil.UpstreamTLS) *http.Transport {
 	dialer := &net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
 	}
-	return &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			if a, ok := ctx.Value(dialAddrKey{}).(string); ok {
-				addr = a
-			}
-			return dialer.DialContext(ctx, network, addr)
-		},
-		TLSClientConfig:       upstreamTLS,
+	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if a, ok := ctx.Value(dialAddrKey{}).(string); ok {
+			addr = a
+		}
+		return dialer.DialContext(ctx, network, addr)
+	}
+	t := &http.Transport{
+		DialContext:           dial,
 		ForceAttemptHTTP2:     false,
 		MaxIdleConns:          200,
 		MaxIdleConnsPerHost:   16,
@@ -515,6 +518,35 @@ func defaultTransport(cfg *config.Config, upstreamTLS *tls.Config) *http.Transpo
 		ExpectContinueTimeout: 1 * time.Second,
 		ResponseHeaderTimeout: cfg.ResponseHeaderTimeout,
 	}
+	if upstreamTLS != nil {
+		t.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			// addr is the outbound URL's host and port. The host is the
+			// name the sandbox certificate must be valid for.
+			serverName, _, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			raw, err := dial(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			conn := tls.Client(raw, upstreamTLS.ClientConfig(serverName))
+			handshakeCtx, cancel := context.WithTimeout(ctx, t.TLSHandshakeTimeout)
+			defer cancel()
+			if err := conn.HandshakeContext(handshakeCtx); err != nil {
+				_ = raw.Close()
+				// Name the cause the way net/http's own handshake does.
+				// The wrapped error still matches
+				// context.DeadlineExceeded for classifyError.
+				if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+					return nil, fmt.Errorf("TLS handshake timeout: %w", err)
+				}
+				return nil, err
+			}
+			return conn, nil
+		}
+	}
+	return t
 }
 
 // dialAddrKey is the request-context key for the address to dial when

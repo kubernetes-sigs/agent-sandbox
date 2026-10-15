@@ -164,7 +164,7 @@ func run(cfg *config.Config, log logr.Logger) error {
 	}
 
 	// --- Upstream TLS to sandboxes ------------------------------------------
-	var upstreamTLS *tls.Config
+	var upstreamTLS *tlsutil.UpstreamTLS
 	if cfg.UpstreamTLSMode == config.UpstreamTLSOn {
 		var clientCert *tlsutil.CertReloader
 		if cfg.UpstreamTLSCertFile != "" {

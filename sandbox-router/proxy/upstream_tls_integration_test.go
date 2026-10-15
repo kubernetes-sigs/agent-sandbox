@@ -23,13 +23,17 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
+	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -380,5 +384,60 @@ func TestIntegration_UpstreamTLSReloadsCA(t *testing.T) {
 			t.Fatalf("status = %d, want 200 after rotation", got)
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestUpstreamTLSHandshakeTimeout checks the TLS dial hook against a
+// sandbox that accepts the TCP connection but never answers the handshake.
+func TestUpstreamTLSHandshakeTimeout(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		if c, err := ln.Accept(); err == nil {
+			accepted <- c
+		}
+	}()
+
+	cfg := config.Defaults()
+	tr := defaultTransport(&cfg, tlsutil.BuildUpstreamTLS(nil, nil))
+	// The hook reads the timeout from the transport on each dial.
+	tr.TLSHandshakeTimeout = 100 * time.Millisecond
+
+	ctx := context.WithValue(t.Context(), dialAddrKey{}, ln.Addr().String())
+	start := time.Now()
+	_, err = tr.DialTLSContext(ctx, "tcp", "sb-a.test.svc.cluster.local:443")
+	if err == nil {
+		t.Fatalf("handshake with a silent server succeeded")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("dial took %s; the handshake timeout did not apply", elapsed)
+	}
+	if !strings.Contains(err.Error(), "TLS handshake timeout") || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want a TLS handshake timeout", err)
+	}
+	if got := classifyError(err); got != "timeout" {
+		t.Fatalf("classifyError = %q, want timeout", got)
+	}
+	if isRetriableDialError(err) {
+		t.Fatalf("handshake timeout is retried as a dial error")
+	}
+
+	// The router closed its end of the connection.
+	var c net.Conn
+	select {
+	case c = <-accepted:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("listener never accepted the connection")
+	}
+	defer c.Close()
+	if err := c.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	if _, err := io.Copy(io.Discard, c); err != nil {
+		t.Fatalf("connection still open after the timeout: %v", err)
 	}
 }

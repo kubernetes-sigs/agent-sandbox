@@ -106,6 +106,60 @@ func TestBuildServerTLS_InvalidMode(t *testing.T) {
 	}
 }
 
+func TestUpstreamTLSClientConfig(t *testing.T) {
+	caPath := writeCABundle(t, genSelfSignedCert(t, "ca").CertPEM)
+	ca, err := NewCAReloader(caPath, logr.Discard())
+	if err != nil {
+		t.Fatalf("NewCAReloader: %v", err)
+	}
+	u := BuildUpstreamTLS(ca, newReloaderForTest(t))
+
+	a := u.ClientConfig("sb-a.test.svc.cluster.local")
+	b := u.ClientConfig("sb-b.test.svc.cluster.local")
+	if a == b {
+		t.Fatalf("connections share one tls.Config")
+	}
+	if a.ServerName != "sb-a.test.svc.cluster.local" || b.ServerName != "sb-b.test.svc.cluster.local" {
+		t.Fatalf("ServerName = %q, %q", a.ServerName, b.ServerName)
+	}
+	if a.MinVersion != tls.VersionTLS12 || a.CipherSuites != nil {
+		t.Fatalf("MinVersion = %#x, CipherSuites = %v; want TLS 1.2 and Go defaults", a.MinVersion, a.CipherSuites)
+	}
+	if a.RootCAs != ca.Pool() {
+		t.Fatalf("RootCAs is not the CA bundle")
+	}
+	if a.GetClientCertificate == nil {
+		t.Fatalf("no client certificate")
+	}
+	// crypto/tls must do all of the verification, so FIPS 140-3 mode
+	// applies its checks too.
+	if a.InsecureSkipVerify || a.VerifyConnection != nil || a.VerifyPeerCertificate != nil {
+		t.Fatalf("verification is replaced or skipped")
+	}
+
+	// A connection opened after the bundle is reloaded uses the new bundle.
+	before := ca.Pool()
+	if err := os.WriteFile(caPath, genSelfSignedCert(t, "ca2").CertPEM, 0o600); err != nil {
+		t.Fatalf("write ca: %v", err)
+	}
+	if err := ca.reload(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got := u.ClientConfig("sb-a.test.svc.cluster.local").RootCAs; got == before || got != ca.Pool() {
+		t.Fatalf("RootCAs did not follow the reload")
+	}
+}
+
+func TestUpstreamTLSClientConfigSystemRoots(t *testing.T) {
+	c := BuildUpstreamTLS(nil, nil).ClientConfig("sb-a.test.svc.cluster.local")
+	if c.RootCAs != nil {
+		t.Fatalf("RootCAs set; want nil for the system roots")
+	}
+	if c.GetClientCertificate != nil {
+		t.Fatalf("client certificate set without one configured")
+	}
+}
+
 func TestLoadCAPool(t *testing.T) {
 	t.Run("valid cert", func(t *testing.T) {
 		c := genSelfSignedCert(t, "ca")

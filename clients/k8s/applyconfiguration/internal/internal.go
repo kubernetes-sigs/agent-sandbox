@@ -2454,6 +2454,12 @@ var schemaYAML = typed.YAMLObject(`types:
       type:
         namedType: PersistentVolumeClaimSpec.v1.core.api.k8s.io
       default: {}
+- name: io.k8s.sigs.agent-sandbox.api.v1beta1.PodFailurePolicy
+  map:
+    fields:
+    - name: action
+      type:
+        scalar: string
 - name: io.k8s.sigs.agent-sandbox.api.v1beta1.PodMetadata
   map:
     fields:
@@ -2505,6 +2511,9 @@ var schemaYAML = typed.YAMLObject(`types:
     - name: operatingMode
       type:
         scalar: string
+    - name: podFailurePolicy
+      type:
+        namedType: io.k8s.sigs.agent-sandbox.api.v1beta1.PodFailurePolicy
     - name: podTemplate
       type:
         namedType: io.k8s.sigs.agent-sandbox.api.v1beta1.PodTemplate

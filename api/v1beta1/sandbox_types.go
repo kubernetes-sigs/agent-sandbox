@@ -247,6 +247,27 @@ const (
 	SandboxOperatingModeSuspended SandboxOperatingMode = "Suspended"
 )
 
+// PodFailurePolicyAction controls behavior when the backing Pod reaches phase Failed.
+// +kubebuilder:validation:Enum=Ignore;Recreate
+type PodFailurePolicyAction string
+
+const (
+	// PodFailurePolicyActionIgnore leaves a Failed Pod in place and surfaces Finished=True
+	// (StatefulSet-like). This is the default.
+	PodFailurePolicyActionIgnore PodFailurePolicyAction = "Ignore"
+	// PodFailurePolicyActionRecreate deletes the controller-owned Failed Pod so a new one
+	// is created. The Sandbox identity and any Sandbox-owned PVCs are retained.
+	PodFailurePolicyActionRecreate PodFailurePolicyAction = "Recreate"
+)
+
+// PodFailurePolicy describes how the Sandbox handles a Failed backing Pod.
+type PodFailurePolicy struct {
+	// action determines whether the Failed Pod is left in place or replaced.
+	// +kubebuilder:default=Ignore
+	// +optional
+	Action PodFailurePolicyAction `json:"action,omitempty"`
+}
+
 // NOTE: When adding, removing, or renaming a field in SandboxBlueprint,
 // also update compareSandboxBlueprint() in extensions/controllers/sandboxwarmpool_controller.go
 // so the SandboxWarmPool staleness check accounts for it. A field left out of that comparison
@@ -278,6 +299,20 @@ type SandboxBlueprint struct {
 	//nolint:kubeapilinter // Enum not used to avoid duplicating the Service API; field is not expected to extend (issue #746).
 	// +optional
 	Service *bool `json:"service,omitempty"`
+
+	// podFailurePolicy controls what happens when the backing Pod enters phase Failed.
+	// Ignore (default): leave the Failed pod and surface Finished=True (StatefulSet-like).
+	// Recreate: delete the controller-owned Failed pod so a new one is created;
+	// the Sandbox identity and any Sandbox-owned PVCs are retained.
+	// Combined with restartPolicy Never and a container that always exits non-zero,
+	// Recreate can recreate the Pod repeatedly; the controller applies Deployment-style
+	// in-memory exponential backoff (5s, doubling up to 5m) between creates so a crash
+	// loop cannot hot-loop the API server. Backoff resets after the replacement Pod has
+	// been continuously observed Running for 10 minutes. Backoff state is not persisted
+	// in status.
+	// +kubebuilder:default={action: Ignore}
+	// +optional
+	PodFailurePolicy *PodFailurePolicy `json:"podFailurePolicy,omitempty"`
 }
 
 // SandboxSpec defines the desired state of Sandbox.

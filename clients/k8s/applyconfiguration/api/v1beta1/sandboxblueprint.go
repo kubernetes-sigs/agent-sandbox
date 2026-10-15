@@ -42,6 +42,17 @@ type SandboxBlueprintApplyConfiguration struct {
 	// compatibility but does not create new ones. Set to true to enable or false
 	// to explicitly disable and remove the Service.
 	Service *bool `json:"service,omitempty"`
+	// podFailurePolicy controls what happens when the backing Pod enters phase Failed.
+	// Ignore (default): leave the Failed pod and surface Finished=True (StatefulSet-like).
+	// Recreate: delete the controller-owned Failed pod so a new one is created;
+	// the Sandbox identity and any Sandbox-owned PVCs are retained.
+	// Combined with restartPolicy Never and a container that always exits non-zero,
+	// Recreate can recreate the Pod repeatedly; the controller applies Deployment-style
+	// in-memory exponential backoff (5s, doubling up to 5m) between creates so a crash
+	// loop cannot hot-loop the API server. Backoff resets after the replacement Pod has
+	// been continuously observed Running for 10 minutes. Backoff state is not persisted
+	// in status.
+	PodFailurePolicy *PodFailurePolicyApplyConfiguration `json:"podFailurePolicy,omitempty"`
 }
 
 // SandboxBlueprintApplyConfiguration constructs a declarative configuration of the SandboxBlueprint type for use with
@@ -76,5 +87,13 @@ func (b *SandboxBlueprintApplyConfiguration) WithVolumeClaimTemplates(values ...
 // If called multiple times, the Service field is set to the value of the last call.
 func (b *SandboxBlueprintApplyConfiguration) WithService(value bool) *SandboxBlueprintApplyConfiguration {
 	b.Service = &value
+	return b
+}
+
+// WithPodFailurePolicy sets the PodFailurePolicy field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the PodFailurePolicy field is set to the value of the last call.
+func (b *SandboxBlueprintApplyConfiguration) WithPodFailurePolicy(value *PodFailurePolicyApplyConfiguration) *SandboxBlueprintApplyConfiguration {
+	b.PodFailurePolicy = value
 	return b
 }

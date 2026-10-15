@@ -33,6 +33,7 @@ EXT_APPLYCONFIG_EXTERNALS="sigs.k8s.io/agent-sandbox/api/v1beta1.SandboxBlueprin
 EXT_APPLYCONFIG_EXTERNALS+=",sigs.k8s.io/agent-sandbox/api/v1beta1.PodMetadata:${APPLYCONFIG_PKG}/api/v1beta1"
 EXT_APPLYCONFIG_EXTERNALS+=",sigs.k8s.io/agent-sandbox/api/v1beta1.PodTemplate:${APPLYCONFIG_PKG}/api/v1beta1"
 EXT_APPLYCONFIG_EXTERNALS+=",sigs.k8s.io/agent-sandbox/api/v1beta1.PersistentVolumeClaimTemplate:${APPLYCONFIG_PKG}/api/v1beta1"
+EXT_APPLYCONFIG_EXTERNALS+=",sigs.k8s.io/agent-sandbox/api/v1beta1.PodFailurePolicy:${APPLYCONFIG_PKG}/api/v1beta1"
 OPENAPI_WORK_DIR=""
 
 cleanup_openapi_work() {

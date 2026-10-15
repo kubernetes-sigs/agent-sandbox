@@ -90,6 +90,23 @@ replacements:
     replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/options.go)'
     description: "Go client options.go to GitHub"
 
+  # TypeScript client links
+  - pattern: '\]\(\.\./\.\./go/README\.md\)'
+    replacement: '](/docs/go-client/)'
+    description: "TypeScript client link to Go client docs page"
+
+  - pattern: '\]\(\.\./\.\./python/agentic-sandbox-client/README\.md\)'
+    replacement: '](/docs/python-client/)'
+    description: "TypeScript client link to Python client docs page"
+
+  - pattern: '\]\(package\.json\)'
+    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/typescript/agentic-sandbox-client/package.json)'
+    description: "TypeScript client package.json to GitHub"
+
+  - pattern: '\]\(src/index\.ts\)'
+    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/typescript/agentic-sandbox-client/src/index.ts)'
+    description: "TypeScript client src/index.ts to GitHub"
+
   # Generic relative README.md links (must come after specific rules)
 
   - pattern: '\]\(README\.md(#[^)]+)?\)'

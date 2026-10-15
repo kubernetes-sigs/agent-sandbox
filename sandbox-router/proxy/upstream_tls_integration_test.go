@@ -217,13 +217,17 @@ func newUpstreamTLSRouter(t *testing.T, ca *testCA, opts upstreamRouterOpts) *ht
 			t.Fatalf("client cert reloader: %v", err)
 		}
 	}
+	upstreamTLS, err := tlsutil.BuildUpstreamTLS(&cfg, caReloader, clientCert)
+	if err != nil {
+		t.Fatalf("build upstream TLS: %v", err)
+	}
 	router := httptest.NewServer(NewHandler(Options{
 		Config: &cfg,
 		Logger: logr.Discard(),
 		// cmd/main.go always sets Metrics, which wraps the upstream
 		// transport, so the tests do too.
 		Metrics:     observability.NewMetrics(prometheus.NewRegistry()),
-		UpstreamTLS: tlsutil.BuildUpstreamTLS(caReloader, clientCert),
+		UpstreamTLS: upstreamTLS,
 	}))
 	t.Cleanup(router.Close)
 	return router
@@ -403,7 +407,11 @@ func TestUpstreamTLSHandshakeTimeout(t *testing.T) {
 	}()
 
 	cfg := config.Defaults()
-	tr := defaultTransport(&cfg, tlsutil.BuildUpstreamTLS(nil, nil))
+	upstreamTLS, err := tlsutil.BuildUpstreamTLS(&cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("build upstream TLS: %v", err)
+	}
+	tr := defaultTransport(&cfg, upstreamTLS)
 	// The hook reads the timeout from the transport on each dial.
 	tr.TLSHandshakeTimeout = 100 * time.Millisecond
 

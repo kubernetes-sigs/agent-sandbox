@@ -153,6 +153,15 @@ type Config struct {
 	// UpstreamTLSKeyFile is the path to the PEM-encoded private key for
 	// UpstreamTLSCertFile. Must be set together with it.
 	UpstreamTLSKeyFile string
+	// UpstreamTLSMinVersion is the minimum TLS version for upstream
+	// connections. Accepted values: VersionTLS10, VersionTLS11,
+	// VersionTLS12, VersionTLS13. Empty defaults to VersionTLS12. Setting it
+	// requires UpstreamTLSMode to be UpstreamTLSOn.
+	UpstreamTLSMinVersion string
+	// UpstreamTLSCipherSuites is an optional list of cipher suites for
+	// upstream connections, using Go cipher-suite names. Empty uses Go
+	// defaults. Setting it requires UpstreamTLSMode to be UpstreamTLSOn.
+	UpstreamTLSCipherSuites []string
 
 	// ClusterDomain is the Kubernetes cluster DNS suffix used to build target
 	// service FQDNs (e.g. "cluster.local"). Honors CLUSTER_DOMAIN.
@@ -446,6 +455,19 @@ func (c *Config) Validate() error {
 		}
 		if c.UpstreamTLSClusterDomain != "" {
 			return errors.New("--upstream-tls-cluster-domain requires --upstream-tls-mode=on")
+		}
+		if c.UpstreamTLSMinVersion != "" {
+			return errors.New("--upstream-tls-min-version requires --upstream-tls-mode=on")
+		}
+		if len(c.UpstreamTLSCipherSuites) > 0 {
+			return errors.New("--upstream-tls-cipher-suites requires --upstream-tls-mode=on")
+		}
+	}
+	if c.UpstreamTLSMinVersion != "" {
+		switch c.UpstreamTLSMinVersion {
+		case "VersionTLS10", "VersionTLS11", "VersionTLS12", "VersionTLS13":
+		default:
+			return fmt.Errorf("invalid --upstream-tls-min-version %q; must be one of: VersionTLS10, VersionTLS11, VersionTLS12, VersionTLS13", c.UpstreamTLSMinVersion)
 		}
 	}
 

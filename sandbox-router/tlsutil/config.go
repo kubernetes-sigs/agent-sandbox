@@ -38,31 +38,16 @@ func BuildServerTLS(cfg *config.Config, reloader *CertReloader) (*tls.Config, er
 		return nil, errors.New("reloader must not be nil")
 	}
 
-	minVersion := uint16(tls.VersionTLS12)
-	if cfg.TLSMinVersion != "" {
-		v, err := inttls.ParseTLSVersion(cfg.TLSMinVersion)
-		if err != nil {
-			return nil, fmt.Errorf("parse TLS min version: %w", err)
-		}
-		minVersion = v
+	minVersion, cipherSuites, err := parseVersionAndCipherSuites(cfg.TLSMinVersion, cfg.TLSCipherSuites)
+	if err != nil {
+		return nil, err
 	}
 
 	tc := &tls.Config{
 		MinVersion:     minVersion,
+		CipherSuites:   cipherSuites,
 		GetCertificate: reloader.GetCertificate,
 		NextProtos:     []string{"h2", "http/1.1"},
-	}
-
-	// Always parse so a typo fails at startup even when TLS 1.3 would
-	// ignore CipherSuites (Go does not let callers configure TLS 1.3 suites).
-	if len(cfg.TLSCipherSuites) > 0 {
-		ids, err := inttls.ParseCipherSuites(cfg.TLSCipherSuites)
-		if err != nil {
-			return nil, fmt.Errorf("parse TLS cipher suites: %w", err)
-		}
-		if minVersion < tls.VersionTLS13 {
-			tc.CipherSuites = ids
-		}
 	}
 
 	switch cfg.MTLSMode {
@@ -130,16 +115,21 @@ type UpstreamTLS struct {
 	ca   *CAReloader
 }
 
-// BuildUpstreamTLS returns the TLS settings for connections to sandboxes.
-// Sandbox certificates are verified against ca's current bundle, or the
-// system roots when ca is nil. clientCert supplies the router's client
-// certificate and may be nil, in which case none is presented.
-func BuildUpstreamTLS(ca *CAReloader, clientCert *CertReloader) *UpstreamTLS {
-	base := &tls.Config{MinVersion: tls.VersionTLS12}
+// BuildUpstreamTLS returns the TLS settings for connections to sandboxes,
+// with the minimum version and cipher suites from cfg. Sandbox certificates
+// are verified against ca's current bundle, or the system roots when ca is
+// nil. clientCert supplies the router's client certificate and may be nil,
+// in which case none is presented.
+func BuildUpstreamTLS(cfg *config.Config, ca *CAReloader, clientCert *CertReloader) (*UpstreamTLS, error) {
+	minVersion, cipherSuites, err := parseVersionAndCipherSuites(cfg.UpstreamTLSMinVersion, cfg.UpstreamTLSCipherSuites)
+	if err != nil {
+		return nil, err
+	}
+	base := &tls.Config{MinVersion: minVersion, CipherSuites: cipherSuites}
 	if clientCert != nil {
 		base.GetClientCertificate = clientCert.GetClientCertificate
 	}
-	return &UpstreamTLS{base: base, ca: ca}
+	return &UpstreamTLS{base: base, ca: ca}, nil
 }
 
 // ClientConfig returns the configuration for a new connection to a sandbox
@@ -156,6 +146,33 @@ func (u *UpstreamTLS) ClientConfig(serverName string) *tls.Config {
 		tc.RootCAs = u.ca.Pool()
 	}
 	return tc
+}
+
+// parseVersionAndCipherSuites parses a minimum TLS version and cipher-suite
+// names as given on the command line. An empty version means TLS 1.2. The
+// cipher suites are parsed even when they will not be used, so a typo fails
+// at startup, but they are returned only for a minimum version below TLS
+// 1.3, because Go does not let callers configure TLS 1.3 suites.
+func parseVersionAndCipherSuites(version string, names []string) (uint16, []uint16, error) {
+	minVersion := uint16(tls.VersionTLS12)
+	if version != "" {
+		v, err := inttls.ParseTLSVersion(version)
+		if err != nil {
+			return 0, nil, fmt.Errorf("parse TLS min version: %w", err)
+		}
+		minVersion = v
+	}
+	if len(names) == 0 {
+		return minVersion, nil, nil
+	}
+	ids, err := inttls.ParseCipherSuites(names)
+	if err != nil {
+		return 0, nil, fmt.Errorf("parse TLS cipher suites: %w", err)
+	}
+	if minVersion >= tls.VersionTLS13 {
+		return minVersion, nil, nil
+	}
+	return minVersion, ids, nil
 }
 
 // LoadCAPool reads a PEM-encoded CA bundle from path and returns a new pool

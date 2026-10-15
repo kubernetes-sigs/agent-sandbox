@@ -189,7 +189,11 @@ func run(cfg *config.Config, log logr.Logger) error {
 				return fmt.Errorf("upstream CA watcher: %w", err)
 			}
 		}
-		upstreamTLS = tlsutil.BuildUpstreamTLS(ca, clientCert)
+		var err error
+		upstreamTLS, err = tlsutil.BuildUpstreamTLS(cfg, ca, clientCert)
+		if err != nil {
+			return fmt.Errorf("build upstream TLS config: %w", err)
+		}
 	}
 
 	// --- Kubernetes client (shared by cache + tokenreview) ----------------

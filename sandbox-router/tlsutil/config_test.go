@@ -18,6 +18,7 @@ import (
 	"crypto/tls"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -112,7 +113,10 @@ func TestUpstreamTLSClientConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCAReloader: %v", err)
 	}
-	u := BuildUpstreamTLS(ca, newReloaderForTest(t))
+	u, err := BuildUpstreamTLS(&config.Config{}, ca, newReloaderForTest(t))
+	if err != nil {
+		t.Fatalf("BuildUpstreamTLS: %v", err)
+	}
 
 	a := u.ClientConfig("sb-a.test.svc.cluster.local")
 	b := u.ClientConfig("sb-b.test.svc.cluster.local")
@@ -151,12 +155,75 @@ func TestUpstreamTLSClientConfig(t *testing.T) {
 }
 
 func TestUpstreamTLSClientConfigSystemRoots(t *testing.T) {
-	c := BuildUpstreamTLS(nil, nil).ClientConfig("sb-a.test.svc.cluster.local")
+	u, err := BuildUpstreamTLS(&config.Config{}, nil, nil)
+	if err != nil {
+		t.Fatalf("BuildUpstreamTLS: %v", err)
+	}
+	c := u.ClientConfig("sb-a.test.svc.cluster.local")
 	if c.RootCAs != nil {
 		t.Fatalf("RootCAs set; want nil for the system roots")
 	}
 	if c.GetClientCertificate != nil {
 		t.Fatalf("client certificate set without one configured")
+	}
+}
+
+func TestBuildUpstreamTLSVersionAndCipherSuites(t *testing.T) {
+	const suite = "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
+	cases := []struct {
+		name        string
+		minVersion  string
+		suites      []string
+		wantVersion uint16
+		wantSuites  []uint16
+		wantErr     string
+	}{
+		{
+			name:        "TLS 1.2 with cipher suites",
+			minVersion:  "VersionTLS12",
+			suites:      []string{suite},
+			wantVersion: tls.VersionTLS12,
+			wantSuites:  []uint16{tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256},
+		},
+		{
+			name:        "TLS 1.3 drops cipher suites",
+			minVersion:  "VersionTLS13",
+			suites:      []string{suite},
+			wantVersion: tls.VersionTLS13,
+		},
+		{
+			name:       "invalid version",
+			minVersion: "TLS1.3",
+			wantErr:    "parse TLS min version",
+		},
+		{
+			name:       "unknown cipher suite with TLS 1.3",
+			minVersion: "VersionTLS13",
+			suites:     []string{"TLS_NOT_A_SUITE"},
+			wantErr:    "parse TLS cipher suites",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{UpstreamTLSMinVersion: tc.minVersion, UpstreamTLSCipherSuites: tc.suites}
+			u, err := BuildUpstreamTLS(cfg, nil, nil)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("BuildUpstreamTLS: %v", err)
+			}
+			c := u.ClientConfig("sb-a.test.svc.cluster.local")
+			if c.MinVersion != tc.wantVersion {
+				t.Fatalf("MinVersion = %#x, want %#x", c.MinVersion, tc.wantVersion)
+			}
+			if !slices.Equal(c.CipherSuites, tc.wantSuites) {
+				t.Fatalf("CipherSuites = %v, want %v", c.CipherSuites, tc.wantSuites)
+			}
+		})
 	}
 }
 

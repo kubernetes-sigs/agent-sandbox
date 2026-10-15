@@ -138,6 +138,8 @@ Run `sandbox-router --help` for the full list. The most relevant:
 | `--upstream-tls-ca-file` | — | CA bundle for verifying sandbox serving certs. Hot-reloaded on change. Empty uses the system roots. Requires `--upstream-tls-mode=on`. |
 | `--upstream-tls-cluster-domain` | `""` (`--cluster-domain`) | Domain in the DNS name that sandbox certs are verified against. Set it when sandbox certificates use a domain other than the cluster's DNS domain. Requires `--upstream-tls-mode=on`. |
 | `--upstream-tls-cert-file` / `--upstream-tls-key-file` | — | Client cert and key presented to sandboxes that request one; both flags may name the same file if it contains the key and the certificate. Hot-reloaded like the server cert. Set together; require `--upstream-tls-mode=on`. |
+| `--upstream-tls-min-version` | `""` (TLS 1.2) | Minimum TLS version for connections to sandboxes: `VersionTLS10`, `VersionTLS11`, `VersionTLS12`, `VersionTLS13`. Requires `--upstream-tls-mode=on`. |
+| `--upstream-tls-cipher-suites` | `""` (Go defaults) | Comma-separated Go cipher-suite names for connections to sandboxes. Ignored when the upstream min version is TLS 1.3. Requires `--upstream-tls-mode=on`. |
 | `--cluster-domain` | `cluster.local` | Honors `CLUSTER_DOMAIN` env var (Python parity). |
 | `--proxy-timeout` | `180s` | Per-request upstream timeout. Honors `PROXY_TIMEOUT_SECONDS` (numeric seconds). |
 | `--upstream-max-retries` | `3` | Dial retries. `0` disables. |

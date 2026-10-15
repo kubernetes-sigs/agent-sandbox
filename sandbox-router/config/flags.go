@@ -112,6 +112,14 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 	fs.StringVar(&c.UpstreamTLSKeyFile, "upstream-tls-key-file", c.UpstreamTLSKeyFile,
 		"Path to the PEM-encoded private key for --upstream-tls-cert-file. "+
 			"Must be set together with --upstream-tls-cert-file.")
+	fs.StringVar(&c.UpstreamTLSMinVersion, "upstream-tls-min-version", c.UpstreamTLSMinVersion,
+		"Minimum TLS version for connections to sandboxes. "+
+			"Accepted values: VersionTLS10, VersionTLS11, VersionTLS12, VersionTLS13. "+
+			"Default: VersionTLS12 (applied when empty). Requires --upstream-tls-mode=on.")
+	stringSliceVar(fs, &c.UpstreamTLSCipherSuites, "upstream-tls-cipher-suites",
+		"Comma-separated cipher suites for connections to sandboxes, using Go "+
+			"cipher-suite names (e.g. TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256). "+
+			"Default: Go defaults. Requires --upstream-tls-mode=on.")
 
 	fs.StringVar(&c.ClusterDomain, "cluster-domain", c.ClusterDomain,
 		"Kubernetes cluster DNS suffix used to build sandbox FQDNs. "+

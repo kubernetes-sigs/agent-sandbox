@@ -212,6 +212,7 @@ describe("SandboxClient (registry)", () => {
               maxUploadSize: 1024,
               maxMetadataResponseSize: 1024,
               maxCommandOutputSize: 1024,
+              authToken: "abc.DEF-123_~+/=",
             },
           }),
       ).not.toThrow();
@@ -245,6 +246,28 @@ describe("SandboxClient (registry)", () => {
       expect(() => new SandboxClient({ sandboxd: { [key]: value } })).toThrow(
         SandboxError,
       );
+    });
+
+    it.each([
+      "",
+      "has space",
+      "tab\there",
+      "new\nline",
+      "t\u00f6ken",
+      42 as unknown as string,
+    ])("throws SandboxError for sandboxd.authToken = %p without echoing it", (authToken) => {
+      const err = (() => {
+        try {
+          new SandboxClient({ sandboxd: { authToken } });
+        } catch (e) {
+          return e;
+        }
+      })();
+      expect(err).toBeInstanceOf(SandboxError);
+      expect((err as SandboxError).message).toMatch(/sandboxd\.authToken/);
+      if (typeof authToken === "string" && authToken !== "") {
+        expect((err as SandboxError).message).not.toContain(authToken);
+      }
     });
   });
 

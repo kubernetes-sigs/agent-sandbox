@@ -13,6 +13,8 @@
 // limitations under the License.
 
 import * as http2 from "node:http2";
+// Type-only: erased at runtime, so the optional dependency stays lazy.
+import type { Interceptor } from "@connectrpc/connect";
 import { ERROR_DETAIL_MAX_BYTES } from "./constants.js";
 import {
   SandboxClosedError,
@@ -38,6 +40,8 @@ export interface ProcessClientOptions {
   /** e.g. "http://127.0.0.1:54322", generation-scoped, never re-resolved. */
   grpcBaseUrl: string;
   maxCommandOutputSize: number;
+  /** `Authorization` header value sent on every RPC, when set. */
+  authorization?: string;
 }
 
 /**
@@ -210,6 +214,13 @@ function createSessionManager(
   return new ClosedStreamSessionManager(baseUrl);
 }
 
+function authInterceptor(authorization: string): Interceptor {
+  return (next) => (req) => {
+    req.header.set("Authorization", authorization);
+    return next(req);
+  };
+}
+
 type UnaryCallOptions = { timeoutMs: number; signal: AbortSignal };
 
 /** The wire shape of one StartResponse, as far as this module reads it. */
@@ -273,6 +284,10 @@ export class ProcessClient {
           baseUrl: this.opts.grpcBaseUrl,
           sessionManager,
           readMaxBytes: this.opts.maxCommandOutputSize,
+          // One interceptor covers unary and streaming calls alike.
+          interceptors: this.opts.authorization
+            ? [authInterceptor(this.opts.authorization)]
+            : [],
         });
         if (this.closed) {
           sessionManager.abort();

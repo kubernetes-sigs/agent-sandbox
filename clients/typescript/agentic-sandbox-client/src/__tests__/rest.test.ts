@@ -71,6 +71,7 @@ function makeClient(
     maxDownloadSize: number;
     maxUploadSize: number;
     maxMetadataResponseSize: number;
+    authorization: string;
   }> = {},
 ): SandboxdRestClient {
   return new SandboxdRestClient({
@@ -78,6 +79,7 @@ function makeClient(
     maxDownloadSize: overrides.maxDownloadSize ?? 1024 * 1024,
     maxUploadSize: overrides.maxUploadSize ?? 1024 * 1024,
     maxMetadataResponseSize: overrides.maxMetadataResponseSize ?? 1024 * 1024,
+    authorization: overrides.authorization,
   });
 }
 
@@ -407,6 +409,78 @@ async function drain(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
   }
   return out;
 }
+
+describe("SandboxdRestClient authorization", () => {
+  it("sends the Authorization header on every request, alongside its own headers", async () => {
+    activeServer = await startServer((req, res) => {
+      if (req.method === "PUT") {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok", uptime_seconds: 1 }));
+    });
+    const client = makeClient(activeServer.baseUrl, {
+      authorization: "Bearer tok-1",
+    });
+    const signal = new AbortController().signal;
+    await client.health(signal);
+    await client.write("a.txt", new Uint8Array([1]), {}, signal);
+
+    expect(activeServer.requests).toHaveLength(2);
+    for (const req of activeServer.requests) {
+      expect(req.headers.authorization).toBe("Bearer tok-1");
+    }
+    expect(activeServer.requests[1].headers["content-type"]).toBe(
+      "application/octet-stream",
+    );
+  });
+
+  it("sends no Authorization header when none is configured", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok", uptime_seconds: 1 }));
+    });
+    await makeClient(activeServer.baseUrl).health(new AbortController().signal);
+    expect(activeServer.requests[0].headers.authorization).toBeUndefined();
+  });
+
+  it("maps a 401 to SandboxdApiError with code UNAUTHENTICATED, with or without a body code", async () => {
+    activeServer = await startServer((req, res) => {
+      if (req.url?.startsWith("/v1/files/bare")) {
+        res.writeHead(401);
+        res.end();
+        return;
+      }
+      res.writeHead(401, {
+        "Content-Type": "application/json",
+        "WWW-Authenticate": 'Bearer realm="sandboxd"',
+      });
+      res.end(
+        JSON.stringify({
+          code: "UNAUTHENTICATED",
+          message: "missing or invalid bearer token",
+        }),
+      );
+    });
+    const client = makeClient(activeServer.baseUrl, {
+      authorization: "Bearer wrong-token",
+    });
+    for (const path of ["a.txt", "bare.txt"]) {
+      const err = await client
+        .read(path, new AbortController().signal)
+        .catch((e: unknown) => e);
+      expect(err).toMatchObject({
+        status: 401,
+        code: "UNAUTHENTICATED",
+      } satisfies Partial<SandboxdApiError>);
+      // The token is only ever sent, never reflected back in an error.
+      expect(JSON.stringify(err)).not.toContain("wrong-token");
+      expect((err as Error).message).not.toContain("wrong-token");
+    }
+  });
+});
 
 describe("SandboxdRestClient.readStream", () => {
   it("streams chunks that concatenate to the exact original content", async () => {

@@ -211,6 +211,20 @@ The in-cluster modes take the apiserver off the data path. Each uses exactly one
 
 The addresses are available on the handle as `sandbox.podIP` and `sandbox.serviceFQDN`. They are `""` when unknown.
 
+### Authentication
+
+If sandboxd runs with `--auth-token-sha256` or `--auth-token-file`, pass the token as `sandboxd.authToken`:
+
+```ts
+const client = new SandboxClient({
+  sandboxd: { authToken: process.env.SANDBOXD_TOKEN },
+});
+```
+
+The SDK sends it as `Authorization: Bearer <token>` on every REST request and gRPC call, and never logs it or puts it in a trace or error. It must be non-empty printable ASCII with no spaces. A missing or wrong token fails the call with `SandboxdApiError` (`code: "UNAUTHENTICATED"`) for files, health and metadata, and `SandboxdRpcError` (`code: "unauthenticated"`) for commands. `GET /v1/health` needs no token, so the connect health check passes even with a wrong one and the first real call reports it.
+
+The token is not encrypted on the wire. See [Trust boundary](#trust-boundary).
+
 ### Streaming
 
 `sandbox.files.readStream()` / `writeStream()` transfer a file without buffering the whole payload in memory, unlike `read()`/`write()`:
@@ -335,9 +349,9 @@ The atomicity guarantee — the target path never briefly shows partial content 
 
 ### Trust boundary
 
-With `port-forward` connectivity, the local TCP listeners the SDK opens for its port-forward tunnel (`127.0.0.1`, random ports) have no authentication of their own. Any other process in the same network namespace can reach the sandbox's files/run API through them for as long as the connection is open. Treat other local processes as trusted, the same way you would for any other unauthenticated `localhost` service.
+With `port-forward` connectivity, the local TCP listeners the SDK opens for its port-forward tunnel (`127.0.0.1`, random ports) have no authentication of their own. Unless sandboxd requires a token, any other process in the same network namespace can reach the sandbox's files/run API through them for as long as the connection is open. Treat other local processes as trusted, the same way you would for any other unauthenticated `localhost` service.
 
-With the in-cluster modes, REST and gRPC travel in plaintext across the pod network, with no authentication. Anything that can reach the sandbox pod on those ports can use its files/run API. Restrict that access with a NetworkPolicy or a service mesh.
+With the in-cluster modes, REST and gRPC travel in plaintext across the pod network. Unless sandboxd requires a token, anything that can reach the sandbox pod on those ports can use its files/run API, and with a token the token itself is sent in plaintext. Restrict that access with a NetworkPolicy or a service mesh.
 
 ### Differences from the Go and Python clients
 

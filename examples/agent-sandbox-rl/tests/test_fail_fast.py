@@ -32,6 +32,7 @@ from agent_sandbox_rl import (
     Task,
 )
 from agent_sandbox_rl import constants
+from agent_sandbox_rl.exceptions import FleetError
 from agent_sandbox_rl import handles as handles_mod
 from agent_sandbox_rl import reaper as reaper_mod
 from agent_sandbox_rl.failfast import ClaimWatchdog, classify_pod
@@ -693,6 +694,38 @@ def test_run_scoped_reap_skips_the_forced_sweep_when_protected_pods_cannot_be_li
   c.core_api.delete_namespaced_pod.assert_not_called()
   swept = [k.kwargs["label_selector"] for k in c.core_api.delete_collection_namespaced_pod.call_args_list]
   assert f"{constants.POD_RUN_ID_LABEL}=r" not in swept
+
+
+@pytest.mark.parametrize("failing", ["sandboxclaims", "sandboxwarmpools", "sandboxes"])
+def test_protected_reap_aborts_before_deleting_when_a_list_fails(failing):
+  # An unknown claim set must not read as an empty one: with protection
+  # requested, a failed list raises before any delete is issued.
+  c = _linked_cluster()
+  base = c.resources._list_objects.side_effect
+  def _list(plural, sel=None, **kw):
+    if plural == failing and sel is None:
+      raise client.ApiException(status=503)
+    if plural == "sandboxclaims" and sel is None:
+      return [{"metadata": {"name": "theirs", "labels": {constants.RUN_ID_LABEL: "live"}},
+               "spec": {"warmPoolRef": {"name": "pool-a"}},
+               "status": {"sandbox": {"name": "sb-theirs"}}}]
+    return base(plural, sel, **kw)
+  c.resources._list_objects.side_effect = _list
+  with pytest.raises(FleetError, match="nothing was deleted"):
+    reaper_mod._reap_with_cluster(c, "r", delete_pods=True,
+                                  protect_claims_of=lambda rid: rid != "r")
+  for m in (c.resources.delete_claim, c.resources.delete_warmpool,
+            c.resources.delete_sandbox, c.resources.delete_template,
+            c.core_api.delete_collection_namespaced_pod, c.core_api.delete_namespaced_pod):
+    m.assert_not_called()
+
+
+def test_unprotected_reap_still_runs_when_the_claim_list_fails():
+  # all_managed sweeps protect nothing, so a failed namespace-wide claim list
+  # is not consulted and must not stop them.
+  c = _linked_cluster()
+  reaper_mod._reap_with_cluster(c, None, delete_pods=False, protect_claims_of=None)
+  assert c.resources.delete_claim.called
 
 
 def _lhandle(pod, uid="u-1", restarts=0):

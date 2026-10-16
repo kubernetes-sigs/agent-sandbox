@@ -50,6 +50,7 @@ from datetime import datetime, timezone
 from . import constants
 from .cluster import Cluster
 from .config import ClusterConfig
+from .exceptions import FleetError
 
 logger = logging.getLogger("agent_sandbox_rl.reap")
 
@@ -237,8 +238,9 @@ def _in_use_elsewhere(cluster: Cluster,
   use: the pools they point at, those pools' templates, and the pod label
   selectors of their pods (each such pool's ``status.selector`` and each such
   claim's Sandbox ``status.labelSelector``). Any claim in the namespace counts,
-  managed or not. A failed claim list protects nothing and is logged; the
-  run-scoped label sweep still applies."""
+  managed or not. When one of these lists fails the protection cannot be
+  established, so this raises `FleetError` and the caller deletes nothing: an
+  unknown claim set must not read as an empty one."""
   r = cluster.resources
   pools: set[str] = set()
   claimed: set[str] = set()
@@ -254,10 +256,11 @@ def _in_use_elsewhere(cluster: Cluster,
       name = sb.get("name") or sb.get("Name")
       if name:
         claimed.add(name)
-  except Exception:  # noqa: BLE001
-    logger.warning("reap: could not list claims to find pools still in use",
-                   exc_info=True)
-    return set(), set(), set()
+  except Exception as exc:  # noqa: BLE001
+    raise FleetError(
+        "reap: could not list the namespace's claims, so the pools, templates "
+        "and pods another run still uses cannot be told apart from this run's; "
+        "nothing was deleted. Retry when the API server answers.") from exc
   templates: set[str] = set()
   pod_selectors: set[str] = set()
   if pools:
@@ -270,9 +273,10 @@ def _in_use_elsewhere(cluster: Cluster,
           sel = (pool.get("status") or {}).get("selector")
           if sel:
             pod_selectors.add(sel)
-    except Exception:  # noqa: BLE001
-      logger.warning("reap: could not list warm pools to find templates still in "
-                     "use", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+      raise FleetError(
+          "reap: could not list warm pools to find the templates and pods "
+          f"another run still uses ({sorted(pools)}); nothing was deleted.") from exc
   if claimed:
     try:
       for sb in r._list_objects(constants.SANDBOXES_PLURAL, None,  # noqa: SLF001
@@ -282,9 +286,10 @@ def _in_use_elsewhere(cluster: Cluster,
           sel = (sb.get("status") or {}).get("labelSelector")
           if sel:
             pod_selectors.add(sel)
-    except Exception:  # noqa: BLE001
-      logger.warning("reap: could not list sandboxes to find pods still in use",
-                     exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+      raise FleetError(
+          "reap: could not list sandboxes to find the pods another run's claims "
+          f"still use ({sorted(claimed)}); nothing was deleted.") from exc
   return pools, templates, pod_selectors
 
 

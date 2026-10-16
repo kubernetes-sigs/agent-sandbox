@@ -104,7 +104,10 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
   carries the run-id label everywhere). Pools, and their templates, that a claim of
   a run not being reaped still points at are kept, here and in `reap(run_id)`, and
   so are their pods and the pods those runs claimed from them, which keep the
-  run-id label of the run that created the pool.
+  run-id label of the run that created the pool. If the claims, pools or
+  Sandboxes needed to tell those apart cannot be listed, the reap raises
+  `FleetError` before deleting anything instead of treating the unknown set as
+  empty.
 - **`reap("")`** and `--run-id ""` are rejected; an empty id used to select every
   managed run.
 - The core SDK's `SandboxClient.delete_sandbox` (sync and async) forgets an

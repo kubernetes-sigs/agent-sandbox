@@ -56,14 +56,17 @@ async function loadMetricsLog(url, startMs, onProgress) {
 
 // indexMetricsLog scans the buffer once, folding each sample into its
 // series. Yields to the event loop periodically so the page stays live.
+// tMin/tMax on the result are the earliest and latest sample offset-seconds.
 async function indexMetricsLog(buf, startMs, onProgress) {
     const progress = onProgress || (() => {});
     const decoder = new TextDecoder();
     const series = [];
     const byKey = new Map();   // series key -> index into series
     // Scrape timestamps repeat for every metric of one scrape pass, so
-    // memoize the string -> epoch-ms parse.
+    // memoize the string -> epoch-ms parse, and track the time range there
+    // rather than rescan every sample.
     const tsCache = new Map();
+    let minMs = Infinity, maxMs = -Infinity;
     let samples = 0;
 
     let start = 0;
@@ -82,6 +85,8 @@ async function indexMetricsLog(buf, startMs, onProgress) {
                 if (tMs === undefined) {
                     tMs = Date.parse(rec.ts);
                     tsCache.set(rec.ts, tMs);
+                    if (tMs < minMs) minMs = tMs;
+                    if (tMs > maxMs) maxMs = tMs;
                 }
                 addSample(series, byKey, rec, (tMs - startMs) / 1000);
                 samples++;
@@ -107,7 +112,7 @@ async function indexMetricsLog(buf, startMs, onProgress) {
     }
 
     progress('done', `${samples.toLocaleString()} samples, ${series.length.toLocaleString()} series`);
-    return { series, families, samples };
+    return { series, families, samples, tMin: (minMs - startMs) / 1000, tMax: (maxMs - startMs) / 1000 };
 }
 
 function addSample(series, byKey, rec, tSec) {
@@ -235,14 +240,19 @@ function matchesSeries(s, terms) {
 }
 
 // lockTerms builds the query that pins exactly one series: its metric,
-// source, instance and every label, all as exact matches.
+// source, instance and every label, all as exact matches. Terms split on
+// whitespace, so a label value holding any cannot be written as one; it is
+// left out, and the lock may then also match series that differ only there,
+// rather than match nothing.
 function lockTerms(s) {
     const terms = [`metric:=${s.metric}`];
     if (s.source) terms.push(`source:=${s.source}`);
     if (s.instance) terms.push(`instance:=${s.instance}`);
     if (s.labels) {
         for (const k of Object.keys(s.labels).sort()) {
-            terms.push(`${k}:=${s.labels[k]}`);
+            const value = String(s.labels[k]);
+            if (/\s/.test(value)) continue;
+            terms.push(`${k}:=${value}`);
         }
     }
     return terms.join(' ');

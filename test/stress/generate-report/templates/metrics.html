@@ -69,7 +69,7 @@
     const moreEl = document.getElementById('mx-more');
 
     let log = null;
-    let timeMin = Infinity, timeMax = -Infinity;
+    let timeMin, timeMax;   // x range shared by the stacked charts
     let yAxisWidth = 0;   // y-axis width shared by the stacked charts
     const naturalYWidth = new WeakMap();   // stacked chart -> its own y-axis width
     // A single query (no standalone ";") is panel 0.
@@ -129,13 +129,16 @@
         return parts.join(' ') || s.instance || s.source || s.metric;
     }
 
+    function kindBadge(g) {
+        return badge('info', g.counter ? 'counter' : 'gauge');
+    }
+
     function groupHtml(g, gi) {
         const fam = log.families.get(g.metric);
-        const kind = g.counter ? 'counter' : 'gauge';
         return `<div class="watch-row" data-g="${gi}">
             <div class="watch-row-head" tabindex="0" role="button" title="Lock this metric into the query">
                 <span class="mx-metric">${escapeHtml(g.metric)}</span>
-                ${badge('info', kind)}
+                ${kindBadge(g)}
                 <span class="watch-muted">${g.indices.length.toLocaleString()} of ${fam.series.toLocaleString()} series match</span>
             </div>
         </div>`;
@@ -172,11 +175,10 @@
     }
 
     // Index the rendered panels, not the input, which may hold an edit the
-    // debounce has not rendered yet. A locked label value may hold a
-    // standalone ";", which must not split off a panel of its own.
+    // debounce has not rendered yet.
     function setSubQuery(p, q) {
         const parts = panelParts.slice();
-        parts[p] = splitPanels(q).join(' ');
+        parts[p] = q;
         setQuery(parts.join(' ; '));
     }
 
@@ -217,14 +219,20 @@
         if (panelParts.length < 2) clearResults();
         const old = [...resultsEl.children];
         panelGroups = parts.map((part, p) => part === panelParts[p] ? panelGroups[p] : searchMetricSeries(log, part));
-        const matched = new Set(panelGroups.flatMap(gs => gs.flatMap(g => g.indices))).size;
+        // Count each series once even when several panels match it. Flags
+        // beat a Set of every matched index, which runs on each keystroke.
+        const seen = new Uint8Array(log.series.length);
+        let matched = 0;
+        for (const g of panelGroups.flat()) {
+            for (const i of g.indices) if (!seen[i]) { seen[i] = 1; matched++; }
+        }
         statusEl.textContent = `${parts.length} panels, ${matched.toLocaleString()} / ${log.series.length.toLocaleString()} series`;
         parts.forEach((part, p) => {
             if (part === panelParts[p]) return;
             const gs = panelGroups[p];
             let note;
             if (gs.length === 1) {
-                note = `${escapeHtml(gs[0].metric)} ${badge('info', gs[0].counter ? 'counter' : 'gauge')}`;
+                note = `${escapeHtml(gs[0].metric)} ${kindBadge(gs[0])}`;
             } else if (gs.length === 0) {
                 note = badge('warning', 'no match');
             } else {
@@ -425,16 +433,10 @@
             });
             // Keep every panel on the full run's time axis, including metrics
             // that appear late and counters whose rates omit the first sample.
-            for (const s of log.series) {
-                for (const t of s.t) {
-                    if (t < timeMin) timeMin = t;
-                    if (t > timeMax) timeMax = t;
-                }
-            }
             // Chart.js labels explicit bounds as edge ticks, so round them out
             // to whole seconds rather than show the raw fractional offsets.
-            timeMin = Math.floor(timeMin);
-            timeMax = Math.ceil(timeMax);
+            timeMin = Math.floor(log.tMin);
+            timeMax = Math.ceil(log.tMax);
             // Chart.js keeps equal explicit bounds as a zero-width axis, so
             // give a log with a single scrape time some room.
             if (timeMin === timeMax) {

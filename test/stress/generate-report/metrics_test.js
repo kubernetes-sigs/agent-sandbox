@@ -83,7 +83,11 @@ async function loadExplorer(query, fixture, hash = '#q=' + encodeURIComponent(qu
         { metric: 'late_total', t: [900, 1200, 1500, 1800] },
         ...Array.from({ length: 105 }, (_, i) => ({ metric: `node_metric_${String(i).padStart(3, '0')}`, t: [0, 1800] })),
     ]).map(s => ({ source: 'node-exporter', instance: 'node-1', labelsStr: '', hay: s.metric, v: s.t.map((_, i) => i), ...s }));
-    const log = { series, families: new Map(series.map(s => [s.metric, { series: 1 }])) };
+    const times = series.flatMap(s => s.t);
+    const log = {
+        series, families: new Map(series.map(s => [s.metric, { series: 1 }])),
+        tMin: Math.min(...times), tMax: Math.max(...times),
+    };
     const context = vm.createContext({
         document: { getElementById: id => elements[id], createElement: () => new Element(), addEventListener() {} },
         window: { getSelection: () => '' },
@@ -212,12 +216,13 @@ test('a semicolon inside a label value does not start a panel', async () => {
     assert.equal(explorer.elements['mx-status'].textContent, '1 metrics, 1 / 107 series');
 });
 
-test('locking a series whose label value holds a spaced semicolon keeps the panels', async () => {
+test('locking a series whose label value holds whitespace still matches it in its panel', async () => {
     const explorer = await loadExplorer('metric:=early_gauge ; metric:node_metric_00');
-    vm.runInContext("log.series[5].labels = { path: '/a ; b' }", explorer.context);
+    // " ; " would also split off a panel if it reached the query.
+    vm.runInContext("log.series[5].labels = { code: '500', path: '/a ; b' }", explorer.context);
     assert.equal(click(explorer, { panel: 1, series: 5 }),
-        'metric:=early_gauge ; metric:=node_metric_003 source:=node-exporter instance:=node-1 path:=/a b');
-    assert.equal(explorer.elements['mx-results'].children.length, 2);
+        'metric:=early_gauge ; metric:=node_metric_003 source:=node-exporter instance:=node-1 code:=500');
+    assert.equal(explorer.elements['mx-status'].textContent, '2 panels, 2 / 107 series');
 });
 
 test('a hash with a bare percent sign still decodes the rest of the query', async () => {
@@ -286,6 +291,21 @@ test('a single-query chart fits its own data', async () => {
     const [chart] = charts.values();
     assert.equal(chart.config.options.scales.x.min, undefined);
     assert.equal(chart.config.options.scales.x.max, undefined);
+});
+
+test('indexing records the log time range in offset seconds', async () => {
+    const context = vm.createContext({ TextDecoder });
+    vm.runInContext(fs.readFileSync(path.join(__dirname, 'static', 'metrics-explorer.js'), 'utf8'), context);
+    context.buf = new TextEncoder().encode([
+        '{"ts":"2026-10-15T00:00:01.500Z","metric":"a","value":1}',
+        '{"ts":"2026-10-15T00:30:12.437Z","metric":"a","value":2}',
+        '{"ts":"2026-10-14T23:59:57.469Z","metric":"b","value":3}',
+        // A sample without a timestamp must not widen or poison the range.
+        '{"metric":"b","value":4}',
+    ].join('\n'));
+    const log = await vm.runInContext('indexMetricsLog(buf, Date.parse("2026-10-15T00:00:00Z"))', context);
+    assert.equal(log.tMin, -2.531);
+    assert.equal(log.tMax, 1812.437);
 });
 
 test('a log with a single scrape time still gets a usable shared x range', async () => {

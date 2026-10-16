@@ -16,7 +16,7 @@
 import re
 from typing import Any
 
-from .exceptions import SandboxNotFoundError
+from .exceptions import SandboxNotFoundError, SandboxWarmPoolMismatchError
 
 
 _DNS1123_SUBDOMAIN_RE = re.compile(
@@ -40,7 +40,25 @@ def validate_claim_name(name: str) -> None:
         )
 
 
-def validate_claim_for_adoption(claim: dict[str, Any] | None, claim_name: str, warmpool: str) -> None:
+def claim_warmpool_name(claim: dict[str, Any]) -> str | None:
+    """Return a SandboxClaim's ``spec.warmPoolRef.name``, tolerating null fields."""
+    return ((claim.get("spec") or {}).get("warmPoolRef") or {}).get("name")
+
+
+def validate_claim_warmpool(
+    claim_name: str, namespace: str, existing_pool: str | None, expected_pool: str
+) -> None:
+    """Validate that a SandboxClaim references the expected SandboxWarmPool."""
+    if existing_pool != expected_pool:
+        raise SandboxWarmPoolMismatchError(
+            f"SandboxClaim '{claim_name}' in namespace '{namespace}' references "
+            f"warm pool '{existing_pool}', not '{expected_pool}'."
+        )
+
+
+def validate_claim_for_adoption(
+    claim: dict[str, Any] | None, claim_name: str, namespace: str, warmpool: str
+) -> None:
     """Check the pool, deletion state and identity needed for a UID-pinned watch."""
     if claim is None:
         raise SandboxNotFoundError(
@@ -49,11 +67,7 @@ def validate_claim_for_adoption(claim: dict[str, Any] | None, claim_name: str, w
     metadata = claim.get("metadata") or {}
     if metadata.get("deletionTimestamp"):
         raise ValueError(f"SandboxClaim '{claim_name}' is terminating.")
-    existing_pool = (claim.get("spec") or {}).get("warmPoolRef", {}).get("name")
-    if existing_pool != warmpool:
-        raise ValueError(
-            f"SandboxClaim '{claim_name}' references warm pool '{existing_pool}', not '{warmpool}'."
-        )
+    validate_claim_warmpool(claim_name, namespace, claim_warmpool_name(claim), warmpool)
     for field in ("uid", "resourceVersion"):
         if not isinstance(metadata.get(field), str) or not metadata[field]:
             raise ValueError(f"SandboxClaim '{claim_name}' is missing metadata.{field}.")

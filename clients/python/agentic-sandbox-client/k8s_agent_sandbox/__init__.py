@@ -20,6 +20,7 @@ from .exceptions import (
     SandboxNotFoundError,
     SandboxTemplateNotFoundError,
     SandboxWarmPoolNotFoundError,
+    SandboxWarmPoolMismatchError,
     SandboxNotReadyError,
     SandboxNoServiceError,
     SandboxServiceUnavailableError,

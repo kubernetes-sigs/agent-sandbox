@@ -66,13 +66,13 @@ class K8sHelper:
         name: str,
         warmpool: str,
         namespace: str,
-        annotations: dict | None = None,
-        labels: dict | None = None,
-        lifecycle: dict | None = None,
-        volume_claim_templates: list[dict] | None = None,
-        pod_metadata: dict | None = None,
+        annotations: dict[str, str] | None = None,
+        labels: dict[str, str] | None = None,
+        lifecycle: dict[str, Any] | None = None,
+        volume_claim_templates: list[dict[str, Any]] | None = None,
+        pod_metadata: dict[str, Any] | None = None,
         env: dict[str, str] | None = None,
-    ):
+    ) -> dict[str, Any]:
         """Creates a SandboxClaim custom resource.
 
         Args:
@@ -119,13 +119,13 @@ class K8sHelper:
             "spec": spec,
         }
         logger.info(f"Creating SandboxClaim '{name}' in namespace '{namespace}' using warm pool '{warmpool}'...")
-        return self.custom_objects_api.create_namespaced_custom_object(
+        return cast(dict[str, Any], self.custom_objects_api.create_namespaced_custom_object(
             group=CLAIM_API_GROUP,
             version=CLAIM_API_VERSION,
             namespace=namespace,
             plural=CLAIM_PLURAL_NAME,
             body=manifest
-        )
+        ))
 
     def resolve_sandbox_name(self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None) -> str:
         """Resolves the actual Sandbox name from the SandboxClaim status.
@@ -143,7 +143,7 @@ class K8sHelper:
 
     def wait_for_claim_ready(
         self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None,
-        *, expected_uid: str | None = None, initial_claim: dict | None = None,
+        *, expected_uid: str | None = None, initial_claim: dict[str, Any] | None = None,
     ) -> str:
         """Watches the SandboxClaim until it is bound to a sandbox AND its
         Ready condition is True, then returns the sandbox name.
@@ -169,7 +169,7 @@ class K8sHelper:
 
     def _watch_claim(self, claim_name: str, namespace: str, timeout: int, require_ready: bool,
                      resource_version: str | None = None,
-                     *, expected_uid: str | None = None, initial_claim: dict | None = None) -> str:
+                     *, expected_uid: str | None = None, initial_claim: dict[str, Any] | None = None) -> str:
         """Shared SandboxClaim watch loop.
 
         Returns the sandbox name once ``status.sandbox.name`` is populated;
@@ -273,7 +273,7 @@ class K8sHelper:
                             logger.info(
                                 f"Resolved sandbox name '{name}' from claim status"
                                 + (" (claim Ready)" if ready else ""))
-                            return name
+                            return cast(str, name)
             except client.ApiException as e:
                 if e.status == 410:
                     # The requested resourceVersion was compacted away:
@@ -398,27 +398,27 @@ class K8sHelper:
                 return None
             raise
 
-    def patch_sandbox_claim(self, name: str, namespace: str, body: dict):
+    def patch_sandbox_claim(self, name: str, namespace: str, body: dict[str, Any]) -> dict[str, Any]:
         """Patches a SandboxClaim custom resource."""
-        return self.custom_objects_api.patch_namespaced_custom_object(
+        return cast(dict[str, Any], self.custom_objects_api.patch_namespaced_custom_object(
             group=CLAIM_API_GROUP,
             version=CLAIM_API_VERSION,
             namespace=namespace,
             plural=CLAIM_PLURAL_NAME,
             name=name,
             body=body
-        )
+        ))
 
-    def get_sandbox_claim(self, name: str, namespace: str):
+    def get_sandbox_claim(self, name: str, namespace: str) -> dict[str, Any] | None:
         """Gets a SandboxClaim custom resource (or ``None`` if it doesn't exist)."""
         try:
-            return self.custom_objects_api.get_namespaced_custom_object(
+            return cast(dict[str, Any], self.custom_objects_api.get_namespaced_custom_object(
                 group=CLAIM_API_GROUP,
                 version=CLAIM_API_VERSION,
                 namespace=namespace,
                 plural=CLAIM_PLURAL_NAME,
                 name=name
-            )
+            ))
         except client.ApiException as e:
             if e.status == 404:
                 return None
@@ -434,7 +434,7 @@ class K8sHelper:
                 matching the selector are returned.
         """
         try:
-            kwargs: dict = dict(
+            kwargs: dict[str, Any] = dict(
                 group=CLAIM_API_GROUP,
                 version=CLAIM_API_VERSION,
                 namespace=namespace,
@@ -492,4 +492,4 @@ class K8sHelper:
                         
                         logger.info(f"Gateway ready. IP: {ip_address}")
                         w.stop()
-                        return ip_address
+                        return cast(str, ip_address)

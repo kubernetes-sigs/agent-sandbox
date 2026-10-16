@@ -14,6 +14,7 @@
 """Helpers for validating labels and assembling pod metadata."""
 
 import re
+from typing import Any
 
 
 # Kubernetes label validation: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#syntax-and-character-set
@@ -23,7 +24,7 @@ LABEL_NAME_MAX_LENGTH = 63
 LABEL_PREFIX_MAX_LENGTH = 253
 
 
-def validate_label_name(name: str, context: str):
+def validate_label_name(name: str, context: str) -> None:
     """Validates a label name segment (key or value) against k8s constraints."""
     if len(name) > LABEL_NAME_MAX_LENGTH:
         raise ValueError(
@@ -36,7 +37,7 @@ def validate_label_name(name: str, context: str):
         )
 
 
-def validate_labels(labels: dict[str, str]):
+def validate_labels(labels: dict[str, str]) -> None:
     """Validates label keys and values against Kubernetes constraints."""
     for key, value in labels.items():
         if not key:
@@ -67,7 +68,7 @@ def validate_labels(labels: dict[str, str]):
 def build_pod_metadata(
     pod_labels: dict[str, str] | None,
     pod_annotations: dict[str, str] | None,
-) -> dict | None:
+) -> dict[str, Any] | None:
     """Assembles the ``spec.additionalPodMetadata`` payload.
 
     ``pod_labels`` are validated with the same RFC-1123 rules as claim
@@ -81,7 +82,7 @@ def build_pod_metadata(
     if pod_labels:
         validate_labels(pod_labels)
 
-    pod_metadata: dict = {}
+    pod_metadata: dict[str, Any] = {}
     if pod_labels:
         pod_metadata["labels"] = pod_labels
     if pod_annotations:

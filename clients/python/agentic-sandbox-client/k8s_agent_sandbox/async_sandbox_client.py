@@ -25,7 +25,7 @@ import logging
 import sys
 import uuid
 from types import TracebackType
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 from kubernetes import client as sync_client
 from kubernetes_asyncio import client as async_client
@@ -61,7 +61,7 @@ _CONNECTION_FIELDS = (
 )
 
 
-def _sync_configuration_from_async(async_configuration) -> sync_client.Configuration:
+def _sync_configuration_from_async(async_configuration: Any) -> sync_client.Configuration:
     """Builds the sync Configuration atexit cleanup uses from an injected async one, copying only
     ``_CONNECTION_FIELDS`` so sync-only fields (e.g. ``no_proxy``) keep their defaults and an async
     ``refresh_api_key_hook`` is never carried over."""
@@ -84,7 +84,7 @@ def _sync_configuration_from_async(async_configuration) -> sync_client.Configura
     return sync_configuration
 
 
-def _refresh_api_key_for_atexit(refresh_api_key_hook, sync_configuration) -> None:
+def _refresh_api_key_for_atexit(refresh_api_key_hook: Any, sync_configuration: Any) -> None:
     """Runs the injected client's ``refresh_api_key_hook`` against the sync copy, since kubernetes_asyncio
     only runs it when preparing a request and the token may have expired since the last one. An async hook
     can't be awaited at atexit, so its coroutine is closed unrun and the live ``api_key`` is used as-is."""
@@ -235,7 +235,7 @@ class AsyncSandboxClient(Generic[T]):
         claim_name: str | None = None,
         adopt_existing: bool = False,
         shutdown_after_seconds: int | None = None,
-        volume_claim_templates: list[dict] | None = None,
+        volume_claim_templates: list[dict[str, Any]] | None = None,
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         env: dict[str, str] | None = None,
@@ -302,7 +302,7 @@ class AsyncSandboxClient(Generic[T]):
 
         try:
             try:
-                created_claim = await self._create_claim(
+                created_claim: dict[str, Any] | None = await self._create_claim(
                     claim_name,
                     warmpool,
                     namespace,
@@ -518,7 +518,7 @@ class AsyncSandboxClient(Generic[T]):
             if (namespace, claim_name) not in self._explicit_claims:
                 await self.delete_sandbox(claim_name, namespace)
 
-    def _atexit_cleanup(self):
+    def _atexit_cleanup(self) -> None:
         """Best-effort atexit cleanup for claims and local sandbox resources.
 
         Tracked sandbox handles use their synchronous, loop-independent
@@ -589,11 +589,11 @@ class AsyncSandboxClient(Generic[T]):
         warmpool_name: str,
         namespace: str,
         labels: dict[str, str] | None = None,
-        lifecycle: dict | None = None,
-        volume_claim_templates: list[dict] | None = None,
-        pod_metadata: dict | None = None,
+        lifecycle: dict[str, Any] | None = None,
+        volume_claim_templates: list[dict[str, Any]] | None = None,
+        pod_metadata: dict[str, Any] | None = None,
         env: dict[str, str] | None = None,
-    ):
+    ) -> dict[str, Any]:
         """Create a claim with lifecycle, metadata, and trace context."""
         span = trace.get_current_span()
         if span.is_recording():
@@ -621,7 +621,7 @@ class AsyncSandboxClient(Generic[T]):
         )
 
     @async_trace_span("wait_for_claim_ready")
-    async def _wait_for_claim_ready(self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None, **kwargs) -> str:
+    async def _wait_for_claim_ready(self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None, **kwargs: Any) -> str:
         """Waits for the SandboxClaim to be bound and Ready, returning the sandbox name."""
         return await self.k8s_helper.wait_for_claim_ready(claim_name, namespace, timeout, resource_version=resource_version, **kwargs)
 
@@ -633,6 +633,6 @@ class AsyncSandboxClient(Generic[T]):
         await self.k8s_helper.wait_for_sandbox_ready(sandbox_id, namespace, timeout)
 
     @async_trace_span("delete_claim")
-    async def _delete_claim(self, claim_name: str, namespace: str, **kwargs) -> None:
+    async def _delete_claim(self, claim_name: str, namespace: str, **kwargs: Any) -> None:
         """Delete a claim through the client's shared Kubernetes helper."""
         await self.k8s_helper.delete_sandbox_claim(claim_name, namespace, **kwargs)

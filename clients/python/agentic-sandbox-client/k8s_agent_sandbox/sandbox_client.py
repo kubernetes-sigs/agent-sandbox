@@ -21,7 +21,7 @@ import uuid
 import atexit
 import logging
 from types import TracebackType
-from typing import List, Dict, Tuple, TypeVar, Generic, Type
+from typing import Any, Dict, Generic, List, Self, Tuple, Type, TypeVar, cast
 
 from kubernetes import client
 from kubernetes.client import ApiException
@@ -98,7 +98,7 @@ class SandboxClient(Generic[T]):
         if cleanup:
             atexit.register(self._delete_automatic_sandboxes)
 
-    def __enter__(self) -> "SandboxClient[T]":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(
@@ -120,7 +120,7 @@ class SandboxClient(Generic[T]):
         claim_name: str | None = None,
         adopt_existing: bool = False,
         shutdown_after_seconds: int | None = None,
-        volume_claim_templates: list[dict] | None = None,
+        volume_claim_templates: list[dict[str, Any]] | None = None,
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         env: dict[str, str] | None = None,
@@ -188,7 +188,7 @@ class SandboxClient(Generic[T]):
 
         try:
             try:
-                created_claim = self._create_claim(
+                created_claim: dict[str, Any] | None = self._create_claim(
                     claim_name,
                     warmpool,
                     namespace,
@@ -407,11 +407,11 @@ class SandboxClient(Generic[T]):
         warmpool_name: str,
         namespace: str,
         labels: dict[str, str] | None = None,
-        lifecycle: dict | None = None,
-        volume_claim_templates: list[dict] | None = None,
-        pod_metadata: dict | None = None,
+        lifecycle: dict[str, Any] | None = None,
+        volume_claim_templates: list[dict[str, Any]] | None = None,
+        pod_metadata: dict[str, Any] | None = None,
         env: dict[str, str] | None = None,
-    ):
+    ) -> dict[str, Any]:
         """Creates the SandboxClaim custom resource in the Kubernetes cluster."""
         span = trace.get_current_span()
         if span.is_recording():
@@ -439,7 +439,7 @@ class SandboxClient(Generic[T]):
         )
 
     @trace_span("wait_for_claim_ready")
-    def _wait_for_claim_ready(self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None, **kwargs) -> str:
+    def _wait_for_claim_ready(self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None, **kwargs: Any) -> str:
         """Waits for the SandboxClaim to be bound and Ready, returning the sandbox name."""
         return self.k8s_helper.wait_for_claim_ready(claim_name, namespace, timeout, resource_version=resource_version, **kwargs)
 
@@ -450,7 +450,7 @@ class SandboxClient(Generic[T]):
         self.k8s_helper.wait_for_sandbox_ready(sandbox_id, namespace, timeout)
 
     @trace_span("delete_claim")
-    def _delete_claim(self, claim_name: str, namespace: str, **kwargs) -> None:
+    def _delete_claim(self, claim_name: str, namespace: str, **kwargs: Any) -> None:
         """Deletes the SandboxClaim custom resource from the Kubernetes cluster."""
         self.k8s_helper.delete_sandbox_claim(claim_name, namespace, **kwargs)
 
@@ -466,4 +466,8 @@ class SandboxClient(Generic[T]):
             .get("warmPoolRef", {})
             .get("name")
         )
+        if not isinstance(warmpool_name, str) or not warmpool_name:
+            raise SandboxNotFoundError(
+                f"SandboxClaim '{claim_name}' is missing spec.warmPoolRef.name."
+            )
         return warmpool_name

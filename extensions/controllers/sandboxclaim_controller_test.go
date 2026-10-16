@@ -7213,6 +7213,104 @@ func TestSandboxClaimAdoptionConflictRetriedInPass(t *testing.T) {
 	require.Equal(t, types.UID("claim-uid-123"), controllerRef.UID, "candidate must be owned by the claim after the retried adoption")
 }
 
+// TestSandboxClaimStatusConflictRetriedOnFreshBase verifies that when an optimistic-lock
+// 409 conflict occurs on the initial claim status patch (e.g. because earlier in-pass
+// metadata updates committed a newer resourceVersion to the API server), the controller
+// performs an in-pass authoritative retry on the fresh base and successfully finalizes
+// the status rather than silently dropping the uncommitted Ready state.
+func TestSandboxClaimStatusConflictRetriedOnFreshBase(t *testing.T) {
+	scheme := newScheme(t)
+	claim, template, warmPool, adopted := newOptimisticLockTestObjects()
+	claim.Annotations[asmetrics.WebhookAnnotation] = time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano)
+	claim.Annotations[asmetrics.ObservabilityAnnotation] = time.Now().Add(-4 * time.Second).Format(time.RFC3339Nano)
+
+	asmetrics.ClaimStartupLatency.Reset()
+	asmetrics.ClaimControllerStartupLatency.Reset()
+
+	conflict := k8errors.NewConflict(
+		schema.GroupResource{Group: "extensions.agents.x-k8s.io", Resource: "sandboxclaims"},
+		claim.Name,
+		errors.New("the object has been modified; please apply your changes to the latest version and try again"),
+	)
+
+	conflictOnce := true
+	statusPatchAttempts := 0
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim, adopted).
+		WithStatusSubresource(claim).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+				if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok && subResourceName == "status" {
+					statusPatchAttempts++
+					if conflictOnce {
+						conflictOnce = false
+						// Simulate an intervening write that bumped the live claim's resourceVersion
+						claimCopy := claim.DeepCopy()
+						if claimCopy.Annotations == nil {
+							claimCopy.Annotations = make(map[string]string)
+						}
+						claimCopy.Annotations["concurrent-write"] = "true"
+						if updateErr := c.Update(ctx, claimCopy); updateErr != nil {
+							return updateErr
+						}
+						return conflict
+					}
+				}
+				return c.SubResource(subResourceName).Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
+	res, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err, "expected status conflict to be resolved in-pass without error")
+	require.True(t, res.IsZero(), "expected no requeue when status conflict is resolved in-pass")
+	require.Equal(t, 2, statusPatchAttempts, "expected exactly 2 status patch attempts (1 initial conflict + 1 successful authoritative retry)")
+
+	updatedClaim := &extensionsv1beta1.SandboxClaim{}
+	require.NoError(t, fakeClient.Get(context.Background(), req.NamespacedName, updatedClaim))
+	require.Equal(t, "adopted-sb", updatedClaim.Status.SandboxStatus.Name, "status must be finalized with adopted sandbox name")
+	readyCond := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	require.NotNil(t, readyCond, "status must have Ready condition")
+	require.Equal(t, metav1.ConditionTrue, readyCond.Status, "status must be Ready=True")
+
+	// Verify metrics recorded exactly once
+	require.Equal(t, uint64(1), histogramSampleCount(t, asmetrics.ClaimStartupLatency), "startup latency must be recorded exactly once")
+	require.Equal(t, uint64(1), histogramSampleCount(t, asmetrics.ClaimControllerStartupLatency), "controller latency must be recorded exactly once")
+}
+
+func TestSandboxStatusRelevantChangeAdmitsOwnerReferences(t *testing.T) {
+	oldSb := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			OwnerReferences: []metav1.OwnerReference{{
+				Kind: "SandboxWarmPool",
+				Name: "pool-1",
+			}},
+		},
+	}
+	newSb := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			OwnerReferences: []metav1.OwnerReference{{
+				Kind: "SandboxClaim",
+				Name: "claim-1",
+			}},
+		},
+	}
+
+	require.True(t, sandboxStatusRelevantChange(oldSb, newSb),
+		"sandboxStatusRelevantChange must return true when OwnerReferences change")
+}
+
 // newPoolCandidateSandbox builds a Ready, adoptable warm-pool member for the
 // default/test-pool + test-template fixtures.
 func newPoolCandidateSandbox(name string) *sandboxv1beta1.Sandbox {

@@ -762,6 +762,13 @@ func (r *SandboxClaimReconciler) updateStatus(ctx context.Context, oldStatus *ex
 			return true, nil
 		}
 		if k8errors.IsConflict(err) {
+			// A 409 means the patch was computed from an informer cache view
+			// that is stale relative to etcd (often behind our own earlier
+			// metadata or status writes). Attempt an in-pass authoritative
+			// retry on a fresh base to resolve the conflict immediately.
+			if authoritative, retryErr := r.retryStatusPatchOnFreshBase(ctx, claim, oldClaim.ResourceVersion); retryErr == nil {
+				return authoritative, nil
+			}
 			// Dropping the conflict with a nil error and no requeue relies
 			// entirely on the conflicting write emitting a claim watch event
 			// that re-enqueues this key. That holds because getTimingPredicate
@@ -781,6 +788,68 @@ func (r *SandboxClaimReconciler) updateStatus(ctx context.Context, oldStatus *ex
 		"name", claim.Name,
 		"namespace", claim.Namespace,
 		"observedGeneration", claim.Generation)
+	return true, nil
+}
+
+// isClaimStatusSatisfied reports whether current status satisfies desired status.
+// It avoids overwriting a committed status (e.g. Ready=True) with a stale or unready status.
+func isClaimStatusSatisfied(current, desired *extensionsv1beta1.SandboxClaimStatus) bool {
+	if desired.SandboxStatus.Name != "" && current.SandboxStatus.Name != "" && current.SandboxStatus.Name != desired.SandboxStatus.Name {
+		return false
+	}
+	currentReady := meta.FindStatusCondition(current.Conditions, string(v1beta1.SandboxConditionReady))
+	desiredReady := meta.FindStatusCondition(desired.Conditions, string(v1beta1.SandboxConditionReady))
+
+	// If the server already reached Ready=True, do not regress it with a pre-Ready view.
+	if currentReady != nil && currentReady.Status == metav1.ConditionTrue {
+		if desiredReady == nil || desiredReady.Status != metav1.ConditionTrue {
+			return true
+		}
+	}
+	// If both are Ready=True and sandbox name matches, it is satisfied.
+	if currentReady != nil && desiredReady != nil &&
+		currentReady.Status == metav1.ConditionTrue && desiredReady.Status == metav1.ConditionTrue {
+		return current.SandboxStatus.Name == desired.SandboxStatus.Name
+	}
+
+	return equality.Semantic.DeepEqual(current, desired)
+}
+
+// retryStatusPatchOnFreshBase retries an optimistically locked status patch
+// on a fresh base fetched from the authoritative reader (APIReader).
+func (r *SandboxClaimReconciler) retryStatusPatchOnFreshBase(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, staleResourceVersion string) (bool, error) {
+	reader := r.authoritativeReader()
+	key := client.ObjectKeyFromObject(claim)
+	desiredStatus := claim.Status.DeepCopy()
+
+	fresh := &extensionsv1beta1.SandboxClaim{}
+	if err := reader.Get(ctx, key, fresh); err != nil {
+		return false, err
+	}
+
+	// If the server already has a status that satisfies the desired status (e.g.
+	// already Ready=True committed by another pass), mark as authoritative.
+	if isClaimStatusSatisfied(&fresh.Status, desiredStatus) {
+		fresh.DeepCopyInto(claim)
+		return true, nil
+	}
+
+	// If the authoritative reader does not have a newer ResourceVersion than
+	// the one that just conflicted, attempting another patch is doomed to conflict.
+	if fresh.ResourceVersion == staleResourceVersion {
+		return false, nil
+	}
+
+	oldFresh := fresh.DeepCopy()
+	fresh.Status = *desiredStatus
+	patch := client.MergeFromWithOptions(oldFresh, client.MergeFromWithOptimisticLock{})
+	if err := r.Status().Patch(ctx, fresh, patch); err != nil {
+		if k8errors.IsConflict(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	fresh.DeepCopyInto(claim)
 	return true, nil
 }
 
@@ -2493,14 +2562,15 @@ func sandboxTemplateCreatePredicate() predicate.Funcs {
 // the entire Ready condition. Narrowing this to a Status-only compare would
 // silently stop expiry from reaching claims.
 //
-// Invariant: this predicate deliberately drops all metadata- and spec-only
-// updates on owned Sandboxes (labels, annotations, generation). Nothing in the
-// bound path consumes those today, so this is safe — but any future logic that
-// reconciles Sandbox *metadata* through this Owns watch (e.g. the
-// adoption-hardening direction in #1229) will not fire until this predicate is
-// widened to admit the relevant metadata change.
+// Invariant: this predicate drops most metadata- and spec-only updates on
+// owned Sandboxes, but admits OwnerReferences changes (e.g. when an adopted
+// sandbox's controller reference is transferred from SandboxWarmPool to
+// SandboxClaim, waking the claim's Owns watch) and DeletionTimestamp.
 func sandboxStatusRelevantChange(oldSb, newSb *v1beta1.Sandbox) bool {
 	if oldSb.DeletionTimestamp.IsZero() != newSb.DeletionTimestamp.IsZero() {
+		return true
+	}
+	if !equality.Semantic.DeepEqual(oldSb.OwnerReferences, newSb.OwnerReferences) {
 		return true
 	}
 	if !equality.Semantic.DeepEqual(oldSb.Status.PodIPs, newSb.Status.PodIPs) {

@@ -196,11 +196,16 @@ def test_pod_selector_covers_only_what_known_labels_confirm():
 # ------------------------------------------------------ GKE Pod Snapshots (opt-in)
 
 
-def _snapshot_cluster(policies=1):
+def _policy_obj(name, labels):
+  return {"metadata": {"name": name},
+          "spec": {"snapshotGroupingRules": {"groupByLabelValue": {"labels": list(labels)}}}}
+
+
+def _snapshot_cluster(policies=1, grouping=(constants.SANDBOX_NAME_HASH_LABEL,)):
   c = _healthy_cluster()
   c.custom_api = MagicMock()
   c.custom_api.list_namespaced_custom_object.return_value = {
-      "items": [{"metadata": {"name": f"p{i}"}} for i in range(policies)]}
+      "items": [_policy_obj(f"p{i}", grouping) for i in range(policies)]}
   return c
 
 
@@ -258,6 +263,32 @@ def test_snapshots_missing_policy_is_warning(monkeypatch):
   w = {ch.name: ch for ch in rep.warnings}
   assert "snapshots:policy" in w
   assert constants.SANDBOX_NAME_HASH_LABEL in w["snapshots:policy"].detail
+
+
+def test_snapshots_policy_without_the_grouping_label_is_named_in_a_warning(monkeypatch):
+  _patch(monkeypatch, crd_for=_crd_router())
+  c = _snapshot_cluster(policies=2, grouping=("golden-pool",))
+  rep = pf.preflight_cluster(c, snapshots=True, require_runtime_class="gvisor")
+  assert rep.ok
+  w = {ch.name: ch for ch in rep.warnings}["snapshots:policy"]
+  assert "p0, p1" in w.detail and constants.SANDBOX_NAME_HASH_LABEL in w.detail
+  assert "groupByLabelValue" in w.detail
+  # one correctly grouped policy among others is enough, and it is named
+  c.custom_api.list_namespaced_custom_object.return_value = {"items": [
+      _policy_obj("other", ["golden-pool"]),
+      _policy_obj("fleet", ["golden-pool", constants.SANDBOX_NAME_HASH_LABEL]),
+      {"metadata": {"name": "broken"}, "spec": {"snapshotGroupingRules": "oops"}}]}
+  rep = pf.preflight_cluster(c, snapshots=True, require_runtime_class="gvisor")
+  ok = {ch.name: ch for ch in rep.checks}["snapshots:policy"]
+  assert ok.ok and "1/3" in ok.detail and "fleet" in ok.detail
+
+
+def test_policy_groups_by_tolerates_malformed_specs():
+  assert pf.policy_groups_by(_policy_obj("p", ["a", constants.SANDBOX_NAME_HASH_LABEL]),
+                             constants.SANDBOX_NAME_HASH_LABEL)
+  assert not pf.policy_groups_by({"metadata": {"name": "p"}}, "x")
+  assert not pf.policy_groups_by({"spec": {"snapshotGroupingRules": {"groupByLabelValue": {"labels": "x"}}}}, "x")
+  assert not pf.policy_groups_by(None, "x")
 
 
 def test_registry_preflight_passes_cluster_snapshot_flag(monkeypatch):

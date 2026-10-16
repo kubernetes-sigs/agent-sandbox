@@ -262,16 +262,44 @@ def preflight_cluster(cluster, *, require_runtime_class: str | None = None,
       pols = cluster.custom_api.list_namespaced_custom_object(
           constants.PODSNAPSHOT_GROUP, constants.PODSNAPSHOT_VERSION, ns,
           constants.PODSNAPSHOT_POLICIES_PLURAL)
-      n = len((pols or {}).get("items") or [])
-      r.add("snapshots:policy", n > 0,
-            f"{n} PodSnapshotPolicy in {ns}" if n else
-            f"no PodSnapshotPolicy in {ns} — snapshots will fail (the SDK "
-            "creates only triggers; apply a policy grouped by "
-            f"{constants.SANDBOX_NAME_HASH_LABEL})", warn_only=True)
+      items = (pols or {}).get("items") or []
+      names = [((p.get("metadata") or {}).get("name") or "?") for p in items]
+      grouped = [name for name, p in zip(names, items)
+                 if policy_groups_by(p, constants.SANDBOX_NAME_HASH_LABEL)]
+      if not items:
+        r.add("snapshots:policy", False,
+              f"no PodSnapshotPolicy in {ns} — snapshots will fail (the SDK "
+              "creates only triggers; apply a policy grouped by "
+              f"{constants.SANDBOX_NAME_HASH_LABEL})", warn_only=True)
+      elif not grouped:
+        # The most common setup failure: a policy exists but groups snapshots by
+        # another label, so restores target the wrong group and the trigger
+        # fails with an opaque `runsc error: exit status 128`.
+        r.add("snapshots:policy", False,
+              f"{len(items)} PodSnapshotPolicy in {ns} ({', '.join(names)}) but "
+              f"none groups by {constants.SANDBOX_NAME_HASH_LABEL} — add it under "
+              "spec.snapshotGroupingRules.groupByLabelValue.labels, or restores "
+              "target the wrong group", warn_only=True)
+      else:
+        r.add("snapshots:policy", True,
+              f"{len(grouped)}/{len(items)} PodSnapshotPolicy in {ns} group by "
+              f"{constants.SANDBOX_NAME_HASH_LABEL}: {', '.join(grouped)}")
     except Exception as e:  # noqa: BLE001 — RBAC etc.; advisory only
       r.add("snapshots:policy", False, str(e), warn_only=True)
 
   return r
+
+
+def policy_groups_by(policy: dict, label: str) -> bool:
+  """Whether a ``PodSnapshotPolicy`` groups snapshots by ``label``
+  (``spec.snapshotGroupingRules.groupByLabelValue.labels``). Tolerates a missing
+  or malformed spec (False)."""
+  node = policy
+  for key in ("spec", "snapshotGroupingRules", "groupByLabelValue", "labels"):
+    if not isinstance(node, dict):
+      return False
+    node = node.get(key)
+  return isinstance(node, (list, tuple)) and label in node
 
 
 def preflight(registry, *, runtime_class: str | None = None,

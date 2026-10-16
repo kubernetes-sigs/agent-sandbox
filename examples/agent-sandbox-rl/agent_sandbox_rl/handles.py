@@ -187,7 +187,13 @@ class SandboxHandle:
   ``restore()`` / ``list_snapshots()``; a resume or restore brings up a **new
   pod**, so those calls end with ``refresh()`` (new ``pod_name`` / ``pod_ip``,
   exec session dropped). ``hostname`` / ``sandbox_id`` / ``claim_name`` are
-  stable across it.
+  stable across it. ``pending_snapshot_uid`` is set when ``acquire(task,
+  snapshot_uid=...)`` adopted an already-running warm pod, so the pin was not
+  applied: it applies to the sandbox's next pod (suspend + resume), or call
+  ``restore(uid)``; a resume or restore clears it. Prefer the fleet's
+  ``suspend`` / ``resume`` / ``restore`` wrappers over the handle methods: the
+  fleet gives a suspended sandbox's claim slot back to ``max_live_sandboxes``
+  and takes it again on resume, which the bare handle methods do not.
   """
 
   task: Task
@@ -198,8 +204,10 @@ class SandboxHandle:
   hostname: str
   pod_ip: Optional[str] = None
   sandbox: object = None
+  pending_snapshot_uid: Optional[str] = None
   _cluster: "Cluster" = field(default=None, repr=False)
   _session: Optional["SandboxSession"] = field(default=None, repr=False)
+  _slot_released: bool = field(default=False, repr=False)
 
   def exec(self, command, timeout: float | None = None) -> str:
     """Run a command inside the sandbox (router-free, via the pod's exec API).
@@ -360,6 +368,7 @@ class SandboxHandle:
     """
     r = _snap.check(self._snapshot_sandbox().resume(wait_timeout=timeout), "resume")
     self.refresh()
+    self.pending_snapshot_uid = None       # the new pod honored the pin, if any
     return bool(getattr(r, "restored_from_snapshot", False))
 
   def restore(self, snapshot_uid: str, *, timeout: int = 180) -> None:
@@ -372,6 +381,7 @@ class SandboxHandle:
     _snap.check(self._snapshot_sandbox().restore(
         snapshot_uid, sandbox_ready_timeout=timeout), "restore")
     self.refresh()
+    self.pending_snapshot_uid = None
 
   @property
   def is_suspended(self) -> bool:

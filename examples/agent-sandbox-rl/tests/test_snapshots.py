@@ -304,6 +304,7 @@ def test_release_deletes_snapshots_only_when_asked(make_cluster):
   keep, drop = f.acquire(f.tasks[0]), f.acquire(f.tasks[1])
   keep.sandbox, drop.sandbox = FakeSnapSandbox(), FakeSnapSandbox()
   keep_engine, drop_engine = keep.sandbox.snapshots, drop.sandbox.snapshots
+  _snapshots_by_label(c, ["uid-1"])
   f.release(keep)
   assert keep_engine.deleted == [] and ("terminate",) in keep.sandbox.calls
   # delete by uid only after the claim is gone (terminate dropped the engine)
@@ -315,6 +316,11 @@ def test_release_deletes_snapshots_only_when_asked(make_cluster):
   assert drop_engine.deleted == [("uid-1", 180)] and drop_engine.deleted_all == 0
   assert order == [("delete", True)]
   assert f.handles() == []
+  # listed by the Sandbox's own label selector, bounded, never through the engine
+  kw = c.custom_api.list_namespaced_custom_object.call_args.kwargs
+  assert kw["label_selector"] == "agents.x-k8s.io/sandbox-name-hash=abcd"
+  assert kw["_request_timeout"] == (3, 10)
+  assert c.custom_api.get_namespaced_custom_object.call_args.kwargs["_request_timeout"] == (3, 10)
 
 
 def test_failed_release_keeps_the_snapshots(make_cluster):
@@ -324,6 +330,7 @@ def test_failed_release_keeps_the_snapshots(make_cluster):
   h = f.acquire(f.tasks[0])
   h.sandbox = FakeSnapSandbox()
   engine = h.sandbox.snapshots
+  _snapshots_by_label(c, ["uid-1"])
   h.sandbox.fail_next = "terminate"
   with pytest.raises(RuntimeError, match="apiserver unavailable"):
     f.release(h, delete_snapshots=True)
@@ -337,6 +344,7 @@ def test_release_snapshot_cleanup_failure_does_not_block_release(make_cluster, c
   f.load_tasks(["img"])
   h = f.acquire(f.tasks[0])
   h.sandbox = FakeSnapSandbox()
+  _snapshots_by_label(c, ["uid-1"])
   h.sandbox.snapshots.delete = lambda uid, timeout=180: _fail("bucket gone")
   f.release(h, delete_snapshots=True)
   assert ("terminate",) in h.sandbox.calls
@@ -351,10 +359,133 @@ def test_release_snapshot_list_failure_keeps_them_and_still_releases(make_cluste
   h = f.acquire(f.tasks[0])
   h.sandbox = FakeSnapSandbox()
   engine = h.sandbox.snapshots
-  engine.list = lambda filter_by=None: _fail("pod name not found")
+  c.custom_api.get_namespaced_custom_object.side_effect = RuntimeError("apiserver slow")
   f.release(h, delete_snapshots=True)
   assert ("terminate",) in h.sandbox.calls and engine.deleted == []
   assert any("could not list snapshots" in r.message for r in caplog.records)
+
+
+def test_release_keeps_snapshots_when_the_sandbox_has_no_selector_yet(make_cluster, caplog):
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]))
+  f.load_tasks(["img"])
+  h = f.acquire(f.tasks[0])
+  h.sandbox = FakeSnapSandbox()
+  f.release(h, delete_snapshots=True)            # conftest default: no labelSelector
+  assert h.sandbox.snapshots is None and f.handles() == []
+  assert any("could not list snapshots" in r.message for r in caplog.records)
+  c.custom_api.list_namespaced_custom_object.assert_not_called()
+
+
+def _snapshots_by_label(c, uids, selector="agents.x-k8s.io/sandbox-name-hash=abcd"):
+  c.custom_api.get_namespaced_custom_object.return_value = {"status": {"labelSelector": selector}}
+  c.custom_api.list_namespaced_custom_object.return_value = {
+      "items": [{"metadata": {"name": u}} for u in uids]}
+
+
+def _pod_restored(message):
+  cond = types.SimpleNamespace(type="PodRestored", status="True", message=message)
+  return types.SimpleNamespace(status=types.SimpleNamespace(conditions=[cond]))
+
+
+def test_acquire_reports_an_unapplied_pin_on_the_handle(make_cluster, caplog):
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]))
+  f.load_tasks(["img"])
+  # adopted warm pod: fresh start, no PodRestored condition
+  c.core_api.read_namespaced_pod.return_value = types.SimpleNamespace(
+      status=types.SimpleNamespace(conditions=[]))
+  with caplog.at_level("INFO"):
+    h = f.acquire(f.tasks[0], snapshot_uid="uid-9")
+  assert h.pending_snapshot_uid == "uid-9"
+  assert any("pin to snapshot uid-9 is not applied" in r.message for r in caplog.records)
+  # the next pod applies it: resume clears the marker
+  h.sandbox = FakeSnapSandbox()
+  f.suspend(h)
+  f.resume(h)
+  assert h.pending_snapshot_uid is None
+
+
+def test_acquire_pin_applied_on_a_cold_start_leaves_no_marker(make_cluster):
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]))
+  f.load_tasks(["img"])
+  c.core_api.read_namespaced_pod.return_value = _pod_restored("restored from PodSnapshot uid-9")
+  h = f.acquire(f.tasks[0], snapshot_uid="uid-9")
+  assert h.pending_snapshot_uid is None
+  f.acquire(f.tasks[0])                                  # no pin: no pod read
+  assert c.core_api.read_namespaced_pod.call_count == 1
+
+
+def test_suspend_frees_the_claim_slot_and_resume_takes_it_back(make_cluster):
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_live_sandboxes=1)
+  f.load_tasks(["img", "img"])
+  h = f.acquire(f.tasks[0])
+  h.sandbox = FakeSnapSandbox()
+  assert f._claims_reserved == 1 and c.active_claims == 1
+  f.suspend(h)
+  assert f._claims_reserved == 0 and c.active_claims == 0
+  f.suspend(h)                                           # idempotent: no double free
+  assert f._claims_reserved == 0 and c.active_claims == 0
+  # the freed slot is real: another claim fits under the cap while h is parked
+  other = f.acquire(f.tasks[1])
+  assert f._claims_reserved == 1
+  from agent_sandbox_rl import FleetOvercommitError
+  with pytest.raises(FleetOvercommitError, match="stays suspended"):
+    f.resume(h)                                          # cap reached, sandbox untouched
+  assert ("resume", 180) not in h.sandbox.calls and h._slot_released
+  f.release(other)
+  assert f.resume(h) is True
+  assert f._claims_reserved == 1 and c.active_claims == 1 and not h._slot_released
+  f.release(h)
+  assert f._claims_reserved == 0 and c.active_claims == 0
+
+
+def test_release_of_a_suspended_handle_does_not_free_the_slot_twice(make_cluster):
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]))
+  f.load_tasks(["img", "img"])
+  parked, live = f.acquire(f.tasks[0]), f.acquire(f.tasks[1])
+  parked.sandbox = FakeSnapSandbox()
+  f.suspend(parked)
+  assert f._claims_reserved == 1 and c.active_claims == 1
+  f.release(parked)
+  assert f._claims_reserved == 1 and c.active_claims == 1   # live still counted
+  f.release(live)
+  assert f._claims_reserved == 0 and c.active_claims == 0
+
+
+def test_failed_resume_gives_the_slot_back(make_cluster):
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]))
+  f.load_tasks(["img"])
+  h = f.acquire(f.tasks[0])
+  h.sandbox = FakeSnapSandbox()
+  f.suspend(h)
+  h.sandbox.fail_next = "node pool exhausted"
+  with pytest.raises(SnapshotError, match="resume failed"):
+    f.resume(h)
+  assert f._claims_reserved == 0 and c.active_claims == 0 and h._slot_released
+  h.sandbox.fail_next = "snapshot missing"
+  with pytest.raises(SnapshotError, match="restore failed"):
+    f.restore(h, "uid-1")
+  assert f._claims_reserved == 0 and h._slot_released
+  f.restore(h, "uid-1")
+  assert f._claims_reserved == 1 and c.active_claims == 1 and not h._slot_released
+
+
+def test_handle_level_suspend_keeps_the_slot(make_cluster):
+  # The bare handle method cannot reach the fleet's counters; documented.
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]))
+  f.load_tasks(["img"])
+  h = f.acquire(f.tasks[0])
+  h.sandbox = FakeSnapSandbox()
+  h.suspend()
+  assert f._claims_reserved == 1 and c.active_claims == 1
+  f.release(h)
+  assert f._claims_reserved == 0 and c.active_claims == 0
 
 
 # --------------------------------------------------------------- restore status
@@ -540,6 +671,7 @@ async def test_async_fleet_mirrors_snapshot_wrappers(make_cluster):
     assert kw["pod_annotations"] == {"k": "v", PIN: "uid-a"}
     h.sandbox = FakeSnapSandbox()
     engine = h.sandbox.snapshots        # terminate() drops it, as in the SDK
+    _snapshots_by_label(c, ["uid-1"])
     with af._fleet.recording("async") as rep:
       assert await af.snapshot(h, "pre") == "uid-1"
       assert await af.suspend(h, timeout=30) == "uid-s"

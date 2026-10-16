@@ -577,8 +577,10 @@ fleet.load_tasks(source, image_rewrite=make_rewriter(
 - **Preflight** (`fleet.preflight()`): per-cluster reachability, v1beta1 CRD
   versions, controller, namespace, and (if configured) runtime class + pull
   secret; on clusters with `snapshots=True` also the PodSnapshot CRDs, a gVisor
-  runtime class, and (warning) a `PodSnapshotPolicy` in the namespace. Hard
-  failures raise `PreflightError`; soft issues are warnings.
+  runtime class, and (warning) a `PodSnapshotPolicy` in the namespace that groups
+  by `agents.x-k8s.io/sandbox-name-hash` — a policy grouped by another label is
+  named in the warning. Hard failures raise `PreflightError`; soft issues are
+  warnings.
 - **Pre-pull** (`fleet.prepull()` / `setup(prepull=True)`): a DaemonSet caches
   task images on every node so warm pools skip the multi-GB pull. This is where
   cold-start time goes — `wait_pool_ready` dominates a cold run (the sample report
@@ -664,10 +666,21 @@ What to know:
 - **Pinning.** `fleet.acquire(task, snapshot_uid=uid)` stamps
   `podsnapshot.gke.io/ps-name` on the pod so a claim boots from that snapshot instead
   of the group's latest. It applies at pod creation: a cold start honors it, an adopted
-  already-running warm member does not (until its next pod).
-- **Bookkeeping.** A suspended handle stays tracked and its claim counted; node capacity
-  freed by suspension is not modeled. Snapshots persist after release unless
-  `delete_snapshots=True`; the policy's retention bounds them per sandbox.
+  already-running warm member does not — and warm adoption is the common path. The
+  fleet reads the new pod's `PodRestored` condition after a pinned acquire: when the pin
+  did not apply it logs at INFO and sets `handle.pending_snapshot_uid`, so the caller
+  can `fleet.suspend(h)` + `fleet.resume(h)` (or `fleet.restore(h, uid)`) to apply it;
+  a resume or restore clears the marker.
+- **Bookkeeping.** `fleet.suspend(h)` gives the claim slot back: a suspended sandbox has
+  no pod, so it stops counting toward `max_live_sandboxes` and the cluster's claim
+  count, and `fleet.resume` / `fleet.restore` take a slot again (raising
+  `FleetOvercommitError` at the cap before touching the sandbox). Parking 10K handles
+  between turns therefore lets the loop acquire 10K new ones. Suspension creates no
+  *warm* capacity, though: the claim still holds its sandbox, so the pool does not
+  refill for it. The bare `h.suspend()` skips this bookkeeping. Snapshots persist after
+  release unless `delete_snapshots=True`; the policy's retention bounds them per
+  sandbox, and the release lists them by the sandbox's label with a 10 s timeout (kept,
+  with a warning, when that fails).
 - **Async.** The SDK calls block. `AsyncSandboxFleet` has the same `snapshot` /
   `suspend` / `resume` / `restore` (and `acquire(snapshot_uid=…)`,
   `release(delete_snapshots=…)`) running on its thread pool — use those rather than
@@ -675,6 +688,25 @@ What to know:
 - **Scope.** GKE only. Restore targets a sandbox's *own* snapshots; sharing one
   snapshot across a warm pool is a policy-level pattern (see upstream
   `examples/podsnapshot-golden-warmpool`).
+
+Limits and failure modes the fakes in the tests cannot show:
+
+- **A wedged sandbox survives restore.** A snapshot taken of a hung sandbox restores a
+  hung sandbox. Plan one-strike eviction: `release(h)` and acquire a new one rather than
+  retrying `restore` on the same handle.
+- **A timed-out trigger blocks the next suspend.** A `PodSnapshotManualTrigger` that was
+  not processed within `timeout=` stays on the cluster (the SDK deletes its triggers only
+  when the sandbox is terminated) and blocks the next snapshot or suspend of that sandbox
+  until it is deleted: `kubectl -n <ns> delete podsnapshotmanualtrigger <name>` (the
+  name starts with the sandbox id).
+- **Propagation has its own clock.** `resume` and `restore` wait up to 30 s, independent
+  of `timeout=`, for the pin annotation to propagate from the claim to the Sandbox. When
+  that lapses the SDK reports `Internal Error: Timed out waiting for …` and the fleet
+  raises `SnapshotError` with it. This is controller lag, not a caller mistake: retry
+  the call.
+- **The policy's grouping label decides what a restore finds.** A policy grouped by any
+  label other than `agents.x-k8s.io/sandbox-name-hash` makes triggers fail with an opaque
+  `runsc error: exit status 128`; `preflight()` names such policies.
 
 ## Observability
 

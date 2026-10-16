@@ -180,6 +180,25 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
   calls made outside `run()` (sets `fleet.report`).
 - README → *Snapshots — suspend / resume / restore* (prerequisites, semantics, limits);
   `examples/run_snapshot_demo.py` (claim → snapshot → suspend → resume → verify).
+- **Suspension frees the claim slot** (review of #1540): `fleet.suspend` gives the
+  slot back to `max_live_sandboxes` and the cluster's claim count, and
+  `fleet.resume` / `fleet.restore` take one again, raising `FleetOvercommitError` at
+  the cap before touching the sandbox and giving the slot back when the wake fails;
+  `release` of a suspended handle does not free it twice. The bare handle methods keep
+  the old accounting (documented).
+- **Unapplied pins are visible**: after `acquire(task, snapshot_uid=…)` the fleet
+  reads the pod's `PodRestored` condition; when the pin did not apply (an adopted,
+  already-running warm pod — the common case) it logs at INFO and sets
+  `handle.pending_snapshot_uid`, cleared by the next resume or restore.
+- **`release(delete_snapshots=True)` lists snapshots by label**, through the Sandbox's
+  `status.labelSelector` and the PodSnapshot API with a `(3, 10)` s request timeout,
+  instead of the engine's unbounded list, so an eviction never waits on the sandbox it
+  is evicting; a failed list keeps the snapshots and warns, as before.
+- **Preflight checks the policy's grouping label**: a `PodSnapshotPolicy` that does not
+  group by `agents.x-k8s.io/sandbox-name-hash` is named in the warning
+  (`policy_groups_by()`); the ok detail names the policies that do.
+- README → *Limits and failure modes* (wedged sandboxes survive restore, a timed-out
+  trigger blocks the next suspend, the 30 s propagation wait, the grouping label).
 
 ### Changed (docs / guidance)
 - **Warm-pool worker guidance updated for Agent Sandbox v0.5.4**: the #1215

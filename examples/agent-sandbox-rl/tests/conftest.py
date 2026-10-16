@@ -35,6 +35,11 @@ class FakeCluster:
     self.api_client = MagicMock()
     self.core_api = MagicMock()
     self.apps_api = MagicMock()
+    # Direct custom-object reads (snapshot listing by label at release): a
+    # Sandbox without a selector yet and no PodSnapshots, unless a test says so.
+    self.custom_api = MagicMock()
+    self.custom_api.get_namespaced_custom_object.return_value = {"metadata": {}, "status": {}}
+    self.custom_api.list_namespaced_custom_object.return_value = {"items": []}
     self.resources = MagicMock()
     self.resources.managed_selector.return_value = "app=agent-sandbox-rl"
     # A live, unlabelled pool: owned (pre-run-id semantics) and present, so unwarm

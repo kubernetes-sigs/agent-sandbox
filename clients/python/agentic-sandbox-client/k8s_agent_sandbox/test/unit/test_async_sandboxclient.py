@@ -36,6 +36,7 @@ pytest.importorskip("kubernetes_asyncio")
 from kubernetes import client as sync_client
 from kubernetes_asyncio import client as async_client
 
+from k8s_agent_sandbox.models import AdditionalPodMetadata
 from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
 from k8s_agent_sandbox.async_sandbox import AsyncSandbox
 from k8s_agent_sandbox.async_sandbox_client import (
@@ -598,10 +599,10 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             call_kwargs = mock_create.call_args[1]
             self.assertEqual(
                 call_kwargs["pod_metadata"],
-                {
-                    "labels": {"client-id": "tenant-a"},
-                    "annotations": {"note": "owned-by-tenant-a"},
-                },
+                AdditionalPodMetadata(
+                    labels={"client-id": "tenant-a"},
+                    annotations={"note": "owned-by-tenant-a"},
+                ),
             )
 
     async def test_create_sandbox_rejects_invalid_pod_label(self):

@@ -35,6 +35,7 @@ from .constants import (
     CREATED_BY_LABEL,
     TERMINAL_CLAIM_READY_REASONS,
 )
+from .models import AdditionalPodMetadata
 from .exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
 from .utils import (
     construct_sandbox_claim_env_spec,
@@ -90,15 +91,15 @@ class AsyncK8sHelper:
         labels: dict[str, str] | None = None,
         lifecycle: dict[str, Any] | None = None,
         volume_claim_templates: list[dict[str, Any]] | None = None,
-        pod_metadata: dict[str, Any] | None = None,
+        pod_metadata: AdditionalPodMetadata | None = None,
         env: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Creates a SandboxClaim custom resource.
 
         Args:
-            pod_metadata: Optional ``{"labels": {...}, "annotations": {...}}``
-                dict emitted as ``spec.additionalPodMetadata`` so the labels and
-                annotations propagate onto the running Sandbox Pod (as opposed to
+            pod_metadata: Optional ``AdditionalPodMetadata`` serialized as
+                ``spec.additionalPodMetadata`` so the labels and annotations
+                propagate onto the running Sandbox Pod (as opposed to
                 ``labels``, which only land on the SandboxClaim object).
         """
         await self._ensure_initialized()
@@ -126,7 +127,7 @@ class AsyncK8sHelper:
         if volume_claim_templates:
             spec["volumeClaimTemplates"] = volume_claim_templates
         if pod_metadata:
-            spec["additionalPodMetadata"] = pod_metadata
+            spec["additionalPodMetadata"] = pod_metadata.model_dump(exclude_none=True)
         env_spec = construct_sandbox_claim_env_spec(env)
         if env_spec:
             spec["env"] = [

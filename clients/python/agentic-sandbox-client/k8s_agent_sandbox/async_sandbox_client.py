@@ -38,7 +38,7 @@ from .exceptions import SandboxNotFoundError
 from .k8s_helper import K8sHelper
 from .pod_metadata import build_pod_metadata, validate_labels
 from .utils import construct_sandbox_claim_lifecycle_spec
-from .models import SandboxConnectionConfig, SandboxTracerConfig
+from .models import AdditionalPodMetadata, SandboxConnectionConfig, SandboxTracerConfig
 from .trace_manager import async_trace_span, create_tracer_manager, initialize_tracer, trace
 
 logger = logging.getLogger(__name__)
@@ -591,7 +591,7 @@ class AsyncSandboxClient(Generic[T]):
         labels: dict[str, str] | None = None,
         lifecycle: dict[str, Any] | None = None,
         volume_claim_templates: list[dict[str, Any]] | None = None,
-        pod_metadata: dict[str, Any] | None = None,
+        pod_metadata: AdditionalPodMetadata | None = None,
         env: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Create a claim with lifecycle, metadata, and trace context."""

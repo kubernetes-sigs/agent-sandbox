@@ -22,6 +22,7 @@ pytest.importorskip("kubernetes_asyncio")
 import aiohttp
 from kubernetes_asyncio import client
 
+from k8s_agent_sandbox.models import AdditionalPodMetadata
 from k8s_agent_sandbox.async_k8s_helper import AsyncK8sHelper
 from k8s_agent_sandbox.exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxTemplateNotFoundError
 from k8s_agent_sandbox.constants import CLIENT_REQUEST_TIME_ANNOTATION
@@ -98,7 +99,7 @@ class TestAsyncK8sHelperCreateSandboxClaim(unittest.IsolatedAsyncioTestCase):
         self.assertIn(CLIENT_REQUEST_TIME_ANNOTATION, body["metadata"]["annotations"])
 
     async def test_pod_metadata_included_in_manifest(self):
-        pod_metadata = {"labels": {"client-id": "tenant-a"}}
+        pod_metadata = AdditionalPodMetadata(labels={"client-id": "tenant-a"})
         await self.helper.create_sandbox_claim(
             "test-claim", "test-warmpool", "test-namespace", pod_metadata=pod_metadata
         )

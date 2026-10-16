@@ -30,6 +30,7 @@ from urllib3.util.retry import Retry
 from kubernetes import config as k8s_config
 from k8s_agent_sandbox.sandbox_client import SandboxClient
 from k8s_agent_sandbox.connector import SandboxConnector
+from k8s_agent_sandbox.models import AdditionalPodMetadata
 from k8s_agent_sandbox.pod_metadata import validate_labels
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
@@ -295,10 +296,10 @@ class TestSandboxClient(unittest.TestCase):
                 labels=None,
                 lifecycle=None,
                 volume_claim_templates=None,
-                pod_metadata={
-                    "labels": {"client-id": "tenant-a"},
-                    "annotations": {"note": "owned-by-tenant-a"},
-                },
+                pod_metadata=AdditionalPodMetadata(
+                    labels={"client-id": "tenant-a"},
+                    annotations={"note": "owned-by-tenant-a"},
+                ),
                 env=None,
             )
 
@@ -378,7 +379,7 @@ class TestSandboxClient(unittest.TestCase):
         self.client.tracing_manager = MagicMock()
         self.client.tracing_manager.get_trace_context_json.return_value = "trace-data"
 
-        pod_metadata = {"labels": {"client-id": "tenant-a"}}
+        pod_metadata = AdditionalPodMetadata(labels={"client-id": "tenant-a"})
         self.client._create_claim(
             "test-claim", "test-warmpool", "test-namespace", pod_metadata=pod_metadata
         )
@@ -389,7 +390,7 @@ class TestSandboxClient(unittest.TestCase):
             labels=None,
             lifecycle=None,
             volume_claim_templates=None,
-            pod_metadata={"labels": {"client-id": "tenant-a"}},
+            pod_metadata=AdditionalPodMetadata(labels={"client-id": "tenant-a"}),
             env=None,
         )
 

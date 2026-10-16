@@ -14,7 +14,8 @@
 """Helpers for validating labels and assembling pod metadata."""
 
 import re
-from typing import Any
+
+from .models import AdditionalPodMetadata
 
 
 # Kubernetes label validation: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#syntax-and-character-set
@@ -68,7 +69,7 @@ def validate_labels(labels: dict[str, str]) -> None:
 def build_pod_metadata(
     pod_labels: dict[str, str] | None,
     pod_annotations: dict[str, str] | None,
-) -> dict[str, Any] | None:
+) -> AdditionalPodMetadata | None:
     """Assembles the ``spec.additionalPodMetadata`` payload.
 
     ``pod_labels`` are validated with the same RFC-1123 rules as claim
@@ -82,9 +83,10 @@ def build_pod_metadata(
     if pod_labels:
         validate_labels(pod_labels)
 
-    pod_metadata: dict[str, Any] = {}
-    if pod_labels:
-        pod_metadata["labels"] = pod_labels
-    if pod_annotations:
-        pod_metadata["annotations"] = pod_annotations
-    return pod_metadata or None
+    if not pod_labels and not pod_annotations:
+        return None
+
+    return AdditionalPodMetadata(
+        labels=pod_labels or None,
+        annotations=pod_annotations or None,
+    )

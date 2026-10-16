@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 from kubernetes import client
 import urllib3.exceptions
 from pydantic import ValidationError
+from k8s_agent_sandbox.models import AdditionalPodMetadata
 from k8s_agent_sandbox.k8s_helper import K8sHelper
 from k8s_agent_sandbox.exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxTemplateNotFoundError
 from k8s_agent_sandbox.constants import CLIENT_REQUEST_TIME_ANNOTATION
@@ -163,7 +164,7 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
         mock_api = MagicMock()
         mock_api_cls.return_value = mock_api
 
-        pod_metadata = {"labels": {"client-id": "tenant-a"}}
+        pod_metadata = AdditionalPodMetadata(labels={"client-id": "tenant-a"})
         helper = K8sHelper()
         helper.create_sandbox_claim(
             "test-claim", "test-warmpool", "test-namespace", pod_metadata=pod_metadata

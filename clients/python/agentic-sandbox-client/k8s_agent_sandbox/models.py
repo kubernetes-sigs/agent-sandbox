@@ -219,6 +219,16 @@ SandboxConnectionConfig = Union[
     SandboxdInClusterConnectionConfig,
 ]
 
+class AdditionalPodMetadata(BaseModel):
+    """Wire-format for SandboxClaim ``spec.additionalPodMetadata``.
+
+    Labels and annotations stamped onto the running Sandbox Pod (not the
+    SandboxClaim object). Omit empty sections so the manifest never carries
+    an empty ``additionalPodMetadata``.
+    """
+    labels: dict[str, str] | None = None
+    annotations: dict[str, str] | None = None
+
 class SandboxTracerConfig(BaseModel):
     """Configuration for tracer level information"""
     enable_tracing: bool = False  # Whether to enable OpenTelemetry tracing.

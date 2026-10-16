@@ -34,6 +34,7 @@ from .trace_manager import (
 )
 from .sandbox import Sandbox
 from .models import (
+    AdditionalPodMetadata,
     SandboxConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
     SandboxTracerConfig,
@@ -409,7 +410,7 @@ class SandboxClient(Generic[T]):
         labels: dict[str, str] | None = None,
         lifecycle: dict[str, Any] | None = None,
         volume_claim_templates: list[dict[str, Any]] | None = None,
-        pod_metadata: dict[str, Any] | None = None,
+        pod_metadata: AdditionalPodMetadata | None = None,
         env: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Creates the SandboxClaim custom resource in the Kubernetes cluster."""

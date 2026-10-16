@@ -92,6 +92,7 @@ steps:
     Params:
       # The helper owns the convergence deadline. Leave time for diagnostics.
       timeout: {{AddInt $timeout 180}}s
+      # CL2 Exec applies os.ExpandEnv to each argument before starting the process.
       command:
       - python3
       - $WARMPOOL_TEST_DIR/wait_for_warmpool.py
@@ -131,6 +132,7 @@ steps:
     Method: Exec
     Params:
       timeout: {{AddInt $timeout 180}}s
+      # CL2 Exec applies os.ExpandEnv to each argument before starting the process.
       command:
       - python3
       - $WARMPOOL_TEST_DIR/wait_for_warmpool.py

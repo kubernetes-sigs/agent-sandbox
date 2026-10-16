@@ -65,35 +65,46 @@ def convergence_errors(pools, sandboxes, pool_count, replicas, revision):
     return errors
 
 
-def kubectl(*args):
-    return subprocess.check_output(["kubectl", "--request-timeout=15s", *args],
-                                   text=True, stderr=subprocess.PIPE, timeout=20)
+def kubectl(*args, timeout):
+    """Bound a request and its subprocess by the caller's remaining budget."""
+    if timeout <= 0:
+        raise subprocess.TimeoutExpired("kubectl", timeout)
+    return subprocess.check_output(["kubectl", f"--request-timeout={timeout:.3f}s", *args],
+                                   text=True, stderr=subprocess.PIPE, timeout=timeout)
 
 
 def error_message(exc):
+    """Preserve kubectl stderr so API failures are actionable."""
     if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
         return f"{exc}: {exc.stderr.strip()}"
     return str(exc)
 
 
-def snapshot(output, pools, sandboxes, namespaces):
-    (output / "pools.json").write_text(json.dumps(pools, indent=2) + "\n")
-    (output / "sandboxes.json").write_text(json.dumps(sandboxes, indent=2) + "\n")
+def snapshot(output, pools, sandboxes, namespaces, status):
+    """Save metrics each stage, but full objects only at the first failure."""
+    deadline = time.monotonic() + 120
     commands = {"controller-metrics.txt": ["get", "--raw", os.environ.get(
         "CONTROLLER_METRICS_PATH",
         "/api/v1/namespaces/agent-sandbox-system/services/agent-sandbox-controller:metrics/proxy/metrics")]}
-    for namespace in namespaces:
-        commands[f"{namespace}-pods.json"] = ["get", "pods", "-n", namespace, "-o", "json"]
-        commands[f"{namespace}-events.json"] = ["get", "events", "-n", namespace, "-o", "json"]
+    first_failure = output.parent / "first-failure.txt"
+    if status != "converged" and not first_failure.exists():
+        # CL2 continues after a failed measurement; avoid repeating large dumps.
+        first_failure.write_text(output.name + "\n")
+        (output / "pools.json").write_text(json.dumps(pools) + "\n")
+        (output / "sandboxes.json").write_text(json.dumps(sandboxes) + "\n")
+        for namespace in namespaces:
+            commands[f"{namespace}-pods.json"] = ["get", "pods", "-n", namespace, "-o", "json"]
+            commands[f"{namespace}-events.json"] = ["get", "events", "-n", namespace, "-o", "json"]
     for filename, command in commands.items():
         try:
-            (output / filename).write_text(kubectl(*command))
+            (output / filename).write_text(kubectl(*command, timeout=deadline - time.monotonic()))
         except (subprocess.SubprocessError, OSError) as exc:
             # Metrics/RBAC availability must not turn convergence into a failure.
             (output / (filename + ".error")).write_text(error_message(exc) + "\n")
 
 
 def main():
+    """Poll within one stage deadline and report convergence separately from API errors."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pools", type=int, required=True)
     parser.add_argument("--replicas", type=int, required=True)
@@ -111,30 +122,42 @@ def main():
     output = Path(os.environ["WARMPOOL_REPORT_DIR"]) / args.stage
     output.mkdir(parents=True, exist_ok=True)
     start = time.monotonic()
+    deadline = start + args.timeout
     pools, sandboxes, namespaces = [], [], []
     status, errors = "error", []
     try:
         while True:
+            if time.monotonic() >= deadline:
+                status = "timeout"
+                break
+            # Large LISTs share the stage budget instead of an independent 20s cap.
             pools = json.loads(kubectl("get", "sandboxwarmpools", "-A", "-l",
-                f"benchmark-run={os.environ['WARMPOOL_RUN_ID']}", "-o", "json"))["items"]
+                f"benchmark-run={os.environ['WARMPOOL_RUN_ID']}", "-o", "json",
+                timeout=deadline - time.monotonic()))["items"]
             namespaces = sorted({p["metadata"]["namespace"] for p in pools})
             sandboxes = []
+            # Custom run labels are not copied to members; use the controller's
+            # membership label to exclude standalone Sandboxes, then match owner UIDs.
             for namespace in namespaces:
                 sandboxes.extend(json.loads(kubectl("get", "sandboxes", "-n", namespace,
-                                                    "-o", "json"))["items"])
+                                                    "-l", "agents.x-k8s.io/warm-pool-sandbox",
+                                                    "-o", "json", timeout=deadline - time.monotonic()))["items"])
+            # These separate LISTs are not an atomic snapshot. Transient mismatches
+            # during reconciliation are expected and are checked again on the next poll.
             errors = convergence_errors(pools, sandboxes, args.pools, args.replicas, args.revision)
-            if not errors:
-                status = "converged"
-                break
-            remaining = args.timeout - (time.monotonic() - start)
+            remaining = deadline - time.monotonic()
             if remaining <= 0:
                 status = "timeout"
+                errors.append("stage deadline expired while observing convergence")
+                break
+            if not errors:
+                status = "converged"
                 break
             time.sleep(min(args.interval, remaining))
     except (subprocess.SubprocessError, OSError, ValueError) as exc:
         errors = [error_message(exc)]
     elapsed = time.monotonic() - start
-    snapshot(output, pools, sandboxes, namespaces)
+    snapshot(output, pools, sandboxes, namespaces, status)
     result = dict(status=status, stage=args.stage, pools=args.pools, replicas=args.replicas,
                   revision=args.revision, elapsed_seconds=elapsed, errors=errors)
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")

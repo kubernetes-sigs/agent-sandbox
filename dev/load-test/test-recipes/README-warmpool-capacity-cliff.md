@@ -55,7 +55,8 @@ WORKLOAD=warmpool WARMPOOL_SCENARIO=many-pools POOL_SIZE=1 \
 
 These verify the workflow, not a capacity limit. `ENABLE_PROMETHEUS=false` skips
 CL2's Prometheus installation/queries for a small smoke run; raw controller metrics
-and resource snapshots are still attempted. Use the default `true` for load runs.
+are still attempted, with resource snapshots saved on the first failure. Use the
+default `true` for load runs.
 The existing Prometheus sizing and kind flags in `run_capacity_cliff.sh` apply.
 
 ## Load configuration
@@ -89,7 +90,9 @@ Artifacts are written under `dev/load-test/test-recipes/tmp/<run-id>/`. Each
 
 - `result.json`: target, revision, wait elapsed time, `converged`, `timeout`, or
   `error`, and explanations for objects that did not converge.
-- `pools.json`, `sandboxes.json`, and namespace Pod/event snapshots.
+- On the **first failed stage only**: `pools.json`, `sandboxes.json`, and namespace
+  Pod/event snapshots. The run-level `first-failure.txt` identifies that stage.
+  Successful and subsequent failed stages do not repeat full object dumps.
 - `controller-metrics.txt`: raw metrics including process memory, CPU counters,
   workqueue depth and reconcile histograms. The default proxy path is
   `/api/v1/namespaces/agent-sandbox-system/services/agent-sandbox-controller:metrics/proxy/metrics`.
@@ -106,12 +109,12 @@ members can still be Ready before the controller notices the change.
 The first `timeout` is the failed load step; the preceding successful target is
 only a tested lower bound under these settings. A rollout timeout is distinct from
 an initial capacity timeout. `error` indicates an API/tooling failure and must not
-be interpreted as a capacity cliff. The helper saves snapshots before returning
-a failure. CL2 records the failure but continues its pre-expanded steps, then
-exits nonzero: use the **first** failed
-step when interpreting the cliff, even if later steps converge. Size the maximum
-load accordingly. Raw snapshots remain available independently of Prometheus
-gathering. CL2 normally deletes its test namespace afterward, so use the saved
+be interpreted as a capacity cliff. The helper saves full snapshots before
+returning the first failure, with a shared 120-second budget for diagnostic
+commands. CL2 records the failure but continues its pre-expanded steps, then exits
+nonzero: use the **first** failed step when interpreting the cliff, even if later
+steps converge. Size the maximum load accordingly. The first-failure snapshots
+remain available independently of Prometheus gathering. CL2 normally deletes its test namespace afterward, so use the saved
 snapshots for diagnosis.
 
 Short or idle steps may omit rate-based metrics such as reconcile p99 when there
@@ -121,13 +124,21 @@ zero latency; the raw histogram counters remain in the per-stage snapshots.
 A slow convergence can reflect insufficient timeout, deliberate controller refill
 limits, unschedulable Pods, or image pulls. Inspect snapshots and metrics before
 attributing the result to the controller. Polling and snapshot LISTs add load;
-keep polling slow during large tests. The helper's elapsed time measures the wait
-following the CL2 mutation phase, not end-to-end object submission latency.
+keep polling slow during large tests. Each LIST can use the remaining stage
+budget (`WARMPOOL_TIMEOUT_SECONDS`), including client-side decoding time, rather
+than an independent 20-second limit. An interrupted/failed LIST is an `error`, not
+evidence of a capacity cliff. Size the deadline for the expected object count and
+API response time. Member LISTs select the controller's WarmPool membership label;
+owner UIDs restrict convergence checks to the current run. Custom pool/template
+labels are not propagated to Sandbox metadata. The pool and member LISTs are
+separate observations; transient mismatches are retried. The helper's elapsed time
+measures the wait following the CL2 mutation phase, not end-to-end object submission
+latency.
 
 Run convergence regression checks with:
 
 ```bash
-python3 -m unittest discover -s dev/tools -p wait_for_warmpool_test.py
+python3 -m unittest discover -s dev/load-test/test-recipes -p wait_for_warmpool_test.py
 ```
 
-These are also collected by `make test-unit` in the existing dev-tools suite.
+These are also collected by `make test-unit` in the stdlib-only `load-test-recipes` suite.

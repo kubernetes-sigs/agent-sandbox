@@ -396,7 +396,8 @@ class SandboxHandle:
 
     Raises `FleetError` when the pod name cannot be read after a few tries. The
     handle then still names the previous pod, which no longer exists after a
-    resume or restore, so call ``refresh()`` again before ``exec()``.
+    resume or restore, so call ``refresh()`` again before ``exec()``. On success
+    the pod identity used by ``is_alive()`` is re-recorded for the new pod.
     """
     self.close_session()
     sb = self.sandbox
@@ -422,6 +423,10 @@ class SandboxHandle:
       self.pod_ip = sb.get_pod_ip()
     except Exception:  # noqa: BLE001
       self.pod_ip = None
+    # The new pod is the sandbox's state from now on: re-baseline the identity
+    # that is_alive() compares against, or every check after a resume would
+    # report the restored pod as a replacement of the one that was suspended.
+    self.record_pod_identity()
 
   def snapshot(self, name: str | None = None, *, timeout: int = 180) -> str:
     """Snapshot the running sandbox (memory + filesystem); returns the uid.

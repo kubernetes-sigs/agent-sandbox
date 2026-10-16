@@ -742,6 +742,17 @@ def _running(uid="u-1", restarts=0, name="agent-runtime", extra=()):
               {"name": name, "restart_count": restarts, "state": {"running": {}}}, *extra]}}
 
 
+def test_refresh_rebaselines_pod_identity_for_the_new_pod():
+  # A resume/restore brings up a new pod: after refresh() the handle must judge
+  # liveness against that pod, not report it as a replacement of the old one.
+  h = _lhandle(_running("u-2"), uid="u-1")
+  h.sandbox = types.SimpleNamespace(get_pod_name=lambda: "p", get_pod_ip=lambda: "10.0.0.2")
+  assert h.is_alive() is False                   # stale baseline: u-1 vs live u-2
+  h.refresh()
+  assert h.pod_uid == "u-2" and h.pod_ip == "10.0.0.2"
+  assert h.is_alive() is True
+
+
 def test_is_alive_detects_a_same_name_replacement_pod():
   assert _lhandle(_running("u-1")).is_alive() is True
   assert _lhandle(_running("u-2")).is_alive() is False

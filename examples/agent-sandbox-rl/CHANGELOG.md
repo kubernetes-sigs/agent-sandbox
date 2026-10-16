@@ -93,7 +93,7 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
   `acquire()` records the pod's UID and the runtime container's restart count, so
   `is_alive()` also reports a pod recreated under the same name (eviction,
   deletion) and an in-place restart (OOM kill). Only the runtime container is
-  judged; a sidecar that exits does not mark the sandbox lost.
+  judged; a sidecar that exits does not mark the sandbox lost. After a resume or restore, `refresh()` re-records the identity for the new pod, so `is_alive()` does not report the restored pod as a replacement.
 - **`reap_orphans(alive_run_ids)`** / `python -m agent_sandbox_rl.reaper --orphans
   --alive-run-ids a,b`: reap every run in the namespace whose driver the caller
   does not list as alive, discovered through the run-id label on its claims,

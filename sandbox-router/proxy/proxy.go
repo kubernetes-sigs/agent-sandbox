@@ -17,12 +17,14 @@ package proxy
 import (
 	"context"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -271,34 +273,34 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		outboundRawQuery = stripQueryParam(outboundRawQuery, h.cfg.AuthzCookieQueryParam)
 	}
 	upstreamURL.RawQuery = outboundRawQuery
-	// With upstream TLS the outbound URL's host is the Sandbox's DNS name,
-	// while new connections go to the resolved address, which the dial
-	// hooks in defaultTransport read from a value stored on the request
-	// context (dialAddrKey). The TLS dial hook sends that name as the TLS
-	// ServerName and verifies the sandbox certificate against it. Pooled
-	// connections are keyed by that name
-	// too, so a connection verified as one sandbox is not reused for a
-	// request routed to another that happens to resolve to the same Pod IP
-	// (a recycled IP, or a caller-supplied X-Sandbox-Pod-IP). Conversely,
-	// a request may reuse an idle connection that an earlier request for
-	// the same Sandbox dialed to a different resolved address, such as the
-	// IP of a Pod since replaced.
+	// With upstream TLS, the sandbox certificate is verified against the
+	// Sandbox's DNS name, and the outbound URL's host is a connection-pool
+	// key built from that name and the resolved address (see
+	// upstreamPoolHost) rather than an address. The dial hooks in
+	// defaultTransport take the address and the name from a dialTarget
+	// stored on the request context, and the Host header is set to the
+	// name.
 	outboundURL := upstreamURL
-	var dialAddr string
+	outboundHost := ""
+	var dt *dialTarget
 	if h.upstreamTLS {
-		named := *upstreamURL
-		named.Host = net.JoinHostPort(target0.ServiceHost(h.upstreamTLSDomain), strconv.Itoa(target0.Port))
-		outboundURL = &named
-		if named.Host != upstreamURL.Host {
-			dialAddr = upstreamURL.Host
-		}
+		serverName := target0.ServiceHost(h.upstreamTLSDomain)
+		port := strconv.Itoa(target0.Port)
+		keyed := *upstreamURL
+		keyed.Host = net.JoinHostPort(upstreamPoolHost(upstreamURL.Hostname(), serverName), port)
+		outboundURL = &keyed
+		outboundHost = net.JoinHostPort(serverName, port)
+		dt = &dialTarget{addr: upstreamURL.Host, serverName: serverName}
 	}
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL = outboundURL
-			// Clear inbound Host so net/http picks the URL host. Matches the
-			// Python router's behavior of stripping Host before forwarding.
-			pr.Out.Host = ""
+			// Replace the inbound Host. Matches the Python router's behavior
+			// of stripping Host before forwarding. For plain HTTP,
+			// outboundHost is empty, so net/http sends the URL host, which is
+			// the address. With upstream TLS it is the Sandbox's DNS name,
+			// because the URL host is a pool key.
+			pr.Out.Host = outboundHost
 			// Strip Authorization before forwarding. The router consumes
 			// it (e.g. --authz-mode=tokenreview validates a Bearer token
 			// via the K8s TokenReview API); the sandbox must not see the
@@ -350,9 +352,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// Origin is a hard problem on upgrade. Many WebSocket
 			// backends (vscode-server is the classic case) validate
 			// Origin == Host for CSRF protection. We rewrite Host to
-			// the upstream's address, so a client-supplied Origin
-			// pointing at the router's external hostname will mismatch
-			// and the backend rejects the upgrade with a 1006 close.
+			// the upstream's address (with upstream TLS, the Sandbox's
+			// DNS name), so a client-supplied Origin pointing at the
+			// router's external hostname will mismatch and the backend
+			// rejects the upgrade with a 1006 close.
 			// Dropping Origin tells the backend "no Origin assertion
 			// available", which CSRF-aware backends typically allow
 			// for non-browser callers; backends that require a present
@@ -420,8 +423,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel = context.WithTimeout(ctx, h.cfg.ProxyTimeout)
 		defer cancel()
 	}
-	if dialAddr != "" {
-		ctx = context.WithValue(ctx, dialAddrKey{}, dialAddr)
+	if dt != nil {
+		ctx = context.WithValue(ctx, dialTargetKey{}, *dt)
 	}
 	rp.ServeHTTP(w, r.WithContext(ctx))
 }
@@ -503,8 +506,8 @@ func defaultTransport(cfg *config.Config, upstreamTLS *tlsutil.UpstreamTLS) *htt
 		KeepAlive: 30 * time.Second,
 	}
 	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
-		if a, ok := ctx.Value(dialAddrKey{}).(string); ok {
-			addr = a
+		if target, ok := ctx.Value(dialTargetKey{}).(dialTarget); ok {
+			addr = target.addr
 		}
 		return dialer.DialContext(ctx, network, addr)
 	}
@@ -520,17 +523,17 @@ func defaultTransport(cfg *config.Config, upstreamTLS *tlsutil.UpstreamTLS) *htt
 	}
 	if upstreamTLS != nil {
 		t.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			// addr is the outbound URL's host and port. The host is the
-			// name the sandbox certificate must be valid for.
-			serverName, _, err := net.SplitHostPort(addr)
-			if err != nil {
-				return nil, err
+			// addr is the outbound URL's host and port, a pool key, so the
+			// certificate name comes from the request context.
+			target, ok := ctx.Value(dialTargetKey{}).(dialTarget)
+			if !ok || target.serverName == "" {
+				return nil, errors.New("upstream TLS: no server name for the connection")
 			}
 			raw, err := dial(ctx, network, addr)
 			if err != nil {
 				return nil, err
 			}
-			conn := tls.Client(raw, upstreamTLS.ClientConfig(serverName))
+			conn := tls.Client(raw, upstreamTLS.ClientConfig(target.serverName))
 			handshakeCtx, cancel := context.WithTimeout(ctx, t.TLSHandshakeTimeout)
 			defer cancel()
 			if err := conn.HandshakeContext(handshakeCtx); err != nil {
@@ -549,12 +552,41 @@ func defaultTransport(cfg *config.Config, upstreamTLS *tlsutil.UpstreamTLS) *htt
 	return t
 }
 
-// dialAddrKey is the request-context key for the address to dial when
-// it differs from the outbound URL's host. With upstream TLS, the URL's
-// host is the name in the sandbox certificate, but the connection goes
-// to the resolved address: a Pod IP or, on DNS fallback, the
-// --cluster-domain name.
-type dialAddrKey struct{}
+// dialTarget tells the dial hooks in defaultTransport where a connection
+// to a sandbox goes when upstream TLS is on. It is stored on the request
+// context under dialTargetKey.
+type dialTarget struct {
+	// addr is the address to connect to: a Pod IP and port or, on DNS
+	// fallback, the --cluster-domain name and port.
+	addr string
+	// serverName is the name the sandbox certificate must be valid for.
+	serverName string
+}
+
+// dialTargetKey is the request-context key for a dialTarget.
+type dialTargetKey struct{}
+
+// upstreamPoolHost returns the outbound URL host for a request when
+// upstream TLS is on. net/http pools connections by that host and the
+// port, so the host has to identify both the sandbox whose certificate
+// the connection verified and the address it goes to. Keyed by the name
+// alone, a request for a recreated Sandbox could reuse an idle connection
+// to the previous Pod. Keyed by the address alone, a connection verified
+// as one sandbox could be reused for a request routed to another sandbox
+// at the same address.
+//
+// When dialHost is an IP address, the result is that address in hex,
+// which keeps IPv6 colons out of the host, as an extra label in front of
+// serverName. On DNS fallback dialHost is a name that identifies the same
+// Sandbox as serverName, so the result is serverName, and connections are
+// pooled by name as plain-HTTP fallback connections are.
+func upstreamPoolHost(dialHost, serverName string) string {
+	ip, err := netip.ParseAddr(dialHost)
+	if err != nil {
+		return serverName
+	}
+	return hex.EncodeToString(ip.Unmap().AsSlice()) + "." + serverName
+}
 
 // recordUpstreamErrorReason bumps the upstream-error counter with a
 // pre-classified reason label.

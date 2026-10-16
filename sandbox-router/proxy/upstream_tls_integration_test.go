@@ -391,6 +391,89 @@ func TestIntegration_UpstreamTLSReloadsCA(t *testing.T) {
 	}
 }
 
+func TestUpstreamPoolHost(t *testing.T) {
+	const name = "sb-a.test.svc.cluster.local"
+	cases := []struct {
+		dialHost string
+		want     string
+	}{
+		{"10.0.0.5", "0a000005." + name},
+		{"::ffff:10.0.0.5", "0a000005." + name},
+		{"fd00::1", "fd000000000000000000000000000001." + name},
+		{"sb-a.test.svc.cluster.local", name},
+		{"sb-a.test.svc.other.example", name},
+	}
+	for _, tc := range cases {
+		if got := upstreamPoolHost(tc.dialHost, name); got != tc.want {
+			t.Errorf("upstreamPoolHost(%q) = %q, want %q", tc.dialHost, got, tc.want)
+		}
+	}
+}
+
+// TestIntegration_UpstreamTLSPoolKeyedByAddress checks that requests for
+// one sandbox name routed to two addresses do not share a connection. Two
+// backends hold certificates for the same Sandbox, as an old and a
+// replacement Pod would, at 127.0.0.1 and 127.0.0.2 on the same port.
+// Keyed by the name alone, the second request would reuse the first
+// backend's connection.
+func TestIntegration_UpstreamTLSPoolKeyedByAddress(t *testing.T) {
+	ca := newTestCA(t)
+	certPEM, keyPEM := ca.issue(t, "sb-a", []string{"sb-a.test.svc.cluster.local"}, x509.ExtKeyUsageServerAuth)
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("load backend cert: %v", err)
+	}
+	first, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	_, port, _ := net.SplitHostPort(first.Addr().String())
+	second, err := net.Listen("tcp", net.JoinHostPort("127.0.0.2", port))
+	if err != nil {
+		_ = first.Close()
+		t.Skipf("cannot listen on 127.0.0.2:%s: %v", port, err)
+	}
+	for name, ln := range map[string]net.Listener{"first": first, "second": second} {
+		backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("X-Backend", name)
+			w.WriteHeader(http.StatusOK)
+		}))
+		_ = backend.Listener.Close()
+		backend.Listener = ln
+		backend.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
+		backend.StartTLS()
+		t.Cleanup(backend.Close)
+	}
+
+	router := newUpstreamTLSRouter(t, ca, upstreamRouterOpts{})
+	backendAt := func(ip string) string {
+		t.Helper()
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, router.URL+"/", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set(HeaderSandboxID, "sb-a")
+		req.Header.Set(HeaderSandboxNamespace, "test")
+		req.Header.Set(HeaderSandboxPodIP, ip)
+		req.Header.Set(HeaderSandboxPort, port)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("do: %v", err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		return resp.Header.Get("X-Backend")
+	}
+	if got := backendAt("127.0.0.1"); got != "first" {
+		t.Fatalf("request to 127.0.0.1 reached %q, want first", got)
+	}
+	if got := backendAt("127.0.0.2"); got != "second" {
+		t.Fatalf("request to 127.0.0.2 reached %q, want second", got)
+	}
+}
+
 // TestUpstreamTLSHandshakeTimeout checks the TLS dial hook against a
 // sandbox that accepts the TCP connection but never answers the handshake.
 func TestUpstreamTLSHandshakeTimeout(t *testing.T) {
@@ -415,7 +498,10 @@ func TestUpstreamTLSHandshakeTimeout(t *testing.T) {
 	// The hook reads the timeout from the transport on each dial.
 	tr.TLSHandshakeTimeout = 100 * time.Millisecond
 
-	ctx := context.WithValue(t.Context(), dialAddrKey{}, ln.Addr().String())
+	ctx := context.WithValue(t.Context(), dialTargetKey{}, dialTarget{
+		addr:       ln.Addr().String(),
+		serverName: "sb-a.test.svc.cluster.local",
+	})
 	start := time.Now()
 	_, err = tr.DialTLSContext(ctx, "tcp", "sb-a.test.svc.cluster.local:443")
 	if err == nil {

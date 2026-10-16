@@ -28,22 +28,25 @@ class Element {
         this.children = [];
         this.dataset = {};
         this.html = '';
+        this.on = {};
     }
     set innerHTML(value) {
         this.html = value;
         this.children = [];
         this.canvas = value.includes('<canvas>') ? { getContext: () => this.canvas } : null;
         this.rate = { checked: value.includes('checked'), addEventListener: (name, fn) => { this.rate[name] = fn; } };
+        this.details = value.includes('<details') ? new Element() : null;
     }
     get innerHTML() { return this.html; }
     appendChild(child) { this.children.push(child); }
     replaceChild(child, old) { this.children[this.children.indexOf(old)] = child; }
     removeChild(child) { this.children.splice(this.children.indexOf(child), 1); }
     insertAdjacentHTML(position, html) { this.html += html; }
-    addEventListener() {}
+    addEventListener(name, fn) { this.on[name] = fn; }
     querySelector(selector) {
         if (selector === 'canvas') return this.canvas;
         if (selector === '.mx-rate') return this.rate;
+        if (selector === 'details') return this.details;
         // A single match hangs its detail off the one metric row, which the
         // stub does not parse out of the HTML; the container stands in.
         if (selector === '.watch-row') return this;
@@ -296,8 +299,13 @@ test('a single-query chart is laid out once and not aligned', async () => {
 test('stacked panels collapse a lone series\' raw samples so charts stay close', async () => {
     const stacked = await loadExplorer('metric:=early_gauge ; metric:=late_total');
     for (const panel of stacked.elements['mx-results'].children) {
-        assert.match(panel.children[0].innerHTML, /<details style=/);
+        const detail = panel.children[0];
+        assert.match(detail.innerHTML, /<details style=/);
+        // The collapsed sample table is only built once it is opened.
+        assert.doesNotMatch(detail.innerHTML, /<th>Δ\/s<\/th>/);
+        detail.details.on.toggle();
+        assert.match(detail.details.innerHTML, /<th>Δ\/s<\/th>/);
     }
     const single = await loadExplorer('metric:=early_gauge');
-    assert.match(single.elements['mx-results'].children[0].innerHTML, /<details open style=/);
+    assert.match(single.elements['mx-results'].children[0].innerHTML, /<details open style=[\s\S]*<th>Δ\/s<\/th>/);
 });

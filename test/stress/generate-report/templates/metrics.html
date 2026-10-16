@@ -198,9 +198,13 @@
         }
     }
 
+    // Also retires the page-level Show more, which only a single query's
+    // list uses, and the list its handler holds.
     function clearResults() {
         destroyCharts(resultsEl);
         resultsEl.innerHTML = '';
+        moreEl.hidden = true;
+        moreEl.onclick = null;
         panelParts = [];
         yAxisWidth = 0;
     }
@@ -254,7 +258,6 @@
         }
         alignYAxes();
         panelParts = parts;
-        moreEl.hidden = true;
     }
 
     function runSearch() {
@@ -279,7 +282,6 @@
             detail.className = 'watch-row-detail';
             resultsEl.querySelector('.watch-row').appendChild(detail);
             renderDetail(detail, g);
-            moreEl.hidden = true;
         } else {
             paginate(resultsEl, groups, moreEl, RENDER_CHUNK, groupHtml);
         }
@@ -319,7 +321,15 @@
                     <td>${fmtValue(min)}</td><td>${fmtValue(max)}</td><td>${fmtValue(s.v[s.v.length - 1])}</td>
                 </tr>`;
             }).join('')}</tbody></table>
-            ${sorted.length === 1 ? `<details${stacked ? '' : ' open'} style="margin-top:10px;"><summary class="watch-muted">raw samples</summary>${samplesHtml(log.series[sorted[0]])}</details>` : ''}`;
+            ${sorted.length === 1 ? `<details${stacked ? '' : ' open'} style="margin-top:10px;"><summary class="watch-muted">raw samples</summary>${stacked ? '' : samplesHtml(log.series[sorted[0]])}</details>` : ''}`;
+
+        // A collapsed sample table may never be opened, so build it on first open.
+        if (stacked && sorted.length === 1) {
+            const samples = detailEl.querySelector('details');
+            samples.addEventListener('toggle', () => {
+                samples.insertAdjacentHTML('beforeend', samplesHtml(log.series[sorted[0]]));
+            }, { once: true });
+        }
 
         const plot = () => {
             const canvas = detailEl.querySelector('canvas');

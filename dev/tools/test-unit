@@ -444,7 +444,7 @@ def run_report_tests(repo_root, artifact_dir):
         node_path, "--test",
         "--test-reporter=spec", "--test-reporter-destination=stdout",
         "--test-reporter=junit", f"--test-reporter-destination={junit_file}",
-        "test/stress/generate-report/metrics_test.js",
+        "test/stress/generate-report/*_test.js",
     ], cwd=repo_root, env=env).returncode
 
 
@@ -462,13 +462,7 @@ def main():
     ts_rc = run_typescript_tests(repo_root, artifact_dir)
     report_rc = run_report_tests(repo_root, artifact_dir)
 
-    if go_rc != 0:
-        return go_rc
-    if python_rc != 0:
-        return python_rc
-    if ts_rc != 0:
-        return ts_rc
-    return report_rc
+    return go_rc or python_rc or ts_rc or report_rc
 
 
 if __name__ == "__main__":

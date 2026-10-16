@@ -18,7 +18,7 @@ import pytest
 from kubernetes import client
 
 from agent_sandbox_rl import constants
-from agent_sandbox_rl.config import TemplateSpec
+from agent_sandbox_rl.config import ResourceSpec, TemplateSpec
 from agent_sandbox_rl.exceptions import OwnedByAnotherRunError
 from agent_sandbox_rl.resources import Resources
 
@@ -599,3 +599,80 @@ def test_conflict_then_deleted_template_is_created_fresh():
   body = r.custom_api.create_namespaced_custom_object.call_args.kwargs["body"]
   assert body["spec"]["networkPolicyManagement"] == "Unmanaged"
 
+
+
+# ------------------------------------------------ hardening, limits, sidecars
+
+
+def _created_body(r):
+  _, kwargs = r.custom_api.create_namespaced_custom_object.call_args
+  return kwargs["body"]
+
+
+def _absent():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  return r
+
+
+def test_template_manifest_is_hardened_by_default():
+  r = _absent()
+  r.ensure_template(IMG, TNAME, TemplateSpec())
+  pod = _created_body(r)["spec"]["podTemplate"]["spec"]
+  assert pod["automountServiceAccountToken"] is False
+  assert pod["shareProcessNamespace"] is False
+  assert "limits" not in pod["containers"][0]["resources"]      # unlimited unless asked
+
+
+def test_template_manifest_hardening_opt_out_and_limits():
+  r = _absent()
+  r.ensure_template(IMG, TNAME, TemplateSpec(
+      automount_service_account_token=True, share_process_namespace=True,
+      resources=ResourceSpec(cpu="1", memory="2Gi", cpu_limit="2", memory_limit="4Gi")))
+  pod = _created_body(r)["spec"]["podTemplate"]["spec"]
+  assert pod["automountServiceAccountToken"] is True and pod["shareProcessNamespace"] is True
+  assert pod["containers"][0]["resources"] == {
+      "requests": {"cpu": "1", "memory": "2Gi"}, "limits": {"cpu": "2", "memory": "4Gi"}}
+  # one limit alone is fine too
+  r = _absent()
+  r.ensure_template(IMG, TNAME, TemplateSpec(resources=ResourceSpec(memory_limit="4Gi")))
+  pod = _created_body(r)["spec"]["podTemplate"]["spec"]
+  assert pod["containers"][0]["resources"]["limits"] == {"memory": "4Gi"}
+
+
+def test_extra_pod_spec_task_image_placeholder_is_resolved_per_template():
+  extra = {
+      "containers": [{"name": "eval", "image": constants.TASK_IMAGE_PLACEHOLDER,
+                      "command": ["sleep", "infinity"]},
+                     {"name": "proxy", "image": "proxy:v1", "imagePullPolicy": "Always"}],
+      "initContainers": [{"name": "seed", "image": "{task_image}", "command": ["true"]}],
+  }
+  spec = TemplateSpec(extra_pod_spec=extra)
+  r = _absent()
+  r.ensure_template(IMG, TNAME, spec)
+  pod = _created_body(r)["spec"]["podTemplate"]["spec"]
+  by_name = {c["name"]: c for c in pod["containers"]}
+  assert by_name["eval"]["image"] == IMG                        # the template's task image
+  assert by_name["eval"]["imagePullPolicy"] == "IfNotPresent"   # filled from the template
+  assert by_name["proxy"]["imagePullPolicy"] == "Always"        # explicit value kept
+  assert pod["initContainers"][0]["image"] == IMG
+  assert pod["initContainers"][0]["imagePullPolicy"] == "IfNotPresent"
+  # a second template from the same spec gets ITS image: the caller's dicts are
+  # never written to
+  r = _absent()
+  r.ensure_template("other/image:1", "r2e-img-other", spec)
+  pod = _created_body(r)["spec"]["podTemplate"]["spec"]
+  assert {c["name"]: c["image"] for c in pod["containers"]}["eval"] == "other/image:1"
+  assert extra["containers"][0]["image"] == constants.TASK_IMAGE_PLACEHOLDER
+  assert extra["initContainers"][0]["image"] == "{task_image}"
+
+
+def test_extra_template_spec_merges_next_to_pod_template_and_rejects_pod_template():
+  r = _absent()
+  r.ensure_template(IMG, TNAME, TemplateSpec(extra_template_spec={"foo": {"bar": 1}},
+                                             network_policy_management="Unmanaged"))
+  spec = _created_body(r)["spec"]
+  assert spec["foo"] == {"bar": 1} and spec["networkPolicyManagement"] == "Unmanaged"
+  assert "podTemplate" in spec
+  with pytest.raises(ValueError, match="podTemplate"):
+    TemplateSpec(extra_template_spec={"podTemplate": {}})

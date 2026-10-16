@@ -5,6 +5,25 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 
 ## [0.1.0.dev0] — unreleased
 
+### Added (template knobs for multi-container, hardened sandbox pods)
+- **`ResourceSpec.cpu_limit` / `memory_limit`**: optional limits on the runtime
+  container (requests unchanged; an unset limit stays unlimited).
+- **`{task_image}` placeholder** (`constants.TASK_IMAGE_PLACEHOLDER`): a container or
+  init container in `TemplateSpec.extra_pod_spec` whose image is `{task_image}` runs the
+  template's own task image, resolved per template, so a fresh grading sidecar of the
+  task image is one dict in the spec instead of a patched manifest. Extra and init
+  containers that name no `imagePullPolicy` get the template's.
+- **`TemplateSpec.extra_template_spec`**: extra SandboxTemplate `spec` keys merged next
+  to `podTemplate` and `networkPolicyManagement` (`podTemplate` itself is rejected).
+
+### Changed (pod hardening defaults)
+- **Sandbox pods are hardened by default**: the rendered pod spec now sets
+  `automountServiceAccountToken: false` and `shareProcessNamespace: false`. Sandboxes
+  run untrusted agent code, and a grading sidecar must neither see nor be seen by the
+  agent's processes. `TemplateSpec.automount_service_account_token` /
+  `share_process_namespace` restore either; `extra_pod_spec` keys still win. Existing
+  templates are not rewritten; the defaults apply to templates a fleet creates.
+
 ### Added (one NetworkPolicy per namespace)
 - **`TemplateSpec.network_policy_management`** sets `spec.networkPolicyManagement`
   on the SandboxTemplates a fleet creates, and patches it onto a pre-existing

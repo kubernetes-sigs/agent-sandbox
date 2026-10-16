@@ -86,6 +86,14 @@ flowchart LR
 
 ## Installation
 
+Agent Sandbox requires Kubernetes **1.25 or later** with [CRD CEL validation rules](https://kubernetes.io/blog/2022/09/23/crd-validation-rules-beta/) enabled. On Kubernetes 1.25 through 1.28, keep the `CustomResourceValidationExpressions` feature gate enabled. If the gate is disabled when CRDs are installed, the API server drops the CEL rules. Sandbox name validation and volume claim template immutability are then not enforced.
+
+**Kubernetes 1.29 or later is recommended** because CRD CEL validation is stable and cannot be disabled.
+
+Gateway-based client connections must also meet the Kubernetes version requirements of the installed Gateway API CRDs and controller. The full [Gateway API v1.5.0 CRD bundle](https://github.com/kubernetes-sigs/gateway-api/releases/tag/v1.5.0) requires **Kubernetes 1.31 or later** because of its TLSRoute CEL validation.
+
+Each release is built against the latest Kubernetes libraries and tested with the newest Kubernetes release. Intermediate versions are expected to work but are not regularly tested.
+
 ### Standard Install (Core + Extensions)
 
 Recommended for most users:

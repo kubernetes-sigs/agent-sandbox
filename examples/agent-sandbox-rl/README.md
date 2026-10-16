@@ -621,8 +621,15 @@ fleet.load_tasks(source, image_rewrite=make_rewriter(
   one-shot `exec()` against such a replacement succeeds without a transport
   error, so call `is_alive()` at step boundaries when lost state must not go
   unnoticed.
-- **Pre-pull** (`fleet.prepull()` / `setup(prepull=True)`): a DaemonSet caches
-  task images on every node so warm pools skip the multi-GB pull. This is where
+- **Pre-pull** (`fleet.prepull()` / `setup(prepull=True)`): DaemonSets cache
+  task images on every node so warm pools skip the multi-GB pull. Images are split
+  into DaemonSets of `prepull_images_per_pod` (25) images, at most
+  `prepull_max_parallel` (4) of them pulling at once per node; the pods inherit the
+  template's node selector, pull secret and tolerations, so they land on tainted
+  sandbox pools. `prepull_delete_when_done` removes each DaemonSet as its nodes
+  finish (otherwise they stay and cover new nodes; `fleet.prepull_delete()` removes
+  them all), and `prepull_drop_caches` ends with a privileged one-shot DaemonSet that
+  drops the page cache, for runs that must start cold. This is where
   cold-start time goes — `wait_pool_ready` dominates a cold run (the sample report
   shows it as ~34 s of a 48 s run), so pre-pulling (or a persistent node-level
   image cache) is the single biggest lever for repeated/RL runs. See

@@ -92,6 +92,7 @@ func main() {
 	var metricsCertDir string
 	var tlsMinVersion string
 	var tlsCipherSuites string
+	var enableOpenMetrics bool
 
 	flag.BoolVar(&printVersion, "version", false, "Print version information and exit.")
 	flag.StringVar(&clusterDomain, "cluster-domain", "cluster.local", "Kubernetes cluster domain for service FQDN generation")
@@ -189,6 +190,11 @@ func main() {
 			"using Go cipher-suite names (e.g. TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256). "+
 			"If not set, the Go default applies. TLS 1.3 cipher suites are not configurable. "+
 			"A downstream operator can use this flag to inject the cluster TLS profile.")
+	flag.BoolVar(&enableOpenMetrics, "metrics-enable-openmetrics", false,
+		"Enable OpenMetrics format for the metrics server. Prometheus 2.5.0+ will negotiate "+
+			"OpenMetrics as first priority when enabled. This allows transmitting exemplars but "+
+			"changes the formatting of quantile and le labels (trailing .0 for integer values), "+
+			"which may affect existing dashboards and alerting rules.")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -319,6 +325,15 @@ func main() {
 
 	metricsOpts := metricsserver.Options{
 		BindAddress: metricsAddr,
+	}
+	// Always set HandlerOpts to explicitly control OpenMetrics behavior.
+	// This ensures consistent behavior across controller-runtime versions:
+	// - v0.25.x: defaults to false, we override based on flag
+	// - v0.26.0+: defaults to true, we override based on flag
+	// See: https://github.com/kubernetes-sigs/controller-runtime/pull/3595
+	metricsOpts.HandlerOpts = asmetrics.BuildMetricsHandlerOpts(enableOpenMetrics)
+	if enableOpenMetrics {
+		setupLog.Info("OpenMetrics format enabled (--metrics-enable-openmetrics)")
 	}
 	if metricsSecureServing {
 		metricsOpts.SecureServing = true

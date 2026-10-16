@@ -34,6 +34,13 @@ const (
 	subpackagePrefix = prometheusPath + "/"
 )
 
+// prometheusSubpackageAllowlist lists Prometheus subpackages that are allowed
+// because they don't declare metrics. The extractor only cares about metric
+// definitions, so these can be safely ignored.
+var prometheusSubpackageAllowlist = map[string]bool{
+	"promhttp": true, // HTTP handler for serving metrics, not metric definitions
+}
+
 // constructor describes a Prometheus constructor that declares a metric family.
 type constructor struct {
 	metricType familyType
@@ -200,10 +207,15 @@ func prometheusImportName(fset *token.FileSet, file *ast.File) (string, error) {
 		if err != nil {
 			continue
 		}
-		if strings.HasPrefix(path, subpackagePrefix) {
-			// promauto declares and registers a metric in one call, so accepting
-			// it would let a metric ship undocumented.
-			return "", fmt.Errorf("%s: importing %s is not supported; teach internal/metricsdocs about it first", fset.Position(imp.Pos()), path)
+		if subpkg, ok := strings.CutPrefix(path, subpackagePrefix); ok {
+			// Check if this subpackage is in the allowlist (e.g., promhttp for HTTP serving)
+			if !prometheusSubpackageAllowlist[subpkg] {
+				// promauto declares and registers a metric in one call, so accepting
+				// it would let a metric ship undocumented.
+				return "", fmt.Errorf("%s: importing %s is not supported; teach internal/metricsdocs about it first", fset.Position(imp.Pos()), path)
+			}
+			// Allowlisted subpackages are ignored (not used for metric definitions)
+			continue
 		}
 		if path != prometheusPath {
 			continue

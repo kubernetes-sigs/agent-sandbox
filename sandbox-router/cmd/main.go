@@ -131,17 +131,19 @@ func run(cfg *config.Config, log logr.Logger) error {
 	}
 
 	// --- TLS / cert reload --------------------------------------------------
+	// recordCertReload counts reloads of the server certificate and of the
+	// upstream client certificate and CA bundle.
+	recordCertReload := func(ok bool, _ error) {
+		outcome := "success"
+		if !ok {
+			outcome = "failure"
+		}
+		metrics.CertReloadsTotal.WithLabelValues(outcome).Inc()
+	}
 	var tlsConfig *tls.Config
 	var metricsTLSConfig *tls.Config
 	if cfg.HTTPSAddr != "" || cfg.MetricsSecureServing {
-		reloader, err := tlsutil.NewCertReloader(cfg.TLSCertFile, cfg.TLSKeyFile, log.WithName("tls"),
-			func(ok bool, _ error) {
-				outcome := "success"
-				if !ok {
-					outcome = "failure"
-				}
-				metrics.CertReloadsTotal.WithLabelValues(outcome).Inc()
-			})
+		reloader, err := tlsutil.NewCertReloader(cfg.TLSCertFile, cfg.TLSKeyFile, log.WithName("tls"), recordCertReload)
 		if err != nil {
 			return fmt.Errorf("cert reloader: %w", err)
 		}
@@ -170,7 +172,7 @@ func run(cfg *config.Config, log logr.Logger) error {
 		if cfg.UpstreamTLSCertFile != "" {
 			var err error
 			clientCert, err = tlsutil.NewCertReloader(cfg.UpstreamTLSCertFile, cfg.UpstreamTLSKeyFile,
-				log.WithName("upstream-tls"), nil)
+				log.WithName("upstream-tls"), recordCertReload)
 			if err != nil {
 				return fmt.Errorf("upstream client cert reloader: %w", err)
 			}
@@ -181,7 +183,7 @@ func run(cfg *config.Config, log logr.Logger) error {
 		var ca *tlsutil.CAReloader
 		if cfg.UpstreamTLSCAFile != "" {
 			var err error
-			ca, err = tlsutil.NewCAReloader(cfg.UpstreamTLSCAFile, log.WithName("upstream-tls"))
+			ca, err = tlsutil.NewCAReloader(cfg.UpstreamTLSCAFile, log.WithName("upstream-tls"), recordCertReload)
 			if err != nil {
 				return fmt.Errorf("upstream CA reloader: %w", err)
 			}

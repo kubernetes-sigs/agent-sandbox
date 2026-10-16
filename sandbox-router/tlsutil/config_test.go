@@ -109,7 +109,7 @@ func TestBuildServerTLS_InvalidMode(t *testing.T) {
 
 func TestUpstreamTLSClientConfig(t *testing.T) {
 	caPath := writeCABundle(t, genSelfSignedCert(t, "ca").CertPEM)
-	ca, err := NewCAReloader(caPath, logr.Discard())
+	ca, err := NewCAReloader(caPath, logr.Discard(), nil)
 	if err != nil {
 		t.Fatalf("NewCAReloader: %v", err)
 	}

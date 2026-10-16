@@ -259,14 +259,16 @@ func (w *fileWatcher) run(ctx context.Context, watcher *fsnotify.Watcher) {
 type CAReloader struct {
 	file string
 	log  logr.Logger
+	cb   ReloadCallback
 
 	cur atomic.Pointer[x509.CertPool]
 }
 
 // NewCAReloader loads the initial bundle and returns a reloader whose Pool
-// follows the file once Start is called.
-func NewCAReloader(file string, log logr.Logger) (*CAReloader, error) {
-	r := &CAReloader{file: file, log: log}
+// follows the file once Start is called. cb, which may be nil, is called
+// after every load attempt, the same way CertReloader calls its callback.
+func NewCAReloader(file string, log logr.Logger, cb ReloadCallback) (*CAReloader, error) {
+	r := &CAReloader{file: file, log: log, cb: cb}
 	if err := r.reload(); err != nil {
 		return nil, fmt.Errorf("initial CA load: %w", err)
 	}
@@ -282,9 +284,15 @@ func (r *CAReloader) Pool() *x509.CertPool {
 func (r *CAReloader) reload() error {
 	pool, err := LoadCAPool(r.file)
 	if err != nil {
+		if r.cb != nil {
+			r.cb(false, err)
+		}
 		return err
 	}
 	r.cur.Store(pool)
+	if r.cb != nil {
+		r.cb(true, nil)
+	}
 	return nil
 }
 

@@ -19,6 +19,7 @@ import (
 	"crypto/x509"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -232,7 +233,10 @@ func TestCertReloaderCredentialBundle(t *testing.T) {
 
 func TestCAReloaderKeepsPoolOnBrokenBundle(t *testing.T) {
 	certPath, _ := writeCert(t, genSelfSignedCert(t, "ca"))
-	r, err := NewCAReloader(certPath, logr.Discard())
+	var outcomes []bool
+	r, err := NewCAReloader(certPath, logr.Discard(), func(ok bool, _ error) {
+		outcomes = append(outcomes, ok)
+	})
 	if err != nil {
 		t.Fatalf("NewCAReloader: %v", err)
 	}
@@ -246,5 +250,8 @@ func TestCAReloaderKeepsPoolOnBrokenBundle(t *testing.T) {
 	}
 	if r.Pool() != before {
 		t.Fatal("broken bundle replaced the pool, want the previous one kept")
+	}
+	if !slices.Equal(outcomes, []bool{true, false}) {
+		t.Fatalf("callback outcomes = %v, want [true false]", outcomes)
 	}
 }

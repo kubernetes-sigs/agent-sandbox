@@ -197,7 +197,7 @@ func newUpstreamTLSRouter(t *testing.T, ca *testCA, opts upstreamRouterOpts) *ht
 	var caReloader *tlsutil.CAReloader
 	if cfg.UpstreamTLSCAFile != "" {
 		var err error
-		caReloader, err = tlsutil.NewCAReloader(cfg.UpstreamTLSCAFile, logr.Discard())
+		caReloader, err = tlsutil.NewCAReloader(cfg.UpstreamTLSCAFile, logr.Discard(), nil)
 		if err != nil {
 			t.Fatalf("CA reloader: %v", err)
 		}

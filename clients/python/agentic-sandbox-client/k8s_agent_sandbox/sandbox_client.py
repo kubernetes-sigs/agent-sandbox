@@ -21,7 +21,7 @@ import uuid
 import atexit
 import logging
 from types import TracebackType
-from typing import Any, Dict, Generic, List, Self, Tuple, Type, TypeVar, cast
+from typing import Any, Dict, Generic, List, Self, Tuple, Type, TypeVar
 
 from kubernetes import client
 from kubernetes.client import ApiException
@@ -42,7 +42,7 @@ from .models import (
 from .k8s_helper import K8sHelper
 from .pod_metadata import build_pod_metadata, validate_labels
 from .utils import construct_sandbox_claim_lifecycle_spec
-from .exceptions import SandboxNotFoundError
+from .exceptions import SandboxMetadataError, SandboxNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -468,7 +468,7 @@ class SandboxClient(Generic[T]):
             .get("name")
         )
         if not isinstance(warmpool_name, str) or not warmpool_name:
-            raise SandboxNotFoundError(
+            raise SandboxMetadataError(
                 f"SandboxClaim '{claim_name}' is missing spec.warmPoolRef.name."
             )
         return warmpool_name

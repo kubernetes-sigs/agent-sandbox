@@ -110,6 +110,18 @@ class TestAsyncK8sHelperCreateSandboxClaim(unittest.IsolatedAsyncioTestCase):
             body["spec"]["additionalPodMetadata"]["labels"]["client-id"], "tenant-a"
         )
 
+    async def test_pod_metadata_dict_backward_compatible(self):
+        await self.helper.create_sandbox_claim(
+            "test-claim", "test-warmpool", "test-namespace",
+            pod_metadata={"labels": {"client-id": "tenant-a"}, "annotations": {"a": "b"}},
+        )
+
+        call_kwargs = self.helper.custom_objects_api.create_namespaced_custom_object.call_args.kwargs
+        self.assertEqual(
+            call_kwargs["body"]["spec"]["additionalPodMetadata"],
+            {"labels": {"client-id": "tenant-a"}, "annotations": {"a": "b"}},
+        )
+
     async def test_no_pod_metadata_omits_key(self):
         await self.helper.create_sandbox_claim(
             "test-claim", "test-warmpool", "test-namespace"

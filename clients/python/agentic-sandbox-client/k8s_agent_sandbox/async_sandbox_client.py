@@ -25,7 +25,7 @@ import logging
 import sys
 import uuid
 from types import TracebackType
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Self, TypeVar
 
 from kubernetes import client as sync_client
 from kubernetes_asyncio import client as async_client
@@ -195,7 +195,7 @@ class AsyncSandboxClient(Generic[T]):
         if cleanup:
             atexit.register(self._atexit_cleanup)
 
-    async def __aenter__(self) -> "AsyncSandboxClient[T]":
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(

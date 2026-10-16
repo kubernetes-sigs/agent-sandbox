@@ -42,6 +42,7 @@ from k8s_agent_sandbox.exceptions import (
     SandboxPortForwardError,
     SandboxRequestError,
     SandboxNotFoundError,
+    SandboxMetadataError,
 )
 from k8s_agent_sandbox.k8s_helper import K8sHelper
 
@@ -620,6 +621,11 @@ class TestSandboxClient(unittest.TestCase):
         with self.assertRaises(SandboxNotFoundError):
             self.client.get_sandbox_claim_warmpool_name("my-claim", "my-namespace")
 
+
+    def test_get_sandbox_claim_warmpool_name_missing_warmpool_ref(self):
+        self.mock_k8s_helper.get_sandbox_claim.return_value = {"spec": {}}
+        with self.assertRaises(SandboxMetadataError):
+            self.client.get_sandbox_claim_warmpool_name("my-claim", "my-namespace")
 
 class SandboxHandler(BaseHTTPRequestHandler):
     """Minimal api handler with basic routing to exercise error paths."""

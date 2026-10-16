@@ -71,13 +71,14 @@ class K8sHelper:
         labels: dict[str, str] | None = None,
         lifecycle: dict[str, Any] | None = None,
         volume_claim_templates: list[dict[str, Any]] | None = None,
-        pod_metadata: AdditionalPodMetadata | None = None,
+        pod_metadata: AdditionalPodMetadata | dict[str, Any] | None = None,
         env: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Creates a SandboxClaim custom resource.
 
         Args:
-            pod_metadata: Optional ``AdditionalPodMetadata`` serialized as
+            pod_metadata: Optional ``AdditionalPodMetadata`` (or an equivalent
+                ``dict``, validated via ``model_validate``) serialized as
                 ``spec.additionalPodMetadata`` so the labels and annotations
                 propagate onto the running Sandbox Pod (as opposed to
                 ``labels``, which only land on the SandboxClaim object).
@@ -105,6 +106,8 @@ class K8sHelper:
         if volume_claim_templates:
             spec["volumeClaimTemplates"] = volume_claim_templates
         if pod_metadata:
+            if isinstance(pod_metadata, dict):
+                pod_metadata = AdditionalPodMetadata.model_validate(pod_metadata)
             spec["additionalPodMetadata"] = pod_metadata.model_dump(exclude_none=True)
         env_spec = construct_sandbox_claim_env_spec(env)
         if env_spec:

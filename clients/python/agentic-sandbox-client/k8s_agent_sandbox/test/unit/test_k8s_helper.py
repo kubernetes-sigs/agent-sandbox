@@ -175,6 +175,22 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
             body["spec"]["additionalPodMetadata"]["labels"]["client-id"], "tenant-a"
         )
 
+    def test_pod_metadata_dict_backward_compatible(self, mock_config, mock_api_cls, mock_core_cls):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+
+        helper = K8sHelper()
+        helper.create_sandbox_claim(
+            "test-claim", "test-warmpool", "test-namespace",
+            pod_metadata={"labels": {"client-id": "tenant-a"}, "annotations": {"a": "b"}},
+        )
+
+        body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
+        self.assertEqual(
+            body["spec"]["additionalPodMetadata"],
+            {"labels": {"client-id": "tenant-a"}, "annotations": {"a": "b"}},
+        )
+
     def test_no_pod_metadata_omits_key(self, mock_config, mock_api_cls, mock_core_cls):
         mock_api = MagicMock()
         mock_api_cls.return_value = mock_api

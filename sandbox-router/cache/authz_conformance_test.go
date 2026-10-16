@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/authz"
 	sandboxcache "sigs.k8s.io/agent-sandbox/sandbox-router/cache"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
@@ -143,9 +144,9 @@ func newConformanceFixture(t *testing.T, pod *corev1.Pod) *conformanceFixture {
 
 func conformancePod(uid types.UID, unclaimed bool) *corev1.Pod {
 	controller := true
-	labels := map[string]string{sandboxcache.PodSandboxNameHashLabel: "name-hash"}
+	labels := map[string]string{sandboxv1beta1.SandboxNameHashLabel: "name-hash"}
 	if unclaimed {
-		labels[sandboxcache.PodWarmPoolLabel] = "pool-hash"
+		labels[sandboxv1beta1.SandboxWarmPoolLabel] = "pool-hash"
 	}
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -247,7 +248,7 @@ func TestScopedTokenV2CacheConformance_UnclaimedMemberAndAdoption(t *testing.T) 
 	}
 
 	adopted := pod.DeepCopy()
-	delete(adopted.Labels, sandboxcache.PodWarmPoolLabel)
+	delete(adopted.Labels, sandboxv1beta1.SandboxWarmPoolLabel)
 	if _, err := f.client.CoreV1().Pods(conformanceNamespace).Update(t.Context(), adopted, metav1.UpdateOptions{}); err != nil {
 		t.Fatalf("adopt warm member: %v", err)
 	}

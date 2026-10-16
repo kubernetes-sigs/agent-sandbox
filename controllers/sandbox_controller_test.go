@@ -1446,7 +1446,7 @@ func TestReconcile(t *testing.T) {
 						Name:            sandboxName,
 						Namespace:       sandboxNs,
 						Finalizers:      []string{"agents.x-k8s.io/test-hold"},
-						Labels:          map[string]string{sandboxLabel: nameHash},
+						Labels:          map[string]string{sandboxv1beta1.SandboxNameHashLabel: nameHash},
 						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
 					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
@@ -2648,7 +2648,7 @@ func TestReconcilePod(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "2",
 					Labels: map[string]string{
-						sandboxLabel:                         nameHash,
+						sandboxv1beta1.SandboxNameHashLabel:  nameHash,
 						sandboxv1beta1.SandboxAdoptableLabel: "true",
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
@@ -2922,10 +2922,10 @@ func TestReconcilePod(t *testing.T) {
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
 						Labels: map[string]string{
-							sandboxLabel:                   nameHash,
-							"remove-label":                 "value",
-							"keep-label":                   "value",
-							"agents.x-k8s.io/system-label": "value",
+							sandboxv1beta1.SandboxNameHashLabel: nameHash,
+							"remove-label":                      "value",
+							"keep-label":                        "value",
+							"agents.x-k8s.io/system-label":      "value",
 						},
 						Annotations: map[string]string{
 							"remove-annotation":                      "value",
@@ -2968,9 +2968,9 @@ func TestReconcilePod(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "2",
 					Labels: map[string]string{
-						sandboxLabel:                   nameHash,
-						"keep-label":                   "value",
-						"agents.x-k8s.io/system-label": "value",
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
+						"keep-label":                        "value",
+						"agents.x-k8s.io/system-label":      "value",
 					},
 					Annotations: map[string]string{
 						"keep-annotation":                        "value",
@@ -3296,7 +3296,7 @@ func TestReconcilePodRecoversOwnedPodWhenTrackedPodIsMissing(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            survivor,
 			Namespace:       sandboxNs,
-			Labels:          map[string]string{sandboxLabel: nameHash},
+			Labels:          map[string]string{sandboxv1beta1.SandboxNameHashLabel: nameHash},
 			OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 		},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
@@ -3354,7 +3354,7 @@ func TestReconcilePodPrefersOwnedPodOverStaleAdoptionTarget(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            survivor,
 			Namespace:       sandboxNs,
-			Labels:          map[string]string{sandboxLabel: nameHash},
+			Labels:          map[string]string{sandboxv1beta1.SandboxNameHashLabel: nameHash},
 			OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 		},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
@@ -3412,7 +3412,7 @@ func TestReconcilePodFailsClosedForMultipleOwnedPods(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:            name,
 				Namespace:       sandboxNs,
-				Labels:          map[string]string{sandboxLabel: nameHash},
+				Labels:          map[string]string{sandboxv1beta1.SandboxNameHashLabel: nameHash},
 				OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 			},
 			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
@@ -3468,7 +3468,7 @@ func TestReconcileChildResourcesSurfacesMultipleOwnedPods(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:            name,
 				Namespace:       sandboxNs,
-				Labels:          map[string]string{sandboxLabel: nameHash},
+				Labels:          map[string]string{sandboxv1beta1.SandboxNameHashLabel: nameHash},
 				OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 			},
 		}
@@ -3549,7 +3549,7 @@ func TestReconcilePodWaitsForOwnedTerminatingPod(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "terminating-owned-pod",
 			Namespace:         sandboxNs,
-			Labels:            map[string]string{sandboxLabel: nameHash},
+			Labels:            map[string]string{sandboxv1beta1.SandboxNameHashLabel: nameHash},
 			OwnerReferences:   []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 			Finalizers:        []string{"agents.x-k8s.io/test-hold"},
 			DeletionTimestamp: &deletionTime,
@@ -3670,14 +3670,14 @@ func TestReconcileService(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "1",
 					Labels: map[string]string{
-						sandboxLabel: nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
 				Spec: corev1.ServiceSpec{
 					ClusterIP: "None",
 					Selector: map[string]string{
-						sandboxLabel: nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 				},
 			},
@@ -3695,14 +3695,14 @@ func TestReconcileService(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "1",
 					Labels: map[string]string{
-						sandboxLabel: nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
 				Spec: corev1.ServiceSpec{
 					ClusterIP: "None",
 					Selector: map[string]string{
-						sandboxLabel: nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 					Ports: []corev1.ServicePort{
 						servicePort(8080, corev1.ProtocolTCP),
@@ -3742,14 +3742,14 @@ func TestReconcileService(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "1",
 					Labels: map[string]string{
-						sandboxLabel: nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
 				Spec: corev1.ServiceSpec{
 					ClusterIP: "None",
 					Selector: map[string]string{
-						sandboxLabel: nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 					Ports: []corev1.ServicePort{
 						servicePortWithName(15020, corev1.ProtocolTCP, "metrics"),
@@ -3774,14 +3774,14 @@ func TestReconcileService(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "1",
 					Labels: map[string]string{
-						sandboxLabel: nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
 				Spec: corev1.ServiceSpec{
 					ClusterIP: "None",
 					Selector: map[string]string{
-						sandboxLabel: nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 					Ports: []corev1.ServicePort{
 						servicePortWithName(8080, corev1.ProtocolTCP, "http"),
@@ -3817,14 +3817,14 @@ func TestReconcileService(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "1",
 					Labels: map[string]string{
-						sandboxLabel: nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
 				Spec: corev1.ServiceSpec{
 					ClusterIP: "None",
 					Selector: map[string]string{
-						sandboxLabel: nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 					Ports: []corev1.ServicePort{
 						servicePort(8080, corev1.ProtocolTCP),
@@ -3847,14 +3847,14 @@ func TestReconcileService(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "1",
 					Labels: map[string]string{
-						sandboxLabel: nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
 				Spec: corev1.ServiceSpec{
 					ClusterIP: "None",
 					Selector: map[string]string{
-						sandboxLabel: nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 					Ports: []corev1.ServicePort{
 						servicePortWithName(8080, corev1.ProtocolTCP, "p-8080-tcp-2"),
@@ -3912,14 +3912,14 @@ func TestReconcileService(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "2",
 					Labels: map[string]string{
-						"keep":       "me",
-						sandboxLabel: nameHash,
+						"keep":                              "me",
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
 				Spec: corev1.ServiceSpec{
 					Selector: map[string]string{
-						sandboxLabel: nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 				},
 			},
@@ -3935,14 +3935,14 @@ func TestReconcileService(t *testing.T) {
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
 						Labels: map[string]string{
-							"keep":       "me",
-							sandboxLabel: nameHash,
+							"keep":                              "me",
+							sandboxv1beta1.SandboxNameHashLabel: nameHash,
 						},
 						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
 					Spec: corev1.ServiceSpec{
 						Selector: map[string]string{
-							sandboxLabel: nameHash,
+							sandboxv1beta1.SandboxNameHashLabel: nameHash,
 						},
 						Ports: []corev1.ServicePort{
 							servicePort(9090, corev1.ProtocolTCP),
@@ -3959,14 +3959,14 @@ func TestReconcileService(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "2",
 					Labels: map[string]string{
-						"keep":       "me",
-						sandboxLabel: nameHash,
+						"keep":                              "me",
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
 				Spec: corev1.ServiceSpec{
 					Selector: map[string]string{
-						sandboxLabel: nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 					Ports: []corev1.ServicePort{
 						servicePort(8080, corev1.ProtocolTCP),
@@ -3985,14 +3985,14 @@ func TestReconcileService(t *testing.T) {
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
 						Labels: map[string]string{
-							sandboxLabel: nameHash,
+							sandboxv1beta1.SandboxNameHashLabel: nameHash,
 						},
 						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
 					Spec: corev1.ServiceSpec{
 						ClusterIP: "None",
 						Selector: map[string]string{
-							sandboxLabel: nameHash,
+							sandboxv1beta1.SandboxNameHashLabel: nameHash,
 						},
 						Ports: []corev1.ServicePort{{
 							Name:        "p-8080-tcp",
@@ -4013,14 +4013,14 @@ func TestReconcileService(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "1",
 					Labels: map[string]string{
-						sandboxLabel: nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
 				Spec: corev1.ServiceSpec{
 					ClusterIP: "None",
 					Selector: map[string]string{
-						sandboxLabel: nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 					Ports: []corev1.ServicePort{{
 						Name:        "p-8080-tcp",
@@ -4832,7 +4832,7 @@ func TestReconcileChildResourcesSuspendedForeignPodDoesNotLeakIPOrNodeName(t *te
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sandboxName,
 			Namespace: sandboxNs,
-			Labels:    map[string]string{sandboxLabel: nameHash},
+			Labels:    map[string]string{sandboxv1beta1.SandboxNameHashLabel: nameHash},
 			OwnerReferences: []metav1.OwnerReference{
 				{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "other-rs", UID: "other-uid-999", Controller: new(true)},
 			},
@@ -4853,7 +4853,7 @@ func TestReconcileChildResourcesSuspendedForeignPodDoesNotLeakIPOrNodeName(t *te
 
 	assert.Nil(t, sandboxObj.Status.PodIPs, "foreign pod IPs must NOT leak into sandbox status")
 	assert.Empty(t, sandboxObj.Status.NodeName, "foreign pod NodeName must NOT leak into sandbox status")
-	assert.Equal(t, sandboxLabel+"="+nameHash, sandboxObj.Status.LabelSelector, "LabelSelector must be set for any non-nil pod (including foreign pods)")
+	assert.Equal(t, sandboxv1beta1.SandboxNameHashLabel+"="+nameHash, sandboxObj.Status.LabelSelector, "LabelSelector must be set for any non-nil pod (including foreign pods)")
 
 	// Confirm we actually hit the foreign-pod path (guards against silently
 	// regressing to the pod==nil clearing, which would pass the asserts above for
@@ -5317,7 +5317,7 @@ func TestSandboxReconcile_ConditionsDoNotAccumulate(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: sbName, Namespace: sbNs,
-			Labels:          map[string]string{sandboxLabel: nameHash},
+			Labels:          map[string]string{sandboxv1beta1.SandboxNameHashLabel: nameHash},
 			OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sbName)},
 		},
 		Spec: corev1.PodSpec{
@@ -5342,12 +5342,12 @@ func TestSandboxReconcile_ConditionsDoNotAccumulate(t *testing.T) {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: sbName, Namespace: sbNs,
-			Labels:          map[string]string{sandboxLabel: nameHash},
+			Labels:          map[string]string{sandboxv1beta1.SandboxNameHashLabel: nameHash},
 			OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sbName)},
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP: "None",
-			Selector:  map[string]string{sandboxLabel: nameHash},
+			Selector:  map[string]string{sandboxv1beta1.SandboxNameHashLabel: nameHash},
 		},
 	}
 
@@ -5880,7 +5880,7 @@ func TestReconcileNamespaceTerminatingRequeue(t *testing.T) {
 						Name:            sb.Name,
 						Namespace:       sb.Namespace,
 						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sb.Name)},
-						Labels:          map[string]string{sandboxLabel: NameHash(sb.Name)},
+						Labels:          map[string]string{sandboxv1beta1.SandboxNameHashLabel: NameHash(sb.Name)},
 					},
 				}
 				return []runtime.Object{pod}

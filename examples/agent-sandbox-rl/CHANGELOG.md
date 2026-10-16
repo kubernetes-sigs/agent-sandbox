@@ -5,6 +5,19 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 
 ## [0.1.0.dev0] — unreleased
 
+### Added (dataset rows and image manifests as task sources)
+- **`to_tasks` / `JsonlSource` understand dataset rows**: a row's image is found with
+  `extract_image` under the SDK's `image` key or the R2E-Gym / SWE-bench conventions
+  (`DEFAULT_IMAGE_FIELDS`: `docker_image`, `image_name`, `metadata.*`,
+  `metadata.env_config.entry.*`, ...), one-element array or bytes values included, and
+  its id under `id` / `instance_id` / `task_id`. `image_field=` takes a dotted path,
+  several paths tried in order, or a callable; `id_field=` likewise. The whole row stays
+  in `Task.metadata`. A row without an image raises `KeyError` naming the paths tried.
+- **`load_image_list(path)` / `ImageListSource(path)`**: one-image-per-line manifests
+  (blank lines, `#` comments and duplicates dropped) from a local path or `gs://`;
+  `read_text(path)` reads `gs://` through `google.cloud.storage` when importable, else
+  `gcloud storage cat` / `gsutil cat`, with a clear error when neither is available.
+
 ### Added (one NetworkPolicy per namespace)
 - **`TemplateSpec.network_policy_management`** sets `spec.networkPolicyManagement`
   on the SandboxTemplates a fleet creates, and patches it onto a pre-existing

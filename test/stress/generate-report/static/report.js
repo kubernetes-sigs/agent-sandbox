@@ -103,14 +103,16 @@ function paginate(container, items, moreButton, chunk, rowHtml) {
 }
 
 // hashQuery returns the search query carried in a #q= hash, or null. A
-// hand-edited hash may hold a bare "%"; take it as typed rather than throw
-// and fail the page.
+// hand-edited hash may hold a bare "%" (one that starts no escape), which
+// would make decodeURIComponent throw and fail the page; keep it literal and
+// decode the rest.
 function hashQuery() {
     if (!location.hash.startsWith('#q=')) return null;
     const raw = location.hash.slice(3);
     try {
-        return decodeURIComponent(raw);
+        return decodeURIComponent(raw.replace(/%(?![0-9a-f]{2})/gi, '%25'));
     } catch (err) {
+        // Escapes that are not valid UTF-8 still throw; take those as typed.
         return raw;
     }
 }

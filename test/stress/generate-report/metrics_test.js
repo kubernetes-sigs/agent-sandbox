@@ -220,11 +220,15 @@ test('locking a series whose label value holds a spaced semicolon keeps the pane
     assert.equal(explorer.elements['mx-results'].children.length, 2);
 });
 
-test('a hash with a bare percent sign still loads the explorer', async () => {
-    // loadExplorer itself fails the test if the page reports "load failed".
-    const { elements } = await loadExplorer(undefined, undefined, '#q=metric:=early_gauge 100%');
-    assert.equal(elements['mx-search'].value, 'metric:=early_gauge 100%');
-    assert.equal(elements['mx-status'].textContent, '0 metrics, 0 / 107 series');
+test('a hash with a bare percent sign still decodes the rest of the query', async () => {
+    // Browsers encode a typed fragment's spaces, so editing a shared link
+    // leaves a bare "%" among valid escapes. loadExplorer itself fails the
+    // test if the page reports "load failed".
+    const edited = await loadExplorer(undefined, undefined, '#q=metric%3A%3Dearly_gauge%20100%');
+    assert.equal(edited.elements['mx-search'].value, 'metric:=early_gauge 100%');
+    // An escape that is not valid UTF-8 cannot be decoded, so it stays as typed.
+    const broken = await loadExplorer(undefined, undefined, '#q=%E0%A4%A');
+    assert.equal(broken.elements['mx-search'].value, '%E0%A4%A');
 });
 
 test('a panel click ignores an edit the debounce has not rendered', async () => {

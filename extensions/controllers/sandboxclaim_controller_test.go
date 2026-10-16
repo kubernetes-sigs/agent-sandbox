@@ -1307,6 +1307,8 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 		sandboxIsExpired           bool
 		isWarmPool                 bool
 		sandboxNotOwned            bool // sandbox exists at statusName but belongs to a different owner
+		noShutdownTime             bool // no expiry configured at all
+		sandboxFinished            bool // sandbox reports Finished=True
 		expectClaimDeleted         bool
 		expectSandboxDeleted       bool
 		expectSandboxStatusCleared bool // SandboxStatus.Name, PodIPs, and ServiceFQDN must be empty
@@ -1350,6 +1352,15 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 			expectStatus:         "",
 		},
 		{
+			name:                 "Policy=Delete, no expiry, Sandbox Finished -> Should Retain Claim and Sandbox",
+			claim:                createClaim("delete-claim-no-expiry", extensionsv1beta1.ShutdownPolicyDelete),
+			noShutdownTime:       true,
+			sandboxFinished:      true,
+			expectClaimDeleted:   false,
+			expectSandboxDeleted: false,
+			expectStatus:         "SandboxReady",
+		},
+		{
 			name:                 "Policy=Delete && Sandbox Running -> Should Delete Claim immediately",
 			claim:                createClaim("delete-claim-race", extensionsv1beta1.ShutdownPolicyDelete),
 			sandboxIsExpired:     false,
@@ -1381,6 +1392,18 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			scheme := newScheme(t)
 			sandbox := createSandbox(tc.claim.Name, tc.sandboxIsExpired)
+
+			if tc.noShutdownTime {
+				tc.claim.Spec.Lifecycle.ShutdownTime = nil
+			}
+			if tc.sandboxFinished {
+				sandbox.Status.Conditions = append(sandbox.Status.Conditions, metav1.Condition{
+					Type:               string(sandboxv1beta1.SandboxConditionFinished),
+					Status:             metav1.ConditionTrue,
+					Reason:             sandboxv1beta1.SandboxReasonPodSucceeded,
+					LastTransitionTime: metav1.NewTime(time.Now().Add(-time.Minute)),
+				})
+			}
 
 			// Hack: Simulate warmPool adopted sandbox
 			if tc.isWarmPool {
@@ -1614,6 +1637,7 @@ func TestSandboxClaimTTLAfterFinishedCleanupPolicy(t *testing.T) {
 	testCases := []struct {
 		name                 string
 		policy               extensionsv1beta1.ShutdownPolicy
+		sandboxTerminating   bool // a finalizer keeps the Sandbox around after it is deleted
 		expectClaimDeleted   bool
 		expectSandboxDeleted bool
 	}{
@@ -1622,6 +1646,13 @@ func TestSandboxClaimTTLAfterFinishedCleanupPolicy(t *testing.T) {
 			policy:               extensionsv1beta1.ShutdownPolicyRetain,
 			expectClaimDeleted:   false,
 			expectSandboxDeleted: true,
+		},
+		{
+			name:                 "retain preserves finished condition while sandbox terminates",
+			policy:               extensionsv1beta1.ShutdownPolicyRetain,
+			sandboxTerminating:   true,
+			expectClaimDeleted:   false,
+			expectSandboxDeleted: false,
 		},
 		{
 			name:                 "delete foreground deletes claim",
@@ -1635,6 +1666,10 @@ func TestSandboxClaimTTLAfterFinishedCleanupPolicy(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			claim := createClaim(tc.name, tc.policy)
 			sandbox := createSandbox(claim)
+			if tc.sandboxTerminating {
+				sandbox.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+				sandbox.Finalizers = []string{"test-finalizer"}
+			}
 			client := fake.NewClientBuilder().WithScheme(scheme).
 				WithObjects(claim, sandbox, warmPool, template).
 				WithStatusSubresource(claim).
@@ -1653,14 +1688,19 @@ func TestSandboxClaimTTLAfterFinishedCleanupPolicy(t *testing.T) {
 			require.NoError(t, err)
 			require.Greater(t, result.RequeueAfter, time.Duration(0))
 
+			requireExpiredAndFinished := func(claim *extensionsv1beta1.SandboxClaim) {
+				t.Helper()
+				readyCondition := meta.FindStatusCondition(claim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+				require.NotNil(t, readyCondition)
+				require.Equal(t, extensionsv1beta1.ClaimExpiredReason, readyCondition.Reason)
+				finishedCondition := meta.FindStatusCondition(claim.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished))
+				require.NotNil(t, finishedCondition)
+				require.Equal(t, sandboxv1beta1.SandboxReasonPodSucceeded, finishedCondition.Reason)
+			}
+
 			updatedClaim := &extensionsv1beta1.SandboxClaim{}
 			require.NoError(t, client.Get(context.Background(), req.NamespacedName, updatedClaim))
-			readyCondition := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
-			require.NotNil(t, readyCondition)
-			require.Equal(t, extensionsv1beta1.ClaimExpiredReason, readyCondition.Reason)
-			finishedCondition := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished))
-			require.NotNil(t, finishedCondition)
-			require.Equal(t, sandboxv1beta1.SandboxReasonPodSucceeded, finishedCondition.Reason)
+			requireExpiredAndFinished(updatedClaim)
 
 			updatedSandbox := &sandboxv1beta1.Sandbox{}
 			require.NoError(t, client.Get(context.Background(), req.NamespacedName, updatedSandbox))
@@ -1674,12 +1714,7 @@ func TestSandboxClaimTTLAfterFinishedCleanupPolicy(t *testing.T) {
 				require.True(t, k8errors.IsNotFound(err))
 			} else {
 				require.NoError(t, err)
-				readyCondition = meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
-				require.NotNil(t, readyCondition)
-				require.Equal(t, extensionsv1beta1.ClaimExpiredReason, readyCondition.Reason)
-				finishedCondition = meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished))
-				require.NotNil(t, finishedCondition)
-				require.Equal(t, sandboxv1beta1.SandboxReasonPodSucceeded, finishedCondition.Reason)
+				requireExpiredAndFinished(updatedClaim)
 			}
 
 			err = client.Get(context.Background(), req.NamespacedName, updatedSandbox)
@@ -1688,6 +1723,26 @@ func TestSandboxClaimTTLAfterFinishedCleanupPolicy(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
+
+			if tc.expectClaimDeleted {
+				return
+			}
+
+			// A retained claim must keep its expired and finished status after the
+			// sandbox is gone, not only while it is being deleted.
+			if tc.sandboxTerminating {
+				updatedSandbox.Finalizers = nil
+				require.NoError(t, client.Update(context.Background(), updatedSandbox))
+			}
+			result, err = reconciler.Reconcile(context.Background(), req)
+			require.NoError(t, err)
+			require.Zero(t, result.RequeueAfter)
+
+			require.NoError(t, client.Get(context.Background(), req.NamespacedName, updatedClaim))
+			requireExpiredAndFinished(updatedClaim)
+			require.Empty(t, updatedClaim.Status.SandboxStatus.Name)
+			err = client.Get(context.Background(), req.NamespacedName, &sandboxv1beta1.Sandbox{})
+			require.True(t, k8errors.IsNotFound(err))
 		})
 	}
 }

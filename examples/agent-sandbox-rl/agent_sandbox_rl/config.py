@@ -37,10 +37,12 @@ PLACEMENTS = ("round-robin", "least-loaded", "capacity-weighted", "image-affinit
 
 
 class ResourceSpec(BaseModel):
-  """Per-sandbox container resource requests."""
+  """Runtime container resources: requests, and optional limits (unset = none)."""
 
   cpu: str = "250m"
   memory: str = "512Mi"
+  cpu_limit: str | None = None
+  memory_limit: str | None = None
 
 
 class TemplateSpec(BaseModel):
@@ -75,6 +77,16 @@ class TemplateSpec(BaseModel):
   # onto a pre-existing template it owns.
   # See examples/agent-sandbox-rl-network-policy.
   network_policy_management: str | None = None
+  # Pod hardening. Sandboxes run untrusted agent code, so by default the pod
+  # mounts no ServiceAccount token and its containers do not share a PID
+  # namespace (a grading sidecar must neither see nor be seen by the agent's
+  # processes). Set either to True for a workload that needs them.
+  automount_service_account_token: bool = False
+  share_process_namespace: bool = False
+  # Extra keys merged into the SandboxTemplate `spec` next to `podTemplate` and
+  # `networkPolicyManagement`, for template fields this model has no knob for.
+  # `podTemplate` itself is rejected here: use extra_pod_spec.
+  extra_template_spec: dict = Field(default_factory=dict)
 
   @field_validator("image_pull_policy")
   @classmethod
@@ -88,6 +100,14 @@ class TemplateSpec(BaseModel):
   def _valid_network_policy_management(cls, v: str | None) -> str | None:
     if v is not None and v not in ("Managed", "Unmanaged"):
       raise ValueError("network_policy_management must be Managed|Unmanaged")
+    return v
+
+  @field_validator("extra_template_spec")
+  @classmethod
+  def _extra_template_spec_not_pod_template(cls, v: dict) -> dict:
+    if "podTemplate" in v:
+      raise ValueError("extra_template_spec must not carry podTemplate; "
+                       "use extra_pod_spec for pod-spec keys")
     return v
 
 

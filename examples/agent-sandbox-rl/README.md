@@ -309,6 +309,33 @@ fleet.run(process_fn, strategy="naive")          # warm everything, full depth, 
 > serializes problems and underfills `max_concurrent` once rollouts do real work
 > (measured: pipelined wall 55 s → 97 s). `pipelined` is for the 1:1 eval case.
 
+### Streaming batches — an external step loop
+
+An RL trainer owns its loop: it dispatches batch after batch from a prompt stream, knows
+the next batch or two ahead of time, and may still be claiming for a batch it dispatched
+two steps ago. `LookaheadWarmer` keeps the pools sized for exactly the batches in flight:
+
+```python
+from agent_sandbox_rl import LookaheadWarmer
+warmer = LookaheadWarmer(fleet, keep_finished=max_staleness)   # cap = max_warmpool_size
+warmer.add(0, {img: prompts * G for img, prompts in batch0}, wait=True)   # start-up barrier
+warmer.add(1, counts_of(batch1))        # lookahead: pools warm while step 0 runs
+...                                     # dispatch, acquire(task) per episode
+warmer.add(2, counts_of(batch2)); warmer.finish(0)   # batch 0 released: its pools stay for
+                                                     # keep_finished more finishes, then go
+warmer.close()
+```
+
+Each `add` / `finish` diffs the desired replicas (sum over live batches plus the kept
+finished ones, capped) against what was asked before and applies it concurrently:
+`warm_image(wait=False)` for new images, `set_pool_replicas` for changed counts,
+`unwarm_image` for images no batch needs. Unknown images are added to the plan first
+(`fleet.add_tasks`). Warm errors land in the returned `WarmReport` and the log, not in
+your step; `fail_fast=True` re-raises a `FleetError` from a pool create after the phase.
+`wait=True` is a best-effort barrier (`fleet.wait_pools_ready`): a pool that exists but
+is slow reports `ready[img] == False` instead of raising, and `add_async` does the same
+on a background thread.
+
 ### Sandbox recycling (reset-and-reuse) — experimental
 
 `warm_per_task` gives each rollout its own *fresh* sandbox; **recycling** instead keeps

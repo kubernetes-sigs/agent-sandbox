@@ -104,6 +104,15 @@ class FleetPlan:
   def for_image(self, image: str) -> Optional[PlanEntry]:
     return self._by_image.get(image)
 
+  def add(self, entry: PlanEntry) -> None:
+    """Append an entry (see `SandboxFleet.add_tasks`); an image already planned
+    is replaced."""
+    old = self._by_image.get(entry.image)
+    if old is not None:
+      self.entries.remove(old)
+    self.entries.append(entry)
+    self._by_image[entry.image] = entry
+
   @property
   def total_replicas(self) -> int:
     return sum(e.replicas for e in self.entries)
@@ -426,6 +435,102 @@ class SandboxFleet:
     logger.info("Loaded %d tasks (%d unique images)",
                 len(self.tasks), len({t.image for t in self.tasks}))
     return self.tasks
+
+  def add_tasks(self, source, *, image_rewrite=None) -> list[Task]:
+    """Append tasks to the fleet and extend the current plan in place.
+
+    The streaming counterpart of `load_tasks` + `plan`: a trainer that learns its
+    prompts batch by batch registers each batch's images here, instead of
+    reloading every task and re-planning per new image. New images are placed
+    and sized like `plan` does (same placement, same per-cluster budget split,
+    same ``max_warmpool_size`` cap); images already planned only gain task
+    counts (their pool size is not revisited). Without a plan yet this only
+    appends; with ``adopt_existing`` the plan is rebuilt against the namespace's
+    pools (an unserved image raises `PoolNotFoundError`, as in `plan`).
+    Thread-safe; returns the tasks added.
+    """
+    new_tasks = to_tasks(source)
+    if image_rewrite is not None:
+      rewritten = []
+      for t in new_tasks:
+        new = image_rewrite(t.image)
+        if new != t.image:
+          t = t.model_copy(update={
+              "image": new, "metadata": {**t.metadata, "original_image": t.image}})
+        rewritten.append(t)
+      new_tasks = rewritten
+    if not new_tasks:
+      return []
+    with self._lock:
+      self.tasks = list(self.tasks) + list(new_tasks)
+      plan = self.plan_
+    if plan is None:
+      return new_tasks
+    if self.config.adopt_existing:
+      self._plan_adopt()
+      return new_tasks
+    counts = collections.Counter(t.image for t in new_tasks)
+    with self._lock:
+      cluster_totals: dict[str, int] = collections.defaultdict(int)
+      for e in plan.entries:
+        cluster_totals[e.cluster] += e.tasks
+      fresh: list[tuple[str, int, Cluster]] = []
+      for image, n in counts.items():
+        e = plan.for_image(image)
+        if e is not None:
+          e.tasks += n
+          continue
+        c = self.placement.select(image, self.registry)
+        cluster_totals[c.name] += n
+        fresh.append((image, n, c))
+      if not fresh:
+        return new_tasks
+      used = [self.registry.get(name) for name in cluster_totals]
+      budget = _split_budget(self.config.max_concurrent,
+                             {c.name: c.config.weight for c in used})
+      for image, n, c in fresh:
+        replicas = sizing.compute_replicas(
+            n, cluster_totals[c.name], budget[c.name],
+            self.config.max_warmpool_size, per_task=self.config.warm_per_task)
+        plan.add(PlanEntry(
+            cluster=c.name, image=image, template=self.config.template_name(image),
+            pool=self.config.pool_name(image), replicas=replicas, tasks=n))
+    logger.info("add_tasks: %d task(s), %d new image(s) added to the plan",
+                len(new_tasks), len(fresh))
+    return new_tasks
+
+  def wait_pools_ready(self, images, *, timeout: float | None = None) -> dict[str, bool]:
+    """Best-effort readiness barrier: ``image -> ready`` for each planned image,
+    waiting up to ``timeout`` seconds (default ``ready_timeout``) on each pool
+    concurrently. Never raises: a pool that is slow, an image not in the plan or
+    a watch error reads as ``False`` and is logged. The replica count waited for
+    is what this fleet asked of the pool (one for an adopted or borrowed pool)."""
+    images = list(dict.fromkeys(images))
+    if not images:
+      return {}
+    plan = self.plan_ or self.plan()
+    limit = self.config.ready_timeout if timeout is None else timeout
+    with self._lock:
+      warmed = dict(self._warmed)
+
+    def _one(image: str) -> bool:
+      e = plan.for_image(image)
+      if e is None:
+        logger.warning("wait_pools_ready: image %s is not in the plan", image)
+        return False
+      want = 1 if (e.adopted or image not in warmed) else max(1, warmed[image])
+      c = self.registry.get(e.cluster)
+      try:
+        return bool(c.resources.wait_for_pool_ready(e.pool, want, timeout=limit))
+      except Exception as exc:  # noqa: BLE001 — best-effort by contract
+        logger.warning("wait_pools_ready: pool %s on %s: %s", e.pool, e.cluster, exc)
+        return False
+
+    workers = max(1, min(len(images), self.config.max_concurrent))
+    if workers == 1:
+      return {img: _one(img) for img in images}
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="pool-ready") as ex:
+      return dict(zip(images, ex.map(_one, images)))
 
   def image_counts(self) -> "collections.OrderedDict[str, int]":
     counts: "collections.OrderedDict[str, int]" = collections.OrderedDict()

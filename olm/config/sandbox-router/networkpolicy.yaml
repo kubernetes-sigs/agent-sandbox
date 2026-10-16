@@ -8,6 +8,20 @@
 #   1. Set --authz-mode=tokenreview (or scoped-token) for L7 authz, and/or
 #   2. Tighten the from: namespaceSelector to a known set of caller namespaces.
 #
+# Limitations and workarounds:
+#
+#   namespaceSelector: {} only matches sources on the pod network.
+#   Host-network callers and L7 load balancers that send directly to pod IPs
+#   are not matched by any namespaceSelector — they need an ipBlock rule.
+#
+#   Metrics scraping is restricted to the "monitoring" namespace. If your
+#   Prometheus runs elsewhere, you need an extra policy for its namespace.
+#
+#   OLM-managed installs cannot edit this policy directly (the operator owns
+#   it), but NetworkPolicies are additive — if *any* policy in the namespace
+#   allows the traffic, it is allowed. Deploy a second NetworkPolicy to cover
+#   additional sources.
+#
 # Egress to sandbox pods is unrestricted on port because the upstream port is
 # caller-specified (X-Sandbox-Port header, default 8888). Destinations are
 # limited to pods carrying the controller-stamped

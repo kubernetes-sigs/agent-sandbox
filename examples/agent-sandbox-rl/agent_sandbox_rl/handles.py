@@ -39,10 +39,20 @@ _REFRESH_ATTEMPTS = 3
 _REFRESH_BACKOFF_S = 0.5
 
 
-def exec_in_pod(core_api, pod: str, namespace: str, command) -> str:
+def exec_container_kwargs(container: str | None) -> dict:
+  """The ``container=`` keyword for a kubernetes exec ``stream()`` call, or
+  nothing: an unset container keeps the API's default (the pod's first
+  container), which is the fleet's ``agent-runtime`` on single-container pods."""
+  return {"container": container} if container else {}
+
+
+def exec_in_pod(core_api, pod: str, namespace: str, command, *,
+                container: str | None = None) -> str:
   """Run ``command`` in a pod via the Kubernetes exec API (router-free).
 
   ``command`` may be a list (argv) or a string (wrapped as ``bash -lc``).
+  ``container`` picks the container of a multi-container pod (for example a
+  separate grading sidecar); unset means the pod's default container.
   Returns combined stdout/stderr.
   """
   if isinstance(command, str):
@@ -51,7 +61,7 @@ def exec_in_pod(core_api, pod: str, namespace: str, command) -> str:
       core_api.connect_get_namespaced_pod_exec,
       pod, namespace, command=command,
       stderr=True, stdin=False, stdout=True, tty=False,
-      _preload_content=True)
+      _preload_content=True, **exec_container_kwargs(container))
   if out is None:
     return ""
   if isinstance(out, bytes):
@@ -88,13 +98,14 @@ class SandboxSession:
   """
 
   def __init__(self, core_api, pod: str, namespace: str, *,
-               open_timeout: float = 30.0):
+               open_timeout: float = 30.0, container: str | None = None):
     self.pod = pod
+    self.container = container          # which container the shell runs in (None = default)
     self._seq = 0
     self._resp = stream(
         core_api.connect_get_namespaced_pod_exec, pod, namespace,
         command=["bash", "-l"], stderr=True, stdin=True, stdout=True, tty=True,
-        _preload_content=False)
+        _preload_content=False, **exec_container_kwargs(container))
     # Let the shell come up and drain the initial prompt/banner.
     deadline = time.monotonic() + open_timeout
     while time.monotonic() < deadline and not self._resp.is_open():
@@ -181,6 +192,10 @@ class SandboxHandle:
     pod_ip: Pod IP if known.
     sandbox: The underlying SDK ``Sandbox`` (``.commands`` / ``.files`` — needs
       the Sandbox Router; ``exec()`` below is the router-free path).
+    target_container: Container of a multi-container pod that ``exec()`` and
+      ``open_session()`` use when a call does not name one. ``None`` (default)
+      is the pod's default container. Set it to route every exec of this
+      handle to, say, a grading sidecar; the R2E-Gym adapter honors it too.
 
   On a cluster with ``ClusterConfig(snapshots=True)`` (GKE Pod Snapshots) the
   handle also offers ``snapshot()`` / ``suspend()`` / ``resume()`` /
@@ -205,11 +220,13 @@ class SandboxHandle:
   pod_ip: Optional[str] = None
   sandbox: object = None
   pending_snapshot_uid: Optional[str] = None
+  target_container: Optional[str] = None
   _cluster: "Cluster" = field(default=None, repr=False)
   _session: Optional["SandboxSession"] = field(default=None, repr=False)
   _slot_released: bool = field(default=False, repr=False)
 
-  def exec(self, command, timeout: float | None = None) -> str:
+  def exec(self, command, timeout: float | None = None, *,
+           container: str | None = None) -> str:
     """Run a command inside the sandbox (router-free, via the pod's exec API).
 
     ``timeout`` (seconds) bounds the wait on the **session** path; ``None`` (default)
@@ -218,25 +235,40 @@ class SandboxHandle:
     a session is attached — the point being that attaching a session no longer
     silently caps a command (the previous 120s default).
 
-    If a persistent `SandboxSession` is attached (``open_session()``), the command
-    is piped over that single held-open stream — no per-command websocket connect
-    (the recycling control-plane lever). Otherwise a fresh one-shot exec is used,
-    via a **thread-local** ``CoreV1Api`` (``Cluster.exec_core_api``): the
-    kubernetes ``stream()`` websocket exec is not thread-safe across a shared
-    client, so parallel one-shot execs stay isolated per thread while the client
-    is cached per thread rather than rebuilt per call.
+    ``container`` names the container to exec in; unset means ``target_container``,
+    and unset again means the pod's default container.
+
+    If a persistent `SandboxSession` is attached (``open_session()``) **for that
+    container**, the command is piped over that single held-open stream — no
+    per-command websocket connect (the recycling control-plane lever). Otherwise a
+    fresh one-shot exec is used, via a **thread-local** ``CoreV1Api``
+    (``Cluster.exec_core_api``): the kubernetes ``stream()`` websocket exec is not
+    thread-safe across a shared client, so parallel one-shot execs stay isolated
+    per thread while the client is cached per thread rather than rebuilt per call.
     """
-    if self._session is not None and self._session.is_open:
+    target = container or self.target_container
+    if (self._session is not None and self._session.is_open
+        and self._session.container == target):
       return self._session.run(command, timeout=timeout)
     core = self._cluster.exec_core_api()
-    return exec_in_pod(core, self.pod_name, self._cluster.namespace, command)
+    return exec_in_pod(core, self.pod_name, self._cluster.namespace, command,
+                       container=target)
 
-  def open_session(self) -> "SandboxSession":
+  def open_session(self, *, container: str | None = None) -> "SandboxSession":
     """Open (once) a persistent exec session so subsequent ``exec()`` calls reuse
-    a single websocket instead of connecting per command. Returns it."""
-    if self._session is None or not self._session.is_open:
-      self._session = SandboxSession(
-          self._cluster.exec_core_api(), self.pod_name, self._cluster.namespace)
+    a single websocket instead of connecting per command. Returns it.
+
+    A session is bound to one container (``container`` or ``target_container``).
+    A handle holds one session at a time, so opening one for another container
+    closes the current session first."""
+    target = container or self.target_container
+    if (self._session is not None and self._session.is_open
+        and self._session.container == target):
+      return self._session
+    self.close_session()
+    self._session = SandboxSession(
+        self._cluster.exec_core_api(), self.pod_name, self._cluster.namespace,
+        container=target)
     return self._session
 
   def close_session(self) -> None:

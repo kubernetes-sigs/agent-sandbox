@@ -5,6 +5,20 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 
 ## [0.1.0.dev0] — unreleased
 
+### Added (multi-container pods — exec targeting)
+- **`SandboxHandle.target_container`** and a per-call **`exec(..., container=)`** /
+  **`open_session(container=)`** choose the container of a multi-container pod that
+  router-free exec talks to (default unchanged: the pod's first container, the fleet's
+  `agent-runtime`). A session is bound to one container; opening one for another
+  container closes the previous session, and `exec()` reuses a session only when its
+  container matches. `exec_in_pod(container=)` and `SandboxSession(container=)` carry
+  it to the kubernetes exec API (`exec_container_kwargs`).
+- **R2E-Gym adapter**: `make_fleet_repo_env(handle, container=)` and
+  `FleetDockerRuntime(handle, container=)` route the env's exec and file-copy to that
+  container, defaulting to `handle.target_container`, so a trainer can run the episode
+  in the runtime container and grade in a fresh sidecar of the task image without
+  patching the adapter's internals.
+
 ### Added (one NetworkPolicy per namespace)
 - **`TemplateSpec.network_policy_management`** sets `spec.networkPolicyManagement`
   on the SandboxTemplates a fleet creates, and patches it onto a pre-existing

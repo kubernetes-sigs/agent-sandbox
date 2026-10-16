@@ -124,12 +124,93 @@ def test_handle_exec_routes_through_session(monkeypatch):
   from agent_sandbox_rl.sources import Task
   sess = MagicMock()
   sess.is_open = True
+  sess.container = None                      # bound to the pod's default container
   sess.run.return_value = "via-session"
   h = SandboxHandle(task=Task(id="t", image="i"), cluster_name="c",
                     claim_name="cl", sandbox_id="s", pod_name="p", hostname="s")
   h._session = sess
   assert h.exec(["bash", "-lc", "echo hi"]) == "via-session"
   sess.run.assert_called_once()
+
+
+# ------------------------------------------------ multi-container pods
+
+
+def _handle_with_cluster():
+  from agent_sandbox_rl.handles import SandboxHandle
+  from agent_sandbox_rl.sources import Task
+  core = MagicMock()
+  cluster = MagicMock()
+  cluster.namespace = "ns"
+  cluster.exec_core_api.return_value = core
+  h = SandboxHandle(task=Task(id="t", image="i"), cluster_name="c",
+                    claim_name="cl", sandbox_id="s", pod_name="p", hostname="s",
+                    _cluster=cluster)
+  return h, core
+
+
+def _capture_stream(monkeypatch, ws_factory=None):
+  calls = []
+  def fake(func, pod, ns, **kw):
+    calls.append((pod, ns, kw))
+    return ws_factory() if ws_factory else "out"
+  monkeypatch.setattr(handles, "stream", fake)
+  return calls
+
+
+def test_exec_in_pod_passes_the_container_only_when_set(monkeypatch):
+  calls = _capture_stream(monkeypatch)
+  handles.exec_in_pod(MagicMock(), "p", "ns", "echo hi")
+  handles.exec_in_pod(MagicMock(), "p", "ns", "echo hi", container="eval")
+  assert "container" not in calls[0][2]        # API default = first container
+  assert calls[1][2]["container"] == "eval"
+
+
+def test_session_binds_to_a_container(monkeypatch):
+  calls = _capture_stream(monkeypatch, lambda: FakeWS({}))
+  s = SandboxSession(MagicMock(), "p", "ns", container="eval")
+  assert s.container == "eval" and calls[0][2]["container"] == "eval"
+  s2 = SandboxSession(MagicMock(), "p", "ns")
+  assert s2.container is None and "container" not in calls[1][2]
+
+
+def test_handle_exec_uses_target_container_and_per_call_override(monkeypatch):
+  calls = _capture_stream(monkeypatch)
+  h, _ = _handle_with_cluster()
+  h.exec("a")                                  # default container
+  h.target_container = "eval"
+  h.exec("b")                                  # handle-level target
+  h.exec("c", container="agent-runtime")       # per-call override wins
+  assert [c[2].get("container") for c in calls] == [None, "eval", "agent-runtime"]
+
+
+def test_handle_exec_reuses_a_session_only_for_its_container(monkeypatch):
+  calls = _capture_stream(monkeypatch)
+  h, _ = _handle_with_cluster()
+  sess = MagicMock()
+  sess.is_open = True
+  sess.container = "eval"
+  sess.run.return_value = "via-session"
+  h._session = sess
+  assert h.exec("x", container="eval") == "via-session"      # matching container
+  assert h.exec("y") == "out"                                # default: one-shot
+  assert calls and calls[-1][2].get("container") is None
+  h.target_container = "eval"
+  assert h.exec("z") == "via-session"                        # target matches session
+  assert sess.run.call_count == 2
+
+
+def test_open_session_switches_container_by_closing_the_previous_one(monkeypatch):
+  calls = _capture_stream(monkeypatch, lambda: FakeWS({}))
+  h, _ = _handle_with_cluster()
+  first = h.open_session()
+  assert first.container is None and h.open_session() is first      # reused
+  second = h.open_session(container="eval")
+  assert second is not first and second.container == "eval"
+  assert not first.is_open                                          # closed first
+  assert calls[-1][2]["container"] == "eval"
+  h.target_container = "eval"
+  assert h.open_session() is second                                 # target matches
 
 
 def test_as_script_shell_quotes_argv():

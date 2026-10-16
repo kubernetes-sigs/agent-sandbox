@@ -27,3 +27,22 @@ go test ./test/e2e/... --parallel=1
 ```
 
 Note: the `--parallel=1` argument makes sure only a single test runs at a time.
+
+## Namespace-scoped controller mode
+
+`TestNamespacedModeScope` is gated because the regular suite expects a
+cluster-scoped controller and creates arbitrary namespaces. Run it against a
+controller configured to watch `agent-sandbox-watched`, with both
+`agent-sandbox-watched` and `agent-sandbox-unwatched` created in advance:
+
+```shell
+NAMESPACED_MODE=true go test ./test/e2e \
+  -run '^TestNamespacedModeScope$' \
+  -count=1 \
+  -v
+```
+
+The test proves that a Sandbox in `agent-sandbox-watched` is reconciled while a
+Sandbox in `agent-sandbox-unwatched` receives no Pod, Service, or status update.
+Set `NAMESPACED_MODE_WATCHED_NAMESPACES` to the same comma-separated value used
+by `--namespace` to exercise multi-namespace mode.

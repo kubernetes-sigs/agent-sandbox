@@ -5,6 +5,15 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 
 ## [0.1.0.dev0] — unreleased
 
+### Added (verified teardown)
+- **`teardown(verify=True)`** / **`verify_teardown()`**: after the sweep, the run-scoped
+  reaper (`reap(run_id=…)`) runs on every cluster, deletes whatever of this run is still
+  there and returns `{cluster: counts}` (all zero = clean; leftovers are logged as a
+  warning). Skipped with a note for a shared `run_id` (the id spans other processes),
+  `adopt_existing` (adopted pools may carry this run's label from an earlier run) and
+  a namespace the teardown deleted; a reaper error is recorded under `"error"`, never
+  raised. `AsyncSandboxFleet.teardown(verify=)` / `verify_teardown()` mirror it.
+
 ### Added (one NetworkPolicy per namespace)
 - **`TemplateSpec.network_policy_management`** sets `spec.networkPolicyManagement`
   on the SandboxTemplates a fleet creates, and patches it onto a pre-existing

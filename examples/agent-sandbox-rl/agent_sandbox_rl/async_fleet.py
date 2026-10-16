@@ -201,8 +201,11 @@ class AsyncSandboxFleet:
     return await self._to_thread(self._fleet.restore, handle, snapshot_uid,
                                  timeout=timeout)
 
-  async def teardown(self, delete_namespace: bool = False):
-    return await self._to_thread(self._fleet.teardown, delete_namespace)
+  async def teardown(self, delete_namespace: bool = False, *, verify: bool = False):
+    return await self._to_thread(self._fleet.teardown, delete_namespace, verify=verify)
+
+  async def verify_teardown(self):
+    return await self._to_thread(self._fleet.verify_teardown)
 
   async def __aenter__(self) -> "AsyncSandboxFleet":
     return await self.setup()

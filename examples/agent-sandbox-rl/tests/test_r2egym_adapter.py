@@ -189,16 +189,19 @@ def fake_r2egym(monkeypatch):
   monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda api=None: fake_core)
 
   copied_ns = []   # namespaces seen by file-copy
+  containers = []  # `container=` of every exec / file-copy (None when unset)
 
   def fake_stream(func, name, namespace, **kw):
     if kw.get("stdin"):              # the file-copy path
       copied_ns.append(namespace)
+    containers.append(kw.get("container"))
     return _FakeResp(namespace)
 
   monkeypatch.setattr("agent_sandbox_rl.adapters.r2egym.stream", fake_stream)
 
   yield types.SimpleNamespace(docker_mod=docker_mod, core=fake_core,
-                              pod=fake_pod, copied_ns=copied_ns)
+                              pod=fake_pod, copied_ns=copied_ns,
+                              containers=containers)
   _reset_classes()
 
 
@@ -250,6 +253,37 @@ def test_copy_uses_handle_namespace(fake_r2egym, tmp_path):
   src.write_text("x")
   rt._copy_to_container_kubernetes(str(src), "/dst/x.py")
   assert fake_r2egym.copied_ns == ["rl-ns"]
+
+
+def test_exec_and_copy_target_the_handles_container(fake_r2egym, tmp_path):
+  FleetDockerRuntime, _ = adapter._build_classes()
+  h = _handle(ns="rl-ns")
+  h.target_container = "eval"
+  rt = FleetDockerRuntime(h)
+  rt._run_kubernetes("echo hi")
+  src = tmp_path / "x.py"
+  src.write_text("x")
+  rt._copy_to_container_kubernetes(str(src), "/dst/x.py")
+  assert fake_r2egym.containers == ["eval", "eval"]
+  # default: no container keyword at all (API picks the pod's first container)
+  fake_r2egym.containers.clear()
+  FleetDockerRuntime(_handle(ns="rl-ns"))._run_kubernetes("echo hi")
+  assert fake_r2egym.containers == [None]
+
+
+def test_runtime_container_argument_overrides_the_handle(fake_r2egym):
+  FleetDockerRuntime, _ = adapter._build_classes()
+  h = _handle(ns="rl-ns")
+  h.target_container = "eval"
+  FleetDockerRuntime(h, container="agent-runtime")._run_kubernetes("echo hi")
+  assert fake_r2egym.containers == ["agent-runtime"]
+
+
+def test_make_fleet_repo_env_forwards_container(fake_r2egym):
+  env = adapter.make_fleet_repo_env(_handle(), container="eval")
+  assert env.runtime._container == "eval"
+  env.runtime._run_kubernetes("echo hi")
+  assert fake_r2egym.containers[-1] == "eval"
 
 
 def test_namespace_isolated_under_concurrency(fake_r2egym):

@@ -5,6 +5,20 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 
 ## [0.1.0.dev0] — unreleased
 
+### Added (OpenHands agent-server template preset)
+- **`adapters.openhands.agent_server_template(...)`** returns the `TemplateSpec` an
+  OpenHands pool needs: the agent-server command on `server_port` (8000), a `/health`
+  readinessProbe bounded by `readiness_timeout_s`, the session key as
+  `OH_SESSION_API_KEYS_0` (`session_key` literal or `session_key_secret=(name, key)`),
+  500m/1Gi requests with 2 CPU/4Gi limits, tolerations, node selector, runtime class,
+  no ServiceAccount token and no shared PID namespace. With `server_image=` an init
+  container copies the server out of that image into an emptyDir
+  (`AGENT_SERVER_MOUNT`) so plain repo images (R2E-Gym, SWE-bench) serve it without a
+  rebuild; without it the task image's own `/usr/local/bin/openhands-agent-server` runs.
+  `agent_server_command()` exposes the command (repo venv on PATH, `/testbed` and
+  `/workspace` linked, git `safe.directory`). `DEFAULT_AGENT_SERVER_IMAGE` matches the
+  standalone integration's template.
+
 ### Added (one NetworkPolicy per namespace)
 - **`TemplateSpec.network_policy_management`** sets `spec.networkPolicyManagement`
   on the SandboxTemplates a fleet creates, and patches it onto a pre-existing

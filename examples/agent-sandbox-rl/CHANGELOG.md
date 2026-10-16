@@ -5,6 +5,24 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 
 ## [0.1.0.dev0] — unreleased
 
+### Changed (pre-pull scales to hundreds of images)
+- **`prepull` batches**: images are split into DaemonSets of `images_per_pod` images
+  (`FleetConfig.prepull_images_per_pod`, 25) named `<ds_name>-000`, `-001`, ...; with
+  `wait` at most `max_parallel` (`prepull_max_parallel`, 4) exist at once, the next
+  starting as the oldest finishes, which bounds the concurrent pulls per node. A single
+  DaemonSet with every image (one init container each) was an oversized object and a
+  serial pull at 700 images. Lists of at most `images_per_pod` images keep the one
+  DaemonSet named `ds_name`; the low-level `prepull()` default stays `images_per_pod=None`.
+- **Tolerations**: `prepull(tolerations=)`; `fleet.prepull` takes them from the
+  template's `extra_pod_spec`, so pre-pull pods schedule on tainted sandbox pools.
+- **`delete_when_done`** (`prepull_delete_when_done`) removes each DaemonSet once its
+  nodes are ready; **`drop_caches`** (`prepull_drop_caches`) ends with a privileged
+  one-shot DaemonSet (`<ds_name>-drop-caches`, `busybox` shell) that drops the page
+  cache on every selected node and is deleted afterwards. `prepull_delete` removes the
+  named DaemonSet and every one carrying the managed labels with `role=prepull`.
+  `fleet.prepull` returns whether every cluster finished within its budget and passes
+  overrides through; `timeout` is the budget for all batches.
+
 ### Added (one NetworkPolicy per namespace)
 - **`TemplateSpec.network_policy_management`** sets `spec.networkPolicyManagement`
   on the SandboxTemplates a fleet creates, and patches it onto a pre-existing

@@ -156,8 +156,8 @@ class AsyncSandboxFleet:
     return await self._to_thread(self._fleet.start_warmpools, wait,
                                  create_budget=create_budget)
 
-  async def prepull(self, wait: bool = True):
-    return await self._to_thread(self._fleet.prepull, wait)
+  async def prepull(self, wait: bool = True, **overrides):
+    return await self._to_thread(self._fleet.prepull, wait, **overrides)
 
   async def prepull_delete(self):
     return await self._to_thread(self._fleet.prepull_delete)

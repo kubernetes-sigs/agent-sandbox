@@ -45,6 +45,16 @@ type staticTraceTracer struct {
 
 func (s staticTraceTracer) GetTraceContext(context.Context) string { return s.traceContext }
 
+// getTestClaim reads the "test-claim" fixture back from c.
+func getTestClaim(t *testing.T, c client.Client) *extensionsv1beta1.SandboxClaim {
+	t.Helper()
+	got := &extensionsv1beta1.SandboxClaim{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "test-claim", Namespace: "default"}, got); err != nil {
+		t.Fatalf("get claim: %v", err)
+	}
+	return got
+}
+
 // TestInitializeAnnotationsRawPayload pins the exact bytes the rawpatch
 // rewrite of initializeAnnotations puts on the wire, and proves they are
 // identical to what the historical DeepCopy+MergeFrom pattern computed for
@@ -125,10 +135,7 @@ func TestInitializeAnnotationsRawPayload(t *testing.T) {
 	}
 
 	// The annotations must actually be persisted (and pre-existing ones kept).
-	got := &extensionsv1beta1.SandboxClaim{}
-	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-claim", Namespace: "default"}, got); err != nil {
-		t.Fatalf("get claim: %v", err)
-	}
+	got := getTestClaim(t, fakeClient)
 	if got.Annotations[asmetrics.ObservabilityAnnotation] != "2026-07-19T15:27:56.85Z" {
 		t.Errorf("observability annotation = %q, want stamped timestamp", got.Annotations[asmetrics.ObservabilityAnnotation])
 	}
@@ -146,6 +153,38 @@ func TestInitializeAnnotationsRawPayload(t *testing.T) {
 	}
 	if captured != nil {
 		t.Errorf("expected no patch when annotations already present, got %s", captured)
+	}
+}
+
+// TestInitializeAnnotationsStampsRealObservedTime covers what the seeded
+// tests above cannot: with no seeded time, the persisted annotation is the
+// controller's own wall-clock reading from this call, not truncated to seconds.
+func TestInitializeAnnotationsStampsRealObservedTime(t *testing.T) {
+	scheme := newScheme(t)
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid-123"},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim.DeepCopy()).Build()
+	r := &SandboxClaimReconciler{Client: fakeClient, Scheme: scheme, Tracer: asmetrics.NewNoOp()}
+
+	before := time.Now()
+	if err := r.initializeAnnotations(context.Background(), claim.DeepCopy()); err != nil {
+		t.Fatalf("initializeAnnotations failed: %v", err)
+	}
+	after := time.Now()
+
+	got := getTestClaim(t, fakeClient)
+	value := got.Annotations[asmetrics.ObservabilityAnnotation]
+	stamped, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		t.Fatalf("annotation %q is not RFC3339Nano: %v", value, err)
+	}
+	if stamped.Before(before) || stamped.After(after) {
+		t.Errorf("stamped %v outside the call window [%v, %v]", stamped, before, after)
+	}
+	// Equal to the recorded reading proves the format kept full precision.
+	if recorded := r.getOrRecordObservedTime(claim); !stamped.Equal(recorded) {
+		t.Errorf("stamped %v != recorded observed time %v", stamped, recorded)
 	}
 }
 
@@ -193,10 +232,7 @@ func TestInitializeAnnotationsDisabledStampsInMemoryOnly(t *testing.T) {
 		t.Error("trace context annotation should be stamped in-memory")
 	}
 
-	got := &extensionsv1beta1.SandboxClaim{}
-	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-claim", Namespace: "default"}, got); err != nil {
-		t.Fatalf("get claim: %v", err)
-	}
+	got := getTestClaim(t, fakeClient)
 	if got.Annotations[asmetrics.ObservabilityAnnotation] != "" {
 		t.Errorf("observability annotation should not be persisted, got %q", got.Annotations[asmetrics.ObservabilityAnnotation])
 	}

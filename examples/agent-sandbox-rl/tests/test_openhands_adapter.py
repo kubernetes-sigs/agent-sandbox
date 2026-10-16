@@ -25,12 +25,20 @@ import types
 
 import pytest
 
+from unittest.mock import MagicMock
+
 from agent_sandbox_rl.adapters.openhands import (
+    AGENT_SERVER_MOUNT,
+    DEFAULT_AGENT_SERVER_IMAGE,
     BoundHandleClient,
     FleetWorkspaceClient,
+    agent_server_command,
+    agent_server_template,
     make_fleet_workspace,
     make_handle_workspace,
 )
+from agent_sandbox_rl.config import ResourceSpec
+from agent_sandbox_rl.resources import Resources
 from agent_sandbox_rl.sources import Task
 
 
@@ -191,3 +199,76 @@ def test_handle_workspace_fleet_owned_kwargs_rejected(
     fake_openhands_integration, key, value):
   with pytest.raises(ValueError, match="fleet-owned"):
     make_handle_workspace(FakeHandle(), **{key: value})
+
+
+# ------------------------------------------------------- agent-server template
+
+
+def _render(spec, image="repo/task:1"):
+  return Resources(MagicMock(), MagicMock(), "ns")._template_manifest(
+      image, "oh-img-1", spec)["spec"]["podTemplate"]["spec"]
+
+
+def test_agent_server_template_defaults_serve_from_the_task_image():
+  spec = agent_server_template()
+  pod = _render(spec)
+  runtime = pod["containers"][0]
+  assert runtime["name"] == "agent-runtime" and runtime["image"] == "repo/task:1"
+  assert runtime["command"] == agent_server_command(8000)
+  assert "--port 8000" in runtime["command"][2] and "/usr/local/bin/openhands-agent-server" in runtime["command"][2]
+  assert runtime["ports"] == [{"containerPort": 8000}]
+  assert runtime["readinessProbe"]["httpGet"] == {"path": "/health", "port": 8000}
+  assert runtime["readinessProbe"]["failureThreshold"] * runtime["readinessProbe"]["periodSeconds"] == 300
+  assert runtime["resources"] == {"requests": {"cpu": "500m", "memory": "1Gi"},
+                                  "limits": {"cpu": "2", "memory": "4Gi"}}
+  assert "env" not in runtime and "initContainers" not in pod and "volumes" not in pod
+  assert pod["automountServiceAccountToken"] is False and pod["shareProcessNamespace"] is False
+  assert spec.image_pull_policy == "IfNotPresent" and runtime["imagePullPolicy"] == "IfNotPresent"
+
+
+def test_agent_server_template_injects_the_server_from_another_image():
+  spec = agent_server_template(server_image=DEFAULT_AGENT_SERVER_IMAGE, session_key="k1",
+                               server_port=9000, tolerations=[{"key": "workload", "value": "sandbox"}],
+                               node_selector={"pool": "sbx"}, runtime_class="gvisor",
+                               image_pull_policy="Always", readiness_timeout_s=60)
+  pod = _render(spec)
+  init = pod["initContainers"][0]
+  assert init["name"] == "oh-server" and init["image"] == DEFAULT_AGENT_SERVER_IMAGE
+  assert init["imagePullPolicy"] == "Always" and init["volumeMounts"] == [{"name": "oh", "mountPath": AGENT_SERVER_MOUNT}]
+  assert "cp -a" in init["command"][2] and AGENT_SERVER_MOUNT in init["command"][2]
+  assert pod["volumes"] == [{"name": "oh", "emptyDir": {}}]
+  runtime = pod["containers"][0]
+  assert runtime["volumeMounts"] == [{"name": "oh", "mountPath": AGENT_SERVER_MOUNT}]
+  assert f"{AGENT_SERVER_MOUNT}/openhands-agent-server --host 0.0.0.0 --port 9000" in runtime["command"][2]
+  assert runtime["ports"] == [{"containerPort": 9000}]
+  assert runtime["readinessProbe"]["httpGet"]["port"] == 9000
+  assert runtime["readinessProbe"]["failureThreshold"] == 30
+  assert runtime["env"] == [{"name": "OH_SESSION_API_KEYS_0", "value": "k1"}]
+  assert pod["tolerations"] == [{"key": "workload", "value": "sandbox"}]
+  assert pod["nodeSelector"] == {"pool": "sbx"} and pod["runtimeClassName"] == "gvisor"
+
+
+def test_agent_server_template_session_key_from_a_secret_and_overrides():
+  spec = agent_server_template(session_key_secret=("oh-key", "key"),
+                               resources=ResourceSpec(cpu="1", memory="2Gi"),
+                               workspace_dir=None,
+                               extra_pod_spec={"serviceAccountName": "sa",
+                                               "containers": [{"env": [{"name": "X", "value": "1"}]}]})
+  pod = _render(spec)
+  runtime = pod["containers"][0]
+  assert {"name": "OH_SESSION_API_KEYS_0",
+          "valueFrom": {"secretKeyRef": {"name": "oh-key", "key": "key"}}} in runtime["env"]
+  assert {"name": "X", "value": "1"} in runtime["env"]       # caller's env merged in
+  assert runtime["resources"]["requests"] == {"cpu": "1", "memory": "2Gi"}
+  assert pod["serviceAccountName"] == "sa" and len(pod["containers"]) == 1
+  assert ".venv" not in runtime["command"][2] and "ln -s" not in runtime["command"][2]
+  with pytest.raises(ValueError, match="not both"):
+    agent_server_template(session_key="a", session_key_secret=("s", "k"))
+
+
+def test_agent_server_command_prepares_the_workspace():
+  cmd = agent_server_command(8000, workspace_dir="/testbed/")
+  assert cmd[:2] == ["sh", "-c"]
+  body = cmd[2]
+  assert "/testbed/.venv/bin" in body and "ln -s /testbed /workspace" in body
+  assert "safe.directory" in body and body.rstrip().endswith("fi")

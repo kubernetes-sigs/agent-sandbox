@@ -429,6 +429,25 @@ def run_typescript_tests(repo_root, artifact_dir):
     return returncode
 
 
+def run_report_tests(repo_root, artifact_dir):
+    """Runs the report's browser-script tests with Node's built-in runner."""
+    env = os.environ.copy()
+    npm_path, npx_path = ensure_node(repo_root, env)
+    if not npm_path or not npx_path:
+        print("Failed to ensure Node.js/npm is available.")
+        return 1
+
+    node_path = shutil.which("node", path=env.get("PATH", "")) or "node"
+    junit_file = os.path.join(artifact_dir, "junit_unit-report.xml")
+    print("\n=== Running report JavaScript unit tests ===")
+    return subprocess.run([
+        node_path, "--test",
+        "--test-reporter=spec", "--test-reporter-destination=stdout",
+        "--test-reporter=junit", f"--test-reporter-destination={junit_file}",
+        "test/stress/generate-report/*_test.js",
+    ], cwd=repo_root, env=env).returncode
+
+
 def main():
     """ invokes unit tests and outputs junit results files """
     repo_root = utils.get_repo_root()
@@ -441,12 +460,9 @@ def main():
     go_rc = run_go_tests(repo_root, artifact_dir)
     python_rc = run_python_tests(repo_root, artifact_dir)
     ts_rc = run_typescript_tests(repo_root, artifact_dir)
+    report_rc = run_report_tests(repo_root, artifact_dir)
 
-    if go_rc != 0:
-        return go_rc
-    if python_rc != 0:
-        return python_rc
-    return ts_rc
+    return go_rc or python_rc or ts_rc or report_rc
 
 
 if __name__ == "__main__":

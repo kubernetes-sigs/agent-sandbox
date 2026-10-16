@@ -86,6 +86,37 @@ function renderTable(selector, columns, rows) {
     table.replaceChildren(thead, tbody);
 }
 
+// Appends items to container chunk at a time, so long result lists stay
+// responsive; moreButton reveals the next chunk and hides once all are
+// shown. rowHtml(item, index) returns trusted HTML.
+function paginate(container, items, moreButton, chunk, rowHtml) {
+    let rendered = 0;
+    const renderMore = () => {
+        const next = items.slice(rendered, rendered + chunk);
+        container.insertAdjacentHTML('beforeend', next.map((item, i) => rowHtml(item, rendered + i)).join(''));
+        rendered += next.length;
+        moreButton.hidden = rendered >= items.length;
+        moreButton.textContent = `Show more (${(items.length - rendered).toLocaleString()} remaining)`;
+    };
+    moreButton.onclick = renderMore;
+    renderMore();
+}
+
+// hashQuery returns the search query carried in a #q= hash, or null. A
+// hand-edited hash may hold a bare "%" (one that starts no escape), which
+// would make decodeURIComponent throw and fail the page; keep it literal and
+// decode the rest.
+function hashQuery() {
+    if (!location.hash.startsWith('#q=')) return null;
+    const raw = location.hash.slice(3);
+    try {
+        return decodeURIComponent(raw.replace(/%(?![0-9a-f]{2})/gi, '%25'));
+    } catch (err) {
+        // Escapes that are not valid UTF-8 still throw; take those as typed.
+        return raw;
+    }
+}
+
 // ---- Section navigation ----
 //
 // Pages are a stack of cards, and anything below the first screenful is

@@ -66,8 +66,6 @@
     const moreEl = document.getElementById('watch-more');
 
     let log = null;
-    let matches = [];
-    let rendered = 0;
     const summaryCache = new Map(); // event index -> inline summary HTML
 
     const TYPE_BADGE = { ADDED: 'success', MODIFIED: 'info', DELETED: 'danger' };
@@ -157,21 +155,12 @@
         </div>`;
     }
 
-    function renderMore() {
-        const next = matches.slice(rendered, rendered + RENDER_CHUNK);
-        resultsEl.insertAdjacentHTML('beforeend', next.map(rowHtml).join(''));
-        rendered += next.length;
-        moreEl.hidden = rendered >= matches.length;
-        moreEl.textContent = `Show more (${(matches.length - rendered).toLocaleString()} remaining)`;
-    }
-
     function runSearch() {
         if (!log) return;
-        matches = searchEvents(log, searchEl.value);
+        const matches = searchEvents(log, searchEl.value);
         resultsEl.innerHTML = '';
-        rendered = 0;
         statusEl.textContent = `${matches.length.toLocaleString()} / ${log.events.length.toLocaleString()} events`;
-        renderMore();
+        paginate(resultsEl, matches, moreEl, RENDER_CHUNK, rowHtml);
     }
 
     let debounce = null;
@@ -182,8 +171,6 @@
             runSearch();
         }, 150);
     });
-
-    moreEl.addEventListener('click', renderMore);
 
     function toggleRow(row) {
         const detail = row.querySelector('.watch-row-detail');
@@ -225,9 +212,8 @@
             log = await loadWatchLog(WATCH_LOG, (stage, detail) => {
                 statusEl.textContent = detail ? `${stage} (${detail})` : stage + '…';
             });
-            if (location.hash.startsWith('#q=')) {
-                searchEl.value = decodeURIComponent(location.hash.slice(3));
-            }
+            const q = hashQuery();
+            if (q !== null) searchEl.value = q;
             runSearch();
         } catch (err) {
             statusEl.textContent = 'load failed';

@@ -40,7 +40,9 @@
         its raw samples) — back out by editing the query. Counter-style metrics
         (<code>_total</code>/<code>_count</code>/<code>_sum</code>/<code>_bucket</code>) plot as
         per-second rates by default — untick "rate" for raw cumulative values. Dashed blue lines mark
-        phase starts.
+        phase starts. Separate queries with a standalone <code>;</code> to stack one panel per query on this page:
+        each part uses the same grammar, the charts share the time axis and phase marks, clicks inside
+        a panel narrow only that panel, and the URL hash keeps the whole set.
     </div>
     <div id="mx-results" class="watch-results"></div>
     <div style="text-align: center; margin-top: 12px;">
@@ -67,8 +69,12 @@
     const moreEl = document.getElementById('mx-more');
 
     let log = null;
-    let groups = [];   // search result: [{metric, counter, indices}]
-    let rendered = 0;
+    let timeMin, timeMax;   // x range shared by the stacked charts
+    let yAxisWidth = 0;   // y-axis width shared by the stacked charts
+    const naturalYWidth = new WeakMap();   // stacked chart -> its own y-axis width
+    // A single query (no standalone ";") is panel 0.
+    let panelGroups = [];   // search result per panel index: [{metric, counter, indices}]
+    let panelParts = [];    // query part per panel index
 
     // Chart.js plugin drawing a dashed vertical line and label at each phase
     // start, for charts whose x axis is linear offset-seconds (report.js's
@@ -123,24 +129,19 @@
         return parts.join(' ') || s.instance || s.source || s.metric;
     }
 
+    function kindBadge(g) {
+        return badge('info', g.counter ? 'counter' : 'gauge');
+    }
+
     function groupHtml(g, gi) {
         const fam = log.families.get(g.metric);
-        const kind = g.counter ? 'counter' : 'gauge';
         return `<div class="watch-row" data-g="${gi}">
             <div class="watch-row-head" tabindex="0" role="button" title="Lock this metric into the query">
                 <span class="mx-metric">${escapeHtml(g.metric)}</span>
-                ${badge('info', kind)}
+                ${kindBadge(g)}
                 <span class="watch-muted">${g.indices.length.toLocaleString()} of ${fam.series.toLocaleString()} series match</span>
             </div>
         </div>`;
-    }
-
-    function renderMore() {
-        const next = groups.slice(rendered, rendered + RENDER_CHUNK);
-        resultsEl.insertAdjacentHTML('beforeend', next.map((g, i) => groupHtml(g, rendered + i)).join(''));
-        rendered += next.length;
-        moreEl.hidden = rendered >= groups.length;
-        moreEl.textContent = `Show more (${(groups.length - rendered).toLocaleString()} remaining)`;
     }
 
     // setQuery drives every drill-down: the query is the single source of
@@ -151,28 +152,136 @@
         runSearch();
     }
 
-    // lockMetric pins one metric exactly, keeping any field/label filters
-    // already in the query (their raw tokens) but dropping bare text and
-    // previous metric: terms — those were for finding the metric.
-    function lockMetric(metric) {
-        const kept = (searchEl.value || '').trim().split(/\s+/).filter(tok => {
+    // lockMetricTokens pins one metric exactly within a query, keeping any
+    // field/label filters already there (their raw tokens) but dropping bare
+    // text and previous metric: terms — those were for finding the metric.
+    function lockMetricTokens(queryText, metric) {
+        const kept = (queryText || '').trim().split(/\s+/).filter(tok => {
             const sep = tok.indexOf(':');
             if (sep <= 0 || sep === tok.length - 1) return false;
             return tok.slice(0, sep).toLowerCase() !== 'metric';
         });
-        setQuery([`metric:=${metric}`, ...kept].join(' '));
+        return [`metric:=${metric}`, ...kept].join(' ');
+    }
+
+    // Panels: ";" separates independent queries, each rendered as its own
+    // chart (or metric list) and stacked on the page, so several metrics can
+    // be read against the same time axis. The hash carries the whole set.
+    // Only a standalone ";" separates, so one inside a label value stays put.
+    // No lookbehind: Safari before 16.4 cannot parse it, which would break the
+    // whole page.
+    function splitPanels(q) {
+        return (q || '').split(/(?:^|\s);(?=\s|$)/).map(part => part.trim()).filter(Boolean);
+    }
+
+    // Index the rendered panels, not the input, which may hold an edit the
+    // debounce has not rendered yet.
+    function setSubQuery(p, q) {
+        const parts = panelParts.slice();
+        parts[p] = q;
+        setQuery(parts.join(' ; '));
+    }
+
+    function chartsIn(el) {
+        return [...el.querySelectorAll('canvas')].map(canvas => Chart.getChart(canvas)).filter(Boolean);
+    }
+
+    function destroyCharts(el) {
+        for (const chart of chartsIn(el)) chart.destroy();
+    }
+
+    // Stacked charts share the widest y axis, so every plot starts at the same
+    // x and equal times line up across panels. The width is re-derived from
+    // each chart's own, so it also shrinks when the widest panel goes away.
+    function alignYAxes() {
+        const charts = chartsIn(resultsEl);
+        yAxisWidth = Math.max(0, ...charts.map(chart => naturalYWidth.get(chart) || 0));
+        for (const chart of charts) {
+            if (chart.scales.y.width !== yAxisWidth) chart.update();
+        }
+    }
+
+    // Also retires the page-level Show more, which only a single query's
+    // list uses, and the list its handler holds.
+    function clearResults() {
+        destroyCharts(resultsEl);
+        resultsEl.innerHTML = '';
+        moreEl.hidden = true;
+        moreEl.onclick = null;
+        panelParts = [];
+        yAxisWidth = 0;
+    }
+
+    // A panel whose part is unchanged keeps its DOM, so narrowing one panel
+    // leaves the others' rate toggle and Show more state alone. A single
+    // query's panel 0 is not rendered as a panel, so it is never kept.
+    function renderPanels(parts) {
+        if (panelParts.length < 2) clearResults();
+        const old = [...resultsEl.children];
+        panelGroups = parts.map((part, p) => part === panelParts[p] ? panelGroups[p] : searchMetricSeries(log, part));
+        // Count each series once even when several panels match it. Flags
+        // beat a Set of every matched index, which runs on each keystroke.
+        const seen = new Uint8Array(log.series.length);
+        let matched = 0;
+        for (const g of panelGroups.flat()) {
+            for (const i of g.indices) if (!seen[i]) { seen[i] = 1; matched++; }
+        }
+        statusEl.textContent = `${parts.length} panels, ${matched.toLocaleString()} / ${log.series.length.toLocaleString()} series`;
+        parts.forEach((part, p) => {
+            if (part === panelParts[p]) return;
+            const gs = panelGroups[p];
+            let note;
+            if (gs.length === 1) {
+                note = `${escapeHtml(gs[0].metric)} ${kindBadge(gs[0])}`;
+            } else if (gs.length === 0) {
+                note = badge('warning', 'no match');
+            } else {
+                note = badge('warning', `${gs.length.toLocaleString()} metrics match — click one to lock it into this panel`);
+            }
+            const panel = document.createElement('div');
+            panel.className = 'mx-panel';
+            panel.dataset.p = String(p);
+            panel.innerHTML = `<div class="mx-panel-head"><span class="mx-metric">${escapeHtml(part)}</span> ${note}</div>`;
+            const detail = document.createElement('div');
+            detail.className = 'watch-row-detail';
+            panel.appendChild(detail);
+            if (old[p]) {
+                destroyCharts(old[p]);
+                resultsEl.replaceChild(panel, old[p]);
+            } else {
+                resultsEl.appendChild(panel);
+            }
+            if (gs.length === 1) {
+                renderDetail(detail, gs[0], true);
+            } else if (gs.length > 1) {
+                const more = document.createElement('button');
+                more.type = 'button';
+                more.className = 'watch-more';
+                panel.appendChild(more);
+                paginate(detail, gs, more, RENDER_CHUNK, groupHtml);
+            }
+        });
+        for (const extra of old.slice(parts.length)) {
+            destroyCharts(extra);
+            resultsEl.removeChild(extra);
+        }
+        alignYAxes();
+        panelParts = parts;
     }
 
     function runSearch() {
         if (!log) return;
-        for (const canvas of resultsEl.querySelectorAll('canvas')) {
-            const chart = Chart.getChart(canvas);
-            if (chart) chart.destroy();
+        const parts = splitPanels(searchEl.value);
+        if (parts.length > 1) {
+            renderPanels(parts);
+            return;
         }
-        groups = searchMetricSeries(log, searchEl.value);
+        clearResults();
+        const part = parts[0] || '';
+        const groups = searchMetricSeries(log, part);
+        panelParts = [part];
+        panelGroups = [groups];
         const matched = groups.reduce((n, g) => n + g.indices.length, 0);
-        resultsEl.innerHTML = '';
-        rendered = 0;
         statusEl.textContent = `${groups.length.toLocaleString()} metrics, ${matched.toLocaleString()} / ${log.series.length.toLocaleString()} series`;
         if (groups.length === 1) {
             // The query pins down one metric: show it expanded, no list.
@@ -182,15 +291,16 @@
             detail.className = 'watch-row-detail';
             resultsEl.querySelector('.watch-row').appendChild(detail);
             renderDetail(detail, g);
-            moreEl.hidden = true;
         } else {
-            renderMore();
+            paginate(resultsEl, groups, moreEl, RENDER_CHUNK, groupHtml);
         }
     }
 
     // renderDetail fills in one expanded metric: rate toggle, chart of the
-    // first MAX_PLOTTED matching series, and the full series table.
-    function renderDetail(detailEl, g) {
+    // first MAX_PLOTTED matching series, and the full series table. Stacked
+    // panels share the run's time axis and y-axis width, and start a lone
+    // series' raw samples collapsed so the next chart stays close.
+    function renderDetail(detailEl, g, stacked = false) {
         const sorted = g.indices.slice().sort((a, b) => {
             const x = log.series[a], y = log.series[b];
             return x.source.localeCompare(y.source) || x.instance.localeCompare(y.instance)
@@ -220,12 +330,19 @@
                     <td>${fmtValue(min)}</td><td>${fmtValue(max)}</td><td>${fmtValue(s.v[s.v.length - 1])}</td>
                 </tr>`;
             }).join('')}</tbody></table>
-            ${sorted.length === 1 ? `<div class="watch-muted" style="margin-top:10px;">raw samples</div>${samplesHtml(log.series[sorted[0]])}` : ''}`;
+            ${sorted.length === 1 ? `<details${stacked ? '' : ' open'} style="margin-top:10px;"><summary class="watch-muted">raw samples</summary>${stacked ? '' : samplesHtml(log.series[sorted[0]])}</details>` : ''}`;
+
+        // A collapsed sample table may never be opened, so build it on first open.
+        if (stacked && sorted.length === 1) {
+            const samples = detailEl.querySelector('details');
+            samples.addEventListener('toggle', () => {
+                samples.insertAdjacentHTML('beforeend', samplesHtml(log.series[sorted[0]]));
+            }, { once: true });
+        }
 
         const plot = () => {
             const canvas = detailEl.querySelector('canvas');
-            const old = Chart.getChart(canvas);
-            if (old) old.destroy();
+            destroyCharts(detailEl);
             const rate = detailEl.querySelector('.mx-rate').checked;
             const plotted = sorted.slice(0, MAX_PLOTTED).map(si => log.series[si]);
             const datasets = plotted.map((s, i) => {
@@ -237,6 +354,14 @@
             });
             const options = lineChartOptions(rate ? 'per second' : 'value');
             options.scales.x.type = 'linear';
+            if (stacked) {
+                options.scales.x.min = timeMin;
+                options.scales.x.max = timeMax;
+                options.scales.y.afterFit = scale => {
+                    naturalYWidth.set(scale.chart, scale.width);
+                    scale.width = Math.max(scale.width, yAxisWidth);
+                };
+            }
             options.scales.x.title.text = 'seconds since run start';
             options.plugins.legend.display = datasets.length > 1;
             new Chart(canvas.getContext('2d'), {
@@ -246,7 +371,12 @@
                 plugins: [phaseLinesSeconds(PHASES)]
             });
         };
-        detailEl.querySelector('.mx-rate').addEventListener('change', plot);
+        // renderPanels aligns once after building every panel; a later rate
+        // toggle re-plots one chart, so it realigns on its own.
+        detailEl.querySelector('.mx-rate').addEventListener('change', () => {
+            plot();
+            if (stacked) alignYAxes();
+        });
         plot();
     }
 
@@ -265,15 +395,17 @@
     // metric, a series row locks the whole series.
     function activate(e) {
         if (window.getSelection().toString()) return;
+        const panel = e.target.closest('.mx-panel');
+        const p = panel ? Number(panel.dataset.p) : 0;
         const seriesRow = e.target.closest('tr[data-s]');
         if (seriesRow) {
-            setQuery(lockTerms(log.series[Number(seriesRow.dataset.s)]));
+            setSubQuery(p, lockTerms(log.series[Number(seriesRow.dataset.s)]));
             return;
         }
         const head = e.target.closest('.watch-row-head');
-        if (head) {
-            lockMetric(groups[Number(head.closest('.watch-row').dataset.g)].metric);
-        }
+        if (!head) return;
+        const gi = Number(head.closest('.watch-row').dataset.g);
+        setSubQuery(p, lockMetricTokens(panelParts[p], panelGroups[p][gi].metric));
     }
 
     resultsEl.addEventListener('click', activate);
@@ -294,16 +426,25 @@
         }, 150);
     });
 
-    moreEl.addEventListener('click', renderMore);
-
     (async () => {
         try {
             log = await loadMetricsLog(METRICS_LOG, START_MS, (stage, detail) => {
                 statusEl.textContent = detail ? `${stage} (${detail})` : stage + '…';
             });
-            if (location.hash.startsWith('#q=')) {
-                searchEl.value = decodeURIComponent(location.hash.slice(3));
+            // Keep every panel on the full run's time axis, including metrics
+            // that appear late and counters whose rates omit the first sample.
+            // Chart.js labels explicit bounds as edge ticks, so round them out
+            // to whole seconds rather than show the raw fractional offsets.
+            timeMin = Math.floor(log.tMin);
+            timeMax = Math.ceil(log.tMax);
+            // Chart.js keeps equal explicit bounds as a zero-width axis, so
+            // give a log with a single scrape time some room.
+            if (timeMin === timeMax) {
+                timeMin -= 1;
+                timeMax += 1;
             }
+            const q = hashQuery();
+            if (q !== null) searchEl.value = q;
             runSearch();
         } catch (err) {
             statusEl.textContent = 'load failed';

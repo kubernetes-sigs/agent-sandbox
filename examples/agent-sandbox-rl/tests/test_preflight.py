@@ -191,3 +191,130 @@ def test_pod_selector_covers_only_what_known_labels_confirm():
   # `sandbox` label, controller labels): no requirement on them confirms coverage.
   for op, values in (("DoesNotExist", None), ("NotIn", ["x"]), ("Exists", None), ("In", ["x"])):
     assert not pf.pod_selector_covers(sel(match_expressions=[("sandbox", op, values)]), known), op
+
+
+# ------------------------------------------------------ GKE Pod Snapshots (opt-in)
+
+
+def _policy_obj(name, labels):
+  return {"metadata": {"name": name},
+          "spec": {"snapshotGroupingRules": {"groupByLabelValue": {"labels": list(labels)}}}}
+
+
+def _snapshot_cluster(policies=1, grouping=(constants.SANDBOX_NAME_HASH_LABEL,)):
+  c = _healthy_cluster()
+  c.custom_api = MagicMock()
+  c.custom_api.list_namespaced_custom_object.return_value = {
+      "items": [_policy_obj(f"p{i}", grouping) for i in range(policies)]}
+  return c
+
+
+def _crd_router(missing=()):
+  def route(name):
+    if any(name.startswith(m) for m in missing):
+      raise client.ApiException(status=404)
+    return _crd(("v1",)) if name.endswith(constants.PODSNAPSHOT_GROUP) else _crd()
+  return route
+
+
+def test_snapshots_not_requested_adds_no_checks(monkeypatch):
+  _patch(monkeypatch)
+  rep = pf.preflight_cluster(_snapshot_cluster())
+  assert not [c for c in rep.checks if c.name.startswith(("crd:podsnapshot", "snapshots:"))]
+
+
+def test_snapshots_all_ok_with_gvisor(monkeypatch):
+  _patch(monkeypatch, crd_for=_crd_router())
+  c = _snapshot_cluster()
+  rep = pf.preflight_cluster(c, snapshots=True, require_runtime_class="gvisor")
+  names = {ch.name: ch for ch in rep.checks}
+  assert rep.ok and not rep.warnings
+  assert names["crd:podsnapshots"].ok and names["crd:podsnapshotmanualtriggers"].ok
+  assert names["snapshots:runtime_class"].ok and names["snapshots:policy"].ok
+  c.custom_api.list_namespaced_custom_object.assert_called_once_with(
+      constants.PODSNAPSHOT_GROUP, constants.PODSNAPSHOT_VERSION, "ns",
+      constants.PODSNAPSHOT_POLICIES_PLURAL)
+
+
+def test_snapshots_missing_crd_is_hard_failure(monkeypatch):
+  _patch(monkeypatch, crd_for=_crd_router(missing=("podsnapshots.",)))
+  rep = pf.preflight_cluster(_snapshot_cluster(), snapshots=True,
+                             require_runtime_class="gvisor")
+  assert not rep.ok
+  bad = {ch.name: ch.detail for ch in rep.failures}
+  assert "crd:podsnapshots" in bad and "enable Pod Snapshots" in bad["crd:podsnapshots"]
+
+
+def test_snapshots_require_runtime_class(monkeypatch):
+  _patch(monkeypatch, crd_for=_crd_router())
+  rep = pf.preflight_cluster(_snapshot_cluster(), snapshots=True)
+  assert [ch.name for ch in rep.failures] == ["snapshots:runtime_class"]
+  # A non-"gvisor" name may still be gVisor → warning, not failure.
+  rep = pf.preflight_cluster(_snapshot_cluster(), snapshots=True,
+                             require_runtime_class="gvisor-custom")
+  assert rep.ok and [w.name for w in rep.warnings] == ["snapshots:runtime_class"]
+
+
+def test_snapshots_missing_policy_is_warning(monkeypatch):
+  _patch(monkeypatch, crd_for=_crd_router())
+  rep = pf.preflight_cluster(_snapshot_cluster(policies=0), snapshots=True,
+                             require_runtime_class="gvisor")
+  assert rep.ok
+  w = {ch.name: ch for ch in rep.warnings}
+  assert "snapshots:policy" in w
+  assert constants.SANDBOX_NAME_HASH_LABEL in w["snapshots:policy"].detail
+
+
+def test_snapshots_policy_without_the_grouping_label_is_named_in_a_warning(monkeypatch):
+  _patch(monkeypatch, crd_for=_crd_router())
+  c = _snapshot_cluster(policies=2, grouping=("golden-pool",))
+  rep = pf.preflight_cluster(c, snapshots=True, require_runtime_class="gvisor")
+  assert rep.ok
+  w = {ch.name: ch for ch in rep.warnings}["snapshots:policy"]
+  assert "p0, p1" in w.detail and constants.SANDBOX_NAME_HASH_LABEL in w.detail
+  assert "groupByLabelValue" in w.detail
+  # one correctly grouped policy among others is enough, and it is named
+  c.custom_api.list_namespaced_custom_object.return_value = {"items": [
+      _policy_obj("other", ["golden-pool"]),
+      _policy_obj("fleet", ["golden-pool", constants.SANDBOX_NAME_HASH_LABEL]),
+      {"metadata": {"name": "broken"}, "spec": {"snapshotGroupingRules": "oops"}}]}
+  rep = pf.preflight_cluster(c, snapshots=True, require_runtime_class="gvisor")
+  ok = {ch.name: ch for ch in rep.checks}["snapshots:policy"]
+  assert ok.ok and "1/3" in ok.detail and "fleet" in ok.detail
+
+
+def test_policy_groups_by_tolerates_malformed_specs():
+  assert pf.policy_groups_by(_policy_obj("p", ["a", constants.SANDBOX_NAME_HASH_LABEL]),
+                             constants.SANDBOX_NAME_HASH_LABEL)
+  assert not pf.policy_groups_by({"metadata": {"name": "p"}}, "x")
+  assert not pf.policy_groups_by({"spec": {"snapshotGroupingRules": {"groupByLabelValue": {"labels": "x"}}}}, "x")
+  assert not pf.policy_groups_by(None, "x")
+
+
+def test_registry_preflight_passes_cluster_snapshot_flag(monkeypatch):
+  seen = {}
+
+  def fake(cluster, **kw):
+    seen[cluster.name] = kw.get("snapshots")
+    r = pf.PreflightReport(cluster.name)
+    r.add("stub", True)
+    return r
+  monkeypatch.setattr(pf, "preflight_cluster", fake)
+  a = types.SimpleNamespace(name="a", config=types.SimpleNamespace(snapshots=True))
+  b = types.SimpleNamespace(name="b", config=types.SimpleNamespace())
+  pf.preflight([a, b])
+  assert seen == {"a": True, "b": False}
+
+
+def test_snapshots_served_version_mismatch_is_hard_failure(monkeypatch):
+  def route(name):
+    if name.endswith(constants.PODSNAPSHOT_GROUP):
+      return _crd(("v1alpha1",))            # CRD present, but not serving v1
+    return _crd()
+  _patch(monkeypatch, crd_for=route)
+  rep = pf.preflight_cluster(_snapshot_cluster(), snapshots=True,
+                             require_runtime_class="gvisor")
+  assert not rep.ok
+  bad = {ch.name: ch.detail for ch in rep.failures}
+  assert set(bad) == {"crd:podsnapshots", "crd:podsnapshotmanualtriggers"}
+  assert all(detail == "v1alpha1" for detail in bad.values())

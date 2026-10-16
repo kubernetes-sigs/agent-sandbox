@@ -86,13 +86,20 @@ None. The binary is `bin/agtsbx`, built by `make build-agtsbx`.
   `kube.go`, `exec.go` (sandboxd client), `run.go` (orchestration).
 - Container backends drive the engine CLI instead of linking an engine SDK.
 
-Security baseline, since `sandboxd` has no authentication of its own:
+Security baseline. `sandboxd` authenticates clients only when started with
+`--auth-token-sha256` ([#1895](https://github.com/kubernetes-sigs/agent-sandbox/pull/1895)),
+so by default it relies on the transport:
 
 - Containers: `--cap-drop ALL`, `no-new-privileges`, loopback-only ports.
 - Kubernetes: no service account token, `runAsNonRoot`, no privilege
   escalation, all capabilities dropped, reached by port-forward only.
 - `-e` values travel in the `ProcessService` request and are never written to
   the engine argv or the `Sandbox` spec.
+- Proposed, not implemented yet (see Open Question 3): a per-run bearer token
+  on both backends. `agtsbx` mints it, keeps it in memory, passes only its
+  SHA-256 digest to `sandboxd`, and sends it as `authorization` metadata on
+  each `ProcessService` call. `GET /v1/health` is exempt, so readiness probing
+  is unchanged.
 
 ### Open Questions
 
@@ -108,16 +115,20 @@ Security baseline, since `sandboxd` has no authentication of its own:
    who already have a template and want warm pools, template network policy
    and the router.
 3. **Network isolation.** A raw `Sandbox` has no template-managed
-   `NetworkPolicy`, and `sandboxd` binds `0.0.0.0` by default. Proposed: an
-   owned deny-all-ingress `NetworkPolicy` per run on the Kubernetes backend,
-   removed with the `Sandbox`. Port-forward and kubelet probes keep working.
-   A `NetworkPolicy` is only enforced when the CNI supports it (plain kindnet
-   ignores it), so this is best-effort. Binding `sandboxd` to loopback is the
-   CNI-independent option, but it fails the HTTP readiness probe, which dials
-   the pod IP. It would need an exec probe, and `sandboxd` has no health
-   subcommand for that today. Until approvers accept a default, ship the
-   policy as an opt-in flag. Containers publish on host loopback only; other containers on
-   the same engine network can still reach `sandboxd`, which the README states.
+   `NetworkPolicy`, and `sandboxd` binds `0.0.0.0` by default. Proposed: a
+   per-run bearer token by default on both backends, using the
+   `--auth-token-sha256` support from #1895. It does not depend on the CNI,
+   keeps the HTTP readiness probe working because `GET /v1/health` is exempt,
+   and also covers other containers on the same engine network. Only the
+   digest reaches the engine argv or the `Sandbox` spec. This replaces the two
+   earlier options: binding `sandboxd` to loopback would fail the readiness
+   probe, which dials the pod IP, and an exec probe needs a health subcommand
+   `sandboxd` does not have. An owned deny-all-ingress `NetworkPolicy` per run
+   stays an opt-in flag as defense in depth. It is only enforced when the CNI
+   supports it (plain kindnet ignores it). The token authenticates the client,
+   not code inside the sandbox, which already has the API's reach. An image
+   whose `sandboxd` predates #1895 exits on the unknown flag, so the run fails
+   at start rather than running unauthenticated.
 4. **Resource limits.** Neither backend sets CPU, memory or PID limits today.
    Proposed: opt-in flags only (`--cpus`, `--memory`, `--pids-limit`) and no
    defaults. The right values depend on the image, and a low default turns into

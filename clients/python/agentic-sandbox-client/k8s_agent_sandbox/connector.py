@@ -352,6 +352,8 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
             while time.monotonic() - port_forward_start < self.config.port_forward_ready_timeout:
                 if self.port_forward_process.poll() is not None:
                     stderr_text = _kubectl_stderr_tail(self._stderr_log)
+                    # kubectl has exited, so close() reaps it and closes the stderr log.
+                    self.close()
                     hint = ROUTER_NAMESPACE_HINT if "not found" in stderr_text.lower() else ""
                     raise SandboxPortForwardError(
                         f"Tunnel to router service '{ROUTER_SERVICE_NAME}' in namespace "
@@ -531,13 +533,21 @@ class SandboxdPodTunnelStrategy(ConnectionStrategy):
                     ],
                     self._stderr_log,
                 )
+            except OSError as e:
+                self._stderr_log = None
+                raise SandboxPortForwardError(
+                    "failed to start sandboxd port-forward for pod "
+                    f"{self.namespace}/{pod_name}: {e}"
+                ) from e
             except Exception:
                 self._stderr_log = None
                 raise
             while time.monotonic() - start_time < self.config.port_forward_ready_timeout:
                 if self.port_forward_process.poll() is not None:
-                    raise SandboxPortForwardError(
-                        f"Tunnel crashed: {_kubectl_stderr_tail(self._stderr_log)}")
+                    stderr_text = _kubectl_stderr_tail(self._stderr_log)
+                    # kubectl has exited, so close() reaps it and closes the stderr log.
+                    self.close()
+                    raise SandboxPortForwardError(f"Tunnel crashed: {stderr_text}")
                 if self._is_port_open(rest_local) and self._is_port_open(grpc_local):
                     self.base_url = f"http://127.0.0.1:{rest_local}"
                     self.grpc_target = f"127.0.0.1:{grpc_local}"
@@ -546,7 +556,10 @@ class SandboxdPodTunnelStrategy(ConnectionStrategy):
                     return self.base_url
                 time.sleep(0.05)
             self.close()
-            raise TimeoutError("Failed to establish sandboxd pod tunnel.")
+            raise SandboxPortForwardError(
+                "timed out waiting for sandboxd port-forward for pod "
+                f"{self.namespace}/{pod_name}"
+            )
         except Exception:
             status = "failure"
             raise

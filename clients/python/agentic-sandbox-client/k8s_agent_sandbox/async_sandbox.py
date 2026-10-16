@@ -246,6 +246,9 @@ class AsyncSandbox:
         if self._is_closed:
             return
 
+        # Clear before awaiting close() so a failed or cancelled close cannot
+        # leave a stale pod name for the next reconnect, matching Sandbox.
+        self._pod_name = None
         await self.connector.close()
 
         self._commands = None
@@ -267,6 +270,7 @@ class AsyncSandbox:
         self._commands = None
         self._files = None
         self._watcher = None
+        self._pod_name = None
         self._is_closed = True
 
     async def terminate(self) -> None:

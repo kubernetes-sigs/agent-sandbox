@@ -86,6 +86,22 @@ function renderTable(selector, columns, rows) {
     table.replaceChildren(thead, tbody);
 }
 
+// Appends items to container chunk at a time, so long result lists stay
+// responsive; moreButton reveals the next chunk and hides once all are
+// shown. rowHtml(item, index) returns trusted HTML.
+function paginate(container, items, moreButton, chunk, rowHtml) {
+    let rendered = 0;
+    const renderMore = () => {
+        const next = items.slice(rendered, rendered + chunk);
+        container.insertAdjacentHTML('beforeend', next.map((item, i) => rowHtml(item, rendered + i)).join(''));
+        rendered += next.length;
+        moreButton.hidden = rendered >= items.length;
+        moreButton.textContent = `Show more (${(items.length - rendered).toLocaleString()} remaining)`;
+    };
+    moreButton.onclick = renderMore;
+    renderMore();
+}
+
 // ---- Section navigation ----
 //
 // Pages are a stack of cards, and anything below the first screenful is

@@ -212,9 +212,8 @@
             log = await loadWatchLog(WATCH_LOG, (stage, detail) => {
                 statusEl.textContent = detail ? `${stage} (${detail})` : stage + '…';
             });
-            if (location.hash.startsWith('#q=')) {
-                searchEl.value = decodeURIComponent(location.hash.slice(3));
-            }
+            const q = hashQuery();
+            if (q !== null) searchEl.value = q;
             runSearch();
         } catch (err) {
             statusEl.textContent = 'load failed';

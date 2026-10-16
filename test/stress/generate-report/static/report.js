@@ -102,6 +102,19 @@ function paginate(container, items, moreButton, chunk, rowHtml) {
     renderMore();
 }
 
+// hashQuery returns the search query carried in a #q= hash, or null. A
+// hand-edited hash may hold a bare "%"; take it as typed rather than throw
+// and fail the page.
+function hashQuery() {
+    if (!location.hash.startsWith('#q=')) return null;
+    const raw = location.hash.slice(3);
+    try {
+        return decodeURIComponent(raw);
+    } catch (err) {
+        return raw;
+    }
+}
+
 // ---- Section navigation ----
 //
 // Pages are a stack of cards, and anything below the first screenful is

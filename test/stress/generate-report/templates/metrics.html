@@ -441,16 +441,8 @@
                 timeMin -= 1;
                 timeMax += 1;
             }
-            if (location.hash.startsWith('#q=')) {
-                // A hand-edited hash may hold a bare "%"; take it as typed
-                // rather than report the loaded log as failed.
-                const raw = location.hash.slice(3);
-                try {
-                    searchEl.value = decodeURIComponent(raw);
-                } catch (err) {
-                    searchEl.value = raw;
-                }
-            }
+            const q = hashQuery();
+            if (q !== null) searchEl.value = q;
             runSearch();
         } catch (err) {
             statusEl.textContent = 'load failed';

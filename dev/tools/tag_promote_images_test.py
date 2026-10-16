@@ -21,6 +21,7 @@ import tempfile
 import textwrap
 import unittest
 from importlib.machinery import SourceFileLoader
+from unittest import mock
 import yaml
 
 _TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -309,6 +310,184 @@ class UpdateImagesYamlTest(unittest.TestCase):
         self.assertIsNone(tag_promote.parse_image_name("- name:"))
         self.assertIsNone(tag_promote.parse_image_name("# - name: commented"))
         self.assertIsNone(tag_promote.parse_image_name("images: []"))
+
+
+class UpdateImagesYamlChartTest(unittest.TestCase):
+    """Tests the charts/agent-sandbox promotion path."""
+
+    def setUp(self):
+        self._temp_files = []
+
+    def tearDown(self):
+        for f in self._temp_files:
+            if os.path.exists(f):
+                os.unlink(f)
+
+    def _write_temp_yaml(self, content):
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
+        tmp.write(textwrap.dedent(content))
+        tmp.close()
+        self._temp_files.append(tmp.name)
+        return tmp.name
+
+    def test_chart_block_added_with_both_destination_tags(self):
+        sample_yaml = """
+        images:
+          - name: agent-sandbox-controller
+            dmap:
+              "sha256:old1": ["v1.2.2"]
+        """
+        yaml_path = self._write_temp_yaml(sample_yaml)
+        collected_digests = {
+            "agent-sandbox-controller": "sha256:new1",
+            "charts/agent-sandbox": ("sha256:chart1", ["1.2.3"]),
+        }
+
+        tag_promote.update_images_yaml(yaml_path, "v1.2.3", collected_digests)
+
+        with open(yaml_path) as f:
+            parsed = yaml.safe_load(f)
+        by_name = {b["name"]: b for b in parsed["images"]}
+
+        # Existing container-image behavior is unaffected: new digest is
+        # tagged with just the release tag, prior releases' history stays.
+        self.assertEqual(
+            by_name["agent-sandbox-controller"]["dmap"],
+            {"sha256:new1": ["v1.2.3"], "sha256:old1": ["v1.2.2"]},
+        )
+        # The chart gets both the release tag and its bare semver.
+        self.assertEqual(by_name["charts/agent-sandbox"]["dmap"], {"sha256:chart1": ["v1.2.3", "1.2.3"]})
+
+    def test_chart_rerun_is_idempotent_and_does_not_duplicate(self):
+        sample_yaml = """
+        images:
+          - name: charts/agent-sandbox
+            dmap:
+              "sha256:chart1": ["v1.2.3", "1.2.3"]
+        """
+        yaml_path = self._write_temp_yaml(sample_yaml)
+        collected_digests = {"charts/agent-sandbox": ("sha256:chart1", ["1.2.3"])}
+
+        tag_promote.update_images_yaml(yaml_path, "v1.2.3", collected_digests)
+
+        with open(yaml_path) as f:
+            content = f.read()
+        self.assertEqual(content.count("charts/agent-sandbox"), 1)
+        self.assertEqual(content.count("sha256:chart1"), 1)
+        parsed = yaml.safe_load(content)
+        chart_block = next(b for b in parsed["images"] if b["name"] == "charts/agent-sandbox")
+        self.assertEqual(chart_block["dmap"], {"sha256:chart1": ["v1.2.3", "1.2.3"]})
+
+    def test_chart_rerun_with_changed_digest_replaces_both_old_tags(self):
+        sample_yaml = """
+        images:
+          - name: charts/agent-sandbox
+            dmap:
+              "sha256:chart_old": ["v1.2.3", "1.2.3"]
+        """
+        yaml_path = self._write_temp_yaml(sample_yaml)
+        collected_digests = {"charts/agent-sandbox": ("sha256:chart_new", ["1.2.3"])}
+
+        tag_promote.update_images_yaml(yaml_path, "v1.2.3", collected_digests)
+
+        with open(yaml_path) as f:
+            content = f.read()
+        self.assertNotIn("sha256:chart_old", content)
+        parsed = yaml.safe_load(content)
+        chart_block = next(b for b in parsed["images"] if b["name"] == "charts/agent-sandbox")
+        self.assertEqual(chart_block["dmap"], {"sha256:chart_new": ["v1.2.3", "1.2.3"]})
+
+    def test_chart_appended_as_new_block_with_two_tags(self):
+        sample_yaml = """
+        images:
+          - name: agent-sandbox-controller
+            dmap:
+              "sha256:old1": ["v1.2.2"]
+        """
+        yaml_path = self._write_temp_yaml(sample_yaml)
+        collected_digests = {"charts/agent-sandbox": ("sha256:chart1", ["1.2.3"])}
+
+        tag_promote.update_images_yaml(yaml_path, "v1.2.3", collected_digests)
+
+        with open(yaml_path) as f:
+            parsed = yaml.safe_load(f)
+        by_name = {b["name"]: b for b in parsed["images"]}
+        self.assertEqual(by_name["charts/agent-sandbox"]["dmap"], {"sha256:chart1": ["v1.2.3", "1.2.3"]})
+
+    def test_mixed_images_and_chart_promoted_in_one_run(self):
+        """A full promotion run: existing image history for other tags is
+        preserved while both the images and the chart get this run's tag(s)."""
+        sample_yaml = """
+        images:
+          - name: agent-sandbox-controller
+            dmap:
+              "sha256:old1": ["v1.2.2"]
+          - name: chrome-sandbox
+            dmap:
+              "sha256:old2": ["v1.2.2"]
+          - name: python-runtime-sandbox
+            dmap:
+              "sha256:old3": ["v1.2.2"]
+          - name: sandbox-router-go
+            dmap:
+              "sha256:old4": ["v1.2.2"]
+          - name: charts/agent-sandbox
+            dmap:
+              "sha256:old_chart": ["v1.2.2", "1.2.2"]
+        """
+        yaml_path = self._write_temp_yaml(sample_yaml)
+        collected_digests = {
+            "agent-sandbox-controller": "sha256:new1",
+            "chrome-sandbox": "sha256:new2",
+            "python-runtime-sandbox": "sha256:new3",
+            "sandbox-router-go": "sha256:new4",
+            "charts/agent-sandbox": ("sha256:new_chart", ["1.2.3"]),
+        }
+
+        tag_promote.update_images_yaml(yaml_path, "v1.2.3", collected_digests)
+
+        with open(yaml_path) as f:
+            content = f.read()
+        parsed = yaml.safe_load(content)
+        by_name = {b["name"]: b for b in parsed["images"]}
+
+        self.assertEqual(by_name["agent-sandbox-controller"]["dmap"]["sha256:new1"], ["v1.2.3"])
+        self.assertEqual(by_name["charts/agent-sandbox"]["dmap"]["sha256:new_chart"], ["v1.2.3", "1.2.3"])
+        # Prior releases' history for an unrelated tag is untouched.
+        self.assertIn('"sha256:old1": ["v1.2.2"]', content)
+        self.assertIn('"sha256:old_chart": ["v1.2.2", "1.2.2"]', content)
+
+
+class GetChartDigestTest(unittest.TestCase):
+
+    def test_returns_digest_on_first_successful_poll(self):
+        with mock.patch.object(tag_promote, "run_command", return_value="sha256:abc") as run_cmd, \
+             mock.patch.object(tag_promote.time, "sleep") as sleep:
+            digest = tag_promote.get_chart_digest("1.2.3")
+
+        self.assertEqual(digest, "sha256:abc")
+        sleep.assert_not_called()
+        called_args = run_cmd.call_args[0][0]
+        self.assertIn(tag_promote.STAGING_CHART_REPO, called_args)
+        self.assertIn(r"--filter=tags~^1\.2\.3$", called_args)
+
+    def test_returns_none_after_timeout(self):
+        with mock.patch.object(tag_promote, "run_command", return_value=None), \
+             mock.patch.object(tag_promote.time, "sleep"):
+            digest = tag_promote.get_chart_digest("1.2.3")
+        self.assertIsNone(digest)
+
+
+class IsStableReleaseTagTest(unittest.TestCase):
+    """The chart-promotion gate in main() relies on this from shared.git_ops."""
+
+    def test_stable_tags_are_accepted(self):
+        for tag in ("v1.0.0", "v0.1.0", "v10.20.30"):
+            self.assertTrue(tag_promote.is_stable_release_tag(tag), tag)
+
+    def test_prerelease_and_malformed_tags_are_rejected(self):
+        for tag in ("v1.0.0-rc1", "v1.0.0rc1", "v1.0.0.post1", "1.0.0", "v1.0"):
+            self.assertFalse(tag_promote.is_stable_release_tag(tag), tag)
 
 
 if __name__ == "__main__":

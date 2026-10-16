@@ -1,0 +1,157 @@
+# KEP-1870: agtsbx, a docker-like CLI for running one command in a sandbox
+
+<!-- toc -->
+- [Summary](#summary)
+- [Motivation](#motivation)
+  - [Goals](#goals)
+  - [Non-Goals](#non-goals)
+- [Proposal](#proposal)
+  - [User Stories (Optional)](#user-stories-optional)
+  - [High-Level Design](#high-level-design)
+    - [API Changes](#api-changes)
+    - [Implementation Guidance](#implementation-guidance)
+  - [Open Questions](#open-questions)
+- [Scalability](#scalability)
+- [Alternatives (Optional)](#alternatives-optional)
+<!-- /toc -->
+
+## Summary
+
+`agtsbx run IMAGE COMMAND` creates a throwaway sandbox, runs one command in it,
+streams the output, tears the sandbox down and exits with the command's exit
+status. It works against a local container engine or a Kubernetes cluster by
+talking to the `sandboxd` contract from [KEP-539.2](../539.2-runtime-standardization/README.md).
+Tracking issue: [#1870](https://github.com/kubernetes-sigs/agent-sandbox/issues/1870).
+Implementation: [#1496](https://github.com/kubernetes-sigs/agent-sandbox/pull/1496).
+
+## Motivation
+
+Trying agent-sandbox today means installing a cluster, the controller and a
+`SandboxTemplate` first. That is a lot of ceremony to answer "does my agent's
+code work in a sandbox?". Coding agents are the motivating case: they edit
+files and run commands on the user's behalf, which is the work a sandbox
+exists to contain.
+
+### Goals
+
+- One command to run a process in an isolated sandbox, with docker-like
+  semantics (streamed output, propagated exit status, cleanup on Ctrl-C).
+- Identical in-sandbox behavior on every backend, via `sandboxd`.
+- No new API, no CRD change, no new module dependencies.
+
+### Non-Goals
+
+- Replacing the SDKs, `SandboxClaim`, `SandboxTemplate` or `SandboxWarmPool`.
+- Long-lived or interactive sessions beyond `--keep`.
+- Being a general container runtime or orchestrator.
+
+## Proposal
+
+### User Stories (Optional)
+
+- A developer runs `agtsbx run -e ANTHROPIC_API_KEY agents:latest claude -p '...'`
+  locally and gets the agent's output, with the agent contained.
+- A CI job runs `agtsbx run --runtime kubernetes IMAGE make test` and relies on
+  the exit status.
+
+### High-Level Design
+
+A backend only answers "where do I dial `sandboxd`?". Everything after that
+(health polling, `ProcessService.Execute`, output streaming, exit status) is
+backend-agnostic.
+
+| Backend | Creates | Reaches sandboxd via |
+| --- | --- | --- |
+| container engine (`docker` and compatible engines) | a container, ports on `127.0.0.1` | the published loopback port |
+| `kubernetes` | a core `Sandbox` | a port-forward to the pod |
+
+`--runtime auto` uses the first local engine found and falls back to
+`kubernetes`; an explicit `--runtime` is never silently downgraded. The
+Kubernetes backend uses the core `Sandbox` API rather than `SandboxClaim`,
+because only `Sandbox` accepts an image directly.
+
+Each run tags its object with a unique `app.kubernetes.io/instance` ID. Cleanup
+after an ambiguous start failure removes only an object carrying that ID, so a
+name collision never deletes a user's own object or a `--keep` one from an
+earlier run.
+
+#### API Changes
+
+None. The binary is `bin/agtsbx`, built by `make build-agtsbx`.
+
+#### Implementation Guidance
+
+- `cmd/agtsbx`: entrypoint and signal handling.
+- `internal/agtsbx`: `backend.go` (runtime selection), `container.go`,
+  `kube.go`, `exec.go` (sandboxd client), `run.go` (orchestration).
+- Container backends drive the engine CLI instead of linking an engine SDK.
+
+Security baseline. `sandboxd` authenticates clients only when started with
+`--auth-token-sha256` ([#1895](https://github.com/kubernetes-sigs/agent-sandbox/pull/1895)),
+so by default it relies on the transport:
+
+- Containers: `--cap-drop ALL`, `no-new-privileges`, loopback-only ports.
+- Kubernetes: no service account token, `runAsNonRoot`, no privilege
+  escalation, all capabilities dropped, reached by port-forward only.
+- `-e` values travel in the `ProcessService` request and are never written to
+  the engine argv or the `Sandbox` spec.
+- Proposed, not implemented yet (see Open Question 3): a per-run bearer token
+  on both backends. `agtsbx` mints it, keeps it in memory, passes only its
+  SHA-256 digest to `sandboxd`, and sends it as `authorization` metadata on
+  each `ProcessService` call. `GET /v1/health` is exempt, so readiness probing
+  is unchanged.
+
+### Open Questions
+
+1. **Scope.** Proposed: keep local container orchestration in this repo. It
+   removes the cluster prerequisite named in Motivation, adds no module
+   dependency (it drives the engine CLI), and shares the `sandboxd` contract
+   and client code with the rest of the project. If approvers disagree, the
+   Kubernetes-only subset can move to an SDK example.
+2. **Kubernetes UX.** Proposed: start with a raw `Sandbox` plus port-forward,
+   because only `Sandbox` accepts an image directly and the goal is zero
+   setup. This path is for development and CI, not production traffic. A
+   follow-up `--template` flag can create a `SandboxClaim` instead, for users
+   who already have a template and want warm pools, template network policy
+   and the router.
+3. **Network isolation.** A raw `Sandbox` has no template-managed
+   `NetworkPolicy`, and `sandboxd` binds `0.0.0.0` by default. Proposed: a
+   per-run bearer token by default on both backends, using the
+   `--auth-token-sha256` support from #1895. It does not depend on the CNI,
+   keeps the HTTP readiness probe working because `GET /v1/health` is exempt,
+   and also covers other containers on the same engine network. Only the
+   digest reaches the engine argv or the `Sandbox` spec. This replaces the two
+   earlier options: binding `sandboxd` to loopback would fail the readiness
+   probe, which dials the pod IP, and an exec probe needs a health subcommand
+   `sandboxd` does not have. An owned deny-all-ingress `NetworkPolicy` per run
+   stays an opt-in flag as defense in depth. It is only enforced when the CNI
+   supports it (plain kindnet ignores it). The token authenticates the client,
+   not code inside the sandbox, which already has the API's reach. An image
+   whose `sandboxd` predates #1895 exits on the unknown flag, so the run fails
+   at start rather than running unauthenticated.
+4. **Resource limits.** Neither backend sets CPU, memory or PID limits today.
+   Proposed: opt-in flags only (`--cpus`, `--memory`, `--pids-limit`) and no
+   defaults. The right values depend on the image, and a low default turns into
+   unexplained OOM kills of the user's command. Namespaces that need a ceiling
+   already get one from a `LimitRange` or quota. The README states that runs
+   are unbounded unless a flag is set.
+5. **Engine probing.** `auto` checks that the CLI exists, not that the engine
+   is reachable. Should it probe liveness before choosing?
+
+## Scalability
+
+Each run is one container or one `Sandbox`, created and removed by the caller.
+There is no controller-side state, watch, or reconcile load beyond the
+existing `Sandbox` reconciler handling one more object. `--keep` leaves the
+object in place, so it is the caller's job to clean it up.
+
+## Alternatives (Optional)
+
+- **SDK-only.** Keep the Go and Python SDKs as the single entry point. No new
+  binary to maintain, but no zero-setup local path and no shell-friendly
+  exit-status contract.
+- **`SandboxClaim` backend only.** Reuses templates, warm pools and network
+  policy, but needs a cluster and a template before anything runs, which is
+  the friction this KEP is trying to remove.
+- **Separate repository.** Avoids ownership of local-engine orchestration here,
+  at the cost of drifting from the `sandboxd` contract.

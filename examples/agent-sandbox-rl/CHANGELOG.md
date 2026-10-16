@@ -5,6 +5,15 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 
 ## [0.1.0.dev0] — unreleased
 
+### Added (test double)
+- **`agent_sandbox_rl.testing.FakeFleet` / `FakeHandle`**: the `SandboxFleet` surface
+  in memory (tasks, plan, warm / scale / unwarm, `wait_pools_ready`, `acquire` /
+  `release` / `run` / `recording`, snapshot wrappers, `teardown`) with every call
+  recorded, the real `RunReport`, the fleet's exceptions where a loop can observe them,
+  and injectable failures (`fail_warm`, `fail_acquire`) and exec outputs
+  (`exec_outputs`). `FakeHandle` is a `SandboxHandle` subclass, so adapters and type
+  checks see a real handle. Frameworks no longer need to maintain their own fake.
+
 ### Added (one NetworkPolicy per namespace)
 - **`TemplateSpec.network_policy_management`** sets `spec.networkPolicyManagement`
   on the SandboxTemplates a fleet creates, and patches it onto a pre-existing

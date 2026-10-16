@@ -883,6 +883,27 @@ kubectl -n agent-sandbox-system patch deploy agent-sandbox-controller --type=jso
 | `'NoneType' object has no attribute 'decode'` on parallel exec | Handled: `SandboxHandle.exec` builds a fresh `ApiClient` per call (kubernetes `stream()` isn't thread-safe across a shared client). |
 | Async `process_fn` calls `handle.exec` | `exec` is blocking — in async code do `await asyncio.to_thread(h.exec, ...)`, or pass a sync `process_fn` (run in a worker thread automatically). |
 
+### Testing your integration without a cluster
+
+`agent_sandbox_rl.testing.FakeFleet` is the `SandboxFleet` surface with no API server
+behind it: `load_tasks` / `add_tasks` / `plan` / `setup`, `warm_image` /
+`set_pool_replicas` / `unwarm_image` / `wait_pools_ready`, `acquire` / `release` /
+`run` / `recording`, the snapshot wrappers and `teardown`. It keeps the fleet's
+bookkeeping in memory (`active_pools`, `handles()`, the `RunReport`), records every
+call (`warm_calls`, `scale_calls`, `unwarm_calls`, `acquire_calls`, `release_calls`),
+and raises what the real fleet would (`FleetOvercommitError` at `max_live_sandboxes`,
+`KeyError` for an unplanned image, a released handle on `exec`). Inject failures with
+`fail_warm` / `fail_acquire` and program `exec` with `exec_outputs`:
+
+```python
+from agent_sandbox_rl.testing import FakeFleet
+fleet = FakeFleet(FleetConfig(warm_per_task=True, max_warmpool_size=4),
+                  exec_outputs={"pytest": "3 passed\n"})
+fleet.load_tasks(rows); fleet.setup()
+my_trainer_step(fleet)                      # the code under test, unchanged
+assert fleet.active_pools and fleet.release_calls
+```
+
 ## Testing
 
 ```bash

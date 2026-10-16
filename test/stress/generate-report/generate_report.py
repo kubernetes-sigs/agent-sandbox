@@ -950,7 +950,27 @@ def main():
     # cpu-seconds by mode, so busy% = 1 - (idle + iowait) / total. iowait is
     # carried separately: it is the waiting-on-disk share, the node-level
     # number that distinguishes I/O starvation from CPU starvation.
+    # Node roles come from the node-role.kubernetes.io/* labels in the watch
+    # stream (the same test the stress tool's inspectCluster applies). The
+    # node name is only a fallback: kOps names GCE nodes after the instance
+    # group ("control-plane-us-central1-a-xxxx"), but AWS nodes after the
+    # EC2 instance id ("i-0123..."), which says nothing about the role.
+    node_roles = {}
+    if watch_file.exists():
+        node_roles_raw = conn.execute(f"""
+            SELECT
+                CAST(object->'metadata'->>'name' AS VARCHAR) as name,
+                bool_or(coalesce(list_has_any(json_keys(object, '$.metadata.labels'),
+                    ['node-role.kubernetes.io/control-plane', 'node-role.kubernetes.io/master']), false)) as is_control_plane
+            FROM {json_scan(watch_path_str, WATCH_COLUMNS)}
+            WHERE resource = 'nodes'
+            GROUP BY name
+        """).fetchall()
+        node_roles = {name: "control-plane" if is_control_plane else "worker" for name, is_control_plane in node_roles_raw}
+
     def node_role(instance):
+        if instance in node_roles:
+            return node_roles[instance]
         return "control-plane" if ("control-plane" in instance or "master" in instance) else "worker"
 
     def cpu_shares(modes):

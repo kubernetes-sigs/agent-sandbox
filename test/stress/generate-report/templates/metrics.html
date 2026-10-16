@@ -172,10 +172,11 @@
     }
 
     // Index the rendered panels, not the input, which may hold an edit the
-    // debounce has not rendered yet.
+    // debounce has not rendered yet. A locked label value may hold a
+    // standalone ";", which must not split off a panel of its own.
     function setSubQuery(p, q) {
         const parts = panelParts.slice();
-        parts[p] = q;
+        parts[p] = splitPanels(q).join(' ');
         setQuery(parts.join(' ; '));
     }
 
@@ -430,6 +431,10 @@
                     if (t > timeMax) timeMax = t;
                 }
             }
+            // Chart.js labels explicit bounds as edge ticks, so round them out
+            // to whole seconds rather than show the raw fractional offsets.
+            timeMin = Math.floor(timeMin);
+            timeMax = Math.ceil(timeMax);
             // Chart.js keeps equal explicit bounds as a zero-width axis, so
             // give a log with a single scrape time some room.
             if (timeMin === timeMax) {
@@ -437,7 +442,14 @@
                 timeMax += 1;
             }
             if (location.hash.startsWith('#q=')) {
-                searchEl.value = decodeURIComponent(location.hash.slice(3));
+                // A hand-edited hash may hold a bare "%"; take it as typed
+                // rather than report the loaded log as failed.
+                const raw = location.hash.slice(3);
+                try {
+                    searchEl.value = decodeURIComponent(raw);
+                } catch (err) {
+                    searchEl.value = raw;
+                }
             }
             runSearch();
         } catch (err) {

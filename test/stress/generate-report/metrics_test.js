@@ -59,8 +59,9 @@ class Element {
     click() { this.onclick(); }
 }
 
-// fixture optionally replaces the default series: [{metric, t, v?}].
-async function loadExplorer(query, fixture) {
+// fixture optionally replaces the default series: [{metric, t, v?}]; hash
+// replaces the URL hash otherwise built from query.
+async function loadExplorer(query, fixture, hash = '#q=' + encodeURIComponent(query)) {
     const elements = Object.fromEntries(['mx-status', 'mx-search', 'mx-results', 'mx-more'].map(id => [id, new Element()]));
     const charts = new Map();
     class Chart {
@@ -86,7 +87,7 @@ async function loadExplorer(query, fixture) {
     const context = vm.createContext({
         document: { getElementById: id => elements[id], createElement: () => new Element(), addEventListener() {} },
         window: { getSelection: () => '' },
-        location: { hash: '#q=' + encodeURIComponent(query) },
+        location: { hash },
         history: { replaceState() {} },
         Chart, readLog: async () => log,
     });
@@ -211,6 +212,21 @@ test('a semicolon inside a label value does not start a panel', async () => {
     assert.equal(explorer.elements['mx-status'].textContent, '1 metrics, 1 / 107 series');
 });
 
+test('locking a series whose label value holds a spaced semicolon keeps the panels', async () => {
+    const explorer = await loadExplorer('metric:=early_gauge ; metric:node_metric_00');
+    vm.runInContext("log.series[5].labels = { path: '/a ; b' }", explorer.context);
+    assert.equal(click(explorer, { panel: 1, series: 5 }),
+        'metric:=early_gauge ; metric:=node_metric_003 source:=node-exporter instance:=node-1 path:=/a b');
+    assert.equal(explorer.elements['mx-results'].children.length, 2);
+});
+
+test('a hash with a bare percent sign still loads the explorer', async () => {
+    // loadExplorer itself fails the test if the page reports "load failed".
+    const { elements } = await loadExplorer(undefined, undefined, '#q=metric:=early_gauge 100%');
+    assert.equal(elements['mx-search'].value, 'metric:=early_gauge 100%');
+    assert.equal(elements['mx-status'].textContent, '0 metrics, 0 / 107 series');
+});
+
 test('a panel click ignores an edit the debounce has not rendered', async () => {
     const explorer = await loadExplorer('metric:=early_gauge ; metric:node_metric_00 ; metric:=late_total');
     explorer.elements['mx-search'].value = 'metric:node_metric_00 ; metric:=late_total';
@@ -274,6 +290,17 @@ test('a log with a single scrape time still gets a usable shared x range', async
     for (const chart of charts.values()) {
         assert.equal(chart.config.options.scales.x.min, 899);
         assert.equal(chart.config.options.scales.x.max, 901);
+    }
+});
+
+test('the shared x range rounds fractional scrape times out to whole seconds', async () => {
+    const { charts } = await loadExplorer('metric:=a ; metric:=b', [
+        { metric: 'a', t: [-2.531, 600.25] },
+        { metric: 'b', t: [900.5, 1812.437] },
+    ]);
+    for (const chart of charts.values()) {
+        assert.equal(chart.config.options.scales.x.min, -3);
+        assert.equal(chart.config.options.scales.x.max, 1813);
     }
 });
 

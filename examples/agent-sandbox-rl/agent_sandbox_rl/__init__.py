@@ -86,7 +86,18 @@ from .sizing import (
     recommend_window_disk,
     recommend_window_pipelined,
 )
-from .sources import JsonlSource, ListSource, Task, TaskSource, to_tasks
+from .sources import (
+    DEFAULT_IMAGE_FIELDS,
+    ImageListSource,
+    JsonlSource,
+    ListSource,
+    Task,
+    TaskSource,
+    extract_image,
+    load_image_list,
+    read_text,
+    to_tasks,
+)
 from .strategies import STRATEGIES, process_parallel
 
 __all__ = [
@@ -116,6 +127,11 @@ __all__ = [
     "ListSource",
     "JsonlSource",
     "to_tasks",
+    "extract_image",
+    "load_image_list",
+    "read_text",
+    "ImageListSource",
+    "DEFAULT_IMAGE_FIELDS",
     # swebench adapter
     "SweBenchSource",
     "swebench_probe",

@@ -1695,6 +1695,7 @@ func TestSandboxClaimTTLAfterFinishedCleanupPolicy(t *testing.T) {
 				require.Equal(t, extensionsv1beta1.ClaimExpiredReason, readyCondition.Reason)
 				finishedCondition := meta.FindStatusCondition(claim.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished))
 				require.NotNil(t, finishedCondition)
+				require.Equal(t, metav1.ConditionTrue, finishedCondition.Status)
 				require.Equal(t, sandboxv1beta1.SandboxReasonPodSucceeded, finishedCondition.Reason)
 			}
 

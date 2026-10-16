@@ -1655,6 +1655,12 @@ func TestSandboxClaimTTLAfterFinishedCleanupPolicy(t *testing.T) {
 			expectSandboxDeleted: false,
 		},
 		{
+			name:                 "delete deletes claim",
+			policy:               extensionsv1beta1.ShutdownPolicyDelete,
+			expectClaimDeleted:   true,
+			expectSandboxDeleted: false,
+		},
+		{
 			name:                 "delete foreground deletes claim",
 			policy:               extensionsv1beta1.ShutdownPolicyDeleteForeground,
 			expectClaimDeleted:   true,

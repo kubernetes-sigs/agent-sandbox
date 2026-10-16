@@ -112,7 +112,7 @@ and are not repeated here.
 
 ## Deployment Example
 
-To deploy the controller with custom concurrency settings, modify the `args` of the `agent-sandbox-controller` container within the project's installation manifests. For an alternative that does not require manifest changes, see [agent-sandbox-config ConfigMap](#agent-sandbox-config-configmap).
+To deploy the controller with custom concurrency settings, modify the `args` of the `agent-sandbox-controller` container within the project's installation manifests.
 
 If using the core controller, update `sandbox.yaml`:
 
@@ -361,6 +361,11 @@ restricted-domain blocklist (with `cluster-autoscaler.kubernetes.io/safe-to-evic
 exempted), not by this allowlist.
 
 ### Controller flag overrides
+
+This mechanism is mainly useful for OLM-managed installs, where the
+ClusterServiceVersion owns the Deployment args and editing them directly
+is impractical. Non-OLM users can set flags in the Deployment manifest
+or Helm values instead.
 
 Keys that match one of the tunable flag names below override the compiled
 default; explicit CLI flags always take precedence

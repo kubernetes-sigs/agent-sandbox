@@ -145,8 +145,11 @@ spec:
 
     ## Configuration
 
-    The controller can be tuned at runtime via an optional `agent-sandbox-config`
-    ConfigMap in the controller namespace. See
+    Because the OLM ClusterServiceVersion owns the controller Deployment,
+    editing its args directly is impractical. Instead, create an
+    `agent-sandbox-config` ConfigMap in the controller namespace to override
+    tunable flags (concurrency, API QPS/burst, profiling, etc.) without
+    touching the CSV. See
     [docs/configuration.md](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/configuration.md)
     for the full list of tunable keys and precedence rules.
   displayName: Agent Sandbox Operator

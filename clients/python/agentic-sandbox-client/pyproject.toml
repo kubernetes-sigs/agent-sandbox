@@ -81,10 +81,20 @@ tracing = [
 testpaths = ["k8s_agent_sandbox"]
 
 [tool.mypy]
+strict = true
+# kubernetes / kubernetes_asyncio / watch still expose incompletely typed callables;
+# keep the rest of strict enabled for this package's own code.
+disallow_untyped_calls = false
 ignore_missing_imports = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 show_error_codes = true
+# Unit tests and generated protobuf stubs are not part of the typed public API.
+exclude = [
+  "(^|/)test/",
+  "(^|/)tests/",
+  "(^|/)_proto/",
+]
 
 [[tool.mypy.overrides]]
 module = [

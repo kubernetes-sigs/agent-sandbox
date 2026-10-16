@@ -5,6 +5,24 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 
 ## [0.1.0.dev0] — unreleased
 
+### Added (warm pools for an external step loop)
+- **`LookaheadWarmer`** (`agent_sandbox_rl.lookahead`): keeps pools sized for the
+  batches an RL trainer has in flight. `add(batch_id, {image: claims})` /
+  `finish(batch_id)` diff the desired replicas (sum over live batches plus
+  `keep_finished` finished ones, capped at `max_warmpool_size`) and apply it
+  concurrently: `warm_image(wait=False)`, `set_pool_replicas`, `unwarm_image`.
+  Unknown images are registered through `add_tasks`. Errors are recorded in the
+  returned `WarmReport` and logged; `fail_fast` re-raises a `FleetError` from a create
+  after the phase. `wait=True` runs the readiness barrier below for the batch; `add_async`
+  runs an add on a background thread; `close()` unwarms everything it asked for.
+- **`SandboxFleet.add_tasks(source, image_rewrite=)`** appends tasks and extends the
+  current plan in place (new images placed and sized like `plan()`, existing ones gain
+  task counts; adopt mode re-plans against the namespace), instead of reloading every
+  task and re-planning per new image.
+- **`SandboxFleet.wait_pools_ready(images, timeout=)`** is a best-effort readiness
+  barrier returning `image -> ready`; a slow pool, an unplanned image or a watch error
+  reads as `False` and is logged, never raised. `FleetPlan.add(entry)`.
+
 ### Added (one NetworkPolicy per namespace)
 - **`TemplateSpec.network_policy_management`** sets `spec.networkPolicyManagement`
   on the SandboxTemplates a fleet creates, and patches it onto a pre-existing

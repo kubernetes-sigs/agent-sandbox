@@ -53,6 +53,7 @@ from .exceptions import (
 )
 from .async_fleet import AsyncSandboxFleet
 from .fleet import FleetPlan, PlanEntry, SandboxFleet
+from .lookahead import LookaheadWarmer, WarmReport
 from .reaper import reap
 from .handles import SandboxHandle, SandboxSession
 from .observability import Observer, RunReport, repo_family, serve_metrics
@@ -129,6 +130,8 @@ __all__ = [
     "ImageAffinity",
     # fleet
     "SandboxFleet",
+    "LookaheadWarmer",
+    "WarmReport",
     "AsyncSandboxFleet",
     "FleetPlan",
     "PlanEntry",

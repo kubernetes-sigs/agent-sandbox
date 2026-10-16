@@ -137,6 +137,7 @@ class SandboxFleet:
     # and pool name sees the final values.
     self.config.apply_run_isolation(self.run_id)
     self._created_namespaces: set[tuple[str, str]] = set()  # (cluster, ns) this run made
+    self._deleted_namespaces: set = set()
     # Owned namespaces whose `run_namespace_setup` hook completed. Separate from
     # ownership: a namespace whose rollback delete failed stays owned, and the
     # next attempt must still run the hook on it.
@@ -1661,11 +1662,61 @@ class SandboxFleet:
       self.release(h)
 
   # --- teardown ---------------------------------------------------------- #
-  def teardown(self, delete_namespace: bool = False) -> None:
+  def teardown(self, delete_namespace: bool = False, *,
+               verify: bool = False) -> "dict[str, dict] | None":
     """Release all claims and delete every resource this fleet created. With a
-    shared `FleetConfig.run_id`, only the pools this fleet warmed are deleted."""
+    shared `FleetConfig.run_id`, only the pools this fleet warmed are deleted.
+
+    ``verify`` follows the sweep with `verify_teardown`: the run-scoped reaper
+    runs on every cluster, deletes whatever of this run is still there, and the
+    per-cluster counts come back (all zero means the teardown was clean)."""
     with self._obs.phase("teardown"):
       self._teardown(delete_namespace)
+    if not verify:
+      return None
+    return self.verify_teardown()
+
+  def verify_teardown(self) -> "dict[str, dict]":
+    """Check (and finish) a teardown with the run-scoped reaper.
+
+    For every cluster, ``reap(run_id=<this run>)`` lists this run's claims,
+    pools, Sandboxes, templates and pods and deletes what it finds, so a delete
+    that failed inside `teardown`, a pod the controller had not removed yet, or
+    a Sandbox a claim left behind is both reported and cleaned. Returns
+    ``{cluster_name: counts}`` as `reap` reports them; a cluster with leftovers
+    is logged as a warning. Skipped, with a note in the result, for a shared
+    run id (the id spans other processes' resources), for ``adopt_existing``
+    (adopted pools may carry this run's label from an earlier run) and for a
+    namespace this teardown deleted. Never raises: a reaper error is recorded
+    under ``"error"``.
+    """
+    from .reaper import reap
+    out: dict[str, dict] = {}
+    for c in self.registry:
+      if self._shared_run_id:
+        out[c.name] = {"skipped": "shared run id: the reaper would reach other processes"}
+        continue
+      if self.config.adopt_existing:
+        out[c.name] = {"skipped": "adopt_existing: adopted pools are not this run's to reap"}
+        continue
+      if (c.name, c.namespace) in self._deleted_namespaces:
+        out[c.name] = {"skipped": f"namespace {c.namespace} was deleted"}
+        continue
+      cfg = c.config
+      try:
+        counts = reap(run_id=self.run_id, context=cfg.context, namespace=c.namespace,
+                      kubeconfig=cfg.kubeconfig, in_cluster=cfg.in_cluster)
+      except Exception as exc:  # noqa: BLE001 — verification must not fail the caller
+        logger.warning("verify_teardown: reaper failed on cluster %s: %s", c.name, exc)
+        counts = {"error": f"{type(exc).__name__}: {exc}"}
+      leftovers = {k: v for k, v in counts.items() if isinstance(v, int) and v > 0}
+      if leftovers:
+        logger.warning("verify_teardown: cluster %s still had %s of run %s; reaped",
+                       c.name, leftovers, self.run_id)
+      else:
+        logger.info("verify_teardown: cluster %s clean for run %s", c.name, self.run_id)
+      out[c.name] = counts
+    return out
 
   def _teardown(self, delete_namespace: bool) -> None:
     # Idempotent/reentrant: the breaker thread, a strategy's teardown, __exit__,
@@ -1757,6 +1808,7 @@ class SandboxFleet:
                               and not self._shared_run_id):
         try:
           c.resources.delete_namespace(c.namespace)
+          self._deleted_namespaces.add(key)
         except Exception as exc:  # noqa: BLE001 — best-effort, like the sweeps above
           # Keep the ownership record, as the rollback path does, so the next
           # teardown cycle retries the delete instead of leaking the namespace.

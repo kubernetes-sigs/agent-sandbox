@@ -632,6 +632,11 @@ fleet.load_tasks(source, image_rewrite=make_rewriter(
   reconnecting and falling back to a short re-check on watch drops.
 - **Cleanup**: everything created is labeled `app=agent-sandbox-rl`; `teardown`
   sweeps claims → pools → templates (defensive against stray claims).
+  `teardown(verify=True)` (or `verify_teardown()` afterwards) then runs the run-scoped
+  reaper on every cluster, deletes whatever of this run is still there (a failed
+  delete, a pod the controller had not removed, a Sandbox a claim left) and returns
+  `{cluster: counts}`; all-zero counts mean the teardown was clean. Skipped, with a note,
+  for a shared `run_id`, `adopt_existing`, and a namespace the teardown deleted.
 
 ### Snapshots — suspend / resume / restore (GKE, opt-in)
 

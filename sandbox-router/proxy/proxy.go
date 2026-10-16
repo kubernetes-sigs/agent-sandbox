@@ -30,6 +30,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/propagation"
 	"golang.org/x/net/http/httpguts"
+	"google.golang.org/grpc/codes"
 
 	"sigs.k8s.io/agent-sandbox/sandbox-router/authz"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
@@ -40,13 +41,16 @@ import (
 // HTTP request is parsed into a Target and proxied to the upstream sandbox
 // with the same body, headers (minus Host), and method.
 type Handler struct {
-	cfg        *config.Config
-	metrics    *observability.Metrics
-	propagator propagation.TextMapPropagator
-	transport  http.RoundTripper
-	cache      Lookup
-	authz      authz.Authorizer
-	log        logr.Logger
+	cfg             *config.Config
+	metrics         *observability.Metrics
+	propagator      propagation.TextMapPropagator
+	transport       http.RoundTripper
+	httpTransport   *http.Transport
+	grpcTransport   *http.Transport
+	grpcConnections *grpcConnections
+	cache           Lookup
+	authz           authz.Authorizer
+	log             logr.Logger
 }
 
 // Options bundles the dependencies NewHandler needs. Metrics, Propagator,
@@ -76,7 +80,8 @@ func NewHandler(o Options) *Handler {
 	if o.Propagator == nil {
 		o.Propagator = propagation.TraceContext{}
 	}
-	var tr http.RoundTripper = defaultTransport(o.Config)
+	httpTransport := defaultTransport(o.Config)
+	var tr http.RoundTripper = httpTransport
 	// Wrap with retry only if max-retries > 0. The transport is unchanged
 	// when retries are disabled so the request path stays a single Dial.
 	if o.Config.UpstreamMaxRetries > 0 {
@@ -107,24 +112,65 @@ func NewHandler(o Options) *Handler {
 	if authorizer == nil {
 		authorizer = authz.AllowAll{}
 	}
+	grpcTr := grpcTransport(o.Config)
+	grpcConns := newGRPCConnections(grpcTr.DialContext)
+	grpcTr.DialContext = grpcConns.dialContext
 	return &Handler{
-		cfg:        o.Config,
-		metrics:    o.Metrics,
-		propagator: o.Propagator,
-		transport:  tr,
-		cache:      o.Cache,
-		authz:      authorizer,
-		log:        o.Logger,
+		cfg:             o.Config,
+		metrics:         o.Metrics,
+		propagator:      o.Propagator,
+		transport:       tr,
+		httpTransport:   httpTransport,
+		grpcTransport:   grpcTr,
+		grpcConnections: grpcConns,
+		cache:           o.Cache,
+		authz:           authorizer,
+		log:             o.Logger,
 	}
+}
+
+// CloseIdleConnections releases idle upstream connections without interrupting
+// active requests. Use Close for final cleanup after server shutdown.
+func (h *Handler) CloseIdleConnections() {
+	h.httpTransport.CloseIdleConnections()
+	h.grpcTransport.CloseIdleConnections()
+}
+
+// Close releases upstream resources after server shutdown. It also closes
+// native gRPC connections whose canceled streams are still unwinding, without
+// waiting for request handlers. The handler cannot be reused after Close.
+func (h *Handler) Close() {
+	h.grpcConnections.close()
+	h.CloseIdleConnections()
 }
 
 // ServeHTTP implements http.Handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	grpcRequest := isGRPCRequest(r)
+	if grpcRequest {
+		if labels := observability.LabelsFromContext(r.Context()); labels != nil {
+			labels.GRPC = true
+		}
+		ctx, cancel, err := grpcRequestContext(r, h.cfg.GRPCProxyTimeout)
+		if err != nil {
+			writeGRPCError(w, codes.InvalidArgument, err.Error())
+			return
+		}
+		defer cancel()
+		r = r.WithContext(ctx)
+		if err := grpcContextError(ctx); err != nil {
+			writeProxyError(w, r, &Error{Status: http.StatusBadGateway, Detail: err.Error()})
+			return
+		}
+		if h.cfg.MaxRequestBodyBytes > 0 {
+			r.Body = http.MaxBytesReader(w, r.Body, h.cfg.MaxRequestBodyBytes)
+		}
+	}
 	upstreamPath, upstreamRawPath := r.URL.Path, ""
 	var pathRouted bool
 	target, perr := h.resolveTarget(r, &upstreamPath, &upstreamRawPath, &pathRouted)
 	if perr != nil {
-		WriteJSONError(w, perr)
+		writeProxyError(w, r, perr)
 		return
 	}
 
@@ -167,7 +213,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if h.metrics != nil {
 				h.metrics.AuthzDecisionsTotal.WithLabelValues(target.Namespace, "deny").Inc()
 			}
-			WriteJSONError(w, &Error{Status: http.StatusForbidden, Detail: "origin not allowed for cookie-authenticated request"})
+			writeProxyError(w, r, &Error{Status: http.StatusForbidden, Detail: "origin not allowed for cookie-authenticated request"})
 			return
 		}
 	}
@@ -207,7 +253,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Path:        upstreamPathURL.EscapedPath(),
 	})
 	if err != nil {
-		WriteJSONError(w, &Error{Status: http.StatusInternalServerError, Detail: err.Error()})
+		writeProxyError(w, r, &Error{Status: http.StatusInternalServerError, Detail: err.Error()})
 		return
 	}
 	if err := h.authz.Authorize(r.Context(), r, authorizationTarget); err != nil {
@@ -221,11 +267,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if h.metrics != nil {
 			h.metrics.AuthzDecisionsTotal.WithLabelValues(target.Namespace, "deny").Inc()
 		}
-		WriteJSONError(w, &Error{Status: status, Detail: err.Error()})
+		writeProxyError(w, r, &Error{Status: status, Detail: err.Error()})
 		return
 	}
 	if h.metrics != nil {
 		h.metrics.AuthzDecisionsTotal.WithLabelValues(target.Namespace, "allow").Inc()
+	}
+	if grpcRequest {
+		if err := grpcContextError(r.Context()); err != nil {
+			writeProxyError(w, r, &Error{Status: http.StatusBadGateway, Detail: err.Error()})
+			return
+		}
 	}
 
 	// Browser-session bootstrap: this request just proved (via the
@@ -254,6 +306,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// Clear inbound Host so net/http picks the URL host. Matches the
 			// Python router's behavior of stripping Host before forwarding.
 			pr.Out.Host = ""
+			if grpcRequest {
+				if deadline, ok := pr.Out.Context().Deadline(); ok {
+					pr.Out.Header.Set("Grpc-Timeout", remainingGRPCTimeout(time.Until(deadline)))
+				}
+			}
 			// Strip Authorization before forwarding. The router consumes
 			// it (e.g. --authz-mode=tokenreview validates a Bearer token
 			// via the K8s TokenReview API); the sandbox must not see the
@@ -324,6 +381,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Transport:     h.transport,
 		FlushInterval: -1, // immediate flush for SSE / streaming responses
 		ErrorHandler: func(w http.ResponseWriter, errReq *http.Request, err error) {
+			var bodyLimit *http.MaxBytesError
+			if grpcRequest && errors.As(err, &bodyLimit) {
+				writeGRPCError(w, codes.ResourceExhausted, "RPC request body limit exceeded")
+				return
+			}
 			h.recordUpstreamErrorReason(target0.Namespace, classifyError(err))
 			// KEP-NNNN: actively invalidate the cache entry when a dial
 			// failure indicates the IP itself is dead (timeout, no
@@ -354,11 +416,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"namespace", target0.Namespace,
 				"source", string(src),
 			)
-			WriteJSONError(w, &Error{
+			writeProxyError(w, errReq, &Error{
 				Status: http.StatusBadGateway,
 				Detail: fmt.Sprintf("Could not connect to the backend sandbox: %s", target0.ID),
 			})
 		},
+	}
+	if grpcRequest {
+		rp.Transport = h.grpcTransport
+		rp.ModifyResponse = prepareGRPCResponse
 	}
 
 	// Bound the upstream request lifetime by the configured proxy timeout,
@@ -370,7 +436,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 101 handshake is done the connection's TCP keepalive is the
 	// liveness signal, not our handler context.
 	ctx := r.Context()
-	if !upgrade {
+	if !upgrade && !grpcRequest {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, h.cfg.ProxyTimeout)
 		defer cancel()
@@ -400,7 +466,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // Path shaped like the routing prefix and can never match a
 // header-routed request's URL.
 func (h *Handler) resolveTarget(r *http.Request, upstreamPath, upstreamRawPath *string, pathRouted *bool) (Target, *Error) {
-	if h.cfg.PathRoutingPrefix != "" {
+	if !isGRPCRequest(r) && h.cfg.PathRoutingPrefix != "" {
 		if route, matched, perr := ParsePathRoute(h.cfg.PathRoutingPrefix, r.URL.EscapedPath()); matched {
 			if perr != nil {
 				return Target{}, perr
@@ -411,7 +477,10 @@ func (h *Handler) resolveTarget(r *http.Request, upstreamPath, upstreamRawPath *
 			return route.Target, nil
 		}
 	}
-	return ParseSandboxHeaders(r.Header, ParseOptions{AllowLoopbackPodIP: h.cfg.AllowLoopbackPodIP})
+	return ParseSandboxHeaders(r.Header, ParseOptions{
+		AllowLoopbackPodIP: h.cfg.AllowLoopbackPodIP,
+		RequirePort:        isGRPCRequest(r),
+	})
 }
 
 // isUpgradeRequest reports whether r is asking the server to switch

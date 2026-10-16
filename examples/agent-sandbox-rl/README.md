@@ -98,7 +98,22 @@ raises a clear error if it's missing. (No `r2egym` extra for that reason.)
 The **OpenHands adapter** (`adapters.openhands`) likewise imports lazily and
 needs the [`openhands-k8s-agent-sandbox`](../../clients/integrations/openhands)
 integration (`pip install -e clients/integrations/openhands`), which pulls the
-OpenHands agent SDK — note the SDK requires **Python >= 3.12**.
+OpenHands agent SDK — note the SDK requires **Python >= 3.12**. Its
+`agent_server_template(...)` builds the `TemplateSpec` such pools need (agent-server
+on `:8000` with a `/health` readiness probe and the session key as
+`OH_SESSION_API_KEYS_0`), either from task images that contain the server or, with
+`server_image=`, by copying the server out of one agent-server image into every plain
+repo image's pod through an init container — no per-task image rebuild:
+
+```python
+from agent_sandbox_rl.adapters.openhands import agent_server_template, DEFAULT_AGENT_SERVER_IMAGE
+fleet = SandboxFleet(FleetConfig(
+    template=agent_server_template(server_image=DEFAULT_AGENT_SERVER_IMAGE,
+                                   session_key_secret=("openhands-session-key", "key"),
+                                   tolerations=[{"key": "workload", "operator": "Equal",
+                                                 "value": "sandbox", "effect": "NoSchedule"}]),
+    warm_per_task=True, ...))
+```
 
 ### 4. Verify
 

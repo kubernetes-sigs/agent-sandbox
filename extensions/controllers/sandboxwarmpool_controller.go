@@ -50,6 +50,7 @@ import (
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+	"sigs.k8s.io/agent-sandbox/internal/lifecycle"
 )
 
 const (
@@ -454,6 +455,22 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, nil
 	}
 
+	poolTTLExpired, poolTTLTimeLeft := lifecycle.TimeLeftAfterCreated(r.clockNow(), warmPool.CreationTimestamp, warmPool.Spec.TTLSecondsAfterCreated)
+	if poolTTLExpired {
+		logger.Info("Deleting SandboxWarmPool because ttlSecondsAfterCreated expired", "warmPool", warmPool.Name)
+		if r.Recorder != nil {
+			r.Recorder.Eventf(warmPool, nil, corev1.EventTypeNormal, "TTLExpired", "TTLExpired", "Deleting SandboxWarmPool because ttlSecondsAfterCreated expired")
+		}
+		// A TTL edit on the same object must also invalidate the cached deadline.
+		if err := r.Delete(ctx, warmPool, client.Preconditions{UID: &warmPool.UID, ResourceVersion: &warmPool.ResourceVersion}); err != nil {
+			if k8serrors.IsConflict(err) {
+				return ctrl.Result{RequeueAfter: immediateRequeueDelay}, nil
+			}
+			return ctrl.Result{}, client.IgnoreNotFound(err)
+		}
+		return ctrl.Result{}, nil
+	}
+
 	// Save old status for comparison
 	oldStatus := warmPool.Status.DeepCopy()
 
@@ -471,6 +488,9 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
+	if poolTTLTimeLeft > 0 && (requeueAfter == 0 || poolTTLTimeLeft < requeueAfter) {
+		requeueAfter = poolTTLTimeLeft
+	}
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 

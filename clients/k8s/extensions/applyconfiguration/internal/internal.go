@@ -2623,6 +2623,9 @@ var schemaYAML = typed.YAMLObject(`types:
     - name: lifecycle
       type:
         namedType: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.Lifecycle
+    - name: ttlSecondsAfterCreated
+      type:
+        scalar: numeric
     - name: volumeClaimTemplates
       type:
         list:
@@ -2751,6 +2754,9 @@ var schemaYAML = typed.YAMLObject(`types:
       type:
         namedType: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.SandboxTemplateRef
       default: {}
+    - name: ttlSecondsAfterCreated
+      type:
+        scalar: numeric
     - name: updateStrategy
       type:
         namedType: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.SandboxWarmPoolUpdateStrategy

@@ -222,6 +222,24 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         await self.client.delete_sandbox("test-claim", "test-ns")
         mock_sandbox.terminate.assert_called_once()
 
+    async def test_delete_sandbox_forgets_an_explicit_claim_name(self):
+        key = ("test-ns", "named-claim")
+        mock_sandbox = MagicMock()
+        mock_sandbox.terminate = AsyncMock()
+        self.client._explicit_claims.add(key)
+        self.client._active_connection_sandboxes[key] = mock_sandbox
+
+        await self.client.delete_sandbox("named-claim", "test-ns")
+        self.assertNotIn(key, self.client._explicit_claims)
+
+    async def test_failed_delete_keeps_the_explicit_claim_name(self):
+        key = ("test-ns", "named-claim")
+        self.client._explicit_claims.add(key)
+        with patch.object(self.client, "_delete_claim",
+                          new_callable=AsyncMock, side_effect=RuntimeError("api down")):
+            await self.client.delete_sandbox("named-claim", "test-ns")
+        self.assertIn(key, self.client._explicit_claims)
+
     async def test_delete_all(self):
         mock1 = MagicMock()
         mock1.terminate = AsyncMock()

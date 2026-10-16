@@ -396,6 +396,26 @@ The [load test](tests/loadtest.py) reproduces both: `--tasks-per-image 1` (eval)
 (e.g. `--strategies naive,pipelined,reuse`) to compare recycling against the warm-pool
 strategies in the same run (`--max-reuses`/`--reset-timeout`/`--check-env` tune it).
 
+### Multi-container pods
+
+A template can add containers next to the runtime (via `extra_pod_spec["containers"]`,
+merged by name), for example a fresh container of the task image that grades the
+episode without seeing the agent's scratch files. Exec picks the container per handle
+or per call:
+
+```python
+h.exec("pytest -q")                       # the pod's default container (agent-runtime)
+h.exec("pytest -q", container="eval")     # one call in the sidecar
+h.target_container = "eval"               # every exec / session of this handle from now on
+h.open_session()                          # a session is bound to one container; switching
+                                          # containers closes the previous session
+make_fleet_repo_env(h, container="eval")  # R2E-Gym env whose exec/copy target the sidecar
+```
+
+`SandboxHandle.target_container` is also what the R2E-Gym adapter uses when
+`make_fleet_repo_env` is not given a container, so a framework that holds one handle
+per episode can point grading at the sidecar without touching adapter internals.
+
 ## Multi-cluster
 
 Pass several `ClusterConfig`s (different `context`/`kubeconfig`) + a `placement`;

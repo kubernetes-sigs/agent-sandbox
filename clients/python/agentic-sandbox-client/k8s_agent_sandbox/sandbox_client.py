@@ -26,7 +26,12 @@ from typing import List, Dict, Tuple, TypeVar, Generic, Type
 from kubernetes import client
 from kubernetes.client import ApiException
 
-from .claim_adoption import validate_claim_name, validate_claim_for_adoption
+from .claim_adoption import (
+    claim_warmpool_name,
+    validate_claim_name,
+    validate_claim_for_adoption,
+    validate_claim_warmpool,
+)
 
 # Import all tracing components from the trace_manager module
 from .trace_manager import (
@@ -41,7 +46,7 @@ from .models import (
 from .k8s_helper import K8sHelper
 from .pod_metadata import build_pod_metadata, validate_labels
 from .utils import construct_sandbox_claim_lifecycle_spec
-from .exceptions import SandboxNotFoundError
+from .exceptions import SandboxNotFoundError, SandboxWarmPoolMismatchError
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +98,7 @@ class SandboxClient(Generic[T]):
         # Tracks all the active client side connections to the created sandbox claims
         self._active_connection_sandboxes: Dict[Tuple[str, str], T] = {}
         self._explicit_claims: set[tuple[str, str]] = set()
+        self._failed_deletes: set[tuple[str, str]] = set()
         
         # Optional automatic cleanup of sandboxes on program termination
         if cleanup:
@@ -205,7 +211,7 @@ class SandboxClient(Generic[T]):
                     raise
                 created_claim = self.k8s_helper.get_sandbox_claim(claim_name, namespace)
             if not generated_name:
-                validate_claim_for_adoption(created_claim, claim_name, warmpool)
+                validate_claim_for_adoption(created_claim, claim_name, namespace, warmpool)
             # Wait for the claim to be bound and Ready in a single watch.
             # The claim status carries the sandbox name (which differs from
             # the claim name with warm pools) and the forwarded Ready
@@ -251,6 +257,7 @@ class SandboxClient(Generic[T]):
 
         previous = self._active_connection_sandboxes.get((namespace, claim_name))
         self._active_connection_sandboxes[(namespace, claim_name)] = sandbox
+        self._failed_deletes.discard((namespace, claim_name))
         if previous is not None:
             previous.close_connection()
         return sandbox
@@ -260,6 +267,7 @@ class SandboxClient(Generic[T]):
         claim_name: str,
         namespace: str = "default",
         resolve_timeout: int = 30,
+        warmpool_name: str | None = None,
     ) -> T:
         """
         Retrieves an existing sandbox handle given a sandbox claim name.
@@ -270,6 +278,11 @@ class SandboxClient(Generic[T]):
             namespace: Kubernetes namespace the claim lives in.
             resolve_timeout: Seconds to wait while resolving the sandbox
                 name from the claim status.
+            warmpool_name: Optional SandboxWarmPool name to validate against
+                the existing claim's ``spec.warmPoolRef.name``.
+                When supplied and the claim references a different
+                warmpool, ``SandboxWarmPoolMismatchError`` is raised before returning a
+                handle.
         Example:
 
             >>> client = SandboxClient()
@@ -283,10 +296,20 @@ class SandboxClient(Generic[T]):
 
         # Check if the sandbox actually exists in Kubernetes
         try:
+            if warmpool_name is not None:
+                existing_warmpool = self.get_sandbox_claim_warmpool_name(
+                    claim_name, namespace
+                )
+                validate_claim_warmpool(claim_name, namespace, existing_warmpool, warmpool_name)
             sandbox_id = self.k8s_helper.resolve_sandbox_name(claim_name, namespace, timeout=resolve_timeout)
             sandbox_object = self.k8s_helper.get_sandbox(sandbox_id, namespace)
             if not sandbox_object:
                 raise SandboxNotFoundError(f"Underlying Sandbox '{sandbox_id}' not found.")
+        except SandboxWarmPoolMismatchError:
+            # Warmpool mismatch is a signed-off refusal — propagate
+            # untouched so the caller sees the security-relevant reason
+            # rather than a generic "not found" wrap.
+            raise
         except Exception as e:
             if existing:
                 # A failed lookup doesn't mean the claim is gone, and cleanup
@@ -313,6 +336,7 @@ class SandboxClient(Generic[T]):
         )
 
         self._active_connection_sandboxes[key] = new_handle
+        self._failed_deletes.discard(key)
         return new_handle
     
     def list_active_sandboxes(self) -> List[Tuple[str, str]]:
@@ -326,10 +350,15 @@ class SandboxClient(Generic[T]):
             [('default', 'sandbox-claim-1234abcd')]
         """
         # We only return IDs that are still active/initialized, and clean up inactive ones.
+        # Failed deletes stay tracked so atexit cleanup can retry them.
         for key, obj in list(self._active_connection_sandboxes.items()):
-            if not obj.is_active:
+            if not obj.is_active and key not in self._failed_deletes:
                 self._active_connection_sandboxes.pop(key, None)
-        return list(self._active_connection_sandboxes.keys())
+        return [
+            key
+            for key, obj in self._active_connection_sandboxes.items()
+            if obj.is_active
+        ]
       
     def list_all_sandboxes(self, namespace: str = "default", label_selector: str | None = None) -> List[str]:
         """
@@ -361,14 +390,16 @@ class SandboxClient(Generic[T]):
         """
         key = (namespace, claim_name)
         sandbox = self._active_connection_sandboxes.get(key)
-        try:
-            if sandbox:
+        if sandbox:
+            try:
                 sandbox.terminate()
-                self._active_connection_sandboxes.pop(key, None)
-            else:
-                self._delete_claim(claim_name, namespace)
-        except Exception as e:
-            logger.error(f"Failed to delete sandbox '{claim_name}' in namespace '{namespace}': {e}")
+            except Exception:
+                self._failed_deletes.add(key)
+                raise
+            self._failed_deletes.discard(key)
+            self._active_connection_sandboxes.pop(key, None)
+        else:
+            self._delete_claim(claim_name, namespace)
             
     def delete_all(self) -> None:
         """
@@ -454,16 +485,11 @@ class SandboxClient(Generic[T]):
         """Deletes the SandboxClaim custom resource from the Kubernetes cluster."""
         self.k8s_helper.delete_sandbox_claim(claim_name, namespace, **kwargs)
 
-    def get_sandbox_claim_warmpool_name(self, claim_name: str, namespace: str) -> str:
+    def get_sandbox_claim_warmpool_name(self, claim_name: str, namespace: str) -> str | None:
         """Get warmpool name of a sandbox claim."""
         claim_object = self.k8s_helper.get_sandbox_claim(claim_name, namespace)
         if not claim_object:
             raise SandboxNotFoundError(
                 f"SandboxClaim '{claim_name}' not found in namespace '{namespace}'."
             )
-        warmpool_name = (
-            claim_object.get("spec", {})
-            .get("warmPoolRef", {})
-            .get("name")
-        )
-        return warmpool_name
+        return claim_warmpool_name(claim_object)

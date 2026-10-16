@@ -47,6 +47,10 @@ class SandboxWarmPoolNotFoundError(SandboxError):
     """Raised when the requested sandbox warm pool does not exist."""
 
 
+class SandboxWarmPoolMismatchError(SandboxError, ValueError):
+    """Raised when a SandboxClaim references a different SandboxWarmPool than expected."""
+
+
 class SandboxPortForwardError(SandboxError):
     """Raised when the port-forward process crashes."""
 

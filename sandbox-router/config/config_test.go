@@ -334,6 +334,98 @@ func TestValidate(t *testing.T) {
 			wantErr: "",
 		},
 		{
+			name:    "invalid upstream tls mode",
+			mut:     func(c *Config) { c.UpstreamTLSMode = "bogus" },
+			wantErr: "invalid --upstream-tls-mode",
+		},
+		{
+			name:    "upstream tls on with system roots",
+			mut:     func(c *Config) { c.UpstreamTLSMode = UpstreamTLSOn },
+			wantErr: "",
+		},
+		{
+			name: "upstream tls on with ca and client cert",
+			mut: func(c *Config) {
+				c.UpstreamTLSMode = UpstreamTLSOn
+				c.UpstreamTLSCAFile = "/ca"
+				c.UpstreamTLSCertFile = "/c"
+				c.UpstreamTLSKeyFile = "/k"
+			},
+			wantErr: "",
+		},
+		{
+			name: "upstream tls client cert with system roots",
+			mut: func(c *Config) {
+				c.UpstreamTLSMode = UpstreamTLSOn
+				c.UpstreamTLSCertFile = "/c"
+				c.UpstreamTLSKeyFile = "/k"
+			},
+			wantErr: "",
+		},
+		{
+			name: "upstream tls cert without key",
+			mut: func(c *Config) {
+				c.UpstreamTLSMode = UpstreamTLSOn
+				c.UpstreamTLSCertFile = "/c"
+			},
+			wantErr: "must be set together",
+		},
+		{
+			name:    "upstream tls ca with mode off",
+			mut:     func(c *Config) { c.UpstreamTLSCAFile = "/ca" },
+			wantErr: "--upstream-tls-ca-file requires --upstream-tls-mode=on",
+		},
+		{
+			name: "upstream tls client cert with mode off",
+			mut: func(c *Config) {
+				c.UpstreamTLSCertFile = "/c"
+				c.UpstreamTLSKeyFile = "/k"
+			},
+			wantErr: "--upstream-tls-cert-file requires --upstream-tls-mode=on",
+		},
+		{
+			name: "upstream tls cluster domain",
+			mut: func(c *Config) {
+				c.UpstreamTLSMode = UpstreamTLSOn
+				c.UpstreamTLSClusterDomain = "sandboxes.example"
+			},
+			wantErr: "",
+		},
+		{
+			name:    "upstream tls cluster domain with mode off",
+			mut:     func(c *Config) { c.UpstreamTLSClusterDomain = "sandboxes.example" },
+			wantErr: "--upstream-tls-cluster-domain requires --upstream-tls-mode=on",
+		},
+		{
+			name: "upstream tls min version and cipher suites",
+			mut: func(c *Config) {
+				c.UpstreamTLSMode = UpstreamTLSOn
+				c.UpstreamTLSMinVersion = "VersionTLS13"
+				c.UpstreamTLSCipherSuites = []string{"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"}
+			},
+			wantErr: "",
+		},
+		{
+			name: "invalid upstream tls min version",
+			mut: func(c *Config) {
+				c.UpstreamTLSMode = UpstreamTLSOn
+				c.UpstreamTLSMinVersion = "TLS1.3"
+			},
+			wantErr: "invalid --upstream-tls-min-version",
+		},
+		{
+			name:    "upstream tls min version with mode off",
+			mut:     func(c *Config) { c.UpstreamTLSMinVersion = "VersionTLS13" },
+			wantErr: "--upstream-tls-min-version requires --upstream-tls-mode=on",
+		},
+		{
+			name: "upstream tls cipher suites with mode off",
+			mut: func(c *Config) {
+				c.UpstreamTLSCipherSuites = []string{"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"}
+			},
+			wantErr: "--upstream-tls-cipher-suites requires --upstream-tls-mode=on",
+		},
+		{
 			name:    "negative proxy timeout",
 			mut:     func(c *Config) { c.ProxyTimeout = -1 * time.Second },
 			wantErr: "proxy-timeout",

@@ -116,7 +116,7 @@ func (t Target) Resolve(scheme, clusterDomain, path, rawQuery string, lookup Loo
 		// DNS fallback. This branch fires when there was no PodIP override
 		// and either the cache wasn't configured or both cache lookups
 		// missed.
-		host = t.ID + "." + t.Namespace + ".svc." + clusterDomain
+		host = t.ServiceHost(clusterDomain)
 	}
 
 	return &url.URL{
@@ -130,4 +130,11 @@ func (t Target) Resolve(scheme, clusterDomain, path, rawQuery string, lookup Loo
 		Path:     path,
 		RawQuery: rawQuery,
 	}, src, resolved
+}
+
+// ServiceHost returns the Sandbox's DNS name, <id>.<namespace>.svc.<domain>.
+// It is the DNS-fallback dial target and, with upstream TLS, the name the
+// sandbox certificate is verified against whichever address is dialed.
+func (t Target) ServiceHost(clusterDomain string) string {
+	return t.ID + "." + t.Namespace + ".svc." + clusterDomain
 }

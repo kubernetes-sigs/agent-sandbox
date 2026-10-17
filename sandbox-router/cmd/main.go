@@ -131,17 +131,19 @@ func run(cfg *config.Config, log logr.Logger) error {
 	}
 
 	// --- TLS / cert reload --------------------------------------------------
+	// recordCertReload counts reloads of the server certificate and of the
+	// upstream client certificate and CA bundle.
+	recordCertReload := func(ok bool, _ error) {
+		outcome := "success"
+		if !ok {
+			outcome = "failure"
+		}
+		metrics.CertReloadsTotal.WithLabelValues(outcome).Inc()
+	}
 	var tlsConfig *tls.Config
 	var metricsTLSConfig *tls.Config
 	if cfg.HTTPSAddr != "" || cfg.MetricsSecureServing {
-		reloader, err := tlsutil.NewCertReloader(cfg.TLSCertFile, cfg.TLSKeyFile, log.WithName("tls"),
-			func(ok bool, _ error) {
-				outcome := "success"
-				if !ok {
-					outcome = "failure"
-				}
-				metrics.CertReloadsTotal.WithLabelValues(outcome).Inc()
-			})
+		reloader, err := tlsutil.NewCertReloader(cfg.TLSCertFile, cfg.TLSKeyFile, log.WithName("tls"), recordCertReload)
 		if err != nil {
 			return fmt.Errorf("cert reloader: %w", err)
 		}
@@ -160,6 +162,39 @@ func run(cfg *config.Config, log logr.Logger) error {
 				return fmt.Errorf("build metrics TLS config: %w", err)
 			}
 			log.Info("metrics server TLS enabled (--metrics-secure-serving)")
+		}
+	}
+
+	// --- Upstream TLS to sandboxes ------------------------------------------
+	var upstreamTLS *tlsutil.UpstreamTLS
+	if cfg.UpstreamTLSMode == config.UpstreamTLSOn {
+		var clientCert *tlsutil.CertReloader
+		if cfg.UpstreamTLSCertFile != "" {
+			var err error
+			clientCert, err = tlsutil.NewCertReloader(cfg.UpstreamTLSCertFile, cfg.UpstreamTLSKeyFile,
+				log.WithName("upstream-tls"), recordCertReload)
+			if err != nil {
+				return fmt.Errorf("upstream client cert reloader: %w", err)
+			}
+			if err := clientCert.Start(ctx); err != nil {
+				return fmt.Errorf("upstream client cert watcher: %w", err)
+			}
+		}
+		var ca *tlsutil.CAReloader
+		if cfg.UpstreamTLSCAFile != "" {
+			var err error
+			ca, err = tlsutil.NewCAReloader(cfg.UpstreamTLSCAFile, log.WithName("upstream-tls"), recordCertReload)
+			if err != nil {
+				return fmt.Errorf("upstream CA reloader: %w", err)
+			}
+			if err := ca.Start(ctx); err != nil {
+				return fmt.Errorf("upstream CA watcher: %w", err)
+			}
+		}
+		var err error
+		upstreamTLS, err = tlsutil.BuildUpstreamTLS(cfg, ca, clientCert)
+		if err != nil {
+			return fmt.Errorf("build upstream TLS config: %w", err)
 		}
 	}
 
@@ -274,11 +309,12 @@ func run(cfg *config.Config, log logr.Logger) error {
 
 	// --- Proxy handler -----------------------------------------------------
 	proxyOpts := proxy.Options{
-		Config:     cfg,
-		Metrics:    metrics,
-		Propagator: otel.GetTextMapPropagator(),
-		Logger:     log.WithName("proxy"),
-		Authorizer: authorizer,
+		Config:      cfg,
+		Metrics:     metrics,
+		Propagator:  otel.GetTextMapPropagator(),
+		Logger:      log.WithName("proxy"),
+		Authorizer:  authorizer,
+		UpstreamTLS: upstreamTLS,
 	}
 	if podCache != nil {
 		proxyOpts.Cache = podCache
@@ -343,6 +379,7 @@ func run(cfg *config.Config, log logr.Logger) error {
 		"metrics", cfg.MetricsAddr,
 		"probes", cfg.ProbeAddr,
 		"mtls", cfg.MTLSMode,
+		"upstreamTLS", upstreamTLS != nil,
 		"tracing", cfg.EnableTracing,
 		"otelMetrics", cfg.EnableOTelMetrics,
 		"cache", cfg.CacheEnabled,

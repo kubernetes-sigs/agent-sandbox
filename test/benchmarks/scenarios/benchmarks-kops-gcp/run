@@ -405,6 +405,13 @@ echo "Deploying node-exporter..."
 kubectl apply -f test/benchmarks/scenarios/benchmarks-kops-gcp/node-exporter.yaml
 kubectl --namespace kube-system rollout status daemonset/node-exporter --timeout=3m
 
+# Metrics are required here even though the stress scraper is best-effort.
+echo "Checking containerd metrics..."
+node_exporter_pods=$(kubectl --namespace kube-system get pods --selector=app.kubernetes.io/name=node-exporter -o jsonpath='{.items[*].metadata.name}')
+for pod in ${node_exporter_pods:?No node-exporter pods found}; do
+  kubectl --request-timeout=10s get --raw "/api/v1/namespaces/kube-system/pods/http:${pod}:1338/proxy/v1/metrics" > /dev/null
+done
+
 # Deploy to cluster. CONTROLLER_ARGS optionally appends controller flags
 # (e.g. "--enable-pprof-debug" so the stress tool's --profile-controller can
 # actually fetch CPU/heap profiles; see benchmarks-kops-gcp-claims).

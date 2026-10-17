@@ -53,7 +53,7 @@ func TestScrapeContainerd(t *testing.T) {
 				case "/api/v1/namespaces/kube-system/pods/http:exporter-a:9100/proxy/metrics",
 					"/api/v1/namespaces/kube-system/pods/http:exporter-isolated:9100/proxy/metrics":
 					fmt.Fprint(w, "# TYPE node_load1 gauge\nnode_load1 7\n")
-				case "/api/v1/namespaces/kube-system/pods/http:exporter-a:1338/proxy/metrics":
+				case "/api/v1/namespaces/kube-system/pods/http:exporter-a:1338/proxy/v1/metrics":
 					if unavailable {
 						http.Error(w, "connection refused", http.StatusServiceUnavailable)
 						return

@@ -199,7 +199,7 @@ func (s *promScraper) resolveSources(ctx context.Context) []promSource {
 				sources = append(sources, promSource{
 					source:   "containerd",
 					instance: pod.Spec.NodeName,
-					path:     fmt.Sprintf("/api/v1/namespaces/kube-system/pods/http:%s:1338/proxy/metrics", pod.Name),
+					path:     fmt.Sprintf("/api/v1/namespaces/kube-system/pods/http:%s:1338/proxy/v1/metrics", pod.Name),
 				})
 			}
 		}

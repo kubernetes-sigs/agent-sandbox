@@ -23,6 +23,7 @@ import atexit
 import asyncio
 import logging
 import sys
+import tempfile
 import uuid
 from types import TracebackType
 from typing import Generic, TypeVar
@@ -558,23 +559,26 @@ class AsyncSandboxClient(Generic[T]):
                 for name, value in dict(self._injected_api_client.default_headers).items():
                     atexit_api_client.set_default_header(name, value)
 
-            helper = K8sHelper(api_client=atexit_api_client)
-            for ns, claim_name in (key for key, _ in tracked):
-                if (ns, claim_name) in self._explicit_claims:
-                    continue
-                try:
-                    helper.delete_sandbox_claim(
-                        claim_name,
-                        ns,
-                        _request_timeout=_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS,
-                    )
-                except Exception as e:
-                    if sys.stderr is not None:
-                        print(
-                            f"[agent-sandbox] Warning: failed to delete sandbox claim "
-                            f"'{claim_name}' in namespace '{ns}' during atexit cleanup: {e}",
-                            file=sys.stderr,
+            # kubernetes registers its own atexit removal of extracted inline cert files, but Python drops
+            # registrations made from inside a running atexit hook, so they go in a directory removed here.
+            with tempfile.TemporaryDirectory() as kube_config_dir:
+                helper = K8sHelper(api_client=atexit_api_client, kube_config_temp_dir=kube_config_dir)
+                for ns, claim_name in (key for key, _ in tracked):
+                    if (ns, claim_name) in self._explicit_claims:
+                        continue
+                    try:
+                        helper.delete_sandbox_claim(
+                            claim_name,
+                            ns,
+                            _request_timeout=_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS,
                         )
+                    except Exception as e:
+                        if sys.stderr is not None:
+                            print(
+                                f"[agent-sandbox] Warning: failed to delete sandbox claim "
+                                f"'{claim_name}' in namespace '{ns}' during atexit cleanup: {e}",
+                                file=sys.stderr,
+                            )
         except Exception as e:
             if sys.stderr is not None:
                 print(

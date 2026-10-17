@@ -315,6 +315,12 @@ if [[ "${CNI}" == "kindnet" && "${STRESS_KINDNET_NETWORK_POLICIES:-false}" != "t
     --set cluster.spec.networking.kindnet.networkPolicies=false
 fi
 
+# Containerd's CRI and CNI timers expose network setup within sandbox creation.
+# The scraper reaches this host listener through the node-exporter pod proxy.
+kops edit cluster --name "${CLUSTER_NAME}" \
+  --set 'spec.containerd.configAdditions=metrics.address=0.0.0.0:1338' \
+  --set 'spec.containerd.configAdditions=metrics.grpc_histogram=true'
+
 if [[ "${CNI}" == "cilium" ]]; then
   # cilium.enablePrometheusMetrics: serve cilium-agent metrics on :9090 so the
   # stress test can scrape them (promscrape.go already targets this port; the
@@ -398,6 +404,13 @@ fi
 echo "Deploying node-exporter..."
 kubectl apply -f test/benchmarks/scenarios/benchmarks-kops-gcp/node-exporter.yaml
 kubectl --namespace kube-system rollout status daemonset/node-exporter --timeout=3m
+
+# Metrics are required here even though the stress scraper is best-effort.
+echo "Checking containerd metrics..."
+node_exporter_pods=$(kubectl --namespace kube-system get pods --selector=app.kubernetes.io/name=node-exporter -o jsonpath='{.items[*].metadata.name}')
+for pod in ${node_exporter_pods:?No node-exporter pods found}; do
+  kubectl --request-timeout=10s get --raw "/api/v1/namespaces/kube-system/pods/http:${pod}:1338/proxy/v1/metrics" > /dev/null
+done
 
 # Deploy to cluster. CONTROLLER_ARGS optionally appends controller flags
 # (e.g. "--enable-pprof-debug" so the stress tool's --profile-controller can

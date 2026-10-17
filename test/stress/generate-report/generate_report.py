@@ -160,6 +160,35 @@ def metrics_timeseries(conn, metrics_path, metrics, labels=None, group_by=None, 
     return conn.execute(sql).fetchall()
 
 
+def containerd_operations_by_phase(conn, metrics_path):
+    timers = [
+        ("containerd_cri_sandbox_runtime_create_seconds", "Sandbox creation (includes network)"),
+        ("containerd_cri_sandbox_create_network_seconds", "Network setup (includes CNI)"),
+        # Containerd's timer library appends a second _seconds suffix.
+        ("containerd_cri_network_plugin_operations_duration_seconds_seconds", "CNI"),
+    ]
+    rows = metrics_by_phase(
+        conn, metrics_path,
+        metrics=[f"{metric}_{suffix}" for metric, _ in timers for suffix in ("count", "sum")],
+        labels={"runtime": "runtime", "operation_type": "operation_type"},
+        group_by=["instance", "runtime", "operation_type"],
+        where="source = 'containerd'")
+    operations = []
+    for phase, node, runtime, operation_type, *values in rows:
+        for i, (_, operation) in enumerate(timers):
+            count, duration = values[2 * i:2 * i + 2]
+            if count > 0:
+                operations.append({
+                    "phase_name": phase,
+                    "instance": node,
+                    "operation": f"{operation} {operation_type}" if operation_type else operation,
+                    "runtime": runtime,
+                    "count_delta": int(count),
+                    "avg_latency_ms": duration / count * 1000,
+                })
+    return operations
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate stress test bottleneck report.")
     parser.add_argument("--input-dir", required=True, help="Directory containing stress test outputs (summary.json, metrics.jsonl)")
@@ -265,6 +294,9 @@ def main():
             "count_delta": int(count_delta),
             "avg_latency_ms": avg_latency_ms
         })
+
+    print("Querying containerd operations by phase...")
+    containerd_ops = containerd_operations_by_phase(conn, metrics_path_str)
 
     print("Querying CRI timeseries...")
     cri_ts_raw = metrics_timeseries(
@@ -1393,6 +1425,7 @@ def main():
         "active_page": "cri",
         "summary": summary,
         "cri_ops": cri_ops,
+        "containerd_ops": containerd_ops,
         "chart_data": cri_chart_data,
         "phases": js_phases
     }

@@ -14,7 +14,8 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "kubernetes",
+    # 36.0.0 drops the in-cluster service account token, so requests are anonymous.
+    "kubernetes!=36.0.0",
     "requests",
     "urllib3",
     "pydantic",

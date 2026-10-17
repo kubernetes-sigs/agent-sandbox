@@ -51,7 +51,7 @@ All standard tasks go through the [Makefile](Makefile). Prefer `make` targets ov
 
 - `make all` — runs `fix-go-generate`, `fix-api-docs`, `build`, `lint-go`, `lint-api`, `test-unit`, `toc-verify`, `verify-olm`. Run this before sending a PR.
 - `make build` — compiles `bin/manager` (`build-controller`), `bin/sandbox-router` (`build-sandbox-router`), and `bin/sandboxd` (`build-sandboxd`).
-- `make test-unit` — runs Go unit tests (`-race`) across all Go modules in the repo, Python `pytest` suites + `mypy` type checks, and TypeScript `vitest` unit tests via `dev/tools/test-unit`.
+- `make test-unit` — runs Go unit tests (`-race`) across all Go modules in the repo, Python `pytest` suites + `mypy` type checks, TypeScript `vitest` unit tests, and the stress report's browser-script tests (`node --test`) via `dev/tools/test-unit`.
 - `make test-e2e` / `make test-e2e-race` — e2e suite against a kind cluster (much slower; e2e is not raced by default).
 - `make lint-go` / `make fix-go` — `golangci-lint` (config in [dev/tools/.golangci.yaml](dev/tools/.golangci.yaml)).
 - `make lint-api` / `make fix-api` — KAL API linter for kubebuilder tags and CRD conventions.

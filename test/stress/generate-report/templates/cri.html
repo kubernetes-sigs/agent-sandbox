@@ -37,6 +37,20 @@
     </div>
 </div>
 
+<div class="card">
+    <div class="card-title">Containerd Operations by Phase and Node</div>
+    <p>CNI measures plugin execution. Network setup also includes namespace creation and metadata updates.
+        Sandbox creation includes network setup and runtime work. These timers overlap; do not add them together
+        or subtract their averages when operation counts differ. Metrics cover all pods on each node.</p>
+    {% if containerd_ops %}
+    <div class="table-container">
+        <table id="containerd-ops-table"></table>
+    </div>
+    {% else %}
+    <p>No containerd operations were measured. Enable containerd metrics on port 1338 and collect at least two scrapes.</p>
+    {% endif %}
+</div>
+
 <script>
     const criOps = {{ cri_ops | tojson }};
     renderTable('#cri-ops-table', [
@@ -48,6 +62,18 @@
             : v > 2000 ? badge('warning', (v / 1000).toFixed(2) + 's')
             : badge('success', v.toFixed(2) + 'ms')}
     ], criOps);
+
+    const containerdOps = {{ containerd_ops | tojson }};
+    if (containerdOps.length) {
+        renderTable('#containerd-ops-table', [
+            {key: 'phase_name', label: 'Phase', render: v => `<strong>${escapeHtml(v)}</strong>`},
+            {key: 'instance', label: 'Node'},
+            {key: 'operation', label: 'Operation'},
+            {key: 'runtime', label: 'Runtime', render: v => escapeHtml(v || '—')},
+            {key: 'count_delta', label: 'Count'},
+            {key: 'avg_latency_ms', label: 'Average Latency', render: v => v.toFixed(2) + 'ms'}
+        ], containerdOps);
+    }
 
     const chartData = {{ chart_data | tojson }};
     const phases = {{ phases | tojson }};

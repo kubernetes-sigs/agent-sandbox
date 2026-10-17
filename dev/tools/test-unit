@@ -27,6 +27,11 @@ PYTHON_SDK_DIR = os.path.join("clients", "python", "agentic-sandbox-client")
 
 PYTHON_TEST_SUITES = [
     {
+        "name": "stress-report",
+        "dir": os.path.join("test", "stress", "generate-report"),
+        "extra_packages": ["duckdb>=1,<2", "jinja2>=3,<4"],
+    },
+    {
         "name": "load-test-recipes",
         # The convergence helper and its tests use only the standard library.
         "dir": os.path.join("dev", "load-test", "test-recipes"),

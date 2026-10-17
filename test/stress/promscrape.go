@@ -47,7 +47,7 @@ import (
 // same pattern).
 type metricSample struct {
 	TS       time.Time       `json:"ts"`
-	Source   string          `json:"source"`   // kube-apiserver | kube-controller-manager | kube-scheduler | agent-sandbox-controller | kubelet | cilium-agent | etcd-main | etcd-events | node
+	Source   string          `json:"source"`   // kube-apiserver | kube-controller-manager | kube-scheduler | agent-sandbox-controller | kubelet | containerd | cilium-agent | etcd-main | etcd-events | node
 	Instance string          `json:"instance"` // pod or node name
 	Metric   string          `json:"metric"`   // family name (+ _bucket/_sum/_count for histograms and summaries)
 	Labels   json.RawMessage `json:"labels,omitempty"`
@@ -194,6 +194,14 @@ func (s *promScraper) resolveSources(ctx context.Context) []promSource {
 				instance: pod.Spec.NodeName,
 				path:     fmt.Sprintf("/api/v1/namespaces/kube-system/pods/http:%s:9100/proxy/metrics", pod.Name),
 			})
+			// The host-network pod also provides a proxy to containerd's listener.
+			if pod.Spec.HostNetwork {
+				sources = append(sources, promSource{
+					source:   "containerd",
+					instance: pod.Spec.NodeName,
+					path:     fmt.Sprintf("/api/v1/namespaces/kube-system/pods/http:%s:1338/proxy/metrics", pod.Name),
+				})
+			}
 		}
 	}
 

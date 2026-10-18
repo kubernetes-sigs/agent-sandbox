@@ -323,58 +323,33 @@ class TestK8sHelperResolveSandboxName(unittest.TestCase):
     @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
     def test_wait_for_claim_ready_terminal_reason_fails_fast(self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls):
         """A terminal Ready=False reason raises immediately instead of waiting out the timeout."""
-        mock_watch = MagicMock()
-        mock_event = {
-            "type": "MODIFIED",
-            "object": {
-                "metadata": {"name": "test-claim"},
-                "status": {
-                    "conditions": [
-                        {
-                            "type": "Ready",
-                            "status": "False",
-                            "reason": "VolumeClaimTemplatesError",
-                            "message": "volumeClaimTemplates overrides are not allowed",
-                        }
-                    ]
-                },
-            },
-        }
-        mock_watch.stream.return_value = [mock_event]
-        mock_watch_class.return_value = mock_watch
+        cases = [
+            ("VolumeClaimTemplatesError", "volumeClaimTemplates overrides are not allowed"),
+            ("InvalidConfiguration", "Service 'test-claim' is invalid: must be no more than 63 characters"),
+            ("PodFailed", "Pod failed"),
+            ("PodSucceeded", "Pod completed successfully"),
+        ]
+        for reason, message in cases:
+            with self.subTest(reason=reason):
+                mock_watch = MagicMock()
+                mock_event = {
+                    "type": "MODIFIED",
+                    "object": {
+                        "metadata": {"name": "test-claim"},
+                        "status": {
+                            "conditions": [
+                                {"type": "Ready", "status": "False", "reason": reason, "message": message}
+                            ]
+                        },
+                    },
+                }
+                mock_watch.stream.return_value = [mock_event]
+                mock_watch_class.return_value = mock_watch
 
-        helper = K8sHelper()
-        with self.assertRaises(SandboxClaimFailedError) as context:
-            helper.wait_for_claim_ready("test-claim", "default", timeout=5)
-        self.assertIn("VolumeClaimTemplatesError", str(context.exception))
-
-    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
-    def test_wait_for_claim_ready_invalid_configuration_fails_fast(self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls):
-        """InvalidConfiguration (forwarded from the Sandbox) fails fast too."""
-        mock_watch = MagicMock()
-        mock_event = {
-            "type": "MODIFIED",
-            "object": {
-                "metadata": {"name": "test-claim"},
-                "status": {
-                    "conditions": [
-                        {
-                            "type": "Ready",
-                            "status": "False",
-                            "reason": "InvalidConfiguration",
-                            "message": "Service 'test-claim' is invalid: must be no more than 63 characters",
-                        }
-                    ]
-                },
-            },
-        }
-        mock_watch.stream.return_value = [mock_event]
-        mock_watch_class.return_value = mock_watch
-
-        helper = K8sHelper()
-        with self.assertRaises(SandboxClaimFailedError) as context:
-            helper.wait_for_claim_ready("test-claim", "default", timeout=5)
-        self.assertIn("InvalidConfiguration", str(context.exception))
+                helper = K8sHelper()
+                with self.assertRaises(SandboxClaimFailedError) as context:
+                    helper.wait_for_claim_ready("test-claim", "default", timeout=5)
+                self.assertIn(reason, str(context.exception))
 
     @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
     def test_wait_for_claim_ready_transient_reason_keeps_waiting(self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls):
@@ -1021,6 +996,52 @@ class TestK8sHelperApiClientInjection(unittest.TestCase):
         sentinel = MagicMock(name="ApiClient")
         self.assertIs(K8sHelper(api_client=sentinel).injected_api_client, sentinel)
         self.assertIsNone(K8sHelper().injected_api_client)
+
+
+class TestK8sHelperWatchTimeout(unittest.TestCase):
+    def test_one_second_wait_observes_ready_resource(self):
+        ready = {"type": "Ready", "status": "True"}
+        cases = [
+            ("resolve_sandbox_name", {"sandbox": {"name": "sandbox"}}, "sandbox"),
+            ("wait_for_claim_ready", {"sandbox": {"name": "sandbox"}, "conditions": [ready]}, "sandbox"),
+            ("wait_for_sandbox_ready", {"conditions": [ready], "podIPs": [{"ip": "10.0.0.1"}]}, "10.0.0.1"),
+            ("wait_for_gateway_ip", {"addresses": [{"value": "10.0.0.2"}]}, "10.0.0.2"),
+        ]
+        with client.ApiClient(client.Configuration()) as api_client:
+            helper = K8sHelper(api_client)
+            for method, status, expected in cases:
+                with self.subTest(method=method), patch(
+                    "k8s_agent_sandbox.k8s_helper.time", **{"monotonic.side_effect": [100.0, 100.1]}
+                ), patch("k8s_agent_sandbox.k8s_helper.watch.Watch") as watch_cls:
+                    watch_cls.return_value.stream.return_value = iter([
+                        {"type": "ADDED", "object": {"status": status}}
+                    ])
+                    self.assertEqual(getattr(helper, method)("resource", "default", timeout=1), expected)
+                    self.assertEqual(watch_cls.return_value.stream.call_args.kwargs["timeout_seconds"], 1)
+
+    def test_claim_watch_restarts_during_final_fractional_second(self):
+        with client.ApiClient(client.Configuration()) as api_client:
+            helper = K8sHelper(api_client)
+            with patch(
+                "k8s_agent_sandbox.k8s_helper.time", **{"monotonic.side_effect": [100.0, 100.1, 104.5]}
+            ), patch("k8s_agent_sandbox.k8s_helper.watch.Watch") as watch_cls:
+                watch_cls.return_value.stream.side_effect = [iter([]), iter([
+                    {"type": "ADDED", "object": {"status": {"sandbox": {"name": "sandbox"}}}}
+                ])]
+                self.assertEqual(helper.resolve_sandbox_name("claim", "default", timeout=5), "sandbox")
+                self.assertEqual(watch_cls.return_value.stream.call_count, 2)
+                self.assertEqual(watch_cls.return_value.stream.call_args.kwargs["timeout_seconds"], 1)
+
+    def test_expired_wait_does_not_start_watch(self):
+        with client.ApiClient(client.Configuration()) as api_client:
+            helper = K8sHelper(api_client)
+            with patch(
+                "k8s_agent_sandbox.k8s_helper.time", **{"monotonic.side_effect": [100.0, 101.0]}
+            ), patch("k8s_agent_sandbox.k8s_helper.watch.Watch") as watch_cls:
+                with self.assertRaises(TimeoutError):
+                    helper.resolve_sandbox_name("claim", "default", timeout=1)
+                watch_cls.assert_not_called()
+
 
 
 if __name__ == '__main__':

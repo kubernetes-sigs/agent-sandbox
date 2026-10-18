@@ -27,6 +27,7 @@ import logging
 import tarfile
 import uuid
 from pathlib import Path
+from typing import Any
 
 from agents.sandbox.errors import (
     ExposedPortUnavailableError,
@@ -64,9 +65,11 @@ class K8sSandboxSession(BaseSandboxSession):
     def __init__(
         self,
         *,
+        sandbox: Any,
         transport: SandboxTransport,
         state: K8sSandboxSessionState,
     ) -> None:
+        self._sandbox = sandbox
         self._transport = transport
         self.state = state
 

@@ -38,6 +38,8 @@ export interface SandboxdRestClientOptions {
   maxDownloadSize: number;
   maxUploadSize: number;
   maxMetadataResponseSize: number;
+  /** `Authorization` header value sent on every request, when set. */
+  authorization?: string;
 }
 
 export type SandboxPathOperation =
@@ -407,6 +409,7 @@ function wrapUploadStream(
 }
 
 const KNOWN_API_CODES: ReadonlySet<string> = new Set([
+  "UNAUTHENTICATED",
   "NOT_FOUND",
   "PERMISSION_DENIED",
   "CONFLICT",
@@ -421,6 +424,8 @@ function normalizeApiCode(
     return serverCode as SandboxdApiCode;
   }
   switch (status) {
+    case 401:
+      return "UNAUTHENTICATED";
     case 404:
       return "NOT_FOUND";
     case 403:
@@ -481,7 +486,10 @@ export class SandboxdRestClient {
     const fetchInit: RequestInit & { duplex?: "half" } = {
       method,
       body: init.body,
-      headers: init.headers,
+      headers: this.opts.authorization
+        ? { ...init.headers, Authorization: this.opts.authorization }
+        : init.headers,
+      // Never follow a redirect: it could carry the token to another host.
       redirect: "error",
       signal: combined,
     };

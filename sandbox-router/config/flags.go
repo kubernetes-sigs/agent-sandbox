@@ -64,6 +64,9 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 		"Address for the TLS proxy listener (empty disables TLS).")
 	fs.StringVar(&c.MetricsAddr, "metrics-bind-address", c.MetricsAddr,
 		"Address for the Prometheus /metrics endpoint.")
+	fs.BoolVar(&c.MetricsSecureServing, "metrics-secure-serving", c.MetricsSecureServing,
+		"Serve the /metrics endpoint over TLS using the same certificate as "+
+			"the HTTPS proxy listener. Requires --tls-cert-file and --tls-key-file.")
 	fs.StringVar(&c.ProbeAddr, "health-probe-bind-address", c.ProbeAddr,
 		"Address for the /healthz and /readyz endpoints.")
 

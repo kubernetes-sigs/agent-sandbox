@@ -219,8 +219,7 @@ kind: Sandbox
 metadata:
   name: resilient-sandbox
 spec:
-  podFailurePolicy:
-    action: Recreate
+  failedPodPolicy: Recreate
   operatingMode: Running
   podTemplate:
     spec:
@@ -230,7 +229,7 @@ spec:
         command: ["sleep", "infinity"]
 ```
 
-With `podFailurePolicy.action: Recreate`, the controller deletes the controller-owned Failed Pod and creates a new one from `podTemplate`. PVCs from `volumeClaimTemplates` stay owned by the Sandbox and are remounted. Because the policy is part of `SandboxBlueprint`, it can also be set on a `SandboxTemplate` for Sandboxes provisioned through a warm pool or claim.
+With `failedPodPolicy: Recreate`, the controller deletes the controller-owned Failed Pod and creates a new one from `podTemplate`. PVCs from `volumeClaimTemplates` stay owned by the Sandbox and are remounted. Because the policy is part of `SandboxBlueprint`, it can also be set on a `SandboxTemplate` for Sandboxes provisioned through a warm pool or claim.
 
 `PodSucceeded` is unchanged (still terminal). Combining `Recreate` with `restartPolicy: Never` and a container that always exits non-zero can recreate repeatedly; the controller applies Deployment-style in-memory exponential backoff (5s, doubling up to 5m) between replacement Creates so a crash loop cannot hot-loop the API server. Backoff resets after the controller has continuously observed the same replacement Pod UID in `Running` for 10 minutes; time spent Pending does not count. See [KEP-729](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/keps/729-opt-in-pod-recreation-on-failure/README.md).
 

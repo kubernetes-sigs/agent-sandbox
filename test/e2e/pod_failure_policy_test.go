@@ -29,10 +29,10 @@ import (
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 )
 
-// TestSandboxPodFailurePolicyRecreate verifies that a Failed pod is deleted and
-// replaced when podFailurePolicy.action=Recreate, and that PVC data survives across the
+// TestSandboxFailedPodPolicyRecreate verifies that a Failed pod is deleted and
+// replaced when failedPodPolicy=Recreate, and that PVC data survives across the
 // recreation (first boot writes a marker and exits 1; second boot sees it and sleeps).
-func TestSandboxPodFailurePolicyRecreate(t *testing.T) {
+func TestSandboxFailedPodPolicyRecreate(t *testing.T) {
 	tc := framework.NewTestContext(t)
 
 	ns := &corev1.Namespace{}
@@ -46,10 +46,8 @@ func TestSandboxPodFailurePolicyRecreate(t *testing.T) {
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
 			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
-				Service: new(true),
-				PodFailurePolicy: &sandboxv1beta1.PodFailurePolicy{
-					Action: sandboxv1beta1.PodFailurePolicyActionRecreate,
-				},
+				Service:         new(true),
+				FailedPodPolicy: sandboxv1beta1.FailedPodPolicyRecreate,
 				PodTemplate: sandboxv1beta1.PodTemplate{
 					Spec: corev1.PodSpec{
 						RestartPolicy: corev1.RestartPolicyNever,

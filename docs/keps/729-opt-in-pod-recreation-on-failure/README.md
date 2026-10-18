@@ -20,7 +20,7 @@ TOC is auto-generated via `make toc-update`.
 
 ## Summary
 
-Add an opt-in `podFailurePolicy.action` field to `SandboxBlueprint`, which is shared by `Sandbox` and `SandboxTemplate`. When set to `Recreate`, the Sandbox controller deletes a controller-owned backing Pod that has entered `phase=Failed`, clears the pod-name annotation, and relies on the existing missing-pod create path to provision a fresh Pod. The Sandbox identity and any PVCs owned by the Sandbox are preserved. The default `Ignore` keeps today's StatefulSet-like behavior.
+Add an opt-in `failedPodPolicy` field to `SandboxBlueprint`, which is shared by `Sandbox` and `SandboxTemplate`. When set to `Recreate`, the Sandbox controller deletes a controller-owned backing Pod that has entered `phase=Failed`, clears the pod-name annotation, and relies on the existing missing-pod create path to provision a fresh Pod. The Sandbox identity and any PVCs owned by the Sandbox are preserved. The default `Retain` keeps today's StatefulSet-like behavior.
 
 ## Motivation
 
@@ -38,7 +38,7 @@ Auto-recreation must remain opt-in so platforms that rely on terminal `Finished`
 
 - Opt-in recovery from `PodFailed` without deleting the Sandbox or its PVCs.
 - Place the reusable control in `SandboxBlueprint` so direct Sandboxes and Sandboxes provisioned from templates use the same behavior.
-- Preserve default Ignore behavior (non-breaking).
+- Preserve default Retain behavior (non-breaking).
 - Bound crash-loop recreate churn with Deployment-style in-memory exponential backoff (5s…5m).
 
 ### Non-Goals
@@ -54,13 +54,13 @@ Auto-recreation must remain opt-in so platforms that rely on terminal `Finished`
 ### User Stories
 
 - As an operator of long-running sandboxes with user data on a PVC, I want a Failed Pod (for example after eviction) to be replaced automatically so the session recovers without data loss.
-- As a platform that uses `Finished` + Claim TTL for one-shot jobs, I want the default Ignore behavior so Failed sandboxes still surface `Finished` and can be cleaned up.
+- As a platform that uses `Finished` + Claim TTL for one-shot jobs, I want the default Retain behavior so Failed sandboxes still surface `Finished` and can be cleaned up.
 
 ### High-Level Design
 
 ```text
 reconcilePod sees existing Pod
-  → if phase=Failed AND podFailurePolicy.action=Recreate AND owned by Sandbox
+  → if phase=Failed AND failedPodPolicy=Recreate AND owned by Sandbox
       → Delete Pod (bump in-memory backoff only on successful delete; skip bump on NotFound), clear agents.x-k8s.io/pod-name annotation, return nil
   → next reconcile: Pod missing → if recreate backoff not elapsed, skip Create and RequeueAfter
   → once backoff elapses: existing create path builds a new Pod
@@ -79,27 +79,21 @@ With Recreate, `Finished` must not stick on the Failed Pod being replaced: `reco
 On `SandboxBlueprint`, so `SandboxTemplate` and the Sandboxes provisioned from it inherit the policy:
 
 ```go
-// PodFailurePolicyAction controls behavior when the backing Pod reaches phase Failed.
-// +kubebuilder:validation:Enum=Ignore;Recreate
-type PodFailurePolicyAction string
+// FailedPodPolicy controls behavior when the backing Pod reaches phase Failed.
+// +kubebuilder:validation:Enum=Retain;Recreate
+type FailedPodPolicy string
 
 const (
-	PodFailurePolicyActionIgnore   PodFailurePolicyAction = "Ignore"
-	PodFailurePolicyActionRecreate PodFailurePolicyAction = "Recreate"
+	FailedPodPolicyRetain   FailedPodPolicy = "Retain"
+	FailedPodPolicyRecreate FailedPodPolicy = "Recreate"
 )
 
-type PodFailurePolicy struct {
-	// +kubebuilder:default=Ignore
-	// +optional
-	Action PodFailurePolicyAction `json:"action,omitempty"`
-}
-
-// +kubebuilder:default={action: Ignore}
+// +kubebuilder:default=Retain
 // +optional
-PodFailurePolicy *PodFailurePolicy `json:"podFailurePolicy,omitempty"`
+FailedPodPolicy FailedPodPolicy `json:"failedPodPolicy,omitempty"`
 ```
 
-The nested policy object leaves room for future strategy settings without replacing the field's shape. Its `action` enum avoids a boolean whose meaning would become unclear as additional behaviors are introduced.
+The policy only applies to Failed Pods; Succeeded Pods remain terminal. A flat enum covers the two behaviors without a nested action object. The field name and Retain value distinguish this policy from Job's podFailurePolicy, where Ignore still creates a replacement Pod.
 
 #### Implementation Guidance
 
@@ -109,7 +103,7 @@ The nested policy object leaves room for future strategy settings without replac
 - Log the recreate delete at `Info` (major lifecycle event).
 - Apply Deployment-style in-memory recreate backoff: bump on successful Failed delete (skip bump when Delete returns NotFound), gate Create, and use `RequeueAfter` for the remaining delay. Start the 10-minute reset window only when the controller first observes `Running` for a Pod UID; do not use Pod `startTime`, because Pending and image-pull time must not count.
 - Emit a Normal Event when a successful Failed-Pod delete schedules its replacement delay, and clear backoff state after success or whenever the Sandbox can no longer recreate Failed Pods.
-- Unit-test Ignore vs Recreate, ownership refusal, Succeeded+Recreate (no recreate), Suspended (suspend path only), recreate backoff gate/reset, skip-bump on Delete NotFound, and no reset on brief Running.
+- Unit-test Retain vs Recreate, ownership refusal, Succeeded+Recreate (no recreate), Suspended (suspend path only), recreate backoff gate/reset, skip-bump on Delete NotFound, and no reset on brief Running.
 - Optional e2e: Fail once, recreate, remount PVC with surviving data.
 
 ## Scalability

@@ -2590,28 +2590,22 @@ func TestCompareSandboxBlueprint(t *testing.T) {
 			expectedResult: false,
 		},
 		{
-			name: "Pod failure policy drift should NOT match",
+			name: "Failed Pod policy drift should NOT match",
 			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
-				PodTemplate: basePodTemplate,
-				PodFailurePolicy: &sandboxv1beta1.PodFailurePolicy{
-					Action: sandboxv1beta1.PodFailurePolicyActionRecreate,
-				},
+				PodTemplate:     basePodTemplate,
+				FailedPodPolicy: sandboxv1beta1.FailedPodPolicyRecreate,
 			},
 			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
-				PodTemplate: basePodTemplate,
-				PodFailurePolicy: &sandboxv1beta1.PodFailurePolicy{
-					Action: sandboxv1beta1.PodFailurePolicyActionIgnore,
-				},
+				PodTemplate:     basePodTemplate,
+				FailedPodPolicy: sandboxv1beta1.FailedPodPolicyRetain,
 			},
 			expectedResult: false,
 		},
 		{
-			name: "Pod failure policy nil and default Ignore should match",
+			name: "Failed Pod policy Retain and omitted policy should match",
 			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
-				PodTemplate: basePodTemplate,
-				PodFailurePolicy: &sandboxv1beta1.PodFailurePolicy{
-					Action: sandboxv1beta1.PodFailurePolicyActionIgnore,
-				},
+				PodTemplate:     basePodTemplate,
+				FailedPodPolicy: sandboxv1beta1.FailedPodPolicyRetain,
 			},
 			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
 				PodTemplate: basePodTemplate,
@@ -2619,16 +2613,13 @@ func TestCompareSandboxBlueprint(t *testing.T) {
 			expectedResult: true,
 		},
 		{
-			name: "Pod failure policy empty action and default Ignore should match",
+			name: "Failed Pod policy omitted policy and Retain should match",
 			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
 				PodTemplate: basePodTemplate,
-				PodFailurePolicy: &sandboxv1beta1.PodFailurePolicy{
-					Action: sandboxv1beta1.PodFailurePolicyActionIgnore,
-				},
 			},
 			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
-				PodTemplate:      basePodTemplate,
-				PodFailurePolicy: &sandboxv1beta1.PodFailurePolicy{},
+				PodTemplate:     basePodTemplate,
+				FailedPodPolicy: sandboxv1beta1.FailedPodPolicyRetain,
 			},
 			expectedResult: true,
 		},
@@ -2653,7 +2644,7 @@ func TestCompareSandboxBlueprint(t *testing.T) {
 // comparison logic is not tracked for drift, so a warm sandbox will not be detected
 // as stale when that field changes.
 func TestSandboxBlueprintFieldsAreCompared(t *testing.T) {
-	expectedFields := []string{"PodTemplate", "VolumeClaimTemplates", "Service", "PodFailurePolicy"}
+	expectedFields := []string{"PodTemplate", "VolumeClaimTemplates", "Service", "FailedPodPolicy"}
 
 	var actualFields []string
 	blueprintType := reflect.TypeFor[sandboxv1beta1.SandboxBlueprint]()

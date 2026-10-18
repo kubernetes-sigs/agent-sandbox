@@ -27,6 +27,11 @@ PYTHON_SDK_DIR = os.path.join("clients", "python", "agentic-sandbox-client")
 
 PYTHON_TEST_SUITES = [
     {
+        "name": "load-test-recipes",
+        # The convergence helper and its tests use only the standard library.
+        "dir": os.path.join("dev", "load-test", "test-recipes"),
+    },
+    {
         "name": "sandbox-router",
         "dir": os.path.join("clients", "python", "agentic-sandbox-client", "sandbox-router"),
         "requirements": "requirements.txt",

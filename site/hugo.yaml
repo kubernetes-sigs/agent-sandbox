@@ -159,6 +159,10 @@ module:
     target: assets/additional/go-client
     files: ["README.md"]
   - disableWatch: true
+    source: ../clients/typescript/agentic-sandbox-client
+    target: assets/additional/typescript-agentic-sandbox-client
+    files: ["README.md"]
+  - disableWatch: true
     source: ../clients/integrations/nemo-gym
     target: assets/additional/integrations-nemo-gym
     files: ["README.md"]

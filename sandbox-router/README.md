@@ -127,6 +127,7 @@ Run `sandbox-router --help` for the full list. The most relevant:
 | `--http-bind-address` | `:8080` | Plain-HTTP proxy listener. Empty disables. |
 | `--https-bind-address` | `""` | TLS proxy listener. Empty disables. Requires `--tls-cert-file` and `--tls-key-file`. |
 | `--metrics-bind-address` | `:9090` | Prometheus `/metrics`. |
+| `--metrics-secure-serving` | `false` | Serve `/metrics` over TLS using the same certificate as the HTTPS proxy listener. Requires `--tls-cert-file` and `--tls-key-file`. |
 | `--health-probe-bind-address` | `:8081` | `/healthz` and `/readyz`. |
 | `--tls-cert-file` / `--tls-key-file` | — | PEM-encoded server cert and key. Hot-reloaded on file change (via fsnotify on the parent directory, so atomic Secret rotation just works). |
 | `--tls-client-ca-file` | — | CA bundle for verifying client certs when mTLS is on. |
@@ -194,7 +195,7 @@ Flags:
 | `--authz-tokenreview-require-token` | `false` | When false, tokenless requests pass (transitional). When true, missing token → 401. |
 | `--authz-tokenreview-audiences` | `""` | Comma-separated audience filter — required for projected ServiceAccount tokens minted with `--audience`. |
 
-RBAC: the router's ServiceAccount needs `create` on `tokenreviews.authentication.k8s.io`. The `system:auth-delegator` ClusterRole grants exactly this and is the standard pattern (kubelet, metrics-server, kube-state-metrics all use it). The `deploy/rbac.yaml` example wires it.
+RBAC: the router's ServiceAccount needs `create` on `tokenreviews.authentication.k8s.io`. The `system:auth-delegator` ClusterRole grants this, plus `create` on `subjectaccessreviews.authorization.k8s.io`, and is the standard pattern (kubelet, metrics-server, kube-state-metrics all use it). The `deploy/rbac-tokenreview.yaml` example wires it. The core kustomization leaves that binding out, so apply it alongside the core install: `kubectl apply -f sandbox-router/deploy/rbac-tokenreview.yaml`.
 
 **Scope of v1.** TokenReview only **authenticates** the caller — it verifies the token belongs to a known principal in the cluster. It does **not** check whether that principal is allowed to access the specific sandbox they named in `X-Sandbox-ID`. Tightening to per-sandbox authorization needs an agreed identity contract on the Sandbox CR (owner label, annotation, or a SubjectAccessReview-style policy) and is tracked as follow-up after KEP-NNNN lands.
 
@@ -203,6 +204,8 @@ RBAC: the router's ServiceAccount needs `create` on `tokenreviews.authentication
 Set `--authz-mode=scoped-token` to authorize requests without giving callers a cluster-verifiable K8s credential. The original `v1.<payload>.<signature>` format uses HMAC-SHA256 and binds `(namespace, name, exp)`. It remains the default when only `--authz-scoped-token-secret-file` is set, so existing deployments keep the same behavior.
 
 Scoped-token v2 uses Ed25519 and binds the full `AuthorizationTarget` plus expiry. Its wire format is `v2.<kid>.<payload>.<signature>`. The signature covers the key ID as well as the payload, so changing `kid` cannot select another verification key. Key IDs may contain ASCII letters, digits, hyphens, and underscores. A key file may contain multiple public keys during reader-first rotation. Private signing keys never belong in the router.
+
+The router reads the verification key file once during startup. It does not reload projected file updates. Use a versioned ConfigMap name in the Pod template so each reader-first key-set change rolls the Deployment, and wait for every router replica to accept the overlapping set before issuers use a new `kid`. The [`examples/scoped-token-v2`](examples/scoped-token-v2/) overlay carries the upstream patch and rotation sequence. Helm values, content-hash annotations, and rollout policy belong to the downstream deployment.
 
 V2 requires `--cache-enabled` and rejects `X-Sandbox-Pod-IP`, because a raw address is not part of the signed target. Before authorization, the router resolves the UID and namespace/name indexes together and places the cache-selected Sandbox UID in the canonical target. The current name owner wins over a stale requested UID, so a token from a replaced Sandbox cannot follow the name to its replacement. An unclaimed warm-pool member remains reachable only through its exact UID until adoption adds the name index. When v1 and v2 verification are both configured, legacy namespace/name routing remains available to v1 only during the configured overlap window. V1-only deployments retain their existing behavior.
 
@@ -289,6 +292,10 @@ The HTTPS listener is opt-in (set `--https-bind-address`). Cert and key are read
 
 `tls.Config.MinVersion` defaults to TLS 1.2 and is configurable via `--tls-min-version` (or the `TLS_MIN_VERSION` env var). Cipher suites can be set via `--tls-cipher-suites` (or `TLS_CIPHER_SUITES`); when omitted, Go defaults apply. ALPN advertises `h2` and `http/1.1`. A downstream operator can inject the cluster TLS profile via these flags or env vars.
 
+### Metrics endpoint TLS
+
+Set `--metrics-secure-serving` to serve the `/metrics` endpoint over TLS using the same certificate as the HTTPS proxy listener. The metrics TLS config shares the `--tls-min-version` and `--tls-cipher-suites` settings but does not enable mTLS (Prometheus scraping does not present client certs). Requires `--tls-cert-file` and `--tls-key-file`; `--https-bind-address` is not required — the metrics endpoint can be the only TLS listener.
+
 ## Metrics
 
 All metrics live under a private Prometheus registry (no controller-runtime metrics bleed-through) and serve on `--metrics-bind-address`. Per-sandbox `sandbox_id` labels are **intentionally absent** — a cluster can have 10k+ sandboxes, and exposing one series per sandbox would blow up Prometheus storage. Use traces for per-sandbox debugging.
@@ -343,6 +350,7 @@ tls-key-file: "/tls/tls.key"
 tls-client-ca-file: "/tls/ca.crt"
 tls-min-version: "VersionTLS12"
 tls-cipher-suites: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
+metrics-secure-serving: true
 mtls-mode: "required"
 cluster-domain: "cluster.local"
 proxy-timeout: "180s"
@@ -358,7 +366,7 @@ enable-otel-metrics: true
 Example K8s manifests live in [`deploy/`](deploy/) — Deployment, Service, PodDisruptionBudget, NetworkPolicy, plus a README that walks through what to tighten before production.
 
 ```sh
-kubectl apply -f sandbox-router/deploy/
+kubectl apply -k sandbox-router/deploy/
 ```
 
 ## Scaling guidance

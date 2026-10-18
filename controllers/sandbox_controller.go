@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
@@ -71,7 +72,7 @@ const (
 	podMetadataFlushBound = time.Second
 
 	// recreateBackoffBase / recreateBackoffMax are Job-style intervals used by
-	// Deployment-pattern in-memory backoff for podFailurePolicy.action=Recreate.
+	// Deployment-pattern in-memory backoff for failedPodPolicy=Recreate.
 	recreateBackoffBase = 5 * time.Second
 	recreateBackoffMax  = 5 * time.Minute
 	// recreateBackoffResetAfter is how long a replacement Pod must have been
@@ -271,9 +272,16 @@ type SandboxReconciler struct {
 	// losing it is harmless.
 	deferralClock deferredWriteClock
 
-	// recreateBackoff delays Pod creates after podFailurePolicy.action=Recreate
+	// recreateBackoff delays Pod creates after failedPodPolicy=Recreate
 	// deletes a Failed Pod (Deployment-style in-memory backoff).
 	recreateBackoff recreateBackoff
+
+	// Only Sandbox watch events admit new UIDs, excluding the initial inventory.
+	// Removing a UID after Ready consumes its eligibility, so subsequent readiness
+	// flaps cannot record again. A restart excludes even previously suspended
+	// Sandboxes, at the cost of missing startups that span controller runs.
+	creationMetricsMu      sync.Mutex
+	pendingCreationMetrics map[types.UID]struct{}
 }
 
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
@@ -325,6 +333,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		logger.Info("Sandbox is being deleted")
 		r.deferralClock.clear(req.NamespacedName)
 		r.recreateBackoff.clear(req.NamespacedName)
+		r.forgetSandboxCreationMetrics(sandbox.UID)
 		return ctrl.Result{}, nil
 	}
 
@@ -414,6 +423,8 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
 			// Surface update error
 			err = errors.Join(err, statusUpdateErr)
+		} else {
+			r.recordSandboxCreationMetrics(ctx, sandbox, oldStatus)
 		}
 	}
 
@@ -826,6 +837,7 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 	if err := r.Status().Patch(ctx, sandbox, client.MergeFrom(base)); err != nil {
 		if k8serrors.IsNotFound(err) {
 			// Sandbox was deleted mid-reconcile
+			r.forgetSandboxCreationMetrics(sandbox.UID)
 			return nil
 		}
 		logger.Error(err, "Failed to patch sandbox status")
@@ -838,6 +850,88 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 
 	// Surface error
 	return nil
+}
+
+// sandboxCreationMetricsPredicate maintains eligibility before enqueueing a
+// reconcile. Every notification still reaches the normal reconciliation queue.
+func (r *SandboxReconciler) sandboxCreationMetricsPredicate() predicate.Funcs {
+	return predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool {
+			if !e.IsInInitialList {
+				r.trackSandboxCreationMetrics(e.Object.(*sandboxv1beta1.Sandbox))
+			}
+			return true
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			// A delete followed by creation under the same name can be delivered
+			// as an update when the informer misses the intermediate deletion.
+			if e.ObjectOld.GetUID() != e.ObjectNew.GetUID() {
+				r.forgetSandboxCreationMetrics(e.ObjectOld.GetUID())
+				r.trackSandboxCreationMetrics(e.ObjectNew.(*sandboxv1beta1.Sandbox))
+			}
+			return true
+		},
+		DeleteFunc: func(e event.DeleteEvent) bool {
+			r.forgetSandboxCreationMetrics(e.Object.GetUID())
+			return true
+		},
+	}
+}
+
+func (r *SandboxReconciler) trackSandboxCreationMetrics(sandbox *sandboxv1beta1.Sandbox) {
+	if sandbox.UID == "" || !sandbox.DeletionTimestamp.IsZero() ||
+		meta.IsStatusConditionTrue(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady)) {
+		return
+	}
+	r.creationMetricsMu.Lock()
+	defer r.creationMetricsMu.Unlock()
+	if r.pendingCreationMetrics == nil {
+		r.pendingCreationMetrics = make(map[types.UID]struct{})
+	}
+	r.pendingCreationMetrics[sandbox.UID] = struct{}{}
+}
+
+func (r *SandboxReconciler) forgetSandboxCreationMetrics(uid types.UID) {
+	r.creationMetricsMu.Lock()
+	defer r.creationMetricsMu.Unlock()
+	delete(r.pendingCreationMetrics, uid)
+}
+
+// recordSandboxCreationMetrics consumes eligibility only after Ready status has
+// been persisted. Invalid timestamps also consume it to prevent a later recovery
+// or resume from being measured as initial creation latency.
+func (r *SandboxReconciler) recordSandboxCreationMetrics(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, oldStatus *sandboxv1beta1.SandboxStatus) {
+	ready := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	if ready == nil || ready.Status != metav1.ConditionTrue {
+		return
+	}
+	r.creationMetricsMu.Lock()
+	_, eligible := r.pendingCreationMetrics[sandbox.UID]
+	delete(r.pendingCreationMetrics, sandbox.UID)
+	r.creationMetricsMu.Unlock()
+	if !eligible || meta.IsStatusConditionTrue(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionReady)) ||
+		sandbox.CreationTimestamp.IsZero() || ready.LastTransitionTime.IsZero() {
+		return
+	}
+	latency := ready.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
+	if latency < 0 {
+		return
+	}
+	logger := log.FromContext(ctx)
+
+	// Resolve metric labels.
+	launchType := asmetrics.LaunchTypeCold
+	if sandbox.Labels[sandboxv1beta1.SandboxLaunchTypeLabel] == sandboxv1beta1.SandboxLaunchTypeWarm {
+		launchType = asmetrics.LaunchTypeWarm
+	}
+
+	templateName := "__unknown__"
+	if tmpl, ok := sandbox.Annotations[sandboxv1beta1.SandboxTemplateRefAnnotation]; ok && tmpl != "" {
+		templateName = tmpl
+	}
+
+	logger.V(1).Info("Sandbox reached Ready state", "sandbox", sandbox.Name, "launchType", launchType)
+	asmetrics.RecordSandboxCreationLatency(latency, sandbox.Namespace, launchType, templateName)
 }
 
 func (r *SandboxReconciler) recordReadyTransitionEvent(sandbox *sandboxv1beta1.Sandbox, oldStatus *sandboxv1beta1.SandboxStatus) {
@@ -1287,8 +1381,7 @@ func (r *SandboxReconciler) clearServiceStatus(sandbox *sandboxv1beta1.Sandbox) 
 }
 
 func sandboxRecreatesFailedPods(sandbox *sandboxv1beta1.Sandbox) bool {
-	return sandbox != nil && sandbox.Spec.PodFailurePolicy != nil &&
-		sandbox.Spec.PodFailurePolicy.Action == sandboxv1beta1.PodFailurePolicyActionRecreate
+	return sandbox != nil && sandbox.Spec.FailedPodPolicy == sandboxv1beta1.FailedPodPolicyRecreate
 }
 
 func (r *SandboxReconciler) recordRecreateBackoffEvent(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod, delay time.Duration) {
@@ -1511,7 +1604,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		if recreateFailedPod {
 			var recreateRequeue time.Duration
 			if pod.DeletionTimestamp.IsZero() {
-				logger.Info("Deleting Failed Pod because .Spec.PodFailurePolicy.Action is Recreate",
+				logger.Info("Deleting Failed Pod because .Spec.FailedPodPolicy is Recreate",
 					"Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 				if r.Tracer.IsRecording(ctx) {
 					r.Tracer.AddEvent(ctx, "FailedPodDeletedForRecreate", map[string]string{
@@ -2062,14 +2155,14 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&sandboxv1beta1.Sandbox{}).
+		For(&sandboxv1beta1.Sandbox{}, builder.WithPredicates(r.sandboxCreationMetricsPredicate())).
 		Owns(&corev1.Pod{}, builder.WithPredicates(labelSelectorPredicate)).
 		Owns(&corev1.Service{}, builder.WithPredicates(labelSelectorPredicate)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Complete(r)
 }
 
-// In-memory exponential backoff for podFailurePolicy.action=Recreate.
+// In-memory exponential backoff for failedPodPolicy=Recreate.
 //
 // This follows the Deployment / workqueue pattern: retry state lives in the
 // controller process rather than SandboxStatus (the Job pattern). Watch-driven

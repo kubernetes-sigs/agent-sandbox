@@ -35,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	fakedynamic "k8s.io/client-go/dynamic/fake"
 	fakekube "k8s.io/client-go/kubernetes/fake"
@@ -1148,7 +1149,7 @@ func TestCreateClaim_Labels(t *testing.T) {
 			})
 			h := &K8sHelper{ExtensionsClient: extensionsCS.ExtensionsV1beta1(), Log: logr.Discard()}
 
-			if _, err := h.createClaim(context.Background(), "default", "pool", nil, tc.labels, 0, otel.GetTracerProvider().Tracer("test"), "test"); err != nil {
+			if _, err := h.createClaim(context.Background(), newClaim(&Options{Namespace: "default", WarmPoolName: "pool", Labels: tc.labels}, time.Now()), otel.GetTracerProvider().Tracer("test"), "test"); err != nil {
 				t.Fatalf("createClaim() error: %v", err)
 			}
 			if !reflect.DeepEqual(created.Labels, tc.want) {
@@ -1323,7 +1324,7 @@ func TestClose_CancelsBlockedOpen(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// monitorPortForward tests (TunnelStrategy)
+// monitorPortForward tests (portForwardTunnel)
 // ---------------------------------------------------------------------------
 
 func TestMonitorPortForward_ClearsStateOnDeath(t *testing.T) {
@@ -1343,8 +1344,8 @@ func TestMonitorPortForward_ClearsStateOnDeath(t *testing.T) {
 	errChan := make(chan error, 1)
 	stderrBuf := &syncBuffer{}
 
-	ts := &tunnelStrategy{
-		connector:           conn,
+	ts := &portForwardTunnel{
+		onDied:              conn.SetLastError,
 		log:                 logr.Discard(),
 		portForwardStopChan: stopChan,
 	}
@@ -1388,8 +1389,8 @@ func TestMonitorPortForward_StaleMonitorIgnored(t *testing.T) {
 	errChan := make(chan error, 1)
 	stderrBuf := &syncBuffer{}
 
-	ts := &tunnelStrategy{
-		connector:           conn,
+	ts := &portForwardTunnel{
+		onDied:              conn.SetLastError,
 		log:                 logr.Discard(),
 		portForwardStopChan: newStopChan,
 	}
@@ -1750,8 +1751,11 @@ func TestValidation_InvalidNames(t *testing.T) {
 		{"uppercase GatewayName", Options{WarmPoolName: "pool", GatewayName: "MyGateway"}},
 		{"uppercase Namespace", Options{WarmPoolName: "pool", Namespace: "MyNS"}},
 		{"uppercase WarmPoolName", Options{WarmPoolName: "MyWarmPool"}},
+		{"uppercase ClaimName", Options{WarmPoolName: "pool", ClaimName: "MyClaim"}},
+		{"AdoptExisting without ClaimName", Options{WarmPoolName: "pool", AdoptExisting: true}},
 		{"Labels key with a space", Options{WarmPoolName: "pool", Labels: map[string]string{"bad key": "v"}}},
 		{"Labels value with a slash", Options{WarmPoolName: "pool", Labels: map[string]string{"k": "a/b"}}},
+		{"PodLabels key with a space", Options{WarmPoolName: "pool", PodLabels: map[string]string{"bad key": "v"}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1761,6 +1765,233 @@ func TestValidation_InvalidNames(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestOpen_PopulatesClaimPodMetadataAndVolumeClaimTemplates(t *testing.T) {
+	opts := defaultTestOpts()
+	opts.Labels = map[string]string{"app": "agent"}
+	opts.Env = []extv1beta1.EnvVar{{Name: "MODE", Value: "prod"}}
+	opts.PodLabels = map[string]string{"sandbox.users.io/team": "agents"}
+	opts.PodAnnotations = map[string]string{"example.com/trace": "enabled"}
+	opts.VolumeClaimTemplates = []sandboxv1beta1.PersistentVolumeClaimTemplate{
+		{
+			EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{
+				Name:   "workspace",
+				Labels: map[string]string{"sandbox.users.io/vol": "ssd"},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+		},
+	}
+
+	s, agentsCS, extensionsCS := newTestSandbox(opts)
+	setupWatchWithReactor(agentsCS, extensionsCS, readySandbox("test-sandbox"))
+
+	var created *extv1beta1.SandboxClaim
+	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+		created = action.(ktesting.CreateAction).GetObject().(*extv1beta1.SandboxClaim)
+		return false, nil, nil
+	})
+
+	// Mutate caller maps/slices after New() before Open() to ensure Open uses
+	// isolated copies when building the claim.
+	opts.Labels["app"] = "mutated"
+	opts.Env[0].Value = "mutated"
+	opts.PodLabels["sandbox.users.io/team"] = "mutated"
+	opts.PodAnnotations["example.com/trace"] = "mutated"
+	opts.VolumeClaimTemplates[0].EmbeddedObjectMetadata.Labels["sandbox.users.io/vol"] = "mutated"
+
+	if err := s.Open(context.Background()); err != nil {
+		t.Fatalf("Open() error: %v", err)
+	}
+	defer s.Close(context.Background())
+
+	if created == nil {
+		t.Fatal("expected SandboxClaim to be created")
+	}
+	wantLabels := map[string]string{"app": "agent", sandboxv1beta1.CreatedByLabel: "go-client"}
+	if !reflect.DeepEqual(created.Labels, wantLabels) {
+		t.Errorf("Labels = %v, want %v", created.Labels, wantLabels)
+	}
+	wantEnv := []extv1beta1.EnvVar{{Name: "MODE", Value: "prod"}}
+	if !reflect.DeepEqual(created.Spec.Env, wantEnv) {
+		t.Errorf("Env = %v, want %v", created.Spec.Env, wantEnv)
+	}
+	wantPodLabels := map[string]string{"sandbox.users.io/team": "agents"}
+	if !reflect.DeepEqual(created.Spec.AdditionalPodMetadata.Labels, wantPodLabels) {
+		t.Errorf("AdditionalPodMetadata.Labels = %v, want %v", created.Spec.AdditionalPodMetadata.Labels, wantPodLabels)
+	}
+	wantPodAnnotations := map[string]string{"example.com/trace": "enabled"}
+	if !reflect.DeepEqual(created.Spec.AdditionalPodMetadata.Annotations, wantPodAnnotations) {
+		t.Errorf("AdditionalPodMetadata.Annotations = %v, want %v", created.Spec.AdditionalPodMetadata.Annotations, wantPodAnnotations)
+	}
+	if len(created.Spec.VolumeClaimTemplates) != 1 || created.Spec.VolumeClaimTemplates[0].Name != "workspace" {
+		t.Fatalf("VolumeClaimTemplates = %+v, want 1 workspace template", created.Spec.VolumeClaimTemplates)
+	}
+	if got := created.Spec.VolumeClaimTemplates[0].Labels["sandbox.users.io/vol"]; got != "ssd" {
+		t.Errorf("VolumeClaimTemplates[0].Labels[vol] = %q, want %q", got, "ssd")
+	}
+}
+
+func TestOpen_DeterministicClaimName_CreatesAndAdoptsOnConflict(t *testing.T) {
+	t.Run("creates with explicit Name and empty GenerateName", func(t *testing.T) {
+		opts := defaultTestOpts()
+		opts.ClaimName = "my-deterministic-claim"
+
+		s, agentsCS, extensionsCS := newTestSandbox(opts)
+		setupWatchWithReactor(agentsCS, extensionsCS, readySandbox("my-deterministic-claim"))
+
+		var created *extv1beta1.SandboxClaim
+		extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+			created = action.(ktesting.CreateAction).GetObject().(*extv1beta1.SandboxClaim)
+			return false, nil, nil
+		})
+
+		if err := s.Open(context.Background()); err != nil {
+			t.Fatalf("Open() error: %v", err)
+		}
+		defer s.Close(context.Background())
+
+		if created == nil {
+			t.Fatal("expected SandboxClaim to be created")
+		}
+		if created.Name != "my-deterministic-claim" {
+			t.Errorf("created.Name = %q, want %q", created.Name, "my-deterministic-claim")
+		}
+		if created.GenerateName != "" {
+			t.Errorf("created.GenerateName = %q, want empty", created.GenerateName)
+		}
+		if s.ClaimName() != "my-deterministic-claim" {
+			t.Errorf("s.ClaimName() = %q, want %q", s.ClaimName(), "my-deterministic-claim")
+		}
+	})
+
+	t.Run("keeps newly created named claim on rollback", func(t *testing.T) {
+		opts := defaultTestOpts()
+		opts.ClaimName = "newly-created-claim"
+
+		s, _, extensionsCS := newTestSandbox(opts)
+
+		// Create succeeds (not 409), then resolveSandboxName fails with terminal condition.
+		extensionsCS.PrependReactor("get", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+			return true, claimNotReady("newly-created-claim", "WarmPoolNotFound"), nil
+		})
+
+		deleteCalled := false
+		extensionsCS.PrependReactor("delete", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+			deleteCalled = true
+			return true, nil, nil
+		})
+
+		err := s.Open(context.Background())
+		if !errors.Is(err, ErrWarmPoolNotFound) {
+			t.Fatalf("expected ErrWarmPoolNotFound, got: %v", err)
+		}
+		if deleteCalled {
+			t.Error("rollbackOpen must not delete a caller-owned named claim")
+		}
+		if s.ClaimName() != "" {
+			t.Errorf("expected s.ClaimName() to be cleared after failed Open, got %q", s.ClaimName())
+		}
+	})
+
+	t.Run("fails when the adopted claim is replaced during resolution", func(t *testing.T) {
+		opts := defaultTestOpts()
+		opts.ClaimName = "replaced-claim"
+		opts.AdoptExisting = true
+		s, _, extensionsCS := newTestSandbox(opts)
+
+		extensionsCS.PrependReactor("create", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+			return true, nil, k8serrors.NewAlreadyExists(schema.GroupResource{Group: "extensions.agents.x-k8s.io", Resource: "sandboxclaims"}, "replaced-claim")
+		})
+		gets := 0
+		extensionsCS.PrependReactor("get", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+			gets++
+			uid := types.UID("uid-adopted")
+			if gets > 1 {
+				uid = "uid-replacement"
+			}
+			return true, &extv1beta1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "replaced-claim", Namespace: "default", UID: uid},
+				Spec:       extv1beta1.SandboxClaimSpec{WarmPoolRef: extv1beta1.SandboxWarmPoolRef{Name: opts.WarmPoolName}},
+				Status:     extv1beta1.SandboxClaimStatus{SandboxStatus: extv1beta1.SandboxStatus{Name: "replacement-sandbox"}},
+			}, nil
+		})
+
+		err := s.Open(context.Background())
+		if !errors.Is(err, ErrSandboxDeleted) || !strings.Contains(err.Error(), "replaced") {
+			t.Fatalf("expected ErrSandboxDeleted for a replaced claim, got: %v", err)
+		}
+	})
+
+	t.Run("does not adopt on 409 without AdoptExisting", func(t *testing.T) {
+		opts := defaultTestOpts()
+		opts.ClaimName = "someone-elses-claim"
+		s, _, extensionsCS := newTestSandbox(opts)
+
+		extensionsCS.PrependReactor("create", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+			return true, nil, k8serrors.NewAlreadyExists(schema.GroupResource{Group: "extensions.agents.x-k8s.io", Resource: "sandboxclaims"}, "someone-elses-claim")
+		})
+
+		err := s.Open(context.Background())
+		if !errors.Is(err, ErrClaimFailed) || !k8serrors.IsAlreadyExists(err) {
+			t.Fatalf("expected ErrClaimFailed wrapping AlreadyExists, got: %v", err)
+		}
+		if s.ClaimName() != "" {
+			t.Errorf("expected s.ClaimName() to stay empty, got %q", s.ClaimName())
+		}
+	})
+
+	t.Run("rejects terminating existing claim on 409", func(t *testing.T) {
+		opts := defaultTestOpts()
+		opts.ClaimName = "terminating-claim"
+		opts.AdoptExisting = true
+		s, _, extensionsCS := newTestSandbox(opts)
+
+		now := metav1.Now()
+		extensionsCS.PrependReactor("create", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+			return true, nil, k8serrors.NewAlreadyExists(schema.GroupResource{Group: "extensions.agents.x-k8s.io", Resource: "sandboxclaims"}, "terminating-claim")
+		})
+		extensionsCS.PrependReactor("get", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+			return true, &extv1beta1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "terminating-claim",
+					Namespace:         "default",
+					DeletionTimestamp: &now,
+				},
+			}, nil
+		})
+
+		err := s.Open(context.Background())
+		if !errors.Is(err, ErrSandboxDeleted) || !strings.Contains(err.Error(), "is terminating") {
+			t.Fatalf("expected terminating ErrSandboxDeleted, got: %v", err)
+		}
+	})
+
+	t.Run("rejects existing claim with mismatched WarmPoolRef on 409", func(t *testing.T) {
+		opts := defaultTestOpts()
+		opts.ClaimName = "other-pool-claim"
+		opts.AdoptExisting = true
+		s, _, extensionsCS := newTestSandbox(opts)
+
+		extensionsCS.PrependReactor("create", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+			return true, nil, k8serrors.NewAlreadyExists(schema.GroupResource{Group: "extensions.agents.x-k8s.io", Resource: "sandboxclaims"}, "other-pool-claim")
+		})
+		extensionsCS.PrependReactor("get", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+			return true, &extv1beta1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "other-pool-claim", Namespace: "default"},
+				Spec: extv1beta1.SandboxClaimSpec{
+					WarmPoolRef: extv1beta1.SandboxWarmPoolRef{Name: "different-pool"},
+				},
+			}, nil
+		})
+
+		err := s.Open(context.Background())
+		if !errors.Is(err, ErrClaimFailed) || !strings.Contains(err.Error(), `references warm pool "different-pool"`) {
+			t.Fatalf("expected warm pool mismatch ErrClaimFailed, got: %v", err)
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -2657,8 +2888,8 @@ func TestMonitorPortForward_Timeout(t *testing.T) {
 	errChan := make(chan error, 1)
 	stderrBuf := &syncBuffer{}
 
-	ts := &tunnelStrategy{
-		connector:           conn,
+	ts := &portForwardTunnel{
+		onDied:              conn.SetLastError,
 		log:                 logr.Discard(),
 		portForwardStopChan: stopChan,
 	}
@@ -2730,8 +2961,8 @@ func TestMonitorPortForward_Timeout_SetsLastError(t *testing.T) {
 	errChan := make(chan error, 1)
 	stderrBuf := &syncBuffer{}
 
-	ts := &tunnelStrategy{
-		connector:           conn,
+	ts := &portForwardTunnel{
+		onDied:              conn.SetLastError,
 		log:                 logr.Discard(),
 		portForwardStopChan: stopChan,
 	}

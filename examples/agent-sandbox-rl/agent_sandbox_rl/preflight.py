@@ -120,7 +120,8 @@ def preflight_cluster(cluster, *, require_runtime_class: str | None = None,
                       namespace: str | None = None,
                       validate_template=None,
                       sample_image: str = "busybox:latest",
-                      unmanaged_pod_labels: dict | None = None) -> PreflightReport:
+                      unmanaged_pod_labels: dict | None = None,
+                      snapshots: bool = False) -> PreflightReport:
   """Run all checks on one cluster and return a `PreflightReport`.
 
   ``unmanaged_pod_labels`` (the labels every fleet pod carries) is passed when the
@@ -133,6 +134,12 @@ def preflight_cluster(cluster, *, require_runtime_class: str | None = None,
   against the live CRD schema — a clear schema rejection (HTTP 400/422) is a hard
   failure (catches drift the mocked unit tests can't); other errors (RBAC,
   dry-run unsupported) are warnings so we never false-fail.
+
+  With ``snapshots`` (the cluster opted into GKE Pod Snapshots) the PodSnapshot
+  CRDs must be served and a gVisor runtime class configured (hard failures —
+  the SDK client refuses to build without the CRDs, and GKE only snapshots
+  gVisor pods); a missing ``PodSnapshotPolicy`` in the namespace is a warning
+  (the SDK creates only triggers, so without a policy snapshots fail later).
   """
   r = PreflightReport(cluster.name)
   ns = namespace or cluster.namespace
@@ -229,7 +236,70 @@ def preflight_cluster(cluster, *, require_runtime_class: str | None = None,
       r.add("networkpolicy", False,
             f"could not list NetworkPolicies in {ns}: {e}", warn_only=True)
 
+  # 9. GKE Pod Snapshots (only when this cluster opted in)
+  if snapshots:
+    for plural in (constants.PODSNAPSHOTS_PLURAL, constants.PODSNAPSHOT_TRIGGERS_PLURAL):
+      name = f"{plural}.{constants.PODSNAPSHOT_GROUP}"
+      try:
+        crd = crd_api.read_custom_resource_definition(name)
+        served = [v.name for v in crd.spec.versions if v.served]
+        r.add(f"crd:{plural}", constants.PODSNAPSHOT_VERSION in served,
+              ",".join(served) or "none")
+      except client.ApiException as e:
+        r.add(f"crd:{plural}", False,
+              "not found (enable Pod Snapshots on the GKE cluster)"
+              if e.status == 404 else str(e))
+    if not require_runtime_class:
+      r.add("snapshots:runtime_class", False,
+            "Pod Snapshots need a gVisor runtime class — set "
+            "TemplateSpec/ClusterConfig runtime_class='gvisor'")
+    else:
+      # Only the literal GKE class name is known-good; anything else may still
+      # be gVisor under another name, so warn rather than fail.
+      r.add("snapshots:runtime_class", require_runtime_class == "gvisor",
+            require_runtime_class, warn_only=require_runtime_class != "gvisor")
+    try:
+      pols = cluster.custom_api.list_namespaced_custom_object(
+          constants.PODSNAPSHOT_GROUP, constants.PODSNAPSHOT_VERSION, ns,
+          constants.PODSNAPSHOT_POLICIES_PLURAL)
+      items = (pols or {}).get("items") or []
+      names = [((p.get("metadata") or {}).get("name") or "?") for p in items]
+      grouped = [name for name, p in zip(names, items)
+                 if policy_groups_by(p, constants.SANDBOX_NAME_HASH_LABEL)]
+      if not items:
+        r.add("snapshots:policy", False,
+              f"no PodSnapshotPolicy in {ns} — snapshots will fail (the SDK "
+              "creates only triggers; apply a policy grouped by "
+              f"{constants.SANDBOX_NAME_HASH_LABEL})", warn_only=True)
+      elif not grouped:
+        # The most common setup failure: a policy exists but groups snapshots by
+        # another label, so restores target the wrong group and the trigger
+        # fails with an opaque `runsc error: exit status 128`.
+        r.add("snapshots:policy", False,
+              f"{len(items)} PodSnapshotPolicy in {ns} ({', '.join(names)}) but "
+              f"none groups by {constants.SANDBOX_NAME_HASH_LABEL} — add it under "
+              "spec.snapshotGroupingRules.groupByLabelValue.labels, or restores "
+              "target the wrong group", warn_only=True)
+      else:
+        r.add("snapshots:policy", True,
+              f"{len(grouped)}/{len(items)} PodSnapshotPolicy in {ns} group by "
+              f"{constants.SANDBOX_NAME_HASH_LABEL}: {', '.join(grouped)}")
+    except Exception as e:  # noqa: BLE001 — RBAC etc.; advisory only
+      r.add("snapshots:policy", False, str(e), warn_only=True)
+
   return r
+
+
+def policy_groups_by(policy: dict, label: str) -> bool:
+  """Whether a ``PodSnapshotPolicy`` groups snapshots by ``label``
+  (``spec.snapshotGroupingRules.groupByLabelValue.labels``). Tolerates a missing
+  or malformed spec (False)."""
+  node = policy
+  for key in ("spec", "snapshotGroupingRules", "groupByLabelValue", "labels"):
+    if not isinstance(node, dict):
+      return False
+    node = node.get(key)
+  return isinstance(node, (list, tuple)) and label in node
 
 
 def preflight(registry, *, runtime_class: str | None = None,
@@ -245,7 +315,8 @@ def preflight(registry, *, runtime_class: str | None = None,
   for c in registry:
     rep = preflight_cluster(
         c, require_runtime_class=runtime_class,
-        image_pull_secret=image_pull_secret, namespace=namespace)
+        image_pull_secret=image_pull_secret, namespace=namespace,
+        snapshots=getattr(getattr(c, "config", None), "snapshots", False))
     reports[c.name] = rep
     for w in rep.warnings:
       logger.warning("[%s] %s: %s", c.name, w.name, w.detail)

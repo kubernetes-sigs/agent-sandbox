@@ -35,6 +35,12 @@ spec:
                 - Overrides
                 - Disallowed
                 type: string
+              failedPodPolicy:
+                default: Retain
+                enum:
+                - Retain
+                - Recreate
+                type: string
               networkPolicy:
                 properties:
                   egress:
@@ -226,17 +232,6 @@ spec:
                 - Managed
                 - Unmanaged
                 type: string
-              podFailurePolicy:
-                default:
-                  action: Ignore
-                properties:
-                  action:
-                    default: Ignore
-                    enum:
-                    - Ignore
-                    - Recreate
-                    type: string
-                type: object
               podTemplate:
                 properties:
                   metadata:

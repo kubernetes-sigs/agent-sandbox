@@ -136,6 +136,7 @@ export class SandboxConnectionError extends SandboxError {
  * small fixed enum. Never a free-form string.
  */
 export type SandboxdApiCode =
+  | "UNAUTHENTICATED"
   | "NOT_FOUND"
   | "PERMISSION_DENIED"
   | "CONFLICT"

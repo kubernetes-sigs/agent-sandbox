@@ -77,7 +77,7 @@ metadata:
     capabilities: Basic Install
     categories: AI/Machine Learning
     containerImage: registry.k8s.io/agent-sandbox/agent-sandbox-controller:v1.0.5
-    createdAt: "2026-10-08T11:52:20Z"
+    createdAt: "2026-10-18T11:16:52Z"
     operatorframework.io/suggested-namespace: agent-sandbox-system
     operators.operatorframework.io/builder: operator-sdk-v1.42.2
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
@@ -359,6 +359,7 @@ spec:
                 app.kubernetes.io/component: sandbox-router
                 app.kubernetes.io/name: sandbox-router
             spec:
+              automountServiceAccountToken: false
               containers:
               - args:
                 - --http-bind-address=:8080
@@ -411,6 +412,10 @@ spec:
                   runAsNonRoot: true
                   seccompProfile:
                     type: RuntimeDefault
+                volumeMounts:
+                - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+                  name: kubernetes-api-access
+                  readOnly: true
               serviceAccountName: sandbox-router
               terminationGracePeriodSeconds: 45
               topologySpreadConstraints:
@@ -426,6 +431,25 @@ spec:
                 maxSkew: 1
                 topologyKey: kubernetes.io/hostname
                 whenUnsatisfiable: ScheduleAnyway
+              volumes:
+              - name: kubernetes-api-access
+                projected:
+                  defaultMode: 292
+                  sources:
+                  - serviceAccountToken:
+                      expirationSeconds: 3600
+                      path: token
+                  - configMap:
+                      items:
+                      - key: ca.crt
+                        path: ca.crt
+                      name: kube-root-ca.crt
+                  - downwardAPI:
+                      items:
+                      - fieldRef:
+                          apiVersion: v1
+                          fieldPath: metadata.namespace
+                        path: namespace
     strategy: deployment
   installModes:
   - supported: false

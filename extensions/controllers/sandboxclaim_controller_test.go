@@ -1886,9 +1886,7 @@ func TestCreateSandboxPropagatesVolumeClaimTemplates(t *testing.T) {
 						},
 					},
 				},
-				PodFailurePolicy: &sandboxv1beta1.PodFailurePolicy{
-					Action: sandboxv1beta1.PodFailurePolicyActionRecreate,
-				},
+				FailedPodPolicy: sandboxv1beta1.FailedPodPolicyRecreate,
 			},
 		},
 	}
@@ -1929,8 +1927,8 @@ func TestCreateSandboxPropagatesVolumeClaimTemplates(t *testing.T) {
 	if !actualStorage.Equal(expectedStorage) {
 		t.Errorf("expected storage %s, got %s", expectedStorage.String(), actualStorage.String())
 	}
-	if sandbox.Spec.PodFailurePolicy == nil || sandbox.Spec.PodFailurePolicy.Action != sandboxv1beta1.PodFailurePolicyActionRecreate {
-		t.Fatalf("expected podFailurePolicy.action Recreate, got %#v", sandbox.Spec.PodFailurePolicy)
+	if sandbox.Spec.FailedPodPolicy != sandboxv1beta1.FailedPodPolicyRecreate {
+		t.Fatalf("expected failedPodPolicy Recreate, got %#v", sandbox.Spec.FailedPodPolicy)
 	}
 }
 

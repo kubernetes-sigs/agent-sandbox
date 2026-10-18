@@ -21,6 +21,7 @@ Requires the ``async`` optional dependencies::
 
 import atexit
 import asyncio
+import contextlib
 import logging
 import sys
 import tempfile
@@ -561,7 +562,11 @@ class AsyncSandboxClient(Generic[T]):
 
             # kubernetes registers its own atexit removal of extracted inline cert files, but Python drops
             # registrations made from inside a running atexit hook, so they go in a directory removed here.
-            with tempfile.TemporaryDirectory() as kube_config_dir:
+            # An injected api_client loads no kubeconfig, so it needs no directory.
+            kube_config_dir_cm = (
+                contextlib.nullcontext() if atexit_api_client is not None else tempfile.TemporaryDirectory()
+            )
+            with kube_config_dir_cm as kube_config_dir:
                 helper = K8sHelper(api_client=atexit_api_client, kube_config_temp_dir=kube_config_dir)
                 for ns, claim_name in (key for key, _ in tracked):
                     if (ns, claim_name) in self._explicit_claims:

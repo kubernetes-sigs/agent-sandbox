@@ -386,6 +386,35 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(atexit_api_client.cookie, "session=abc")
         self.assertEqual(atexit_api_client.default_headers.get("Impersonate-User"), "tenant-a")
 
+    def test_atexit_cleanup_with_injected_api_client_needs_no_temp_dir(self):
+        """An injected ApiClient loads no kubeconfig, so cleanup must not need a temp directory."""
+        injected_api_client = MagicMock(name="InjectedApiClient")
+        injected_api_client.configuration = async_client.Configuration(host="https://tenant-a.example.com")
+        injected_api_client.default_headers = {}
+        injected_api_client.cookie = None
+        client = AsyncSandboxClient(
+            connection_config=self.config,
+            cleanup=False,
+            api_client=injected_api_client,
+        )
+        client._active_connection_sandboxes = {("tenant-ns", "claim-abc"): MagicMock()}
+        mock_helper_instance = MagicMock()
+
+        with patch(
+            "k8s_agent_sandbox.async_sandbox_client.K8sHelper",
+            return_value=mock_helper_instance,
+        ) as MockHelper, patch(
+            "k8s_agent_sandbox.async_sandbox_client.tempfile.TemporaryDirectory",
+            side_effect=OSError("no usable temp dir"),
+        ) as mock_tmpdir:
+            client._atexit_cleanup()
+
+        mock_tmpdir.assert_not_called()
+        self.assertIsNone(MockHelper.call_args.kwargs["kube_config_temp_dir"])
+        mock_helper_instance.delete_sandbox_claim.assert_called_once_with(
+            "claim-abc", "tenant-ns", _request_timeout=_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS
+        )
+
     def test_atexit_cleanup_reflects_injected_client_state_at_cleanup_time_not_construction_time(self):
         injected_configuration = async_client.Configuration(host="https://old.example.com")
         injected_api_client = MagicMock(name="InjectedApiClient")

@@ -39,6 +39,12 @@ const (
 	// System-injected labels/annotations shouldn't be touched.
 	SandboxIDLabel = "agents.x-k8s.io/claim-uid"
 
+	// SandboxClaimNameAnnotation is the annotation key applied to the Pod to identify the
+	// owning Claim name. It is an annotation rather than a label because a claim name can
+	// exceed the 63 character label value limit. It is set only while a SandboxClaim owns
+	// the Sandbox, and users cannot set it through additionalPodMetadata.
+	SandboxClaimNameAnnotation = "agents.x-k8s.io/claim-name"
+
 	// NetworkPolicyManagementManaged means the controller will ensure a shared NetworkPolicy exists.
 	// This shared NetworkPolicy will be a user provide one or a default controller created policy.
 	// This is the default behavior if the field is omitted.

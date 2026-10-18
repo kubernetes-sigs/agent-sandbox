@@ -264,8 +264,10 @@ type SandboxBlueprint struct {
 	//     existing Pod. Other changes do not affect a running Pod; they take effect when the
 	//     controller next creates the Pod, for example after the Pod is deleted or the
 	//     Sandbox is resumed.
-	//   - On a SandboxTemplate, pod spec changes do not alter Sandboxes already created from
-	//     it. See SandboxWarmPool updateStrategy for how pooled sandboxes are refreshed.
+	//   - On a SandboxTemplate, pod spec changes do not update existing Sandboxes directly.
+	//     A SandboxWarmPool using Recreate deletes stale, unclaimed Sandboxes and creates
+	//     replacements from the updated template. OnReplenish leaves stale, unclaimed
+	//     Sandboxes in place. Claimed Sandboxes are never replaced.
 	// +required
 	PodTemplate PodTemplate `json:"podTemplate"`
 

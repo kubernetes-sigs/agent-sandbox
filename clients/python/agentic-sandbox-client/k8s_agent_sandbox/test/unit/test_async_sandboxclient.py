@@ -17,6 +17,7 @@
 import asyncio
 import json
 import os
+import shutil
 import ssl
 import subprocess
 import sys
@@ -384,6 +385,35 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(atexit_api_client.configuration.verify_ssl)
         self.assertEqual(atexit_api_client.cookie, "session=abc")
         self.assertEqual(atexit_api_client.default_headers.get("Impersonate-User"), "tenant-a")
+
+    def test_atexit_cleanup_with_injected_api_client_needs_no_temp_dir(self):
+        """An injected ApiClient loads no kubeconfig, so cleanup must not need a temp directory."""
+        injected_api_client = MagicMock(name="InjectedApiClient")
+        injected_api_client.configuration = async_client.Configuration(host="https://tenant-a.example.com")
+        injected_api_client.default_headers = {}
+        injected_api_client.cookie = None
+        client = AsyncSandboxClient(
+            connection_config=self.config,
+            cleanup=False,
+            api_client=injected_api_client,
+        )
+        client._active_connection_sandboxes = {("tenant-ns", "claim-abc"): MagicMock()}
+        mock_helper_instance = MagicMock()
+
+        with patch(
+            "k8s_agent_sandbox.async_sandbox_client.K8sHelper",
+            return_value=mock_helper_instance,
+        ) as MockHelper, patch(
+            "k8s_agent_sandbox.async_sandbox_client.tempfile.TemporaryDirectory",
+            side_effect=OSError("no usable temp dir"),
+        ) as mock_tmpdir:
+            client._atexit_cleanup()
+
+        mock_tmpdir.assert_not_called()
+        self.assertIsNone(MockHelper.call_args.kwargs["kube_config_temp_dir"])
+        mock_helper_instance.delete_sandbox_claim.assert_called_once_with(
+            "claim-abc", "tenant-ns", _request_timeout=_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS
+        )
 
     def test_atexit_cleanup_reflects_injected_client_state_at_cleanup_time_not_construction_time(self):
         injected_configuration = async_client.Configuration(host="https://old.example.com")
@@ -2031,7 +2061,7 @@ class TestAtexitCleanupRealInterpreterShutdown(unittest.TestCase):
     def setUp(self):
         SandboxClaimDeleteHandler.received_deletes = []
 
-    def _write_fake_kubeconfig(self) -> str:
+    def _write_fake_kubeconfig(self, server: str | None = None, user: str = "{}") -> str:
         fd, path = tempfile.mkstemp(suffix=".yaml")
         with os.fdopen(fd, "w") as f:
             f.write(f"""\
@@ -2039,7 +2069,7 @@ apiVersion: v1
 kind: Config
 clusters:
 - cluster:
-    server: http://127.0.0.1:{self.port}
+    server: {server or f"http://127.0.0.1:{self.port}"}
   name: test-cluster
 contexts:
 - context:
@@ -2049,13 +2079,13 @@ contexts:
 current-context: test-context
 users:
 - name: test-user
-  user: {{}}
+  user: {user}
 """)
         self.addCleanup(os.remove, path)
         return path
 
-    def test_atexit_cleanup_deletes_claim_on_real_process_exit(self):
-        kubeconfig_path = self._write_fake_kubeconfig()
+    def _run_atexit_script(self, kubeconfig_path: str, tmpdir: str | None = None) -> None:
+        """Runs a client that never closes, so only its atexit hook can delete the claim."""
         script = """
 import asyncio
 from k8s_agent_sandbox.async_sandbox_client import AsyncSandboxClient
@@ -2082,6 +2112,8 @@ asyncio.run(main())
         for k in ("KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT", "KUBERNETES_PORT"):
             env.pop(k, None)
         env["KUBECONFIG"] = kubeconfig_path
+        if tmpdir is not None:
+            env["TMPDIR"] = tmpdir
 
         result = subprocess.run(
             [sys.executable, "-c", script],
@@ -2093,10 +2125,29 @@ asyncio.run(main())
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("Traceback", result.stderr, result.stderr)
+
+    def test_atexit_cleanup_deletes_claim_on_real_process_exit(self):
+        self._run_atexit_script(self._write_fake_kubeconfig())
+
         self.assertEqual(
             SandboxClaimDeleteHandler.received_deletes,
             ["/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/default/sandboxclaims/claim-abc"],
         )
+
+    def test_atexit_cleanup_leaves_no_temp_cert_files(self):
+        """kubernetes extracts inline client-certificate-data of an https cluster to temp files and registers an
+        atexit hook to remove them, but Python drops registrations made from inside a running atexit hook, so the
+        files used to leak. The server is unreachable on purpose, since the files exist as soon as the config loads."""
+        leak_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, leak_dir, True)
+        kubeconfig_path = self._write_fake_kubeconfig(
+            server="https://127.0.0.1:1",
+            user="{client-certificate-data: Y2VydA==, client-key-data: a2V5}",
+        )
+
+        self._run_atexit_script(kubeconfig_path, tmpdir=leak_dir)
+
+        self.assertEqual(os.listdir(leak_dir), [])
 
 
 if __name__ == "__main__":

@@ -1276,6 +1276,40 @@ class TestTunnelConcurrency(unittest.TestCase):
         self.assertEqual(mock_popen.call_count, 1)
 
 
+class TestTunnelKubectlOutput(unittest.TestCase):
+    """kubectl's per-connection stdout log must not go to a pipe nobody reads."""
+
+    @patch.object(LocalTunnelConnectionStrategy, "_preflight_check_router_service")
+    @patch.object(LocalTunnelConnectionStrategy, "_is_port_open", return_value=True)
+    @patch("subprocess.Popen")
+    def test_local_tunnel_discards_kubectl_stdout(self, mock_popen, *_):
+        mock_popen.return_value.poll.return_value = None
+        strategy = LocalTunnelConnectionStrategy(
+            "sb", "ns", SandboxLocalTunnelConnectionConfig()
+        )
+
+        strategy.connect()
+
+        kwargs = mock_popen.call_args.kwargs
+        self.assertEqual(kwargs["stdout"], subprocess.DEVNULL)
+        self.assertEqual(kwargs["stderr"], subprocess.PIPE)
+
+    @patch.object(SandboxdPodTunnelStrategy, "_is_port_open", return_value=True)
+    @patch("subprocess.Popen")
+    def test_sandboxd_tunnel_discards_kubectl_stdout(self, mock_popen, _):
+        mock_popen.return_value.poll.return_value = None
+        strategy = SandboxdPodTunnelStrategy(
+            "sb", "ns", SandboxdPodTunnelConnectionConfig(),
+            get_pod_name=lambda: "sb-pod",
+        )
+
+        strategy.connect()
+
+        kwargs = mock_popen.call_args.kwargs
+        self.assertEqual(kwargs["stdout"], subprocess.DEVNULL)
+        self.assertEqual(kwargs["stderr"], subprocess.PIPE)
+
+
 class TestTunnelTargetsInjectedApiClient(unittest.TestCase):
     """kubectl must reach the cluster an injected ApiClient targets, not the ambient one."""
 

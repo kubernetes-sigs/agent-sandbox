@@ -33,6 +33,6 @@ By submitting this PR, you acknowledge our [Contributing Guidelines](https://git
   * We use CodeRabbit for initial reviews. Do NOT click "Commit suggestion" in the GitHub UI, as AI bots cannot sign the CLA and will block your PR. Please apply suggestions locally instead.
   * Once automated reviews finish the first pass, please resolve their comments so maintainers can review your PR!
 * PR TAKEOVERS: To speed up delivery, maintainers may push final changes and directly merge your PR if it is close to completion.
-* STALE POLICY: PRs inactive for 30 days are marked stale and closed 15 days later.
+* STALE POLICY: PRs inactive for 15 days are marked stale and closed 15 days later.
 =======================================================================
 -->

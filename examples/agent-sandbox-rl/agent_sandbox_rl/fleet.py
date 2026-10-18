@@ -51,6 +51,7 @@ from .exceptions import (
 from .handles import SandboxHandle
 from .observability import Observer, repo_family
 from .placement import get_placement
+from .snapshots import pod_restore_status
 from .sources import Task, to_tasks
 
 logger = logging.getLogger("agent_sandbox_rl.fleet")
@@ -641,7 +642,8 @@ class SandboxFleet:
           c, require_runtime_class=ts.runtime_class,
           image_pull_secret=ts.image_pull_secret, namespace=c.namespace,
           validate_template=ts, sample_image=sample_image,
-          unmanaged_pod_labels=unmanaged_labels)
+          unmanaged_pod_labels=unmanaged_labels,
+          snapshots=getattr(c.config, "snapshots", False))
       reports[c.name] = rep
       for w in rep.warnings:
         logger.warning("[%s] %s: %s", c.name, w.name, w.detail)
@@ -1250,8 +1252,17 @@ class SandboxFleet:
     return self
 
   # --- claims ------------------------------------------------------------ #
-  def acquire(self, task: Task) -> SandboxHandle:
+  def acquire(self, task: Task, *, snapshot_uid: str | None = None,
+              pod_annotations: dict | None = None) -> SandboxHandle:
     """Claim a sandbox for ``task`` and return a `SandboxHandle`.
+
+    ``pod_annotations`` are stamped onto the sandbox **pod** (the claim's
+    ``spec.additionalPodMetadata``). ``snapshot_uid`` is shorthand for the GKE
+    Pod Snapshot pin (``podsnapshot.gke.io/ps-name``): a pod created for this
+    claim boots restored from that snapshot instead of "latest Ready wins".
+    The pin applies at pod creation — a cold start (empty pool) honors it; an
+    adopted, already-running warm member does not until its next pod
+    (suspend → resume).
 
     On any failure between claim creation and bookkeeping, the partially-created
     sandbox is terminated and the on-demand replica bump is rolled back, so a
@@ -1272,15 +1283,21 @@ class SandboxFleet:
             "more, or raise the limit.")
       self._claims_reserved += 1
     try:
-      return self._acquire_reserved(task)
+      return self._acquire_reserved(task, snapshot_uid=snapshot_uid,
+                                    pod_annotations=pod_annotations)
     except Exception:
       with self._lock:
         self._claims_reserved = max(0, self._claims_reserved - 1)
       raise
 
-  def _acquire_reserved(self, task: Task) -> SandboxHandle:
+  def _acquire_reserved(self, task: Task, *, snapshot_uid: str | None = None,
+                        pod_annotations: dict | None = None) -> SandboxHandle:
     # Body of acquire(); the caller holds one slot in _claims_reserved and
     # releases it if this raises.
+    annotations = dict(pod_annotations or {})
+    if snapshot_uid:
+      annotations[constants.PODSNAPSHOT_NAME_ANNOTATION] = snapshot_uid
+    extra = {"pod_annotations": annotations} if annotations else {}
     entry = self.plan_.for_image(task.image) if self.plan_ else None
     on_demand = entry is None
     if not on_demand:
@@ -1327,7 +1344,7 @@ class SandboxFleet:
         sandbox = cluster.sandbox_client.create_sandbox(
             warmpool=pool, namespace=cluster.namespace,
             sandbox_ready_timeout=self.config.ready_timeout,
-            labels=dict(self.config.labels))
+            labels=dict(self.config.labels), **extra)
         pod = sandbox.get_pod_name()
         try:
           pod_ip = sandbox.get_pod_ip()
@@ -1394,6 +1411,23 @@ class SandboxFleet:
           "been terminated. Call setup() before acquiring again.")
     cluster.reserve_claim()
     self._obs.claim(cluster.name, "ok")
+    if snapshot_uid:
+      # Warm adoption is the default plan path, and an adopted pod is already
+      # running, so the pin did nothing there. Say so once, and keep it visible
+      # on the handle so the caller can suspend + resume (or restore) to apply it.
+      status = pod_restore_status(cluster.core_api, pod, cluster.namespace)
+      if status.from_snapshot(snapshot_uid):
+        logger.info("claim %s: pod %s was restored from the pinned snapshot %s",
+                    handle.claim_name, pod, snapshot_uid)
+      else:
+        handle.pending_snapshot_uid = snapshot_uid
+        why = ("was adopted already running" if status.restored is False
+               else f"PodRestored could not be read ({status.message})")
+        logger.info("claim %s: pin to snapshot %s is not applied — pod %s %s; it "
+                    "applies to the sandbox's next pod (fleet.suspend + "
+                    "fleet.resume) or call fleet.restore(handle, %r); see "
+                    "handle.pending_snapshot_uid",
+                    handle.claim_name, snapshot_uid, pod, why, snapshot_uid)
     return handle
 
   def acquire_batch(self, tasks: list[Task]) -> list[SandboxHandle]:
@@ -1408,7 +1442,12 @@ class SandboxFleet:
   def endpoints(self, port: int = 8888) -> list[str]:
     return [h.endpoint(port) for h in self._handles]
 
-  def release(self, handle: SandboxHandle) -> None:
+  def release(self, handle: SandboxHandle, *, delete_snapshots: bool = False) -> None:
+    """Release ``handle`` (delete its claim). With ``delete_snapshots`` also
+    delete the sandbox's GKE Pod Snapshots, which outlive the claim (and cost
+    storage) otherwise. They are listed before the release and deleted only after
+    it succeeds, so a failed release leaves a live sandbox with its checkpoints
+    intact for the retry. Snapshot cleanup failures are logged, never raised."""
     # Claim the handle under the lock first, so a concurrent double-release of the
     # same handle issues the remote delete (and counter decrement) exactly once.
     with self._lock:
@@ -1416,6 +1455,19 @@ class SandboxFleet:
         return
       self._handles.remove(handle)
       c = self.registry.get(handle.cluster_name)
+    snapshot_uids: list = []
+    delete_snapshot = None
+    if delete_snapshots:
+      # Only read here: deleting is irreversible, so it waits for the release.
+      # The list goes to the API server by label with a short timeout (see
+      # _snapshot_uids_by_label) so an eviction never waits on the sandbox it
+      # is evicting.
+      try:
+        snapshot_uids = self._snapshot_uids_by_label(handle, c)
+        delete_snapshot = handle.snapshot_deleter()
+      except Exception:  # noqa: BLE001 — best-effort hygiene, release must proceed
+        logger.warning("release: could not list snapshots of %s; they are kept",
+                       handle.sandbox_id, exc_info=True)
     try:
       with self._obs.phase("release", cluster=handle.cluster_name):
         handle.release()
@@ -1427,9 +1479,135 @@ class SandboxFleet:
       with self._lock:
         self._handles.append(handle)
       raise
-    c.release_claim()
+    # A suspended handle gave its slot back at suspend time (see suspend()).
+    if not handle._slot_released:
+      c.release_claim()
+      with self._lock:
+        self._claims_reserved = max(0, self._claims_reserved - 1)
+    for uid in snapshot_uids:
+      try:
+        delete_snapshot(uid)
+      except Exception:  # noqa: BLE001 — the claim is gone; report and move on
+        logger.warning("release: could not delete snapshot %s of %s", uid,
+                       handle.sandbox_id, exc_info=True)
+
+  # --- GKE Pod Snapshots (opt-in: ClusterConfig(snapshots=True)) ----------- #
+  # Thin, timed wrappers over the SandboxHandle primitives so the run report
+  # (and metrics/spans) see snapshot work next to claim/process/release, plus
+  # the claim-slot bookkeeping a suspend/resume cycle needs.
+  _SNAPSHOT_LIST_TIMEOUT = (3, 10)      # (connect, read) seconds
+
+  def _snapshot_uids_by_label(self, handle: SandboxHandle, cluster) -> list[str]:
+    """The uids of ``handle``'s PodSnapshots, listed by the sandbox's name-hash
+    label with a short request timeout. The engine's own ``list()`` resolves the
+    sandbox through the SDK object with no timeout; this reads the Sandbox's
+    ``status.labelSelector`` and the PodSnapshots directly, both bounded, so a
+    release never waits on the sandbox it is releasing."""
+    sb = cluster.custom_api.get_namespaced_custom_object(
+        constants.SANDBOX_GROUP, constants.SANDBOX_VERSION, cluster.namespace,
+        constants.SANDBOXES_PLURAL, handle.sandbox_id,
+        _request_timeout=self._SNAPSHOT_LIST_TIMEOUT)
+    selector = ((sb or {}).get("status") or {}).get("labelSelector")
+    if not selector:
+      raise FleetError(f"sandbox {handle.sandbox_id!r} has no status.labelSelector "
+                       "yet; its snapshots cannot be listed by label")
+    resp = cluster.custom_api.list_namespaced_custom_object(
+        constants.PODSNAPSHOT_GROUP, constants.PODSNAPSHOT_VERSION, cluster.namespace,
+        constants.PODSNAPSHOTS_PLURAL, label_selector=selector,
+        _request_timeout=self._SNAPSHOT_LIST_TIMEOUT)
+    uids = []
+    for item in (resp or {}).get("items") or []:
+      name = (item.get("metadata") or {}).get("name")
+      if name:
+        uids.append(name)
+    return uids
+
+  def _free_slot_for_suspend(self, handle: SandboxHandle) -> None:
+    """A suspended sandbox has no pod: give its claim slot back to
+    ``max_live_sandboxes`` and the cluster's claim count. Idempotent per handle."""
     with self._lock:
+      if handle._slot_released:
+        return
+      handle._slot_released = True
       self._claims_reserved = max(0, self._claims_reserved - 1)
+    self.registry.get(handle.cluster_name).release_claim()
+
+  def _retake_slot_for_wake(self, handle: SandboxHandle) -> bool:
+    """Before a resume/restore brings the pod back: take a claim slot again, or
+    raise `FleetOvercommitError` without touching the sandbox. Returns whether a
+    slot was taken (False when the handle never gave one back)."""
+    with self._lock:
+      if not handle._slot_released:
+        return False
+      hard = self.config.max_live_sandboxes
+      if hard and self._claims_reserved >= hard:
+        raise FleetOvercommitError(
+            f"max_live_sandboxes={hard} reached: {self._claims_reserved} claims "
+            f"live or in flight on this fleet, so {handle.sandbox_id} stays "
+            "suspended. Release or suspend other handles first, or raise the limit.")
+      self._claims_reserved += 1
+      handle._slot_released = False
+    self.registry.get(handle.cluster_name).reserve_claim()
+    return True
+
+  def snapshot(self, handle: SandboxHandle, name: str | None = None, *,
+               timeout: int = 180) -> str:
+    """Snapshot ``handle``'s sandbox (memory + filesystem); returns the uid."""
+    with self._obs.phase("snapshot", cluster=handle.cluster_name,
+                         family=repo_family(handle.task)):
+      return handle.snapshot(name, timeout=timeout)
+
+  def suspend(self, handle: SandboxHandle, *, snapshot: bool = True,
+              timeout: int = 180) -> Optional[str]:
+    """Suspend ``handle``'s sandbox (pod deleted, claim kept); returns the
+    pre-suspend snapshot uid (None when ``snapshot=False``, in which case
+    ``resume`` restores the latest older snapshot if one exists; see
+    `SandboxHandle.suspend`).
+
+    The handle stays tracked, but its claim slot is given back: a suspended
+    sandbox has no pod, so it no longer counts toward ``max_live_sandboxes`` or
+    the cluster's claim count, and ``resume`` / ``restore`` take a slot again
+    (raising `FleetOvercommitError` at the cap before touching the sandbox).
+    What suspension does not create is warm capacity: the claim still holds its
+    sandbox, so the pool does not refill for it. Calling ``handle.suspend()``
+    directly skips this bookkeeping."""
+    with self._obs.phase("suspend", cluster=handle.cluster_name,
+                         family=repo_family(handle.task)):
+      uid = handle.suspend(snapshot=snapshot, timeout=timeout)
+    self._free_slot_for_suspend(handle)
+    return uid
+
+  def resume(self, handle: SandboxHandle, *, timeout: int = 180) -> bool:
+    """Resume ``handle``'s sandbox (latest snapshot if any); returns whether it
+    was restored from a snapshot. The handle is refreshed (new pod) and its
+    claim slot taken again (see `suspend`)."""
+    retaken = self._retake_slot_for_wake(handle)
+    try:
+      with self._obs.phase("resume", cluster=handle.cluster_name,
+                           family=repo_family(handle.task)):
+        restored = handle.resume(timeout=timeout)
+    except Exception:
+      if retaken:
+        self._free_slot_for_suspend(handle)    # still suspended: slot goes back
+      raise
+    self._obs.restored(handle.cluster_name, restored)
+    return restored
+
+  def restore(self, handle: SandboxHandle, snapshot_uid: str, *,
+              timeout: int = 180) -> None:
+    """Restore ``handle``'s (suspended) sandbox from ``snapshot_uid``; the SDK
+    verifies the pod's ``PodRestored`` condition. The handle is refreshed and
+    its claim slot taken again (see `suspend`)."""
+    retaken = self._retake_slot_for_wake(handle)
+    try:
+      with self._obs.phase("restore", cluster=handle.cluster_name,
+                           family=repo_family(handle.task)):
+        handle.restore(snapshot_uid, timeout=timeout)
+    except Exception:
+      if retaken:
+        self._free_slot_for_suspend(handle)
+      raise
+    self._obs.restored(handle.cluster_name, True)
 
   def release_all(self) -> None:
     for h in list(self._handles):
@@ -1557,6 +1735,16 @@ class SandboxFleet:
     self.teardown()
 
   # --- managed runner ---------------------------------------------------- #
+  @contextlib.contextmanager
+  def recording(self, label: str = "manual"):
+    """Record a `RunReport` around primitive calls made outside ``run()``
+    (acquire / snapshot / suspend / resume / restore / release …). Sets
+    ``fleet.report`` for the duration (and leaves it set); ``label`` fills the
+    report's ``strategy`` field. ``run()`` records on its own — don't nest."""
+    with self._obs.run(label) as report:
+      self.report = report
+      yield report
+
   def run(self, process_fn: Callable[[Task, SandboxHandle], object],
           strategy: str = "naive", concurrency: int | None = None,
           *, epochs: int = 1, keep_warm: bool = False,

@@ -26,6 +26,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -154,50 +155,76 @@ func claimLifecycle(now time.Time, ttl time.Duration) *extv1beta1.Lifecycle {
 	}
 }
 
-// createClaim creates a SandboxClaim and returns its generated name.
-func (h *K8sHelper) createClaim(ctx context.Context, namespace, warmPoolName string, env []extv1beta1.EnvVar, labels map[string]string, shutdownAfter time.Duration, tracer trace.Tracer, svcName string) (string, error) {
-	ctx, span := startSpan(ctx, tracer, svcName, "create_claim")
-	defer span.End()
-
-	var annotations map[string]string
-	if traceCtx := traceContextJSON(ctx); traceCtx != "" {
-		annotations = map[string]string{
-			"opentelemetry.io/trace-context": traceCtx,
-		}
-	}
-	now := time.Now()
-	annotations = stampClientRequestTime(annotations, now)
-
-	claimLabels := make(map[string]string, len(labels)+1)
-	maps.Copy(claimLabels, labels)
+// newClaim builds the SandboxClaim that Open creates from opts. The claim
+// shares opts' maps and slices, so callers must not mutate its spec.
+func newClaim(opts *Options, now time.Time) *extv1beta1.SandboxClaim {
+	claimLabels := make(map[string]string, len(opts.Labels)+1)
+	maps.Copy(claimLabels, opts.Labels)
 	claimLabels[sandboxv1beta1.CreatedByLabel] = "go-client"
 
 	claim := &extv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: "sandbox-claim-",
-			Namespace:    namespace,
-			Annotations:  annotations,
-			Labels:       claimLabels,
+			Namespace:   opts.Namespace,
+			Annotations: stampClientRequestTime(nil, now),
+			Labels:      claimLabels,
 		},
 		Spec: extv1beta1.SandboxClaimSpec{
 			WarmPoolRef: extv1beta1.SandboxWarmPoolRef{
-				Name: warmPoolName,
+				Name: opts.WarmPoolName,
 			},
-			Env:       env,
-			Lifecycle: claimLifecycle(now, shutdownAfter),
+			Env:                  opts.Env,
+			Lifecycle:            claimLifecycle(now, opts.ShutdownAfter),
+			VolumeClaimTemplates: opts.VolumeClaimTemplates,
 		},
 	}
+	if opts.ClaimName != "" {
+		claim.Name = opts.ClaimName
+	} else {
+		claim.GenerateName = "sandbox-claim-"
+	}
+	if len(opts.PodLabels) > 0 {
+		claim.Spec.AdditionalPodMetadata.Labels = opts.PodLabels
+	}
+	if len(opts.PodAnnotations) > 0 {
+		claim.Spec.AdditionalPodMetadata.Annotations = opts.PodAnnotations
+	}
+	return claim
+}
 
+// createClaim creates claim and returns the stored object. Errors, including
+// AlreadyExists, are wrapped in ErrClaimFailed.
+func (h *K8sHelper) createClaim(ctx context.Context, claim *extv1beta1.SandboxClaim, tracer trace.Tracer, svcName string) (*extv1beta1.SandboxClaim, error) {
+	ctx, span := startSpan(ctx, tracer, svcName, "create_claim")
+	defer span.End()
+
+	if traceCtx := traceContextJSON(ctx); traceCtx != "" {
+		claim.Annotations["opentelemetry.io/trace-context"] = traceCtx
+	}
+
+	namespace := claim.Namespace
 	created, err := h.ExtensionsClient.SandboxClaims(namespace).Create(ctx, claim, metav1.CreateOptions{})
 	if err != nil {
 		recordError(span, err)
-		return "", fmt.Errorf("%w: warmpool=%s namespace=%s: %w", ErrClaimFailed, warmPoolName, namespace, err)
+		return nil, fmt.Errorf("%w: warmpool=%s namespace=%s: %w", ErrClaimFailed, claim.Spec.WarmPoolRef.Name, namespace, err)
 	}
 
-	name := created.Name
+	span.SetAttributes(AttrClaimName.String(created.Name))
+	h.Log.Info("claim created", "claim", created.Name, "namespace", namespace)
+	return created, nil
+}
+
+// getClaim fetches a SandboxClaim.
+func (h *K8sHelper) getClaim(ctx context.Context, name, namespace string, tracer trace.Tracer, svcName string) (*extv1beta1.SandboxClaim, error) {
+	ctx, span := startSpan(ctx, tracer, svcName, "get_claim")
+	defer span.End()
+
+	claim, err := h.ExtensionsClient.SandboxClaims(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		recordError(span, err)
+		return nil, err
+	}
 	span.SetAttributes(AttrClaimName.String(name))
-	h.Log.Info("claim created", "claim", name, "namespace", namespace)
-	return name, nil
+	return claim, nil
 }
 
 // deleteClaim deletes a SandboxClaim. Returns nil if the claim is already gone.
@@ -222,8 +249,7 @@ func (h *K8sHelper) deleteClaim(ctx context.Context, name, namespace string) err
 // extensions/controllers/sandboxclaim_controller.go). Transient reasons such as
 // AdoptionPending, SandboxMissing, SandboxNotReady and ReconcilerError are
 // left out because the controller recovers from them. Kept in sync with
-// TERMINAL_CLAIM_READY_REASONS in the Python and TypeScript SDKs, plus the
-// finished-Pod reasons, which the Sandbox controller never recovers from.
+// TERMINAL_CLAIM_READY_REASONS in the Python and TypeScript SDKs.
 var terminalReadyReasons = map[string]bool{
 	"InvalidMetadata":                                true,
 	"EnvVarsInjectionRejected":                       true,
@@ -279,10 +305,27 @@ func sandboxFailure(sb *sandboxv1beta1.Sandbox) error {
 	return terminalFailure("sandbox", sb.Name, currentNotReady(sb.Status.Conditions, sb.Generation))
 }
 
+// claimIdentityFailure returns ErrSandboxDeleted when claim is no longer the
+// object Open created or adopted: a same-name replacement with another UID, or
+// the original being deleted. An empty expectedUID disables the check.
+func claimIdentityFailure(claim *extv1beta1.SandboxClaim, expectedUID types.UID) error {
+	if expectedUID == "" {
+		return nil
+	}
+	if claim.UID != expectedUID {
+		return fmt.Errorf("%w: claim %s was replaced (uid %s, want %s)", ErrSandboxDeleted, claim.Name, claim.UID, expectedUID)
+	}
+	if claim.DeletionTimestamp != nil {
+		return fmt.Errorf("%w: claim %s is terminating", ErrSandboxDeleted, claim.Name)
+	}
+	return nil
+}
+
 // resolveSandboxName watches SandboxClaim status until the sandbox name is
 // populated. With warm pool, the sandbox name may differ from the claim name.
-// It returns early with a claimFailure error if the claim can never become ready.
-func (h *K8sHelper) resolveSandboxName(ctx context.Context, claimName, namespace string, timeout time.Duration, tracer trace.Tracer, svcName string) (string, error) {
+// It returns early with a claimFailure error if the claim can never become ready,
+// and, when expectedUID is set, if the claim is replaced or starts terminating.
+func (h *K8sHelper) resolveSandboxName(ctx context.Context, claimName, namespace string, expectedUID types.UID, timeout time.Duration, tracer trace.Tracer, svcName string) (string, error) {
 	ctx, span := startSpan(ctx, tracer, svcName, "resolve_sandbox_name")
 	defer span.End()
 
@@ -299,6 +342,10 @@ func (h *K8sHelper) resolveSandboxName(ctx context.Context, claimName, namespace
 	for {
 		claim, err := h.ExtensionsClient.SandboxClaims(namespace).Get(ctx, claimName, metav1.GetOptions{})
 		if err == nil {
+			if failure := claimIdentityFailure(claim, expectedUID); failure != nil {
+				recordError(span, failure)
+				return "", failure
+			}
 			if failure := claimFailure(claim); failure != nil {
 				recordError(span, failure)
 				return "", failure
@@ -331,7 +378,7 @@ func (h *K8sHelper) resolveSandboxName(ctx context.Context, claimName, namespace
 			continue
 		}
 
-		name, done, watchErr := h.drainClaimWatch(ctx, watcher, claimName, timeout)
+		name, done, watchErr := h.drainClaimWatch(ctx, watcher, claimName, expectedUID, timeout)
 		watcher.Stop()
 		if done {
 			h.Log.Info("sandbox name resolved", "claim", claimName, "sandbox", name)
@@ -351,7 +398,7 @@ func (h *K8sHelper) resolveSandboxName(ctx context.Context, claimName, namespace
 	}
 }
 
-func (h *K8sHelper) drainClaimWatch(ctx context.Context, watcher watch.Interface, claimName string, timeout time.Duration) (string, bool, error) {
+func (h *K8sHelper) drainClaimWatch(ctx context.Context, watcher watch.Interface, claimName string, expectedUID types.UID, timeout time.Duration) (string, bool, error) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -370,6 +417,9 @@ func (h *K8sHelper) drainClaimWatch(ctx context.Context, watcher watch.Interface
 			claim, ok := event.Object.(*extv1beta1.SandboxClaim)
 			if !ok {
 				continue
+			}
+			if failure := claimIdentityFailure(claim, expectedUID); failure != nil {
+				return "", false, failure
 			}
 			if failure := claimFailure(claim); failure != nil {
 				return "", false, failure

@@ -146,6 +146,24 @@ export interface ResolvedSandboxdOptions {
   maxUploadSize: number;
   maxMetadataResponseSize: number;
   maxCommandOutputSize: number;
+  /** Full `Authorization` header value ("Bearer <token>"), if configured. */
+  authorization?: string;
+}
+
+// Printable ASCII without spaces, so the value is always a legal header value.
+// An illegal one would make fetch() throw an error that quotes the token.
+const AUTH_TOKEN_RE = /^[\x21-\x7e]+$/;
+
+function bearerAuthorization(token: string | undefined): string | undefined {
+  if (token === undefined) return undefined;
+  // The message must not echo the token.
+  if (typeof token !== "string" || !AUTH_TOKEN_RE.test(token)) {
+    throw new SandboxError(
+      "sandboxd.authToken must be a non-empty string of printable ASCII characters with no spaces",
+      { telemetryCode: "invalid_argument" },
+    );
+  }
+  return `Bearer ${token}`;
 }
 
 function validateBoundedInt(
@@ -211,6 +229,7 @@ export function normalizeSandboxdOptions(
         opts?.maxCommandOutputSize,
         0xffffffff,
       ) ?? DEFAULT_MAX_COMMAND_OUTPUT_SIZE,
+    authorization: bearerAuthorization(opts?.authToken),
   };
   // With in-cluster connectivity both would dial the same pod address, so
   // REST and gRPC must be on distinct ports; the Go client rejects this too.
@@ -819,12 +838,14 @@ export class Sandbox {
         maxDownloadSize: this.sandboxdOptions.maxDownloadSize,
         maxUploadSize: this.sandboxdOptions.maxUploadSize,
         maxMetadataResponseSize: this.sandboxdOptions.maxMetadataResponseSize,
+        authorization: this.sandboxdOptions.authorization,
       });
       await this.waitForHealthy(rest, transport, signal);
 
       const process = new ProcessClient({
         grpcBaseUrl: transport.grpcBaseUrl,
         maxCommandOutputSize: this.sandboxdOptions.maxCommandOutputSize,
+        authorization: this.sandboxdOptions.authorization,
       });
 
       return {

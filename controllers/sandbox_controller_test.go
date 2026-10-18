@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -45,6 +47,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
@@ -5388,6 +5391,256 @@ func TestSandboxReconcile_ConditionsDoNotAccumulate(t *testing.T) {
 	// Steady state for a running, ready sandbox: Suspended, PodScheduled, Ready.
 	require.Len(t, got.Status.Conditions, 3,
 		"conditions slice must not grow across %d reconcile iterations — controller must upsert not append", iters)
+}
+
+func TestRecordSandboxCreationMetrics(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		launchType string
+		template   string
+	}{
+		{name: "direct", launchType: "cold", template: "__unknown__"},
+		{name: "claim", launchType: "cold", template: "test-template"},
+		{name: "warm pool", launchType: "warm", template: "test-template"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			asmetrics.SandboxCreationLatency.Reset()
+			createdAt := metav1.NewTime(time.Now().UTC().Add(-10 * time.Second).Truncate(time.Second))
+			readyAt := metav1.NewTime(createdAt.Add(5 * time.Second))
+			sandbox := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "sandbox-metrics", Namespace: "default", UID: "metrics-uid",
+					CreationTimestamp: createdAt,
+					Labels:            map[string]string{sandboxv1beta1.SandboxLaunchTypeLabel: tc.launchType},
+				},
+			}
+			if tc.template != "__unknown__" {
+				sandbox.Annotations = map[string]string{sandboxv1beta1.SandboxTemplateRefAnnotation: tc.template}
+			}
+			r := &SandboxReconciler{Client: newFakeClient(sandbox)}
+			watch := r.sandboxCreationMetricsPredicate()
+			require.True(t, watch.Create(event.CreateEvent{Object: sandbox}))
+			oldStatus := sandbox.Status.DeepCopy()
+			r.recordSandboxCreationMetrics(t.Context(), sandbox, oldStatus)
+			require.Contains(t, r.pendingCreationMetrics, sandbox.UID, "NotReady must retain eligibility")
+			sandbox.Status.Conditions = []metav1.Condition{{
+				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue,
+				LastTransitionTime: readyAt,
+			}}
+			require.NoError(t, r.updateStatus(t.Context(), oldStatus, sandbox))
+			r.recordSandboxCreationMetrics(t.Context(), sandbox, oldStatus)
+			require.Empty(t, r.pendingCreationMetrics)
+
+			// Both ordinary updates and a later readiness flap leave the UID excluded.
+			notReady := sandbox.DeepCopy()
+			notReady.Status.Conditions[0].Status = metav1.ConditionFalse
+			require.True(t, watch.Update(event.UpdateEvent{ObjectOld: sandbox, ObjectNew: notReady}))
+			r.recordSandboxCreationMetrics(t.Context(), notReady, &sandbox.Status)
+			flappedReady := sandbox.DeepCopy()
+			flappedReady.Status.Conditions[0].LastTransitionTime = metav1.NewTime(readyAt.Add(20 * time.Second))
+			require.True(t, watch.Update(event.UpdateEvent{ObjectOld: notReady, ObjectNew: flappedReady}))
+			r.recordSandboxCreationMetrics(t.Context(), flappedReady, &notReady.Status)
+			require.Empty(t, r.pendingCreationMetrics)
+
+			metrics := make(chan prometheus.Metric, 1)
+			asmetrics.SandboxCreationLatency.Collect(metrics)
+			metric := <-metrics
+			collected := &dto.Metric{}
+			require.NoError(t, metric.Write(collected))
+			assert.Equal(t, uint64(1), collected.GetHistogram().GetSampleCount())
+			assert.InDelta(t, float64(5000), collected.GetHistogram().GetSampleSum(), 0.001)
+			labelValues := make(map[string]string)
+			for _, label := range collected.GetLabel() {
+				labelValues[label.GetName()] = label.GetValue()
+			}
+			assert.Equal(t, "default", labelValues["namespace"])
+			assert.Equal(t, tc.launchType, labelValues["launch_type"])
+			assert.Equal(t, tc.template, labelValues["sandbox_template"])
+		})
+	}
+}
+
+func TestSandboxCreationMetricsInitialInventory(t *testing.T) {
+	for _, initialState := range []metav1.ConditionStatus{metav1.ConditionTrue, metav1.ConditionFalse, metav1.ConditionUnknown} {
+		t.Run(string(initialState), func(t *testing.T) {
+			asmetrics.SandboxCreationLatency.Reset()
+			sandbox := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "existing", Namespace: "default", UID: "existing-uid",
+					CreationTimestamp: metav1.NewTime(time.Now().Add(-time.Hour)),
+				},
+				Status: sandboxv1beta1.SandboxStatus{Conditions: []metav1.Condition{{
+					Type: string(sandboxv1beta1.SandboxConditionReady), Status: initialState,
+					LastTransitionTime: metav1.NewTime(time.Now().Add(-time.Minute)),
+				}}},
+			}
+			// A fresh reconciler represents a restart or upgrade. The initial
+			// inventory can contain a Ready, still-starting, or suspended Sandbox.
+			r := &SandboxReconciler{}
+			watch := r.sandboxCreationMetricsPredicate()
+			require.True(t, watch.Create(event.CreateEvent{Object: sandbox, IsInInitialList: true}))
+			require.Empty(t, r.pendingCreationMetrics)
+			notReady := sandbox.DeepCopy()
+			notReady.Status.Conditions[0].Status = metav1.ConditionFalse
+			notReady.Status.Conditions[0].Reason = sandboxv1beta1.SandboxReasonSuspended
+			require.True(t, watch.Update(event.UpdateEvent{ObjectOld: sandbox, ObjectNew: notReady}))
+			ready := notReady.DeepCopy()
+			ready.Status.Conditions[0].Status = metav1.ConditionTrue
+			ready.Status.Conditions[0].LastTransitionTime = metav1.Now()
+			require.True(t, watch.Update(event.UpdateEvent{ObjectOld: notReady, ObjectNew: ready}))
+			r.recordSandboxCreationMetrics(t.Context(), ready, &notReady.Status)
+			assert.Zero(t, testutil.CollectAndCount(asmetrics.SandboxCreationLatency))
+			assert.Empty(t, r.pendingCreationMetrics)
+		})
+	}
+}
+
+func TestSandboxCreationMetricsWatchLifecycle(t *testing.T) {
+	asmetrics.SandboxCreationLatency.Reset()
+	r := &SandboxReconciler{}
+	watch := r.sandboxCreationMetricsPredicate()
+	original := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "same-name", Namespace: "default", UID: "old-uid"}}
+	require.True(t, watch.Create(event.CreateEvent{Object: original}))
+	require.Contains(t, r.pendingCreationMetrics, original.UID)
+
+	replacement := original.DeepCopy()
+	replacement.UID = "new-uid"
+	require.True(t, watch.Update(event.UpdateEvent{ObjectOld: original, ObjectNew: replacement}))
+	require.NotContains(t, r.pendingCreationMetrics, original.UID)
+	require.Contains(t, r.pendingCreationMetrics, replacement.UID)
+	// A late deletion of the old UID cannot drop the replacement's eligibility.
+	require.True(t, watch.Delete(event.DeleteEvent{Object: original, DeleteStateUnknown: true}))
+	require.Contains(t, r.pendingCreationMetrics, replacement.UID)
+	require.True(t, watch.Delete(event.DeleteEvent{Object: replacement}))
+	require.Empty(t, r.pendingCreationMetrics)
+
+	// Objects first observed already Ready have no recoverable initial transition.
+	alreadyReady := replacement.DeepCopy()
+	alreadyReady.Status.Conditions = []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue}}
+	require.True(t, watch.Create(event.CreateEvent{Object: alreadyReady}))
+	require.Empty(t, r.pendingCreationMetrics)
+}
+
+func TestSandboxCreationMetricsInvalidTimestamps(t *testing.T) {
+	createdAt := metav1.NewTime(time.Now().Add(-time.Minute).Truncate(time.Second))
+	for _, tc := range []struct {
+		name      string
+		createdAt metav1.Time
+		readyAt   metav1.Time
+	}{
+		{name: "missing creation time", readyAt: metav1.Now()},
+		{name: "missing Ready time", createdAt: createdAt},
+		{name: "negative latency", createdAt: createdAt, readyAt: metav1.NewTime(createdAt.Add(-time.Second))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			asmetrics.SandboxCreationLatency.Reset()
+			r := &SandboxReconciler{}
+			sandbox := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{
+				Name: "invalid", Namespace: "default", UID: "invalid-uid", CreationTimestamp: tc.createdAt,
+			}}
+			require.True(t, r.sandboxCreationMetricsPredicate().Create(event.CreateEvent{Object: sandbox}))
+			oldStatus := sandbox.Status.DeepCopy()
+			sandbox.Status.Conditions = []metav1.Condition{{
+				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue, LastTransitionTime: tc.readyAt,
+			}}
+			r.recordSandboxCreationMetrics(t.Context(), sandbox, oldStatus)
+			require.Empty(t, r.pendingCreationMetrics)
+			// A later valid timestamp cannot turn recovery into a creation sample.
+			sandbox.Status.Conditions[0].LastTransitionTime = metav1.Now()
+			r.recordSandboxCreationMetrics(t.Context(), sandbox, oldStatus)
+			assert.Zero(t, testutil.CollectAndCount(asmetrics.SandboxCreationLatency))
+		})
+	}
+}
+
+func TestSandboxCreationMetricsConcurrentEvents(t *testing.T) {
+	r := &SandboxReconciler{}
+	watch := r.sandboxCreationMetricsPredicate()
+	var workers sync.WaitGroup
+	for i := range 50 {
+		workers.Go(func() {
+			sandbox := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{UID: types.UID(fmt.Sprintf("metrics-%d", i))}}
+			watch.Create(event.CreateEvent{Object: sandbox})
+			ready := sandbox.DeepCopy()
+			ready.Status.Conditions = []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue}}
+			watch.Update(event.UpdateEvent{ObjectOld: sandbox, ObjectNew: ready})
+			r.recordSandboxCreationMetrics(t.Context(), ready, &sandbox.Status)
+			watch.Delete(event.DeleteEvent{Object: ready})
+		})
+	}
+	workers.Wait()
+	require.Empty(t, r.pendingCreationMetrics)
+}
+
+func TestSandboxCreationMetricsStatusRetry(t *testing.T) {
+	asmetrics.SandboxCreationLatency.Reset()
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "metrics-retry", Namespace: "default", UID: sandboxUID,
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-time.Minute).Truncate(time.Second)),
+		},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+			PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}},
+			}},
+		}},
+	}
+	r := &SandboxReconciler{Client: newFakeClient(sandbox), Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+	watch := r.sandboxCreationMetricsPredicate()
+	require.True(t, watch.Create(event.CreateEvent{Object: sandbox}))
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sandbox)}
+	_, err := r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	require.Contains(t, r.pendingCreationMetrics, sandbox.UID)
+
+	pod := &corev1.Pod{}
+	require.NoError(t, r.Get(t.Context(), req.NamespacedName, pod))
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.PodIPs = []corev1.PodIP{{IP: "10.0.0.8"}}
+	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+	require.NoError(t, r.Status().Update(t.Context(), pod))
+	inner := r.Client.(client.WithWatch)
+	patchErr := errors.New("status unavailable")
+	r.Client = interceptor.NewClient(inner, interceptor.Funcs{
+		SubResourcePatch: func(_ context.Context, _ client.Client, _ string, _ client.Object, _ client.Patch, _ ...client.SubResourcePatchOption) error {
+			return patchErr
+		},
+	})
+	_, err = r.Reconcile(t.Context(), req)
+	require.ErrorIs(t, err, patchErr)
+	require.Contains(t, r.pendingCreationMetrics, sandbox.UID, "a failed status write must retain eligibility")
+	assert.Zero(t, testutil.CollectAndCount(asmetrics.SandboxCreationLatency))
+
+	r.Client = inner
+	_, err = r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	require.Empty(t, r.pendingCreationMetrics)
+	assert.Equal(t, 1, testutil.CollectAndCount(asmetrics.SandboxCreationLatency))
+	// The ordinary steady-state pass must not restore eligibility.
+	_, err = r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	require.Empty(t, r.pendingCreationMetrics)
+	collected := &dto.Metric{}
+	metric := asmetrics.SandboxCreationLatency.WithLabelValues("default", "cold", "__unknown__").(prometheus.Metric)
+	require.NoError(t, metric.Write(collected))
+	assert.Equal(t, uint64(1), collected.GetHistogram().GetSampleCount())
+
+	t.Run("deleted before Ready status persisted", func(t *testing.T) {
+		asmetrics.SandboxCreationLatency.Reset()
+		r := &SandboxReconciler{
+			Client: interceptor.NewClient(newFakeClient(sandbox, pod), interceptor.Funcs{
+				SubResourcePatch: func(_ context.Context, _ client.Client, _ string, obj client.Object, _ client.Patch, _ ...client.SubResourcePatchOption) error {
+					return k8serrors.NewNotFound(sandboxv1beta1.GroupVersion.WithResource("sandboxes").GroupResource(), obj.GetName())
+				},
+			}),
+			Scheme: Scheme, Tracer: asmetrics.NewNoOp(),
+		}
+		r.sandboxCreationMetricsPredicate().Create(event.CreateEvent{Object: sandbox})
+		_, err := r.Reconcile(t.Context(), req)
+		require.NoError(t, err)
+		require.Empty(t, r.pendingCreationMetrics)
+		assert.Zero(t, testutil.CollectAndCount(asmetrics.SandboxCreationLatency))
+	})
 }
 
 type mockTracer struct {

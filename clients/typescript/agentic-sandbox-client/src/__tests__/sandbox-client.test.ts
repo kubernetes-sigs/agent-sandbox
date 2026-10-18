@@ -83,6 +83,9 @@ import { SandboxClient } from "../sandbox-client.js";
 
 // ---------- helpers ----------
 
+/** The private method that auto-cleanup runs for each client. */
+type ExitCleanup = { releaseOnExit: () => Promise<void> };
+
 /**
  * Sets up two sequential Watch calls:
  *   1. SandboxClaim watch → resolves sandbox name
@@ -92,6 +95,7 @@ function mockSandboxReadyFlow(
   sandboxName: string,
   podAnnotation?: string,
   extraStatus: Record<string, unknown> = {},
+  claimMetadata?: Record<string, unknown>,
 ): void {
   // First watch: SandboxClaim resolves actual sandbox name
   mockWatchFn.mockImplementationOnce(
@@ -101,7 +105,10 @@ function mockSandboxReadyFlow(
       callback: (type: string, obj: Record<string, unknown>) => void,
       _done: (err: unknown) => void,
     ) => {
-      callback("MODIFIED", { status: { sandbox: { name: sandboxName } } });
+      callback("MODIFIED", {
+        ...(claimMetadata ? { metadata: claimMetadata } : {}),
+        status: { sandbox: { name: sandboxName } },
+      });
       return Promise.resolve(new AbortController());
     },
   );
@@ -205,6 +212,7 @@ describe("SandboxClient (registry)", () => {
               maxUploadSize: 1024,
               maxMetadataResponseSize: 1024,
               maxCommandOutputSize: 1024,
+              authToken: "abc.DEF-123_~+/=",
             },
           }),
       ).not.toThrow();
@@ -238,6 +246,28 @@ describe("SandboxClient (registry)", () => {
       expect(() => new SandboxClient({ sandboxd: { [key]: value } })).toThrow(
         SandboxError,
       );
+    });
+
+    it.each([
+      "",
+      "has space",
+      "tab\there",
+      "new\nline",
+      "t\u00f6ken",
+      42 as unknown as string,
+    ])("throws SandboxError for sandboxd.authToken = %p without echoing it", (authToken) => {
+      const err = (() => {
+        try {
+          new SandboxClient({ sandboxd: { authToken } });
+        } catch (e) {
+          return e;
+        }
+      })();
+      expect(err).toBeInstanceOf(SandboxError);
+      expect((err as SandboxError).message).toMatch(/sandboxd\.authToken/);
+      if (typeof authToken === "string" && authToken !== "") {
+        expect((err as SandboxError).message).not.toContain(authToken);
+      }
     });
   });
 
@@ -845,6 +875,256 @@ describe("SandboxClient (registry)", () => {
       expect(sandbox.namespace).toBe("default");
       const createArgs = mockCreateNamespacedCustomObject.mock.calls[0][0];
       expect(createArgs.namespace).toBe("default");
+    });
+  });
+
+  // ===== createSandbox() with claimName =====
+
+  describe("createSandbox() with claimName", () => {
+    const claim = (extra: Record<string, unknown> = {}) => ({
+      metadata: { uid: "uid-1", resourceVersion: "1", ...extra },
+      spec: { warmPoolRef: { name: "tpl" } },
+    });
+    const conflict = () =>
+      Object.assign(new Error("AlreadyExists"), { code: 409 });
+    const named = { claimName: "my-claim", adoptExisting: true };
+
+    it("creates the claim under the given name", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sb");
+
+      const client = new SandboxClient();
+      const sandbox = await client.createSandbox("tpl", "default", {
+        claimName: "my.claim-1",
+      });
+
+      expect(sandbox.claimName).toBe("my.claim-1");
+      const body = mockCreateNamespacedCustomObject.mock.calls[0][0].body;
+      expect(body.metadata.name).toBe("my.claim-1");
+    });
+
+    it.each([
+      "",
+      "Upper",
+      "-lead",
+      "trail-",
+      "a_b",
+      "a..b",
+      "x".repeat(254),
+    ])("rejects the invalid claimName %j before provisioning", async (claimName) => {
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", { claimName }),
+      ).rejects.toThrow(SandboxError);
+      expect(mockCreateNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
+    it("rejects adoptExisting without claimName", async () => {
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", { adoptExisting: true }),
+      ).rejects.toThrow("adoptExisting requires an explicit claimName");
+      expect(mockCreateNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
+    it("keeps the claim when waiting for it fails", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          _callback: unknown,
+          done: (err: unknown) => void,
+        ) => {
+          done(new Error("watch failed"));
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", { claimName: "my-claim" }),
+      ).rejects.toThrow("watch failed");
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
+    it("fails on a name conflict without adoptExisting", async () => {
+      mockCreateNamespacedCustomObject.mockRejectedValueOnce(conflict());
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", { claimName: "my-claim" }),
+      ).rejects.toThrow("AlreadyExists");
+      expect(mockGetNamespacedCustomObject).not.toHaveBeenCalled();
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
+    it("adopts the existing claim on a name conflict", async () => {
+      mockCreateNamespacedCustomObject.mockRejectedValueOnce(conflict());
+      mockGetNamespacedCustomObject.mockResolvedValueOnce(claim());
+      mockSandboxReadyFlow("sb", undefined, {}, { uid: "uid-1" });
+
+      const client = new SandboxClient();
+      const sandbox = await client.createSandbox("tpl", "default", named);
+
+      expect(sandbox.claimName).toBe("my-claim");
+      expect(sandbox.sandboxName).toBe("sb");
+      expect(mockCreateNamespacedCustomObject).toHaveBeenCalledOnce();
+      expect(mockGetNamespacedCustomObject.mock.calls[0][0].name).toBe(
+        "my-claim",
+      );
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [
+        "terminating",
+        claim({ deletionTimestamp: "2026-01-01T00:00:00Z" }),
+        "terminating",
+      ],
+      [
+        "using another warm pool",
+        { ...claim(), spec: { warmPoolRef: { name: "other" } } },
+        "references warm pool 'other', not 'tpl'",
+      ],
+      [
+        "missing a UID",
+        { ...claim(), metadata: { resourceVersion: "1" } },
+        "has no metadata.uid",
+      ],
+    ])("refuses to adopt a claim that is %s", async (_label, existing, message) => {
+      mockCreateNamespacedCustomObject.mockRejectedValueOnce(conflict());
+      mockGetNamespacedCustomObject.mockResolvedValueOnce(existing);
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", named),
+      ).rejects.toThrow(message);
+      expect(mockWatchFn).not.toHaveBeenCalled();
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
+    it("fails when the conflicting claim is gone by the time it is read", async () => {
+      mockCreateNamespacedCustomObject.mockRejectedValueOnce(conflict());
+      mockGetNamespacedCustomObject.mockRejectedValueOnce(
+        Object.assign(new Error("Not Found"), { code: 404 }),
+      );
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", named),
+      ).rejects.toBeInstanceOf(SandboxNotFoundError);
+    });
+
+    it("fails when the claim is replaced while waiting for it", async () => {
+      mockCreateNamespacedCustomObject.mockRejectedValueOnce(conflict());
+      mockGetNamespacedCustomObject
+        .mockResolvedValueOnce(claim())
+        .mockResolvedValueOnce(claim({ uid: "uid-2" }));
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", named),
+      ).rejects.toBeInstanceOf(SandboxNotFoundError);
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
+    it("fails when a watch event is for a replacement claim", async () => {
+      mockCreateNamespacedCustomObject.mockRejectedValueOnce(conflict());
+      mockGetNamespacedCustomObject.mockResolvedValueOnce(claim());
+      mockSandboxReadyFlow("sb", undefined, {}, { uid: "uid-2" });
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", named),
+      ).rejects.toBeInstanceOf(SandboxNotFoundError);
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
+    it("returns the registered handle when the same claim is created again", async () => {
+      mockCreateNamespacedCustomObject
+        .mockResolvedValueOnce({})
+        .mockRejectedValueOnce(conflict());
+      mockSandboxReadyFlow("sb");
+      mockSandboxReadyFlow("sb", undefined, {}, { uid: "uid-1" });
+
+      const client = new SandboxClient();
+      const first = await client.createSandbox("tpl", "default", named);
+      mockGetNamespacedCustomObject.mockResolvedValueOnce(claim());
+      const second = await client.createSandbox("tpl", "default", named);
+
+      expect(second).toBe(first);
+      expect(first.isActive).toBe(true);
+      expect(client.listActiveSandboxes()).toHaveLength(1);
+    });
+
+    it("rejects a second create of the same claim while one is in flight", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValue({});
+      let claimWatchCallback:
+        | ((type: string, obj: Record<string, unknown>) => void)
+        | undefined;
+      mockWatchFn.mockImplementation(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          claimWatchCallback = callback;
+          return Promise.resolve(new AbortController());
+        },
+      );
+      mockDeleteNamespacedCustomObject.mockImplementation(() => {
+        claimWatchCallback?.("DELETED", {});
+        return Promise.resolve({});
+      });
+
+      const client = new SandboxClient();
+      const first = client.createSandbox("tpl", "default", named);
+      await vi.waitFor(() => expect(claimWatchCallback).toBeDefined());
+
+      await expect(
+        client.createSandbox("tpl", "default", named),
+      ).rejects.toThrow("already being created or attached");
+
+      await client.deleteAll();
+      await expect(first).rejects.toBeInstanceOf(SandboxError);
+    });
+
+    it("deleteAll() deletes a named claim", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockDeleteNamespacedCustomObject.mockResolvedValue({});
+      mockSandboxReadyFlow("sb");
+
+      const client = new SandboxClient();
+      await client.createSandbox("tpl", "default", { claimName: "my-claim" });
+      await client.deleteAll();
+
+      expect(mockDeleteNamespacedCustomObject).toHaveBeenCalledOnce();
+      expect(mockDeleteNamespacedCustomObject.mock.calls[0][0].name).toBe(
+        "my-claim",
+      );
+    });
+
+    it("auto-cleanup releases a named claim but deletes a generated one", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValue({});
+      mockDeleteNamespacedCustomObject.mockResolvedValue({});
+      mockSandboxReadyFlow("sb-named");
+      mockSandboxReadyFlow("sb-generated");
+
+      const client = new SandboxClient();
+      const kept = await client.createSandbox("tpl", "default", {
+        claimName: "my-claim",
+      });
+      const dropped = await client.createSandbox("tpl", "default");
+
+      await (client as unknown as ExitCleanup).releaseOnExit();
+
+      expect(kept.isActive).toBe(false);
+      expect(dropped.isActive).toBe(false);
+      expect(mockDeleteNamespacedCustomObject).toHaveBeenCalledOnce();
+      expect(mockDeleteNamespacedCustomObject.mock.calls[0][0].name).toBe(
+        dropped.claimName,
+      );
     });
   });
 
@@ -2119,11 +2399,11 @@ describe("SandboxClient (registry)", () => {
       const cleanupA = new Promise<void>((resolve) => {
         releaseA = resolve;
       });
-      const deleteAllA = vi
-        .spyOn(clientA, "deleteAll")
+      const exitA = vi
+        .spyOn(clientA as unknown as ExitCleanup, "releaseOnExit")
         .mockImplementation(() => cleanupA);
-      const deleteAllB = vi
-        .spyOn(clientB, "deleteAll")
+      const exitB = vi
+        .spyOn(clientB as unknown as ExitCleanup, "releaseOnExit")
         .mockResolvedValue(undefined);
 
       const killSpy = vi
@@ -2139,8 +2419,8 @@ describe("SandboxClient (registry)", () => {
 
         process.emit("SIGINT", "SIGINT");
 
-        await vi.waitFor(() => expect(deleteAllB).toHaveBeenCalledTimes(1));
-        expect(deleteAllA).toHaveBeenCalledTimes(1);
+        await vi.waitFor(() => expect(exitB).toHaveBeenCalledTimes(1));
+        expect(exitA).toHaveBeenCalledTimes(1);
         expect(killSpy).not.toHaveBeenCalled();
 
         releaseA?.();
@@ -2148,8 +2428,8 @@ describe("SandboxClient (registry)", () => {
         expect(killSpy).toHaveBeenCalledWith(process.pid, "SIGINT");
       } finally {
         killSpy.mockRestore();
-        deleteAllA.mockRestore();
-        deleteAllB.mockRestore();
+        exitA.mockRestore();
+        exitB.mockRestore();
         stopA();
         stopB();
       }
@@ -2639,7 +2919,15 @@ describe("SandboxClient (registry)", () => {
       expect(sandbox.sandboxName).toBe("sandbox-ok");
     });
 
-    it("GET path: throws SandboxClaimFailedError on a terminal Ready=False reason", async () => {
+    it.each([
+      ["VolumeClaimTemplatesError", "bad PVC template"],
+      [
+        "InvalidConfiguration",
+        "Service 'warmpool-bad' is invalid: must be no more than 63 characters",
+      ],
+      ["PodFailed", "Pod failed"],
+      ["PodSucceeded", "Pod completed successfully"],
+    ])("GET path: throws SandboxClaimFailedError on terminal reason %s", async (reason, message) => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
       mockGetNamespacedCustomObject.mockResolvedValueOnce({
         status: {
@@ -2647,40 +2935,17 @@ describe("SandboxClient (registry)", () => {
             {
               type: "Ready",
               status: "False",
-              reason: "VolumeClaimTemplatesError",
-              message: "bad PVC template",
+              reason,
+              message,
             },
           ],
         },
       });
 
       const client = new SandboxClient();
-      await expect(
-        client.createSandbox("warmpool-bad-pvc"),
-      ).rejects.toBeInstanceOf(SandboxClaimFailedError);
-      expect(mockWatchFn).not.toHaveBeenCalled();
-    });
-
-    it("GET path: throws SandboxClaimFailedError on InvalidConfiguration", async () => {
-      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
-      mockGetNamespacedCustomObject.mockResolvedValueOnce({
-        status: {
-          conditions: [
-            {
-              type: "Ready",
-              status: "False",
-              reason: "InvalidConfiguration",
-              message:
-                "Service 'warmpool-bad-name' is invalid: must be no more than 63 characters",
-            },
-          ],
-        },
-      });
-
-      const client = new SandboxClient();
-      await expect(
-        client.createSandbox("warmpool-bad-name"),
-      ).rejects.toBeInstanceOf(SandboxClaimFailedError);
+      await expect(client.createSandbox("warmpool-bad")).rejects.toBeInstanceOf(
+        SandboxClaimFailedError,
+      );
       expect(mockWatchFn).not.toHaveBeenCalled();
     });
 

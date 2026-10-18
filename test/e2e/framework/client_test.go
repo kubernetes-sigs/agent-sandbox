@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -186,5 +187,56 @@ exec sleep 30`)
 	// Signal reports ErrProcessDone only once Wait has reaped the child.
 	if err := cmd.Process.Signal(syscall.Signal(0)); !errors.Is(err, os.ErrProcessDone) {
 		t.Errorf("port-forward outlived the test that started it: Signal(0) = %v, want %v", err, os.ErrProcessDone)
+	}
+}
+
+// fatalRecordingT records Fatalf instead of stopping the test, so code paths
+// that end in cl.Fatalf can be asserted on.
+type fatalRecordingT struct {
+	T
+	fatal string
+}
+
+func (f *fatalRecordingT) Fatalf(format string, args ...any) {
+	f.fatal = fmt.Sprintf(format, args...)
+}
+
+// Only kind:// means kind; every other cloud provider id is a real cluster,
+// and a cluster whose nodes carry no provider id at all cannot be classified.
+func TestIsKindCluster(t *testing.T) {
+	tests := []struct {
+		name       string
+		providerID string
+		wantKind   bool
+		wantFatal  bool
+	}{
+		{name: "kind", providerID: "kind://docker/agent-sandbox/agent-sandbox-control-plane", wantKind: true},
+		{name: "gce", providerID: "gce://my-project/us-central1-a/nodes-us-central1-a-abcd"},
+		{name: "aws", providerID: "aws:///us-east-1a/i-0123456789abcdef0"},
+		{name: "azure", providerID: "azure:///subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg/providers/Microsoft.Compute/virtualMachineScaleSets/nodes-eastus-1.example.k8s.local/virtualMachines/0"},
+		{name: "no provider id", providerID: "", wantFatal: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+				Spec:       corev1.NodeSpec{ProviderID: tt.providerID},
+			}
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(controllers.Scheme).
+				WithObjects(node).
+				Build()
+			recorder := &fatalRecordingT{T: t}
+			cl := &ClusterClient{T: recorder, client: fakeClient}
+
+			got := cl.IsKindCluster()
+
+			if got != tt.wantKind {
+				t.Errorf("IsKindCluster() = %v, want %v", got, tt.wantKind)
+			}
+			if gotFatal := recorder.fatal != ""; gotFatal != tt.wantFatal {
+				t.Errorf("IsKindCluster() fatal = %q, want fatal = %v", recorder.fatal, tt.wantFatal)
+			}
+		})
 	}
 }

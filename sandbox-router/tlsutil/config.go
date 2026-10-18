@@ -87,6 +87,42 @@ func BuildServerTLS(cfg *config.Config, reloader *CertReloader) (*tls.Config, er
 	return tc, nil
 }
 
+// BuildMetricsTLS assembles a *tls.Config for the metrics endpoint. It shares
+// the same certificate (via reloader) and TLS version/cipher settings as the
+// proxy, but without mTLS — Prometheus scraping does not present client certs.
+func BuildMetricsTLS(cfg *config.Config, reloader *CertReloader) (*tls.Config, error) {
+	if reloader == nil {
+		return nil, errors.New("reloader must not be nil")
+	}
+
+	minVersion := uint16(tls.VersionTLS12)
+	if cfg.TLSMinVersion != "" {
+		v, err := inttls.ParseTLSVersion(cfg.TLSMinVersion)
+		if err != nil {
+			return nil, fmt.Errorf("parse TLS min version: %w", err)
+		}
+		minVersion = v
+	}
+
+	tc := &tls.Config{
+		MinVersion:     minVersion,
+		GetCertificate: reloader.GetCertificate,
+		NextProtos:     []string{"h2", "http/1.1"},
+	}
+
+	if len(cfg.TLSCipherSuites) > 0 {
+		ids, err := inttls.ParseCipherSuites(cfg.TLSCipherSuites)
+		if err != nil {
+			return nil, fmt.Errorf("parse TLS cipher suites: %w", err)
+		}
+		if minVersion < tls.VersionTLS13 {
+			tc.CipherSuites = ids
+		}
+	}
+
+	return tc, nil
+}
+
 // LoadCAPool reads a PEM-encoded CA bundle from path and returns a new pool
 // containing every parsed certificate. It returns an error if the file is
 // empty or contains no parseable certificates.

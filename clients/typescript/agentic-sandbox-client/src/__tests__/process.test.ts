@@ -404,6 +404,96 @@ describe("ProcessClient.run", () => {
   });
 });
 
+describe("ProcessClient authorization", () => {
+  const exitMsg = (exitCode: number) =>
+    create(StartResponseSchema, {
+      event: { case: "exit", value: { exitCode } },
+    });
+  const initMsg = () =>
+    create(StartResponseSchema, {
+      event: {
+        case: "init",
+        value: create(InitEventSchema, { processId: 7 }),
+      },
+    });
+
+  // Rejects like sandboxd's interceptors do, so a missing or wrong header
+  // reaches the client as a real UNAUTHENTICATED status.
+  function requireBearer(ctx: { requestHeader: Headers }, token: string) {
+    if (ctx.requestHeader.get("authorization") !== `Bearer ${token}`) {
+      throw new ConnectError(
+        "missing or invalid bearer token",
+        Code.Unauthenticated,
+      );
+    }
+  }
+
+  async function startAuthClient(authorization: string | undefined) {
+    activeServer = await startH2Server((router) => {
+      router.service(ProcessService, {
+        execute: (_req, ctx) => {
+          requireBearer(ctx, "tok-1");
+          return create(ExecuteResponseSchema, { exitCode: 0 });
+        },
+        start: async function* (_req, ctx) {
+          requireBearer(ctx, "tok-1");
+          yield initMsg();
+          yield exitMsg(0);
+        },
+      });
+    });
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+      authorization,
+    });
+    return activeClient;
+  }
+
+  it("sends the Authorization header on unary and streaming calls", async () => {
+    const client = await startAuthClient("Bearer tok-1");
+    const signal = new AbortController().signal;
+
+    await expect(
+      client.run({ command: ["true"] }, 30_000, signal),
+    ).resolves.toMatchObject({ exitCode: 0 });
+
+    const started = await client.start(
+      { command: ["true"] },
+      undefined,
+      signal,
+    );
+    expect(started.pid).toBe(7);
+    expect(await started.events.next()).toEqual({
+      done: false,
+      value: { type: "exit", exitCode: 0 },
+    });
+  });
+
+  it("surfaces a missing or wrong token as an unauthenticated SandboxdRpcError", async () => {
+    for (const authorization of [undefined, "Bearer wrong-token"]) {
+      const client = await startAuthClient(authorization);
+      const signal = new AbortController().signal;
+
+      const unary = await client
+        .run({ command: ["true"] }, 30_000, signal)
+        .catch((e: unknown) => e);
+      expect(unary).toBeInstanceOf(SandboxdRpcError);
+      expect(unary).toMatchObject({ code: "unauthenticated" });
+
+      const stream = await client
+        .start({ command: ["true"] }, undefined, signal)
+        .catch((e: unknown) => e);
+      expect(stream).toBeInstanceOf(SandboxdRpcError);
+      expect(stream).toMatchObject({ code: "unauthenticated" });
+      expect(String((unary as Error).message)).not.toContain("wrong-token");
+
+      activeClient?.abort();
+      await activeServer?.close();
+    }
+  });
+});
+
 describe("ProcessClient.start", () => {
   const initMsg = () =>
     create(StartResponseSchema, {

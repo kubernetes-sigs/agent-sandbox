@@ -77,6 +77,7 @@ The Hugo site at [site/](site/) mounts these repo paths into `assets/additional/
 - [packages/sandboxd/USER_GUIDE.md](packages/sandboxd/USER_GUIDE.md) → `/docs/api/runtime/`
 - [clients/go/README.md](clients/go/README.md) → `/docs/go-client/`
 - [clients/python/agentic-sandbox-client/README.md](clients/python/agentic-sandbox-client/README.md) → `/docs/python-client/`
+- [clients/typescript/agentic-sandbox-client/README.md](clients/typescript/agentic-sandbox-client/README.md) → `/docs/typescript-client/`
 - [clients/integrations/nemo-gym/README.md](clients/integrations/nemo-gym/README.md) → `/docs/use-cases/examples/nemo-gym/` (the only `clients/integrations/` README currently mounted in [site/hugo.yaml](site/hugo.yaml))
 - Many `examples/*/README.md` files → pages under `/docs/use-cases/examples/`, `/docs/runtime-templates/`, and `/docs/getting_started/`
 
@@ -143,7 +144,7 @@ The TypeScript SDK lives at [clients/typescript/agentic-sandbox-client/](clients
 - This is a Kubernetes SIG project: contributors must have a signed [CNCF CLA](https://git.k8s.io/community/CLA.md). PRs without one are not reviewed.
 - CI runs through Prow (configured in [kubernetes/test-infra](https://github.com/kubernetes/test-infra)). The `k8s-ci-robot` merges PRs once they have `lgtm` + `approve` and presubmits pass. Default merge mode is squash; use `/label tide/merge-method-rebase` only when distinct commits matter.
 - CodeRabbit provides automated first-pass reviews on open PRs. **Never click "Commit suggestion" in the GitHub UI** — that adds the AI bot as a co-author, and AI bots cannot sign the Kubernetes CLA, so the CLA check will fail and block the PR. Instead: read the suggestion, apply the change manually in your local checkout, and push it as a normal commit authored by you.
-- Inactive PRs go stale after 30 days and close after 15 more. Reopen freely if you return to the work.
+- Inactive PRs go stale after 15 days and close after 15 more. Reopen freely if you return to the work.
 - Keep PR titles short and conventional; the body should explain motivation and link any issue or KEP.
 - Commit messages must stand alone: a reader with only `git log` should understand what changed and why. Lead with the motivation — the problem or gap that prompted the change — rather than restating the diff, which the reader can see for themselves. Use the terminology already established in the code and docs; do not invent new names for existing concepts. Be clear and concise. Since the default merge mode is squash, the PR title and body usually become the commit message — write them to the same standard.
 

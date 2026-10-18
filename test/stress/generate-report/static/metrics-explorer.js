@@ -20,12 +20,9 @@
 // The file is one sample per line, written by promscrape.go:
 //   {"ts": "...", "source": "...", "instance": "...", "metric": "...",
 //    "labels": {...}?, "value": N}
-// and is large (millions of samples), so the design mirrors watch.js: fetch
-// the whole file (gunzipping if needed), scan it once, and keep only compact
-// per-series records — a series is one unique (source, instance, metric,
-// labels) stream, holding parallel arrays of (offset-seconds, value). The
-// raw buffer is discarded after indexing; the series arrays are the working
-// set.
+// and is large (millions of samples). Decompress and index it incrementally,
+// keeping only per-series records — a series is one unique (source, instance,
+// metric, labels) stream, holding parallel arrays of (offset-seconds, value).
 
 // loadMetricsLog fetches, gunzips if the bytes are gzip, and indexes the
 // metrics log. startMs anchors each sample's offset-seconds. onProgress
@@ -45,18 +42,82 @@ async function loadMetricsLog(url, startMs, onProgress) {
         }
         resp = altResp;
     }
-    let buf = new Uint8Array(await resp.arrayBuffer());
-    if (buf[0] === 0x1f && buf[1] === 0x8b) {
-        progress('decompressing', '');
-        const gunzip = new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip')));
-        buf = new Uint8Array(await gunzip.arrayBuffer());
+    // Bound compressed input too: some browsers deliver a cached response
+    // as one chunk, which the decompressor can inflate into a huge buffer.
+    const reader = rechunkStream(resp.body || new ReadableStream({
+        start(controller) { controller.close(); },
+    }), 64 << 10).getReader();
+    try {
+        // Gzip's two magic bytes may arrive in separate (or empty) chunks.
+        const prefix = [];
+        let length = 0;
+        while (length < 2) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            prefix.push(value);
+            length += value.length;
+        }
+        const gzip = length >= 2 && prefix[0][0] === 0x1f
+            && (prefix[0].length > 1 ? prefix[0][1] : prefix[1][0]) === 0x8b;
+        // No cancel(): the finally below owns cleanup, so it still waits for
+        // the body's cancellation when the decompressor cancels this stream first.
+        let stream = new ReadableStream({
+            async pull(controller) {
+                if (prefix.length) {
+                    controller.enqueue(prefix.shift());
+                    return;
+                }
+                const { done, value } = await reader.read();
+                if (done) controller.close(); else controller.enqueue(value);
+            },
+        });
+        if (gzip) {
+            stream = stream.pipeThrough(new DecompressionStream('gzip'));
+        }
+        return await indexMetricsStream(stream, startMs, progress);
+    } finally {
+        await reader.cancel().catch(() => {});
+        reader.releaseLock();
     }
-    return indexMetricsLog(buf, startMs, progress);
 }
 
-// indexMetricsLog scans the buffer once, folding each sample into its
-// series. Yields to the event loop periodically so the page stays live.
-async function indexMetricsLog(buf, startMs, onProgress) {
+// Slice on demand rather than enqueueing every view of a large browser-owned
+// buffer at once. The original buffer remains live until its slices are read.
+function rechunkStream(stream, maxChunkBytes) {
+    const reader = stream.getReader();
+    let chunk;
+    let offset = 0;
+    return new ReadableStream({
+        async pull(controller) {
+            try {
+                while (!chunk || offset === chunk.length) {
+                    const { done, value } = await reader.read();
+                    if (done) {
+                        reader.releaseLock();
+                        controller.close();
+                        return;
+                    }
+                    chunk = value;
+                    offset = 0;
+                }
+                controller.enqueue(chunk.subarray(offset, offset + maxChunkBytes));
+                offset += Math.min(maxChunkBytes, chunk.length - offset);
+                if (offset === chunk.length) chunk = undefined;
+            } catch (err) {
+                reader.releaseLock();
+                throw err;
+            }
+        },
+        async cancel(reason) {
+            try { await reader.cancel(reason); }
+            finally { reader.releaseLock(); }
+        },
+    });
+}
+
+// Keep only the trailing partial record between chunks. Decode bounds apply
+// here so compressed and plain inputs get the same protection.
+async function indexMetricsStream(stream, startMs, onProgress) {
     const progress = onProgress || (() => {});
     const decoder = new TextDecoder();
     const series = [];
@@ -66,32 +127,57 @@ async function indexMetricsLog(buf, startMs, onProgress) {
     const tsCache = new Map();
     let samples = 0;
 
-    let start = 0;
-    while (start < buf.length) {
-        let end = buf.indexOf(0x0a, start); // '\n'
-        if (end === -1) end = buf.length;
-        if (end > start) {
-            let rec;
-            try {
-                rec = JSON.parse(decoder.decode(buf.subarray(start, end)));
-            } catch (err) {
-                rec = null; // tolerate a truncated final line
+    let bytes = 0;
+    let lastYield = 0;
+    let carry = '';
+    const indexLine = (line) => {
+        if (!line) return;
+        let rec;
+        try {
+            rec = JSON.parse(line);
+        } catch (err) {
+            return; // tolerate malformed records, including a truncated final line
+        }
+        if (!rec || !rec.metric || typeof rec.value !== 'number') return;
+        let tMs = tsCache.get(rec.ts);
+        if (tMs === undefined) {
+            tMs = Date.parse(rec.ts);
+            tsCache.set(rec.ts, tMs);
+        }
+        addSample(series, byKey, rec, (tMs - startMs) / 1000);
+        samples++;
+    };
+
+    // Indexing overlaps the download, so report it before the first sample
+    // rather than leaving the earlier stage on screen.
+    progress('indexing', '');
+    const reader = rechunkStream(stream, 1 << 20).getReader();
+    try {
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done) {
+                indexLine(carry + decoder.decode());
+                break;
             }
-            if (rec && rec.metric && typeof rec.value === 'number') {
-                let tMs = tsCache.get(rec.ts);
-                if (tMs === undefined) {
-                    tMs = Date.parse(rec.ts);
-                    tsCache.set(rec.ts, tMs);
-                }
-                addSample(series, byKey, rec, (tMs - startMs) / 1000);
-                samples++;
-                if (samples % 100000 === 0) {
-                    progress('indexing', `${samples.toLocaleString()} samples`);
-                    await new Promise(resolve => setTimeout(resolve, 0));
-                }
+            bytes += value.byteLength;
+            const text = decoder.decode(value, { stream: true });
+            // Do not rescan a growing partial record on every chunk.
+            const end = text.lastIndexOf('\n');
+            if (end < 0) {
+                carry += text;
+            } else {
+                for (const line of (carry + text.slice(0, end)).split('\n')) indexLine(line);
+                carry = text.slice(end + 1);
+            }
+            if (samples - lastYield >= 100000) {
+                lastYield = samples;
+                progress('indexing', `${samples.toLocaleString()} samples, ${(bytes / 1048576).toFixed(0)} MB decoded`);
+                await new Promise(resolve => setTimeout(resolve, 0));
             }
         }
-        start = end + 1;
+    } finally {
+        await reader.cancel().catch(() => {});
+        reader.releaseLock();
     }
 
     // Families: one entry per metric name, spanning its series.

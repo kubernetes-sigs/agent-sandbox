@@ -265,10 +265,11 @@ def test_exec_and_copy_target_the_handles_container(fake_r2egym, tmp_path):
   src.write_text("x")
   rt._copy_to_container_kubernetes(str(src), "/dst/x.py")
   assert fake_r2egym.containers == ["eval", "eval"]
-  # default: no container keyword at all (API picks the pod's first container)
+  # default: the container running the task image, always named (the exec API
+  # has no default container on a multi-container pod)
   fake_r2egym.containers.clear()
   FleetDockerRuntime(_handle(ns="rl-ns"))._run_kubernetes("echo hi")
-  assert fake_r2egym.containers == [None]
+  assert fake_r2egym.containers == ["agent-runtime"]
 
 
 def test_runtime_container_argument_overrides_the_handle(fake_r2egym):

@@ -122,8 +122,11 @@ def _build_classes():
                    container=None, **docker_kwargs):
         self._handle = handle
         # Which container of the pod exec / file-copy target: an explicit
-        # argument, else the handle's target_container, else the pod default.
-        self._container = container or getattr(handle, "target_container", None)
+        # argument, else the handle's target_container, else the container
+        # running the task image (never unnamed: the exec API has no default
+        # container on a multi-container pod).
+        self._container = (container or getattr(handle, "target_container", None)
+                           or getattr(handle, "runtime_container", None))
         ds = (getattr(handle.task, "metadata", None) or {}).get("ds")
         if ds is None:
           raise RuntimeError(

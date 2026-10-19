@@ -45,8 +45,8 @@ _REFRESH_BACKOFF_S = 0.5
 
 def exec_container_kwargs(container: str | None) -> dict:
   """The ``container=`` keyword for a kubernetes exec ``stream()`` call, or
-  nothing: an unset container keeps the API's default (the pod's first
-  container), which is the fleet's ``agent-runtime`` on single-container pods."""
+  nothing. Leave it unset only for a single-container pod: the exec API has no
+  default container and rejects an unnamed exec when the pod has several."""
   return {"container": container} if container else {}
 
 
@@ -56,7 +56,7 @@ def exec_in_pod(core_api, pod: str, namespace: str, command, *,
 
   ``command`` may be a list (argv) or a string (wrapped as ``bash -lc``).
   ``container`` picks the container of a multi-container pod (for example a
-  separate grading sidecar); unset means the pod's default container.
+  separate grading sidecar); unset works only on a single-container pod.
   Returns combined stdout/stderr.
   """
   if isinstance(command, str):
@@ -269,10 +269,14 @@ class SandboxHandle:
     pod_ip: Pod IP if known.
     sandbox: The underlying SDK ``Sandbox`` (``.commands`` / ``.files`` — needs
       the Sandbox Router; ``exec()`` below is the router-free path).
+    runtime_container: The container that runs the task image (``agent-runtime``
+      for a template this fleet wrote; the discovered name for an adopted one).
+      Exec goes there unless a call or ``target_container`` says otherwise, and
+      recycling always primes and resets there. Set by ``acquire()``.
     target_container: Container of a multi-container pod that ``exec()`` and
       ``open_session()`` use when a call does not name one. ``None`` (default)
-      is the pod's default container. Set it to route every exec of this
-      handle to, say, a grading sidecar; the R2E-Gym adapter honors it too.
+      means ``runtime_container``. Set it to route every exec of this handle
+      to, say, a grading sidecar; the R2E-Gym adapter honors it too.
 
   On a cluster with ``ClusterConfig(snapshots=True)`` (GKE Pod Snapshots) the
   handle also offers ``snapshot()`` / ``suspend()`` / ``resume()`` /
@@ -297,6 +301,7 @@ class SandboxHandle:
   pod_ip: Optional[str] = None
   sandbox: object = None
   pending_snapshot_uid: Optional[str] = None
+  runtime_container: Optional[str] = constants.RUNTIME_CONTAINER
   target_container: Optional[str] = None
   _cluster: "Cluster" = field(default=None, repr=False)
   _session: Optional["SandboxSession"] = field(default=None, repr=False)
@@ -317,7 +322,9 @@ class SandboxHandle:
     silently caps a command (the previous 120s default).
 
     ``container`` names the container to exec in; unset means ``target_container``,
-    and unset again means the pod's default container.
+    and unset again means ``runtime_container``. The name is always sent: the exec
+    API has no default container and rejects an unnamed exec on a multi-container
+    pod.
 
     If a persistent `SandboxSession` is attached (``open_session()``) **for that
     container**, the command is piped over that single held-open stream — no
@@ -327,7 +334,7 @@ class SandboxHandle:
     thread-safe across a shared client, so parallel one-shot execs stay isolated
     per thread while the client is cached per thread rather than rebuilt per call.
     """
-    target = container or self.target_container
+    target = container or self.target_container or self.runtime_container
     try:
       if (self._session is not None and self._session.is_open
           and self._session.container == target):
@@ -404,10 +411,11 @@ class SandboxHandle:
     """Open (once) a persistent exec session so subsequent ``exec()`` calls reuse
     a single websocket instead of connecting per command. Returns it.
 
-    A session is bound to one container (``container`` or ``target_container``).
+    A session is bound to one container (``container``, else ``target_container``,
+    else ``runtime_container``).
     A handle holds one session at a time, so opening one for another container
     closes the current session first."""
-    target = container or self.target_container
+    target = container or self.target_container or self.runtime_container
     if (self._session is not None and self._session.is_open
         and self._session.container == target):
       return self._session

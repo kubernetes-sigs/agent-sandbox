@@ -91,6 +91,10 @@ class PlanEntry:
   # rather than sized and created by this fleet. An adopted entry's ``replicas``
   # is the pool's *observed* depth, which nothing here owns or may change.
   adopted: bool = False
+  # Container that runs the task image in this entry's pods: None for a
+  # template this fleet writes (always ``agent-runtime``), the discovered name
+  # for an adopted template, whose lone container may be called anything.
+  runtime_container: Optional[str] = None
 
 
 class FleetPlan:
@@ -754,7 +758,8 @@ class SandboxFleet:
       cname, dp = hits[0]
       entries.append(PlanEntry(
           cluster=cname, image=image, template=dp.template, pool=dp.pool,
-          replicas=dp.replicas, tasks=counts[image], adopted=True))
+          replicas=dp.replicas, tasks=counts[image], adopted=True,
+          runtime_container=dp.runtime_container))
     if missing:
       raise PoolNotFoundError(self._adopt_miss_message(missing, discovered))
 
@@ -1433,7 +1438,9 @@ class SandboxFleet:
     handle = SandboxHandle(
         task=task, cluster_name=cluster.name, claim_name=sandbox.claim_name,
         sandbox_id=sandbox.sandbox_id, pod_name=pod, hostname=sandbox.sandbox_id,
-        pod_ip=pod_ip, sandbox=sandbox, _cluster=cluster)
+        pod_ip=pod_ip, sandbox=sandbox, _cluster=cluster,
+        runtime_container=((entry.runtime_container if entry is not None else None)
+                           or constants.RUNTIME_CONTAINER))
     handle.record_pod_identity()
     # The remote create ran outside the lock, and the breaker thread can tear
     # the fleet down in that window. _teardown flips _torndown under this same

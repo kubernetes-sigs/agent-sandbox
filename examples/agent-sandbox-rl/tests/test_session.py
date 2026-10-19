@@ -124,7 +124,7 @@ def test_handle_exec_routes_through_session(monkeypatch):
   from agent_sandbox_rl.sources import Task
   sess = MagicMock()
   sess.is_open = True
-  sess.container = None                      # bound to the pod's default container
+  sess.container = "agent-runtime"           # bound to the runtime container
   sess.run.return_value = "via-session"
   h = SandboxHandle(task=Task(id="t", image="i"), cluster_name="c",
                     claim_name="cl", sandbox_id="s", pod_name="p", hostname="s")
@@ -181,7 +181,20 @@ def test_handle_exec_uses_target_container_and_per_call_override(monkeypatch):
   h.target_container = "eval"
   h.exec("b")                                  # handle-level target
   h.exec("c", container="agent-runtime")       # per-call override wins
-  assert [c[2].get("container") for c in calls] == [None, "eval", "agent-runtime"]
+  assert [c[2].get("container") for c in calls] == ["agent-runtime", "eval", "agent-runtime"]
+
+
+def test_handle_exec_always_names_a_container(monkeypatch):
+  # The exec API rejects an unnamed exec on a multi-container pod, so the default
+  # is the container running the task image, not "unset".
+  calls = _capture_stream(monkeypatch)
+  h, _ = _handle_with_cluster()
+  h.exec("a")                                  # a template the fleet wrote
+  h.runtime_container = "sandbox"              # an adopted single-container template
+  h.exec("b")
+  h.target_container = "eval"
+  h.exec("c")
+  assert [c[2]["container"] for c in calls] == ["agent-runtime", "sandbox", "eval"]
 
 
 def test_handle_exec_reuses_a_session_only_for_its_container(monkeypatch):
@@ -194,7 +207,7 @@ def test_handle_exec_reuses_a_session_only_for_its_container(monkeypatch):
   h._session = sess
   assert h.exec("x", container="eval") == "via-session"      # matching container
   assert h.exec("y") == "out"                                # default: one-shot
-  assert calls and calls[-1][2].get("container") is None
+  assert calls and calls[-1][2].get("container") == "agent-runtime"
   h.target_container = "eval"
   assert h.exec("z") == "via-session"                        # target matches session
   assert sess.run.call_count == 2
@@ -204,7 +217,7 @@ def test_open_session_switches_container_by_closing_the_previous_one(monkeypatch
   calls = _capture_stream(monkeypatch, lambda: FakeWS({}))
   h, _ = _handle_with_cluster()
   first = h.open_session()
-  assert first.container is None and h.open_session() is first      # reused
+  assert first.container == "agent-runtime" and h.open_session() is first   # reused
   second = h.open_session(container="eval")
   assert second is not first and second.container == "eval"
   assert not first.is_open                                          # closed first

@@ -137,7 +137,7 @@ class SandboxFleet:
     # and pool name sees the final values.
     self.config.apply_run_isolation(self.run_id)
     self._created_namespaces: set[tuple[str, str]] = set()  # (cluster, ns) this run made
-    self._deleted_namespaces: set = set()
+    self._deleted_namespaces: set[tuple[str, str]] = set()  # deleted by a teardown
     # Owned namespaces whose `run_namespace_setup` hook completed. Separate from
     # ownership: a namespace whose rollback delete failed stays owned, and the
     # next attempt must still run the hook on it.
@@ -1243,6 +1243,7 @@ class SandboxFleet:
     if self.config.install_teardown_hooks:
       self._install_teardown_hooks()          # (#4) clean up even on kill/crash
     self._torndown = False
+    self._deleted_namespaces.clear()          # this cycle recreates what it needs
     with self._lock:
       # A fresh cycle starts with a clean slate; a slot leaked by a crashed
       # prior cycle must not pre-charge this one's max_live_sandboxes.
@@ -1679,18 +1680,26 @@ class SandboxFleet:
   def verify_teardown(self) -> "dict[str, dict]":
     """Check (and finish) a teardown with the run-scoped reaper.
 
-    For every cluster, ``reap(run_id=<this run>)`` lists this run's claims,
-    pools, Sandboxes, templates and pods and deletes what it finds, so a delete
-    that failed inside `teardown`, a pod the controller had not removed yet, or
-    a Sandbox a claim left behind is both reported and cleaned. Returns
-    ``{cluster_name: counts}`` as `reap` reports them; a cluster with leftovers
+    For every cluster: this run's pods are counted, then ``reap(run_id=<this
+    run>)`` lists and deletes this run's claims, pools and templates (Sandbox
+    CRs go with their claims) and force-deletes its pods by label, so a delete
+    that failed inside `teardown` or a pod the controller had not removed yet
+    is both reported and cleaned. Returns ``{cluster_name: counts}`` with
+    ``claims``, ``warmpools``, ``sandboxes``, ``templates`` and ``pods`` as
+    integers (all zero means the teardown was clean); a cluster with leftovers
     is logged as a warning. Skipped, with a note in the result, for a shared
     run id (the id spans other processes' resources), for ``adopt_existing``
     (adopted pools may carry this run's label from an earlier run) and for a
-    namespace this teardown deleted. Never raises: a reaper error is recorded
-    under ``"error"``.
+    namespace this teardown deleted. A reaper error is recorded under
+    ``"error"``, not raised.
+
+    Raises `FleetError` when called before `teardown`: the reaper deletes, so
+    it is not a mid-run inspection.
     """
     from .reaper import reap
+    if not self._torndown:
+      raise FleetError("verify_teardown() runs the run-scoped reaper, which deletes "
+                       "this run's resources; call teardown() first")
     out: dict[str, dict] = {}
     for c in self.registry:
       if self._shared_run_id:
@@ -1703,12 +1712,19 @@ class SandboxFleet:
         out[c.name] = {"skipped": f"namespace {c.namespace} was deleted"}
         continue
       cfg = c.config
-      try:
-        counts = reap(run_id=self.run_id, context=cfg.context, namespace=c.namespace,
-                      kubeconfig=cfg.kubeconfig, in_cluster=cfg.in_cluster)
-      except Exception as exc:  # noqa: BLE001 — verification must not fail the caller
-        logger.warning("verify_teardown: reaper failed on cluster %s: %s", c.name, exc)
-        counts = {"error": f"{type(exc).__name__}: {exc}"}
+      with self._obs.phase("verify_teardown", cluster=c.name):
+        try:
+          # Counted before the reaper's delete-collection, which does not count.
+          pods = int(c.resources.count_pods(label_selector=self.pod_run_selector()))
+          counts = reap(run_id=self.run_id, context=getattr(cfg, "context", None),
+                        namespace=c.namespace, kubeconfig=getattr(cfg, "kubeconfig", None),
+                        in_cluster=bool(getattr(cfg, "in_cluster", False)))
+          if "pods" not in counts:            # reap logs a failed delete-collection
+            counts["error"] = "pod delete-collection failed; see the reaper log"
+          counts["pods"] = pods
+        except Exception as exc:  # noqa: BLE001 — verification must not fail the caller
+          logger.warning("verify_teardown: reaper failed on cluster %s: %s", c.name, exc)
+          counts = {"error": f"{type(exc).__name__}: {exc}"}
       leftovers = {k: v for k, v in counts.items() if isinstance(v, int) and v > 0}
       if leftovers:
         logger.warning("verify_teardown: cluster %s still had %s of run %s; reaped",

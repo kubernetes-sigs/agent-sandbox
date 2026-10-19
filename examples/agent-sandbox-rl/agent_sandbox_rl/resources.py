@@ -96,9 +96,9 @@ def _container_resources(spec) -> dict:
   limits only for the fields set (an unset limit stays unlimited)."""
   out = {"requests": {"cpu": spec.cpu, "memory": spec.memory}}
   limits = {}
-  if spec.cpu_limit:
+  if spec.cpu_limit is not None:
     limits["cpu"] = spec.cpu_limit
-  if spec.memory_limit:
+  if spec.memory_limit is not None:
     limits["memory"] = spec.memory_limit
   if limits:
     out["limits"] = limits

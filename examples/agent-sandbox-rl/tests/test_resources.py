@@ -671,6 +671,14 @@ def test_extra_pod_spec_task_image_placeholder_is_resolved_per_template():
   assert extra["initContainers"][0]["image"] == "{task_image}"
 
 
+def test_resource_limits_reject_empty_strings_instead_of_dropping_them():
+  with pytest.raises(ValueError, match="non-empty"):
+    ResourceSpec(cpu_limit="")
+  with pytest.raises(ValueError, match="non-empty"):
+    ResourceSpec(memory="  ")
+  assert ResourceSpec(cpu_limit=None).cpu_limit is None
+
+
 def test_extra_pod_spec_keys_win_over_the_hardening_defaults():
   r = _absent()
   r.ensure_template(IMG, TNAME, TemplateSpec(extra_pod_spec={"shareProcessNamespace": True}))

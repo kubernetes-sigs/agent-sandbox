@@ -44,6 +44,15 @@ class ResourceSpec(BaseModel):
   cpu_limit: str | None = None
   memory_limit: str | None = None
 
+  @field_validator("cpu", "memory", "cpu_limit", "memory_limit")
+  @classmethod
+  def _quantity_nonempty(cls, v: str | None) -> str | None:
+    # An empty string is neither "unset" nor a quantity: rendering would drop
+    # the limit the caller meant to set, or send "" as a request.
+    if v is not None and not v.strip():
+      raise ValueError("resource quantities must be non-empty (use None for no limit)")
+    return v
+
 
 class TemplateSpec(BaseModel):
   """How to render each image's SandboxTemplate pod."""

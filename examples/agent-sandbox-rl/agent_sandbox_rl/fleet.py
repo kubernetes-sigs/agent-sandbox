@@ -33,6 +33,7 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from collections.abc import Mapping
 from typing import Optional
 from collections.abc import Callable
 
@@ -461,54 +462,75 @@ class SandboxFleet:
       new_tasks = rewritten
     if not new_tasks:
       return []
-    with self._lock:
-      self.tasks = list(self.tasks) + list(new_tasks)
-      plan = self.plan_
-    if plan is None:
-      return new_tasks
-    if self.config.adopt_existing:
-      self._plan_adopt()
-      return new_tasks
     counts = collections.Counter(t.image for t in new_tasks)
+    fresh: list[tuple[str, int, Cluster]] = []
     with self._lock:
-      cluster_totals: dict[str, int] = collections.defaultdict(int)
-      for e in plan.entries:
-        cluster_totals[e.cluster] += e.tasks
-      fresh: list[tuple[str, int, Cluster]] = []
-      for image, n in counts.items():
-        e = plan.for_image(image)
-        if e is not None:
+      plan = self.plan_
+      adopt = plan is not None and self.config.adopt_existing
+      if plan is not None and not adopt:
+        # Resolve every placement before touching the tasks or the plan: a
+        # NoClusterAvailableError must leave both as they were, or a retry
+        # appends the batch twice and double-counts the known images.
+        cluster_totals: dict[str, int] = collections.defaultdict(int)
+        for e in plan.entries:
+          cluster_totals[e.cluster] += e.tasks
+        bump: list[tuple[PlanEntry, int]] = []
+        for image, n in counts.items():
+          e = plan.for_image(image)
+          if e is not None:
+            cluster_totals[e.cluster] += n          # counts toward the budget split
+            bump.append((e, n))
+            continue
+          c = self.placement.select(image, self.registry)
+          cluster_totals[c.name] += n
+          fresh.append((image, n, c))
+        entries: list[PlanEntry] = []
+        if fresh:
+          used = [self.registry.get(name) for name in cluster_totals]
+          budget = _split_budget(self.config.max_concurrent,
+                                 {c.name: c.config.weight for c in used})
+          for image, n, c in fresh:
+            replicas = sizing.compute_replicas(
+                n, cluster_totals[c.name], budget[c.name],
+                self.config.max_warmpool_size, per_task=self.config.warm_per_task)
+            entries.append(PlanEntry(
+                cluster=c.name, image=image, template=self.config.template_name(image),
+                pool=self.config.pool_name(image), replicas=replicas, tasks=n))
+        for e, n in bump:
           e.tasks += n
-          continue
-        c = self.placement.select(image, self.registry)
-        cluster_totals[c.name] += n
-        fresh.append((image, n, c))
-      if not fresh:
-        return new_tasks
-      used = [self.registry.get(name) for name in cluster_totals]
-      budget = _split_budget(self.config.max_concurrent,
-                             {c.name: c.config.weight for c in used})
-      for image, n, c in fresh:
-        replicas = sizing.compute_replicas(
-            n, cluster_totals[c.name], budget[c.name],
-            self.config.max_warmpool_size, per_task=self.config.warm_per_task)
-        plan.add(PlanEntry(
-            cluster=c.name, image=image, template=self.config.template_name(image),
-            pool=self.config.pool_name(image), replicas=replicas, tasks=n))
-    logger.info("add_tasks: %d task(s), %d new image(s) added to the plan",
-                len(new_tasks), len(fresh))
+        for entry in entries:
+          plan.add(entry)
+      self.tasks = list(self.tasks) + list(new_tasks)
+    if adopt:
+      try:
+        self._plan_adopt()
+      except Exception:
+        with self._lock:                            # an unserved image: undo the append
+          added = {id(t) for t in new_tasks}
+          self.tasks = [t for t in self.tasks if id(t) not in added]
+        raise
+    if plan is not None:
+      logger.info("add_tasks: %d task(s), %d new image(s) added to the plan",
+                  len(new_tasks), len(fresh))
     return new_tasks
 
-  def wait_pools_ready(self, images, *, timeout: float | None = None) -> dict[str, bool]:
+  def wait_pools_ready(self, images, *, timeout: float | None = None,
+                       replicas: "Mapping[str, int] | None" = None) -> dict[str, bool]:
     """Best-effort readiness barrier: ``image -> ready`` for each planned image,
     waiting up to ``timeout`` seconds (default ``ready_timeout``) on each pool
-    concurrently. Never raises: a pool that is slow, an image not in the plan or
-    a watch error reads as ``False`` and is logged. The replica count waited for
-    is what this fleet asked of the pool (one for an adopted or borrowed pool)."""
+    concurrently. Never raises: a pool that is slow, an image not in the plan, a
+    missing plan or a watch error reads as ``False`` and is logged. The replica
+    count waited for is what this fleet asked of the pool (one for an adopted or
+    borrowed pool), lowered to ``replicas[image]`` when given: a caller that
+    shares a pool across batches waits for its own share, not the sum."""
     images = list(dict.fromkeys(images))
     if not images:
       return {}
-    plan = self.plan_ or self.plan()
+    try:
+      plan = self.plan_ or self.plan()
+    except Exception as exc:  # noqa: BLE001 — best-effort by contract
+      logger.warning("wait_pools_ready: no plan (%s)", exc)
+      return {img: False for img in images}
     limit = self.config.ready_timeout if timeout is None else timeout
     with self._lock:
       warmed = dict(self._warmed)
@@ -519,8 +541,10 @@ class SandboxFleet:
         logger.warning("wait_pools_ready: image %s is not in the plan", image)
         return False
       want = 1 if (e.adopted or image not in warmed) else max(1, warmed[image])
-      c = self.registry.get(e.cluster)
+      if replicas and replicas.get(image):
+        want = max(1, min(int(replicas[image]), want))
       try:
+        c = self.registry.get(e.cluster)
         return bool(c.resources.wait_for_pool_ready(e.pool, want, timeout=limit))
       except Exception as exc:  # noqa: BLE001 — best-effort by contract
         logger.warning("wait_pools_ready: pool %s on %s: %s", e.pool, e.cluster, exc)

@@ -14,12 +14,13 @@
 """LookaheadWarmer against a recording fake fleet, plus the fleet's add_tasks
 and wait_pools_ready against the shared FakeCluster."""
 import threading
+import time
 import types
 
 import pytest
 
 from agent_sandbox_rl import ClusterRegistry, FleetConfig, LookaheadWarmer, SandboxFleet, WarmReport
-from agent_sandbox_rl.exceptions import FleetError
+from agent_sandbox_rl.exceptions import FleetError, NoClusterAvailableError
 from agent_sandbox_rl.preflight import PreflightReport
 from agent_sandbox_rl.sources import Task
 
@@ -32,6 +33,7 @@ class RecordingFleet:
     self.calls = []
     self.planned = set(planned)
     self.fail = fail or {}            # image -> exception to raise on warm
+    self.wait_replicas = []           # the per-image share each barrier asked for
     self.plan_ = types.SimpleNamespace(
         for_image=lambda img: object() if img in self.planned else None)
     self._lock = threading.Lock()
@@ -56,9 +58,10 @@ class RecordingFleet:
     with self._lock:
       self.calls.append(("unwarm", image))
 
-  def wait_pools_ready(self, images, *, timeout=None):
+  def wait_pools_ready(self, images, *, timeout=None, replicas=None):
     with self._lock:
       self.calls.append(("wait", tuple(images), timeout))
+      self.wait_replicas.append(replicas)
     return {img: img != "slow" for img in images}
 
   def of(self, kind):
@@ -231,3 +234,81 @@ def test_wait_pools_ready_is_best_effort_and_uses_what_the_fleet_asked_for(make_
   assert seen[f.config.pool_name("b")] == (3, 12)
   assert seen[f.config.pool_name("c")] == (1, 12)          # not warmed by us: one ready replica
   assert f.wait_pools_ready([]) == {}
+
+
+class SlowWarmFleet(RecordingFleet):
+  """warm_image takes a while, so a second add_async is still queued."""
+
+  def warm_image(self, image, *, replicas_override=None, wait=True):
+    time.sleep(0.2)
+    super().warm_image(image, replicas_override=replicas_override, wait=wait)
+
+
+def test_close_drains_or_cancels_a_queued_add_before_it_clears_the_tables():
+  f = SlowWarmFleet(planned={"a", "b"})
+  w = LookaheadWarmer(f)
+  w.add_async(0, {"a": 2})
+  w.add_async(1, {"b": 1})                    # queued behind the first
+  w.close()
+  assert w.active == {} and w.live_batches == []
+  warmed = {c[1] for c in f.calls if c[0] == "warm"}
+  unwarmed = {c[1] for c in f.calls if c[0] == "unwarm"}
+  assert warmed and unwarmed == warmed        # nothing warmed survives close()
+
+
+def test_wait_uses_this_batchs_share_not_the_sum_across_batches():
+  f = RecordingFleet(planned={"a"})
+  w = LookaheadWarmer(f, cap=4)
+  w.add(0, {"a": 2})
+  w.add(1, {"a": 3}, wait=True)
+  assert w.active == {"a": 4}                  # capped sum
+  assert f.wait_replicas == [{"a": 3}]         # this batch alone, below the cap
+  w.add(2, {"a": 9}, wait=True)
+  assert f.wait_replicas[-1] == {"a": 4}       # a batch above the cap waits for the cap
+
+
+def test_add_async_registers_the_batch_before_the_worker_runs():
+  f = RecordingFleet(planned={"a"})
+  w = LookaheadWarmer(f)
+  w.add(0, {"a": 1})
+  fut = w.add_async(1, {"a": 1})               # shares the image with batch 0
+  assert 1 in w.live_batches                   # known at once, not when the worker runs
+  w.finish(0)                                  # must not unwarm "a": batch 1 still wants it
+  fut.result(timeout=5)
+  assert w.active == {"a": 1}
+  assert not [c for c in f.calls if c[0] == "unwarm"]
+  w.close()
+
+
+def test_lookahead_unwraps_an_async_fleet():
+  inner = RecordingFleet(planned={"a"})
+  assert LookaheadWarmer(types.SimpleNamespace(_fleet=inner)).fleet is inner
+  assert LookaheadWarmer(inner).fleet is inner
+
+
+def test_add_tasks_leaves_tasks_and_plan_untouched_when_placement_fails(make_cluster):
+  c = make_cluster("solo")
+  f = _fleet(c)
+  f.load_tasks(["a"])
+  plan = f.plan()
+
+  class NoRoom:
+    def select(self, image, registry):
+      raise NoClusterAvailableError("every cluster is at max_replicas")
+
+  f.placement = NoRoom()
+  with pytest.raises(NoClusterAvailableError):
+    f.add_tasks(["a", "zzz"])                 # known image first, then the one that fails
+  assert len(f.tasks) == 1 and plan.for_image("a").tasks == 1
+  assert plan.for_image("zzz") is None and f.plan_ is plan
+
+
+def test_wait_pools_ready_without_a_plan_reads_false(make_cluster, monkeypatch):
+  c = make_cluster("solo")
+  f = _fleet(c)
+
+  def no_plan():
+    raise FleetError("run namespace cannot be created")
+
+  monkeypatch.setattr(f, "plan", no_plan)
+  assert f.wait_pools_ready(["a", "b"]) == {"a": False, "b": False}

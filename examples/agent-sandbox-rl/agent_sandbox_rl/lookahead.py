@@ -89,7 +89,7 @@ class LookaheadWarmer:
   """Size warm pools for the batches an external step loop has in flight.
 
   Args:
-    fleet: the `SandboxFleet` (or `AsyncSandboxFleet`'s ``_fleet``) to drive.
+    fleet: the `SandboxFleet` to drive (an `AsyncSandboxFleet` is unwrapped).
     cap: hard cap on replicas per image; ``None`` uses the fleet's
       ``max_warmpool_size``.
     keep_finished: how many finished batches keep their pools (the trainer's
@@ -105,8 +105,9 @@ class LookaheadWarmer:
   def __init__(self, fleet, *, cap: int | None = None, keep_finished: int = 0,
                max_workers: int = 32, fail_fast: bool = False,
                register_images: bool = True):
-    self.fleet = fleet
-    self.cap = cap if cap is not None else int(fleet.config.max_warmpool_size)
+    inner = getattr(fleet, "_fleet", None)      # AsyncSandboxFleet wraps a sync fleet
+    self.fleet = inner if inner is not None and hasattr(inner, "warm_image") else fleet
+    self.cap = cap if cap is not None else int(self.fleet.config.max_warmpool_size)
     self.keep_finished = max(0, int(keep_finished))
     self.max_workers = max(1, int(max_workers))
     self.fail_fast = fail_fast
@@ -154,24 +155,39 @@ class LookaheadWarmer:
     and records the outcome per image in ``report.ready``. Re-adding a known
     batch id replaces its counts.
     """
-    clean = {str(k): int(v) for k, v in counts.items() if int(v) > 0}
-    with self._lock:
-      self._live[batch_id] = clean
-    report = self._reconcile()
-    if wait:
-      report.ready = self.wait_ready(clean.keys(), timeout=wait_timeout)
-    return report
+    clean = self._register_batch(batch_id, counts)
+    return self._apply(clean, wait, wait_timeout)
 
   def add_async(self, batch_id, counts: Mapping[str, int], *, wait: bool = False,
                 wait_timeout: float | None = None) -> "Future[WarmReport]":
     """`add` on a background thread; the future carries the `WarmReport` (or
-    the `FleetError` a fail-fast add would raise). One batch at a time."""
+    the `FleetError` a fail-fast add would raise). One batch at a time. The
+    batch is registered now, so a `finish` that lands before the worker runs
+    already counts it and does not unwarm an image the two batches share."""
+    clean = self._register_batch(batch_id, counts)
     with self._lock:
       if self._executor is None:
         self._executor = ThreadPoolExecutor(max_workers=1,
                                             thread_name_prefix="lookahead-warm")
       ex = self._executor
-    return ex.submit(self.add, batch_id, counts, wait=wait, wait_timeout=wait_timeout)
+    return ex.submit(self._apply, clean, wait, wait_timeout)
+
+  def _register_batch(self, batch_id, counts: Mapping[str, int]) -> dict[str, int]:
+    clean = {str(k): int(v) for k, v in counts.items() if int(v) > 0}
+    with self._lock:
+      self._live[batch_id] = clean
+    return clean
+
+  def _apply(self, clean: dict[str, int], wait: bool, wait_timeout) -> WarmReport:
+    report = self._reconcile()
+    if wait:
+      # This batch's own share, not the sum over live batches: an earlier batch
+      # is draining the same pool while this one warms, so readyReplicas never
+      # reaches the sum under a steady claim stream.
+      report.ready = self.wait_ready(
+          clean.keys(), timeout=wait_timeout,
+          replicas={img: min(self.cap, n) for img, n in clean.items()})
+    return report
 
   def finish(self, batch_id) -> WarmReport:
     """Batch ``batch_id`` has no claims left to make: its pools stay for the
@@ -185,22 +201,28 @@ class LookaheadWarmer:
     return self._reconcile()
 
   def wait_ready(self, images: Iterable[str] | None = None,
-                 timeout: float | None = None) -> dict[str, bool]:
-    """Best-effort readiness barrier on ``images`` (default: every active image)."""
+                 timeout: float | None = None, *,
+                 replicas: Mapping[str, int] | None = None) -> dict[str, bool]:
+    """Best-effort readiness barrier on ``images`` (default: every active image).
+    ``replicas`` caps the ready count waited for per image (default: what the
+    fleet asked of the pool)."""
     with self._lock:
       targets = list(images) if images is not None else list(self._active)
     if not targets:
       return {}
-    return self.fleet.wait_pools_ready(targets, timeout=timeout)
+    return self.fleet.wait_pools_ready(targets, timeout=timeout, replicas=replicas)
 
   def close(self) -> WarmReport:
-    """Forget every batch and unwarm everything this warmer asked for."""
+    """Forget every batch and unwarm everything this warmer asked for. A queued
+    `add_async` is cancelled, a running one drained, before the tables are
+    cleared, so nothing is warmed again behind the final reconcile."""
+    with self._lock:
+      ex, self._executor = self._executor, None
+    if ex is not None:
+      ex.shutdown(wait=True, cancel_futures=True)
     with self._lock:
       self._live.clear()
       self._finished.clear()
-      ex, self._executor = self._executor, None
-    if ex is not None:
-      ex.shutdown(wait=True)
     return self._reconcile()
 
   def __enter__(self):

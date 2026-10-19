@@ -933,6 +933,26 @@ class TestDetach(unittest.TestCase):
         self.mock_client.k8s_helper.read_batch_lease.assert_called_once()
         self.mock_client.k8s_helper.replace_batch_lease.assert_called_once()
 
+    def test_release_conflict_succeeds_only_once_the_lease_is_not_held(self):
+        # A concurrent detach() can release the Lease between this call's read and write.
+        for holder_after_conflict, released in ((None, True), ("this handle", False)):
+            with self.subTest(holder_after_conflict=holder_after_conflict):
+                mock_client = MagicMock()
+                handle = _make_handle(mock_client)
+                holder = handle._holder_identity if holder_after_conflict else None
+                mock_client.k8s_helper.read_batch_lease.side_effect = [
+                    _lease(holder_identity=handle._holder_identity),
+                    _lease(holder_identity=holder),
+                ]
+                mock_client.k8s_helper.replace_batch_lease.side_effect = k8s_client.ApiException(status=409)
+
+                if released:
+                    handle.detach()
+                else:
+                    with self.assertRaises(k8s_client.ApiException):
+                        handle.detach()
+                self.assertEqual(handle._lease_released, released)
+
     def test_retryable_after_release_write_failure(self):
         self.mock_client.k8s_helper.read_batch_lease.return_value = _lease(
             holder_identity=self.handle._holder_identity

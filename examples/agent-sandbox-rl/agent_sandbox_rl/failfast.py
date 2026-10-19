@@ -103,7 +103,9 @@ def classify_pod(pod: Any, *, now: float, first_seen: dict[str, float],
   name = meta.get("name")
   present: set[str] = set()
 
-  def _held_for(key: str, grace: float) -> float | None:
+  def _held_for(key: str, grace: float | None) -> float | None:
+    if grace is None:                 # this class of reason is left to the timeout
+      return None
     present.add(key)
     first = first_seen.setdefault(key, now)
     last_seen[key] = now
@@ -111,10 +113,11 @@ def classify_pod(pod: Any, *, now: float, first_seen: dict[str, float],
     return held if held >= grace else None
 
   verdict: StartVerdict | None = None
-  if _get(meta, "deletion_timestamp", "deletionTimestamp"):
-    verdict = StartVerdict("PodTerminating", "pod is being deleted", name)
+  # A pod being deleted is not a verdict: the Sandbox controller recreates an
+  # evicted or preempted pod under the same name, and a deleted claim or
+  # Sandbox ends the SDK wait on its own.
   phase = status.get("phase")
-  if verdict is None and phase in ("Failed", "Succeeded"):
+  if phase in ("Failed", "Succeeded"):
     verdict = StartVerdict(
         f"Pod{phase}", status.get("message") or status.get("reason")
         or f"pod phase is {phase} before it became ready", name)
@@ -170,7 +173,7 @@ def classify_pod(pod: Any, *, now: float, first_seen: dict[str, float],
       continue
     grace = (policy.unschedulable_grace_s if key == "Unschedulable"
              else policy.grace_s)
-    if now - last_seen.get(key, float("-inf")) >= grace:
+    if grace is None or now - last_seen.get(key, float("-inf")) >= grace:
       del first_seen[key]
       last_seen.pop(key, None)
   return verdict

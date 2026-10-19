@@ -75,14 +75,25 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
   and runs a `ClaimWatchdog` (`failfast.py`) next to the wait; when the pod is in a
   state the controller will not recover from, the watchdog deletes the claim and
   `acquire()` raises **`SandboxStartError`** with the Kubernetes reason, the pod and
-  the image. Reasons that never clear fail at once; transient-looking ones fail
-  after `FailFastPolicy.grace_s` (60 s); `Unschedulable` after
-  `unschedulable_grace_s` (180 s). The retryable reasons of a container share one
+  the image. Reasons that never clear fail at once. The graced classes are opt-in:
+  transient-looking ones fail after `FailFastPolicy.grace_s` and `Unschedulable`
+  after `unschedulable_grace_s` only when those are set (unset by default: a GPU
+  or node-auto-provisioning scale-up outlasts a few minutes of `Unschedulable`,
+  and failing a pull during registry throttling makes the caller retry on a new
+  pod whose pull starts at once, adding load). A pod being deleted is not a
+  verdict: the controller recreates an evicted or preempted pod under the same
+  name. The retryable reasons of a container share one
   grace clock, which resets only after the condition has been gone for a full
   grace period, so a pull flipping between `ErrImagePull` and `ImagePullBackOff`
   or a crash loop seen between restarts is not restarted on every poll. An
   earlier OOM kill fails a container only while it is not running again. Off with
   `FleetConfig(fail_fast=FailFastPolicy(enabled=False))`.
+- **Claim tracking does not grow per episode.** `acquire()` names its claim, which
+  the SDK client records (`_explicit_claims`, next to the Sandbox object in
+  `_active_connection_sandboxes`); `sandbox.terminate()` leaves both in place.
+  `handle.release()` and every rollback path of a failed `acquire()` now prune the
+  claim from the client (`forget_claim_in_client`). The SDK itself is unchanged
+  here; pruning on its terminate path is a separate SDK change.
 - **`FleetConfig.claim_timeout`** bounds one claim's readiness wait separately from
   `ready_timeout`, which also bounds whole-pool fills and is sized for those.
   `None` (default) keeps the old behaviour.

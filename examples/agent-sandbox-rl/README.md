@@ -514,7 +514,7 @@ where it would sweep the other processes' resources too.
 
 **FleetConfig:** `clusters`, `placement`, `max_concurrent` (1), `max_warmpool_size`
 (8), `warm_per_task` (False — one warm replica per task for instant claims),
-`window_size` (None=auto), `ready_timeout` (900), `claim_timeout` (None = `ready_timeout`; bounds one claim's readiness wait), `fail_fast` (`FailFastPolicy`: `enabled` True, `initial_delay_s` 10, `poll_s` 5, `grace_s` 60, `unschedulable_grace_s` 180), `warm_create_budget` (1000 — stage
+`window_size` (None=auto), `ready_timeout` (900), `claim_timeout` (None = `ready_timeout`; bounds one claim's readiness wait), `fail_fast` (`FailFastPolicy`: `enabled` True, `initial_delay_s` 10, `poll_s` 5, `grace_s` None, `unschedulable_grace_s` None — set either to also fail the transient reasons / `Unschedulable` after that many seconds), `warm_create_budget` (1000 — stage
 the warm fill in waves of ≤ N sandbox creates in flight to bound the controller's
 create burst; on controllers ≤ v0.5.3 also pair with a low
 `--sandbox-warm-pool-concurrent-workers` to dodge #1215; `0` = warm all at once), `template`
@@ -595,9 +595,12 @@ fleet.load_tasks(source, image_rewrite=make_rewriter(
   `ready_timeout` (15 min) before the caller heard anything. `acquire()` now runs
   a watchdog on the claim's pod and raises **`SandboxStartError`** (with the
   Kubernetes reason, pod and image) as soon as the pod is in a state the
-  controller will not recover from: at once for reasons that never clear, after
-  `FailFastPolicy.grace_s` (60 s) for ones that can be transient, after
-  `unschedulable_grace_s` (180 s) for scheduling. `FleetConfig.claim_timeout`
+  controller will not recover from: at once for reasons that never clear, and,
+  opt-in, after `FailFastPolicy.grace_s` for ones that can be transient and after
+  `unschedulable_grace_s` for scheduling (unset by default: a GPU or node
+  auto-provisioning scale-up outlasts a few minutes of `Unschedulable`, and failing
+  a throttled pull only moves the load to a new pod). A pod being deleted is not a
+  verdict; the controller recreates it. `FleetConfig.claim_timeout`
   bounds one claim's wait separately from the pool-fill `ready_timeout`. A pull
   that flips between `ErrImagePull` and `ImagePullBackOff`, or a crash loop seen
   between restarts, keeps one grace clock per container. Mid-episode,

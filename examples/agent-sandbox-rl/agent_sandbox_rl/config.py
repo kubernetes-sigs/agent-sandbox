@@ -139,25 +139,31 @@ class FailFastPolicy(BaseModel):
 
   `SandboxFleet.acquire` runs a watchdog next to the SDK's claim wait (see
   `failfast.py`). Reasons that never clear on their own (``InvalidImageName``, a
-  ``Failed`` pod, an OOM-killed container) fail at once; reasons that can be
-  transient (``ImagePullBackOff``, ``CreateContainerConfigError``,
-  ``CrashLoopBackOff``, ...) fail once they have persisted for ``grace_s``; an
-  ``Unschedulable`` pod fails after ``unschedulable_grace_s`` (the cluster
-  autoscaler gets its chance). ``enabled=False`` restores the plain wait, bounded
-  only by ``claim_timeout`` / ``ready_timeout``.
+  ``Failed`` pod, an OOM-killed container) fail at once. The graced classes are
+  opt-in: with ``grace_s`` set, reasons that can be transient
+  (``ImagePullBackOff``, ``CreateContainerConfigError``, ``CrashLoopBackOff``,
+  ...) fail once they have persisted that long; with ``unschedulable_grace_s``
+  set, an ``Unschedulable`` pod fails after that long. Unset (the default) leaves
+  them to ``claim_timeout``: a GPU or node-auto-provisioning scale-up often
+  outlasts a few minutes of ``Unschedulable``, and failing a pull during registry
+  throttling makes the caller retry on a new pod whose pull starts at once
+  (kubelet's pull backoff is per pod), adding load while the registry is already
+  throttling. ``enabled=False`` restores the plain wait, bounded only by
+  ``claim_timeout`` / ``ready_timeout``.
   """
 
   enabled: bool = True
   # Warm adoptions are Ready within a second or two; do not poll pods for those.
   initial_delay_s: float = 10.0
   poll_s: float = 5.0
-  grace_s: float = 60.0
-  unschedulable_grace_s: float = 180.0
+  # None = this class of reason is left to claim_timeout (see the docstring).
+  grace_s: float | None = None
+  unschedulable_grace_s: float | None = None
 
   @field_validator("initial_delay_s", "grace_s", "unschedulable_grace_s")
   @classmethod
-  def _non_negative(cls, v: float) -> float:
-    if v < 0:
+  def _non_negative(cls, v: float | None) -> float | None:
+    if v is not None and v < 0:
       raise ValueError("must be >= 0")
     return v
 

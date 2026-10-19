@@ -222,6 +222,28 @@ class SandboxSession:
       pass
 
 
+
+def forget_claim_in_client(cluster, claim_name: str) -> None:
+  """Drop a claim from the SDK client's per-process tracking after the fleet
+  removed it outside ``SandboxClient.delete_sandbox``.
+
+  ``create_sandbox`` records the Sandbox object in
+  ``_active_connection_sandboxes`` and, for a caller-named claim, the name in
+  ``_explicit_claims``; ``sandbox.terminate()`` and a direct claim delete leave
+  both in place, so a fleet that claims per episode grows them for the life of
+  the process. Best-effort over the client's private state until the SDK prunes
+  it on the terminate path itself."""
+  client = getattr(cluster, "sandbox_client", None)
+  if client is None:
+    return
+  key = (cluster.namespace, claim_name)
+  active = getattr(client, "_active_connection_sandboxes", None)
+  if isinstance(active, dict):
+    active.pop(key, None)
+  explicit = getattr(client, "_explicit_claims", None)
+  if isinstance(explicit, set):
+    explicit.discard(key)
+
 @dataclass
 class SandboxHandle:
   """A claimed sandbox bound to one task on one cluster.
@@ -300,6 +322,9 @@ class SandboxHandle:
     Without it, `is_alive()` cannot tell a replacement pod from the original."""
     if self._cluster is None:
       return
+    # A failed read must leave the identity unknown, not the previous pod's:
+    # after a resume or restore a stale UID would read the new pod as lost.
+    self.pod_uid, self.runtime_restarts = None, None
     try:
       pod = self._cluster.exec_core_api().read_namespaced_pod_status(
           self.pod_name, self._cluster.namespace, _request_timeout=(3, 10))
@@ -527,3 +552,5 @@ class SandboxHandle:
     else:
       self._cluster.sandbox_client.delete_sandbox(
           self.claim_name, namespace=self._cluster.namespace)
+    if self._cluster is not None:
+      forget_claim_in_client(self._cluster, self.claim_name)

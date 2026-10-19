@@ -49,7 +49,7 @@ from .exceptions import (
     PoolNotFoundError,
     PreflightError,
 )
-from .handles import SandboxHandle
+from .handles import SandboxHandle, forget_claim_in_client
 from .failfast import ClaimWatchdog
 from .observability import Observer, repo_family
 from .placement import get_placement
@@ -1387,6 +1387,9 @@ class SandboxFleet:
         except Exception:  # noqa: BLE001
           logger.warning("failed to terminate sandbox after acquire error",
                          exc_info=True)
+      # However the claim went (deleted here, by the watchdog, or never
+      # created), the SDK client still tracks its name and object: prune them.
+      forget_claim_in_client(cluster, claim_name)
       # If this call created the on-demand pool, undo it fully (delete pool +
       # template, release the replica, forget it) so a failed acquire leaves no
       # trace. A reused pool is left for the next acquire.
@@ -1448,6 +1451,7 @@ class SandboxFleet:
       except Exception:  # noqa: BLE001
         logger.warning("failed to terminate sandbox created during teardown",
                        exc_info=True)
+      forget_claim_in_client(cluster, claim_name)
       self._obs.claim(cluster.name, "error")
       raise FleetError(
           "fleet was torn down while this claim was in flight; the claim has "

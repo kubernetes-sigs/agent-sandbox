@@ -89,12 +89,16 @@ def _cluster(*, context, namespace, kubeconfig, in_cluster) -> Cluster:
 
 
 def _reap_with_cluster(cluster: Cluster, run_id: str | None, *,
-                       delete_pods: bool,
-                       protect_claims_of=None) -> dict:
+                       delete_pods: bool, protect_claims_of=None,
+                       protection: tuple[set[str], set[str], set[str]] | None = None,
+                       sandbox_index: dict[str, str | None] | None = None) -> dict:
   """``run_id=None`` sweeps every managed run. ``protect_claims_of(rid)`` (rid
   may be None for an unlabelled claim) says whether a claim belongs to a run
   that must keep working: pools such a claim points at, their templates, and
-  their Sandboxes and pods are left alone even if they carry ``run_id``."""
+  their Sandboxes and pods are left alone even if they carry ``run_id``.
+  ``protection`` (the result of `_in_use_elsewhere`) and ``sandbox_index`` (from
+  `_sandbox_selector_index`) let a sweep over many runs do the namespace-wide
+  lists once instead of once per run."""
   if run_id is not None and not run_id:
     raise ValueError("an empty run_id would select every managed run")
   namespace = cluster.namespace
@@ -109,9 +113,10 @@ def _reap_with_cluster(cluster: Cluster, run_id: str | None, *,
   # A pool keeps the run id of the run that created it, so a live run that
   # adopted it (adopt_existing, or a shared namespace) would lose its pool and
   # template here. Those still referenced by a protected run's claims stay.
-  protected_pools, protected_templates, protected_pod_selectors = (
-      _in_use_elsewhere(cluster, protect_claims_of) if protect_claims_of
-      else (set(), set(), set()))
+  if protection is None:
+    protection = (_in_use_elsewhere(cluster, protect_claims_of, sandbox_index=sandbox_index)
+                  if protect_claims_of else (set(), set(), set()))
+  protected_pools, protected_templates, protected_pod_selectors = protection
   if protected_pools:
     logger.warning("reap(%s): keeping pool(s) %s and template(s) %s, still used by "
                    "another run's claims", run_id, sorted(protected_pools),
@@ -121,7 +126,8 @@ def _reap_with_cluster(cluster: Cluster, run_id: str | None, *,
   # Sandboxes and pods are reached through the pools and claims (see the module
   # docstring), so record how before those are deleted.
   pod_selectors, sandbox_names = _sandbox_links(cluster, selector,
-                                                skip_pools=protected_pools)
+                                                skip_pools=protected_pools,
+                                                sandbox_index=sandbox_index)
 
   def _sweep(kind, lister, deleter, keep=frozenset()):
     names = [n for n in lister(label_selector=selector) if n not in keep]
@@ -171,8 +177,24 @@ def _reap_with_cluster(cluster: Cluster, run_id: str | None, *,
   return counts
 
 
+def _sandbox_selector_index(cluster: Cluster) -> dict[str, str | None]:
+  """Sandbox name -> ``status.labelSelector`` for every Sandbox in the namespace:
+  one LIST, shared by the helpers below, so a sweep over many runs does not list
+  tens of thousands of Sandboxes once per run."""
+  out: dict[str, str | None] = {}
+  for sb in cluster.resources._list_objects(  # noqa: SLF001
+      constants.SANDBOXES_PLURAL, None,
+      group=constants.SANDBOX_GROUP, version=constants.SANDBOX_VERSION):
+    name = (sb.get("metadata") or {}).get("name")
+    if name:
+      out[name] = (sb.get("status") or {}).get("labelSelector")
+  return out
+
+
 def _sandbox_links(cluster: Cluster, selector: str, *,
-                   skip_pools: set[str] | frozenset = frozenset()) -> tuple[set[str], set[str]]:
+                   skip_pools: set[str] | frozenset = frozenset(),
+                   sandbox_index: dict[str, str | None] | None = None
+                   ) -> tuple[set[str], set[str]]:
   """Pod label selectors and Sandbox names that belong to the objects matching
   ``selector``: every pool's ``status.selector`` (its Sandboxes and pods carry
   that label), every claim's ``status.sandbox.name``, and for those claimed
@@ -220,20 +242,20 @@ def _sandbox_links(cluster: Cluster, selector: str, *,
   # already covered by the pool selector, so only the claimed ones are looked up.
   if claimed:
     try:
-      for sb in r._list_objects(constants.SANDBOXES_PLURAL, None,  # noqa: SLF001
-                                group=constants.SANDBOX_GROUP,
-                                version=constants.SANDBOX_VERSION):
-        if (sb.get("metadata") or {}).get("name") in claimed:
-          sel = (sb.get("status") or {}).get("labelSelector")
-          if sel:
-            pod_selectors.add(sel)
+      index = (sandbox_index if sandbox_index is not None
+               else _sandbox_selector_index(cluster))
+      for name in claimed:
+        sel = index.get(name)
+        if sel:
+          pod_selectors.add(sel)
     except Exception:  # noqa: BLE001
       logger.warning("reap: could not list sandboxes for pod selectors", exc_info=True)
   return pod_selectors, sandbox_names
 
 
-def _in_use_elsewhere(cluster: Cluster,
-                      protect_claims_of) -> tuple[set[str], set[str], set[str]]:
+def _in_use_elsewhere(cluster: Cluster, protect_claims_of, *,
+                      sandbox_index: dict[str, str | None] | None = None
+                      ) -> tuple[set[str], set[str], set[str]]:
   """What the claims for which ``protect_claims_of(claim_run_id)`` is true still
   use: the pools they point at, those pools' templates, and the pod label
   selectors of their pods (each such pool's ``status.selector`` and each such
@@ -279,13 +301,12 @@ def _in_use_elsewhere(cluster: Cluster,
           f"another run still uses ({sorted(pools)}); nothing was deleted.") from exc
   if claimed:
     try:
-      for sb in r._list_objects(constants.SANDBOXES_PLURAL, None,  # noqa: SLF001
-                                group=constants.SANDBOX_GROUP,
-                                version=constants.SANDBOX_VERSION):
-        if (sb.get("metadata") or {}).get("name") in claimed:
-          sel = (sb.get("status") or {}).get("labelSelector")
-          if sel:
-            pod_selectors.add(sel)
+      index = (sandbox_index if sandbox_index is not None
+               else _sandbox_selector_index(cluster))
+      for name in claimed:
+        sel = index.get(name)
+        if sel:
+          pod_selectors.add(sel)
     except Exception as exc:  # noqa: BLE001
       raise FleetError(
           "reap: could not list sandboxes to find the pods another run's claims "
@@ -393,11 +414,23 @@ def reap_orphans(alive_run_ids: Iterable[str], *, min_age_s: float = 300.0,
   if dry_run:
     logger.info("reap_orphans (dry run): would reap %s", sorted(orphans))
     return orphans
+  # The namespace-wide lists once per sweep, not once per orphan: at tens of
+  # thousands of Sandboxes a per-run LIST is the cost that matters. Both fail
+  # before anything is deleted when a list fails.
+  def protect(claim_rid):
+    return claim_rid not in orphans
+
+  try:
+    sandbox_index = _sandbox_selector_index(cluster)
+  except Exception as exc:  # noqa: BLE001
+    raise FleetError("reap_orphans: could not list the namespace's Sandboxes; "
+                     "nothing was deleted. Retry when the API server answers.") from exc
+  protection = _in_use_elsewhere(cluster, protect, sandbox_index=sandbox_index)
   results: dict[str, dict] = {}
   for rid in sorted(orphans):
     results[rid] = _reap_with_cluster(
-        cluster, rid, delete_pods=delete_pods,
-        protect_claims_of=lambda claim_rid: claim_rid not in orphans)
+        cluster, rid, delete_pods=delete_pods, protect_claims_of=protect,
+        protection=protection, sandbox_index=sandbox_index)
   return results
 
 
@@ -424,6 +457,9 @@ def main(argv=None) -> None:
   a = p.parse_args(argv)
   if a.dry_run and not a.orphans:
     p.error("--dry-run is only supported with --orphans; --run-id and --all delete")
+  if a.orphans and (a.run_id is not None or a.all):
+    p.error("--orphans cannot be combined with --run-id or --all: the orphan sweep "
+            "is scoped by --alive-run-ids and --min-age-s")
   logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
   try:
     if a.orphans:

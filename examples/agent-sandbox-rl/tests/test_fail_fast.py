@@ -103,7 +103,8 @@ def test_classify_oom_killed_init_container_is_terminal():
 
 def test_classify_failed_phase_and_deleting_pod():
   assert classify_pod(_pod(phase="Failed"), now=0, first_seen={}, policy=POLICY).reason == "PodFailed"
-  assert classify_pod(_pod(deleting=True), now=0, first_seen={}, policy=POLICY).reason == "PodTerminating"
+  # a pod being deleted is not a verdict: the controller recreates it
+  assert classify_pod(_pod(deleting=True), now=0, first_seen={}, policy=POLICY) is None
 
 
 def test_classify_unschedulable_uses_its_own_grace():
@@ -113,6 +114,25 @@ def test_classify_unschedulable_uses_its_own_grace():
   assert classify_pod(pod, now=179, first_seen=seen, policy=POLICY) is None
   v = classify_pod(pod, now=180, first_seen=seen, policy=POLICY)
   assert v is not None and v.reason == "Unschedulable" and "0/3 nodes" in v.message
+
+
+def test_graced_classes_are_opt_in():
+  default = FailFastPolicy()
+  assert default.grace_s is None and default.unschedulable_grace_s is None
+  seen = {}
+  assert classify_pod(_pod(waiting="ImagePullBackOff"), now=10**6, first_seen=seen,
+                      policy=default) is None
+  assert classify_pod(_pod(unschedulable=True), now=10**6, first_seen=seen,
+                      policy=default) is None
+  assert seen == {}                                    # nothing is tracked for them
+  v = classify_pod(_pod(waiting="InvalidImageName"), now=0, first_seen=seen, policy=default)
+  assert v is not None and v.reason == "InvalidImageName"   # terminal: still at once
+  only_pull = FailFastPolicy(grace_s=30)              # one class on, the other off
+  assert classify_pod(_pod(unschedulable=True), now=10**6, first_seen={},
+                      policy=only_pull) is None
+  v = classify_pod(_pod(waiting="ImagePullBackOff"), now=30,
+                   first_seen={"agent-runtime:retryable": 0}, policy=only_pull)
+  assert v is not None and v.reason == "ImagePullBackOff"
 
 
 def test_classify_accepts_kubernetes_model():
@@ -259,6 +279,51 @@ def test_acquire_raises_sandbox_start_error_when_watchdog_kills_the_claim(make_c
   assert f._claims_reserved == 0
 
 
+def test_release_and_a_failed_acquire_prune_the_clients_claim_tracking(make_cluster, recording_watchdog):
+  c = make_cluster("solo")
+  client = c.sandbox_client
+  client._explicit_claims = set()
+  client._active_connection_sandboxes = {}
+  real_create = client.create_sandbox.side_effect
+
+  def create(**kw):                                      # what the SDK client records
+    sb = real_create(**kw)
+    sb.claim_name = kw["claim_name"]                     # the SDK returns the named claim
+    key = (kw["namespace"], kw["claim_name"])
+    client._explicit_claims.add(key)
+    client._active_connection_sandboxes[key] = sb
+    return sb
+
+  client.create_sandbox.side_effect = create
+  f = _fleet(ClusterRegistry([c]))
+  f.load_tasks(["img"])
+  h = f.acquire(f.tasks[0])
+  assert len(client._explicit_claims) == 1 and len(client._active_connection_sandboxes) == 1
+  f.release(h)
+  h.sandbox.terminate.assert_called_once()               # the release path itself is unchanged
+  assert client._explicit_claims == set() and client._active_connection_sandboxes == {}
+
+  def failing(**kw):                                     # registered, then the create fails
+    client._explicit_claims.add((kw["namespace"], kw["claim_name"]))
+    raise RuntimeError("boom")
+
+  client.create_sandbox.side_effect = failing
+  with pytest.raises(RuntimeError):
+    f.acquire(f.tasks[0])
+  assert client._explicit_claims == set()
+
+
+def test_record_pod_identity_clears_a_stale_identity_when_the_read_fails():
+  cluster = MagicMock()
+  cluster.namespace = "ns"
+  cluster.exec_core_api.return_value.read_namespaced_pod_status.side_effect = RuntimeError("timeout")
+  h = SandboxHandle(task=Task(id="t", image="i"), cluster_name="c", claim_name="cl",
+                    sandbox_id="sb", pod_name="p", hostname="sb", _cluster=cluster)
+  h.pod_uid, h.runtime_restarts = "old-uid", 2
+  h.record_pod_identity()                                # a resume re-baselines here
+  assert h.pod_uid is None and h.runtime_restarts is None   # unknown, not the old pod's
+
+
 def test_acquire_deletes_named_claim_when_create_fails_without_verdict(make_cluster, recording_watchdog):
   c = make_cluster("solo")
   c.sandbox_client.create_sandbox.side_effect = RuntimeError("boom")
@@ -383,14 +448,28 @@ def test_reap_orphans_reaps_each_orphan_and_honours_dry_run(monkeypatch):
                       lambda cluster, alive, min_age_s: {"r1": {"objects": 2}, "r2": {"objects": 1}})
   reaped = []
   protect = {}
+  passed = {}
+  idx_calls = []
+  prot_calls = []
+  monkeypatch.setattr(reaper_mod, "_sandbox_selector_index",
+                      lambda cluster: idx_calls.append(1) or {"sb": "sel"})
+  monkeypatch.setattr(reaper_mod, "_in_use_elsewhere",
+                      lambda cluster, protect_claims_of, *, sandbox_index=None: (
+                          prot_calls.append(sandbox_index) or ({"pool-x"}, set(), set())))
   monkeypatch.setattr(reaper_mod, "_reap_with_cluster",
-                      lambda cluster, rid, delete_pods, protect_claims_of=None: (
+                      lambda cluster, rid, delete_pods, protect_claims_of=None, **kw: (
                           protect.__setitem__(rid, protect_claims_of),
-                          reaped.append((rid, delete_pods)))[1] or {"claims": 1})
+                          passed.__setitem__(rid, kw),
+                          reaped.append((rid, delete_pods)))[2] or {"claims": 1})
   out = reaper_mod.reap_orphans(["a"], namespace="ns", dry_run=True)
   assert out == {"r1": {"objects": 2}, "r2": {"objects": 1}} and reaped == []
+  assert idx_calls == [] and prot_calls == []          # a dry run lists nothing more
   out = reaper_mod.reap_orphans(["a"], namespace="ns", delete_pods=False)
   assert reaped == [("r1", False), ("r2", False)] and out == {"r1": {"claims": 1}, "r2": {"claims": 1}}
+  # the namespace-wide Sandbox LIST and the protection are computed once per sweep
+  assert len(idx_calls) == 1 and prot_calls == [{"sb": "sel"}]
+  assert passed["r1"] == passed["r2"] == {"protection": ({"pool-x"}, set(), set()),
+                                          "sandbox_index": {"sb": "sel"}}
   # claims of runs being reaped do not protect; anyone else's (or unlabelled) do
   assert protect["r1"]("r2") is False and protect["r1"]("a") is True
   assert protect["r1"](None) is True
@@ -406,6 +485,10 @@ def test_reaper_cli_orphans_flags(monkeypatch, capsys):
   assert calls["min_age_s"] == 60 and calls["dry_run"] is True
   with pytest.raises(SystemExit):
     reaper_mod.main(["--orphans", "--namespace", "ns"])   # alive list is mandatory
+  for extra in (["--run-id", "r"], ["--all"]):           # a different deletion scope
+    with pytest.raises(SystemExit):
+      reaper_mod.main(["--orphans", "--alive-run-ids", "", *extra])
+  assert calls["alive"] == ["a", "b"]                   # none of the rejected calls ran
 
 
 # --- reaper: pods and Sandboxes are reached through pools and claims ---------- #

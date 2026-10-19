@@ -364,17 +364,32 @@ class AsyncSandboxBatch:
                     f"'{lease.spec.holder_identity}', not this handle; treating as released"
                 )
             else:
-                lease.spec.holder_identity = None
-                lease.spec.renew_time = batch_utils.lease_now()
-                # Refresh the Lease so it doesn't expire immediately after we release it,
-                # giving other clients a chance to acquire it.
-                lease.spec.lease_duration_seconds = self._detach_grace
-                await self._client.k8s_helper.replace_batch_lease(
-                    self._lease_name,
-                    self.namespace,
-                    lease,
-                    _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
-                )
+                for attempt in range(2):
+                    lease.spec.holder_identity = None
+                    lease.spec.renew_time = batch_utils.lease_now()
+                    # Refresh the Lease so it doesn't expire immediately after we release it,
+                    # giving other clients a chance to acquire it.
+                    lease.spec.lease_duration_seconds = self._detach_grace
+                    try:
+                        await self._client.k8s_helper.replace_batch_lease(
+                            self._lease_name,
+                            self.namespace,
+                            lease,
+                            _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
+                        )
+                        break
+                    except ApiException as e:
+                        if e.status != 409 or attempt:
+                            raise
+                        # A 409 means the Lease changed after it was read. A concurrent detach() of this handle
+                        # leaves it released and a takeover leaves another holder, so both count as done. It can
+                        # still be held here only if one of this handle's own renewals landed late, so the release
+                        # is written once more.
+                        lease = await self._client.k8s_helper.read_batch_lease(
+                            self._lease_name, self.namespace, _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
+                        )
+                        if lease is None or lease.spec.holder_identity != self._holder_identity:
+                            break
 
         async with self._lock:
             self._lease_released = True

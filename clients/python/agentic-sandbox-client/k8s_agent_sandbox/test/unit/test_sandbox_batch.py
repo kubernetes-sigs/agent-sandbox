@@ -934,6 +934,45 @@ class TestDetach(unittest.TestCase):
         self.mock_client.k8s_helper.read_batch_lease.assert_called_once()
         self.mock_client.k8s_helper.replace_batch_lease.assert_called_once()
 
+    def test_release_conflict_succeeds_only_once_the_lease_is_not_held(self):
+        # A concurrent detach() can release the Lease between this call's read and write, and a late renewal
+        # of this handle can leave it held, which detach() releases with one more write.
+        for after_conflict, writes, released in (
+            ("released", [409], True),
+            ("deleted", [409], True),
+            ("another holder", [409], True),
+            ("this handle", [409, 200], True),
+            ("this handle", [409, 409], False),
+            ("this handle", [409, 500], False),
+        ):
+            with self.subTest(after_conflict=after_conflict, writes=writes):
+                mock_client = MagicMock()
+                handle = _make_handle(mock_client)
+                first = _lease(holder_identity=handle._holder_identity)
+                current = {
+                    "released": _lease(holder_identity=None),
+                    "deleted": None,
+                    "another holder": _lease(holder_identity="other"),
+                    "this handle": _lease(holder_identity=handle._holder_identity),
+                }[after_conflict]
+                mock_client.k8s_helper.read_batch_lease.side_effect = [first, current]
+                mock_client.k8s_helper.replace_batch_lease.side_effect = [
+                    k8s_client.ApiException(status=status) if status != 200 else None for status in writes
+                ]
+
+                if released:
+                    handle.detach(grace=17)
+                else:
+                    with self.assertRaises(k8s_client.ApiException):
+                        handle.detach(grace=17)
+                self.assertEqual(handle._lease_released, released)
+                replace = mock_client.k8s_helper.replace_batch_lease
+                self.assertEqual(replace.call_count, len(writes))
+                written = replace.call_args.args[2]
+                self.assertIs(written, current if len(writes) == 2 else first)
+                self.assertIsNone(written.spec.holder_identity)
+                self.assertEqual(written.spec.lease_duration_seconds, 17)
+
     def test_retryable_after_release_write_failure(self):
         self.mock_client.k8s_helper.read_batch_lease.return_value = _lease(
             holder_identity=self.handle._holder_identity

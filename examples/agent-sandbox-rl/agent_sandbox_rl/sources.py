@@ -45,10 +45,12 @@ DEFAULT_IMAGE_FIELDS: tuple[str, ...] = (
 )
 DEFAULT_ID_FIELDS: tuple[str, ...] = ("id", "instance_id", "task_id")
 
-ImageField = "str | Sequence[str] | Callable[[dict], object] | None"
-
 
 def _dig(row: dict, path: str):
+  """``row[path]`` when the literal key exists (flattened datasets emit
+  ``metadata.docker_image`` columns), else the dotted descent."""
+  if path in row:
+    return row[path]
   node = row
   for part in path.split("."):
     if not isinstance(node, dict) or part not in node:
@@ -65,15 +67,36 @@ def _as_image(value) -> str | None:
   if hasattr(value, "tolist") and not isinstance(value, (str, bytes)):
     value = value.tolist()
   while isinstance(value, (list, tuple)):
-    if not value:
+    if len(value) != 1:                      # several images is not "the image"
       return None
     value = value[0]
   if isinstance(value, bytes):
-    value = value.decode("utf-8", errors="replace")
+    try:
+      value = value.decode("utf-8")
+    except UnicodeDecodeError:               # binary (a PNG under "image"): not a ref
+      return None
   if isinstance(value, str):
     value = value.strip()
     return value or None
   return None
+
+
+def _paths(field, defaults: Sequence[str]) -> Sequence[str]:
+  if field is None:
+    return defaults
+  return (field,) if isinstance(field, str) else tuple(field)
+
+
+def _find_image(row: dict, image_field) -> "tuple[str | None, str | None]":
+  """``(path, image)``: the path the image was read from (``None`` for a
+  callable) and the image, or ``(None, None)`` when nothing matches."""
+  if callable(image_field):
+    return None, _as_image(image_field(row))
+  for path in _paths(image_field, DEFAULT_IMAGE_FIELDS):
+    img = _as_image(_dig(row, path))
+    if img:
+      return path, img
+  return None, None
 
 
 def extract_image(row: dict, image_field=None) -> str | None:
@@ -83,46 +106,36 @@ def extract_image(row: dict, image_field=None) -> str | None:
   paths tried in order, a callable ``row -> value``, or ``None`` for
   `DEFAULT_IMAGE_FIELDS`. Returns ``None`` when nothing matches.
   """
-  if callable(image_field):
-    return _as_image(image_field(row))
-  if image_field is None:
-    paths: Sequence[str] = DEFAULT_IMAGE_FIELDS
-  elif isinstance(image_field, str):
-    paths = (image_field,)
-  else:
-    paths = tuple(image_field)
-  for path in paths:
-    img = _as_image(_dig(row, path))
-    if img:
-      return img
-  return None
+  return _find_image(row, image_field)[1]
 
 
-def _row_id(row: dict, id_field, default) -> str:
+def _find_id(row: dict, id_field, default) -> "tuple[str | None, str]":
+  """``(path, id)`` like `_find_image`; ``default`` (the row index) when no
+  field matches."""
   if callable(id_field):
     v = id_field(row)
-    return str(v) if v is not None else str(default)
-  paths = DEFAULT_ID_FIELDS if id_field is None else (
-      (id_field,) if isinstance(id_field, str) else tuple(id_field))
-  for path in paths:
+    return None, (str(v) if v is not None else str(default))
+  for path in _paths(id_field, DEFAULT_ID_FIELDS):
     v = _dig(row, path)
     if v is not None and not isinstance(v, (dict, list)):
-      return str(v)
-  return str(default)
+      return path, str(v)
+  return None, str(default)
 
 
 def row_to_task(row: dict, index, *, image_field=None, id_field=None) -> Task:
-  """`Task` for one dataset row (see `extract_image`); the whole row stays in
-  ``metadata`` minus the top-level ``id`` and ``image`` keys. Raises ``KeyError``
-  when no image field matches."""
-  image = extract_image(row, image_field)
+  """`Task` for one dataset row (see `extract_image`). The row stays in
+  ``metadata`` minus the top-level keys its id and image were read from (and
+  the SDK's own ``id`` / ``image`` keys). Raises ``KeyError`` when no image
+  field matches."""
+  img_path, image = _find_image(row, image_field)
   if not image:
-    tried = (image_field if isinstance(image_field, str) else
-             "callable" if callable(image_field) else
-             ", ".join(image_field or DEFAULT_IMAGE_FIELDS))
+    tried = ("callable" if callable(image_field) else
+             ", ".join(_paths(image_field, DEFAULT_IMAGE_FIELDS)))
     raise KeyError(f"task #{index} row has no container image (tried: {tried})")
-  return Task(id=_row_id(row, id_field, index), image=image,
-              metadata={k: v for k, v in row.items() if k not in ("id", "image")})
+  id_path, task_id = _find_id(row, id_field, index)
+  consumed = {"id", "image"} | {p for p in (img_path, id_path) if p and p in row}
+  return Task(id=task_id, image=image,
+              metadata={k: v for k, v in row.items() if k not in consumed})
 
 
 class Task(BaseModel):
@@ -162,9 +175,11 @@ class JsonlSource:
   """A `TaskSource` reading one JSON object per line.
 
   Args:
-    path: Path to a ``.jsonl`` file.
-    image_field: Field holding the container image.
-    id_field: Field holding the task id (falls back to the row index).
+    path: A local ``.jsonl`` file (streamed, so ``limit`` stops the read) or a
+      ``gs://`` object (downloaded whole; see `read_text`).
+    image_field: Where the image is: a dotted path, several tried in order, or a
+      callable ``row -> value``; default `DEFAULT_IMAGE_FIELDS`.
+    id_field: Likewise for the id; default `DEFAULT_ID_FIELDS`, then the row index.
     limit: Cap on the number of tasks. ``None`` (default) = all; ``0`` = none.
   """
 
@@ -175,22 +190,36 @@ class JsonlSource:
     self.id_field = id_field
     self.limit = limit
 
+  def _lines(self) -> Iterable[str]:
+    path = os.fspath(self.path)
+    if path.startswith("gs://"):
+      # Not splitlines(): U+2028 / U+2029 / U+0085 are legal inside a JSON
+      # string and must not end a record.
+      return read_text(path).split("\n")
+    return open(os.path.expanduser(path), encoding="utf-8")  # noqa: SIM115 — closed in load()
+
   def load(self) -> list[Task]:
     tasks: list[Task] = []
     if self.limit == 0:                      # explicit "none" (None = all)
       return tasks
-    for i, line in enumerate(read_text(self.path).splitlines()):
-      line = line.strip()
-      if not line:
-        continue
-      row = json.loads(line)
-      try:
-        tasks.append(row_to_task(row, i, image_field=self.image_field,
-                                 id_field=self.id_field))
-      except KeyError as e:
-        raise KeyError(f"{self.path}:{i + 1}: {e.args[0]}") from None
-      if self.limit is not None and len(tasks) >= self.limit:
-        break
+    lines = self._lines()
+    try:
+      for i, line in enumerate(lines):
+        line = line.strip()
+        if not line:
+          continue
+        row = json.loads(line)
+        try:
+          tasks.append(row_to_task(row, i, image_field=self.image_field,
+                                   id_field=self.id_field))
+        except KeyError as e:
+          raise KeyError(f"{self.path}:{i + 1}: {e.args[0]}") from e
+        if self.limit is not None and len(tasks) >= self.limit:
+          break
+    finally:
+      close = getattr(lines, "close", None)
+      if close is not None:
+        close()
     return tasks
 
 
@@ -201,22 +230,34 @@ def read_text(path: str) -> str:
   credentials), else the ``gcloud storage cat`` or ``gsutil cat`` command on
   ``PATH``; a clear error names the options when none is available.
   """
+  path = os.fspath(path)
   if path.startswith("gs://"):
     bucket, _, blob = path[len("gs://"):].partition("/")
     try:
       from google.cloud import storage  # type: ignore
     except ImportError:
       storage = None
+    client_error = None
     if storage is not None:
-      return storage.Client().bucket(bucket).blob(blob).download_as_text()
+      try:
+        return storage.Client().bucket(bucket).blob(blob).download_as_text()
+      except Exception as exc:  # noqa: BLE001 — e.g. no ADC on a gcloud-logged-in
+        # machine, where the CLI below still works
+        client_error = f"{type(exc).__name__}: {exc}"
+        logger.info("google.cloud.storage could not read %s (%s); trying the CLI",
+                    path, client_error)
     for tool, argv in (("gcloud", ["gcloud", "storage", "cat", path]),
                        ("gsutil", ["gsutil", "cat", path])):
       if shutil.which(tool):
-        return subprocess.run(argv, check=True, capture_output=True,
-                              text=True).stdout
+        try:
+          return subprocess.run(argv, check=True, capture_output=True,
+                                encoding="utf-8", timeout=600).stdout
+        except subprocess.CalledProcessError as e:
+          raise RuntimeError(
+              f"cannot read {path}: {tool} failed: {(e.stderr or '').strip()}") from e
     raise RuntimeError(
         f"cannot read {path}: install google-cloud-storage, or put gcloud or "
-        "gsutil on PATH")
+        "gsutil on PATH" + (f" ({client_error})" if client_error else ""))
   with open(os.path.expanduser(path), encoding="utf-8") as fh:
     return fh.read()
 

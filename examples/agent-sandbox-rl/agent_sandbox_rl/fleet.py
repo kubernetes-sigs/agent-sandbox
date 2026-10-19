@@ -404,11 +404,14 @@ class SandboxFleet:
     return ClusterRegistry([Cluster(ClusterConfig(), labels=config.labels)])
 
   # --- inputs ------------------------------------------------------------ #
-  def load_tasks(self, source, *, image_rewrite=None) -> list[Task]:
+  def load_tasks(self, source, *, image_rewrite=None, image_field=None,
+                 id_field=None) -> list[Task]:
     """Load tasks from ``source``. ``image_rewrite`` is an optional
     ``image -> image`` hook (e.g. ``registry_rewrite.make_rewriter(...)``) applied
-    to each task's image; the original is stashed in ``metadata['original_image']``."""
-    tasks = to_tasks(source)
+    to each task's image; the original is stashed in ``metadata['original_image']``.
+    ``image_field`` / ``id_field`` say where dataset rows keep their image and id
+    (see `extract_image`)."""
+    tasks = to_tasks(source, image_field=image_field, id_field=id_field)
     if image_rewrite is not None:
       # Copy rather than mutate: to_tasks may hand back the caller's own Task
       # objects (e.g. a list[Task] / caching TaskSource), so rewriting in place

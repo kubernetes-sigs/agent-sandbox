@@ -13,6 +13,7 @@
 # limitations under the License.
 """Dataset-row image extraction, manifest loading and the gs:// reader."""
 import subprocess
+import sys
 import types
 
 import pytest
@@ -56,14 +57,15 @@ def test_extract_image_explicit_field_sequence_and_callable():
   assert extract_image(row, "missing") is None
 
 
-def test_to_tasks_rows_use_conventions_and_keep_the_row_as_metadata():
+def test_to_tasks_rows_use_conventions_and_keep_the_rest_of_the_row_as_metadata():
   rows = [{"instance_id": "django-1", "docker_image": "img:1", "repo": "django"},
           {"id": "x", "image": "img:2"},
           {"metadata": {"docker_image": "img:3"}, "task_id": 7}]
   tasks = to_tasks(rows)
   assert [(t.id, t.image) for t in tasks] == [("django-1", "img:1"), ("x", "img:2"), ("7", "img:3")]
-  assert tasks[0].metadata == {"instance_id": "django-1", "docker_image": "img:1", "repo": "django"}
+  assert tasks[0].metadata == {"repo": "django"}        # minus the keys id/image came from
   assert tasks[1].metadata == {}
+  assert tasks[2].metadata == {"metadata": {"docker_image": "img:3"}}   # nested: kept whole
   assert to_tasks(rows[:1], image_field="docker_image", id_field="instance_id")[0].id == "django-1"
   with pytest.raises(KeyError, match="no container image"):
     to_tasks([{"repo": "x"}])
@@ -125,3 +127,63 @@ def test_read_text_gs_prefers_the_storage_client_then_gcloud(monkeypatch):
   monkeypatch.setattr(sources.shutil, "which", lambda tool: None)
   with pytest.raises(RuntimeError, match="google-cloud-storage"):
     read_text("gs://b/x.txt")
+
+
+def test_jsonl_source_streams_local_files_and_keeps_json_line_separators(tmp_path):
+  p = tmp_path / "t.jsonl"
+  p.write_text('{"image": "img:1", "text": "a\u2028b"}\n{"image": "img:2"}\n', encoding="utf-8")
+  tasks = sources.JsonlSource(p).load()                        # PathLike accepted
+  assert [t.image for t in tasks] == ["img:1", "img:2"]
+  assert tasks[0].metadata["text"] == "a\u2028b"                # U+2028 is not a record end
+  assert [t.image for t in sources.JsonlSource(str(p), limit=1).load()] == ["img:1"]
+
+
+def test_read_text_gs_falls_back_to_the_cli_when_the_client_cannot_authenticate(monkeypatch):
+  class _Client:
+    def __init__(self):
+      raise RuntimeError("no ADC")
+  fake_storage = types.SimpleNamespace(Client=_Client)
+  monkeypatch.setitem(sys.modules, "google", types.SimpleNamespace(cloud=types.SimpleNamespace(storage=fake_storage)))
+  monkeypatch.setitem(sys.modules, "google.cloud", types.SimpleNamespace(storage=fake_storage))
+  monkeypatch.setitem(sys.modules, "google.cloud.storage", fake_storage)
+  monkeypatch.setattr(sources.shutil, "which", lambda tool: "/usr/bin/gcloud" if tool == "gcloud" else None)
+  seen = {}
+  def run(argv, **kw):
+    seen.update(kw)
+    return types.SimpleNamespace(stdout="x\n")
+  monkeypatch.setattr(sources.subprocess, "run", run)
+  assert sources.read_text("gs://b/f") == "x\n"
+  assert seen["check"] is True and seen["encoding"] == "utf-8" and seen["timeout"]
+
+  def boom(argv, **kw):
+    raise subprocess.CalledProcessError(1, argv, stderr="AccessDeniedException: 403 forbidden\n")
+  monkeypatch.setattr(sources.subprocess, "run", boom)
+  with pytest.raises(RuntimeError, match="AccessDeniedException"):
+    sources.read_text("gs://b/f")
+  monkeypatch.setattr(sources.shutil, "which", lambda tool: None)
+  with pytest.raises(RuntimeError, match="no ADC"):             # the client error is named
+    sources.read_text("gs://b/f")
+
+
+def test_extract_image_literal_dotted_keys_multi_element_lists_and_binary():
+  assert sources.extract_image({"metadata.docker_image": "img:1"}) == "img:1"   # flattened column
+  assert sources.extract_image({"docker_image": ["a:1", "b:2"]}) is None          # not one image
+  assert sources.extract_image({"image": b"\x89PNG\r\n", "docker_image": "img:2"}) == "img:2"
+
+
+def test_row_to_task_strips_the_keys_it_consumed_and_keeps_the_rest():
+  t = sources.row_to_task({"instance_id": "i1", "docker_image": "img:1", "repo": "r"}, 0,
+                          image_field="docker_image", id_field="instance_id")
+  assert (t.id, t.image, t.metadata) == ("i1", "img:1", {"repo": "r"})
+  t = sources.row_to_task({"meta": {"docker_image": "img:3"}, "task_id": 7}, 1,
+                          image_field="meta.docker_image")
+  assert t.id == "7" and t.image == "img:3"
+  assert t.metadata == {"meta": {"docker_image": "img:3"}}       # nested keys stay whole
+
+
+def test_fleet_load_tasks_passes_the_field_options_through(make_cluster):
+  from agent_sandbox_rl import ClusterRegistry, FleetConfig, SandboxFleet
+  f = SandboxFleet(FleetConfig(), registry=ClusterRegistry([make_cluster("solo")]))
+  tasks = f.load_tasks([{"docker_image": "img:1", "instance_id": "i1"}],
+                       image_field="docker_image", id_field="instance_id")
+  assert [(t.id, t.image) for t in tasks] == [("i1", "img:1")]

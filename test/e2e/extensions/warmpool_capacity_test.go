@@ -284,6 +284,36 @@ func TestWarmPoolStandbyCapacityColdAndResize(t *testing.T) {
 	}
 }
 
+func TestWarmPoolStandbyCapacityRepairedCandidate(t *testing.T) {
+	tc, pool := newCapacityFixture(t, new(int64(3)), 1)
+	inventory := waitForCapacityState(t, tc, pool, 0, 1, 1)
+	stock := &inventory[0]
+	framework.MustUpdateObject(tc.ClusterClient, stock, func(obj *sandboxv1beta1.Sandbox) {
+		obj.Annotations[capacitySourceUID] = "conflicting-pool-uid"
+	})
+	require.Eventually(t, func() bool {
+		latest := capacityPool(t, tc, pool)
+		_, present, _ := unstructured.NestedInt64(latest.Object, "status", "occupiedReplicas")
+		return !present
+	}, capacityTimeout, 500*time.Millisecond, "conflicting stock must pause accounting before claiming")
+	// This request has no Env override: selection must examine and reject the
+	// conflicted warm candidate before falling back to a new cold instance.
+	first := &extensionsv1beta1.SandboxClaim{ObjectMeta: metav1.ObjectMeta{Name: "before-repair", Namespace: pool.GetNamespace()}, Spec: extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: pool.GetName()}}}
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), first))
+	waitForClaimReady(t, tc, first)
+	cold := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, tc.Get(t.Context(), types.NamespacedName{Namespace: first.Namespace, Name: first.Status.SandboxStatus.Name}, cold))
+	require.Equal(t, sandboxv1beta1.SandboxLaunchTypeCold, cold.Labels[sandboxv1beta1.SandboxLaunchTypeLabel])
+	require.NotEqual(t, stock.UID, cold.UID)
+	framework.MustUpdateObject(tc.ClusterClient, stock, func(obj *sandboxv1beta1.Sandbox) {
+		obj.Annotations[capacitySourceUID] = string(pool.GetUID())
+	})
+	waitForCapacityState(t, tc, pool, 1, 1, 1)
+	_, adopted := claimCapacitySandbox(t, tc, pool, "after-repair", false)
+	require.Equal(t, stock.UID, adopted.UID, "metadata-only repair must restore the same Ready warm candidate")
+	waitForCapacityState(t, tc, pool, 2, 1, 1)
+}
+
 func TestWarmPoolStandbyCapacityValidation(t *testing.T) {
 	tc, pool := newCapacityFixture(t, new(int64(0)), 0)
 	waitForCapacityState(t, tc, pool, 0, 0, 0)

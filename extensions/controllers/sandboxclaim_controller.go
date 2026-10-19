@@ -2871,8 +2871,12 @@ func (h *sandboxEventHandler) Update(ctx context.Context, e event.UpdateEvent, _
 
 	poolChanged := oldWarmPoolName != newWarmPoolName
 	nodeScheduled := oldSandbox.Status.NodeName != newSandbox.Status.NodeName
+	sourceChanged := oldSandbox.Annotations[sourceWarmPoolNameAnnotation] != newSandbox.Annotations[sourceWarmPoolNameAnnotation] ||
+		oldSandbox.Annotations[sourceWarmPoolUIDAnnotation] != newSandbox.Annotations[sourceWarmPoolUIDAnnotation]
 
-	if (!oldAdoptable && newAdoptable) || (newAdoptable && poolChanged) || (newAdoptable && nodeScheduled) {
+	if newAdoptable && (!oldAdoptable || poolChanged || nodeScheduled || sourceChanged) {
+		// A source conflict can evict otherwise valid stock during selection.
+		// Repairing annotations alone must make that stock selectable again.
 		// Add/update sandbox in the queue
 		key := queue.SandboxKey{
 			Namespace: newSandbox.Namespace,

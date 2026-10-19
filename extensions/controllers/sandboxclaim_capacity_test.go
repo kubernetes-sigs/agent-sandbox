@@ -20,9 +20,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/extensions/controllers/queue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 )
 
 func TestClaimAwareAdoptionRejectsPreviousPoolIncarnation(t *testing.T) {
@@ -55,6 +57,35 @@ func TestClaimAwareAdoptionRejectsPreviousPoolIncarnation(t *testing.T) {
 			require.Empty(t, claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation])
 		})
 	}
+}
+
+func TestClaimAwareAdoptionRecoversAfterSourceOnlyRepair(t *testing.T) {
+	ctx := context.Background()
+	claim, template, pool, sb := newOptimisticLockTestObjects()
+	pool.Spec.ReplenishmentCapacity = new(int32(1))
+	delete(claim.Annotations, extensionsv1beta1.AssignedSandboxNameAnnotation)
+	sb.OwnerReferences = []metav1.OwnerReference{{APIVersion: extensionsv1beta1.GroupVersion.String(), Kind: extensionsv1beta1.SandboxWarmPoolKind, Name: pool.Name, UID: pool.UID, Controller: new(true)}}
+	sb.Annotations = map[string]string{sourceWarmPoolNameAnnotation: pool.Name, sourceWarmPoolUIDAnnotation: "conflicting-uid"}
+	sb.Labels[warmPoolSandboxLabel] = "pool-member"
+	sb.Labels[sandboxTemplateRefHash] = SandboxTemplateRefHash(template.Name)
+	sb.Status.PodIPs = []string{"10.0.0.1"}
+	c := newFakeClient(newTestScheme(), claim, template, pool, sb)
+	r := &SandboxClaimReconciler{Client: c, APIReader: c, Scheme: newTestScheme(), WarmSandboxQueue: queue.NewSimpleSandboxQueue()}
+	h := &sandboxEventHandler{sandboxQueue: r.WarmSandboxQueue}
+	h.Create(ctx, event.CreateEvent{Object: sb}, nil)
+	candidate, _, _, err := r.getCandidate(ctx, claim)
+	require.NoError(t, err)
+	require.Nil(t, candidate, "conflicting provenance cannot be adopted")
+	beforeRepair := sb.DeepCopy()
+	sb.Annotations[sourceWarmPoolUIDAnnotation] = string(pool.UID)
+	require.NoError(t, c.Update(ctx, sb))
+	h.Update(ctx, event.UpdateEvent{ObjectOld: beforeRepair, ObjectNew: sb}, nil)
+	adopted, _, err := r.adoptSandboxFromCandidates(ctx, claim)
+	require.NoError(t, err)
+	require.NotNil(t, adopted, "source-only repair must make Ready inventory claimable again")
+	require.Equal(t, sb.UID, adopted.UID)
+	require.True(t, metav1.IsControlledBy(adopted, claim))
+	require.Equal(t, sandboxv1beta1.SandboxLaunchTypeWarm, adopted.Labels[sandboxv1beta1.SandboxLaunchTypeLabel])
 }
 
 func TestClaimAwareAdoptionKeepsAlreadyBoundPreviousIncarnation(t *testing.T) {

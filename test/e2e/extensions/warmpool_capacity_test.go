@@ -54,6 +54,9 @@ func newCapacityFixture(t *testing.T, capacity *int64, replicas int64) (*framewo
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("warmpool-capacity-%d", time.Now().UnixNano())}}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
 	template := newWarmPoolTemplate(ns.Name)
+	// Cold-creation cases deliberately customize Env; the template must grant
+	// that capability rather than exercising the default-deny policy.
+	template.Spec.EnvVarsInjectionPolicy = extensionsv1beta1.EnvVarsInjectionPolicyAllowed
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), template))
 	pool := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": extensionsv1beta1.GroupVersion.String(),

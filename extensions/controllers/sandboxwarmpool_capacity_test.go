@@ -74,6 +74,65 @@ func TestClaimAwarePoolDoesNotReplenishOccupiedCapacity(t *testing.T) {
 	require.Zero(t, pool.Status.Replicas)
 }
 
+func TestClaimAwarePoolRecoversFromMissedSourceRouting(t *testing.T) {
+	for _, association := range []string{"claim owner", "membership"} {
+		t.Run(association, func(t *testing.T) {
+			ctx := context.Background()
+			template := createTemplate("default")
+			pool := &extensionsv1beta1.SandboxWarmPool{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default", UID: "pool-uid"}, Spec: extensionsv1beta1.SandboxWarmPoolSpec{Replicas: new(int32(1)), ReplenishmentCapacity: new(int32(1)), TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}}}
+			claim := &extensionsv1beta1.SandboxClaim{ObjectMeta: metav1.ObjectMeta{Name: "consumer", Namespace: pool.Namespace, UID: "claim-uid"}, Spec: extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: pool.Name}}}
+			sb := createPoolSandbox(pool.Name, pool.Namespace, sandboxcontrollers.NameHash(pool.Name), template, "-stock")
+			sb.UID = "stock-uid"
+			sb.OwnerReferences = []metav1.OwnerReference{{APIVersion: extensionsv1beta1.GroupVersion.String(), Kind: extensionsv1beta1.SandboxWarmPoolKind, Name: pool.Name, UID: pool.UID, Controller: new(true)}}
+			sb.Annotations = map[string]string{sourceWarmPoolNameAnnotation: pool.Name, sourceWarmPoolUIDAnnotation: string(pool.UID)}
+			c := newFakeClient(newTestScheme(), pool, template, claim, sb)
+			r := &SandboxWarmPoolReconciler{Client: c, Scheme: newTestScheme(), MaxBatchSize: 1}
+			req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)}
+			scheduled, err := r.Reconcile(ctx, req)
+			require.NoError(t, err)
+			require.Positive(t, scheduled.RequeueAfter, "even a converged opt-in pool must schedule fallback observation")
+			require.LessOrEqual(t, scheduled.RequeueAfter, 30*time.Second)
+			require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(sb), sb))
+			sb.Annotations = nil
+			sb.OwnerReferences = nil
+			if association == "claim owner" {
+				sb.OwnerReferences = []metav1.OwnerReference{{APIVersion: extensionsv1beta1.GroupVersion.String(), Kind: extensionsv1beta1.SandboxClaimKind, Name: claim.Name, UID: claim.UID, Controller: new(true)}}
+				delete(sb.Labels, warmPoolSandboxLabel)
+			}
+			require.NoError(t, c.Update(ctx, sb))
+			failingReader := interceptor.NewClient(c, interceptor.Funcs{
+				Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+					return fmt.Errorf("claim association unavailable")
+				},
+				List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+					return fmt.Errorf("membership association unavailable")
+				},
+			})
+			q := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
+			defer q.ShutDown()
+			h := &warmPoolSandboxEventHandler{EventHandler: handler.Funcs{}, expectations: r.exp(), reader: failingReader}
+			h.Create(ctx, event.CreateEvent{Object: sb}, q)
+			require.Zero(t, q.Len(), "the failed lookup has no trustworthy pool name to enqueue")
+			// Execute the observation already scheduled by the settled pool.
+			_, err = r.Reconcile(ctx, req)
+			require.Error(t, err)
+			require.NoError(t, c.Get(ctx, req.NamespacedName, pool))
+			require.Nil(t, pool.Status.OccupiedReplicas)
+			require.Nil(t, pool.Status.DesiredStandbyReplicas)
+			sb.Annotations = map[string]string{sourceWarmPoolNameAnnotation: pool.Name, sourceWarmPoolUIDAnnotation: string(pool.UID)}
+			require.NoError(t, c.Update(ctx, sb))
+			_, err = r.Reconcile(ctx, req)
+			require.NoError(t, err)
+			require.NoError(t, c.Get(ctx, req.NamespacedName, pool))
+			require.Equal(t, new(int32(1)), pool.Status.OccupiedReplicas)
+			require.Equal(t, new(int32(0)), pool.Status.DesiredStandbyReplicas)
+			list := &sandboxv1beta1.SandboxList{}
+			require.NoError(t, c.List(ctx, list))
+			require.Len(t, list.Items, 1, "missed events must not turn unknown occupancy into replacement stock")
+		})
+	}
+}
+
 func TestClaimAwarePoolLaunchLabelFailureKeepsObservedCapacity(t *testing.T) {
 	ctx := context.Background()
 	template := createTemplate("default")

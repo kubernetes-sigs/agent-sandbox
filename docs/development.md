@@ -127,11 +127,13 @@ kubectl logs -n agent-sandbox-system <pod-name>
 
 ### Accessing the Controller Pod
 
-You can get a shell into the controller's pod to inspect its filesystem and environment:
+The controller image is distroless and does not include a shell. Start an ephemeral debugging container in the controller's pod instead:
 
 ```sh
-kubectl exec -it -n agent-sandbox-system <pod-name> -- /bin/bash
+kubectl debug -it -n agent-sandbox-system <pod-name> --image=busybox:1.37 --target=agent-sandbox-controller -- /bin/sh
 ```
+
+The shell runs in the debugging container. `--target` makes the controller's processes visible when the container runtime supports process namespace targeting.
 
 ### Running the Controller on the Host
 
@@ -157,7 +159,7 @@ For a faster feedback loop, you can run the controller directly on your host mac
 4.  **Run the controller:**
 
     ```sh
-    go run ./cmd/agent-sandbox-controller/main.go
+    go run ./cmd/agent-sandbox-controller
     ```
 
 The controller will now be running on your host machine and will be connected to the `kind` cluster. You can now use a debugger like Delve to debug the controller.

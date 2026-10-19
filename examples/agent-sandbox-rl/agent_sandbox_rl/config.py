@@ -316,7 +316,8 @@ class FleetConfig(BaseModel):
   # None => conservative single-node bound (safe when the pool size is unknown).
   cluster_nodes: int | None = None
 
-  @field_validator("max_concurrent", "max_warmpool_size")
+  @field_validator("max_concurrent", "max_warmpool_size", "prepull_images_per_pod",
+                   "prepull_max_parallel")
   @classmethod
   def _positive(cls, v: int) -> int:
     if v < 1:

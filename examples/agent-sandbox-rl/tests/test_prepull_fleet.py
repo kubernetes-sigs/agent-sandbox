@@ -75,3 +75,10 @@ def test_setup_warns_when_the_prepull_budget_runs_out(make_cluster, monkeypatch,
     f.setup(prepull=True)
   assert seen["runtime_class"] == "gvisor"
   assert any("pre-pull did not finish" in r.message for r in caplog.records)
+
+
+def test_prepull_batch_knobs_must_be_positive():
+  with pytest.raises(ValueError):
+    FleetConfig(prepull_images_per_pod=0)
+  with pytest.raises(ValueError):
+    FleetConfig(prepull_max_parallel=-1)

@@ -23,6 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
@@ -215,51 +216,87 @@ func TestClaimAwarePoolTemplateReplacement(t *testing.T) {
 	}
 }
 
-func TestClaimAwarePoolReadinessGraceAndUnschedulableHold(t *testing.T) {
+func TestClaimAwarePoolReadinessGraceAndSchedulingHolds(t *testing.T) {
 	zeroGraceJitter(t)
-	ctx := context.Background()
-	now := time.Now().Truncate(time.Second)
+	for _, reason := range []string{corev1.PodReasonUnschedulable, corev1.PodReasonSchedulingGated} {
+		t.Run(reason, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Now().Truncate(time.Second)
+			pool := newReplenishTestPool(4)
+			pool.Spec.ReplenishmentCapacity = new(int32(3))
+			template := createTemplate(pool.Namespace)
+			used := capacityInteractionSandbox(pool, template, "-used")
+			used.OwnerReferences = nil
+			used2 := capacityInteractionSandbox(pool, template, "-used2")
+			used2.OwnerReferences = nil
+			stock := capacityInteractionSandbox(pool, template, "-pending")
+			stock.CreationTimestamp = metav1.NewTime(now.Add(-15 * time.Second))
+			stock.Status.Conditions = []metav1.Condition{
+				{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse},
+				{Type: string(sandboxv1beta1.SandboxConditionPodScheduled), Status: metav1.ConditionFalse, Reason: reason},
+			}
+			scheme := newTestScheme()
+			r := &SandboxWarmPoolReconciler{
+				Client: newFakeClient(scheme, pool, template, used, used2, stock), Scheme: scheme, MaxBatchSize: 4,
+				ReadinessGracePeriod: 20 * time.Second, UnschedulableRecheckInterval: 10 * time.Second,
+				now: func() time.Time { return now },
+			}
+			result := reconcileCapacityInteraction(t, r, pool)
+			require.Equal(t, 5*time.Second+graceRequeueSlack, result.RequeueAfter, "the young standby must schedule its post-grace evaluation")
+			require.Len(t, capacityInteractionStandby(t, r, pool), 1, "non-Ready standby occupies the effective target slot")
+			require.Equal(t, int32(1), pool.Status.Replicas)
+			require.Zero(t, pool.Status.ReadyReplicas)
+			require.Equal(t, new(int32(1)), pool.Status.DesiredStandbyReplicas)
+
+			now = now.Add(7 * time.Second)
+			result = reconcileCapacityInteraction(t, r, pool)
+			require.Equal(t, 10*time.Second, result.RequeueAfter)
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(stock), stock), "a standby waiting for scheduling must survive the grace deadline")
+			require.Len(t, capacityInteractionStandby(t, r, pool), 1, "held standby cannot trigger refill to spec.replicas")
+
+			// Scheduling starts a fresh grace window for pulling images and starting containers.
+			stock.Status.Conditions[1].Status = metav1.ConditionTrue
+			stock.Status.Conditions[1].Reason = sandboxv1beta1.SandboxReasonPodScheduled
+			stock.Status.Conditions[1].LastTransitionTime = metav1.NewTime(now)
+			require.NoError(t, r.Update(ctx, stock))
+			result = reconcileCapacityInteraction(t, r, pool)
+			require.Equal(t, 20*time.Second+graceRequeueSlack, result.RequeueAfter)
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(stock), stock))
+			require.Len(t, capacityInteractionStandby(t, r, pool), 1)
+
+			now = now.Add(20*time.Second + graceRequeueSlack)
+			reconcileCapacityInteraction(t, r, pool)
+			require.Empty(t, capacityInteractionStandby(t, r, pool), "stuck deletion must wait for observation before replacement")
+			syncPoolExpectations(r, pool)
+			reconcileCapacityInteraction(t, r, pool)
+			require.Len(t, capacityInteractionStandby(t, r, pool), 1, "stuck replacement must still stop at B-C, not R")
+			require.Equal(t, new(int32(2)), pool.Status.OccupiedReplicas)
+			require.Equal(t, new(int32(1)), pool.Status.DesiredStandbyReplicas)
+		})
+	}
+}
+
+func TestClaimAwarePoolMissingTemplateUsesEffectiveTarget(t *testing.T) {
 	pool := newReplenishTestPool(4)
-	pool.Spec.ReplenishmentCapacity = new(int32(3))
+	pool.Spec.ReplenishmentCapacity = new(int32(1))
 	template := createTemplate(pool.Namespace)
 	used := capacityInteractionSandbox(pool, template, "-used")
 	used.OwnerReferences = nil
-	used2 := capacityInteractionSandbox(pool, template, "-used2")
-	used2.OwnerReferences = nil
-	stock := capacityInteractionSandbox(pool, template, "-pending")
-	stock.CreationTimestamp = metav1.NewTime(now.Add(-15 * time.Second))
-	stock.Status.Conditions = []metav1.Condition{
-		{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse},
-		{Type: string(sandboxv1beta1.SandboxConditionPodScheduled), Status: metav1.ConditionFalse, Reason: corev1.PodReasonUnschedulable},
-	}
 	scheme := newTestScheme()
-	r := &SandboxWarmPoolReconciler{
-		Client: newFakeClient(scheme, pool, template, used, used2, stock), Scheme: scheme, MaxBatchSize: 4,
-		ReadinessGracePeriod: 20 * time.Second, UnschedulableRecheckInterval: 10 * time.Second,
-		now: func() time.Time { return now },
-	}
+	recorder := events.NewFakeRecorder(10)
+	r := &SandboxWarmPoolReconciler{Client: newFakeClient(scheme, pool, used), Scheme: scheme, Recorder: recorder}
+
 	result := reconcileCapacityInteraction(t, r, pool)
-	require.Equal(t, 5*time.Second+graceRequeueSlack, result.RequeueAfter, "the young standby must schedule its post-grace evaluation")
-	require.Len(t, capacityInteractionStandby(t, r, pool), 1, "non-Ready standby occupies the effective target slot")
-	require.Equal(t, int32(1), pool.Status.Replicas)
-	require.Zero(t, pool.Status.ReadyReplicas)
-	require.Equal(t, new(int32(1)), pool.Status.DesiredStandbyReplicas)
-
-	now = now.Add(7 * time.Second)
-	result = reconcileCapacityInteraction(t, r, pool)
-	require.Equal(t, 10*time.Second, result.RequeueAfter)
-	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(stock), stock), "an unschedulable standby must survive the grace deadline")
-	require.Len(t, capacityInteractionStandby(t, r, pool), 1, "held standby cannot trigger refill to spec.replicas")
-
-	// Once scheduled, the same post-grace non-Ready instance is genuinely stuck.
-	stock.Status.Conditions[1].Status = metav1.ConditionTrue
-	stock.Status.Conditions[1].Reason = sandboxv1beta1.SandboxReasonPodScheduled
-	require.NoError(t, r.Update(ctx, stock))
+	require.Equal(t, new(int32(0)), pool.Status.DesiredStandbyReplicas)
+	require.Equal(t, expectationsPendingRequeueDelay, result.RequeueAfter)
+	require.Empty(t, recorder.Events, "a zero standby target does not need a template")
+	require.NoError(t, r.Delete(context.Background(), used))
 	reconcileCapacityInteraction(t, r, pool)
-	require.Empty(t, capacityInteractionStandby(t, r, pool), "stuck deletion must wait for observation before replacement")
-	syncPoolExpectations(r, pool)
-	reconcileCapacityInteraction(t, r, pool)
-	require.Len(t, capacityInteractionStandby(t, r, pool), 1, "stuck replacement must still stop at B-C, not R")
-	require.Equal(t, new(int32(2)), pool.Status.OccupiedReplicas)
 	require.Equal(t, new(int32(1)), pool.Status.DesiredStandbyReplicas)
+	select {
+	case event := <-recorder.Events:
+		require.Contains(t, event, reasonSandboxTemplateError, "the missing template must warn once standby capacity is needed")
+	default:
+		t.Fatal("expected a missing-template warning after the occupied instance disappears")
+	}
 }

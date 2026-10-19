@@ -32,6 +32,7 @@ def _stub_preflight(monkeypatch):
 
 
 def _patch_reap(monkeypatch, counts=None, error=None):
+  monkeypatch.setattr("agent_sandbox_rl.fleet._VERIFY_SETTLE_S", ())
   calls = []
   def fake(run_id=None, **kw):
     calls.append((run_id, kw))
@@ -68,7 +69,8 @@ def test_verify_runs_the_run_scoped_reaper_per_cluster_and_reports(make_cluster,
   with caplog.at_level("WARNING"):
     out = f.teardown(verify=True)
   assert out == {"solo": {"claims": 0, "warmpools": 1, "sandboxes": 2, "templates": 0,
-                          "pods": 0}}
+                          "pods": 0, "remaining": {"claims": 0, "warmpools": 0,
+                                                   "templates": 0, "pods": 0}}}
   (run_id, kw), = calls
   assert run_id == f.run_id
   assert kw == {"context": "ctx-1", "namespace": c.namespace, "kubeconfig": "/kc", "in_cluster": False}
@@ -118,7 +120,8 @@ def test_verify_counts_the_pods_and_flags_a_failed_pod_delete(make_cluster, monk
   with caplog.at_level("WARNING"):
     out = f.teardown(verify=True)
   assert out["solo"]["pods"] == 3 and "delete-collection failed" in out["solo"]["error"]
-  assert any("still had" in r.message and "pods" in r.message for r in caplog.records)
+  assert out["solo"]["remaining"]["pods"] == 3                 # still there after the reaper
+  assert any("NOT verified clean" in r.message for r in caplog.records)
   assert calls
 
 
@@ -142,3 +145,31 @@ def test_setup_forgets_the_namespaces_an_earlier_teardown_deleted(make_cluster, 
   f.setup()                                   # recreates what it needs
   f.teardown()
   assert "skipped" not in f.verify_teardown()["solo"]
+
+
+def test_verify_waits_for_a_sweep_another_thread_is_running(make_cluster, monkeypatch):
+  import threading
+  calls = _patch_reap(monkeypatch)
+  c = make_cluster("solo")
+  f = _fleet(c)
+  gate = threading.Event()
+  order = []
+  real_release_all = f.release_all
+
+  def slow_release_all():
+    order.append("sweep-start")
+    gate.wait(5)
+    real_release_all()
+    order.append("sweep-end")
+
+  monkeypatch.setattr(f, "release_all", slow_release_all)
+  t = threading.Thread(target=f.teardown)
+  t.start()
+  while "sweep-start" not in order:
+    pass
+  v = threading.Thread(target=lambda: order.append(("verify", f.teardown(verify=True))))
+  v.start()
+  assert not calls                            # the reaper has not run beside the sweep
+  gate.set()
+  t.join(5); v.join(5)
+  assert order[:2] == ["sweep-start", "sweep-end"] and calls

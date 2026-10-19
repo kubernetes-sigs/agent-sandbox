@@ -29,7 +29,7 @@ from .constants import (
     TERMINAL_CLAIM_READY_REASONS,
 )
 from .exceptions import BatchError
-from .models import BatchGroup, Member
+from .models import BatchGroup, Member, MemberState
 
 
 def parse_ordinal(batch_id: str, claim_name: str) -> int | None:
@@ -100,8 +100,10 @@ def derive_member(claim_obj: dict[str, Any]) -> Member:
     status = claim_obj.get("status") or {}
     conditions = status.get("conditions") or []
 
-    ready = False
-    terminal = False
+    sandbox_status = status.get("sandbox") or {}
+    sandbox_name = sandbox_status.get("name") or None
+
+    state = MemberState.PENDING
     reason: str | None = None
     message: str | None = None
     ready_condition = next((c for c in conditions if c.get("type") == "Ready"), None)
@@ -109,15 +111,12 @@ def derive_member(claim_obj: dict[str, Any]) -> Member:
         reason = ready_condition.get("reason")
         message = ready_condition.get("message")
         if ready_condition.get("status") == "True":
-            ready = True
+            if sandbox_name is not None:
+                state = MemberState.READY
         # We do not treat WarmPoolNotFound or TemplateNotFound as terminal, because the controller
         # requeues those every minute rather than failing the claim.
         elif ready_condition.get("status") == "False" and reason in TERMINAL_CLAIM_READY_REASONS:
-            terminal = True
-
-    sandbox_status = status.get("sandbox") or {}
-    sandbox_name = sandbox_status.get("name") or None
-    ready = ready and sandbox_name is not None
+            state = MemberState.FAILED
 
     return Member(
         claim_name=metadata.get("name", ""),
@@ -125,9 +124,7 @@ def derive_member(claim_obj: dict[str, Any]) -> Member:
         warmpool=(spec.get("warmPoolRef") or {}).get("name", ""),
         pod_ips=tuple(sandbox_status.get("podIPs") or []),
         service_fqdn=sandbox_status.get("serviceFQDN"),
-        ready=ready,
-        terminal=terminal,
-        lost=False,
+        state=state,
         reason=reason,
         message=message,
     )
@@ -162,13 +159,18 @@ class BatchState:
         return member
 
     def mark_lost(self, claim_name: str) -> Member | None:
-        """Handles a lost claim (watch DELETED or missing on re-list)."""
+        """Handles a lost claim (watch DELETED or missing on re-list).
+
+        A member that already failed stays ``FAILED``, so its state keeps saying why it can't
+        become Ready.
+        """
         existing = self._members.get(claim_name)
         if existing is None:
             # Deleted before this handle ever saw an ADDED/MODIFIED event for it.
             return None
+        state = MemberState.FAILED if existing.state is MemberState.FAILED else MemberState.LOST
         lost_member = existing.model_copy(
-            update={"lost": True, "ready": False, "pod_ips": (), "service_fqdn": None}
+            update={"state": state, "pod_ips": (), "service_fqdn": None}
         )
         self._members[claim_name] = lost_member
         return lost_member

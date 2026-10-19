@@ -15,6 +15,7 @@
 import re
 import warnings
 from datetime import datetime, timezone
+from enum import StrEnum
 from typing import Any, Literal, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -261,6 +262,19 @@ class BatchGroup(BaseModel):
         return self
 
 
+class MemberState(StrEnum):
+    """Where a batch member's claim is in its lifecycle.
+
+    ``FAILED`` is terminal, so the claim will never become Ready. A member stays ``FAILED`` if its
+    claim is deleted afterwards, so its state keeps saying why it can't become Ready. ``LOST``
+    means the claim was deleted before it failed.
+    """
+    PENDING = "pending"
+    READY = "ready"
+    FAILED = "failed"
+    LOST = "lost"
+
+
 class Member(BaseModel):
     """Represents the identity of a single claim in a batch."""
     # frozen=True blocks field reassignment; pod_ips is declared as a tuple instead of a list
@@ -272,8 +286,6 @@ class Member(BaseModel):
     warmpool: str  # The group this member belongs to.
     pod_ips: tuple[str, ...] = ()
     service_fqdn: str | None = None
-    ready: bool = False
-    terminal: bool = False
-    lost: bool = False
+    state: MemberState = MemberState.PENDING
     reason: str | None = None
     message: str | None = None

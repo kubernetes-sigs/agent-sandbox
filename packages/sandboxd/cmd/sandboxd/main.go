@@ -48,6 +48,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	"sigs.k8s.io/agent-sandbox/internal/version"
+	"sigs.k8s.io/agent-sandbox/packages/sandboxd/pkg/processmanager"
 	"sigs.k8s.io/agent-sandbox/packages/sandboxd/pkg/server"
 )
 
@@ -176,12 +177,20 @@ func run(cfg *config, log logr.Logger) error {
 		return err
 	}
 
+	var reaper *processmanager.Reaper
+	if os.Getpid() == 1 {
+		log.Info("running as PID 1; starting zombie process reaper")
+		reaper = processmanager.StartReaper(log.WithName("reaper"))
+		defer reaper.Stop()
+	}
+
 	srv, err := server.New(server.Options{
 		RootDir:           cfg.rootDir,
 		MetadataEnvPrefix: cfg.metadataEnvPrefix,
 		StreamChunkSize:   cfg.streamChunkSize,
 		AuthTokenSHA256:   authDigest,
 		Log:               log.WithName("rest"),
+		Reaper:            reaper,
 	})
 	if err != nil {
 		return fmt.Errorf("build server: %w", err)

@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"syscall"
 	"time"
 
@@ -68,6 +69,9 @@ type Options struct {
 	// unauthenticated.
 	AuthTokenSHA256 []byte
 	Log             logr.Logger
+	// Reaper is an optional background process reaper for PID 1 environments.
+	// When nil and os.Getpid() == 1, New starts a background reaper automatically.
+	Reaper *processmanager.Reaper
 }
 
 // Server bundles the gRPC ProcessService and REST FilesystemService behind a
@@ -77,6 +81,8 @@ type Server struct {
 	processServer *ProcessServer
 	restServer    *RESTServer
 	auth          *tokenChecker
+	reaper        *processmanager.Reaper
+	ownsReaper    bool
 }
 
 // New assembles a Server from opts.
@@ -85,10 +91,25 @@ func New(opts Options) (*Server, error) {
 		return nil, errors.New("RootDir is required: refusing to default to \"/\", which would disable sandbox confinement")
 	}
 	registry := processmanager.NewProcessRegistry()
+	reaper := opts.Reaper
+	ownsReaper := false
+	if reaper == nil && os.Getpid() == 1 {
+		reaper = processmanager.StartReaper(opts.Log.WithName("reaper"))
+		ownsReaper = true
+	}
+	if reaper != nil {
+		registry.SetReaper(reaper)
+	}
+
+	procSrv := NewProcessServer(opts.RootDir, registry, opts.StreamChunkSize, opts.Log)
+	procSrv.SetReaper(reaper)
+
 	s := &Server{
 		registry:      registry,
-		processServer: NewProcessServer(opts.RootDir, registry, opts.StreamChunkSize, opts.Log),
+		processServer: procSrv,
 		restServer:    NewRESTServer(opts.RootDir, opts.MetadataEnvPrefix, opts.Log),
+		reaper:        reaper,
+		ownsReaper:    ownsReaper,
 	}
 	if opts.AuthTokenSHA256 != nil {
 		if len(opts.AuthTokenSHA256) != AuthTokenDigestSize {
@@ -142,4 +163,13 @@ func (s *Server) ShutdownProcesses(ctx context.Context) {
 	case <-ctx.Done():
 	}
 	s.registry.SignalAll(syscall.SIGKILL)
+
+	if s.ownsReaper && s.reaper != nil {
+		s.reaper.Stop()
+	}
+}
+
+// Reaper returns the background process reaper, if active.
+func (s *Server) Reaper() *processmanager.Reaper {
+	return s.reaper
 }

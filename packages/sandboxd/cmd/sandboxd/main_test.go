@@ -21,7 +21,11 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
+
+	"sigs.k8s.io/agent-sandbox/packages/sandboxd/pkg/processmanager"
+	"sigs.k8s.io/agent-sandbox/packages/sandboxd/pkg/server"
 )
 
 func TestAuthTokenDigest(t *testing.T) {
@@ -44,4 +48,15 @@ func TestAuthTokenDigest(t *testing.T) {
 
 	_, err = authTokenDigest(&config{authTokenSHA256: hexSum, authTokenFile: file})
 	require.Error(t, err)
+}
+
+func TestServerReaperOption(t *testing.T) {
+	reaper := processmanager.NewReaper(logr.Discard())
+	srv, err := server.New(server.Options{
+		RootDir: t.TempDir(),
+		Log:     logr.Discard(),
+		Reaper:  reaper,
+	})
+	require.NoError(t, err)
+	require.Equal(t, reaper, srv.Reaper())
 }

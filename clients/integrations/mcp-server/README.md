@@ -28,7 +28,11 @@ The MCP server exposes the following tools:
     * `namespace` (str)
     * `command` (str)
     * `timeout` (int, default: 60)
-  * **Returns**: Execution exit code, stdout, and stderr.
+    * `max_output_chars` (int, default: 30000, min: 128, max: 300000) — Combined stdout/stderr character budget, including omission markers.
+  * **Returns**: `exit_code`, `stdout`, and `stderr`, plus `stdout_total_chars`, `stderr_total_chars`, `stdout_truncated`, and `stderr_truncated`.
+  * **Output budget**: stdout and stderr initially share the budget equally (stderr gets the odd character), and unused capacity is available to the other stream. Short output is unchanged. Each oversized stream keeps equal-sized beginning and end excerpts, with at most one extra character at the end, separated by `[... N characters omitted ...]`. The marker and its surrounding newlines count toward the budget; the minimum leaves room for a marker in both streams.
+    Character counts use Unicode code points, not UTF-8 bytes, visual characters, or model tokens. The `*_total_chars` fields describe the SDK's output before this tool truncates it; the `*_truncated` fields indicate whether this tool omitted content. Truncation preserves the original exit code, including nonzero exits, and never reruns the command.
+  * **Compatibility**: Output exceeding the default budget is now truncated, and the response includes four new metadata fields. Callers needing a larger excerpt can set `max_output_chars` up to 300000; clients with strict response schemas must accept the new fields. No output files are created. This limit applies to stdout/stderr text in completed results, not exception messages or the complete serialized MCP response. The SDK has already received the full result, so this does not reduce runtime capture memory.
 
 * **`upload_file`**: Uploads a file to a target sandbox.
   * **Arguments**:

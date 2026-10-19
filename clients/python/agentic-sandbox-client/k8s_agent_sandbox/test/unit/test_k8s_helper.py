@@ -82,6 +82,19 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
             ],
         )
 
+    def test_owner_references_included_in_manifest_only_when_given(self, mock_config, mock_api_cls, mock_core_cls):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+        owner = [{"apiVersion": "coordination.k8s.io/v1", "kind": "Lease", "name": "batch-b1", "uid": "u1"}]
+
+        helper = K8sHelper()
+        helper.create_sandbox_claim("test-claim", "test-warmpool", "test-namespace", owner_references=owner)
+        body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
+        self.assertEqual(body["metadata"]["ownerReferences"], owner)
+        helper.create_sandbox_claim("test-claim", "test-warmpool", "test-namespace")
+        body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
+        self.assertNotIn("ownerReferences", body["metadata"])
+
     def test_labels_and_annotations_coexist_in_manifest(self, mock_config, mock_api_cls, mock_core_cls):
         mock_api = MagicMock()
         mock_api_cls.return_value = mock_api

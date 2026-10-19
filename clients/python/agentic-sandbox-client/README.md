@@ -684,7 +684,10 @@ and `wait_for_quorum()` and `group_outcomes()` skip it. The claims are named `<b
 sum of the group sizes. They carry the `agents.x-k8s.io/batch-id` label and the `agents.x-k8s.io/batch-group`
 label, whose value is a hash of the warm pool's name, and are created in the background, paced at `create_rps` creates per second with at most `max_in_flight` in flight. The batch
 also has a `coordination.k8s.io/v1` Lease named `batch-<batch-id>`, which the handle renews while it is
-alive.
+alive. Every claim has an `ownerReference` to that Lease, so the Kubernetes garbage collector deletes the
+claims once the Lease is gone. Deleting the Lease by hand (`kubectl delete lease batch-<batch-id>`) therefore
+deletes the batch's claims too, in the background. `kubectl delete lease --cascade=orphan` instead keeps the
+claims, which then stay until their `shutdownTime`.
 
 ```python
 from k8s_agent_sandbox import BatchGroup, SandboxClient

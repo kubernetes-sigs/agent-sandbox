@@ -17,6 +17,8 @@ import unittest
 from unittest.mock import patch
 from datetime import UTC, datetime
 
+from kubernetes.client import V1Lease, V1ObjectMeta
+
 from k8s_agent_sandbox import batch_utils
 from k8s_agent_sandbox.batch_utils import (
     BATCH_DEFAULT_LEASE_DURATION_SECONDS,
@@ -103,6 +105,15 @@ class TestLeaseNow(unittest.TestCase):
                  patch("k8s_agent_sandbox.batch_utils.datetime") as mock_datetime:
                 mock_datetime.now.return_value = datetime(2026, 1, 1, microsecond=microsecond, tzinfo=UTC)
                 self.assertEqual(batch_utils.lease_now().microsecond, expected)
+
+
+class TestLeaseOwnerReference(unittest.TestCase):
+
+    def test_rejects_a_lease_without_a_name_or_uid(self):
+        for metadata in (None, V1ObjectMeta(uid="lease-uid"), V1ObjectMeta(name="batch-b1")):
+            with self.subTest(metadata=metadata):
+                with self.assertRaises(BatchError):
+                    batch_utils.lease_owner_reference(V1Lease(metadata=metadata))
 
 
 class TestRetryableStatus(unittest.TestCase):

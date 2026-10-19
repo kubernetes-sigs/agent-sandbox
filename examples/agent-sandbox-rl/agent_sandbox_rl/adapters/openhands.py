@@ -23,7 +23,8 @@ pods (pools, placement, budgets, accounting), and the workspace merely binds one
 Usage::
 
     from agent_sandbox_rl import SandboxFleet, FleetConfig
-    from agent_sandbox_rl.adapters.openhands import make_fleet_workspace
+    from agent_sandbox_rl.adapters.openhands import (
+        DEFAULT_AGENT_SERVER_IMAGE, agent_server_template, make_fleet_workspace)
 
     fleet = SandboxFleet(FleetConfig(                  # pools of agent-server pods
         template=agent_server_template(session_key=POOL_KEY,
@@ -48,6 +49,7 @@ inside `make_fleet_workspace` so the core package works without them.
 from __future__ import annotations
 
 import logging
+import shlex
 
 logger = logging.getLogger("agent_sandbox_rl.adapters.openhands")
 
@@ -69,7 +71,10 @@ _SERVER_COPY_CMD = (
     f"cp -a /opt/oh/. {AGENT_SERVER_MOUNT}/ 2>/dev/null"
     f" || cp -a /usr/local/bin/openhands-agent-server {AGENT_SERVER_MOUNT}/ 2>/dev/null"
     f" || cp -a /openhands/poetry/*/bin/agent-server"
-    f" {AGENT_SERVER_MOUNT}/openhands-agent-server 2>/dev/null || true")
+    f" {AGENT_SERVER_MOUNT}/openhands-agent-server 2>/dev/null"
+    # Fail the init container, loudly, rather than let the runtime container
+    # crash-loop later with the server missing.
+    " || { echo 'no openhands-agent-server found in server_image' >&2; exit 1; }")
 
 
 def agent_server_command(server_port: int = 8000,
@@ -87,9 +92,9 @@ def agent_server_command(server_port: int = 8000,
   mount = AGENT_SERVER_MOUNT
   prep = f"chmod +x {mount}/openhands-agent-server 2>/dev/null || true; "
   if workspace_dir:
-    wd = workspace_dir.rstrip("/")
+    wd = shlex.quote(workspace_dir.rstrip("/"))
     prep += (
-        f'if [ -d {wd}/.venv/bin ]; then export PATH="{wd}/.venv/bin:${{PATH}}"; fi; '
+        f'if [ -d {wd}/.venv/bin ]; then export PATH={wd}/.venv/bin:"${{PATH}}"; fi; '
         f"([ -d {wd} ] && [ ! -e /workspace ] && ln -s {wd} /workspace 2>/dev/null || true); "
         f"([ -d /workspace ] && [ ! -e {wd} ] && ln -s /workspace {wd} 2>/dev/null || true); ")
   prep += "git config --global --add safe.directory '*' 2>/dev/null || true; cd /; "
@@ -108,7 +113,8 @@ def agent_server_template(*, server_image: str | None = None,
                           server_port: int = 8000,
                           workspace_dir: str | None = "/testbed",
                           readiness_timeout_s: int = 300,
-                          resources=None, node_selector: dict | None = None,
+                          resources=None, limits: dict | None = None,
+                          node_selector: dict | None = None,
                           tolerations: list | None = None,
                           runtime_class: str | None = None,
                           image_pull_policy: str = "IfNotPresent",
@@ -127,24 +133,36 @@ def agent_server_template(*, server_image: str | None = None,
     `AGENT_SERVER_MOUNT` and the runtime container runs it from there. One
     agent-server image serves every task image without rebuilding them.
 
-  The runtime container listens on ``server_port``, carries a readinessProbe on
-  ``/health`` (so a Ready pod is a serving agent-server, which the workspace's
-  short health wait relies on), and exposes the session key as
+  The runtime container listens on ``server_port`` and probes ``/health`` twice:
+  a startupProbe gives a pod ``readiness_timeout_s`` to come up (the kubelet
+  restarts a container that has not served by then), and a 1 s readinessProbe
+  with the default threshold gates traffic after that, so a Ready pod is a serving
+  agent-server (the workspace's short health wait relies on it) and a server that
+  hangs later drops out of Ready within seconds. The session key is exposed as
   ``OH_SESSION_API_KEYS_0``: ``session_key`` as a literal value, or
   ``session_key_secret=(secret_name, key)`` as a ``secretKeyRef``. Pass the same
-  key as the workspace's ``api_key``. ``readiness_timeout_s`` bounds how long a
-  pod may take to serve ``/health`` before the probe gives up on it.
-  ``resources`` defaults to 500m / 1Gi requests with 2 CPU / 4Gi limits.
-  ``tolerations`` and ``extra_pod_spec`` go through `TemplateSpec.extra_pod_spec`
-  (``extra_pod_spec`` is merged last and wins). The pod mounts no ServiceAccount
-  token and shares no PID namespace.
+  key as the workspace's ``api_key``.
+
+  ``resources`` defaults to 500m / 1Gi requests with 2 CPU / 4Gi ``limits``. A
+  caller-supplied ``resources`` comes with no limits unless ``limits`` is given
+  too (a request above a fixed limit is an invalid pod); the init container that
+  stages the server carries the same requests and limits. ``tolerations`` and
+  ``extra_pod_spec`` go through `TemplateSpec.extra_pod_spec`; ``extra_pod_spec``
+  is merged last and wins, except that its ``containers``, ``initContainers``,
+  ``volumes`` and ``tolerations`` are appended to the preset's rather than
+  replacing them (the server volume must stay mounted). The pod mounts no
+  ServiceAccount token and shares no PID namespace.
   """
   from ..config import ResourceSpec, TemplateSpec
   if session_key and session_key_secret:
     raise ValueError("pass session_key or session_key_secret, not both")
   if resources is None:
     resources = ResourceSpec(cpu="500m", memory="1Gi")
-  limits = {"cpu": "2", "memory": "4Gi"}
+    if limits is None:
+      limits = {"cpu": "2", "memory": "4Gi"}
+  container_resources: dict = {}
+  if limits:
+    container_resources["limits"] = dict(limits)
   env = []
   if session_key:
     env.append({"name": "OH_SESSION_API_KEYS_0", "value": session_key})
@@ -155,13 +173,20 @@ def agent_server_template(*, server_image: str | None = None,
   period = 2
   runtime = {
       "ports": [{"containerPort": server_port}],
-      "readinessProbe": {
+      # A readinessProbe never gives up on start-up (its threshold only governs
+      # Ready -> NotReady), so the start-up budget is a startupProbe.
+      "startupProbe": {
           "httpGet": {"path": "/health", "port": server_port},
           "periodSeconds": period,
           "failureThreshold": max(1, readiness_timeout_s // period),
       },
-      "resources": {"limits": dict(limits)},
+      "readinessProbe": {
+          "httpGet": {"path": "/health", "port": server_port},
+          "periodSeconds": 1,
+      },
   }
+  if container_resources:
+    runtime["resources"] = dict(container_resources)
   if env:
     runtime["env"] = env
   pod: dict = {
@@ -177,16 +202,24 @@ def agent_server_template(*, server_image: str | None = None,
         "imagePullPolicy": image_pull_policy,
         "command": ["sh", "-c", _SERVER_COPY_CMD],
         "volumeMounts": [{"name": "oh", "mountPath": AGENT_SERVER_MOUNT}],
+        # Init requests do not add to the pod's (max of init and app containers),
+        # and a namespace quota rejects a container without them.
+        "resources": {"requests": {"cpu": resources.cpu, "memory": resources.memory},
+                      **container_resources},
     }]
     pod["volumes"] = [{"name": "oh", "emptyDir": {}}]
   if tolerations:
     pod["tolerations"] = list(tolerations)
   if extra_pod_spec:
     extra = dict(extra_pod_spec)
-    if "containers" in extra:
-      # Let the caller's (unnamed or runtime-named) container dict refine ours
-      # instead of replacing it: the fleet merges containers by name later.
-      pod["containers"] = pod["containers"] + list(extra.pop("containers"))
+    # List-valued keys the preset fills itself are appended to, not replaced:
+    # the caller's (unnamed or runtime-named) container dict refines ours (the
+    # fleet merges containers by name later), and replacing `volumes` or
+    # `initContainers` would leave both containers mounting a volume that no
+    # longer exists.
+    for key in ("containers", "initContainers", "volumes", "tolerations"):
+      if key in extra:
+        pod[key] = list(pod.get(key, [])) + list(extra.pop(key))
     pod.update(extra)
   return TemplateSpec(
       resources=resources, image_pull_policy=image_pull_policy,

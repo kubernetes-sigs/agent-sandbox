@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import logging
 import math
 import time
@@ -45,6 +46,26 @@ from .constants import (
 logger = logging.getLogger(__name__)
 
 
+def _api_client_without_retries(api_client: client.ApiClient | None) -> client.ApiClient:
+    """Returns an ``ApiClient`` like ``api_client`` (or the default one) whose requests urllib3 doesn't retry.
+
+    urllib3 retries a timed-out request with a fresh timeout, which would stretch a Lease renewal
+    past the Lease's expiry, and a retried Lease write that already landed comes back as a conflict.
+    The async helper needs no counterpart, since aiohttp doesn't retry requests.
+    """
+    if api_client is None:
+        configuration = client.Configuration.get_default_copy()
+    else:
+        configuration = copy.deepcopy(api_client.configuration)
+    configuration.retries = False
+    no_retries = client.ApiClient(configuration=configuration)
+    if api_client is not None:
+        no_retries.cookie = api_client.cookie
+        for name, value in dict(api_client.default_headers).items():
+            no_retries.set_default_header(name, value)
+    return no_retries
+
+
 class K8sHelper:
     """Helper class for Kubernetes API interactions."""
 
@@ -60,7 +81,7 @@ class K8sHelper:
                 config.load_kube_config()
         self.custom_objects_api = client.CustomObjectsApi(api_client)
         self.core_v1_api = client.CoreV1Api(api_client)
-        self.coordination_v1_api = client.CoordinationV1Api(api_client)
+        self.coordination_v1_api = client.CoordinationV1Api(_api_client_without_retries(api_client))
 
     def create_sandbox_claim(
         self,

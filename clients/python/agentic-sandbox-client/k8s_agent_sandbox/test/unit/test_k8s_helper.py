@@ -975,13 +975,14 @@ class TestK8sHelperWatchResourceVersion(unittest.TestCase):
         self.assertEqual(mock_watch.stream.call_count, 2)
 
 
+@patch("k8s_agent_sandbox.k8s_helper._api_client_without_retries")
 @patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
 @patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")
 @patch("k8s_agent_sandbox.k8s_helper.config")
 class TestK8sHelperApiClientInjection(unittest.TestCase):
 
     def test_injected_api_client_used_and_no_config_loaded(
-        self, mock_config, mock_custom_cls, mock_core_cls
+        self, mock_config, mock_custom_cls, mock_core_cls, _
     ):
         sentinel = MagicMock(name="ApiClient")
         K8sHelper(api_client=sentinel)
@@ -991,7 +992,7 @@ class TestK8sHelperApiClientInjection(unittest.TestCase):
         mock_config.load_kube_config.assert_not_called()
 
     def test_injected_api_client_is_exposed_only_when_injected(
-        self, mock_config, mock_custom_cls, mock_core_cls
+        self, mock_config, mock_custom_cls, mock_core_cls, _
     ):
         sentinel = MagicMock(name="ApiClient")
         self.assertIs(K8sHelper(api_client=sentinel).injected_api_client, sentinel)
@@ -1041,6 +1042,25 @@ class TestK8sHelperWatchTimeout(unittest.TestCase):
                 with self.assertRaises(TimeoutError):
                     helper.resolve_sandbox_name("claim", "default", timeout=1)
                 watch_cls.assert_not_called()
+
+
+@patch("k8s_agent_sandbox.k8s_helper.config")
+class TestLeaseApiClient(unittest.TestCase):
+
+    def test_lease_requests_are_not_retried_and_keep_the_injected_client_settings(self, _):
+        configuration = client.Configuration(host="https://cluster-b:6443")
+        injected = client.ApiClient(configuration=configuration, cookie="session=1")
+        injected.set_default_header("X-Test", "yes")
+        lease_api_client = K8sHelper(api_client=injected).coordination_v1_api.api_client
+        self.assertIs(lease_api_client.configuration.retries, False)
+        self.assertEqual(lease_api_client.configuration.host, "https://cluster-b:6443")
+        self.assertEqual(lease_api_client.cookie, "session=1")
+        self.assertEqual(lease_api_client.default_headers["X-Test"], "yes")
+        self.assertIsNone(configuration.retries)
+
+    def test_lease_requests_are_not_retried_with_the_default_client(self, _):
+        lease_api_client = K8sHelper().coordination_v1_api.api_client
+        self.assertIs(lease_api_client.configuration.retries, False)
 
 
 @patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")

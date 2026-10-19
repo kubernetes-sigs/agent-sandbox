@@ -100,6 +100,10 @@ def is_lease_stale(
 ) -> bool:
     """Computes Lease staleness to prevent ``get_batch`` operating on an inactive batch.
     Staleness is computed via ``now > renew_time + lease_duration_seconds - skew_margin``.
+
+    Subtracting the margin makes ``get_batch`` stop adopting a Lease early, which is the safe
+    side for attaching. A check that deletes a batch on staleness has to add its margin instead,
+    so it never acts before the holder has given up.
     """
     return now > renew_time + timedelta(seconds=lease_duration_seconds - skew_margin)
 

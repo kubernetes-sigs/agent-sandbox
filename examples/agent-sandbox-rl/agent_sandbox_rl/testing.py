@@ -18,9 +18,10 @@ cluster behind it.
 An RL framework that drives a fleet (warms pools ahead of its batches, acquires
 a handle per episode, execs, releases, tears down) needs to test that loop
 without Kubernetes. `FakeFleet` keeps the fleet's bookkeeping in memory, records
-every call, and raises the same exceptions the real fleet would where that
-matters (`FleetOvercommitError`, `KeyError` for an unplanned image, injected
-failures), so the loop under test is exercised, not mocked away::
+every call, runs the real strategies and `RunReport`, and raises what the real
+fleet raises where a loop can observe it (`FleetOvercommitError` at the cap,
+`KeyError` for an unplanned image, a torn-down fleet on `acquire`), so the loop
+under test is exercised, not mocked away::
 
     from agent_sandbox_rl.testing import FakeFleet
 
@@ -31,6 +32,12 @@ failures), so the loop under test is exercised, not mocked away::
     assert fleet.active_pools == {"img:a": 2, "img:b": 1}
     assert fleet.warm_calls and h.commands == ["pytest -q"]
 
+The fake offers the methods `SandboxFleet` has, with the same signatures, so a
+test that passes here does not call something the real fleet lacks. Beyond
+that surface it adds inspection only: the ``*_calls`` records, `active_pools`,
+`FakeHandle.commands`, and `FakeSandboxGone` (exec on a released or suspended
+handle, a guard the real handle does not have).
+
 Importing this module pulls nothing beyond the package itself.
 """
 
@@ -40,14 +47,15 @@ import collections
 import contextlib
 import itertools
 import threading
-from collections.abc import Callable, Iterable, Mapping
+import types
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Optional
 
-from . import constants
-from .config import FleetConfig
+from . import constants, sizing
+from .config import FleetConfig, run_namespace
 from .exceptions import FleetError, FleetOvercommitError
-from .fleet import FleetPlan, PlanEntry
+from .fleet import FleetPlan, PlanEntry, SandboxFleet
 from .handles import SandboxHandle
 from .observability import Observer
 from .sources import Task, to_tasks
@@ -55,15 +63,22 @@ from .sources import Task, to_tasks
 FAKE_CLUSTER = "fake"
 
 
+class FakeSandboxGone(RuntimeError):
+  """Exec on a released or suspended `FakeHandle`.
+
+  A test aid, not fleet behavior: the real handle has no such guard (the exec
+  API returns an error, or output from a pod that is still terminating), so
+  this sits outside the `FleetError` hierarchy on purpose."""
+
+
 @dataclass
 class FakeSession:
   """Stands in for `SandboxSession`: open until closed, runs through the handle."""
   handle: "FakeHandle"
-  container: Optional[str] = None
   is_open: bool = True
 
   def run(self, command, timeout: float | None = None) -> str:
-    return self.handle._run(command, self.container)
+    return self.handle._run(command)
 
   def close(self) -> None:
     self.is_open = False
@@ -73,22 +88,26 @@ class FakeSession:
 class FakeHandle(SandboxHandle):
   """A `SandboxHandle` whose exec is programmable and recorded.
 
-  ``exec_outputs`` maps a substring of the command to its output (first match
-  wins) or to a callable ``command -> output`` / ``command -> Exception`` to
+  ``exec_outputs`` maps a substring of the command to its output (the longest
+  matching key wins) or to a callable ``command -> output`` / an exception to
   raise; unmatched commands return ``""``. ``commands`` lists every command
-  run, ``released`` flips on release, ``suspended`` tracks suspend / resume.
+  run, ``released`` / ``suspended`` track the lifecycle, ``snapshots`` the uids
+  taken. The snapshot methods keep state only; ``refresh()`` renames the pod as
+  a resume does.
   """
   exec_outputs: dict = field(default_factory=dict, repr=False)
   commands: list = field(default_factory=list, repr=False)
   released: bool = False
   suspended: bool = False
   snapshots: list = field(default_factory=list, repr=False)
+  _generation: int = field(default=0, repr=False)
 
-  def _run(self, command, container=None) -> str:
+  def _run(self, command) -> str:
     text = command if isinstance(command, str) else " ".join(map(str, command))
     self.commands.append(text)
-    for key, out in self.exec_outputs.items():
+    for key in sorted(self.exec_outputs, key=len, reverse=True):
       if key in text:
+        out = self.exec_outputs[key]
         if callable(out):
           out = out(text)
         if isinstance(out, BaseException):
@@ -96,14 +115,18 @@ class FakeHandle(SandboxHandle):
         return out
     return ""
 
-  def exec(self, command, timeout: float | None = None, *, container: str | None = None) -> str:
+  def exec(self, command, timeout: float | None = None) -> str:
     if self.released:
-      raise FleetError(f"handle {self.sandbox_id} was released")
-    return self._run(command, container or getattr(self, "target_container", None))
+      raise FakeSandboxGone(f"handle {self.sandbox_id} was released")
+    if self.suspended:
+      raise FakeSandboxGone(f"sandbox {self.sandbox_id} is suspended (no pod)")
+    if self._session is not None and self._session.is_open:
+      return self._session.run(command, timeout=timeout)
+    return self._run(command)
 
-  def open_session(self, *, container: str | None = None) -> FakeSession:
+  def open_session(self) -> FakeSession:
     if self._session is None or not self._session.is_open:
-      self._session = FakeSession(self, container or getattr(self, "target_container", None))
+      self._session = FakeSession(self)
     return self._session
 
   def close_session(self) -> None:
@@ -111,35 +134,93 @@ class FakeHandle(SandboxHandle):
       self._session.close()
       self._session = None
 
-  def is_alive(self) -> bool:
-    return not self.released and not self.suspended
+  def refresh(self) -> None:
+    """A resumed or restored sandbox is a new pod: new name, session dropped."""
+    self.close_session()
+    self._generation += 1
+    self.pod_name = f"{self.sandbox_id}-pod{self._generation}"
+
+  # --- snapshots (state only; the fleet wrappers below call these) --------- #
+  def snapshot(self, name: str | None = None, *, timeout: int = 180) -> str:
+    uid = f"{name or self.sandbox_id}-snap{len(self.snapshots) + 1}"
+    self.snapshots.append(uid)
+    return uid
+
+  def list_snapshots(self) -> list:
+    return list(self.snapshots)
+
+  def snapshot_deleter(self) -> Callable[..., None]:
+    def _delete(uid=None, *_, **__):
+      if uid in self.snapshots:
+        self.snapshots.remove(uid)
+    return _delete
+
+  def suspend(self, *, snapshot: bool = True, timeout: int = 180) -> Optional[str]:
+    self.close_session()
+    uid = self.snapshot() if snapshot else None
+    self.suspended = True
+    return uid
+
+  def resume(self, *, timeout: int = 180) -> bool:
+    self.suspended = False
+    self.refresh()
+    return bool(self.snapshots)
+
+  def restore(self, snapshot_uid: str, *, timeout: int = 180) -> None:
+    if snapshot_uid not in self.snapshots:
+      raise FleetError(f"unknown snapshot {snapshot_uid} for {self.sandbox_id}")
+    self.suspended = False
+    self.refresh()
+
+  @property
+  def is_suspended(self) -> bool:
+    return self.suspended
 
   def release(self) -> None:
     self.close_session()
     self.released = True
+    self.pod_ip = None
 
 
 class FakeFleet:
-  """In-memory `SandboxFleet`: same methods, no API calls.
+  """In-memory `SandboxFleet`: the same methods and signatures, no API calls.
 
   Args:
-    config: the `FleetConfig` the real fleet would get (sizing, cap, names).
+    config: the `FleetConfig` the real fleet would get. It is copied and
+      resolved the way `SandboxFleet` does it (run id label, ``{run_id}``
+      names, ``run_isolation``), so pool and template names match the real ones.
     exec_outputs: default programmed outputs for every handle's ``exec``.
     fail_warm: ``image -> Exception`` raised by ``warm_image`` for that image.
     fail_acquire: ``image -> Exception`` raised by ``acquire`` for that image.
-    slow_images: images whose pools never report ready in `wait_pools_ready`.
+
+  Plans size pools with the real `sizing.compute_replicas` on one cluster;
+  ``run()`` executes the real strategies (naive / sliding / pipelined) over
+  this fleet, so warming order, teardown and the `RunReport` are the fleet's.
   """
+
+  # The real window arithmetic: it only reads config and image counts.
+  recommended_window = SandboxFleet.recommended_window
+  _disk_spec = SandboxFleet._disk_spec
 
   def __init__(self, config: FleetConfig | None = None, *, exec_outputs=None,
                fail_warm: Mapping[str, BaseException] | None = None,
-               fail_acquire: Mapping[str, BaseException] | None = None,
-               slow_images: Iterable[str] = ()):
-    self.config = config or FleetConfig()
+               fail_acquire: Mapping[str, BaseException] | None = None):
+    self.config = (config or FleetConfig()).model_copy(deep=True)
     self.exec_outputs = dict(exec_outputs or {})
     self.fail_warm = dict(fail_warm or {})
     self.fail_acquire = dict(fail_acquire or {})
-    self.slow_images = set(slow_images)
     self.run_id = self.config.run_id or "fake-run"
+    self._shared_run_id = self.config.run_id is not None
+    self.config.labels = {**self.config.labels, constants.RUN_ID_LABEL: self.run_id}
+    self.config.apply_run_isolation(self.run_id)
+    if self.config.clusters:
+      self.namespace = self.config.clusters[0].namespace
+    elif self.config.run_isolation == "namespace":
+      self.namespace = run_namespace("default", self.run_id)
+    else:
+      self.namespace = "default"
+    # What handles see as their cluster: enough for endpoint() and cluster_name.
+    self._cluster = types.SimpleNamespace(name=FAKE_CLUSTER, namespace=self.namespace)
     self.tasks: list[Task] = []
     self.plan_: FleetPlan | None = None
     self.report = None
@@ -154,9 +235,10 @@ class FakeFleet:
     self.warm_calls: list[tuple] = []       # (image, replicas, wait)
     self.scale_calls: list[tuple] = []      # (image, replicas)
     self.unwarm_calls: list[str] = []
-    self.acquire_calls: list[tuple] = []    # (image, kwargs)
+    self.skipped_images: list[str] = []     # warm_images: not in the plan
+    self.acquire_calls: list[tuple] = []    # (image, snapshot_uid, pod_annotations)
     self.release_calls: list[str] = []      # sandbox ids
-    self.prepull_calls: list[dict] = []
+    self.prepull_calls: list[bool] = []     # wait flags
     self.on_demand: set[str] = set()
     self.teardowns = 0
 
@@ -164,34 +246,22 @@ class FakeFleet:
   def run_selector(self) -> str:
     return f"{constants.RUN_ID_LABEL}={self.run_id}"
 
-  def _rewrite(self, tasks, image_rewrite):
-    if image_rewrite is None:
-      return list(tasks)
-    out = []
-    for t in tasks:
-      new = image_rewrite(t.image)
-      if new != t.image:
-        t = t.model_copy(update={"image": new,
-                                 "metadata": {**t.metadata, "original_image": t.image}})
-      out.append(t)
-    return out
+  def pod_run_selector(self) -> str:
+    return f"{constants.POD_RUN_ID_LABEL}={self.run_id}"
 
   def load_tasks(self, source, *, image_rewrite=None) -> list[Task]:
-    self.tasks = self._rewrite(to_tasks(source), image_rewrite)
+    tasks = to_tasks(source)
+    if image_rewrite is not None:
+      out = []
+      for t in tasks:
+        new = image_rewrite(t.image)
+        if new != t.image:
+          t = t.model_copy(update={"image": new,
+                                   "metadata": {**t.metadata, "original_image": t.image}})
+        out.append(t)
+      tasks = out
+    self.tasks = tasks
     return self.tasks
-
-  def add_tasks(self, source, *, image_rewrite=None) -> list[Task]:
-    new = self._rewrite(to_tasks(source), image_rewrite)
-    with self._lock:
-      self.tasks = list(self.tasks) + new
-      if self.plan_ is not None:
-        for t in new:
-          entry = self.plan_.for_image(t.image)
-          if entry is None:
-            self.plan_ = FleetPlan(self.plan_.entries + [self._entry(t.image, 1)])
-          else:
-            entry.tasks += 1
-    return new
 
   def image_counts(self) -> "collections.OrderedDict[str, int]":
     counts: "collections.OrderedDict[str, int]" = collections.OrderedDict()
@@ -200,9 +270,10 @@ class FakeFleet:
     return counts
 
   # --- plan / setup ---------------------------------------------------------- #
-  def _entry(self, image: str, n: int) -> PlanEntry:
-    cap = self.config.max_warmpool_size
-    replicas = min(n, cap) if self.config.warm_per_task else max(1, min(cap, self.config.max_concurrent))
+  def _entry(self, image: str, n: int, total: int) -> PlanEntry:
+    replicas = sizing.compute_replicas(
+        n, total, self.config.max_concurrent, self.config.max_warmpool_size,
+        per_task=self.config.warm_per_task)
     return PlanEntry(cluster=FAKE_CLUSTER, image=image,
                      template=self.config.template_name(image),
                      pool=self.config.pool_name(image), replicas=replicas, tasks=n)
@@ -212,24 +283,29 @@ class FakeFleet:
 
   def plan(self) -> FleetPlan:
     with self._obs.phase("plan"):
-      self.plan_ = FleetPlan([self._entry(img, n) for img, n in self.image_counts().items()])
+      counts = self.image_counts()
+      total = sum(counts.values())
+      self.plan_ = FleetPlan([self._entry(img, n, total) for img, n in counts.items()])
     return self.plan_
+
+  def ensure_templates(self) -> None:
+    self.plan_ or self.plan()
 
   def start_warmpools(self, wait: bool = True, create_budget: int | None = None) -> None:
     plan = self.plan_ or self.plan()
     for e in plan.entries:
       self.warm_image(e.image, wait=wait)
 
-  def prepull(self, wait: bool = True, **kw) -> bool:
-    self.prepull_calls.append({"wait": wait, **kw})
-    return True
+  def prepull(self, wait: bool = True) -> None:
+    self.prepull_calls.append(wait)
 
   def prepull_delete(self) -> None:
     pass
 
   def setup(self, prepull: bool = False, create_budget: int | None = None) -> "FakeFleet":
     self._torndown = False
-    self._claims_reserved = 0
+    with self._lock:
+      self._claims_reserved = 0
     self.preflight()
     self.plan()
     if prepull:
@@ -246,6 +322,7 @@ class FakeFleet:
   # --- pools ----------------------------------------------------------------- #
   @property
   def active_pools(self) -> dict[str, int]:
+    """Inspection only (no real-fleet counterpart): replicas per warmed image."""
     with self._lock:
       return dict(self._warmed)
 
@@ -263,14 +340,19 @@ class FakeFleet:
 
   def warm_images(self, images, *, replicas_override: int | None = None,
                   wait: bool = True) -> None:
+    plan = self.plan_ or self.plan()
     for img in dict.fromkeys(images):
+      if plan.for_image(img) is None:       # the real fleet skips these with a warning
+        self.skipped_images.append(img)
+        continue
       self.warm_image(img, replicas_override=replicas_override, wait=wait)
 
   def set_pool_replicas(self, image: str, replicas: int) -> None:
+    if (self.plan_ or self.plan()).for_image(image) is None:
+      return                                # unplanned: a silent no-op, as the real one
     self.scale_calls.append((image, replicas))
     with self._lock:
-      if image in self._warmed:
-        self._warmed[image] = max(0, replicas)
+      self._warmed[image] = max(0, replicas)
 
   def unwarm_image(self, image: str) -> None:
     with self._lock:
@@ -282,14 +364,10 @@ class FakeFleet:
     for img in dict.fromkeys(images):
       self.unwarm_image(img)
 
-  def wait_pools_ready(self, images, *, timeout: float | None = None) -> dict[str, bool]:
-    plan = self.plan_ or self.plan()
-    return {img: plan.for_image(img) is not None and img not in self.slow_images
-            for img in dict.fromkeys(images)}
-
   # --- claims ---------------------------------------------------------------- #
-  def acquire(self, task: Task, **kwargs) -> FakeHandle:
-    self.acquire_calls.append((task.image, dict(kwargs)))
+  def acquire(self, task: Task, *, snapshot_uid: str | None = None,
+              pod_annotations: dict | None = None) -> FakeHandle:
+    self.acquire_calls.append((task.image, snapshot_uid, pod_annotations))
     with self._lock:
       hard = self.config.max_live_sandboxes
       if hard and self._claims_reserved >= hard:
@@ -305,8 +383,9 @@ class FakeFleet:
       n = next(self._seq)
       handle = FakeHandle(
           task=task, cluster_name=FAKE_CLUSTER, claim_name=f"claim-{n}",
-          sandbox_id=f"sb-{n}", pod_name=f"pod-{n}", hostname=f"sb-{n}",
-          pod_ip=f"10.0.0.{n % 250 + 1}", exec_outputs=dict(self.exec_outputs))
+          sandbox_id=f"sb-{n}", pod_name=f"sb-{n}-pod0", hostname=f"sb-{n}",
+          pod_ip=f"10.0.0.{n % 250 + 1}", exec_outputs=dict(self.exec_outputs),
+          _cluster=self._cluster)
       self._claims_reserved += 1
       self._handles.append(handle)
     self._obs.claim(FAKE_CLUSTER, "ok")
@@ -315,13 +394,16 @@ class FakeFleet:
   def acquire_batch(self, tasks) -> list[FakeHandle]:
     return [self.acquire(t) for t in tasks]
 
-  def release(self, handle: FakeHandle, **_) -> None:
+  def release(self, handle: FakeHandle, *, delete_snapshots: bool = False) -> None:
     with self._lock:
       if handle not in self._handles:
         return
       self._handles.remove(handle)
-      self._claims_reserved = max(0, self._claims_reserved - 1)
+      if not handle._slot_released:         # a suspended handle gave its slot back already
+        self._claims_reserved = max(0, self._claims_reserved - 1)
     handle.release()
+    if delete_snapshots:
+      handle.snapshots.clear()
     self.release_calls.append(handle.sandbox_id)
 
   def release_all(self) -> None:
@@ -335,28 +417,62 @@ class FakeFleet:
     return [h.hostname for h in self._handles]
 
   def endpoints(self, port: int = 8888) -> list[str]:
-    return [f"{h.hostname}.{self.config.clusters[0].namespace if self.config.clusters else 'default'}:{port}"
-            for h in self._handles]
+    return [h.endpoint(port) for h in self._handles]
 
-  # --- snapshots (state only) ------------------------------------------------ #
+  # --- snapshots: the fleet's slot bookkeeping over the handle methods ------- #
+  def _free_slot_for_suspend(self, handle: FakeHandle) -> None:
+    with self._lock:
+      if handle._slot_released:
+        return
+      handle._slot_released = True
+      self._claims_reserved = max(0, self._claims_reserved - 1)
+
+  def _retake_slot_for_wake(self, handle: FakeHandle) -> bool:
+    with self._lock:
+      if not handle._slot_released:
+        return False
+      hard = self.config.max_live_sandboxes
+      if hard and self._claims_reserved >= hard:
+        raise FleetOvercommitError(
+            f"max_live_sandboxes={hard} reached: {self._claims_reserved} claims live, "
+            f"so {handle.sandbox_id} stays suspended")
+      self._claims_reserved += 1
+      handle._slot_released = False
+    return True
+
   def snapshot(self, handle: FakeHandle, name: str | None = None, *, timeout: int = 180) -> str:
-    uid = f"snap-{len(handle.snapshots) + 1}"
-    handle.snapshots.append(uid)
+    with self._obs.phase("snapshot", cluster=FAKE_CLUSTER):
+      return handle.snapshot(name, timeout=timeout)
+
+  def suspend(self, handle: FakeHandle, *, snapshot: bool = True,
+              timeout: int = 180) -> Optional[str]:
+    with self._obs.phase("suspend", cluster=FAKE_CLUSTER):
+      uid = handle.suspend(snapshot=snapshot, timeout=timeout)
+    self._free_slot_for_suspend(handle)
     return uid
 
-  def suspend(self, handle: FakeHandle, *, snapshot: bool = True, timeout: int = 180):
-    handle.close_session()
-    handle.suspended = True
-    return self.snapshot(handle) if snapshot else None
-
   def resume(self, handle: FakeHandle, *, timeout: int = 180) -> bool:
-    handle.suspended = False
-    return bool(handle.snapshots)
+    retaken = self._retake_slot_for_wake(handle)
+    try:
+      with self._obs.phase("resume", cluster=FAKE_CLUSTER):
+        restored = handle.resume(timeout=timeout)
+    except Exception:
+      if retaken:
+        self._free_slot_for_suspend(handle)
+      raise
+    self._obs.restored(FAKE_CLUSTER, restored)
+    return restored
 
   def restore(self, handle: FakeHandle, snapshot_uid: str, *, timeout: int = 180) -> None:
-    if snapshot_uid not in handle.snapshots:
-      raise FleetError(f"unknown snapshot {snapshot_uid}")
-    handle.suspended = False
+    retaken = self._retake_slot_for_wake(handle)
+    try:
+      with self._obs.phase("restore", cluster=FAKE_CLUSTER):
+        handle.restore(snapshot_uid, timeout=timeout)
+    except Exception:
+      if retaken:
+        self._free_slot_for_suspend(handle)
+      raise
+    self._obs.restored(FAKE_CLUSTER, True)
 
   # --- runs ------------------------------------------------------------------ #
   @contextlib.contextmanager
@@ -365,28 +481,47 @@ class FakeFleet:
       self.report = report
       yield report
 
-  def run(self, process_fn: Callable[[Task, FakeHandle], object], strategy: str = "naive",
-          concurrency: int | None = None, **_) -> list:
-    """Acquire → ``process_fn(task, handle)`` → release for every task, in task
-    order, recording a `RunReport`. A per-task exception is captured as that
-    task's result, as the real fleet does."""
-    results = []
-    with self.recording(strategy):
-      for task in list(self.tasks):
-        h = self.acquire(task)
+  def run(self, process_fn: Callable[[Task, FakeHandle], object],
+          strategy: str = "naive", concurrency: int | None = None,
+          *, epochs: int = 1, keep_warm: bool = False, recycle: bool = False,
+          **recycle_options) -> list:
+    """`SandboxFleet.run` over this fleet: the real strategy (naive / sliding /
+    pipelined) warms, acquires, processes, releases and tears down, and the
+    `RunReport` records it. ``recycle=True`` is not supported by the fake."""
+    from .strategies import STRATEGIES, process_parallel
+    if strategy not in STRATEGIES:
+      raise ValueError(f"unknown strategy '{strategy}'; choose from {sorted(STRATEGIES)}")
+    if epochs < 1:
+      raise ValueError("epochs must be >= 1")
+    if recycle:
+      raise NotImplementedError("FakeFleet.run does not model recycle=True "
+                                "(git-restore reuse needs a real sandbox)")
+    conc = concurrency or self.config.max_concurrent
+    fn = STRATEGIES[strategy]
+    if self.plan_ is None:
+      self.plan()
+    with self._obs.run(strategy) as report:
+      self.report = report
+      report.environment = self.describe_environment()
+      if epochs == 1:
+        return fn(self, process_fn, conc, teardown=not keep_warm, executor=process_parallel)
+      results = []
+      for e in range(epochs):
+        last = e == epochs - 1
         try:
-          results.append(process_fn(task, h))
-        except Exception as exc:  # noqa: BLE001 — mirrors fleet.run's capture
-          results.append(exc)
-        finally:
-          self.release(h)
-    return results
+          results.append(fn(self, process_fn, conc, teardown=last and not keep_warm,
+                            executor=process_parallel))
+        except BaseException:
+          if not keep_warm and not last:
+            self.teardown()
+          raise
+      return results
 
   def describe_environment(self) -> dict:
-    return {FAKE_CLUSTER: {"fake": True, "namespace": "default"}}
+    return {FAKE_CLUSTER: {"fake": True, "namespace": self.namespace}}
 
   # --- teardown -------------------------------------------------------------- #
-  def teardown(self, delete_namespace: bool = False, *, verify: bool = False):
+  def teardown(self, delete_namespace: bool = False) -> None:
     self.teardowns += 1
     self.release_all()
     with self._lock:
@@ -394,5 +529,4 @@ class FakeFleet:
         self.unwarm_calls.append(img)
       self._warmed.clear()
       self._torndown = True
-    return {FAKE_CLUSTER: {"claims": 0, "warmpools": 0, "sandboxes": 0,
-                           "templates": 0}} if verify else None
+      self.plan_ = None                       # as the real _teardown does

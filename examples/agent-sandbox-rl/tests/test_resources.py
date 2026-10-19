@@ -644,8 +644,10 @@ def test_extra_pod_spec_task_image_placeholder_is_resolved_per_template():
   extra = {
       "containers": [{"name": "eval", "image": constants.TASK_IMAGE_PLACEHOLDER,
                       "command": ["sleep", "infinity"]},
-                     {"name": "proxy", "image": "proxy:v1", "imagePullPolicy": "Always"}],
-      "initContainers": [{"name": "seed", "image": "{task_image}", "command": ["true"]}],
+                     {"name": "proxy", "image": "proxy:v1", "imagePullPolicy": "Always"},
+                     {"name": "otel", "image": "otel/collector:0.90"}],
+      "initContainers": [{"name": "seed", "image": "{task_image}", "command": ["true"]},
+                         {"name": "fetch", "image": "busybox:1.36", "command": ["true"]}],
   }
   spec = TemplateSpec(extra_pod_spec=extra)
   r = _absent()
@@ -655,8 +657,10 @@ def test_extra_pod_spec_task_image_placeholder_is_resolved_per_template():
   assert by_name["eval"]["image"] == IMG                        # the template's task image
   assert by_name["eval"]["imagePullPolicy"] == "IfNotPresent"   # filled from the template
   assert by_name["proxy"]["imagePullPolicy"] == "Always"        # explicit value kept
-  assert pod["initContainers"][0]["image"] == IMG
+  assert "imagePullPolicy" not in by_name["otel"]               # not the task image:
+  assert pod["initContainers"][0]["image"] == IMG                # Kubernetes default
   assert pod["initContainers"][0]["imagePullPolicy"] == "IfNotPresent"
+  assert "imagePullPolicy" not in pod["initContainers"][1]
   # a second template from the same spec gets ITS image: the caller's dicts are
   # never written to
   r = _absent()
@@ -665,6 +669,21 @@ def test_extra_pod_spec_task_image_placeholder_is_resolved_per_template():
   assert {c["name"]: c["image"] for c in pod["containers"]}["eval"] == "other/image:1"
   assert extra["containers"][0]["image"] == constants.TASK_IMAGE_PLACEHOLDER
   assert extra["initContainers"][0]["image"] == "{task_image}"
+
+
+def test_extra_pod_spec_keys_win_over_the_hardening_defaults():
+  r = _absent()
+  r.ensure_template(IMG, TNAME, TemplateSpec(extra_pod_spec={"shareProcessNamespace": True}))
+  pod = _created_body(r)["spec"]["podTemplate"]["spec"]
+  assert pod["shareProcessNamespace"] is True
+  assert pod["automountServiceAccountToken"] is False
+
+
+def test_extra_template_spec_rejects_keys_that_have_their_own_knob():
+  with pytest.raises(ValueError, match="network_policy_management"):
+    TemplateSpec(extra_template_spec={"networkPolicyManagement": "Unmanaged"})
+  with pytest.raises(ValueError, match="extra_pod_spec"):
+    TemplateSpec(extra_template_spec={"podTemplate": {}})
 
 
 def test_extra_template_spec_merges_next_to_pod_template_and_rejects_pod_template():

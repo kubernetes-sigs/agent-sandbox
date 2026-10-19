@@ -11,16 +11,21 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 - **`{task_image}` placeholder** (`constants.TASK_IMAGE_PLACEHOLDER`): a container or
   init container in `TemplateSpec.extra_pod_spec` whose image is `{task_image}` runs the
   template's own task image, resolved per template, so a fresh grading sidecar of the
-  task image is one dict in the spec instead of a patched manifest. Extra and init
-  containers that name no `imagePullPolicy` get the template's.
+  task image is one dict in the spec instead of a patched manifest. A `{task_image}`
+  container that names no `imagePullPolicy` gets the template's; any other container
+  keeps the Kubernetes default.
 - **`TemplateSpec.extra_template_spec`**: extra SandboxTemplate `spec` keys merged next
-  to `podTemplate` and `networkPolicyManagement` (`podTemplate` itself is rejected).
+  to `podTemplate` and `networkPolicyManagement`. Those two keys are rejected: they
+  have knobs the SDK's own logic reads (`extra_pod_spec`, `network_policy_management`).
+  Keys the CRD does not know are pruned by the API server.
 
-### Changed (pod hardening defaults)
-- **Sandbox pods are hardened by default**: the rendered pod spec now sets
-  `automountServiceAccountToken: false` and `shareProcessNamespace: false`. Sandboxes
-  run untrusted agent code, and a grading sidecar must neither see nor be seen by the
-  agent's processes. `TemplateSpec.automount_service_account_token` /
+### Changed (pod hardening made explicit)
+- **The rendered pod spec now states its hardening**: `automountServiceAccountToken:
+  false` and `shareProcessNamespace: false`. Pod behavior does not change: the
+  controller already defaults automount to false on the pods it creates, and no shared
+  PID namespace is the Kubernetes default. The values are explicit so a reader of the
+  template (or a policy engine) sees them, and so a grading sidecar never shares the
+  agent's PID namespace by accident. `TemplateSpec.automount_service_account_token` /
   `share_process_namespace` restore either; `extra_pod_spec` keys still win. Existing
   templates are not rewritten; the defaults apply to templates a fleet creates.
 

@@ -77,15 +77,19 @@ class TemplateSpec(BaseModel):
   # onto a pre-existing template it owns.
   # See examples/agent-sandbox-rl-network-policy.
   network_policy_management: str | None = None
-  # Pod hardening. Sandboxes run untrusted agent code, so by default the pod
-  # mounts no ServiceAccount token and its containers do not share a PID
-  # namespace (a grading sidecar must neither see nor be seen by the agent's
-  # processes). Set either to True for a workload that needs them.
+  # Pod hardening, stated explicitly in the rendered spec: no ServiceAccount
+  # token (the controller already defaults automount to false on the pods it
+  # creates) and no shared PID namespace (the Kubernetes default; a grading
+  # sidecar must neither see nor be seen by the agent's processes). Set either
+  # to True for a workload that needs them.
   automount_service_account_token: bool = False
   share_process_namespace: bool = False
   # Extra keys merged into the SandboxTemplate `spec` next to `podTemplate` and
   # `networkPolicyManagement`, for template fields this model has no knob for.
-  # `podTemplate` itself is rejected here: use extra_pod_spec.
+  # `podTemplate` and `networkPolicyManagement` are rejected here: they have
+  # knobs (extra_pod_spec, network_policy_management) that the SDK's own logic
+  # reads. Keys the SandboxTemplate CRD does not know are pruned by the API
+  # server, silently.
   extra_template_spec: dict = Field(default_factory=dict)
 
   @field_validator("image_pull_policy")
@@ -108,6 +112,10 @@ class TemplateSpec(BaseModel):
     if "podTemplate" in v:
       raise ValueError("extra_template_spec must not carry podTemplate; "
                        "use extra_pod_spec for pod-spec keys")
+    if "networkPolicyManagement" in v:
+      raise ValueError("extra_template_spec must not carry networkPolicyManagement; "
+                       "use network_policy_management (preflight and the template "
+                       "patch read that field)")
     return v
 
 

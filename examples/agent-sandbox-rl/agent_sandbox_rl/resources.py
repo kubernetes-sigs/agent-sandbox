@@ -287,8 +287,9 @@ class Resources:
 
     # Extra containers (and init containers) from the escape hatch: copy them so
     # a per-template substitution never writes into the caller's TemplateSpec,
-    # resolve the task-image placeholder, and give them the template's pull
-    # policy when they name none (the runtime container already has it).
+    # resolve the task-image placeholder, and give a task-image container the
+    # template's pull policy when it names none (the runtime container already
+    # has it; any other image keeps the Kubernetes default).
     for key in ("containers", "initContainers"):
       if key in pod_spec:
         resolved = []
@@ -297,7 +298,7 @@ class Resources:
             c = dict(c)
             if c.get("image") == constants.TASK_IMAGE_PLACEHOLDER:
               c["image"] = image
-            c.setdefault("imagePullPolicy", template.image_pull_policy)
+              c.setdefault("imagePullPolicy", template.image_pull_policy)
           resolved.append(c)
         pod_spec[key] = resolved
 

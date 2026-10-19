@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sys
 import types
+
+import pytest
 from unittest.mock import MagicMock
 
 from kubernetes import client
@@ -22,6 +25,15 @@ from agent_sandbox_rl import prepull, prepull_delete
 
 def _cluster():
   return types.SimpleNamespace(name="c", namespace="ns", apps_api=MagicMock())
+
+
+def _no_sleep(monkeypatch, *, monotonic=None):
+  # The package re-exports prepull() under the module's name, so patch the
+  # module object's `time` rather than a dotted path.
+  import time as _time
+  mod = sys.modules["agent_sandbox_rl.prepull"]
+  monkeypatch.setattr(mod, "time", types.SimpleNamespace(
+      monotonic=monotonic or _time.monotonic, sleep=lambda s: None))
 
 
 def _status(desired, ready):
@@ -62,12 +74,66 @@ def test_empty_images_noop():
   c.apps_api.create_namespaced_daemon_set.assert_not_called()
 
 
-def test_existing_ds_is_patched():
+def test_existing_ds_with_the_same_selector_is_replaced():
   c = _cluster()
   c.apps_api.create_namespaced_daemon_set.side_effect = client.ApiException(status=409)
+  c.apps_api.read_namespaced_daemon_set.return_value = types.SimpleNamespace(
+      spec=types.SimpleNamespace(selector=types.SimpleNamespace(
+          match_labels={"app": "agent-sandbox-rl", "role": "prepull",
+                        "prepull-ds": "agent-sandbox-rl-prepull"})))
   c.apps_api.read_namespaced_daemon_set_status.return_value = _status(1, 1)
   assert prepull(c, ["x"], wait=True, timeout=5) is True
-  c.apps_api.patch_namespaced_daemon_set.assert_called_once()
+  c.apps_api.replace_namespaced_daemon_set.assert_called_once()
+  c.apps_api.patch_namespaced_daemon_set.assert_not_called()
+  c.apps_api.delete_namespaced_daemon_set.assert_not_called()
+
+
+def test_existing_ds_with_another_selector_is_recreated(monkeypatch):
+  _no_sleep(monkeypatch)
+  c = _cluster()
+  c.apps_api.create_namespaced_daemon_set.side_effect = [
+      client.ApiException(status=409), client.ApiException(status=409), None]
+  c.apps_api.read_namespaced_daemon_set.return_value = types.SimpleNamespace(
+      spec=types.SimpleNamespace(selector=types.SimpleNamespace(
+          match_labels={"app": "agent-sandbox-rl", "role": "prepull",
+                        "agents.x-k8s.io/asrl-run-id": "old-run"})))
+  c.apps_api.read_namespaced_daemon_set_status.return_value = _status(1, 1)
+  assert prepull(c, ["x"], wait=True, timeout=5) is True
+  c.apps_api.delete_namespaced_daemon_set.assert_called_once()
+  assert c.apps_api.create_namespaced_daemon_set.call_count == 3    # 409, deleted, 409, ok
+  c.apps_api.replace_namespaced_daemon_set.assert_not_called()
+
+
+def test_selector_is_run_independent_and_labels_carry_the_run():
+  c = _cluster()
+  c.apps_api.read_namespaced_daemon_set_status.return_value = _status(1, 1)
+  labels = {"app": "agent-sandbox-rl", "agents.x-k8s.io/asrl-run-id": "run-1"}
+  prepull(c, ["x"], labels=labels, runtime_class="gvisor", wait=True, timeout=5)
+  _, body = c.apps_api.create_namespaced_daemon_set.call_args.args
+  sel = body["spec"]["selector"]["matchLabels"]
+  assert sel == {"app": "agent-sandbox-rl", "role": "prepull", "prepull-ds": "agent-sandbox-rl-prepull"}
+  assert body["metadata"]["labels"]["agents.x-k8s.io/asrl-run-id"] == "run-1"
+  tmpl = body["spec"]["template"]
+  assert tmpl["metadata"]["labels"]["agents.x-k8s.io/asrl-run-id"] == "run-1"
+  assert all(tmpl["metadata"]["labels"][k] == v for k, v in sel.items())
+  assert tmpl["spec"]["runtimeClassName"] == "gvisor"
+  with pytest.raises(ValueError, match="63"):
+    prepull(c, ["x"], ds_name="p" * 64, wait=False)
+
+
+def test_readiness_needs_the_current_generation_and_an_updated_rollout():
+  c = _cluster()
+  stale = types.SimpleNamespace(
+      metadata=types.SimpleNamespace(generation=2),
+      status=types.SimpleNamespace(desired_number_scheduled=2, number_ready=2,
+                                   observed_generation=1, updated_number_scheduled=0))
+  fresh = types.SimpleNamespace(
+      metadata=types.SimpleNamespace(generation=2),
+      status=types.SimpleNamespace(desired_number_scheduled=2, number_ready=2,
+                                   observed_generation=2, updated_number_scheduled=2))
+  c.apps_api.read_namespaced_daemon_set_status.side_effect = [stale, stale, fresh]
+  assert prepull(c, ["x"], wait=True, timeout=30, poll_interval=0) is True
+  assert c.apps_api.read_namespaced_daemon_set_status.call_count == 3
 
 
 def test_delete_swallows_404():
@@ -151,6 +217,45 @@ def test_budget_exhausted_stops_starting_batches_and_returns_false():
   assert len(c.created) == 1                 # the rest never started
 
 
+def test_zero_desired_grace_is_measured_per_batch(monkeypatch):
+  clock = {"t": 0.0}
+
+  def monotonic():
+    clock["t"] += 10.0                        # every look at the clock is 10 s later
+    return clock["t"]
+
+  _no_sleep(monkeypatch, monotonic=monotonic)
+  c = _Tracker()
+  reads = {}
+
+  def status(name, ns):                       # a fresh DaemonSet says 0/0 once
+    reads[name] = reads.get(name, 0) + 1
+    return _status(0, 0) if reads[name] == 1 else _status(2, 2)
+
+  c.apps_api.read_namespaced_daemon_set_status.side_effect = status
+  ok = prepull(c, [f"i{i}" for i in range(30)], images_per_pod=10, max_parallel=1,
+               wait=True, timeout=1000, poll_interval=0)
+  assert ok is True
+  # each batch was polled past its own 0/0 reading, including the ones created
+  # long after the 15 s grace from the start of the pre-pull had passed
+  assert reads == {"agent-sandbox-rl-prepull-000": 2, "agent-sandbox-rl-prepull-001": 2,
+                   "agent-sandbox-rl-prepull-002": 2}
+
+
+def test_a_batch_that_missed_the_budget_is_kept_for_inspection():
+  c = _Tracker(ready=False)
+  ok = prepull(c, ["a"], delete_when_done=True, wait=True, timeout=0, poll_interval=0)
+  assert ok is False and c.deleted == [] and c.alive == {"agent-sandbox-rl-prepull"}
+
+
+def test_no_wait_warns_when_cleanup_or_drop_caches_cannot_run(caplog):
+  c = _Tracker()
+  with caplog.at_level("WARNING", logger="agent_sandbox_rl.prepull"):
+    assert prepull(c, ["a"], drop_caches=True, wait=False) is True
+  assert any("need wait=True" in r.message for r in caplog.records)
+  assert len(c.created) == 1                  # no drop-caches DaemonSet
+
+
 def test_drop_caches_runs_a_privileged_oneshot_after_the_pulls():
   c = _Tracker()
   tol = [{"key": "workload", "value": "sandbox"}]
@@ -176,6 +281,6 @@ def test_prepull_delete_removes_the_labeled_batches_too():
   c.apps_api.list_namespaced_daemon_set.return_value = types.SimpleNamespace(items=items)
   prepull_delete(c, labels={"app": "agent-sandbox-rl", "run": "r1"})
   sel = c.apps_api.list_namespaced_daemon_set.call_args.kwargs["label_selector"]
-  assert sel == "app=agent-sandbox-rl,run=r1,role=prepull"
+  assert sel == "app=agent-sandbox-rl,role=prepull"      # any run's, not only this run's
   deleted = [k.args[0] for k in c.apps_api.delete_namespaced_daemon_set.call_args_list]
   assert deleted == ["agent-sandbox-rl-prepull", "agent-sandbox-rl-prepull-003", "x-drop-caches"]

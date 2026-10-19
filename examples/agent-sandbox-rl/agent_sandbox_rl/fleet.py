@@ -1221,28 +1221,29 @@ class SandboxFleet:
     Batching, pacing, cleanup and the page-cache drop come from the
     ``prepull_*`` fields of `FleetConfig`; ``overrides`` are passed through to
     `prepull.prepull` (``images_per_pod``, ``max_parallel``, ``delete_when_done``,
-    ``drop_caches``, ``timeout``, ...). The pods inherit the template's node
-    selector, pull secret and tolerations, so they land where the sandboxes do.
-    Returns whether every cluster finished within its budget.
+    ``drop_caches``, ``timeout``, ...) and win over the template-derived values.
+    The pods inherit the template's node selector, runtime class, pull secret
+    and tolerations, so they land where the sandboxes do. Returns whether every
+    cluster finished within its budget.
     """
     from .prepull import prepull as _do_prepull
     plan = self.plan_ or self.plan()
     cfg = self.config
-    kwargs = dict(images_per_pod=cfg.prepull_images_per_pod,
-                  max_parallel=cfg.prepull_max_parallel,
-                  delete_when_done=cfg.prepull_delete_when_done,
-                  drop_caches=cfg.prepull_drop_caches)
-    kwargs.update(overrides)
+    base = dict(images_per_pod=cfg.prepull_images_per_pod,
+                max_parallel=cfg.prepull_max_parallel,
+                delete_when_done=cfg.prepull_delete_when_done,
+                drop_caches=cfg.prepull_drop_caches)
     ok = True
     with self._obs.phase("prepull"):
       for cname, entries in plan.by_cluster().items():
         c = self.registry.get(cname)
         ts = c.template_spec(cfg.template)
-        done = _do_prepull(c, [e.image for e in entries],
-                           node_selector=ts.node_selector,
-                           tolerations=(ts.extra_pod_spec or {}).get("tolerations"),
-                           image_pull_secret=ts.image_pull_secret,
-                           labels=cfg.labels, wait=wait, **kwargs)
+        kwargs = dict(base, node_selector=ts.node_selector,
+                      tolerations=(ts.extra_pod_spec or {}).get("tolerations"),
+                      runtime_class=ts.runtime_class,
+                      image_pull_secret=ts.image_pull_secret, labels=cfg.labels)
+        kwargs.update(overrides)
+        done = _do_prepull(c, [e.image for e in entries], wait=wait, **kwargs)
         ok = ok and bool(done)
     return ok
 
@@ -1266,8 +1267,9 @@ class SandboxFleet:
       self._claims_reserved = 0
     self.preflight()
     self.plan()
-    if prepull:
-      self.prepull(wait=True)
+    if prepull and not self.prepull(wait=True):
+      logger.warning("pre-pull did not finish within its budget; the warm pools "
+                     "start anyway and pull what is missing")
     self.start_warmpools(wait=True, create_budget=create_budget)
     return self
 

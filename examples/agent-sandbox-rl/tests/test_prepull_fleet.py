@@ -48,10 +48,30 @@ def test_fleet_prepull_passes_template_tolerations_and_config(make_cluster, monk
   assert seen["cluster"] is c and sorted(seen["images"]) == ["a", "b"]
   kw = seen["kw"]
   assert kw["tolerations"] == tol and kw["node_selector"] == {"pool": "sbx"}
+  assert kw["runtime_class"] is None
   assert (kw["images_per_pod"], kw["max_parallel"], kw["delete_when_done"],
           kw["drop_caches"], kw["wait"], kw["timeout"]) == (10, 2, True, True, False, 7)
+  # an override of a template-derived value wins instead of raising TypeError
+  assert f.prepull(wait=False, tolerations=[{"key": "other"}], runtime_class="gvisor") is True
+  assert seen["kw"]["tolerations"] == [{"key": "other"}] and seen["kw"]["runtime_class"] == "gvisor"
   deleted = {}
   monkeypatch.setattr(sys.modules["agent_sandbox_rl.prepull"], "prepull_delete",
                       lambda cluster, labels=None: deleted.setdefault("labels", labels))
   f.prepull_delete()
   assert deleted["labels"] == f.config.labels
+
+
+def test_setup_warns_when_the_prepull_budget_runs_out(make_cluster, monkeypatch, caplog):
+  c = make_cluster("solo")
+  f = SandboxFleet(FleetConfig(template=TemplateSpec(runtime_class="gvisor")),
+                   registry=ClusterRegistry([c]))
+  f.load_tasks(["a"])
+  seen = {}
+  def fake(cluster, images, **kw):
+    seen.update(kw)
+    return False
+  monkeypatch.setattr(sys.modules["agent_sandbox_rl.prepull"], "prepull", fake)
+  with caplog.at_level("WARNING", logger="agent_sandbox_rl.fleet"):
+    f.setup(prepull=True)
+  assert seen["runtime_class"] == "gvisor"
+  assert any("pre-pull did not finish" in r.message for r in caplog.records)

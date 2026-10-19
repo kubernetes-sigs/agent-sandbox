@@ -289,6 +289,19 @@ class AsyncSandboxBatch:
         """
         return self._renewal_degraded
 
+    async def _close_cached_connections(self, action: str) -> None:
+        async with self._lock:
+            connected = list(self._connected.values())
+            self._connected.clear()
+        for sandbox in connected:
+            try:
+                await sandbox.close_connection()
+            except Exception as e:
+                logger.warning(
+                    f"Batch '{self.batch_id}' failed to close a cached sandbox connection "
+                    f"during {action}: {e}"
+                )
+
     async def detach(self, grace: int | None = None) -> None:
         """Stops the background watch and Lease renewal, closes cached sandbox connections, and
         releases this handle's hold on the Lease. ``grace`` is the number of seconds to keep the
@@ -314,18 +327,7 @@ class AsyncSandboxBatch:
             self._detached = True
 
         await self._stop_background_tasks()
-
-        async with self._lock:
-            connected = list(self._connected.values())
-            self._connected.clear()
-        for sandbox in connected:
-            try:
-                await sandbox.close_connection()
-            except Exception as e:
-                logger.warning(
-                    f"Batch '{self.batch_id}' failed to close a cached sandbox connection "
-                    f"during detach: {e}"
-                )
+        await self._close_cached_connections("detach")
 
         lease = await self._client.k8s_helper.read_batch_lease(
             self._lease_name, self.namespace, _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
@@ -354,7 +356,7 @@ class AsyncSandboxBatch:
         async with self._lock:
             self._lease_released = True
 
-        self._client._unregister_batch(self.namespace, self.batch_id)
+        self._client._unregister_batch(self)
 
     async def _watch_loop(self) -> None:
         """Background watch loop which keeps ``self._state`` in sync with the batch's claims.

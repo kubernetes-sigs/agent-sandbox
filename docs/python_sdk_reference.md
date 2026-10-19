@@ -251,7 +251,7 @@ def delete_all() -> None
 ```
 
 Cleanup all tracked sandboxes managed by this client, and stop every tracked batch's
-background watch and Lease renewal.
+background watch and Lease renewal and close its cached sandbox connections.
 
 **Example**:
 

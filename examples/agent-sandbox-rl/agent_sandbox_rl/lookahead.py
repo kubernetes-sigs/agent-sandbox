@@ -252,6 +252,13 @@ class LookaheadWarmer:
       return report
     if self.register_images:
       self._register([img for img, _ in to_create])
+    if to_create and getattr(self.fleet, "plan_", None) is None:
+      # One plan, built here, before the fan-out: a worker's warm_image would
+      # otherwise build its own, and a stateful placement (round-robin) could
+      # then put the pool on one cluster and a later acquire on another.
+      plan = getattr(self.fleet, "plan", None)
+      if callable(plan):
+        plan()
     fatal: list[BaseException] = []
 
     def _create(img, n):
@@ -279,13 +286,15 @@ class LookaheadWarmer:
     def _remove(img):
       try:
         self.fleet.unwarm_image(img)
-        report.removed.append(img)
-      except Exception as exc:  # noqa: BLE001
+      except Exception as exc:  # noqa: BLE001 — the fleet keeps its bookkeeping
+        # on a failed delete so a retry can release the pool; keep ours too,
+        # and the next reconcile tries again.
         report.errors[img] = f"{type(exc).__name__}: {exc}"
-        logger.warning("lookahead: could not unwarm %s: %s", img, exc)
-      finally:
-        with self._lock:
-          self._active.pop(img, None)   # no live batch wants it; do not retry forever
+        logger.warning("lookahead: could not unwarm %s (kept for retry): %s", img, exc)
+        return
+      report.removed.append(img)
+      with self._lock:
+        self._active.pop(img, None)
 
     jobs = ([(_create, (img, n)) for img, n in to_create]
             + [(_scale, (img, n)) for img, n in to_scale]

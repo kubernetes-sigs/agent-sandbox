@@ -312,3 +312,43 @@ def test_wait_pools_ready_without_a_plan_reads_false(make_cluster, monkeypatch):
 
   monkeypatch.setattr(f, "plan", no_plan)
   assert f.wait_pools_ready(["a", "b"]) == {"a": False, "b": False}
+
+
+def test_a_failed_unwarm_is_retried_on_the_next_reconcile():
+  class FlakyUnwarm(RecordingFleet):
+    def __init__(self, *a, **kw):
+      super().__init__(*a, **kw)
+      self.fail_unwarm_once = True
+
+    def unwarm_image(self, image):
+      super().unwarm_image(image)
+      if self.fail_unwarm_once:
+        self.fail_unwarm_once = False
+        raise RuntimeError("409 conflict")
+
+  f = FlakyUnwarm(planned={"a"})
+  w = LookaheadWarmer(f)
+  w.add(0, {"a": 1})
+  rep = w.finish(0)
+  assert "a" in rep.errors and w.active == {"a": 1}      # kept: the pool is still there
+  rep = w.close()
+  assert rep.removed == ["a"] and w.active == {}
+  assert [c for c in f.calls if c[0] == "unwarm"] == [("unwarm", "a"), ("unwarm", "a")]
+
+
+def test_reconcile_builds_the_plan_once_before_the_fan_out():
+  class Unplanned(RecordingFleet):
+    def __init__(self, *a, **kw):
+      super().__init__(*a, **kw)
+      self.plan_ = None
+      self.plans = 0
+
+    def plan(self):
+      self.plans += 1
+      self.plan_ = types.SimpleNamespace(for_image=lambda img: object())
+      return self.plan_
+
+  f = Unplanned(planned={"a", "b", "c"})
+  w = LookaheadWarmer(f, register_images=False)
+  w.add(0, {"a": 1, "b": 1, "c": 1})
+  assert f.plans == 1 and w.active == {"a": 1, "b": 1, "c": 1}

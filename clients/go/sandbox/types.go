@@ -60,7 +60,8 @@ var (
 	ErrResponseTooLarge = errors.New("response exceeded 16 MB limit")
 	// ErrUnsupportedByRuntime is returned by operations the selected
 	// runtime or connection cannot perform (e.g. Delete on the legacy
-	// python-runtime, or Run with RuntimeSandboxd and APIURL).
+	// python-runtime, or Run with RuntimeSandboxd and APIURL or
+	// ConnectivityRouterPortForward).
 	ErrUnsupportedByRuntime = errors.New("operation not supported by the sandbox runtime")
 	// ErrProcessProtocol indicates an invalid or incomplete process event stream.
 	ErrProcessProtocol = errors.New("invalid process event stream")

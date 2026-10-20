@@ -647,6 +647,24 @@ func TestComputeConditions(t *testing.T) {
 			},
 		},
 		{
+			// The kubelet resets the backoff after a long run, so this exit
+			// is restarted like a first exit despite earlier restarts.
+			name:    "25b. Exit after a run that reset the backoff adds no detail",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
+			pod: ownedPod(withRestartPolicy(corev1.RestartPolicyAlways, func() *corev1.Pod {
+				cs := terminatedContainer("app", "Error", 1, 3)
+				started := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+				cs.State.Terminated.StartedAt = metav1.NewTime(started)
+				cs.State.Terminated.FinishedAt = metav1.NewTime(started.Add(crashLoopBackOffResetPeriod))
+				return podWithContainerState(corev1.PodRunning, false, cs)
+			}())),
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
+				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod has not reported a PodScheduled condition yet"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod is Running but not Ready"},
+			},
+		},
+		{
 			name:    "26. Successful exit under restartPolicy OnFailure is not reported",
 			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
 			pod:     ownedPod(withRestartPolicy(corev1.RestartPolicyOnFailure, podWithContainerState(corev1.PodRunning, false, terminatedContainer("app", "Completed", 0, 2)))),

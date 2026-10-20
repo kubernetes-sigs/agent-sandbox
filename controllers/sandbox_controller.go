@@ -785,12 +785,21 @@ func containerIssue(kind string, statuses []corev1.ContainerStatus, restartOnFai
 	return ""
 }
 
+// crashLoopBackOffResetPeriod is how long a container must run before the
+// kubelet resets its restart backoff (the documented default).
+const crashLoopBackOffResetPeriod = 10 * time.Minute
+
 // restartingExit returns the current termination of a container that has
 // restarted before and that the kubelet will restart again, or nil. The first
-// exit is not reported: the kubelet restarts it without a backoff.
+// exit is not reported: the kubelet restarts it without a backoff. Neither is
+// an exit after a run long enough to reset the backoff, which the kubelet
+// treats as a first exit again.
 func restartingExit(cs corev1.ContainerStatus, restartOnFailure, restartOnSuccess bool) *corev1.ContainerStateTerminated {
 	terminated := cs.State.Terminated
 	if terminated == nil || cs.RestartCount == 0 {
+		return nil
+	}
+	if terminated.FinishedAt.Sub(terminated.StartedAt.Time) >= crashLoopBackOffResetPeriod {
 		return nil
 	}
 	if (terminated.ExitCode == 0 && !restartOnSuccess) || (terminated.ExitCode != 0 && !restartOnFailure) {
@@ -799,6 +808,8 @@ func restartingExit(cs corev1.ContainerStatus, restartOnFailure, restartOnSucces
 	return terminated
 }
 
+// crashLoopIssue is the message for a crash-looping container, shared by the
+// terminated and waiting states so alternating between them changes nothing.
 func crashLoopIssue(kind, name, lastExit string) string {
 	if lastExit != "" {
 		return fmt.Sprintf("%s %q is in CrashLoopBackOff (last exit: %s)", kind, name, lastExit)

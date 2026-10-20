@@ -141,6 +141,21 @@ func TestComputeConditions(t *testing.T) {
 		return cs
 	}
 
+	// terminatedContainer is a container the kubelet reports as exited, after
+	// earlier restarts.
+	terminatedContainer := func(name, reason string, exitCode, restarts int32) corev1.ContainerStatus {
+		return corev1.ContainerStatus{
+			Name:         name,
+			RestartCount: restarts,
+			State:        corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: reason, ExitCode: exitCode}},
+		}
+	}
+
+	withRestartPolicy := func(policy corev1.RestartPolicy, pod *corev1.Pod) *corev1.Pod {
+		pod.Spec.RestartPolicy = policy
+		return pod
+	}
+
 	podWithContainerState := func(phase corev1.PodPhase, ready bool, containers ...corev1.ContainerStatus) *corev1.Pod {
 		readyStatus := corev1.ConditionFalse
 		if ready {
@@ -607,6 +622,66 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod has not reported a PodScheduled condition yet"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: `Pod is Running but not Ready; container "app" is in CrashLoopBackOff`},
+			},
+		},
+		{
+			// Between restarts the kubelet reports the container as terminated
+			// for most of the backoff, not as waiting/CrashLoopBackOff.
+			name:    "24. Crash-looping container between restarts is reported as CrashLoopBackOff",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
+			pod:     ownedPod(withRestartPolicy(corev1.RestartPolicyAlways, podWithContainerState(corev1.PodRunning, false, terminatedContainer("app", "Error", 1, 3)))),
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
+				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod has not reported a PodScheduled condition yet"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: `Pod is Running but not Ready; container "app" is in CrashLoopBackOff (last exit: Error)`},
+			},
+		},
+		{
+			name:    "25. First exit before any restart adds no detail",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
+			pod:     ownedPod(withRestartPolicy(corev1.RestartPolicyAlways, podWithContainerState(corev1.PodRunning, false, terminatedContainer("app", "Error", 1, 0)))),
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
+				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod has not reported a PodScheduled condition yet"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod is Running but not Ready"},
+			},
+		},
+		{
+			name:    "26. Successful exit under restartPolicy OnFailure is not reported",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
+			pod:     ownedPod(withRestartPolicy(corev1.RestartPolicyOnFailure, podWithContainerState(corev1.PodRunning, false, terminatedContainer("app", "Completed", 0, 2)))),
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
+				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod has not reported a PodScheduled condition yet"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod is Running but not Ready"},
+			},
+		},
+		{
+			name:    "27. Init container that completed after earlier failures is not reported",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
+			pod: ownedPod(withRestartPolicy(corev1.RestartPolicyAlways, func() *corev1.Pod {
+				pod := podWithContainerState(corev1.PodPending, false, waitingContainer("app", "ContainerCreating", 0, ""))
+				pod.Status.InitContainerStatuses = []corev1.ContainerStatus{terminatedContainer("setup", "Completed", 0, 2)}
+				return pod
+			}())),
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
+				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod has not reported a PodScheduled condition yet"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod exists with phase: Pending"},
+			},
+		},
+		{
+			name:    "28. Init container failing repeatedly is reported as CrashLoopBackOff",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
+			pod: ownedPod(withRestartPolicy(corev1.RestartPolicyAlways, func() *corev1.Pod {
+				pod := podWithContainerState(corev1.PodPending, false, waitingContainer("app", "PodInitializing", 0, ""))
+				pod.Status.InitContainerStatuses = []corev1.ContainerStatus{terminatedContainer("setup", "Error", 1, 2)}
+				return pod
+			}())),
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
+				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod has not reported a PodScheduled condition yet"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: `Pod exists with phase: Pending; init container "setup" is in CrashLoopBackOff (last exit: Error)`},
 			},
 		},
 	}

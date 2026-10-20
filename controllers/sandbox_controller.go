@@ -749,17 +749,26 @@ var startingWaitingReasons = map[string]bool{
 // podContainerIssue describes the first container of pod that cannot start, or
 // "" if there is none. Init containers come first because they gate the rest.
 func podContainerIssue(pod *corev1.Pod) string {
-	if issue := containerIssue("init container", pod.Status.InitContainerStatuses); issue != "" {
+	restartOnFailure := pod.Spec.RestartPolicy != corev1.RestartPolicyNever
+	// Init containers run to completion, so only a failed one is restarted.
+	if issue := containerIssue("init container", pod.Status.InitContainerStatuses, restartOnFailure, false); issue != "" {
 		return issue
 	}
-	return containerIssue("container", pod.Status.ContainerStatuses)
+	return containerIssue("container", pod.Status.ContainerStatuses, restartOnFailure, pod.Spec.RestartPolicy == corev1.RestartPolicyAlways)
 }
 
 // containerIssue is built from stable fields only (name, reason, last exit
 // reason). Kubelet messages and the restart count change on every backoff and
 // would cost a status write each time.
-func containerIssue(kind string, statuses []corev1.ContainerStatus) string {
+func containerIssue(kind string, statuses []corev1.ContainerStatus, restartOnFailure, restartOnSuccess bool) string {
 	for _, cs := range statuses {
+		// A crash-looping container spends most of each backoff in the
+		// terminated state, and is only reported as waiting/CrashLoopBackOff
+		// for part of it. Both states yield the same message, so the
+		// alternation costs no status writes.
+		if exit := restartingExit(cs, restartOnFailure, restartOnSuccess); exit != nil {
+			return crashLoopIssue(kind, cs.Name, exit.Reason)
+		}
 		waiting := cs.State.Waiting
 		if waiting == nil || waiting.Reason == "" || startingWaitingReasons[waiting.Reason] {
 			continue
@@ -767,12 +776,34 @@ func containerIssue(kind string, statuses []corev1.ContainerStatus) string {
 		if waiting.Reason != "CrashLoopBackOff" {
 			return fmt.Sprintf("%s %q is waiting: %s", kind, cs.Name, waiting.Reason)
 		}
-		if last := cs.LastTerminationState.Terminated; last != nil && last.Reason != "" {
-			return fmt.Sprintf("%s %q is in CrashLoopBackOff (last exit: %s)", kind, cs.Name, last.Reason)
+		lastExit := ""
+		if last := cs.LastTerminationState.Terminated; last != nil {
+			lastExit = last.Reason
 		}
-		return fmt.Sprintf("%s %q is in CrashLoopBackOff", kind, cs.Name)
+		return crashLoopIssue(kind, cs.Name, lastExit)
 	}
 	return ""
+}
+
+// restartingExit returns the current termination of a container that has
+// restarted before and that the kubelet will restart again, or nil. The first
+// exit is not reported: the kubelet restarts it without a backoff.
+func restartingExit(cs corev1.ContainerStatus, restartOnFailure, restartOnSuccess bool) *corev1.ContainerStateTerminated {
+	terminated := cs.State.Terminated
+	if terminated == nil || cs.RestartCount == 0 {
+		return nil
+	}
+	if (terminated.ExitCode == 0 && !restartOnSuccess) || (terminated.ExitCode != 0 && !restartOnFailure) {
+		return nil
+	}
+	return terminated
+}
+
+func crashLoopIssue(kind, name, lastExit string) string {
+	if lastExit != "" {
+		return fmt.Sprintf("%s %q is in CrashLoopBackOff (last exit: %s)", kind, name, lastExit)
+	}
+	return fmt.Sprintf("%s %q is in CrashLoopBackOff", kind, name)
 }
 
 func (r *SandboxReconciler) computeFinishedCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) *metav1.Condition {

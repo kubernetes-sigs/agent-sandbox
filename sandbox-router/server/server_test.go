@@ -148,7 +148,9 @@ func TestRun_ReadyOnlyAfterAllBindsSucceed(t *testing.T) {
 	}
 	if !probes.ready.Load() {
 		cancel()
-		<-done
+		if err := <-done; err != nil {
+			t.Logf("Run returned error: %v", err)
+		}
 		t.Fatalf("ready never flipped to true")
 	}
 

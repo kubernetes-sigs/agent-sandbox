@@ -284,3 +284,26 @@ def test_prepull_delete_removes_the_labeled_batches_too():
   assert sel == "app=agent-sandbox-rl,role=prepull"      # any run's, not only this run's
   deleted = [k.args[0] for k in c.apps_api.delete_namespaced_daemon_set.call_args_list]
   assert deleted == ["agent-sandbox-rl-prepull", "agent-sandbox-rl-prepull-003", "x-drop-caches"]
+
+
+def test_object_labels_carry_the_cleanup_selector_even_when_the_caller_labels_replace_the_defaults():
+  c = _cluster()
+  c.apps_api.read_namespaced_daemon_set_status.return_value = _status(1, 1)
+  prepull(c, ["x"], labels={"team": "x"}, wait=True, timeout=5)            # no app= label
+  _, body = c.apps_api.create_namespaced_daemon_set.call_args.args
+  meta = body["metadata"]["labels"]
+  assert meta["team"] == "x" and meta["app"] == "agent-sandbox-rl" and meta["role"] == "prepull"
+  assert meta["prepull-ds"] == "agent-sandbox-rl-prepull"
+
+
+def test_recreation_of_a_terminating_daemonset_honors_the_budget(monkeypatch):
+  _no_sleep(monkeypatch)
+  c = _cluster()
+  c.apps_api.create_namespaced_daemon_set.side_effect = client.ApiException(status=409)
+  c.apps_api.read_namespaced_daemon_set.return_value = types.SimpleNamespace(
+      spec=types.SimpleNamespace(selector=types.SimpleNamespace(
+          match_labels={"app": "agent-sandbox-rl", "role": "prepull",
+                        "agents.x-k8s.io/asrl-run-id": "old-run"})))
+  assert prepull(c, ["x"], wait=True, timeout=0) is False                  # not an exception
+  c.apps_api.delete_namespaced_daemon_set.assert_called_once()
+  assert c.apps_api.create_namespaced_daemon_set.call_count == 1           # no retry past the budget

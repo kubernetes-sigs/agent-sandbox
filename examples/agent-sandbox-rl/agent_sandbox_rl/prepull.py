@@ -78,11 +78,14 @@ def _selector_labels(ds_name: str) -> dict:
 
 def _manifest(*, ds_name, namespace, labels, pod_spec) -> dict:
   sel_labels = _selector_labels(ds_name)
+  # The object carries the selector labels too: prepull_delete lists DaemonSets
+  # by the managed-by label and role, and a caller's `labels` may not include
+  # them (FleetConfig.labels replaces the defaults).
   return {
       "apiVersion": "apps/v1",
       "kind": "DaemonSet",
       "metadata": {"name": ds_name, "namespace": namespace,
-                   "labels": {**labels, "role": "prepull"}},
+                   "labels": {**labels, **sel_labels}},
       "spec": {
           "selector": {"matchLabels": sel_labels},
           "template": {"metadata": {"labels": {**labels, **sel_labels}}, "spec": pod_spec},
@@ -128,7 +131,10 @@ def _existing_selector(obj) -> dict | None:
   return labels if isinstance(labels, dict) else None
 
 
-def _apply(cluster, body: dict, what: str) -> None:
+def _apply(cluster, body: dict, what: str, *, deadline: float | None = None) -> None:
+  """Create the DaemonSet, or bring an existing one to ``body``. ``deadline``
+  (monotonic) bounds the wait for an old object to finish terminating before
+  the recreate; past it a ``TimeoutError`` is raised."""
   name = body["metadata"]["name"]
   try:
     cluster.apps_api.create_namespaced_daemon_set(cluster.namespace, body)
@@ -145,6 +151,9 @@ def _apply(cluster, body: dict, what: str) -> None:
     logger.info("%s DaemonSet '%s' has another selector; recreating it", what, name)
     _delete(cluster, name)
     for attempt in range(60):
+      if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError(f"{what} DaemonSet '{name}': the old object was still "
+                           "terminating when the budget ran out")
       try:
         cluster.apps_api.create_namespaced_daemon_set(cluster.namespace, body)
         logger.info("%s DaemonSet '%s' recreated", what, name)
@@ -263,12 +272,19 @@ def prepull(cluster, images, *, node_selector=None, tolerations=None,
     while pending and len(running) < parallel and (
         started == 0 or time.monotonic() < deadline):
       name, imgs = pending.pop(0)
-      _apply(cluster, body_for(name, imgs), "Pre-pull")
+      try:
+        _apply(cluster, body_for(name, imgs), "Pre-pull", deadline=deadline)
+      except TimeoutError as exc:
+        logger.error("Pre-pull: %s; %d DaemonSet(s) not started", exc, len(pending) + 1)
+        ok = False
+        pending.clear()
+        break
       running.append((name, time.monotonic()))
       started += 1
     if not running:                       # deadline passed before the rest started
-      logger.error("Pre-pull: budget of %ds spent with %d DaemonSet(s) not started",
-                   timeout, len(pending))
+      if pending:
+        logger.error("Pre-pull: budget of %ds spent with %d DaemonSet(s) not started",
+                     timeout, len(pending))
       ok = False
       break
     name, created_at = running.pop(0)
@@ -296,7 +312,11 @@ def _drop_caches(cluster, *, ds_name, node_selector, tolerations, pause_image,
                                node_selector=node_selector, tolerations=tolerations,
                                pause_image=pause_image, shell_image=shell_image,
                                labels=labels, image_pull_secret=image_pull_secret)
-  _apply(cluster, body, "Drop-caches")
+  try:
+    _apply(cluster, body, "Drop-caches", deadline=deadline)
+  except TimeoutError as exc:
+    logger.error("Drop-caches: %s", exc)
+    return False
   try:
     return _wait_ready(cluster, ds_name, deadline=deadline, poll_interval=poll_interval,
                        zero_grace_until=min(deadline, time.monotonic() + 15.0))

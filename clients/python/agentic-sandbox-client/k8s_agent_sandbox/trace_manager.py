@@ -32,6 +32,18 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+__all__ = [
+    "OPENTELEMETRY_AVAILABLE",
+    "initialize_tracer",
+    "trace_span",
+    "async_trace_span",
+    "TracerManager",
+    "create_tracer_manager",
+    "trace",
+    "context",
+    "TraceContextTextMapPropagator",
+]
+
 # If optional dependency OpenTelemetry is not installed, define a complete set of mock objects
 # to prevent runtime errors.
 try:

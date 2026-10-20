@@ -49,7 +49,7 @@ class Sandbox:
         k8s_helper: K8sHelper | None = None,
     ) -> None:
         # Sandbox Related Configuration
-        self.claim_name = claim_name
+        self.claim_name: str | None = claim_name
         self.sandbox_id = sandbox_id
         self.namespace = namespace
         self.connection_config = connection_config or SandboxLocalTunnelConnectionConfig()
@@ -198,7 +198,7 @@ class Sandbox:
         self._is_closed = True
         logger.info(f"Connection to sandbox claim '{self.claim_name}' has been closed.")
     
-    def terminate(self):
+    def terminate(self) -> None:
         """
         Permanent deletion of all server side infrastructure and client side connection.
 

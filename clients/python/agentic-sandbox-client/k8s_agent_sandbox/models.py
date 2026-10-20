@@ -15,7 +15,7 @@
 import re
 import warnings
 from datetime import datetime, timezone
-from typing import Literal, Optional, Union
+from typing import Any, Literal, Optional, Union
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 _ENV_VAR_NAME_RE = re.compile(r"^[-._a-zA-Z][-._a-zA-Z0-9]*$")
@@ -52,7 +52,7 @@ class FileEntry(BaseModel):
     mode: Optional[str] = None  # Octal permission bits (sandboxd only), e.g. "0644".
 
     @classmethod
-    def from_legacy(cls, entry: dict) -> "FileEntry":
+    def from_legacy(cls, entry: dict[str, Any]) -> "FileEntry":
         """Build from the legacy python-runtime listing entry."""
         return cls(
             name=entry["name"],
@@ -62,7 +62,7 @@ class FileEntry(BaseModel):
         )
 
     @classmethod
-    def from_sandboxd(cls, entry: dict) -> "FileEntry":
+    def from_sandboxd(cls, entry: dict[str, Any]) -> "FileEntry":
         """Build from a sandboxd DirectoryListing entry."""
         return cls(
             name=entry["name"],
@@ -218,6 +218,16 @@ SandboxConnectionConfig = Union[
     SandboxdPodTunnelConnectionConfig,
     SandboxdInClusterConnectionConfig,
 ]
+
+class AdditionalPodMetadata(BaseModel):
+    """Wire-format for SandboxClaim ``spec.additionalPodMetadata``.
+
+    Labels and annotations stamped onto the running Sandbox Pod (not the
+    SandboxClaim object). Omit empty sections so the manifest never carries
+    an empty ``additionalPodMetadata``.
+    """
+    labels: dict[str, str] | None = None
+    annotations: dict[str, str] | None = None
 
 class SandboxTracerConfig(BaseModel):
     """Configuration for tracer level information"""

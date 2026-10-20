@@ -658,7 +658,7 @@ class TestWatcher(BaseAsyncBatchClientTest):
         self.assertIsNone(handle.err())
         self.assertEqual(len(self.mock_k8s_helper.list_sandbox_claim_objects.call_args_list), 2)
 
-    async def test_consecutive_failures_back_off_and_an_event_resets_the_delay(self):
+    async def test_consecutive_failures_and_empty_watches_back_off_and_an_event_resets_the_delay(self):
         handle = _make_handle(self.client)
         event = {
             "type": "MODIFIED",
@@ -673,6 +673,8 @@ class TestWatcher(BaseAsyncBatchClientTest):
                 self._terminating_error(status=503),
                 aiohttp.ClientConnectionError("boom"),
                 self._terminating_error(status=429),
+                # A watch that ends at once with no events.
+                _agen([]),
                 _agen_then_raise([event], self._terminating_error(status=503)),
                 _agen_then_raise([], asyncio.CancelledError()),
             ]
@@ -685,11 +687,12 @@ class TestWatcher(BaseAsyncBatchClientTest):
 
         # Equal jitter keeps attempt n within [base * 2**(n-1) / 2, base * 2**(n-1)].
         delays = [c.args[0] for c in mock_sleep.await_args_list]
-        self.assertEqual(len(delays), 4)
+        self.assertEqual(len(delays), 5)
         self.assertTrue(0.25 <= delays[0] <= 0.5, delays)
         self.assertTrue(0.5 <= delays[1] <= 1.0, delays)
         self.assertTrue(1.0 <= delays[2] <= 2.0, delays)
-        self.assertTrue(0.25 <= delays[3] <= 0.5, delays)
+        self.assertTrue(2.0 <= delays[3] <= 4.0, delays)
+        self.assertTrue(0.25 <= delays[4] <= 0.5, delays)
         self.assertIsNone(handle.err())
 
 
@@ -1228,6 +1231,10 @@ class BaseClaimBatchTest(BaseAsyncBatchClientTest):
         super().setUp()
         self.cluster = _Cluster()
         self.client.k8s_helper = self.cluster.helper
+        # The fake's watch ends as soon as it has no events, which an apiserver's watch never does.
+        short_watch = patch.object(async_sandbox_batch, "_SHORT_WATCH_SECONDS", 0)
+        short_watch.start()
+        self.addCleanup(short_watch.stop)
 
     async def claim(self, groups=None, **kwargs):
         kwargs.setdefault("batch_id", "b1")

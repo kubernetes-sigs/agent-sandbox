@@ -63,6 +63,10 @@ _WATCH_TIMEOUT_SECONDS = 30
 _WATCH_CLOSE_GRACE_SECONDS = 5
 _WATCH_REQUEST_TIMEOUT = _WATCH_TIMEOUT_SECONDS + _WATCH_CLOSE_GRACE_SECONDS
 
+# A watch that ends sooner than this without an event counts as a failed attempt, as in client-go's
+# reflector. Otherwise a stream that a proxy or a broken connection ends at once would be reopened in a busy loop.
+_SHORT_WATCH_SECONDS = 1
+
 # Network-level errors that are likely transient, so the watch, creates, and release retry them.
 _TRANSPORT_ERRORS = (
     urllib3.exceptions.ProtocolError,
@@ -584,12 +588,15 @@ class SandboxBatch:
                     with self._lock:
                         self._state.resync_from_list(items)
                     relist = False
+                watch_started = time.monotonic()
+                got_event = False
                 for event in self._client.k8s_helper.watch_sandbox_claims(
                     self.namespace, label_selector, rv, _WATCH_TIMEOUT_SECONDS, _request_timeout=_WATCH_REQUEST_TIMEOUT
                 ):
                     if self._watch_stop.is_set():
                         break
                     failures = 0
+                    got_event = True
                     event_type = event.get("type")
                     obj = event.get("object") or {}
                     seen_rv = (obj.get("metadata") or {}).get("resourceVersion")
@@ -602,6 +609,14 @@ class SandboxBatch:
                             self._state.mark_lost((obj.get("metadata") or {}).get("name", ""))
                         elif event_type in ("ADDED", "MODIFIED"):
                             self._state.upsert_claim(obj)
+                if (
+                    not got_event
+                    and time.monotonic() - watch_started < _SHORT_WATCH_SECONDS
+                    and not self._watch_stop.is_set()
+                ):
+                    failures += 1
+                    self._watch_stop.wait(batch_utils.retry_delay(failures, None))
+                    continue
                 # The watch ended at its timeout, which is not a failure.
                 failures = 0
             except client.ApiException as e:

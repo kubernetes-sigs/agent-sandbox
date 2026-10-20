@@ -187,3 +187,13 @@ def test_fleet_load_tasks_passes_the_field_options_through(make_cluster):
   tasks = f.load_tasks([{"docker_image": "img:1", "instance_id": "i1"}],
                        image_field="docker_image", id_field="instance_id")
   assert [(t.id, t.image) for t in tasks] == [("i1", "img:1")]
+
+
+def test_an_explicit_id_field_that_matches_nothing_raises_instead_of_using_the_index():
+  rows = [{"image": "a", "instance_id": "x"}]
+  assert sources.to_tasks(rows)[0].id == "x"
+  assert sources.to_tasks([{"image": "a"}])[0].id == "0"            # defaults: index fallback
+  with pytest.raises(KeyError, match="tried: instanceid"):
+    sources.to_tasks(rows, id_field="instanceid")                   # a typo is an error
+  with pytest.raises(KeyError, match="returned None"):
+    sources.to_tasks(rows, id_field=lambda row: row.get("nope"))

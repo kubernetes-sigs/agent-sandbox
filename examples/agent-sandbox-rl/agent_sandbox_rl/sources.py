@@ -110,15 +110,22 @@ def extract_image(row: dict, image_field=None) -> str | None:
 
 
 def _find_id(row: dict, id_field, default) -> "tuple[str | None, str]":
-  """``(path, id)`` like `_find_image`; ``default`` (the row index) when no
-  field matches."""
+  """``(path, id)`` like `_find_image`. The row index (``default``) is the
+  fallback for the default fields only: an explicit ``id_field`` that matches
+  nothing, or a callable that returns None, raises ``KeyError``, because a
+  silent switch to positional ids mislabels a whole run."""
   if callable(id_field):
     v = id_field(row)
-    return None, (str(v) if v is not None else str(default))
+    if v is None:
+      raise KeyError(f"task #{default} row has no id (id_field callable returned None)")
+    return None, str(v)
   for path in _paths(id_field, DEFAULT_ID_FIELDS):
     v = _dig(row, path)
     if v is not None and not isinstance(v, (dict, list)):
       return path, str(v)
+  if id_field is not None:
+    raise KeyError(f"task #{default} row has no id (tried: "
+                   f"{', '.join(_paths(id_field, ()))})")
   return None, str(default)
 
 
@@ -180,6 +187,7 @@ class JsonlSource:
     image_field: Where the image is: a dotted path, several tried in order, or a
       callable ``row -> value``; default `DEFAULT_IMAGE_FIELDS`.
     id_field: Likewise for the id; default `DEFAULT_ID_FIELDS`, then the row index.
+      An explicit ``id_field`` that matches nothing raises ``KeyError``.
     limit: Cap on the number of tasks. ``None`` (default) = all; ``0`` = none.
   """
 

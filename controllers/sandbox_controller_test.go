@@ -127,6 +127,33 @@ func TestComputeConditions(t *testing.T) {
 		return pod
 	}
 
+	// waitingContainer is a container the kubelet reports as waiting. lastExit,
+	// when set, is the reason of its previous termination.
+	waitingContainer := func(name, reason string, restarts int32, lastExit string) corev1.ContainerStatus {
+		cs := corev1.ContainerStatus{
+			Name:         name,
+			RestartCount: restarts,
+			State:        corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason, Message: "kubelet detail that changes on every backoff"}},
+		}
+		if lastExit != "" {
+			cs.LastTerminationState.Terminated = &corev1.ContainerStateTerminated{Reason: lastExit, ExitCode: 1}
+		}
+		return cs
+	}
+
+	podWithContainerState := func(phase corev1.PodPhase, ready bool, containers ...corev1.ContainerStatus) *corev1.Pod {
+		readyStatus := corev1.ConditionFalse
+		if ready {
+			readyStatus = corev1.ConditionTrue
+		}
+		return &corev1.Pod{Status: corev1.PodStatus{
+			Phase:             phase,
+			PodIPs:            []corev1.PodIP{{IP: "10.244.0.1"}},
+			Conditions:        []corev1.PodCondition{{Type: corev1.PodReady, Status: readyStatus}},
+			ContainerStatuses: containers,
+		}}
+	}
+
 	// A permanent apiserver validation error (a derived Service name over the
 	// 63-character limit) must map to Ready=False/InvalidConfiguration rather than
 	// the generic ReconcilerError.
@@ -517,6 +544,59 @@ func TestComputeConditions(t *testing.T) {
 			expectedConditions: []metav1.Condition{
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "InvalidConfiguration", Message: invalidNameErr.Error()},
+			},
+		},
+		{
+			name:    "18. Container waiting on image pull names the container and reason",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
+			pod:     ownedPod(podWithContainerState(corev1.PodPending, false, waitingContainer("app", "ImagePullBackOff", 0, ""))),
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
+				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod has not reported a PodScheduled condition yet"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: `Pod exists with phase: Pending; container "app" is waiting: ImagePullBackOff`},
+			},
+		},
+		{
+			name:    "19. Init container failure is reported before container state",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
+			pod: ownedPod(func() *corev1.Pod {
+				pod := podWithContainerState(corev1.PodPending, false, waitingContainer("app", "PodInitializing", 0, ""))
+				pod.Status.InitContainerStatuses = []corev1.ContainerStatus{waitingContainer("setup", "CreateContainerConfigError", 0, "")}
+				return pod
+			}()),
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
+				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod has not reported a PodScheduled condition yet"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: `Pod exists with phase: Pending; init container "setup" is waiting: CreateContainerConfigError`},
+			},
+		},
+		{
+			name:    "20. CrashLoopBackOff reports restarts and last exit without the kubelet message",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
+			pod:     ownedPod(podWithContainerState(corev1.PodRunning, false, waitingContainer("app", "CrashLoopBackOff", 3, "Error"))),
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
+				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod has not reported a PodScheduled condition yet"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: `Pod is Running but not Ready; container "app" is in CrashLoopBackOff (restarts: 3, last exit: Error)`},
+			},
+		},
+		{
+			name:    "21. Normal container startup adds no detail",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
+			pod:     ownedPod(podWithContainerState(corev1.PodPending, false, waitingContainer("app", "ContainerCreating", 0, ""))),
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
+				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod has not reported a PodScheduled condition yet"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod exists with phase: Pending"},
+			},
+		},
+		{
+			name:    "22. Container state of a Pod the Sandbox does not own is not reported",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
+			pod:     podWithContainerState(corev1.PodPending, false, waitingContainer("app", "ImagePullBackOff", 0, "")),
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod exists with phase: Pending"},
 			},
 		},
 	}

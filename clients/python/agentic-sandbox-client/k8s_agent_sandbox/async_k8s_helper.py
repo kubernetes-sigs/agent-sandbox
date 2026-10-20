@@ -606,7 +606,9 @@ class AsyncK8sHelper:
                 allow_watch_bookmarks=True,
                 _request_timeout=_request_timeout,
             ):
-                if event is not None:
+                # kubernetes_asyncio returns a line it can't decode as a str, which the sync client
+                # drops like an empty line. Dropping it here too keeps both watches the same.
+                if isinstance(event, dict):
                     yield event
         finally:
             await w.close()

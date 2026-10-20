@@ -618,7 +618,7 @@ class TestWatcher(BaseBatchClientTest):
         self.assertIsNone(handle.err())
         self.assertEqual(len(self.mock_k8s_helper.list_sandbox_claim_objects.call_args_list), 2)
 
-    def test_consecutive_failures_back_off_and_an_event_resets_the_delay(self):
+    def test_consecutive_failures_and_empty_watches_back_off_and_an_event_resets_the_delay(self):
         handle = _make_handle(self.client)
         delays = []
         handle._watch_stop.wait = lambda timeout=None: delays.append(timeout) or False
@@ -635,6 +635,8 @@ class TestWatcher(BaseBatchClientTest):
             self._terminating_error(status=503),
             urllib3.exceptions.ProtocolError("boom"),
             self._terminating_error(status=429),
+            # A watch that ends at once with no events.
+            iter(()),
             event_then_503(),
         ])
 
@@ -650,11 +652,12 @@ class TestWatcher(BaseBatchClientTest):
         handle._watch_loop()
 
         # Equal jitter keeps attempt n within [base * 2**(n-1) / 2, base * 2**(n-1)].
-        self.assertEqual(len(delays), 4)
+        self.assertEqual(len(delays), 5)
         self.assertTrue(0.25 <= delays[0] <= 0.5, delays)
         self.assertTrue(0.5 <= delays[1] <= 1.0, delays)
         self.assertTrue(1.0 <= delays[2] <= 2.0, delays)
-        self.assertTrue(0.25 <= delays[3] <= 0.5, delays)
+        self.assertTrue(2.0 <= delays[3] <= 4.0, delays)
+        self.assertTrue(0.25 <= delays[4] <= 0.5, delays)
         self.assertIsNone(handle.err())
 
 
@@ -1205,6 +1208,10 @@ class BaseClaimBatchTest(BaseBatchClientTest):
         super().setUp()
         self.cluster = _Cluster()
         self.client.k8s_helper = self.cluster.helper
+        # The fake's watch ends as soon as it has no events, which an apiserver's watch never does.
+        short_watch = patch.object(sandbox_batch, "_SHORT_WATCH_SECONDS", 0)
+        short_watch.start()
+        self.addCleanup(short_watch.stop)
 
     def claim(self, groups=None, **kwargs):
         kwargs.setdefault("batch_id", "b1")

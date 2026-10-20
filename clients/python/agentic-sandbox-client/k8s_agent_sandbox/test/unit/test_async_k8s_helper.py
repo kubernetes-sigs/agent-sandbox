@@ -1099,7 +1099,7 @@ class TestAsyncK8sHelperBatchMethods(unittest.IsolatedAsyncioTestCase):
         mock_watch.close.assert_awaited_once()
 
     @patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch")
-    async def test_watch_sandbox_claims_skips_none_events(self, mock_watch_class):
+    async def test_watch_sandbox_claims_skips_none_and_undecodable_events(self, mock_watch_class):
         mock_watch = MagicMock()
         mock_watch.close = AsyncMock()
         event = {"type": "MODIFIED", "object": {"metadata": {"name": "b1-0"}}}
@@ -1107,7 +1107,8 @@ class TestAsyncK8sHelperBatchMethods(unittest.IsolatedAsyncioTestCase):
         async def _stream(*args, **kwargs):
             yield None
             yield event
-            yield None
+            # kubernetes_asyncio returns a line it can't decode as is.
+            yield "not json"
 
         mock_watch.stream = _stream
         mock_watch_class.return_value = mock_watch

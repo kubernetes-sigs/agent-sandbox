@@ -27,7 +27,7 @@
 
 set -euo pipefail
 
-GVISOR_VERSION="${GVISOR_VERSION:-release-20261001.0}"
+GVISOR_VERSION="${GVISOR_VERSION:-20261001.0}"
 CONTAINER_ENGINE="${CONTAINER_ENGINE:-docker}"
 CLUSTER_NAME=""
 
@@ -59,10 +59,14 @@ trap cleanup EXIT
 
 echo "Installing gVisor ${GVISOR_VERSION} (${ARCH}) on KIND cluster '${CLUSTER_NAME}'"
 
-# Download binaries
-echo "Downloading runsc..."
-curl -fsSL --retry 3 --retry-connrefused "${GVISOR_URL}/runsc" -o "${TMPDIR}/runsc"
-curl -fsSL --retry 3 --retry-connrefused "${GVISOR_URL}/containerd-shim-runsc-v1" -o "${TMPDIR}/containerd-shim-runsc-v1"
+# Download and verify the release tarball (contains runsc, containerd shim, and
+# gvisor-bin/ which runsc needs at runtime; auto-download was removed after
+# September 2026).
+echo "Downloading gVisor release tarball..."
+curl -fsSL --retry 3 --retry-connrefused "${GVISOR_URL}/gvisor.tar.zstd" -o "${TMPDIR}/gvisor.tar.zstd"
+curl -fsSL --retry 3 --retry-connrefused "${GVISOR_URL}/gvisor.tar.zstd.sha512" -o "${TMPDIR}/gvisor.tar.zstd.sha512"
+(cd "${TMPDIR}" && sha512sum -c gvisor.tar.zstd.sha512)
+tar --zstd -xf "${TMPDIR}/gvisor.tar.zstd" -C "${TMPDIR}"
 chmod +x "${TMPDIR}/runsc" "${TMPDIR}/containerd-shim-runsc-v1"
 
 # Discover KIND node containers
@@ -84,6 +88,7 @@ while IFS= read -r node; do
 
   "${CONTAINER_ENGINE}" cp "${TMPDIR}/runsc" "${node}:/usr/local/bin/runsc"
   "${CONTAINER_ENGINE}" cp "${TMPDIR}/containerd-shim-runsc-v1" "${node}:/usr/local/bin/containerd-shim-runsc-v1"
+  "${CONTAINER_ENGINE}" cp "${TMPDIR}/gvisor-bin" "${node}:/usr/local/bin/gvisor-bin"
 
   "${CONTAINER_ENGINE}" exec "${node}" bash -c 'cat >> /etc/containerd/config.toml <<EOF
 
@@ -96,12 +101,14 @@ EOF'
 done <<< "${NODE_CONTAINERS}"
 
 # Wait for nodes to recover after containerd restart
+KUBECTL="kubectl --context kind-${CLUSTER_NAME}"
+
 echo "Waiting for nodes to be Ready..."
-kubectl wait --for=condition=Ready node --all --timeout=120s
+${KUBECTL} wait --for=condition=Ready node --all --timeout=120s
 
 # Apply RuntimeClass
 echo "Applying gvisor RuntimeClass..."
-kubectl apply -f - <<EOF
+${KUBECTL} apply -f - <<EOF
 apiVersion: node.k8s.io/v1
 kind: RuntimeClass
 metadata:
@@ -114,16 +121,16 @@ EOF
 
 # Smoke test
 echo "Running smoke test..."
-kubectl run gvisor-smoke-test \
+${KUBECTL} run gvisor-smoke-test \
   --image=busybox:1.36 \
   --restart=Never \
   --overrides='{"spec":{"runtimeClassName":"gvisor"}}' \
   --command -- sleep 30
 
-kubectl wait --for=condition=Ready pod/gvisor-smoke-test --timeout=60s
+${KUBECTL} wait --for=condition=Ready pod/gvisor-smoke-test --timeout=60s
 
-kernel=$(kubectl exec gvisor-smoke-test -- uname -r 2>/dev/null || echo "unknown")
-kubectl delete pod gvisor-smoke-test --ignore-not-found >/dev/null 2>&1 || true
+kernel=$(${KUBECTL} exec gvisor-smoke-test -- uname -r 2>/dev/null || echo "unknown")
+${KUBECTL} delete pod gvisor-smoke-test --ignore-not-found >/dev/null 2>&1 || true
 
 if [[ "${kernel}" == *gvisor* ]]; then
   echo "Smoke test passed: kernel=${kernel}"

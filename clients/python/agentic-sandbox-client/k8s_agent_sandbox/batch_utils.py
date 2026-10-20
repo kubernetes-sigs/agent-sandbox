@@ -90,7 +90,8 @@ def validate_batch_id(batch_id: str) -> None:
     if (
         not isinstance(batch_id, str)
         or len(batch_id) > BATCH_ID_MAX_LENGTH
-        or not _BATCH_ID_RE.match(batch_id)
+        # fullmatch, since match lets $ match before a trailing newline.
+        or not _BATCH_ID_RE.fullmatch(batch_id)
     ):
         raise ValueError(
             f"batch_id must be a DNS-1123 label starting with a letter, "

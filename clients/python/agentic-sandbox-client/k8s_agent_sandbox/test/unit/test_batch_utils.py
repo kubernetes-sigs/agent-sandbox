@@ -44,6 +44,10 @@ class TestBatchIdValidation(unittest.TestCase):
         with self.assertRaises(ValueError):
             batch_utils.validate_batch_id("Abc")
 
+    def test_rejects_trailing_newline(self):
+        with self.assertRaises(ValueError):
+            batch_utils.validate_batch_id("abc\n")
+
     def test_max_length_accepted(self):
         batch_utils.validate_batch_id("a" * batch_utils.BATCH_ID_MAX_LENGTH)
 

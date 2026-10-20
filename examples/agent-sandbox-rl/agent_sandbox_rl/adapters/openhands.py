@@ -110,6 +110,7 @@ def agent_server_command(server_port: int = 8000,
 def agent_server_template(*, server_image: str | None = None,
                           session_key: str | None = None,
                           session_key_secret: tuple[str, str] | None = None,
+                          allow_unauthenticated: bool = False,
                           server_port: int = 8000,
                           workspace_dir: str | None = "/testbed",
                           readiness_timeout_s: int = 300,
@@ -141,12 +142,16 @@ def agent_server_template(*, server_image: str | None = None,
   hangs later drops out of Ready within seconds. The session key is exposed as
   ``OH_SESSION_API_KEYS_0``: ``session_key`` as a literal value, or
   ``session_key_secret=(secret_name, key)`` as a ``secretKeyRef``. Pass the same
-  key as the workspace's ``api_key``.
+  key as the workspace's ``api_key``. One of them is required: the server listens
+  on ``0.0.0.0``, and an unauthenticated server is only for a private, trusted
+  network, which ``allow_unauthenticated=True`` opts into explicitly.
 
-  ``resources`` defaults to 500m / 1Gi requests with 2 CPU / 4Gi ``limits``. A
-  caller-supplied ``resources`` comes with no limits unless ``limits`` is given
-  too (a request above a fixed limit is an invalid pod); the init container that
-  stages the server carries the same requests and limits. ``tolerations`` and
+  ``resources`` defaults to 500m / 1Gi requests with 2 CPU / 4Gi ``limits``. The
+  pod never goes without limits (task images run untrusted code): a
+  caller-supplied ``resources`` gets limits equal to its requests unless
+  ``limits`` is given too (a request above a fixed limit would be an invalid pod,
+  and limits equal to requests are always valid); the init container that stages
+  the server carries the same requests and limits. ``tolerations`` and
   ``extra_pod_spec`` go through `TemplateSpec.extra_pod_spec`; ``extra_pod_spec``
   is merged last and wins, except that its ``containers``, ``initContainers``,
   ``volumes`` and ``tolerations`` are appended to the preset's rather than
@@ -156,10 +161,19 @@ def agent_server_template(*, server_image: str | None = None,
   from ..config import ResourceSpec, TemplateSpec
   if session_key and session_key_secret:
     raise ValueError("pass session_key or session_key_secret, not both")
+  if not session_key and not session_key_secret and not allow_unauthenticated:
+    raise ValueError(
+        "agent_server_template: pass session_key or session_key_secret; the agent-server "
+        "listens on 0.0.0.0, so a server without a key is only for a private, trusted "
+        "network (allow_unauthenticated=True opts in)")
   if resources is None:
     resources = ResourceSpec(cpu="500m", memory="1Gi")
     if limits is None:
       limits = {"cpu": "2", "memory": "4Gi"}
+  elif limits is None:
+    # Untrusted task code never runs without limits; limits equal to the
+    # caller's requests are always valid and give the pod Guaranteed QoS.
+    limits = {"cpu": resources.cpu, "memory": resources.memory}
   container_resources: dict = {}
   if limits:
     container_resources["limits"] = dict(limits)

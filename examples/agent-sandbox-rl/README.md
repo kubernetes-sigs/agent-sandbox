@@ -100,8 +100,9 @@ needs the [`openhands-k8s-agent-sandbox`](../../clients/integrations/openhands)
 integration (`pip install -e clients/integrations/openhands`), which pulls the
 OpenHands agent SDK — note the SDK requires **Python >= 3.12**. Its
 `agent_server_template(...)` builds the `TemplateSpec` such pools need (agent-server
-on `:8000` with a `/health` readiness probe and the session key as
-`OH_SESSION_API_KEYS_0`), either from task images that contain the server or, with
+on `:8000` with `/health` start-up and readiness probes and the session key as
+`OH_SESSION_API_KEYS_0`; a key is required unless `allow_unauthenticated=True`, and the
+pod always carries resource limits), either from task images that contain the server or, with
 `server_image=`, by copying the server out of one agent-server image into every plain
 repo image's pod through an init container — no per-task image rebuild:
 

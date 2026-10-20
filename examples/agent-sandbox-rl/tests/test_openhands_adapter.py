@@ -210,7 +210,7 @@ def _render(spec, image="repo/task:1"):
 
 
 def test_agent_server_template_defaults_serve_from_the_task_image():
-  spec = agent_server_template()
+  spec = agent_server_template(allow_unauthenticated=True)
   pod = _render(spec)
   runtime = pod["containers"][0]
   assert runtime["name"] == "agent-runtime" and runtime["image"] == "repo/task:1"
@@ -264,16 +264,19 @@ def test_agent_server_template_session_key_from_a_secret_and_overrides():
   assert {"name": "OH_SESSION_API_KEYS_0",
           "valueFrom": {"secretKeyRef": {"name": "oh-key", "key": "key"}}} in runtime["env"]
   assert {"name": "X", "value": "1"} in runtime["env"]       # caller's env merged in
-  assert runtime["resources"] == {"requests": {"cpu": "1", "memory": "2Gi"}}   # no fixed limit
+  assert runtime["resources"] == {"requests": {"cpu": "1", "memory": "2Gi"},
+                                  "limits": {"cpu": "1", "memory": "2Gi"}}    # never limitless
   assert pod["serviceAccountName"] == "sa" and len(pod["containers"]) == 1
   assert ".venv" not in runtime["command"][2] and "ln -s" not in runtime["command"][2]
   with pytest.raises(ValueError, match="not both"):
     agent_server_template(session_key="a", session_key_secret=("s", "k"))
+  with pytest.raises(ValueError, match="allow_unauthenticated"):
+    agent_server_template()                                  # a key is required by default
 
 
 def test_agent_server_template_appends_caller_lists_and_keeps_the_server_volume():
   spec = agent_server_template(
-      server_image=DEFAULT_AGENT_SERVER_IMAGE, tolerations=[{"key": "a"}],
+      server_image=DEFAULT_AGENT_SERVER_IMAGE, tolerations=[{"key": "a"}], session_key="k",
       extra_pod_spec={"volumes": [{"name": "dshm", "emptyDir": {"medium": "Memory"}}],
                       "initContainers": [{"name": "seed", "image": "busybox", "command": ["true"]}],
                       "tolerations": [{"key": "b"}]})
@@ -284,11 +287,13 @@ def test_agent_server_template_appends_caller_lists_and_keeps_the_server_volume(
 
 
 def test_agent_server_template_limits_follow_the_caller():
-  big = _render(agent_server_template(resources=ResourceSpec(cpu="4", memory="8Gi")))
-  assert big["containers"][0]["resources"] == {"requests": {"cpu": "4", "memory": "8Gi"}}
+  big = _render(agent_server_template(resources=ResourceSpec(cpu="4", memory="8Gi"),
+                                      session_key="k"))
+  assert big["containers"][0]["resources"] == {"requests": {"cpu": "4", "memory": "8Gi"},
+                                               "limits": {"cpu": "4", "memory": "8Gi"}}
   explicit = _render(agent_server_template(resources=ResourceSpec(cpu="4", memory="8Gi"),
                                            limits={"cpu": "8", "memory": "16Gi"},
-                                           server_image="srv:1"))
+                                           server_image="srv:1", session_key="k"))
   assert explicit["containers"][0]["resources"]["limits"] == {"cpu": "8", "memory": "16Gi"}
   assert explicit["initContainers"][0]["resources"]["limits"] == {"cpu": "8", "memory": "16Gi"}
 
@@ -296,7 +301,7 @@ def test_agent_server_template_limits_follow_the_caller():
 def test_agent_server_command_quotes_the_workspace_dir_and_the_copy_fails_loudly():
   body = agent_server_command(8000, workspace_dir="/my repo")[2]
   assert "'/my repo'/.venv/bin" in body and "ln -s '/my repo' /workspace" in body
-  init = _render(agent_server_template(server_image="x:1"))["initContainers"][0]
+  init = _render(agent_server_template(server_image="x:1", session_key="k"))["initContainers"][0]
   assert "|| true" not in init["command"][2] and "exit 1" in init["command"][2]
 
 

@@ -496,7 +496,10 @@ class K8sHelper:
                         return ip_address
 
     def list_sandbox_claim_objects(
-        self, namespace: str, label_selector: str
+        self,
+        namespace: str,
+        label_selector: str,
+        _request_timeout: float | tuple[float, float] | None = None,
     ) -> tuple[List[dict], str]:
         """Lists full SandboxClaim objects matching a label selector. Also return the list's
         resourceVersion, so a subsequent watch does not miss any events.
@@ -507,6 +510,7 @@ class K8sHelper:
             namespace=namespace,
             plural=CLAIM_PLURAL_NAME,
             label_selector=label_selector,
+            _request_timeout=_request_timeout,
         ))
         items = response.get("items", [])
         resource_version = (response.get("metadata") or {}).get("resourceVersion", "0")

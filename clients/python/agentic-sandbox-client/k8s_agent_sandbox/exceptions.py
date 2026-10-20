@@ -86,7 +86,10 @@ class SandboxClaimFailedError(SandboxError):
 
 
 class BatchError(SandboxError):
-    """Base class for batch-claim errors."""
+    """Base class for batch-claim errors, so ``except BatchError`` catches all of them.
+
+    Bad arguments raise ``ValueError``, and API or network errors are raised unchanged.
+    """
 
 
 class BatchNotFoundError(BatchError, SandboxNotFoundError):

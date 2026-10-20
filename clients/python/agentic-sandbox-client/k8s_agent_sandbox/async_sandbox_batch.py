@@ -55,6 +55,14 @@ _WATCH_TIMEOUT_SECONDS = 30
 _WATCH_CLOSE_GRACE_SECONDS = 5
 _WATCH_REQUEST_TIMEOUT = _WATCH_TIMEOUT_SECONDS + _WATCH_CLOSE_GRACE_SECONDS
 
+# Network-level errors that are likely transient, so the watch retries them.
+_TRANSPORT_ERRORS = (
+    aiohttp.ClientConnectionError,
+    aiohttp.ClientPayloadError,
+    ConnectionError,
+    asyncio.TimeoutError,
+)
+
 
 def _watch_backoff_delay(failures: int) -> float:
     return batch_utils.backoff_delay(
@@ -120,8 +128,12 @@ class AsyncSandboxBatch:
         lease_name = f"{BATCH_LEASE_NAME_PREFIX}{batch_id}"
         label_selector = f"{BATCH_ID_LABEL}={batch_id}"
 
-        lease = await client.k8s_helper.read_batch_lease(lease_name, namespace)
-        claim_items, list_rv = await client.k8s_helper.list_sandbox_claim_objects(namespace, label_selector)
+        lease = await client.k8s_helper.read_batch_lease(
+            lease_name, namespace, _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
+        )
+        claim_items, list_rv = await client.k8s_helper.list_sandbox_claim_objects(
+            namespace, label_selector, _request_timeout=batch_utils.BATCH_COLLECTION_REQUEST_TIMEOUT_SECONDS
+        )
 
         if lease is None and not claim_items:
             raise BatchNotFoundError(f"batch '{batch_id}' not found in namespace '{namespace}'")
@@ -160,7 +172,9 @@ class AsyncSandboxBatch:
         lease.spec.acquire_time = now
         lease.spec.lease_transitions = (lease.spec.lease_transitions or 0) + 1
         try:
-            await client.k8s_helper.replace_batch_lease(lease_name, namespace, lease)
+            await client.k8s_helper.replace_batch_lease(
+                lease_name, namespace, lease, _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
+            )
         except ApiException as e:
             if e.status == 409:
                 raise BatchInUseError(
@@ -249,6 +263,7 @@ class AsyncSandboxBatch:
 
         Raises:
             ValueError: If ``grace`` is not a valid Lease duration.
+            ApiException: If the Lease release fails (an ``ApiException`` or a transport error).
         """
         if grace is not None:
             batch_utils.validate_lease_duration_value(grace)
@@ -275,7 +290,9 @@ class AsyncSandboxBatch:
                     f"during detach: {e}"
                 )
 
-        lease = await self._client.k8s_helper.read_batch_lease(self._lease_name, self.namespace)
+        lease = await self._client.k8s_helper.read_batch_lease(
+            self._lease_name, self.namespace, _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
+        )
         if lease is not None:
             if lease.spec.holder_identity != self._holder_identity:
                 logger.info(
@@ -291,7 +308,10 @@ class AsyncSandboxBatch:
                     grace if grace is not None else self._lease_duration
                 )
                 await self._client.k8s_helper.replace_batch_lease(
-                    self._lease_name, self.namespace, lease
+                    self._lease_name,
+                    self.namespace,
+                    lease,
+                    _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
                 )
 
         async with self._lock:
@@ -315,7 +335,7 @@ class AsyncSandboxBatch:
             try:
                 if relist:
                     items, rv = await self._client.k8s_helper.list_sandbox_claim_objects(
-                        self.namespace, label_selector
+                        self.namespace, label_selector, _request_timeout=batch_utils.BATCH_COLLECTION_REQUEST_TIMEOUT_SECONDS
                     )
                     async with self._lock:
                         self._state.resync_from_list(items)
@@ -364,11 +384,7 @@ class AsyncSandboxBatch:
                 async with self._lock:
                     self._state.note_error(e)
                 return
-            except (
-                aiohttp.ClientConnectionError,
-                aiohttp.ClientPayloadError,
-                ConnectionError,
-            ):
+            except _TRANSPORT_ERRORS:
                 # Likely transient network-level failure so retry
                 failures += 1
                 await asyncio.sleep(_watch_backoff_delay(failures))

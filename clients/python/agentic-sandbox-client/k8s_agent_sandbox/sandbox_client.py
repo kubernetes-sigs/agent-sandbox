@@ -361,6 +361,10 @@ class SandboxClient(Generic[T]):
         ``members()`` up to date. Only a batch released with ``detach()`` can be re-attached,
         within its grace window.
 
+        The batch errors below are all ``BatchError``, so ``except BatchError`` handles a batch that
+        can't be attached. ``ValueError`` means a bad batch id, and ``ApiException`` an API or
+        network failure.
+
         Raises:
             ValueError: If ``batch_id`` is not a valid batch id.
             BatchNotFoundError: If neither the batch's Lease nor any of its claims exist.
@@ -369,6 +373,8 @@ class SandboxClient(Generic[T]):
             BatchInUseError: If a live Lease is held by another handle, or another client
                 takes it over while attaching.
             BatchError: If the Lease's or the claims' batch annotations are invalid.
+            ApiException: For any other API error such as a 403, or the transport error if a
+                request fails.
 
         Example:
 

@@ -25,6 +25,11 @@ replacements:
     replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/README.md$1)'
     description: "Python SDK README to GitHub"
 
+  # Python SDK README from examples/* (relative paths) - redirect to GitHub
+  - pattern: '\]\(\.\./\.\./clients/python/agentic-sandbox-client/README\.md(#[^)]+)?\)'
+    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/README.md$1)'
+    description: "Relative Python SDK README to GitHub"
+
   # Examples link - redirect to /docs/use-cases/examples/
   - pattern: '\]\(examples/\)'
     replacement: '](/docs/use-cases/examples/)'

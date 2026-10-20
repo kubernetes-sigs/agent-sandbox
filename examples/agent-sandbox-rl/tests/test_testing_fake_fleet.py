@@ -208,3 +208,28 @@ def test_recording_wraps_manual_acquires_in_a_report():
   with f.recording("manual") as rep:
     h = f.acquire(f.tasks[0]); f.release(h)
   assert rep is f.report and rep.to_dict()["claims"] == 1
+
+
+def test_snapshot_calls_on_a_released_handle_fail_and_leave_the_slot_count_alone():
+  f = FakeFleet(FleetConfig(max_live_sandboxes=2))
+  f.load_tasks(["a", "b"]); f.setup()
+  h = f.acquire(f.tasks[0])
+  other = f.acquire(f.tasks[1])
+  f.release(h)
+  for call in (lambda: f.suspend(h), lambda: f.resume(h), lambda: f.restore(h, "x"),
+               lambda: f.snapshot(h)):
+    with pytest.raises(FakeSandboxGone):
+      call()
+  assert f._claims_reserved == 1                           # only `other` holds a slot
+  f.acquire(Task(id="t3", image="a"))                      # exactly one slot was free
+  with pytest.raises(FleetOvercommitError):
+    f.acquire(Task(id="t4", image="a"))
+  # suspended, then released: the slot was given back once, and a late wake does not retake it
+  g = FakeFleet(FleetConfig(max_live_sandboxes=1))
+  g.load_tasks(["a"]); g.setup()
+  h = g.acquire(g.tasks[0])
+  g.suspend(h)
+  g.release(h)
+  with pytest.raises(FakeSandboxGone):
+    g.resume(h)
+  assert g._claims_reserved == 0 and g.acquire(g.tasks[0])

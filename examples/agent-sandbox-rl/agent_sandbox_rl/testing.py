@@ -420,16 +420,24 @@ class FakeFleet:
     return [h.endpoint(port) for h in self._handles]
 
   # --- snapshots: the fleet's slot bookkeeping over the handle methods ------- #
+  def _held(self, handle: FakeHandle) -> None:
+    """A snapshot call on a handle this fleet no longer holds (released) fails
+    on the real fleet because the claim is gone; here it must not touch the
+    slot count either."""
+    with self._lock:
+      if handle not in self._handles:
+        raise FakeSandboxGone(f"handle {handle.sandbox_id} is not held by this fleet")
+
   def _free_slot_for_suspend(self, handle: FakeHandle) -> None:
     with self._lock:
-      if handle._slot_released:
+      if handle not in self._handles or handle._slot_released:
         return
       handle._slot_released = True
       self._claims_reserved = max(0, self._claims_reserved - 1)
 
   def _retake_slot_for_wake(self, handle: FakeHandle) -> bool:
     with self._lock:
-      if not handle._slot_released:
+      if handle not in self._handles or not handle._slot_released:
         return False
       hard = self.config.max_live_sandboxes
       if hard and self._claims_reserved >= hard:
@@ -441,17 +449,20 @@ class FakeFleet:
     return True
 
   def snapshot(self, handle: FakeHandle, name: str | None = None, *, timeout: int = 180) -> str:
+    self._held(handle)
     with self._obs.phase("snapshot", cluster=FAKE_CLUSTER):
       return handle.snapshot(name, timeout=timeout)
 
   def suspend(self, handle: FakeHandle, *, snapshot: bool = True,
               timeout: int = 180) -> Optional[str]:
+    self._held(handle)
     with self._obs.phase("suspend", cluster=FAKE_CLUSTER):
       uid = handle.suspend(snapshot=snapshot, timeout=timeout)
     self._free_slot_for_suspend(handle)
     return uid
 
   def resume(self, handle: FakeHandle, *, timeout: int = 180) -> bool:
+    self._held(handle)
     retaken = self._retake_slot_for_wake(handle)
     try:
       with self._obs.phase("resume", cluster=FAKE_CLUSTER):
@@ -464,6 +475,7 @@ class FakeFleet:
     return restored
 
   def restore(self, handle: FakeHandle, snapshot_uid: str, *, timeout: int = 180) -> None:
+    self._held(handle)
     retaken = self._retake_slot_for_wake(handle)
     try:
       with self._obs.phase("restore", cluster=FAKE_CLUSTER):

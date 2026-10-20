@@ -28,7 +28,12 @@ import (
 	"k8s.io/streaming/pkg/httpstream"
 )
 
-const maxStderrSize = 64 << 10 // 64 KB
+const (
+	maxStderrSize = 64 << 10 // 64 KB
+
+	// routerProxyPort is the sandbox-router HTTP listener (default :8080).
+	routerProxyPort = 8080
+)
 
 // syncBuffer is a goroutine-safe, size-capped bytes.Buffer for port-forward stderr.
 type syncBuffer struct {
@@ -99,23 +104,55 @@ func (d *trackingDialer) Close() {
 }
 
 // tunnelStrategy establishes a port-forward tunnel to the sandbox-router
-// service using native SPDY via client-go.
+// HTTP listener using native SPDY via client-go. routerREST selects
+// ConnectivityRouterPortForward; both modes forward routerProxyPort.
 type tunnelStrategy struct {
 	discoveryClient discoveryv1client.DiscoveryV1Interface
 	namespace       string
 	log             logr.Logger
 	tracer          trace.Tracer
 	svcName         string
+	// routerREST marks ConnectivityRouterPortForward.
+	routerREST bool
 
 	tunnel *portForwardTunnel
 }
 
+func newTunnelStrategy(k8s *K8sHelper, opts Options, tracer trace.Tracer, svcName string, routerREST bool) *tunnelStrategy {
+	name := "port-forward"
+	if routerREST {
+		name = "router port-forward"
+	}
+	return &tunnelStrategy{
+		discoveryClient: k8s.DiscoveryClient,
+		namespace:       opts.routerNamespace(),
+		log:             opts.Logger,
+		tracer:          tracer,
+		svcName:         svcName,
+		routerREST:      routerREST,
+		tunnel: &portForwardTunnel{
+			name:       name,
+			coreClient: k8s.CoreClient,
+			restConfig: k8s.RestConfig,
+			namespace:  opts.routerNamespace(),
+			pfTimeout:  opts.PortForwardReadyTimeout,
+			log:        opts.Logger,
+		},
+	}
+}
+
 func (t *tunnelStrategy) Connect(ctx context.Context) (string, error) {
-	ctx, span := startSpan(ctx, t.tracer, t.svcName, "dev_mode_tunnel")
+	spanName := "dev_mode_tunnel"
+	op := "port-forward"
+	if t.routerREST {
+		spanName = "router_port_forward"
+		op = "router port-forward"
+	}
+	ctx, span := startSpan(ctx, t.tracer, t.svcName, spanName)
 	defer span.End()
 
 	if t.tunnel == nil || t.tunnel.coreClient == nil || t.tunnel.restConfig == nil {
-		err := fmt.Errorf("sandbox: core client and REST config required for port-forward")
+		err := fmt.Errorf("sandbox: core client and REST config required for %s", op)
 		recordError(span, err)
 		return "", err
 	}
@@ -136,13 +173,18 @@ func (t *tunnelStrategy) Connect(ctx context.Context) (string, error) {
 		}
 
 		baseURL = fmt.Sprintf("http://127.0.0.1:%d", ports[0].Local)
-		t.log.Info("port-forward established",
-			"localPort", ports[0].Local, "pod", podName)
+		if t.routerREST {
+			t.log.Info("router port-forward established",
+				"localPort", ports[0].Local, "pod", podName, "remotePort", routerProxyPort)
+		} else {
+			t.log.Info("port-forward established",
+				"localPort", ports[0].Local, "pod", podName)
+		}
 		return nil
 	}
 
 	err = t.tunnel.start(
-		ctx, podName, []string{"0:8080"}, "port-forward", onReady,
+		ctx, podName, []string{fmt.Sprintf("0:%d", routerProxyPort)}, op, onReady,
 	)
 	if err != nil {
 		recordError(span, err)
@@ -157,12 +199,17 @@ func (t *tunnelStrategy) Close() error {
 }
 
 func (t *tunnelStrategy) resolveRouterPod(ctx context.Context) (string, error) {
-	if t.discoveryClient == nil {
+	return resolveRouterPod(ctx, t.discoveryClient, t.namespace)
+}
+
+// resolveRouterPod returns a ready pod behind sandbox-router-svc in namespace.
+func resolveRouterPod(ctx context.Context, discoveryClient discoveryv1client.DiscoveryV1Interface, namespace string) (string, error) {
+	if discoveryClient == nil {
 		return "", fmt.Errorf("sandbox: discovery client required for port-forward")
 	}
 
 	selector := "kubernetes.io/service-name=sandbox-router-svc"
-	slices, err := t.discoveryClient.EndpointSlices(t.namespace).List(
+	slices, err := discoveryClient.EndpointSlices(namespace).List(
 		ctx,
 		metav1.ListOptions{LabelSelector: selector},
 	)
@@ -181,5 +228,5 @@ func (t *tunnelStrategy) resolveRouterPod(ctx context.Context) (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("sandbox: no ready endpoints for sandbox-router-svc in namespace %s", t.namespace)
+	return "", fmt.Errorf("sandbox: no ready endpoints for sandbox-router-svc in namespace %s", namespace)
 }

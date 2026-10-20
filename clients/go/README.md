@@ -23,7 +23,7 @@ The client operates in three connectivity modes:
 
 - A running Kubernetes cluster with a valid kubeconfig (or in-cluster config). This is required even in Direct URL mode because the client creates Kubernetes clientsets for SandboxClaim lifecycle management.
 - The [**Agent Sandbox Controller**](https://github.com/kubernetes-sigs/agent-sandbox?tab=readme-ov-file#installation) installed.
-- The **Sandbox Router** deployed in the target namespace (see [sandbox-router](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/sandbox-router/README.md) and its [deployment manifests](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/sandbox-router/deploy)). *(Note: If you are using a specific tagged release, replace `main` in these URLs with your version tag.)*
+- The **Sandbox Router** deployed in the target namespace, or in another namespace named by `RouterNamespace` (see [sandbox-router](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/sandbox-router/README.md) and its [deployment manifests](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/sandbox-router/deploy)). *(Note: If you are using a specific tagged release, replace `main` in these URLs with your version tag.)*
 - A `SandboxWarmPool` created in the target namespace.
 - Go 1.26+.
 
@@ -175,8 +175,10 @@ meta, err := sb.Metadata(ctx)   // meta.Env (non-sensitive, SANDBOX_-prefixed by
 `sb.Commands().Start` runs a command with the same shell-string semantics as
 `Run` (`/bin/sh -c`), but lets you read output before the command exits. It needs
 `RuntimeSandboxd` and a gRPC connection established through pod port-forward or
-in-cluster connectivity. The legacy runtime and a REST-only `APIURL` return
-`ErrUnsupportedByRuntime`; this does not add a Gateway+sandboxd connection mode.
+in-cluster connectivity. The legacy runtime, a REST-only `APIURL`, and
+`ConnectivityRouterPortForward` return `ErrUnsupportedByRuntime`. That mode
+port-forwards the sandbox-router HTTP server and can carry the sandbox HTTP
+API, not gRPC. This does not add a Gateway+sandboxd connection mode.
 
 The example assumes `sb` is already open with `RuntimeSandboxd`. Import
 `context`, `io`, `os`, `time`, and the `sandbox` SDK package:
@@ -318,6 +320,15 @@ All options are documented on the `Options` struct in
 - `Labels`: labels added to every `SandboxClaim` the client creates.
 - `ShutdownAfter`: expire every claim this client creates after this long, so a
   crashed client does not leak sandboxes. Unset by default (no expiry).
+- `Connectivity`: `port-forward` (default), `router-port-forward`,
+  `in-cluster-service`, or `in-cluster-pod-ip`. `router-port-forward`
+  port-forwards the sandbox-router HTTP server so it can proxy to the sandbox
+  HTTP port. sandboxd `Run` and `Start` need gRPC and are not available on that
+  path.
+- `RouterNamespace`: namespace of `sandbox-router-svc` for the port-forward
+  modes that go through the router. Defaults to the claim namespace. Set it to
+  `agent-sandbox-system` when using the shipped router manifests, which deploy
+  the router there.
 - `GatewayName`: set to enable Gateway mode.
 - `APIURL`: set for Direct URL mode (takes precedence over `GatewayName`).
 - `TracerProvider`: OpenTelemetry integration.

@@ -75,10 +75,22 @@ const (
 	//
 	// With RuntimeSandboxd the forward targets the sandbox pod itself, which
 	// does not work for Kata or gVisor pods: their workload does not listen in
-	// the pod's host-side network namespace. Use an in-cluster mode for those.
+	// the pod's host-side network namespace. Use an in-cluster mode, or
+	// ConnectivityRouterPortForward for the HTTP API. gRPC still needs a
+	// direct path.
 	// RuntimeLegacyPython forwards to the sandbox-router instead and is
 	// unaffected.
 	ConnectivityPortForward Connectivity = "port-forward"
+
+	// ConnectivityRouterPortForward port-forwards the sandbox-router HTTP
+	// server and proxies to sandboxd's REST port (X-Sandbox-Port:
+	// SandboxdRESTPort). Requires RuntimeSandboxd. The legacy runtime already
+	// uses ConnectivityPortForward for the same tunnel.
+	//
+	// The router does not carry gRPC, so Run and Start return
+	// ErrUnsupportedByRuntime. This is the laptop or CI path for Kata and
+	// gVisor sandboxes, which pod port-forward cannot reach.
+	ConnectivityRouterPortForward Connectivity = "router-port-forward"
 	// ConnectivityInClusterService dials the Sandbox's headless Service by
 	// its in-cluster DNS name (Status.ServiceFQDN), taking the apiserver —
 	// and, for RuntimeLegacyPython, the sandbox-router, off the data path.
@@ -142,17 +154,18 @@ type Options struct {
 	AdoptExisting bool
 
 	// Runtime selects the in-sandbox runtime API. Default: RuntimeLegacyPython.
-	// RuntimeSandboxd talks to the sandbox pod rather than the sandbox-router,
-	// so GatewayName is not supported with it. APIURL remains available as an
-	// advanced/testing escape hatch for the REST endpoint only: Run needs the
-	// gRPC endpoint and returns ErrUnsupportedByRuntime with it.
+	// RuntimeSandboxd talks to sandboxd on the sandbox pod, so GatewayName is
+	// not supported with it. APIURL remains available as an advanced/testing
+	// escape hatch for the REST endpoint only: Run needs the gRPC endpoint and
+	// returns ErrUnsupportedByRuntime with it.
 	Runtime Runtime
 
 	// Connectivity selects the transport. Default: ConnectivityPortForward.
 	//
 	// The in-cluster values conflict with both GatewayName and APIURL, and
 	// require that this process runs inside the same cluster as the sandbox
-	// pods.
+	// pods. ConnectivityRouterPortForward also conflicts with GatewayName and
+	// APIURL.
 	Connectivity Connectivity
 
 	// SandboxdRESTPort is the pod port of sandboxd's Filesystem & Runtime
@@ -166,6 +179,10 @@ type Options struct {
 	// Namespace where the SandboxClaim will be created. Default: "default".
 	// Must be a valid Kubernetes DNS label (lowercase, [a-z0-9-]).
 	Namespace string
+
+	// RouterNamespace is where port-forward modes find sandbox-router-svc
+	// (shipped manifests use "agent-sandbox-system"). Default: Namespace.
+	RouterNamespace string
 
 	// GatewayName enables Gateway mode. The client watches this Gateway resource
 	// for an external IP, then routes through the sandbox-router.
@@ -293,6 +310,15 @@ type Options struct {
 	// Note: this only affects router-based transports that send X-Sandbox-* headers.
 	// Default: false (header is sent when router headers are enabled and a pod IP is present).
 	DisablePodIPRouting bool
+}
+
+// routerNamespace defaults lazily, not in setDefaults, so it follows the
+// per-call Namespace that Client swaps in on CreateSandbox and GetSandbox.
+func (o *Options) routerNamespace() string {
+	if o.RouterNamespace != "" {
+		return o.RouterNamespace
+	}
+	return o.Namespace
 }
 
 func (o *Options) setDefaults() {
@@ -465,6 +491,9 @@ func (o *Options) validateCommon() error {
 	if !isValidDNSLabel(o.Namespace) {
 		return fmt.Errorf("sandbox: Namespace %q is not a valid Kubernetes namespace (DNS label)", o.Namespace)
 	}
+	if o.RouterNamespace != "" && !isValidDNSLabel(o.RouterNamespace) {
+		return fmt.Errorf("sandbox: RouterNamespace %q is not a valid Kubernetes namespace (DNS label)", o.RouterNamespace)
+	}
 	if !isValidDNSLabel(o.GatewayNamespace) {
 		return fmt.Errorf("sandbox: GatewayNamespace %q is not a valid Kubernetes namespace (DNS label)", o.GatewayNamespace)
 	}
@@ -480,8 +509,11 @@ func (o *Options) validateCommon() error {
 	if o.Runtime != RuntimeLegacyPython && o.Runtime != RuntimeSandboxd {
 		return fmt.Errorf("sandbox: Runtime must be %q or %q, got %q", RuntimeLegacyPython, RuntimeSandboxd, o.Runtime)
 	}
-	if o.Connectivity != ConnectivityPortForward && o.Connectivity != ConnectivityInClusterPodIP && o.Connectivity != ConnectivityInClusterService {
-		return fmt.Errorf("sandbox: Connectivity must be %q, %q or %q, got %q", ConnectivityPortForward, ConnectivityInClusterPodIP, ConnectivityInClusterService, o.Connectivity)
+	switch o.Connectivity {
+	case ConnectivityPortForward, ConnectivityRouterPortForward, ConnectivityInClusterPodIP, ConnectivityInClusterService:
+	default:
+		return fmt.Errorf("sandbox: Connectivity must be %q, %q, %q or %q, got %q",
+			ConnectivityPortForward, ConnectivityRouterPortForward, ConnectivityInClusterPodIP, ConnectivityInClusterService, o.Connectivity)
 	}
 	if o.Connectivity.isInCluster() {
 		if o.APIURL != "" {
@@ -491,9 +523,21 @@ func (o *Options) validateCommon() error {
 			return fmt.Errorf("sandbox: %s connectivity cannot be combined with GatewayName: the gateway routes through the sandbox-router, which in-cluster connectivity bypasses", o.Connectivity)
 		}
 	}
+	if o.Connectivity == ConnectivityRouterPortForward {
+		if o.Runtime != RuntimeSandboxd {
+			return fmt.Errorf("sandbox: %s requires %s: the legacy runtime already port-forwards the sandbox-router when Connectivity is %s",
+				ConnectivityRouterPortForward, RuntimeSandboxd, ConnectivityPortForward)
+		}
+		if o.APIURL != "" {
+			return fmt.Errorf("sandbox: %s connectivity cannot be combined with APIURL: both select an endpoint, so set only one", o.Connectivity)
+		}
+		if o.GatewayName != "" {
+			return fmt.Errorf("sandbox: %s connectivity cannot be combined with GatewayName: both reach the sandbox-router, so set only one", o.Connectivity)
+		}
+	}
 	if o.Runtime == RuntimeSandboxd {
 		if o.GatewayName != "" {
-			return fmt.Errorf("sandbox: RuntimeSandboxd cannot be combined with GatewayName: sandboxd is reached on the sandbox pod, not through the sandbox-router")
+			return fmt.Errorf("sandbox: RuntimeSandboxd cannot be combined with GatewayName: Gateway mode does not support sandboxd yet; use %s for the REST API, or pod port-forward or an in-cluster mode when Run is required", ConnectivityRouterPortForward)
 		}
 		if o.SandboxdRESTPort <= 0 || o.SandboxdRESTPort > 65535 {
 			return fmt.Errorf("sandbox: SandboxdRESTPort must be between 1 and 65535, got %d", o.SandboxdRESTPort)

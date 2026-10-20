@@ -681,8 +681,9 @@ func TestOptions_SandboxdRejectsGateway(t *testing.T) {
 		GatewayName:  "gw",
 	}
 	opts.setDefaults()
-	if err := opts.validateCommon(); err == nil {
-		t.Fatal("expected validation error for RuntimeSandboxd + GatewayName")
+	err := opts.validateCommon()
+	if err == nil || !strings.Contains(err.Error(), "Gateway mode does not support sandboxd yet") {
+		t.Fatalf("expected Gateway mode to say it does not support sandboxd yet, got %v", err)
 	}
 }
 

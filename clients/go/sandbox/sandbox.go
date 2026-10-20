@@ -106,6 +106,9 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 			ics.grpcPort = opts.SandboxdGRPCPort
 		}
 		strategy = ics
+	case opts.Connectivity == ConnectivityRouterPortForward:
+		// REST through the sandbox-router. gRPC is not forwarded.
+		strategy = newTunnelStrategy(k8s, opts, tracer, svcName, true)
 	case opts.Runtime == RuntimeSandboxd:
 		// sandboxd talks to the sandbox pod, not the sandbox-router, and the
 		// default transport reaches it without pod-network access: a
@@ -138,28 +141,21 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 			svcName:          svcName,
 		}
 	default:
-		strategy = &tunnelStrategy{
-			discoveryClient: k8s.DiscoveryClient,
-			namespace:       opts.Namespace,
-			log:             opts.Logger,
-			tracer:          tracer,
-			svcName:         svcName,
-			tunnel: &portForwardTunnel{
-				name:       "port-forward",
-				coreClient: k8s.CoreClient,
-				restConfig: k8s.RestConfig,
-				namespace:  opts.Namespace,
-				pfTimeout:  opts.PortForwardReadyTimeout,
-				log:        opts.Logger,
-			},
-		}
+		strategy = newTunnelStrategy(k8s, opts, tracer, svcName, false)
 	}
 
+	serverPort := opts.ServerPort
+	routerHeaders := opts.Runtime != RuntimeSandboxd && !opts.Connectivity.isInCluster()
+	if opts.Connectivity == ConnectivityRouterPortForward && opts.Runtime == RuntimeSandboxd {
+		// X-Sandbox-Port selects sandboxd's REST listener.
+		routerHeaders = true
+		serverPort = opts.SandboxdRESTPort
+	}
 	conn := newConnector(connectorConfig{
 		Strategy:            strategy,
 		Namespace:           opts.Namespace,
-		ServerPort:          opts.ServerPort,
-		RouterHeaders:       opts.Runtime != RuntimeSandboxd && !opts.Connectivity.isInCluster(),
+		ServerPort:          serverPort,
+		RouterHeaders:       routerHeaders,
 		RequestTimeout:      opts.RequestTimeout,
 		PerAttemptTimeout:   opts.PerAttemptTimeout,
 		HTTPTransport:       opts.HTTPTransport,

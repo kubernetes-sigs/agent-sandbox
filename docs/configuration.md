@@ -285,6 +285,37 @@ The controller's metrics server can optionally serve over HTTPS with configurabl
 
 A downstream operator can inject the cluster TLS profile by translating it into these flags and patching the controller Deployment.
 
+## SandboxClaim identity on Pods
+
+For a Sandbox owned by a SandboxClaim, the controller maintains these fields on
+its Pod:
+
+| Metadata | Key | Value |
+| --- | --- | --- |
+| Label | `agents.x-k8s.io/claim-uid` | The Claim's UID; identifies that specific Claim object. |
+| Annotation | `agents.x-k8s.io/claim-name` | The Claim's full name, in the same namespace as the Pod. |
+
+The Claim name is an annotation because resource names can be up to 253 characters,
+while label values are limited to 63 characters. Deleting and recreating a Claim
+with the same name produces a different UID; use the UID when distinguishing
+Claim instances matters.
+
+The metadata is set on newly created Pods and reconciled on existing Pods after
+WarmPool adoption. Unclaimed WarmPool Pods and standalone Sandboxes do not receive
+Claim identity metadata. Updates are asynchronous: consumers must handle missing
+metadata while reconciliation is in progress.
+
+```sh
+kubectl get pod <pod-name> -n <namespace> \
+  -o jsonpath='{.metadata.annotations.agents\.x-k8s\.io/claim-name}{"\t"}{.metadata.labels.agents\.x-k8s\.io/claim-uid}{"\n"}'
+```
+
+These keys are controller-owned; do not set them through `additionalPodMetadata`
+or a Pod template. External services can use them to discover Claim identity, but
+metadata alone does not authenticate a caller. Authenticate the caller (for example,
+with TokenReview of a Pod-bound service account token) and enforce authorization
+and any live-Claim UID checks required by the service.
+
 ## SandboxClaim label-domain allowlist
 
 Since v0.5.0, label keys in `SandboxClaim.spec.additionalPodMetadata.labels`

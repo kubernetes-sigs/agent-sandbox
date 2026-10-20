@@ -187,6 +187,30 @@ func TestCreateSandboxClaimVolumeClaimTemplates(t *testing.T) {
 	}
 }
 
+func TestSandboxTemplateVolumeClaimTemplatesValidation(t *testing.T) {
+	testCases := []struct {
+		name    string
+		vcts    []sandboxv1beta1.PersistentVolumeClaimTemplate
+		wantErr string
+	}{
+		{"empty name", []sandboxv1beta1.PersistentVolumeClaimTemplate{customVCT("", "1Gi")}, "metadata.name must not be empty"},
+		{"duplicate names", []sandboxv1beta1.PersistentVolumeClaimTemplate{customVCT("data", "1Gi"), customVCT("data", "1Gi")}, "volumeClaimTemplates names must be unique"},
+		{"too many", numberedVCTs(129), "must have at most 128 items"},
+	}
+	for _, c := range testCases {
+		t.Run(c.name, func(t *testing.T) {
+			tc := framework.NewTestContext(t)
+
+			ns := &corev1.Namespace{}
+			ns.Name = fmt.Sprintf("vct-template-invalid-%d", time.Now().UnixNano())
+			require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
+
+			template := newTemplateForVCT(ns.Name, "vct-template", extensionsv1beta1.VolumeClaimTemplatesPolicyAllowed, c.vcts)
+			require.ErrorContains(t, tc.CreateWithCleanup(t.Context(), template), c.wantErr)
+		})
+	}
+}
+
 func customVCT(name, size string) sandboxv1beta1.PersistentVolumeClaimTemplate {
 	return sandboxv1beta1.PersistentVolumeClaimTemplate{
 		EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{
@@ -232,9 +256,8 @@ func verifySandboxAndPVCs(t *testing.T, tc *framework.TestContext, namespace, cl
 	}
 }
 
-func createTemplateForVCT(t *testing.T, tc *framework.TestContext, namespace, name string, policy extensionsv1beta1.VolumeClaimTemplatesPolicy, vcts []sandboxv1beta1.PersistentVolumeClaimTemplate) *extensionsv1beta1.SandboxTemplate {
-	t.Helper()
-	template := &extensionsv1beta1.SandboxTemplate{
+func newTemplateForVCT(namespace, name string, policy extensionsv1beta1.VolumeClaimTemplatesPolicy, vcts []sandboxv1beta1.PersistentVolumeClaimTemplate) *extensionsv1beta1.SandboxTemplate {
+	return &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
@@ -257,6 +280,11 @@ func createTemplateForVCT(t *testing.T, tc *framework.TestContext, namespace, na
 			},
 		},
 	}
+}
+
+func createTemplateForVCT(t *testing.T, tc *framework.TestContext, namespace, name string, policy extensionsv1beta1.VolumeClaimTemplatesPolicy, vcts []sandboxv1beta1.PersistentVolumeClaimTemplate) *extensionsv1beta1.SandboxTemplate {
+	t.Helper()
+	template := newTemplateForVCT(namespace, name, policy, vcts)
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), template))
 	return template
 }

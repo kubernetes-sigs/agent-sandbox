@@ -755,9 +755,9 @@ func podContainerIssue(pod *corev1.Pod) string {
 	return containerIssue("container", pod.Status.ContainerStatuses)
 }
 
-// containerIssue is built from stable fields only (name, reason, restart count,
-// last exit reason). Kubelet messages change on every backoff and would cost a
-// status write each time.
+// containerIssue is built from stable fields only (name, reason, last exit
+// reason). Kubelet messages and the restart count change on every backoff and
+// would cost a status write each time.
 func containerIssue(kind string, statuses []corev1.ContainerStatus) string {
 	for _, cs := range statuses {
 		waiting := cs.State.Waiting
@@ -767,11 +767,10 @@ func containerIssue(kind string, statuses []corev1.ContainerStatus) string {
 		if waiting.Reason != "CrashLoopBackOff" {
 			return fmt.Sprintf("%s %q is waiting: %s", kind, cs.Name, waiting.Reason)
 		}
-		detail := fmt.Sprintf("restarts: %d", cs.RestartCount)
 		if last := cs.LastTerminationState.Terminated; last != nil && last.Reason != "" {
-			detail += ", last exit: " + last.Reason
+			return fmt.Sprintf("%s %q is in CrashLoopBackOff (last exit: %s)", kind, cs.Name, last.Reason)
 		}
-		return fmt.Sprintf("%s %q is in CrashLoopBackOff (%s)", kind, cs.Name, detail)
+		return fmt.Sprintf("%s %q is in CrashLoopBackOff", kind, cs.Name)
 	}
 	return ""
 }

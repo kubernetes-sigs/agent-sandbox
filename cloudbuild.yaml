@@ -12,6 +12,26 @@ steps:
       - "--image-prefix=${_IMAGE_PREFIX}/"
       - "--extra-image-tag=${_GIT_TAG}-${_CONFIG}"
       - "--extra-image-tag=latest-${_CONFIG}"
+  # Publishes the Helm chart for stable release tags only; other refs skip
+  # without installing Helm.
+  - name: "gcr.io/k8s-staging-test-infra/gcb-docker-gcloud"
+    entrypoint: "bash"
+    env:
+      - PULL_BASE_REF=${_PULL_BASE_REF}
+    args:
+      - "-c"
+      - |
+        set -o errexit
+        if [[ ! "$$PULL_BASE_REF" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$$ ]]; then
+          echo "skipping chart publish: $$PULL_BASE_REF is not a stable release tag"
+          exit 0
+        fi
+        gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+        make helm
+        python3 ./dev/tools/push-chart \
+          --helm-bin=./bin/helm \
+          --staging-repo="${_IMAGE_PREFIX}/charts" \
+          --tag="$$PULL_BASE_REF"
 
 options:
   enableStructuredLogging: true
@@ -21,4 +41,5 @@ options:
 substitutions:
   _GIT_TAG: "12345"
   _CONFIG: main
+  _PULL_BASE_REF: main
   _IMAGE_PREFIX: "us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox"

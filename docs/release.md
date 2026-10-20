@@ -26,6 +26,15 @@ This step can be automated by running `make release-promote TAG=vX.Y.Z`. This ca
 > [!IMPORTANT]
 > `make release-promote` by default also creates and pushes the git tag. You can use `SKIP_TAGGING=true` to skip tagging, or `ONLY_TAGGING=true` to only perform tagging. It requires `gh` and `gcloud` authentication.
 
+## Helm Chart Staging and Promotion
+
+The Helm chart follows the same staging-then-promotion flow as the container images, and is part of the same postsubmit build and promotion PR -- no separate release step is required.
+
+-   **Staging**: [`cloudbuild.yaml`](../cloudbuild.yaml) checks the postsubmit's `_PULL_BASE_REF` (the branch or tag that triggered the build) against a stable `vX.Y.Z` pattern before doing anything else; ordinary `main` commits and pre-release tags (`rc`/`post`/`dev`) skip the step without installing Helm. For an exact stable tag, it runs [`dev/tools/push-chart`](../dev/tools/push-chart) with that tag. push-chart packages a temporary copy of `helm/` (the checked-in chart is never modified) with `helm package --version X.Y.Z --app-version vX.Y.Z` and `image.tag` set to the release tag, then pushes it to `oci://us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/charts/agent-sandbox`. push-chart can also auto-detect the release tag from git for local/manual use, but the postsubmit always passes it explicitly.
+-   **Promotion**: [`dev/tools/tag-promote-images`](../dev/tools/tag-promote-images) polls the staging chart repository for the release's digest (for stable tags only) and adds it to the same `images.yaml` promotion PR as the container images, as a `charts/agent-sandbox` block tagged with both `vX.Y.Z` and `X.Y.Z`. Once merged, the chart is promoted to `oci://registry.k8s.io/agent-sandbox/charts/agent-sandbox` the same way the images are.
+
+The committed `helm/Chart.yaml` continues to follow the repository's existing source-chart versioning policy -- see [`helm/README.md`](../helm/README.md#development). Published OCI release artifacts are packaged with the repository release version via `helm package --version`, without rewriting the committed `Chart.yaml`.
+
 ## Automated Release Workflow
 
 The project uses a GitHub Actions workflow to automate the release process: [`.github/workflows/release.yml`](../.github/workflows/release.yml).

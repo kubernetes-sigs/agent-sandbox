@@ -84,7 +84,6 @@ async def execute_command(
                     "and end. This limits returned text, not execution memory or tokens.",
         ge=MIN_OUTPUT_CHARS,
         le=MAX_OUTPUT_CHARS_LIMIT,
-        strict=True,
     )] = DEFAULT_MAX_OUTPUT_CHARS,
 
 ) -> ExecuteCommandOutputSchema:

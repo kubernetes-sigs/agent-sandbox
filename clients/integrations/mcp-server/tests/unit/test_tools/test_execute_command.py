@@ -203,8 +203,15 @@ def _assert_output_excerpt(original, content, stream, budget):
         ("a" * 1000, "b" * 1000, 129, 64, 65),
         ("a" * 300001, "", 300000, 300000, 0),
         ("开始🙂\n" + "中e\u0301\t\x00" * 100 + "\n结束🚀", "错误Ω" * 100, 129, 64, 65),
+        ("a" * 100, "b" * 100, "128", 64, 64),
+        ("a" * 20001, "", "20000", 20000, 0),
+        ("a" * 300001, "", "300000", 300000, 0),
+        ("a" * 100, "b" * 100, 128.0, 64, 64),
     ],
-    ids=["empty", "exact", "one-over", "shared", "short-stderr", "short-stdout", "odd", "maximum", "unicode"],
+    ids=[
+        "empty", "exact", "one-over", "shared", "short-stderr", "short-stdout", "odd", "maximum", "unicode",
+        "numeric-string-minimum", "numeric-string", "numeric-string-maximum", "integral-float",
+    ],
 )
 async def test_execute_command_custom_output_budget(
     mcp_client, mock_sandbox, stdout, stderr, budget, stdout_budget, stderr_budget,
@@ -225,7 +232,7 @@ async def test_execute_command_custom_output_budget(
     )
 
     content = result.structured_content
-    assert len(content["stdout"]) + len(content["stderr"]) <= budget
+    assert len(content["stdout"]) + len(content["stderr"]) <= stdout_budget + stderr_budget
     _assert_output_excerpt(stdout, content, "stdout", stdout_budget)
     _assert_output_excerpt(stderr, content, "stderr", stderr_budget)
     assert content["exit_code"] == 0
@@ -235,7 +242,9 @@ async def test_execute_command_custom_output_budget(
 
 @pytest.mark.anyio
 @pytest.mark.usefixtures("mocked_servers_sandbox_client_class")
-@pytest.mark.parametrize("budget", [0, -1, 127, 300001, None, True, 128.0, "128"])
+@pytest.mark.parametrize(
+    "budget", [0, -1, 127, 300001, None, True, False, 128.5, "128.5", "not-a-number", "127", "300001"],
+)
 async def test_execute_command_rejects_invalid_budget(
     mcp_client, mock_sandbox_client, mock_sandbox, budget,
 ):

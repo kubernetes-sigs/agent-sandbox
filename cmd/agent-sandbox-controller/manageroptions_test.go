@@ -20,7 +20,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/runtime"
-	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
@@ -70,7 +69,7 @@ func TestBuildManagerOptionsWithOpenMetrics(t *testing.T) {
 	// Test with OpenMetrics enabled
 	metricsOptsEnabled := metricsserver.Options{
 		BindAddress: ":8080",
-		HandlerOpts: asmetrics.BuildMetricsHandlerOpts(true),
+		HandlerOpts: buildMetricsHandlerOpts(true),
 	}
 	optsEnabled := buildManagerOptions(scheme, metricsOptsEnabled, ":8081", true, "")
 	assert.Equal(t, ":8080", optsEnabled.Metrics.BindAddress)
@@ -85,7 +84,7 @@ func TestBuildManagerOptionsWithOpenMetrics(t *testing.T) {
 	// Test with OpenMetrics disabled
 	metricsOptsDisabled := metricsserver.Options{
 		BindAddress: ":8080",
-		HandlerOpts: asmetrics.BuildMetricsHandlerOpts(false),
+		HandlerOpts: buildMetricsHandlerOpts(false),
 	}
 	optsDisabled := buildManagerOptions(scheme, metricsOptsDisabled, ":8081", true, "")
 	assert.Equal(t, ":8080", optsDisabled.Metrics.BindAddress)

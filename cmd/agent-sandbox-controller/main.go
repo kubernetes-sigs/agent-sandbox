@@ -192,9 +192,10 @@ func main() {
 			"A downstream operator can use this flag to inject the cluster TLS profile.")
 	flag.BoolVar(&enableOpenMetrics, "metrics-enable-openmetrics", false,
 		"Enable OpenMetrics format for the metrics server. Prometheus 2.5.0+ will negotiate "+
-			"OpenMetrics as first priority when enabled. This allows transmitting exemplars but "+
-			"changes the formatting of quantile and le labels (trailing .0 for integer values), "+
-			"which may affect existing dashboards and alerting rules.")
+			"OpenMetrics as first priority when enabled. Nothing on this endpoint records "+
+			"exemplars today, so enabling this only changes the formatting of quantile and le "+
+			"labels (trailing .0 for integer values), which may affect existing dashboards and "+
+			"alerting rules.")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -331,7 +332,7 @@ func main() {
 	// - v0.25.x: defaults to false, we override based on flag
 	// - v0.26.0+: defaults to true, we override based on flag
 	// See: https://github.com/kubernetes-sigs/controller-runtime/pull/3595
-	metricsOpts.HandlerOpts = asmetrics.BuildMetricsHandlerOpts(enableOpenMetrics)
+	metricsOpts.HandlerOpts = buildMetricsHandlerOpts(enableOpenMetrics)
 	if enableOpenMetrics {
 		setupLog.Info("OpenMetrics format enabled (--metrics-enable-openmetrics)")
 	}

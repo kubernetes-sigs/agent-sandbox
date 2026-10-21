@@ -1546,6 +1546,115 @@ class TestClaimBatchCreation(BaseClaimBatchTest):
         for k, t in enumerate(starts):
             self.assertGreaterEqual(t - start, k * 0.05 - 0.001)
 
+    def test_creates_the_warm_pool_covers_skip_pacing(self):
+        ready = {"pool-a": 5, "pool-b": 0}
+        self.cluster.helper.get_sandbox_warmpool.side_effect = lambda name, *a, **k: {
+            "spec": {"sandboxTemplateRef": {"name": "tmpl"}},
+            "status": {"readyReplicas": ready[name]},
+        }
+        start = time.monotonic()
+        self.claim(
+            [BatchGroup(warmpool="pool-a", size=3), BatchGroup(warmpool="pool-b", size=3)],
+            max_in_flight=6,
+            create_rps=4,
+        )
+        _wait_until(lambda: len(self.cluster.created) == 6)
+        started = {name: t - start for name, t in self.cluster.created}
+        # pool-a's three claims are covered. pool-b's first takes the first pacing slot at once, and
+        # pool-a's spare credit doesn't cover pool-b's others.
+        for name in ("b1-0", "b1-1", "b1-2", "b1-3"):
+            self.assertLess(started[name], 0.15, name)
+        self.assertGreaterEqual(started["b1-4"], 0.249)
+        self.assertGreaterEqual(started["b1-5"], 0.499)
+
+        # When an earlier cold group reserves future pacing slots and the final planned claim
+        # belongs to a warm-covered group, _fill_deadline counts from the latest fill slot rather
+        # than now, and _drop_planned_creates ignores later slots that acquire() reserved.
+        ready["pool-a"] = 5
+        ready["pool-b"] = 0
+        start = time.monotonic()
+        mixed = self.claim(
+            [BatchGroup(warmpool="pool-b", size=3, min_ready=1), BatchGroup(warmpool="pool-a", size=2, min_ready=1)],
+            batch_id="b2",
+            max_in_flight=5,
+            create_rps=0.5,
+            quorum_timeout=10,
+        )
+        _wait_until(lambda: mixed._fill_deadline is not None)
+        mixed._stop_background_threads()
+        self.assertGreaterEqual(mixed._last_fill_slot - start, 3.9)
+        self.assertEqual(mixed._fill_deadline, mixed._last_fill_slot + 10)
+
+        with patch.object(SandboxBatch, "_create_worker", lambda self: None):
+            dropped = self.claim(
+                [BatchGroup(warmpool="pool-b", size=2, min_ready=1)],
+                batch_id="b3",
+                max_in_flight=1,
+                create_rps=0.5,
+                quorum_timeout=10,
+            )
+        with dropped._lock:
+            now = time.monotonic()
+            dropped._last_fill_slot = now + 2.0
+            dropped._next_create_at = now + 20.0
+            dropped._drop_planned_creates("pool-b")
+        self.assertEqual(dropped._fill_deadline, dropped._last_fill_slot + 10)
+
+    @patch("k8s_agent_sandbox.batch_utils.retry_delay", return_value=0)
+    def test_first_429_paces_creates_during_cooldown_and_recovers(self, _):
+        helper = self.cluster.helper
+        helper.get_sandbox_warmpool.return_value = {
+            "spec": {"sandboxTemplateRef": {"name": "tmpl"}}, "status": {"readyReplicas": 6}
+        }
+        for status, paced in ((429, True), (503, False)):
+            with self.subTest(status):
+                sent_at = []
+                outcomes = iter([k8s_client.ApiException(status=status)])
+
+                def create(*args, **kwargs):
+                    sent_at.append(time.monotonic())
+                    if (outcome := next(outcomes, None)) is not None:
+                        raise outcome
+
+                helper.create_sandbox_claim.side_effect = create
+                self.claim(
+                    [BatchGroup(warmpool="pool-a", size=4)], batch_id=f"b{status}", max_in_flight=1, create_rps=5
+                )
+                _wait_until(lambda: len(sent_at) == 5)
+                gaps = [later - earlier for earlier, later in zip(sent_at[1:], sent_at[2:])]
+                if paced:
+                    self.assertTrue(all(gap >= 0.18 for gap in gaps), gaps)
+                else:
+                    self.assertTrue(all(gap < 0.1 for gap in gaps), gaps)
+
+        # Once the 429 cooldown expires, remaining warm credit covers later fill creates without
+        # over-crediting the sandboxes already adopted by paced creates during cooldown.
+        offset = [0.0]
+        fake_time = SimpleNamespace(monotonic=lambda: time.monotonic() + offset[0])
+        sent_at = []
+        throttled = k8s_client.ApiException(status=429)
+        throttled.headers = {"Retry-After": "0"}
+        outcomes = iter([throttled])
+
+        def create_recovering(*args, **kwargs):
+            sent_at.append(time.monotonic())
+            if len(sent_at) == 3:
+                offset[0] += batch_utils.BATCH_WARM_CREDIT_THROTTLE_SECONDS + 0.1
+            if (outcome := next(outcomes, None)) is not None:
+                raise outcome
+
+        helper.create_sandbox_claim.side_effect = create_recovering
+        with patch.object(batch_utils, "time", fake_time):
+            self.claim([BatchGroup(warmpool="pool-a", size=8)], batch_id="brecover", max_in_flight=1, create_rps=5)
+            _wait_until(lambda: len(sent_at) == 9)
+        gaps = [later - earlier for earlier, later in zip(sent_at[1:], sent_at[2:])]
+        # Claim 0 took credit 1 and its retry reserved t+0; claim 1 paced at t+0.2 during cooldown
+        # (spending credit 2) and advanced offset past cooldown; claims 2..5 use the 4 remaining
+        # credits unpaced; claims 6..7 pace again once credit hits 0.
+        self.assertGreaterEqual(gaps[0], 0.18)
+        self.assertTrue(all(gap < 0.1 for gap in gaps[1:5]), gaps)
+        self.assertTrue(all(gap >= 0.18 for gap in gaps[5:]), gaps)
+
     def test_creates_each_groups_min_ready_claims_first_in_group_order(self):
         self.claim(
             [BatchGroup(warmpool="pool-a", size=6, min_ready=3), BatchGroup(warmpool="pool-b", size=3, min_ready=1)],

@@ -194,12 +194,14 @@ class SandboxBatch:
         # and events() stops waiting for fill members that aren't Ready yet. Set once the last
         # create's pacing slot is taken, or at attach for a re-attached batch.
         self._fill_deadline: float | None = None
+        self._last_fill_slot: float = 0.0
         self._released = False
         self._creators: list[threading.Thread] = []
         self._stop_creating = threading.Event()
         self._create_plan: deque[tuple[str, BatchGroup]] = deque()
         self._next_create_at = 0.0
         self._create_interval = 0.0
+        self._warm_credit = batch_utils.WarmCredit()
         # Bounds concurrent claim creates and member deletes to max_in_flight, matching the HTTP
         # connection pool budget so deletes neither overflow the pool nor serialize on a lock.
         self._in_flight = threading.BoundedSemaphore(max_in_flight)
@@ -242,7 +244,7 @@ class SandboxBatch:
         """Create a batch: precheck, create its Lease, start the watch, then create claims in the background."""
         helper = client.k8s_helper
         timeout = batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
-        _precheck_pools(helper, [g.warmpool for g in args.groups], namespace)
+        ready = _precheck_pools(helper, [g.warmpool for g in args.groups], namespace)
 
         size = sum(g.size for g in args.groups)
         # One shutdownTime for the whole fill. Quorum can come as late as quorum_timeout after the
@@ -316,6 +318,8 @@ class SandboxBatch:
         )
         handle._create_plan = deque(batch_utils.fill_create_plan(args.batch_id, args.groups))
         handle._create_interval = 1 / args.create_rps
+        for warmpool, count in ready.items():
+            handle._warm_credit.record(warmpool, count)
         handle._labels = {**args.labels, BATCH_ID_LABEL: args.batch_id}
         handle._claim_labels = {
             g.warmpool: {
@@ -978,9 +982,9 @@ class SandboxBatch:
                 kept.append((claim_name, group))
         self._create_plan = kept
         if not kept:
-            # No worker takes the last planned create now, so the fill deadline counts from the
-            # last pacing slot already taken.
-            last_slot = max(time.monotonic(), self._next_create_at - self._create_interval)
+            # Count from _last_fill_slot rather than _next_create_at so pacing slots that
+            # acquire() reserved do not push the fill deadline out.
+            last_slot = max(time.monotonic(), self._last_fill_slot)
             self._fill_deadline = last_slot + self._quorum_timeout
 
     def _delete_claim(self, claim_name: str) -> None:
@@ -1499,19 +1503,25 @@ class SandboxBatch:
 
     def _create_worker(self) -> None:
         """Creates planned claims one at a time. ``max_in_flight`` workers share one pacing slot,
-        so together they start at most ``create_rps`` creates per second.
+        so together they start at most ``create_rps`` creates per second, except for the creates
+        the warm pool's credit covers, which start at once.
         """
         while True:
             with self._lock:
                 if not self._create_plan or self._stop_creating.is_set():
                     return
                 claim_name, group = self._create_plan.popleft()
-                slot = self._reserve_create_slot(time.monotonic())
+                if self._warm_credit.take(group.warmpool):
+                    slot = time.monotonic()
+                else:
+                    self._warm_credit.spend(group.warmpool)
+                    slot = self._reserve_create_slot(time.monotonic())
+                self._last_fill_slot = max(self._last_fill_slot, slot)
                 # This worker took the last planned create, so the fill deadline is known now
                 if not self._create_plan:
-                    # Counted from when the last create is sent, so groups don't time out while
-                    # their claims are still waiting for a pacing slot.
-                    self._fill_deadline = slot + self._quorum_timeout
+                    # Count from the latest fill slot so a warm-covered final group does not expire
+                    # an earlier cold group whose claims still wait for their pacing slots.
+                    self._fill_deadline = self._last_fill_slot + self._quorum_timeout
                     self._changed.notify_all()
             if self._stop_creating.wait(max(0.0, slot - time.monotonic())):
                 return
@@ -1632,13 +1642,20 @@ class SandboxBatch:
                     outcome = batch_utils.create_error_outcome(None, attempt)
                 else:
                     outcome = batch_utils.CreateOutcome.FAIL
+                retry_after = batch_utils.retry_after_seconds(e)
+                if isinstance(e, ApiException) and e.status == 429:
+                    with self._lock:
+                        first_throttle = self._warm_credit.throttle(retry_after)
+                    if first_throttle:
+                        logger.info(
+                            f"Apiserver throttled batch '{self.batch_id}', temporarily pacing creates at create_rps"
+                        )
                 if outcome == batch_utils.CreateOutcome.SUCCESS:
                     return True
                 if outcome == batch_utils.CreateOutcome.RETRY:
                     # A backoff belongs to this create alone, so the create waits it out here and then takes a
                     # normal pacing slot. client-go retries the same way. The apiserver computes a Retry-After for a
                     # whole priority level, so a Retry-After moves the shared slot and every create waits for it.
-                    retry_after = batch_utils.retry_after_seconds(e)
                     if retry_after is None:
                         backoff = batch_utils.retry_delay(attempt, None)
                         with self._lock:
@@ -1658,8 +1675,9 @@ class SandboxBatch:
                 raise
 
 
-def _precheck_pools(helper: Any, warmpools: Iterable[str], namespace: str) -> None:
-    """Checks that each warm pool and the SandboxTemplate it references exist.
+def _precheck_pools(helper: Any, warmpools: Iterable[str], namespace: str) -> dict[str, int]:
+    """Checks that each warm pool and the SandboxTemplate it references exist, and returns each
+    pool's Ready replica count.
 
     Raises:
         SandboxWarmPoolNotFoundError: If a warm pool doesn't exist.
@@ -1667,12 +1685,14 @@ def _precheck_pools(helper: Any, warmpools: Iterable[str], namespace: str) -> No
     """
     timeout = batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
     checked_templates: set[str] = set()
+    ready: dict[str, int] = {}
     for name in warmpools:
         warmpool = helper.get_sandbox_warmpool(name, namespace, _request_timeout=timeout)
         if warmpool is None:
             raise SandboxWarmPoolNotFoundError(
                 f"SandboxWarmPool '{name}' not found in namespace '{namespace}'"
             )
+        ready[name] = batch_utils.warmpool_ready_replicas(warmpool)
         template = batch_utils.warmpool_template_name(warmpool)
         if template is None:
             raise SandboxTemplateNotFoundError(
@@ -1685,6 +1705,7 @@ def _precheck_pools(helper: Any, warmpools: Iterable[str], namespace: str) -> No
                 f"SandboxTemplate '{template}' not found in namespace '{namespace}'"
             )
         checked_templates.add(template)
+    return ready
 
 
 def _take_batch_lease(

@@ -350,5 +350,34 @@ class TestParseLeaseMetadata(unittest.TestCase):
                         batch_utils.parse_lease_metadata(None, {key: value})
 
 
+class TestWarmCredit(unittest.TestCase):
+
+    def test_cooldown_tracks_spent_credit_and_recovers(self):
+        now = [100.0]
+        with patch.object(batch_utils.time, "monotonic", side_effect=lambda: now[0]):
+            credit = batch_utils.WarmCredit()
+            credit.record("pool-a", 4)
+            self.assertTrue(credit.take("pool-a"))
+            # Default 5s cooldown starts once and suppresses repeated log triggers inside the window.
+            self.assertTrue(credit.throttle())
+            self.assertFalse(credit.throttle(2.0))
+            self.assertFalse(credit.take("pool-a"))
+            # Two paced creates during cooldown consume two of the three remaining Ready sandboxes.
+            credit.spend("pool-a")
+            credit.spend("pool-a")
+            now[0] += 4.9
+            self.assertFalse(credit.take("pool-a"))
+            now[0] += 0.2
+            self.assertTrue(credit.take("pool-a"))
+            self.assertFalse(credit.take("pool-a"))
+            # A longer Retry-After extends the cooldown window, and a new window reports True again.
+            credit.record("pool-a", 2)
+            self.assertTrue(credit.throttle(12.0))
+            now[0] += 11.9
+            self.assertFalse(credit.take("pool-a"))
+            now[0] += 0.2
+            self.assertTrue(credit.take("pool-a"))
+
+
 if __name__ == "__main__":
     unittest.main()

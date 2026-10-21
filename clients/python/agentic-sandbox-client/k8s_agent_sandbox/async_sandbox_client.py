@@ -572,7 +572,11 @@ class AsyncSandboxClient(Generic[T]):
                 from ``get_batch`` puts them on the claims it adds with ``acquire()``.
             batch_id: Optional batch id; a DNS-1123 label starting with a letter, at most 52
                 characters. Generated if omitted.
-            create_rps: Maximum claim creates started per second. Defaults to 50.
+            create_rps: Maximum claim creates started per second. Defaults to 50. Claims that a
+                pool's Ready sandboxes cover, counted when ``claim_batch`` checks the pool, skip
+                ``create_rps`` pacing, so only ``max_in_flight`` bounds them. When the apiserver
+                answers a create with 429, the batch pauses warm-pool credit for ``Retry-After``
+                (at least 5 seconds) and paces creates at ``create_rps`` until cooldown ends.
             max_in_flight: Maximum claim creates and member deletes in flight at once. Defaults to
                 20, clamped to ``pool_size - 2`` when the client's Kubernetes API connection pool
                 is smaller. The pool must hold at least ``max_in_flight + 2``, since the batch's

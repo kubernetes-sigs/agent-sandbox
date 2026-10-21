@@ -668,6 +668,20 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 	// Cold path: no existing sandbox or warm pool candidate.
 	// Need template to create from scratch.
 	logger.V(1).Info("Cold path: no sandbox found, creating from template", "claim", claim.Name)
+
+	// The cached claim can predate an adoption an earlier pass committed, and no
+	// later pass removes a Sandbox created here. Confirm on a fresh read first.
+	// A failed read doesn't block the create: the name-based lookup and the
+	// AlreadyExists handling still guard it.
+	fresh := &extensionsv1beta1.SandboxClaim{}
+	if err := r.authoritativeReader().Get(ctx, client.ObjectKeyFromObject(claim), fresh); err != nil {
+		logger.V(1).Info("Fresh claim read before cold create failed; creating anyway", "claim", claim.Name, "error", err)
+	} else if fresh.UID != claim.UID || fresh.Status.SandboxStatus.Name != "" ||
+		fresh.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] != "" {
+		logger.V(1).Info("Cached claim is behind the API server; skipping cold create", "claim", claim.Name)
+		return nil, fmt.Errorf("%w: claim %s is already assigned", errSandboxAlreadyExists, claim.Name)
+	}
+
 	template, templateErr := r.getTemplate(ctx, claim)
 	if templateErr != nil {
 		return nil, templateErr

@@ -15,6 +15,7 @@
 """Sync handle for using a claimed or re-attached sandbox batch."""
 
 import logging
+import ssl
 import threading
 import time
 from typing import TYPE_CHECKING, Any
@@ -56,15 +57,18 @@ _TRANSPORT_ERRORS = (
     urllib3.exceptions.ReadTimeoutError,
     urllib3.exceptions.MaxRetryError,
     ConnectionError,
+    # A peer that closes the TLS connection early (e.g. a load balancer during a control-plane upgrade)
+    # is transient like a connection reset. Certificate and other TLS failures are not.
+    ssl.SSLEOFError,
 )
 
 
 def _is_transport_error(error: BaseException) -> bool:
-    # SSLError is not transient
-    if isinstance(error, urllib3.exceptions.MaxRetryError) and isinstance(
-        error.reason, urllib3.exceptions.SSLError
-    ):
-        return False
+    # A TLS failure is judged by the ssl error urllib3 wrapped, so a MaxRetryError caused by one is
+    # not retried just because MaxRetryError is in the tuple.
+    cause = error.reason if isinstance(error, urllib3.exceptions.MaxRetryError) else error
+    if isinstance(cause, urllib3.exceptions.SSLError):
+        error = cause.args[0] if cause.args else cause
     return isinstance(error, _TRANSPORT_ERRORS)
 
 
@@ -417,7 +421,7 @@ class SandboxBatch:
                     failures += 1
                     self._watch_stop.wait(_watch_backoff_delay(failures))
                     continue
-                # Anything else (e.g. an SSL error) is not known to be transient, so surface it
+                # Anything else (e.g. a certificate error) is not known to be transient, so surface it
                 # via err() instead of leaving the thread dead with err() still None.
                 if self._watch_stop.is_set():
                     return

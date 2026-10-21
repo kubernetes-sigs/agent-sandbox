@@ -1,0 +1,19 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: secure-warmpool
+  # NOTE: This must be applied to the SAME namespace as the SandboxWarmPool.
+  namespace: default
+spec:
+  # Keep at least this many idle warm pool pods available during drains.
+  # Use an integer: a percentage would need a /scale subresource on Sandbox,
+  # which it doesn't have.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      # Must match a label in the SandboxTemplate's podTemplate.
+      app: my-sandbox-app
+    matchExpressions:
+    # Exclude pods that a SandboxClaim has taken; claimed-sandboxes-pdb.yaml covers those.
+    - key: agents.x-k8s.io/claim-uid
+      operator: DoesNotExist

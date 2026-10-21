@@ -6,10 +6,8 @@ metadata:
 spec:
   podTemplate:
     metadata:
-      annotations:
-        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
       labels:
-        sandbox-disruption-policy: "manual-protection"
+        # warmpool-pdb.yaml selects idle warm pool pods by this label.
         app: my-sandbox-app
     spec:
       containers:

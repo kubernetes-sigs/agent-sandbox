@@ -209,7 +209,7 @@ func main() {
 
 ## Opt-in recovery from Failed pods
 
-By default, when a Sandbox's backing Pod reaches `phase=Failed` (for example after node-pressure eviction), the controller surfaces `Finished=True` with reason `PodFailed` and does not create a replacement. That matches StatefulSet behavior and keeps one-shot workloads compatible with Claim `ttlSecondsAfterFinished`.
+By default, when a Sandbox's backing Pod reaches `phase=Failed` (for example after node-pressure eviction), the controller surfaces `Finished=True` with reason `PodFailed` and does not create a replacement. This preserves existing behavior and keeps one-shot workloads compatible with Claim `ttlSecondsAfterFinished`.
 
 For long-running sandboxes that should recover while preserving Sandbox identity and PVCs, set:
 

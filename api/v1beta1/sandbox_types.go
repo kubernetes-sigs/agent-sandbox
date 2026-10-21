@@ -252,8 +252,8 @@ const (
 type FailedPodPolicy string
 
 const (
-	// FailedPodPolicyRetain leaves a Failed Pod in place and surfaces Finished=True
-	// (StatefulSet-like). This is the default.
+	// FailedPodPolicyRetain leaves a Failed Pod in place and surfaces Finished=True.
+	// This is the default.
 	FailedPodPolicyRetain FailedPodPolicy = "Retain"
 	// FailedPodPolicyRecreate deletes the controller-owned Failed Pod so a new one
 	// is created. The Sandbox identity and any Sandbox-owned PVCs are retained.
@@ -293,7 +293,7 @@ type SandboxBlueprint struct {
 	Service *bool `json:"service,omitempty"`
 
 	// failedPodPolicy controls what happens when the backing Pod enters phase Failed.
-	// Retain (default): leave the Failed pod and surface Finished=True (StatefulSet-like).
+	// Retain (default): leave the Failed pod and surface Finished=True.
 	// Recreate: delete the controller-owned Failed pod so a new one is created;
 	// the Sandbox identity and any Sandbox-owned PVCs are retained.
 	// Combined with restartPolicy Never and a container that always exits non-zero,

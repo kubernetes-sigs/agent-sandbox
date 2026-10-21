@@ -47,7 +47,7 @@ type SandboxBlueprintApplyConfiguration struct {
 	// to explicitly disable and remove the Service.
 	Service *bool `json:"service,omitempty"`
 	// failedPodPolicy controls what happens when the backing Pod enters phase Failed.
-	// Retain (default): leave the Failed pod and surface Finished=True (StatefulSet-like).
+	// Retain (default): leave the Failed pod and surface Finished=True.
 	// Recreate: delete the controller-owned Failed pod so a new one is created;
 	// the Sandbox identity and any Sandbox-owned PVCs are retained.
 	// Combined with restartPolicy Never and a container that always exits non-zero,

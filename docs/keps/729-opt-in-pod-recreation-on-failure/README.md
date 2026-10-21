@@ -20,7 +20,7 @@ TOC is auto-generated via `make toc-update`.
 
 ## Summary
 
-Add an opt-in `failedPodPolicy` field to `SandboxBlueprint`, which is shared by `Sandbox` and `SandboxTemplate`. When set to `Recreate`, the Sandbox controller deletes a controller-owned backing Pod that has entered `phase=Failed`, clears the pod-name annotation, and relies on the existing missing-pod create path to provision a fresh Pod. The Sandbox identity and any PVCs owned by the Sandbox are preserved. The default `Retain` keeps today's StatefulSet-like behavior.
+Add an opt-in `failedPodPolicy` field to `SandboxBlueprint`, which is shared by `Sandbox` and `SandboxTemplate`. When set to `Recreate`, the Sandbox controller deletes a controller-owned backing Pod that has entered `phase=Failed`, clears the pod-name annotation, and relies on the existing missing-pod create path to provision a fresh Pod. The Sandbox identity and any PVCs owned by the Sandbox are preserved. The default `Retain` preserves the existing behavior: leave the Failed Pod in place and surface `Finished=True` with reason `PodFailed`.
 
 ## Motivation
 
@@ -28,9 +28,7 @@ When a Sandbox's Pod ends in `phase=Failed` (for example after node-pressure evi
 
 This is distinct from the already-supported case where the Pod object is gone from etcd: with `operatingMode=Running`, the controller recreates a missing Pod. Failed Pods still exist, so that path is never reached.
 
-Core workload precedence:
-- **StatefulSet**: leaves Failed pods in etcd (requires user intervention). Agent Sandbox matches this today.
-- **ReplicaSet**: ignores Failed pods when counting replicas and creates replacements.
+ReplicaSets provide a precedent for automatic recovery: they ignore Failed Pods when counting replicas and create replacements.
 
 Auto-recreation must remain opt-in so platforms that rely on terminal `Finished` for cleanup (for example Claim `ttlSecondsAfterFinished`) are not broken.
 

@@ -6,14 +6,18 @@ metadata:
   namespace: default
 spec:
   # Keep at least this many idle warm pool pods available during drains.
+  # Keep it below the pool's replicas, or no idle pod can ever be evicted.
   # Use an integer: a percentage would need a /scale subresource on Sandbox,
   # which it doesn't have.
   minAvailable: 1
+  # Let drains evict pods that aren't Ready, so a broken pool pod doesn't block node maintenance.
+  unhealthyPodEvictionPolicy: AlwaysAllow
   selector:
-    matchLabels:
-      # Must match a label in the SandboxTemplate's podTemplate.
-      app: my-sandbox-app
     matchExpressions:
-    # Exclude pods that a SandboxClaim has taken; claimed-sandboxes-pdb.yaml covers those.
+    # Set on pods whose Sandbox is owned by a SandboxWarmPool (idle, not yet claimed).
+    - key: agents.x-k8s.io/warm-pool-sandbox
+      operator: Exists
+    # Never set together with the warm pool label; requiring its absence keeps
+    # this PDB disjoint from claimed-sandboxes-pdb.yaml by construction.
     - key: agents.x-k8s.io/claim-uid
       operator: DoesNotExist

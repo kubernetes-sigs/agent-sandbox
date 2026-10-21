@@ -7,7 +7,6 @@ spec:
   podTemplate:
     metadata:
       labels:
-        # warmpool-pdb.yaml selects idle warm pool pods by this label.
         app: my-sandbox-app
     spec:
       containers:

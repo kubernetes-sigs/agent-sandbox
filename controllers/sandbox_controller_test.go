@@ -637,6 +637,23 @@ func TestComputeConditions(t *testing.T) {
 			},
 		},
 		{
+			// The kubelet reports StartedAt as the Unix epoch for a container
+			// that failed to start, so the run length must not reset the backoff.
+			name:    "24b. Container that failed to start between restarts is reported as CrashLoopBackOff",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
+			pod: ownedPod(withRestartPolicy(corev1.RestartPolicyAlways, func() *corev1.Pod {
+				cs := terminatedContainer("app", "StartError", 128, 3)
+				cs.State.Terminated.StartedAt = metav1.NewTime(time.Unix(0, 0))
+				cs.State.Terminated.FinishedAt = metav1.NewTime(time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC))
+				return podWithContainerState(corev1.PodRunning, false, cs)
+			}())),
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
+				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod has not reported a PodScheduled condition yet"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: `Pod is Running but not Ready; container "app" is in CrashLoopBackOff (last exit: StartError)`},
+			},
+		},
+		{
 			name:    "25. First exit before any restart adds no detail",
 			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
 			pod:     ownedPod(withRestartPolicy(corev1.RestartPolicyAlways, podWithContainerState(corev1.PodRunning, false, terminatedContainer("app", "Error", 1, 0)))),

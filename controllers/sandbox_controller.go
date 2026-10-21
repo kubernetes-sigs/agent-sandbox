@@ -799,7 +799,9 @@ func restartingExit(cs corev1.ContainerStatus, restartOnFailure, restartOnSucces
 	if terminated == nil || cs.RestartCount == 0 {
 		return nil
 	}
-	if terminated.FinishedAt.Sub(terminated.StartedAt.Time) >= crashLoopBackOffResetPeriod {
+	// A container that failed to start (StartError) reports StartedAt as the
+	// Unix epoch, so its run length says nothing about a backoff reset.
+	if started := terminated.StartedAt; started.Unix() > 0 && terminated.FinishedAt.Sub(started.Time) >= crashLoopBackOffResetPeriod {
 		return nil
 	}
 	if (terminated.ExitCode == 0 && !restartOnSuccess) || (terminated.ExitCode != 0 && !restartOnFailure) {

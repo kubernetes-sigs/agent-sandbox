@@ -22,7 +22,7 @@ To maintain high velocity and prevent our review queue from stagnating, this pro
   - **CodeRabbit:** CodeRabbit provides automated PR summaries, walkthroughs, and high-level reviews. It is configured to signal approval once checks pass and issues are resolved. You can interact with it by commenting `@coderabbitai` on your PR (e.g., `@coderabbitai review` to request an incremental re-review, or `@coderabbitai full review` to re-evaluate the entire PR from scratch).
   - **AI Agent Skills:** We provide instructions for AI agents in the [`.agents/skills/`](.agents/skills/) directory. These skills guide AI assistants to follow project conventions and rules. Contributors using AI tools are encouraged to reference these skills.
 - **Fast-Track Delivery (PR Takeovers):** To focus on delivering features faster, maintainers may take over community PRs that are approved or highly important. If a PR is close to completion, a maintainer might push the final changes and merge it directly.
-- **Stale Management:** We have shifted to a more aggressive rule for inactive PRs to reduce queue clutter. Any PR that is inactive for 30 days will be automatically marked stale (`lifecycle/stale` label) and closed after 15 more days of inactivity. Closed PRs can always be reopened if the author returns to continue the work.
+- **Stale Management:** We have shifted to a more aggressive rule for inactive PRs to reduce queue clutter. Any PR that is inactive for 15 days will be automatically marked stale (`lifecycle/stale` label) and closed after 15 more days of inactivity. Closed PRs can always be reopened if the author returns to continue the work.
 
 ## Mentorship
 

@@ -16,8 +16,8 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"maps"
 	"os"
 	"os/signal"
 	"sync"
@@ -42,13 +42,20 @@ type Client struct {
 	tracer  trace.Tracer
 	svcName string
 
-	mu         sync.Mutex
-	registry   map[Key]*Sandbox
-	stopSignal context.CancelFunc // non-nil when signal handler is active
+	mu       sync.Mutex
+	registry map[Key]*Sandbox
+	// namedClaims records claims requested with WithClaimName. Ownership is
+	// kept here rather than on the handle because GetSandbox re-attaches
+	// with a fresh handle.
+	namedClaims map[Key]struct{}
+	stopSignal  context.CancelFunc // non-nil when signal handler is active
 }
 
 // NewClient creates a Client with shared configuration.
 func NewClient(_ context.Context, opts Options) (*Client, error) {
+	if opts.ClaimName != "" || opts.AdoptExisting {
+		return nil, errors.New("sandbox: ClaimName and AdoptExisting are per-sandbox; use WithClaimName and WithAdoptExisting with CreateSandbox")
+	}
 	opts.setDefaults()
 	if err := opts.validateCommon(); err != nil {
 		return nil, err
@@ -66,23 +73,33 @@ func NewClient(_ context.Context, opts Options) (*Client, error) {
 	tracer, svcName := newTracer(opts)
 
 	return &Client{
-		opts:     opts,
-		k8s:      k8s,
-		log:      opts.Logger,
-		tracer:   tracer,
-		svcName:  svcName,
-		registry: make(map[Key]*Sandbox),
+		opts:        opts,
+		k8s:         k8s,
+		log:         opts.Logger,
+		tracer:      tracer,
+		svcName:     svcName,
+		registry:    make(map[Key]*Sandbox),
+		namedClaims: make(map[Key]struct{}),
 	}, nil
 }
 
 // CreateSandbox provisions a new sandbox and returns a managed handle.
-// On failure, the orphaned claim is cleaned up.
-func (c *Client) CreateSandbox(ctx context.Context, warmPoolName, namespace string) (*Sandbox, error) {
+// Optional CreateOption values override or merge onto the Client's base
+// Options for this call. On failure, a claim with a generated name is
+// cleaned up; a claim named with WithClaimName is left in place.
+func (c *Client) CreateSandbox(ctx context.Context, warmPoolName, namespace string, opts ...CreateOption) (*Sandbox, error) {
 	if namespace == "" {
 		namespace = defaultNamespace
 	}
 
+	var co createOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&co)
+		}
+	}
 	sandboxOpts := c.opts
+	co.apply(&sandboxOpts)
 	sandboxOpts.WarmPoolName = warmPoolName
 	sandboxOpts.Namespace = namespace
 	sandboxOpts.K8sHelper = c.k8s
@@ -92,14 +109,21 @@ func (c *Client) CreateSandbox(ctx context.Context, warmPoolName, namespace stri
 		return nil, err
 	}
 
+	// A failed Open leaves a named claim in place, so it is recorded first.
+	if sandboxOpts.ClaimName != "" {
+		c.mu.Lock()
+		c.namedClaims[Key{Namespace: namespace, ClaimName: sandboxOpts.ClaimName}] = struct{}{}
+		c.mu.Unlock()
+	}
+
 	if err := sb.Open(ctx); err != nil {
 		return nil, err
 	}
 
 	key := Key{Namespace: namespace, ClaimName: sb.ClaimName()}
-	// The registry key is built from the server-assigned (GenerateName) claim
-	// name, which is unique to this sb, so a hit means a concurrent GetSandbox
-	// attached to the very claim we just created and registered first.
+	// Key may already be in the registry from a concurrent attach to this
+	// claim, adopting an already-tracked claim, or a stale handle from a
+	// deleted claim of the same name.
 	return c.trackOrAdoptRace(key, sb), nil
 }
 
@@ -133,7 +157,7 @@ func (c *Client) GetSandbox(ctx context.Context, claimName, namespace string) (*
 	if err := c.k8s.verifyClaimExists(ctx, claimName, namespace, c.tracer, c.svcName); err != nil {
 		return nil, fmt.Errorf("sandbox: claim %q not found in %q: %w", claimName, namespace, err)
 	}
-	sandboxName, err := c.k8s.resolveSandboxName(ctx, claimName, namespace, sandboxOpts.SandboxReadyTimeout, c.tracer, c.svcName)
+	sandboxName, err := c.k8s.resolveSandboxName(ctx, claimName, namespace, "", sandboxOpts.SandboxReadyTimeout, c.tracer, c.svcName)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: failed to resolve sandbox for claim %q: %w", claimName, err)
 	}
@@ -232,6 +256,7 @@ func (c *Client) DeleteSandbox(ctx context.Context, claimName, namespace string)
 	c.mu.Lock()
 	sb := c.registry[key]
 	delete(c.registry, key)
+	delete(c.namedClaims, key)
 	c.mu.Unlock()
 
 	if sb != nil {
@@ -242,20 +267,45 @@ func (c *Client) DeleteSandbox(ctx context.Context, claimName, namespace string)
 
 // DeleteAll closes and deletes all tracked sandboxes. Best-effort.
 func (c *Client) DeleteAll(ctx context.Context) {
+	c.closeTracked(ctx, false)
+}
+
+// closeTracked empties the registry and closes every handle it held. With
+// keepNamed, handles of named claims are disconnected instead.
+func (c *Client) closeTracked(ctx context.Context, keepNamed bool) {
+	type tracked struct {
+		key  Key
+		sb   *Sandbox
+		keep bool
+	}
 	c.mu.Lock()
-	snapshot := make(map[Key]*Sandbox, len(c.registry))
-	maps.Copy(snapshot, c.registry)
+	snapshot := make([]tracked, 0, len(c.registry))
+	for key, sb := range c.registry {
+		_, named := c.namedClaims[key]
+		snapshot = append(snapshot, tracked{key: key, sb: sb, keep: keepNamed && named})
+		if !keepNamed {
+			delete(c.namedClaims, key)
+		}
+	}
 	c.registry = make(map[Key]*Sandbox)
 	c.mu.Unlock()
 
-	for key, sb := range snapshot {
-		if err := sb.Close(ctx); err != nil {
-			c.log.Error(err, "cleanup failed", "claim", key.ClaimName, "namespace", key.Namespace)
+	for _, t := range snapshot {
+		var err error
+		if t.keep {
+			err = t.sb.Disconnect(ctx)
+		} else {
+			err = t.sb.Close(ctx)
+		}
+		if err != nil {
+			c.log.Error(err, "cleanup failed", "claim", t.key.ClaimName, "namespace", t.key.Namespace)
 		}
 	}
 }
 
-// EnableAutoCleanup calls DeleteAll on SIGINT/SIGTERM.
+// EnableAutoCleanup deletes tracked sandboxes on SIGINT/SIGTERM. Claims
+// created with WithClaimName are caller-owned: their handles are
+// disconnected but the claims are kept.
 // Call the returned function to stop the signal handler.
 func (c *Client) EnableAutoCleanup() (stop func()) {
 	c.mu.Lock()
@@ -274,7 +324,7 @@ func (c *Client) EnableAutoCleanup() (stop func()) {
 		select {
 		case sig := <-ch:
 			c.log.Info("signal received, cleaning up sandboxes", "signal", sig.String())
-			c.DeleteAll(context.Background())
+			c.closeTracked(context.Background(), true)
 			signal.Stop(ch)
 			// Re-raise so the default handler terminates the process.
 			p, _ := os.FindProcess(os.Getpid())

@@ -164,7 +164,7 @@ class SandboxWithSnapshotSupport(Sandbox):
                     f"Sandbox '{self.sandbox_id}' is in the process of resuming/starting (spec.operatingMode='{spec_operating_mode}' but no podIPs assigned)."
                 )
 
-            return is_spec_suspended
+            return bool(is_spec_suspended)
         except Exception as e:
             logger.error(
                 f"Failed to check if Sandbox '{self.sandbox_id}' is suspended: {e}"
@@ -447,7 +447,10 @@ class SandboxWithSnapshotSupport(Sandbox):
                     }
                 }
             }
-            self.k8s_helper.patch_sandbox_claim(self.claim_name, self.namespace, body)
+            claim_name = self.claim_name
+            if not claim_name:
+                raise RuntimeError("Cannot patch SandboxClaim: claim_name is not set")
+            self.k8s_helper.patch_sandbox_claim(claim_name, self.namespace, body)
         except Exception as e:
             logger.error(f"Failed to clean up restore annotation before resuming: {e}")
             return ResumeResponse(
@@ -518,7 +521,10 @@ class SandboxWithSnapshotSupport(Sandbox):
                     }
                 }
             }
-            self.k8s_helper.patch_sandbox_claim(self.claim_name, self.namespace, body)
+            claim_name = self.claim_name
+            if not claim_name:
+                raise RuntimeError("Cannot patch SandboxClaim: claim_name is not set")
+            self.k8s_helper.patch_sandbox_claim(claim_name, self.namespace, body)
 
             if not wait_for_sandbox_propagation(
                 self.k8s_helper, self.namespace, self.sandbox_id, snapshot_uid

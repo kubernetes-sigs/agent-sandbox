@@ -279,7 +279,9 @@ func (t *portForwardTunnel) start(
 			timer := time.NewTimer(monitorExitTimeout)
 			defer timer.Stop()
 			select {
-			case <-errChan:
+			case err := <-errChan:
+				t.log.V(4).Info("port-forward monitor exited after cancellation",
+					"pod", podName, "err", err)
 			case <-timer.C:
 				t.log.Error(
 					nil,

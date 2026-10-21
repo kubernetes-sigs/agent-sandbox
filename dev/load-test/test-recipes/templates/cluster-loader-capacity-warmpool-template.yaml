@@ -1,0 +1,32 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: {{.Name}}
+  labels:
+    group: {{.Group}}
+spec:
+  service: false
+  podTemplate:
+    metadata:
+      labels:
+        group: {{.Group}}
+    spec:
+      terminationGracePeriodSeconds: 1
+      {{if eq .KwokNodes "true"}}
+      nodeSelector:
+        type: kwok
+      tolerations:
+      - key: kwok.x-k8s.io/node
+        operator: Exists
+        effect: NoSchedule
+      {{end}}
+      containers:
+      - name: sandbox
+        image: {{.Image}}
+        env:
+        - name: BENCHMARK_REVISION
+          value: "{{.Revision}}"
+        resources:
+          requests:
+            cpu: 1m
+            memory: 8Mi

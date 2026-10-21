@@ -12,3 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Computer-use client extensions for the Agentic Sandbox Python SDK."""
+
+from .computer_use import ComputerUseSandboxClient, SandboxWithComputerUseSupport
+
+__all__ = [
+    "ComputerUseSandboxClient",
+    "SandboxWithComputerUseSupport",
+]

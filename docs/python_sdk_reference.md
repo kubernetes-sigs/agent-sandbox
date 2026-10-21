@@ -220,9 +220,10 @@ network failure.
 **Example**:
 
   
+  >>> from k8s_agent_sandbox import MemberState
   >>> client = SandboxClient()
   >>> batch = client.get_batch("b1234abcd12")
-  >>> ready = [m for m in batch.members() if m.ready]
+  >>> ready = [m for m in batch.members() if m.state is MemberState.READY]
 
 <a id="k8s_agent_sandbox.sandbox_client.SandboxClient.delete_sandbox"></a>
 
@@ -645,6 +646,20 @@ Represents one warmpool in a batch for multi-pool batch claiming.
 ##### min\_ready
 
 Defaults to ``size``.
+
+<a id="k8s_agent_sandbox.models.MemberState"></a>
+
+### MemberState Objects
+
+```python
+class MemberState(StrEnum)
+```
+
+Where a batch member's claim is in its lifecycle.
+
+``FAILED`` is terminal, so the claim will never become Ready. A member stays ``FAILED`` if its
+claim is deleted afterwards, so its state keeps saying why it can't become Ready. ``LOST``
+means the claim was deleted before it failed.
 
 <a id="k8s_agent_sandbox.models.Member"></a>
 

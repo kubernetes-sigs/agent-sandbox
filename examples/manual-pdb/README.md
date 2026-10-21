@@ -23,7 +23,7 @@ When a claim adopts a warm pool pod, the pod moves from the warm pool PDB to the
 
 The two selectors are mutually exclusive: one requires `agents.x-k8s.io/claim-uid`, the other requires it to be absent. Keep it that way. If a pod matches more than one PDB, the eviction API rejects every eviction for it ("This pod has more than one PodDisruptionBudget"), and drains fail. Don't add other PDBs that select these pods.
 
-The warm pool PDB covers every warm pool in the namespace. To limit it to one pool, add a label from that pool's SandboxTemplate `podTemplate` to the PDB's `matchLabels`. Keep `minAvailable` below the pool's `replicas`; otherwise no idle pod can be evicted, and drains of the nodes running them never finish.
+The warm pool PDB covers every warm pool in the namespace. To limit it to one pool, replace the `Exists` expression with that pool's value of `agents.x-k8s.io/warm-pool-sandbox` under `matchLabels`. The value is a hash of the pool name; read it from one of the pool's pods (their names start with the pool name) with `kubectl get pods -L agents.x-k8s.io/warm-pool-sandbox`. Keep `minAvailable` below the pool's `replicas`; otherwise no idle pod can be evicted, and drains of the nodes running them never finish.
 
 Without the optional warm pool PDB, idle warm pool pods can be evicted freely. They hold no user state: the warm pool marks them `cluster-autoscaler.kubernetes.io/safe-to-evict: "true"` by default, and an evicted pod is recreated by its Sandbox.
 
@@ -63,7 +63,7 @@ kubectl apply -f sandboxwarmpool.yaml -n default
 
 ### Step 3: Apply the PDBs (Once per Namespace)
 
-Apply the PDBs to **every** namespace where you run Sandboxes. `warmpool-pdb.yaml` is optional.
+Apply the PDBs to **every** namespace where you run Sandboxes. The PDB manifests don't set `metadata.namespace`, so `-n` chooses the namespace. `warmpool-pdb.yaml` is optional.
 
 ```bash
 kubectl apply -f claimed-sandboxes-pdb.yaml -n default
@@ -127,7 +127,6 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: direct-sandboxes
-  namespace: default
 spec:
   minAvailable: 1000000
   unhealthyPodEvictionPolicy: AlwaysAllow

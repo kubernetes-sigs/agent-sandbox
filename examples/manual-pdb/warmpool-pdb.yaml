@@ -2,8 +2,8 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: secure-warmpool
-  # NOTE: This must be applied to the SAME namespace as the SandboxWarmPool.
-  namespace: default
+  # No namespace is set, so `kubectl apply -n <namespace>` chooses it.
+  # Apply it to the namespace of the SandboxWarmPool.
 spec:
   # Keep at least this many idle warm pool pods available during drains.
   # Keep it below the pool's replicas, or no idle pod can ever be evicted.

@@ -2,8 +2,8 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: claimed-sandboxes
-  # NOTE: This must be applied to the SAME namespace where the SandboxClaims create their pods.
-  namespace: default
+  # No namespace is set, so `kubectl apply -n <namespace>` chooses it.
+  # Apply it to every namespace where SandboxClaims create pods.
 spec:
   # Larger than any realistic pod count, so disruptionsAllowed is always 0.
   # Use an integer: maxUnavailable or a percentage would need a /scale

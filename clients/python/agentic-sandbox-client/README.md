@@ -700,6 +700,7 @@ batch.detach()
 - `members(warmpool=None)`: a snapshot of every `Member`, sorted by ordinal.
 - `connect(member)`: a connected `Sandbox`/`AsyncSandbox` for a ready member.
 - `err()`: the error that stopped the background watch/renewal, or `None`.
+- `lease_degraded()`: whether Lease renewal is failing, from the first failed renewal until one succeeds.
 - `detach(grace=None)`: stops the background tasks and releases the Lease so another `get_batch` can take over; idempotent.
 
 #### RBAC

@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 
 import aiohttp
 from kubernetes_asyncio import client
+from kubernetes_asyncio.client import V1Lease
 from kubernetes_asyncio.client.exceptions import ApiException
 
 from . import batch_state, batch_utils
@@ -90,6 +91,8 @@ class AsyncSandboxBatch:
         holder_identity: str,
         lease_duration: int,
         list_resource_version: str,
+        lease: V1Lease,
+        lease_renewed_at: float,
     ) -> None:
         self._client = client
         self.batch_id = batch_id
@@ -106,7 +109,12 @@ class AsyncSandboxBatch:
         self._detached = False
         self._lease_released = False
         self._renewal_degraded = False
-        self._last_renew_success = time.monotonic()
+        # The Lease from this handle's last successful write. Renewal sends it back without reading
+        # the Lease first, and only reads it if the write conflicts.
+        self._lease = lease
+        # When this handle considers its Lease expired. It's a little earlier than the expiry other
+        # clients see, so the handle never thinks it holds the batch after someone else could take it.
+        self._lease_expires_at = lease_renewed_at + lease_duration
         self._watch_task: asyncio.Task | None = None
         self._renew_task: asyncio.Task | None = None
 
@@ -143,6 +151,9 @@ class AsyncSandboxBatch:
             annotation = (lease.metadata.annotations or {}).get(BATCH_LEASE_DURATION_ANNOTATION)
         duration = batch_utils.parse_lease_duration_annotation(annotation)
 
+        # Read before renewTime is stamped, so this handle's expiry is never later than the one
+        # other clients see.
+        renewed_at = time.monotonic()
         now = batch_utils.lease_now()
         spec_duration = lease.spec.lease_duration_seconds if lease is not None else None
         renew_time = lease.spec.renew_time if lease is not None else None
@@ -156,7 +167,7 @@ class AsyncSandboxBatch:
                 f"batch '{batch_id}' Lease is missing or stale in namespace '{namespace}'"
             )
 
-        if lease.spec.holder_identity is not None:
+        if lease.spec.holder_identity:
             raise BatchInUseError(
                 f"batch '{batch_id}' is held by '{lease.spec.holder_identity}'"
             )
@@ -172,7 +183,7 @@ class AsyncSandboxBatch:
         lease.spec.acquire_time = now
         lease.spec.lease_transitions = (lease.spec.lease_transitions or 0) + 1
         try:
-            await client.k8s_helper.replace_batch_lease(
+            written = await client.k8s_helper.replace_batch_lease(
                 lease_name, namespace, lease, _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
             )
         except ApiException as e:
@@ -191,6 +202,8 @@ class AsyncSandboxBatch:
             holder_identity=holder_identity,
             lease_duration=duration,
             list_resource_version=list_rv,
+            lease=written,
+            lease_renewed_at=renewed_at,
         )
         handle._start()
         return handle
@@ -251,6 +264,14 @@ class AsyncSandboxBatch:
         Lease renewal (e.g., ``BatchLeaseExpiredError``), or ``None`` while healthy.
         """
         return self._state.error()
+
+    def lease_degraded(self) -> bool:
+        """Returns whether background Lease renewal is failing.
+
+        ``True`` from the first failed renewal until a renewal succeeds. It stays ``True`` once
+        renewal stops on an error, such as the Lease expiring, so it can be polled at any time.
+        """
+        return self._renewal_degraded
 
     async def detach(self, grace: int | None = None) -> None:
         """Stops the background watch and Lease renewal, closes cached sandbox connections, and
@@ -398,67 +419,109 @@ class AsyncSandboxBatch:
     async def _renew_loop(self) -> None:
         """Background lease renewal loop: renews at roughly 1/3 of lease duration
         so a couple of missed renewals in a row still leave margin before the Lease goes stale.
+        A failed renewal is retried on a short backoff instead of a full interval, so a brief
+        apiserver outage doesn't use up the time left before expiry.
         """
+        # Consecutive failed renewals, which set the retry backoff.
+        failures = 0
         while True:
-            await asyncio.sleep(self._renew_interval)
+            deadline = self._lease_expires_at
+            wait = self._renew_interval if failures == 0 else batch_utils.backoff_delay(
+                failures, batch_utils.BATCH_BACKOFF_BASE_SECONDS, batch_utils.BATCH_BACKOFF_MAX_SECONDS
+            )
+            await asyncio.sleep(max(0.0, min(wait, deadline - time.monotonic())))
+            if time.monotonic() >= deadline:
+                await self._stop_renewal(
+                    BatchLeaseExpiredError(
+                        f"batch '{self.batch_id}' lease has not renewed successfully "
+                        f"for {self._lease_duration}s"
+                    )
+                )
+                return
             if not await self._renew_once():
                 return
+            failures = failures + 1 if self._renewal_degraded else 0
+
+    def _mark_renewal_degraded(self, reason: object) -> None:
+        """Sets ``_renewal_degraded``, logging the first failure of each episode. Requires ``_lock``."""
+        if not self._renewal_degraded:
+            logger.info(f"Batch '{self.batch_id}' lease renewal degraded: {reason}")
+            self._renewal_degraded = True
+
+    def _renew_request_timeout(self) -> float:
+        """Bounds a renewal request by the renew interval and by the time left before expiry."""
+        left = self._lease_expires_at - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("the Lease expired before the renewal request was sent")
+        return min(self._renew_interval, left)
 
     async def _renew_once(self) -> bool:
-        """Does a single attempt to renew a Lease. A transient failure sets ``_renewal_degraded``
-        and logs, and if the Lease has not been successfully renewed for a full Lease duration,
-        sets a batch-level error.
+        """Does a single attempt to renew a Lease, and sets ``_renewal_degraded`` if it fails.
+
+        Replaces the Lease this handle last wrote without reading it first. Only a conflict means
+        the Lease changed since, so only then is it read to find out whether this handle still
+        holds it.
 
         Returns ``False`` if another holder has taken the Lease or the Lease no longer exists,
         meaning this handle must stop renewing rather than overwrite it.
         """
         try:
-            # Neither Kubernetes client has a default request timeout. Bounding each request by the
-            # renewal interval makes a hung apiserver count as a failed renewal.
-            lease = await self._client.k8s_helper.read_batch_lease(
-                self._lease_name, self.namespace, _request_timeout=self._renew_interval
-            )
-            if lease is None:
-                async with self._lock:
-                    self._state.note_error(
-                        BatchLeaseExpiredError(
-                            f"batch '{self.batch_id}' Lease '{self._lease_name}' no longer exists"
-                        )
-                    )
-                return False
-            if lease.spec.holder_identity != self._holder_identity:
-                async with self._lock:
-                    self._state.note_error(
+            try:
+                sent_at, written = await self._write_renewal(self._lease)
+            except ApiException as e:
+                if e.status == 404:
+                    return await self._stop_renewal(self._lease_gone_error())
+                if e.status != 409:
+                    raise
+                # A conflict means another holder took the Lease, or an earlier renewal whose
+                # response was lost did land, so read it to tell the two apart.
+                lease = await self._client.k8s_helper.read_batch_lease(
+                    self._lease_name, self.namespace, _request_timeout=self._renew_request_timeout()
+                )
+                if lease is None:
+                    return await self._stop_renewal(self._lease_gone_error())
+                if lease.spec.holder_identity != self._holder_identity:
+                    return await self._stop_renewal(
                         BatchInUseError(
                             f"batch '{self.batch_id}' Lease is no longer held by this handle "
                             f"(current holder: {lease.spec.holder_identity!r})"
                         )
                     )
-                return False
-            lease.spec.holder_identity = self._holder_identity
-            lease.spec.renew_time = batch_utils.lease_now()
-            lease.spec.lease_duration_seconds = self._lease_duration
-            await self._client.k8s_helper.replace_batch_lease(
-                self._lease_name, self.namespace, lease, _request_timeout=self._renew_interval
-            )
+                sent_at, written = await self._write_renewal(lease)
         except asyncio.CancelledError:
             raise
         except Exception as e:
             async with self._lock:
-                if not self._renewal_degraded:
-                    logger.info(f"Batch '{self.batch_id}' lease renewal degraded: {e}")
-                    self._renewal_degraded = True
-                # time.monotonic() is a clock that only ever moves forward, so unlike datetime.now(),
-                # it can't jump backward from an NTP correction or a system clock change.
-                if time.monotonic() - self._last_renew_success >= self._lease_duration:
-                    self._state.note_error(
-                        BatchLeaseExpiredError(
-                            f"batch '{self.batch_id}' lease has not renewed successfully "
-                            f"for {self._lease_duration}s"
-                        )
-                    )
+                self._mark_renewal_degraded(e)
             return True
         async with self._lock:
-            self._last_renew_success = time.monotonic()
+            self._lease = written
+            self._lease_expires_at = sent_at + self._lease_duration
             self._renewal_degraded = False
         return True
+
+    async def _stop_renewal(self, error: BatchError) -> bool:
+        """Records why this handle stops renewing the Lease. Returns ``False`` for ``_renew_once``."""
+        async with self._lock:
+            self._mark_renewal_degraded(error)
+            self._state.note_error(error)
+        return False
+
+    async def _write_renewal(self, lease) -> tuple[float, V1Lease]:
+        """Stamps ``lease`` as renewed now and replaces it, returning the send time and the written Lease."""
+        # Neither Kubernetes client has a default request timeout, so a hung apiserver would
+        # otherwise stall renewal past the Lease's expiry.
+        timeout = self._renew_request_timeout()
+        sent_at = time.monotonic()
+        lease.spec.holder_identity = self._holder_identity
+        lease.spec.renew_time = batch_utils.lease_now()
+        lease.spec.lease_duration_seconds = self._lease_duration
+        written = await self._client.k8s_helper.replace_batch_lease(
+            self._lease_name, self.namespace, lease, _request_timeout=timeout
+        )
+        return sent_at, written
+
+    def _lease_gone_error(self) -> BatchLeaseExpiredError:
+        return BatchLeaseExpiredError(
+            f"batch '{self.batch_id}' Lease '{self._lease_name}' no longer exists"
+        )

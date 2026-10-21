@@ -18,6 +18,7 @@ import math
 import time
 from itertools import chain
 from datetime import UTC, datetime
+from collections.abc import Iterator
 from typing import Any, List, cast
 from kubernetes import client, config, watch
 import urllib3.exceptions
@@ -528,7 +529,7 @@ class K8sHelper:
         namespace: str,
         label_selector: str,
         _request_timeout: float | tuple[float, float] | None = None,
-    ) -> tuple[List[dict], str]:
+    ) -> tuple[List[dict[str, Any]], str]:
         """Lists full SandboxClaim objects matching a label selector. Also return the list's
         resourceVersion, so a subsequent watch does not miss any events.
         """
@@ -547,7 +548,7 @@ class K8sHelper:
     def watch_sandbox_claims(
         self, namespace: str, label_selector: str, resource_version: str, timeout_seconds: int,
         _request_timeout: float | tuple[float, float] | None = None
-    ):
+    ) -> Iterator[dict[str, Any]]:
         """Uses a single watch starting at ``resource_version`` to yield raw watch events for multiple
         SandboxClaims matching a label selector.
 
@@ -576,7 +577,7 @@ class K8sHelper:
 
     def read_batch_lease(
         self, name: str, namespace: str, _request_timeout: float | tuple[float, float] | None = None
-    ):
+    ) -> Any:
         """Reads a batch Lease, or ``None`` if it doesn't exist.
 
         Args:
@@ -593,8 +594,8 @@ class K8sHelper:
             raise
 
     def replace_batch_lease(
-        self, name: str, namespace: str, body, _request_timeout: float | tuple[float, float] | None = None
-    ):
+        self, name: str, namespace: str, body: Any, _request_timeout: float | tuple[float, float] | None = None
+    ) -> Any:
         """Replaces a batch Lease, then returns the updated object.
 
         Args:

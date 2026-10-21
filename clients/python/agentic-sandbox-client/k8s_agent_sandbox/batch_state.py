@@ -20,6 +20,7 @@ Kubernetes objects and thus do not perform any network I/O, threading, or lockin
 """
 
 from collections.abc import Sequence
+from typing import Any
 from operator import itemgetter
 
 from .constants import (
@@ -42,7 +43,7 @@ def parse_ordinal(batch_id: str, claim_name: str) -> int | None:
     return int(suffix)
 
 
-def reconstruct_groups(claim_objs: Sequence[dict]) -> list[BatchGroup]:
+def reconstruct_groups(claim_objs: Sequence[dict[str, Any]]) -> list[BatchGroup]:
     """Rebuilds each pool's ``BatchGroup`` from its claims' group annotations.
 
     A pool with no group annotations on any of its claims becomes ``BatchGroup(size=0, min_ready=0)``,
@@ -92,7 +93,7 @@ def reconstruct_groups(claim_objs: Sequence[dict]) -> list[BatchGroup]:
     return groups
 
 
-def derive_member(claim_obj: dict) -> Member:
+def derive_member(claim_obj: dict[str, Any]) -> Member:
     """Builds a ``Member`` from a raw SandboxClaim object."""
     metadata = claim_obj.get("metadata") or {}
     spec = claim_obj.get("spec") or {}
@@ -144,12 +145,12 @@ class BatchState:
         self._ordinals: dict[str, int] = {}
         self._error: Exception | None = None
 
-    def seed_from_claims(self, claim_objs: Sequence[dict]) -> None:
+    def seed_from_claims(self, claim_objs: Sequence[dict[str, Any]]) -> None:
         """Reconstructs state from the batch's existing claims."""
         for claim_obj in claim_objs:
             self.upsert_claim(claim_obj)
 
-    def upsert_claim(self, claim_obj: dict) -> Member | None:
+    def upsert_claim(self, claim_obj: dict[str, Any]) -> Member | None:
         """Derives a ``Member`` from a claim and inserts or updates it."""
         metadata = claim_obj.get("metadata") or {}
         claim_name = metadata.get("name", "")
@@ -172,7 +173,7 @@ class BatchState:
         self._members[claim_name] = lost_member
         return lost_member
 
-    def resync_from_list(self, claim_objs: Sequence[dict]) -> None:
+    def resync_from_list(self, claim_objs: Sequence[dict[str, Any]]) -> None:
         """Replaces the cache with a fresh list after a watch 410."""
         seen_names = set()
         for claim_obj in claim_objs:

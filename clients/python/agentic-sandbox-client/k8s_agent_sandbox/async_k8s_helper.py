@@ -17,6 +17,7 @@ import logging
 import math
 import time
 from datetime import UTC, datetime
+from collections.abc import AsyncIterator
 from typing import Any, cast
 
 import aiohttp
@@ -552,7 +553,7 @@ class AsyncK8sHelper:
 
     async def list_sandbox_claim_objects(
         self, namespace: str, label_selector: str, _request_timeout: float | None = None
-    ) -> tuple[list[dict], str]:
+    ) -> tuple[list[dict[str, Any]], str]:
         """Lists full SandboxClaim objects matching a label selector. Also return the list's
         resourceVersion, so a subsequent watch does not miss any events.
         """
@@ -573,7 +574,7 @@ class AsyncK8sHelper:
     async def watch_sandbox_claims(
         self, namespace: str, label_selector: str, resource_version: str, timeout_seconds: int,
         _request_timeout: float | None = None
-    ):
+    ) -> AsyncIterator[dict[str, Any]]:
         """Uses a single watch starting at ``resource_version`` to yield raw watch events for multiple
         SandboxClaims matching a label selector.
 
@@ -601,7 +602,7 @@ class AsyncK8sHelper:
         finally:
             await w.close()
 
-    async def read_batch_lease(self, name: str, namespace: str, _request_timeout: float | None = None):
+    async def read_batch_lease(self, name: str, namespace: str, _request_timeout: float | None = None) -> Any:
         """Reads a batch Lease, or ``None`` if it doesn't exist.
 
         Args:
@@ -619,8 +620,8 @@ class AsyncK8sHelper:
             raise
 
     async def replace_batch_lease(
-        self, name: str, namespace: str, body, _request_timeout: float | None = None
-    ):
+        self, name: str, namespace: str, body: Any, _request_timeout: float | None = None
+    ) -> Any:
         """Replaces a batch Lease, then returns the updated object.
 
         Args:

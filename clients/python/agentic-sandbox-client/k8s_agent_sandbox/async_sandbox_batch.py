@@ -23,7 +23,7 @@ import asyncio
 import contextlib
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
 from kubernetes_asyncio import client
@@ -83,7 +83,7 @@ class AsyncSandboxBatch:
 
     def __init__(
         self,
-        client: "AsyncSandboxClient",
+        client: "AsyncSandboxClient[Any]",
         batch_id: str,
         namespace: str,
         state: batch_state.BatchState,
@@ -115,8 +115,8 @@ class AsyncSandboxBatch:
         # When this handle considers its Lease expired. It's a little earlier than the expiry other
         # clients see, so the handle never thinks it holds the batch after someone else could take it.
         self._lease_expires_at = lease_renewed_at + lease_duration
-        self._watch_task: asyncio.Task | None = None
-        self._renew_task: asyncio.Task | None = None
+        self._watch_task: asyncio.Task[None] | None = None
+        self._renew_task: asyncio.Task[None] | None = None
 
     @property
     def groups(self) -> list[BatchGroup]:
@@ -129,7 +129,7 @@ class AsyncSandboxBatch:
         return self._state.size
 
     @classmethod
-    async def _attach(cls, client: "AsyncSandboxClient", batch_id: str, namespace: str) -> "AsyncSandboxBatch":
+    async def _attach(cls, client: "AsyncSandboxClient[Any]", batch_id: str, namespace: str) -> "AsyncSandboxBatch":
         """Attach to an existing batch and take over its Lease."""
         batch_utils.validate_batch_id(batch_id)
 
@@ -248,7 +248,7 @@ class AsyncSandboxBatch:
                 raise SandboxNotReadyError(
                     f"batch member '{member.claim_name}' is not ready"
                 )
-            sandbox = self._client.sandbox_class(
+            sandbox: AsyncSandbox = self._client.sandbox_class(
                 claim_name=member.claim_name,
                 sandbox_id=current.sandbox_name,
                 namespace=self.namespace,
@@ -507,7 +507,7 @@ class AsyncSandboxBatch:
             self._state.note_error(error)
         return False
 
-    async def _write_renewal(self, lease) -> tuple[float, V1Lease]:
+    async def _write_renewal(self, lease: Any) -> tuple[float, V1Lease]:
         """Stamps ``lease`` as renewed now and replaces it, returning the send time and the written Lease."""
         # Neither Kubernetes client has a default request timeout, so a hung apiserver would
         # otherwise stall renewal past the Lease's expiry.

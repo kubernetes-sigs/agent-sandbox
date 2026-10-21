@@ -6,10 +6,7 @@ metadata:
 spec:
   podTemplate:
     metadata:
-      annotations:
-        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
       labels:
-        sandbox-disruption-policy: "manual-protection"
         app: my-sandbox-app
     spec:
       containers:

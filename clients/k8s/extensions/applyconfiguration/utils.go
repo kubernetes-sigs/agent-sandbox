@@ -60,6 +60,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &apiv1beta1.SandboxWarmPoolStatusApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("SandboxWarmPoolUpdateStrategy"):
 		return &apiv1beta1.SandboxWarmPoolUpdateStrategyApplyConfiguration{}
+	case v1beta1.SchemeGroupVersion.WithKind("WorkspaceResourceOverride"):
+		return &apiv1beta1.WorkspaceResourceOverrideApplyConfiguration{}
 
 	}
 	return nil

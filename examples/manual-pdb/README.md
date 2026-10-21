@@ -13,6 +13,8 @@ A SandboxClaim labels its pod with `agents.x-k8s.io/claim-uid`, both when it ado
 
 When a claim adopts a warm pool pod, the pod moves from the warm pool PDB to the claimed-sandboxes PDB.
 
+The two selectors are mutually exclusive: one requires `agents.x-k8s.io/claim-uid`, the other requires it to be absent. Keep it that way. If a pod matches more than one PDB, the eviction API rejects every eviction for it ("This pod has more than one PodDisruptionBudget"), and drains fail. Don't add other PDBs that select these pods, and use a template label that no other workload in the namespace uses.
+
 Without the optional warm pool PDB, idle warm pool pods can be evicted freely. They hold no user state: the warm pool marks them `cluster-autoscaler.kubernetes.io/safe-to-evict: "true"` by default, and an evicted pod is recreated by its Sandbox.
 
 ### Why `minAvailable` Is Always an Integer

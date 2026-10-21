@@ -105,7 +105,7 @@ func ParseURL(raw string) (*Target, error) {
 		return nil, formatErr
 	}
 	kubeContext, namespace := rest[:j], rest[j+1:i]
-	service, port, _ := strings.Cut(rest[i+1:], ":")
+	service, port, hasPort := strings.Cut(rest[i+1:], ":")
 
 	if !isKubernetesName(namespace) {
 		return nil, fmt.Errorf("%q: namespace %q must be lowercase alphanumeric or '-'", raw, namespace)
@@ -113,7 +113,8 @@ func ParseURL(raw string) (*Target, error) {
 	if !isKubernetesName(service) {
 		return nil, fmt.Errorf("%q: service %q must be lowercase alphanumeric or '-'", raw, service)
 	}
-	if port != "" && !isKubernetesName(port) {
+	// A colon with nothing after it is a mistake, not "the only port".
+	if hasPort && !isKubernetesName(port) {
 		return nil, fmt.Errorf("%q: port %q must be a port number or name", raw, port)
 	}
 	return &Target{Context: kubeContext, Namespace: namespace, Service: service, Port: port}, nil

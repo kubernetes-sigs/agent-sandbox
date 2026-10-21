@@ -67,6 +67,7 @@ func TestParseURL(t *testing.T) {
 		{url: "kubeservice://ctx/ns/:8090", wantErr: `service ""`},
 		{url: "kubeservice://ctx/ns/svc?port=1", wantErr: `service "svc?port=1"`},
 		{url: "kubeservice://ctx/ns/svc:8090:1", wantErr: `port "8090:1"`},
+		{url: "kubeservice://ctx/ns/svc:", wantErr: `port ""`},
 		{url: "kubeservice://ctx/NS/svc", wantErr: `namespace "NS"`},
 	}
 	for _, tc := range tests {

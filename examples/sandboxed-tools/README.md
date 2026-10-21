@@ -220,7 +220,7 @@ To prevent orphaned containers and resource leaks in your cluster, the applicati
 - If no new tool calls are made for 5 minutes (e.g., because the CLI was closed, crashed, or left idle), the **Kubernetes controller automatically terminates the Pod and deletes the Sandbox resource**.
 
 ### 3. Resuming & Local Filesystem Backups
-- **Message History**: Chat history is saved in real-time to a JSONL file at `~/.local/sandboxed-tools/<session-name>/sessions/latest.jsonl`, and restored automatically on startup.
+- **Message History**: Chat history is saved in real-time to a JSONL file at `~/.local/sandboxed-tools/<session-name>/sessions/latest.jsonl`, and restored automatically on startup. A sibling `metadata.json` records the session's toolset, its parent session (if another session created it), and its creation time; it is written once, when the session is created.
 - **Durable Backups**: After each set of tool executions completes (at conversation boundaries), the filesystem state of `/home/clawtainer` is archived to a local timestamped backup at `~/.local/sandboxed-tools/<session-name>/fs`. If the CLI is later restarted or the sandbox is deleted by Kubernetes due to inactivity, a new sandbox is created and restored seamlessly from the latest local backup on the next tool execution.
 
 ## Example Session

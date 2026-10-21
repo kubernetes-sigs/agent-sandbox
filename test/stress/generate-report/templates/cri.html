@@ -23,7 +23,7 @@
 {% block content %}
 <div class="grid">
     <div class="card chart-card" id="cri-chart-card">
-        <div class="card-title">run_podsandbox Latency & Scrape Rates Over Time</div>
+        <div class="card-title">run_podsandbox Latency Over Time</div>
         <div class="chart-container">
             <canvas id="criTimeseriesChart"></canvas>
         </div>
@@ -37,9 +37,24 @@
     </div>
 </div>
 
+<div class="card">
+    <div class="card-title">Containerd Operations by Phase</div>
+    <p><code>network_plugin_operations_set_up_pod</code> and <code>network_plugin_operations_tear_down_pod</code> measure CNI plugin execution.
+        <code>sandbox_create_network</code> also includes namespace creation and metadata updates.
+        <code>sandbox_runtime_create</code> includes network setup and runtime work.
+        These timers overlap; do not add them together or subtract their averages when operation counts differ.
+        Counts and durations are aggregated across all nodes and runtimes; metrics cover all pods.</p>
+    {% if containerd_ops %}
+    <div class="table-container">
+        <table id="containerd-ops-table"></table>
+    </div>
+    {% else %}
+    <p>No containerd operations were measured. Enable containerd metrics on port 1338 and collect at least two scrapes.</p>
+    {% endif %}
+</div>
+
 <script>
-    const criOps = {{ cri_ops | tojson }};
-    renderTable('#cri-ops-table', [
+    const operationColumns = [
         {key: 'phase_name', label: 'Phase', render: v => `<strong>${escapeHtml(v)}</strong>`},
         {key: 'operation_type', label: 'Operation Type', render: v => `<code>${escapeHtml(v)}</code>`},
         {key: 'count_delta', label: 'Count'},
@@ -47,7 +62,14 @@
             v > 10000 ? badge('danger', (v / 1000).toFixed(2) + 's')
             : v > 2000 ? badge('warning', (v / 1000).toFixed(2) + 's')
             : badge('success', v.toFixed(2) + 'ms')}
-    ], criOps);
+    ];
+    const criOps = {{ cri_ops | tojson }};
+    renderTable('#cri-ops-table', operationColumns, criOps);
+
+    const containerdOps = {{ containerd_ops | tojson }};
+    if (containerdOps.length) {
+        renderTable('#containerd-ops-table', operationColumns, containerdOps);
+    }
 
     const chartData = {{ chart_data | tojson }};
     const phases = {{ phases | tojson }};

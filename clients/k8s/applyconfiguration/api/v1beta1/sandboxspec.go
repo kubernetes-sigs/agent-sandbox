@@ -37,7 +37,8 @@ type SandboxSpecApplyConfiguration struct {
 	// operatingMode specifies the desired operational state of the Sandbox:
 	// - Running (default): the controller keeps a backing Pod running.
 	// - Suspended: the controller terminates the backing Pod but retains the
-	// Sandbox object and its volumes so it can later be resumed.
+	// Sandbox object and its volumes so it can later be resumed. Resuming creates a new
+	// Pod from the current podTemplate that reattaches the retained volumes.
 	// This field declares intent only. The observed readiness of the Sandbox is
 	// reported by the Ready condition, and the progress of a suspension by the
 	// Suspended condition; a Sandbox in Running mode is not Ready until its Pod is

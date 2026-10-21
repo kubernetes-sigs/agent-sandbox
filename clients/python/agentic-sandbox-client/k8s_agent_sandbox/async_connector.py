@@ -84,7 +84,7 @@ async def _capture_streamed_error_body(response: httpx.Response) -> None:
         logger.debug("Unable to capture streamed error response body", exc_info=True)
 
 
-def _router_timeout_header_value(timeout) -> str | None:
+def _router_timeout_header_value(timeout: Any) -> str | None:
     """Return a positive read timeout suitable for the router header."""
     value = None
     if isinstance(timeout, bool):
@@ -664,7 +664,7 @@ class AsyncSandboxdPodTunnelStrategy:
         """Return an unused loopback port for ``kubectl`` to bind."""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.bind(("127.0.0.1", 0))
-            return sock.getsockname()[1]
+            return int(sock.getsockname()[1])
 
     @staticmethod
     async def _is_port_open(port: int) -> bool:

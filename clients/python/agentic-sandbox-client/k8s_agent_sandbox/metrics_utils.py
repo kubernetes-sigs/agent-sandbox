@@ -22,6 +22,6 @@ def get_metrics() -> str:
     return generate_latest(REGISTRY).decode("utf-8")
 
 
-def print_metrics():
+def print_metrics() -> None:
     """Prints the registered Prometheus metrics to stdout."""
     print(get_metrics())

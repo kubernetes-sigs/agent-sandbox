@@ -64,7 +64,7 @@ def create_sandbox(warmpool: str,
                    claim_name: str | None = None,
                    adopt_existing: bool = False,
                    shutdown_after_seconds: int | None = None,
-                   volume_claim_templates: list[dict] | None = None,
+                   volume_claim_templates: list[dict[str, Any]] | None = None,
                    pod_labels: dict[str, str] | None = None,
                    pod_annotations: dict[str, str] | None = None,
                    env: dict[str, str] | None = None) -> T
@@ -381,7 +381,7 @@ Octal permission bits (sandboxd only), e.g. "0644".
 
 ```python
 @classmethod
-def from_legacy(cls, entry: dict) -> "FileEntry"
+def from_legacy(cls, entry: dict[str, Any]) -> "FileEntry"
 ```
 
 Build from the legacy python-runtime listing entry.
@@ -392,7 +392,7 @@ Build from the legacy python-runtime listing entry.
 
 ```python
 @classmethod
-def from_sandboxd(cls, entry: dict) -> "FileEntry"
+def from_sandboxd(cls, entry: dict[str, Any]) -> "FileEntry"
 ```
 
 Build from a sandboxd DirectoryListing entry.
@@ -593,6 +593,20 @@ is unavailable, it falls back to the stable Kubernetes DNS endpoint:
 ##### server\_port
 
 Port the sandbox container listens on.
+
+<a id="k8s_agent_sandbox.models.AdditionalPodMetadata"></a>
+
+### AdditionalPodMetadata Objects
+
+```python
+class AdditionalPodMetadata(BaseModel)
+```
+
+Wire-format for SandboxClaim ``spec.additionalPodMetadata``.
+
+Labels and annotations stamped onto the running Sandbox Pod (not the
+SandboxClaim object). Omit empty sections so the manifest never carries
+an empty ``additionalPodMetadata``.
 
 <a id="k8s_agent_sandbox.models.SandboxTracerConfig"></a>
 

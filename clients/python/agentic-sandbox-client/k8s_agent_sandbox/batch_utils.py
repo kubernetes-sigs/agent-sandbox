@@ -137,4 +137,4 @@ def backoff_delay(
     # Cap the exponent early to avoid computing massive 2**n values
     doublings = min(attempt - 1, math.ceil(math.log2(cap / base)))
     wait = min(cap, base * 2 ** doublings)
-    return wait / 2 + rand() * wait / 2
+    return float(wait / 2 + rand() * wait / 2)

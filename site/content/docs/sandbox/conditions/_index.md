@@ -29,7 +29,7 @@ Summarizes whether the Sandbox can serve traffic. It is `True` only when the bac
 | Status | Reason | Meaning |
 | --- | --- | --- |
 | `True` | `DependenciesReady` | The Pod (and Service, if required) are provisioned and the Pod is Ready. |
-| `False` | `DependenciesNotReady` | The Sandbox should be running, but the Pod or Service is not provisioned or not Ready yet. |
+| `False` | `DependenciesNotReady` | The Sandbox should be running, but the Pod or Service is not provisioned or not Ready yet. If a container cannot start, the message names it, for example `container "app" is waiting: ImagePullBackOff`. |
 | `False` | `ReconcilerError` | Reconciling a child resource failed. The controller retries. |
 | `False` | `InvalidConfiguration` | A child resource was rejected with a permanent validation error, for example a Sandbox name whose derived Service name exceeds 63 characters. Recreate the Sandbox. |
 | `False` | `MultiplePods` | More than one Pod is controlled by the Sandbox and the controller cannot pick one safely. |

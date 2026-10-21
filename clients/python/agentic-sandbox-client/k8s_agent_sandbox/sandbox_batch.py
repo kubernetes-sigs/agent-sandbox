@@ -17,7 +17,7 @@
 import logging
 import threading
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import urllib3.exceptions
 from kubernetes import client
@@ -86,7 +86,7 @@ class SandboxBatch:
 
     def __init__(
         self,
-        client: "SandboxClient",
+        client: "SandboxClient[Any]",
         batch_id: str,
         namespace: str,
         state: batch_state.BatchState,
@@ -134,7 +134,7 @@ class SandboxBatch:
         return self._state.size
 
     @classmethod
-    def _attach(cls, client: "SandboxClient", batch_id: str, namespace: str) -> "SandboxBatch":
+    def _attach(cls, client: "SandboxClient[Any]", batch_id: str, namespace: str) -> "SandboxBatch":
         """Attach to an existing batch and take over its Lease."""
         batch_utils.validate_batch_id(batch_id)
 
@@ -245,7 +245,7 @@ class SandboxBatch:
                 raise SandboxNotReadyError(
                     f"batch member '{member.claim_name}' is not ready"
                 )
-            sandbox = self._client.sandbox_class(
+            sandbox: Sandbox = self._client.sandbox_class(
                 claim_name=member.claim_name,
                 sandbox_id=current.sandbox_name,
                 namespace=self.namespace,
@@ -512,7 +512,7 @@ class SandboxBatch:
             self._state.note_error(error)
         return False
 
-    def _write_renewal(self, lease) -> tuple[float, V1Lease]:
+    def _write_renewal(self, lease: Any) -> tuple[float, V1Lease]:
         """Stamps ``lease`` as renewed now and replaces it, returning the send time and the written Lease."""
         # Neither Kubernetes client has a default request timeout, so a hung apiserver would
         # otherwise stall renewal past the Lease's expiry.

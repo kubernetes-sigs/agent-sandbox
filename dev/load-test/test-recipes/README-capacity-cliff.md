@@ -23,6 +23,9 @@ headless Service (`service: false`) and uses no `volumeClaimTemplates`, and the 
 (SandboxClaim / SandboxTemplate / SandboxWarmPool) are not exercised — run the controller **without**
 `--extensions`.
 
+For `SandboxWarmPool` scale and shared-template rollout tests, see the
+[WarmPool capacity recipe](README-warmpool-capacity-cliff.md).
+
 ## Prerequisites
 
 - **Go Environment**: A working Go installation is required to compile and run ClusterLoader2.

@@ -703,6 +703,11 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 	} else {
 		message = "Pod does not exist"
 	}
+	if pod != nil && !podReady && isOwnedBySandbox(pod, sandbox) {
+		if issue := podContainerIssue(pod); issue != "" {
+			message += "; " + issue
+		}
+	}
 
 	// svcRequired: true if the sandbox explicitly requests a service or if a
 	// service already exists.
@@ -732,6 +737,42 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 	}
 
 	return readyCondition
+}
+
+// startingWaitingReasons are the kubelet waiting reasons of a container that is
+// starting normally, so they are not reported as an issue.
+var startingWaitingReasons = map[string]bool{
+	"ContainerCreating": true,
+	"PodInitializing":   true,
+}
+
+// podContainerIssue describes the first container of pod that cannot start, or
+// "" if there is none. Init containers come first because they gate the rest.
+func podContainerIssue(pod *corev1.Pod) string {
+	if issue := containerIssue("init container", pod.Status.InitContainerStatuses); issue != "" {
+		return issue
+	}
+	return containerIssue("container", pod.Status.ContainerStatuses)
+}
+
+// containerIssue is built from stable fields only (name, reason, last exit
+// reason). Kubelet messages and the restart count change on every backoff and
+// would cost a status write each time.
+func containerIssue(kind string, statuses []corev1.ContainerStatus) string {
+	for _, cs := range statuses {
+		waiting := cs.State.Waiting
+		if waiting == nil || waiting.Reason == "" || startingWaitingReasons[waiting.Reason] {
+			continue
+		}
+		if waiting.Reason != "CrashLoopBackOff" {
+			return fmt.Sprintf("%s %q is waiting: %s", kind, cs.Name, waiting.Reason)
+		}
+		if last := cs.LastTerminationState.Terminated; last != nil && last.Reason != "" {
+			return fmt.Sprintf("%s %q is in CrashLoopBackOff (last exit: %s)", kind, cs.Name, last.Reason)
+		}
+		return fmt.Sprintf("%s %q is in CrashLoopBackOff", kind, cs.Name)
+	}
+	return ""
 }
 
 func (r *SandboxReconciler) computeFinishedCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) *metav1.Condition {

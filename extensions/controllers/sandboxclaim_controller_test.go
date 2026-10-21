@@ -1866,24 +1866,28 @@ func TestCreateSandboxPropagatesVolumeClaimTemplates(t *testing.T) {
 
 	template := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "vct-template", Namespace: "default"},
-		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
-			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{{Name: "app", Image: "test"}},
-			},
-		},
-			VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{
-				{
-					EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
-					Spec: corev1.PersistentVolumeClaimSpec{
-						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-						Resources: corev1.VolumeResourceRequirements{
-							Requests: corev1.ResourceList{
-								corev1.ResourceStorage: resource.MustParse("1Gi"),
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "app", Image: "test"}},
+					},
+				},
+				VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{
+					{
+						EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+						Spec: corev1.PersistentVolumeClaimSpec{
+							AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+							Resources: corev1.VolumeResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceStorage: resource.MustParse("1Gi"),
+								},
 							},
 						},
 					},
 				},
-			}},
+				FailedPodPolicy: sandboxv1beta1.FailedPodPolicyRecreate,
+			},
 		},
 	}
 
@@ -1922,6 +1926,9 @@ func TestCreateSandboxPropagatesVolumeClaimTemplates(t *testing.T) {
 	actualStorage := sandbox.Spec.VolumeClaimTemplates[0].Spec.Resources.Requests[corev1.ResourceStorage]
 	if !actualStorage.Equal(expectedStorage) {
 		t.Errorf("expected storage %s, got %s", expectedStorage.String(), actualStorage.String())
+	}
+	if sandbox.Spec.FailedPodPolicy != sandboxv1beta1.FailedPodPolicyRecreate {
+		t.Fatalf("expected failedPodPolicy Recreate, got %#v", sandbox.Spec.FailedPodPolicy)
 	}
 }
 

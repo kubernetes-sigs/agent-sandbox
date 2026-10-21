@@ -82,6 +82,14 @@ func (b *SandboxSpecApplyConfiguration) WithService(value bool) *SandboxSpecAppl
 	return b
 }
 
+// WithFailedPodPolicy sets the FailedPodPolicy field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the FailedPodPolicy field is set to the value of the last call.
+func (b *SandboxSpecApplyConfiguration) WithFailedPodPolicy(value apiv1beta1.FailedPodPolicy) *SandboxSpecApplyConfiguration {
+	b.SandboxBlueprintApplyConfiguration.FailedPodPolicy = &value
+	return b
+}
+
 // WithShutdownTime sets the ShutdownTime field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the ShutdownTime field is set to the value of the last call.

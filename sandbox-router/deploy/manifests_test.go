@@ -268,8 +268,10 @@ func TestDeploymentStartupProbeAllowsInitialPodCacheSync(t *testing.T) {
 	if probe == nil || probe.HTTPGet == nil || probe.HTTPGet.Path != "/healthz" {
 		t.Fatal("startup probe must wait for /healthz")
 	}
-	if probe.PeriodSeconds <= 0 || probe.FailureThreshold*probe.PeriodSeconds < 60 {
-		t.Fatalf("startup probe budget: got %d seconds want at least 60 seconds", probe.FailureThreshold*probe.PeriodSeconds)
+	const initialSyncTimeoutSeconds int32 = 60
+	const startupProbeMarginSeconds int32 = 30
+	if probe.PeriodSeconds <= 0 || probe.FailureThreshold*probe.PeriodSeconds < initialSyncTimeoutSeconds+startupProbeMarginSeconds {
+		t.Fatalf("startup probe budget: got %d seconds want at least %d seconds (sync timeout plus margin)", probe.FailureThreshold*probe.PeriodSeconds, initialSyncTimeoutSeconds+startupProbeMarginSeconds)
 	}
 }
 

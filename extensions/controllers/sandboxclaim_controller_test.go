@@ -5416,6 +5416,70 @@ func TestSandboxClaimStaleClaimAfterAdoptionCreatesNoColdSandbox(t *testing.T) {
 	}
 }
 
+// A claim that is still in the cache but already deleted on the API server
+// must not get a cold Sandbox, which would be left for GC to collect.
+func TestSandboxClaimDeletedClaimCreatesNoColdSandbox(t *testing.T) {
+	scheme := newScheme(t)
+	ctx := context.Background()
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid-123"},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
+		},
+	}
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}},
+		}}},
+	}
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default", UID: "warmpool-uid-123"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"}},
+	}
+
+	cachedClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim).
+		WithStatusSubresource(claim).
+		Build()
+	apiReader := interceptor.NewClient(cachedClient, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok {
+				return k8errors.NewNotFound(
+					schema.GroupResource{Group: extensionsv1beta1.GroupVersion.Group, Resource: "sandboxclaims"},
+					key.Name,
+				)
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           cachedClient,
+		APIReader:        apiReader,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+	}
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
+
+	if _, err := reconciler.Reconcile(ctx, req); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	cold := &sandboxv1beta1.Sandbox{}
+	err := cachedClient.Get(ctx, req.NamespacedName, cold)
+	if err == nil {
+		t.Fatalf("created Sandbox %q for a claim the API server no longer has", cold.Name)
+	}
+	if !k8errors.IsNotFound(err) {
+		t.Fatalf("get cold sandbox: %v", err)
+	}
+}
+
 func TestSandboxClaimPreventsAdoptionFromWrongWarmPool(t *testing.T) {
 	scheme := newScheme(t)
 
@@ -8443,7 +8507,7 @@ func TestCreateSandboxAlreadyExistsRecoversViaAuthoritativeRead(t *testing.T) {
 		Build()
 
 	apiReader := fake.NewClientBuilder().WithScheme(scheme).
-		WithObjects(existingSandbox.DeepCopy()).
+		WithObjects(claim.DeepCopy(), existingSandbox.DeepCopy()).
 		Build()
 
 	reconciler := &SandboxClaimReconciler{
@@ -8537,7 +8601,7 @@ func TestCreateSandboxAlreadyExistsNameCollisionIsTerminal(t *testing.T) {
 		Build()
 
 	apiReader := fake.NewClientBuilder().WithScheme(scheme).
-		WithObjects(foreignSandbox.DeepCopy()).
+		WithObjects(claim.DeepCopy(), foreignSandbox.DeepCopy()).
 		Build()
 
 	reconciler := &SandboxClaimReconciler{

@@ -134,7 +134,21 @@ for instance in ${WORKER_INSTANCES}; do
     --most-disruptive-allowed-action=RESTART
 done
 
-echo "Waiting for nodes to be Ready after restart..."
+# Two-phase wait: after gcloud restarts instances, the kubelet may still
+# report Ready for a few seconds before the node controller marks it
+# NotReady. Waiting only for Ready can pass before the reboot takes effect.
+echo "Waiting for worker nodes to go NotReady (reboot in progress)..."
+for i in $(seq 1 30); do
+  not_ready=$(kubectl get nodes --no-headers 2>/dev/null \
+    | grep -c "NotReady" || true)
+  if [[ "${not_ready}" -gt 0 ]]; then
+    echo "  ${not_ready} node(s) NotReady — reboot detected"
+    break
+  fi
+  sleep 2
+done
+
+echo "Waiting for all nodes to be Ready after restart..."
 kubectl wait --for=condition=Ready node --all --timeout=300s
 
 # Verify /dev/kvm is available via a privileged pod (avoids SSH key

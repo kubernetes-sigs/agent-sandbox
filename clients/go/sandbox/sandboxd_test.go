@@ -498,24 +498,32 @@ func TestSandboxdRun_PodTunnelDeathReturnsErrNotReady(t *testing.T) {
 	opts.Runtime = RuntimeSandboxd
 	c, _, _ := newTestSandbox(opts)
 
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to listen: %v", err)
+	// serve stands in for one tunnel's gRPC local port.
+	serve := func(stdout string) (*grpc.Server, uint16) {
+		lis, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("failed to listen: %v", err)
+		}
+		srv := grpc.NewServer()
+		processv1.RegisterProcessServiceServer(srv, &fakeProcessService{response: &processv1.ExecuteResponse{Stdout: []byte(stdout)}})
+		go func() { _ = srv.Serve(lis) }()
+		t.Cleanup(srv.Stop)
+		return srv, uint16(lis.Addr().(*net.TCPAddr).Port)
 	}
-	grpcServer := grpc.NewServer()
-	processv1.RegisterProcessServiceServer(grpcServer, &fakeProcessService{response: &processv1.ExecuteResponse{}})
-	go func() { _ = grpcServer.Serve(lis) }()
-	t.Cleanup(grpcServer.Stop)
+	forwarder := func(grpcLocal uint16) *fakeForwarder {
+		return &fakeForwarder{
+			ports: []portforward.ForwardedPort{
+				{Local: 12345, Remote: uint16(opts.SandboxdRESTPort)},
+				{Local: grpcLocal, Remote: uint16(opts.SandboxdGRPCPort)},
+			},
+			signalReady: true,
+			die:         make(chan error, 1),
+			returned:    make(chan struct{}),
+		}
+	}
 
-	fw := &fakeForwarder{
-		ports: []portforward.ForwardedPort{
-			{Local: 12345, Remote: uint16(opts.SandboxdRESTPort)},
-			{Local: uint16(lis.Addr().(*net.TCPAddr).Port), Remote: uint16(opts.SandboxdGRPCPort)},
-		},
-		signalReady: true,
-		die:         make(chan error, 1),
-		returned:    make(chan struct{}),
-	}
+	grpcServer, grpcLocal := serve("first\n")
+	fw := forwarder(grpcLocal)
 	stub := newTestPortForwardTunnel(fw)
 	pts := c.connector.strategy.(*podTunnelStrategy)
 	pts.tunnel.coreClient = fakekube.NewSimpleClientset().CoreV1() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
@@ -551,11 +559,30 @@ func TestSandboxdRun_PodTunnelDeathReturnsErrNotReady(t *testing.T) {
 	if !errors.Is(err, ErrNotReady) || !errors.Is(err, ErrPortForwardDied) {
 		t.Fatalf("expected ErrNotReady wrapping ErrPortForwardDied, got: %v", err)
 	}
-	if _, err := c.Commands().Start(context.Background(), "echo hi"); !errors.Is(err, ErrNotReady) {
-		t.Errorf("expected Start to return ErrNotReady, got: %v", err)
+	if _, err := c.Commands().Start(context.Background(), "echo hi"); !errors.Is(err, ErrNotReady) || !errors.Is(err, ErrPortForwardDied) {
+		t.Errorf("expected Start to return ErrNotReady wrapping ErrPortForwardDied, got: %v", err)
 	}
 	if state := deadConn.GetState(); state != connectivity.Shutdown {
 		t.Errorf("expected the dead tunnel's gRPC conn to be closed, got state %s", state)
+	}
+
+	// Reconnecting, as Open does, must publish the new tunnel's target.
+	_, grpcLocal = serve("second\n")
+	fw2 := forwarder(grpcLocal)
+	pts.tunnel.newForwarder = newTestPortForwardTunnel(fw2).newForwarder
+	if err := c.connector.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect() after tunnel death: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = pts.tunnel.Close()
+		waitForwardReturned(t, fw2)
+	})
+	result, err := c.Run(context.Background(), "echo hi")
+	if err != nil {
+		t.Fatalf("Run() after reconnect: %v", err)
+	}
+	if result.Stdout != "second\n" {
+		t.Errorf("expected Run to reach the new tunnel, got stdout %q", result.Stdout)
 	}
 }
 

@@ -868,14 +868,35 @@ class TestConnect(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SandboxNotReadyError):
             await self.handle.connect(member)
 
-    async def test_lost_member_raises(self):
+    async def test_member_no_longer_ready_raises_even_when_cached(self):
+        failed = {"type": "Ready", "status": "False", "reason": "ClaimExpired"}
+        updates = {
+            MemberState.PENDING: lambda: self.handle._state.upsert_claim(_claim("b1-0", conditions=[])),
+            MemberState.FAILED: lambda: self.handle._state.upsert_claim(_claim("b1-0", conditions=[failed])),
+            MemberState.LOST: lambda: self.handle._state.mark_lost("b1-0"),
+        }
+        for state, update in updates.items():
+            with self.subTest(state=state):
+                self.handle._state.upsert_claim(
+                    _claim("b1-0", conditions=[{"type": "Ready", "status": "True"}], sandbox={"name": "sbx-1"})
+                )
+                member = self.handle.members()[0]
+                await self.handle.connect(member)
+                update()
+                with self.assertRaises(SandboxNotReadyError):
+                    await self.handle.connect(member)
+
+    async def test_connect_after_err_raises_even_when_cached(self):
         self.handle._state.upsert_claim(
             _claim("b1-0", conditions=[{"type": "Ready", "status": "True"}], sandbox={"name": "sbx-1"})
         )
         member = self.handle.members()[0]
-        self.handle._state.mark_lost("b1-0")
-        with self.assertRaises(SandboxNotReadyError):
+        await self.handle.connect(member)
+        lease_lost = BatchLeaseExpiredError("lost")
+        self.handle._state.note_error(lease_lost)
+        with self.assertRaises(BatchError) as raised:
             await self.handle.connect(member)
+        self.assertIs(raised.exception.__cause__, lease_lost)
 
     async def test_connected_handle_not_registered_in_active_connection_sandboxes(self):
         patcher = patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper")

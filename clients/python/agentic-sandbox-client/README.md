@@ -482,6 +482,32 @@ With sandboxd, `commands.run` also takes `env` and `cwd`, as in the synchronous
 example. `cwd` is confined to the sandbox root. The legacy runtime raises
 `NotImplementedError` for both.
 
+#### sandboxd bearer authentication
+
+If sandboxd requires a bearer token (`--auth-token-sha256` or
+`--auth-token-file`), set `auth_token` on either
+`SandboxdPodTunnelConnectionConfig` or `SandboxdInClusterConnectionConfig`:
+
+```python
+import os
+from k8s_agent_sandbox import SandboxdInClusterConnectionConfig
+
+config = SandboxdInClusterConnectionConfig(
+    mode="in-cluster-service",
+    auth_token=os.environ["SANDBOXD_AUTH_TOKEN"],
+)
+```
+
+Pass this config to `SandboxClient` or `AsyncSandboxClient`. The raw token must
+be non-empty printable ASCII without spaces, matching TypeScript's `authToken`.
+The SDK adds `Bearer ` to REST headers and all unary/streaming gRPC calls,
+including after reconnect. Omit `auth_token` to preserve existing behavior.
+
+This client-level credential is stored as `SecretStr` and hidden from config
+repr and validation error messages. Configure the matching token on sandboxd
+separately. It is independent of Kubernetes credentials and does not add TLS;
+in-cluster traffic remains plaintext and requires appropriate network isolation.
+
 ### 9. Labels and Pod Metadata
 
 `create_sandbox` lets you attach metadata at two different levels:

@@ -500,6 +500,12 @@ sandbox pod, reaching both.
 
 Doesn't work on Kata or gVisor; use SandboxdInClusterConnectionConfig for those.
 
+<a id="k8s_agent_sandbox.models.SandboxdPodTunnelConnectionConfig.auth_token"></a>
+
+##### auth\_token
+
+Optional bearer token for sandboxd REST and gRPC.
+
 <a id="k8s_agent_sandbox.models.SandboxdPodTunnelConnectionConfig.rest_port"></a>
 
 ##### rest\_port
@@ -533,6 +539,12 @@ enabled on the Sandbox template. ``in-cluster-pod-ip`` uses
 ``Sandbox.status.podIPs``. Neither mode falls back to the other. sandboxd's
 REST filesystem listener defaults to port 8080 and its gRPC ProcessService
 listener to port 9090.
+
+<a id="k8s_agent_sandbox.models.SandboxdInClusterConnectionConfig.auth_token"></a>
+
+##### auth\_token
+
+Optional bearer token for sandboxd REST and gRPC.
 
 <a id="k8s_agent_sandbox.models.SandboxInClusterConnectionConfig"></a>
 

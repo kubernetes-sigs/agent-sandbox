@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any
+from typing import Any, cast
 
 """Non-blocking command execution for legacy and sandboxd runtimes."""
 
@@ -144,16 +144,17 @@ class AsyncCommandExecutor:
         try:
             response = await stub.Execute(request, timeout=timeout)
         except grpc.RpcError as e:
-            if report_timeout and e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
+            rpc_error = cast("grpc.aio.AioRpcError", e)
+            if report_timeout and rpc_error.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
                 return ExecutionResult(
                     stderr=f"Command timed out after {timeout:g} seconds",
                     exit_code=124,
                     timed_out=True,
                 )
-            if e.code() == grpc.StatusCode.UNAVAILABLE:
+            if rpc_error.code() == grpc.StatusCode.UNAVAILABLE:
                 await self.connector.invalidate_sandboxd_transport(channel)
             raise RuntimeError(
-                f"sandboxd process service failed ({e.code()}): {e.details()}"
+                f"sandboxd process service failed ({rpc_error.code()}): {rpc_error.details()}"
             ) from e
         return ExecutionResult(
             stdout=response.stdout.decode("utf-8", errors="replace"),

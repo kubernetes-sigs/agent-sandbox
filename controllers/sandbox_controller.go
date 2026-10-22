@@ -707,6 +707,16 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 		}
 	}
 
+	// A terminating Pod stays Running/Ready until containers stop, but EndpointSlices
+	// already mark it not ready. Treat deletionTimestamp as not Ready so clients that
+	// wait on the Sandbox Ready condition do not hit DNS/connect failures during the
+	// grace period. The suspended path returns earlier and is unaffected.
+	if pod != nil && !pod.DeletionTimestamp.IsZero() {
+		readyCondition.Reason = sandboxv1beta1.SandboxReasonPodTerminating
+		readyCondition.Message = "Pod is terminating"
+		return readyCondition
+	}
+
 	message := ""
 	podReady := false
 	if pod != nil {

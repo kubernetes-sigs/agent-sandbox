@@ -635,6 +635,53 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: `Pod is Running but not Ready; container "app" is in CrashLoopBackOff`},
 			},
 		},
+		{
+			// A Running+Ready Pod with deletionTimestamp set (node drain, eviction,
+			// manual delete) must flip Sandbox Ready to False immediately. The kubelet
+			// keeps Pod Ready=True through the grace period, but EndpointSlices already
+			// mark the endpoint not ready.
+			name:    "24. Terminating Running+Ready pod reports Ready=False/PodTerminating",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
+			svc:     &corev1.Service{},
+			pod: ownedPod(&corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					DeletionTimestamp: new(metav1.NewTime(time.Now())),
+				},
+				Status: corev1.PodStatus{
+					Phase:  corev1.PodRunning,
+					PodIPs: []corev1.PodIP{{IP: "10.244.0.1"}},
+					Conditions: []corev1.PodCondition{
+						{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
+						{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+					},
+				},
+			}),
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
+				{Type: "PodScheduled", Status: "True", ObservedGeneration: gen, Reason: "PodScheduled"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Pod is terminating"},
+			},
+		},
+		{
+			name:    "25. Running Ready pod without deletionTimestamp stays Ready=True",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
+			svc:     &corev1.Service{},
+			pod: ownedPod(&corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase:  corev1.PodRunning,
+					PodIPs: []corev1.PodIP{{IP: "10.244.0.1"}},
+					Conditions: []corev1.PodCondition{
+						{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
+						{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+					},
+				},
+			}),
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
+				{Type: "PodScheduled", Status: "True", ObservedGeneration: gen, Reason: "PodScheduled"},
+				{Type: "Ready", Status: "True", ObservedGeneration: gen, Reason: "DependenciesReady", Message: "Pod is Ready; Service Exists"},
+			},
+		},
 	}
 
 	for _, tc := range testCases {

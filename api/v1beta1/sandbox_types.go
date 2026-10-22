@@ -69,14 +69,16 @@ const (
 	// distinct from the desired "running" state requested via spec.operatingMode: a
 	// Sandbox with operatingMode Running is not Ready until its Pod actually comes up.
 	// Status is True only when the backing Pod is in the Running phase with its Pod
-	// Ready condition True and at least one pod IP assigned, and, when a Service is
-	// required, that Service exists. A Service is required when it is explicitly
+	// Ready condition True, at least one pod IP assigned, and no deletionTimestamp,
+	// and, when a Service is required, that Service exists. A Service is required when
+	// it is explicitly
 	// requested (see SandboxBlueprint.Service) or, for backward compatibility, when a
 	// Service already exists even though one was not explicitly requested.
 	// In all other states Status is False with a reason describing why: the Sandbox is
 	// still provisioning (DependenciesNotReady), suspended (SandboxSuspended), its Pod
-	// has reached a terminal phase (PodSucceeded/PodFailed), it has expired
-	// (SandboxExpired), or the controller hit an error (ReconcilerError).
+	// is terminating (PodTerminating), has reached a terminal phase
+	// (PodSucceeded/PodFailed), it has expired (SandboxExpired), or the controller hit
+	// an error (ReconcilerError).
 	SandboxConditionReady ConditionType = "Ready"
 	// SandboxReasonDependenciesReady is the Ready=True reason: the Pod (and Service, if
 	// requested) are provisioned and the Pod reports Ready with an assigned IP.
@@ -105,6 +107,12 @@ const (
 	// SandboxReasonSuspended is a Ready=False reason: the Sandbox has been administratively
 	// suspended (i.e., intentional action by the user to suspend the Sandbox).
 	SandboxReasonSuspended = "SandboxSuspended"
+	// SandboxReasonPodTerminating is a Ready=False reason: the backing Pod has a
+	// deletionTimestamp set (for example after a node drain, eviction, or manual
+	// delete) and is draining. During that window EndpointSlices mark the endpoint
+	// not ready, so the Sandbox is not usable even though the Pod may still report
+	// Running and Ready. The string value matches SandboxReasonSuspendedPodTerminating.
+	SandboxReasonPodTerminating = "PodTerminating"
 
 	// SandboxConditionPodScheduled mirrors the backing Pod's PodScheduled
 	// condition so consumers can see why a Sandbox is not scheduled (e.g.

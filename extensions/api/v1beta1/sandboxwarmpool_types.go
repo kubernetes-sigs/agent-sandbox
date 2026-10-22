@@ -37,13 +37,26 @@ type SandboxTemplateRef struct {
 }
 
 // SandboxWarmPoolSpec defines the desired state of SandboxWarmPool.
+// +kubebuilder:validation:XValidation:rule="has(self.replenishmentCapacity) == has(oldSelf.replenishmentCapacity)",message="replenishmentCapacity must be enabled or disabled at pool creation"
 type SandboxWarmPoolSpec struct {
-	// replicas is the desired number of sandboxes in the pool.
-	// This field is controlled by an HPA if specified.
+	// replicas is the desired standby count, or its ceiling when
+	// replenishmentCapacity is set. HPA scaling is supported only when
+	// replenishmentCapacity is unset.
 	// +optional
 	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=0
 	Replicas *int32 `json:"replicas,omitempty"`
+
+	// replenishmentCapacity reduces the standby target by the number of
+	// still-existing Sandboxes attributed to this pool that are no longer its
+	// standby inventory. The target is the smaller of replicas and the remaining
+	// capacity, with a minimum of zero. Unset preserves fixed-standby behavior;
+	// zero maintains no standby. This is not an admission limit: cold creation
+	// remains available. Presence is immutable after creation, but the value
+	// may change. HPA/KEDA scaling is not supported with this field set.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	ReplenishmentCapacity *int32 `json:"replenishmentCapacity,omitempty"`
 
 	// sandboxTemplateRef - name of the SandboxTemplate to be used for creating a Sandbox
 	// Warning: Any change to the json tag "sandboxTemplateRef" must be synchronized with the TemplateRefField constant.
@@ -98,6 +111,21 @@ type SandboxWarmPoolStatus struct {
 	// readyReplicas is the total number of sandboxes in the pool that are in a ready state.
 	// +optional
 	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
+
+	// occupiedReplicas counts still-existing Sandboxes attributed to this pool
+	// UID that have left its standby inventory, including cold-created and
+	// terminating instances. Absent means the policy is disabled or accounting
+	// is unavailable, not zero occupancy.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	OccupiedReplicas *int32 `json:"occupiedReplicas,omitempty"`
+
+	// desiredStandbyReplicas is the last successfully calculated standby target.
+	// Absent means the policy is disabled or accounting is unavailable; zero
+	// is a valid target and does not imply a ready instance is available.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	DesiredStandbyReplicas *int32 `json:"desiredStandbyReplicas,omitempty"`
 
 	// selector is the label selector used to find the pods in the pool.
 	// +optional

@@ -22,6 +22,7 @@ Requires the ``async`` optional dependencies::
 import asyncio
 import contextlib
 import logging
+import ssl
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -62,7 +63,18 @@ _TRANSPORT_ERRORS = (
     aiohttp.ClientPayloadError,
     ConnectionError,
     asyncio.TimeoutError,
+    # A peer that closes the TLS connection early (e.g. a load balancer during a control-plane upgrade)
+    # is transient like a connection reset. Certificate and other TLS failures are not.
+    ssl.SSLEOFError,
 )
+
+
+def _is_transport_error(error: BaseException) -> bool:
+    # A TLS failure is judged by the ssl error it wraps. aiohttp.ClientSSLError is itself a
+    # ClientConnectionError, so it must be unwrapped before the tuple check.
+    if isinstance(error, aiohttp.ClientSSLError):
+        error = error.os_error
+    return isinstance(error, _TRANSPORT_ERRORS)
 
 
 def _watch_backoff_delay(failures: int) -> float:
@@ -402,20 +414,13 @@ class AsyncSandboxBatch:
                 async with self._lock:
                     self._state.note_error(e)
                 return
-            except aiohttp.ClientSSLError as e:
-                # aiohttp.ClientSSLError is a subclass of aiohttp.ClientConnectionError, so it
-                # must be caught ahead of the tuple below. It is not known to be transient
-                # so surface it via err() instead of retrying.
-                async with self._lock:
-                    self._state.note_error(e)
-                return
-            except _TRANSPORT_ERRORS:
-                # Likely transient network-level failure so retry
-                failures += 1
-                await asyncio.sleep(_watch_backoff_delay(failures))
-                continue
             except Exception as e:
-                # Anything else is not known to be transient either, so surface it via err().
+                if _is_transport_error(e):
+                    # Likely transient network-level failure so retry
+                    failures += 1
+                    await asyncio.sleep(_watch_backoff_delay(failures))
+                    continue
+                # Anything else is not known to be transient, so surface it via err().
                 async with self._lock:
                     self._state.note_error(e)
                 return

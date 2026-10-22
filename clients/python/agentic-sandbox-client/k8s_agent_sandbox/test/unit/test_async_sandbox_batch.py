@@ -16,6 +16,7 @@
 
 import asyncio
 import inspect
+import ssl
 import time
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -597,6 +598,21 @@ class TestWatcher(BaseAsyncBatchClientTest):
         )
         await handle._watch_loop()
         self.assertIsInstance(handle.err(), aiohttp.ClientSSLError)
+
+    async def test_connection_failure_and_tls_eof_retry_but_certificate_errors_stop(self):
+        refused = aiohttp.ClientConnectorError(MagicMock(), ConnectionRefusedError(111, "refused"))
+        tls_eof = aiohttp.ClientConnectorSSLError(
+            MagicMock(), ssl.SSLEOFError(8, "EOF occurred in violation of protocol")
+        )
+        bad_cert = aiohttp.ClientConnectorCertificateError(
+            MagicMock(), ssl.SSLCertVerificationError(1, "certificate verify failed")
+        )
+        handle = _make_handle(self.client)
+        self.mock_k8s_helper.watch_sandbox_claims = MagicMock(side_effect=[refused, tls_eof, tls_eof.os_error, bad_cert])
+        with patch("k8s_agent_sandbox.async_sandbox_batch._watch_backoff_delay", return_value=0):
+            await handle._watch_loop()
+        self.assertEqual(self.mock_k8s_helper.watch_sandbox_claims.call_count, 4)
+        self.assertIs(handle.err(), bad_cert)
 
     async def test_client_timeout_retries_from_last_resource_version(self):
         handle = _make_handle(self.client)

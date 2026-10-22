@@ -13,6 +13,7 @@
 # limitations under the License.
 """Unit tests for the sync SandboxBatch handle and SandboxClient.get_batch."""
 
+import ssl
 import time
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -546,17 +547,22 @@ class TestWatcher(BaseBatchClientTest):
         handle._watch_loop()
         self.assertIsInstance(handle.err(), urllib3.exceptions.SSLError)
 
-    def test_connection_failure_retries_unless_caused_by_ssl(self):
+    def test_connection_failure_and_tls_eof_retry_but_certificate_errors_stop(self):
         refused = urllib3.exceptions.NewConnectionError(None, "refused")
+        tls_eof = urllib3.exceptions.SSLError(ssl.SSLEOFError(8, "EOF occurred in violation of protocol"))
+        bad_cert = urllib3.exceptions.SSLError(ssl.SSLCertVerificationError(1, "certificate verify failed"))
         handle = _make_handle(self.client)
         self.mock_k8s_helper.watch_sandbox_claims.side_effect = [
             urllib3.exceptions.MaxRetryError(None, "/", reason=refused),
-            urllib3.exceptions.MaxRetryError(None, "/", reason=urllib3.exceptions.SSLError("boom")),
+            urllib3.exceptions.MaxRetryError(None, "/", reason=tls_eof),
+            tls_eof,
+            tls_eof.args[0],
+            urllib3.exceptions.MaxRetryError(None, "/", reason=bad_cert),
         ]
         with patch("k8s_agent_sandbox.sandbox_batch._watch_backoff_delay", return_value=0):
             handle._watch_loop()
-        self.assertEqual(self.mock_k8s_helper.watch_sandbox_claims.call_count, 2)
-        self.assertIsInstance(handle.err().reason, urllib3.exceptions.SSLError)
+        self.assertEqual(self.mock_k8s_helper.watch_sandbox_claims.call_count, 5)
+        self.assertIs(handle.err().reason, bad_cert)
 
     def test_unexpected_error_surfaces_through_err_and_stops(self):
         handle = _make_handle(self.client)

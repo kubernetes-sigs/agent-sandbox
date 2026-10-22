@@ -562,8 +562,13 @@ func TestSandboxdRun_PodTunnelDeathReturnsErrNotReady(t *testing.T) {
 	if _, err := c.Commands().Start(context.Background(), "echo hi"); !errors.Is(err, ErrNotReady) || !errors.Is(err, ErrPortForwardDied) {
 		t.Errorf("expected Start to return ErrNotReady wrapping ErrPortForwardDied, got: %v", err)
 	}
-	if state := deadConn.GetState(); state != connectivity.Shutdown {
-		t.Errorf("expected the dead tunnel's gRPC conn to be closed, got state %s", state)
+	// SetLastError closes the conn after releasing the connector lock.
+	deadline = time.Now().Add(2 * time.Second)
+	for deadConn.GetState() != connectivity.Shutdown {
+		if time.Now().After(deadline) {
+			t.Fatalf("expected the dead tunnel's gRPC conn to be closed, got state %s", deadConn.GetState())
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	// Reconnecting, as Open does, must publish the new tunnel's target.

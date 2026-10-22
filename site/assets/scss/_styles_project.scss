@@ -179,13 +179,13 @@ footer {
     font-weight: 600;
   }
 
-  .td-sidebar-nav__section-title a:not(.active) {
+  .td-sidebar-nav__section-title a:not(.active):not(:hover):not(:focus) {
     color: rgba(255, 255, 255, 0.92) !important;
   }
 
   // Mid-level pages and nested section titles.
-  .ul-1 .td-sidebar-link__page:not(.active),
-  .ul-1 .td-sidebar-nav__section-title a:not(.active) {
+  .ul-1 .td-sidebar-link__page:not(.active):not(:hover):not(:focus),
+  .ul-1 .td-sidebar-nav__section-title a:not(.active):not(:hover):not(:focus) {
     font-weight: 500;
     color: rgba(255, 255, 255, 0.78) !important;
   }
@@ -198,14 +198,14 @@ footer {
     font-weight: 400;
   }
 
-  .ul-2 .td-sidebar-link:not(.active),
-  .ul-3 .td-sidebar-link:not(.active),
-  .ul-4 .td-sidebar-link:not(.active) {
+  .ul-2 .td-sidebar-link:not(.active):not(:hover):not(:focus),
+  .ul-3 .td-sidebar-link:not(.active):not(:hover):not(:focus),
+  .ul-4 .td-sidebar-link:not(.active):not(:hover):not(:focus) {
     color: rgba(255, 255, 255, 0.68) !important;
   }
 
   // Leaf pages that sit under the root (no ul-N parent match above).
-  .td-sidebar-link__page:not(.active) {
+  .td-sidebar-link__page:not(.active):not(:hover):not(:focus) {
     color: rgba(255, 255, 255, 0.75) !important;
   }
 

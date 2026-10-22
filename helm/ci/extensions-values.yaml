@@ -1,4 +1,2 @@
-image:
-  tag: v0.0.0-lint
 controller:
   extensions: true

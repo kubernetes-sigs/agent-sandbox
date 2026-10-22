@@ -707,6 +707,15 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 		}
 	}
 
+	// A terminating Pod stays Running and Ready until its containers exit, but
+	// EndpointSlices already mark it not ready. Report that window as not ready.
+	// Suspended and terminal phases return above, so those reasons still win.
+	if pod != nil && !pod.DeletionTimestamp.IsZero() {
+		readyCondition.Reason = sandboxv1beta1.SandboxReasonPodTerminating
+		readyCondition.Message = "Pod is terminating"
+		return readyCondition
+	}
+
 	message := ""
 	podReady := false
 	if pod != nil {

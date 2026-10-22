@@ -61,6 +61,7 @@ if [[ -n "${BOSKOS_HOST:-}" ]]; then
     exit 1
   fi
   echo "Acquired project ${PROJECT_ID} from Boskos."
+  trap 'resourcectl cleanup || true' EXIT
 else
   PROJECT_ID=$(gcloud config get-value project)
 fi
@@ -169,7 +170,7 @@ fi
 echo ""
 echo "=== Installing Kata Containers ==="
 
-KATA_VERSION="${KATA_VERSION:-3.12.0}"
+KATA_VERSION="${KATA_VERSION:-4.2.0}"
 RUNTIME_CLASS="${SANDBOX_RUNTIME_CLASS:-kata-qemu}"
 
 "${REPO_ROOT}/dev/ci/shared/install-kata-kops" \

@@ -29,7 +29,7 @@
 
 set -euo pipefail
 
-KATA_VERSION="${KATA_VERSION:-3.12.0}"
+KATA_VERSION="${KATA_VERSION:-4.2.0}"
 RUNTIME_CLASS="${RUNTIME_CLASS:-kata-qemu}"
 SHIMS="${SHIMS:-qemu}"
 CLUSTER_NAME=""
@@ -177,12 +177,20 @@ echo "KVM available on worker node"
 echo ""
 echo "=== Installing Kata Containers via helm (${CHART_OCI}:${KATA_VERSION}) ==="
 
-# Skip if already installed (idempotency for run_with_retry)
-if helm status "${HELM_RELEASE}" -n "${HELM_NAMESPACE}" &>/dev/null; then
+# Skip if already deployed (idempotency for run_with_retry).
+# Check for "deployed" state specifically; a failed/pending release
+# should be uninstalled and retried, not skipped.
+release_status=$(helm status "${HELM_RELEASE}" -n "${HELM_NAMESPACE}" -o json 2>/dev/null \
+  | grep -o '"status":"[a-z-]*"' | head -n1 || true)
+if [[ "${release_status}" == '"status":"deployed"' ]]; then
   installed_ver=$(helm get metadata "${HELM_RELEASE}" -n "${HELM_NAMESPACE}" \
     -o json 2>/dev/null | grep '"appVersion"' | cut -d'"' -f4 || echo "unknown")
   echo "Kata already installed (version: ${installed_ver}), skipping helm install"
 else
+  if [[ -n "${release_status}" ]]; then
+    echo "Existing release in state ${release_status}, uninstalling before retry..."
+    helm uninstall "${HELM_RELEASE}" -n "${HELM_NAMESPACE}" --wait 2>/dev/null || true
+  fi
   # Build shim selection args
   helm_shim_args=(--set "shims.disableAll=true")
   IFS=',' read -ra shim_list <<< "${SHIMS}"
@@ -261,12 +269,16 @@ if ! kubectl wait pod "${SMOKE_POD}" -n "${SMOKE_NS}" --for=condition=Ready --ti
 fi
 
 guest_kernel=$(kubectl exec "${SMOKE_POD}" -n "${SMOKE_NS}" -- uname -r 2>/dev/null || echo "unknown")
-host_kernel=$(uname -r 2>/dev/null || echo "")
+node_name=$(kubectl get pod "${SMOKE_POD}" -n "${SMOKE_NS}" -o jsonpath='{.spec.nodeName}' 2>/dev/null || echo "")
+node_kernel=""
+if [[ -n "${node_name}" ]]; then
+  node_kernel=$(kubectl get node "${node_name}" -o jsonpath='{.status.nodeInfo.kernelVersion}' 2>/dev/null || echo "")
+fi
 
-if [[ -n "${host_kernel}" && "${guest_kernel}" != "${host_kernel}" && "${guest_kernel}" != "unknown" ]]; then
-  echo "Smoke test passed: guest kernel=${guest_kernel} (host=${host_kernel}) — VM isolation confirmed"
+if [[ -n "${node_kernel}" && "${guest_kernel}" != "${node_kernel}" && "${guest_kernel}" != "unknown" ]]; then
+  echo "Smoke test passed: guest kernel=${guest_kernel} (worker=${node_kernel}) — VM isolation confirmed"
 elif [[ "${guest_kernel}" != "unknown" ]]; then
-  echo "Smoke test passed: guest kernel=${guest_kernel} (pod is running)"
+  echo "Smoke test passed: guest kernel=${guest_kernel} (pod is running; VM isolation not verified)"
 else
   echo "WARNING: could not read kernel version from smoke test pod" >&2
 fi

@@ -272,12 +272,20 @@ func (c *connector) BaseURL() string {
 	return c.baseURL
 }
 
-// SetLastError is called by tunnelStrategy's monitor to signal tunnel death.
+// SetLastError is called by the port-forward monitor to signal tunnel death.
+// The gRPC target is a local port of the dead tunnel, so it goes too, and
+// GRPCConn reports lastError as ErrNotReady like SendRequest does.
 func (c *connector) SetLastError(err error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.lastError = err
 	c.baseURL = ""
+	grpcConn := c.grpcConn
+	c.grpcConn = nil
+	c.grpcTarget = ""
+	c.mu.Unlock()
+	if grpcConn != nil {
+		_ = grpcConn.Close()
+	}
 }
 
 // cancelOnClose wraps an io.ReadCloser to run a cleanup function when the

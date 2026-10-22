@@ -248,7 +248,9 @@ func (h *K8sHelper) deleteClaim(ctx context.Context, name, namespace string) err
 // controllers do not retry on their own (see computeReadyCondition in
 // extensions/controllers/sandboxclaim_controller.go). Transient reasons such as
 // AdoptionPending, SandboxMissing, SandboxNotReady and ReconcilerError are
-// left out because the controller recovers from them. Kept in sync with
+// left out because the controller recovers from them. PodTerminating is also
+// left out: it is transient while the Pod is being deleted, and the terminal
+// phase is reported on the Finished condition. Kept in sync with
 // TERMINAL_CLAIM_READY_REASONS in the Python and TypeScript SDKs.
 var terminalReadyReasons = map[string]bool{
 	"InvalidMetadata":                                true,

@@ -765,6 +765,15 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 		return readyCondition
 	}
 
+	// A terminating Pod stays Running and Ready until its containers exit, and
+	// the kubelet then sets Failed or Succeeded before removing it. Report the
+	// whole window as not ready, including those terminal phases.
+	if pod != nil && !pod.DeletionTimestamp.IsZero() {
+		readyCondition.Reason = sandboxv1beta1.SandboxReasonPodTerminating
+		readyCondition.Message = "Pod is terminating"
+		return readyCondition
+	}
+
 	if pod != nil {
 		switch pod.Status.Phase {
 		case corev1.PodSucceeded:

@@ -12,12 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
 from kubernetes import client
+from kubernetes.config import incluster_config
 import urllib3.exceptions
 from pydantic import ValidationError
+from k8s_agent_sandbox.models import AdditionalPodMetadata
 from k8s_agent_sandbox.k8s_helper import K8sHelper
 from k8s_agent_sandbox.exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxTemplateNotFoundError
 from k8s_agent_sandbox.constants import CLIENT_REQUEST_TIME_ANNOTATION
@@ -163,7 +167,7 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
         mock_api = MagicMock()
         mock_api_cls.return_value = mock_api
 
-        pod_metadata = {"labels": {"client-id": "tenant-a"}}
+        pod_metadata = AdditionalPodMetadata(labels={"client-id": "tenant-a"})
         helper = K8sHelper()
         helper.create_sandbox_claim(
             "test-claim", "test-warmpool", "test-namespace", pod_metadata=pod_metadata
@@ -172,6 +176,22 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
         body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
         self.assertEqual(
             body["spec"]["additionalPodMetadata"]["labels"]["client-id"], "tenant-a"
+        )
+
+    def test_pod_metadata_dict_backward_compatible(self, mock_config, mock_api_cls, mock_core_cls):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+
+        helper = K8sHelper()
+        helper.create_sandbox_claim(
+            "test-claim", "test-warmpool", "test-namespace",
+            pod_metadata={"labels": {"client-id": "tenant-a"}, "annotations": {"a": "b"}},
+        )
+
+        body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
+        self.assertEqual(
+            body["spec"]["additionalPodMetadata"],
+            {"labels": {"client-id": "tenant-a"}, "annotations": {"a": "b"}},
         )
 
     def test_no_pod_metadata_omits_key(self, mock_config, mock_api_cls, mock_core_cls):
@@ -996,6 +1016,33 @@ class TestK8sHelperApiClientInjection(unittest.TestCase):
         sentinel = MagicMock(name="ApiClient")
         self.assertIs(K8sHelper(api_client=sentinel).injected_api_client, sentinel)
         self.assertIsNone(K8sHelper().injected_api_client)
+
+
+class TestK8sHelperInClusterAuth(unittest.TestCase):
+
+    def test_incluster_service_account_token_is_sent(self):
+        # 36.0.0 loaded the token but never sent it; a mocked loader can't catch that.
+        original = client.Configuration.get_default_copy()
+        self.addCleanup(client.Configuration.set_default, original)
+        with tempfile.TemporaryDirectory() as tmp:
+            token_path = os.path.join(tmp, "token")
+            ca_path = os.path.join(tmp, "ca.crt")
+            for path, content in ((token_path, "test-token"), (ca_path, "test-ca")):
+                with open(path, "w") as f:
+                    f.write(content)
+            with patch.dict(os.environ, {
+                "KUBERNETES_SERVICE_HOST": "10.0.0.1",
+                "KUBERNETES_SERVICE_PORT": "443",
+            }), patch.object(
+                incluster_config, "SERVICE_TOKEN_FILENAME", token_path
+            ), patch.object(incluster_config, "SERVICE_CERT_FILENAME", ca_path):
+                helper = K8sHelper()
+
+        settings = helper.core_v1_api.api_client.configuration.auth_settings()
+        self.assertTrue(
+            any("test-token" in str(s.get("value")) for s in settings.values()),
+            f"in-cluster token missing from auth settings: {settings}",
+        )
 
 
 class TestK8sHelperWatchTimeout(unittest.TestCase):

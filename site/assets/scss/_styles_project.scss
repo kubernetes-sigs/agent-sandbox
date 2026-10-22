@@ -2,6 +2,34 @@ a {
   text-decoration: none;
 }
 
+.td-box--black,
+.td-cover-block.-bg-black,
+.td-section,
+.td-page,
+footer.bg-dark {
+  --bs-link-color: #{$link-color-dark};
+  --bs-link-color-rgb: #{to-rgb($link-color-dark)};
+  --bs-link-hover-color: #{$link-hover-color-dark};
+  --bs-link-hover-color-rgb: #{to-rgb($link-hover-color-dark)};
+
+  // Light components must not inherit the dark surface's link colors.
+  .alert,
+  .feature-state-notice {
+    --bs-link-color: #{$link-color};
+    --bs-link-color-rgb: #{to-rgb($link-color)};
+    --bs-link-hover-color: #{$link-hover-color};
+    --bs-link-hover-color-rgb: #{to-rgb($link-hover-color)};
+  }
+}
+
+// Docsy's cover links use a fixed hover color instead of Bootstrap variables.
+.td-cover-block.-bg-black p:not(.p-initial) > a {
+  &:hover,
+  &:focus {
+    color: $link-hover-color-dark;
+  }
+}
+
 // --------------------------------------------------
 // remove whitespace after footer
 // --------------------------------------------------
@@ -149,7 +177,7 @@ footer {
 
   a.active,
   a .td-sidebar-nav-active-item {
-    color: $primary !important;
+    color: $link-color-dark !important;
     font-weight: 700;
   }
 
@@ -493,7 +521,7 @@ h1.text-center {
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: $primary;
+    color: $link-color-dark;
     margin-bottom: 0.25rem;
   }
 

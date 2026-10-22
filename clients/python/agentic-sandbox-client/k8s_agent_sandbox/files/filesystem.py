@@ -423,7 +423,7 @@ class Filesystem:
         exists = response_data.get("exists", False)
         if span.is_recording():
             span.set_attribute("sandbox.file.exists", exists)
-        return exists
+        return bool(exists)
 
     @trace_span("delete")
     def delete(self, path: str, recursive: bool = False, timeout: int = 60) -> None:

@@ -1,0 +1,303 @@
+#!/bin/bash
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Install Kata Containers on a kOps GCE cluster with nested virtualization.
+#
+# kOps does not natively support GCE nested virtualization (see
+# https://github.com/kubernetes/kops/issues/13671), so this script
+# enables it on worker instances post-creation, then installs kata via
+# the official helm chart.
+#
+# Reusable by any CI job that needs kata on kOps/GCE.
+#
+# Usage:
+#   install-kata-kops --cluster-name my-cluster --zone us-central1-a --project my-project
+#   install-kata-kops --cluster-name my-cluster --zone us-central1-a --project my-project \
+#     --kata-version 3.12.0 --runtime-class kata-clh --shims clh
+
+set -euo pipefail
+
+KATA_VERSION="${KATA_VERSION:-4.2.0}"
+RUNTIME_CLASS="${RUNTIME_CLASS:-kata-qemu}"
+SHIMS="${SHIMS:-qemu}"
+CLUSTER_NAME=""
+ZONE=""
+PROJECT=""
+HELM_TIMEOUT="600"
+HELM_RELEASE="kata-deploy"
+HELM_NAMESPACE="kube-system"
+CHART_OCI="oci://ghcr.io/kata-containers/kata-deploy-charts/kata-deploy"
+
+usage() {
+  echo "Usage: $(basename "$0") --cluster-name <name> --zone <zone> --project <project-id>"
+  echo "       [--kata-version <ver>] [--runtime-class <name>] [--shims <list>]"
+  exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --cluster-name)    CLUSTER_NAME="$2"; shift 2 ;;
+    --zone)            ZONE="$2"; shift 2 ;;
+    --project)         PROJECT="$2"; shift 2 ;;
+    --kata-version)    KATA_VERSION="$2"; shift 2 ;;
+    --runtime-class)   RUNTIME_CLASS="$2"; shift 2 ;;
+    --shims)           SHIMS="$2"; shift 2 ;;
+    -h|--help)         usage ;;
+    *)                 echo "Unknown option: $1" >&2; usage ;;
+  esac
+done
+
+if [[ -z "${CLUSTER_NAME}" || -z "${ZONE}" || -z "${PROJECT}" ]]; then
+  echo "ERROR: --cluster-name, --zone, and --project are required" >&2
+  usage
+fi
+
+echo "Installing Kata Containers ${KATA_VERSION} on kOps cluster '${CLUSTER_NAME}'"
+echo "  zone:          ${ZONE}"
+echo "  project:       ${PROJECT}"
+echo "  runtime-class: ${RUNTIME_CLASS}"
+echo "  shims:         ${SHIMS}"
+
+# ─── Step 1: Enable nested virtualization on worker nodes ────────────────────
+# kOps creates GCE managed instance groups but does not expose the
+# advancedMachineFeatures.enableNestedVirtualization field. We enable it
+# per-instance after kOps creates the cluster, restarting each worker.
+
+echo ""
+echo "=== Enabling nested virtualization on worker nodes ==="
+
+WORK_TMPDIR="$(mktemp -d)"
+cleanup() { rm -rf "${WORK_TMPDIR}"; }
+trap cleanup EXIT
+
+# kOps on GCE creates managed instance groups with predictable names.
+# Worker nodes are in the "a-nodes-<zone>-<cluster>" MIG.
+WORKER_MIG="a-nodes-${ZONE}-${CLUSTER_NAME}"
+WORKER_INSTANCES=$(gcloud compute instance-groups managed list-instances "${WORKER_MIG}" \
+  --zone="${ZONE}" --project="${PROJECT}" \
+  --format="value(instance.basename())" 2>/dev/null || true)
+
+# Fallback: name-based filter if the MIG name doesn't match
+if [[ -z "${WORKER_INSTANCES}" ]]; then
+  echo "MIG '${WORKER_MIG}' not found, falling back to name filter..."
+  WORKER_INSTANCES=$(gcloud compute instances list \
+    --filter="name ~ 'nodes.*${CLUSTER_NAME}' AND zone:${ZONE}" \
+    --format="value(name)" \
+    --project="${PROJECT}" 2>/dev/null || true)
+fi
+
+if [[ -z "${WORKER_INSTANCES}" ]]; then
+  echo "ERROR: no worker instances found for kOps instance group 'nodes-${ZONE}'" >&2
+  exit 1
+fi
+
+echo "Found worker instances:"
+echo "${WORKER_INSTANCES}" | sed 's/^/  /'
+
+for instance in ${WORKER_INSTANCES}; do
+  config_file="${WORK_TMPDIR}/${instance}.yaml"
+  echo "Enabling nested virt on ${instance}..."
+
+  gcloud compute instances export "${instance}" \
+    --destination="${config_file}" \
+    --zone="${ZONE}" \
+    --project="${PROJECT}"
+
+  # Inject advancedMachineFeatures if not already present
+  if ! grep -q "enableNestedVirtualization: true" "${config_file}"; then
+    if grep -q "advancedMachineFeatures:" "${config_file}"; then
+      sed -i '/advancedMachineFeatures:/a\  enableNestedVirtualization: true' "${config_file}"
+    else
+      echo -e "\nadvancedMachineFeatures:\n  enableNestedVirtualization: true" >> "${config_file}"
+    fi
+  else
+    echo "  already enabled, skipping"
+    continue
+  fi
+
+  gcloud compute instances update-from-file "${instance}" \
+    --source="${config_file}" \
+    --zone="${ZONE}" \
+    --project="${PROJECT}" \
+    --most-disruptive-allowed-action=RESTART
+done
+
+# Two-phase wait: after gcloud restarts instances, the kubelet may still
+# report Ready for a few seconds before the node controller marks it
+# NotReady. Waiting only for Ready can pass before the reboot takes effect.
+echo "Waiting for worker nodes to go NotReady (reboot in progress)..."
+for i in $(seq 1 30); do
+  not_ready=$(kubectl get nodes --no-headers 2>/dev/null \
+    | grep -c "NotReady" || true)
+  if [[ "${not_ready}" -gt 0 ]]; then
+    echo "  ${not_ready} node(s) NotReady — reboot detected"
+    break
+  fi
+  sleep 2
+done
+
+echo "Waiting for all nodes to be Ready after restart..."
+kubectl wait --for=condition=Ready node --all --timeout=300s
+
+# Verify /dev/kvm is available via a privileged pod (avoids SSH key
+# requirements; more reliable in CI than gcloud compute ssh).
+echo "Verifying KVM availability on worker nodes..."
+kubectl delete pod kvm-check --ignore-not-found >/dev/null 2>&1 || true
+kubectl apply -f - <<KVMEOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kvm-check
+spec:
+  restartPolicy: Never
+  containers:
+    - name: kvm-check
+      image: busybox:1.36
+      command: ["sh", "-c", "test -e /dev/kvm && echo KVM_OK || echo KVM_MISSING"]
+      securityContext:
+        privileged: true
+      volumeMounts:
+        - name: dev
+          mountPath: /dev
+  volumes:
+    - name: dev
+      hostPath:
+        path: /dev
+KVMEOF
+kubectl wait pod/kvm-check --for=jsonpath='{.status.phase}'=Succeeded --timeout=60s 2>/dev/null || true
+kvm_result=$(kubectl logs kvm-check 2>/dev/null || echo "UNKNOWN")
+kubectl delete pod kvm-check --ignore-not-found >/dev/null 2>&1 || true
+if [[ "${kvm_result}" != *"KVM_OK"* ]]; then
+  echo "ERROR: /dev/kvm not found on worker node after enabling nested virtualization" >&2
+  echo "  kvm-check result: ${kvm_result}" >&2
+  exit 1
+fi
+echo "KVM available on worker node"
+
+# ─── Step 2: Install kata via helm chart ─────────────────────────────────────
+
+echo ""
+echo "=== Installing Kata Containers via helm (${CHART_OCI}:${KATA_VERSION}) ==="
+
+# Skip if already deployed (idempotency for run_with_retry).
+# Check for "deployed" state specifically; a failed/pending release
+# should be uninstalled and retried, not skipped.
+release_status=$(helm status "${HELM_RELEASE}" -n "${HELM_NAMESPACE}" -o json 2>/dev/null \
+  | grep -o '"status":"[a-z-]*"' | head -n1 || true)
+if [[ "${release_status}" == '"status":"deployed"' ]]; then
+  installed_ver=$(helm get metadata "${HELM_RELEASE}" -n "${HELM_NAMESPACE}" \
+    -o json 2>/dev/null | grep '"appVersion"' | cut -d'"' -f4 || echo "unknown")
+  echo "Kata already installed (version: ${installed_ver}), skipping helm install"
+else
+  if [[ -n "${release_status}" ]]; then
+    echo "Existing release in state ${release_status}, uninstalling before retry..."
+    helm uninstall "${HELM_RELEASE}" -n "${HELM_NAMESPACE}" --wait 2>/dev/null || true
+  fi
+  # Build shim selection args
+  helm_shim_args=(--set "shims.disableAll=true")
+  IFS=',' read -ra shim_list <<< "${SHIMS}"
+  for shim in "${shim_list[@]}"; do
+    shim=$(echo "${shim}" | tr -d '[:space:]')
+    helm_shim_args+=(--set "shims.${shim}.enabled=true")
+    helm_shim_args+=(--set "shims.${shim}-runtime-rs.enabled=true")
+  done
+
+  helm install "${HELM_RELEASE}" "${CHART_OCI}" \
+    -n "${HELM_NAMESPACE}" \
+    --version "${KATA_VERSION}" \
+    --timeout "${HELM_TIMEOUT}s" \
+    --wait \
+    --set "k8sDistribution=k8s" \
+    "${helm_shim_args[@]}"
+fi
+
+echo "Waiting for kata-deploy DaemonSet rollout..."
+kubectl -n "${HELM_NAMESPACE}" rollout status daemonset/kata-deploy --timeout="${HELM_TIMEOUT}s"
+
+# ─── Step 3: Verify RuntimeClass ─────────────────────────────────────────────
+
+echo ""
+echo "=== Verifying RuntimeClass ==="
+
+if ! kubectl get runtimeclass "${RUNTIME_CLASS}" &>/dev/null; then
+  echo "ERROR: RuntimeClass '${RUNTIME_CLASS}' not found after kata-deploy rollout." >&2
+  echo "Available kata RuntimeClasses:" >&2
+  kubectl get runtimeclass 2>/dev/null | grep -E '^kata-|^NAME' || echo "  (none)" >&2
+  exit 1
+fi
+echo "RuntimeClass '${RUNTIME_CLASS}' exists"
+
+# ─── Step 4: Smoke test ──────────────────────────────────────────────────────
+
+echo ""
+echo "=== Running smoke test (RuntimeClass: ${RUNTIME_CLASS}) ==="
+
+SMOKE_NS="kata-smoke-test"
+SMOKE_POD="kata-smoke-${RUNTIME_CLASS}"
+
+kubectl delete ns "${SMOKE_NS}" --ignore-not-found >/dev/null 2>&1 || true
+kubectl wait --for=delete ns/"${SMOKE_NS}" --timeout=60s 2>/dev/null || true
+kubectl create ns "${SMOKE_NS}"
+
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${SMOKE_POD}
+  namespace: ${SMOKE_NS}
+spec:
+  runtimeClassName: ${RUNTIME_CLASS}
+  restartPolicy: Never
+  containers:
+    - name: test
+      image: busybox:1.36
+      command: ["sleep", "120"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+        capabilities:
+          drop: ["ALL"]
+EOF
+
+echo "Waiting for smoke test pod to be ready..."
+if ! kubectl wait pod "${SMOKE_POD}" -n "${SMOKE_NS}" --for=condition=Ready --timeout=120s; then
+  echo "ERROR: smoke test pod did not become Ready" >&2
+  kubectl describe pod "${SMOKE_POD}" -n "${SMOKE_NS}" >&2 || true
+  kubectl delete ns "${SMOKE_NS}" --ignore-not-found >/dev/null 2>&1 || true
+  exit 1
+fi
+
+guest_kernel=$(kubectl exec "${SMOKE_POD}" -n "${SMOKE_NS}" -- uname -r 2>/dev/null || echo "unknown")
+node_name=$(kubectl get pod "${SMOKE_POD}" -n "${SMOKE_NS}" -o jsonpath='{.spec.nodeName}' 2>/dev/null || echo "")
+node_kernel=""
+if [[ -n "${node_name}" ]]; then
+  node_kernel=$(kubectl get node "${node_name}" -o jsonpath='{.status.nodeInfo.kernelVersion}' 2>/dev/null || echo "")
+fi
+
+if [[ -n "${node_kernel}" && "${guest_kernel}" != "${node_kernel}" && "${guest_kernel}" != "unknown" ]]; then
+  echo "Smoke test passed: guest kernel=${guest_kernel} (worker=${node_kernel}) — VM isolation confirmed"
+elif [[ "${guest_kernel}" != "unknown" ]]; then
+  echo "Smoke test passed: guest kernel=${guest_kernel} (pod is running; VM isolation not verified)"
+else
+  echo "WARNING: could not read kernel version from smoke test pod" >&2
+fi
+
+kubectl delete ns "${SMOKE_NS}" --ignore-not-found >/dev/null 2>&1 || true
+
+echo ""
+echo "Kata installation complete on kOps cluster '${CLUSTER_NAME}'"

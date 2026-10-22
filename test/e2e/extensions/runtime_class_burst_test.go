@@ -57,7 +57,7 @@ func workloadPodSpec(rcPtr *string, workloadSec int) corev1.PodSpec {
 	if workloadSec == 0 {
 		container.Image = "registry.k8s.io/pause:3.10"
 	} else {
-		container.Image = "busybox:1.36"
+		container.Image = "quay.io/prometheus/busybox:latest"
 		container.Command = []string{"sleep", strconv.Itoa(workloadSec)}
 	}
 	return corev1.PodSpec{
@@ -808,7 +808,8 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 		}
 		require.NoError(t, tc0.Delete(t.Context(), pool))
 
-		drainTimeout := time.Duration(poolSize)*10*time.Second + 30*time.Second
+		perPodDrain := max(10*time.Second, coldBaseline)
+		drainTimeout := time.Duration(poolSize)*perPodDrain + 30*time.Second
 		drainCtx, drainCancel := context.WithTimeout(t.Context(), drainTimeout)
 		defer drainCancel()
 		t.Logf("[drain] waiting for pods in %s to terminate (timeout %s)", ns.Name, drainTimeout)

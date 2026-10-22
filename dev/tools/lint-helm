@@ -37,7 +37,7 @@ def ensure_venv(tools_dir):
     """Creates a venv with ct's Python dependencies, returning its bin dir."""
     venv_dir = os.path.join(tools_dir, "tmp", "lint-helm-venv")
     bin_dir = os.path.join(venv_dir, "bin")
-    if not os.path.exists(venv_dir):
+    if not os.path.isfile(os.path.join(bin_dir, "pip")):
         subprocess.run([sys.executable, "-m", "venv", venv_dir], check=True)
     subprocess.run(
         [os.path.join(bin_dir, "pip"), "install", "--quiet", *PYTHON_REQUIREMENTS],

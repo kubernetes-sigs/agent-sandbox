@@ -1104,6 +1104,9 @@ class TestLeaseApiClient(unittest.TestCase):
         self.assertEqual(lease_api_client.cookie, "session=1")
         self.assertEqual(lease_api_client.default_headers["X-Test"], "yes")
         self.assertIsNone(configuration.retries)
+        configuration.api_key["authorization"] = "rotated"
+        configuration.api_key_prefix["authorization"] = "Bearer"
+        self.assertEqual(lease_api_client.configuration.get_api_key_with_prefix("authorization"), "Bearer rotated")
 
     def test_lease_requests_are_not_retried_with_the_default_client(self, _):
         lease_api_client = K8sHelper().coordination_v1_api.api_client

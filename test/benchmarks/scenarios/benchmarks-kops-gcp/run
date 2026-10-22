@@ -78,10 +78,11 @@ fi
 export IMAGE_TAG
 echo "Using image tag: ${IMAGE_TAG}"
 
-# Push images
+# Push images. The nodes are amd64, so skip arm64: building it runs apt
+# postinst scripts under QEMU, which fails intermittently (#2014).
 for image in "agent-sandbox-controller" "chrome-sandbox"; do
   echo "Pushing ${image} to ${IMAGE_PREFIX}..."
-  dev/tools/push-images --image-prefix="${IMAGE_PREFIX}" --images "${image}"
+  dev/tools/push-images --image-prefix="${IMAGE_PREFIX}" --platform=linux/amd64 --images "${image}"
 done
 
 

@@ -66,7 +66,7 @@ class BuildxDockerfileArgTest(unittest.TestCase):
     instead (issue #1123).
     """
 
-    def _captured_build_cmd(self, srcdir, dockerfile_path):
+    def _captured_build_cmd(self, srcdir, dockerfile_path, **arg_overrides):
         captured = {}
 
         def fake_run(cmd, **kwargs):
@@ -85,7 +85,10 @@ class BuildxDockerfileArgTest(unittest.TestCase):
             args = argparse.Namespace(
                 docker_build_output_type="docker",
                 extra_image_tags=[],
+                platform=push_images.DEFAULT_PLATFORMS,
             )
+            for k, v in arg_overrides.items():
+                setattr(args, k, v)
             push_images.build_and_push_image_with_docker_buildx(
                 args, "svc", srcdir, dockerfile_path, "testtag"
             )
@@ -119,6 +122,31 @@ class BuildxDockerfileArgTest(unittest.TestCase):
             os.path.join("sandbox-router", "Dockerfile"),
         )
         self.assertEqual(captured["cwd"], ".")
+
+    def _platform_args(self, **arg_overrides):
+        cmd = self._captured_build_cmd(
+            srcdir=".",
+            dockerfile_path=os.path.join(".", "Dockerfile"),
+            **arg_overrides,
+        )["cmd"]
+        return [a for a in cmd if a.startswith("--platform")]
+
+    def test_registry_push_defaults_to_multi_arch(self):
+        self.assertEqual(
+            self._platform_args(docker_build_output_type="registry"),
+            ["--platform=linux/amd64,linux/arm64"],
+        )
+
+    def test_registry_push_honors_platform(self):
+        self.assertEqual(
+            self._platform_args(
+                docker_build_output_type="registry", platform="linux/amd64"
+            ),
+            ["--platform=linux/amd64"],
+        )
+
+    def test_kind_load_builds_host_platform_only(self):
+        self.assertEqual(self._platform_args(platform="linux/amd64"), [])
 
 
 class ControllerOnlySelectionTest(unittest.TestCase):
@@ -497,6 +525,14 @@ class CLITest(unittest.TestCase):
         os.environ["CONTAINER_ENGINE"] = "podman"
         args = self._make_parser().parse_args([])
         self.assertEqual(args.container_engine, "podman")
+
+    def test_platform_defaults_to_multi_arch(self):
+        args = self._make_parser().parse_args([])
+        self.assertEqual(args.platform, push_images.DEFAULT_PLATFORMS)
+
+    def test_platform_flag(self):
+        args = self._make_parser().parse_args(["--platform", "linux/amd64"])
+        self.assertEqual(args.platform, "linux/amd64")
 
     def test_cli_overrides_env(self):
         os.environ["CONTAINER_ENGINE"] = "podman"

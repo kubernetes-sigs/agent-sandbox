@@ -36,6 +36,7 @@ Summarizes whether the Sandbox can serve traffic. It is `True` only when the bac
 | `False` | `SandboxSuspended` | The Sandbox is suspending or suspended (`spec.operatingMode: Suspended`). |
 | `False` | `PodSucceeded` | The Pod completed successfully. |
 | `False` | `PodFailed` | The Pod failed. |
+| `False` | `PodTerminating` | The backing Pod has a deletion timestamp. This includes the window after the kubelet sets Failed or Succeeded and before the Pod is removed. |
 | `False` | `SandboxExpired` | `spec.shutdownTime` was reached. Resource cleanup may still be pending or in progress. See [shutdown time]({{< ref "/docs/sandbox/lifecycle" >}}). |
 
 ### Suspended

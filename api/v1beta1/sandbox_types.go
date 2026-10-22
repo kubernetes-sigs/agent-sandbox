@@ -75,8 +75,9 @@ const (
 	// Service already exists even though one was not explicitly requested.
 	// In all other states Status is False with a reason describing why: the Sandbox is
 	// still provisioning (DependenciesNotReady), suspended (SandboxSuspended), its Pod
-	// has reached a terminal phase (PodSucceeded/PodFailed), it has expired
-	// (SandboxExpired), or the controller hit an error (ReconcilerError).
+	// is terminating (PodTerminating), its Pod has reached a terminal phase
+	// (PodSucceeded/PodFailed), it has expired (SandboxExpired), or the controller hit
+	// an error (ReconcilerError).
 	SandboxConditionReady ConditionType = "Ready"
 	// SandboxReasonDependenciesReady is the Ready=True reason: the Pod (and Service, if
 	// requested) are provisioned and the Pod reports Ready with an assigned IP.
@@ -129,6 +130,12 @@ const (
 	SandboxReasonPodSucceeded = "PodSucceeded"
 	// SandboxReasonPodFailed indicates the backing Pod completed unsuccessfully.
 	SandboxReasonPodFailed = "PodFailed"
+	// SandboxReasonPodTerminating is a Ready=False reason: the backing Pod has a
+	// deletion timestamp. The kubelet keeps that Pod Running and Ready until its
+	// containers exit, then sets Failed or Succeeded before removing it.
+	// EndpointSlices have already dropped it. Those terminal phases still report
+	// PodTerminating. The reason string matches SandboxReasonSuspendedPodTerminating.
+	SandboxReasonPodTerminating = "PodTerminating"
 
 	// SandboxReasonExpired is a Ready=False reason: the Sandbox reached its shutdownTime.
 	// Teardown of its underlying resources may still be pending (see Lifecycle).

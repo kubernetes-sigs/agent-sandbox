@@ -160,14 +160,53 @@ footer {
   }
 }
 
-// Fix sidebar nav link colors for dark background
+// Sidebar nav hierarchy (#1658): smaller type, spacing > wrap gap,
+// and weight/color distinction per Docsy nesting level (.ul-0/.ul-1/...).
 .td-sidebar-nav {
-  .td-sidebar-link__page:not(.active) {
-    color: rgba(255, 255, 255, 0.75) !important;
+  font-size: 0.875rem; // 14px
+  line-height: 1.35;
+
+  .td-sidebar-link {
+    // Docsy default 0.375rem is << 24px line-height, so wrapped lines
+    // look like separate entries. Keep item gap above the wrap gap.
+    padding-bottom: 0.65rem;
+    line-height: 1.35;
+  }
+
+  // Root / section titles: heaviest and brightest.
+  .ul-0 > li > .td-sidebar-link,
+  .td-sidebar-nav__section-title > a {
+    font-weight: 600;
   }
 
   .td-sidebar-nav__section-title a:not(.active) {
-    color: rgba(255, 255, 255, 0.9) !important;
+    color: rgba(255, 255, 255, 0.92) !important;
+  }
+
+  // Mid-level pages and nested section titles.
+  .ul-1 .td-sidebar-link__page:not(.active),
+  .ul-1 .td-sidebar-nav__section-title a:not(.active) {
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.78) !important;
+  }
+
+  // Deeper nesting: lighter weight and slightly smaller type.
+  .ul-2 .td-sidebar-link,
+  .ul-3 .td-sidebar-link,
+  .ul-4 .td-sidebar-link {
+    font-size: 0.8125rem; // 13px
+    font-weight: 400;
+  }
+
+  .ul-2 .td-sidebar-link:not(.active),
+  .ul-3 .td-sidebar-link:not(.active),
+  .ul-4 .td-sidebar-link:not(.active) {
+    color: rgba(255, 255, 255, 0.68) !important;
+  }
+
+  // Leaf pages that sit under the root (no ul-N parent match above).
+  .td-sidebar-link__page:not(.active) {
+    color: rgba(255, 255, 255, 0.75) !important;
   }
 
   a:hover,

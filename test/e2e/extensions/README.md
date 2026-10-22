@@ -39,6 +39,7 @@ behaviour across different container runtimes (runc, gVisor, kata).
 | `SANDBOX_WORKLOAD_SEC` | `30` | Seconds the workload container sleeps in burst recovery and benchmark tests. `0` uses a pause container. Longevity mode overrides this to `max(10, coldStart×5)` unless explicitly set — derived from cold start calibration so pods survive pool fill time. |
 | `SANDBOX_TTL` | `0` | TTL in seconds for non-burst claim auto-cleanup (lifecycle, benchmark tests). Burst recovery uses `ShutdownTime` instead — see [Design Decisions](#design-decisions). |
 | `SANDBOX_IMAGES` | `registry.k8s.io/pause:3.10` | Comma-separated images for cold start and warm claim benchmarks |
+| `SANDBOX_DEFAULT_TIMEOUT` | `60s` | Default per-operation timeout for framework waits (WaitForObject, WaitForWarmPoolReady, etc.). Set to `5m` for kata-remote (peer-pods) where pod VM provisioning takes 60-80s on AWS and 4+ minutes on Azure. |
 | `SANDBOX_CONTROLLER_WORKERS` | *(auto for kata, unset otherwise)* | Override controller worker counts. Format: `sandbox:20,claim:10,pool:1,batch:10`. Patches the controller deployment, waits for rollout, and restores original args on cleanup. For VM runtimes (kata), auto-derives node-aware defaults when unset — see [Controller Worker Auto-Tuning](#controller-worker-auto-tuning). |
 
 ## Quick Start
@@ -107,6 +108,31 @@ SANDBOX_RUNTIME_CLASS=kata-clh \
 SANDBOX_RUNTIME_CLASS=kata-clh \
   SANDBOX_POOL_SIZES=20 \
   SANDBOX_CONTROLLER_WORKERS=sandbox:10,claim:10,batch:10 \
+  go test ./test/e2e/extensions/... -run TestRuntimeClassBurstRecovery -v -timeout 60m
+```
+
+### Kata-Remote (Peer-Pods)
+
+Peer-pods (`kata-remote`) provision a full VM per sandbox via a cloud provider
+API (AWS, Azure). Cold start is significantly slower than local kata: 60-80s on
+AWS, 4+ minutes on Azure. Set `SANDBOX_DEFAULT_TIMEOUT` to avoid per-operation
+timeouts in the test framework.
+
+```shell
+# Lifecycle smoke test on AWS peer-pods
+SANDBOX_RUNTIME_CLASS=kata-remote \
+  SANDBOX_DEFAULT_TIMEOUT=5m \
+  go test ./test/e2e/extensions/... -run TestRuntimeClassLifecycle -v -timeout 30m
+
+# Cold vs warm comparison
+SANDBOX_RUNTIME_CLASS=kata-remote \
+  SANDBOX_DEFAULT_TIMEOUT=5m \
+  go test ./test/e2e/extensions/... -run TestRuntimeClassStartupComparison -v -timeout 30m
+
+# Burst recovery (smaller pool sizes due to VM provisioning cost)
+SANDBOX_RUNTIME_CLASS=kata-remote \
+  SANDBOX_DEFAULT_TIMEOUT=5m \
+  SANDBOX_POOL_SIZES=2,4,6 \
   go test ./test/e2e/extensions/... -run TestRuntimeClassBurstRecovery -v -timeout 60m
 ```
 

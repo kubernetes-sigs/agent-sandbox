@@ -235,9 +235,13 @@ func applyControllerWorkerTuning(t *testing.T, ctx context.Context, cl *framewor
 
 	deploy.Spec.Template.Spec.Containers[0].Args = newArgs
 	require.NoError(t, cl.Update(ctx, &deploy))
-	waitForControllerRollout(t, ctx, cl, key)
 
+	restored := false
 	restore := func() {
+		if restored {
+			return
+		}
+		restored = true
 		var current appsv1.Deployment
 		if err := cl.Get(ctx, key, &current); err != nil {
 			t.Logf("[tuning] restore: failed to get deployment: %v", err)
@@ -251,6 +255,8 @@ func applyControllerWorkerTuning(t *testing.T, ctx context.Context, cl *framewor
 		waitForControllerRollout(t, ctx, cl, key)
 		t.Logf("[tuning] controller args restored")
 	}
+	t.Cleanup(restore)
+	waitForControllerRollout(t, ctx, cl, key)
 	return cfg, restore
 }
 
@@ -284,7 +290,8 @@ func waitForControllerRollout(t *testing.T, ctx context.Context, cl *framework.C
 	for {
 		var deploy appsv1.Deployment
 		require.NoError(t, cl.Get(deadline, key, &deploy))
-		if deploy.Status.UpdatedReplicas == *deploy.Spec.Replicas &&
+		if deploy.Status.Replicas == *deploy.Spec.Replicas &&
+			deploy.Status.UpdatedReplicas == *deploy.Spec.Replicas &&
 			deploy.Status.ReadyReplicas == *deploy.Spec.Replicas &&
 			deploy.Status.ObservedGeneration >= deploy.Generation {
 			t.Logf("[tuning] controller rollout complete (ready=%d)", deploy.Status.ReadyReplicas)

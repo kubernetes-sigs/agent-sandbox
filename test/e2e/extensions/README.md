@@ -39,7 +39,7 @@ behaviour across different container runtimes (runc, gVisor, kata).
 | `SANDBOX_WORKLOAD_SEC` | `30` | Seconds the workload container sleeps in burst recovery and benchmark tests. `0` uses a pause container. Longevity mode overrides this to `max(10, coldStart×5)` unless explicitly set — derived from cold start calibration so pods survive pool fill time. |
 | `SANDBOX_TTL` | `0` | TTL in seconds for non-burst claim auto-cleanup (lifecycle, benchmark tests). Burst recovery uses `ShutdownTime` instead — see [Design Decisions](#design-decisions). |
 | `SANDBOX_IMAGES` | `registry.k8s.io/pause:3.10` | Comma-separated images for cold start and warm claim benchmarks |
-| `SANDBOX_DEFAULT_TIMEOUT` | `60s` | Default per-operation timeout for framework waits (WaitForObject, WaitForWarmPoolReady, etc.). Set to `5m` for kata-remote (peer-pods) where pod VM provisioning takes 60-80s on AWS and 4+ minutes on Azure. |
+| `SANDBOX_DEFAULT_TIMEOUT` | `60s` | Default per-operation timeout for framework waits (WaitForObject, WaitForWarmPoolReady, etc.). Set to `5m` for kata-remote (peer-pods) where pod VM provisioning takes 60-80s on AWS and 2-3 minutes on Azure. |
 | `SANDBOX_CONTROLLER_WORKERS` | *(auto for kata, unset otherwise)* | Override controller worker counts. Format: `sandbox:20,claim:10,pool:1,batch:10`. Patches the controller deployment, waits for rollout, and restores original args on cleanup. For VM runtimes (kata), auto-derives node-aware defaults when unset — see [Controller Worker Auto-Tuning](#controller-worker-auto-tuning). |
 
 ## Quick Start
@@ -115,7 +115,7 @@ SANDBOX_RUNTIME_CLASS=kata-clh \
 
 Peer-pods (`kata-remote`) provision a full VM per sandbox via a cloud provider
 API (AWS, Azure). Cold start is significantly slower than local kata: 60-80s on
-AWS, 4+ minutes on Azure. Set `SANDBOX_DEFAULT_TIMEOUT` to avoid per-operation
+AWS, 2-3 minutes on Azure. Set `SANDBOX_DEFAULT_TIMEOUT` to avoid per-operation
 timeouts in the test framework.
 
 ```shell

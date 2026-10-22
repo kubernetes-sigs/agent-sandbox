@@ -51,7 +51,7 @@ import (
 // for runtimes with slower pod startup such as kata-remote.
 var DefaultTimeout = func() time.Duration {
 	if v := os.Getenv("SANDBOX_DEFAULT_TIMEOUT"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			return d
 		}
 	}

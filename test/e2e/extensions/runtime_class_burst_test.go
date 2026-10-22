@@ -57,7 +57,7 @@ func workloadPodSpec(rcPtr *string, workloadSec int) corev1.PodSpec {
 	if workloadSec == 0 {
 		container.Image = "registry.k8s.io/pause:3.10"
 	} else {
-		container.Image = "quay.io/prometheus/busybox:latest"
+		container.Image = "quay.io/prometheus/busybox:glibc"
 		container.Command = []string{"sleep", strconv.Itoa(workloadSec)}
 	}
 	return corev1.PodSpec{
@@ -514,7 +514,7 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 								WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: pool.Name},
 							},
 						}
-						shutdownAt := metav1.NewTime(time.Now().Add(time.Duration(workloadSec)*time.Second + 10*time.Second))
+						shutdownAt := metav1.NewTime(time.Now().Add(coldBaseline + time.Duration(workloadSec)*time.Second + 10*time.Second))
 						claim.Spec.Lifecycle = &extensionsv1beta1.Lifecycle{
 							ShutdownPolicy: extensionsv1beta1.ShutdownPolicyDelete,
 							ShutdownTime:   &shutdownAt,

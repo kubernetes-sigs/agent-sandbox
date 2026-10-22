@@ -127,6 +127,11 @@ type Session struct {
 	// sessionStore is the store for session state.
 	sessionStore sessions.Store
 
+	// Metadata records where the session came from (its parent, if any) and
+	// which toolset it runs with. It is persisted when the session is
+	// created; sessions recorded before metadata existed have zero values.
+	Metadata sessions.Metadata
+
 	// messages is a list of all the messages in the current session chat.
 	messages []llm.Message
 
@@ -697,37 +702,66 @@ func NewHarness(llmClient llm.ChatClient, sandboxClient *SandboxClient, toolsReg
 	}
 }
 
-// BuildSession creates a Session named sessionName, loading any existing
-// history from the session store.
-func (h *Harness) BuildSession(ctx context.Context, sessionStore sessions.Store, sessionName string) (*Session, error) {
+// NewSession creates a new Session named sessionName and persists its
+// metadata to the session store. If metadata.CreatedAt is zero, it is set to
+// the current time.
+func (h *Harness) NewSession(ctx context.Context, sessionStore sessions.Store, sessionName string, metadata sessions.Metadata) (*Session, error) {
 	// Session names become Kubernetes object names and filesystem path
 	// components, so validate here even though front ends generally do too.
 	if err := sessions.ValidateSessionName(sessionName); err != nil {
 		return nil, fmt.Errorf("invalid session name %q: %w", sessionName, err)
 	}
 
-	session := &Session{
+	if metadata.CreatedAt.IsZero() {
+		metadata.CreatedAt = time.Now()
+	}
+	if err := sessionStore.NewSession(ctx, sessionName, metadata); err != nil {
+		return nil, fmt.Errorf("creating session: %w", err)
+	}
+
+	return &Session{
 		Name:         sessionName,
 		client:       h.sandboxClient,
 		HomeDir:      h.opts.HomeDir,
 		sessionStore: sessionStore,
+		Metadata:     metadata,
+		sandboxID: types.NamespacedName{
+			Name:      sessionName,
+			Namespace: h.opts.Namespace,
+		},
+	}, nil
+}
+
+// LoadSession loads an existing Session named sessionName (its message
+// history and metadata) from the session store. If the session does not
+// exist, it returns an error wrapping sessions.ErrNotFound.
+func (h *Harness) LoadSession(ctx context.Context, sessionStore sessions.Store, sessionName string) (*Session, error) {
+	if err := sessions.ValidateSessionName(sessionName); err != nil {
+		return nil, fmt.Errorf("invalid session name %q: %w", sessionName, err)
 	}
 
-	session.sandboxID = types.NamespacedName{
-		Name:      session.Name,
-		Namespace: h.opts.Namespace,
-	}
-
-	// A missing session is simply a new one here: the CLI and ACP's
-	// session/new both create-or-resume by name. Callers that must not
-	// create (ACP's session/load) check the store for ErrNotFound first.
-	messages, err := sessionStore.LoadSession(ctx, session.Name)
-	if err != nil && !errors.Is(err, sessions.ErrNotFound) {
+	messages, metadata, err := sessionStore.LoadSession(ctx, sessionName)
+	if err != nil {
 		return nil, fmt.Errorf("loading session: %w", err)
 	}
-	session.messages = messages
 
-	return session, nil
+	var meta sessions.Metadata
+	if metadata != nil {
+		meta = *metadata
+	}
+
+	return &Session{
+		Name:         sessionName,
+		client:       h.sandboxClient,
+		HomeDir:      h.opts.HomeDir,
+		sessionStore: sessionStore,
+		Metadata:     meta,
+		messages:     messages,
+		sandboxID: types.NamespacedName{
+			Name:      sessionName,
+			Namespace: h.opts.Namespace,
+		},
+	}, nil
 }
 
 // EnsureSystemPrompt seeds a new session with the configured system prompt.

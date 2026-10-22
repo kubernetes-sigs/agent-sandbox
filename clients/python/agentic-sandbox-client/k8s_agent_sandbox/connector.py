@@ -39,7 +39,7 @@ from .models import (
     SandboxdInClusterConnectionConfig,
 )
 from .k8s_helper import K8sHelper
-from .utils import kubectl_kubeconfig_args, merge_headers
+from .utils import kubectl_kubeconfig_args, merge_headers, sandboxd_auth_headers
 from .exceptions import (
     SandboxNoServiceError,
     SandboxNotReadyError,
@@ -642,6 +642,7 @@ class SandboxConnector:
         self.id = sandbox_id
         self.namespace = namespace
         self.connection_config = connection_config
+        self._sandboxd_auth_headers = sandboxd_auth_headers(connection_config)
         self.k8s_helper = k8s_helper
         self._get_pod_ip = get_pod_ip
         self._get_pod_name = get_pod_name
@@ -761,7 +762,20 @@ class SandboxConnector:
                 "the sandboxd runtime requires gRPC support; install the "
                 "'grpc' extra: pip install k8s-agent-sandbox[grpc]"
             ) from e
-        self._grpc_channel = grpc.insecure_channel(target)
+        authorization = self._sandboxd_auth_headers.get("authorization")
+        if authorization is None:
+            channel = grpc.insecure_channel(target)
+        else:
+            from ._grpc_auth import BearerTokenInterceptor
+
+            interceptor = BearerTokenInterceptor(authorization)
+            channel = grpc.insecure_channel(target)
+            try:
+                channel = grpc.intercept_channel(channel, interceptor)
+            except Exception:
+                channel.close()
+                raise
+        self._grpc_channel = channel
         self._grpc_channel_target = target
         return self._grpc_channel
 
@@ -881,8 +895,10 @@ class SandboxConnector:
             # Prepare the request
             url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
 
-            # Precedence: config < caller < SDK routing headers.
-            headers = merge_headers(self._extra_headers, kwargs.get("headers"))
+            # Precedence: config < caller < sandboxd auth / SDK routing headers.
+            headers = merge_headers(
+                self._extra_headers, kwargs.get("headers"), self._sandboxd_auth_headers
+            )
             if self.strategy.should_inject_router_headers():
                 headers["X-Sandbox-ID"] = self.id
                 headers["X-Sandbox-Namespace"] = self.namespace
@@ -927,6 +943,9 @@ class SandboxConnector:
             request_session = (
                 self._no_retry_session if disable_retries else self.session
             )
+            if self._sandboxd_auth_headers:
+                # Explicit auth prevents requests from replacing Bearer via .netrc.
+                kwargs["auth"] = lambda request: request
             response = request_session.request(
                 method, url, allow_redirects=False, **{**self._tls_kwargs, **kwargs}
             )

@@ -66,8 +66,10 @@ Get a token from [HuggingFace](https://huggingface.co/settings/tokens).
 
 ### 3. Clone the repository and navigate to the examples/langchain directory
 
+If you have already cloned the repository, simply navigate to the `examples/langchain` directory from your repository root.
+
 ```bash
-# Clone the repository
+# Clone the repository (if not already done)
 git clone https://github.com/kubernetes-sigs/agent-sandbox.git
 
 # Navigate to the examples/langchain directory

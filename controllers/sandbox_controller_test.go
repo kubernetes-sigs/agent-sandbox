@@ -6427,8 +6427,7 @@ func TestRecordSandboxCreationMetrics(t *testing.T) {
 				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue,
 				LastTransitionTime: readyAt,
 			}}
-			require.NoError(t, r.updateStatus(t.Context(), oldStatus, sandbox))
-			r.recordSandboxCreationMetrics(t.Context(), sandbox, oldStatus)
+			require.NoError(t, r.updateStatus(t.Context(), oldStatus, sandbox.ResourceVersion, sandbox))
 			require.Empty(t, r.pendingCreationMetrics)
 
 			// Both ordinary updates and a later readiness flap leave the UID excluded.
@@ -7276,4 +7275,554 @@ func TestReconcileEvents_SandboxSuspended(t *testing.T) {
 	_, err = r.Reconcile(t.Context(), req)
 	require.NoError(t, err)
 	require.Equal(t, "Normal SandboxReady Sandbox is ready", drainEvent(t, recorder))
+}
+
+func TestRecordLifecycleMetrics_SuspendAndResume(t *testing.T) {
+	const name, ns, tmpl = "sb-lifecycle", "sb-ns", "my-tmpl"
+	key := types.NamespacedName{Name: name, Namespace: ns}
+
+	newSandbox := func(mode sandboxv1beta1.SandboxOperatingMode, suspendedStatus metav1.ConditionStatus, suspendedReason string, readyStatus metav1.ConditionStatus, readyReason string) *sandboxv1beta1.Sandbox {
+		s := &sandboxv1beta1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: ns,
+				UID:       sandboxUID,
+				Annotations: map[string]string{
+					sandboxv1beta1.SandboxTemplateRefAnnotation: tmpl,
+				},
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: extensionsv1beta1.GroupVersion.String(),
+					Kind:       extensionsv1beta1.SandboxClaimKind,
+					Name:       "test-claim",
+					Controller: new(true),
+				}},
+			},
+			Spec: sandboxv1beta1.SandboxSpec{OperatingMode: mode},
+		}
+		meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
+			Type:   string(sandboxv1beta1.SandboxConditionSuspended),
+			Status: suspendedStatus,
+			Reason: suspendedReason,
+		})
+		meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
+			Type:   string(sandboxv1beta1.SandboxConditionReady),
+			Status: readyStatus,
+			Reason: readyReason,
+		})
+		return s
+	}
+
+	statusWithConditions := func(conds ...metav1.Condition) *sandboxv1beta1.SandboxStatus {
+		st := &sandboxv1beta1.SandboxStatus{}
+		for _, c := range conds {
+			meta.SetStatusCondition(&st.Conditions, c)
+		}
+		return st
+	}
+
+	condSuspended := func(status metav1.ConditionStatus, reason string) metav1.Condition {
+		return metav1.Condition{
+			Type:   string(sandboxv1beta1.SandboxConditionSuspended),
+			Status: status,
+			Reason: reason,
+		}
+	}
+
+	condReady := func(status metav1.ConditionStatus, reason string) metav1.Condition {
+		return metav1.Condition{
+			Type:   string(sandboxv1beta1.SandboxConditionReady),
+			Status: status,
+			Reason: reason,
+		}
+	}
+
+	tests := []struct {
+		name                  string
+		seedSuspend           *lifecycleTimeEntry
+		seedResume            *lifecycleTimeEntry
+		sandbox               *sandboxv1beta1.Sandbox
+		oldStatus             *sandboxv1beta1.SandboxStatus
+		wantSuspendRequested  float64
+		wantSuspendTerminated float64
+		wantSuspendError      float64
+		wantSuspendLatencyObs int
+		wantSuspendEntryUID   types.UID
+		wantResumeRequested   float64
+		wantResumeReady       float64
+		wantResumeError       float64
+		wantResumeLatencyObs  int
+		wantResumeEntryUID    types.UID
+	}{
+		{
+			name:                 "suspend requested anchors timer and increments requested counter",
+			sandbox:              newSandbox(sandboxv1beta1.SandboxOperatingModeSuspended, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspendedPodTerminating, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspended),
+			oldStatus:            statusWithConditions(condSuspended(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNotSuspended), condReady(metav1.ConditionTrue, sandboxv1beta1.SandboxReasonDependenciesReady)),
+			wantSuspendRequested: 1,
+			wantSuspendEntryUID:  sandboxUID,
+		},
+		{
+			name:                  "suspend completion records pod_terminated and suspend latency after anchor",
+			seedSuspend:           &lifecycleTimeEntry{timestamp: time.Now().Add(-500 * time.Millisecond), uid: sandboxUID},
+			sandbox:               newSandbox(sandboxv1beta1.SandboxOperatingModeSuspended, metav1.ConditionTrue, sandboxv1beta1.SandboxReasonSuspendedPodTerminated, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspended),
+			oldStatus:             statusWithConditions(condSuspended(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspendedPodTerminating), condReady(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspended)),
+			wantSuspendTerminated: 1,
+			wantSuspendLatencyObs: 1,
+		},
+		{
+			name:                  "same-reconcile suspend request and pod_terminated skips ~0ms latency sample and clears timer",
+			sandbox:               newSandbox(sandboxv1beta1.SandboxOperatingModeSuspended, metav1.ConditionTrue, sandboxv1beta1.SandboxReasonSuspendedPodTerminated, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspended),
+			oldStatus:             statusWithConditions(condSuspended(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNotSuspended)),
+			wantSuspendRequested:  1,
+			wantSuspendTerminated: 1,
+		},
+		{
+			name:      "does not record suspend on fresh create with operatingMode=Suspended",
+			sandbox:   newSandbox(sandboxv1beta1.SandboxOperatingModeSuspended, metav1.ConditionTrue, sandboxv1beta1.SandboxReasonSuspendedPodTerminated, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspended),
+			oldStatus: statusWithConditions(),
+		},
+		{
+			name:                 "suspend error increments error counter",
+			sandbox:              newSandbox(sandboxv1beta1.SandboxOperatingModeSuspended, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspendedPodNotOwned, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspended),
+			oldStatus:            statusWithConditions(condSuspended(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNotSuspended)),
+			wantSuspendRequested: 1,
+			wantSuspendError:     1,
+			wantSuspendEntryUID:  sandboxUID,
+		},
+		{
+			name:                "counts suspend error at most once per anchored suspend across error reasons",
+			seedSuspend:         &lifecycleTimeEntry{timestamp: time.Now().Add(-time.Second), uid: sandboxUID, errorRecorded: true},
+			sandbox:             newSandbox(sandboxv1beta1.SandboxOperatingModeSuspended, metav1.ConditionUnknown, sandboxv1beta1.SandboxReasonSuspendedPodStateUnknown, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspended),
+			oldStatus:           statusWithConditions(condSuspended(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspendedPodNotOwned)),
+			wantSuspendEntryUID: sandboxUID,
+		},
+		{
+			name:                "anchors resume start when leaving Suspended=True, not yet Ready",
+			sandbox:             newSandbox(sandboxv1beta1.SandboxOperatingModeRunning, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNotSuspended, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonDependenciesNotReady),
+			oldStatus:           statusWithConditions(condSuspended(metav1.ConditionTrue, sandboxv1beta1.SandboxReasonSuspendedPodTerminated)),
+			wantResumeRequested: 1,
+			wantResumeEntryUID:  sandboxUID,
+		},
+		{
+			name:                 "records resume ready and latency once Ready after an anchor",
+			seedResume:           &lifecycleTimeEntry{timestamp: time.Now().Add(-2 * time.Second), uid: sandboxUID},
+			sandbox:              newSandbox(sandboxv1beta1.SandboxOperatingModeRunning, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNotSuspended, metav1.ConditionTrue, sandboxv1beta1.SandboxReasonDependenciesReady),
+			oldStatus:            statusWithConditions(condSuspended(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNotSuspended), condReady(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonDependenciesNotReady)),
+			wantResumeReady:      1,
+			wantResumeLatencyObs: 1,
+		},
+		{
+			name:                "same-reconcile resume request and Ready=True skips ~0ms latency sample and clears timer",
+			sandbox:             newSandbox(sandboxv1beta1.SandboxOperatingModeRunning, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNotSuspended, metav1.ConditionTrue, sandboxv1beta1.SandboxReasonDependenciesReady),
+			oldStatus:           statusWithConditions(condSuspended(metav1.ConditionTrue, sandboxv1beta1.SandboxReasonSuspendedPodTerminated)),
+			wantResumeRequested: 1,
+			wantResumeReady:     1,
+		},
+		{
+			name:      "does not anchor if prior Suspended condition was False (canceled suspend)",
+			sandbox:   newSandbox(sandboxv1beta1.SandboxOperatingModeRunning, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNotSuspended, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonDependenciesNotReady),
+			oldStatus: statusWithConditions(condSuspended(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspendedPodTerminating)),
+		},
+		{
+			name:       "suspend clears an in-flight resume timer",
+			seedResume: &lifecycleTimeEntry{timestamp: time.Now(), uid: sandboxUID},
+			sandbox:    newSandbox(sandboxv1beta1.SandboxOperatingModeSuspended, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspendedPodTerminating, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspended),
+			oldStatus:  statusWithConditions(condSuspended(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspendedPodTerminating)),
+		},
+		{
+			name:               "does not consume or delete a resume entry belonging to a different UID",
+			seedResume:         &lifecycleTimeEntry{timestamp: time.Now().Add(-2 * time.Second), uid: types.UID("other-uid")},
+			sandbox:            newSandbox(sandboxv1beta1.SandboxOperatingModeRunning, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNotSuspended, metav1.ConditionTrue, sandboxv1beta1.SandboxReasonDependenciesReady),
+			oldStatus:          statusWithConditions(),
+			wantResumeEntryUID: types.UID("other-uid"),
+		},
+		{
+			name:               "records resume error when an in-flight resume hits ReconcilerError",
+			seedResume:         &lifecycleTimeEntry{timestamp: time.Now().Add(-time.Second), uid: sandboxUID},
+			sandbox:            newSandbox(sandboxv1beta1.SandboxOperatingModeRunning, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNotSuspended, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonReconcilerError),
+			oldStatus:          statusWithConditions(condSuspended(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNotSuspended), condReady(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonDependenciesNotReady)),
+			wantResumeError:    1,
+			wantResumeEntryUID: sandboxUID,
+		},
+		{
+			name:               "counts resume error at most once per anchored resume across error flaps",
+			seedResume:         &lifecycleTimeEntry{timestamp: time.Now().Add(-time.Second), uid: sandboxUID, errorRecorded: true},
+			sandbox:            newSandbox(sandboxv1beta1.SandboxOperatingModeRunning, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNotSuspended, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonReconcilerError),
+			oldStatus:          statusWithConditions(condSuspended(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNotSuspended), condReady(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonDependenciesNotReady)),
+			wantResumeEntryUID: sandboxUID,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			asmetrics.SandboxSuspendTotal.Reset()
+			asmetrics.SandboxSuspendLatency.Reset()
+			asmetrics.SandboxResumeTotal.Reset()
+			asmetrics.SandboxResumeLatency.Reset()
+
+			r := &SandboxReconciler{}
+			if tc.seedSuspend != nil {
+				r.suspendStartTimes.Store(key, *tc.seedSuspend)
+			}
+			if tc.seedResume != nil {
+				r.resumeStartTimes.Store(key, *tc.seedResume)
+			}
+
+			r.recordLifecycleMetrics(context.Background(), tc.oldStatus, tc.sandbox)
+
+			assert.InDelta(t, tc.wantSuspendRequested, testutil.ToFloat64(asmetrics.SandboxSuspendTotal.WithLabelValues(ns, tmpl, "SandboxClaim", "requested")), 0.001)
+			assert.InDelta(t, tc.wantSuspendTerminated, testutil.ToFloat64(asmetrics.SandboxSuspendTotal.WithLabelValues(ns, tmpl, "SandboxClaim", "pod_terminated")), 0.001)
+			assert.InDelta(t, tc.wantSuspendError, testutil.ToFloat64(asmetrics.SandboxSuspendTotal.WithLabelValues(ns, tmpl, "SandboxClaim", "error")), 0.001)
+			assert.Equal(t, tc.wantSuspendLatencyObs, testutil.CollectAndCount(asmetrics.SandboxSuspendLatency))
+
+			suspendEntry, _ := r.suspendStartTimes.Load(key)
+			assert.Equal(t, tc.wantSuspendEntryUID, suspendEntry.uid)
+
+			assert.InDelta(t, tc.wantResumeRequested, testutil.ToFloat64(asmetrics.SandboxResumeTotal.WithLabelValues(ns, tmpl, "SandboxClaim", "requested")), 0.001)
+			assert.InDelta(t, tc.wantResumeReady, testutil.ToFloat64(asmetrics.SandboxResumeTotal.WithLabelValues(ns, tmpl, "SandboxClaim", "ready")), 0.001)
+			assert.InDelta(t, tc.wantResumeError, testutil.ToFloat64(asmetrics.SandboxResumeTotal.WithLabelValues(ns, tmpl, "SandboxClaim", "error")), 0.001)
+			assert.Equal(t, tc.wantResumeLatencyObs, testutil.CollectAndCount(asmetrics.SandboxResumeLatency))
+
+			resumeEntry, _ := r.resumeStartTimes.Load(key)
+			assert.Equal(t, tc.wantResumeEntryUID, resumeEntry.uid)
+		})
+	}
+}
+
+func TestRecordLifecycleMetrics_FinishedAndExpired(t *testing.T) {
+	const name, ns, tmpl = "sb-terminal", "sb-ns", "my-tmpl"
+	key := types.NamespacedName{Name: name, Namespace: ns}
+
+	claimOwnerRef := []metav1.OwnerReference{{
+		APIVersion: extensionsv1beta1.GroupVersion.String(),
+		Kind:       extensionsv1beta1.SandboxClaimKind,
+		Name:       "test-claim",
+		Controller: new(true),
+	}}
+
+	t.Run("Finished transitions", func(t *testing.T) {
+		asmetrics.SandboxFinishedTotal.Reset()
+		r := &SandboxReconciler{}
+
+		sb := &sandboxv1beta1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: ns,
+				UID:       sandboxUID,
+				Annotations: map[string]string{
+					sandboxv1beta1.SandboxTemplateRefAnnotation: tmpl,
+				},
+				OwnerReferences: claimOwnerRef,
+			},
+		}
+		meta.SetStatusCondition(&sb.Status.Conditions, metav1.Condition{
+			Type:   string(sandboxv1beta1.SandboxConditionFinished),
+			Status: metav1.ConditionTrue,
+			Reason: sandboxv1beta1.SandboxReasonPodSucceeded,
+		})
+
+		oldStatus := &sandboxv1beta1.SandboxStatus{}
+		r.recordLifecycleMetrics(context.Background(), oldStatus, sb)
+		require.InDelta(t, 1.0, testutil.ToFloat64(asmetrics.SandboxFinishedTotal.WithLabelValues(ns, tmpl, "SandboxClaim", "PodSucceeded")), 0.001)
+
+		// Repeating with identical Finished status must not double-count.
+		r.recordLifecycleMetrics(context.Background(), sb.Status.DeepCopy(), sb)
+		require.InDelta(t, 1.0, testutil.ToFloat64(asmetrics.SandboxFinishedTotal.WithLabelValues(ns, tmpl, "SandboxClaim", "PodSucceeded")), 0.001)
+
+		// Direct Sandbox (owned_by=None) ignores user-supplied template annotation.
+		directSB := sb.DeepCopy()
+		directSB.OwnerReferences = nil
+		r.recordLifecycleMetrics(context.Background(), oldStatus, directSB)
+		require.InDelta(t, 1.0, testutil.ToFloat64(asmetrics.SandboxFinishedTotal.WithLabelValues(ns, "unknown", "None", "PodSucceeded")), 0.001)
+	})
+
+	t.Run("Expired transitions clear timers and record policy", func(t *testing.T) {
+		asmetrics.SandboxExpiredTotal.Reset()
+		r := &SandboxReconciler{}
+		r.suspendStartTimes.Store(key, lifecycleTimeEntry{timestamp: time.Now(), uid: sandboxUID})
+		r.resumeStartTimes.Store(key, lifecycleTimeEntry{timestamp: time.Now(), uid: sandboxUID})
+
+		delPolicy := sandboxv1beta1.ShutdownPolicyDelete
+		sb := &sandboxv1beta1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: ns,
+				UID:       sandboxUID,
+				Annotations: map[string]string{
+					sandboxv1beta1.SandboxTemplateRefAnnotation: tmpl,
+				},
+				OwnerReferences: claimOwnerRef,
+			},
+			Spec: sandboxv1beta1.SandboxSpec{
+				Lifecycle: sandboxv1beta1.Lifecycle{
+					ShutdownPolicy: &delPolicy,
+				},
+			},
+		}
+		meta.SetStatusCondition(&sb.Status.Conditions, metav1.Condition{
+			Type:   string(sandboxv1beta1.SandboxConditionReady),
+			Status: metav1.ConditionFalse,
+			Reason: sandboxv1beta1.SandboxReasonExpired,
+		})
+
+		oldStatus := &sandboxv1beta1.SandboxStatus{}
+		r.recordLifecycleMetrics(context.Background(), oldStatus, sb)
+		require.InDelta(t, 1.0, testutil.ToFloat64(asmetrics.SandboxExpiredTotal.WithLabelValues(ns, tmpl, "SandboxClaim", "Delete")), 0.001)
+
+		_, hasSuspend := r.suspendStartTimes.Load(key)
+		_, hasResume := r.resumeStartTimes.Load(key)
+		assert.False(t, hasSuspend)
+		assert.False(t, hasResume)
+
+		// Repeating with Reason=SandboxExpired already in oldStatus must not double-count.
+		r.recordLifecycleMetrics(context.Background(), sb.Status.DeepCopy(), sb)
+		require.InDelta(t, 1.0, testutil.ToFloat64(asmetrics.SandboxExpiredTotal.WithLabelValues(ns, tmpl, "SandboxClaim", "Delete")), 0.001)
+	})
+}
+
+func TestReconcile_CleanUpLifecycleTimersOnNotFoundAndDeletion(t *testing.T) {
+	key := types.NamespacedName{Name: "stale-sb", Namespace: "default"}
+
+	t.Run("NotFound", func(t *testing.T) {
+		fc := fake.NewClientBuilder().WithScheme(Scheme).Build()
+		r := &SandboxReconciler{
+			Client: fc,
+			Scheme: Scheme,
+			Tracer: asmetrics.NewNoOp(),
+		}
+		r.suspendStartTimes.Store(key, lifecycleTimeEntry{timestamp: time.Now(), uid: "stale-uid"})
+		r.resumeStartTimes.Store(key, lifecycleTimeEntry{timestamp: time.Now(), uid: "stale-uid"})
+
+		_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key})
+		require.NoError(t, err)
+
+		_, hasSuspend := r.suspendStartTimes.Load(key)
+		_, hasResume := r.resumeStartTimes.Load(key)
+		assert.False(t, hasSuspend, "expected suspendStartTimes entry to be deleted on NotFound")
+		assert.False(t, hasResume, "expected resumeStartTimes entry to be deleted on NotFound")
+	})
+
+	t.Run("DeletionTimestamp", func(t *testing.T) {
+		now := metav1.Now()
+		sb := &sandboxv1beta1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              key.Name,
+				Namespace:         key.Namespace,
+				UID:               "deleting-uid",
+				DeletionTimestamp: &now,
+				Finalizers:        []string{"test.agents.x-k8s.io/keep"},
+			},
+		}
+		fc := fake.NewClientBuilder().WithScheme(Scheme).WithObjects(sb).Build()
+		r := &SandboxReconciler{
+			Client: fc,
+			Scheme: Scheme,
+			Tracer: asmetrics.NewNoOp(),
+		}
+		r.suspendStartTimes.Store(key, lifecycleTimeEntry{timestamp: time.Now(), uid: sb.UID})
+		r.resumeStartTimes.Store(key, lifecycleTimeEntry{timestamp: time.Now(), uid: sb.UID})
+
+		_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key})
+		require.NoError(t, err)
+
+		_, hasSuspend := r.suspendStartTimes.Load(key)
+		_, hasResume := r.resumeStartTimes.Load(key)
+		assert.False(t, hasSuspend, "expected suspendStartTimes entry to be deleted on DeletionTimestamp")
+		assert.False(t, hasResume, "expected resumeStartTimes entry to be deleted on DeletionTimestamp")
+	})
+}
+
+func TestReconcile_LifecycleMetricsEndToEnd(t *testing.T) {
+	asmetrics.SandboxSuspendTotal.Reset()
+	asmetrics.SandboxSuspendLatency.Reset()
+	asmetrics.SandboxResumeTotal.Reset()
+	asmetrics.SandboxResumeLatency.Reset()
+	asmetrics.SandboxExpiredTotal.Reset()
+
+	const ns, tmpl = "default", "e2e-tmpl"
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sandbox-e2e-metrics",
+			Namespace: ns,
+			UID:       sandboxUID,
+			Annotations: map[string]string{
+				sandboxv1beta1.SandboxTemplateRefAnnotation: tmpl,
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       extensionsv1beta1.SandboxClaimKind,
+				Name:       "e2e-claim",
+				Controller: new(true),
+			}},
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+				},
+			},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            sandbox.Name,
+			Namespace:       sandbox.Namespace,
+			OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandbox.Name)},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+		Status: corev1.PodStatus{
+			Phase:      corev1.PodRunning,
+			PodIPs:     []corev1.PodIP{{IP: "10.244.0.1"}},
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		},
+	}
+
+	r := &SandboxReconciler{
+		Client: newFakeClient(sandbox, pod),
+		Scheme: Scheme,
+		Tracer: asmetrics.NewNoOp(),
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}}
+
+	// 1. Initial Ready reconcile (cold create): no suspend/resume/expired metrics.
+	_, err := r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	require.Equal(t, 0, testutil.CollectAndCount(asmetrics.SandboxResumeLatency))
+
+	// 2. Suspend requested: pass 1 deletes Pod and marks PodTerminating; pass 2 observes Pod gone -> PodTerminated.
+	live := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, r.Get(t.Context(), req.NamespacedName, live))
+	live.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeSuspended
+	require.NoError(t, r.Update(t.Context(), live))
+
+	_, err = r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	require.InDelta(t, 1.0, testutil.ToFloat64(asmetrics.SandboxSuspendTotal.WithLabelValues(ns, tmpl, "SandboxClaim", "requested")), 0.001)
+	require.Equal(t, 0, testutil.CollectAndCount(asmetrics.SandboxSuspendLatency))
+
+	_, err = r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	require.InDelta(t, 1.0, testutil.ToFloat64(asmetrics.SandboxSuspendTotal.WithLabelValues(ns, tmpl, "SandboxClaim", "pod_terminated")), 0.001)
+	require.Equal(t, 1, testutil.CollectAndCount(asmetrics.SandboxSuspendLatency))
+
+	// 3. Resume requested: pass 1 creates Pod (not Ready yet); pass 2 sees Pod Ready.
+	require.NoError(t, r.Get(t.Context(), req.NamespacedName, live))
+	live.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeRunning
+	require.NoError(t, r.Update(t.Context(), live))
+
+	_, err = r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	require.InDelta(t, 1.0, testutil.ToFloat64(asmetrics.SandboxResumeTotal.WithLabelValues(ns, tmpl, "SandboxClaim", "requested")), 0.001)
+	require.Equal(t, 0, testutil.CollectAndCount(asmetrics.SandboxResumeLatency))
+
+	createdPod := &corev1.Pod{}
+	require.NoError(t, r.Get(t.Context(), req.NamespacedName, createdPod))
+	createdPod.Status = corev1.PodStatus{
+		Phase:      corev1.PodRunning,
+		PodIPs:     []corev1.PodIP{{IP: "10.244.0.2"}},
+		Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+	}
+	require.NoError(t, r.Status().Update(t.Context(), createdPod))
+
+	_, err = r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	require.InDelta(t, 1.0, testutil.ToFloat64(asmetrics.SandboxResumeTotal.WithLabelValues(ns, tmpl, "SandboxClaim", "ready")), 0.001)
+	require.Equal(t, 1, testutil.CollectAndCount(asmetrics.SandboxResumeLatency))
+
+	// 4. Sandbox expires -> SandboxExpired.
+	require.NoError(t, r.Get(t.Context(), req.NamespacedName, live))
+	past := metav1.NewTime(time.Now().Add(-time.Minute))
+	live.Spec.ShutdownTime = &past
+	require.NoError(t, r.Update(t.Context(), live))
+
+	_, err = r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	require.InDelta(t, 1.0, testutil.ToFloat64(asmetrics.SandboxExpiredTotal.WithLabelValues(ns, tmpl, "SandboxClaim", "Retain")), 0.001)
+}
+
+func TestSandboxStaleStatusPatchConflictDroppedWithoutMetrics(t *testing.T) {
+	asmetrics.SandboxSuspendTotal.Reset()
+
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sb-stale-status",
+			Namespace: "default",
+			UID:       sandboxUID,
+			Annotations: map[string]string{
+				sandboxv1beta1.SandboxPodNameAnnotation: "missing-legacy-pod",
+			},
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			OperatingMode: sandboxv1beta1.SandboxOperatingModeSuspended,
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			Conditions: []metav1.Condition{{
+				Type:   string(sandboxv1beta1.SandboxConditionSuspended),
+				Status: metav1.ConditionFalse,
+				Reason: sandboxv1beta1.SandboxReasonNotSuspended,
+			}},
+		},
+	}
+
+	staleView := false
+	var staleSandbox *sandboxv1beta1.Sandbox
+	statusPatchAttempts := 0
+
+	fc := fake.NewClientBuilder().
+		WithScheme(Scheme).
+		WithRuntimeObjects(sandbox).
+		WithStatusSubresource(&sandboxv1beta1.Sandbox{}).
+		WithIndex(&corev1.Pod{}, podSandboxNameHashIndex, podSandboxNameHashIndexer).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if sb, ok := obj.(*sandboxv1beta1.Sandbox); ok && key.Name == sandbox.Name && staleView {
+					staleSandbox.DeepCopyInto(sb)
+					return nil
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+			SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+				if _, ok := obj.(*sandboxv1beta1.Sandbox); ok && subResourceName == "status" {
+					statusPatchAttempts++
+				}
+				return c.SubResource(subResourceName).Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+
+	r := &SandboxReconciler{
+		Client: fc,
+		Scheme: Scheme,
+		Tracer: asmetrics.NewNoOp(),
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}}
+
+	// Freeze the initial stale cache view (with SandboxPodNameAnnotation and old RV)
+	// before any reconcile writes land.
+	staleSandbox = &sandboxv1beta1.Sandbox{}
+	require.NoError(t, fc.Get(t.Context(), req.NamespacedName, staleSandbox))
+
+	// Pass 1 clears SandboxPodNameAnnotation (bumping RV), so its own status patch
+	// conflicts against the metadata write and is dropped without recording metrics.
+	_, err := r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	require.Equal(t, 1, statusPatchAttempts)
+	require.InDelta(t, 0.0, testutil.ToFloat64(asmetrics.SandboxSuspendTotal.WithLabelValues("default", "unknown", "None", "requested")), 0.001)
+
+	// Pass 2 runs on the converged view (annotation cleared) and commits Suspended=True once.
+	_, err = r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	require.Equal(t, 2, statusPatchAttempts)
+	require.InDelta(t, 1.0, testutil.ToFloat64(asmetrics.SandboxSuspendTotal.WithLabelValues("default", "unknown", "None", "requested")), 0.001)
+	require.InDelta(t, 1.0, testutil.ToFloat64(asmetrics.SandboxSuspendTotal.WithLabelValues("default", "unknown", "None", "pod_terminated")), 0.001)
+
+	// Pass 3 reads the frozen stale view (still carrying SandboxPodNameAnnotation).
+	// clearPodNameAnnotation patches metadata and refreshes sandbox.ResourceVersion
+	// mid-pass, but updateStatus pins its optimistic lock to oldResourceVersion, so
+	// the fake client rejects the status patch (409) without double-counting.
+	staleView = true
+	_, err = r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	require.Equal(t, 3, statusPatchAttempts)
+	require.InDelta(t, 1.0, testutil.ToFloat64(asmetrics.SandboxSuspendTotal.WithLabelValues("default", "unknown", "None", "requested")), 0.001)
+	require.InDelta(t, 1.0, testutil.ToFloat64(asmetrics.SandboxSuspendTotal.WithLabelValues("default", "unknown", "None", "pod_terminated")), 0.001)
 }

@@ -25,8 +25,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
-	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
-	"sigs.k8s.io/agent-sandbox/internal/utils"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
@@ -129,22 +127,8 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 			launchTypeStr = LaunchTypeWarm
 		}
 
-		sandboxTemplateStr := "unknown"
-		// If a user manually creates a Sandbox without a SandboxClaim, it won't have the
-		// SandboxTemplateRefAnnotation. The collector correctly handles this by defaulting to "unknown".
-		if template, ok := sandbox.Annotations[sandboxv1beta1.SandboxTemplateRefAnnotation]; ok && template != "" {
-			sandboxTemplateStr = template
-		}
-
-		ownedByStr := "None"
-		controllerRef := metav1.GetControllerOf(&sandbox)
-		// Owner references keep the apiVersion that was current when they
-		// were written; sandboxes created before the v1beta1 upgrade still
-		// carry the v1alpha1 group version. Match on group, not version.
-		if g, k := utils.GetGroupKind(controllerRef); g == extensionsv1beta1.GroupVersion.Group &&
-			(k == extensionsv1beta1.SandboxClaimKind || k == extensionsv1beta1.SandboxWarmPoolKind) {
-			ownedByStr = k
-		}
+		sandboxTemplateStr := SandboxTemplateLabel(&sandbox)
+		ownedByStr := SandboxOwnedByLabel(&sandbox)
 
 		createdByStr := "unknown"
 		if val, ok := sandbox.Labels[sandboxv1beta1.CreatedByLabel]; ok {

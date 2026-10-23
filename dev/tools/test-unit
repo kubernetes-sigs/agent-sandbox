@@ -76,6 +76,14 @@ PYTHON_TEST_SUITES = [
         "dir": os.path.join("examples", "policy", "command-governance"),
     },
     {
+        "name": "deer-flow-sandbox",
+        # test_parsing.py covers the example's stdlib-only parsing helpers
+        # (agent_sandbox_provider/parsing.py); the provider module itself
+        # needs the deer-flow harness and a cluster and is exercised by the
+        # example's main.py instead. Just pytest, no requirements.txt.
+        "dir": os.path.join("examples", "deer-flow-sandbox"),
+    },
+    {
         "name": "hpa-swp-scaling",
         "dir": os.path.join("examples", "hpa-swp-scaling"),
         "requirements": "requirements.txt",

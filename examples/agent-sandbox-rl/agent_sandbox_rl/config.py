@@ -233,6 +233,15 @@ class FleetConfig(BaseModel):
   # recognised before the timeout.
   claim_timeout: int | None = None
   fail_fast: FailFastPolicy = Field(default_factory=FailFastPolicy)
+  # Pre-pull (setup(prepull=True) / fleet.prepull()): images per DaemonSet pod,
+  # how many DaemonSets pull at once per node, whether each is deleted once its
+  # nodes are ready, and whether to drop the page cache afterwards (privileged
+  # one-shot DaemonSet; for runs that must start cold). The sandbox template's
+  # tolerations are applied to the pre-pull pods automatically.
+  prepull_images_per_pod: int = 25
+  prepull_max_parallel: int = 4
+  prepull_delete_when_done: bool = False
+  prepull_drop_caches: bool = False
   # Stage the warm fill in waves of <= this many sandbox creates in flight,
   # waiting for each wave to reach Ready before the next. Bounds the controller's
   # concurrent create burst (Σ pools×replicas). On controllers <= v0.5.3 this
@@ -307,7 +316,8 @@ class FleetConfig(BaseModel):
   # None => conservative single-node bound (safe when the pool size is unknown).
   cluster_nodes: int | None = None
 
-  @field_validator("max_concurrent", "max_warmpool_size")
+  @field_validator("max_concurrent", "max_warmpool_size", "prepull_images_per_pod",
+                   "prepull_max_parallel")
   @classmethod
   def _positive(cls, v: int) -> int:
     if v < 1:

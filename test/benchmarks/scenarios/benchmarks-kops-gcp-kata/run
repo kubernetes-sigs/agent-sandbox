@@ -20,150 +20,45 @@
 # deploys the agent-sandbox controller, and runs the RuntimeClass-aware
 # e2e test suite with SANDBOX_RUNTIME_CLASS=kata-qemu.
 #
-# This is a stripped-down variant of benchmarks-kops-gcp/run: it shares
-# the Boskos/kOps lifecycle but omits benchmark-specific tuning (QPS
-# overrides, etcd quota, containerd metrics, stress phases). The goal is
-# functional verification of the controller under kata's ~8-12s cold
-# starts, not throughput measurement.
+# This scenario sources dev/ci/shared/kops-gcp-lifecycle.sh for the
+# Boskos/kOps lifecycle and adds kata-specific steps (nested virt,
+# kata install) between cluster creation and test execution. The goal
+# is functional verification of the controller under kata's ~8-12s
+# cold starts, not throughput measurement.
 
 set -o errexit
 set -o nounset
 set -o pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-cd "${REPO_ROOT}"
 
-export WORKDIR="${REPO_ROOT}/.build"
-rm -rf "${WORKDIR}"
-mkdir -p "${WORKDIR}/bin"
+# shellcheck source=dev/ci/shared/kops-gcp-lifecycle.sh
+source "${REPO_ROOT}/dev/ci/shared/kops-gcp-lifecycle.sh"
 
-export BINDIR="${WORKDIR}/bin"
-export PATH="${BINDIR}:${PATH}"
+kops_install_tools
+kops_acquire_project
 
-export KUBECONFIG="${WORKDIR}/kubeconfig"
-
-# Install kOps
-echo "Installing kOps to ${BINDIR}..."
-GOBIN="${BINDIR}" go install k8s.io/kops/cmd/kops@v1.36.0
-
-# Install resourcectl
-echo "Installing resourcectl to ${BINDIR}..."
-pushd dev/tools
-GOBIN="${BINDIR}" go install ./resourcectl
-popd
-
-UNIQUE_SUFFIX="$(date +%Y%m%d-%H%M%S)"
-
-# Acquire GCE project from Boskos (or use local default)
-if [[ -n "${BOSKOS_HOST:-}" ]]; then
-  if ! PROJECT_ID=$(resourcectl get --key project-main --boskos-type gce-project); then
-    echo "Failed to acquire project from Boskos"
-    exit 1
-  fi
-  echo "Acquired project ${PROJECT_ID} from Boskos."
-  trap 'resourcectl cleanup || true' EXIT
-else
-  PROJECT_ID=$(gcloud config get-value project)
-fi
-
-PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)")
-echo "Using project: ${PROJECT_ID} (number: ${PROJECT_NUMBER})"
-
-IMAGE_PREFIX="gcr.io/${PROJECT_ID}/agent-sandbox/"
-export IMAGE_PREFIX
-echo "Using image prefix: ${IMAGE_PREFIX}"
-
-gcloud auth configure-docker --quiet gcr.io
-
-IMAGE_TAG=$(git describe --tags --dirty --always)
-if [[ "${IMAGE_TAG}" == *"-dirty" ]]; then
-  IMAGE_TAG="${IMAGE_TAG}-${UNIQUE_SUFFIX}"
-fi
-export IMAGE_TAG
-echo "Using image tag: ${IMAGE_TAG}"
-
-echo "Pushing controller image to ${IMAGE_PREFIX}..."
-dev/tools/push-images --image-prefix="${IMAGE_PREFIX}" --images "agent-sandbox-controller"
-
-BUCKET_NAME="kops-state-${PROJECT_NUMBER}"
-echo "Using bucket: ${BUCKET_NAME}"
-
-if ! gcloud storage buckets describe "gs://${BUCKET_NAME}" >/dev/null 2>&1; then
-  echo "Creating bucket gs://${BUCKET_NAME}..."
-  gcloud storage buckets create "gs://${BUCKET_NAME}" --project="${PROJECT_ID}" --location=us-central1
-else
-  echo "Bucket gs://${BUCKET_NAME} already exists."
-fi
-
-export KOPS_STATE_STORE="gs://${BUCKET_NAME}"
-
-CLUSTER_NAME="sandbox-kata-${UNIQUE_SUFFIX}"
-ZONE="us-central1-a"
-
-cleanup() {
-  echo "Cleaning up..."
-
+kata_capture_logs() {
   echo "Capturing controller diagnostics..."
   local out_dir="${ARTIFACTS:-${REPO_ROOT}/bin}"
   mkdir -p "${out_dir}"
   kubectl logs deployment/agent-sandbox-controller \
     --namespace agent-sandbox-system --tail=-1 > "${out_dir}/controller.log" 2>/dev/null || true
-
-  kops delete cluster --name="${CLUSTER_NAME}" --yes || true
-
-  echo "Cleaning up resources via resourcectl..."
-  resourcectl cleanup || true
-
-  rm -rf "${WORKDIR}"
-  echo "DONE"
 }
+KOPS_PRE_CLEANUP_HOOK=kata_capture_logs
+kops_register_cleanup
 
-trap cleanup EXIT
+kops_setup_images "agent-sandbox-controller"
+kops_create_bucket
 
 # Cluster sizing: 3 worker nodes (n2-standard-8, 24 vCPUs total) for
 # kata e2e with pool size 8, batch cap 2 (~10 VMs at peak burst).
 # n2 is required for GCE nested virtualization (n2d/AMD and c3/c4 do
 # not support it). Control plane is small since we're running
 # functional tests, not benchmarks.
-CNI="${CNI:-cilium}"
-NODE_COUNT="${STRESS_NODE_COUNT:-3}"
-CP_SIZE="${STRESS_CONTROL_PLANE_SIZE:-n2-standard-4}"
+kops_create_cluster "sandbox-kata-${UNIQUE_SUFFIX}" "us-central1-a"
 
-echo "Creating kOps cluster: ${CLUSTER_NAME} (${NODE_COUNT} workers, CP=${CP_SIZE}, CNI=${CNI})"
-kops create cluster \
-  --cloud=gce \
-  --gce-service-account=default \
-  --networking="${CNI}" \
-  --name="${CLUSTER_NAME}" \
-  --zones="${ZONE}" \
-  --project="${PROJECT_ID}" \
-  --control-plane-count=1 \
-  --control-plane-size="${CP_SIZE}" \
-  --node-count="${NODE_COUNT}" \
-  --node-size=n2-standard-8
-
-# pd-ssd for node root volumes (avoids the pd-standard I/O wall that
-# slows pod creation under any runtime, but is especially painful with
-# kata's larger image pulls).
-kops edit instancegroup --name "${CLUSTER_NAME}" "nodes-${ZONE}" \
-  --set "spec.rootVolume.type=pd-ssd"
-
-# n2 control plane needs pd-ssd as well (n2 supports pd-standard, but
-# pd-ssd is cheap and removes a variable).
-kops edit instancegroup --name "${CLUSTER_NAME}" "control-plane-${ZONE}" \
-  --set "spec.rootVolume.type=pd-ssd"
-
-echo "Applying cluster configuration..."
-kops update cluster --name "${CLUSTER_NAME}" --yes
-
-echo "Exporting kubeconfig..."
-kops export kubeconfig --name "${CLUSTER_NAME}" --admin
-
-echo "Waiting for cluster to be ready..."
-if ! kops validate cluster --wait "${STRESS_VALIDATE_WAIT:-25m}"; then
-  echo "kOps cluster validation failed" >&2
-  exit 1
-fi
+kops_apply_and_validate
 
 # ─── Install kata with nested virtualization ─────────────────────────────────
 

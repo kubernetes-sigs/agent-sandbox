@@ -648,6 +648,16 @@ shared `app=agent-sandbox-rl` pod label instead, and `preflight()` warns if no p
 selects the fleet's pods; see
 [examples/agent-sandbox-rl-network-policy](../agent-sandbox-rl-network-policy)).
 
+**Dataset rows and image manifests:** `load_tasks` takes a `TaskSource`, a list of
+images, `Task`s, or dataset rows (dicts). A row's image is found under the SDK's
+`image` key or the R2E-Gym / SWE-bench conventions (`docker_image`, `image_name`,
+`metadata.docker_image`, `metadata.env_config.entry.docker_image`, ...; one-element array
+values are unwrapped), and its id under `id` / `instance_id` / `task_id`; pass
+`image_field=` (a dotted path, several, or a callable) and `id_field=` to override. The
+row stays in `Task.metadata` minus the keys the id and image were read from.
+`ImageListSource(path)` / `load_image_list(path)` read a one-image-per-line manifest from
+a local path or `gs://` (the storage client library if installed, else `gcloud storage cat`).
+
 **Image rewriting (optional):** redirect task images at an in-region mirror /
 pull-through cache without touching the source:
 

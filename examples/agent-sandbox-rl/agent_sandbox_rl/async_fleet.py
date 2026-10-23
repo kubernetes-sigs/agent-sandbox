@@ -126,8 +126,10 @@ class AsyncSandboxFleet:
   def report(self):
     return self._fleet.report
 
-  def load_tasks(self, source, *, image_rewrite=None) -> list[Task]:
-    return self._fleet.load_tasks(source, image_rewrite=image_rewrite)
+  def load_tasks(self, source, *, image_rewrite=None, image_field=None,
+                 id_field=None) -> list[Task]:
+    return self._fleet.load_tasks(source, image_rewrite=image_rewrite,
+                                  image_field=image_field, id_field=id_field)
 
   def add_tasks(self, source, *, image_rewrite=None) -> list[Task]:
     return self._fleet.add_tasks(source, image_rewrite=image_rewrite)

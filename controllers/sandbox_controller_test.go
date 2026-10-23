@@ -1713,6 +1713,8 @@ func TestReconcilePod(t *testing.T) {
 	sandboxName := "sandbox-name"
 	sandboxNs := "sandbox-ns"
 	nameHash := "name-hash"
+	// Resource names can be 253 characters, well past the 63 character label value limit.
+	longClaimName := strings.Repeat("c", 253)
 	sandboxObj := &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sandboxName,
@@ -2335,7 +2337,8 @@ func TestReconcilePod(t *testing.T) {
 						sandboxv1beta1.SandboxTemplateRefHashLabel: "da1fd924",
 					},
 					Annotations: map[string]string{
-						"agents.x-k8s.io/propagated-labels": "custom-label",
+						"agents.x-k8s.io/propagated-labels":          "custom-label",
+						extensionsv1beta1.SandboxClaimNameAnnotation: "my-claim",
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
@@ -2398,7 +2401,8 @@ func TestReconcilePod(t *testing.T) {
 						sandboxv1beta1.SandboxTemplateRefHashLabel: "da1fd924",
 					},
 					Annotations: map[string]string{
-						"agents.x-k8s.io/propagated-labels": "custom-label",
+						"agents.x-k8s.io/propagated-labels":          "custom-label",
+						extensionsv1beta1.SandboxClaimNameAnnotation: "my-claim",
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
@@ -2442,7 +2446,8 @@ func TestReconcilePod(t *testing.T) {
 						extensionsv1beta1.SandboxIDLabel:    "claim-uid",
 					},
 					Annotations: map[string]string{
-						"agents.x-k8s.io/propagated-labels": "custom-label",
+						"agents.x-k8s.io/propagated-labels":          "custom-label",
+						extensionsv1beta1.SandboxClaimNameAnnotation: "my-claim",
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
@@ -2505,7 +2510,8 @@ func TestReconcilePod(t *testing.T) {
 						extensionsv1beta1.SandboxIDLabel:    "claim-uid",
 					},
 					Annotations: map[string]string{
-						"agents.x-k8s.io/propagated-labels": "custom-label",
+						"agents.x-k8s.io/propagated-labels":          "custom-label",
+						extensionsv1beta1.SandboxClaimNameAnnotation: "my-claim",
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
@@ -2665,13 +2671,158 @@ func TestReconcilePod(t *testing.T) {
 						"custom-label":                      "label-val",
 					},
 					Annotations: map[string]string{
-						"agents.x-k8s.io/propagated-labels": "custom-label",
+						"agents.x-k8s.io/propagated-labels":          "custom-label",
+						extensionsv1beta1.SandboxClaimNameAnnotation: "my-claim",
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
+			},
+		},
+		{
+			name: "sets full claim name annotation on new Pod and ignores a template value for it",
+			sandbox: &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxClaimKind,
+							Name:       longClaimName,
+							UID:        "claim-uid",
+							Controller: new(true),
+						},
+					},
+				},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+					ObjectMeta: sandboxv1beta1.PodMetadata{Annotations: map[string]string{
+						"custom-annotation":                          "anno-val",
+						extensionsv1beta1.SandboxClaimNameAnnotation: "spoofed",
+					}},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+				},
+			},
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels:          map[string]string{"agents.x-k8s.io/sandbox-name-hash": nameHash},
+					Annotations: map[string]string{
+						"custom-annotation":                          "anno-val",
+						"agents.x-k8s.io/propagated-annotations":     "custom-annotation",
+						extensionsv1beta1.SandboxClaimNameAnnotation: longClaimName,
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+			},
+		},
+		{
+			name: "replaces a stale claim name annotation on existing Pod",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels:          map[string]string{"agents.x-k8s.io/sandbox-name-hash": nameHash},
+						Annotations:     map[string]string{extensionsv1beta1.SandboxClaimNameAnnotation: "old-claim"},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+				},
+			},
+			sandbox: &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxClaimKind,
+							Name:       "my-claim",
+							UID:        "claim-uid",
+							Controller: new(true),
+						},
+					},
+				},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+				},
+			},
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "2",
+					Labels:          map[string]string{"agents.x-k8s.io/sandbox-name-hash": nameHash},
+					Annotations:     map[string]string{extensionsv1beta1.SandboxClaimNameAnnotation: "my-claim"},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+			},
+		},
+		{
+			name: "removes claim name annotation from existing Pod when a warm pool owns the Sandbox",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels:          map[string]string{"agents.x-k8s.io/sandbox-name-hash": nameHash},
+						Annotations: map[string]string{
+							"custom-annotation":                          "anno-val",
+							"agents.x-k8s.io/propagated-annotations":     "custom-annotation",
+							extensionsv1beta1.SandboxClaimNameAnnotation: "my-claim",
+						},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+				},
+			},
+			sandbox: &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxWarmPoolKind,
+							Name:       "my-warm-pool",
+							UID:        "pool-uid",
+							Controller: new(true),
+						},
+					},
+				},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+					ObjectMeta: sandboxv1beta1.PodMetadata{Annotations: map[string]string{"custom-annotation": "anno-val"}},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+				},
+			},
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "2",
+					Labels:          map[string]string{"agents.x-k8s.io/sandbox-name-hash": nameHash},
+					Annotations: map[string]string{
+						"custom-annotation":                      "anno-val",
+						"agents.x-k8s.io/propagated-annotations": "custom-annotation",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
 			},
 		},
 		{

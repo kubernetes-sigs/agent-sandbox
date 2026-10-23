@@ -88,7 +88,7 @@ A `Sandbox` lets a tenant supply a `spec.podTemplate`, including arbitrary `meta
 The controller also relies on a set of **system-reserved** label and annotation keys to implement core behavior:
 
 - `agents.x-k8s.io/sandbox-name-hash` — the selector label used by the per-Sandbox headless `Service`. Traffic for a Sandbox is routed to the Pod(s) carrying the matching value.
-- `agents.x-k8s.io/propagated-labels`, `agents.x-k8s.io/propagated-annotations`, and `opentelemetry.io/trace-context` — controller-managed annotations.
+- `agents.x-k8s.io/propagated-labels`, `agents.x-k8s.io/propagated-annotations`, `agents.x-k8s.io/claim-name`, and `opentelemetry.io/trace-context` — controller-managed annotations.
 
 Extension controllers (warm pool, claim) may set additional system-prefixed labels on the **Sandbox CR** (`metadata.labels`, `spec.podTemplate`, etc.). The core Sandbox reconciler does not propagate those to Pods; extension controllers own that lifecycle separately.
 
@@ -110,7 +110,7 @@ The core controller treats any label/annotation key under `agents.x-k8s.io/` or 
 
 - **Create path (`reconcilePod`)** and **adoption path (`updatePodMetadata`)** filter out system-reserved keys from the user template before applying them.
 - The Service selector label `agents.x-k8s.io/sandbox-name-hash` is assigned by the controller **after** merging user labels, so it cannot be overridden.
-- On adoption/update, system-reserved keys that an older (vulnerable) controller recorded in the `propagated-labels` / `propagated-annotations` lists are scrubbed from the Pod — except the controller-owned name-hash label and the controller-managed annotations (`propagated-labels`, `propagated-annotations`). Combined with always (re)setting the name-hash label to the controller's value, this prevents a stale or spoofed Service-selector label from surviving adoption.
+- On adoption/update, system-reserved keys that an older (vulnerable) controller recorded in the `propagated-labels` / `propagated-annotations` lists are scrubbed from the Pod — except the controller-owned name-hash label and the controller-managed annotations (`propagated-labels`, `propagated-annotations`, `claim-name`). Combined with always (re)setting the name-hash label to the controller's value, this prevents a stale or spoofed Service-selector label from surviving adoption.
 - System labels on `Sandbox.metadata.labels` are **not** copied to Pods by the core controller. Only non-system keys from `spec.podTemplate` are propagated.
 
 ### Out of Scope

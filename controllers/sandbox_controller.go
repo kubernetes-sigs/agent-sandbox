@@ -1065,16 +1065,63 @@ var extensionPodLabelKeys = []string{
 	sandboxv1beta1.SandboxTemplateRefHashLabel,
 }
 
+// extensionPodAnnotationKeys must stay in sync with computeExtensionPodAnnotations so
+// reconcile removes stale extension annotations when they are no longer expected on the Pod.
+var extensionPodAnnotationKeys = []string{
+	extensionsv1beta1.SandboxClaimNameAnnotation,
+}
+
+// extensionOwner returns the controller owner reference of the Sandbox and its kind
+// when the Sandbox is owned by an extensions controller (SandboxClaim or
+// SandboxWarmPool). It returns a nil reference otherwise.
+func extensionOwner(sandbox *sandboxv1beta1.Sandbox) (*metav1.OwnerReference, string) {
+	ref := metav1.GetControllerOf(sandbox)
+	if ref == nil {
+		return nil, ""
+	}
+	g, k := utils.GetGroupKind(ref)
+	if g != extensionsv1beta1.GroupVersion.Group {
+		return nil, ""
+	}
+	return ref, k
+}
+
+// reconcileOwnedKeys makes current hold exactly the values in want for the given
+// controller-owned keys, deleting keys that are no longer wanted. It reports
+// whether current changed.
+func reconcileOwnedKeys(current map[string]string, keys []string, want map[string]string) bool {
+	changed := false
+	for _, key := range keys {
+		if val, ok := want[key]; ok {
+			if current[key] != val {
+				current[key] = val
+				changed = true
+			}
+		} else if _, exists := current[key]; exists {
+			delete(current, key)
+			changed = true
+		}
+	}
+	return changed
+}
+
+// computeExtensionPodAnnotations returns extension-owned annotations that should be
+// propagated from a Sandbox CR to its Pod. The claim name comes from the owner
+// reference, so it follows warm pool adoption without extra state on the Sandbox.
+func computeExtensionPodAnnotations(sandbox *sandboxv1beta1.Sandbox) map[string]string {
+	ref, k := extensionOwner(sandbox)
+	if ref == nil || k != extensionsv1beta1.SandboxClaimKind || ref.Name == "" {
+		return nil
+	}
+	return map[string]string{extensionsv1beta1.SandboxClaimNameAnnotation: ref.Name}
+}
+
 // computeExtensionPodLabels returns extension-owned labels that should be propagated
 // from a Sandbox CR to its Pod. Labels are only returned when the Sandbox is owned
 // by an extensions controller (SandboxClaim or SandboxWarmPool).
 func computeExtensionPodLabels(sandbox *sandboxv1beta1.Sandbox) map[string]string {
-	ref := metav1.GetControllerOf(sandbox)
+	ref, k := extensionOwner(sandbox)
 	if ref == nil {
-		return nil
-	}
-	g, k := utils.GetGroupKind(ref)
-	if g != extensionsv1beta1.GroupVersion.Group {
 		return nil
 	}
 
@@ -1118,7 +1165,8 @@ func isSystemAnnotation(key string) bool {
 func isControllerManagedPodAnnotation(key string) bool {
 	switch key {
 	case sandboxv1beta1.SandboxPropagatedLabelsAnnotation,
-		sandboxv1beta1.SandboxPropagatedAnnotationsAnnotation:
+		sandboxv1beta1.SandboxPropagatedAnnotationsAnnotation,
+		extensionsv1beta1.SandboxClaimNameAnnotation:
 		return true
 	default:
 		return false
@@ -1750,6 +1798,8 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		annotations[k] = v
 		managedAnnotationKeys = append(managedAnnotationKeys, k)
 	}
+	// Assign system-owned annotations after merging user input so they cannot be overridden.
+	maps.Copy(annotations, computeExtensionPodAnnotations(sandbox))
 	slices.Sort(managedLabelKeys)
 	slices.Sort(managedAnnotationKeys)
 	if len(managedLabelKeys) > 0 {
@@ -1871,17 +1921,8 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 		}
 	}
 	// Reconcile extension-owned labels based on Sandbox ownership.
-	extensionLabels := computeExtensionPodLabels(sandbox)
-	for _, key := range extensionPodLabelKeys {
-		if val, ok := extensionLabels[key]; ok {
-			if pod.Labels[key] != val {
-				pod.Labels[key] = val
-				updated = true
-			}
-		} else if _, exists := pod.Labels[key]; exists {
-			delete(pod.Labels, key)
-			updated = true
-		}
+	if reconcileOwnedKeys(pod.Labels, extensionPodLabelKeys, computeExtensionPodLabels(sandbox)) {
+		updated = true
 	}
 
 	// Ensure the created-by label is present on the Pod if it is present on the Sandbox.
@@ -1948,6 +1989,10 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 	// Update tracked annotations on the pod
 	if pod.Annotations == nil {
 		pod.Annotations = make(map[string]string)
+	}
+	// Reconcile extension-owned annotations based on Sandbox ownership.
+	if reconcileOwnedKeys(pod.Annotations, extensionPodAnnotationKeys, computeExtensionPodAnnotations(sandbox)) {
+		updated = true
 	}
 	slices.Sort(managedLabelKeys)
 	newLabelsStr := strings.Join(managedLabelKeys, ",")

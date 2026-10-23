@@ -183,6 +183,9 @@ func TestSandboxVolumeClaimTemplatesImmutable(t *testing.T) {
 			}
 			require.NoError(t, tc.CreateWithCleanup(t.Context(), sb))
 
+			// Controller metadata patches (observability / pod-name annotations) can
+			// bump resourceVersion between Get and Update; retry so we assert the
+			// immutability admission error rather than a stale-object conflict.
 			err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 				latest := &sandboxv1beta1.Sandbox{}
 				if err := tc.Get(t.Context(), types.NamespacedName{Name: sb.Name, Namespace: ns.Name}, latest); err != nil {

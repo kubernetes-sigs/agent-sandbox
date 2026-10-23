@@ -239,6 +239,8 @@ def test_agent_server_template_injects_the_server_from_another_image():
   assert init["name"] == "oh-server" and init["image"] == DEFAULT_AGENT_SERVER_IMAGE
   assert init["imagePullPolicy"] == "Always" and init["volumeMounts"] == [{"name": "oh", "mountPath": AGENT_SERVER_MOUNT}]
   assert "cp -a" in init["command"][2] and AGENT_SERVER_MOUNT in init["command"][2]
+  cmd = init["command"][2]                                  # the published layout first
+  assert cmd.index("/usr/local/bin/openhands-agent-server") < cmd.index("/opt/oh/.")
   assert pod["volumes"] == [{"name": "oh", "emptyDir": {}}]
   runtime = pod["containers"][0]
   assert runtime["volumeMounts"] == [{"name": "oh", "mountPath": AGENT_SERVER_MOUNT}]

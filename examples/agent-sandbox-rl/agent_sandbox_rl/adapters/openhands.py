@@ -67,9 +67,13 @@ DEFAULT_AGENT_SERVER_IMAGE = "ghcr.io/openhands/agent-server:1.44.1-python"
 # Where an injected server is staged inside the pod (emptyDir shared by the
 # init container that copies it and the runtime container that runs it).
 AGENT_SERVER_MOUNT = "/oh"
+# The published image (DEFAULT_AGENT_SERVER_IMAGE, checked with crane on
+# 2026-10-22) ships one file, /usr/local/bin/openhands-agent-server (a
+# self-contained PyInstaller binary); it has no /opt/oh. The other two paths
+# are layouts of source-built images and are tried after it.
 _SERVER_COPY_CMD = (
-    f"cp -a /opt/oh/. {AGENT_SERVER_MOUNT}/ 2>/dev/null"
-    f" || cp -a /usr/local/bin/openhands-agent-server {AGENT_SERVER_MOUNT}/ 2>/dev/null"
+    f"cp -a /usr/local/bin/openhands-agent-server {AGENT_SERVER_MOUNT}/ 2>/dev/null"
+    f" || cp -a /opt/oh/. {AGENT_SERVER_MOUNT}/ 2>/dev/null"
     f" || cp -a /openhands/poetry/*/bin/agent-server"
     f" {AGENT_SERVER_MOUNT}/openhands-agent-server 2>/dev/null"
     # Fail the init container, loudly, rather than let the runtime container
@@ -128,7 +132,9 @@ def agent_server_template(*, server_image: str | None = None,
 
   - ``None``: every task image already contains the agent-server (for example
     `DEFAULT_AGENT_SERVER_IMAGE` itself, or a derived image). The pod runs it
-    from ``/usr/local/bin``.
+    from ``/usr/local/bin``. A plain repo image (R2E-Gym, SWE-bench) has no
+    server, so with ``None`` its pod exits with ``openhands-agent-server not
+    found`` and crash-loops; pass ``server_image`` for those.
   - an image: the task image is a plain repo image (R2E-Gym, SWE-bench); an init
     container copies the server out of ``server_image`` into an emptyDir at
     `AGENT_SERVER_MOUNT` and the runtime container runs it from there. One

@@ -2,7 +2,7 @@ module sigs.k8s.io/agent-sandbox/examples/agentclientprotocol
 
 go 1.26.0
 
-toolchain go1.27.1
+toolchain go1.27.3
 
 require (
 	k8s.io/api v0.37.1

@@ -2,7 +2,7 @@ module sigs.k8s.io/agent-sandbox/olm
 
 go 1.26.0
 
-toolchain go1.27.1
+toolchain go1.27.3
 
 require (
 	github.com/onsi/ginkgo/v2 v2.33.1

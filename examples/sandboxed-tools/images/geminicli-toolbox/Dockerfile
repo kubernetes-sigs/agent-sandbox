@@ -23,7 +23,7 @@
 # The builder runs on the build host's native platform and cross-compiles for
 # the target, so only the runtime stage below needs emulation when building
 # for a foreign architecture (e.g. amd64 images from an arm64 workstation).
-FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.3-bookworm AS build
 ARG TARGETARCH
 WORKDIR /src
 # examples/sandboxed-tools is its own module that replaces the root module

@@ -676,33 +676,131 @@ logging.basicConfig(level=logging.INFO)
 
 ### 15. Batch claims
 
-`SandboxClient.get_batch()` attaches to an existing batch of `SandboxClaims` sharing an
-`agents.x-k8s.io/batch-id` label, returning a `SandboxBatch` handle. The claims can be spread across
-warmpools but must be in the same namespace. `get_batch()` is only for re-attaching to claims;
-it does not create anything and assumes the batch's claims and its `coordination.k8s.io/v1`
-Lease (named `batch-<id>`) already exist. `claim_batch`, which creates both, is a later
-addition to this SDK.
+`SandboxClient.claim_batch()` claims a batch of `SandboxClaims` across one or more warm pools in one call,
+returning a `SandboxBatch` handle right away. Each `BatchGroup` names a warm pool, how many claims to
+create from it (`size`), and how many of them must become Ready for the group to count (`min_ready`,
+which defaults to `size`). A group with `size=0` creates no claims and gets its members from `acquire()`,
+and `wait_for_quorum()` and `iter_ready_groups()` skip it. The claims are named `<batch-id>-0` to `<batch-id>-<N-1>`, where `N` is the
+sum of the group sizes. They carry the `agents.x-k8s.io/batch-id` label and the `agents.x-k8s.io/batch-group`
+label, whose value is a hash of the warm pool's name, and are created in the background, paced at `create_rps` creates per second with at most `max_in_flight` in flight. The batch
+also has a `coordination.k8s.io/v1` Lease named `batch-<batch-id>`, which the handle renews while it is
+alive.
 
 ```python
-from k8s_agent_sandbox import MemberState
+from k8s_agent_sandbox import BatchGroup, SandboxClient
 
-batch = client.get_batch("b1234abcd12", namespace="default")
+client = SandboxClient()
+batch = client.claim_batch(
+    [BatchGroup(warmpool="python-sandbox-pool", size=8, min_ready=4)],
+    namespace="default",
+)
 
-ready = [m for m in batch.members() if m.state is MemberState.READY]
-for member in ready:
-    sandbox = batch.connect(member)
-    sandbox.commands.run("echo hello")
+for group in batch.iter_ready_groups():
+    if group.error is not None:
+        print(f"{group.warmpool} failed: {group.error}")
+        continue
+    for member in group.members:
+        batch.connect(member).commands.run("echo hello")
+if batch.err() is not None:
+    print(f"batch stopped: {batch.err()}")
 
-batch.detach()
+batch.release()
 ```
+
+`wait_for_quorum()` instead waits until every group has `min_ready` Ready members, so work starts with
+the whole batch at once.
+
+```python
+from k8s_agent_sandbox import BatchEventType, BatchGroup, SandboxClient
+
+client = SandboxClient()
+batch = client.claim_batch(
+    [BatchGroup(warmpool="python-sandbox-pool", size=8, min_ready=6)],
+    namespace="default",
+)
+
+try:
+    for member in batch.wait_for_quorum():
+        batch.connect(member).commands.run("echo hello")
+    # Members beyond the quorum are handed out as they become Ready, until the batch settles.
+    for event in batch.events():
+        if event.type is BatchEventType.MEMBER_READY:
+            batch.connect(event.member).commands.run("echo hello")
+finally:
+    batch.release()
+```
+
+A batch's claims are consumed in one of three modes, fixed by whichever method is called first.
+
+- `wait_for_quorum()` (quorum mode) waits until every group has `min_ready` Ready members and
+  returns them in one list, each group's first `min_ready` in the order they became Ready, with the groups in
+  batch order. It raises `QuorumUnreachableError` once any group has too few members that can still become
+  Ready, and `BatchTimeoutError` if the quorum isn't reached within `quorum_timeout` of the batch's last claim
+  create. After that no members are handed out and no more claims are created, and the same holds if the wait
+  ends with any other exception, such as a cancellation or `KeyboardInterrupt`. It raises `BatchError` if the
+  batch's watch or Lease renewal stops with an error while it waits, and it can be called only once.
+- `iter_ready_groups()` (group mode) yields one `GroupReady` per group, holding either its first
+  `min_ready` Ready members, in the order they became Ready, or an `error`. A group fails with `QuorumUnreachableError` once
+  too few of its members can still become Ready, and with `BatchTimeoutError` if it hasn't reached `min_ready`
+  within `quorum_timeout` of the batch's last claim create. A failed group is finished, so no more of its
+  claims are created and none of its members are handed out.
+- `events()` yields `BatchEvent`s. It yields `MEMBER_READY` once per claim that becomes Ready, `MEMBER_FAILED`
+  and `MEMBER_LOST` for claims that fail or are deleted.
+  Called first (stream mode), it streams every Ready member. Called after `iter_ready_groups()`, it hands out a
+  group's members only after that group has yielded successfully, starting with the Ready members beyond
+  its first `min_ready` and then later ones as they become Ready. Called after `wait_for_quorum()`, it hands
+  out the Ready members the quorum didn't return once the quorum is reached. `iter_ready_groups()` and
+  `wait_for_quorum()` can't be called after `events()` or after each other.
+
+Both iterators can be called again to continue where they stopped. They also end early if the batch's
+watch or Lease renewal stops with an error, so check `batch.err()` after the loop. `release()` deletes the
+batch's claims and then its Lease; `detach(grace=None)` instead leaves everything in place and releases the
+Lease so `get_batch()` can take the batch over.
+
+Three methods free sandboxes before `release()`. `release_member(member)` deletes one member's claim.
+`release_group(warmpool)` deletes every claim of a pool, pending ones included, for example a group that
+`iter_ready_groups()` yields with an error, whose claims are otherwise kept until `release()`.
+`release_not_ready()` stops creating claims and deletes every initial claim that isn't Ready and was never
+handed out, once you have what you need. Released members are never handed out, are dropped from `members()`, and
+count as unable to become Ready, so releasing members before a group or the quorum has been decided can make
+it unreachable. Read a failed member's `reason` before releasing it.
+
+`acquire(warmpool, timeout=None)` adds a member from any warm pool in the batch's namespace and blocks until
+it is Ready, for example to replace a member released with `release_member()`. Its claim takes the next unused
+ordinal, so ordinals are never reused, even across `detach()` and `get_batch()`. It isn't one of the initial
+claims, so `events()`, the quorum consumers and `release_not_ready()` leave it alone, but `release_group()` on
+its pool releases it, and its `shutdownTime` counts from its own create. It raises `TerminalMemberError` if the create fails or the
+member fails or is deleted before it is Ready, and `BatchTimeoutError` if it isn't Ready within `timeout`,
+which defaults to `quorum_timeout`. Both are `BatchError`, so `except BatchError` catches every runtime
+failure. If it raises, including on a cancellation, the member is dropped from `members()` and its claim is
+deleted, and calling it again tries a new claim.
+
+The `claim_batch()` defaults are `create_rps=50`, `max_in_flight=20`, `quorum_timeout=600` seconds,
+`work_budget=3600` seconds, and `lease_duration=60` seconds. Every initial claim gets the same `shutdownTime`, the
+time of the `claim_batch()` call plus `N / create_rps` seconds (rounded up) plus `quorum_timeout` plus
+`work_budget` plus 600 seconds, so the controller deletes an abandoned batch's claims eventually.
+`work_budget` is a hard cap. Nothing extends a claim's `shutdownTime`, so a batch held for a whole run sets
+`work_budget` to the run's length.
+
+The client tracks every batch handle it returns. `delete_all()`, and the client's exit cleanup
+(`cleanup=True`, or leaving `async with` for `AsyncSandboxClient`), release every tracked batch; call
+`detach()` first to hand a batch off instead.
+
+`SandboxClient.get_batch()` attaches to an existing batch that was detached, returning a handle that
+supports all of the above.
 
 `SandboxBatch` (and its async twin `AsyncSandboxBatch`) expose:
 
 - `batch_id`, `namespace`, `groups`, `size`: the batch's identity and its per-warmpool `BatchGroup`s.
 - `members(warmpool=None)`: a snapshot of every `Member`, sorted by ordinal. A member's `state` is `PENDING`, `READY`, `FAILED` or `LOST`.
 - `connect(member)`: a connected `Sandbox`/`AsyncSandbox` for a ready member.
-- `err()`: the error that stopped the background watch/renewal, or `None`.
+- `wait_for_quorum()`, `iter_ready_groups()`, and `events()`, the three consumers described above.
+- `err()`: the error that stopped the background watch/renewal, or `None`. Once it is set, no more claims
+  are created.
 - `lease_degraded()`: whether Lease renewal is failing, from the first failed renewal until one succeeds.
+- `acquire(warmpool, timeout=None)`, described above.
+- `release_member(member)`, `release_group(warmpool)`, and `release_not_ready()`, described above.
+- `release()` deletes the batch's claims, then its Lease. Idempotent.
 - `detach(grace=None)`: stops the background tasks and releases the Lease so another `get_batch` can take over; idempotent.
 
 #### RBAC
@@ -717,10 +815,13 @@ metadata:
 rules:
 - apiGroups: ["extensions.agents.x-k8s.io"]
   resources: ["sandboxclaims"]
-  verbs: ["get", "list", "watch"]
+  verbs: ["create", "get", "list", "watch", "delete", "deletecollection"]
+- apiGroups: ["extensions.agents.x-k8s.io"]
+  resources: ["sandboxwarmpools", "sandboxtemplates"]
+  verbs: ["get"]
 - apiGroups: ["coordination.k8s.io"]
   resources: ["leases"]
-  verbs: ["get", "update"]
+  verbs: ["create", "get", "update", "delete"]
 ```
 
 Connecting to a member uses the same connection modes as a single sandbox, so it also needs the

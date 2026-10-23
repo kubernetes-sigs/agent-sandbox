@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .models import Member
 
 
 class SandboxError(RuntimeError):
@@ -106,3 +109,52 @@ class BatchLeaseExpiredError(BatchError):
 
 class BatchInUseError(BatchError):
     """``get_batch`` found a live Lease held by a different holder."""
+
+
+class BatchExistsError(BatchError):
+    """``claim_batch`` found an existing Lease or claims for the batch id."""
+
+
+class QuorumUnreachableError(BatchError):
+    """A group can no longer reach ``min_ready``: fewer than ``min_ready`` of its
+    members can still become Ready.
+
+    ``failed`` counts terminal members, including failed creates, ``lost`` counts
+    members whose claim was deleted, or was missing when the batch was re-attached, and
+    ``released`` counts members the caller released, including creates they stopped.
+    """
+
+    def __init__(
+        self, *, warmpool: str, size: int, min_ready: int, failed: int, lost: int, released: int
+    ) -> None:
+        super().__init__(
+            f"group '{warmpool}' can no longer reach min_ready={min_ready}: "
+            f"size={size}, failed={failed}, lost={lost}, released={released}"
+        )
+        self.warmpool = warmpool
+        self.size = size
+        self.min_ready = min_ready
+        self.failed = failed
+        self.lost = lost
+        self.released = released
+
+
+class BatchTimeoutError(BatchError, TimeoutError):
+    """A group didn't reach ``min_ready`` within the batch's quorum timeout, or an acquired member
+    wasn't Ready within its timeout."""
+
+
+class TerminalMemberError(BatchError):
+    """A member added by ``acquire()`` failed, or was deleted, before it was Ready.
+
+    ``member`` is ``FAILED``, with reason ``CreateFailed`` if its create failed, or ``LOST`` if
+    someone else deleted its claim.
+    """
+
+    def __init__(self, member: "Member") -> None:
+        detail = f" ({member.reason}: {member.message})" if member.reason else ""
+        super().__init__(
+            f"acquired member '{member.claim_name}' of pool '{member.warmpool}' is "
+            f"{member.state.value} and won't become Ready{detail}"
+        )
+        self.member = member

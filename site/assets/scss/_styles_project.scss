@@ -173,40 +173,42 @@ footer {
     line-height: 1.35;
   }
 
-  // Root / section titles: heaviest and brightest.
-  .ul-0 > li > .td-sidebar-link,
-  .td-sidebar-nav__section-title > a {
+  // Each level is scoped with child combinators: Docsy 0.12 puts
+  // `.td-sidebar-nav__section-title` on every `li`, and nested links are
+  // `ul.ul-N > li > label > a`, so descendant selectors would leak into
+  // deeper levels. Weight/size rules skip only `.active` (so `a.active`
+  // keeps its bold); color rules also skip `:hover`/`:focus` so the white
+  // hover/focus color below still wins.
+
+  // Root entry: heaviest and brightest.
+  .ul-0 > li > .td-sidebar-link:not(.active) {
     font-weight: 600;
   }
 
-  .td-sidebar-nav__section-title a:not(.active):not(:hover):not(:focus) {
+  .ul-0 > li > .td-sidebar-link:not(.active):not(:hover):not(:focus) {
     color: rgba(255, 255, 255, 0.92) !important;
   }
 
-  // Mid-level pages and nested section titles.
-  .ul-1 .td-sidebar-link__page:not(.active):not(:hover):not(:focus),
-  .ul-1 .td-sidebar-nav__section-title a:not(.active):not(:hover):not(:focus) {
+  // First level under the root.
+  .ul-1 > li > label > .td-sidebar-link:not(.active) {
     font-weight: 500;
+  }
+
+  .ul-1 > li > label > .td-sidebar-link:not(.active):not(:hover):not(:focus) {
     color: rgba(255, 255, 255, 0.78) !important;
   }
 
-  // Deeper nesting: lighter weight and slightly smaller type.
-  .ul-2 .td-sidebar-link,
-  .ul-3 .td-sidebar-link,
-  .ul-4 .td-sidebar-link {
+  // Deeper nesting (.ul-2 and below): lighter weight and smaller type.
+  .ul-1 ul > li > label > .td-sidebar-link {
     font-size: 0.8125rem; // 13px
+  }
+
+  .ul-1 ul > li > label > .td-sidebar-link:not(.active) {
     font-weight: 400;
   }
 
-  .ul-2 .td-sidebar-link:not(.active):not(:hover):not(:focus),
-  .ul-3 .td-sidebar-link:not(.active):not(:hover):not(:focus),
-  .ul-4 .td-sidebar-link:not(.active):not(:hover):not(:focus) {
+  .ul-1 ul > li > label > .td-sidebar-link:not(.active):not(:hover):not(:focus) {
     color: rgba(255, 255, 255, 0.68) !important;
-  }
-
-  // Leaf pages that sit under the root (no ul-N parent match above).
-  .td-sidebar-link__page:not(.active):not(:hover):not(:focus) {
-    color: rgba(255, 255, 255, 0.75) !important;
   }
 
   a:hover,

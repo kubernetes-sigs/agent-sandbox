@@ -46,6 +46,10 @@ KEEPALIVE_COMMAND = ["sleep", "infinity"]
 # template with no container by this name gives no way to tell the task image
 # from a sidecar, and is skipped for adoption rather than guessed at.
 RUNTIME_CONTAINER = "agent-runtime"
+# Image placeholder for extra containers in TemplateSpec.extra_pod_spec: a
+# container whose image is this string runs the template's own task image
+# (for example a fresh grading sidecar next to the runtime container).
+TASK_IMAGE_PLACEHOLDER = "{task_image}"
 
 # Default label applied to every resource this package creates (for listing +
 # scoped cleanup).

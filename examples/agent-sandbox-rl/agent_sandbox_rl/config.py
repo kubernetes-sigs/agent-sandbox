@@ -37,10 +37,21 @@ PLACEMENTS = ("round-robin", "least-loaded", "capacity-weighted", "image-affinit
 
 
 class ResourceSpec(BaseModel):
-  """Per-sandbox container resource requests."""
+  """Runtime container resources: requests, and optional limits (unset = none)."""
 
   cpu: str = "250m"
   memory: str = "512Mi"
+  cpu_limit: str | None = None
+  memory_limit: str | None = None
+
+  @field_validator("cpu", "memory", "cpu_limit", "memory_limit")
+  @classmethod
+  def _quantity_nonempty(cls, v: str | None) -> str | None:
+    # An empty string is neither "unset" nor a quantity: rendering would drop
+    # the limit the caller meant to set, or send "" as a request.
+    if v is not None and not v.strip():
+      raise ValueError("resource quantities must be non-empty (use None for no limit)")
+    return v
 
 
 class TemplateSpec(BaseModel):
@@ -75,6 +86,20 @@ class TemplateSpec(BaseModel):
   # onto a pre-existing template it owns.
   # See examples/agent-sandbox-rl-network-policy.
   network_policy_management: str | None = None
+  # Pod hardening, stated explicitly in the rendered spec: no ServiceAccount
+  # token (the controller already defaults automount to false on the pods it
+  # creates) and no shared PID namespace (the Kubernetes default; a grading
+  # sidecar must neither see nor be seen by the agent's processes). Set either
+  # to True for a workload that needs them.
+  automount_service_account_token: bool = False
+  share_process_namespace: bool = False
+  # Extra keys merged into the SandboxTemplate `spec` next to `podTemplate` and
+  # `networkPolicyManagement`, for template fields this model has no knob for.
+  # `podTemplate` and `networkPolicyManagement` are rejected here: they have
+  # knobs (extra_pod_spec, network_policy_management) that the SDK's own logic
+  # reads. Keys the SandboxTemplate CRD does not know are pruned by the API
+  # server, silently.
+  extra_template_spec: dict = Field(default_factory=dict)
 
   @field_validator("image_pull_policy")
   @classmethod
@@ -88,6 +113,18 @@ class TemplateSpec(BaseModel):
   def _valid_network_policy_management(cls, v: str | None) -> str | None:
     if v is not None and v not in ("Managed", "Unmanaged"):
       raise ValueError("network_policy_management must be Managed|Unmanaged")
+    return v
+
+  @field_validator("extra_template_spec")
+  @classmethod
+  def _extra_template_spec_not_pod_template(cls, v: dict) -> dict:
+    if "podTemplate" in v:
+      raise ValueError("extra_template_spec must not carry podTemplate; "
+                       "use extra_pod_spec for pod-spec keys")
+    if "networkPolicyManagement" in v:
+      raise ValueError("extra_template_spec must not carry networkPolicyManagement; "
+                       "use network_policy_management (preflight and the template "
+                       "patch read that field)")
     return v
 
 

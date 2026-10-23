@@ -91,6 +91,20 @@ class _TemplateChanged(Exception):
   changed, or was deleted and recreated, after it was read."""
 
 
+def _container_resources(spec) -> dict:
+  """Kubernetes ``resources`` for the runtime container: requests always,
+  limits only for the fields set (an unset limit stays unlimited)."""
+  out = {"requests": {"cpu": spec.cpu, "memory": spec.memory}}
+  limits = {}
+  if spec.cpu_limit is not None:
+    limits["cpu"] = spec.cpu_limit
+  if spec.memory_limit is not None:
+    limits["memory"] = spec.memory_limit
+  if limits:
+    out["limits"] = limits
+  return out
+
+
 class Resources:
   """Template + warm-pool lifecycle for a single cluster/namespace."""
 
@@ -204,11 +218,11 @@ class Resources:
             "command": list(template.keepalive_command),
             "stdin": True,
             "tty": True,
-            "resources": {"requests": {
-                "cpu": template.resources.cpu,
-                "memory": template.resources.memory,
-            }},
+            "resources": _container_resources(template.resources),
         }],
+        # Hardened by default (see TemplateSpec); extra_pod_spec can override.
+        "automountServiceAccountToken": template.automount_service_account_token,
+        "shareProcessNamespace": template.share_process_namespace,
     }
     if template.runtime_class:
       pod_spec["runtimeClassName"] = template.runtime_class
@@ -271,6 +285,23 @@ class Resources:
           pod_spec["containers"] = merged_containers
       pod_spec.update(extra)
 
+    # Extra containers (and init containers) from the escape hatch: copy them so
+    # a per-template substitution never writes into the caller's TemplateSpec,
+    # resolve the task-image placeholder, and give a task-image container the
+    # template's pull policy when it names none (the runtime container already
+    # has it; any other image keeps the Kubernetes default).
+    for key in ("containers", "initContainers"):
+      if key in pod_spec:
+        resolved = []
+        for c in pod_spec[key]:
+          if isinstance(c, dict):
+            c = dict(c)
+            if c.get("image") == constants.TASK_IMAGE_PLACEHOLDER:
+              c["image"] = image
+              c.setdefault("imagePullPolicy", template.image_pull_policy)
+          resolved.append(c)
+        pod_spec[key] = resolved
+
     spec: dict = {
         "podTemplate": {
             # See _pod_template_labels: this is how pods carry the run id.
@@ -280,6 +311,8 @@ class Resources:
     }
     if template.network_policy_management:
       spec["networkPolicyManagement"] = template.network_policy_management
+    if template.extra_template_spec:
+      spec.update(template.extra_template_spec)
     return {
         "apiVersion": f"{constants.GROUP}/{constants.VERSION}",
         "kind": "SandboxTemplate",

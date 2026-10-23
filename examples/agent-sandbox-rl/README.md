@@ -559,11 +559,20 @@ for footprint/concurrency beyond what the control plane comfortably absorbs.
 `node_selector`, `runtime_class`, `image_pull_secret`, `weight`, `max_replicas`,
 `snapshots` (False — GKE Pod Snapshots; see [Snapshots](#snapshots--suspend--resume--restore-gke-opt-in)).
 
-**TemplateSpec:** `resources` (cpu/memory), `keepalive_command` (`sleep infinity`),
+**TemplateSpec:** `resources` (cpu/memory requests; optional `cpu_limit` /
+`memory_limit`), `keepalive_command` (`sleep infinity`),
 `runtime_class`, `node_selector`, `image_pull_secret`, `image_pull_policy`
-(`IfNotPresent` — reuses the node layer cache across epochs), `colocate_replicas`
+(`IfNotPresent` — reuses the node layer cache across epochs; also filled in on
+`{task_image}` containers that name none), `colocate_replicas`
 (False — prefer scheduling a pool's replicas on one node for cache reuse),
-`extra_pod_spec`, `network_policy_management` (None — the controller's default, one
+`automount_service_account_token` / `share_process_namespace` (both False, stated in
+the rendered spec — the controller already defaults the token off and Kubernetes the
+shared PID namespace off; set True for a workload that needs them), `extra_pod_spec` (a container or
+init container whose image is `{task_image}` runs the template's own task image — the
+way to declare a fresh grading sidecar next to the runtime container),
+`extra_template_spec` (extra SandboxTemplate `spec` keys; `podTemplate` and
+`networkPolicyManagement` have their own knobs and are rejected),
+`network_policy_management` (None — the controller's default, one
 NetworkPolicy per template; `"Unmanaged"` to run one namespace-wide policy on the
 shared `app=agent-sandbox-rl` pod label instead, and `preflight()` warns if no policy
 selects the fleet's pods; see

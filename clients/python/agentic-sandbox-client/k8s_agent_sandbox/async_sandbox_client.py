@@ -26,6 +26,7 @@ import logging
 import sys
 import tempfile
 import uuid
+from collections.abc import Sequence
 from types import TracebackType
 from typing import Any, Generic, Self, TypeVar
 
@@ -33,6 +34,7 @@ from kubernetes import client as sync_client
 from kubernetes_asyncio import client as async_client
 from kubernetes_asyncio.client import ApiException
 
+from . import batch_utils
 from .claim_adoption import validate_claim_name, validate_claim_for_adoption
 from .async_k8s_helper import AsyncK8sHelper
 from .async_sandbox import AsyncSandbox
@@ -40,8 +42,9 @@ from .async_sandbox_batch import AsyncSandboxBatch
 from .exceptions import SandboxNotFoundError
 from .k8s_helper import K8sHelper
 from .pod_metadata import build_pod_metadata, validate_labels
+from .sandbox_batch import _delete_batch_objects as _delete_batch_objects_sync
 from .utils import construct_sandbox_claim_lifecycle_spec
-from .models import AdditionalPodMetadata, SandboxConnectionConfig, SandboxTracerConfig
+from .models import AdditionalPodMetadata, BatchGroup, SandboxConnectionConfig, SandboxTracerConfig
 from .trace_manager import async_trace_span, create_tracer_manager, initialize_tracer, trace
 
 logger = logging.getLogger(__name__)
@@ -120,7 +123,8 @@ class AsyncSandboxClient(Generic[T]):
     ``SandboxLocalTunnelConnectionConfig``.
 
     By default (``cleanup=True``) an atexit hook is registered that deletes
-    tracked sandboxes on program termination, except explicitly named Claims.
+    tracked sandboxes on program termination, except explicitly named Claims,
+    and releases tracked batches.
     The hook also terminates
     loop-independent local resources such as sandboxd port-forward processes.
     Pass ``cleanup=False`` to opt out of this behavior::
@@ -131,8 +135,8 @@ class AsyncSandboxClient(Generic[T]):
     which defaults to ``cleanup=False``; the async client opts in to safer
     out-of-the-box cleanup.
 
-    Use ``async with`` to delete automatically managed Claims and close local
-    connections. Explicitly named Claims remain caller-owned and are not
+    Use ``async with`` to delete automatically managed Claims, release tracked
+    batches, and close local connections. Explicitly named Claims remain caller-owned and are not
     deleted on context exit. To delete them, explicitly call
     ``await client.delete_sandbox(...)`` or ``await client.delete_all()``
     before closing the client. Outside a context manager, call
@@ -218,6 +222,9 @@ class AsyncSandboxClient(Generic[T]):
 
         A connection that fails to close remains tracked so a later call can
         retry its cleanup.
+
+        It stops each tracked batch's Lease renewal without releasing the Lease, so ``get_batch``
+        can't re-attach a batch that wasn't detached with ``detach()``.
         """
         async with self._lock:
             for key, sandbox in list(self._active_connection_sandboxes.items()):
@@ -235,16 +242,22 @@ class AsyncSandboxClient(Generic[T]):
         # event loop, so the batch would never go stale.
         async with self._lock:
             batches = list(self._active_batches.values())
-            self._active_batches.clear()
         for batch in batches:
             try:
                 # The handle stops renewing its Lease, so connect() must not hand out new connections.
                 async with batch._lock:
                     batch._detached = True
-                await batch._stop_background_tasks()
-                await batch._close_cached_connections("client cleanup")
+                    batch._changed.notify_all()
+                try:
+                    await batch._stop_background_tasks()
+                finally:
+                    # A failed stop must not leave port-forwards open.
+                    await batch._close_cached_connections("client cleanup")
             except Exception as e:
                 logger.error(f"Failed to stop batch '{batch.batch_id}' tasks: {e}")
+            # Client cleanup keeps a batch tracked while it still has connections, so a later cleanup retries them.
+            if not batch._connected:
+                self._unregister_batch(batch)
 
     async def create_sandbox(
         self,
@@ -504,16 +517,91 @@ class AsyncSandboxClient(Generic[T]):
         """
         return await self.k8s_helper.list_sandbox_claims(namespace, label_selector=label_selector)
 
+    async def claim_batch(
+        self,
+        groups: Sequence[BatchGroup],
+        *,
+        namespace: str = "default",
+        labels: dict[str, str] | None = None,
+        batch_id: str | None = None,
+        create_rps: float | None = None,
+        max_in_flight: int | None = None,
+        work_budget: int | None = None,
+        quorum_timeout: int | None = None,
+        lease_duration: int | None = None,
+    ) -> AsyncSandboxBatch:
+        """Claims a batch of sandboxes across one or more warm pools, returning its handle at once.
+
+        Checks that every group's ``SandboxWarmPool`` and its ``SandboxTemplate`` exist, creates the
+        batch Lease ``batch-<id>``, and starts the batch's watch. The claims ``<id>-0`` to
+        ``<id>-<N-1>``, where ``N`` is the sum of the group sizes, are then created in the background
+        until ``err()`` is set. Each group's claims get consecutive ordinals in group order. Each
+        group's first ``min_ready`` claims are created first, one group after another in group
+        order, and the rest follow in the same order. Use ``events()`` or ``iter_ready_groups()``
+        to consume them as they become Ready, and ``release()`` to delete the batch.
+
+        Every claim gets the same ``shutdownTime``, the time of this call plus ``N / create_rps``
+        seconds (rounded up) plus ``quorum_timeout`` plus ``work_budget`` plus 600 seconds, so an
+        abandoned batch is eventually deleted by the controller. ``work_budget`` is a hard cap.
+        Nothing extends a claim's ``shutdownTime``, so a batch held for a whole run sets
+        ``work_budget`` to the run's length.
+
+        Of the errors below, only ``BatchExistsError`` is a ``BatchError``. The others mean a bad
+        argument, a missing pool or template, or an API error. Failures after this call returns,
+        such as a failed create, aren't raised here but show in ``members()`` and ``err()``.
+
+        Args:
+            groups: One ``BatchGroup`` per warm pool, each with ``size`` at least 1.
+            namespace: Kubernetes namespace for the claims and the Lease.
+            labels: Optional labels for every claim.
+            batch_id: Optional batch id; a DNS-1123 label starting with a letter, at most 52
+                characters. Generated if omitted.
+            create_rps: Maximum claim creates started per second. Defaults to 50.
+            max_in_flight: Maximum claim creates in flight at once. Defaults to 20.
+            work_budget: Seconds the caller expects to work with the batch after it is Ready;
+                part of each claim's ``shutdownTime``. Defaults to 3600.
+            quorum_timeout: Seconds after the last claim create that a group may take to reach
+                ``min_ready``. Defaults to 600.
+            lease_duration: Seconds the batch Lease stays valid without renewal. Defaults to 60.
+
+        Raises:
+            ValueError: If an argument is invalid.
+            SandboxWarmPoolNotFoundError: If a group's warm pool doesn't exist.
+            SandboxTemplateNotFoundError: If a warm pool's template doesn't exist, or it names none.
+            BatchExistsError: If a Lease or claims with this batch id already exist.
+            ApiException: For any other API error before the first claim is created, such as a
+                403. If the Lease was already created, it is deleted first.
+
+        Example::
+
+            batch = await client.claim_batch([BatchGroup(warmpool="python-sandbox-pool", size=4, min_ready=2)])
+            async for group in batch.iter_ready_groups():
+                if group.error is None:
+                    sandbox = await batch.connect(group.members[0])
+                    await sandbox.commands.run("echo hello")
+            await batch.release()
+        """
+        args = batch_utils.validate_claim_batch_args(
+            groups, labels, batch_id, create_rps, max_in_flight, work_budget, quorum_timeout,
+            lease_duration,
+        )
+        batch = await AsyncSandboxBatch._claim(self, args, namespace, self._trace_context_annotations())
+        # Registered with no await in between, so a cancel here can't leave the batch's tasks
+        # running where close() won't stop them.
+        self._active_batches[(namespace, batch.batch_id)] = batch
+        return batch
+
     async def get_batch(self, batch_id: str, namespace: str = "default") -> AsyncSandboxBatch:
         """Attaches to an existing batch, taking over its Lease.
 
         Resumes batch lease renewal and starts a label-scoped watch that keeps
         ``members()`` up to date. Only a batch released with ``detach()`` can be re-attached,
-        within its grace window.
+        within its grace window. A group whose claims are all gone is unknown to the new handle,
+        so it isn't in ``groups`` and ``iter_ready_groups()`` doesn't yield it.
 
         The batch errors below are all ``BatchError``, so ``except BatchError`` handles a batch that
-        can't be attached. ``ValueError`` means a bad batch id, and ``ApiException`` an API or
-        network failure.
+        can't be attached. ``ValueError`` means a bad batch id, ``ApiException`` an API error,
+        and a failed request raises the transport's own error.
 
         Raises:
             ValueError: If ``batch_id`` is not a valid batch id.
@@ -523,8 +611,9 @@ class AsyncSandboxClient(Generic[T]):
             BatchInUseError: If a live Lease is held by another handle, or another client
                 takes it over while attaching.
             BatchError: If the Lease's or the claims' batch annotations are invalid.
-            ApiException: For any other API error such as a 403, or the transport error if a
-                request fails.
+            ApiException: For any other API error such as a 403.
+            aiohttp.ClientError, TimeoutError: If a request fails, such as on a connection error or
+                timeout.
 
         Example::
 
@@ -563,8 +652,7 @@ class AsyncSandboxClient(Generic[T]):
             )
 
     async def delete_all(self) -> None:
-        """Cleanup all tracked sandboxes managed by this client, and stop every tracked batch's
-        background watch and Lease renewal and close its cached sandbox connections."""
+        """Cleanup all tracked sandboxes managed by this client, and release every tracked batch."""
         async with self._lock:
             items = list(self._active_connection_sandboxes.items())
 
@@ -573,7 +661,7 @@ class AsyncSandboxClient(Generic[T]):
                 await self.delete_sandbox(claim_name, namespace=ns)
             except Exception as e:
                 logger.error(f"Cleanup failed for {claim_name} in namespace {ns}: {e}")
-        await self._stop_batches()
+        await self._release_batches()
 
     async def _delete_automatic_sandboxes(self) -> None:
         async with self._lock:
@@ -581,6 +669,18 @@ class AsyncSandboxClient(Generic[T]):
         for namespace, claim_name in claims:
             if (namespace, claim_name) not in self._explicit_claims:
                 await self.delete_sandbox(claim_name, namespace)
+        await self._release_batches()
+
+    async def _release_batches(self) -> None:
+        # A handle that exits without detach() has signaled no handoff, so its batch is released
+        # whether this client claimed it or re-attached to it.
+        async with self._lock:
+            batches = list(self._active_batches.items())
+        for (namespace, batch_id), batch in batches:
+            try:
+                await batch.release()
+            except Exception as e:
+                logger.error(f"Failed to release batch '{batch_id}' in namespace {namespace}: {e}")
 
     def _atexit_cleanup(self) -> None:
         """Best-effort atexit cleanup for claims and local sandbox resources.
@@ -615,8 +715,6 @@ class AsyncSandboxClient(Generic[T]):
                             f"connection during atexit cleanup: {e}",
                             file=sys.stderr,
                         )
-            if not tracked:
-                return
 
             atexit_api_client = None
             if self._injected_api_client is not None:
@@ -651,6 +749,16 @@ class AsyncSandboxClient(Generic[T]):
                                 f"'{claim_name}' in namespace '{ns}' during atexit cleanup: {e}",
                                 file=sys.stderr,
                             )
+                for batch in batches:
+                    try:
+                        _delete_batch_objects_sync(helper, batch.namespace, batch.batch_id, batch._lease_name)
+                    except Exception as e:
+                        if sys.stderr is not None:
+                            print(
+                                f"[agent-sandbox] Warning: failed to release batch "
+                                f"'{batch.batch_id}' in namespace '{batch.namespace}' during atexit cleanup: {e}",
+                                file=sys.stderr,
+                            )
         except Exception as e:
             if sys.stderr is not None:
                 print(
@@ -678,23 +786,25 @@ class AsyncSandboxClient(Generic[T]):
                 span.set_attribute("sandbox.lifecycle.shutdown_time", lifecycle["shutdownTime"])
                 span.set_attribute("sandbox.lifecycle.shutdown_policy", lifecycle["shutdownPolicy"])
 
-        annotations = {}
-        if self.tracing_manager:
-            trace_context_str = self.tracing_manager.get_trace_context_json()
-            if trace_context_str:
-                annotations["opentelemetry.io/trace-context"] = trace_context_str
-
         return await self.k8s_helper.create_sandbox_claim(
             claim_name,
             warmpool_name,
             namespace,
-            annotations=annotations,
+            annotations=self._trace_context_annotations(),
             labels=labels,
             lifecycle=lifecycle,
             volume_claim_templates=volume_claim_templates,
             pod_metadata=pod_metadata,
             env=env,
         )
+
+    def _trace_context_annotations(self) -> dict[str, str]:
+        annotations = {}
+        if self.tracing_manager:
+            trace_context_str = self.tracing_manager.get_trace_context_json()
+            if trace_context_str:
+                annotations["opentelemetry.io/trace-context"] = trace_context_str
+        return annotations
 
     @async_trace_span("wait_for_claim_ready")
     async def _wait_for_claim_ready(self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None, **kwargs: Any) -> str:

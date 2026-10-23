@@ -59,17 +59,28 @@ def _dig(row: dict, path: str):
   return node
 
 
-def _as_image(value) -> str | None:
-  """A single image string out of what a dataset hands back: a string, bytes,
-  or a one-element list / tuple / array (``tolist``) as columnar datasets do."""
+def _as_scalar(value):
+  """Unwrap what a columnar dataset hands back for one field: a one-element
+  list / tuple / array (``tolist``) becomes its element; several elements, a
+  dict or None is not a scalar and yields None. Used for images and ids alike,
+  so a columnar row never falls back to a positional id."""
   if value is None:
     return None
   if hasattr(value, "tolist") and not isinstance(value, (str, bytes)):
     value = value.tolist()
   while isinstance(value, (list, tuple)):
-    if len(value) != 1:                      # several images is not "the image"
+    if len(value) != 1:
       return None
     value = value[0]
+  if isinstance(value, dict):
+    return None
+  return value
+
+
+def _as_image(value) -> str | None:
+  """A single image string out of what a dataset hands back: a string, bytes,
+  or a one-element list / tuple / array (``tolist``) as columnar datasets do."""
+  value = _as_scalar(value)
   if isinstance(value, bytes):
     try:
       value = value.decode("utf-8")
@@ -120,8 +131,8 @@ def _find_id(row: dict, id_field, default) -> "tuple[str | None, str]":
       raise KeyError(f"task #{default} row has no id (id_field callable returned None)")
     return None, str(v)
   for path in _paths(id_field, DEFAULT_ID_FIELDS):
-    v = _dig(row, path)
-    if v is not None and not isinstance(v, (dict, list)):
+    v = _as_scalar(_dig(row, path))
+    if v is not None:
       return path, str(v)
   if id_field is not None:
     raise KeyError(f"task #{default} row has no id (tried: "

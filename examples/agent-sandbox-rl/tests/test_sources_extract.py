@@ -197,3 +197,14 @@ def test_an_explicit_id_field_that_matches_nothing_raises_instead_of_using_the_i
     sources.to_tasks(rows, id_field="instanceid")                   # a typo is an error
   with pytest.raises(KeyError, match="returned None"):
     sources.to_tasks(rows, id_field=lambda row: row.get("nope"))
+
+
+def test_row_ids_unwrap_one_element_arrays_like_images_do():
+  class _Arr:                                            # what a columnar dataset returns
+    def __init__(self, v): self._v = v
+    def tolist(self): return self._v
+  t = sources.row_to_task({"image": _Arr(["img:1"]), "instance_id": _Arr(["django-1"])}, 7)
+  assert (t.id, t.image) == ("django-1", "img:1")        # not the positional "7"
+  t = sources.row_to_task({"image": "img:2", "instance_id": ("x",)}, 3)
+  assert t.id == "x"
+  assert sources.row_to_task({"image": "img:3", "instance_id": ["a", "b"]}, 4).id == "4"   # not one id

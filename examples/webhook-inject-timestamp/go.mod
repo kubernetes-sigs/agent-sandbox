@@ -2,7 +2,7 @@ module sigs.k8s.io/agent-sandbox/examples/webhook-inject-timestamp
 
 go 1.26.2
 
-toolchain go1.27.1
+toolchain go1.27.3
 
 require (
 	k8s.io/api v0.35.9

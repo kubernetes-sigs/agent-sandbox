@@ -129,6 +129,14 @@ class AsyncSandboxFleet:
   def load_tasks(self, source, *, image_rewrite=None) -> list[Task]:
     return self._fleet.load_tasks(source, image_rewrite=image_rewrite)
 
+  def add_tasks(self, source, *, image_rewrite=None) -> list[Task]:
+    return self._fleet.add_tasks(source, image_rewrite=image_rewrite)
+
+  async def wait_pools_ready(self, images, *, timeout: float | None = None,
+                             replicas=None) -> dict[str, bool]:
+    return await self._to_thread(self._fleet.wait_pools_ready, images,
+                                 timeout=timeout, replicas=replicas)
+
   def image_counts(self):
     return self._fleet.image_counts()
 

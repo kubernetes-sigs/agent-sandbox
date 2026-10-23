@@ -282,12 +282,18 @@ class SandboxBatch:
 
     def _close_cached_connections(self, action: str) -> None:
         with self._lock:
-            connected = list(self._connected.values())
-            self._connected.clear()
-        for sandbox in connected:
+            names = list(self._connected)
+        for claim_name in names:
+            with self._lock:
+                sandbox = self._connected.pop(claim_name, None)
+            if sandbox is None:
+                continue
             try:
                 sandbox.close_connection()
             except Exception as e:
+                # A connection that fails to close is kept on the handle rather than dropped.
+                with self._lock:
+                    self._connected.setdefault(claim_name, sandbox)
                 logger.warning(
                     f"Batch '{self.batch_id}' failed to close a cached sandbox connection "
                     f"during {action}: {e}"

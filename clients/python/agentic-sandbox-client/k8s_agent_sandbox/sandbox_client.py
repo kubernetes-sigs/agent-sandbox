@@ -366,8 +366,8 @@ class SandboxClient(Generic[T]):
         within its grace window.
 
         The batch errors below are all ``BatchError``, so ``except BatchError`` handles a batch that
-        can't be attached. ``ValueError`` means a bad batch id, and ``ApiException`` an API or
-        network failure.
+        can't be attached. ``ValueError`` means a bad batch id, ``ApiException`` an API error,
+        and a failed request raises the transport's own error.
 
         Raises:
             ValueError: If ``batch_id`` is not a valid batch id.
@@ -377,8 +377,9 @@ class SandboxClient(Generic[T]):
             BatchInUseError: If a live Lease is held by another handle, or another client
                 takes it over while attaching.
             BatchError: If the Lease's or the claims' batch annotations are invalid.
-            ApiException: For any other API error such as a 403, or the transport error if a
-                request fails.
+            ApiException: For any other API error such as a 403.
+            urllib3.exceptions.HTTPError: If a request fails, such as on a connection error or
+                timeout.
 
         Example:
 
@@ -423,6 +424,9 @@ class SandboxClient(Generic[T]):
         """
         Cleanup all tracked sandboxes managed by this client, and stop every tracked batch's
         background watch and Lease renewal and close its cached sandbox connections.
+
+        It stops each tracked batch's Lease renewal without releasing the Lease, so ``get_batch``
+        can't re-attach a batch that wasn't detached with ``detach()``.
         
         Example:
         
@@ -457,16 +461,21 @@ class SandboxClient(Generic[T]):
         # life of the process, so the batch would never go stale.
         with self._batches_lock:
             batches = list(self._active_batches.values())
-            self._active_batches.clear()
         for batch in batches:
             try:
                 # The handle stops renewing its Lease, so connect() must not hand out new connections.
                 with batch._lock:
                     batch._detached = True
-                batch._stop_background_threads()
-                batch._close_cached_connections("client cleanup")
+                try:
+                    batch._stop_background_threads()
+                finally:
+                    # A failed stop must not leave port-forwards open.
+                    batch._close_cached_connections("client cleanup")
             except Exception as e:
                 logger.error(f"Failed to stop batch '{batch.batch_id}' threads: {e}")
+            # Client cleanup keeps a batch tracked while it still has connections, so a later cleanup retries them.
+            if not batch._connected:
+                self._unregister_batch(batch)
 
     @trace_span("create_claim")
     def _create_claim(

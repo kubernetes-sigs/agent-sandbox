@@ -218,6 +218,9 @@ class AsyncSandboxClient(Generic[T]):
 
         A connection that fails to close remains tracked so a later call can
         retry its cleanup.
+
+        It stops each tracked batch's Lease renewal without releasing the Lease, so ``get_batch``
+        can't re-attach a batch that wasn't detached with ``detach()``.
         """
         async with self._lock:
             for key, sandbox in list(self._active_connection_sandboxes.items()):
@@ -235,16 +238,21 @@ class AsyncSandboxClient(Generic[T]):
         # event loop, so the batch would never go stale.
         async with self._lock:
             batches = list(self._active_batches.values())
-            self._active_batches.clear()
         for batch in batches:
             try:
                 # The handle stops renewing its Lease, so connect() must not hand out new connections.
                 async with batch._lock:
                     batch._detached = True
-                await batch._stop_background_tasks()
-                await batch._close_cached_connections("client cleanup")
+                try:
+                    await batch._stop_background_tasks()
+                finally:
+                    # A failed stop must not leave port-forwards open.
+                    await batch._close_cached_connections("client cleanup")
             except Exception as e:
                 logger.error(f"Failed to stop batch '{batch.batch_id}' tasks: {e}")
+            # Client cleanup keeps a batch tracked while it still has connections, so a later cleanup retries them.
+            if not batch._connected:
+                self._unregister_batch(batch)
 
     async def create_sandbox(
         self,
@@ -512,8 +520,8 @@ class AsyncSandboxClient(Generic[T]):
         within its grace window.
 
         The batch errors below are all ``BatchError``, so ``except BatchError`` handles a batch that
-        can't be attached. ``ValueError`` means a bad batch id, and ``ApiException`` an API or
-        network failure.
+        can't be attached. ``ValueError`` means a bad batch id, ``ApiException`` an API error,
+        and a failed request raises the transport's own error.
 
         Raises:
             ValueError: If ``batch_id`` is not a valid batch id.
@@ -523,8 +531,9 @@ class AsyncSandboxClient(Generic[T]):
             BatchInUseError: If a live Lease is held by another handle, or another client
                 takes it over while attaching.
             BatchError: If the Lease's or the claims' batch annotations are invalid.
-            ApiException: For any other API error such as a 403, or the transport error if a
-                request fails.
+            ApiException: For any other API error such as a 403.
+            aiohttp.ClientError, TimeoutError: If a request fails, such as on a connection error or
+                timeout.
 
         Example::
 
@@ -564,7 +573,11 @@ class AsyncSandboxClient(Generic[T]):
 
     async def delete_all(self) -> None:
         """Cleanup all tracked sandboxes managed by this client, and stop every tracked batch's
-        background watch and Lease renewal and close its cached sandbox connections."""
+        background watch and Lease renewal and close its cached sandbox connections.
+
+        It stops each tracked batch's Lease renewal without releasing the Lease, so ``get_batch``
+        can't re-attach a batch that wasn't detached with ``detach()``.
+        """
         async with self._lock:
             items = list(self._active_connection_sandboxes.items())
 

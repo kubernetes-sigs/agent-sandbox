@@ -66,6 +66,76 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
   `ensure_templates()` raises a `FleetError` naming the owning run, like the
   warm path.
 
+### Added (fail fast on claims that cannot start)
+- **`acquire()` fails fast on a pod that will not come up.** The SDK's claim wait
+  can only see the claim, so a pod stuck in `ImagePullBackOff`,
+  `CreateContainerConfigError`, `CrashLoopBackOff`, OOM-killed at start, or
+  `Unschedulable` looked like one still starting and ran out `ready_timeout`
+  (15 minutes) before the caller learned anything. `acquire()` now names its claim
+  and runs a `ClaimWatchdog` (`failfast.py`) next to the wait; when the pod is in a
+  state the controller will not recover from, the watchdog deletes the claim and
+  `acquire()` raises **`SandboxStartError`** with the Kubernetes reason, the pod and
+  the image. Reasons that never clear fail at once. The graced classes are opt-in:
+  transient-looking ones fail after `FailFastPolicy.grace_s` and `Unschedulable`
+  after `unschedulable_grace_s` only when those are set (unset by default: a GPU
+  or node-auto-provisioning scale-up outlasts a few minutes of `Unschedulable`,
+  and failing a pull during registry throttling makes the caller retry on a new
+  pod whose pull starts at once, adding load). A pod being deleted is not a
+  verdict: the controller recreates an evicted or preempted pod under the same
+  name. The retryable reasons of a container share one
+  grace clock, which resets only after the condition has been gone for a full
+  grace period, so a pull flipping between `ErrImagePull` and `ImagePullBackOff`
+  or a crash loop seen between restarts is not restarted on every poll. An
+  earlier OOM kill fails a container only while it is not running again. Off with
+  `FleetConfig(fail_fast=FailFastPolicy(enabled=False))`.
+- **Claim tracking does not grow per episode.** `acquire()` names its claim, which
+  the SDK client records (`_explicit_claims`, next to the Sandbox object in
+  `_active_connection_sandboxes`); `sandbox.terminate()` leaves both in place.
+  `handle.release()` and every rollback path of a failed `acquire()` now prune the
+  claim from the client (`forget_claim_in_client`). The SDK itself is unchanged
+  here; pruning on its terminate path is a separate SDK change.
+- **`FleetConfig.claim_timeout`** bounds one claim's readiness wait separately from
+  `ready_timeout`, which also bounds whole-pool fills and is sized for those.
+  `None` (default) keeps the old behaviour.
+- **`SandboxHandle.is_alive()`** and **`SandboxLostError`**: an `exec()` that fails
+  because the pod is gone (deleted, evicted, OOM-killed, finished) now raises
+  `SandboxLostError` instead of the raw transport error, after one pod read, so an
+  RL loop can release and re-acquire at once instead of spending its step timeout.
+  `acquire()` records the pod's UID and the runtime container's restart count, so
+  `is_alive()` also reports a pod recreated under the same name (eviction,
+  deletion) and an in-place restart (OOM kill). Only the runtime container is
+  judged; a sidecar that exits does not mark the sandbox lost. After a resume or restore, `refresh()` re-records the identity for the new pod, so `is_alive()` does not report the restored pod as a replacement.
+- **`reap_orphans(alive_run_ids)`** / `python -m agent_sandbox_rl.reaper --orphans
+  --alive-run-ids a,b`: reap every run in the namespace whose driver the caller
+  does not list as alive, discovered through the run-id label on its claims,
+  pools and templates (pods and Sandboxes are reached through those).
+  This is the sweep an external reaper should call rather than matching names or
+  ages itself; `--min-age-s` (300) protects runs that just started, `--dry-run`
+  reports only. Runs with only pods or Sandboxes left are not discovered (neither
+  carries the run-id label everywhere). Pools, and their templates, that a claim of
+  a run not being reaped still points at are kept, here and in `reap(run_id)`, and
+  so are their pods and the pods those runs claimed from them, which keep the
+  run-id label of the run that created the pool. If the claims, pools or
+  Sandboxes needed to tell those apart cannot be listed, the reap raises
+  `FleetError` before deleting anything instead of treating the unknown set as
+  empty.
+- **`reap("")`** and `--run-id ""` are rejected; an empty id used to select every
+  managed run.
+- The core SDK's `SandboxClient.delete_sandbox` (sync and async) forgets an
+  explicitly named claim once it is deleted. `acquire()` names its claims, and
+  the set used to grow by one per claim for the life of the process.
+- `OwnedByAnotherRunError` is now exported from the package root.
+
+### Fixed
+- **`reap()` reaches a run's Sandboxes and pods without relying on the run-id
+  label.** Sandbox CRs never carry it, and pods created before `POD_RUN_ID_LABEL`
+  ([#1807](https://github.com/kubernetes-sigs/agent-sandbox/issues/1807)) carry no
+  run id at all, so the label-based sweeps alone left them to the owner cascade.
+  The sweep now records, before deleting anything, each pool's `status.selector`
+  and each claim's `status.sandbox.name` (and that Sandbox's `status.labelSelector`),
+  deletes those Sandboxes by name and force-deletes pods by every selector, so a
+  stalled owner cascade still ends with the pods gone.
+
 ### Fixed (concurrent runs in one namespace —
 [#1736](https://github.com/kubernetes-sigs/agent-sandbox/issues/1736))
 - **`teardown()` is scoped to this run.** It listed claims, pools and templates by

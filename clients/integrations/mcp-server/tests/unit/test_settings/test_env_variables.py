@@ -13,12 +13,15 @@
 # limitations under the License.
 
 import pytest
+from pydantic import ValidationError
 
+from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
 from k8s_agent_sandbox_mcp_server.settings import (
     Settings,
     DirectConnectionConfig,
     GatewayConnectionConfig,
     InClusterConnectionConfig,
+    SandboxdConnectionConfig,
 )
 
 
@@ -50,3 +53,55 @@ class TestInClusterConnection:
         settings = Settings()
     
         assert type(settings.connection) is InClusterConnectionConfig 
+
+
+class TestSandboxdConnection:
+    @pytest.mark.parametrize("mode", ["in-cluster-service", "in-cluster-pod-ip"])
+    def test_env_vars(self, monkeypatch, mode):
+        monkeypatch.setenv("K8S_SANDBOX_CONNECTION__TYPE", "sandboxd-in-cluster")
+        monkeypatch.setenv("K8S_SANDBOX_CONNECTION__MODE", mode)
+
+        settings = Settings()
+
+        assert type(settings.connection) is SandboxdConnectionConfig
+        assert settings.connection.mode == mode
+        assert settings.connection.rest_port == 8080
+        assert settings.connection.grpc_port == 9090
+
+    def test_env_vars_ports(self, monkeypatch):
+        monkeypatch.setenv("K8S_SANDBOX_CONNECTION__TYPE", "sandboxd-in-cluster")
+        monkeypatch.setenv("K8S_SANDBOX_CONNECTION__MODE", "in-cluster-pod-ip")
+        monkeypatch.setenv("K8S_SANDBOX_CONNECTION__REST_PORT", "18080")
+        monkeypatch.setenv("K8S_SANDBOX_CONNECTION__GRPC_PORT", "19090")
+
+        settings = Settings()
+
+        assert settings.connection.rest_port == 18080
+        assert settings.connection.grpc_port == 19090
+
+    def test_mode_is_required(self, monkeypatch):
+        monkeypatch.setenv("K8S_SANDBOX_CONNECTION__TYPE", "sandboxd-in-cluster")
+
+        with pytest.raises(ValidationError):
+            Settings()
+
+    def test_rejects_unknown_mode(self, monkeypatch):
+        monkeypatch.setenv("K8S_SANDBOX_CONNECTION__TYPE", "sandboxd-in-cluster")
+        monkeypatch.setenv("K8S_SANDBOX_CONNECTION__MODE", "port-forward")
+
+        with pytest.raises(ValidationError):
+            Settings()
+
+    def test_sdk_connector_uses_sandboxd(self, monkeypatch):
+        monkeypatch.setenv("K8S_SANDBOX_CONNECTION__TYPE", "sandboxd-in-cluster")
+        monkeypatch.setenv("K8S_SANDBOX_CONNECTION__MODE", "in-cluster-service")
+
+        connector = AsyncSandboxConnector(
+            sandbox_id="my-sandbox",
+            namespace="my-namespace",
+            connection_config=Settings().connection,
+            k8s_helper=None,
+        )
+
+        assert connector.is_sandboxd()
+        assert not connector.should_inject_router_headers()

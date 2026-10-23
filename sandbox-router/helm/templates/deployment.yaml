@@ -94,6 +94,15 @@ spec:
         {{- with .Values.extraVolumeMounts }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+        # The health listener starts only after the Pod-cache initial LIST, which
+        # can take up to 60s. Without this the liveness probe restarts the
+        # container at ~35s and the sync never finishes.
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: healthz
+          periodSeconds: 5
+          failureThreshold: 18
         livenessProbe:
           httpGet:
             path: /healthz

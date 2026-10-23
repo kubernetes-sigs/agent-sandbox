@@ -2,7 +2,7 @@
 
 This Helm chart installs the Go [sandbox-router](../README.md), the reverse proxy that routes SDK and browser traffic to sandboxes. It renders the same resources as the kustomize base in [`../deploy/`](../deploy/), with the optional pieces (TLS, TokenReview RBAC, namespace-scoped cache RBAC) behind values.
 
-The chart does not create the namespace. It defaults to `agent-sandbox-system`, which the controller chart creates; use `--create-namespace` when installing the router on its own.
+The chart does not create the namespace. It deploys into the release namespace (`--namespace`) unless `namespace.name` is set. Use `--create-namespace` when installing the router on its own; the controller chart creates `agent-sandbox-system` by default.
 
 ## Installation
 
@@ -78,7 +78,7 @@ helm uninstall sandbox-router --namespace agent-sandbox-system
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `imagePullSecrets` | Image pull secrets for the Deployment | `[]` |
 | `replicaCount` | Number of router replicas (2 is the HA minimum) | `2` |
-| `namespace.name` | Namespace to deploy into, falls back to the release namespace if empty | `agent-sandbox-system` |
+| `namespace.name` | Namespace to deploy into, empty means the release namespace | `""` |
 | `router.clusterDomain` | Kubernetes cluster domain used to build sandbox FQDNs | `cluster.local` |
 | `router.proxyTimeout` | Per-request upstream timeout | `180s` |
 | `router.upstreamMaxRetries` | Dial retries, `0` disables | `3` |
@@ -113,7 +113,7 @@ helm uninstall sandbox-router --namespace agent-sandbox-system
 | `networkPolicy.enabled` | Create the NetworkPolicy | `true` |
 | `networkPolicy.proxyIngressFrom` | Peers allowed to reach the proxy ports, tighten to your Gateway namespace | all namespaces |
 | `networkPolicy.metricsIngressFrom` | Peers allowed to scrape the metrics port | `monitoring` namespace |
-| `networkPolicy.apiServerCIDRs` | CIDRs of the Kubernetes API server endpoints (control-plane node IPs or the external load balancer), allowed on ports 443 and 6443. Needed on enforcing clusters whose API server is not a Pod in `default`, otherwise the Pod-IP cache cannot sync and TokenReview calls fail | `[]` |
+| `networkPolicy.apiServerCIDRs` | CIDRs of the Kubernetes API server endpoints (control-plane node IPs or the external load balancer), allowed on ports 443 and 6443. Needed on enforcing clusters whose API server is not a Pod in `default`, otherwise the Pod-IP cache cannot sync and TokenReview calls fail. Some network plugins evaluate egress before Service translation. On those plugins, also add the `kubernetes` Service ClusterIP (`kubectl get svc kubernetes -n default -o jsonpath='{.spec.clusterIP}'`) as a `/32` or `/128` entry | `[]` |
 
 Before production, read "Things to change before production" in the [deploy README](../deploy/README.md): replica count, resource requests, NetworkPolicy selectors, TLS and an HPA apply to the chart as well.
 

@@ -1,8 +1,9 @@
 {{/*
-Expand the name of the chart.
+The component name. Resource names and selector labels are fixed to match the
+kustomize base in deploy/, so the Service and PDB keep selecting the Deployment.
 */}}
 {{- define "sandbox-router.name" -}}
-{{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
+sandbox-router
 {{- end }}
 
 {{/*

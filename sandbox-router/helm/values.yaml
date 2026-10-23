@@ -1,8 +1,9 @@
 namespace:
-  # name is the namespace the router is deployed into. It is not created by
-  # this chart: use `helm install --create-namespace`, or install after the
-  # controller chart, which creates agent-sandbox-system by default.
-  name: agent-sandbox-system
+  # name is the namespace the router is deployed into. Empty means the release
+  # namespace (helm install --namespace). The chart does not create it: use
+  # `helm install --create-namespace`, or install after the controller chart,
+  # which creates agent-sandbox-system by default.
+  name: ""
 
 image:
   repository: registry.k8s.io/agent-sandbox/sandbox-router-go

@@ -30,6 +30,7 @@ import logging
 import math
 import signal
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -56,6 +57,9 @@ from .observability import Observer, repo_family
 from .placement import get_placement
 from .snapshots import pod_restore_status
 from .sources import Task, to_tasks
+
+# verify_teardown re-lists after the reaper; force-deleted pods take a moment to go.
+_VERIFY_SETTLE_S: tuple[float, ...] = (1.0, 2.0, 4.0)
 
 logger = logging.getLogger("agent_sandbox_rl.fleet")
 
@@ -151,6 +155,7 @@ class SandboxFleet:
     # and pool name sees the final values.
     self.config.apply_run_isolation(self.run_id)
     self._created_namespaces: set[tuple[str, str]] = set()  # (cluster, ns) this run made
+    self._deleted_namespaces: set[tuple[str, str]] = set()  # deleted by a teardown
     # Owned namespaces whose `run_namespace_setup` hook completed. Separate from
     # ownership: a namespace whose rollback delete failed stays owned, and the
     # next attempt must still run the hook on it.
@@ -161,6 +166,9 @@ class SandboxFleet:
     self._atexit_registered = False
     self._torndown = False
     self._teardown_lock = threading.Lock()   # makes _teardown idempotent/reentrant
+    # Held for the whole sweep: a second caller returns early on _torndown, and
+    # its verify_teardown must wait for the sweep instead of reaping beside it.
+    self._sweep_lock = threading.Lock()
     # Honor an explicitly-passed registry even when empty — `ClusterRegistry`
     # defines `__len__`, so `registry or …` would treat `ClusterRegistry([])` as
     # falsy and build a default ambient Cluster (which loads kube-config). Only
@@ -1401,6 +1409,7 @@ class SandboxFleet:
     if self.config.install_teardown_hooks:
       self._install_teardown_hooks()          # (#4) clean up even on kill/crash
     self._torndown = False
+    self._deleted_namespaces.clear()          # this cycle recreates what it needs
     with self._lock:
       # A fresh cycle starts with a clean slate; a slot leaked by a crashed
       # prior cycle must not pre-charge this one's max_live_sandboxes.
@@ -1823,11 +1832,103 @@ class SandboxFleet:
       self.release(h)
 
   # --- teardown ---------------------------------------------------------- #
-  def teardown(self, delete_namespace: bool = False) -> None:
+  def teardown(self, delete_namespace: bool = False, *,
+               verify: bool = False) -> "dict[str, dict] | None":
     """Release all claims and delete every resource this fleet created. With a
-    shared `FleetConfig.run_id`, only the pools this fleet warmed are deleted."""
+    shared `FleetConfig.run_id`, only the pools this fleet warmed are deleted.
+
+    ``verify`` follows the sweep with `verify_teardown`: the run-scoped reaper
+    runs on every cluster, deletes whatever of this run is still there, and the
+    per-cluster counts come back (all zero means the teardown was clean)."""
     with self._obs.phase("teardown"):
       self._teardown(delete_namespace)
+    if not verify:
+      return None
+    return self.verify_teardown()
+
+  def verify_teardown(self) -> "dict[str, dict]":
+    """Check (and finish) a teardown with the run-scoped reaper.
+
+    For every cluster: this run's pods are counted, then ``reap(run_id=<this
+    run>)`` lists and deletes this run's claims, pools and templates (Sandbox
+    CRs go with their claims) and force-deletes its pods by label, so a delete
+    that failed inside `teardown` or a pod the controller had not removed yet
+    is both reported and cleaned. Returns ``{cluster_name: counts}`` with
+    ``claims``, ``warmpools``, ``sandboxes``, ``templates`` and ``pods`` as
+    integers (what the reaper found; all zero means the teardown was clean) and
+    ``remaining``, the same kinds re-listed after the reaper with a short settle
+    (all zero means the namespace is verified clean; anything else is logged as
+    a warning, because the reaper counts what it listed, not what is gone).
+    Waits for a teardown sweep another thread is still running. Skipped, with a note in the result, for a shared
+    run id (the id spans other processes' resources), for ``adopt_existing``
+    (adopted pools may carry this run's label from an earlier run) and for a
+    namespace this teardown deleted. A reaper error is recorded under
+    ``"error"``, not raised.
+
+    Raises `FleetError` when called before `teardown`: the reaper deletes, so
+    it is not a mid-run inspection.
+    """
+    from .reaper import reap
+    if not self._torndown:
+      raise FleetError("verify_teardown() runs the run-scoped reaper, which deletes "
+                       "this run's resources; call teardown() first")
+    out: dict[str, dict] = {}
+    with self._sweep_lock:                    # an in-progress sweep finishes first
+      for c in self.registry:
+        out[c.name] = self._verify_cluster(c, reap)
+    return out
+
+  def _run_leftovers(self, c: "Cluster") -> dict[str, int]:
+    """What of this run is in the namespace right now, by kind."""
+    return {
+        "claims": len(c.resources.list_claims(label_selector=self.run_selector())),
+        "warmpools": len(c.resources.list_warmpools(label_selector=self.run_selector())),
+        "templates": len(c.resources.list_templates(label_selector=self.run_selector())),
+        "pods": int(c.resources.count_pods(label_selector=self.pod_run_selector())),
+    }
+
+  def _verify_cluster(self, c: "Cluster", reap) -> dict:
+    if self._shared_run_id:
+      return {"skipped": "shared run id: the reaper would reach other processes"}
+    if self.config.adopt_existing:
+      return {"skipped": "adopt_existing: adopted pools are not this run's to reap"}
+    if (c.name, c.namespace) in self._deleted_namespaces:
+      return {"skipped": f"namespace {c.namespace} was deleted"}
+    cfg = c.config
+    with self._obs.phase("verify_teardown", cluster=c.name):
+      try:
+        # Counted before the reaper's delete-collection, which does not count.
+        pods = int(c.resources.count_pods(label_selector=self.pod_run_selector()))
+        counts = reap(run_id=self.run_id, context=getattr(cfg, "context", None),
+                      namespace=c.namespace, kubeconfig=getattr(cfg, "kubeconfig", None),
+                      in_cluster=bool(getattr(cfg, "in_cluster", False)))
+        if "pods" not in counts:              # reap logs a failed delete-collection
+          counts["error"] = "pod delete-collection failed; see the reaper log"
+        counts["pods"] = pods
+        # The reaper counts what it listed, not what is gone: a delete can fail
+        # and a force-deleted pod takes a moment to leave. Re-list, with a short
+        # settle, and report what is still there separately.
+        remaining = self._run_leftovers(c)
+        for delay in _VERIFY_SETTLE_S:
+          if not any(remaining.values()):
+            break
+          time.sleep(delay)
+          remaining = self._run_leftovers(c)
+        counts["remaining"] = remaining
+      except Exception as exc:  # noqa: BLE001 — verification must not fail the caller
+        logger.warning("verify_teardown: reaper failed on cluster %s: %s", c.name, exc)
+        return {"error": f"{type(exc).__name__}: {exc}"}
+    found = {k: v for k, v in counts.items() if isinstance(v, int) and v > 0}
+    left = {k: v for k, v in counts["remaining"].items() if v > 0}
+    if left:
+      logger.warning("verify_teardown: cluster %s is NOT verified clean for run %s: "
+                     "still present after the reaper: %s", c.name, self.run_id, left)
+    elif found:
+      logger.warning("verify_teardown: cluster %s still had %s of run %s; reaped, "
+                     "now clean", c.name, found, self.run_id)
+    else:
+      logger.info("verify_teardown: cluster %s clean for run %s", c.name, self.run_id)
+    return counts
 
   def _teardown(self, delete_namespace: bool) -> None:
     # Idempotent/reentrant: the breaker thread, a strategy's teardown, __exit__,
@@ -1843,99 +1944,101 @@ class SandboxFleet:
       # will see the flag and terminate its own claim.
       with self._lock:
         self._torndown = True
-    self.release_all()
-    if self._shared_run_id:
-      # A sweep by a shared id would tear down the whole job; unwarm only what
-      # this fleet warmed and leave the rest for the reaper.
-      with self._lock:
-        warmed = list(self._warmed)
-      if warmed and self.plan_:
-        try:
-          self.unwarm_images(warmed)
-        except Exception as exc:  # noqa: BLE001 — best-effort, like the sweep
-          logger.exception("teardown: failed to unwarm this fleet's pools: %s", exc)
-    for c in self.registry:
-      # Run-scoped on purpose. Every claim, pool and template this fleet created
-      # carries this run's id label; the namespace-wide managed label also matches
-      # every OTHER agent-sandbox-rl run in the namespace, and sweeping by it once
-      # deleted a concurrent tenant's whole warm fleet. Leftovers of a run that
-      # crashed without tearing down are the reaper's job (`reap(run_id=…)`, or
-      # the explicit `all_managed=True` sweep).
-      sel = self.run_selector()
+    with self._sweep_lock:
+      self.release_all()
       if self._shared_run_id:
-        claims, pools, tmpls = [], [], []
-      else:
-        logger.info("teardown: sweeping run %s on cluster %s (%s)",
-                    self.run_id, c.name, sel)
-        # Sweep any stray claims first (defensive: untracked/leaked claims keep
-        # their adopted sandbox alive even after the pool is gone).
-        try:
-          claims = c.resources.list_claims(label_selector=sel)
-          pools = c.resources.list_warmpools(label_selector=sel)
-          tmpls = c.resources.list_templates(label_selector=sel)
-        except Exception as exc:
-          logger.exception("Failed to list resources on cluster %s during teardown: %s", c.name, exc)
+        # A sweep by a shared id would tear down the whole job; unwarm only what
+        # this fleet warmed and leave the rest for the reaper.
+        with self._lock:
+          warmed = list(self._warmed)
+        if warmed and self.plan_:
+          try:
+            self.unwarm_images(warmed)
+          except Exception as exc:  # noqa: BLE001 — best-effort, like the sweep
+            logger.exception("teardown: failed to unwarm this fleet's pools: %s", exc)
+      for c in self.registry:
+        # Run-scoped on purpose. Every claim, pool and template this fleet created
+        # carries this run's id label; the namespace-wide managed label also matches
+        # every OTHER agent-sandbox-rl run in the namespace, and sweeping by it once
+        # deleted a concurrent tenant's whole warm fleet. Leftovers of a run that
+        # crashed without tearing down are the reaper's job (`reap(run_id=…)`, or
+        # the explicit `all_managed=True` sweep).
+        sel = self.run_selector()
+        if self._shared_run_id:
           claims, pools, tmpls = [], [], []
-      # Adopted pools/templates are swept out of the delete set explicitly. They
-      # normally don't carry our managed label at all, but they can — adopting a
-      # pool an earlier run of this SDK left behind is a legitimate use — and
-      # deleting the fleet's warm pods on the way out is not a recoverable
-      # mistake. Claims stay in: those we created, and they must be released.
-      if self._adopted_pools or self._adopted_templates:
-        kept_p = [p for p in pools if (c.name, p) in self._adopted_pools]
-        kept_t = [t for t in tmpls if (c.name, t) in self._adopted_templates]
-        if kept_p or kept_t:
-          logger.info("teardown: leaving %d adopted pool(s) and %d adopted "
-                      "template(s) on cluster %s in place",
-                      len(kept_p), len(kept_t), c.name)
-        pools = [p for p in pools if (c.name, p) not in self._adopted_pools]
-        tmpls = [t for t in tmpls if (c.name, t) not in self._adopted_templates]
-      total_items = len(claims) + len(pools) + len(tmpls)
-      if total_items > 0:
-        workers = max(1, min(total_items, self.config.max_concurrent))
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-          # Phase 1: Sweep stray claims first so adopted sandboxes aren't leaked.
-          if claims:
-            claim_futs = [ex.submit(c.resources.delete_claim, claim) for claim in claims]
-            for f in as_completed(claim_futs):
-              try:
-                f.result()
-              except Exception as exc:
-                logger.exception("Failed to delete claim during teardown: %s", exc)
-          # Phase 2: Delete pools and templates concurrently.
-          rest_futs = [ex.submit(c.resources.delete_warmpool, pool) for pool in pools]
-          rest_futs.extend(ex.submit(c.resources.delete_template, tmpl) for tmpl in tmpls)
-          if rest_futs:
-            for f in as_completed(rest_futs):
-              try:
-                f.result()
-              except Exception as exc:
-                logger.exception("Failed to delete pool/template during teardown: %s", exc)
-      c.reset_counts()
-      # A namespace this run created (run_isolation="namespace") goes with it;
-      # a pre-existing one, or a shared run id's, only when the caller asks.
-      key = (c.name, c.namespace)
-      if delete_namespace or (key in self._created_namespaces
-                              and not self._shared_run_id):
-        try:
-          c.resources.delete_namespace(c.namespace)
-        except Exception as exc:  # noqa: BLE001 — best-effort, like the sweeps above
-          # Keep the ownership record, as the rollback path does, so the next
-          # teardown cycle retries the delete instead of leaking the namespace.
-          logger.warning("teardown: failed to delete namespace '%s' on cluster %s: %s",
-                         c.namespace, c.name, exc)
-          continue
-        self._created_namespaces.discard(key)
-        self._namespaces_set_up.discard(key)
-    self._namespaces_ensured = False
-    self._obs.warm_reset()
-    with self._lock:
-      self._warmed.clear()
-      self._ondemand.clear()
-    self._adopted_pools.clear()
-    self._adopted_templates.clear()
-    self.plan_ = None
-    self._remove_teardown_hooks()
+        else:
+          logger.info("teardown: sweeping run %s on cluster %s (%s)",
+                      self.run_id, c.name, sel)
+          # Sweep any stray claims first (defensive: untracked/leaked claims keep
+          # their adopted sandbox alive even after the pool is gone).
+          try:
+            claims = c.resources.list_claims(label_selector=sel)
+            pools = c.resources.list_warmpools(label_selector=sel)
+            tmpls = c.resources.list_templates(label_selector=sel)
+          except Exception as exc:
+            logger.exception("Failed to list resources on cluster %s during teardown: %s", c.name, exc)
+            claims, pools, tmpls = [], [], []
+        # Adopted pools/templates are swept out of the delete set explicitly. They
+        # normally don't carry our managed label at all, but they can — adopting a
+        # pool an earlier run of this SDK left behind is a legitimate use — and
+        # deleting the fleet's warm pods on the way out is not a recoverable
+        # mistake. Claims stay in: those we created, and they must be released.
+        if self._adopted_pools or self._adopted_templates:
+          kept_p = [p for p in pools if (c.name, p) in self._adopted_pools]
+          kept_t = [t for t in tmpls if (c.name, t) in self._adopted_templates]
+          if kept_p or kept_t:
+            logger.info("teardown: leaving %d adopted pool(s) and %d adopted "
+                        "template(s) on cluster %s in place",
+                        len(kept_p), len(kept_t), c.name)
+          pools = [p for p in pools if (c.name, p) not in self._adopted_pools]
+          tmpls = [t for t in tmpls if (c.name, t) not in self._adopted_templates]
+        total_items = len(claims) + len(pools) + len(tmpls)
+        if total_items > 0:
+          workers = max(1, min(total_items, self.config.max_concurrent))
+          with ThreadPoolExecutor(max_workers=workers) as ex:
+            # Phase 1: Sweep stray claims first so adopted sandboxes aren't leaked.
+            if claims:
+              claim_futs = [ex.submit(c.resources.delete_claim, claim) for claim in claims]
+              for f in as_completed(claim_futs):
+                try:
+                  f.result()
+                except Exception as exc:
+                  logger.exception("Failed to delete claim during teardown: %s", exc)
+            # Phase 2: Delete pools and templates concurrently.
+            rest_futs = [ex.submit(c.resources.delete_warmpool, pool) for pool in pools]
+            rest_futs.extend(ex.submit(c.resources.delete_template, tmpl) for tmpl in tmpls)
+            if rest_futs:
+              for f in as_completed(rest_futs):
+                try:
+                  f.result()
+                except Exception as exc:
+                  logger.exception("Failed to delete pool/template during teardown: %s", exc)
+        c.reset_counts()
+        # A namespace this run created (run_isolation="namespace") goes with it;
+        # a pre-existing one, or a shared run id's, only when the caller asks.
+        key = (c.name, c.namespace)
+        if delete_namespace or (key in self._created_namespaces
+                                and not self._shared_run_id):
+          try:
+            c.resources.delete_namespace(c.namespace)
+            self._deleted_namespaces.add(key)
+          except Exception as exc:  # noqa: BLE001 — best-effort, like the sweeps above
+            # Keep the ownership record, as the rollback path does, so the next
+            # teardown cycle retries the delete instead of leaking the namespace.
+            logger.warning("teardown: failed to delete namespace '%s' on cluster %s: %s",
+                           c.namespace, c.name, exc)
+            continue
+          self._created_namespaces.discard(key)
+          self._namespaces_set_up.discard(key)
+      self._namespaces_ensured = False
+      self._obs.warm_reset()
+      with self._lock:
+        self._warmed.clear()
+        self._ondemand.clear()
+      self._adopted_pools.clear()
+      self._adopted_templates.clear()
+      self.plan_ = None
+      self._remove_teardown_hooks()
 
   def __enter__(self) -> "SandboxFleet":
     return self.setup()

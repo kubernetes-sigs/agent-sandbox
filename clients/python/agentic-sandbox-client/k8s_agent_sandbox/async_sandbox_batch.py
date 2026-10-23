@@ -221,8 +221,8 @@ class AsyncSandboxBatch:
         return handle
 
     def _start(self) -> None:
-        self._watch_task = asyncio.ensure_future(self._watch_loop())
-        self._renew_task = asyncio.ensure_future(self._renew_loop())
+        self._watch_task = asyncio.create_task(self._watch_loop(), name=f"batch-{self.batch_id}-watch")
+        self._renew_task = asyncio.create_task(self._renew_loop(), name=f"batch-{self.batch_id}-renew")
 
     async def _stop_background_tasks(self) -> None:
         """Cancels the watcher and lease renewal loop."""
@@ -291,12 +291,20 @@ class AsyncSandboxBatch:
 
     async def _close_cached_connections(self, action: str) -> None:
         async with self._lock:
-            connected = list(self._connected.values())
-            self._connected.clear()
-        for sandbox in connected:
+            names = list(self._connected)
+        for claim_name in names:
+            async with self._lock:
+                sandbox = self._connected.pop(claim_name, None)
+            if sandbox is None:
+                continue
             try:
                 await sandbox.close_connection()
-            except Exception as e:
+            except BaseException as e:
+                # A connection that fails to close is kept on the handle rather than dropped.
+                async with self._lock:
+                    self._connected.setdefault(claim_name, sandbox)
+                if not isinstance(e, Exception):
+                    raise
                 logger.warning(
                     f"Batch '{self.batch_id}' failed to close a cached sandbox connection "
                     f"during {action}: {e}"
@@ -346,12 +354,23 @@ class AsyncSandboxBatch:
                 lease.spec.lease_duration_seconds = (
                     grace if grace is not None else self._lease_duration
                 )
-                await self._client.k8s_helper.replace_batch_lease(
-                    self._lease_name,
-                    self.namespace,
-                    lease,
-                    _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
-                )
+                try:
+                    await self._client.k8s_helper.replace_batch_lease(
+                        self._lease_name,
+                        self.namespace,
+                        lease,
+                        _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
+                    )
+                except ApiException as e:
+                    if e.status != 409:
+                        raise
+                    # The Lease changed since the read above, most likely because a concurrent
+                    # detach() of this handle released it first. Only a Lease still held here is a failure.
+                    current = await self._client.k8s_helper.read_batch_lease(
+                        self._lease_name, self.namespace, _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
+                    )
+                    if current is not None and current.spec.holder_identity == self._holder_identity:
+                        raise
 
         async with self._lock:
             self._lease_released = True

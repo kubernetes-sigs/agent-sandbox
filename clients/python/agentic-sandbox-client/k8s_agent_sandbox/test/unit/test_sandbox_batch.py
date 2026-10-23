@@ -933,6 +933,26 @@ class TestDetach(unittest.TestCase):
         self.mock_client.k8s_helper.read_batch_lease.assert_called_once()
         self.mock_client.k8s_helper.replace_batch_lease.assert_called_once()
 
+    def test_release_conflict_succeeds_only_once_the_lease_is_not_held(self):
+        # A concurrent detach() can release the Lease between this call's read and write.
+        for holder_after_conflict, released in ((None, True), ("this handle", False)):
+            with self.subTest(holder_after_conflict=holder_after_conflict):
+                mock_client = MagicMock()
+                handle = _make_handle(mock_client)
+                holder = handle._holder_identity if holder_after_conflict else None
+                mock_client.k8s_helper.read_batch_lease.side_effect = [
+                    _lease(holder_identity=handle._holder_identity),
+                    _lease(holder_identity=holder),
+                ]
+                mock_client.k8s_helper.replace_batch_lease.side_effect = k8s_client.ApiException(status=409)
+
+                if released:
+                    handle.detach()
+                else:
+                    with self.assertRaises(k8s_client.ApiException):
+                        handle.detach()
+                self.assertEqual(handle._lease_released, released)
+
     def test_retryable_after_release_write_failure(self):
         self.mock_client.k8s_helper.read_batch_lease.return_value = _lease(
             holder_identity=self.handle._holder_identity
@@ -1024,13 +1044,32 @@ class TestClientBatchCleanup(BaseBatchClientTest):
                 cached = MagicMock()
                 first._connected["b1-0"] = cached
 
-                with patch.object(SandboxBatch, "_stop_background_threads", autospec=True) as stop:
+                # A failed stop must still leave the cached connection closed.
+                with patch.object(
+                    SandboxBatch, "_stop_background_threads", autospec=True, side_effect=RuntimeError("stop failed")
+                ) as stop:
                     getattr(self.client, cleanup)()
                 self.assertEqual({c.args[0] for c in stop.call_args_list}, {first, second})
                 self.assertEqual(self.client._active_batches, {})
                 cached.close_connection.assert_called_once()
                 with self.assertRaises(BatchError):
                     first.connect(MagicMock())
+
+    def test_a_connection_that_fails_to_close_is_retried_by_the_next_cleanup(self):
+        handle = _make_handle(self.client)
+        cached = MagicMock()
+        cached.close_connection.side_effect = [RuntimeError("close failed"), None]
+        handle._connected["b1-0"] = cached
+        self.client._active_batches[("default", "b1")] = handle
+
+        self.client.delete_all()
+        self.assertEqual(handle._connected, {"b1-0": cached})
+        self.assertEqual(self.client._active_batches, {("default", "b1"): handle})
+
+        self.client.delete_all()
+        self.assertEqual(cached.close_connection.call_count, 2)
+        self.assertEqual(handle._connected, {})
+        self.assertEqual(self.client._active_batches, {})
 
     def test_unregistering_an_old_handle_keeps_a_newer_one_registered(self):
         old_handle = MagicMock(namespace="default", batch_id="b1")
@@ -1059,13 +1098,9 @@ class TestClientBatchCleanup(BaseBatchClientTest):
                 register_concurrently()
                 return value
 
-            def clear(self):
-                register_concurrently()
-                super().clear()
-
         for cleanup in ("unregister", "delete_all"):
             with self.subTest(cleanup):
-                old_handle = MagicMock(namespace="default", batch_id="b1")
+                old_handle = MagicMock(namespace="default", batch_id="b1", _connected={})
                 client._active_batches = RacingDict({("default", "b1"): old_handle})
                 with patch.object(SandboxBatch, "_attach", return_value=new_handle):
                     if cleanup == "unregister":

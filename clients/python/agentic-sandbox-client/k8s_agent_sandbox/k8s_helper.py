@@ -34,7 +34,9 @@ from .constants import (
     CLAIM_API_GROUP,
     CLAIM_API_VERSION,
     CLAIM_PLURAL_NAME,
+    TEMPLATE_PLURAL_NAME,
     TERMINAL_CLAIM_READY_REASONS,
+    WARMPOOL_PLURAL_NAME,
     CLIENT_REQUEST_TIME_ANNOTATION,
     GATEWAY_API_GROUP,
     GATEWAY_API_VERSION,
@@ -101,6 +103,9 @@ class K8sHelper:
         volume_claim_templates: list[dict[str, Any]] | None = None,
         pod_metadata: AdditionalPodMetadata | dict[str, Any] | None = None,
         env: dict[str, str] | None = None,
+        *,
+        log_level: int = logging.INFO,
+        _request_timeout: float | tuple[float, float] | None = None,
     ) -> dict[str, Any]:
         """Creates a SandboxClaim custom resource.
 
@@ -110,6 +115,9 @@ class K8sHelper:
                 ``spec.additionalPodMetadata`` so the labels and annotations
                 propagate onto the running Sandbox Pod (as opposed to
                 ``labels``, which only land on the SandboxClaim object).
+            log_level: Log level for the logger during this function call.
+            _request_timeout: Optional timeout (seconds, or a ``(connect, read)``
+                pair) forwarded to the underlying urllib3 request.
         """
         updated_annotations = dict(annotations) if annotations else {}
         if CLIENT_REQUEST_TIME_ANNOTATION not in updated_annotations:
@@ -150,13 +158,14 @@ class K8sHelper:
             "metadata": metadata,
             "spec": spec,
         }
-        logger.info(f"Creating SandboxClaim '{name}' in namespace '{namespace}' using warm pool '{warmpool}'...")
+        logger.log(log_level, f"Creating SandboxClaim '{name}' in namespace '{namespace}' using warm pool '{warmpool}'...")
         return cast(dict[str, Any], self.custom_objects_api.create_namespaced_custom_object(
             group=CLAIM_API_GROUP,
             version=CLAIM_API_VERSION,
             namespace=namespace,
             plural=CLAIM_PLURAL_NAME,
-            body=manifest
+            body=manifest,
+            _request_timeout=_request_timeout,
         ))
 
     def resolve_sandbox_name(self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None) -> str:
@@ -383,7 +392,7 @@ class K8sHelper:
 
     def delete_sandbox_claim(
         self, name: str, namespace: str, _request_timeout: float | tuple[float, float] | None = None,
-        *, expected_uid: str | None = None,
+        *, expected_uid: str | None = None, log_level: int = logging.INFO,
     ) -> None:
         """Deletes a SandboxClaim custom resource.
 
@@ -391,6 +400,7 @@ class K8sHelper:
             _request_timeout: Optional timeout (seconds, or a ``(connect, read)``
                 pair) forwarded to the underlying urllib3-based request.
             expected_uid: If provided, delete only the Claim with this UID.
+            log_level: Log level for the logger during this function call.
         """
         delete_kwargs: dict[str, Any] = {}
         if expected_uid is not None:
@@ -407,7 +417,7 @@ class K8sHelper:
                 _request_timeout=_request_timeout,
                 **delete_kwargs,
             )
-            logger.info(f"Terminated SandboxClaim: {name}")
+            logger.log(log_level, f"Terminated SandboxClaim: {name}")
         except client.ApiException as e:
             if e.status != 404:
                 logger.error(f"Error terminating SandboxClaim {name}: {e}")
@@ -609,3 +619,88 @@ class K8sHelper:
         return self.coordination_v1_api.replace_namespaced_lease(
             name, namespace, body, _request_timeout=_request_timeout
         )
+
+    def create_batch_lease(
+        self, namespace: str, body: Any, _request_timeout: float | tuple[float, float] | None = None
+    ) -> Any:
+        """Creates a batch Lease, then returns the created object. Raises a 409 ``ApiException`` if the Lease exists.
+
+        Args:
+            _request_timeout: Optional timeout (seconds, or a ``(connect, read)``
+                pair) forwarded to the underlying urllib3 request.
+        """
+        return self.coordination_v1_api.create_namespaced_lease(
+            namespace, body, _request_timeout=_request_timeout
+        )
+
+    def delete_batch_lease(
+        self, name: str, namespace: str, _request_timeout: float | tuple[float, float] | None = None
+    ) -> None:
+        """Deletes a batch Lease. A Lease that doesn't exist is treated as deleted.
+
+        Args:
+            _request_timeout: Optional timeout (seconds, or a ``(connect, read)``
+                pair) forwarded to the underlying urllib3 request.
+        """
+        try:
+            self.coordination_v1_api.delete_namespaced_lease(
+                name, namespace, _request_timeout=_request_timeout
+            )
+        except client.ApiException as e:
+            if e.status != 404:
+                raise
+
+    def delete_sandbox_claims_by_label(
+        self,
+        namespace: str,
+        label_selector: str,
+        _request_timeout: float | tuple[float, float] | None = None,
+    ) -> None:
+        """Deletes every SandboxClaim matching a label selector with one deletecollection request.
+
+        Args:
+            _request_timeout: Optional timeout (seconds, or a ``(connect, read)``
+                pair) forwarded to the underlying urllib3 request.
+        """
+        self.custom_objects_api.delete_collection_namespaced_custom_object(
+            group=CLAIM_API_GROUP,
+            version=CLAIM_API_VERSION,
+            namespace=namespace,
+            plural=CLAIM_PLURAL_NAME,
+            label_selector=label_selector,
+            _request_timeout=_request_timeout,
+        )
+
+    def get_sandbox_warmpool(
+        self, name: str, namespace: str, _request_timeout: float | tuple[float, float] | None = None
+    ) -> dict[str, Any] | None:
+        """Gets a SandboxWarmPool custom resource (or ``None`` if it doesn't exist)."""
+        return self._get_extensions_object(WARMPOOL_PLURAL_NAME, name, namespace, _request_timeout)
+
+    def get_sandbox_template(
+        self, name: str, namespace: str, _request_timeout: float | tuple[float, float] | None = None
+    ) -> dict[str, Any] | None:
+        """Gets a SandboxTemplate custom resource (or ``None`` if it doesn't exist)."""
+        return self._get_extensions_object(TEMPLATE_PLURAL_NAME, name, namespace, _request_timeout)
+
+    def _get_extensions_object(
+        self,
+        plural: str,
+        name: str,
+        namespace: str,
+        _request_timeout: float | tuple[float, float] | None,
+    ) -> dict[str, Any] | None:
+        """Gets an object in the extensions API group, or ``None`` if it doesn't exist."""
+        try:
+            return cast(dict[str, Any], self.custom_objects_api.get_namespaced_custom_object(
+                group=CLAIM_API_GROUP,
+                version=CLAIM_API_VERSION,
+                namespace=namespace,
+                plural=plural,
+                name=name,
+                _request_timeout=_request_timeout,
+            ))
+        except client.ApiException as e:
+            if e.status == 404:
+                return None
+            raise

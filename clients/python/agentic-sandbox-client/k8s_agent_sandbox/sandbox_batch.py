@@ -15,26 +15,43 @@
 """Sync handle for using a claimed or re-attached sandbox batch."""
 
 import logging
+import math
 import ssl
 import threading
 import time
-from typing import TYPE_CHECKING, Any
+from collections import deque
+from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import urllib3.exceptions
 from kubernetes import client
-from kubernetes.client import V1Lease
+from kubernetes.client import V1Lease, V1LeaseSpec, V1ObjectMeta
 from kubernetes.client.exceptions import ApiException
 
 from . import batch_state, batch_utils
-from .constants import BATCH_ID_LABEL, BATCH_LEASE_DURATION_ANNOTATION, BATCH_LEASE_NAME_PREFIX
+from .constants import (
+    BATCH_GROUP_LABEL,
+    BATCH_GROUP_MIN_READY_ANNOTATION,
+    BATCH_GROUP_SIZE_ANNOTATION,
+    BATCH_ID_LABEL,
+    BATCH_LEASE_DURATION_ANNOTATION,
+    BATCH_LEASE_NAME_PREFIX,
+    BATCH_QUORUM_TIMEOUT_ANNOTATION,
+)
 from .exceptions import (
     BatchError,
+    BatchExistsError,
     BatchInUseError,
     BatchLeaseExpiredError,
     BatchNotFoundError,
+    BatchTimeoutError,
     SandboxNotReadyError,
+    SandboxTemplateNotFoundError,
+    SandboxWarmPoolNotFoundError,
 )
-from .models import BatchGroup, Member, MemberState
+from .models import BatchEvent, BatchGroup, GroupReady, Member, MemberState
+from .utils import construct_sandbox_claim_lifecycle_spec
 
 if TYPE_CHECKING:
     from .sandbox import Sandbox
@@ -51,7 +68,11 @@ _WATCH_TIMEOUT_SECONDS = 30
 _WATCH_CLOSE_GRACE_SECONDS = 5
 _WATCH_REQUEST_TIMEOUT = _WATCH_TIMEOUT_SECONDS + _WATCH_CLOSE_GRACE_SECONDS
 
-# Network-level errors that are likely transient, so the watch retries them.
+# A watch that ends sooner than this without an event counts as a failed attempt, as in client-go's
+# reflector. Otherwise a stream that a proxy or a broken connection ends at once would be reopened in a busy loop.
+_SHORT_WATCH_SECONDS = 1
+
+# Network-level errors that are likely transient, so the watch, creates, and release retry them.
 _TRANSPORT_ERRORS = (
     urllib3.exceptions.ProtocolError,
     urllib3.exceptions.ReadTimeoutError,
@@ -72,20 +93,30 @@ def _is_transport_error(error: BaseException) -> bool:
     return isinstance(error, _TRANSPORT_ERRORS)
 
 
-def _watch_backoff_delay(failures: int) -> float:
-    return batch_utils.backoff_delay(
-        failures,
-        batch_utils.BATCH_BACKOFF_BASE_SECONDS,
-        batch_utils.BATCH_BACKOFF_MAX_SECONDS,
-    )
+def _is_transient_error(error: Exception) -> bool:
+    if isinstance(error, ApiException):
+        return batch_utils.is_retryable_status(error.status)
+    return _is_transport_error(error)
+
+
+def _create_failure_message(error: Exception) -> str:
+    # str() of an ApiException holds every response header and the raw body.
+    if isinstance(error, ApiException):
+        return batch_utils.api_status_message(error.body, error.reason)
+    return str(error)
+
+
+_T = TypeVar("_T")
 
 
 class SandboxBatch:
-    """A handle to an existing batch's claims, obtained via ``SandboxClient.get_batch``.
+    """A handle to a batch's claims, obtained via ``SandboxClient.claim_batch`` or
+    ``SandboxClient.get_batch``.
 
     Keeps a live cache of the batch's claims through one label-scoped watch
     (a background daemon thread), renews the batch Lease on another daemon
     thread, and exposes methods for connecting to ready sandboxes and detaching from the batch.
+    A claimed batch also creates its claims on background worker threads.
     """
 
     def __init__(
@@ -100,6 +131,7 @@ class SandboxBatch:
         list_resource_version: str,
         lease: V1Lease,
         lease_renewed_at: float,
+        quorum_timeout: int = batch_utils.BATCH_DEFAULT_QUORUM_TIMEOUT_SECONDS,
     ) -> None:
         self._client = client
         self.batch_id = batch_id
@@ -127,6 +159,24 @@ class SandboxBatch:
         self._watch_thread: threading.Thread | None = None
         self._renew_thread: threading.Thread | None = None
 
+        # Notified on every change consumers wait for: watch events, create failures, errors,
+        # the fill deadline being set, and detach/release.
+        self._changed = threading.Condition(self._lock)
+        self._quorum_timeout = quorum_timeout
+        # Monotonic time at which the fill expires. After it, groups without an outcome time out
+        # and events() stops waiting for fill members that aren't Ready yet. Set once the last
+        # create's pacing slot is taken, or at attach for a re-attached batch.
+        self._fill_deadline: float | None = None
+        self._released = False
+        self._creators: list[threading.Thread] = []
+        self._stop_creating = threading.Event()
+        self._create_plan: deque[tuple[str, BatchGroup]] = deque()
+        self._next_create_at = 0.0
+        self._create_interval = 0.0
+        self._claim_labels: dict[str, dict[str, str]] = {}
+        self._claim_annotations: dict[str, dict[str, str]] = {}
+        self._claim_lifecycle: dict[str, str] = {}
+
     @property
     def groups(self) -> list[BatchGroup]:
         """The batch's ``BatchGroup``\\ s; one per warm pool."""
@@ -136,6 +186,133 @@ class SandboxBatch:
     def size(self) -> int:
         """The total number of claims across all groups."""
         return self._state.size
+
+    @classmethod
+    def _claim(
+        cls,
+        client: "SandboxClient[Any]",
+        args: batch_utils.ClaimBatchArgs,
+        namespace: str,
+        trace_annotations: dict[str, str],
+    ) -> "SandboxBatch":
+        """Create a batch: precheck, create its Lease, start the watch, then create claims in the background."""
+        helper = client.k8s_helper
+        timeout = batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
+        checked_templates: set[str] = set()
+        for group in args.groups:
+            warmpool = helper.get_sandbox_warmpool(group.warmpool, namespace, _request_timeout=timeout)
+            if warmpool is None:
+                raise SandboxWarmPoolNotFoundError(
+                    f"SandboxWarmPool '{group.warmpool}' not found in namespace '{namespace}'"
+                )
+            template = batch_utils.warmpool_template_name(warmpool)
+            if template is None:
+                raise SandboxTemplateNotFoundError(
+                    f"SandboxWarmPool '{group.warmpool}' does not reference a SandboxTemplate"
+                )
+            if template in checked_templates:
+                continue
+            if helper.get_sandbox_template(template, namespace, _request_timeout=timeout) is None:
+                raise SandboxTemplateNotFoundError(
+                    f"SandboxTemplate '{template}' not found in namespace '{namespace}'"
+                )
+            checked_templates.add(template)
+
+        size = sum(g.size for g in args.groups)
+        # One shutdownTime for the whole fill. Quorum can come as late as quorum_timeout after the
+        # last paced create, so the pacing time counts too, or it would eat into work_budget.
+        claim_lifecycle = construct_sandbox_claim_lifecycle_spec(
+            math.ceil(size / args.create_rps)
+            + args.quorum_timeout
+            + args.work_budget
+            + batch_utils.BATCH_SHUTDOWN_MARGIN_SECONDS
+        )
+
+        lease_name = f"{BATCH_LEASE_NAME_PREFIX}{args.batch_id}"
+        label_selector = f"{BATCH_ID_LABEL}={args.batch_id}"
+        holder_identity = batch_utils.generate_holder_identity()
+        lease_labels, lease_annotations = batch_utils.batch_lease_metadata(
+            args.batch_id, args.lease_duration, args.work_budget, args.quorum_timeout
+        )
+        # Read before renewTime is stamped, so this handle's expiry is never later than the one
+        # other clients see.
+        renewed_at = time.monotonic()
+        now = batch_utils.lease_now()
+        lease = V1Lease(
+            metadata=V1ObjectMeta(
+                name=lease_name, labels=lease_labels, annotations=lease_annotations
+            ),
+            spec=V1LeaseSpec(
+                holder_identity=holder_identity,
+                lease_duration_seconds=args.lease_duration,
+                acquire_time=now,
+                renew_time=now,
+                lease_transitions=0,
+            ),
+        )
+        try:
+            created = helper.create_batch_lease(namespace, lease, _request_timeout=timeout)
+        except ApiException as e:
+            if e.status == 409:
+                raise BatchExistsError(
+                    f"batch '{args.batch_id}' already exists in namespace '{namespace}'"
+                ) from e
+            raise
+        try:
+            # The list's resourceVersion is where the watch starts, so no create is missed.
+            claim_items, list_rv = helper.list_sandbox_claim_objects(
+                namespace, label_selector, _request_timeout=timeout
+            )
+            if claim_items:
+                raise BatchExistsError(
+                    f"claims with batch id '{args.batch_id}' already exist in namespace '{namespace}'"
+                )
+        except BaseException:
+            # BaseException too, so a cancel or Ctrl-C during the list doesn't leave the Lease behind.
+            try:
+                helper.delete_batch_lease(lease_name, namespace, _request_timeout=timeout)
+            except Exception as e:
+                logger.warning(f"Batch '{args.batch_id}' failed to delete its Lease: {e}")
+            raise
+
+        handle = cls(
+            client=client,
+            batch_id=args.batch_id,
+            namespace=namespace,
+            state=batch_state.BatchState(args.batch_id, args.groups),
+            lease_name=lease_name,
+            holder_identity=holder_identity,
+            lease_duration=args.lease_duration,
+            list_resource_version=list_rv,
+            lease=created,
+            lease_renewed_at=renewed_at,
+            quorum_timeout=args.quorum_timeout,
+        )
+        handle._create_plan = deque(batch_utils.fill_create_plan(args.batch_id, args.groups))
+        handle._create_interval = 1 / args.create_rps
+        handle._claim_labels = {
+            g.warmpool: {
+                **args.labels,
+                BATCH_ID_LABEL: args.batch_id,
+                BATCH_GROUP_LABEL: batch_utils.group_label_value(g.warmpool),
+            }
+            for g in args.groups
+        }
+        handle._claim_annotations = {
+            g.warmpool: {
+                BATCH_GROUP_SIZE_ANNOTATION: str(g.size),
+                BATCH_GROUP_MIN_READY_ANNOTATION: str(g.min_ready),
+                **trace_annotations,
+            }
+            for g in args.groups
+        }
+        handle._claim_lifecycle = claim_lifecycle
+        handle._start()
+        for _ in range(min(args.max_in_flight, len(handle._create_plan))):
+            creator = threading.Thread(target=handle._create_worker, daemon=True)
+            handle._creators.append(creator)
+            creator.start()
+        return handle
 
     @classmethod
     def _attach(cls, client: "SandboxClient[Any]", batch_id: str, namespace: str) -> "SandboxBatch":
@@ -156,9 +333,12 @@ class SandboxBatch:
             raise BatchNotFoundError(f"batch '{batch_id}' not found in namespace '{namespace}'")
 
         annotation = None
+        quorum_annotation = None
         if lease is not None:
             annotation = (lease.metadata.annotations or {}).get(BATCH_LEASE_DURATION_ANNOTATION)
+            quorum_annotation = (lease.metadata.annotations or {}).get(BATCH_QUORUM_TIMEOUT_ANNOTATION)
         duration = batch_utils.parse_lease_duration_annotation(annotation)
+        quorum_timeout = batch_utils.parse_quorum_timeout_annotation(quorum_annotation)
 
         # Read before renewTime is stamped, so this handle's expiry is never later than the one
         # other clients see.
@@ -184,6 +364,7 @@ class SandboxBatch:
         groups = batch_state.reconstruct_groups(batch_id, claim_items)
         state = batch_state.BatchState(batch_id, groups)
         state.seed_from_claims(claim_items)
+        state.count_missing_fill_as_unable()
 
         holder_identity = batch_utils.generate_holder_identity()
         lease.spec.holder_identity = holder_identity
@@ -213,7 +394,9 @@ class SandboxBatch:
             list_resource_version=list_rv,
             lease=written,
             lease_renewed_at=renewed_at,
+            quorum_timeout=quorum_timeout,
         )
+        handle._fill_deadline = time.monotonic() + quorum_timeout
         handle._start()
         return handle
 
@@ -225,7 +408,7 @@ class SandboxBatch:
 
     def _check_active(self) -> None:
         if self._detached:
-            raise BatchError(f"batch '{self.batch_id}' has been detached")
+            raise BatchError(f"batch '{self.batch_id}' has been detached or released")
 
     def members(self, warmpool: str | None = None) -> list[Member]:
         """Returns a snapshot of the batch's members, optionally filtered to one warm pool."""
@@ -280,14 +463,306 @@ class SandboxBatch:
         with self._lock:
             return self._renewal_degraded
 
-    def _close_cached_connections(self, action: str) -> None:
+    def events(self) -> Iterator[BatchEvent]:
+        """Returns an iterator over the batch's events.
+
+        ``MEMBER_READY`` is yielded once per initial claim that becomes Ready, and ``MEMBER_FAILED``
+        and ``MEMBER_LOST`` once per initial claim that fails or is deleted. Called on its own, it
+        streams every Ready member. Called after ``iter_ready_groups()``, it yields a group's members
+        only after that group has yielded successfully there, so a group that fails yields none.
+        Called after ``wait_for_quorum()``, it yields the members the quorum doesn't return once the
+        quorum is reached, and none if the quorum fails. ``iter_ready_groups()`` and
+        ``wait_for_quorum()`` can't be called after ``events()``, since the first consumer to be
+        called fixes how members are handed out.
+
+        The iterator ends once every initial claim is Ready or can't become Ready, once the fill
+        deadline (``quorum_timeout`` after the last claim create) has passed, or once ``err()`` is
+        set. A change after that, such as a handed-out member that fails, is yielded only by a later
+        call of ``events()``, which continues where the previous iterator stopped. ``members()``
+        always shows each claim's current state.
+
+        Raises:
+            BatchError: If this handle has been detached or released, when called or while waiting.
+        """
         with self._lock:
-            connected = list(self._connected.values())
-            self._connected.clear()
-        for sandbox in connected:
+            self._check_active()
+            self._state.set_mode(batch_state.ConsumerMode.STREAM)
+        return self._iterate(self._state.pop_event, self._state.events_done)
+
+    def iter_ready_groups(self) -> Iterator[GroupReady]:
+        """Returns an iterator that yields one ``GroupReady`` per group, as soon as its outcome is known.
+
+        A group yields its first ``min_ready`` Ready members, in the order they became Ready. It
+        fails with ``QuorumUnreachableError`` once too few of its members can still become Ready,
+        or with ``BatchTimeoutError`` if it hasn't reached ``min_ready`` within the quorum timeout.
+        The iterator ends once every group has yielded, or once ``err()`` is set. Calling it again
+        continues with the groups that haven't yielded yet.
+
+        Raises:
+            BatchError: If ``events()`` or ``wait_for_quorum()`` was called first, or this handle has
+                been detached or released, when called or while waiting.
+        """
+        with self._lock:
+            self._check_active()
+            self._state.set_mode(batch_state.ConsumerMode.GROUP)
+        return self._iterate(self._state.pop_group_outcome, self._state.groups_done)
+
+    def wait_for_quorum(self) -> list[Member]:
+        """Waits until every group has ``min_ready`` Ready members, and returns them.
+
+        The returned list has each group's first ``min_ready`` members, in the order they became
+        Ready, with the groups in batch order. Members it doesn't return are yielded by ``events()``.
+        If the quorum fails, no members are handed out and no more claims are created. The quorum
+        also fails if the wait ends with any other exception, such as a cancellation or
+        ``KeyboardInterrupt``. Can be called only once per handle.
+
+        ``QuorumUnreachableError`` and ``BatchTimeoutError`` are both ``BatchError``, so
+        ``except BatchError`` handles every failure.
+
+        Raises:
+            QuorumUnreachableError: If too few members of a group can still become Ready.
+            BatchTimeoutError: If the quorum isn't reached within the quorum timeout.
+            BatchError: If ``events()`` or ``iter_ready_groups()`` was called first, this method
+                was already called, ``err()`` is set while waiting, or this handle has been
+                detached or released, when called or while waiting.
+        """
+        with self._lock:
+            self._check_active()
+            self._state.set_mode(batch_state.ConsumerMode.QUORUM)
+        try:
+            result = self._next(self._state.quorum_result, lambda: False)
+            if result is None:
+                raise BatchError(f"batch '{self.batch_id}' stopped while waiting for quorum") from self._state.error()
+        except BaseException:
+            # This was the only wait, so a quorum left undecided would hold its members forever.
+            with self._changed:
+                self._state.fail_quorum(BatchTimeoutError("wait_for_quorum() ended before the quorum was reached"))
+                self._changed.notify_all()
+            raise
+        members, error = result
+        if error is not None:
+            raise error
+        return members
+
+    def _iterate(self, pop: Callable[[], _T | None], done: Callable[[], bool]) -> Iterator[_T]:
+        while (item := self._next(pop, done)) is not None:
+            yield item
+
+    def _next(self, pop: Callable[[], _T | None], done: Callable[[], bool]) -> _T | None:
+        with self._changed:
+            while True:
+                self._check_active()
+                self._expire_fill_if_due()
+                item = pop()
+                if item is not None:
+                    return item
+                if done() or self._state.error() is not None:
+                    return None
+                # Nothing to hand out yet, but returning None would end the iterator, so wait for
+                # a change. The wait also wakes at the fill deadline so pending members can expire.
+                timeout = None
+                if self._fill_deadline is not None:
+                    timeout = max(0.0, self._fill_deadline - time.monotonic())
+                self._changed.wait(timeout)
+
+    def _expire_fill_if_due(self) -> None:
+        # Called with the lock held.
+        if self._fill_deadline is not None and time.monotonic() >= self._fill_deadline:
+            if self._state.expire_fill():
+                self._changed.notify_all()
+
+    def release_member(self, member: Member) -> None:
+        """Deletes one member's claim and drops the member from ``members()``.
+
+        The member is never handed out afterwards and emits no ``MEMBER_LOST``. A member of the
+        initial claims counts as unable to become Ready, so releasing one before a quorum consumer
+        has decided can make its group or the quorum unreachable. A claim that is already gone
+        counts as deleted, and transient errors are retried. If the delete fails, calling
+        ``release_member`` again retries it.
+
+        Raises:
+            ValueError: If the member isn't in this batch.
+            BatchError: If this handle has been detached or released.
+            ApiException: For a non-transient error such as a 403, or the last transient error
+                after ``BATCH_DELETE_ATTEMPTS`` attempts (an ``ApiException`` or a transport error).
+        """
+        with self._changed:
+            self._check_active()
+            needs_delete = self._state.release_member(member.claim_name)
+            self._changed.notify_all()
+        self._close_cached_connections("release_member", [member.claim_name])
+        if needs_delete:
+            self._delete_claim(member.claim_name)
+
+    def release_not_ready(self) -> None:
+        """Ends the fill and deletes every initial claim that isn't Ready and was never handed out.
+
+        Creates not yet sent are skipped, and a create that lands afterwards is deleted. A member
+        that was handed out is kept, even if it has since gone not Ready. Members are picked and
+        released in one step under the batch lock, so none can turn Ready and be handed out in
+        between, as could happen when calling ``release_member`` on each member that ``members()``
+        lists as not Ready. Released members are dropped from ``members()``, emit no
+        ``MEMBER_LOST``, and count as unable to become Ready, so calling this before a quorum
+        consumer has decided can make a group or the quorum unreachable. Call it once you have
+        what you need.
+
+        Each claim is deleted like ``release_member``, up to ``BATCH_DEFAULT_MAX_IN_FLIGHT`` at
+        once. If a delete fails, calling ``release_not_ready`` again retries it.
+
+        Raises:
+            BatchError: If this handle has been detached or released.
+            ApiException: The first error a delete ended with, once every delete has been tried
+                (an ``ApiException`` or a transport error).
+        """
+        with self._changed:
+            self._check_active()
+            self._drop_planned_creates(None)
+            names = self._state.release_not_ready()
+            self._changed.notify_all()
+        self._close_cached_connections("release_not_ready", names)
+        if not names:
+            return
+        with ThreadPoolExecutor(min(len(names), batch_utils.BATCH_DEFAULT_MAX_IN_FLIGHT)) as pool:
+            futures = [pool.submit(self._delete_claim, name) for name in names]
+        errors = [e for f in futures if (e := f.exception()) is not None]
+        if errors:
+            raise errors[0]
+
+    def release_group(self, warmpool: str) -> None:
+        """Deletes every initial claim of one group, pending ones included, and drops its members
+        from ``members()``.
+
+        The group's creates not yet sent are skipped, and a create that lands afterwards is deleted.
+        Its members are never handed out afterwards and emit no ``MEMBER_LOST``. They count as
+        unable to become Ready, so releasing a group before a quorum consumer has decided makes it,
+        or the quorum, unreachable. Works with any consumer, typically on a group that
+        ``iter_ready_groups()`` yields with an error.
+
+        Claims are deleted like ``release()`` deletes the batch's, with deletecollection rounds
+        scoped to the group's label. If they fail, calling ``release_group`` again retries.
+
+        Raises:
+            ValueError: If the batch has no group for ``warmpool``.
+            BatchError: If this handle has been detached or released, or claims are still not
+                being deleted after the last round.
+            ApiException: For a non-transient error such as a 403, which is raised at once.
+                After the last round, the last transient error is raised (an ``ApiException``
+                or a transport error).
+        """
+        with self._changed:
+            self._check_active()
+            if all(group.warmpool != warmpool for group in self._state.groups):
+                raise ValueError(f"batch '{self.batch_id}' has no group for warm pool '{warmpool}'")
+            self._drop_planned_creates(warmpool)
+            names = self._state.release_group(warmpool)
+            self._changed.notify_all()
+        self._close_cached_connections("release_group", names)
+        _delete_claims_in_rounds(
+            self._client.k8s_helper,
+            self.namespace,
+            batch_utils.group_label_selector(self.batch_id, warmpool),
+            f"batch '{self.batch_id}' group '{warmpool}'",
+        )
+
+    def _drop_planned_creates(self, warmpool: str | None) -> None:
+        """Releases the planned creates not yet sent, of one pool or of every pool, so they don't
+        take pacing slots. Called with the lock held.
+        """
+        if not self._create_plan:
+            return
+        kept: deque[tuple[str, BatchGroup]] = deque()
+        for claim_name, group in self._create_plan:
+            if warmpool is None or group.warmpool == warmpool:
+                self._state.release_claim(claim_name, group.warmpool)
+            else:
+                kept.append((claim_name, group))
+        self._create_plan = kept
+        if not kept:
+            # No worker takes the last planned create now, so the fill deadline counts from the
+            # last pacing slot already taken.
+            last_slot = max(time.monotonic(), self._next_create_at - self._create_interval)
+            self._fill_deadline = last_slot + self._quorum_timeout
+
+    def _delete_claim(self, claim_name: str) -> None:
+        """Deletes one released claim, retrying transient errors. A claim already gone counts as deleted."""
+        attempt = 1
+        while True:
+            try:
+                self._client.k8s_helper.delete_sandbox_claim(
+                    claim_name,
+                    self.namespace,
+                    _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
+                    log_level=logging.DEBUG,
+                )
+                break
+            except Exception as e:
+                if attempt >= batch_utils.BATCH_DELETE_ATTEMPTS or not _is_transient_error(e):
+                    raise
+                time.sleep(batch_utils.retry_delay(attempt, e))
+                attempt += 1
+        with self._lock:
+            self._state.note_deleted(claim_name)
+
+    def release(self) -> None:
+        """Stops creating claims, stops the background watch and Lease renewal, closes cached
+        sandbox connections, then deletes the batch's claims and finally its Lease. Idempotent.
+
+        Claims are deleted with label-scoped deletecollection requests, re-listing between rounds
+        until no claim is left that isn't already being deleted. A transient error moves on to the
+        next round, and release gives up after ``BATCH_RELEASE_MAX_IDLE_ROUNDS`` rounds in a row
+        that delete nothing. On failure the Lease is kept, and calling ``release`` again retries.
+
+        Raises:
+            BatchError: If this handle has been detached, or claims are still not being deleted
+                after the last round.
+            ApiException: For a non-transient error such as a 403, which is raised at once.
+                After the last round, the last transient error is raised (an ``ApiException``
+                or a transport error).
+        """
+        with self._lock:
+            if self._released:
+                return
+            if self._lease_released:
+                raise BatchError(f"batch '{self.batch_id}' has been detached")
+            self._detached = True
+            self._changed.notify_all()
+
+        self._stop_background_threads()
+        self._close_cached_connections("release")
+        _delete_batch_objects(self._client.k8s_helper, self.namespace, self.batch_id, self._lease_name)
+
+        with self._lock:
+            self._lease_released = True
+            self._released = True
+        self._client._unregister_batch(self)
+
+    def _stop_background_threads(self) -> None:
+        """Stops claim creators and stops the watcher and lease renewal loop."""
+        self._stop_creating.set()
+        # Pause to ensure each in-progress create request has been responded to
+        deadline = time.monotonic() + batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS + batch_utils.BATCH_CREATOR_STOP_GRACE_SECONDS
+        for creator in self._creators:
+            creator.join(max(0.0, deadline - time.monotonic()))
+        self._watch_stop.set()
+        self._renew_stop.set()
+        if self._renew_thread is not None:
+            self._renew_thread.join()
+
+    def _close_cached_connections(self, action: str, claim_names: Iterable[str] | None = None) -> None:
+        """Closes the cached connections to the given claims' sandboxes, or to every sandbox."""
+        with self._lock:
+            names = list(self._connected) if claim_names is None else claim_names
+        for claim_name in names:
+            with self._lock:
+                sandbox = self._connected.pop(claim_name, None)
+            if sandbox is None:
+                continue
             try:
                 sandbox.close_connection()
             except Exception as e:
+                # A connection that fails to close is kept on the handle rather than dropped.
+                with self._lock:
+                    self._connected.setdefault(claim_name, sandbox)
                 logger.warning(
                     f"Batch '{self.batch_id}' failed to close a cached sandbox connection "
                     f"during {action}: {e}"
@@ -301,9 +776,11 @@ class SandboxBatch:
 
         If the Lease release fails, the error propagates and this handle stays in a detached state with
         the Lease still held. Call ``detach`` again to retry; steps that already completed are skipped.
+        A batch that is still creating claims stops creating first, and every claim is left in place.
 
         Raises:
             ValueError: If ``grace`` is not a valid Lease duration.
+            BatchError: If this handle has been released.
             ApiException: If the Lease release fails (an ``ApiException`` or a transport error).
         """
         if grace is not None:
@@ -313,9 +790,12 @@ class SandboxBatch:
         # detach fully completed (i.e. the previous steps and the Lease release write succeeded), so callers
         # can retry detach() if the release fails.
         with self._lock:
+            if self._released:
+                raise BatchError(f"batch '{self.batch_id}' has been released")
             if self._lease_released:
                 return
             self._detached = True
+            self._changed.notify_all()
 
         self._stop_background_threads()
         self._close_cached_connections("detach")
@@ -337,23 +817,27 @@ class SandboxBatch:
                 lease.spec.lease_duration_seconds = (
                     grace if grace is not None else self._lease_duration
                 )
-                self._client.k8s_helper.replace_batch_lease(
-                    self._lease_name,
-                    self.namespace,
-                    lease,
-                    _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
-                )
+                try:
+                    self._client.k8s_helper.replace_batch_lease(
+                        self._lease_name,
+                        self.namespace,
+                        lease,
+                        _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
+                    )
+                except ApiException as e:
+                    if e.status != 409:
+                        raise
+                    # The Lease changed since the read above, most likely because a concurrent
+                    # detach() of this handle released it first. Only a Lease still held here is a failure.
+                    current = self._client.k8s_helper.read_batch_lease(
+                        self._lease_name, self.namespace, _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
+                    )
+                    if current is not None and current.spec.holder_identity == self._holder_identity:
+                        raise
 
         with self._lock:
             self._lease_released = True
         self._client._unregister_batch(self)
-
-    def _stop_background_threads(self) -> None:
-        """Stops the watcher and lease renewal loop."""
-        self._watch_stop.set()
-        self._renew_stop.set()
-        if self._renew_thread is not None:
-            self._renew_thread.join()
 
     def _watch_loop(self) -> None:
         """Background watch loop which keeps ``self._state`` in sync with the batch's claims.
@@ -377,13 +861,17 @@ class SandboxBatch:
                         return
                     with self._lock:
                         self._state.resync_from_list(items)
+                        self._changed.notify_all()
                     relist = False
+                watch_started = time.monotonic()
+                got_event = False
                 for event in self._client.k8s_helper.watch_sandbox_claims(
                     self.namespace, label_selector, rv, _WATCH_TIMEOUT_SECONDS, _request_timeout=_WATCH_REQUEST_TIMEOUT
                 ):
                     if self._watch_stop.is_set():
                         break
                     failures = 0
+                    got_event = True
                     event_type = event.get("type")
                     obj = event.get("object") or {}
                     seen_rv = (obj.get("metadata") or {}).get("resourceVersion")
@@ -396,6 +884,15 @@ class SandboxBatch:
                             self._state.mark_lost((obj.get("metadata") or {}).get("name", ""))
                         elif event_type in ("ADDED", "MODIFIED"):
                             self._state.upsert_claim(obj)
+                        self._changed.notify_all()
+                if (
+                    not got_event
+                    and time.monotonic() - watch_started < _SHORT_WATCH_SECONDS
+                    and not self._watch_stop.is_set()
+                ):
+                    failures += 1
+                    self._watch_stop.wait(batch_utils.retry_delay(failures, None))
+                    continue
                 # The watch ended at its timeout, which is not a failure.
                 failures = 0
             except client.ApiException as e:
@@ -408,7 +905,7 @@ class SandboxBatch:
                 if batch_utils.is_retryable_status(e.status):
                     # Likely transient: retry the re-list, or the watch from the last-seen resourceVersion.
                     failures += 1
-                    self._watch_stop.wait(_watch_backoff_delay(failures))
+                    self._watch_stop.wait(batch_utils.retry_delay(failures, e))
                     continue
                 # Response codes outside of this (e.g. 403, 404) are not recoverable
                 # by retrying, so we error then exit
@@ -416,12 +913,13 @@ class SandboxBatch:
                     return
                 with self._lock:
                     self._state.note_error(e)
+                    self._changed.notify_all()
                 return
             except Exception as e:
                 if _is_transport_error(e):
                     # Likely transient network-level failure so retry
                     failures += 1
-                    self._watch_stop.wait(_watch_backoff_delay(failures))
+                    self._watch_stop.wait(batch_utils.retry_delay(failures, e))
                     continue
                 # Anything else (e.g. a certificate error) is not known to be transient, so surface it
                 # via err() instead of leaving the thread dead with err() still None.
@@ -429,6 +927,7 @@ class SandboxBatch:
                     return
                 with self._lock:
                     self._state.note_error(e)
+                    self._changed.notify_all()
                 return
 
     def _renew_loop(self) -> None:
@@ -520,6 +1019,7 @@ class SandboxBatch:
         with self._lock:
             self._mark_renewal_degraded(error)
             self._state.note_error(error)
+            self._changed.notify_all()
         return False
 
     def _write_renewal(self, lease: Any) -> tuple[float, V1Lease]:
@@ -540,3 +1040,196 @@ class SandboxBatch:
         return BatchLeaseExpiredError(
             f"batch '{self.batch_id}' Lease '{self._lease_name}' no longer exists"
         )
+
+    def _create_worker(self) -> None:
+        """Creates planned claims one at a time. ``max_in_flight`` workers share one pacing slot,
+        so together they start at most ``create_rps`` creates per second.
+        """
+        while True:
+            with self._lock:
+                if not self._create_plan or self._stop_creating.is_set():
+                    return
+                claim_name, group = self._create_plan.popleft()
+                slot = self._reserve_create_slot(time.monotonic())
+                # This worker took the last planned create, so the fill deadline is known now
+                if not self._create_plan:
+                    # Counted from when the last create is sent, so groups don't time out while
+                    # their claims are still waiting for a pacing slot.
+                    self._fill_deadline = slot + self._quorum_timeout
+                    self._changed.notify_all()
+            if self._stop_creating.wait(max(0.0, slot - time.monotonic())):
+                return
+            with self._lock:
+                # Once err() is set the handle can no longer watch or hold the batch, so further
+                # claims would be ones nobody can observe or keep alive.
+                if self._state.error() is not None:
+                    return
+                self._expire_fill_if_due()
+                if self._state.fill_creates_released(group.warmpool):
+                    self._state.release_claim(claim_name, group.warmpool)
+                    self._changed.notify_all()
+                    continue
+                if self._state.group_failed(group.warmpool):
+                    self._state.record_skipped_create()
+                    self._changed.notify_all()
+                    continue
+            if self._create_one(claim_name, group):
+                self._delete_released_create(claim_name, group.warmpool)
+
+    def _reserve_create_slot(self, earliest: float) -> float:
+        """Reserves the next pacing slot at or after ``earliest``, so creates and their retries
+        together stay within ``create_rps``. The caller holds ``self._lock``.
+        """
+        slot = max(earliest, self._next_create_at)
+        self._next_create_at = slot + self._create_interval
+        return slot
+
+    def _delete_released_create(self, claim_name: str, warmpool: str) -> None:
+        """Deletes a fill claim whose create may have landed after the caller released its group or
+        ended the fill. A failed delete leaves the claim for ``release()``.
+        """
+        with self._lock:
+            if not self._state.fill_creates_released(warmpool):
+                return
+            self._state.release_claim(claim_name, warmpool)
+            self._changed.notify_all()
+        try:
+            self._delete_claim(claim_name)
+        except Exception as e:
+            logger.warning(f"Batch '{self.batch_id}' failed to delete released claim '{claim_name}': {e}")
+
+    def _create_one(self, claim_name: str, group: BatchGroup) -> bool:
+        """Creates one claim, retrying transient errors. Returns whether the claim may exist."""
+        attempt = 1
+        while True:
+            try:
+                self._client.k8s_helper.create_sandbox_claim(
+                    claim_name,
+                    group.warmpool,
+                    self.namespace,
+                    annotations=self._claim_annotations[group.warmpool],
+                    labels=self._claim_labels[group.warmpool],
+                    lifecycle=self._claim_lifecycle,
+                    log_level=logging.DEBUG,
+                    _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
+                )
+                return True
+            except Exception as e:
+                if isinstance(e, ApiException):
+                    outcome = batch_utils.create_error_outcome(e.status, attempt)
+                elif _is_transport_error(e):
+                    outcome = batch_utils.create_error_outcome(None, attempt)
+                else:
+                    outcome = batch_utils.CreateOutcome.FAIL
+                if outcome == batch_utils.CreateOutcome.SUCCESS:
+                    return True
+                if outcome == batch_utils.CreateOutcome.RETRY:
+                    with self._lock:
+                        slot = self._reserve_create_slot(
+                            time.monotonic() + batch_utils.retry_delay(attempt, e)
+                        )
+                    if self._stop_creating.wait(max(0.0, slot - time.monotonic())):
+                        return False
+                    attempt += 1
+                    continue
+                logger.debug(f"Batch '{self.batch_id}' failed to create claim '{claim_name}': {e}")
+                with self._lock:
+                    self._state.record_create_failure(
+                        claim_name, group.warmpool, _create_failure_message(e)
+                    )
+                    self._changed.notify_all()
+                return False
+
+
+def _delete_batch_objects(helper: Any, namespace: str, batch_id: str, lease_name: str) -> None:
+    """Deletes a batch's claims in rounds, then its Lease once no claim is left that isn't
+    already being deleted.
+
+    Also used by ``AsyncSandboxClient``'s atexit hook, which can't use the event loop.
+
+    Raises:
+        BatchError: If claims are still not being deleted after the last round.
+        ApiException: For a non-transient error at once, or the last transient error after
+            the last round.
+    """
+    _delete_claims_in_rounds(
+        helper,
+        namespace,
+        f"{BATCH_ID_LABEL}={batch_id}",
+        f"batch '{batch_id}'",
+        finish=lambda: helper.delete_batch_lease(
+            lease_name, namespace, _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
+        ),
+    )
+
+
+def _delete_claims_in_rounds(
+    helper: Any,
+    namespace: str,
+    label_selector: str,
+    description: str,
+    finish: Callable[[], None] | None = None,
+) -> None:
+    """Deletes the claims matching ``label_selector`` with deletecollection rounds, re-listing
+    between rounds until no claim is left that isn't already being deleted, then calls ``finish``.
+
+    A transient error, in ``finish`` too, moves on to the next round, and it gives up after
+    ``BATCH_RELEASE_MAX_IDLE_ROUNDS`` rounds in a row that delete nothing.
+
+    Raises:
+        BatchError: If claims are still not being deleted after the last round.
+        ApiException: For a non-transient error at once, or the last transient error after
+            the last round.
+    """
+    collection_timeout = batch_utils.BATCH_COLLECTION_REQUEST_TIMEOUT_SECONDS
+    idle_rounds = 0
+    remaining_before: int | None = None
+    while True:
+        last_error: Exception | None = None
+        try:
+            # deletecollection deletes one claim at a time on the apiserver, so for a large batch
+            # it can time out while deletion continues. For this case, we track it with the list below.
+            helper.delete_sandbox_claims_by_label(
+                namespace, label_selector, _request_timeout=collection_timeout
+            )
+        except Exception as e:
+            if not _is_transient_error(e):
+                raise
+            last_error = e
+
+        live: list[dict[str, Any]] | None = None
+        try:
+            # A consistent read (no resourceVersion), so a lagging watch cache can't report
+            # that no claims are left too early.
+            items, _ = helper.list_sandbox_claim_objects(
+                namespace, label_selector, _request_timeout=collection_timeout
+            )
+            live = [c for c in items if not (c.get("metadata") or {}).get("deletionTimestamp")]
+        except Exception as e:
+            if not _is_transient_error(e):
+                raise
+            last_error = e
+
+        if live == []:
+            try:
+                if finish is not None:
+                    finish()
+                return
+            except Exception as e:
+                if not _is_transient_error(e):
+                    raise
+                last_error = e
+
+        # A round that shrinks the number of live claims doesn't count toward giving up, so a large
+        # batch that takes many rounds to delete isn't abandoned while it is still making progress.
+        progressed = live is not None and (remaining_before is None or len(live) < remaining_before)
+        idle_rounds = 0 if progressed else idle_rounds + 1
+        if idle_rounds >= batch_utils.BATCH_RELEASE_MAX_IDLE_ROUNDS:
+            if last_error is not None:
+                raise last_error
+            raise BatchError(
+                f"{description}: {len(live or [])} claims are still not being deleted"
+            )
+        if live is not None:
+            remaining_before = len(live)
+        time.sleep(batch_utils.retry_delay(max(idle_rounds, 1), last_error))

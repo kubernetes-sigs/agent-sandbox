@@ -396,6 +396,33 @@ The [load test](tests/loadtest.py) reproduces both: `--tasks-per-image 1` (eval)
 (e.g. `--strategies naive,pipelined,reuse`) to compare recycling against the warm-pool
 strategies in the same run (`--max-reuses`/`--reset-timeout`/`--check-env` tune it).
 
+### Multi-container pods
+
+A template can add containers next to the runtime (via `extra_pod_spec["containers"]`,
+merged by name), for example a fresh container of the task image that grades the
+episode without seeing the agent's scratch files. Give such a sidecar a `command` that
+stays up (the template's keepalive, `["sleep", "infinity"]`): a task image's own
+entrypoint exits at once and the pod never becomes Ready. Every exec names its
+container, because the exec API has no default once a pod has two; the name comes
+from the handle or from the call:
+
+```python
+h.exec("pytest -q")                       # the runtime container (agent-runtime)
+h.exec("pytest -q", container="eval")     # one call in the sidecar
+h.target_container = "eval"               # every exec / session of this handle from now on
+h.open_session()                          # a session is bound to one container; switching
+                                          # containers closes the previous session
+make_fleet_repo_env(h, container="eval")  # R2E-Gym env whose exec/copy target the sidecar
+```
+
+`h.runtime_container` is the container that runs the task image (`agent-runtime` for a
+template the fleet wrote; the discovered name for an adopted one). Recycling
+(`recycle=True`) primes and resets the workspace there regardless of `target_container`.
+
+`SandboxHandle.target_container` is also what the R2E-Gym adapter uses when
+`make_fleet_repo_env` is not given a container, so a framework that holds one handle
+per episode can point grading at the sidecar without touching adapter internals.
+
 ## Multi-cluster
 
 Pass several `ClusterConfig`s (different `context`/`kubeconfig`) + a `placement`;

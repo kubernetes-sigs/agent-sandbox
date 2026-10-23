@@ -49,6 +49,10 @@ class DiscoveredPool:
   template: str
   image: str
   replicas: int
+  # Container that runs the image: ``agent-runtime`` when the template names
+  # one, else the lone container of a foreign single-container template. Exec
+  # on an adopted handle must name it (the exec API has no default container).
+  runtime_container: "str | None" = None
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -870,12 +874,18 @@ class Resources:
 
   # --- adoption ---------------------------------------------------------- #
   def template_images(self, label_selector: str | None = None) -> "dict[str, str]":
-    """Map SandboxTemplate name -> the container image it runs.
+    """Map SandboxTemplate name -> the container image it runs."""
+    return {name: image
+            for name, (image, _) in self._template_runtimes(label_selector).items()}
+
+  def _template_runtimes(self, label_selector: str | None = None
+                         ) -> "dict[str, tuple[str, str]]":
+    """Map SandboxTemplate name -> (image, name of the container running it).
 
     Read back off the live objects rather than recomputed from a name, so it
     works for templates this package did not write (no assumption about the
     `<prefix><md5>` scheme, which only holds for our own)."""
-    out: dict[str, str] = {}
+    out: dict[str, tuple[str, str]] = {}
     for obj in self._list_objects(constants.TEMPLATES_PLURAL, label_selector):
       name = (obj.get("metadata") or {}).get("name")
       containers = ((((obj.get("spec") or {}).get("podTemplate") or {})
@@ -899,7 +909,7 @@ class Resources:
         chosen = containers[0]
       image = chosen.get("image")
       if image:
-        out[name] = image
+        out[name] = (image, chosen.get("name") or constants.RUNTIME_CONTAINER)
     return out
 
   def discover_pools(self, label_selector: str | None = None
@@ -914,7 +924,7 @@ class Resources:
 
     ``label_selector`` is normally left unset: an adopted pool belongs to its
     provisioner and does not carry our management labels."""
-    images = self.template_images(label_selector)
+    runtimes = self._template_runtimes(label_selector)
     found: dict[str, DiscoveredPool] = {}
     for obj in self._list_objects(constants.WARMPOOLS_PLURAL, label_selector):
       name = (obj.get("metadata") or {}).get("name")
@@ -922,20 +932,21 @@ class Resources:
       tref = (spec.get("sandboxTemplateRef") or {}).get("name")
       if not name or not tref:
         continue
-      image = images.get(tref)
-      if image is None:
+      hit = runtimes.get(tref)
+      if hit is None:
         logger.debug("warm pool '%s' references template '%s', which was not "
                      "listed (or has no image); skipping", name, tref)
         continue
+      image, runtime_container = hit
       replicas = int(spec.get("replicas", 0) or 0)
       prev = found.get(image)
       if prev is None:
-        found[image] = DiscoveredPool(name, tref, image, replicas)
+        found[image] = DiscoveredPool(name, tref, image, replicas, runtime_container)
         continue
       # Two pools serving one image is legal and happens (a leftover alongside a
       # fresh one). Pick deterministically — deepest wins, name breaks the tie —
       # so repeated planning of the same namespace does not flip between them.
-      winner = (DiscoveredPool(name, tref, image, replicas)
+      winner = (DiscoveredPool(name, tref, image, replicas, runtime_container)
                 if (replicas, prev.pool) > (prev.replicas, name) else prev)
       logger.warning("image %s is served by more than one warm pool (%s, %s); "
                      "using '%s' (%d replicas)", image, prev.pool, name,

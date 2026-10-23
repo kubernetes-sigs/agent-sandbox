@@ -19,6 +19,7 @@ Two halves, matching the two defects: the pool name was hardcoded to
 invisible), and a miss fell silently through to the on-demand path.
 """
 
+import dataclasses
 import logging
 from unittest.mock import MagicMock
 
@@ -163,7 +164,27 @@ def test_discover_pools_finds_a_foreign_naming_scheme():
                       [_tmpl("r2e-img-aaa", IMG_A)])
   found = r.discover_pools()
   assert found == {IMG_A: DiscoveredPool("r2e-img-aaa-pool", "r2e-img-aaa",
-                                         IMG_A, 500)}
+                                         IMG_A, 500, constants.RUNTIME_CONTAINER)}
+
+
+def test_discover_pools_records_the_container_running_each_image():
+  r = _resources_with([_pool("p-a", "t-a", 1), _pool("p-b", "t-b", 1)],
+                      [_tmpl("t-a", IMG_A), _tmpl("t-b", "example.com/b:1", container="sandbox")])
+  found = r.discover_pools()
+  assert found[IMG_A].runtime_container == constants.RUNTIME_CONTAINER
+  assert found["example.com/b:1"].runtime_container == "sandbox"   # foreign naming
+
+
+def test_adopted_handle_targets_the_discovered_container(make_cluster):
+  c = make_cluster("solo")
+  f = _adopt_fleet(ClusterRegistry([c]))
+  _seed(c, f.config, IMG_A)
+  c.resources.discover_pools.return_value[IMG_A] = dataclasses.replace(
+      c.resources.discover_pools.return_value[IMG_A], runtime_container="sandbox")
+  f.load_tasks([IMG_A])
+  f.plan()
+  h = f.acquire(Task(id="t", image=IMG_A))
+  assert h.runtime_container == "sandbox"
 
 
 def test_discover_pools_skips_a_pool_whose_template_is_gone():

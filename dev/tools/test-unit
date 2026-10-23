@@ -155,7 +155,7 @@ PYTHON_TEST_SUITES = [
         "name": "integrations-mcp-server",
         "dir": os.path.join("clients", "integrations", "mcp-server"),
         "editable_installs": [
-            (PYTHON_SDK_DIR, "[async]"),
+            (PYTHON_SDK_DIR, "[async,grpc]"),
             (os.path.join("clients", "integrations", "mcp-server"), "[test]"),
         ]
     },

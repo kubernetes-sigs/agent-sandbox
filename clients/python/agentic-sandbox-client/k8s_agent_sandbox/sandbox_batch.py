@@ -115,6 +115,10 @@ class SandboxBatch:
         self._connected: dict[str, "Sandbox"] = {}
         self._detached = False
         self._lease_released = False
+        # The Lease duration detach() writes, the grace from the last detach() call that gave one or else
+        # the batch's Lease duration, kept so that a retry without a grace, including the one client
+        # cleanup makes, writes the same one.
+        self._detach_grace: int | None = None
         self._watch_stop = threading.Event()
         self._renew_stop = threading.Event()
         self._renewal_degraded = False
@@ -282,16 +286,32 @@ class SandboxBatch:
 
     def _close_cached_connections(self, action: str) -> None:
         with self._lock:
-            connected = list(self._connected.values())
-            self._connected.clear()
-        for sandbox in connected:
+            names = list(self._connected)
+        for claim_name in names:
+            with self._lock:
+                sandbox = self._connected.pop(claim_name, None)
+            if sandbox is None:
+                continue
+            closed = False
             try:
                 sandbox.close_connection()
+                closed = True
             except Exception as e:
                 logger.warning(
                     f"Batch '{self.batch_id}' failed to close a cached sandbox connection "
                     f"during {action}: {e}"
                 )
+            finally:
+                if not closed:
+                    # A connection that fails to close is kept on the handle rather than dropped, and the
+                    # client keeps the handle for its next cleanup.
+                    with self._lock:
+                        self._connected.setdefault(claim_name, sandbox)
+                    self._client._track_closing(self)
+
+    def _detach_unfinished(self) -> bool:
+        """Returns whether detach() started on this handle but hasn't released the Lease."""
+        return self._detach_grace is not None and not self._lease_released
 
     def detach(self, grace: int | None = None) -> None:
         """Stops the background watch and Lease renewal, closes cached sandbox connections, and
@@ -301,6 +321,8 @@ class SandboxBatch:
 
         If the Lease release fails, the error propagates and this handle stays in a detached state with
         the Lease still held. Call ``detach`` again to retry; steps that already completed are skipped.
+        A retry without ``grace`` keeps the earlier call's Lease duration, and if no retry is made,
+        client cleanup makes one.
 
         Raises:
             ValueError: If ``grace`` is not a valid Lease duration.
@@ -316,6 +338,10 @@ class SandboxBatch:
             if self._lease_released:
                 return
             self._detached = True
+            if grace is not None:
+                self._detach_grace = grace
+            elif self._detach_grace is None:
+                self._detach_grace = self._lease_duration
 
         self._stop_background_threads()
         self._close_cached_connections("detach")
@@ -334,9 +360,7 @@ class SandboxBatch:
                 lease.spec.renew_time = batch_utils.lease_now()
                 # Refresh the Lease so it doesn't expire immediately after we release it,
                 # giving other clients a chance to acquire it.
-                lease.spec.lease_duration_seconds = (
-                    grace if grace is not None else self._lease_duration
-                )
+                lease.spec.lease_duration_seconds = self._detach_grace
                 self._client.k8s_helper.replace_batch_lease(
                     self._lease_name,
                     self.namespace,

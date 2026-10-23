@@ -99,6 +99,8 @@ class SandboxClient(Generic[T]):
         self._explicit_claims: set[tuple[str, str]] = set()
         # Batch handles from get_batch() until they are detached
         self._active_batches: Dict[Tuple[str, str], SandboxBatch] = {}
+        # Handles that left _active_batches with cached connections still to close
+        self._closing_batches: set[SandboxBatch] = set()
         # A handle's detach() can run on another thread while get_batch registers a new handle.
         self._batches_lock = threading.Lock()
         
@@ -366,8 +368,8 @@ class SandboxClient(Generic[T]):
         within its grace window.
 
         The batch errors below are all ``BatchError``, so ``except BatchError`` handles a batch that
-        can't be attached. ``ValueError`` means a bad batch id, and ``ApiException`` an API or
-        network failure.
+        can't be attached. ``ValueError`` means a bad batch id, ``ApiException`` an API error,
+        and a failed request raises the transport's own error.
 
         Raises:
             ValueError: If ``batch_id`` is not a valid batch id.
@@ -377,8 +379,9 @@ class SandboxClient(Generic[T]):
             BatchInUseError: If a live Lease is held by another handle, or another client
                 takes it over while attaching.
             BatchError: If the Lease's or the claims' batch annotations are invalid.
-            ApiException: For any other API error such as a 403, or the transport error if a
-                request fails.
+            ApiException: For any other API error such as a 403.
+            urllib3.exceptions.HTTPError: If a request fails, such as on a connection error or
+                timeout.
 
         Example:
 
@@ -388,9 +391,16 @@ class SandboxClient(Generic[T]):
             >>> ready = [m for m in batch.members() if m.state is MemberState.READY]
         """
         batch = SandboxBatch._attach(self, batch_id, namespace)
-        with self._batches_lock:
-            self._active_batches[(namespace, batch_id)] = batch
+        self._register_batch(batch)
         return batch
+
+    def _register_batch(self, batch: SandboxBatch) -> None:
+        key = (batch.namespace, batch.batch_id)
+        with self._batches_lock:
+            replaced = self._active_batches.get(key)
+            self._active_batches[key] = batch
+        if replaced is not None:
+            self._track_closing(replaced)
 
     def _unregister_batch(self, batch: SandboxBatch) -> None:
         key = (batch.namespace, batch.batch_id)
@@ -398,6 +408,37 @@ class SandboxClient(Generic[T]):
         with self._batches_lock:
             if self._active_batches.get(key) is batch:
                 del self._active_batches[key]
+        self._track_closing(batch)
+
+    def _track_closing(self, batch: SandboxBatch) -> None:
+        # Every connection that fails to close is retried at the next client cleanup until it closes.
+        # A handle that is no longer its batch's live one waits here, and cleanup only closes its
+        # connections.
+        key = (batch.namespace, batch.batch_id)
+        with self._batches_lock:
+            if batch._connected and self._active_batches.get(key) is not batch:
+                self._closing_batches.add(batch)
+            else:
+                self._closing_batches.discard(batch)
+
+    def _finish_detach(self, batch: SandboxBatch) -> bool:
+        # A caller whose detach() didn't finish has handed the batch off, so cleanup finishes the detach
+        # instead of stopping or releasing the batch. If that fails too, nothing is deleted and the
+        # handle stays registered for the next cleanup.
+        if not batch._detach_unfinished():
+            return False
+        try:
+            batch.detach()
+        except Exception as e:
+            logger.error(f"Failed to finish detaching batch '{batch.batch_id}': {e}")
+        return True
+
+    def _retry_closing_batches(self) -> None:
+        with self._batches_lock:
+            closing = list(self._closing_batches)
+        for batch in closing:
+            batch._close_cached_connections("client cleanup")
+            self._track_closing(batch)
 
     def delete_sandbox(self, claim_name: str, namespace: str = "default") -> None:
         """Stops the client side connection and deletes the Kubernetes resources.
@@ -423,6 +464,9 @@ class SandboxClient(Generic[T]):
         """
         Cleanup all tracked sandboxes managed by this client, and stop every tracked batch's
         background watch and Lease renewal and close its cached sandbox connections.
+
+        It stops each tracked batch's Lease renewal without releasing the Lease, so ``get_batch``
+        can't re-attach a batch that wasn't detached with ``detach()``.
         
         Example:
         
@@ -455,18 +499,24 @@ class SandboxClient(Generic[T]):
     def _stop_batches(self) -> None:
         # Without this, a dropped handle's daemon threads would keep renewing its Lease for the
         # life of the process, so the batch would never go stale.
+        self._retry_closing_batches()
         with self._batches_lock:
             batches = list(self._active_batches.values())
-            self._active_batches.clear()
         for batch in batches:
+            if self._finish_detach(batch):
+                continue
             try:
                 # The handle stops renewing its Lease, so connect() must not hand out new connections.
                 with batch._lock:
                     batch._detached = True
-                batch._stop_background_threads()
-                batch._close_cached_connections("client cleanup")
+                try:
+                    batch._stop_background_threads()
+                finally:
+                    # A failed stop must not leave port-forwards open.
+                    batch._close_cached_connections("client cleanup")
             except Exception as e:
                 logger.error(f"Failed to stop batch '{batch.batch_id}' threads: {e}")
+            self._unregister_batch(batch)
 
     @trace_span("create_claim")
     def _create_claim(

@@ -280,6 +280,19 @@ class SandboxBatch:
         with self._lock:
             return self._renewal_degraded
 
+    def _close_cached_connections(self, action: str) -> None:
+        with self._lock:
+            connected = list(self._connected.values())
+            self._connected.clear()
+        for sandbox in connected:
+            try:
+                sandbox.close_connection()
+            except Exception as e:
+                logger.warning(
+                    f"Batch '{self.batch_id}' failed to close a cached sandbox connection "
+                    f"during {action}: {e}"
+                )
+
     def detach(self, grace: int | None = None) -> None:
         """Stops the background watch and Lease renewal, closes cached sandbox connections, and
         releases this handle's hold on the Lease. ``grace`` is the number of seconds to keep the
@@ -305,18 +318,7 @@ class SandboxBatch:
             self._detached = True
 
         self._stop_background_threads()
-
-        with self._lock:
-            connected = list(self._connected.values())
-            self._connected.clear()
-        for sandbox in connected:
-            try:
-                sandbox.close_connection()
-            except Exception as e:
-                logger.warning(
-                    f"Batch '{self.batch_id}' failed to close a cached sandbox connection "
-                    f"during detach: {e}"
-                )
+        self._close_cached_connections("detach")
 
         lease = self._client.k8s_helper.read_batch_lease(
             self._lease_name, self.namespace, _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
@@ -344,7 +346,7 @@ class SandboxBatch:
 
         with self._lock:
             self._lease_released = True
-        self._client._unregister_batch(self.namespace, self.batch_id)
+        self._client._unregister_batch(self)
 
     def _stop_background_threads(self) -> None:
         """Stops the watcher and lease renewal loop."""

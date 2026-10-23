@@ -20,6 +20,7 @@ file I/O) via the Sandbox resource handle.
 import uuid
 import atexit
 import logging
+import threading
 from types import TracebackType
 from typing import Any, Dict, Generic, List, Self, Tuple, Type, TypeVar
 
@@ -98,6 +99,8 @@ class SandboxClient(Generic[T]):
         self._explicit_claims: set[tuple[str, str]] = set()
         # Batch handles from get_batch() until they are detached
         self._active_batches: Dict[Tuple[str, str], SandboxBatch] = {}
+        # A handle's detach() can run on another thread while get_batch registers a new handle.
+        self._batches_lock = threading.Lock()
         
         # Optional automatic cleanup of sandboxes on program termination
         if cleanup:
@@ -385,11 +388,16 @@ class SandboxClient(Generic[T]):
             >>> ready = [m for m in batch.members() if m.state is MemberState.READY]
         """
         batch = SandboxBatch._attach(self, batch_id, namespace)
-        self._active_batches[(namespace, batch_id)] = batch
+        with self._batches_lock:
+            self._active_batches[(namespace, batch_id)] = batch
         return batch
 
-    def _unregister_batch(self, namespace: str, batch_id: str) -> None:
-        self._active_batches.pop((namespace, batch_id), None)
+    def _unregister_batch(self, batch: SandboxBatch) -> None:
+        key = (batch.namespace, batch.batch_id)
+        # get_batch may have registered a newer handle for the same batch since.
+        with self._batches_lock:
+            if self._active_batches.get(key) is batch:
+                del self._active_batches[key]
 
     def delete_sandbox(self, claim_name: str, namespace: str = "default") -> None:
         """Stops the client side connection and deletes the Kubernetes resources.
@@ -414,7 +422,7 @@ class SandboxClient(Generic[T]):
     def delete_all(self) -> None:
         """
         Cleanup all tracked sandboxes managed by this client, and stop every tracked batch's
-        background watch and Lease renewal.
+        background watch and Lease renewal and close its cached sandbox connections.
         
         Example:
         
@@ -447,11 +455,16 @@ class SandboxClient(Generic[T]):
     def _stop_batches(self) -> None:
         # Without this, a dropped handle's daemon threads would keep renewing its Lease for the
         # life of the process, so the batch would never go stale.
-        batches = list(self._active_batches.values())
-        self._active_batches.clear()
+        with self._batches_lock:
+            batches = list(self._active_batches.values())
+            self._active_batches.clear()
         for batch in batches:
             try:
+                # The handle stops renewing its Lease, so connect() must not hand out new connections.
+                with batch._lock:
+                    batch._detached = True
                 batch._stop_background_threads()
+                batch._close_cached_connections("client cleanup")
             except Exception as e:
                 logger.error(f"Failed to stop batch '{batch.batch_id}' threads: {e}")
 

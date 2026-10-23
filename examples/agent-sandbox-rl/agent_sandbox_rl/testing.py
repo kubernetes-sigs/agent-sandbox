@@ -142,6 +142,8 @@ class FakeHandle(SandboxHandle):
 
   # --- snapshots (state only; the fleet wrappers below call these) --------- #
   def snapshot(self, name: str | None = None, *, timeout: int = 180) -> str:
+    if self.released or self.suspended:                   # no pod to snapshot
+      raise FakeSandboxGone(f"sandbox {self.sandbox_id} has no running pod")
     uid = f"{name or self.sandbox_id}-snap{len(self.snapshots) + 1}"
     self.snapshots.append(uid)
     return uid
@@ -156,6 +158,8 @@ class FakeHandle(SandboxHandle):
     return _delete
 
   def suspend(self, *, snapshot: bool = True, timeout: int = 180) -> Optional[str]:
+    if self.suspended:
+      raise FakeSandboxGone(f"sandbox {self.sandbox_id} is already suspended")
     self.close_session()
     uid = self.snapshot() if snapshot else None
     self.suspended = True

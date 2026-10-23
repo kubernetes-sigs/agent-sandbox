@@ -179,6 +179,12 @@ def test_suspend_frees_the_claim_slot_and_resume_retakes_it():
   assert uid and h.is_suspended and h.list_snapshots() == [uid]
   with pytest.raises(FakeSandboxGone, match="suspended"):
     h.exec("x")
+  with pytest.raises(FakeSandboxGone):                      # no pod to snapshot either
+    h.snapshot()
+  with pytest.raises(FakeSandboxGone):
+    f.snapshot(h)
+  with pytest.raises(FakeSandboxGone):                      # a second suspend
+    f.suspend(h)
   other = f.acquire(f.tasks[1])                               # the slot is free now
   with pytest.raises(FleetOvercommitError):
     f.resume(h)                                               # at the cap: stays suspended

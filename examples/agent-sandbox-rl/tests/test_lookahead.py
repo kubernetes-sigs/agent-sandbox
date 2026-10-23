@@ -352,3 +352,40 @@ def test_reconcile_builds_the_plan_once_before_the_fan_out():
   w = LookaheadWarmer(f, register_images=False)
   w.add(0, {"a": 1, "b": 1, "c": 1})
   assert f.plans == 1 and w.active == {"a": 1, "b": 1, "c": 1}
+
+
+def test_a_plan_failure_is_recorded_per_image_not_raised():
+  class Unplannable(RecordingFleet):
+    def __init__(self, *a, **kw):
+      super().__init__(*a, **kw)
+      self.plan_ = None
+
+    def plan(self):
+      raise FleetError("run namespace cannot be created")
+
+    def warm_image(self, image, *, replicas_override=None, wait=True):
+      raise FleetError(f"no plan for {image}")          # what the real warm_image does next
+
+  f = Unplannable(planned=set())
+  w = LookaheadWarmer(f, register_images=False)
+  rep = w.add(0, {"a": 1, "b": 1}, wait=True)           # the README's first call
+  assert set(rep.errors) == {"a", "b"} and not rep.ok
+  assert all("no plan for" in e for e in rep.errors.values())   # per image, not the plan error
+  with pytest.raises(FleetError):                       # fail_fast keeps its contract
+    LookaheadWarmer(f, register_images=False, fail_fast=True).add(1, {"c": 1})
+
+
+def test_add_tasks_in_adopt_mode_validates_before_a_plan_exists(make_cluster, monkeypatch):
+  from agent_sandbox_rl.exceptions import PoolNotFoundError
+  c = make_cluster("solo")
+  f = _fleet(c, adopt_existing=True)
+  calls = []
+
+  def fake_plan_adopt():
+    calls.append(1)
+    raise PoolNotFoundError("image zzz has no pool")
+
+  monkeypatch.setattr(f, "_plan_adopt", fake_plan_adopt)
+  with pytest.raises(PoolNotFoundError):
+    f.add_tasks(["zzz"])                                # no plan yet: still validated
+  assert calls == [1] and f.tasks == []                  # and rolled back

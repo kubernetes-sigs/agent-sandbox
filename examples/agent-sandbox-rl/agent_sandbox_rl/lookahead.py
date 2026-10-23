@@ -255,10 +255,15 @@ class LookaheadWarmer:
     if to_create and getattr(self.fleet, "plan_", None) is None:
       # One plan, built here, before the fan-out: a worker's warm_image would
       # otherwise build its own, and a stateful placement (round-robin) could
-      # then put the pool on one cluster and a later acquire on another.
+      # then put the pool on one cluster and a later acquire on another. A
+      # failure here is not fatal to the warmer: each create below reports its
+      # own error per image (the WarmReport contract), and fail_fast decides.
       plan = getattr(self.fleet, "plan", None)
       if callable(plan):
-        plan()
+        try:
+          plan()
+        except Exception as exc:  # noqa: BLE001 — each warm below reports per image
+          logger.warning("lookahead: could not plan the fleet (%s); warming per image", exc)
     fatal: list[BaseException] = []
 
     def _create(img, n):

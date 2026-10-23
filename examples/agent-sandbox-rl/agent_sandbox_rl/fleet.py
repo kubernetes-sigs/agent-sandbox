@@ -466,7 +466,10 @@ class SandboxFleet:
     fresh: list[tuple[str, int, Cluster]] = []
     with self._lock:
       plan = self.plan_
-      adopt = plan is not None and self.config.adopt_existing
+      # Adopt mode validates even before a plan exists: otherwise an unserved
+      # image is appended, the later plan() raises for it, and every plan after
+      # that fails too.
+      adopt = self.config.adopt_existing
       if plan is not None and not adopt:
         # Resolve every placement before touching the tasks or the plan: a
         # NoClusterAvailableError must leave both as they were, or a retry

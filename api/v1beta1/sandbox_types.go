@@ -122,8 +122,8 @@ const (
 	// determined: the Pod has not reported PodScheduled yet, reports it without a
 	// reason (and not True), or could not be read.
 	SandboxReasonPodSchedulingUnknown = "PodSchedulingUnknown"
-	// SandboxReasonPodTerminating indicates an unscheduled backing Pod is
-	// terminating (its DeletionTimestamp is set).
+	// SandboxReasonPodTerminating indicates the backing Pod is terminating
+	// (its DeletionTimestamp is set).
 	SandboxReasonPodTerminating = "PodTerminating"
 
 	// SandboxConditionFinished reports that the backing Pod reached a terminal phase.

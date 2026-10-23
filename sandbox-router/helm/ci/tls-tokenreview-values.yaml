@@ -5,6 +5,10 @@ authz:
 tls:
   enabled: true
   metricsSecureServing: true
+networkPolicy:
+  apiServerCIDRs:
+    - 10.0.0.2/32
+    - 10.0.0.3/32
 router:
   enableTracing: true
   extraArgs:

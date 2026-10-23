@@ -48,8 +48,9 @@ tls:
   enabled: false
   # secretName must hold tls.crt and tls.key (cert-manager is the typical source).
   secretName: sandbox-router-tls
-  # metricsSecureServing serves /metrics over TLS with the same certificate.
-  # Add prometheus.io/scheme: https to podAnnotations when enabling it.
+  # metricsSecureServing serves /metrics over TLS with the same certificate. It
+  # requires tls.enabled and sets prometheus.io/scheme: https on the Pod unless
+  # podAnnotations already sets one.
   metricsSecureServing: false
 
 # extraEnv, extraVolumes and extraVolumeMounts cover what the chart does not
@@ -135,3 +136,11 @@ networkPolicy:
     - namespaceSelector:
         matchLabels:
           kubernetes.io/metadata.name: monitoring
+  # apiServerCIDRs lists the CIDRs of the Kubernetes API server endpoints
+  # (control-plane node IPs or the external load balancer), allowed on ports 443
+  # and 6443. Needed on enforcing clusters whose apiserver is not a Pod in the
+  # default namespace: without it the Pod-IP cache cannot sync and TokenReview
+  # calls fail. Example:
+  # apiServerCIDRs:
+  #   - 10.0.0.2/32
+  apiServerCIDRs: []

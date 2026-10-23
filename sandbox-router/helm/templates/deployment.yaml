@@ -16,7 +16,15 @@ spec:
       {{- $selectorLabels := include "sandbox-router.selectorLabels" . | fromYaml }}
       labels:
         {{- toYaml (merge (dict "app" "sandbox-router") $selectorLabels .Values.podLabels) | nindent 8 }}
-      {{- with .Values.podAnnotations }}
+      {{- /*
+      Secure metrics are served over HTTPS, so annotation-based scrapers need the
+      scheme. An explicit prometheus.io/scheme in podAnnotations takes precedence.
+      */}}
+      {{- $annotations := .Values.podAnnotations }}
+      {{- if and .Values.tls.enabled .Values.tls.metricsSecureServing }}
+      {{- $annotations = merge (dict) .Values.podAnnotations (dict "prometheus.io/scheme" "https") }}
+      {{- end }}
+      {{- with $annotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
       {{- end }}

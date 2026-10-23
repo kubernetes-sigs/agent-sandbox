@@ -63,6 +63,9 @@ The authorization mode, rejecting values the router does not know.
 Router command-line arguments. Unset optional flags are omitted.
 */}}
 {{- define "sandbox-router.args" -}}
+{{- if and .Values.tls.metricsSecureServing (not .Values.tls.enabled) }}
+{{- fail "tls.metricsSecureServing requires tls.enabled=true" }}
+{{- end }}
 - --http-bind-address=:8080
 {{- if .Values.tls.enabled }}
 - --https-bind-address=:8443

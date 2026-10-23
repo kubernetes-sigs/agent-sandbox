@@ -49,9 +49,11 @@ The chart does not model the verification key set. Mount it with `extraVolumes` 
 ```bash
 helm upgrade sandbox-router ./sandbox-router/helm/ \
   --namespace agent-sandbox-system \
-  --reuse-values \
+  --reset-then-reuse-values \
   --set image.tag=<new-version>
 ```
+
+`--reset-then-reuse-values` needs Helm 3.14 or later. Plain `--reuse-values` keeps only the values of the previous release, so defaults added by a newer chart version are silently missing.
 
 ### Moving from the kustomize base
 
@@ -91,7 +93,7 @@ helm uninstall sandbox-router --namespace agent-sandbox-system
 | `authz.mode` | `allow-all`, `tokenreview` or `scoped-token` | `allow-all` |
 | `tls.enabled` | Enable the HTTPS listener and mount the TLS Secret | `false` |
 | `tls.secretName` | Secret holding `tls.crt` and `tls.key` | `sandbox-router-tls` |
-| `tls.metricsSecureServing` | Serve `/metrics` over TLS with the same certificate | `false` |
+| `tls.metricsSecureServing` | Serve `/metrics` over TLS with the same certificate. Requires `tls.enabled`, and sets `prometheus.io/scheme: https` on the Pod unless `podAnnotations` already sets one | `false` |
 | `extraEnv` | Extra environment variables, e.g. `OTEL_EXPORTER_OTLP_ENDPOINT` | `[]` |
 | `extraVolumes` / `extraVolumeMounts` | Extra volumes and mounts, e.g. the scoped-token key set | `[]` |
 | `podAnnotations` | Pod annotations; the default lets Prometheus scrape port 9090 | `prometheus.io/*` scrape annotations |
@@ -111,6 +113,7 @@ helm uninstall sandbox-router --namespace agent-sandbox-system
 | `networkPolicy.enabled` | Create the NetworkPolicy | `true` |
 | `networkPolicy.proxyIngressFrom` | Peers allowed to reach the proxy ports, tighten to your Gateway namespace | all namespaces |
 | `networkPolicy.metricsIngressFrom` | Peers allowed to scrape the metrics port | `monitoring` namespace |
+| `networkPolicy.apiServerCIDRs` | CIDRs of the Kubernetes API server endpoints (control-plane node IPs or the external load balancer), allowed on ports 443 and 6443. Needed on enforcing clusters whose API server is not a Pod in `default`, otherwise the Pod-IP cache cannot sync and TokenReview calls fail | `[]` |
 
 Before production, read "Things to change before production" in the [deploy README](../deploy/README.md): replica count, resource requests, NetworkPolicy selectors, TLS and an HPA apply to the chart as well.
 

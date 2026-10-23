@@ -59,13 +59,19 @@ spec:
     - protocol: TCP
       port: 4317
   # Kubernetes API server, required by the Pod-IP cache and by
-  # --authz-mode=tokenreview. NetworkPolicy cannot name the apiserver, so this
-  # allows the default namespace on the standard ports. Add an ipBlock for the
-  # LB CIDR if your cluster routes apiserver traffic that way.
+  # --authz-mode=tokenreview. NetworkPolicy cannot name the apiserver, and a
+  # namespaceSelector only matches Pods, so the default namespace below covers
+  # clusters whose apiserver is backed by Pods there. Everywhere else, list the
+  # apiserver endpoint CIDRs (control-plane node IPs or the external load
+  # balancer) in networkPolicy.apiServerCIDRs.
   - to:
     - namespaceSelector:
         matchLabels:
           kubernetes.io/metadata.name: default
+    {{- range .Values.networkPolicy.apiServerCIDRs }}
+    - ipBlock:
+        cidr: {{ . | quote }}
+    {{- end }}
     ports:
     - protocol: TCP
       port: 443

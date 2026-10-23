@@ -46,18 +46,21 @@ spec:
       port: 53
     - protocol: TCP
       port: 53
-  # Forwarding to sandbox pods on the agreed sandbox port.
+  # Forwarding to sandbox pods. No port filter: X-Sandbox-Port accepts any port
+  # from 1 to 65535 (8888 is only the default), so a port allow-list would block
+  # sandboxes that listen elsewhere.
   - to:
     - namespaceSelector: {}
-    ports:
-    - protocol: TCP
-      port: 8888
   # OTel collector (if tracing or OTel metrics are enabled).
   - to:
+    {{- with .Values.networkPolicy.otlpEgressTo }}
+    {{- toYaml . | nindent 4 }}
+    {{- else }}
     - namespaceSelector: {}
+    {{- end }}
     ports:
     - protocol: TCP
-      port: 4317
+      port: {{ .Values.networkPolicy.otlpPort }}
   # Kubernetes API server, required by the Pod-IP cache and by
   # --authz-mode=tokenreview. NetworkPolicy cannot name the apiserver, and a
   # namespaceSelector only matches Pods, so the default namespace below covers

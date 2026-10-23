@@ -145,3 +145,12 @@ networkPolicy:
   # apiServerCIDRs:
   #   - 10.0.0.2/32
   apiServerCIDRs: []
+  # otlpEgressTo lists the peers allowed to receive OTLP gRPC export, as
+  # NetworkPolicy `to` entries. Empty keeps the default: Pods in any namespace.
+  # Set it when the collector is outside the cluster, e.g.
+  # otlpEgressTo:
+  #   - ipBlock:
+  #       cidr: 10.1.0.0/24
+  otlpEgressTo: []
+  # otlpPort is the TCP port of the OTLP gRPC collector.
+  otlpPort: 4317

@@ -2,6 +2,11 @@ image:
   tag: v0.0.0-lint
 authz:
   mode: scoped-token
+networkPolicy:
+  otlpPort: 4318
+  otlpEgressTo:
+    - ipBlock:
+        cidr: 10.1.0.0/24
 router:
   cacheNamespace: tenants
   extraArgs:

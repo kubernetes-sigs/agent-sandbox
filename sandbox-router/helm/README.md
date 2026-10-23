@@ -114,6 +114,8 @@ helm uninstall sandbox-router --namespace agent-sandbox-system
 | `networkPolicy.proxyIngressFrom` | Peers allowed to reach the proxy ports, tighten to your Gateway namespace | all namespaces |
 | `networkPolicy.metricsIngressFrom` | Peers allowed to scrape the metrics port | `monitoring` namespace |
 | `networkPolicy.apiServerCIDRs` | CIDRs of the Kubernetes API server endpoints (control-plane node IPs or the external load balancer), allowed on ports 443 and 6443. Needed on enforcing clusters whose API server is not a Pod in `default`, otherwise the Pod-IP cache cannot sync and TokenReview calls fail. Some network plugins evaluate egress before Service translation. On those plugins, also add the `kubernetes` Service ClusterIP (`kubectl get svc kubernetes -n default -o jsonpath='{.spec.clusterIP}'`) as a `/32` or `/128` entry | `[]` |
+| `networkPolicy.otlpEgressTo` | Peers allowed to receive OTLP gRPC export, as NetworkPolicy `to` entries. Set it when the collector is outside the cluster. Empty allows Pods in any namespace | `[]` |
+| `networkPolicy.otlpPort` | TCP port of the OTLP gRPC collector | `4317` |
 
 Before production, read "Things to change before production" in the [deploy README](../deploy/README.md): replica count, resource requests, NetworkPolicy selectors, TLS and an HPA apply to the chart as well.
 

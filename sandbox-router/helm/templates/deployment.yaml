@@ -163,7 +163,7 @@ spec:
       {{- if .Values.tls.enabled }}
       - name: tls-certs
         secret:
-          secretName: {{ .Values.tls.secretName }}
+          secretName: {{ required "tls.secretName is required when tls.enabled is true" .Values.tls.secretName | quote }}
       {{- end }}
       {{- with .Values.extraVolumes }}
       {{- toYaml . | nindent 6 }}

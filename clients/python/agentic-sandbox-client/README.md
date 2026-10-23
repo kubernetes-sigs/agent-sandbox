@@ -267,16 +267,38 @@ sandbox = client.create_sandbox(warmpool="node-sandbox-warmpool", namespace="def
 
 ### File Operations
 
+Use `SandboxFileConfig` to bound file downloads for every sandbox created or
+attached by a client:
+
+```python
+from k8s_agent_sandbox.models import SandboxFileConfig
+
+client = SandboxClient(
+    file_config=SandboxFileConfig(
+        max_download_size=256 * 1024 * 1024,
+    ),
+)
+sandbox = client.create_sandbox(warmpool="python-sandbox-warmpool")
+```
+
+`AsyncSandboxClient` accepts the same `file_config`; it can also be passed to
+`Sandbox` or `AsyncSandbox` directly. `max_download_size` is a positive byte
+limit shared by `read()` and `read_to()`, for both runtimes. It defaults to
+`None`, preserving unlimited downloads. An oversized download raises
+`SandboxResponseTooLargeError` (a `RuntimeError` subclass) and closes the response.
+Limits are checked while reading, including when the response length is unknown.
+The limit counts file bytes after HTTP content decoding, not compressed wire bytes.
+
 `read()` remains convenient for small files and returns the complete contents as
-`bytes`. Use `read_to()` for large files so the response is copied incrementally
-into a caller-owned binary destination:
+`bytes`; it never returns partial content on overflow. Use `read_to()` for large
+files so the response is copied incrementally into a caller-owned binary destination:
 
 ```python
 with open("artifact-copy.tar", "wb") as destination:
     written = sandbox.files.read_to(
         "artifact.tar",
         destination,
-        max_bytes=512 * 1024 * 1024,
+        max_bytes=128 * 1024 * 1024,
     )
 
 print(f"downloaded {written} bytes")
@@ -284,8 +306,10 @@ print(f"downloaded {written} bytes")
 
 `read_to()` never closes the destination. It always closes the HTTP response,
 including after a size-limit violation or destination error. If an error occurs,
-data already written remains in the destination. Omitting `max_bytes` disables
-the optional per-call download limit.
+data already written remains in the destination. The smaller of the configured
+`max_download_size` and the per-call `max_bytes` applies. Omitting `max_bytes`
+removes only the per-call restriction, not the configured limit; `max_bytes=0`
+allows only empty files. With neither limit set, downloads remain unlimited.
 
 `AsyncFilesystem.read_to()` provides the same behavior for an asynchronous sink
 whose `write(bytes)` method is awaitable and returns the number of bytes accepted:
@@ -294,7 +318,7 @@ whose `write(bytes)` method is awaitable and returns the number of bytes accepte
 written = await sandbox.files.read_to(
     "artifact.tar",
     async_destination,
-    max_bytes=512 * 1024 * 1024,
+    max_bytes=128 * 1024 * 1024,
 )
 ```
 

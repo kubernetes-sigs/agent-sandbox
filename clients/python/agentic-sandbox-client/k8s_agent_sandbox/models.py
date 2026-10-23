@@ -267,6 +267,14 @@ class AdditionalPodMetadata(BaseModel):
     labels: dict[str, str] | None = None
     annotations: dict[str, str] | None = None
 
+class SandboxFileConfig(BaseModel):
+    """Client-side file download limits, shared by read() and read_to()."""
+
+    model_config = ConfigDict(validate_assignment=True)
+
+    max_download_size: int | None = Field(default=None, strict=True, gt=0)  # Maximum file bytes downloaded; None preserves unlimited reads.
+
+
 class SandboxTracerConfig(BaseModel):
     """Configuration for tracer level information"""
     enable_tracing: bool = False  # Whether to enable OpenTelemetry tracing.

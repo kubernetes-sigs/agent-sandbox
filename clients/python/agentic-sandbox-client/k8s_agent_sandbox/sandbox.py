@@ -18,6 +18,7 @@ from .commands.command_executor import CommandExecutor
 from .files.filesystem import Filesystem
 from .models import (
     SandboxConnectionConfig,
+    SandboxFileConfig,
     SandboxLocalTunnelConnectionConfig,
     SandboxTracerConfig,
 )
@@ -47,6 +48,8 @@ class Sandbox:
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
         k8s_helper: K8sHelper | None = None,
+        *,
+        file_config: SandboxFileConfig | None = None,
     ) -> None:
         # Sandbox Related Configuration
         self.claim_name: str | None = claim_name
@@ -74,7 +77,10 @@ class Sandbox:
 
         # Initialisation of namespaced engines
         self._commands: CommandExecutor | None = CommandExecutor(self.connector, self.tracer, self.trace_service_name)
-        self._files: Filesystem | None = Filesystem(self.connector, self.tracer, self.trace_service_name)
+        self._files: Filesystem | None = Filesystem(
+            self.connector, self.tracer, self.trace_service_name,
+            **({"file_config": file_config} if file_config is not None else {}),
+        )
         
         # Internal state tracking
         self._is_closed = False

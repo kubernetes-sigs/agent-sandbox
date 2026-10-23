@@ -227,7 +227,9 @@ def prepull(cluster, images, *, node_selector=None, tolerations=None,
   (``<ds_name>-drop-caches``) that drops the page cache on every selected node
   and is deleted afterwards; it runs with the default runtime (it must reach the
   host), so a pool that admits only a RuntimeClass needs its taint in
-  ``tolerations``. Both need ``wait=True``. ``runtime_class`` goes on the pull
+  ``tolerations``. The pod is privileged: a namespace under Pod Security
+  Admission ``baseline`` or ``restricted`` rejects it, which is reported at once
+  (``False``) rather than after the budget. Both need ``wait=True``. ``runtime_class`` goes on the pull
   pods, so they schedule where the sandboxes do. ``timeout`` is the budget for
   everything.
 
@@ -317,6 +319,16 @@ def _drop_caches(cluster, *, ds_name, node_selector, tolerations, pause_image,
   except TimeoutError as exc:
     logger.error("Drop-caches: %s", exc)
     return False
+  except client.ApiException as e:
+    if e.status == 403:
+      # Pod Security Admission at baseline or restricted rejects the privileged
+      # pod outright; say so now instead of polling the budget away.
+      logger.error("Drop-caches: the namespace rejects privileged pods (403; Pod "
+                   "Security Admission baseline/restricted?). Label the namespace "
+                   "pod-security.kubernetes.io/enforce=privileged or set "
+                   "drop_caches=False: %s", e.reason)
+      return False
+    raise
   try:
     return _wait_ready(cluster, ds_name, deadline=deadline, poll_interval=poll_interval,
                        zero_grace_until=min(deadline, time.monotonic() + 15.0))

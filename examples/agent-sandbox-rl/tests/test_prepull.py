@@ -307,3 +307,17 @@ def test_recreation_of_a_terminating_daemonset_honors_the_budget(monkeypatch):
   assert prepull(c, ["x"], wait=True, timeout=0) is False                  # not an exception
   c.apps_api.delete_namespaced_daemon_set.assert_called_once()
   assert c.apps_api.create_namespaced_daemon_set.call_count == 1           # no retry past the budget
+
+
+def test_drop_caches_rejected_by_pod_security_fails_at_once():
+  c = _Tracker()
+  real_create = c.apps_api.create_namespaced_daemon_set.side_effect
+
+  def create(ns, body):
+    if body["metadata"]["name"].endswith("-drop-caches"):
+      raise client.ApiException(status=403, reason="violates PodSecurity \"restricted:latest\"")
+    return real_create(ns, body)
+
+  c.apps_api.create_namespaced_daemon_set.side_effect = create
+  assert prepull(c, ["a"], drop_caches=True, wait=True, timeout=10, poll_interval=0) is False
+  assert c.apps_api.read_namespaced_daemon_set_status.call_count == 1   # the pull batch only

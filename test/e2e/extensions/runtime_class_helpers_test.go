@@ -242,17 +242,21 @@ func applyControllerWorkerTuning(t *testing.T, ctx context.Context, cl *framewor
 			return
 		}
 		restored = true
+		// t.Cleanup runs after t.Context() is cancelled, so use a fresh
+		// context with its own timeout for the restore operations.
+		restoreCtx, restoreCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer restoreCancel()
 		var current appsv1.Deployment
-		if err := cl.Get(ctx, key, &current); err != nil {
+		if err := cl.Get(restoreCtx, key, &current); err != nil {
 			t.Logf("[tuning] restore: failed to get deployment: %v", err)
 			return
 		}
 		current.Spec.Template.Spec.Containers[0].Args = originalArgs
-		if err := cl.Update(ctx, &current); err != nil {
+		if err := cl.Update(restoreCtx, &current); err != nil {
 			t.Logf("[tuning] restore: failed to update deployment: %v", err)
 			return
 		}
-		waitForControllerRollout(t, ctx, cl, key)
+		waitForControllerRollout(t, restoreCtx, cl, key)
 		t.Logf("[tuning] controller args restored")
 	}
 	t.Cleanup(restore)

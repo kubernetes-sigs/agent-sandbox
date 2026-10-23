@@ -398,7 +398,7 @@ Key differences from regular burst mode:
   derived from cold start calibration so pods survive one full pool fill
   cycle.
 - **Claim auto-cleanup**: all claims use `ShutdownPolicy: Delete` with
-  `ShutdownTime` set to `now + workloadSec + 10s`. The controller deletes
+  `ShutdownTime` set to `now + coldBaseline + workloadSec + 10s`. The controller deletes
   claims at the deadline regardless of pod restart policy — no client-side
   GC needed. `TTLSecondsAfterFinished` is not used because it requires the
   sandbox to reach a terminal state, which never happens with the default
@@ -569,7 +569,7 @@ the hypervisor layer, the storage layer, or the application stack.
 ## Design Decisions
 
 All claims use `ShutdownPolicy: Delete` with `ShutdownTime` set to
-`now + workloadSec + SANDBOX_TTL` (default 10s buffer) to prevent zombie
+`now + coldBaseline + workloadSec + 10s` to prevent zombie
 claim/sandbox/pod accumulation. `ShutdownTime` is used instead of
 `TTLSecondsAfterFinished` because TTL only fires after the sandbox reaches
 a terminal state — with `RestartPolicy: Always` (the default), the container

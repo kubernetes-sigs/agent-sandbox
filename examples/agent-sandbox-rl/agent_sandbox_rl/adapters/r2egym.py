@@ -320,9 +320,10 @@ def make_fleet_repo_env(handle, *, command_files=None, verbose=False,
   ``SweBenchSource(keep_row=True)`` (the env/reward grading need the full dataset
   row in ``task.metadata['ds']``). ``command_files`` are R2E-Gym tool files copied
   into the pod (see `r2egym_command_files`). ``container`` names the pod container
-  the env execs and copies into (default: ``handle.target_container``, else the
-  pod's default container) — build one env on the runtime container for the
-  episode and another on a fresh grading sidecar for the reward. Call
+  the env execs and copies into (default: ``handle.target_container``, else
+  ``handle.runtime_container``; the exec API has no default container) — build
+  one env on the runtime container for the episode and another on a fresh
+  grading sidecar for the reward. Call
   ``env.close()`` when done — it is a no-op that does NOT delete the pod; the
   fleet releases it.
   """

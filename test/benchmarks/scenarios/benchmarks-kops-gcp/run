@@ -27,6 +27,7 @@ source "${REPO_ROOT}/dev/ci/shared/kops-gcp-lifecycle.sh"
 
 kops_install_tools
 kops_acquire_project
+kops_register_cleanup
 kops_setup_images "agent-sandbox-controller" "chrome-sandbox"
 kops_create_bucket
 
@@ -234,8 +235,6 @@ if [[ "${CNI}" == "cilium" ]]; then
   kubectl --namespace kube-system delete pods --selector=k8s-app=cilium
   kops_validate_cluster "${STRESS_CILIUM_VALIDATE_WAIT:-5m}"
 fi
-
-kops_register_cleanup
 
 # node-exporter: node-level CPU (incl. iowait), memory and disk stats for
 # every node including the control plane; the stress tool scrapes it via the

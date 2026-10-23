@@ -37,6 +37,17 @@ source "${REPO_ROOT}/dev/ci/shared/kops-gcp-lifecycle.sh"
 
 kops_install_tools
 kops_acquire_project
+
+kata_capture_logs() {
+  echo "Capturing controller diagnostics..."
+  local out_dir="${ARTIFACTS:-${REPO_ROOT}/bin}"
+  mkdir -p "${out_dir}"
+  kubectl logs deployment/agent-sandbox-controller \
+    --namespace agent-sandbox-system --tail=-1 > "${out_dir}/controller.log" 2>/dev/null || true
+}
+KOPS_PRE_CLEANUP_HOOK=kata_capture_logs
+kops_register_cleanup
+
 kops_setup_images "agent-sandbox-controller"
 kops_create_bucket
 
@@ -48,16 +59,6 @@ kops_create_bucket
 kops_create_cluster "sandbox-kata-${UNIQUE_SUFFIX}" "us-central1-a"
 
 kops_apply_and_validate
-
-kata_capture_logs() {
-  echo "Capturing controller diagnostics..."
-  local out_dir="${ARTIFACTS:-${REPO_ROOT}/bin}"
-  mkdir -p "${out_dir}"
-  kubectl logs deployment/agent-sandbox-controller \
-    --namespace agent-sandbox-system --tail=-1 > "${out_dir}/controller.log" 2>/dev/null || true
-}
-KOPS_PRE_CLEANUP_HOOK=kata_capture_logs
-kops_register_cleanup
 
 # ─── Install kata with nested virtualization ─────────────────────────────────
 

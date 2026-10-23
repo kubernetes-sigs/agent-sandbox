@@ -23,12 +23,12 @@
 #   source "${REPO_ROOT}/dev/ci/shared/kops-gcp-lifecycle.sh"
 #   kops_install_tools
 #   kops_acquire_project
+#   kops_register_cleanup  # install early; tolerates resources not yet created
 #   kops_setup_images "agent-sandbox-controller"
 #   kops_create_bucket
 #   kops_create_cluster "sandbox-${UNIQUE_SUFFIX}" "${ZONE}"
 #   # ... scenario-specific kops edit calls ...
 #   kops_apply_and_validate
-#   kops_register_cleanup  # optional pre-cleanup hook: KOPS_PRE_CLEANUP_HOOK
 
 REPO_ROOT="${REPO_ROOT:-$(git rev-parse --show-toplevel)}"
 cd "${REPO_ROOT}"
@@ -190,9 +190,11 @@ kops_register_cleanup() {
       "${KOPS_PRE_CLEANUP_HOOK}" || true
     fi
 
-    kops delete cluster --name="${CLUSTER_NAME}" --yes || true
+    if [[ -n "${CLUSTER_NAME:-}" ]]; then
+      kops delete cluster --name="${CLUSTER_NAME}" --yes || true
+    fi
 
-    if [[ "${CLEANUP_BUCKET:-false}" == "true" ]]; then
+    if [[ "${CLEANUP_BUCKET:-false}" == "true" && -n "${BUCKET_NAME:-}" ]]; then
       echo "Deleting bucket gs://${BUCKET_NAME}..."
       gcloud storage buckets delete "gs://${BUCKET_NAME}" --quiet || true
     fi

@@ -113,7 +113,7 @@ Connects directly to [sandboxd](../../../packages/sandboxd/USER_GUIDE.md) in the
 * `K8S_SANDBOX_CONNECTION__REST_PORT`: sandboxd REST port. (Default: `8080`)
 * `K8S_SANDBOX_CONNECTION__GRPC_PORT`: sandboxd gRPC port. (Default: `9090`)
 
-The warm pool's template must run sandboxd, as in [examples/sandboxd-sandbox](../../../examples/sandboxd-sandbox/sandbox-template.yaml). The default `Managed` network policy admits only sandbox-router, so add a `spec.networkPolicy.ingress` rule to the template that admits the MCP server on TCP ports `8080` and `9090`. The server's service account needs `create`, `get`, `list`, `watch` and `delete` on `sandboxclaims`, and `get`, `list` and `watch` on `sandboxes`. It needs no `pods/portforward`. See the [sandboxd guide](../../../packages/sandboxd/USER_GUIDE.md#agent-sandbox-sdk-access) for details.
+The warm pool's template must run sandboxd, as in [examples/sandboxd-sandbox](../../../examples/sandboxd-sandbox/sandbox-template.yaml). The default `Managed` network policy admits only sandbox-router, so add a `spec.networkPolicy.ingress` rule to the template that admits the MCP server on TCP ports `8080` and `9090`. Supplying `spec.networkPolicy` replaces all secure defaults, so also add the `spec.networkPolicy.egress` rules the sandbox needs: an omitted egress list denies all outbound traffic. The server's service account needs `create`, `get`, `list`, `watch` and `delete` on `sandboxclaims`, and `get`, `list` and `watch` on `sandboxes`. It needs no `pods/portforward`. See the [sandboxd guide](../../../packages/sandboxd/USER_GUIDE.md#agent-sandbox-sdk-access) for details.
 
 
 ### General Settings

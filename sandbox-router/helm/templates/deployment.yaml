@@ -1,0 +1,154 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-router
+  namespace: {{ include "sandbox-router.namespace" . }}
+  labels:
+    app: sandbox-router
+    {{- include "sandbox-router.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "sandbox-router.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- $selectorLabels := include "sandbox-router.selectorLabels" . | fromYaml }}
+      labels:
+        {{- toYaml (merge (dict "app" "sandbox-router") $selectorLabels .Values.podLabels) | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: sandbox-router
+      # Mount only the bounded token projected below, so its lifetime is part of
+      # this Pod contract rather than an API server default.
+      automountServiceAccountToken: false
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.topologySpread.enabled }}
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            {{- include "sandbox-router.selectorLabels" . | nindent 12 }}
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            {{- include "sandbox-router.selectorLabels" . | nindent 12 }}
+      {{- end }}
+      containers:
+      - name: sandbox-router
+        image: {{ include "sandbox-router.image" . }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        args:
+        {{- include "sandbox-router.args" . | nindent 8 }}
+        {{- with .Values.extraEnv }}
+        env:
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+        ports:
+        - name: proxy
+          containerPort: 8080
+          protocol: TCP
+        {{- if .Values.tls.enabled }}
+        - name: proxy-tls
+          containerPort: 8443
+          protocol: TCP
+        {{- end }}
+        - name: metrics
+          containerPort: 9090
+          protocol: TCP
+        - name: healthz
+          containerPort: 8081
+          protocol: TCP
+        volumeMounts:
+        # client-go's in-cluster configuration reads this standard path.
+        - name: kubernetes-api-access
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
+        {{- if .Values.tls.enabled }}
+        - name: tls-certs
+          mountPath: /tls
+          readOnly: true
+        {{- end }}
+        {{- with .Values.extraVolumeMounts }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: healthz
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: healthz
+          initialDelaySeconds: 1
+          periodSeconds: 5
+          failureThreshold: 2
+        {{- with .Values.resources }}
+        resources:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.containerSecurityContext }}
+        securityContext:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+      - name: kubernetes-api-access
+        projected:
+          defaultMode: 0444
+          sources:
+          - serviceAccountToken:
+              # No audience, so kubelet requests the API server's own. The
+              # implicit mount asks for 3607 seconds, which
+              # --service-account-extend-token-expiration stretches to a year;
+              # 3600 keeps this a genuine one-hour token.
+              expirationSeconds: 3600
+              path: token
+          - configMap:
+              name: kube-root-ca.crt
+              items:
+              - key: ca.crt
+                path: ca.crt
+          - downwardAPI:
+              items:
+              - fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+                path: namespace
+      {{- if .Values.tls.enabled }}
+      - name: tls-certs
+        secret:
+          secretName: {{ .Values.tls.secretName }}
+      {{- end }}
+      {{- with .Values.extraVolumes }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}

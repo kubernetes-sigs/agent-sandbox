@@ -369,6 +369,14 @@ Example K8s manifests live in [`deploy/`](deploy/) — Deployment, Service, PodD
 kubectl apply -k sandbox-router/deploy/
 ```
 
+A Helm chart that renders the same resources lives in [`helm/`](helm/), with TLS, TokenReview RBAC and a namespace-scoped cache behind values:
+
+```sh
+helm install sandbox-router sandbox-router/helm/ \
+  --namespace agent-sandbox-system --create-namespace \
+  --set image.tag=<version>
+```
+
 ## Scaling guidance
 
 A locally-hosted load test lives at [`dev/load-test/router/`](../dev/load-test/router/). Drives synthetic load through an in-process router into a no-op backend so capacity numbers can be captured without a cluster.

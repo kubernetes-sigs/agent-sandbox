@@ -671,16 +671,7 @@ func TestReconcilePoolsSharingTemplate(t *testing.T) {
 	template := createTemplate(namespace)
 	scheme := newTestScheme()
 
-	newPool := func(name string, replicas int32) *extensionsv1beta1.SandboxWarmPool {
-		return &extensionsv1beta1.SandboxWarmPool{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, UID: types.UID(name + "-uid")},
-			Spec: extensionsv1beta1.SandboxWarmPoolSpec{
-				Replicas:    &replicas,
-				TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
-			},
-		}
-	}
-	poolA, poolB := newPool("pool-a", 3), newPool("pool-b", 2)
+	poolA, poolB := newTestPool("pool-a", template.Name, 3), newTestPool("pool-b", template.Name, 2)
 	hashA, hashB := sandboxcontrollers.NameHash(poolA.Name), sandboxcontrollers.NameHash(poolB.Name)
 
 	r := SandboxWarmPoolReconciler{
@@ -689,55 +680,34 @@ func TestReconcilePoolsSharingTemplate(t *testing.T) {
 		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 	}
 	ctx := context.Background()
-
-	// Two passes, as in TestReconcilePool, so each pool settles.
-	reconcile := func(pool *extensionsv1beta1.SandboxWarmPool) {
-		t.Helper()
-		for range 2 {
-			_, err := r.reconcilePool(ctx, pool)
-			require.NoError(t, err)
-			syncPoolExpectations(&r, pool)
-		}
-	}
-	// Names, not counts, so a pool deleting and recreating the other's
-	// sandboxes cannot go unnoticed.
-	sandboxNames := func(poolNameHash string) []string {
-		t.Helper()
-		list := &sandboxv1beta1.SandboxList{}
-		require.NoError(t, r.List(ctx, list, &client.ListOptions{Namespace: namespace}))
-		var names []string
-		for _, sb := range list.Items {
-			if sb.Labels[warmPoolSandboxLabel] == poolNameHash {
-				names = append(names, sb.Name)
-			}
-		}
-		return names
+	names := func(poolNameHash string) []string {
+		return poolSandboxNames(ctx, t, r.Client, namespace, poolNameHash)
 	}
 
-	reconcile(poolA)
-	reconcile(poolB)
+	settlePool(ctx, t, &r, poolA)
+	settlePool(ctx, t, &r, poolB)
 	require.Equal(t, 3, countPoolOwnedSandboxes(ctx, t, r.Client, namespace, hashA, poolA.UID))
 	require.Equal(t, 2, countPoolOwnedSandboxes(ctx, t, r.Client, namespace, hashB, poolB.UID))
-	namesA, namesB := sandboxNames(hashA), sandboxNames(hashB)
+	namesA, namesB := names(hashA), names(hashB)
 
 	// Reconciling an already converged pool leaves both pools untouched.
-	reconcile(poolA)
-	reconcile(poolB)
-	require.ElementsMatch(t, namesA, sandboxNames(hashA))
-	require.ElementsMatch(t, namesB, sandboxNames(hashB))
+	settlePool(ctx, t, &r, poolA)
+	settlePool(ctx, t, &r, poolB)
+	require.ElementsMatch(t, namesA, names(hashA))
+	require.ElementsMatch(t, namesB, names(hashB))
 
 	// Scaling one pool down does not touch the other.
 	poolA.Spec.Replicas = new(int32(1))
-	reconcile(poolA)
+	settlePool(ctx, t, &r, poolA)
 	require.Equal(t, 1, countPoolOwnedSandboxes(ctx, t, r.Client, namespace, hashA, poolA.UID))
-	require.ElementsMatch(t, namesB, sandboxNames(hashB))
-	namesA = sandboxNames(hashA)
+	require.ElementsMatch(t, namesB, names(hashB))
+	namesA = names(hashA)
 
 	// Emptying one pool does not touch the other either.
 	poolB.Spec.Replicas = new(int32(0))
-	reconcile(poolB)
-	require.Empty(t, sandboxNames(hashB))
-	require.ElementsMatch(t, namesA, sandboxNames(hashA))
+	settlePool(ctx, t, &r, poolB)
+	require.Empty(t, names(hashB))
+	require.ElementsMatch(t, namesA, names(hashA))
 }
 
 func TestPoolLabelValueInIntegration(t *testing.T) {
@@ -1482,6 +1452,61 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Updating one template must roll out only the pools that reference it.
+// TestFindWarmPoolsForTemplate covers which pools the update enqueues.
+func TestReconcilePool_TemplateUpdateDoesNotAffectOtherPools(t *testing.T) {
+	namespace := "default"
+	scheme := newTestScheme()
+
+	templateA, templateB := createTemplate(namespace), createTemplate(namespace)
+	templateA.Name, templateB.Name = "template-a", "template-b"
+	poolA := newTestPool("pool-a", templateA.Name, 2)
+	poolB := newTestPool("pool-b", templateB.Name, 2)
+	for _, pool := range []*extensionsv1beta1.SandboxWarmPool{poolA, poolB} {
+		pool.Spec.UpdateStrategy = &extensionsv1beta1.SandboxWarmPoolUpdateStrategy{
+			Type: extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType,
+		}
+	}
+	hashA, hashB := sandboxcontrollers.NameHash(poolA.Name), sandboxcontrollers.NameHash(poolB.Name)
+
+	r := SandboxWarmPoolReconciler{
+		Client:       newFakeClient(scheme, templateA, templateB),
+		Scheme:       scheme,
+		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+	}
+	ctx := context.Background()
+	names := func(poolNameHash string) []string {
+		return poolSandboxNames(ctx, t, r.Client, namespace, poolNameHash)
+	}
+
+	settlePool(ctx, t, &r, poolA)
+	settlePool(ctx, t, &r, poolB)
+	namesA, namesB := names(hashA), names(hashB)
+	require.Len(t, namesA, 2)
+	require.Len(t, namesB, 2)
+
+	updated := &extensionsv1beta1.SandboxTemplate{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(templateA), updated))
+	updated.Spec.PodTemplate.Spec.Containers[0].Image = "image-v2"
+	require.NoError(t, r.Update(ctx, updated))
+
+	settlePool(ctx, t, &r, poolA)
+	settlePool(ctx, t, &r, poolB)
+
+	// Pool A's sandboxes are all replacements that run the new image.
+	newNamesA := names(hashA)
+	require.Len(t, newNamesA, 2)
+	for _, name := range newNamesA {
+		require.NotContains(t, namesA, name, "pool A sandbox should have been recreated")
+		sb := &sandboxv1beta1.Sandbox{}
+		require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, sb))
+		require.Equal(t, "image-v2", sb.Spec.PodTemplate.Spec.Containers[0].Image)
+	}
+
+	// Pool B keeps its original sandboxes.
+	require.ElementsMatch(t, namesB, names(hashB))
 }
 
 func TestReconcilePool_TemplateRefUpdate_SameSpec(t *testing.T) {
@@ -2694,6 +2719,44 @@ func countPoolOwnedSandboxes(ctx context.Context, t *testing.T, c client.Client,
 		}
 	}
 	return count
+}
+
+// poolSandboxNames returns the names of the sandboxes that carry the pool label.
+// Tests compare names rather than counts so that a pool deleting and recreating
+// another pool's sandboxes cannot go unnoticed.
+func poolSandboxNames(ctx context.Context, t *testing.T, c client.Client, namespace, poolNameHash string) []string {
+	t.Helper()
+	list := &sandboxv1beta1.SandboxList{}
+	require.NoError(t, c.List(ctx, list, &client.ListOptions{Namespace: namespace}))
+	var names []string
+	for _, sb := range list.Items {
+		if sb.Labels[warmPoolSandboxLabel] == poolNameHash {
+			names = append(names, sb.Name)
+		}
+	}
+	return names
+}
+
+// newTestPool returns a pool that references the named template.
+func newTestPool(name, templateName string, replicas int32) *extensionsv1beta1.SandboxWarmPool {
+	return &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: types.UID(name + "-uid")},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: templateName},
+		},
+	}
+}
+
+// settlePool reconciles the pool twice so it converges. Under Recreate the
+// first pass deletes stale sandboxes and the second creates the replacements.
+func settlePool(ctx context.Context, t *testing.T, r *SandboxWarmPoolReconciler, pool *extensionsv1beta1.SandboxWarmPool) {
+	t.Helper()
+	for range 2 {
+		_, err := r.reconcilePool(ctx, pool)
+		require.NoError(t, err)
+		syncPoolExpectations(r, pool)
+	}
 }
 
 func newReplenishTestPool(replicas int32) *extensionsv1beta1.SandboxWarmPool {

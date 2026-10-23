@@ -24,6 +24,7 @@ from .files.async_filesystem import AsyncFilesystem
 from .models import SandboxConnectionConfig, SandboxFileConfig, SandboxTracerConfig
 from .trace_manager import create_tracer_manager
 from .utils import select_pod_ip, extract_sandbox_name_hash
+from .watcher.async_file_watcher import AsyncFileWatcher
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,9 @@ class AsyncSandbox:
         self._files: AsyncFilesystem | None = AsyncFilesystem(
             self.connector, self.tracer, self.trace_service_name,
             **({"file_config": file_config} if file_config is not None else {}),
+        )
+        self._watcher: AsyncFileWatcher | None = AsyncFileWatcher(
+            self.connector, self.tracer, self.trace_service_name
         )
 
         self._is_closed = False
@@ -175,6 +179,11 @@ class AsyncSandbox:
         return self._files
 
     @property
+    def watcher(self) -> AsyncFileWatcher | None:
+        """Filesystem event streaming interface (sandboxd runtime only)."""
+        return self._watcher
+
+    @property
     def is_active(self) -> bool:
         """
         Returns True if the connection hasn't been explicitly closed
@@ -196,6 +205,7 @@ class AsyncSandbox:
 
         self._commands = None
         self._files = None
+        self._watcher = None
 
         if self.tracing_manager:
             try:
@@ -211,6 +221,7 @@ class AsyncSandbox:
         self.connector._close_for_atexit()
         self._commands = None
         self._files = None
+        self._watcher = None
         self._is_closed = True
 
     async def terminate(self) -> None:

@@ -31,7 +31,9 @@ type: ignore
 def __init__(connection_config: SandboxConnectionConfig | None = None,
              tracer_config: SandboxTracerConfig | None = None,
              cleanup: bool = False,
-             api_client: client.ApiClient | None = None) -> None
+             api_client: client.ApiClient | None = None,
+             *,
+             file_config: SandboxFileConfig | None = None) -> None
 ```
 
 Initializes the SandboxClient.
@@ -49,6 +51,8 @@ Initializes the SandboxClient.
   explicitly named through create_sandbox(). Defaults to False.
 - `api_client` - Optional pre-configured Kubernetes ``ApiClient`` forwarded
   to the underlying ``K8sHelper`` to target a specific cluster/context.
+- `file_config` - File download limits for created and attached sandboxes.
+  Defaults to unlimited downloads.
 
 <a id="k8s_agent_sandbox.sandbox_client.SandboxClient.create_sandbox"></a>
 
@@ -579,6 +583,22 @@ Wire-format for SandboxClaim ``spec.additionalPodMetadata``.
 Labels and annotations stamped onto the running Sandbox Pod (not the
 SandboxClaim object). Omit empty sections so the manifest never carries
 an empty ``additionalPodMetadata``.
+
+<a id="k8s_agent_sandbox.models.SandboxFileConfig"></a>
+
+### SandboxFileConfig Objects
+
+```python
+class SandboxFileConfig(BaseModel)
+```
+
+Client-side file download limits, shared by read() and read_to().
+
+<a id="k8s_agent_sandbox.models.SandboxFileConfig.max_download_size"></a>
+
+##### max\_download\_size
+
+Maximum file bytes downloaded; None preserves unlimited reads.
 
 <a id="k8s_agent_sandbox.models.SandboxTracerConfig"></a>
 

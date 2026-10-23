@@ -21,7 +21,7 @@ from .async_k8s_helper import AsyncK8sHelper
 from .commands.async_command_executor import AsyncCommandExecutor
 from .constants import POD_NAME_ANNOTATION
 from .files.async_filesystem import AsyncFilesystem
-from .models import SandboxConnectionConfig, SandboxTracerConfig
+from .models import SandboxConnectionConfig, SandboxFileConfig, SandboxTracerConfig
 from .trace_manager import create_tracer_manager
 from .utils import select_pod_ip, extract_sandbox_name_hash
 
@@ -50,6 +50,8 @@ class AsyncSandbox:
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
         k8s_helper: AsyncK8sHelper | None = None,
+        *,
+        file_config: SandboxFileConfig | None = None,
     ) -> None:
         if connection_config is None:
             raise ValueError(
@@ -84,7 +86,8 @@ class AsyncSandbox:
             self.connector, self.tracer, self.trace_service_name
         )
         self._files: AsyncFilesystem | None = AsyncFilesystem(
-            self.connector, self.tracer, self.trace_service_name
+            self.connector, self.tracer, self.trace_service_name,
+            **({"file_config": file_config} if file_config is not None else {}),
         )
 
         self._is_closed = False

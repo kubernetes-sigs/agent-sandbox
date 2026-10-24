@@ -98,10 +98,18 @@ debug endpoints.
   `--enable-pprof-debug` is set. `<=0` disables the mutex profile; `1` samples all events;
   `N>1` samples roughly `1/N` events (e.g. `10` ≈ 1/10, `100` ≈ 1/100). Negative values are
   clamped to `0` at startup.
+* `--metrics-enable-openmetrics` (default: `false`): Enable OpenMetrics format for the metrics
+  server. When enabled, Prometheus 2.5.0+ will negotiate OpenMetrics as the first priority
+  during content negotiation. This changes the formatting of `quantile` labels in Summaries and
+  `le` labels in Histograms (they get a trailing `.0` for integer values). Prometheus v3.0+
+  normalizes these labels during ingestion, so stored series identity is unchanged on modern
+  servers. On older Prometheus versions (or other scrapers that do not normalize), the resulting
+  series identity changes and existing dashboards and alerting rules that depend on these labels
+  may need to be updated.
 
 The Helm chart exposes the same settings as `controller.enableTracing`, `controller.enablePprof`,
-`controller.enablePprofDebug`, `controller.pprofBlockProfileRate` and
-`controller.pprofMutexProfileFraction`; see [helm/README.md](../helm/README.md).
+`controller.enablePprofDebug`, `controller.enableOpenMetrics`, `controller.pprofBlockProfileRate`
+and `controller.pprofMutexProfileFraction`; see [helm/README.md](../helm/README.md).
 
 The controller also binds controller-runtime's standard zap logging flags — `--zap-devel`,
 `--zap-encoder`, `--zap-log-level`, `--zap-stacktrace-level` and `--zap-time-encoding`. Their

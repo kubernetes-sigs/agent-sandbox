@@ -1,0 +1,131 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: grpc-router-demo
+---
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: box-a
+  namespace: grpc-router-demo
+spec:
+  service: true
+  podTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sandboxd-grpc
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: sandboxd
+        image: kind.local/sandboxd:grpc-router
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: health
+          containerPort: 8080
+        - name: grpc
+          containerPort: 9090
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: [ALL]
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        readinessProbe:
+          httpGet:
+            path: /v1/health
+            port: health
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-router-grpc
+  namespace: grpc-router-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sandbox-router-grpc
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sandbox-router-grpc
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 40
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: router
+        image: kind.local/sandbox-router-go:grpc-router
+        imagePullPolicy: IfNotPresent
+        args:
+        - --http-bind-address=:8080
+        - --cache-enabled=false
+        - --authz-mode=scoped-token
+        - --authz-scoped-token-secret-file=/auth/key
+        - --grpc-proxy-timeout=0s
+        - --shutdown-timeout=30s
+        ports:
+        - name: proxy
+          containerPort: 8080
+        - name: probes
+          containerPort: 8081
+        - name: metrics
+          containerPort: 9090
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        volumeMounts:
+        - name: auth
+          mountPath: /auth
+          readOnly: true
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: probes
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: probes
+      volumes:
+      - name: auth
+        secret:
+          secretName: grpc-router-auth
+---
+# A separate Service leaves sandbox-router-svc's HTTP protocol unchanged.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-router-grpc
+  namespace: grpc-router-demo
+spec:
+  selector:
+    app.kubernetes.io/name: sandbox-router-grpc
+  ports:
+  - name: grpc
+    port: 8080
+    targetPort: proxy
+    appProtocol: kubernetes.io/h2c

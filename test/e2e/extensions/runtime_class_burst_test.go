@@ -242,7 +242,7 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 	tc0 := framework.NewTestContext(t)
 	cluster, err := tc0.ClusterInfo(t.Context())
 	require.NoError(t, err)
-	workerCfg, restoreWorkers := applyControllerWorkerTuning(t, t.Context(), tc0.ClusterClient, runtimeClass, len(cluster.Workers))
+	workerCfg, restoreWorkers := applyControllerWorkerTuning(t.Context(), t, tc0.ClusterClient, runtimeClass, len(cluster.Workers))
 	defer restoreWorkers()
 
 	reportDir := os.Getenv("SANDBOX_REPORT_DIR")

@@ -164,7 +164,7 @@ func defaultVMWorkerConfig(nodeCount int) *controllerWorkerConfig {
 }
 
 // parseControllerWorkers parses SANDBOX_CONTROLLER_WORKERS.
-// Format: "sandbox:20,claim:10,pool:1,batch:10"
+// Format: "sandbox:20,claim:10,pool:1,batch:10".
 func parseControllerWorkers() *controllerWorkerConfig {
 	v := os.Getenv("SANDBOX_CONTROLLER_WORKERS")
 	if v == "" {
@@ -191,6 +191,9 @@ func parseControllerWorkers() *controllerWorkerConfig {
 			cfg.MaxBatchSize = n
 		}
 	}
+	if cfg.SandboxWorkers == 0 && cfg.ClaimWorkers == 0 && cfg.PoolWorkers == 0 && cfg.MaxBatchSize == 0 {
+		return nil
+	}
 	return cfg
 }
 
@@ -199,7 +202,7 @@ func parseControllerWorkers() *controllerWorkerConfig {
 // (kata), auto-derives node-aware defaults when the env var is unset.
 // Returns the config (nil only for non-VM runtimes with no env var) and a
 // restore function that reverts to the original args.
-func applyControllerWorkerTuning(t *testing.T, ctx context.Context, cl *framework.ClusterClient, runtimeClass string, nodeCount int) (*controllerWorkerConfig, func()) {
+func applyControllerWorkerTuning(ctx context.Context, t *testing.T, cl *framework.ClusterClient, runtimeClass string, nodeCount int) (*controllerWorkerConfig, func()) {
 	cfg := parseControllerWorkers()
 	if cfg == nil && isVMRuntime(runtimeClass) {
 		cfg = defaultVMWorkerConfig(nodeCount)
@@ -241,7 +244,6 @@ func applyControllerWorkerTuning(t *testing.T, ctx context.Context, cl *framewor
 		if restored {
 			return
 		}
-		restored = true
 		// t.Cleanup runs after t.Context() is cancelled, so use a fresh
 		// context with its own timeout for the restore operations.
 		restoreCtx, restoreCancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -256,11 +258,12 @@ func applyControllerWorkerTuning(t *testing.T, ctx context.Context, cl *framewor
 			t.Logf("[tuning] restore: failed to update deployment: %v", err)
 			return
 		}
-		waitForControllerRollout(t, restoreCtx, cl, key)
+		waitForControllerRollout(restoreCtx, t, cl, key)
+		restored = true
 		t.Logf("[tuning] controller args restored")
 	}
 	t.Cleanup(restore)
-	waitForControllerRollout(t, ctx, cl, key)
+	waitForControllerRollout(ctx, t, cl, key)
 	return cfg, restore
 }
 
@@ -286,7 +289,7 @@ func patchDeployArgs(args []string, overrides map[string]int) []string {
 
 // waitForControllerRollout blocks until the controller deployment has rolled out
 // all updated replicas and reports ready, or fails after 2 minutes.
-func waitForControllerRollout(t *testing.T, ctx context.Context, cl *framework.ClusterClient, key types.NamespacedName) {
+func waitForControllerRollout(ctx context.Context, t *testing.T, cl *framework.ClusterClient, key types.NamespacedName) {
 	t.Logf("[tuning] waiting for controller rollout...")
 	timeout := 2 * time.Minute
 	deadline, cancel := context.WithTimeout(ctx, timeout)

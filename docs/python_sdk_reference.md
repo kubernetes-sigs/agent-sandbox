@@ -122,7 +122,8 @@ the underlying infrastructure.
 ```python
 def get_sandbox(claim_name: str,
                 namespace: str = "default",
-                resolve_timeout: int = 30) -> T
+                resolve_timeout: int = 30,
+                warmpool_name: str | None = None) -> T
 ```
 
 Retrieves an existing sandbox handle given a sandbox claim name.
@@ -134,6 +135,11 @@ If the handle is closed or missing, it re-attaches to the infrastructure.
 - `namespace` - Kubernetes namespace the claim lives in.
 - `resolve_timeout` - Seconds to wait while resolving the sandbox
   name from the claim status.
+- `warmpool_name` - Optional SandboxWarmPool name to validate against
+  the existing claim's ``spec.warmPoolRef.name``.
+  When supplied and the claim references a different
+  warmpool, ``SandboxWarmPoolMismatchError`` is raised before returning a
+  handle.
 
 **Example**:
 

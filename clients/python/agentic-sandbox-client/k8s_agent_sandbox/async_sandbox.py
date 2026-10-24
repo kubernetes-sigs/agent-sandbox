@@ -196,6 +196,7 @@ class AsyncSandbox:
 
         self._commands = None
         self._files = None
+        self._pod_name = None
 
         if self.tracing_manager:
             try:
@@ -211,6 +212,7 @@ class AsyncSandbox:
         self.connector._close_for_atexit()
         self._commands = None
         self._files = None
+        self._pod_name = None
         self._is_closed = True
 
     async def terminate(self) -> None:

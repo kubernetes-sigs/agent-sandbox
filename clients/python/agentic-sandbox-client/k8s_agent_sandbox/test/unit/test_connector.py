@@ -544,6 +544,38 @@ class TestPortForwardCleanup(unittest.TestCase):
         popen.assert_not_called()
         self.assertIs(strategy.port_forward_process, process)
 
+    @patch("k8s_agent_sandbox.connector.subprocess.Popen")
+    def test_sandboxd_tunnel_start_error_includes_pod_context(self, popen):
+        popen.side_effect = FileNotFoundError("kubectl not found")
+        strategy = SandboxdPodTunnelStrategy(
+            sandbox_id="sandbox-1",
+            namespace="agents",
+            config=SandboxdPodTunnelConnectionConfig(),
+            get_pod_name=lambda: "sandbox-1",
+        )
+
+        with self.assertRaisesRegex(
+            SandboxPortForwardError, "sandbox-1.*agents|agents.*sandbox-1"
+        ):
+            strategy.connect()
+
+    @patch("k8s_agent_sandbox.connector.subprocess.Popen")
+    def test_sandboxd_tunnel_timeout_uses_port_forward_error(self, popen):
+        process = MagicMock()
+        process.poll.return_value = None
+        popen.return_value = process
+        strategy = SandboxdPodTunnelStrategy(
+            sandbox_id="sandbox-1",
+            namespace="agents",
+            config=SandboxdPodTunnelConnectionConfig(port_forward_ready_timeout=0),
+            get_pod_name=lambda: "sandbox-1",
+        )
+
+        with self.assertRaisesRegex(
+            SandboxPortForwardError, "sandbox-1.*agents|agents.*sandbox-1"
+        ):
+            strategy.connect()
+
 
 class TestSandboxConnectorStrategySelection(unittest.TestCase):
     def _make_connector(self, config):

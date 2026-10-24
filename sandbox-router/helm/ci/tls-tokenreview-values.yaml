@@ -1,0 +1,18 @@
+image:
+  tag: v0.0.0-lint
+authz:
+  mode: tokenreview
+tls:
+  enabled: true
+  metricsSecureServing: true
+networkPolicy:
+  apiServerCIDRs:
+    - 10.0.0.2/32
+    - 10.0.0.3/32
+router:
+  enableTracing: true
+  extraArgs:
+    - --authz-tokenreview-require-token=true
+extraEnv:
+  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+    value: http://otel-collector.observability:4317

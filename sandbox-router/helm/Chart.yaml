@@ -1,0 +1,16 @@
+apiVersion: v2
+name: sandbox-router
+description: Reverse proxy that routes SDK and browser traffic to Agent Sandbox sandboxes
+type: application
+version: 0.1.0
+keywords:
+  - agent
+  - sandbox
+  - router
+  - kubernetes
+home: https://github.com/kubernetes-sigs/agent-sandbox
+sources:
+  - https://github.com/kubernetes-sigs/agent-sandbox
+maintainers:
+  - name: Kubernetes SIGs
+    url: https://github.com/kubernetes-sigs

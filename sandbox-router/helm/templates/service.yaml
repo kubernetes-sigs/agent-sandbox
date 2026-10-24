@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "sandbox-router.serviceName" . }}
+  namespace: {{ include "sandbox-router.namespace" . }}
+  labels:
+    {{- include "sandbox-router.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "sandbox-router.selectorLabels" . | nindent 4 }}
+  ports:
+  - name: proxy
+    port: 8080
+    targetPort: proxy
+    protocol: TCP
+  {{- if .Values.tls.enabled }}
+  - name: proxy-tls
+    port: 8443
+    targetPort: proxy-tls
+    protocol: TCP
+  {{- end }}

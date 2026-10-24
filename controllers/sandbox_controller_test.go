@@ -626,6 +626,28 @@ func TestComputeConditions(t *testing.T) {
 			},
 		},
 		{
+			name:    "24. Running Ready Pod with deletionTimestamp is not ready",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
+			pod: ownedPod(&corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					DeletionTimestamp: &metav1.Time{Time: time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC)},
+				},
+				Status: corev1.PodStatus{
+					Phase:  corev1.PodRunning,
+					PodIPs: []corev1.PodIP{{IP: "10.244.0.1"}},
+					Conditions: []corev1.PodCondition{
+						{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
+						{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+					},
+				},
+			}),
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
+				{Type: "PodScheduled", Status: "True", ObservedGeneration: gen, Reason: "PodScheduled"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Pod is terminating"},
+			},
+		},
+		{
 			name:    "23. CrashLoopBackOff without a last exit reason omits the detail",
 			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
 			pod:     ownedPod(podWithContainerState(corev1.PodRunning, false, waitingContainer("app", "CrashLoopBackOff", 4, ""))),
@@ -7427,4 +7449,37 @@ func TestReconcileEvents_SandboxSuspended(t *testing.T) {
 	_, err = r.Reconcile(t.Context(), req)
 	require.NoError(t, err)
 	require.Equal(t, "Normal SandboxReady Sandbox is ready", drainEvent(t, recorder))
+}
+
+func TestComputeReadyConditionTerminatingPodIsNotReady(t *testing.T) {
+	r := &SandboxReconciler{}
+	deletionTime := metav1.Now()
+	sandbox := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{Generation: 3}}
+	runningReady := corev1.PodStatus{
+		Phase:  corev1.PodRunning,
+		PodIPs: []corev1.PodIP{{IP: "10.0.0.8"}},
+		Conditions: []corev1.PodCondition{
+			{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+		},
+	}
+	terminatingPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{DeletionTimestamp: &deletionTime},
+		Status:     runningReady,
+	}
+
+	got := r.computeReadyCondition(sandbox, nil, nil, terminatingPod)
+	require.Equal(t, metav1.ConditionFalse, got.Status)
+	require.Equal(t, sandboxv1beta1.SandboxReasonPodTerminating, got.Reason)
+	require.Equal(t, "Pod is terminating", got.Message)
+	require.Equal(t, int64(3), got.ObservedGeneration)
+
+	failedWhileTerminating := terminatingPod.DeepCopy()
+	failedWhileTerminating.Status.Phase = corev1.PodFailed
+	got = r.computeReadyCondition(sandbox, nil, nil, failedWhileTerminating)
+	require.Equal(t, sandboxv1beta1.SandboxReasonPodFailed, got.Reason)
+
+	suspended := sandbox.DeepCopy()
+	suspended.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeSuspended
+	got = r.computeReadyCondition(suspended, nil, nil, terminatingPod)
+	require.Equal(t, sandboxv1beta1.SandboxReasonSuspended, got.Reason)
 }

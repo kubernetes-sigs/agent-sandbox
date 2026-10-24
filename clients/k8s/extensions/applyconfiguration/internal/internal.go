@@ -2545,6 +2545,12 @@ var schemaYAML = typed.YAMLObject(`types:
       type:
         namedType: PodSpec.v1.core.api.k8s.io
       default: {}
+- name: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.ClaimDefaults
+  map:
+    fields:
+    - name: lifecycle
+      type:
+        namedType: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.Lifecycle
 - name: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.EnvVar
   map:
     fields:
@@ -2747,6 +2753,9 @@ var schemaYAML = typed.YAMLObject(`types:
 - name: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.SandboxWarmPoolSpec
   map:
     fields:
+    - name: claimDefaults
+      type:
+        namedType: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.ClaimDefaults
     - name: replicas
       type:
         scalar: numeric

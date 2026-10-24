@@ -104,6 +104,14 @@ spec:
         # - name: tls-certs
         #   mountPath: /tls
         #   readOnly: true
+        # The health listener starts after the router's initial Pod-cache
+        # LIST, which may take up to 60 seconds.
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: healthz
+          periodSeconds: 5
+          failureThreshold: 18
         livenessProbe:
           httpGet:
             path: /healthz

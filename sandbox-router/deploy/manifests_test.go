@@ -261,6 +261,20 @@ func TestCoreKustomizationExcludesTokenReviewRBAC(t *testing.T) {
 	}
 }
 
+func TestDeploymentStartupProbeAllowsInitialPodCacheSync(t *testing.T) {
+	deployment := readManifest[appsv1.Deployment](t, "deployment.yaml")
+	container := routerContainer(t, deployment)
+	probe := container.StartupProbe
+	if probe == nil || probe.HTTPGet == nil || probe.HTTPGet.Path != "/healthz" {
+		t.Fatal("startup probe must wait for /healthz")
+	}
+	const initialSyncTimeoutSeconds int32 = 60
+	const startupProbeMarginSeconds int32 = 30
+	if probe.PeriodSeconds <= 0 || probe.FailureThreshold*probe.PeriodSeconds < initialSyncTimeoutSeconds+startupProbeMarginSeconds {
+		t.Fatalf("startup probe budget: got %d seconds want at least %d seconds (sync timeout plus margin)", probe.FailureThreshold*probe.PeriodSeconds, initialSyncTimeoutSeconds+startupProbeMarginSeconds)
+	}
+}
+
 func TestScopedTokenV2OverlayComposesPatchOntoCoreInstall(t *testing.T) {
 	// Applying the patch after the core install would start allow-all
 	// replicas first, so the overlay must carry both.

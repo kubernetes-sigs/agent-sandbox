@@ -44,6 +44,7 @@ func TestCreateSandboxClaimVolumeClaimTemplates(t *testing.T) {
 		templateVCTs        []sandboxv1beta1.PersistentVolumeClaimTemplate
 		claimVCTs           []sandboxv1beta1.PersistentVolumeClaimTemplate
 		expectedErrorReason string // If non-empty, verifies validation failure with this Ready condition reason
+		expectedCreateError string // If non-empty, the API server must reject the claim with this message
 		verifySuccess       func(t *testing.T, tc *framework.TestContext, namespace string, claim *extensionsv1beta1.SandboxClaim)
 	}{
 		{
@@ -126,13 +127,19 @@ func TestCreateSandboxClaimVolumeClaimTemplates(t *testing.T) {
 			name:                "policy=Allowed, empty VCT volume name rejected",
 			policy:              extensionsv1beta1.VolumeClaimTemplatesPolicyAllowed,
 			claimVCTs:           []sandboxv1beta1.PersistentVolumeClaimTemplate{customVCT("", "2Gi")},
-			expectedErrorReason: "VolumeClaimTemplatesError",
+			expectedCreateError: "metadata.name must not be empty",
 		},
 		{
 			name:                "policy=Allowed, duplicate VCT volume name rejected",
 			policy:              extensionsv1beta1.VolumeClaimTemplatesPolicyAllowed,
 			claimVCTs:           []sandboxv1beta1.PersistentVolumeClaimTemplate{customVCT("custom-data", "2Gi"), customVCT("custom-data", "2Gi")},
-			expectedErrorReason: "VolumeClaimTemplatesError",
+			expectedCreateError: "volumeClaimTemplates names must be unique",
+		},
+		{
+			name:                "policy=Allowed, too many VCTs rejected",
+			policy:              extensionsv1beta1.VolumeClaimTemplatesPolicyAllowed,
+			claimVCTs:           numberedVCTs(129),
+			expectedCreateError: "must have at most 128 items",
 		},
 	}
 
@@ -163,7 +170,12 @@ func TestCreateSandboxClaimVolumeClaimTemplates(t *testing.T) {
 					VolumeClaimTemplates: tcCase.claimVCTs,
 				},
 			}
-			require.NoError(t, tc.CreateWithCleanup(t.Context(), claim))
+			err := tc.CreateWithCleanup(t.Context(), claim)
+			if tcCase.expectedCreateError != "" {
+				require.ErrorContains(t, err, tcCase.expectedCreateError)
+				return
+			}
+			require.NoError(t, err)
 
 			if tcCase.expectedErrorReason != "" {
 				tc.MustWaitForObject(claim, predicates.ConditionReasonEquals(string(sandboxv1beta1.SandboxConditionReady), tcCase.expectedErrorReason))
@@ -171,6 +183,30 @@ func TestCreateSandboxClaimVolumeClaimTemplates(t *testing.T) {
 				tc.MustWaitForObject(claim, predicates.ReadyConditionIsTrue)
 				tcCase.verifySuccess(t, tc, ns.Name, claim)
 			}
+		})
+	}
+}
+
+func TestSandboxTemplateVolumeClaimTemplatesValidation(t *testing.T) {
+	testCases := []struct {
+		name    string
+		vcts    []sandboxv1beta1.PersistentVolumeClaimTemplate
+		wantErr string
+	}{
+		{"empty name", []sandboxv1beta1.PersistentVolumeClaimTemplate{customVCT("", "1Gi")}, "metadata.name must not be empty"},
+		{"duplicate names", []sandboxv1beta1.PersistentVolumeClaimTemplate{customVCT("data", "1Gi"), customVCT("data", "1Gi")}, "volumeClaimTemplates names must be unique"},
+		{"too many", numberedVCTs(129), "must have at most 128 items"},
+	}
+	for _, c := range testCases {
+		t.Run(c.name, func(t *testing.T) {
+			tc := framework.NewTestContext(t)
+
+			ns := &corev1.Namespace{}
+			ns.Name = fmt.Sprintf("vct-template-invalid-%d", time.Now().UnixNano())
+			require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
+
+			template := newTemplateForVCT(ns.Name, "vct-template", extensionsv1beta1.VolumeClaimTemplatesPolicyAllowed, c.vcts)
+			require.ErrorContains(t, tc.CreateWithCleanup(t.Context(), template), c.wantErr)
 		})
 	}
 }
@@ -189,6 +225,14 @@ func customVCT(name, size string) sandboxv1beta1.PersistentVolumeClaimTemplate {
 			},
 		},
 	}
+}
+
+func numberedVCTs(n int) []sandboxv1beta1.PersistentVolumeClaimTemplate {
+	vcts := make([]sandboxv1beta1.PersistentVolumeClaimTemplate, n)
+	for i := range vcts {
+		vcts[i] = customVCT(fmt.Sprintf("vol-%d", i), "1Gi")
+	}
+	return vcts
 }
 
 func verifySandboxAndPVCs(t *testing.T, tc *framework.TestContext, namespace, claimName string, expected []expectedVCT) {
@@ -212,9 +256,8 @@ func verifySandboxAndPVCs(t *testing.T, tc *framework.TestContext, namespace, cl
 	}
 }
 
-func createTemplateForVCT(t *testing.T, tc *framework.TestContext, namespace, name string, policy extensionsv1beta1.VolumeClaimTemplatesPolicy, vcts []sandboxv1beta1.PersistentVolumeClaimTemplate) *extensionsv1beta1.SandboxTemplate {
-	t.Helper()
-	template := &extensionsv1beta1.SandboxTemplate{
+func newTemplateForVCT(namespace, name string, policy extensionsv1beta1.VolumeClaimTemplatesPolicy, vcts []sandboxv1beta1.PersistentVolumeClaimTemplate) *extensionsv1beta1.SandboxTemplate {
+	return &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
@@ -237,6 +280,11 @@ func createTemplateForVCT(t *testing.T, tc *framework.TestContext, namespace, na
 			},
 		},
 	}
+}
+
+func createTemplateForVCT(t *testing.T, tc *framework.TestContext, namespace, name string, policy extensionsv1beta1.VolumeClaimTemplatesPolicy, vcts []sandboxv1beta1.PersistentVolumeClaimTemplate) *extensionsv1beta1.SandboxTemplate {
+	t.Helper()
+	template := newTemplateForVCT(namespace, name, policy, vcts)
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), template))
 	return template
 }

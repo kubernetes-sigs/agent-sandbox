@@ -15,6 +15,7 @@
 package processmanager
 
 import (
+	"os"
 	"sync"
 	"syscall"
 	"testing"
@@ -85,4 +86,19 @@ func TestExitCodeRoundTrip(t *testing.T) {
 	p := &ManagedProcess{ID: 1, Done: make(chan struct{})}
 	p.SetExitCode(42)
 	require.Equal(t, int32(42), p.ExitCode())
+}
+
+func TestCloseStdinIsIdempotent(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	require.NoError(t, err)
+	defer reader.Close()
+
+	proc := &ManagedProcess{Stdin: writer}
+	require.NoError(t, proc.CloseStdin())
+	// The process already closed its own stdin by the time a late EOF lands.
+	require.NoError(t, proc.CloseStdin())
+}
+
+func TestCloseStdinWithoutStdin(t *testing.T) {
+	require.NoError(t, (&ManagedProcess{}).CloseStdin())
 }

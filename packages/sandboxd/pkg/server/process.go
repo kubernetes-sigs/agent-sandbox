@@ -65,6 +65,7 @@ type ProcessServer struct {
 	registry        *processmanager.ProcessRegistry
 	streamChunkSize int
 	log             logr.Logger
+	reaper          *processmanager.Reaper
 }
 
 // NewProcessServer builds a ProcessServer rooted at rootDir. rootDir must be
@@ -88,7 +89,18 @@ func NewProcessServer(rootDir string, registry *processmanager.ProcessRegistry, 
 		registry:        registry,
 		streamChunkSize: streamChunkSize,
 		log:             log,
+		reaper:          registry.Reaper(),
 	}
+}
+
+// SetReaper attaches a process reaper to the ProcessServer.
+func (s *ProcessServer) SetReaper(reaper *processmanager.Reaper) {
+	s.reaper = reaper
+}
+
+// Reaper returns the currently attached process reaper, or nil.
+func (s *ProcessServer) Reaper() *processmanager.Reaper {
+	return s.reaper
 }
 
 // buildCommand translates a ProcessConfig into an exec.Cmd with env merged
@@ -219,6 +231,8 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		closeAll(stdoutW, stderrW, stdinR)
 	}
 
+	s.reaper.Track(cmd.Process.Pid)
+
 	// Register BEFORE sending InitEvent so a client that calls WriteStdin /
 	// SendSignal immediately after receiving the event never races the
 	// registry.
@@ -239,11 +253,13 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		closeAll(stdoutR, stderrR, stdinW)
 		go func() {
 			_ = cmd.Wait()
+			s.reaper.Untrack(cmd.Process.Pid)
 			_ = proc.ClosePTY()
 			close(proc.Done) // release the cancellation watcher so it doesn't leak
 		}()
 		return status.Errorf(codes.Internal, "failed to send InitEvent: %v", err)
 	}
+	defer s.reaper.Untrack(cmd.Process.Pid)
 
 	var streamWg sync.WaitGroup
 	var sendMu sync.Mutex
@@ -299,14 +315,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		waitForReaders(&streamWg, func() { closeAll(stdoutR, stderrR) })
 	}
 
-	exitCode := int32(0)
-	if waitErr != nil {
-		if exitErr, ok := errors.AsType[*exec.ExitError](waitErr); ok {
-			exitCode = exitStatus(exitErr)
-		} else {
-			exitCode = -1
-		}
-	}
+	exitCode, _ := s.reaper.WaitResult(cmd, waitErr)
 
 	proc.SetExitCode(exitCode)
 	closeAll(stdinW) // close stdin pipe; safe no-op if nil (PTY path)
@@ -343,6 +352,8 @@ func (s *ProcessServer) Execute(ctx context.Context, req *processv1.ExecuteReque
 	if err := cmd.Start(); err != nil {
 		return nil, mapCommandError(err, "failed to execute command")
 	}
+	s.reaper.Track(cmd.Process.Pid)
+	defer s.reaper.Untrack(cmd.Process.Pid)
 
 	// Kill the entire process group on context cancellation. Use a local
 	// done channel since Execute does not register in the process registry.
@@ -351,13 +362,9 @@ func (s *ProcessServer) Execute(ctx context.Context, req *processv1.ExecuteReque
 	s.killProcessGroupOnContextDone(ctx, cmd, execDone)
 
 	runErr := cmd.Wait()
-	exitCode := int32(0)
-	if runErr != nil {
-		if exitErr, ok := errors.AsType[*exec.ExitError](runErr); ok {
-			exitCode = exitStatus(exitErr)
-		} else {
-			return nil, mapCommandError(runErr, "failed to execute command")
-		}
+	exitCode, err := s.reaper.WaitResult(cmd, runErr)
+	if err != nil {
+		return nil, mapCommandError(err, "failed to execute command")
 	}
 
 	// The command may have been killed by killProcessGroupOnContextDone
@@ -569,14 +576,4 @@ func waitForReaders(wg *sync.WaitGroup, forceClose func()) {
 		forceClose()
 		<-done
 	}
-}
-
-// exitStatus returns the process's exit code, or 128+n when signal n killed
-// it, as a shell reports it. exec.ExitError.ExitCode returns -1 for a
-// signal, which is indistinguishable from sandboxd's own failure value.
-func exitStatus(exitErr *exec.ExitError) int32 {
-	if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
-		return 128 + int32(ws.Signal())
-	}
-	return int32(exitErr.ExitCode())
 }

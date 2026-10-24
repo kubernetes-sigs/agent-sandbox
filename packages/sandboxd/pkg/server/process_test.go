@@ -613,3 +613,67 @@ func TestExecuteAbsoluteCwdWithFilesystemRoot(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, dir, strings.TrimSpace(string(resp.GetStdout())))
 }
+
+func TestProcessServerWithReaper(t *testing.T) {
+	rootDir := t.TempDir()
+	registry := processmanager.NewProcessRegistry()
+	reaper := processmanager.StartReaper(logr.Discard())
+	defer reaper.Stop()
+	registry.SetReaper(reaper)
+
+	procServer := NewProcessServer(rootDir, registry, 0, logr.Discard())
+	require.Equal(t, reaper, procServer.Reaper())
+
+	lis := bufconn.Listen(1024 * 1024)
+	grpcServer := grpc.NewServer()
+	processv1.RegisterProcessServiceServer(grpcServer, procServer)
+	go func() { _ = grpcServer.Serve(lis) }()
+
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return lis.DialContext(ctx)
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		require.NoError(t, conn.Close())
+		grpcServer.GracefulStop()
+		_ = lis.Close()
+	})
+	client := processv1.NewProcessServiceClient(conn)
+	ctx := testCtx(t)
+
+	// Test Execute with exit code 0
+	resp, err := client.Execute(ctx, &processv1.ExecuteRequest{
+		Config: &processv1.ProcessConfig{Command: []string{"sh", "-c", "echo hello; exit 0"}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(0), resp.GetExitCode())
+	require.Equal(t, "hello\n", string(resp.GetStdout()))
+
+	// Test Execute with non-zero exit code
+	resp, err = client.Execute(ctx, &processv1.ExecuteRequest{
+		Config: &processv1.ProcessConfig{Command: []string{"sh", "-c", "echo failed; exit 42"}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(42), resp.GetExitCode())
+	require.Equal(t, "failed\n", string(resp.GetStdout()))
+
+	// Test Start with exit code 0
+	stream, err := client.Start(ctx, &processv1.StartRequest{
+		Config: &processv1.ProcessConfig{Command: []string{"sh", "-c", "echo streamed; exit 0"}},
+	})
+	require.NoError(t, err)
+	res := drainStart(t, stream)
+	require.Equal(t, int32(0), res.exitCode)
+	require.Equal(t, "streamed\n", res.stdout.String())
+
+	// Test Start with non-zero exit code
+	stream, err = client.Start(ctx, &processv1.StartRequest{
+		Config: &processv1.ProcessConfig{Command: []string{"sh", "-c", "exit 17"}},
+	})
+	require.NoError(t, err)
+	res = drainStart(t, stream)
+	require.Equal(t, int32(17), res.exitCode)
+}

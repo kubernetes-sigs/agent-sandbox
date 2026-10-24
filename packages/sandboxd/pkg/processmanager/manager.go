@@ -26,6 +26,7 @@ type ProcessRegistry struct {
 	mu         sync.RWMutex
 	processes  map[int32]*ManagedProcess
 	pidCounter atomic.Int32
+	reaper     *Reaper
 }
 
 // NewProcessRegistry returns an empty registry.
@@ -71,4 +72,19 @@ func (r *ProcessRegistry) SignalAll(sig syscall.Signal) {
 	for _, p := range r.processes {
 		_ = p.Signal(sig)
 	}
+}
+
+// SetReaper attaches a Reaper to the registry so child processes can coordinate
+// exit status with the background reaper.
+func (r *ProcessRegistry) SetReaper(reaper *Reaper) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reaper = reaper
+}
+
+// Reaper returns the currently attached Reaper, or nil.
+func (r *ProcessRegistry) Reaper() *Reaper {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.reaper
 }

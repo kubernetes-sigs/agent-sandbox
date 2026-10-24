@@ -72,3 +72,6 @@ BATCH_LEASE_NAME_PREFIX = "batch-"
 BATCH_LEASE_DURATION_ANNOTATION = "agents.x-k8s.io/batch-lease-duration"
 BATCH_WORK_BUDGET_ANNOTATION = "agents.x-k8s.io/batch-work-budget"
 BATCH_QUORUM_TIMEOUT_ANNOTATION = "agents.x-k8s.io/batch-quorum-timeout"
+BATCH_CREATE_RPS_ANNOTATION = "agents.x-k8s.io/batch-create-rps"
+# Written by detach() so a handle that re-attaches never reuses an ordinal, even one whose claim is gone.
+BATCH_NEXT_ORDINAL_ANNOTATION = "agents.x-k8s.io/batch-next-ordinal"

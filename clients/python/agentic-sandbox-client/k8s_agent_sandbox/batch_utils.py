@@ -31,9 +31,11 @@ from itertools import accumulate
 from typing import Any, NamedTuple
 
 from .constants import (
+    BATCH_CREATE_RPS_ANNOTATION,
     BATCH_GROUP_LABEL,
     BATCH_ID_LABEL,
     BATCH_LEASE_DURATION_ANNOTATION,
+    BATCH_NEXT_ORDINAL_ANNOTATION,
     BATCH_QUORUM_TIMEOUT_ANNOTATION,
     BATCH_WORK_BUDGET_ANNOTATION,
     CREATED_BY_LABEL,
@@ -215,6 +217,19 @@ def _positive_int(name: str, value: object, default: int) -> int:
     return value
 
 
+def positive_number(name: str, value: object, default: float) -> float:
+    """Validates an optional positive int or float argument, filling in ``default`` for ``None``.
+
+    Raises:
+        ValueError: If ``value`` isn't a positive finite number.
+    """
+    if value is None:
+        return float(default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value < math.inf:
+        raise ValueError(f"{name} must be a positive finite number, got {value!r}")
+    return float(value)
+
+
 def validate_claim_batch_args(
     groups: Sequence[BatchGroup],
     labels: dict[str, str] | None,
@@ -243,11 +258,6 @@ def validate_claim_batch_args(
             raise ValueError(f"warm pool '{group.warmpool}' appears in more than one group")
         pools.add(group.warmpool)
 
-    if create_rps is None:
-        create_rps = BATCH_DEFAULT_CREATE_RPS
-    elif isinstance(create_rps, bool) or not isinstance(create_rps, (int, float)) or not create_rps > 0:
-        raise ValueError(f"create_rps must be a positive number, got {create_rps!r}")
-
     labels = dict(labels or {})
     for reserved in (BATCH_ID_LABEL, BATCH_GROUP_LABEL):
         if reserved in labels:
@@ -264,7 +274,7 @@ def validate_claim_batch_args(
         groups=groups,
         labels=labels,
         batch_id=batch_id,
-        create_rps=float(create_rps),
+        create_rps=positive_number("create_rps", create_rps, BATCH_DEFAULT_CREATE_RPS),
         max_in_flight=_positive_int("max_in_flight", max_in_flight, BATCH_DEFAULT_MAX_IN_FLIGHT),
         work_budget=_positive_int("work_budget", work_budget, BATCH_DEFAULT_WORK_BUDGET_SECONDS),
         quorum_timeout=_positive_int(
@@ -355,29 +365,71 @@ def retry_delay(attempt: int, error: BaseException | None) -> float:
     return backoff_delay(attempt, BATCH_BACKOFF_BASE_SECONDS, BATCH_BACKOFF_MAX_SECONDS)
 
 
-def parse_quorum_timeout_annotation(value: str | None) -> int:
-    """Parses ``BATCH_QUORUM_TIMEOUT_ANNOTATION`` upon ``get_batch``. If missing, falls back to the default.
-    """
+def _parse_int_annotation(annotations: dict[str, str], key: str, default: int, minimum: int) -> int:
+    value = annotations.get(key)
     if value is None:
-        return BATCH_DEFAULT_QUORUM_TIMEOUT_SECONDS
+        return default
     try:
         parsed = int(value)
     except (TypeError, ValueError):
-        parsed = 0
-    if parsed <= 0:
-        raise BatchError(f"batch quorum timeout annotation {value!r} is not a positive integer")
+        parsed = minimum - 1
+    if parsed < minimum:
+        raise BatchError(f"batch annotation {key} value {value!r} is not an integer of at least {minimum}")
     return parsed
 
 
-def batch_lease_metadata(
-    batch_id: str, lease_duration: int, work_budget: int, quorum_timeout: int
-) -> tuple[dict[str, str], dict[str, str]]:
+class LeaseSettings(NamedTuple):
+    """The batch settings ``get_batch`` reads back from the Lease's labels and annotations."""
+    lease_duration: int
+    quorum_timeout: int
+    work_budget: int
+    next_ordinal: int
+    create_rps: float
+    # The labels the caller passed to claim_batch.
+    labels: dict[str, str]
+
+
+def parse_lease_metadata(labels: dict[str, str] | None, annotations: dict[str, str] | None) -> LeaseSettings:
+    """Parses the batch Lease's labels and annotations upon ``get_batch``. A missing annotation
+    falls back to its default.
+
+    Raises:
+        BatchError: If an annotation's value is invalid.
+    """
+    annotations = annotations or {}
+    create_rps_str = annotations.get(BATCH_CREATE_RPS_ANNOTATION)
+    create_rps = BATCH_DEFAULT_CREATE_RPS
+    if create_rps_str is not None:
+        try:
+            create_rps = float(create_rps_str)
+        except ValueError:
+            create_rps = 0.0
+        if not 0 < create_rps < math.inf:
+            raise BatchError(
+                f"batch annotation {BATCH_CREATE_RPS_ANNOTATION} value {create_rps_str!r} is not a positive number"
+            )
+    return LeaseSettings(
+        lease_duration=parse_lease_duration_annotation(annotations.get(BATCH_LEASE_DURATION_ANNOTATION)),
+        quorum_timeout=_parse_int_annotation(
+            annotations, BATCH_QUORUM_TIMEOUT_ANNOTATION, BATCH_DEFAULT_QUORUM_TIMEOUT_SECONDS, 1
+        ),
+        work_budget=_parse_int_annotation(
+            annotations, BATCH_WORK_BUDGET_ANNOTATION, BATCH_DEFAULT_WORK_BUDGET_SECONDS, 1
+        ),
+        next_ordinal=_parse_int_annotation(annotations, BATCH_NEXT_ORDINAL_ANNOTATION, 0, 0),
+        create_rps=create_rps,
+        labels={k: v for k, v in (labels or {}).items() if k not in (BATCH_ID_LABEL, CREATED_BY_LABEL)},
+    )
+
+
+def batch_lease_metadata(args: ClaimBatchArgs) -> tuple[dict[str, str], dict[str, str]]:
     """Returns the batch Lease's labels and annotations, which ``get_batch`` reads back."""
-    labels = {BATCH_ID_LABEL: batch_id, CREATED_BY_LABEL: "python-client"}
+    labels = {**args.labels, BATCH_ID_LABEL: args.batch_id, CREATED_BY_LABEL: "python-client"}
     annotations = {
-        BATCH_LEASE_DURATION_ANNOTATION: str(lease_duration),
-        BATCH_WORK_BUDGET_ANNOTATION: str(work_budget),
-        BATCH_QUORUM_TIMEOUT_ANNOTATION: str(quorum_timeout),
+        BATCH_LEASE_DURATION_ANNOTATION: str(args.lease_duration),
+        BATCH_WORK_BUDGET_ANNOTATION: str(args.work_budget),
+        BATCH_QUORUM_TIMEOUT_ANNOTATION: str(args.quorum_timeout),
+        BATCH_CREATE_RPS_ANNOTATION: f"{args.create_rps:g}",
     }
     return labels, annotations
 

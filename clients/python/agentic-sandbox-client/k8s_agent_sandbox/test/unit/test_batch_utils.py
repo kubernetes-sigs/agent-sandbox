@@ -21,7 +21,14 @@ from k8s_agent_sandbox.batch_utils import (
     BATCH_DEFAULT_LEASE_DURATION_SECONDS,
     CLOCK_SKEW_MARGIN,
 )
-from k8s_agent_sandbox.constants import BATCH_GROUP_LABEL, BATCH_ID_LABEL
+from k8s_agent_sandbox.constants import (
+    BATCH_CREATE_RPS_ANNOTATION,
+    BATCH_GROUP_LABEL,
+    BATCH_ID_LABEL,
+    BATCH_NEXT_ORDINAL_ANNOTATION,
+    BATCH_QUORUM_TIMEOUT_ANNOTATION,
+    BATCH_WORK_BUDGET_ANNOTATION,
+)
 from k8s_agent_sandbox.exceptions import BatchError
 from k8s_agent_sandbox.models import BatchGroup
 
@@ -167,6 +174,7 @@ class TestValidateClaimBatchArgs(unittest.TestCase):
             "not a BatchGroup": {"groups": [{"warmpool": "pool-a", "size": 1}]},
             "create_rps 0": {"create_rps": 0},
             "create_rps -1": {"create_rps": -1},
+            "create_rps inf": {"create_rps": float("inf")},
             "create_rps True": {"create_rps": True},
             "create_rps str": {"create_rps": "5"},
             "max_in_flight 0": {"max_in_flight": 0},
@@ -260,18 +268,40 @@ class TestRetryDelay(unittest.TestCase):
                 self.assertTrue(base / 2 <= batch_utils.retry_delay(1, error) <= base)
 
 
-class TestQuorumTimeoutAnnotation(unittest.TestCase):
+class TestParseLeaseMetadata(unittest.TestCase):
 
     def test_parse_table(self):
         self.assertEqual(
-            batch_utils.parse_quorum_timeout_annotation(None),
-            batch_utils.BATCH_DEFAULT_QUORUM_TIMEOUT_SECONDS,
+            batch_utils.parse_lease_metadata(None, None),
+            (
+                batch_utils.BATCH_DEFAULT_LEASE_DURATION_SECONDS,
+                batch_utils.BATCH_DEFAULT_QUORUM_TIMEOUT_SECONDS,
+                batch_utils.BATCH_DEFAULT_WORK_BUDGET_SECONDS,
+                0,
+                batch_utils.BATCH_DEFAULT_CREATE_RPS,
+                {},
+            ),
         )
-        self.assertEqual(batch_utils.parse_quorum_timeout_annotation("90"), 90)
-        for value in ("abc", "0", "-1"):
-            with self.subTest(value=value):
-                with self.assertRaises(BatchError):
-                    batch_utils.parse_quorum_timeout_annotation(value)
+        args = batch_utils.validate_claim_batch_args(
+            [BatchGroup(warmpool="pool-a", size=1)], {"team": "rl"}, "b1", 2.5, None, 120, 90, 45
+        )
+        labels, annotations = batch_utils.batch_lease_metadata(args)
+        annotations[BATCH_NEXT_ORDINAL_ANNOTATION] = "0"
+        # Every setting claim_batch writes comes back, with the caller's labels apart from the SDK's.
+        self.assertEqual(
+            batch_utils.parse_lease_metadata(labels, annotations), (45, 90, 120, 0, 2.5, {"team": "rl"})
+        )
+        invalid = {
+            BATCH_QUORUM_TIMEOUT_ANNOTATION: ("abc", "0", "-1"),
+            BATCH_WORK_BUDGET_ANNOTATION: ("abc", "0"),
+            BATCH_NEXT_ORDINAL_ANNOTATION: ("abc", "-1"),
+            BATCH_CREATE_RPS_ANNOTATION: ("abc", "0", "-1", "inf", "nan"),
+        }
+        for key, values in invalid.items():
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    with self.assertRaises(BatchError):
+                        batch_utils.parse_lease_metadata(None, {key: value})
 
 
 if __name__ == "__main__":

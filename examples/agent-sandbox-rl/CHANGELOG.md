@@ -5,6 +5,15 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 
 ## [0.1.0.dev0] — unreleased
 
+### Fixed
+- **Concurrent first acquires build one `SandboxClient` per cluster.**
+  `Cluster.sandbox_client` was built lazily with no lock, so a step of threads
+  acquiring at once on a fresh fleet each built a client and loaded the kubeconfig
+  (160 builds for 160 sync per-claim envs on kind, last start 4.22 s against 1.37 s
+  once fixed). It is now built once under a lock, and the SDK clients get the
+  cluster's `ApiClient`, so no build loads a kubeconfig. Requires
+  `k8s-agent-sandbox>=1.0.6`.
+
 ### Added (template knobs for multi-container, hardened sandbox pods)
 - **`ResourceSpec.cpu_limit` / `memory_limit`**: optional limits on the runtime
   container (requests unchanged; an unset limit stays unlimited).

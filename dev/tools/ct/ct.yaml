@@ -7,3 +7,4 @@ chart-yaml-schema: dev/tools/ct/chart_schema.yaml
 validate-maintainers: false
 # dev/tools/verify-chart-version owns the version bump policy.
 check-version-increment: false
+helm-lint-extra-args: --set image.tag=v0.0.0-lint

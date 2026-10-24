@@ -1480,6 +1480,127 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 	}
 }
 
+func TestSandboxClaimPoolDefaultLifecycle(t *testing.T) {
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-default-template", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{}}},
+	}
+
+	pastTime := metav1.Time{Time: time.Now().Add(-2 * time.Hour).Truncate(time.Second)}
+
+	poolWithDefaults := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-with-defaults", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "pool-default-template"},
+			ClaimDefaults: &extensionsv1beta1.ClaimDefaults{
+				Lifecycle: &extensionsv1beta1.Lifecycle{
+					ShutdownPolicy: extensionsv1beta1.ShutdownPolicyDelete,
+					ShutdownTime:   &pastTime,
+				},
+			},
+		},
+	}
+
+	poolWithoutDefaults := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-no-defaults", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "pool-default-template"}},
+	}
+
+	createSandbox := func(name string) *sandboxv1beta1.Sandbox {
+		return &sandboxv1beta1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name, Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{
+					{APIVersion: extensionsv1beta1.GroupVersion.String(), Kind: extensionsv1beta1.SandboxClaimKind, Name: name, UID: types.UID(name), Controller: new(true)},
+				},
+			},
+			Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{}}},
+			Status: sandboxv1beta1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "SandboxReady"},
+				},
+			},
+		}
+	}
+
+	testCases := []struct {
+		name               string
+		pool               *extensionsv1beta1.SandboxWarmPool
+		claimLifecycle     *extensionsv1beta1.Lifecycle
+		expectClaimDeleted bool
+	}{
+		{
+			name:               "nil-lifecycle claim expires via pool defaults",
+			pool:               poolWithDefaults,
+			claimLifecycle:     nil,
+			expectClaimDeleted: true,
+		},
+		{
+			name:               "nil-lifecycle claim without pool defaults does not expire",
+			pool:               poolWithoutDefaults,
+			claimLifecycle:     nil,
+			expectClaimDeleted: false,
+		},
+		{
+			name: "explicit claim lifecycle takes precedence over pool defaults",
+			pool: poolWithDefaults,
+			claimLifecycle: &extensionsv1beta1.Lifecycle{
+				ShutdownPolicy: extensionsv1beta1.ShutdownPolicyRetain,
+				ShutdownTime:   &pastTime,
+			},
+			expectClaimDeleted: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := newScheme(t)
+			claimName := "pool-default-claim-" + tc.name
+			claim := &extensionsv1beta1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: "default", UID: types.UID(claimName)},
+				Spec: extensionsv1beta1.SandboxClaimSpec{
+					WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: tc.pool.Name},
+					Lifecycle:   tc.claimLifecycle,
+				},
+			}
+			sandbox := createSandbox(claimName)
+			claim.Status.SandboxStatus.Name = sandbox.Name
+
+			cl := fake.NewClientBuilder().WithScheme(scheme).
+				WithObjects(template, tc.pool, claim, sandbox).
+				WithStatusSubresource(claim).Build()
+
+			reconciler := &SandboxClaimReconciler{
+				Client:           cl,
+				Scheme:           scheme,
+				Recorder:         events.NewFakeRecorder(10),
+				Tracer:           asmetrics.NewNoOp(),
+				WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+			}
+
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claimName, Namespace: "default"}}
+			for range 2 {
+				_, err := reconciler.Reconcile(context.Background(), req)
+				if err != nil {
+					t.Fatalf("reconcile failed: %v", err)
+				}
+			}
+
+			var fetched extensionsv1beta1.SandboxClaim
+			err := cl.Get(context.Background(), req.NamespacedName, &fetched)
+			if tc.expectClaimDeleted {
+				if !k8errors.IsNotFound(err) {
+					t.Errorf("expected claim to be deleted via pool defaults, but it still exists")
+				}
+			} else {
+				if err != nil {
+					t.Errorf("expected claim to exist, got: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestSandboxClaimMirrorsFinishedConditionAndSchedulesTTL(t *testing.T) {
 	scheme := newScheme(t)
 	ttl := int32(120)

@@ -60,6 +60,21 @@ type SandboxWarmPoolSpec struct {
 	// Defaults to OnReplenish.
 	// +optional
 	UpdateStrategy *SandboxWarmPoolUpdateStrategy `json:"updateStrategy,omitempty"`
+
+	// claimDefaults defines default lifecycle settings for claims targeting this pool.
+	// When a SandboxClaim has no explicit lifecycle and targets a pool with claimDefaults,
+	// the controller uses the pool's defaults as the effective lifecycle at reconcile time.
+	// The claim's spec is never modified.
+	// +optional
+	ClaimDefaults *ClaimDefaults `json:"claimDefaults,omitempty"`
+}
+
+// ClaimDefaults defines default lifecycle settings applied to claims that
+// target this pool when the claim has no explicit lifecycle.
+type ClaimDefaults struct {
+	// lifecycle defines the default lifecycle for claims without an explicit one.
+	// +optional
+	Lifecycle *Lifecycle `json:"lifecycle,omitempty"`
 }
 
 // SandboxWarmPoolUpdateStrategyType is a string enumeration type that enumerates

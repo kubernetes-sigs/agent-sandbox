@@ -20,6 +20,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -28,7 +29,7 @@ func fullPodFixture() *corev1.Pod {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "pod-1",
 			Namespace: "ns",
-			Labels:    map[string]string{sandboxLabel: "hash-1"},
+			Labels:    map[string]string{sandboxv1beta1.SandboxNameHashLabel: "hash-1"},
 			Annotations: map[string]string{
 				"cluster-autoscaler.kubernetes.io/safe-to-evict": "true",
 			},
@@ -87,7 +88,7 @@ func TestPodCacheTransform(t *testing.T) {
 	if pod.Spec.NodeName != "node-7" {
 		t.Errorf("spec.nodeName lost: %q", pod.Spec.NodeName)
 	}
-	if pod.Labels[sandboxLabel] != "hash-1" {
+	if pod.Labels[sandboxv1beta1.SandboxNameHashLabel] != "hash-1" {
 		t.Error("labels lost")
 	}
 	if pod.Annotations["cluster-autoscaler.kubernetes.io/safe-to-evict"] != "true" {

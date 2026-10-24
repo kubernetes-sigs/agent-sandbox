@@ -95,7 +95,7 @@ func TestSandboxFailedPodPolicyRecreate(t *testing.T) {
 	require.NoError(t, tc.WaitForObject(t.Context(), sandbox, predicates.SandboxHasStatus(sandboxv1beta1.SandboxStatus{
 		Service:       sandbox.Name,
 		ServiceFQDN:   fmt.Sprintf("%s.%s.svc.cluster.local", sandbox.Name, ns.Name),
-		LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
+		LabelSelector: sandboxv1beta1.SandboxNameHashLabel + "=" + nameHash,
 		Conditions: []metav1.Condition{
 			{
 				Type:               string(sandboxv1beta1.SandboxConditionSuspended),

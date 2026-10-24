@@ -52,13 +52,27 @@ spec:
       port: 53
     - protocol: TCP
       port: 53
-  # Allow forwarding to sandbox pods on the agreed sandbox port. Tighten
-  # via namespaceSelector/podSelector if your tenancy model permits.
+  # Allow forwarding to sandbox pods on the legacy runtime port (8888).
+  # Tighten via namespaceSelector/podSelector if your tenancy model permits.
   - to:
     - namespaceSelector: {}
     ports:
     - protocol: TCP
       port: 8888
+  # Allow forwarding to sandboxd's default REST port (8080), limited to pods
+  # the Sandbox controller labels. 8080 is a common listener port, and the
+  # allow-all authorizer trusts caller-supplied X-Sandbox-Pod-IP/Port, so
+  # without this selector the router could be used to reach any 8080 service
+  # in the cluster. Labels are not authentication; this only bounds the reach.
+  - to:
+    - namespaceSelector: {}
+      podSelector:
+        matchExpressions:
+        - key: agents.x-k8s.io/sandbox-name-hash
+          operator: Exists
+    ports:
+    - protocol: TCP
+      port: 8080
   # OTel collector (if --enable-tracing or --enable-otel-metrics). Tighten
   # to your collector's namespace/pod selector.
   - to:

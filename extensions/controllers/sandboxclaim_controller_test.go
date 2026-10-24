@@ -1244,6 +1244,179 @@ func TestSandboxClaimReconcile(t *testing.T) {
 	}
 }
 
+func TestSandboxClaimReconcileRequeuesForActiveTTL(t *testing.T) {
+	scheme := newScheme(t)
+	ttl := int32(60)
+	createdAt := time.Now().UTC().Add(-30 * time.Second).Truncate(time.Second)
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "ttl-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}}},
+		}}},
+	}
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "ttl-pool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+	}
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "active-ttl-claim", Namespace: "default", CreationTimestamp: metav1.NewTime(createdAt)},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef:            extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name},
+			TTLSecondsAfterCreated: &ttl,
+		},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim, warmPool, template).WithStatusSubresource(claim).Build()
+	reconciler := &SandboxClaimReconciler{Client: client, Scheme: scheme, WarmSandboxQueue: queue.NewSimpleSandboxQueue(), Tracer: asmetrics.NewNoOp()}
+
+	result, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}})
+	require.NoError(t, err)
+	require.InDelta(t, 30*time.Second, result.RequeueAfter, float64(time.Second))
+
+	// The deadline is derived at reconcile time; the controller must not write it into spec.
+	fetched := &extensionsv1beta1.SandboxClaim{}
+	require.NoError(t, client.Get(context.Background(), types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}, fetched))
+	require.Nil(t, fetched.Spec.Lifecycle)
+	require.Equal(t, claim.Spec, fetched.Spec)
+}
+
+// TestSandboxClaimReconcileExpiredTTLHonorsShutdownPolicy verifies that an
+// age-based TTL expiry follows lifecycle.shutdownPolicy rather than forcing
+// deletion, and never rewrites the user's spec.
+func TestSandboxClaimReconcileExpiredTTLHonorsShutdownPolicy(t *testing.T) {
+	ttl := int32(60)
+
+	testCases := []struct {
+		name          string
+		lifecycle     *extensionsv1beta1.Lifecycle
+		wantDeleted   bool
+		wantDeleteMsg string
+	}{
+		{
+			name: "nil lifecycle retains the claim",
+		},
+		{
+			name:      "retain policy keeps the claim",
+			lifecycle: &extensionsv1beta1.Lifecycle{ShutdownPolicy: extensionsv1beta1.ShutdownPolicyRetain},
+		},
+		{
+			name:          "delete policy removes the claim",
+			lifecycle:     &extensionsv1beta1.Lifecycle{ShutdownPolicy: extensionsv1beta1.ShutdownPolicyDelete},
+			wantDeleted:   true,
+			wantDeleteMsg: "Normal " + extensionsv1beta1.ClaimExpiredReason + " Deleting Claim (ShutdownPolicy=Delete)",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := newScheme(t)
+			fakeRecorder := events.NewFakeRecorder(10)
+			claim := &extensionsv1beta1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "expired-claim",
+					Namespace:         "default",
+					CreationTimestamp: metav1.NewTime(time.Now().Add(-2 * time.Minute)),
+				},
+				Spec: extensionsv1beta1.SandboxClaimSpec{
+					TTLSecondsAfterCreated: &ttl,
+					Lifecycle:              tc.lifecycle,
+				},
+			}
+			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim).WithStatusSubresource(claim).Build()
+			reconciler := &SandboxClaimReconciler{Client: client, Scheme: scheme, Recorder: fakeRecorder, Tracer: asmetrics.NewNoOp()}
+			key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
+
+			result, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
+			require.NoError(t, err)
+			require.Equal(t, immediateRequeueDelay, result.RequeueAfter)
+			require.Equal(t, "Normal "+extensionsv1beta1.ClaimExpiredReason+" Claim expired", <-fakeRecorder.Events)
+
+			_, err = reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
+			require.NoError(t, err)
+
+			fetched := &extensionsv1beta1.SandboxClaim{}
+			err = client.Get(context.Background(), key, fetched)
+			if tc.wantDeleted {
+				require.True(t, k8errors.IsNotFound(err))
+				require.Equal(t, tc.wantDeleteMsg, <-fakeRecorder.Events)
+				return
+			}
+			require.NoError(t, err)
+			require.True(t, hasClaimExpiredCondition(fetched.Status.Conditions))
+			require.Equal(t, claim.Spec, fetched.Spec)
+		})
+	}
+}
+
+func TestSandboxClaimCheckExpirationTTLAfterCreated(t *testing.T) {
+	ttl := int32(60)
+	createdAt := metav1.NewTime(time.Now().Add(-30 * time.Second))
+	earlierShutdown := metav1.NewTime(time.Now().Add(10 * time.Second))
+	laterShutdown := metav1.NewTime(time.Now().Add(2 * time.Hour))
+	pastShutdown := metav1.NewTime(time.Now().Add(-time.Second))
+
+	testCases := []struct {
+		name         string
+		ttl          *int32
+		lifecycle    *extensionsv1beta1.Lifecycle
+		wantExpired  bool
+		wantTimeLeft time.Duration
+	}{
+		{
+			name: "no ttl and no lifecycle never expires",
+		},
+		{
+			name:         "ttl alone sets the deadline",
+			ttl:          &ttl,
+			wantTimeLeft: 30 * time.Second,
+		},
+		{
+			name:         "ttl with lifecycle lacking shutdownTime sets the deadline",
+			ttl:          &ttl,
+			lifecycle:    &extensionsv1beta1.Lifecycle{ShutdownPolicy: extensionsv1beta1.ShutdownPolicyDelete},
+			wantTimeLeft: 30 * time.Second,
+		},
+		{
+			name:         "earlier shutdownTime wins over ttl",
+			ttl:          &ttl,
+			lifecycle:    &extensionsv1beta1.Lifecycle{ShutdownTime: &earlierShutdown},
+			wantTimeLeft: 10 * time.Second,
+		},
+		{
+			name:         "earlier ttl wins over later shutdownTime",
+			ttl:          &ttl,
+			lifecycle:    &extensionsv1beta1.Lifecycle{ShutdownTime: &laterShutdown},
+			wantTimeLeft: 30 * time.Second,
+		},
+		{
+			name:        "expired shutdownTime expires despite active ttl",
+			ttl:         &ttl,
+			lifecycle:   &extensionsv1beta1.Lifecycle{ShutdownTime: &pastShutdown},
+			wantExpired: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			claim := &extensionsv1beta1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "ttl-claim", Namespace: "default", CreationTimestamp: createdAt},
+				Spec: extensionsv1beta1.SandboxClaimSpec{
+					TTLSecondsAfterCreated: tc.ttl,
+					Lifecycle:              tc.lifecycle,
+				},
+			}
+			reconciler := &SandboxClaimReconciler{}
+
+			expired, timeLeft := reconciler.checkExpiration(claim)
+			require.Equal(t, tc.wantExpired, expired)
+			if tc.wantExpired || tc.wantTimeLeft == 0 {
+				require.Zero(t, timeLeft)
+				return
+			}
+			require.InDelta(t, tc.wantTimeLeft, timeLeft, float64(time.Second))
+		})
+	}
+}
+
 // TestSandboxClaimCleanupPolicy verifies that the Claim deletes itself
 // based on its own timestamp, and deletes the Sandbox if Policy=Retain.
 func TestSandboxClaimCleanupPolicy(t *testing.T) {
@@ -8731,4 +8904,185 @@ func TestCreateSandboxAlreadyExistsAuthoritativeReadFailure(t *testing.T) {
 	result, reconcileErr := reconciler.Reconcile(context.Background(), req)
 	require.NoError(t, reconcileErr, "sentinel should be converted to nil error")
 	require.Equal(t, cacheLagRequeueDelay, result.RequeueAfter, "expected bounded requeue delay when the authoritative read fails")
+}
+
+// TestTTLDeleteRejectsConcurrentChanges pins the API-server preconditions that
+// prevent a cached expiration decision from deleting a replacement or TTL edit.
+func TestTTLDeleteRejectsConcurrentChanges(t *testing.T) {
+	for _, kind := range []string{"pool", "claim-delete", "claim-foreground"} {
+		for _, change := range []string{"replacement", "extend", "remove"} {
+			t.Run(kind+"/"+change, func(t *testing.T) {
+				ctx := context.Background()
+				scheme := newScheme(t)
+				now := time.Now().UTC().Truncate(time.Second)
+				metadata := metav1.ObjectMeta{Name: "ttl-race", Namespace: "default", UID: "original", ResourceVersion: "1", CreationTimestamp: metav1.NewTime(now.Add(-2 * time.Minute))}
+				var obj client.Object
+				if kind == "pool" {
+					obj = &extensionsv1beta1.SandboxWarmPool{ObjectMeta: metadata, Spec: extensionsv1beta1.SandboxWarmPoolSpec{Replicas: new(int32(0)), TTLSecondsAfterCreated: new(int32(60)), TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"}}}
+				} else {
+					policy := extensionsv1beta1.ShutdownPolicyDelete
+					if kind == "claim-foreground" {
+						policy = extensionsv1beta1.ShutdownPolicyDeleteForeground
+					}
+					obj = &extensionsv1beta1.SandboxClaim{ObjectMeta: metadata, Spec: extensionsv1beta1.SandboxClaimSpec{TTLSecondsAfterCreated: new(int32(60)), Lifecycle: &extensionsv1beta1.Lifecycle{ShutdownPolicy: policy}}, Status: extensionsv1beta1.SandboxClaimStatus{Conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: extensionsv1beta1.ClaimExpiredReason}}}}
+				}
+				base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(obj, createTemplate("default")).
+					WithStatusSubresource(&extensionsv1beta1.SandboxClaim{}, &extensionsv1beta1.SandboxWarmPool{}).
+					WithIndex(&sandboxv1beta1.Sandbox{}, sandboxWarmPoolLabelIndex, sandboxWarmPoolLabelIndexer).Build()
+				deleteCalls := 0
+				wrapped := interceptor.NewClient(base, interceptor.Funcs{Delete: func(ctx context.Context, c client.WithWatch, stale client.Object, opts ...client.DeleteOption) error {
+					deleteCalls++
+					options := (&client.DeleteOptions{}).ApplyOptions(opts)
+					require.NotNil(t, options.Preconditions)
+					require.NotNil(t, options.Preconditions.UID)
+					require.NotNil(t, options.Preconditions.ResourceVersion)
+					require.Equal(t, stale.GetUID(), *options.Preconditions.UID)
+					require.Equal(t, stale.GetResourceVersion(), *options.Preconditions.ResourceVersion)
+					if kind == "claim-foreground" {
+						require.Equal(t, metav1.DeletePropagationForeground, *options.PropagationPolicy)
+					}
+					latest := stale.DeepCopyObject().(client.Object)
+					var ttl *int32
+					if change != "remove" {
+						ttl = new(int32(300))
+					}
+					switch latest := latest.(type) {
+					case *extensionsv1beta1.SandboxClaim:
+						latest.Spec.TTLSecondsAfterCreated = ttl
+					case *extensionsv1beta1.SandboxWarmPool:
+						latest.Spec.TTLSecondsAfterCreated = ttl
+					}
+					if change == "replacement" {
+						require.NoError(t, c.Delete(ctx, stale))
+						latest.SetUID("replacement")
+						latest.SetResourceVersion("")
+						require.NoError(t, c.Create(ctx, latest))
+						// The fake client enforces RV but not UID preconditions.
+						return k8errors.NewConflict(schema.GroupResource{Group: extensionsv1beta1.GroupVersion.Group, Resource: "ttl-resource"}, stale.GetName(), errors.New("UID precondition failed"))
+					}
+					require.NoError(t, c.Update(ctx, latest))
+					err := c.Delete(ctx, stale, opts...)
+					require.True(t, k8errors.IsConflict(err), "resource-version precondition must reject the old TTL")
+					return err
+				}})
+				var reconciler reconcile.Reconciler
+				if kind == "pool" {
+					reconciler = &SandboxWarmPoolReconciler{Client: wrapped, Scheme: scheme, now: func() time.Time { return now }}
+				} else {
+					reconciler = &SandboxClaimReconciler{Client: wrapped, Scheme: scheme, Tracer: asmetrics.NewNoOp(), WarmSandboxQueue: queue.NewSimpleSandboxQueue(), DisableObservabilityAnnotations: true}
+				}
+				req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(obj)}
+				result, err := reconciler.Reconcile(ctx, req)
+				require.NoError(t, err)
+				require.Equal(t, immediateRequeueDelay, result.RequeueAfter)
+				require.Equal(t, 1, deleteCalls)
+				latest := obj.DeepCopyObject().(client.Object)
+				require.NoError(t, base.Get(ctx, req.NamespacedName, latest))
+				if change == "replacement" {
+					require.Equal(t, types.UID("replacement"), latest.GetUID())
+				}
+				// The retry must read and recompute against the new configuration.
+				_, err = reconciler.Reconcile(ctx, req)
+				require.NoError(t, err)
+				require.Equal(t, 1, deleteCalls)
+				require.NoError(t, base.Get(ctx, req.NamespacedName, latest))
+			})
+		}
+	}
+}
+
+// TestWarmPoolTTLTimelinePreservesClaimedSandbox exercises adoption and refill
+// before pool expiry; the fake client proves ownership, not garbage collection.
+func TestWarmPoolTTLTimelinePreservesClaimedSandbox(t *testing.T) {
+	ctx := t.Context()
+	start := time.Date(2026, 1, 1, 13, 0, 0, 0, time.UTC)
+	now := start
+	scheme := newTestScheme()
+	pool := newReplenishTestPool(2)
+	pool.CreationTimestamp = metav1.NewTime(start)
+	pool.Spec.TTLSecondsAfterCreated = new(int32(30 * 60))
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&extensionsv1beta1.SandboxWarmPool{}, &extensionsv1beta1.SandboxClaim{}, &sandboxv1beta1.Sandbox{}).
+		WithIndex(&sandboxv1beta1.Sandbox{}, sandboxWarmPoolLabelIndex, sandboxWarmPoolLabelIndexer).
+		WithObjects(pool, createTemplate(pool.Namespace)).Build()
+	poolReconciler := &SandboxWarmPoolReconciler{
+		Client: c, Scheme: scheme, MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+		now: func() time.Time { return now },
+	}
+	poolKey := client.ObjectKeyFromObject(pool)
+	reconcilePool := func() {
+		t.Helper()
+		_, err := poolReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: poolKey})
+		require.NoError(t, err)
+		syncPoolExpectations(poolReconciler, pool)
+	}
+	listSandboxes := func() []sandboxv1beta1.Sandbox {
+		t.Helper()
+		list := &sandboxv1beta1.SandboxList{}
+		require.NoError(t, c.List(ctx, list, client.InNamespace(pool.Namespace)))
+		return list.Items
+	}
+
+	// 13:00: the actual pool reconciler creates two pool-owned members.
+	reconcilePool()
+	members := listSandboxes()
+	require.Len(t, members, 2)
+	warmQueue := queue.NewSimpleSandboxQueue()
+	originalNames := make([]string, 0, len(members))
+	for i := range members {
+		sb := &members[i]
+		require.True(t, metav1.IsControlledBy(sb, pool))
+		originalNames = append(originalNames, sb.Name)
+		// Supply the readiness observation normally produced by the Sandbox
+		// controller and enqueue it as the informer would.
+		sb.Status.PodIPs = []string{testNetworkedPodIP}
+		sb.Status.Conditions = []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "DependenciesReady", LastTransitionTime: metav1.NewTime(now)}}
+		require.NoError(t, c.Status().Update(ctx, sb))
+		warmQueue.Add(queue.GetNamespacedWarmPoolName(sb.Namespace, pool.Name), queue.SandboxKey{Namespace: sb.Namespace, Name: sb.Name})
+	}
+
+	// 13:15: claim a real pool member, without a claim-level TTL.
+	now = start.Add(15 * time.Minute)
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "timeline-claim", Namespace: pool.Namespace, UID: "timeline-claim-uid", CreationTimestamp: metav1.NewTime(now)},
+		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: pool.Name}},
+	}
+	require.NoError(t, c.Create(ctx, claim))
+	claimReconciler := &SandboxClaimReconciler{Client: c, Scheme: scheme, WarmSandboxQueue: warmQueue, Tracer: asmetrics.NewNoOp(), DisableObservabilityAnnotations: true}
+	claimKey := client.ObjectKeyFromObject(claim)
+	_, err := claimReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: claimKey})
+	require.NoError(t, err)
+	var claimed *sandboxv1beta1.Sandbox
+	for _, sb := range listSandboxes() {
+		if metav1.IsControlledBy(&sb, claim) {
+			require.Nil(t, claimed, "exactly one member must transfer to the claim")
+			claimed = &sb
+		}
+	}
+	require.NotNil(t, claimed)
+	require.Contains(t, originalNames, claimed.Name, "claim must adopt, not cold-start")
+	require.NotContains(t, claimed.Labels, warmPoolSandboxLabel)
+	require.Len(t, claimed.OwnerReferences, 1)
+	require.Equal(t, 1, countPoolOwnedSandboxes(ctx, t, c, pool.Namespace, sandboxcontrollers.NameHash(pool.Name), pool.UID))
+
+	// Refill is normal pool behavior: two unclaimed members plus the claim.
+	reconcilePool()
+	require.Len(t, listSandboxes(), 3)
+	require.Equal(t, 2, countPoolOwnedSandboxes(ctx, t, c, pool.Namespace, sandboxcontrollers.NameHash(pool.Name), pool.UID))
+
+	// 13:35: pool age is 35 minutes, exceeding its 30-minute TTL.
+	now = start.Add(35 * time.Minute)
+	reconcilePool()
+	require.True(t, k8errors.IsNotFound(c.Get(ctx, poolKey, &extensionsv1beta1.SandboxWarmPool{})))
+	_, err = claimReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: claimKey})
+	require.NoError(t, err)
+	require.NoError(t, c.Get(ctx, claimKey, &extensionsv1beta1.SandboxClaim{}))
+	survivor := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(claimed), survivor))
+	require.True(t, metav1.IsControlledBy(survivor, claim))
+	require.True(t, survivor.DeletionTimestamp.IsZero())
+	require.Len(t, survivor.OwnerReferences, 1)
+	// No fake GC: the two unclaimed members still exist with the deleted
+	// pool's owner reference. A real cluster is needed to verify their removal.
+	require.Equal(t, 2, countPoolOwnedSandboxes(ctx, t, c, pool.Namespace, sandboxcontrollers.NameHash(pool.Name), pool.UID))
 }

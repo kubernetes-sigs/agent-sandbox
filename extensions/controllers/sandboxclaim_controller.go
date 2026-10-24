@@ -290,7 +290,7 @@ type SandboxClaimReconciler struct {
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, reconcileErr error) {
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Start of Reconcile loop for SandboxClaim", "request", req.NamespacedName)
 	claim := &extensionsv1beta1.SandboxClaim{}
@@ -376,12 +376,16 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			r.Recorder.Eventf(claim, nil, corev1.EventTypeNormal, extensionsv1beta1.ClaimExpiredReason, "Deleting", fmt.Sprintf("Deleting Claim (ShutdownPolicy=%s)", policy))
 		}
 
-		deleteOpts := []client.DeleteOption{}
+		// Reject stale-cache deletion of a replacement or an edited lifecycle.
+		deleteOpts := []client.DeleteOption{client.Preconditions{UID: &claim.UID, ResourceVersion: &claim.ResourceVersion}}
 		if policy == extensionsv1beta1.ShutdownPolicyDeleteForeground {
 			deleteOpts = append(deleteOpts, client.PropagationPolicy(metav1.DeletePropagationForeground))
 		}
 
 		if err := r.Delete(ctx, claim, deleteOpts...); err != nil {
+			if k8errors.IsConflict(err) {
+				return ctrl.Result{RequeueAfter: immediateRequeueDelay}, nil
+			}
 			return ctrl.Result{}, client.IgnoreNotFound(err)
 		}
 		return ctrl.Result{}, nil
@@ -389,7 +393,6 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// Manage Resources based on State
 	var sandbox *v1beta1.Sandbox
-	var reconcileErr error
 
 	if claimExpired {
 		// Policy=Retain (since Delete handled above)
@@ -461,7 +464,6 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Determine Result
-	var result ctrl.Result
 	if !claimExpired {
 		if postExpiration {
 			result = ctrl.Result{RequeueAfter: immediateRequeueDelay}
@@ -567,13 +569,31 @@ func (r *SandboxClaimReconciler) initializeAnnotations(ctx context.Context, clai
 }
 
 // checkExpiration calculates if the claim is expired and how much time is left.
+//
+// The age-based deadline (creationTimestamp + ttlSecondsAfterCreated) is derived
+// here on every reconcile instead of being persisted into spec.lifecycle: spec is
+// user intent and the controller must not write to it. Whichever configured
+// deadline comes first wins.
 func (r *SandboxClaimReconciler) checkExpiration(claim *extensionsv1beta1.SandboxClaim) (bool, time.Duration) {
+	now := time.Now()
+	ttlExpired, ttlTimeLeft := lifecycle.TimeLeftAfterCreated(now, claim.CreationTimestamp, claim.Spec.TTLSecondsAfterCreated)
 	if claim.Spec.Lifecycle == nil {
-		return false, 0
+		return ttlExpired, ttlTimeLeft
 	}
 
 	finishedCondition := lifecycle.FinishedCondition(claim.Status.Conditions, string(v1beta1.SandboxConditionFinished))
-	return lifecycle.TimeLeft(time.Now(), claim.Spec.Lifecycle.ShutdownTime, claim.Spec.Lifecycle.TTLSecondsAfterFinished, finishedCondition)
+	lifecycleExpired, lifecycleTimeLeft := lifecycle.TimeLeft(now, claim.Spec.Lifecycle.ShutdownTime, claim.Spec.Lifecycle.TTLSecondsAfterFinished, finishedCondition)
+	if ttlExpired || lifecycleExpired {
+		return true, 0
+	}
+	// A zero timeLeft with expired=false means that source has no deadline.
+	if lifecycleTimeLeft == 0 {
+		return false, ttlTimeLeft
+	}
+	if ttlTimeLeft == 0 {
+		return false, lifecycleTimeLeft
+	}
+	return false, min(ttlTimeLeft, lifecycleTimeLeft)
 }
 
 // reconcileActive handles the creation and updates of running sandboxes.

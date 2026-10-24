@@ -27,6 +27,14 @@ import (
 type SandboxClaimSpecApplyConfiguration struct {
 	// warmPoolRef targets the specific pre-warmed infrastructure pool to check out from.
 	WarmPoolRef *SandboxWarmPoolRefApplyConfiguration `json:"warmPoolRef,omitempty"`
+	// ttlSecondsAfterCreated limits how long the SandboxClaim stays active after creation.
+	// The claim expires at creationTimestamp + ttlSecondsAfterCreated, or at
+	// lifecycle.shutdownTime if that comes first. Expiry follows
+	// lifecycle.shutdownPolicy just like shutdownTime does: the default Retain policy
+	// deletes the Sandbox and marks the claim Expired; set Delete or DeleteForeground
+	// to remove the claim itself. The deadline is computed by the controller and is
+	// not written back to the spec, so later edits to this field take effect on the next reconciliation.
+	TTLSecondsAfterCreated *int32 `json:"ttlSecondsAfterCreated,omitempty"`
 	// lifecycle defines when and how the SandboxClaim should be shut down.
 	Lifecycle *LifecycleApplyConfiguration `json:"lifecycle,omitempty"`
 	// additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.
@@ -56,6 +64,14 @@ func SandboxClaimSpec() *SandboxClaimSpecApplyConfiguration {
 // If called multiple times, the WarmPoolRef field is set to the value of the last call.
 func (b *SandboxClaimSpecApplyConfiguration) WithWarmPoolRef(value *SandboxWarmPoolRefApplyConfiguration) *SandboxClaimSpecApplyConfiguration {
 	b.WarmPoolRef = value
+	return b
+}
+
+// WithTTLSecondsAfterCreated sets the TTLSecondsAfterCreated field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the TTLSecondsAfterCreated field is set to the value of the last call.
+func (b *SandboxClaimSpecApplyConfiguration) WithTTLSecondsAfterCreated(value int32) *SandboxClaimSpecApplyConfiguration {
+	b.TTLSecondsAfterCreated = &value
 	return b
 }
 

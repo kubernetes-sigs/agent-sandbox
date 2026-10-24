@@ -87,7 +87,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 
 		CertReloadsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "sandbox_router_cert_reloads_total",
-			Help: "Server certificate reload attempts, labeled by outcome.",
+			Help: "Reload attempts of the server certificate and of the upstream TLS client certificate and CA bundle, labeled by outcome.",
 		}, []string{"outcome"}),
 
 		UpstreamRetriesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{

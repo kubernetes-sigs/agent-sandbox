@@ -821,7 +821,7 @@ class TestAsyncSandbox(unittest.IsolatedAsyncioTestCase):
 
         callback = mock_connector.call_args.kwargs["get_pod_ip"]
         self.assertIs(callback.__self__, sandbox)
-        self.assertIs(callback.__func__, AsyncSandbox.get_pod_ip)
+        self.assertIs(callback.__func__, AsyncSandbox._resolve_pod_ip)
 
 
 class TestAsyncSandboxClientInCluster(unittest.IsolatedAsyncioTestCase):

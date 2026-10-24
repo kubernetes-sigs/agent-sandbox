@@ -682,7 +682,7 @@ class AsyncSandboxClient(Generic[T]):
         # A handle that is no longer its batch's live one waits here, and cleanup only closes its
         # connections.
         key = (batch.namespace, batch.batch_id)
-        if batch._connected and self._active_batches.get(key) is not batch:
+        if (batch._connected or batch._stale_connections) and self._active_batches.get(key) is not batch:
             self._closing_batches.add(batch)
         else:
             self._closing_batches.discard(batch)
@@ -796,7 +796,8 @@ class AsyncSandboxClient(Generic[T]):
                 return
 
             # A batch's cached connections hold port-forward processes too.
-            batch_sandboxes = [sandbox for batch in batches + closing for sandbox in batch._connected.values()]
+            batch_sandboxes = [sandbox for batch in batches + closing for sandbox, _ in batch._connected.values()]
+            batch_sandboxes += [sandbox for batch in batches + closing for sandbox in batch._stale_connections]
             for sandbox in [sandbox for _, sandbox in tracked] + batch_sandboxes:
                 try:
                     sandbox._close_for_atexit()

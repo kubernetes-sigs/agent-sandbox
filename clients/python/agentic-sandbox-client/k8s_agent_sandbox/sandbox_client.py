@@ -520,7 +520,7 @@ class SandboxClient(Generic[T]):
         # connections.
         key = (batch.namespace, batch.batch_id)
         with self._batches_lock:
-            if batch._connected and self._active_batches.get(key) is not batch:
+            if (batch._connected or batch._stale_connections) and self._active_batches.get(key) is not batch:
                 self._closing_batches.add(batch)
             else:
                 self._closing_batches.discard(batch)

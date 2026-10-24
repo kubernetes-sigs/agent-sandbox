@@ -40,9 +40,8 @@ from .constants import (
     BATCH_GROUP_MIN_READY_ANNOTATION,
     BATCH_GROUP_SIZE_ANNOTATION,
     BATCH_ID_LABEL,
-    BATCH_LEASE_DURATION_ANNOTATION,
     BATCH_LEASE_NAME_PREFIX,
-    BATCH_QUORUM_TIMEOUT_ANNOTATION,
+    BATCH_NEXT_ORDINAL_ANNOTATION,
 )
 from .exceptions import (
     BatchError,
@@ -54,6 +53,7 @@ from .exceptions import (
     SandboxNotReadyError,
     SandboxTemplateNotFoundError,
     SandboxWarmPoolNotFoundError,
+    TerminalMemberError,
 )
 from .models import BatchEvent, BatchGroup, GroupOutcome, Member, MemberState
 from .utils import construct_sandbox_claim_lifecycle_spec
@@ -136,6 +136,7 @@ class AsyncSandboxBatch:
         lease: V1Lease,
         lease_renewed_at: float,
         quorum_timeout: int = batch_utils.BATCH_DEFAULT_QUORUM_TIMEOUT_SECONDS,
+        work_budget: int = batch_utils.BATCH_DEFAULT_WORK_BUDGET_SECONDS,
     ) -> None:
         self._client = client
         self.batch_id = batch_id
@@ -175,6 +176,7 @@ class AsyncSandboxBatch:
         # the fill deadline being set, and detach/release.
         self._changed = asyncio.Condition(self._lock)
         self._quorum_timeout = quorum_timeout
+        self._work_budget = work_budget
         # Monotonic time at which the fill expires. After it, groups without an outcome time out
         # and events() stops waiting for fill members that aren't Ready yet. Set once the last
         # create's pacing slot is taken, or at attach for a re-attached batch.
@@ -185,6 +187,15 @@ class AsyncSandboxBatch:
         self._create_plan: deque[tuple[str, BatchGroup]] = deque()
         self._next_create_at = 0.0
         self._create_interval = 0.0
+        # The caller's labels and the batch id label, which every claim carries.
+        self._labels: dict[str, str] = {BATCH_ID_LABEL: batch_id}
+        # Pools acquire() doesn't check again, since claim_batch checked them or they already have claims.
+        self._checked_pools: set[str] = {g.warmpool for g in state.groups}
+        # The check of each pool that is running, so concurrent first acquires of a pool share it.
+        self._prechecks: dict[str, asyncio.Future[None]] = {}
+        # Set when an in-flight acquire()'s claim resolves or the batch stops, so watch events for
+        # other claims don't wake every waiting acquire().
+        self._acquire_waiters: dict[str, asyncio.Event] = {}
         self._claim_labels: dict[str, dict[str, str]] = {}
         self._claim_annotations: dict[str, dict[str, str]] = {}
         self._claim_lifecycle: dict[str, str] = {}
@@ -210,25 +221,7 @@ class AsyncSandboxBatch:
         """Create a batch: precheck, create its Lease, start the watch, then create claims in the background."""
         helper = client.k8s_helper
         timeout = batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
-        checked_templates: set[str] = set()
-        for group in args.groups:
-            warmpool = await helper.get_sandbox_warmpool(group.warmpool, namespace, _request_timeout=timeout)
-            if warmpool is None:
-                raise SandboxWarmPoolNotFoundError(
-                    f"SandboxWarmPool '{group.warmpool}' not found in namespace '{namespace}'"
-                )
-            template = batch_utils.warmpool_template_name(warmpool)
-            if template is None:
-                raise SandboxTemplateNotFoundError(
-                    f"SandboxWarmPool '{group.warmpool}' does not reference a SandboxTemplate"
-                )
-            if template in checked_templates:
-                continue
-            if await helper.get_sandbox_template(template, namespace, _request_timeout=timeout) is None:
-                raise SandboxTemplateNotFoundError(
-                    f"SandboxTemplate '{template}' not found in namespace '{namespace}'"
-                )
-            checked_templates.add(template)
+        await _precheck_pools(helper, [g.warmpool for g in args.groups], namespace)
 
         size = sum(g.size for g in args.groups)
         # One shutdownTime for the whole fill. Quorum can come as late as quorum_timeout after the
@@ -243,9 +236,7 @@ class AsyncSandboxBatch:
         lease_name = f"{BATCH_LEASE_NAME_PREFIX}{args.batch_id}"
         label_selector = f"{BATCH_ID_LABEL}={args.batch_id}"
         holder_identity = batch_utils.generate_holder_identity()
-        lease_labels, lease_annotations = batch_utils.batch_lease_metadata(
-            args.batch_id, args.lease_duration, args.work_budget, args.quorum_timeout
-        )
+        lease_labels, lease_annotations = batch_utils.batch_lease_metadata(args)
         # Read before renewTime is stamped, so this handle's expiry is never later than the one
         # other clients see.
         renewed_at = time.monotonic()
@@ -297,13 +288,14 @@ class AsyncSandboxBatch:
             lease=created,
             lease_renewed_at=renewed_at,
             quorum_timeout=args.quorum_timeout,
+            work_budget=args.work_budget,
         )
         handle._create_plan = deque(batch_utils.fill_create_plan(args.batch_id, args.groups))
         handle._create_interval = 1 / args.create_rps
+        handle._labels = {**args.labels, BATCH_ID_LABEL: args.batch_id}
         handle._claim_labels = {
             g.warmpool: {
-                **args.labels,
-                BATCH_ID_LABEL: args.batch_id,
+                **handle._labels,
                 BATCH_GROUP_LABEL: batch_utils.group_label_value(g.warmpool),
             }
             for g in args.groups
@@ -342,13 +334,11 @@ class AsyncSandboxBatch:
         if lease is None and not claim_items:
             raise BatchNotFoundError(f"batch '{batch_id}' not found in namespace '{namespace}'")
 
-        annotation = None
-        quorum_annotation = None
-        if lease is not None:
-            annotation = (lease.metadata.annotations or {}).get(BATCH_LEASE_DURATION_ANNOTATION)
-            quorum_annotation = (lease.metadata.annotations or {}).get(BATCH_QUORUM_TIMEOUT_ANNOTATION)
-        duration = batch_utils.parse_lease_duration_annotation(annotation)
-        quorum_timeout = batch_utils.parse_quorum_timeout_annotation(quorum_annotation)
+        settings = batch_utils.parse_lease_metadata(
+            lease.metadata.labels if lease is not None else None,
+            lease.metadata.annotations if lease is not None else None,
+        )
+        duration = settings.lease_duration
 
         # Read before renewTime is stamped, so this handle's expiry is never later than the one
         # other clients see.
@@ -372,7 +362,7 @@ class AsyncSandboxBatch:
             )
 
         groups = batch_state.reconstruct_groups(batch_id, claim_items)
-        state = batch_state.BatchState(batch_id, groups)
+        state = batch_state.BatchState(batch_id, groups, settings.next_ordinal)
         state.seed_from_claims(claim_items)
         state.count_missing_fill_as_unable()
 
@@ -404,9 +394,12 @@ class AsyncSandboxBatch:
             list_resource_version=list_rv,
             lease=written,
             lease_renewed_at=renewed_at,
-            quorum_timeout=quorum_timeout,
+            quorum_timeout=settings.quorum_timeout,
+            work_budget=settings.work_budget,
         )
-        handle._fill_deadline = time.monotonic() + quorum_timeout
+        handle._fill_deadline = time.monotonic() + settings.quorum_timeout
+        handle._create_interval = 1 / settings.create_rps
+        handle._labels = {**settings.labels, BATCH_ID_LABEL: batch_id}
         handle._attached = True
         handle._start()
         return handle
@@ -619,6 +612,195 @@ class AsyncSandboxBatch:
             if self._state.expire_fill():
                 self._changed.notify_all()
 
+    def _wake_acquire(self, claim_name: str) -> None:
+        """Wakes the ``acquire()`` waiting on ``claim_name``, if any. Requires ``_lock``."""
+        if (waiter := self._acquire_waiters.get(claim_name)) is not None:
+            waiter.set()
+
+    def _notify_all(self) -> None:
+        """Wakes every fill consumer and every waiting ``acquire()``. Requires ``_lock``."""
+        self._changed.notify_all()
+        for waiter in self._acquire_waiters.values():
+            waiter.set()
+
+    async def acquire(self, warmpool: str, timeout: float | None = None) -> Member:
+        """Adds a member from ``warmpool`` to the batch, waits until it is Ready, and returns it.
+
+        The pool can be any warm pool in the batch's namespace. A pool that isn't one of the batch's
+        groups is checked once per handle, like ``claim_batch`` checks its pools. The claim takes the
+        next unused ordinal and carries its pool's group label but no group annotations, so it is
+        never one of the initial claims. ``events()``, ``group_outcomes()``, ``wait_for_quorum()``
+        and ``release_not_ready()`` leave it alone, and ``release_group()`` on its pool releases it
+        with the pool's other members. Its ``shutdownTime`` is the
+        time of its create plus ``quorum_timeout`` plus ``work_budget`` plus 600 seconds, and its
+        create is retried and paced like the initial claims'.
+
+        If it raises, including on a cancellation, the member is dropped from ``members()`` and its
+        claim is deleted, unless the claim is already gone or its create was rejected. A failed delete is
+        retried by ``release_not_ready()`` and ``release()``. Once ``err()`` is set the claim is kept,
+        since the handle may no longer hold the batch's Lease, and ``release()`` deletes it. It never
+        creates a second claim, so call it again to try again. A member it returned that fails later
+        shows in ``members()`` like any other, and ``release_member`` frees it.
+
+        ``TerminalMemberError`` and ``BatchTimeoutError`` are both ``BatchError``, so
+        ``except BatchError`` handles every runtime failure. The other errors mean a bad argument
+        or a missing pool or template.
+
+        Args:
+            warmpool: The warm pool to claim the member from.
+            timeout: Seconds to wait for the member to be Ready. Defaults to the batch's
+                ``quorum_timeout``.
+
+        Raises:
+            ValueError: If ``timeout`` isn't a positive finite number.
+            SandboxWarmPoolNotFoundError: If the warm pool doesn't exist.
+            SandboxTemplateNotFoundError: If the warm pool's template doesn't exist, or it names none.
+            TerminalMemberError: If the create fails (the member is ``FAILED`` with reason
+                ``CreateFailed``), the member fails terminally, or someone else deletes its claim
+                (the member is ``LOST``) before it is Ready.
+            BatchTimeoutError: If the member isn't Ready within ``timeout``. A create or create retry
+                that ``create_rps`` pacing can't start within it isn't sent.
+            BatchError: If this handle has been detached or released, or ``err()`` is set, when
+                called or while waiting, or if ``release_member`` or ``release_group`` releases the
+                member before it is Ready.
+        """
+        wait = batch_utils.positive_number("timeout", timeout, self._quorum_timeout)
+        deadline = time.monotonic() + wait
+        await self._check_pool(warmpool, deadline, wait)
+        async with self._lock:
+            self._check_active()
+            if (error := self._state.error()) is not None:
+                raise BatchError(f"batch '{self.batch_id}' has stopped") from error
+            # A create paced past the deadline would only make a claim to delete on timeout.
+            if self._next_create_at >= deadline:
+                raise BatchTimeoutError(f"no create slot for warm pool '{warmpool}' within {wait:g}s")
+            claim_name = self._state.start_acquire(warmpool)
+            waiter = self._acquire_waiters[claim_name] = asyncio.Event()
+            slot = self._reserve_create_slot(time.monotonic())
+        # Whether a claim of the batch may exist under the name, so a failure deletes it.
+        may_exist = True
+        try:
+            # Once creating stops, the handle is detached or released, so _wait_acquired raises.
+            if not await self._wait_for_stop(slot - time.monotonic()):
+                may_exist = False
+                async with self._lock:
+                    # Like the fill, no create starts once err() is set, since nobody could keep the
+                    # claim alive.
+                    if (error := self._state.error()) is not None:
+                        raise BatchError(f"batch '{self.batch_id}' has stopped") from error
+                    # Raises if release_group() released the claim while it waited for its slot.
+                    self._state.acquired_member(claim_name)
+                may_exist = True
+                lifecycle = construct_sandbox_claim_lifecycle_spec(
+                    self._quorum_timeout + self._work_budget + batch_utils.BATCH_SHUTDOWN_MARGIN_SECONDS
+                )
+                try:
+                    await self._create_one(
+                        claim_name,
+                        warmpool,
+                        self._client._trace_context_annotations(),
+                        # The group label lets release_group() free it with the pool's other members.
+                        {**self._labels, BATCH_GROUP_LABEL: batch_utils.group_label_value(warmpool)},
+                        lifecycle,
+                        deadline,
+                    )
+                except BatchTimeoutError:
+                    raise
+                except Exception as e:
+                    # A create that ended in a transient error, such as a timeout or a 5xx, may have
+                    # been stored anyway, so its claim is still deleted.
+                    may_exist = _is_transient_error(e)
+                    raise TerminalMemberError(Member(
+                        claim_name=claim_name,
+                        warmpool=warmpool,
+                        state=MemberState.FAILED,
+                        reason=batch_state.CREATE_FAILED_REASON,
+                        message=_create_failure_message(e),
+                    )) from e
+            return await self._wait_acquired(claim_name, waiter, deadline, wait)
+        except BaseException:
+            await self._drop_acquired(claim_name, may_exist)
+            raise
+
+    async def _wait_acquired(
+        self, claim_name: str, waiter: asyncio.Event, deadline: float, wait: float
+    ) -> Member:
+        while True:
+            async with self._lock:
+                waiter.clear()
+                self._check_active()
+                member = self._state.acquired_member(claim_name)
+                if member is not None:
+                    self._acquire_waiters.pop(claim_name, None)
+                    return member
+                if (error := self._state.error()) is not None:
+                    raise BatchError(f"batch '{self.batch_id}' stopped while acquiring '{claim_name}'") from error
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise BatchTimeoutError(f"acquired member '{claim_name}' wasn't Ready within {wait:g}s")
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(waiter.wait(), remaining)
+
+    async def _check_pool(self, warmpool: str, deadline: float, wait: float) -> None:
+        """Checks a pool that isn't one of the batch's groups the first time ``acquire()`` uses it.
+        Concurrent first acquires of a pool share one check and its outcome. A check that fails
+        isn't remembered, so a later acquire checks the pool again.
+
+        Raises:
+            BatchTimeoutError: If another acquire's check of the pool doesn't finish by ``deadline``.
+        """
+        while True:
+            if warmpool in self._checked_pools:
+                return
+            check = self._prechecks.get(warmpool)
+            if check is None:
+                check = self._prechecks[warmpool] = asyncio.get_running_loop().create_future()
+                # A failed check that no acquire waits for isn't logged as never retrieved.
+                check.add_done_callback(lambda done: done.cancelled() or done.exception())
+                break
+            try:
+                await asyncio.wait_for(asyncio.shield(check), max(0.0, deadline - time.monotonic()))
+            except TimeoutError:
+                if not check.done():
+                    raise BatchTimeoutError(f"warm pool '{warmpool}' wasn't checked within {wait:g}s") from None
+                if check.cancelled():
+                    continue
+                # The check itself timed out, so this acquire raises the check's error.
+                check.result()
+            except asyncio.CancelledError:
+                task = asyncio.current_task()
+                if check.cancelled() and task is not None and not task.cancelling():
+                    # The acquire that ran the check was interrupted, so this one checks the pool itself.
+                    continue
+                raise
+            return
+        try:
+            await _precheck_pools(self._client.k8s_helper, [warmpool], self.namespace)
+        except BaseException as e:
+            del self._prechecks[warmpool]
+            if isinstance(e, Exception):
+                check.set_exception(e)
+            else:
+                check.cancel()
+            raise
+        self._checked_pools.add(warmpool)
+        del self._prechecks[warmpool]
+        check.set_result(None)
+
+    async def _drop_acquired(self, claim_name: str, may_exist: bool) -> None:
+        """Drops a claim ``acquire()`` didn't get Ready and deletes it. A failed delete is logged,
+        since the error ``acquire()`` raises matters more, and left for a later release call.
+        """
+        async with self._changed:
+            self._acquire_waiters.pop(claim_name, None)
+            needs_delete = self._state.drop_acquired(claim_name, may_exist)
+            self._changed.notify_all()
+        if needs_delete:
+            try:
+                await self._delete_claim(claim_name)
+            except Exception as e:
+                logger.warning(f"Batch '{self.batch_id}' failed to delete acquired claim '{claim_name}': {e}")
+
     async def release_member(self, member: Member) -> None:
         """Deletes one member's claim and drops the member from ``members()``.
 
@@ -638,6 +820,7 @@ class AsyncSandboxBatch:
         async with self._changed:
             self._check_active()
             needs_delete = self._state.release_member(member.claim_name)
+            self._wake_acquire(member.claim_name)
             self._changed.notify_all()
         await self._close_cached_connections("release_member", [member.claim_name])
         if needs_delete:
@@ -686,20 +869,22 @@ class AsyncSandboxBatch:
             raise errors[0]
 
     async def release_group(self, warmpool: str) -> None:
-        """Deletes every initial claim of one group, pending ones included, and drops its members
-        from ``members()``.
+        """Deletes every claim the batch holds from one pool, pending ones included, and drops their
+        members from ``members()``. That covers the group's initial claims and the members
+        ``acquire()`` added from the pool, and an ``acquire()`` still waiting on the pool raises
+        ``BatchError``.
 
         The group's creates not yet sent are skipped, and a create that lands afterwards is deleted.
-        Its members are never handed out afterwards and emit no ``MEMBER_LOST``. They count as
-        unable to become Ready, so releasing a group before a quorum consumer has decided makes it,
-        or the quorum, unreachable. Works with any consumer, typically on a group that
+        Its members are never handed out afterwards and emit no ``MEMBER_LOST``. The initial ones
+        count as unable to become Ready, so releasing a group before a quorum consumer has decided
+        makes it, or the quorum, unreachable. Works with any consumer, typically on a group that
         ``group_outcomes()`` yields with an error.
 
         Claims are deleted like ``release()`` deletes the batch's, with deletecollection rounds
         scoped to the group's label. If they fail, calling ``release_group`` again retries.
 
         Raises:
-            ValueError: If the batch has no group for ``warmpool``.
+            ValueError: If the batch has no group, member or ``acquire()`` in flight for ``warmpool``.
             BatchError: If this handle has been detached or released, once ``err()`` is set,
                 since the handle may no longer hold the batch's Lease, or if claims are still not
                 being deleted after the last round.
@@ -709,11 +894,11 @@ class AsyncSandboxBatch:
         """
         async with self._changed:
             self._check_active()
-            if all(group.warmpool != warmpool for group in self._state.groups):
-                raise ValueError(f"batch '{self.batch_id}' has no group for warm pool '{warmpool}'")
+            if not self._state.has_pool(warmpool):
+                raise ValueError(f"batch '{self.batch_id}' has no group or members for warm pool '{warmpool}'")
             self._drop_planned_creates(warmpool)
             names = self._state.release_group(warmpool)
-            self._changed.notify_all()
+            self._notify_all()
         await self._close_cached_connections("release_group", names)
         async with self._lifecycle_lock:
             await _delete_claims_in_rounds(
@@ -796,7 +981,7 @@ class AsyncSandboxBatch:
                 if self._lease_released:
                     raise BatchError(f"batch '{self.batch_id}' has been detached or is held by another handle")
                 self._detached = True
-                self._changed.notify_all()
+                self._notify_all()
                 # A failed release is retried by client cleanup as a release, not as an earlier detach.
                 self._detach_grace = None
 
@@ -899,7 +1084,7 @@ class AsyncSandboxBatch:
             if self._detach_done():
                 return
             self._detached = True
-            self._changed.notify_all()
+            self._notify_all()
             if grace is not None:
                 self._detach_grace = grace
             elif self._detach_grace is None:
@@ -907,6 +1092,8 @@ class AsyncSandboxBatch:
             # Another detach() call can change _detach_grace while this call writes the Lease, so every write
             # uses this copy.
             grace = self._detach_grace
+            # acquire() takes no ordinal once the handle is detached, so this is final.
+            next_ordinal = self._state.next_ordinal
 
         await self._stop_background_tasks()
         await self._close_cached_connections("detach")
@@ -928,6 +1115,10 @@ class AsyncSandboxBatch:
                     for attempt in range(2):
                         lease.spec.holder_identity = None
                         lease.spec.renew_time = batch_utils.lease_now()
+                        lease.metadata.annotations = {
+                            **(lease.metadata.annotations or {}),
+                            BATCH_NEXT_ORDINAL_ANNOTATION: str(next_ordinal),
+                        }
                         # Refresh the Lease so it doesn't expire immediately after we release it,
                         # giving other clients a chance to acquire it.
                         lease.spec.lease_duration_seconds = grace
@@ -978,7 +1169,7 @@ class AsyncSandboxBatch:
                     )
                     async with self._lock:
                         self._state.resync_from_list(items)
-                        self._changed.notify_all()
+                        self._notify_all()
                     relist = False
                 watch_started = time.monotonic()
                 got_event = False
@@ -994,11 +1185,15 @@ class AsyncSandboxBatch:
                         rv = seen_rv
                     if event_type == "BOOKMARK":
                         continue
+                    claim_name = (obj.get("metadata") or {}).get("name", "")
                     async with self._lock:
                         if event_type == "DELETED":
-                            self._state.mark_lost((obj.get("metadata") or {}).get("name", ""))
+                            if self._state.mark_lost(claim_name) is not None:
+                                self._wake_acquire(claim_name)
                         elif event_type in ("ADDED", "MODIFIED"):
-                            self._state.upsert_claim(obj)
+                            member = self._state.upsert_claim(obj)
+                            if member is not None and member.state is not MemberState.PENDING:
+                                self._wake_acquire(claim_name)
                         self._changed.notify_all()
                 if not got_event and time.monotonic() - watch_started < _SHORT_WATCH_SECONDS:
                     failures += 1
@@ -1024,7 +1219,7 @@ class AsyncSandboxBatch:
                 # by retrying, so we error then exit
                 async with self._lock:
                     self._state.note_error(e)
-                    self._changed.notify_all()
+                    self._notify_all()
                 return
             except Exception as e:
                 if _is_transport_error(e):
@@ -1035,7 +1230,7 @@ class AsyncSandboxBatch:
                 # Anything else is not known to be transient, so surface it via err().
                 async with self._lock:
                     self._state.note_error(e)
-                    self._changed.notify_all()
+                    self._notify_all()
                 return
 
     async def _renew_loop(self) -> None:
@@ -1127,7 +1322,7 @@ class AsyncSandboxBatch:
         async with self._lock:
             self._mark_renewal_degraded(error)
             self._state.note_error(error)
-            self._changed.notify_all()
+            self._notify_all()
         return False
 
     async def _write_renewal(self, lease: Any) -> tuple[float, V1Lease]:
@@ -1181,7 +1376,22 @@ class AsyncSandboxBatch:
                     self._state.record_skipped_create()
                     self._changed.notify_all()
                     continue
-            if await self._create_one(claim_name, group):
+            try:
+                created = await self._create_one(
+                    claim_name,
+                    group.warmpool,
+                    self._claim_annotations[group.warmpool],
+                    self._claim_labels[group.warmpool],
+                    self._claim_lifecycle,
+                )
+            except Exception as e:
+                async with self._lock:
+                    self._state.record_create_failure(
+                        claim_name, group.warmpool, _create_failure_message(e)
+                    )
+                    self._changed.notify_all()
+                continue
+            if created:
                 await self._delete_released_create(claim_name, group.warmpool)
 
     async def _delete_released_create(self, claim_name: str, warmpool: str) -> None:
@@ -1216,18 +1426,41 @@ class AsyncSandboxBatch:
         self._next_create_at = slot + self._create_interval
         return slot
 
-    async def _create_one(self, claim_name: str, group: BatchGroup) -> bool:
-        """Creates one claim, retrying transient errors. Returns whether the claim may exist."""
+    def _check_retry_deadline(self, claim_name: str, deadline: float | None, earliest: float, error: Exception) -> None:
+        """Raises ``BatchTimeoutError`` if a retry's pacing slot at or after ``earliest`` would be at or
+        after ``deadline``. The caller holds ``self._lock``.
+        """
+        # A retry paced past the deadline would only make a claim to delete on timeout.
+        if deadline is not None and max(earliest, self._next_create_at) >= deadline:
+            raise BatchTimeoutError(f"no create retry slot for claim '{claim_name}' before the deadline") from error
+
+    async def _create_one(
+        self,
+        claim_name: str,
+        warmpool: str,
+        annotations: dict[str, str],
+        labels: dict[str, str],
+        lifecycle: dict[str, str],
+        deadline: float | None = None,
+    ) -> bool:
+        """Creates one claim, retrying transient errors, with each retry taking a pacing slot.
+
+        Returns whether the claim may exist, which is ``False`` only if creation was stopped.
+
+        Raises:
+            BatchTimeoutError: If a retry's pacing slot is at or after ``deadline``.
+            Exception: The error the create failed with, once it isn't retried.
+        """
         attempt = 1
         while True:
             try:
                 await self._client.k8s_helper.create_sandbox_claim(
                     claim_name,
-                    group.warmpool,
+                    warmpool,
                     self.namespace,
-                    annotations=self._claim_annotations[group.warmpool],
-                    labels=self._claim_labels[group.warmpool],
-                    lifecycle=self._claim_lifecycle,
+                    annotations=annotations,
+                    labels=labels,
+                    lifecycle=lifecycle,
                     log_level=logging.DEBUG,
                     _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
                 )
@@ -1248,21 +1481,52 @@ class AsyncSandboxBatch:
                     # normal pacing slot. client-go retries the same way. The apiserver computes a Retry-After for a
                     # whole priority level, so a Retry-After moves the shared slot and every create waits for it.
                     retry_after = batch_utils.retry_after_seconds(e)
-                    if retry_after is None and await self._wait_for_stop(batch_utils.retry_delay(attempt, None)):
-                        return False
+                    if retry_after is None:
+                        backoff = batch_utils.retry_delay(attempt, None)
+                        async with self._lock:
+                            self._check_retry_deadline(claim_name, deadline, time.monotonic() + backoff, e)
+                        if await self._wait_for_stop(backoff):
+                            return False
                     async with self._lock:
-                        slot = self._reserve_create_slot(time.monotonic() + (retry_after or 0.0))
+                        earliest = time.monotonic() + (retry_after or 0.0)
+                        # Other creates keep taking slots during a backoff, so the create checks the deadline again.
+                        self._check_retry_deadline(claim_name, deadline, earliest, e)
+                        slot = self._reserve_create_slot(earliest)
                     if await self._wait_for_stop(slot - time.monotonic()):
                         return False
                     attempt += 1
                     continue
                 logger.debug(f"Batch '{self.batch_id}' failed to create claim '{claim_name}': {e}")
-                async with self._lock:
-                    self._state.record_create_failure(
-                        claim_name, group.warmpool, _create_failure_message(e)
-                    )
-                    self._changed.notify_all()
-                return False
+                raise
+
+
+async def _precheck_pools(helper: Any, warmpools: Iterable[str], namespace: str) -> None:
+    """Checks that each warm pool and the SandboxTemplate it references exist.
+
+    Raises:
+        SandboxWarmPoolNotFoundError: If a warm pool doesn't exist.
+        SandboxTemplateNotFoundError: If a warm pool's template doesn't exist, or it names none.
+    """
+    timeout = batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
+    checked_templates: set[str] = set()
+    for name in warmpools:
+        warmpool = await helper.get_sandbox_warmpool(name, namespace, _request_timeout=timeout)
+        if warmpool is None:
+            raise SandboxWarmPoolNotFoundError(
+                f"SandboxWarmPool '{name}' not found in namespace '{namespace}'"
+            )
+        template = batch_utils.warmpool_template_name(warmpool)
+        if template is None:
+            raise SandboxTemplateNotFoundError(
+                f"SandboxWarmPool '{name}' does not reference a SandboxTemplate"
+            )
+        if template in checked_templates:
+            continue
+        if await helper.get_sandbox_template(template, namespace, _request_timeout=timeout) is None:
+            raise SandboxTemplateNotFoundError(
+                f"SandboxTemplate '{template}' not found in namespace '{namespace}'"
+            )
+        checked_templates.add(template)
 
 
 async def _take_batch_lease(

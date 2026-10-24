@@ -1273,6 +1273,19 @@ class TestAsyncK8sHelperBatchMethods(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(client.ApiException):
             await self.helper.delete_batch_lease("batch-b1", "default")
 
+    async def test_lease_delete_at_a_resource_version_sends_a_precondition_and_counts_a_conflict_as_deleted(self):
+        coord = self.helper.coordination_v1_api
+        coord.delete_namespaced_lease = AsyncMock()
+
+        await self.helper.delete_batch_lease("batch-b1", "default", resource_version="11")
+        body = coord.delete_namespaced_lease.await_args.kwargs["body"]
+        self.assertEqual(body.preconditions.resource_version, "11")
+
+        coord.delete_namespaced_lease.side_effect = client.ApiException(status=409)
+        await self.helper.delete_batch_lease("batch-b1", "default", resource_version="11")
+        with self.assertRaises(client.ApiException):
+            await self.helper.delete_batch_lease("batch-b1", "default")
+
 
 if __name__ == "__main__":
     unittest.main()

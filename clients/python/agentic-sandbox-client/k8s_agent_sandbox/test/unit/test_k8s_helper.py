@@ -1359,6 +1359,22 @@ class TestK8sHelperBatchMethods(unittest.TestCase):
         with self.assertRaises(client.ApiException):
             helper.delete_batch_lease("batch-b1", "default")
 
+    def test_lease_delete_at_a_resource_version_sends_a_precondition_and_counts_a_conflict_as_deleted(
+        self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
+    ):
+        mock_coord = MagicMock()
+        mock_coord_cls.return_value = mock_coord
+        helper = K8sHelper()
+
+        helper.delete_batch_lease("batch-b1", "default", resource_version="11")
+        body = mock_coord.delete_namespaced_lease.call_args.kwargs["body"]
+        self.assertEqual(body.preconditions.resource_version, "11")
+
+        mock_coord.delete_namespaced_lease.side_effect = client.ApiException(status=409)
+        helper.delete_batch_lease("batch-b1", "default", resource_version="11")
+        with self.assertRaises(client.ApiException):
+            helper.delete_batch_lease("batch-b1", "default")
+
 
 if __name__ == '__main__':
     unittest.main()

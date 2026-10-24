@@ -633,20 +633,28 @@ class K8sHelper:
         )
 
     def delete_batch_lease(
-        self, name: str, namespace: str, _request_timeout: float | tuple[float, float] | None = None
+        self, name: str, namespace: str, _request_timeout: float | tuple[float, float] | None = None,
+        *, resource_version: str | None = None,
     ) -> None:
         """Deletes a batch Lease. A Lease that doesn't exist is treated as deleted.
 
         Args:
             _request_timeout: Optional timeout (seconds, or a ``(connect, read)``
                 pair) forwarded to the underlying urllib3 request.
+            resource_version: If provided, delete the Lease only at this resourceVersion. A Lease
+                someone has written since is left in place and also treated as deleted.
         """
+        delete_kwargs: dict[str, Any] = {}
+        if resource_version is not None:
+            delete_kwargs["body"] = client.V1DeleteOptions(
+                preconditions=client.V1Preconditions(resource_version=resource_version)
+            )
         try:
             self.coordination_v1_api.delete_namespaced_lease(
-                name, namespace, _request_timeout=_request_timeout
+                name, namespace, _request_timeout=_request_timeout, **delete_kwargs
             )
         except client.ApiException as e:
-            if e.status != 404:
+            if e.status != 404 and not (e.status == 409 and resource_version is not None):
                 raise
 
     def delete_sandbox_claims_by_label(

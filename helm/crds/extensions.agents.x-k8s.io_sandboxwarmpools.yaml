@@ -42,6 +42,26 @@ spec:
             type: object
           spec:
             properties:
+              claimDefaults:
+                properties:
+                  lifecycle:
+                    properties:
+                      shutdownPolicy:
+                        default: Retain
+                        enum:
+                        - Delete
+                        - DeleteForeground
+                        - Retain
+                        type: string
+                      shutdownTime:
+                        format: date-time
+                        type: string
+                      ttlSecondsAfterFinished:
+                        format: int32
+                        minimum: 0
+                        type: integer
+                    type: object
+                type: object
               replicas:
                 default: 1
                 format: int32

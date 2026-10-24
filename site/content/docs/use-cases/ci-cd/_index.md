@@ -17,10 +17,10 @@ While Agent Sandbox does not include dedicated CI/CD examples yet, the infrastru
 - **Isolated execution** — Each pipeline run can create its own sandbox, preventing test pollution and side effects between runs.
 - **Network control** — Use Kubernetes Network Policies to restrict what sandboxes can access, preventing untrusted code from reaching internal services.
 - **Disruption protection** — Protect sandbox pods from voluntary evictions (node drains, cluster upgrades) using PodDisruptionBudgets.
-- **Programmatic control** — The [Python client](/docs/python-client/) (`agentic-sandbox-client`) provides a high-level interface for creating, managing, and destroying sandboxes from scripts.
+- **Programmatic control** — The [Python client](/docs/python-client/) (`k8s-agent-sandbox`) provides a high-level interface for creating, managing, and destroying sandboxes from scripts.
 
 ## Related Infrastructure Guides
 
 - [Composing Sandbox with Network Policies](/docs/use-cases/examples/network-policies/) — Shows how to compose `Sandbox` with `NetworkPolicy`, `Ingress`, and `Service` resources using [KRO (Kubernetes Resource Orchestrator)](https://kro.run/docs/overview). Defines a higher-level `AgenticSandbox` CRD via a `ResourceGraphDefinition` that bundles these resources together. Also covers custom controller and Helm approaches.
 - [Manual PodDisruptionBudget Configuration](/docs/use-cases/examples/manual-pdb/) — Demonstrates one PDB per namespace that protects all claimed sandbox pods from voluntary eviction, plus an optional PDB that keeps a minimum number of idle warm pool pods available. Note: manual PDBs do not clean themselves up — coordinate with your team before deletion.
-- [Python Client](/docs/python-client/) — The `agentic-sandbox-client` SDK for programmatic sandbox lifecycle management via the Kubernetes API.
+- [Python Client](/docs/python-client/) — The `k8s-agent-sandbox` SDK for programmatic sandbox lifecycle management via the Kubernetes API.

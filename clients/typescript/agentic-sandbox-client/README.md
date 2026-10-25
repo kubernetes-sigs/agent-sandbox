@@ -134,6 +134,22 @@ A named claim belongs to the caller: a failed `createSandbox()` never deletes
 it, and `enableAutoCleanup()` only closes its handle. `deleteSandbox()` and
 `deleteAll()` still delete it.
 
+### Sandboxes without a claim
+
+Use `getSandboxByName()` to get a handle for a core `Sandbox` that you created
+yourself, without a SandboxClaim:
+
+```typescript
+const sandbox = await client.getSandboxByName("my-sandbox", "default");
+await sandbox.commands.run("node", ["--version"]);
+```
+
+It waits for the Sandbox to become Ready unless you pass `waitForReady: false`,
+and rejects with `SandboxNotFoundError` if the Sandbox does not exist. The
+handle's `claimName` is empty. The client does not track the handle, so
+`deleteAll()` and `enableAutoCleanup()` leave it alone, and `close()` only
+releases its connections. Delete the Sandbox yourself when you are done.
+
 ### Listing sandboxes
 
 With Kubernetes credentials configured and permission to list SandboxClaims, run
@@ -356,6 +372,7 @@ With the in-cluster modes, REST and gRPC travel in plaintext across the pod netw
 ### Differences from the Go and Python clients
 
 - `run()` takes an argv (`command`, `args`) mirroring sandboxd's `ProcessConfig`, plus `env` and `cwd`; the Go/Python clients take a single shell string that they wrap in `/bin/sh -c`.
+- `getSandboxByName()` attaches to a Sandbox without a SandboxClaim. The Go and Python clients only attach through a claim.
 - File paths are never recorded in tracing spans or logs (only counts/sizes/booleans are), and absolute paths / `..` segments are rejected by the client itself before any request is sent.
 - RuntimeClass (gVisor/Kata) is not observed or branched on anywhere in this layer; conformance on non-default runtimes is tracked separately and is not implied by this SDK's tests passing on a standard cluster.
 

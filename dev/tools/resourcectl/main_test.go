@@ -30,6 +30,17 @@ import (
 	"time"
 )
 
+// TestMain lets runGet's `exec.Command(os.Args[0], "heartbeat", ...)` execute
+// the real heartbeat CLI entrypoint inside the test binary at a fast interval.
+func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "heartbeat" {
+		heartbeatInterval = 20 * time.Millisecond
+		main()
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
 func TestHelperProcess(t *testing.T) {
 	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
 		return
@@ -311,8 +322,14 @@ func TestRunHeartbeatRefreshesLeasePeriodically(t *testing.T) {
 			return
 		}
 		updates++
-		// Fail the second refresh to prove one rejected update does not end the loop.
-		if updates == 2 {
+		// Simulate Boskos's informer cache not yet reflecting /acquire on the
+		// first refresh (401 owner mismatch with empty owner), plus a transient
+		// 500 on the second, to prove neither ends the heartbeat loop.
+		switch updates {
+		case 1:
+			http.Error(w, "Update failed: test-resource - busy (test-owner): owner mismatch request by test-owner, currently owned by ", http.StatusUnauthorized)
+			return
+		case 2:
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
@@ -333,9 +350,146 @@ func TestRunHeartbeatRefreshesLeasePeriodically(t *testing.T) {
 	if len(badRequests) > 0 {
 		t.Errorf("unexpected Boskos requests: %v", badRequests)
 	}
-	// Initial heartbeat plus roughly 25 ticks; only a lower bound is meaningful
+	// Roughly 25 ticks at a 20ms interval; only a lower bound is meaningful
 	// on a loaded CI machine.
 	if updates < 5 {
 		t.Errorf("got %d /update calls in 500ms at a 20ms interval, want at least 5", updates)
+	}
+}
+
+// TestRunGetRefreshesLeaseUntilCleanup exercises the full get -> detached
+// heartbeat subprocess -> cleanup lifecycle against a mock Boskos server,
+// including an initial 401 owner-mismatch response while Boskos's informer
+// cache catches up after /acquire.
+func TestRunGetRefreshesLeaseUntilCleanup(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("JOB_NAME", "test-job")
+	t.Setenv("BUILD_ID", "12345")
+	const wantOwner = "resourcectl-test-job-12345"
+	const wantResource = "test-project"
+
+	var mu sync.Mutex
+	var acquiredAt time.Time
+	var acquires, totalUpdates, okUpdates, releases int
+	var badRequests []string
+
+	mockBoskos := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		q := r.URL.Query()
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/acquire" &&
+			q.Get("type") == "gce-project" && q.Get("state") == "free" &&
+			q.Get("dest") == "busy" && q.Get("owner") == wantOwner:
+			acquires++
+			acquiredAt = time.Now()
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"name":%q}`, wantResource)
+
+		case r.Method == http.MethodPost && r.URL.Path == "/update" &&
+			q.Get("name") == wantResource && q.Get("state") == "busy" &&
+			q.Get("owner") == wantOwner:
+			totalUpdates++
+			// Real Boskos serves /update reads from a controller-runtime informer
+			// cache that briefly lags /acquire (< 20ms child tick interval here)
+			// and rejects immediate updates with 401 and an empty current owner.
+			if time.Since(acquiredAt) < 15*time.Millisecond {
+				http.Error(w, fmt.Sprintf("Update failed: %s - busy (%s): owner mismatch request by %s, currently owned by ", wantResource, wantOwner, wantOwner), http.StatusUnauthorized)
+				return
+			}
+			okUpdates++
+			w.WriteHeader(http.StatusOK)
+
+		case r.Method == http.MethodPost && r.URL.Path == "/release" &&
+			q.Get("name") == wantResource && q.Get("state") == "busy" &&
+			q.Get("dest") == "free" && q.Get("owner") == wantOwner:
+			releases++
+			w.WriteHeader(http.StatusOK)
+
+		default:
+			badRequests = append(badRequests, r.Method+" "+r.URL.String())
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(mockBoskos.Close)
+	t.Setenv("BOSKOS_HOST", mockBoskos.URL)
+
+	var heartbeatPID int
+	t.Cleanup(func() {
+		if heartbeatPID != 0 {
+			if p, err := os.FindProcess(heartbeatPID); err == nil {
+				_ = p.Kill()
+				_, _ = p.Wait()
+			}
+		}
+	})
+
+	ctx := context.Background()
+	if err := runGet(ctx, "gce-project", "project-main"); err != nil {
+		t.Fatalf("runGet failed: %v", err)
+	}
+
+	state, err := readState()
+	if err != nil {
+		t.Fatalf("readState failed: %v", err)
+	}
+	if len(state.BoskosResources) != 1 {
+		t.Fatalf("expected 1 resource in state, got %d: %+v", len(state.BoskosResources), state.BoskosResources)
+	}
+	got := state.BoskosResources[0]
+	heartbeatPID = got.HeartbeatPID
+	if got.Name != wantResource || got.Owner != wantOwner || got.Key != "project-main" || heartbeatPID == 0 {
+		t.Fatalf("unexpected persisted resource state: %+v", got)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		ok := okUpdates
+		total := totalUpdates
+		mu.Unlock()
+		if ok >= 3 {
+			break
+		}
+		if runtime.GOOS == "linux" && !isHeartbeatProcess(heartbeatPID, wantResource) {
+			t.Fatalf("heartbeat process (pid %d) exited before cleanup after %d /update attempt(s) (%d succeeded)", heartbeatPID, total, ok)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for >= 3 successful /update calls; got %d total (%d succeeded)", total, ok)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if runtime.GOOS == "linux" && !isHeartbeatProcess(heartbeatPID, wantResource) {
+		t.Fatalf("expected heartbeat process (pid %d) to still be running before cleanup", heartbeatPID)
+	}
+
+	if err := runCleanup(ctx); err != nil {
+		t.Fatalf("runCleanup failed: %v", err)
+	}
+	if p, err := os.FindProcess(heartbeatPID); err == nil {
+		_, _ = p.Wait()
+	}
+	heartbeatPID = 0
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(badRequests) > 0 {
+		t.Errorf("unexpected Boskos requests: %v", badRequests)
+	}
+	if acquires != 1 {
+		t.Errorf("got %d /acquire calls, want 1", acquires)
+	}
+	if releases != 1 {
+		t.Errorf("got %d /release calls, want 1", releases)
+	}
+
+	finalState, err := readState()
+	if err != nil {
+		t.Fatalf("readState after cleanup failed: %v", err)
+	}
+	if len(finalState.BoskosResources) != 0 {
+		t.Errorf("expected 0 resources after cleanup, got %+v", finalState.BoskosResources)
 	}
 }

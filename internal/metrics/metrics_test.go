@@ -17,6 +17,8 @@ package metrics
 
 import (
 	"context"
+	"encoding/hex"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -24,9 +26,13 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	collectortrace "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	"google.golang.org/grpc"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/agent-sandbox/internal/version"
 )
 
@@ -174,4 +180,79 @@ func TestStartSpanEndFuncEndsSpan(t *testing.T) {
 	spans := exp.GetSpans()
 	require.Len(t, spans, 1)
 	require.False(t, spans[0].EndTime.IsZero(), "end func must call span.End")
+}
+
+// fakeTraceServer is an in-process OTLP/gRPC receiver that records export requests.
+type fakeTraceServer struct {
+	collectortrace.UnimplementedTraceServiceServer
+	requests chan *collectortrace.ExportTraceServiceRequest
+}
+
+func (f *fakeTraceServer) Export(_ context.Context, req *collectortrace.ExportTraceServiceRequest) (*collectortrace.ExportTraceServiceResponse, error) {
+	f.requests <- req
+	return &collectortrace.ExportTraceServiceResponse{}, nil
+}
+
+func TestSetupOTelExportsSpansOverOTLP(t *testing.T) {
+	// No other test covers the real exporter path that --enable-tracing turns on, so a break in
+	// the OTLP wiring, the service name, or trace-context continuation would go unnoticed.
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	fake := &fakeTraceServer{requests: make(chan *collectortrace.ExportTraceServiceRequest, 4)}
+	srv := grpc.NewServer()
+	collectortrace.RegisterTraceServiceServer(srv, fake)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://"+lis.Addr().String())
+
+	// SetupOTel replaces the process-wide provider and propagator, so restore them afterwards.
+	prevProvider, prevPropagator := otel.GetTracerProvider(), otel.GetTextMapPropagator()
+	t.Cleanup(func() {
+		otel.SetTracerProvider(prevProvider)
+		otel.SetTextMapPropagator(prevPropagator)
+	})
+
+	inst, shutdown, err := SetupOTel(context.Background(), "test-service")
+	require.NoError(t, err)
+
+	const (
+		traceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+		spanID  = "00f067aa0ba902b7"
+	)
+	obj := &metav1.ObjectMeta{Annotations: map[string]string{
+		TraceContextAnnotation: `{"traceparent":"00-` + traceID + `-` + spanID + `-01"}`,
+	}}
+	ctx, end := inst.StartSpan(context.Background(), obj, "reconcile", map[string]string{"sandbox": "demo"})
+	require.Contains(t, inst.GetTraceContext(ctx), traceID)
+	end()
+	// Shutdown flushes the batch processor.
+	shutdown()
+
+	var req *collectortrace.ExportTraceServiceRequest
+	select {
+	case req = <-fake.requests:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for the OTLP export")
+	}
+
+	require.Len(t, req.ResourceSpans, 1)
+	rs := req.ResourceSpans[0]
+	var serviceName string
+	for _, kv := range rs.Resource.Attributes {
+		if kv.Key == "service.name" {
+			serviceName = kv.Value.GetStringValue()
+		}
+	}
+	require.Equal(t, "test-service", serviceName)
+
+	require.Len(t, rs.ScopeSpans, 1)
+	require.Len(t, rs.ScopeSpans[0].Spans, 1)
+	span := rs.ScopeSpans[0].Spans[0]
+	require.Equal(t, "reconcile", span.Name)
+	require.Equal(t, traceID, hex.EncodeToString(span.TraceId), "span must continue the annotated trace")
+	require.Equal(t, spanID, hex.EncodeToString(span.ParentSpanId))
+	require.Len(t, span.Attributes, 1)
+	require.Equal(t, "sandbox", span.Attributes[0].Key)
+	require.Equal(t, "demo", span.Attributes[0].Value.GetStringValue())
 }

@@ -204,7 +204,10 @@ func TestSetupOTelExportsSpansOverOTLP(t *testing.T) {
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://"+lis.Addr().String())
+	// The traces-specific variable wins over the generic one, so pin both to the listener.
+	endpoint := "http://" + lis.Addr().String()
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", endpoint)
 
 	// SetupOTel replaces the process-wide provider and propagator, so restore them afterwards.
 	prevProvider, prevPropagator := otel.GetTracerProvider(), otel.GetTextMapPropagator()

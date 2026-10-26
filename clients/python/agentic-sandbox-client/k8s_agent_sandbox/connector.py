@@ -824,6 +824,25 @@ class SandboxConnector:
                     self._incluster_transport_token = object()
             return base_url
 
+    def _release_sandbox_callbacks(self) -> None:
+        # The callbacks are bound methods of the handle. Keeping them once the handle
+        # is closed for good makes the handle and its connector a reference cycle, which
+        # holds the connector's sessions until the cyclic garbage collector happens to run.
+        # Hold the transport lock, so a request on another thread never sees a
+        # callback cleared between checking it and calling it.
+        with self._transport_lock:
+            self._get_pod_ip = None
+            self._get_pod_name = None
+            self._get_service_fqdn = None
+            strategy = self.strategy
+            if isinstance(strategy, SandboxdPodTunnelStrategy):
+                strategy._get_pod_name = None
+            elif isinstance(strategy, SandboxdInClusterStrategy):
+                strategy._get_pod_ip = None
+                strategy._get_service_fqdn = None
+            elif isinstance(strategy, InClusterConnectionStrategy):
+                strategy._get_pod_ip = None
+
     def close(self) -> None:
         with self._transport_lock:
             self._incluster_transport_token = object()
@@ -885,9 +904,12 @@ class SandboxConnector:
         disable_retries = kwargs.pop("_disable_retries", False)
         try:
             # Establish connection (re-establishes if closed/dead)
+            # Read the pod IP callback under the lock too, because close_connection() on
+            # another thread may clear it before this request resolves the pod IP.
             with self._transport_lock:
                 base_url = self.connect()
                 transport_token = self._incluster_transport_token
+                get_pod_ip = self._get_pod_ip
 
             # Verify if the connection is active before sending the request
             self.strategy.verify_connection()
@@ -912,10 +934,10 @@ class SandboxConnector:
                 timeout_header = _router_timeout_header_value(kwargs.get("timeout"))
                 if timeout_header is not None:
                     headers["X-Sandbox-Timeout"] = timeout_header
-                if self._get_pod_ip and not self._pod_ip_auth_failed:
+                if get_pod_ip and not self._pod_ip_auth_failed:
                     if not self._pod_ip_resolved:
                         try:
-                            pod_ip = self._get_pod_ip()
+                            pod_ip = get_pod_ip()
                             if pod_ip:
                                 self._pod_ip = pod_ip
                                 self._pod_ip_resolved = True

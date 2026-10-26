@@ -593,6 +593,19 @@ class AsyncSandboxConnector:
                     self.grpc_target = None
                     self._sandboxd_strategy.invalidate_service_fqdn()
 
+    def _release_sandbox_callbacks(self) -> None:
+        # The callbacks are bound methods of the handle. Keeping them once the handle
+        # is closed for good makes the handle and its connector a reference cycle, which
+        # holds the connector's sessions until the cyclic garbage collector happens to run.
+        self._get_pod_ip = None
+        self._get_service_fqdn = None
+        strategy = self._sandboxd_strategy
+        if isinstance(strategy, AsyncSandboxdPodTunnelStrategy):
+            strategy._get_pod_name = None
+        elif isinstance(strategy, AsyncSandboxdInClusterStrategy):
+            strategy._get_pod_ip = None
+            strategy._get_service_fqdn = None
+
     async def close(self) -> None:
         """Close HTTP, gRPC, and port-forward resources owned by the connector."""
         async with self._lifecycle_lock:
@@ -633,6 +646,7 @@ class AsyncSandboxConnector:
                     self._pod_ip = None
                 except BaseException as exc:
                     errors.append(exc)
+                self._release_sandbox_callbacks()
             if errors:
                 # Cancellation must remain observable even when an earlier
                 # cleanup operation raised a regular exception.

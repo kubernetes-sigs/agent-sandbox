@@ -771,12 +771,8 @@ func (r *SandboxClaimReconciler) updateStatus(ctx context.Context, oldStatus *ex
 				return true, nil
 			}
 			if retryErr != nil {
-				logger.V(4).Info("Authoritative status patch retry failed; awaiting converged watch event",
-					"name", claim.Name,
-					"namespace", claim.Namespace,
-					"staleResourceVersion", oldClaim.ResourceVersion,
-					"error", retryErr)
-				return false, nil
+				logger.Error(retryErr, "Failed to retry sandboxclaim status patch on fresh base")
+				return false, retryErr
 			}
 			if authoritative {
 				return true, nil
@@ -862,7 +858,7 @@ func (r *SandboxClaimReconciler) retryStatusPatchOnFreshBase(
 	if err := reader.Get(ctx, key, fresh); err != nil {
 		return false, err
 	}
-	if fresh.UID != claim.UID {
+	if fresh.UID != claim.UID || fresh.Generation != claim.Generation {
 		return false, nil
 	}
 
@@ -877,7 +873,7 @@ func (r *SandboxClaimReconciler) retryStatusPatchOnFreshBase(
 	// already Ready=True committed by an earlier pass), adopt the fresh object
 	// and return false so callers do not re-record transition metrics.
 	if isClaimStatusSatisfied(oldStatus, &fresh.Status, desiredStatus) {
-		fresh.DeepCopyInto(claim)
+		adoptFreshClaim(claim, fresh)
 		return false, nil
 	}
 
@@ -888,7 +884,19 @@ func (r *SandboxClaimReconciler) retryStatusPatchOnFreshBase(
 	}
 
 	oldFresh := fresh.DeepCopy()
-	fresh.Status = *desiredStatus
+	fresh.Status.SandboxStatus = desiredStatus.SandboxStatus
+	fresh.Status.Conditions = slices.DeleteFunc(fresh.Status.Conditions, func(c metav1.Condition) bool {
+		return meta.FindStatusCondition(desiredStatus.Conditions, c.Type) == nil
+	})
+	for _, cond := range desiredStatus.Conditions {
+		meta.SetStatusCondition(&fresh.Status.Conditions, cond)
+	}
+	slices.SortFunc(fresh.Status.Conditions, func(a, b metav1.Condition) int {
+		if a.Type < b.Type {
+			return -1
+		}
+		return 1
+	})
 	patch := client.MergeFromWithOptions(oldFresh, client.MergeFromWithOptimisticLock{})
 	if err := r.Status().Patch(ctx, fresh, patch); err != nil {
 		if k8errors.IsConflict(err) {
@@ -897,8 +905,28 @@ func (r *SandboxClaimReconciler) retryStatusPatchOnFreshBase(
 		return false, err
 	}
 	oldFresh.Status.DeepCopyInto(oldStatus)
-	fresh.DeepCopyInto(claim)
+	adoptFreshClaim(claim, fresh)
 	return true, nil
+}
+
+// adoptFreshClaim copies fresh into claim while preserving any in-memory-only
+// observability annotations stamped when DisableObservabilityAnnotations is enabled.
+func adoptFreshClaim(claim, fresh *extensionsv1beta1.SandboxClaim) {
+	obsTime := claim.Annotations[asmetrics.ObservabilityAnnotation]
+	traceCtx := claim.Annotations[asmetrics.TraceContextAnnotation]
+	fresh.DeepCopyInto(claim)
+	if obsTime != "" && claim.Annotations[asmetrics.ObservabilityAnnotation] == "" {
+		if claim.Annotations == nil {
+			claim.Annotations = make(map[string]string)
+		}
+		claim.Annotations[asmetrics.ObservabilityAnnotation] = obsTime
+	}
+	if traceCtx != "" && claim.Annotations[asmetrics.TraceContextAnnotation] == "" {
+		if claim.Annotations == nil {
+			claim.Annotations = make(map[string]string)
+		}
+		claim.Annotations[asmetrics.TraceContextAnnotation] = traceCtx
+	}
 }
 
 func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.SandboxClaim, sandbox *v1beta1.Sandbox, err error, isClaimExpired bool) metav1.Condition {

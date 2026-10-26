@@ -28,7 +28,8 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "k8s-agent-sandbox",
+    # 1.0.6 adds the api_client parameter that Cluster passes.
+    "k8s-agent-sandbox>=1.0.6",
     "kubernetes",
     "pydantic>=2",
 ]

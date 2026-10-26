@@ -29,11 +29,14 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/gorilla/websocket"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"k8s.io/apimachinery/pkg/types"
 
 	"sigs.k8s.io/agent-sandbox/sandbox-router/authz"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/cache"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/observability"
 )
 
 // echoUpgrader is a permissive WebSocket upgrader for tests — origin
@@ -123,6 +126,44 @@ func TestIntegration_WebSocketUpgradeRoundTrips(t *testing.T) {
 		}
 		if string(got) != msg {
 			t.Fatalf("echo: got %q want %q", got, msg)
+		}
+	}
+}
+
+// TestIntegration_WebSocketUpgradeWithMetrics is the regression test for
+// upgrades returning 502 once Metrics is set, as cmd/main.go always does.
+// It also checks that upgraded traffic is counted in both directions.
+func TestIntegration_WebSocketUpgradeWithMetrics(t *testing.T) {
+	backend := startEchoBackend(t)
+	defer backend.Close()
+
+	cfg := config.Defaults()
+	cfg.AllowLoopbackPodIP = true // httptest binds to 127.0.0.1
+	metrics := observability.NewMetrics(prometheus.NewRegistry())
+	router := httptest.NewServer(NewHandler(Options{
+		Config:  &cfg,
+		Metrics: metrics,
+		Logger:  logr.Discard(),
+	}))
+	defer router.Close()
+
+	conn := dialThroughRouter(t, router.URL, backend.URL)
+	defer conn.Close()
+
+	if err := conn.WriteMessage(websocket.TextMessage, []byte("hello")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	// NewHandler alone does not attach the namespace label, so the bytes land under "-".
+	for name, counter := range map[string]prometheus.Counter{
+		"upstream_rx_bytes_total": metrics.UpstreamRxBytesTotal.WithLabelValues("-"),
+		"upstream_tx_bytes_total": metrics.UpstreamTxBytesTotal.WithLabelValues("-"),
+	} {
+		if testutil.ToFloat64(counter) == 0 {
+			t.Errorf("%s: want upgraded bytes counted, got 0", name)
 		}
 	}
 }

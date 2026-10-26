@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -33,8 +34,10 @@ import (
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	"sigs.k8s.io/yaml"
 
 	sandboxd "sigs.k8s.io/agent-sandbox/packages/sandboxd/pkg/server"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/authz"
@@ -42,6 +45,40 @@ import (
 	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/proxy"
 )
+
+func TestDefaultRouterGRPCEgress(t *testing.T) {
+	for _, path := range []string{
+		"../../sandbox-router/deploy/networkpolicy.yaml",
+		"../../olm/config/sandbox-router/networkpolicy.yaml",
+	} {
+		t.Run(path, func(t *testing.T) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var policy networkingv1.NetworkPolicy
+			if err := yaml.Unmarshal(data, &policy); err != nil {
+				t.Fatal(err)
+			}
+			wantPeers := []networkingv1.NetworkPolicyPeer{{NamespaceSelector: &metav1.LabelSelector{}}}
+			found := false
+			for _, rule := range policy.Spec.Egress {
+				for _, port := range rule.Ports {
+					if port.Port == nil || port.Port.IntValue() != 9090 || (port.Protocol != nil && *port.Protocol != corev1.ProtocolTCP) {
+						continue
+					}
+					found = true
+					if !reflect.DeepEqual(rule.To, wantPeers) {
+						t.Errorf("default gRPC egress must allow tenant namespaces without demo Pod labels; got peers: %+v", rule.To)
+					}
+				}
+			}
+			if !found {
+				t.Fatal("default router policy has no TCP 9090 egress rule")
+			}
+		})
+	}
+}
 
 func TestExampleThroughRouter(t *testing.T) {
 	daemon, err := sandboxd.New(sandboxd.Options{RootDir: t.TempDir(), Log: logr.Discard()})

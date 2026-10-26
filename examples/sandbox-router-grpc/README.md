@@ -182,12 +182,17 @@ not silently count as a pass.
 
 ## Network policy and verification
 
-The existing [router policy](../../sandbox-router/deploy/networkpolicy.yaml) keeps
-legacy TCP 8888 and adds TCP 9090 only to labelled sandboxd Pods in
-`grpc-router-demo`. Adjust its namespace and router Pod selector when applying it
-to this separate deployment. Preserve DNS, required apiserver access for
-cache/TokenReview, and telemetry egress. Neither TLS nor a YAML file proves tenant
-isolation: use an enforcing CNI and validate allowed **and** forbidden destinations.
+The [default router policy](../../sandbox-router/deploy/networkpolicy.yaml) allows
+legacy TCP 8888 and sandboxd gRPC TCP 9090 across namespaces; production deployments
+should tighten its selectors to their permitted tenant range.
+
+`workload.yaml` instead includes an egress-only policy selecting this demo's router.
+It permits DNS to `kube-system` and TCP 9090 only to labelled sandboxd Pods in
+`grpc-router-demo`. The demo uses DNS discovery and local scoped-token validation,
+so it needs no apiserver egress. Add the required destinations if enabling the
+Pod-IP cache, TokenReview or telemetry. The policy does not restrict ingress or
+other Pods. Neither TLS nor a YAML file proves tenant isolation: use an enforcing
+CNI and validate allowed **and** forbidden destinations.
 Default kind networking does not demonstrate enforcement. Kata and gVisor are not
 validated by this ordinary-container example.
 

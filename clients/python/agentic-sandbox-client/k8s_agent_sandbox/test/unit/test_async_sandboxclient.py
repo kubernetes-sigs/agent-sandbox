@@ -296,13 +296,28 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         """Constructing without cleanup= should default to True and register the hook."""
         with patch("k8s_agent_sandbox.async_sandbox_client.atexit") as mock_atexit:
             client = AsyncSandboxClient(connection_config=self.config)
-            mock_atexit.register.assert_called_once_with(client._atexit_cleanup)
+            self._assert_registered_exit_hook(mock_atexit, client, api_client=None)
 
     def test_cleanup_true_registers_atexit(self):
-        """cleanup=True should register the _atexit_cleanup method as an atexit handler."""
+        """cleanup=True registers the static _atexit_cleanup with the client's registry, not the client."""
+        api_client = MagicMock(name="ApiClient")
         with patch("k8s_agent_sandbox.async_sandbox_client.atexit") as mock_atexit:
-            client = AsyncSandboxClient(connection_config=self.config, cleanup=True)
-            mock_atexit.register.assert_called_once_with(client._atexit_cleanup)
+            client = AsyncSandboxClient(connection_config=self.config, cleanup=True, api_client=api_client)
+            self._assert_registered_exit_hook(mock_atexit, client, api_client=api_client)
+
+    def _assert_registered_exit_hook(self, mock_atexit, client, api_client):
+        mock_atexit.register.assert_called_once()
+        hook = mock_atexit.register.call_args.args[0]
+        self.assertIs(hook.func, AsyncSandboxClient._atexit_cleanup)
+        self.assertIs(hook.args[0], client._active_connection_sandboxes)
+        self.assertIs(hook.args[1], client._explicit_claims)
+        self.assertIs(hook.args[2], api_client)
+
+    def _exit_hook_for(self, api_client):
+        """Returns a client with cleanup on and the exit hook it registered."""
+        with patch("k8s_agent_sandbox.async_sandbox_client.atexit") as mock_atexit:
+            client = AsyncSandboxClient(connection_config=self.config, api_client=api_client)
+        return client, mock_atexit.register.call_args.args[0]
 
     def test_cleanup_false_does_not_register_atexit(self):
         """cleanup=False should opt out and not register any atexit handler."""
@@ -317,7 +332,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         second_sandbox = MagicMock()
         second_sandbox.close_connection = AsyncMock()
         second_sandbox._close_for_atexit = MagicMock()
-        self.client._active_connection_sandboxes = {
+        registry = {
             ("default", "claim-abc"): first_sandbox,
             ("other-ns", "claim-xyz"): second_sandbox,
         }
@@ -325,7 +340,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         mock_helper_instance.delete_sandbox_claim = MagicMock()
 
         with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper", return_value=mock_helper_instance):
-            self.client._atexit_cleanup()
+            AsyncSandboxClient._atexit_cleanup(registry, set(), None)
 
         mock_helper_instance.delete_sandbox_claim.assert_any_call(
             "claim-abc", "default", _request_timeout=_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS
@@ -343,7 +358,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         sandbox = MagicMock()
         sandbox.close_connection = AsyncMock()
         sandbox._close_for_atexit = MagicMock()
-        self.client._active_connection_sandboxes = {
+        registry = {
             ("default", "claim-abc"): sandbox,
         }
         mock_helper_instance = MagicMock()
@@ -353,7 +368,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             "k8s_agent_sandbox.async_sandbox_client.K8sHelper",
             return_value=mock_helper_instance,
         ):
-            self.client._atexit_cleanup()
+            AsyncSandboxClient._atexit_cleanup(registry, set(), None)
 
         sandbox._close_for_atexit.assert_called_once_with()
         sandbox.close_connection.assert_not_awaited()
@@ -366,12 +381,8 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         injected_api_client.configuration = injected_configuration
         injected_api_client.default_headers = {"Impersonate-User": "tenant-a"}
         injected_api_client.cookie = "session=abc"
-        client = AsyncSandboxClient(
-            connection_config=self.config,
-            cleanup=False,
-            api_client=injected_api_client,
-        )
-        client._active_connection_sandboxes = {("tenant-ns", "claim-abc"): MagicMock()}
+        client, exit_hook = self._exit_hook_for(injected_api_client)
+        client._active_connection_sandboxes[("tenant-ns", "claim-abc")] = MagicMock()
         mock_helper_instance = MagicMock()
         mock_helper_instance.delete_sandbox_claim = MagicMock()
 
@@ -379,7 +390,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             "k8s_agent_sandbox.async_sandbox_client.K8sHelper",
             return_value=mock_helper_instance,
         ) as MockHelper:
-            client._atexit_cleanup()
+            exit_hook()
 
         MockHelper.assert_called_once()
         atexit_api_client = MockHelper.call_args.kwargs["api_client"]
@@ -395,12 +406,8 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         injected_api_client.configuration = async_client.Configuration(host="https://tenant-a.example.com")
         injected_api_client.default_headers = {}
         injected_api_client.cookie = None
-        client = AsyncSandboxClient(
-            connection_config=self.config,
-            cleanup=False,
-            api_client=injected_api_client,
-        )
-        client._active_connection_sandboxes = {("tenant-ns", "claim-abc"): MagicMock()}
+        client, exit_hook = self._exit_hook_for(injected_api_client)
+        client._active_connection_sandboxes[("tenant-ns", "claim-abc")] = MagicMock()
         mock_helper_instance = MagicMock()
 
         with patch(
@@ -410,7 +417,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             "k8s_agent_sandbox.async_sandbox_client.tempfile.TemporaryDirectory",
             side_effect=OSError("no usable temp dir"),
         ) as mock_tmpdir:
-            client._atexit_cleanup()
+            exit_hook()
 
         mock_tmpdir.assert_not_called()
         self.assertIsNone(MockHelper.call_args.kwargs["kube_config_temp_dir"])
@@ -424,12 +431,8 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         injected_api_client.configuration = injected_configuration
         injected_api_client.default_headers = {"Authorization": "Bearer old-token"}
         injected_api_client.cookie = "session=old"
-        client = AsyncSandboxClient(
-            connection_config=self.config,
-            cleanup=False,
-            api_client=injected_api_client,
-        )
-        client._active_connection_sandboxes = {("tenant-ns", "claim-abc"): MagicMock()}
+        client, exit_hook = self._exit_hook_for(injected_api_client)
+        client._active_connection_sandboxes[("tenant-ns", "claim-abc")] = MagicMock()
         mock_helper_instance = MagicMock()
         mock_helper_instance.delete_sandbox_claim = MagicMock()
 
@@ -442,7 +445,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             "k8s_agent_sandbox.async_sandbox_client.K8sHelper",
             return_value=mock_helper_instance,
         ) as MockHelper:
-            client._atexit_cleanup()
+            exit_hook()
 
         atexit_api_client = MockHelper.call_args.kwargs["api_client"]
         self.assertEqual(atexit_api_client.configuration.host, "https://refreshed.example.com")
@@ -463,12 +466,8 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         injected_api_client.configuration = injected_configuration
         injected_api_client.default_headers = {}
         injected_api_client.cookie = None
-        client = AsyncSandboxClient(
-            connection_config=self.config,
-            cleanup=False,
-            api_client=injected_api_client,
-        )
-        client._active_connection_sandboxes = {("tenant-ns", "claim-abc"): MagicMock()}
+        client, exit_hook = self._exit_hook_for(injected_api_client)
+        client._active_connection_sandboxes[("tenant-ns", "claim-abc")] = MagicMock()
         mock_helper_instance = MagicMock()
         mock_helper_instance.delete_sandbox_claim = MagicMock()
 
@@ -478,7 +477,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
                 "k8s_agent_sandbox.async_sandbox_client.K8sHelper",
                 return_value=mock_helper_instance,
             ) as MockHelper:
-                client._atexit_cleanup()
+                exit_hook()
 
         self.assertFalse(
             any("was never awaited" in str(w.message) for w in caught),
@@ -499,15 +498,11 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         injected_api_client.configuration = injected_configuration
         injected_api_client.default_headers = {}
         injected_api_client.cookie = None
-        client = AsyncSandboxClient(
-            connection_config=self.config,
-            cleanup=False,
-            api_client=injected_api_client,
-        )
-        client._active_connection_sandboxes = {("tenant-ns", "claim-abc"): MagicMock()}
+        client, exit_hook = self._exit_hook_for(injected_api_client)
+        client._active_connection_sandboxes[("tenant-ns", "claim-abc")] = MagicMock()
 
         with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper") as MockHelper:
-            client._atexit_cleanup()
+            exit_hook()
 
         atexit_configuration = MockHelper.call_args.kwargs["api_client"].configuration
         self.assertEqual(atexit_configuration.auth_settings()["BearerToken"]["value"], "Bearer live-token")
@@ -560,33 +555,32 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(explicit.proxy, "http://explicit-proxy:8080")
 
     def test_atexit_cleanup_skips_when_no_sandboxes(self):
-        self.client._active_connection_sandboxes = {}
         with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper") as MockHelper:
-            self.client._atexit_cleanup()
+            AsyncSandboxClient._atexit_cleanup({}, set(), None)
             MockHelper.assert_not_called()
 
     def test_atexit_cleanup_suppresses_errors(self):
         sandbox = MagicMock()
         sandbox.close_connection = AsyncMock()
         sandbox._close_for_atexit = MagicMock()
-        self.client._active_connection_sandboxes = {("default", "claim-abc"): sandbox}
+        registry = {("default", "claim-abc"): sandbox}
         mock_helper_instance = MagicMock()
         mock_helper_instance.delete_sandbox_claim = MagicMock(side_effect=Exception("network error"))
 
         with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper", return_value=mock_helper_instance):
             with patch("k8s_agent_sandbox.async_sandbox_client.sys.stderr") as mock_stderr:
                 # Should not raise
-                self.client._atexit_cleanup()
+                AsyncSandboxClient._atexit_cleanup(registry, set(), None)
                 # Should have printed a warning
                 mock_stderr.write.assert_called()
 
     def test_atexit_cleanup_suppresses_helper_construction_errors(self):
-        self.client._active_connection_sandboxes = {("default", "claim-abc"): MagicMock()}
+        registry = {("default", "claim-abc"): MagicMock()}
 
         with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper", side_effect=Exception("no kubeconfig")):
             with patch("k8s_agent_sandbox.async_sandbox_client.sys.stderr") as mock_stderr:
                 # Should not raise
-                self.client._atexit_cleanup()
+                AsyncSandboxClient._atexit_cleanup(registry, set(), None)
                 # Should have printed a warning
                 mock_stderr.write.assert_called()
 
@@ -597,11 +591,11 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         best-effort."""
         mock_sandboxes = MagicMock()
         mock_sandboxes.keys.side_effect = RuntimeError("dictionary changed size during iteration")
-        self.client._active_connection_sandboxes = mock_sandboxes
+        registry = mock_sandboxes
 
         with patch("k8s_agent_sandbox.async_sandbox_client.sys.stderr") as mock_stderr:
             # Should not raise
-            self.client._atexit_cleanup()
+            AsyncSandboxClient._atexit_cleanup(registry, set(), None)
             # Should have printed a warning
             mock_stderr.write.assert_called()
 
@@ -2172,6 +2166,39 @@ async def test_tracked_handle_does_not_keep_its_client_alive():
     finally:
         gc.enable()
         await sandbox.close_connection()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tracked", [False, True], ids=["registry-empty", "registry-tracking"])
+async def test_dropped_client_is_freed_and_its_exit_hook_still_cleans_up(tracked):
+    with patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper"), \
+            patch("k8s_agent_sandbox.async_sandbox_client.atexit") as mock_atexit:
+        client = AsyncSandboxClient(connection_config=SandboxDirectConnectionConfig(api_url="http://sandbox.invalid"))
+    exit_hook = mock_atexit.register.call_args.args[0]
+    client.sandbox_class = AsyncSandbox
+    client.k8s_helper.wait_for_claim_ready = AsyncMock(return_value="sandbox-id")
+    client.k8s_helper.close = AsyncMock()
+    claim = {"metadata": {"uid": "uid-kept", "resourceVersion": "1"}, "spec": {"warmPoolRef": {"name": "pool"}}}
+    with patch.object(client, "_create_claim", new_callable=AsyncMock, return_value=claim):
+        generated = await client.create_sandbox("pool", "ns")
+        explicit = await client.create_sandbox("pool", "ns", claim_name="kept")
+    generated_name = generated.claim_name
+    if not tracked:
+        await client.close()
+    # With the collector off, only reference counting can free the client.
+    gc.disable()
+    try:
+        client_ref = weakref.ref(client)
+        del client
+        assert client_ref() is None
+    finally:
+        gc.enable()
+    with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper") as MockHelper:
+        exit_hook()
+    deleted = [c.args[:2] for c in MockHelper.return_value.delete_sandbox_claim.call_args_list]
+    assert deleted == ([(generated_name, "ns")] if tracked else [])
+    assert not generated.is_active
+    assert not explicit.is_active
 
 
 if __name__ == "__main__":

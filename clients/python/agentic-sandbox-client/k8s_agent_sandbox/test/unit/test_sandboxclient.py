@@ -26,6 +26,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from unittest.mock import MagicMock, patch, ANY
 
+import pytest
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -1005,6 +1006,43 @@ def test_tracked_handle_does_not_keep_its_client_alive():
     finally:
         gc.enable()
         sandbox.close_connection()
+
+
+@pytest.mark.parametrize("tracked", [False, True], ids=["registry-empty", "registry-tracking"])
+def test_dropped_client_is_freed_and_its_exit_hook_still_cleans_up(tracked):
+    with patch('k8s_agent_sandbox.sandbox_client.K8sHelper'), \
+            patch('k8s_agent_sandbox.sandbox_client.atexit') as mock_atexit:
+        client = SandboxClient(
+            connection_config=SandboxDirectConnectionConfig(api_url="http://sandbox.invalid"), cleanup=True
+        )
+    exit_hook = mock_atexit.register.call_args.args[0]
+    client.sandbox_class = Sandbox
+    helper = client.k8s_helper
+    helper.wait_for_claim_ready.return_value = "sandbox-id"
+    claim = {"metadata": {"uid": "uid-kept", "resourceVersion": "1"}, "spec": {"warmPoolRef": {"name": "pool"}}}
+    with patch.object(client, '_create_claim', return_value=claim):
+        generated = client.create_sandbox("pool", "ns")
+        explicit = client.create_sandbox("pool", "ns", claim_name="kept")
+    generated_name = generated.claim_name
+    if not tracked:
+        generated.terminate()
+        explicit.terminate()
+    helper.delete_sandbox_claim.reset_mock()
+    # With the collector off, only reference counting can free the client.
+    gc.disable()
+    try:
+        client_ref = weakref.ref(client)
+        del client
+        assert client_ref() is None
+    finally:
+        gc.enable()
+    exit_hook()
+    if tracked:
+        helper.delete_sandbox_claim.assert_called_once_with(generated_name, "ns")
+    else:
+        helper.delete_sandbox_claim.assert_not_called()
+    assert not generated.is_active
+    assert not explicit.is_active
 
 
 if __name__ == '__main__':

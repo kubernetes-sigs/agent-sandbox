@@ -20,6 +20,7 @@ import pytest
 from agent_sandbox_rl import FleetConfig, FleetOvercommitError, SandboxFleet, SandboxHandle, Task, sizing
 from agent_sandbox_rl.config import run_namespace
 from agent_sandbox_rl.exceptions import FleetError
+from agent_sandbox_rl.lookahead import LookaheadWarmer
 from agent_sandbox_rl.testing import FakeFleet, FakeHandle, FakeSandboxGone
 
 
@@ -239,3 +240,63 @@ def test_snapshot_calls_on_a_released_handle_fail_and_leave_the_slot_count_alone
   with pytest.raises(FakeSandboxGone):
     g.resume(h)
   assert g._claims_reserved == 0 and g.acquire(g.tasks[0])
+
+
+def test_exec_targets_a_container_and_a_session_is_bound_to_one():
+  f = FakeFleet(FleetConfig())
+  f.load_tasks(["img:a"])
+  f.setup()
+  h = f.acquire(f.tasks[0])
+  h.exec("pytest")                                           # the runtime container by default
+  h.exec("ls", container="grader")                           # a per-call target
+  h.target_container = "grader"
+  h.exec("cat x")                                            # the handle's target
+  assert h.commands == ["pytest", "ls", "cat x"]
+  assert h.exec_calls == [("pytest", "agent-runtime"), ("ls", "grader"), ("cat x", "grader")]
+  s = h.open_session(container="agent-runtime")
+  assert s.container == "agent-runtime" and h.open_session(container="agent-runtime") is s
+  h.exec("in-session", container="agent-runtime")            # served by the session
+  h.exec("outside")                                          # target is grader: bypasses it
+  assert h.exec_calls[-2:] == [("in-session", "agent-runtime"), ("outside", "grader")]
+  s2 = h.open_session()                                      # another container: new session
+  assert s2 is not s and not s.is_open and s2.container == "grader"
+
+
+def test_add_tasks_extends_the_plan_like_the_real_fleet():
+  f = FakeFleet(FleetConfig(max_concurrent=4, max_warmpool_size=8))
+  assert f.add_tasks(["a"]) and f.plan_ is None              # no plan yet: appended only
+  f.plan()
+  new = f.add_tasks(["a", "b", "b"])
+  assert [t.image for t in new] == ["a", "b", "b"] and len(f.tasks) == 4
+  assert f.plan_.for_image("a").tasks == 2                   # known image: counts only
+  b = f.plan_.for_image("b")
+  assert b is not None and b.tasks == 2                      # new image: sized against the total
+  assert b.replicas == sizing.compute_replicas(2, 4, 4, 8)
+  assert f.add_tasks([]) == [] and f.add_tasks_calls == [["a"], ["a", "b", "b"]]
+  assert [p for p in inspect.signature(FakeFleet.add_tasks).parameters] == \
+         [p for p in inspect.signature(SandboxFleet.add_tasks).parameters]
+
+
+def test_wait_pools_ready_reads_warmed_planned_and_unknown_images():
+  f = FakeFleet(FleetConfig())
+  f.load_tasks(["a", "b"])
+  f.plan()
+  f.warm_image("a")
+  assert f.wait_pools_ready(["a", "b", "zzz", "a"], timeout=1, replicas={"a": 1}) == \
+         {"a": True, "b": False, "zzz": False}
+  assert f.wait_pools_ready([]) == {}
+  assert f.wait_calls[0] == (("a", "b", "zzz"), 1, {"a": 1})
+
+
+def test_a_lookahead_warmer_runs_against_the_fake():
+  f = FakeFleet(FleetConfig(max_warmpool_size=4))
+  w = LookaheadWarmer(f, max_workers=1)
+  rep = w.add(0, {"a": 2, "b": 1}, wait=True)                # unknown images: registered
+  assert rep.ok and rep.ready == {"a": True, "b": True}
+  assert f.add_tasks_calls == [["a", "b"]] and f.active_pools == {"a": 2, "b": 1}
+  w.add(1, {"a": 3})                                         # a grows, capped at 4
+  assert f.scale_calls[-1] == ("a", 4)
+  w.finish(0)
+  w.finish(1)
+  w.close()
+  assert sorted(f.unwarm_calls) == ["a", "b"]

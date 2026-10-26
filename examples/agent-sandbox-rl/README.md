@@ -1025,21 +1025,25 @@ kubectl -n agent-sandbox-system patch deploy agent-sandbox-controller --type=jso
 ### Testing your integration without a cluster
 
 `agent_sandbox_rl.testing.FakeFleet` is the `SandboxFleet` surface with no API server
-behind it: the same methods with the same signatures (`load_tasks` / `plan` / `setup`,
-`warm_image` / `warm_images` / `set_pool_replicas` / `unwarm_image`, `acquire` /
-`release` / `run` / `recording`, the snapshot wrappers, `teardown`), so a test that
-passes on the fake does not call something the real fleet lacks. Plans are sized with
+behind it: the same methods with the same signatures (`load_tasks` / `add_tasks` /
+`plan` / `setup`, `warm_image` / `warm_images` / `set_pool_replicas` / `unwarm_image` /
+`wait_pools_ready`, `acquire` / `release` / `run` / `recording`, the snapshot wrappers,
+`teardown`), so a test that passes on the fake does not call something the real fleet
+lacks, and a `LookaheadWarmer` runs against it unchanged. Plans are sized with
 the real `sizing.compute_replicas`, `run()` executes the real strategies over the fake
 (warming order, teardown and the `RunReport` are the fleet's), the claim slot moves on
 suspend / resume as it does for real, and the fleet's exceptions are raised where a
 loop can observe them (`FleetOvercommitError` at `max_live_sandboxes`, `KeyError` for
 an unplanned `warm_image`, a torn-down fleet on `acquire`). On top of that surface it
-adds inspection only: `warm_calls`, `scale_calls`, `unwarm_calls`, `acquire_calls`,
-`release_calls`, `active_pools`, `FakeHandle.commands`, and `FakeSandboxGone` (exec on
-a released or suspended handle, a guard the real handle does not have). Inject failures
+adds inspection only: `warm_calls`, `scale_calls`, `unwarm_calls`, `wait_calls`,
+`add_tasks_calls`, `acquire_calls`, `release_calls`, `active_pools`,
+`FakeHandle.commands` / `exec_calls` (each command with the container it ran in), and
+`FakeSandboxGone` (exec or snapshot on a released or suspended handle, a guard the real
+handle does not have). Inject failures
 with `fail_warm` / `fail_acquire` and program `exec` with `exec_outputs`:
 
 ```python
+from agent_sandbox_rl import FleetConfig
 from agent_sandbox_rl.testing import FakeFleet
 fleet = FakeFleet(FleetConfig(warm_per_task=True, max_warmpool_size=4),
                   exec_outputs={"pytest": "3 passed\n"})

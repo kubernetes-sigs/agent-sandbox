@@ -73,12 +73,14 @@ class FakeSandboxGone(RuntimeError):
 
 @dataclass
 class FakeSession:
-  """Stands in for `SandboxSession`: open until closed, runs through the handle."""
+  """Stands in for `SandboxSession`: open until closed, bound to one container,
+  runs through the handle."""
   handle: "FakeHandle"
+  container: str | None = None
   is_open: bool = True
 
   def run(self, command, timeout: float | None = None) -> str:
-    return self.handle._run(command)
+    return self.handle._run(command, self.container)
 
   def close(self) -> None:
     self.is_open = False
@@ -91,20 +93,24 @@ class FakeHandle(SandboxHandle):
   ``exec_outputs`` maps a substring of the command to its output (the longest
   matching key wins) or to a callable ``command -> output`` / an exception to
   raise; unmatched commands return ``""``. ``commands`` lists every command
-  run, ``released`` / ``suspended`` track the lifecycle, ``snapshots`` the uids
-  taken. The snapshot methods keep state only; ``refresh()`` renames the pod as
-  a resume does.
+  run and ``exec_calls`` the same commands as ``(command, container)``, the
+  container resolved as the real handle resolves it (the call's ``container``,
+  else ``target_container``, else ``runtime_container``). ``released`` /
+  ``suspended`` track the lifecycle, ``snapshots`` the uids taken. The snapshot
+  methods keep state only; ``refresh()`` renames the pod as a resume does.
   """
   exec_outputs: dict = field(default_factory=dict, repr=False)
   commands: list = field(default_factory=list, repr=False)
+  exec_calls: list = field(default_factory=list, repr=False)
   released: bool = False
   suspended: bool = False
   snapshots: list = field(default_factory=list, repr=False)
   _generation: int = field(default=0, repr=False)
 
-  def _run(self, command) -> str:
+  def _run(self, command, container: str | None = None) -> str:
     text = command if isinstance(command, str) else " ".join(map(str, command))
     self.commands.append(text)
+    self.exec_calls.append((text, container))
     for key in sorted(self.exec_outputs, key=len, reverse=True):
       if key in text:
         out = self.exec_outputs[key]
@@ -115,18 +121,26 @@ class FakeHandle(SandboxHandle):
         return out
     return ""
 
-  def exec(self, command, timeout: float | None = None) -> str:
+  def exec(self, command, timeout: float | None = None, *,
+           container: str | None = None) -> str:
     if self.released:
       raise FakeSandboxGone(f"handle {self.sandbox_id} was released")
     if self.suspended:
       raise FakeSandboxGone(f"sandbox {self.sandbox_id} is suspended (no pod)")
-    if self._session is not None and self._session.is_open:
+    target = container or self.target_container or self.runtime_container
+    # As for real: a held session serves only the container it is bound to.
+    if (self._session is not None and self._session.is_open
+        and self._session.container == target):
       return self._session.run(command, timeout=timeout)
-    return self._run(command)
+    return self._run(command, target)
 
-  def open_session(self) -> FakeSession:
-    if self._session is None or not self._session.is_open:
-      self._session = FakeSession(self)
+  def open_session(self, *, container: str | None = None) -> FakeSession:
+    target = container or self.target_container or self.runtime_container
+    if (self._session is not None and self._session.is_open
+        and self._session.container == target):
+      return self._session
+    self.close_session()                      # one session per handle, as for real
+    self._session = FakeSession(self, container=target)
     return self._session
 
   def close_session(self) -> None:
@@ -243,6 +257,8 @@ class FakeFleet:
     self.acquire_calls: list[tuple] = []    # (image, snapshot_uid, pod_annotations)
     self.release_calls: list[str] = []      # sandbox ids
     self.prepull_calls: list[bool] = []     # wait flags
+    self.add_tasks_calls: list[list[str]] = []   # images per add_tasks call
+    self.wait_calls: list[tuple] = []       # (images, timeout, replicas)
     self.on_demand: set[str] = set()
     self.teardowns = 0
 
@@ -253,19 +269,44 @@ class FakeFleet:
   def pod_run_selector(self) -> str:
     return f"{constants.POD_RUN_ID_LABEL}={self.run_id}"
 
+  @staticmethod
+  def _rewritten(tasks: list[Task], image_rewrite) -> list[Task]:
+    if image_rewrite is None:
+      return tasks
+    out = []
+    for t in tasks:
+      new = image_rewrite(t.image)
+      if new != t.image:
+        t = t.model_copy(update={"image": new,
+                                 "metadata": {**t.metadata, "original_image": t.image}})
+      out.append(t)
+    return out
+
   def load_tasks(self, source, *, image_rewrite=None) -> list[Task]:
-    tasks = to_tasks(source)
-    if image_rewrite is not None:
-      out = []
-      for t in tasks:
-        new = image_rewrite(t.image)
-        if new != t.image:
-          t = t.model_copy(update={"image": new,
-                                   "metadata": {**t.metadata, "original_image": t.image}})
-        out.append(t)
-      tasks = out
-    self.tasks = tasks
+    self.tasks = self._rewritten(to_tasks(source), image_rewrite)
     return self.tasks
+
+  def add_tasks(self, source, *, image_rewrite=None) -> list[Task]:
+    """Append tasks and extend the plan in place, as the real fleet does: a new
+    image gets an entry sized like `plan` (against the new task total), an image
+    already planned only gains task counts. Without a plan this only appends."""
+    new_tasks = self._rewritten(to_tasks(source), image_rewrite)
+    if not new_tasks:
+      return []
+    with self._lock:
+      self.tasks = list(self.tasks) + list(new_tasks)
+      self.add_tasks_calls.append([t.image for t in new_tasks])
+      plan = self.plan_
+      if plan is not None:
+        counts = collections.Counter(t.image for t in new_tasks)
+        total = len(self.tasks)
+        for image, n in counts.items():
+          e = plan.for_image(image)
+          if e is not None:
+            e.tasks += n
+          else:
+            plan.add(self._entry(image, n, total))
+    return new_tasks
 
   def image_counts(self) -> "collections.OrderedDict[str, int]":
     counts: "collections.OrderedDict[str, int]" = collections.OrderedDict()
@@ -350,6 +391,20 @@ class FakeFleet:
         self.skipped_images.append(img)
         continue
       self.warm_image(img, replicas_override=replicas_override, wait=wait)
+
+  def wait_pools_ready(self, images, *, timeout: float | None = None,
+                       replicas=None) -> dict[str, bool]:
+    """``image -> ready``: a warmed pool is ready at once in the fake; an image
+    that is not in the plan, or planned but not warmed, reads ``False``. Never
+    raises, as the real barrier. ``replicas`` is recorded, not waited on."""
+    images = list(dict.fromkeys(images))
+    self.wait_calls.append((tuple(images), timeout, dict(replicas) if replicas else None))
+    if not images:
+      return {}
+    plan = self.plan_ or self.plan()
+    with self._lock:
+      warmed = dict(self._warmed)
+    return {img: plan.for_image(img) is not None and img in warmed for img in images}
 
   def set_pool_replicas(self, image: str, replicas: int) -> None:
     if (self.plan_ or self.plan()).for_image(image) is None:

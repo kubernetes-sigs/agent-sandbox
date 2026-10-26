@@ -201,8 +201,8 @@ Resumes batch lease renewal and starts a label-scoped watch that keeps
 within its grace window.
 
 The batch errors below are all ``BatchError``, so ``except BatchError`` handles a batch that
-can't be attached. ``ValueError`` means a bad batch id, and ``ApiException`` an API or
-network failure.
+can't be attached. ``ValueError`` means a bad batch id, ``ApiException`` an API error,
+and a failed request raises the transport's own error.
 
 **Raises**:
 
@@ -213,8 +213,9 @@ network failure.
 - `BatchInUseError` - If a live Lease is held by another handle, or another client
   takes it over while attaching.
 - `BatchError` - If the Lease's or the claims' batch annotations are invalid.
-- `ApiException` - For any other API error such as a 403, or the transport error if a
-  request fails.
+- `ApiException` - For any other API error such as a 403.
+- `urllib3.exceptions.HTTPError` - If a request fails, such as on a connection error or
+  timeout.
   
 
 **Example**:
@@ -252,6 +253,9 @@ def delete_all() -> None
 
 Cleanup all tracked sandboxes managed by this client, and stop every tracked batch's
 background watch and Lease renewal and close its cached sandbox connections.
+
+It stops each tracked batch's Lease renewal without releasing the Lease, so ``get_batch``
+can't re-attach a batch that wasn't detached with ``detach()``.
 
 **Example**:
 
@@ -783,6 +787,8 @@ use the batch's original Lease duration.
 
 If the Lease release fails, the error propagates and this handle stays in a detached state with
 the Lease still held. Call ``detach`` again to retry; steps that already completed are skipped.
+A retry without ``grace`` keeps the earlier call's Lease duration, and if no retry is made,
+client cleanup makes one.
 
 **Raises**:
 

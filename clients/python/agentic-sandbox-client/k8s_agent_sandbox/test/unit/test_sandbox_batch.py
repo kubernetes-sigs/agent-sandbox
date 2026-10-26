@@ -13,6 +13,7 @@
 # limitations under the License.
 """Unit tests for the sync SandboxBatch handle and SandboxClient.get_batch."""
 
+import contextlib
 import ssl
 import threading
 import time
@@ -961,6 +962,17 @@ class TestDetach(unittest.TestCase):
 
         self.mock_client.k8s_helper.replace_batch_lease.assert_called_once()
 
+    def test_a_connection_whose_close_is_interrupted_stays_on_the_handle(self):
+        cached = MagicMock()
+        cached.close_connection.side_effect = KeyboardInterrupt
+        self.handle._connected["b1-0"] = cached
+
+        with self.assertRaises(KeyboardInterrupt):
+            self.handle._close_cached_connections("detach")
+
+        self.assertEqual(self.handle._connected, {"b1-0": cached})
+        self.mock_client._track_closing.assert_called_once_with(self.handle)
+
     def test_foreign_holder_lease_is_left_untouched(self):
         self.mock_client.k8s_helper.read_batch_lease.return_value = _lease(
             holder_identity="someone-else"
@@ -1024,13 +1036,121 @@ class TestClientBatchCleanup(BaseBatchClientTest):
                 cached = MagicMock()
                 first._connected["b1-0"] = cached
 
-                with patch.object(SandboxBatch, "_stop_background_threads", autospec=True) as stop:
+                # A failed stop must still leave the cached connection closed.
+                with patch.object(
+                    SandboxBatch, "_stop_background_threads", autospec=True, side_effect=RuntimeError("stop failed")
+                ) as stop:
                     getattr(self.client, cleanup)()
                 self.assertEqual({c.args[0] for c in stop.call_args_list}, {first, second})
                 self.assertEqual(self.client._active_batches, {})
                 cached.close_connection.assert_called_once()
                 with self.assertRaises(BatchError):
                     first.connect(MagicMock())
+
+    def test_a_connection_that_fails_to_close_is_retried_by_the_next_cleanup(self):
+        handle = _make_handle(self.client)
+        cached = MagicMock()
+        cached.close_connection.side_effect = [RuntimeError("close failed"), None]
+        handle._connected["b1-0"] = cached
+        self.client._active_batches[("default", "b1")] = handle
+
+        self.client.delete_all()
+        self.assertEqual(handle._connected, {"b1-0": cached})
+        self.assertEqual(self.client._active_batches, {})
+        self.assertEqual(self.client._closing_batches, {handle})
+
+        self.client.delete_all()
+        self.assertEqual(cached.close_connection.call_count, 2)
+        self.assertEqual(handle._connected, {})
+        self.assertEqual(self.client._closing_batches, set())
+
+    def test_cleanup_closes_a_reattached_batchs_old_connection_without_stopping_the_old_handle(self):
+        for lease_write_error in (None, RuntimeError("timed out after the write applied")):
+            with self.subTest(lease_write_error=lease_write_error):
+                old = _make_handle(self.client)
+                cached = MagicMock()
+                cached.close_connection.side_effect = [RuntimeError("close failed"), None]
+                old._connected["b1-0"] = cached
+                self.client._active_batches[("default", "b1")] = old
+                self.mock_k8s_helper.read_batch_lease.return_value = _lease(holder_identity=old._holder_identity)
+                self.mock_k8s_helper.replace_batch_lease.side_effect = lease_write_error
+
+                with self.assertLogs(level="WARNING"), contextlib.suppress(RuntimeError):
+                    old.detach()
+                new = _make_handle(self.client)
+                new._stop_background_threads = MagicMock()
+                with patch.object(SandboxBatch, "_attach", return_value=new):
+                    self.client.get_batch("b1")
+                old._stop_background_threads = MagicMock()
+
+                self.client.delete_all()
+                self.assertEqual(cached.close_connection.call_count, 2)
+                old._stop_background_threads.assert_not_called()
+                new._stop_background_threads.assert_called_once()
+                self.assertEqual(self.client._closing_batches, set())
+
+    def test_a_close_that_fails_after_an_overlapping_cleanup_and_reattach_is_retried(self):
+        handle = _make_handle(self.client)
+        newer = _make_handle(self.client)
+        cached = MagicMock()
+
+        def close_connection():
+            if cached.close_connection.call_count == 1:
+                # An overlapping cleanup finds no cached connection and unregisters the handle, then
+                # get_batch registers a newer handle for the same batch.
+                self.client.delete_all()
+                with patch.object(SandboxBatch, "_attach", return_value=newer):
+                    self.client.get_batch("b1")
+                raise RuntimeError("close failed")
+
+        cached.close_connection.side_effect = close_connection
+        handle._connected["b1-0"] = cached
+        self.client._active_batches[("default", "b1")] = handle
+        # detach() fails after its close, so only the put-back can keep the connection tracked.
+        self.mock_k8s_helper.read_batch_lease.side_effect = RuntimeError("api down")
+
+        with self.assertRaises(RuntimeError):
+            handle.detach()
+        self.assertEqual(self.client._closing_batches, {handle})
+
+        self.client.delete_all()
+        self.assertEqual(cached.close_connection.call_count, 2)
+        self.assertEqual(self.client._closing_batches, set())
+
+    def test_cleanup_finishes_an_unfinished_detach_with_its_grace(self):
+        for grace, written_duration in ((42, 42), (None, 90)):
+            with self.subTest(grace=grace):
+                handle = _make_handle(self.client, lease_duration=90)
+                self.client._active_batches[("default", "b1")] = handle
+                helper = self.client.k8s_helper
+                helper.read_batch_lease.side_effect = lambda *a, **k: _lease(holder_identity=handle._holder_identity)
+                helper.replace_batch_lease.reset_mock()
+                helper.replace_batch_lease.side_effect = [RuntimeError("api down"), None]
+                with self.assertRaises(RuntimeError):
+                    handle.detach(grace=grace)
+
+                self.client.delete_all()
+
+                written = helper.replace_batch_lease.call_args.args[2]
+                self.assertEqual(helper.replace_batch_lease.call_count, 2)
+                self.assertIsNone(written.spec.holder_identity)
+                self.assertEqual(written.spec.lease_duration_seconds, written_duration)
+                self.assertEqual(self.client._active_batches, {})
+
+    def test_a_failed_detach_retry_is_logged_and_keeps_the_handle_registered(self):
+        handle = _make_handle(self.client)
+        self.client._active_batches[("default", "b1")] = handle
+        helper = self.client.k8s_helper
+        helper.read_batch_lease.side_effect = lambda *a, **k: _lease(holder_identity=handle._holder_identity)
+        helper.replace_batch_lease.side_effect = RuntimeError("api down")
+        with self.assertRaises(RuntimeError):
+            handle.detach(grace=42)
+
+        with self.assertLogs(level="ERROR"):
+            self.client.delete_all()
+
+        self.assertEqual(helper.replace_batch_lease.call_count, 2)
+        self.assertEqual(self.client._active_batches, {("default", "b1"): handle})
 
     def test_unregistering_an_old_handle_keeps_a_newer_one_registered(self):
         old_handle = MagicMock(namespace="default", batch_id="b1")
@@ -1054,18 +1174,20 @@ class TestClientBatchCleanup(BaseBatchClientTest):
             threads.append(thread)
 
         class RacingDict(dict):
+            raced = False
+
             def get(self, *args):
                 value = super().get(*args)
-                register_concurrently()
+                # Only the first lookup races, since get_batch's own lookups would start more threads.
+                if not self.raced:
+                    self.raced = True
+                    register_concurrently()
                 return value
-
-            def clear(self):
-                register_concurrently()
-                super().clear()
 
         for cleanup in ("unregister", "delete_all"):
             with self.subTest(cleanup):
-                old_handle = MagicMock(namespace="default", batch_id="b1")
+                old_handle = MagicMock(namespace="default", batch_id="b1", _connected={})
+                old_handle._detach_unfinished.return_value = False
                 client._active_batches = RacingDict({("default", "b1"): old_handle})
                 with patch.object(SandboxBatch, "_attach", return_value=new_handle):
                     if cleanup == "unregister":

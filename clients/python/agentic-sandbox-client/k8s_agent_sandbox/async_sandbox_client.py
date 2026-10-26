@@ -194,6 +194,8 @@ class AsyncSandboxClient(Generic[T]):
         self._active_connection_sandboxes: dict[tuple[str, str], T] = {}
         self._explicit_claims: set[tuple[str, str]] = set()
         self._active_batches: dict[tuple[str, str], AsyncSandboxBatch] = {}
+        # Handles that left _active_batches with cached connections still to close
+        self._closing_batches: set[AsyncSandboxBatch] = set()
         self._lock = asyncio.Lock()
 
         if cleanup:
@@ -218,6 +220,9 @@ class AsyncSandboxClient(Generic[T]):
 
         A connection that fails to close remains tracked so a later call can
         retry its cleanup.
+
+        It stops each tracked batch's Lease renewal without releasing the Lease, so ``get_batch``
+        can't re-attach a batch that wasn't detached with ``detach()``.
         """
         async with self._lock:
             for key, sandbox in list(self._active_connection_sandboxes.items()):
@@ -233,18 +238,24 @@ class AsyncSandboxClient(Generic[T]):
     async def _stop_batches(self) -> None:
         # Without this, a dropped handle's tasks would keep renewing its Lease for the life of the
         # event loop, so the batch would never go stale.
+        await self._retry_closing_batches()
         async with self._lock:
             batches = list(self._active_batches.values())
-            self._active_batches.clear()
         for batch in batches:
+            if await self._finish_detach(batch):
+                continue
             try:
                 # The handle stops renewing its Lease, so connect() must not hand out new connections.
                 async with batch._lock:
                     batch._detached = True
-                await batch._stop_background_tasks()
-                await batch._close_cached_connections("client cleanup")
+                try:
+                    await batch._stop_background_tasks()
+                finally:
+                    # A failed stop must not leave port-forwards open.
+                    await batch._close_cached_connections("client cleanup")
             except Exception as e:
                 logger.error(f"Failed to stop batch '{batch.batch_id}' tasks: {e}")
+            self._unregister_batch(batch)
 
     async def create_sandbox(
         self,
@@ -512,8 +523,8 @@ class AsyncSandboxClient(Generic[T]):
         within its grace window.
 
         The batch errors below are all ``BatchError``, so ``except BatchError`` handles a batch that
-        can't be attached. ``ValueError`` means a bad batch id, and ``ApiException`` an API or
-        network failure.
+        can't be attached. ``ValueError`` means a bad batch id, ``ApiException`` an API error,
+        and a failed request raises the transport's own error.
 
         Raises:
             ValueError: If ``batch_id`` is not a valid batch id.
@@ -523,8 +534,9 @@ class AsyncSandboxClient(Generic[T]):
             BatchInUseError: If a live Lease is held by another handle, or another client
                 takes it over while attaching.
             BatchError: If the Lease's or the claims' batch annotations are invalid.
-            ApiException: For any other API error such as a 403, or the transport error if a
-                request fails.
+            ApiException: For any other API error such as a 403.
+            aiohttp.ClientError, TimeoutError: If a request fails, such as on a connection error or
+                timeout.
 
         Example::
 
@@ -533,17 +545,50 @@ class AsyncSandboxClient(Generic[T]):
             batch = await client.get_batch("b1234abcd12")
             ready = [m for m in batch.members() if m.state is MemberState.READY]
         """
-        key = (namespace, batch_id)
         batch = await AsyncSandboxBatch._attach(self, batch_id, namespace)
-        async with self._lock:
-            self._active_batches[key] = batch
+        self._register_batch(batch)
         return batch
+
+    def _register_batch(self, batch: AsyncSandboxBatch) -> None:
+        key = (batch.namespace, batch.batch_id)
+        replaced = self._active_batches.get(key)
+        self._active_batches[key] = batch
+        if replaced is not None:
+            self._track_closing(replaced)
 
     def _unregister_batch(self, batch: AsyncSandboxBatch) -> None:
         key = (batch.namespace, batch.batch_id)
         # get_batch may have registered a newer handle for the same batch since.
         if self._active_batches.get(key) is batch:
             del self._active_batches[key]
+        self._track_closing(batch)
+
+    def _track_closing(self, batch: AsyncSandboxBatch) -> None:
+        # Every connection that fails to close is retried at the next client cleanup until it closes.
+        # A handle that is no longer its batch's live one waits here, and cleanup only closes its
+        # connections.
+        key = (batch.namespace, batch.batch_id)
+        if batch._connected and self._active_batches.get(key) is not batch:
+            self._closing_batches.add(batch)
+        else:
+            self._closing_batches.discard(batch)
+
+    async def _finish_detach(self, batch: AsyncSandboxBatch) -> bool:
+        # A caller whose detach() didn't finish has handed the batch off, so cleanup finishes the detach
+        # instead of stopping or releasing the batch. If that fails too, nothing is deleted and the
+        # handle stays registered for the next cleanup.
+        if not batch._detach_unfinished():
+            return False
+        try:
+            await batch.detach()
+        except Exception as e:
+            logger.error(f"Failed to finish detaching batch '{batch.batch_id}': {e}")
+        return True
+
+    async def _retry_closing_batches(self) -> None:
+        for batch in list(self._closing_batches):
+            await batch._close_cached_connections("client cleanup")
+            self._track_closing(batch)
 
     async def delete_sandbox(self, claim_name: str, namespace: str = "default") -> None:
         """Stops the client side connection and deletes the Kubernetes resources."""
@@ -564,7 +609,11 @@ class AsyncSandboxClient(Generic[T]):
 
     async def delete_all(self) -> None:
         """Cleanup all tracked sandboxes managed by this client, and stop every tracked batch's
-        background watch and Lease renewal and close its cached sandbox connections."""
+        background watch and Lease renewal and close its cached sandbox connections.
+
+        It stops each tracked batch's Lease renewal without releasing the Lease, so ``get_batch``
+        can't re-attach a batch that wasn't detached with ``detach()``.
+        """
         async with self._lock:
             items = list(self._active_connection_sandboxes.items())
 
@@ -599,7 +648,7 @@ class AsyncSandboxClient(Generic[T]):
             tracked = [
                 (key, self._active_connection_sandboxes[key]) for key in claims
             ]
-            batches = list(self._active_batches.values())
+            batches = list(self._active_batches.values()) + list(self._closing_batches)
             if not tracked and not batches:
                 return
 

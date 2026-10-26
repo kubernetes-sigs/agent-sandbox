@@ -598,6 +598,14 @@ func (c *upstreamCountingReadWriteCloser) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// CloseWrite lets ReverseProxy half-close the upstream, as net/http's own body does.
+func (c *upstreamCountingReadWriteCloser) CloseWrite() error {
+	if cw, ok := c.w.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return http.ErrNotSupported
+}
+
 func addBytes(counter prometheus.Counter, n int) {
 	if n > 0 {
 		counter.Add(float64(n))

@@ -324,7 +324,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `shutdownTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | shutdownTime is the absolute time when the SandboxClaim expires.<br />This time governs the lifecycle of the claim. It is not propagated to the<br />underlying Sandbox. Instead, the SandboxClaim controller enforces this<br />expiration by deleting the Sandbox resources when the time is reached.<br />If this field is omitted or set to nil, the SandboxClaim does not expire at a<br />scheduled time and lives until it is deleted, unless ttlSecondsAfterFinished<br />expires it after its Sandbox finishes.<br />This implies unsetting a Sandbox's ShutdownTime via SandboxClaim isn't supported. |  | Format: date-time <br />Optional: \{\} <br /> |
 | `ttlSecondsAfterFinished` _integer_ | ttlSecondsAfterFinished limits how long a finished claim is retained.<br />The timer starts from the mirrored Finished condition's LastTransitionTime. |  | Minimum: 0 <br />Optional: \{\} <br /> |
-| `shutdownPolicy` _[ShutdownPolicy](#shutdownpolicy)_ | shutdownPolicy determines what happens to the SandboxClaim object when it<br />expires, either at shutdownTime or after ttlSecondsAfterFinished. The<br />controller always deletes the underlying Sandbox on expiry.<br />  - Retain (default): the controller keeps the SandboxClaim and sets its Ready<br />    condition to False with reason ClaimExpired.<br />  - Delete: the controller deletes the SandboxClaim.<br />  - DeleteForeground: like Delete, but the SandboxClaim remains, with a<br />    deletionTimestamp, until the Sandbox and its Pod are fully terminated.<br />This field has no effect while the SandboxClaim cannot expire. | Retain | Enum: [Delete DeleteForeground Retain] <br />Optional: \{\} <br /> |
+| `shutdownPolicy` _[ShutdownPolicy](#shutdownpolicy)_ | shutdownPolicy determines what happens to the SandboxClaim object when it<br />expires, either at shutdownTime or after ttlSecondsAfterFinished, whichever<br />comes first. The controller always deletes the underlying Sandbox on expiry.<br />  - Retain (default): the controller keeps the SandboxClaim and sets its Ready<br />    condition to False with reason ClaimExpired.<br />  - Delete: the controller deletes the SandboxClaim.<br />  - DeleteForeground: like Delete, but the SandboxClaim remains, with a<br />    deletionTimestamp, until the Sandbox and its Pod are fully terminated.<br />This field has no effect while the SandboxClaim cannot expire. | Retain | Enum: [Delete DeleteForeground Retain] <br />Optional: \{\} <br /> |
 
 
 #### NetworkPolicyManagement
@@ -621,9 +621,9 @@ _Appears in:_
 
 | Field | Description |
 | --- | --- |
-| `Delete` | ShutdownPolicyDelete deletes the SandboxClaim (and cascadingly the Sandbox) when expired.<br /> |
-| `DeleteForeground` | ShutdownPolicyDeleteForeground deletes the SandboxClaim when expired using foreground<br />cascade deletion. The claim remains in the API (with a deletionTimestamp) until its<br />underlying Sandbox and Pod are fully terminated. This allows external systems to observe<br />shutdown progress by checking whether the claim still exists.<br /> |
-| `Retain` | ShutdownPolicyRetain keeps the SandboxClaim when expired (Status will show Expired).<br />The underlying SandboxClaim resources (Sandbox, Pod, Service) are deleted to save resources,<br />but the SandboxClaim object itself remains.<br /> |
+| `Delete` | ShutdownPolicyDelete deletes the SandboxClaim on expiry.<br /> |
+| `DeleteForeground` | ShutdownPolicyDeleteForeground deletes the SandboxClaim on expiry with foreground cascade deletion.<br /> |
+| `Retain` | ShutdownPolicyRetain keeps the SandboxClaim on expiry and sets its Ready condition to False<br />with reason ClaimExpired.<br /> |
 
 
 #### VolumeClaimTemplatesPolicy

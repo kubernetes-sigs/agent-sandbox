@@ -39,8 +39,8 @@ type LifecycleApplyConfiguration struct {
 	// The timer starts from the mirrored Finished condition's LastTransitionTime.
 	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
 	// shutdownPolicy determines what happens to the SandboxClaim object when it
-	// expires, either at shutdownTime or after ttlSecondsAfterFinished. The
-	// controller always deletes the underlying Sandbox on expiry.
+	// expires, either at shutdownTime or after ttlSecondsAfterFinished, whichever
+	// comes first. The controller always deletes the underlying Sandbox on expiry.
 	// - Retain (default): the controller keeps the SandboxClaim and sets its Ready
 	// condition to False with reason ClaimExpired.
 	// - Delete: the controller deletes the SandboxClaim.

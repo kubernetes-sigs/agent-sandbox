@@ -43,18 +43,14 @@ const (
 type ShutdownPolicy string
 
 const (
-	// ShutdownPolicyDelete deletes the SandboxClaim (and cascadingly the Sandbox) when expired.
+	// ShutdownPolicyDelete deletes the SandboxClaim on expiry.
 	ShutdownPolicyDelete ShutdownPolicy = "Delete"
 
-	// ShutdownPolicyDeleteForeground deletes the SandboxClaim when expired using foreground
-	// cascade deletion. The claim remains in the API (with a deletionTimestamp) until its
-	// underlying Sandbox and Pod are fully terminated. This allows external systems to observe
-	// shutdown progress by checking whether the claim still exists.
+	// ShutdownPolicyDeleteForeground deletes the SandboxClaim on expiry with foreground cascade deletion.
 	ShutdownPolicyDeleteForeground ShutdownPolicy = "DeleteForeground"
 
-	// ShutdownPolicyRetain keeps the SandboxClaim when expired (Status will show Expired).
-	// The underlying SandboxClaim resources (Sandbox, Pod, Service) are deleted to save resources,
-	// but the SandboxClaim object itself remains.
+	// ShutdownPolicyRetain keeps the SandboxClaim on expiry and sets its Ready condition to False
+	// with reason ClaimExpired.
 	ShutdownPolicyRetain ShutdownPolicy = "Retain"
 )
 
@@ -79,8 +75,8 @@ type Lifecycle struct {
 	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
 
 	// shutdownPolicy determines what happens to the SandboxClaim object when it
-	// expires, either at shutdownTime or after ttlSecondsAfterFinished. The
-	// controller always deletes the underlying Sandbox on expiry.
+	// expires, either at shutdownTime or after ttlSecondsAfterFinished, whichever
+	// comes first. The controller always deletes the underlying Sandbox on expiry.
 	//   - Retain (default): the controller keeps the SandboxClaim and sets its Ready
 	//     condition to False with reason ClaimExpired.
 	//   - Delete: the controller deletes the SandboxClaim.

@@ -6373,6 +6373,69 @@ func TestSandboxShutdownExpiryUsesTwoPassAndPreservesFinishedCondition(t *testin
 	}
 }
 
+// Suspend deletes the Pod, and the kubelet moves a deleted Pod to a terminal
+// phase before removing it. That must not surface as Finished on the Sandbox.
+func TestReconcileSuspendTerminatingPodInTerminalPhaseDoesNotSetFinished(t *testing.T) {
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-name", Namespace: "default", UID: sandboxUID},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+			PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+			},
+		}},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            sandbox.Name,
+			Namespace:       sandbox.Namespace,
+			OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandbox.Name)},
+			// The fake client removes a deleted object at once; the finalizer
+			// keeps it terminating, as a real Pod stays until the kubelet has
+			// reported its terminal phase.
+			Finalizers: []string{"test.agents.x-k8s.io/hold"},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+		Status: corev1.PodStatus{
+			Phase:      corev1.PodRunning,
+			PodIPs:     []corev1.PodIP{{IP: "10.244.0.1"}},
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		},
+	}
+	r := &SandboxReconciler{
+		Client: newFakeClient(sandbox, pod),
+		Scheme: Scheme,
+		Tracer: asmetrics.NewNoOp(),
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}}
+
+	_, err := r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+
+	live := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, r.Get(t.Context(), req.NamespacedName, live))
+	live.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeSuspended
+	require.NoError(t, r.Update(t.Context(), live))
+
+	// Deletes the Pod; the finalizer keeps it terminating.
+	_, err = r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+
+	terminating := &corev1.Pod{}
+	require.NoError(t, r.Get(t.Context(), req.NamespacedName, terminating))
+	require.False(t, terminating.DeletionTimestamp.IsZero())
+	terminating.Status.Phase = corev1.PodFailed
+	require.NoError(t, r.Status().Update(t.Context(), terminating))
+
+	_, err = r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+
+	require.NoError(t, r.Get(t.Context(), req.NamespacedName, live))
+	require.False(t, meta.IsStatusConditionTrue(live.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished)))
+	suspended := meta.FindStatusCondition(live.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
+	require.NotNil(t, suspended)
+	require.Equal(t, sandboxv1beta1.SandboxReasonSuspendedPodTerminating, suspended.Reason)
+}
+
 func TestSetServiceStatusCustomDomain(t *testing.T) {
 	testCases := []struct {
 		name          string

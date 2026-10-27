@@ -17,7 +17,6 @@ package metrics
 
 import (
 	"context"
-	"slices"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -175,8 +174,8 @@ var (
 	SandboxStageLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "agent_sandbox_stage_latency_ms",
-			Help: "Latency from Sandbox controller first-observed time to each Ready-path stage in milliseconds. " +
-				"Stages reached before first observation (warm launch or pre-existing sandboxes) are omitted to avoid near-zero samples.",
+			Help: "Latency from the first active Sandbox reconcile to each Ready-path stage in milliseconds. " +
+				"Sandboxes in the initial informer inventory and stages reached before the baseline are omitted. Tracking is in memory, so startups spanning controller restarts may be omitted. Each stage is recorded at most once; readiness flaps do not record another sample.",
 			Buckets: creationLatencyBuckets,
 		},
 		[]string{"namespace", "launch_type", "owned_by", "stage"},
@@ -422,32 +421,6 @@ func LabelsFromSandbox(sandbox *sandboxv1beta1.Sandbox) SandboxMetricLabels {
 		labels.OwnedBy = k
 	}
 	return labels
-}
-
-// RecordedStageSet returns the set of allowlisted stages already recorded.
-// Unknown names are ignored so they cannot collide with allowlisted stage names.
-func RecordedStageSet(stages []string) map[string]struct{} {
-	recorded := make(map[string]struct{})
-	for _, stage := range stages {
-		switch stage {
-		case StagePodCreated, StagePodScheduled, StagePodRunning, StagePodReady, StagePVCBound, StageServiceReady:
-			recorded[stage] = struct{}{}
-		}
-	}
-	return recorded
-}
-
-// SortedRecordedStages serializes recorded stage names as a stable list.
-func SortedRecordedStages(recorded map[string]struct{}) []string {
-	if len(recorded) == 0 {
-		return nil
-	}
-	stages := make([]string, 0, len(recorded))
-	for stage := range recorded {
-		stages = append(stages, stage)
-	}
-	slices.Sort(stages)
-	return stages
 }
 
 // RecordSandboxClaimCreation increments the total count of Sandboxes created or adopted for a SandboxClaim.

@@ -282,6 +282,7 @@ type SandboxReconciler struct {
 	// Sandboxes, at the cost of missing startups that span controller runs.
 	creationMetricsMu      sync.Mutex
 	pendingCreationMetrics map[types.UID]struct{}
+	pendingStageMetrics    map[types.UID]*sandboxStageMetrics
 }
 
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
@@ -350,16 +351,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// failures must not stall reconcile.
 	r.ensureSandboxTraceContext(ctx, sandbox)
 
-	if ensureSandboxFirstObservedTime(sandbox) {
-		r.markInitiallyBoundPVCStage(ctx, sandbox)
-	}
-	// Persist firstObservedTime and any pre-existing PVC stage before creating
-	// children. If this write fails, retry must not have already created child
-	// resources against a later t0.
-	if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
-		return ctrl.Result{}, statusUpdateErr
-	}
-	oldStatus = sandbox.Status.DeepCopy()
+	r.startSandboxStageMetrics(ctx, sandbox)
 
 	var err error
 	var pendingStageLatencies []pendingStageLatency
@@ -368,6 +360,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	expired, _ := checkSandboxExpiry(sandbox, time.Now())
 	if expired {
+		r.forgetSandboxCreationMetrics(sandbox.UID)
 		r.recreateBackoff.clear(req.NamespacedName)
 		if !sandboxMarkedExpired(sandbox) {
 			setSandboxExpiredCondition(sandbox)
@@ -421,13 +414,14 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
+	// Stage observations describe child resources, independently of status writes.
+	emitStageLatencies(ctx, sandbox, pendingStageLatencies)
 	if !sandboxDeleted {
 		// Update status
 		if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
 			// Surface update error
 			err = errors.Join(err, statusUpdateErr)
 		} else {
-			emitStageLatencies(ctx, sandbox, pendingStageLatencies)
 			r.recordSandboxCreationMetrics(ctx, sandbox, oldStatus)
 		}
 	}
@@ -510,7 +504,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	}
 
 	// Prepare Ready-path stage latencies once per stage (skip while suspending).
-	// Samples are emitted only after the lifecycle status persist succeeds.
+	// Deduplication is local to this controller run.
 	if sandbox.Spec.OperatingMode != sandboxv1beta1.SandboxOperatingModeSuspended {
 		pending = r.prepareStageLatencies(ctx, sandbox, pod, svc)
 	}
@@ -940,13 +934,21 @@ func (r *SandboxReconciler) trackSandboxCreationMetrics(sandbox *sandboxv1beta1.
 	if r.pendingCreationMetrics == nil {
 		r.pendingCreationMetrics = make(map[types.UID]struct{})
 	}
+	if _, exists := r.pendingCreationMetrics[sandbox.UID]; exists {
+		return
+	}
 	r.pendingCreationMetrics[sandbox.UID] = struct{}{}
+	if r.pendingStageMetrics == nil {
+		r.pendingStageMetrics = make(map[types.UID]*sandboxStageMetrics)
+	}
+	r.pendingStageMetrics[sandbox.UID] = &sandboxStageMetrics{recorded: make(map[string]struct{})}
 }
 
 func (r *SandboxReconciler) forgetSandboxCreationMetrics(uid types.UID) {
 	r.creationMetricsMu.Lock()
 	defer r.creationMetricsMu.Unlock()
 	delete(r.pendingCreationMetrics, uid)
+	delete(r.pendingStageMetrics, uid)
 }
 
 // recordSandboxCreationMetrics consumes eligibility only after Ready status has
@@ -960,6 +962,7 @@ func (r *SandboxReconciler) recordSandboxCreationMetrics(ctx context.Context, sa
 	r.creationMetricsMu.Lock()
 	_, eligible := r.pendingCreationMetrics[sandbox.UID]
 	delete(r.pendingCreationMetrics, sandbox.UID)
+	delete(r.pendingStageMetrics, sandbox.UID)
 	r.creationMetricsMu.Unlock()
 	if !eligible || meta.IsStatusConditionTrue(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionReady)) ||
 		sandbox.CreationTimestamp.IsZero() || ready.LastTransitionTime.IsZero() {
@@ -1425,7 +1428,7 @@ func (r *SandboxReconciler) clearPodNameAnnotation(ctx context.Context, sandbox 
 	}
 	logger := log.FromContext(ctx)
 	// Metadata patches return the stored object and can clobber in-memory status
-	// that has not been persisted yet (e.g. firstObservedTime).
+	// that has not been persisted yet.
 	statusCopy := sandbox.Status.DeepCopy()
 	patch := client.MergeFrom(sandbox.DeepCopy())
 	delete(sandbox.Annotations, sandboxv1beta1.SandboxPodNameAnnotation)
@@ -2168,11 +2171,9 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 	// If we reach here, sandbox is not deleted
 	// Only update "expired" status if cleanup was successful
 	if allErrors == nil {
-		// Drop live-resource status while retaining terminal conditions and
-		// controller-observed lifecycle bookkeeping.
+		// Drop live-resource status while retaining terminal conditions.
 		conditions := sandbox.Status.Conditions
-		lifecycle := sandbox.Status.Lifecycle
-		sandbox.Status = sandboxv1beta1.SandboxStatus{Conditions: conditions, Lifecycle: lifecycle}
+		sandbox.Status = sandboxv1beta1.SandboxStatus{Conditions: conditions}
 		// Update status to mark as expired
 		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
 			Type:               string(sandboxv1beta1.SandboxConditionReady),
@@ -2290,54 +2291,40 @@ func (r *SandboxReconciler) ensureSandboxTraceContext(ctx context.Context, sandb
 	sandbox.Status = *statusCopy
 }
 
-// ensureSandboxFirstObservedTime records when the controller first saw this
-// Sandbox and reports whether it initialized the timestamp. The caller persists
-// it before creating child resources.
-func ensureSandboxFirstObservedTime(sandbox *sandboxv1beta1.Sandbox) bool {
-	lifecycle := ensureSandboxLifecycleStatus(&sandbox.Status)
-	if lifecycle.FirstObservedTime != nil && !lifecycle.FirstObservedTime.IsZero() {
-		return false
-	}
-	now := metav1.Now()
-	lifecycle.FirstObservedTime = &now
-	return true
+// sandboxStageMetrics exists only for new watch events in this controller run.
+// A zero baseline preserves eligibility while an initially suspended Sandbox waits
+// to become active. Completed entries are removed with creation metric eligibility.
+type sandboxStageMetrics struct {
+	mu         sync.Mutex
+	observedAt time.Time
+	recorded   map[string]struct{}
 }
 
-func ensureSandboxLifecycleStatus(status *sandboxv1beta1.SandboxStatus) *sandboxv1beta1.SandboxLifecycleStatus {
-	if status.Lifecycle == nil {
-		status.Lifecycle = &sandboxv1beta1.SandboxLifecycleStatus{}
-	}
-	return status.Lifecycle
+// Do not hold the watch bookkeeping lock during child-resource cache reads.
+func (r *SandboxReconciler) sandboxStageMetricsEntry(uid types.UID) *sandboxStageMetrics {
+	r.creationMetricsMu.Lock()
+	defer r.creationMetricsMu.Unlock()
+	return r.pendingStageMetrics[uid]
 }
 
-func sandboxFirstObservedTime(sandbox *sandboxv1beta1.Sandbox) (time.Time, bool) {
-	if sandbox.Status.Lifecycle == nil || sandbox.Status.Lifecycle.FirstObservedTime == nil {
-		return time.Time{}, false
-	}
-	t := sandbox.Status.Lifecycle.FirstObservedTime.Time
-	if t.IsZero() {
-		return time.Time{}, false
-	}
-	return t, true
-}
-
-// markInitiallyBoundPVCStage excludes PVC binding latency that the controller
-// cannot measure. This is called only when firstObservedTime is initialized and
-// before this reconciler can create PVCs, so the transition time of an already-
-// complete stage is unknown.
-func (r *SandboxReconciler) markInitiallyBoundPVCStage(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) {
-	if !r.pvcsBound(ctx, sandbox) {
+func (r *SandboxReconciler) startSandboxStageMetrics(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) {
+	if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
 		return
 	}
-
-	lifecycle := ensureSandboxLifecycleStatus(&sandbox.Status)
-	recorded := asmetrics.RecordedStageSet(lifecycle.RecordedStages)
-	if _, already := recorded[asmetrics.StagePVCBound]; already {
+	entry := r.sandboxStageMetricsEntry(sandbox.UID)
+	if entry == nil {
 		return
 	}
-	recorded[asmetrics.StagePVCBound] = struct{}{}
-	lifecycle.RecordedStages = asmetrics.SortedRecordedStages(recorded)
-	log.FromContext(ctx).V(4).Info("Skipping initially completed stage latency", "stage", asmetrics.StagePVCBound)
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !entry.observedAt.IsZero() {
+		return
+	}
+	entry.observedAt = time.Now()
+	// Already-bound PVCs have no transition timestamp to measure.
+	if len(sandbox.Spec.VolumeClaimTemplates) > 0 && r.pvcsBound(ctx, sandbox) {
+		entry.recorded[asmetrics.StagePVCBound] = struct{}{}
+	}
 }
 
 // recordChildReconcileError increments the child reconcile error counter with an allowlisted reason.
@@ -2365,21 +2352,22 @@ func emitStageLatencies(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, pe
 	}
 }
 
-// prepareStageLatencies updates status.lifecycle.recordedStages for Ready-path
-// stages that have been reached. Histogram samples are returned so the caller
-// can emit them only after the durable lifecycle state has been persisted.
+// prepareStageLatencies consumes each reached stage once in memory. Observations
+// must be emitted even if the subsequent Sandbox status write fails.
 func (r *SandboxReconciler) prepareStageLatencies(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod, svc *corev1.Service) []pendingStageLatency {
-	logger := log.FromContext(ctx)
-	now := time.Now()
-	t0, ok := sandboxFirstObservedTime(sandbox)
-	if !ok {
-		logger.V(1).Info("Skipping stage latencies: missing firstObservedTime")
+	entry := r.sandboxStageMetricsEntry(sandbox.UID)
+	if entry == nil {
 		return nil
 	}
-
-	lifecycle := ensureSandboxLifecycleStatus(&sandbox.Status)
-	recorded := asmetrics.RecordedStageSet(lifecycle.RecordedStages)
-	updated := false
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if entry.observedAt.IsZero() {
+		return nil
+	}
+	logger := log.FromContext(ctx)
+	now := time.Now()
+	t0 := entry.observedAt
+	recorded := entry.recorded
 	var pending []pendingStageLatency
 
 	observe := func(stage string, reached bool, endTime time.Time) {
@@ -2397,14 +2385,12 @@ func (r *SandboxReconciler) prepareStageLatencies(ctx context.Context, sandbox *
 		// observing, to avoid a spike of near-zero histogram samples.
 		if endTime.Before(t0) {
 			recorded[stage] = struct{}{}
-			updated = true
 			logger.V(4).Info("Skipping pre-observation stage latency", "stage", stage)
 			return
 		}
 		latency := endTime.Sub(t0)
 		pending = append(pending, pendingStageLatency{stage: stage, latency: latency})
 		recorded[stage] = struct{}{}
-		updated = true
 	}
 
 	observe(asmetrics.StagePodCreated, podCreated(pod), podCreatedTime(pod, now))
@@ -2424,11 +2410,6 @@ func (r *SandboxReconciler) prepareStageLatencies(ctx context.Context, sandbox *
 		observe(asmetrics.StageServiceReady, svc != nil, serviceReadyTime(svc, now))
 	}
 
-	if !updated {
-		return nil
-	}
-
-	lifecycle.RecordedStages = asmetrics.SortedRecordedStages(recorded)
 	return pending
 }
 

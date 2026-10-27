@@ -2499,18 +2499,6 @@ var schemaYAML = typed.YAMLObject(`types:
       type:
         namedType: io.k8s.sigs.agent-sandbox.api.v1beta1.SandboxStatus
       default: {}
-- name: io.k8s.sigs.agent-sandbox.api.v1beta1.SandboxLifecycleStatus
-  map:
-    fields:
-    - name: firstObservedTime
-      type:
-        namedType: Time.v1.meta.apis.pkg.apimachinery.k8s.io
-    - name: recordedStages
-      type:
-        list:
-          elementType:
-            scalar: string
-          elementRelationship: associative
 - name: io.k8s.sigs.agent-sandbox.api.v1beta1.SandboxSpec
   map:
     fields:
@@ -2548,9 +2536,6 @@ var schemaYAML = typed.YAMLObject(`types:
           elementType:
             namedType: Condition.v1.meta.apis.pkg.apimachinery.k8s.io
           elementRelationship: atomic
-    - name: lifecycle
-      type:
-        namedType: io.k8s.sigs.agent-sandbox.api.v1beta1.SandboxLifecycleStatus
     - name: nodeName
       type:
         scalar: string

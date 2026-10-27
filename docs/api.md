@@ -173,24 +173,6 @@ _Appears in:_
 | `failedPodPolicy` _[FailedPodPolicy](#failedpodpolicy)_ | failedPodPolicy controls what happens when the backing Pod enters phase Failed.<br />Retain (default): leave the Failed pod and surface Finished=True.<br />Recreate: delete the controller-owned Failed pod so a new one is created;<br />the Sandbox identity and any Sandbox-owned PVCs are retained.<br />Combined with restartPolicy Never and a container that always exits non-zero,<br />Recreate can recreate the Pod repeatedly; the controller applies Deployment-style<br />in-memory exponential backoff (5s, doubling up to 5m) between creates so a crash<br />loop cannot hot-loop the API server. Backoff resets after the replacement Pod has<br />been continuously observed Running for 10 minutes. Backoff state is not persisted<br />in status. | Retain | Enum: [Retain Recreate] <br />Optional: \{\} <br /> |
 
 
-#### SandboxLifecycleStatus
-
-
-
-SandboxLifecycleStatus stores controller-observed lifecycle timestamps and
-metric dedupe state for a Sandbox.
-
-
-
-_Appears in:_
-- [SandboxStatus](#sandboxstatus)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `firstObservedTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | firstObservedTime is when the controller first observed this Sandbox. |  | Format: date-time <br />Optional: \{\} <br /> |
-| `recordedStages` _string array_ | recordedStages lists Ready-path stages whose latency has already been<br />accounted for. Each value is recorded at most once, including warm or<br />pre-existing stages that are marked recorded without a histogram sample. |  | MaxItems: 6 <br />items:Enum: [pod_created pod_scheduled pod_running pod_ready pvc_bound service_ready] <br />Optional: \{\} <br /> |
-
-
 #### SandboxOperatingMode
 
 _Underlying type:_ _string_
@@ -252,7 +234,6 @@ _Appears in:_
 | `serviceFQDN` _string_ | serviceFQDN that is valid for default cluster settings<br />The domain defaults to cluster.local but is configurable via the controller's --cluster-domain flag. |  | Optional: \{\} <br /> |
 | `service` _string_ | service is the name of the headless Service created for this Sandbox. It is empty<br />when no Service exists for the Sandbox (for example when spec.service is false, or<br />unset with no pre-existing Service). See serviceFQDN for the fully qualified<br />in-cluster DNS name of this Service. |  | Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | conditions defines the status conditions array |  | Optional: \{\} <br /> |
-| `lifecycle` _[SandboxLifecycleStatus](#sandboxlifecyclestatus)_ | lifecycle stores controller-observed lifecycle timestamps and metric<br />recording state for this Sandbox. |  | Optional: \{\} <br /> |
 | `selector` _string_ | selector is the label selector for pods. |  | Optional: \{\} <br /> |
 | `podIPs` _string array_ | podIPs are the IP addresses of the underlying pod.<br />A pod may have multiple IPs in dual-stack clusters.<br />This field is populated only while a backing pod exists. It is cleared whenever<br />the pod is absent, for example when the Sandbox is suspended<br />(operatingMode: Suspended) or before the pod has been created. |  | Optional: \{\} <br /> |
 | `nodeName` _string_ | nodeName is the name of the node where the underlying pod is scheduled.<br />Like podIPs, it is cleared whenever the pod is absent (e.g. while suspended). |  | Optional: \{\} <br /> |

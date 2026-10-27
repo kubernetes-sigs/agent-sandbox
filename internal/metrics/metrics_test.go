@@ -208,21 +208,6 @@ func TestNormalizeAllowlists(t *testing.T) {
 	require.Equal(t, ReasonOther, NormalizeReason("raw api error text"))
 }
 
-func TestRecordedStageSetRoundTrip(t *testing.T) {
-	t.Parallel()
-	recorded := map[string]struct{}{
-		StagePodReady:     {},
-		StagePodCreated:   {},
-		StagePodScheduled: {},
-	}
-	sorted := SortedRecordedStages(recorded)
-	require.Equal(t, []string{"pod_created", "pod_ready", "pod_scheduled"}, sorted)
-	parsed := RecordedStageSet(append(sorted, "bogus"))
-	require.Equal(t, recorded, parsed)
-	require.Empty(t, RecordedStageSet(nil))
-	require.Empty(t, SortedRecordedStages(nil))
-}
-
 func TestLabelsFromSandbox(t *testing.T) {
 	t.Parallel()
 	sandbox := &sandboxv1beta1.Sandbox{

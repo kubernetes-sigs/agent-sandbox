@@ -664,7 +664,12 @@ class AsyncK8sHelper:
             if first:
                 items = []
                 resource_version = (page.get("metadata") or {}).get("resourceVersion", "0")
-            items.extend(page.get("items", []))
+            page_items = page.get("items", [])
+            # Nothing in the SDK reads managedFields, so drop it only in memory from each parsed
+            # dict to lower driver memory without modifying the live SandboxClaim in the cluster.
+            for claim in page_items:
+                (claim.get("metadata") or {}).pop("managedFields", None)
+            items.extend(page_items)
         return items, resource_version
 
     async def count_live_sandbox_claims(

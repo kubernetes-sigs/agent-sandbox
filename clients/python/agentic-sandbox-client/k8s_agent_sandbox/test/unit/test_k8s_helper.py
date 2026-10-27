@@ -1178,16 +1178,25 @@ class TestK8sHelperBatchMethods(unittest.TestCase):
         mock_api = MagicMock()
         mock_api_cls.return_value = mock_api
         mock_api.list_namespaced_custom_object.side_effect = [
-            {"items": [{"metadata": {"name": "b1-0"}}], "metadata": {"resourceVersion": "42", "continue": "t1"}},
+            {
+                "items": [{"metadata": {"name": "b1-0", "managedFields": [{"manager": "sdk"}]}, "spec": {}}],
+                "metadata": {"resourceVersion": "42", "continue": "t1"},
+            },
             # A page may be empty while more follow.
             {"items": [], "metadata": {"resourceVersion": "43", "continue": "t2"}},
-            {"items": [{"metadata": {"name": "b1-1"}}], "metadata": {"resourceVersion": "44"}},
+            {
+                "items": [{"metadata": {"name": "b1-1", "managedFields": [{"manager": "sdk"}]}, "spec": {}}],
+                "metadata": {"resourceVersion": "44"},
+            },
         ]
 
         helper = K8sHelper()
         items, rv = helper.list_sandbox_claim_objects("default", "agents.x-k8s.io/batch-id=b1")
 
-        self.assertEqual([item["metadata"]["name"] for item in items], ["b1-0", "b1-1"])
+        self.assertEqual(
+            items,
+            [{"metadata": {"name": "b1-0"}, "spec": {}}, {"metadata": {"name": "b1-1"}, "spec": {}}],
+        )
         self.assertEqual(rv, "42")
         calls = mock_api.list_namespaced_custom_object.call_args_list
         self.assertEqual([c.kwargs["_continue"] for c in calls], [None, "t1", "t2"])

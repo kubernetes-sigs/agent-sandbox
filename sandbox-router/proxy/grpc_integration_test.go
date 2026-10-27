@@ -250,11 +250,40 @@ func TestGRPCTrailersOnlyMetadata(t *testing.T) {
 
 func TestGRPCTrailersOnlyHTTPHeaders(t *testing.T) {
 	httpHeaders := map[string]string{
-		"Date":                "Mon, 02 Jan 2006 15:04:05 GMT",
-		"Server":              "sandboxd-test",
-		"Cache-Control":       "no-store",
-		"Content-Language":    "en",
-		"Content-Disposition": "inline",
+		"Date":                                   "Mon, 02 Jan 2006 15:04:05 GMT",
+		"Server":                                 "sandboxd-test",
+		"Cache-Control":                          "no-store",
+		"Pragma":                                 "no-cache",
+		"Warning":                                `199 intermediary "test warning"`,
+		"Content-Language":                       "en",
+		"Content-Disposition":                    "inline",
+		"Via":                                    "1.1 intermediary",
+		"Link":                                   "</schema>; rel=describedby",
+		"Alt-Svc":                                `h2=":443"`,
+		"Strict-Transport-Security":              "max-age=31536000",
+		"Content-Security-Policy":                "default-src 'none'",
+		"Content-Security-Policy-Report-Only":    "default-src 'none'",
+		"Referrer-Policy":                        "no-referrer",
+		"Permissions-Policy":                     "camera=()",
+		"X-Content-Type-Options":                 "nosniff",
+		"X-Frame-Options":                        "DENY",
+		"Cross-Origin-Opener-Policy":             "same-origin",
+		"Cross-Origin-Opener-Policy-Report-Only": "same-origin",
+		"Cross-Origin-Embedder-Policy":           "require-corp",
+		"Cross-Origin-Embedder-Policy-Report-Only": "require-corp",
+		"Cross-Origin-Resource-Policy":             "same-origin",
+		"Access-Control-Allow-Origin":              "https://example.test",
+		"Access-Control-Allow-Credentials":         "true",
+		"Access-Control-Allow-Methods":             "POST",
+		"Access-Control-Allow-Headers":             "content-type",
+		"Access-Control-Max-Age":                   "600",
+		"Access-Control-Expose-Headers":            "grpc-status",
+	}
+	applicationMetadata := map[string]string{
+		"content-app-version":      "v1",
+		"access-control-app-trace": "cors-prefix",
+		"cross-origin-app-trace":   "isolation-prefix",
+		"x-app-trace":              "custom-prefix",
 	}
 	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, err := io.Copy(io.Discard, r.Body); err != nil {
@@ -262,6 +291,9 @@ func TestGRPCTrailersOnlyHTTPHeaders(t *testing.T) {
 			return
 		}
 		for key, value := range httpHeaders {
+			w.Header().Set(key, value)
+		}
+		for key, value := range applicationMetadata {
 			w.Header().Set(key, value)
 		}
 		w.Header().Set("Content-Type", "application/grpc")
@@ -289,7 +321,12 @@ func TestGRPCTrailersOnlyHTTPHeaders(t *testing.T) {
 	for key, value := range httpHeaders {
 		key = strings.ToLower(key)
 		if strings.Join(headers.Get(key), "") != value || len(trailers.Get(key)) != 0 {
-			t.Errorf("HTTP header %s must remain in headers: headers=%v trailers=%v", key, headers, trailers)
+			t.Errorf("HTTP header %s: headers=%v trailers=%v, want only header %q", key, headers.Get(key), trailers.Get(key), value)
+		}
+	}
+	for key, value := range applicationMetadata {
+		if len(headers.Get(key)) != 0 || strings.Join(trailers.Get(key), "") != value {
+			t.Errorf("application metadata %s: headers=%v trailers=%v, want only trailer %q", key, headers.Get(key), trailers.Get(key), value)
 		}
 	}
 	if len(headers.Get("finish")) != 0 || strings.Join(trailers.Get("finish"), ",") != "one,two" || strings.Join(trailers.Get("finish-bin"), "") != "\x00\xff" {

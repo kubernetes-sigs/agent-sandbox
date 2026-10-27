@@ -195,11 +195,21 @@ func prepareGRPCResponse(resp *http.Response) error {
 			resp.Trailer = make(http.Header)
 		}
 		for key, values := range resp.Header {
+			// Match known HTTP fields exactly: application metadata can share
+			// prefixes such as Content-, Access-Control- or X-.
 			switch key {
 			case "Content-Type", "Content-Length", "Trailer", "Grpc-Encoding", "Grpc-Accept-Encoding",
-				"Date", "Server", "Cache-Control", "Expires", "Age", "Vary", "Etag", "Last-Modified",
+				"Date", "Server", "Via", "Link", "Alt-Svc",
+				"Cache-Control", "Expires", "Age", "Pragma", "Warning", "Vary", "Etag", "Last-Modified",
 				"Content-Encoding", "Content-Language", "Content-Location", "Content-Range", "Content-Disposition", "Accept-Ranges",
-				"Allow", "Location", "Retry-After", "Set-Cookie", "Www-Authenticate", "Proxy-Authenticate":
+				"Allow", "Location", "Retry-After", "Set-Cookie", "Www-Authenticate", "Proxy-Authenticate",
+				"Strict-Transport-Security", "Content-Security-Policy", "Content-Security-Policy-Report-Only",
+				"Referrer-Policy", "Permissions-Policy", "X-Content-Type-Options", "X-Frame-Options",
+				"Cross-Origin-Opener-Policy", "Cross-Origin-Opener-Policy-Report-Only",
+				"Cross-Origin-Embedder-Policy", "Cross-Origin-Embedder-Policy-Report-Only", "Cross-Origin-Resource-Policy",
+				"Access-Control-Allow-Origin", "Access-Control-Allow-Credentials",
+				"Access-Control-Allow-Methods", "Access-Control-Allow-Headers",
+				"Access-Control-Max-Age", "Access-Control-Expose-Headers":
 				// HTTP response semantics and gRPC representation headers stay
 				// in the initial block; arbitrary application metadata does not.
 				continue

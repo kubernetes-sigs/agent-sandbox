@@ -1,2 +1,1 @@
-image:
-  tag: v0.0.0-lint
+# chart defaults; image.tag comes from helm-lint-extra-args in dev/tools/ct/ct.yaml

@@ -1162,6 +1162,60 @@ class TestAsyncK8sHelperBatchMethods(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(await self.helper.count_live_sandbox_claims("default", "agents.x-k8s.io/batch-id=b1"), 3)
 
+    async def test_delete_sandbox_claims_by_label_drains_the_response_unparsed_and_releases_it(self):
+        drained = []
+
+        async def chunks(error=None):
+            for chunk in (b'{"items": [', b"]}"):
+                drained.append(chunk)
+                yield chunk
+            if error is not None:
+                raise error
+
+        response = MagicMock(status=200)
+        response.content.iter_any.side_effect = chunks
+        delete = self.helper.custom_objects_api.delete_collection_namespaced_custom_object = AsyncMock(
+            return_value=response
+        )
+
+        await self.helper.delete_sandbox_claims_by_label("default", "agents.x-k8s.io/batch-id=b1")
+
+        self.assertIs(delete.call_args.kwargs["_preload_content"], False)
+        self.assertEqual(len(drained), 2)
+        response.release.assert_called_once()
+
+        response.reset_mock()
+        response.content.iter_any.side_effect = lambda: chunks(aiohttp.ClientPayloadError("connection broken"))
+        with self.assertRaises(aiohttp.ClientPayloadError):
+            await self.helper.delete_sandbox_claims_by_label("default", "agents.x-k8s.io/batch-id=b1")
+        response.release.assert_called_once()
+
+    async def test_delete_sandbox_claims_by_label_raises_for_an_error_status_and_releases_the_response(self):
+        # Without preloading, kubernetes_asyncio returns an error response without raising.
+        response = MagicMock(status=429, reason="Too Many Requests", headers={"Retry-After": "7"})
+        response.read = AsyncMock(return_value=b'{"kind": "Status", "code": 429}')
+        self.helper.custom_objects_api.delete_collection_namespaced_custom_object = AsyncMock(return_value=response)
+
+        with self.assertRaises(client.ApiException) as raised:
+            await self.helper.delete_sandbox_claims_by_label("default", "agents.x-k8s.io/batch-id=b1")
+
+        self.assertEqual(raised.exception.status, 429)
+        self.assertEqual(raised.exception.headers["Retry-After"], "7")
+        self.assertEqual(raised.exception.body, '{"kind": "Status", "code": 429}')
+        response.release.assert_called_once()
+
+        binary_error = MagicMock(status=502, reason="Bad Gateway", headers={})
+        binary_error.read = AsyncMock(return_value=b"\xff\xfeproxy error")
+        self.helper.custom_objects_api.delete_collection_namespaced_custom_object = AsyncMock(
+            return_value=binary_error
+        )
+        with self.assertRaises(client.ApiException) as raised:
+            await self.helper.delete_sandbox_claims_by_label("default", "agents.x-k8s.io/batch-id=b1")
+        self.assertEqual(raised.exception.status, 502)
+        self.assertIsInstance(raised.exception.body, str)
+        self.assertIn("\ufffdproxy error", raised.exception.body)
+        binary_error.release.assert_called_once()
+
     @patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch")
     async def test_watch_sandbox_claims_yields_events(self, mock_watch_class):
         mock_watch = MagicMock()
@@ -1300,6 +1354,7 @@ class TestAsyncK8sHelperBatchMethods(unittest.IsolatedAsyncioTestCase):
             "delete_namespaced_custom_object",
         ):
             setattr(api, method, AsyncMock(return_value={"items": [], "metadata": {}}))
+        api.delete_collection_namespaced_custom_object.return_value = MagicMock(status=200)
         coord.create_namespaced_lease = AsyncMock()
         coord.delete_namespaced_lease = AsyncMock()
         helper = self.helper

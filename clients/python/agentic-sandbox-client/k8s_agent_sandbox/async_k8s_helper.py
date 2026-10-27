@@ -22,6 +22,7 @@ from typing import Any, cast
 
 import aiohttp
 from kubernetes_asyncio import client, config, watch
+from kubernetes_asyncio.client.rest import RESTResponse
 from .constants import (
     CLAIM_API_GROUP,
     CLAIM_API_VERSION,
@@ -810,14 +811,36 @@ class AsyncK8sHelper:
         """
         await self._ensure_initialized()
 
-        await self.custom_objects_api.delete_collection_namespaced_custom_object(
+        # Drain the response without decoding it because it lists every deleted claim and no caller
+        # reads it. The sync client raises ApiException for a non-2xx response before returning it,
+        # while the async client returns an unread response without checking its status, so only the
+        # async helper checks the status.
+        response = cast(aiohttp.ClientResponse, await self.custom_objects_api.delete_collection_namespaced_custom_object(
             group=CLAIM_API_GROUP,
             version=CLAIM_API_VERSION,
             namespace=namespace,
             plural=CLAIM_PLURAL_NAME,
             label_selector=label_selector,
+            _preload_content=False,
             _request_timeout=_request_timeout,
-        )
+        ))
+        try:
+            if not 200 <= response.status <= 299:
+                # Replace invalid UTF-8 bytes so a binary proxy error page still raises ApiException
+                # instead of UnicodeDecodeError.
+                body = (await response.read()).decode("utf-8", errors="replace")
+                # kubernetes_asyncio 36's stub types http_resp as an aiohttp response and
+                # ApiException.body as bytes | None, though its own REST client passes a
+                # RESTResponse(resp, bytes) and ApiClient.__call_api decodes body to str.
+                err = client.ApiException(http_resp=cast(Any, RESTResponse(response, body.encode("utf-8"))))
+                err.body = cast(Any, body)
+                raise err
+            async for _ in response.content.iter_any():
+                pass
+        finally:
+            # Release the response so an interruption mid-drain cannot leave its pooled connection
+            # checked out; aiohttp closes incomplete transports on release.
+            response.release()
 
     async def get_sandbox_warmpool(
         self, name: str, namespace: str, _request_timeout: float | None = None

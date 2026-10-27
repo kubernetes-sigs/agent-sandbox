@@ -819,14 +819,28 @@ class K8sHelper:
             _request_timeout: Optional timeout (seconds, or a ``(connect, read)``
                 pair) forwarded to the underlying urllib3 request.
         """
-        self.custom_objects_api.delete_collection_namespaced_custom_object(
+        # Drain the response without decoding it because it lists every deleted claim and no caller
+        # reads it. The sync client raises ApiException for a non-2xx response before returning it,
+        # while the async client returns an unread response without checking its status, so only the
+        # async helper checks the status.
+        response = cast(urllib3.HTTPResponse, self.custom_objects_api.delete_collection_namespaced_custom_object(
             group=CLAIM_API_GROUP,
             version=CLAIM_API_VERSION,
             namespace=namespace,
             plural=CLAIM_PLURAL_NAME,
             label_selector=label_selector,
+            _preload_content=False,
             _request_timeout=_request_timeout,
-        )
+        ))
+        try:
+            for _ in response.stream(decode_content=False):
+                pass
+        finally:
+            # urllib3's release_conn() returns an unfinished response's socket to the pool in
+            # 'Request-sent' state, so close the response first if draining stopped before EOF.
+            if not response.closed:
+                response.close()
+            response.release_conn()
 
     def get_sandbox_warmpool(
         self, name: str, namespace: str, _request_timeout: float | tuple[float, float] | None = None

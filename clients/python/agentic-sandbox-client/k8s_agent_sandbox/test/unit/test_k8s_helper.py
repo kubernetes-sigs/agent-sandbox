@@ -1263,6 +1263,36 @@ class TestK8sHelperBatchMethods(unittest.TestCase):
 
         self.assertEqual(helper.count_live_sandbox_claims("default", "agents.x-k8s.io/batch-id=b1"), 3)
 
+    def test_delete_sandbox_claims_by_label_drains_the_response_unparsed_and_releases_it(
+        self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
+    ):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+        delete = mock_api.delete_collection_namespaced_custom_object
+        response = delete.return_value
+        response.closed = True
+        chunks = iter([b'{"items": [', b"]}"])
+        response.stream.return_value = chunks
+        helper = K8sHelper()
+
+        helper.delete_sandbox_claims_by_label("default", "agents.x-k8s.io/batch-id=b1")
+
+        self.assertIs(delete.call_args.kwargs["_preload_content"], False)
+        response.stream.assert_called_once_with(decode_content=False)
+        self.assertEqual(list(chunks), [])
+        response.close.assert_not_called()
+        response.release_conn.assert_called_once()
+
+        response.reset_mock()
+        response.closed = False
+        cleanup_order: list[str] = []
+        response.close.side_effect = lambda: cleanup_order.append("close")
+        response.release_conn.side_effect = lambda: cleanup_order.append("release_conn")
+        response.stream.side_effect = urllib3.exceptions.ProtocolError("connection broken")
+        with self.assertRaises(urllib3.exceptions.ProtocolError):
+            helper.delete_sandbox_claims_by_label("default", "agents.x-k8s.io/batch-id=b1")
+        self.assertEqual(cleanup_order, ["close", "release_conn"])
+
     @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
     def test_watch_sandbox_claims_yields_events(
         self, mock_watch_class, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls

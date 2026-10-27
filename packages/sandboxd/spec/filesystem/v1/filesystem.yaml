@@ -94,6 +94,7 @@ paths:
       description: >
         Atomically writes request body to the given path using a temporary file and rename strategy.
         Parent directories are created automatically. Supports both new file creation and overwriting.
+        With append=true the body is added to the end of the file instead, which is not atomic.
       parameters:
         - name: mode
           in: query
@@ -102,7 +103,18 @@ paths:
             type: string
             pattern: "^0[0-7]{3}$"
             default: "0644"
-          description: Octal permission bits applied to the written file (e.g. "0755" or "0644").
+          description: >
+            Octal permission bits applied to the written file (e.g. "0755" or "0644").
+            With append=true, applied only when the request creates the file.
+        - name: append
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: >
+            If true, appends the body to the file, creating it if it does not exist.
+            Readers can see a partial append, and concurrent appends can interleave.
       requestBody:
         required: true
         content:

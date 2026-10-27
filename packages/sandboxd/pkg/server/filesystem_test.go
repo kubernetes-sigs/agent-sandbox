@@ -127,6 +127,57 @@ func TestPutOverwritesAtomically(t *testing.T) {
 	require.Len(t, entries, 1)
 }
 
+func TestPutAppendAddsToFile(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+
+	// The first append creates the file, including its parent directories.
+	for _, chunk := range []string{"one,", "two"} {
+		rec := doRequest(handler, http.MethodPut, "/v1/files/a/log.txt?append=true", []byte(chunk), nil)
+		require.Equal(t, http.StatusNoContent, rec.Code)
+	}
+
+	onDisk, err := os.ReadFile(filepath.Join(root, "a", "log.txt"))
+	require.NoError(t, err)
+	require.Equal(t, "one,two", string(onDisk))
+}
+
+func TestPutAppendAppliesModeOnlyToNewFile(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+
+	for _, mode := range []string{"0755", "0600"} {
+		rec := doRequest(handler, http.MethodPut, "/v1/files/run.sh?append=true&mode="+mode, []byte("x"), nil)
+		require.Equal(t, http.StatusNoContent, rec.Code)
+	}
+
+	info, err := os.Stat(filepath.Join(root, "run.sh"))
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o755), info.Mode().Perm())
+}
+
+func TestPutAppendFalseOverwrites(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+
+	require.Equal(t, http.StatusNoContent,
+		doRequest(handler, http.MethodPut, "/v1/files/f.txt", []byte("old"), nil).Code)
+	require.Equal(t, http.StatusNoContent,
+		doRequest(handler, http.MethodPut, "/v1/files/f.txt?append=false", []byte("new"), nil).Code)
+
+	onDisk, err := os.ReadFile(filepath.Join(root, "f.txt"))
+	require.NoError(t, err)
+	require.Equal(t, "new", string(onDisk))
+}
+
+func TestPutAppendRejections(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "d"), 0o755))
+
+	for _, target := range []string{"/v1/files/f.txt?append=banana", "/v1/files/d?append=true"} {
+		rec := doRequest(handler, http.MethodPut, target, []byte("x"), nil)
+		require.Equal(t, http.StatusBadRequest, rec.Code, target)
+		require.Equal(t, "INVALID_ARGUMENT", decodeError(t, rec).Code)
+	}
+}
+
 func TestPutMultipartUpload(t *testing.T) {
 	_, handler, root := newRESTFixture(t)
 

@@ -90,11 +90,12 @@ paths:
           description: Permission is denied while reading a directory, or another internal filesystem error
 
     put:
-      summary: Write or overwrite a file (Idempotent)
+      summary: Write or overwrite a file (Idempotent unless append=true)
       description: >
         Atomically writes request body to the given path using a temporary file and rename strategy.
         Parent directories are created automatically. Supports both new file creation and overwriting.
-        With append=true the body is added to the end of the file instead, which is not atomic.
+        With append=true the body is added to the end of the file instead, which is not atomic
+        or idempotent: retrying an append adds the body again.
       parameters:
         - name: mode
           in: query

@@ -367,10 +367,12 @@ func appendWrite(target string, src io.Reader, mode os.FileMode) (err error) {
 		return fmt.Errorf("failed to create parent directory: %w", err)
 	}
 
-	_, statErr := os.Lstat(target)
-	created := os.IsNotExist(statErr)
-
-	f, err := os.OpenFile(target, os.O_WRONLY|os.O_APPEND|os.O_CREATE, mode)
+	// O_EXCL tells us whether this request created the file.
+	f, err := os.OpenFile(target, os.O_WRONLY|os.O_APPEND|os.O_CREATE|os.O_EXCL, mode)
+	created := err == nil
+	if errors.Is(err, os.ErrExist) {
+		f, err = os.OpenFile(target, os.O_WRONLY|os.O_APPEND, 0)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to open file: %w", err)
 	}

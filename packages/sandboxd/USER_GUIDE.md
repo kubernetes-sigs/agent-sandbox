@@ -172,8 +172,8 @@ default) via symlink-aware sanitization; traversal attempts return
 ### Concurrency semantics
 
 Requests are handled in parallel, with no server-side serialization. The
-atomic-write strategy prevents partial file contents, but it does not impose an
-ordering across requests:
+atomic-write strategy prevents partial file contents for replacement writes (not
+appends, see below), but it does not impose an ordering across requests:
 
 - **Write vs. read** — a successful read sees either the complete previous
   file or the complete new one, never partial content. A read racing with a
@@ -185,6 +185,9 @@ ordering across requests:
   complete after the path is deleted; a read that has not opened it may fail.
 - **Concurrent writes to one path** — each successful rename is atomic; the
   last successful rename determines the final contents.
+- **Appends (`append=true`)** are written in place, not atomically: a read can
+  see a partial append, and concurrent appends to one path can interleave. A
+  retried append adds the body again.
 
 There is no cross-request transaction or compare-and-swap; agents that need
 ordering or coordination on shared paths must layer it themselves.

@@ -12,6 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+import json
+import os
+import tempfile
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -20,11 +24,13 @@ import pytest
 pytest.importorskip("kubernetes_asyncio")
 
 import aiohttp
+import certifi
 from kubernetes_asyncio import client
+from kubernetes_asyncio.config import incluster_config
 
 from k8s_agent_sandbox.models import AdditionalPodMetadata
 from k8s_agent_sandbox.async_k8s_helper import AsyncK8sHelper
-from k8s_agent_sandbox.exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxTemplateNotFoundError
+from k8s_agent_sandbox.exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError
 from k8s_agent_sandbox.constants import CLIENT_REQUEST_TIME_ANNOTATION
 
 
@@ -990,6 +996,75 @@ class TestAsyncK8sHelperApiClientInjection(unittest.IsolatedAsyncioTestCase):
         # A client the helper created must be closed.
         await helper.close()
         created.close.assert_awaited_once()
+
+
+class TestAsyncK8sHelperClientCompatibility(unittest.IsolatedAsyncioTestCase):
+    async def test_incluster_token_and_uid_reach_the_request(self):
+        original = client.Configuration.get_default_copy()
+        self.addCleanup(client.Configuration.set_default, original)
+        helper = AsyncK8sHelper()
+        self.addAsyncCleanup(helper.close)
+        with tempfile.TemporaryDirectory() as tmp:
+            token_path = os.path.join(tmp, "token")
+            with open(token_path, "w") as f:
+                f.write("test-token")
+            with patch.dict(os.environ, {
+                "KUBERNETES_SERVICE_HOST": "10.0.0.1",
+                "KUBERNETES_SERVICE_PORT": "443",
+            }), patch.object(
+                incluster_config, "SERVICE_TOKEN_FILENAME", token_path
+            ), patch.object(incluster_config, "SERVICE_CERT_FILENAME", certifi.where()):
+                await helper._ensure_initialized()
+
+            api_client = helper.custom_objects_api.api_client
+            response = MagicMock(status=200, data=b"{}")
+            response.getheader.return_value = "application/json"
+            # Keep the generated API, serialization and auth code; replace only I/O.
+            with patch.object(api_client, "request", AsyncMock(return_value=response)) as request:
+                await helper.delete_sandbox_claim("claim", "default", expected_uid="claim-uid")
+            self.assertEqual(request.call_args.args[0], "DELETE")
+            self.assertEqual(request.call_args.kwargs["headers"]["authorization"], "Bearer test-token")
+            self.assertEqual(request.call_args.kwargs["body"]["preconditions"], {"uid": "claim-uid"})
+
+    async def test_real_watch_preserves_readiness_uid_and_cancellation(self):
+        async with client.ApiClient() as api_client:
+            helper = AsyncK8sHelper(api_client=api_client)
+            for outcome in ("ready", "replaced", "cancelled"):
+                with self.subTest(outcome=outcome):
+                    response = MagicMock()
+                    events = [
+                        {"type": "ADDED", "object": {
+                            "metadata": {"uid": "claim-uid", "resourceVersion": "10"},
+                            "status": {"sandbox": {"name": "adopted-sandbox"}},
+                        }},
+                        {"type": "MODIFIED", "object": {
+                            "metadata": {"uid": "replacement" if outcome == "replaced" else "claim-uid",
+                                         "resourceVersion": "11", "generation": 2},
+                            "status": {"sandbox": {"name": "adopted-sandbox"},
+                                       "conditions": [{"type": "Ready", "status": "True", "observedGeneration": 2}]},
+                        }},
+                    ]
+                    response.content.readline = AsyncMock(side_effect=(
+                        asyncio.CancelledError() if outcome == "cancelled" else
+                        [(json.dumps(event) + "\n").encode() for event in events]
+                    ))
+                    with patch.object(api_client, "request", AsyncMock(return_value=response)) as request:
+                        wait = helper.wait_for_claim_ready(
+                            "claim", "default", timeout=5, resource_version="9",
+                            expected_uid="claim-uid", require_current_generation=True,
+                        )
+                        if outcome == "ready":
+                            self.assertEqual(await wait, "adopted-sandbox")
+                        else:
+                            with self.assertRaises(SandboxNotFoundError if outcome == "replaced" else asyncio.CancelledError):
+                                await wait
+                    query = dict(request.call_args.kwargs["query_params"])
+                    self.assertEqual(query["resourceVersion"], "9")
+                    self.assertEqual(query["fieldSelector"], "metadata.name=claim")
+                    self.assertTrue(query["watch"])
+                    response.release.assert_called_once()
+                    await helper.close()
+                    self.assertFalse(api_client.rest_client.pool_manager.closed)
 
 
 class TestAsyncK8sHelperWatchTimeout(unittest.IsolatedAsyncioTestCase):

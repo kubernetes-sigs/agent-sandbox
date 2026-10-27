@@ -53,7 +53,7 @@ root = "../../.."
 [project.optional-dependencies]
 async = [
     "httpx",
-    "kubernetes_asyncio<34.0.0",
+    "kubernetes_asyncio<37.0.0",
 ]
 # Required for the sandboxd runtime (pod tunnel or direct in-cluster):
 # command execution runs over gRPC ProcessService. The generated process stubs
@@ -68,7 +68,7 @@ test = [
     "pytest-xdist",
     "pytest-asyncio",
     "httpx",
-    "kubernetes_asyncio<34.0.0",
+    "kubernetes_asyncio<37.0.0",
     "mypy~=1.14",
     # Exercise real gRPC channels and authentication interceptors in unit tests.
     "grpcio>=1.83.0",

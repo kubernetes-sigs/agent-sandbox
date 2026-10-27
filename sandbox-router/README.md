@@ -359,6 +359,10 @@ All metrics live under a private Prometheus registry (no controller-runtime metr
 | `sandbox_router_cert_reloads_total` | counter | `outcome` (`success` / `failure`) |
 | `sandbox_router_build_info` | gauge (const labels) | `git_version`, `git_commit`, `build_date`, `go_version`, `compiler`, `platform` |
 
+These request, duration and inflight metrics also cover native gRPC traffic;
+HTTP 200 does not imply a successful RPC. Upstream byte-volume counters are not
+currently exported for either HTTP or native gRPC.
+
 ## Tracing
 
 Setting `--enable-tracing` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) initializes the OTLP gRPC exporter through `internal/metrics.SetupOTel`. Every request gets a server span (`HTTP <method>`) with attributes `http.method`, `http.target`, `http.status_code`, `sandbox.id`, `sandbox.namespace`. W3C trace context is extracted from inbound headers and re-injected into the outbound request so the sandbox sees a continuation of the trace.

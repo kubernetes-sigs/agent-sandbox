@@ -70,8 +70,9 @@ func (c *grpcConnections) dialContext(ctx context.Context, network, address stri
 
 func (c *grpcConnections) close() {
 	c.closeOnce.Do(func() {
-		c.mu.Lock()
+		// Cancel before detaching the pool so late dials cannot register.
 		c.cancel()
+		c.mu.Lock()
 		conns := c.conns
 		c.conns = nil
 		c.mu.Unlock()

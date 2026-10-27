@@ -151,7 +151,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		r = r.WithContext(ctx)
 		if err := grpcContextError(ctx); err != nil {
-			writeProxyError(w, r, &Error{Status: http.StatusBadGateway, Detail: err.Error()})
+			writeProxyError(w, r, grpcRequest, &Error{Status: http.StatusBadGateway, Detail: err.Error()})
 			return
 		}
 		if h.cfg.MaxRequestBodyBytes > 0 {
@@ -160,9 +160,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	upstreamPath, upstreamRawPath := r.URL.Path, ""
 	var pathRouted bool
-	target, perr := h.resolveTarget(r, &upstreamPath, &upstreamRawPath, &pathRouted)
+	target, perr := h.resolveTarget(r, grpcRequest, &upstreamPath, &upstreamRawPath, &pathRouted)
 	if perr != nil {
-		writeProxyError(w, r, perr)
+		writeProxyError(w, r, grpcRequest, perr)
 		return
 	}
 
@@ -205,7 +205,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if h.metrics != nil {
 				h.metrics.AuthzDecisionsTotal.WithLabelValues(target.Namespace, "deny").Inc()
 			}
-			writeProxyError(w, r, &Error{Status: http.StatusForbidden, Detail: "origin not allowed for cookie-authenticated request"})
+			writeProxyError(w, r, grpcRequest, &Error{Status: http.StatusForbidden, Detail: "origin not allowed for cookie-authenticated request"})
 			return
 		}
 	}
@@ -245,7 +245,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Path:        upstreamPathURL.EscapedPath(),
 	})
 	if err != nil {
-		writeProxyError(w, r, &Error{Status: http.StatusInternalServerError, Detail: err.Error()})
+		writeProxyError(w, r, grpcRequest, &Error{Status: http.StatusInternalServerError, Detail: err.Error()})
 		return
 	}
 	if err := h.authz.Authorize(r.Context(), r, authorizationTarget); err != nil {
@@ -259,7 +259,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if h.metrics != nil {
 			h.metrics.AuthzDecisionsTotal.WithLabelValues(target.Namespace, "deny").Inc()
 		}
-		writeProxyError(w, r, &Error{Status: status, Detail: err.Error()})
+		writeProxyError(w, r, grpcRequest, &Error{Status: status, Detail: err.Error()})
 		return
 	}
 	if h.metrics != nil {
@@ -267,7 +267,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if grpcRequest {
 		if err := grpcContextError(r.Context()); err != nil {
-			writeProxyError(w, r, &Error{Status: http.StatusBadGateway, Detail: err.Error()})
+			writeProxyError(w, r, grpcRequest, &Error{Status: http.StatusBadGateway, Detail: err.Error()})
 			return
 		}
 	}
@@ -408,7 +408,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"namespace", target0.Namespace,
 				"source", string(src),
 			)
-			writeProxyError(w, errReq, &Error{
+			writeProxyError(w, errReq, grpcRequest, &Error{
 				Status: http.StatusBadGateway,
 				Detail: fmt.Sprintf("Could not connect to the backend sandbox: %s", target0.ID),
 			})
@@ -457,8 +457,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // path-routed request, since the cookie it would set is scoped to a
 // Path shaped like the routing prefix and can never match a
 // header-routed request's URL.
-func (h *Handler) resolveTarget(r *http.Request, upstreamPath, upstreamRawPath *string, pathRouted *bool) (Target, *Error) {
-	if !isGRPCRequest(r) && h.cfg.PathRoutingPrefix != "" {
+func (h *Handler) resolveTarget(r *http.Request, grpcRequest bool, upstreamPath, upstreamRawPath *string, pathRouted *bool) (Target, *Error) {
+	if !grpcRequest && h.cfg.PathRoutingPrefix != "" {
 		if route, matched, perr := ParsePathRoute(h.cfg.PathRoutingPrefix, r.URL.EscapedPath()); matched {
 			if perr != nil {
 				return Target{}, perr
@@ -471,7 +471,7 @@ func (h *Handler) resolveTarget(r *http.Request, upstreamPath, upstreamRawPath *
 	}
 	return ParseSandboxHeaders(r.Header, ParseOptions{
 		AllowLoopbackPodIP: h.cfg.AllowLoopbackPodIP,
-		RequirePort:        isGRPCRequest(r),
+		RequirePort:        grpcRequest,
 	})
 }
 

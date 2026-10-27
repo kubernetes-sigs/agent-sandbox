@@ -248,6 +248,55 @@ func TestGRPCTrailersOnlyMetadata(t *testing.T) {
 	}
 }
 
+func TestGRPCTrailersOnlyHTTPHeaders(t *testing.T) {
+	httpHeaders := map[string]string{
+		"Date":                "Mon, 02 Jan 2006 15:04:05 GMT",
+		"Server":              "sandboxd-test",
+		"Cache-Control":       "no-store",
+		"Content-Language":    "en",
+		"Content-Disposition": "inline",
+	}
+	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+			t.Error(err)
+			return
+		}
+		for key, value := range httpHeaders {
+			w.Header().Set(key, value)
+		}
+		w.Header().Set("Content-Type", "application/grpc")
+		w.Header().Set("Grpc-Status", "10")
+		w.Header().Set("Grpc-Message", "rejected")
+		w.Header().Add("Finish", "one")
+		w.Header().Add("Finish", "two")
+		w.Header().Set("Finish-Bin", "AP8=")
+		w.WriteHeader(http.StatusOK)
+	}))
+	backend.Config.Protocols = new(http.Protocols)
+	backend.Config.Protocols.SetUnencryptedHTTP2(true)
+	backend.Start()
+	t.Cleanup(backend.Close)
+	host, port, err := net.SplitHostPort(strings.TrimPrefix(backend.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := grpcRouterClient(t, Options{})
+	var headers, trailers metadata.MD
+	_, err = client.UnaryCall(grpcTargetContext(t, host, port), &grpc_testing.SimpleRequest{}, grpc.Header(&headers), grpc.Trailer(&trailers))
+	if status.Code(err) != codes.Aborted || status.Convert(err).Message() != "rejected" {
+		t.Fatalf("trailers-only backend status: %v", err)
+	}
+	for key, value := range httpHeaders {
+		key = strings.ToLower(key)
+		if strings.Join(headers.Get(key), "") != value || len(trailers.Get(key)) != 0 {
+			t.Errorf("HTTP header %s must remain in headers: headers=%v trailers=%v", key, headers, trailers)
+		}
+	}
+	if len(headers.Get("finish")) != 0 || strings.Join(trailers.Get("finish"), ",") != "one,two" || strings.Join(trailers.Get("finish-bin"), "") != "\x00\xff" {
+		t.Fatalf("application trailers changed: headers=%v trailers=%v", headers, trailers)
+	}
+}
+
 func TestGRPCRoutingErrors(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -297,21 +346,22 @@ func TestGRPCUnreachableBackend(t *testing.T) {
 }
 
 func TestGRPCStreamingShapes(t *testing.T) {
-	release := make(chan struct{})
-	svc := &grpcEchoService{output: func(_ *grpc_testing.StreamingOutputCallRequest, stream grpc.ServerStreamingServer[grpc_testing.StreamingOutputCallResponse]) error {
-		if err := stream.Send(&grpc_testing.StreamingOutputCallResponse{Payload: &grpc_testing.Payload{Body: []byte("first")}}); err != nil {
-			return err
-		}
-		select {
-		case <-release:
-		case <-stream.Context().Done():
-			return stream.Context().Err()
-		}
-		return stream.Send(&grpc_testing.StreamingOutputCallResponse{Payload: &grpc_testing.Payload{Body: []byte("last")}})
-	}}
-	host, port := grpcBackend(t, svc)
-	client := grpcRouterClient(t, Options{})
 	t.Run("server streaming", func(t *testing.T) {
+		t.Parallel()
+		release := make(chan struct{})
+		svc := &grpcEchoService{output: func(_ *grpc_testing.StreamingOutputCallRequest, stream grpc.ServerStreamingServer[grpc_testing.StreamingOutputCallResponse]) error {
+			if err := stream.Send(&grpc_testing.StreamingOutputCallResponse{Payload: &grpc_testing.Payload{Body: []byte("first")}}); err != nil {
+				return err
+			}
+			select {
+			case <-release:
+			case <-stream.Context().Done():
+				return stream.Context().Err()
+			}
+			return stream.Send(&grpc_testing.StreamingOutputCallResponse{Payload: &grpc_testing.Payload{Body: []byte("last")}})
+		}}
+		host, port := grpcBackend(t, svc)
+		client := grpcRouterClient(t, Options{})
 		stream, err := client.StreamingOutputCall(grpcTargetContext(t, host, port), &grpc_testing.StreamingOutputCallRequest{})
 		if err != nil {
 			t.Fatal(err)
@@ -330,6 +380,9 @@ func TestGRPCStreamingShapes(t *testing.T) {
 		}
 	})
 	t.Run("client streaming", func(t *testing.T) {
+		t.Parallel()
+		host, port := grpcBackend(t, &grpcEchoService{})
+		client := grpcRouterClient(t, Options{})
 		stream, err := client.StreamingInputCall(grpcTargetContext(t, host, port))
 		if err != nil {
 			t.Fatal(err)
@@ -345,6 +398,9 @@ func TestGRPCStreamingShapes(t *testing.T) {
 		}
 	})
 	t.Run("bidirectional streaming", func(t *testing.T) {
+		t.Parallel()
+		host, port := grpcBackend(t, &grpcEchoService{})
+		client := grpcRouterClient(t, Options{})
 		stream, err := client.FullDuplexCall(grpcTargetContext(t, host, port))
 		if err != nil {
 			t.Fatal(err)

@@ -89,7 +89,16 @@ func TestGRPCTerminalCleanupClosesActiveUpstream(t *testing.T) {
 	f := newGRPCLifecycleFixture(t, 50*time.Millisecond)
 	// Keep the RPC active so cleanup cannot rely on asynchronous stream
 	// teardown having already made the HTTP/2 connection idle.
-	f.handler.Close()
+	closed := make(chan struct{}, 2)
+	for range 2 {
+		go func() {
+			f.handler.Close()
+			closed <- struct{}{}
+		}()
+	}
+	for range 2 {
+		awaitCompletion(t, closed, "concurrent terminal cleanup")
+	}
 	awaitCompletion(t, f.connectionEnded, "active upstream connection")
 	if _, err := f.stream.Recv(); err == nil || errors.Is(err, io.EOF) {
 		t.Fatalf("terminal cleanup fabricated successful terminal status: %v", err)
@@ -194,9 +203,8 @@ func newGRPCLifecycleFixture(t *testing.T, grace time.Duration) *grpcLifecycleFi
 	cfg.AllowLoopbackPodIP = true
 	f.handler = proxy.NewHandler(proxy.Options{Config: &cfg, Logger: logr.Discard()})
 	t.Cleanup(f.handler.Close)
-	addr := unusedTCPAddr(t)
 	srv, err := New(Options{
-		Log: logr.Discard(), Probes: f.probes, HTTPAddr: addr, ShutdownTimeout: grace,
+		Log: logr.Discard(), Probes: f.probes, HTTPAddr: "127.0.0.1:0", ShutdownTimeout: grace,
 		ProxyHandler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			defer close(f.proxyReturned)
 			f.handler.ServeHTTP(w, r)
@@ -205,7 +213,8 @@ func newGRPCLifecycleFixture(t *testing.T, grace time.Duration) *grpcLifecycleFi
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.cancelServer, f.waitServer = runTestServer(t, srv)
+	var addr string
+	addr, f.cancelServer, f.waitServer = runTestServer(t, srv)
 	waitForReadiness(t, f.probes, true)
 	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithDisableRetry())
 	if err != nil {

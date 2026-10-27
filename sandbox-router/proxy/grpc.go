@@ -42,8 +42,8 @@ func isGRPCRequest(r *http.Request) bool {
 	return mediaType == "application/grpc" || (extended && codec != "")
 }
 
-func writeProxyError(w http.ResponseWriter, r *http.Request, err *Error) {
-	if !isGRPCRequest(r) {
+func writeProxyError(w http.ResponseWriter, r *http.Request, grpcRequest bool, err *Error) {
+	if !grpcRequest {
 		WriteJSONError(w, err)
 		return
 	}
@@ -196,9 +196,12 @@ func prepareGRPCResponse(resp *http.Response) error {
 		}
 		for key, values := range resp.Header {
 			switch key {
-			case "Content-Type", "Content-Length", "Trailer", "Grpc-Encoding", "Grpc-Accept-Encoding":
-				// Keep HTTP framing and gRPC representation headers separate
-				// from application metadata.
+			case "Content-Type", "Content-Length", "Trailer", "Grpc-Encoding", "Grpc-Accept-Encoding",
+				"Date", "Server", "Cache-Control", "Expires", "Age", "Vary", "Etag", "Last-Modified",
+				"Content-Encoding", "Content-Language", "Content-Location", "Content-Range", "Content-Disposition", "Accept-Ranges",
+				"Allow", "Location", "Retry-After", "Set-Cookie", "Www-Authenticate", "Proxy-Authenticate":
+				// HTTP response semantics and gRPC representation headers stay
+				// in the initial block; arbitrary application metadata does not.
 				continue
 			}
 			resp.Trailer[key] = values

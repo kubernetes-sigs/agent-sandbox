@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -28,14 +29,14 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 )
 
 func TestRun_DrainsHTTP2RequestBeforeCanceling(t *testing.T) {
-	addr := unusedTCPAddr(t)
 	release := make(chan struct{})
 	probes := NewProbes()
 	srv, err := New(Options{
-		Log: logr.Discard(), Probes: probes, HTTPAddr: addr, ShutdownTimeout: 3 * time.Second,
+		Log: logr.Discard(), Probes: probes, HTTPAddr: "127.0.0.1:0", ShutdownTimeout: 3 * time.Second,
 		ProxyHandler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			w.(http.Flusher).Flush()
@@ -50,7 +51,7 @@ func TestRun_DrainsHTTP2RequestBeforeCanceling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cancel, wait := runTestServer(t, srv)
+	addr, cancel, wait := runTestServer(t, srv)
 	waitForReadiness(t, probes, true)
 	tr := &http.Transport{Protocols: new(http.Protocols)}
 	tr.Protocols.SetUnencryptedHTTP2(true)
@@ -74,11 +75,10 @@ func TestRun_DrainsHTTP2RequestBeforeCanceling(t *testing.T) {
 }
 
 func TestRun_ForcedShutdownCancelsActiveRequest(t *testing.T) {
-	addr := unusedTCPAddr(t)
 	ended := make(chan struct{})
 	probes := NewProbes()
 	srv, err := New(Options{
-		Log: logr.Discard(), Probes: probes, HTTPAddr: addr, ShutdownTimeout: 50 * time.Millisecond,
+		Log: logr.Discard(), Probes: probes, HTTPAddr: "127.0.0.1:0", ShutdownTimeout: 50 * time.Millisecond,
 		ProxyHandler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			w.(http.Flusher).Flush()
@@ -89,7 +89,7 @@ func TestRun_ForcedShutdownCancelsActiveRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cancel, wait := runTestServer(t, srv)
+	addr, cancel, wait := runTestServer(t, srv)
 	waitForReadiness(t, probes, true)
 	tr := &http.Transport{Protocols: new(http.Protocols)}
 	tr.Protocols.SetUnencryptedHTTP2(true)
@@ -112,12 +112,11 @@ func TestRun_ForcedShutdownCancelsActiveRequest(t *testing.T) {
 }
 
 func TestRun_ForcedShutdownDoesNotWaitForBlockedHandler(t *testing.T) {
-	addr := unusedTCPAddr(t)
 	release := make(chan struct{})
 	ended := make(chan struct{})
 	probes := NewProbes()
 	srv, err := New(Options{
-		Log: logr.Discard(), Probes: probes, HTTPAddr: addr, ShutdownTimeout: 50 * time.Millisecond,
+		Log: logr.Discard(), Probes: probes, HTTPAddr: "127.0.0.1:0", ShutdownTimeout: 50 * time.Millisecond,
 		ProxyHandler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			defer close(ended)
 			w.WriteHeader(http.StatusOK)
@@ -130,7 +129,7 @@ func TestRun_ForcedShutdownDoesNotWaitForBlockedHandler(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cancel, wait := runTestServer(t, srv)
+	addr, cancel, wait := runTestServer(t, srv)
 	waitForReadiness(t, probes, true)
 	tr := &http.Transport{Protocols: new(http.Protocols)}
 	tr.Protocols.SetUnencryptedHTTP2(true)
@@ -195,16 +194,15 @@ func TestRun_BindFailureSurfacesSynchronously(t *testing.T) {
 }
 
 func TestRun_PlainHTTP1AndHTTP2(t *testing.T) {
-	addr := unusedTCPAddr(t)
 	probes := NewProbes()
 	srv, err := New(Options{
-		Log: logr.Discard(), Probes: probes, HTTPAddr: addr, ShutdownTimeout: time.Second,
+		Log: logr.Discard(), Probes: probes, HTTPAddr: "127.0.0.1:0", ShutdownTimeout: time.Second,
 		ProxyHandler: http.HandlerFunc(echoProtocol),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	cancel, wait := runTestServer(t, srv)
+	addr, cancel, wait := runTestServer(t, srv)
 	t.Cleanup(func() {
 		cancel()
 		if err := wait(); err != nil {
@@ -221,10 +219,9 @@ func TestRun_TLSHTTP1AndHTTP2(t *testing.T) {
 	cert := &certFixture.TLS.Certificates[0]
 	roots := x509.NewCertPool()
 	roots.AddCert(certFixture.Certificate())
-	addr := unusedTCPAddr(t)
 	probes := NewProbes()
 	srv, err := New(Options{
-		Log: logr.Discard(), Probes: probes, HTTPSAddr: addr, ShutdownTimeout: time.Second,
+		Log: logr.Discard(), Probes: probes, HTTPSAddr: "127.0.0.1:0", ShutdownTimeout: time.Second,
 		TLSConfig: &tls.Config{
 			MinVersion:     tls.VersionTLS12,
 			GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return cert, nil },
@@ -234,7 +231,7 @@ func TestRun_TLSHTTP1AndHTTP2(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cancel, wait := runTestServer(t, srv)
+	addr, cancel, wait := runTestServer(t, srv)
 	t.Cleanup(func() {
 		cancel()
 		if err := wait(); err != nil {
@@ -272,17 +269,33 @@ func assertListenerProtocols(t *testing.T, baseURL string, tlsConfig *tls.Config
 	}
 }
 
-func unusedTCPAddr(t *testing.T) string {
+// Capture the actual bound address without reserving and releasing a port or
+// adding a production listener-injection API just for tests.
+func listenerAddressLog() (logr.Logger, <-chan string) {
+	addresses := make(chan string, 2)
+	log := funcr.NewJSON(func(record string) {
+		var event struct {
+			Msg, Name, Addr string
+		}
+		if err := json.Unmarshal([]byte(record), &event); err != nil {
+			return
+		}
+		if event.Msg == "listening" && (event.Name == "proxy-http" || event.Name == "proxy-https") {
+			addresses <- event.Addr
+		}
+	}, funcr.Options{})
+	return log, addresses
+}
+
+func waitForListenerAddress(t *testing.T, addresses <-chan string) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	select {
+	case addr := <-addresses:
+		return addr
+	case <-time.After(2 * time.Second):
+		t.Fatal("router did not report a bound proxy address")
+		return ""
 	}
-	addr := ln.Addr().String()
-	if err := ln.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return addr
 }
 
 func waitForReadiness(t *testing.T, probes *Probes, ready bool) {
@@ -305,8 +318,10 @@ func waitForReadiness(t *testing.T, probes *Probes, ready bool) {
 	}
 }
 
-func runTestServer(t *testing.T, srv *Server) (context.CancelFunc, func() error) {
+func runTestServer(t *testing.T, srv *Server) (string, context.CancelFunc, func() error) {
 	t.Helper()
+	log, addresses := listenerAddressLog()
+	srv.log = log
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	var runErr error
@@ -325,7 +340,7 @@ func runTestServer(t *testing.T, srv *Server) (context.CancelFunc, func() error)
 		}
 	}
 	t.Cleanup(func() { cancel(); _ = wait() })
-	return cancel, wait
+	return waitForListenerAddress(t, addresses), cancel, wait
 }
 
 // TestRun_CleansUpPriorBindsOnLaterBindFailure ensures we don't leak a
@@ -340,22 +355,14 @@ func TestRun_CleansUpPriorBindsOnLaterBindFailure(t *testing.T) {
 	defer hog.Close()
 	collidingAddr := hog.Addr().String()
 
-	// Pick a free port for the HTTP listener so it binds successfully
-	// before the metrics bind fails.
-	freeLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("free listen: %v", err)
-	}
-	freeAddr := freeLn.Addr().String()
-	_ = freeLn.Close()
-
+	log, addresses := listenerAddressLog()
 	probes := NewProbes()
 	srv, err := New(Options{
-		Log:             logr.Discard(),
+		Log:             log,
 		Probes:          probes,
 		ProxyHandler:    http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
 		MetricsHandler:  http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
-		HTTPAddr:        freeAddr,      // binds OK
+		HTTPAddr:        "127.0.0.1:0", // OS allocates the port during Run
 		MetricsAddr:     collidingAddr, // collides — bind fails
 		ShutdownTimeout: 1 * time.Second,
 	})
@@ -366,6 +373,7 @@ func TestRun_CleansUpPriorBindsOnLaterBindFailure(t *testing.T) {
 	if runErr := srv.Run(context.Background()); runErr == nil {
 		t.Fatalf("expected error from Run()")
 	}
+	freeAddr := waitForListenerAddress(t, addresses)
 
 	// The previously-bound HTTP port must have been released; we should
 	// be able to bind it again.

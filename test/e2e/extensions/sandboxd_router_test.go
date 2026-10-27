@@ -137,4 +137,7 @@ func TestRunSandboxdViaGoRouter(t *testing.T) {
 	require.Equal(t, codes.DeadlineExceeded, status.Code(err))
 	_, err = client.Execute(metadata.NewOutgoingContext(ctx, metadata.Pairs("x-sandbox-port", "9090")), &processv1.ExecuteRequest{})
 	require.Equal(t, codes.InvalidArgument, status.Code(err))
+	_, err = client.Execute(metadata.NewOutgoingContext(ctx, metadata.Pairs("x-sandbox-id", sb.Name, "x-sandbox-namespace", ns.Name)), &processv1.ExecuteRequest{})
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+	require.Contains(t, status.Convert(err).Message(), "X-Sandbox-Port header is required")
 }

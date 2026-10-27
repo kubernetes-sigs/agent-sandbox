@@ -109,7 +109,7 @@ func TestExampleThroughRouter(t *testing.T) {
 	cfg := config.Defaults()
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "box-a", Namespace: "default", Labels: map[string]string{cache.PodSandboxNameHashLabel: "demo"},
+			Name: "box-a", Namespace: "default", Labels: map[string]string{"agents.x-k8s.io/sandbox-name-hash": "demo"},
 			OwnerReferences: []metav1.OwnerReference{{APIVersion: "agents.x-k8s.io/v1beta1", Kind: "Sandbox", Name: "box-a", UID: "uid-a", Controller: new(true)}},
 		},
 		Status: corev1.PodStatus{PodIP: host, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},

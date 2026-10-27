@@ -109,6 +109,25 @@ def _to_event(response: Any, exit_seen: bool) -> tuple[ProcessEvent, bool]:
         "sandboxd protocol error: stream carried an unrecognized event")
 
 
+_EMPTY_STREAM = (
+    "sandboxd protocol error: ProcessService.Start closed without sending an "
+    "Init event"
+)
+
+
+def _cancel_quietly(stream_call: Any) -> None:
+    """Cancel a stream no handle owns yet.
+
+    start() has not returned, so the caller has nothing to close(); without
+    this the RPC stays open until garbage collection. A failure cancelling
+    must not mask the error that got us here.
+    """
+    try:
+        stream_call.cancel()
+    except Exception:
+        pass
+
+
 def _signal_error(exc: Any, code: Any, process_id: int) -> Exception:
     """Translate a SendSignal gRPC error into the SDK's exception taxonomy."""
     import grpc
@@ -155,8 +174,15 @@ class ProcessHandle:
         where the connector is available to invalidate a dead transport.
         """
         iterator = iter(stream_call)
-        return cls(stub, proto_module, stream_call,
-                   _read_init(next(iterator)), iterator)
+        try:
+            first = next(iterator, None)
+            if first is None:
+                raise RuntimeError(_EMPTY_STREAM)
+            process_id = _read_init(first)
+        except BaseException:
+            _cancel_quietly(stream_call)
+            raise
+        return cls(stub, proto_module, stream_call, process_id, iterator)
 
     def __enter__(self) -> "ProcessHandle":
         return self
@@ -227,7 +253,17 @@ class AsyncProcessHandle:
         gRPC errors propagate unwrapped: Start resolves them at the call site,
         where the connector is available to invalidate a dead transport.
         """
-        return cls(stub, proto_module, stream_call, _read_init(await stream_call.read()))
+        import grpc
+
+        try:
+            first = await stream_call.read()
+            if first is grpc.aio.EOF:
+                raise RuntimeError(_EMPTY_STREAM)
+            process_id = _read_init(first)
+        except BaseException:
+            _cancel_quietly(stream_call)
+            raise
+        return cls(stub, proto_module, stream_call, process_id)
 
     async def __aenter__(self) -> "AsyncProcessHandle":
         return self
@@ -240,8 +276,14 @@ class AsyncProcessHandle:
         """Yield typed events until the process exits or the stream is cancelled."""
         import grpc
 
+        # read() rather than `async for`: from_stream already consumed Init
+        # with read(), and grpc.aio raises UsageError when the iterator and
+        # read/write APIs are mixed on one RPC.
         try:
-            async for response in self._stream:
+            while True:
+                response = await self._stream.read()
+                if response is grpc.aio.EOF:
+                    break
                 event, self._finished = _to_event(response, self._finished)
                 yield event
         except grpc.aio.AioRpcError as e:

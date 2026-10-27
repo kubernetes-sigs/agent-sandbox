@@ -730,8 +730,7 @@ logging.basicConfig(level=logging.INFO)
 its output — fine for short one-shots, but not for long-running builds, hung
 processes, or anything you might need to cancel from the outside. On the
 **sandboxd runtime**, the SDK also exposes a streaming variant that yields
-stdout/stderr in real time and lets you deliver POSIX signals to the running process.
-`commands.start()`.
+stdout/stderr in real time and lets you deliver POSIX signals to the running process through `commands.start()`.
 
 Install the SDK with the `grpc` extra to enable it:
 
@@ -757,7 +756,8 @@ try:
     with sandbox.commands.start("python long_task.py") as handle:
         for event in handle.events():
             if event.type in ("stdout", "stderr"):
-                sys.stdout.write(event.data.decode())
+                sys.stdout.buffer.write(event.data)
+                sys.stdout.buffer.flush()
             elif event.type == "exit":
                 print(f"exited with {event.exit_code}")
             if user_hit_ctrl_c():

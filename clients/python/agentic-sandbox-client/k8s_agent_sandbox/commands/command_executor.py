@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import threading
 from typing import Any, cast
 from k8s_agent_sandbox.commands._process_handle import ProcessHandle
 from k8s_agent_sandbox.connector import SandboxConnector
@@ -157,7 +158,7 @@ class CommandExecutor:
     def start(
         self,
         command: str,
-        timeout: int = 60,
+        timeout: float = 60,
         *,
         env: dict[str, str] | None = None,
         cwd: str | None = None,
@@ -217,18 +218,36 @@ class CommandExecutor:
             config=_process_config(process_pb2, command, env, cwd),
             pty=process_pb2.PTY(cols=pty.cols, rows=pty.rows) if pty else None,
         )
+        # No gRPC deadline on the call itself: that would cap the process's
+        # lifetime, not just the wait for Init. A timer cancels the stream if
+        # Init does not arrive, and is cancelled as soon as it does.
+        stream_call = stub.Start(request)
+        start_timed_out = threading.Event()
+
+        def _cancel_unstarted() -> None:
+            start_timed_out.set()
+            stream_call.cancel()
+
+        timer = threading.Timer(timeout, _cancel_unstarted)
+        timer.start()
         # A sync streaming call reports failures on the first read, not on the
         # call itself, so both are covered by one handler.
         try:
-            stream_call = stub.Start(request, timeout=timeout)
             return ProcessHandle.from_stream(stub, process_pb2, stream_call)
         except grpc.RpcError as e:
+            if start_timed_out.is_set():
+                raise TimeoutError(
+                    f"sandboxd did not report the process started within "
+                    f"{timeout}s"
+                ) from e
             rpc_error = cast("grpc.Call", e)
             if rpc_error.code() == grpc.StatusCode.UNAVAILABLE:
                 self.connector.invalidate_sandboxd_transport(channel)
             raise RuntimeError(
                 f"sandboxd Start failed ({rpc_error.code()}): {rpc_error.details()}"
             ) from e
+        finally:
+            timer.cancel()
 
     def _run_sandboxd(
         self,

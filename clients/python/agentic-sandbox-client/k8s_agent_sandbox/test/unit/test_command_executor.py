@@ -14,7 +14,9 @@
 
 """Tests for synchronous and asynchronous command execution."""
 
+import asyncio
 import signal as sig
+import threading
 import sys
 import unittest
 from types import SimpleNamespace
@@ -605,6 +607,9 @@ class TestProcessHandleSync(unittest.TestCase):
         self.assertEqual(dict(request.config.env_vars), {"FOO": "BAR"})
         self.assertEqual(request.config.cwd, "/workspace")
         self.assertEqual((request.pty.cols, request.pty.rows), (120, 40))
+        # No gRPC deadline on the call: it would cap the process's lifetime,
+        # not just the wait for Init.
+        self.assertNotIn("timeout", stub.Start.call_args.kwargs)
 
     def test_signal_sends_mapped_proto_signal(self):
         for sent, expected in ((sig.SIGINT, "SIGNAL_SIGINT"),
@@ -660,6 +665,7 @@ class TestProcessHandleSync(unittest.TestCase):
             ("unrecognized event", [init(), empty()]),
             # start() itself rejects a stream that does not open with Init.
             ("missing init", [out()]),
+            ("empty stream", []),
             ("init with zero pid", [_make_start_response(self.pb2, init=0)]),
         )
         for name, responses in cases:
@@ -669,6 +675,29 @@ class TestProcessHandleSync(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     with executor.start("noop") as handle:
                         list(handle.events())
+
+    def test_start_cancels_stream_when_init_fails(self):
+        # start() has not returned, so the caller has no handle to close();
+        # without an explicit cancel the RPC stays open until GC.
+        for name, responses in (
+            ("empty stream", []),
+            ("missing init", [_make_start_response(self.pb2, stdout=b"x")]),
+        ):
+            with self.subTest(case=name):
+                stream = _FakeStream(responses)
+                executor, _, _ = self._executor_with_stream(stream)
+                with self.assertRaises(RuntimeError):
+                    executor.start("noop")
+                self.assertTrue(stream.cancelled)
+
+    def test_start_times_out_waiting_for_init(self):
+        # The timeout bounds only the wait for Init; exceeding it must cancel
+        # the stream and raise TimeoutError, not a generic RuntimeError.
+        stream = _StalledStream()
+        executor, _, _ = self._executor_with_stream(stream)
+        with self.assertRaises(TimeoutError):
+            executor.start("noop", timeout=0.05)
+        self.assertTrue(stream.cancelled)
 
     def test_start_rejects_legacy_connector(self):
         connector = MagicMock()
@@ -686,26 +715,60 @@ class TestProcessHandleSync(unittest.TestCase):
         self.assertTrue(stream.cancelled)
 
 
+class _StalledStream:
+    """Sync stream whose first read blocks until the call is cancelled."""
+
+    def __init__(self) -> None:
+        self._released = threading.Event()
+        self.cancelled = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        import grpc
+        self._released.wait(5)
+        err = grpc.RpcError()
+        err.code = lambda: grpc.StatusCode.CANCELLED
+        err.details = lambda: "Cancelled"
+        raise err
+
+    def cancel(self):
+        self.cancelled = True
+        self._released.set()
+
+
+class _StalledAsyncStream:
+    """Async stream whose first read never completes on its own."""
+
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    async def read(self):
+        await asyncio.sleep(5)
+
+    def cancel(self):
+        self.cancelled = True
+
+
 class _FakeAsyncStream:
     """Async server-stream stand-in yielding pre-built StartResponse messages."""
 
     def __init__(self, responses):
-        # read() and `async for` share one position, as a grpc.aio streaming
-        # call does: start() reads Init, then events() resumes after it.
         self._it = iter(list(responses))
         self.cancelled = False
 
     async def read(self):
-        return next(self._it, None)
+        import grpc
+        return next(self._it, grpc.aio.EOF)
 
     def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        try:
-            return next(self._it)
-        except StopIteration:
-            raise StopAsyncIteration
+        # grpc.aio refuses to mix the iterator and read/write APIs on one RPC.
+        # from_stream() consumes Init with read(), so any `async for` over the
+        # stream would raise here exactly as it does against a real call.
+        import grpc
+        raise grpc.aio.UsageError(
+            "The iterator and read/write APIs may not be mixed on a single RPC.")
 
     def cancel(self):
         self.cancelled = True
@@ -805,6 +868,9 @@ class TestAsyncProcessHandle(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(dict(request.config.env_vars), {"FOO": "BAR"})
         self.assertEqual(request.config.cwd, "/workspace")
         self.assertEqual((request.pty.cols, request.pty.rows), (120, 40))
+        # No gRPC deadline on the call: it would cap the process's lifetime,
+        # not just the wait for Init.
+        self.assertNotIn("timeout", stub.Start.call_args.kwargs)
 
     async def test_signal_sends_mapped_proto_signal(self):
         captured = []
@@ -844,6 +910,27 @@ class TestAsyncProcessHandle(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(RuntimeError):
                     async with await executor.start("noop") as handle:
                         [e async for e in handle.events()]
+
+    async def test_start_cancels_stream_when_init_fails(self):
+        # AsyncProcessHandle.from_stream has its own EOF check and cancel, so
+        # the sync table does not cover it.
+        for name, responses in (
+            ("empty stream", []),
+            ("missing init", [_make_start_response(self.pb2, stdout=b"x")]),
+        ):
+            with self.subTest(case=name):
+                stream = _FakeAsyncStream(responses)
+                executor, _, _ = self._executor_with_stream(stream)
+                with self.assertRaises(RuntimeError):
+                    await executor.start("noop")
+                self.assertTrue(stream.cancelled)
+
+    async def test_start_times_out_waiting_for_init(self):
+        stream = _StalledAsyncStream()
+        executor, _, _ = self._executor_with_stream(stream)
+        with self.assertRaises(TimeoutError):
+            await executor.start("noop", timeout=0.05)
+        self.assertTrue(stream.cancelled)
 
     async def test_start_rejects_legacy_connector(self):
         connector = MagicMock()

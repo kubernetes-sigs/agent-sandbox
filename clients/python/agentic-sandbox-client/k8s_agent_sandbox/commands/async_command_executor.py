@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 from typing import Any, cast
 
 """Non-blocking command execution for legacy and sandboxd runtimes."""
@@ -167,7 +168,7 @@ class AsyncCommandExecutor:
     async def start(
         self,
         command: str,
-        timeout: int = 60,
+        timeout: float = 60,
         *,
         env: dict[str, str] | None = None,
         cwd: str | None = None,
@@ -218,10 +219,16 @@ class AsyncCommandExecutor:
         )
         # An aio streaming call reports failures on the first read, not on the
         # call itself, so both are covered by one handler.
+        stream_call = stub.Start(request)
         try:
-            stream_call = stub.Start(request, timeout=timeout)
-            return await AsyncProcessHandle.from_stream(
-                stub, process_pb2, stream_call)
+            return await asyncio.wait_for(
+                AsyncProcessHandle.from_stream(stub, process_pb2, stream_call),
+                timeout,
+            )
+        except asyncio.TimeoutError as e:
+            raise TimeoutError(
+                f"sandboxd did not report the process started within {timeout}s"
+            ) from e
         except grpc.RpcError as e:
             rpc_error = cast("grpc.aio.AioRpcError", e)
             if rpc_error.code() == grpc.StatusCode.UNAVAILABLE:

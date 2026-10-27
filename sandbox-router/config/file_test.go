@@ -32,6 +32,44 @@ func writeYAML(t *testing.T, content string) string {
 	return p
 }
 
+func TestGRPCProxyTimeoutConfig(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		valid bool
+	}{{"0s", true}, {"1s", true}, {"-1s", false}} {
+		t.Run(tc.value, func(t *testing.T) {
+			cfg := Defaults()
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			RegisterFlags(fs, &cfg, nil)
+			if err := LoadFromFile(writeYAML(t, "grpc-proxy-timeout: "+tc.value+"\n"), fs); err != nil {
+				t.Fatal(err)
+			}
+			if err := fs.Parse(nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := cfg.Validate(); (err == nil) != tc.valid {
+				t.Fatalf("Validate = %v, valid=%v", err, tc.valid)
+			}
+		})
+	}
+	// CLI must override the file without changing the HTTP timeout.
+	cfg := Defaults()
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	RegisterFlags(fs, &cfg, nil)
+	if err := LoadFromFile(writeYAML(t, "grpc-proxy-timeout: 1s\n"), fs); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.Parse([]string{"--grpc-proxy-timeout=2s"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := fs.Lookup("grpc-proxy-timeout").Value.String(); got != "2s" {
+		t.Fatalf("CLI value = %s", got)
+	}
+	if cfg.ProxyTimeout != 180*time.Second {
+		t.Fatal("HTTP timeout changed")
+	}
+}
+
 func TestFileFromArgsAndEnv(t *testing.T) {
 	cases := []struct {
 		name string

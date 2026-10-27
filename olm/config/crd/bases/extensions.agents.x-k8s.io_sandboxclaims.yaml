@@ -98,7 +98,7 @@ spec:
                             type: string
                           type: object
                         name:
-                          maxLength: 253
+                          maxLength: 63
                           type: string
                       type: object
                     spec:

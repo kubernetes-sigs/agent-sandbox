@@ -19,12 +19,9 @@ package v1beta1
 // EmbeddedObjectMetadataApplyConfiguration represents a declarative configuration of the EmbeddedObjectMetadata type for use
 // with apply.
 type EmbeddedObjectMetadataApplyConfiguration struct {
-	// name must be unique within a namespace. Is required when creating resources, although
-	// some resources may allow a client to request the generation of an appropriate name
-	// automatically. Name is primarily intended for creation idempotence and configuration
-	// definition.
+	// name is the pod volume name and the prefix of the PVC name, which is
+	// "<name>-<sandbox name>". It can be at most 63 characters, the pod volume name limit.
 	// Cannot be updated.
-	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names#names
 	Name *string `json:"name,omitempty"`
 	// labels defines the map of string keys and values that can be used to organize and categorize
 	// (scope and select) objects. May match selectors of replication controllers

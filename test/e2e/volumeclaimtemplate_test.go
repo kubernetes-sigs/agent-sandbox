@@ -16,6 +16,7 @@ package e2e
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -219,6 +220,7 @@ func TestSandboxVolumeClaimTemplatesValidation(t *testing.T) {
 	}{
 		{"empty name", []sandboxv1beta1.PersistentVolumeClaimTemplate{newVCT("")}, "metadata.name must not be empty"},
 		{"duplicate names", []sandboxv1beta1.PersistentVolumeClaimTemplate{newVCT("data"), newVCT("data")}, "volumeClaimTemplates names must be unique"},
+		{"name too long", []sandboxv1beta1.PersistentVolumeClaimTemplate{newVCT(strings.Repeat("a", 64))}, "may not be more than 63 bytes"},
 		{"too many", tooMany, "must have at most 128 items"},
 	}
 	for _, c := range cases {

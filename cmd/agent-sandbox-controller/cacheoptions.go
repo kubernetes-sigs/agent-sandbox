@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/controllers"
 )
 
@@ -57,7 +58,7 @@ func buildCacheOptions(scopeToTrackingLabel bool) (cache.Options, error) {
 		},
 	}
 	if scopeToTrackingLabel {
-		trackedOnly, err := labels.NewRequirement(controllers.SandboxNameHashLabel, selection.Exists, nil)
+		trackedOnly, err := labels.NewRequirement(sandboxv1beta1.SandboxNameHashLabel, selection.Exists, nil)
 		if err != nil {
 			return cache.Options{}, fmt.Errorf("building cache label selector: %w", err)
 		}

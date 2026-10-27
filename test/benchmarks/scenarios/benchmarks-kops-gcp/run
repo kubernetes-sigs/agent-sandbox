@@ -21,105 +21,15 @@ set -o pipefail
 
 # Start in the root of the repository.
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-cd "${REPO_ROOT}"
 
-export WORKDIR="${REPO_ROOT}/.build"
-rm -rf "${WORKDIR}"
-mkdir -p "${WORKDIR}/bin"
+# shellcheck source=dev/ci/shared/kops-gcp-lifecycle.sh
+source "${REPO_ROOT}/dev/ci/shared/kops-gcp-lifecycle.sh"
 
-export BINDIR="${WORKDIR}/bin"
-export PATH="${BINDIR}:${PATH}"
-
-export KUBECONFIG="${WORKDIR}/kubeconfig"
-
-# Install kOps to bin dir.
-echo "Installing kOps to ${BINDIR}..."
-GOBIN="${BINDIR}" go install k8s.io/kops/cmd/kops@v1.36.0
-
-# Install resourcectl to bin dir
-echo "Installing resourcectl to ${BINDIR}..."
-pushd dev/tools
-GOBIN="${BINDIR}" go install ./resourcectl
-popd
-
-UNIQUE_SUFFIX="$(date +%Y%m%d-%H%M%S)"
-
-# Get project info from boskos if available, otherwise use the default project.
-if [[ -n "${BOSKOS_HOST:-}" ]]; then
-  if ! PROJECT_ID=$(resourcectl get --key project-main --boskos-type gce-project); then
-    echo "Failed to acquire project from Boskos"
-    exit 1
-  fi
-  echo "Acquired project ${PROJECT_ID} from Boskos."
-else
-  PROJECT_ID=$(gcloud config get-value project)
-fi
-
-PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)")
-echo "Using project: ${PROJECT_ID} (number: ${PROJECT_NUMBER})"
-
-IMAGE_PREFIX="gcr.io/${PROJECT_ID}/agent-sandbox/"
-export IMAGE_PREFIX
-echo "Using image prefix: ${IMAGE_PREFIX}"
-
-# Configure Docker to use gcloud credential helper for gcr.io
-gcloud auth configure-docker --quiet gcr.io
-
-# We don't set up registry permissions here because Boskos does not allow
-# configuring IAM permissions on the project. The kOps cluster is configured
-# to use the default compute service account, which has access by default.
-
-# Compute image tag based on the git tag
-IMAGE_TAG=$(git describe --tags --dirty --always)
-# Add a timestamp if it's dirty
-if [[ "${IMAGE_TAG}" == *"-dirty" ]]; then
-  IMAGE_TAG="${IMAGE_TAG}-${UNIQUE_SUFFIX}"
-fi
-export IMAGE_TAG
-echo "Using image tag: ${IMAGE_TAG}"
-
-# Push images
-for image in "agent-sandbox-controller" "chrome-sandbox"; do
-  echo "Pushing ${image} to ${IMAGE_PREFIX}..."
-  dev/tools/push-images --image-prefix="${IMAGE_PREFIX}" --images "${image}"
-done
-
-
-BUCKET_NAME="kops-state-${PROJECT_NUMBER}"
-echo "Using bucket: ${BUCKET_NAME}"
-
-# Create state store bucket if not exists
-if ! gcloud storage buckets describe "gs://${BUCKET_NAME}" >/dev/null 2>&1; then
-  echo "Creating bucket gs://${BUCKET_NAME}..."
-  gcloud storage buckets create "gs://${BUCKET_NAME}" --project="${PROJECT_ID}" --location=us-central1
-else
-  echo "Bucket gs://${BUCKET_NAME} already exists."
-fi
-
-export KOPS_STATE_STORE="gs://${BUCKET_NAME}"
-
-# Compute a relatively unique identifier for this run to allow concurrent runs
-CLUSTER_NAME="sandbox-${UNIQUE_SUFFIX}"
-ZONE="us-central1-a"
-
-cleanup() {
-  echo "Cleaning up..."
-
-  kops delete cluster --name="${CLUSTER_NAME}" --yes || true
-  # By default we don't delete the bucket, so that we can run parallel tests.
-  if [[ "${CLEANUP_BUCKET:-false}" == "true" ]]; then
-    echo "Deleting bucket gs://${BUCKET_NAME}..."
-    gcloud storage buckets delete "gs://${BUCKET_NAME}" --quiet || true
-  fi
-
-  echo "Cleaning up resources via resourcectl..."
-  resourcectl cleanup || true
-
-  rm -rf "${WORKDIR}"
-  echo "DONE"
-}
-
-trap cleanup EXIT
+kops_install_tools
+kops_acquire_project
+kops_register_cleanup
+kops_setup_images "agent-sandbox-controller" "chrome-sandbox"
+kops_create_bucket
 
 # CNI selects the cluster networking (any kOps --networking value; we
 # exercise cilium and kindnet in CI). Running the same benchmark under two
@@ -163,47 +73,13 @@ echo "Using node count: ${STRESS_NODE_COUNT}"
 STRESS_CONTROL_PLANE_SIZE="${STRESS_CONTROL_PLANE_SIZE:-c3-standard-22}"
 echo "Using control-plane size: ${STRESS_CONTROL_PLANE_SIZE}"
 
-echo "Creating kOps cluster configuration..."
-# --gce-service-account=default: needed because boskos doesn't let us configure IAM permissions on the project.
-kops create cluster \
-  --cloud=gce \
-  --gce-service-account=default \
-  --networking="${CNI}" \
-  --name="${CLUSTER_NAME}" \
-  --zones="${ZONE}" \
-  --project="${PROJECT_ID}" \
-  --control-plane-count=1 \
-  --control-plane-size="${STRESS_CONTROL_PLANE_SIZE}" \
-  --node-count="${STRESS_NODE_COUNT}" \
-  --node-size=n2-standard-8
+kops_create_cluster "sandbox-${UNIQUE_SUFFIX}" "us-central1-a"
 
 # Spec tuning is applied as separate `kops edit cluster --set` blocks rather
 # than as flags on `kops create` above. Each knob keeps its rationale next to
 # it, and a new knob is a new block instead of another line in a shared flag
 # list -- so tuning changes stop conflicting with each other. The edits
 # mutate the spec in the state store; `kops update cluster` below applies them.
-
-# Node root volumes: kOps' GCE default is pd-standard (spinning disk), and
-# the bpftrace node profiler (kindnet run 2080606920242106368, 20 nodes)
-# showed the pod launch pipeline is disk-sync-bound on it: containerd spent
-# 2,718s blocked across 923k fsync-family calls (kubelet another 987s at
-# 15ms/call), run_podsandbox mean rose ~130ms -> 1.0-1.2s under load, and
-# iowait hit ~2.1-2.5 cores/node while node CPU stayed under half busy.
-# pd-ssd raises IOPS/GB 40x over pd-standard and attacks that wall
-# directly.
-STRESS_NODE_VOLUME_TYPE="${STRESS_NODE_VOLUME_TYPE:-pd-ssd}"
-echo "Using node root volume type: ${STRESS_NODE_VOLUME_TYPE}"
-kops edit instancegroup --name "${CLUSTER_NAME}" "nodes-${ZONE}" \
-  --set "spec.rootVolume.type=${STRESS_NODE_VOLUME_TYPE}"
-
-# Control-plane root volume: required to be non-pd-standard by the c3
-# machine family (see the control-plane sizing note above), and it retires
-# the cluster's last spinning disk. Nothing latency-critical lives on the
-# CP root - the etcd data volumes are separate PDs and already pd-ssd by
-# kOps' GCE default (DefaultGCEEtcdVolumeType; measured 1.5ms mean fsync) -
-# so this is an enabler, not a tuning claim.
-kops edit instancegroup --name "${CLUSTER_NAME}" "control-plane-${ZONE}" \
-  --set "spec.rootVolume.type=pd-ssd"
 
 # authorizationAlwaysAllowPaths: allow unauthenticated GETs of /metrics on
 # kube-controller-manager and kube-scheduler so the stress test can scrape
@@ -329,43 +205,7 @@ if [[ "${CNI}" == "cilium" ]]; then
     --set cluster.spec.networking.cilium.enablePrometheusMetrics=true
 fi
 
-echo "Applying cluster configuration..."
-kops update cluster --name "${CLUSTER_NAME}" --yes
-
-echo "Exporting kubeconfig..."
-kops export kubeconfig --name "${CLUSTER_NAME}" --admin
-
-capture_control_plane_serial_port() {
-  echo "kOps cluster validation failed. Capturing control plane serial port output for diagnosis..."
-  local out_dir="${ARTIFACTS:-.}"
-  mkdir -p "${out_dir}"
-  local cp_instance
-  cp_instance=$(gcloud compute instance-groups managed list-instances "a-control-plane-${ZONE}-${CLUSTER_NAME}" --zone="${ZONE}" --project="${PROJECT_ID}" --format="value(instance.basename())" 2>/dev/null | head -n1 || true)
-  if [[ -z "${cp_instance}" ]]; then
-    cp_instance=$(gcloud compute instances list --project="${PROJECT_ID}" --filter="name ~ 'control-plane.*${CLUSTER_NAME}' AND zone:${ZONE}" --format="value(name)" 2>/dev/null | head -n1 || true)
-  fi
-  if [[ -n "${cp_instance}" ]]; then
-    echo "Saving serial port output from ${cp_instance} to ${out_dir}/control-plane-serial-port.log..."
-    gcloud compute instances get-serial-port-output "${cp_instance}" --zone="${ZONE}" --project="${PROJECT_ID}" > "${out_dir}/control-plane-serial-port.log" 2>&1 || true
-  else
-    echo "WARNING: Could not find control-plane instance for cluster ${CLUSTER_NAME} in zone ${ZONE}; serial port output was not captured." >&2
-  fi
-}
-
-validate_cluster() {
-  local wait_time="${1:-${STRESS_VALIDATE_WAIT:-25m}}"
-  echo "Waiting for cluster to be ready (timeout: ${wait_time})..."
-  if ! kops validate cluster --wait "${wait_time}"; then
-    capture_control_plane_serial_port
-    exit 1
-  fi
-}
-
-# 25m default: GCE provisioning on shared boskos projects intermittently
-# stalls (resourceNotReady on the API ForwardingRule) and control-plane
-# static pods can still be starting at the 15m mark; those runs validate
-# fine given more headroom, and a longer wait only extends the failing path.
-validate_cluster "${STRESS_VALIDATE_WAIT:-25m}"
+kops_apply_and_validate "${STRESS_VALIDATE_WAIT:-25m}"
 
 if [[ "${CNI}" == "cilium" ]]; then
   # Raise Cilium's endpoint-create API rate limit. The agent rate-limits
@@ -393,7 +233,7 @@ if [[ "${CNI}" == "cilium" ]]; then
   # out). Delete the agent pods so the DaemonSet brings them back with the
   # new config, then re-validate the cluster to wait for them to be Ready.
   kubectl --namespace kube-system delete pods --selector=k8s-app=cilium
-  validate_cluster "${STRESS_CILIUM_VALIDATE_WAIT:-5m}"
+  kops_validate_cluster "${STRESS_CILIUM_VALIDATE_WAIT:-5m}"
 fi
 
 # node-exporter: node-level CPU (incl. iowait), memory and disk stats for

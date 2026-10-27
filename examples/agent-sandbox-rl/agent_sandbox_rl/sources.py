@@ -22,9 +22,138 @@ in ``adapters/`` and just emit `Task`s, keeping the core reusable.
 from __future__ import annotations
 
 import json
+import logging
+import os
+import shutil
+import subprocess
+from collections.abc import Callable, Sequence
 from typing import Iterable, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger("agent_sandbox_rl.sources")
+
+# Where dataset rows keep their container image, in the order tried when a
+# source is given no explicit ``image_field``: the SDK's own key, then the
+# R2E-Gym / SWE-bench conventions (top level, under ``metadata``, and under the
+# environment config a trainer wraps a row in). Dotted paths descend into dicts.
+DEFAULT_IMAGE_FIELDS: tuple[str, ...] = (
+    "image", "docker_image", "image_name",
+    "metadata.image", "metadata.docker_image",
+    "metadata.env_config.entry.image", "metadata.env_config.entry.docker_image",
+    "env_config.entry.image", "env_config.entry.docker_image",
+)
+DEFAULT_ID_FIELDS: tuple[str, ...] = ("id", "instance_id", "task_id")
+
+
+def _dig(row: dict, path: str):
+  """``row[path]`` when the literal key exists (flattened datasets emit
+  ``metadata.docker_image`` columns), else the dotted descent."""
+  if path in row:
+    return row[path]
+  node = row
+  for part in path.split("."):
+    if not isinstance(node, dict) or part not in node:
+      return None
+    node = node[part]
+  return node
+
+
+def _as_scalar(value):
+  """Unwrap what a columnar dataset hands back for one field: a one-element
+  list / tuple / array (``tolist``) becomes its element; several elements, a
+  dict or None is not a scalar and yields None. Used for images and ids alike,
+  so a columnar row never falls back to a positional id."""
+  if value is None:
+    return None
+  if hasattr(value, "tolist") and not isinstance(value, (str, bytes)):
+    value = value.tolist()
+  while isinstance(value, (list, tuple)):
+    if len(value) != 1:
+      return None
+    value = value[0]
+  if isinstance(value, dict):
+    return None
+  return value
+
+
+def _as_image(value) -> str | None:
+  """A single image string out of what a dataset hands back: a string, bytes,
+  or a one-element list / tuple / array (``tolist``) as columnar datasets do."""
+  value = _as_scalar(value)
+  if isinstance(value, bytes):
+    try:
+      value = value.decode("utf-8")
+    except UnicodeDecodeError:               # binary (a PNG under "image"): not a ref
+      return None
+  if isinstance(value, str):
+    value = value.strip()
+    return value or None
+  return None
+
+
+def _paths(field, defaults: Sequence[str]) -> Sequence[str]:
+  if field is None:
+    return defaults
+  return (field,) if isinstance(field, str) else tuple(field)
+
+
+def _find_image(row: dict, image_field) -> "tuple[str | None, str | None]":
+  """``(path, image)``: the path the image was read from (``None`` for a
+  callable) and the image, or ``(None, None)`` when nothing matches."""
+  if callable(image_field):
+    return None, _as_image(image_field(row))
+  for path in _paths(image_field, DEFAULT_IMAGE_FIELDS):
+    img = _as_image(_dig(row, path))
+    if img:
+      return path, img
+  return None, None
+
+
+def extract_image(row: dict, image_field=None) -> str | None:
+  """The container image of a dataset ``row``.
+
+  ``image_field`` is one dotted path (``"metadata.docker_image"``), a sequence of
+  paths tried in order, a callable ``row -> value``, or ``None`` for
+  `DEFAULT_IMAGE_FIELDS`. Returns ``None`` when nothing matches.
+  """
+  return _find_image(row, image_field)[1]
+
+
+def _find_id(row: dict, id_field, default) -> "tuple[str | None, str]":
+  """``(path, id)`` like `_find_image`. The row index (``default``) is the
+  fallback for the default fields only: an explicit ``id_field`` that matches
+  nothing, or a callable that returns None, raises ``KeyError``, because a
+  silent switch to positional ids mislabels a whole run."""
+  if callable(id_field):
+    v = id_field(row)
+    if v is None:
+      raise KeyError(f"task #{default} row has no id (id_field callable returned None)")
+    return None, str(v)
+  for path in _paths(id_field, DEFAULT_ID_FIELDS):
+    v = _as_scalar(_dig(row, path))
+    if v is not None:
+      return path, str(v)
+  if id_field is not None:
+    raise KeyError(f"task #{default} row has no id (tried: "
+                   f"{', '.join(_paths(id_field, ()))})")
+  return None, str(default)
+
+
+def row_to_task(row: dict, index, *, image_field=None, id_field=None) -> Task:
+  """`Task` for one dataset row (see `extract_image`). The row stays in
+  ``metadata`` minus the top-level keys its id and image were read from (and
+  the SDK's own ``id`` / ``image`` keys). Raises ``KeyError`` when no image
+  field matches."""
+  img_path, image = _find_image(row, image_field)
+  if not image:
+    tried = ("callable" if callable(image_field) else
+             ", ".join(_paths(image_field, DEFAULT_IMAGE_FIELDS)))
+    raise KeyError(f"task #{index} row has no container image (tried: {tried})")
+  id_path, task_id = _find_id(row, id_field, index)
+  consumed = {"id", "image"} | {p for p in (img_path, id_path) if p and p in row}
+  return Task(id=task_id, image=image,
+              metadata={k: v for k, v in row.items() if k not in consumed})
 
 
 class Task(BaseModel):
@@ -64,49 +193,127 @@ class JsonlSource:
   """A `TaskSource` reading one JSON object per line.
 
   Args:
-    path: Path to a ``.jsonl`` file.
-    image_field: Field holding the container image.
-    id_field: Field holding the task id (falls back to the row index).
+    path: A local ``.jsonl`` file (streamed, so ``limit`` stops the read) or a
+      ``gs://`` object (downloaded whole; see `read_text`).
+    image_field: Where the image is: a dotted path, several tried in order, or a
+      callable ``row -> value``; default `DEFAULT_IMAGE_FIELDS`.
+    id_field: Likewise for the id; default `DEFAULT_ID_FIELDS`, then the row index.
+      An explicit ``id_field`` that matches nothing raises ``KeyError``.
     limit: Cap on the number of tasks. ``None`` (default) = all; ``0`` = none.
   """
 
-  def __init__(self, path: str, *, image_field: str = "image",
-               id_field: str = "id", limit: int | None = None):
+  def __init__(self, path: str, *, image_field=None, id_field=None,
+               limit: int | None = None):
     self.path = path
     self.image_field = image_field
     self.id_field = id_field
     self.limit = limit
 
+  def _lines(self) -> Iterable[str]:
+    path = os.fspath(self.path)
+    if path.startswith("gs://"):
+      # Not splitlines(): U+2028 / U+2029 / U+0085 are legal inside a JSON
+      # string and must not end a record.
+      return read_text(path).split("\n")
+    return open(os.path.expanduser(path), encoding="utf-8")  # noqa: SIM115 — closed in load()
+
   def load(self) -> list[Task]:
     tasks: list[Task] = []
     if self.limit == 0:                      # explicit "none" (None = all)
       return tasks
-    with open(self.path, encoding="utf-8") as fh:
-      for i, line in enumerate(fh):
+    lines = self._lines()
+    try:
+      for i, line in enumerate(lines):
         line = line.strip()
         if not line:
           continue
         row = json.loads(line)
-        if self.image_field not in row:
-          raise KeyError(
-              f"{self.path}:{i + 1}: row is missing image field "
-              f"'{self.image_field}'")
-        tasks.append(Task(
-            id=str(row.get(self.id_field, i)),
-            image=row[self.image_field],
-            metadata={k: v for k, v in row.items()
-                      if k not in (self.image_field, self.id_field)},
-        ))
+        try:
+          tasks.append(row_to_task(row, i, image_field=self.image_field,
+                                   id_field=self.id_field))
+        except KeyError as e:
+          raise KeyError(f"{self.path}:{i + 1}: {e.args[0]}") from e
         if self.limit is not None and len(tasks) >= self.limit:
           break
+    finally:
+      close = getattr(lines, "close", None)
+      if close is not None:
+        close()
     return tasks
 
 
-def to_tasks(source) -> list[Task]:
+def read_text(path: str) -> str:
+  """Read a local file or a ``gs://`` object as text.
+
+  ``gs://`` goes through ``google.cloud.storage`` when importable (the ambient
+  credentials), else the ``gcloud storage cat`` or ``gsutil cat`` command on
+  ``PATH``; a clear error names the options when none is available.
+  """
+  path = os.fspath(path)
+  if path.startswith("gs://"):
+    bucket, _, blob = path[len("gs://"):].partition("/")
+    try:
+      from google.cloud import storage  # type: ignore
+    except ImportError:
+      storage = None
+    client_error = None
+    if storage is not None:
+      try:
+        return storage.Client().bucket(bucket).blob(blob).download_as_text()
+      except Exception as exc:  # noqa: BLE001 — e.g. no ADC on a gcloud-logged-in
+        # machine, where the CLI below still works
+        client_error = f"{type(exc).__name__}: {exc}"
+        logger.info("google.cloud.storage could not read %s (%s); trying the CLI",
+                    path, client_error)
+    for tool, argv in (("gcloud", ["gcloud", "storage", "cat", path]),
+                       ("gsutil", ["gsutil", "cat", path])):
+      if shutil.which(tool):
+        try:
+          return subprocess.run(argv, check=True, capture_output=True,
+                                encoding="utf-8", timeout=600).stdout
+        except subprocess.CalledProcessError as e:
+          raise RuntimeError(
+              f"cannot read {path}: {tool} failed: {(e.stderr or '').strip()}") from e
+    raise RuntimeError(
+        f"cannot read {path}: install google-cloud-storage, or put gcloud or "
+        "gsutil on PATH" + (f" ({client_error})" if client_error else ""))
+  with open(os.path.expanduser(path), encoding="utf-8") as fh:
+    return fh.read()
+
+
+def load_image_list(path: str) -> list[str]:
+  """Image manifest: one image per line, blank lines and ``#`` comments skipped,
+  duplicates dropped (first occurrence wins). Local path or ``gs://``."""
+  out: list[str] = []
+  seen = set()
+  for raw in read_text(path).splitlines():
+    line = raw.split("#", 1)[0].strip()
+    if line and line not in seen:
+      seen.add(line)
+      out.append(line)
+  return out
+
+
+class ImageListSource:
+  """A `TaskSource` over an image manifest (see `load_image_list`): one task per
+  image, ``id`` = the image."""
+
+  def __init__(self, path: str):
+    self.path = path
+
+  def load(self) -> list[Task]:
+    return [Task(id=img, image=img) for img in load_image_list(self.path)]
+
+
+def to_tasks(source, *, image_field=None, id_field=None) -> list[Task]:
   """Normalize a source into ``list[Task]``.
 
   Accepts a `TaskSource`, a ``list[Task]``, a ``list[str]`` of images, or a
-  ``list[dict]`` (each needing at least an ``image`` key).
+  ``list[dict]`` of dataset rows. A row's image is found with `extract_image`:
+  ``image_field`` names one dotted path, several tried in order, or a callable;
+  by default the SDK's ``image`` key and the R2E-Gym / SWE-bench conventions
+  (`DEFAULT_IMAGE_FIELDS`), including a one-element array value. ``id_field``
+  likewise (default `DEFAULT_ID_FIELDS`, else the row index).
   """
   if isinstance(source, TaskSource):
     return source.load()
@@ -118,11 +325,7 @@ def to_tasks(source) -> list[Task]:
       elif isinstance(item, str):
         out.append(Task(id=str(i), image=item))
       elif isinstance(item, dict):
-        if "image" not in item:
-          raise KeyError(f"task #{i} dict is missing required 'image' key")
-        out.append(Task(id=str(item.get("id", i)), image=item["image"],
-                        metadata={k: v for k, v in item.items()
-                                  if k not in ("id", "image")}))
+        out.append(row_to_task(item, i, image_field=image_field, id_field=id_field))
       else:
         raise TypeError(f"cannot coerce {type(item)!r} to Task")
     return out

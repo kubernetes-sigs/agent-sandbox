@@ -2991,6 +2991,51 @@ func TestMonitorPortForward_Timeout_SetsLastError(t *testing.T) {
 	}
 }
 
+// An old ForwardPorts that outlives its stop signal must not report death
+// once a reconnect has replaced its tunnel.
+func TestMonitorPortForward_TimeoutAfterReplacementIgnored(t *testing.T) {
+	conn := newConnector(connectorConfig{
+		Strategy:          &DirectStrategy{URL: "http://127.0.0.1:12345"},
+		Namespace:         "default",
+		ServerPort:        8888,
+		RequestTimeout:    5 * time.Second,
+		PerAttemptTimeout: 2 * time.Second,
+		Log:               logr.Discard(),
+	})
+	conn.mu.Lock()
+	conn.baseURL = "http://127.0.0.1:12345"
+	conn.mu.Unlock()
+	conn.SetGRPCTarget("127.0.0.1:12346")
+
+	oldStopChan := make(chan struct{})
+	ts := &portForwardTunnel{
+		onDied:              conn.SetLastError,
+		log:                 logr.Discard(),
+		portForwardStopChan: make(chan struct{}),
+	}
+
+	done := make(chan struct{})
+	go func() {
+		ts.monitorPortForward(make(chan error), &syncBuffer{}, "test-pod", oldStopChan)
+		close(done)
+	}()
+
+	close(oldStopChan)
+
+	select {
+	case <-done:
+	case <-time.After(monitorExitTimeout + 5*time.Second):
+		t.Fatal("monitorPortForward did not exit after stop signal timeout")
+	}
+
+	if conn.BaseURL() != "http://127.0.0.1:12345" {
+		t.Error("stale monitor should not have cleared baseURL")
+	}
+	if got := grpcTarget(conn); got != "127.0.0.1:12346" {
+		t.Errorf("stale monitor should not have cleared grpcTarget, got %q", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Close delete failure preserves reconnect state
 // ---------------------------------------------------------------------------

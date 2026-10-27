@@ -17,6 +17,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**composing-sandbox-nw-policies**](./composing-sandbox-nw-policies): An example of composing network policies for sandboxes.
 - [**containarium-execution-scoped-token**](./containarium-execution-scoped-token): An example of execution-scoped credentials in a reused Sandbox: a run-bound token delivered only through sandboxd's `ProcessConfig.env_vars`, egress pinned to a credential proxy with Cilium, and the token revoked when the process exits.
 - [**containarium-ssh-sandbox**](./containarium-ssh-sandbox): An example of running Containarium's agent-box runtime in a Sandbox, reached over SSH with an in-container MCP server (no kube-apiserver token held by the agent).
+- [**deer-flow-sandbox**](./deer-flow-sandbox): An example of running DeerFlow agent turns with shell and file tools executing inside Agent Sandbox pods (drop-in `SandboxProvider` replacing the OpenSandbox backend; per user+thread claim scoping).
 - [**demo-cilium-egress**](./demo-cilium-egress): A demo of enforcing sandbox egress rules with Cilium network policies.
 - [**docker-sbx**](./docker-sbx): An example of running Docker Sandboxes (the `sbx` CLI) inside an Agent Sandbox, giving each coding agent its own microVM, network policy, and Docker daemon on a KVM-enabled node.
 - [**envd-sandbox**](./envd-sandbox): An example of running E2B's envd daemon as the container entrypoint, providing an E2B-compatible REST and gRPC API for filesystem, process execution, and metrics.

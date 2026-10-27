@@ -40,7 +40,7 @@ from .exceptions import SandboxNotFoundError
 from .k8s_helper import K8sHelper
 from .pod_metadata import build_pod_metadata, validate_labels
 from .utils import construct_sandbox_claim_lifecycle_spec
-from .models import AdditionalPodMetadata, SandboxConnectionConfig, SandboxTracerConfig
+from .models import AdditionalPodMetadata, SandboxConnectionConfig, SandboxFileConfig, SandboxTracerConfig
 from .trace_manager import async_trace_span, create_tracer_manager, initialize_tracer, trace
 
 logger = logging.getLogger(__name__)
@@ -146,6 +146,8 @@ class AsyncSandboxClient(Generic[T]):
         tracer_config: SandboxTracerConfig | None = None,
         cleanup: bool = True,
         api_client: async_client.ApiClient | None = None,
+        *,
+        file_config: SandboxFileConfig | None = None,
     ) -> None:
         """
         Args:
@@ -168,6 +170,8 @@ class AsyncSandboxClient(Generic[T]):
             api_client: Optional pre-configured ``kubernetes_asyncio`` ``ApiClient``
                 forwarded to the underlying ``AsyncK8sHelper`` to target a specific
                 cluster/context.
+            file_config: File download limits for created and attached sandboxes.
+                Defaults to unlimited downloads.
         """
         if connection_config is None:
             raise ValueError(
@@ -180,6 +184,7 @@ class AsyncSandboxClient(Generic[T]):
             )
 
         self.connection_config = connection_config
+        self.file_config = file_config
 
         self.tracer_config = tracer_config or SandboxTracerConfig()
         if self.tracer_config.enable_tracing:
@@ -355,6 +360,7 @@ class AsyncSandboxClient(Generic[T]):
                 connection_config=self.connection_config,
                 tracer_config=self.tracer_config,
                 k8s_helper=self.k8s_helper,
+                **({"file_config": self.file_config} if self.file_config is not None else {}),
             )
         except (Exception, asyncio.CancelledError):
             if cleanup_generated:
@@ -460,6 +466,7 @@ class AsyncSandboxClient(Generic[T]):
             connection_config=self.connection_config,
             tracer_config=self.tracer_config,
             k8s_helper=self.k8s_helper,
+            **({"file_config": self.file_config} if self.file_config is not None else {}),
         )
 
         async with self._lock:

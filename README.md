@@ -36,7 +36,7 @@ Key features of the `Sandbox` CRD include:
 The `extensions` module provides additional CRDs and controllers that build on the core `Sandbox` API to provide more advanced features.
 
 *   `SandboxTemplate`: Provides a way to define reusable templates for creating Sandboxes, making it easier to manage large numbers of similar Sandboxes.
-*   `SandboxClaim`: Allows users to create Sandboxes from a `SandboxWarmPool`, abstracting away the details of the underlying Sandbox configuration.
+*   `SandboxClaim`: Allows users to create Sandboxes from a `SandboxWarmPool`, abstracting away the details of the underlying Sandbox configuration. See [SandboxClaim identity on Pods](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/configuration.md#sandboxclaim-identity-on-pods) for the Claim name and UID metadata exposed to external services.
 *   `SandboxWarmPool`: Manages a pool of pre-warmed Sandboxes that can be quickly allocated to users, reducing the time it takes to get a new Sandbox up and running.
 
 ## Architecture

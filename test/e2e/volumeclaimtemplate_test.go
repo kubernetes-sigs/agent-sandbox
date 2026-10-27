@@ -81,7 +81,7 @@ func TestSandboxVolumeClaimTemplates(t *testing.T) {
 		predicates.SandboxHasStatus(sandboxv1beta1.SandboxStatus{
 			Service:       "vct-sandbox",
 			ServiceFQDN:   fmt.Sprintf("vct-sandbox.%s.svc.cluster.local", ns.Name),
-			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
+			LabelSelector: sandboxv1beta1.SandboxNameHashLabel + "=" + nameHash,
 			Conditions: []metav1.Condition{
 				{
 					Type:               string(sandboxv1beta1.SandboxConditionSuspended),
@@ -122,7 +122,7 @@ func TestSandboxVolumeClaimTemplates(t *testing.T) {
 	require.True(t, *pvc.OwnerReferences[0].Controller)
 
 	// Verify PVC has the sandbox label
-	require.Equal(t, nameHash, pvc.Labels["agents.x-k8s.io/sandbox-name-hash"])
+	require.Equal(t, nameHash, pvc.Labels[sandboxv1beta1.SandboxNameHashLabel])
 
 	// Verify the pod has a PVC volume mounted
 	pod := &corev1.Pod{}

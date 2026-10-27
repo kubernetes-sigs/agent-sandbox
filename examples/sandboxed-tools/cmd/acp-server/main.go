@@ -156,7 +156,7 @@ func run(ctx context.Context, opts agent.RunOptions, toolsetName string, listen 
 		log.Info("client connected", "remote", conn.RemoteAddr().String())
 		go func() {
 			defer conn.Close()
-			serveConn(ctx, harness, sessionStore, registry, conn)
+			serveConn(ctx, harness, toolset.Name(), sessionStore, registry, conn)
 			log.Info("client disconnected", "remote", conn.RemoteAddr().String())
 		}()
 	}
@@ -169,7 +169,7 @@ func run(ctx context.Context, opts agent.RunOptions, toolsetName string, listen 
 // roles reversed: OnRequest serves the client's initialize / session/new /
 // session/prompt calls, Notify streams session updates, and Call asks the
 // client for tool call permission.
-func serveConn(ctx context.Context, harness *agent.Harness, sessionStore sessions.Store, registry *sessionRegistry, conn net.Conn) {
+func serveConn(ctx context.Context, harness *agent.Harness, newSessionToolset string, sessionStore sessions.Store, registry *sessionRegistry, conn net.Conn) {
 	// acp.Client answers each request on its own goroutine and Run returns
 	// as soon as the connection closes, without waiting for them. Scope the
 	// context to the connection so an in-flight RunTurn (LLM call, sandbox
@@ -181,11 +181,12 @@ func serveConn(ctx context.Context, harness *agent.Harness, sessionStore session
 	peer := acp.NewClient(conn, conn)
 
 	c := &acpConn{
-		ctx:          ctx,
-		peer:         peer,
-		harness:      harness,
-		sessionStore: sessionStore,
-		registry:     registry,
+		ctx:               ctx,
+		peer:              peer,
+		harness:           harness,
+		sessionStore:      sessionStore,
+		registry:          registry,
+		newSessionToolset: newSessionToolset,
 	}
 	peer.OnRequest = c.handleRequest
 
@@ -228,6 +229,9 @@ type acpConn struct {
 	harness      *agent.Harness
 	sessionStore sessions.Store
 	registry     *sessionRegistry
+
+	// newSessionToolset is the name of the toolset to use for new sessions.
+	newSessionToolset string
 }
 
 func (c *acpConn) handleRequest(method string, params json.RawMessage) (any, *acp.RPCError) {
@@ -251,7 +255,8 @@ func (c *acpConn) handleRequest(method string, params json.RawMessage) (any, *ac
 		if err != nil {
 			return nil, internalError(err)
 		}
-		if _, err := c.startSession(sessionID, false); err != nil {
+		metadata := sessions.Metadata{Toolset: c.newSessionToolset}
+		if _, err := c.newSession(sessionID, metadata); err != nil {
 			return nil, internalError(err)
 		}
 		return acp.NewSessionResponse{SessionID: sessionID}, nil
@@ -264,7 +269,7 @@ func (c *acpConn) handleRequest(method string, params json.RawMessage) (any, *ac
 		if err := sessions.ValidateSessionName(req.SessionID); err != nil {
 			return nil, invalidParams(fmt.Errorf("invalid sessionId: %w", err))
 		}
-		active, err := c.startSession(req.SessionID, true)
+		active, err := c.loadSession(req.SessionID)
 		if err != nil {
 			if errors.Is(err, sessions.ErrNotFound) {
 				return nil, invalidParams(fmt.Errorf("unknown sessionId %q", req.SessionID))
@@ -288,12 +293,8 @@ func (c *acpConn) handleRequest(method string, params json.RawMessage) (any, *ac
 	}
 }
 
-// startSession returns the named session, building (or resuming) it if it
-// is not already loaded. With mustExist, an ID with no persisted history is
-// an error wrapping sessions.ErrNotFound rather than a new session. The
-// registry lock is held across the build so two concurrent loads cannot
-// produce two Session objects for one session ID.
-func (c *acpConn) startSession(sessionID string, mustExist bool) (*activeSession, error) {
+// loadSession loads the named session; returning sessions.ErrNotFound if not found.
+func (c *acpConn) loadSession(sessionID string) (*activeSession, error) {
 	c.registry.mu.Lock()
 	defer c.registry.mu.Unlock()
 
@@ -301,16 +302,22 @@ func (c *acpConn) startSession(sessionID string, mustExist bool) (*activeSession
 		return active, nil
 	}
 
-	if mustExist {
-		// BuildSession creates-or-resumes, so session/load has to check the
-		// store itself; otherwise a typo in the ID would silently start a
-		// fresh conversation.
-		if _, err := c.sessionStore.LoadSession(c.ctx, sessionID); err != nil {
-			return nil, err
-		}
+	session, err := c.harness.LoadSession(c.ctx, c.sessionStore, sessionID)
+	if err != nil {
+		return nil, err
 	}
 
-	session, err := c.harness.BuildSession(c.ctx, c.sessionStore, sessionID)
+	active := &activeSession{session: session}
+	c.registry.sessions[sessionID] = active
+	return active, nil
+}
+
+// newSession creates a new session with the id sessionID .
+func (c *acpConn) newSession(sessionID string, metadata sessions.Metadata) (*activeSession, error) {
+	c.registry.mu.Lock()
+	defer c.registry.mu.Unlock()
+
+	session, err := c.harness.NewSession(c.ctx, c.sessionStore, sessionID, metadata)
 	if err != nil {
 		return nil, err
 	}

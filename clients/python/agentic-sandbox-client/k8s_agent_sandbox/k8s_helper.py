@@ -674,6 +674,38 @@ class K8sHelper:
             items.extend(page.get("items", []))
         return items, resource_version
 
+    def count_live_sandbox_claims(
+        self,
+        namespace: str,
+        label_selector: str,
+        _request_timeout: float | tuple[float, float] | None = None,
+    ) -> int:
+        """Counts matching ``SandboxClaim`` objects without ``metadata.deletionTimestamp``,
+        holding one page of the list at a time.
+
+        Between ``deletecollection`` rounds, ``release()`` and ``release_group()`` run a
+        consistent read only to check whether any non-terminating claims still need deletion and
+        whether the round made progress. Calling ``list_sandbox_claim_objects`` would materialize
+        every surviving claim dict in driver memory just to count them (especially after a
+        ``deletecollection`` timeout on a large batch), whereas ``count_live_sandbox_claims``
+        folds one page at a time into an ``int`` and drops each page before advancing the
+        generator.
+
+        Args:
+            _request_timeout: Optional timeout (seconds, or a ``(connect, read)``
+                pair) forwarded to the underlying urllib3 request of each page.
+        """
+        live = 0
+        for page, first in _claim_list_pages(
+            self.custom_objects_api.list_namespaced_custom_object, namespace, label_selector, _request_timeout
+        ):
+            if first:
+                live = 0
+            live += sum(1 for c in page.get("items", []) if not (c.get("metadata") or {}).get("deletionTimestamp"))
+            # Drop this frame's reference before advancing the generator to fetch the next page.
+            del page
+        return live
+
     def watch_sandbox_claims(
         self, namespace: str, label_selector: str, resource_version: str, timeout_seconds: int,
         _request_timeout: float | tuple[float, float] | None = None

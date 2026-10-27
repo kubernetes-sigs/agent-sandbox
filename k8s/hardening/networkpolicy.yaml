@@ -8,11 +8,20 @@
 # kubelet probes come from the node, not from a pod.
 #
 # The API server typically runs on host-network control plane nodes, not as
-# regular pods, so a namespaceSelector cannot target it. The port-only rule
-# (no "to" restriction) allows egress on the standard API ports to any
-# destination. For strict egress compliance (SOC 2, FedRAMP, CIS benchmarks),
-# tighten with an ipBlock targeting your API server CIDR or cluster service IP:
-#   kubectl get svc kubernetes -n default -o jsonpath='{.spec.clusterIP}'
+# regular pods, so neither a namespaceSelector nor a podSelector matches it.
+# The port-only rule (no "to" restriction) allows egress on the standard API
+# ports to any destination. For strict egress compliance (SOC 2, FedRAMP, CIS
+# benchmarks), tighten with an ipBlock targeting the API server endpoint
+# addresses, not the ClusterIP of the kubernetes Service:
+#   kubectl get endpointslice -n default \
+#     -l kubernetes.io/service-name=kubernetes -o wide
+# kube-proxy rewrites the ClusterIP to an endpoint address before the CNI
+# evaluates this policy, so an ipBlock for the ClusterIP matches nothing and
+# blocks all API traffic. A scoped rule must allow that endpoint port, not the
+# Service port. Endpoint addresses change when control-plane nodes are
+# replaced, so a CIDR for the control-plane subnet is easier to maintain than
+# per-node /32 entries. On a CNI that evaluates policy before the rewrite, the
+# ClusterIP is what matches; list both as peers to cover either dataplane.
 #
 # The podSelector uses the legacy label "app: agent-sandbox-controller" to
 # match the existing controller Deployment. The sandbox-router uses the

@@ -95,11 +95,24 @@ spec:
       port: 4317
   # Kubernetes API server — required when --cache-enabled or
   # --authz-mode=tokenreview. The API server typically runs on host-network
-  # control plane nodes, not as regular pods, so a namespaceSelector cannot
-  # target it. This port-only rule (no "to" restriction) allows egress on
-  # the standard API ports to any destination. Tighten with an ipBlock for
-  # your API server ClusterIP if desired:
-  #   kubectl get svc kubernetes -n default -o jsonpath='{.spec.clusterIP}'
+  # control plane nodes, not as regular pods, so neither a namespaceSelector
+  # nor a podSelector matches it. This port-only rule (no "to" restriction)
+  # allows egress on the standard API ports to any destination.
+  #
+  # To restrict the destination, target the API server endpoint addresses, not
+  # the ClusterIP of the kubernetes Service. kube-proxy rewrites the ClusterIP
+  # to an endpoint address before the CNI evaluates this policy, so an ipBlock
+  # for the ClusterIP matches nothing and blocks all API traffic; the router
+  # then cannot reach the API server and its informer cache never syncs. Read
+  # the endpoint addresses and port with:
+  #   kubectl get endpointslice -n default \
+  #     -l kubernetes.io/service-name=kubernetes -o wide
+  # A scoped rule must allow that endpoint port, not the Service port.
+  # Endpoint addresses change when control-plane nodes are replaced, so a CIDR
+  # for the control-plane subnet is easier to maintain than per-node /32
+  # entries. On a CNI that evaluates policy before the rewrite, the ClusterIP
+  # is what matches; list both as peers to cover either dataplane.
+  #
   # Skip this rule only when running with --cache-enabled=false AND
   # --authz-mode=allow-all.
   - ports:

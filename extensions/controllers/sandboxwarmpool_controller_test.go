@@ -2111,35 +2111,46 @@ func TestReconcilePool_TemplateUpdateRecreate(t *testing.T) {
 	}
 
 	testCases := []struct {
-		name             string
-		updateBaseFn     func(*sandboxv1beta1.SandboxBlueprint)
-		updateFn         func(*extensionsv1beta1.SandboxTemplate)
-		verifyFn         func(*testing.T, sandboxv1beta1.Sandbox)
-		expectRecreation bool
+		name                string
+		updateBaseFn        func(*sandboxv1beta1.SandboxBlueprint)
+		updateFn            func(*extensionsv1beta1.SandboxTemplate)
+		verifyFn            func(*testing.T, sandboxv1beta1.Sandbox)
+		expectRecreation    bool
+		expectInPlaceUpdate bool
 	}{
 		{
 			name:             "Template spec unchanged should NOT recreate",
 			expectRecreation: false,
 		},
 		{
-			name: "Pod template annotation drift should NOT recreate",
+			name: "Pod template annotation drift should update in place",
 			updateFn: func(tmpl *extensionsv1beta1.SandboxTemplate) {
 				if tmpl.Spec.PodTemplate.ObjectMeta.Annotations == nil {
 					tmpl.Spec.PodTemplate.ObjectMeta.Annotations = make(map[string]string)
 				}
 				tmpl.Spec.PodTemplate.ObjectMeta.Annotations["new-annotation"] = "value"
 			},
-			expectRecreation: false,
+			expectInPlaceUpdate: true,
 		},
 		{
-			name: "Pod template label drift should NOT recreate",
+			name: "Pod template label drift should update in place",
 			updateFn: func(tmpl *extensionsv1beta1.SandboxTemplate) {
 				if tmpl.Spec.PodTemplate.ObjectMeta.Labels == nil {
 					tmpl.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
 				}
 				tmpl.Spec.PodTemplate.ObjectMeta.Labels["new-label"] = "value"
 			},
-			expectRecreation: false,
+			expectInPlaceUpdate: true,
+		},
+		{
+			name: "Pod template label removal should update in place",
+			updateBaseFn: func(bp *sandboxv1beta1.SandboxBlueprint) {
+				bp.PodTemplate.ObjectMeta.Labels = map[string]string{"old-label": "value"}
+			},
+			updateFn: func(tmpl *extensionsv1beta1.SandboxTemplate) {
+				delete(tmpl.Spec.PodTemplate.ObjectMeta.Labels, "old-label")
+			},
+			expectInPlaceUpdate: true,
 		},
 		{
 			name: "VCT annotation drift should NOT recreate",
@@ -2303,9 +2314,9 @@ func TestReconcilePool_TemplateUpdateRecreate(t *testing.T) {
 			}
 
 			// Capture updated sandbox blueprint hash after template update
-			_, _, updatedHash, err := r.fetchTemplateAndHash(ctx, warmPool)
+			currentTemplate, updatedPodTemplateHash, updatedHash, err := r.fetchTemplateAndHash(ctx, warmPool)
 			require.NoError(t, err)
-			if tt.expectRecreation {
+			if tt.expectRecreation || tt.expectInPlaceUpdate {
 				require.NotEqual(t, initialHash, updatedHash, "sandbox blueprint hash should change after template update")
 			}
 
@@ -2323,11 +2334,21 @@ func TestReconcilePool_TemplateUpdateRecreate(t *testing.T) {
 			require.Len(t, sandboxes.Items, int(replicas), "expected same replica count after recreation")
 
 			for _, sb := range sandboxes.Items {
-				if tt.expectRecreation {
+				switch {
+				case tt.expectRecreation:
 					require.Equal(t, updatedHash, sb.Labels[sandboxv1beta1.SandboxTemplateHashLabel],
 						"recreated sandbox should carry the updated sandbox blueprint hash")
 					require.NotEqual(t, initialName, sb.Name, "recreated sandbox should have a new name")
-				} else {
+				case tt.expectInPlaceUpdate:
+					require.Equal(t, initialName, sb.Name, "sandbox should be updated in place, not recreated")
+					require.Equal(t, updatedHash, sb.Labels[sandboxv1beta1.SandboxTemplateHashLabel],
+						"updated sandbox should carry the updated sandbox blueprint hash")
+					require.Equal(t, updatedPodTemplateHash, sb.Labels[sandboxv1beta1.DeprecatedSandboxPodTemplateHashLabel])
+					fresh, err := r.buildSandboxCR(warmPool, sandboxcontrollers.NameHash(warmPool.Name), currentTemplate, updatedPodTemplateHash, updatedHash)
+					require.NoError(t, err)
+					require.Equal(t, fresh.Spec.PodTemplate.ObjectMeta, sb.Spec.PodTemplate.ObjectMeta,
+						"updated sandbox should carry the pod metadata of a newly created one")
+				default:
 					require.Equal(t, initialHash, sb.Labels[sandboxv1beta1.SandboxTemplateHashLabel],
 						"unchanged sandbox should retain the initial sandbox blueprint hash")
 					require.Equal(t, initialName, sb.Name, "unchanged sandbox should retain the same name")
@@ -2336,6 +2357,94 @@ func TestReconcilePool_TemplateUpdateRecreate(t *testing.T) {
 					tt.verifyFn(t, sb)
 				}
 			}
+		})
+	}
+}
+
+func newMetadataDriftTestPool(strategy extensionsv1beta1.SandboxWarmPoolUpdateStrategyType) (*extensionsv1beta1.SandboxTemplate, *extensionsv1beta1.SandboxWarmPool) {
+	replicas := int32(1)
+	template := createTemplate("default")
+	return template, &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default", UID: "warmpool-uid"},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:       &replicas,
+			TemplateRef:    extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+			UpdateStrategy: &extensionsv1beta1.SandboxWarmPoolUpdateStrategy{Type: strategy},
+		},
+	}
+}
+
+func TestReconcilePool_TemplatePodMetadataDriftOnReplenish(t *testing.T) {
+	ctx := context.Background()
+	template, warmPool := newMetadataDriftTestPool(extensionsv1beta1.OnReplenishSandboxWarmPoolUpdateStrategyType)
+	scheme := newTestScheme()
+	r := SandboxWarmPoolReconciler{Client: newFakeClient(scheme, template, warmPool), Scheme: scheme, MaxBatchSize: sandboxCreateDeleteMaxBatchSize}
+
+	_, err := r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	syncPoolExpectations(&r, warmPool)
+	_, _, initialHash, err := r.fetchTemplateAndHash(ctx, warmPool)
+	require.NoError(t, err)
+
+	updatedTemplate := template.DeepCopy()
+	updatedTemplate.Spec.PodTemplate.ObjectMeta.Labels = map[string]string{"new-label": "value"}
+	require.NoError(t, r.Update(ctx, updatedTemplate))
+	_, err = r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+
+	sandboxes := &sandboxv1beta1.SandboxList{}
+	require.NoError(t, r.List(ctx, sandboxes, client.InNamespace("default")))
+	require.Len(t, sandboxes.Items, 1)
+	require.Equal(t, initialHash, sandboxes.Items[0].Labels[sandboxv1beta1.SandboxTemplateHashLabel])
+	require.NotContains(t, sandboxes.Items[0].Spec.PodTemplate.ObjectMeta.Labels, "new-label",
+		"OnReplenish should leave existing sandboxes unchanged")
+}
+
+func TestReconcilePool_PodMetadataUpdateFailureKeepsSandbox(t *testing.T) {
+	updateErr := errors.New("update failed")
+	conflictErr := k8serrors.NewConflict(sandboxv1beta1.GroupVersion.WithResource("sandboxes").GroupResource(), "sandbox", errors.New("object was modified"))
+
+	testCases := []struct {
+		name      string
+		updateErr error
+		wantErr   error
+	}{
+		{name: "conflict waits for the next reconcile", updateErr: conflictErr, wantErr: nil},
+		{name: "other errors are returned", updateErr: updateErr, wantErr: updateErr},
+	}
+
+	for _, tt := range testCases {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			template, warmPool := newMetadataDriftTestPool(extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType)
+			scheme := newTestScheme()
+			c := interceptor.NewClient(newFakeClient(scheme, template, warmPool), interceptor.Funcs{
+				Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+					if _, ok := obj.(*sandboxv1beta1.Sandbox); ok {
+						return tt.updateErr
+					}
+					return c.Update(ctx, obj, opts...)
+				},
+			})
+			r := SandboxWarmPoolReconciler{Client: c, Scheme: scheme, MaxBatchSize: sandboxCreateDeleteMaxBatchSize}
+
+			_, err := r.reconcilePool(ctx, warmPool)
+			require.NoError(t, err)
+			syncPoolExpectations(&r, warmPool)
+			before := &sandboxv1beta1.SandboxList{}
+			require.NoError(t, r.List(ctx, before, client.InNamespace("default")))
+			require.Len(t, before.Items, 1)
+
+			updatedTemplate := template.DeepCopy()
+			updatedTemplate.Spec.PodTemplate.ObjectMeta.Labels = map[string]string{"new-label": "value"}
+			require.NoError(t, r.Update(ctx, updatedTemplate))
+			_, err = r.reconcilePool(ctx, warmPool)
+			require.ErrorIs(t, err, tt.wantErr)
+
+			after := &sandboxv1beta1.SandboxList{}
+			require.NoError(t, r.List(ctx, after, client.InNamespace("default")))
+			require.Len(t, after.Items, 1, "a failed update must not make the pool create a replacement")
+			require.Equal(t, before.Items[0].Name, after.Items[0].Name)
 		})
 	}
 }

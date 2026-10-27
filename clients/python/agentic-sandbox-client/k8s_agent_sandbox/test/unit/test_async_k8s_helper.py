@@ -1087,22 +1087,50 @@ class TestAsyncK8sHelperBatchMethods(unittest.IsolatedAsyncioTestCase):
         self.helper.core_v1_api = MagicMock()
         self.helper.coordination_v1_api = MagicMock()
 
-    async def test_list_sandbox_claim_objects_returns_items_and_resource_version(self):
-        self.helper.custom_objects_api.list_namespaced_custom_object = AsyncMock(
-            return_value={
-                "items": [{"metadata": {"name": "b1-0"}}],
-                "metadata": {"resourceVersion": "42"},
-            }
-        )
+    async def test_list_sandbox_claim_objects_pages_and_returns_the_first_pages_resource_version(self):
+        list_page = self.helper.custom_objects_api.list_namespaced_custom_object = AsyncMock(side_effect=[
+            {"items": [{"metadata": {"name": "b1-0"}}], "metadata": {"resourceVersion": "42", "continue": "t1"}},
+            # A page may be empty while more follow.
+            {"items": [], "metadata": {"resourceVersion": "43", "continue": "t2"}},
+            {"items": [{"metadata": {"name": "b1-1"}}], "metadata": {"resourceVersion": "44"}},
+        ])
 
         items, rv = await self.helper.list_sandbox_claim_objects(
             "default", "agents.x-k8s.io/batch-id=b1"
         )
 
-        self.assertEqual(items, [{"metadata": {"name": "b1-0"}}])
+        self.assertEqual([item["metadata"]["name"] for item in items], ["b1-0", "b1-1"])
         self.assertEqual(rv, "42")
-        call_kwargs = self.helper.custom_objects_api.list_namespaced_custom_object.call_args.kwargs
-        self.assertEqual(call_kwargs["label_selector"], "agents.x-k8s.io/batch-id=b1")
+        calls = list_page.call_args_list
+        self.assertEqual([c.kwargs["_continue"] for c in calls], [None, "t1", "t2"])
+        for c in calls:
+            self.assertEqual(c.kwargs["limit"], 500)
+            self.assertEqual(c.kwargs["label_selector"], "agents.x-k8s.io/batch-id=b1")
+
+    async def test_list_sandbox_claim_objects_restarts_once_when_a_continue_token_expires(self):
+        expired = client.ApiException(status=410)
+
+        def page(name, rv, token=None):
+            return {"items": [{"metadata": {"name": name}}], "metadata": {"resourceVersion": rv, "continue": token}}
+
+        list_page = self.helper.custom_objects_api.list_namespaced_custom_object = AsyncMock(side_effect=[
+            page("old-0", "42", "t1"), expired, page("b1-0", "50", "t2"), page("b1-1", "51"),
+        ])
+        items, rv = await self.helper.list_sandbox_claim_objects("default", "agents.x-k8s.io/batch-id=b1")
+        self.assertEqual([item["metadata"]["name"] for item in items], ["b1-0", "b1-1"])
+        self.assertEqual(rv, "50")
+        self.assertEqual([c.kwargs["_continue"] for c in list_page.call_args_list], [None, "t1", None, "t2"])
+
+        for label, side_effect, expected_status in (
+            ("second 410 after restart", [page("old-0", "42", "t1"), expired, page("b1-0", "50", "t2"), expired], 410),
+            ("410 on first page", [expired], 410),
+            ("non-410 mid-pagination", [page("old-0", "42", "t1"), client.ApiException(status=500)], 500),
+        ):
+            with self.subTest(label):
+                list_page.side_effect = side_effect
+                with self.assertRaises(client.ApiException) as raised:
+                    await self.helper.list_sandbox_claim_objects("default", "agents.x-k8s.io/batch-id=b1")
+                self.assertEqual(raised.exception.status, expected_status)
 
     @patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch")
     async def test_watch_sandbox_claims_yields_events(self, mock_watch_class):

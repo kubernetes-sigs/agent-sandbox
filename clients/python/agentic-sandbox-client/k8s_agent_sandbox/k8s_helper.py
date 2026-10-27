@@ -18,7 +18,7 @@ import math
 import time
 from itertools import chain
 from datetime import UTC, datetime
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any, List, cast
 from kubernetes import client, config, watch
 import urllib3.exceptions
@@ -34,6 +34,7 @@ from .utils import (
 from .constants import (
     CLAIM_API_GROUP,
     CLAIM_API_VERSION,
+    CLAIM_LIST_PAGE_SIZE,
     CLAIM_PLURAL_NAME,
     TEMPLATE_PLURAL_NAME,
     TERMINAL_CLAIM_READY_REASONS,
@@ -105,6 +106,57 @@ def _api_client_without_retries(api_client: client.ApiClient | None) -> client.A
     configuration = client.Configuration.get_default_copy()
     configuration.retries = False
     return client.ApiClient(configuration=configuration)
+
+
+def _claim_list_pages(
+    list_page: Callable[..., Any],
+    namespace: str,
+    label_selector: str,
+    _request_timeout: float | tuple[float, float] | None,
+) -> Iterator[tuple[dict[str, Any], bool]]:
+    """Yields ``(page, first)`` pairs for one paginated ``SandboxClaim`` list.
+
+    An unpaginated ``SandboxClaim`` list fetches every claim of a batch in one HTTP response,
+    holding the full raw JSON body and decoded text alongside the parsed dicts in driver memory
+    during ``claim_batch``, ``get_batch``, ``410`` watch re-lists, and release counts.
+    ``_claim_list_pages`` fetches the list in ``CLAIM_LIST_PAGE_SIZE`` chunks so driver memory
+    holds only one page's response buffer at a time while keeping a single consistent snapshot
+    at the first page's ``resourceVersion``.
+
+    Yielding ``(page, first)`` tells the caller when the list starts (or restarts after a ``410``
+    continue-token expiry) so the caller discards anything it gathered from earlier pages.
+    """
+    continue_token: str | None = None
+    restarted = False
+    while True:
+        try:
+            page = cast(dict[str, Any], list_page(
+                group=CLAIM_API_GROUP,
+                version=CLAIM_API_VERSION,
+                namespace=namespace,
+                plural=CLAIM_PLURAL_NAME,
+                label_selector=label_selector,
+                limit=CLAIM_LIST_PAGE_SIZE,
+                _continue=continue_token,
+                _request_timeout=_request_timeout,
+            ))
+        except client.ApiException as e:
+            # A continue token expires after a few minutes, and a 410 isn't transient. Restarting the
+            # list once without the token keeps its pages one consistent snapshot, which a watch
+            # started at the list's resourceVersion relies on.
+            if e.status != 410 or continue_token is None or restarted:
+                raise
+            restarted = True
+            continue_token = None
+            continue
+        yield page, continue_token is None
+        # A page may be empty while more follow, so only the continue token ends the list.
+        continue_token = (page.get("metadata") or {}).get("continue") or None
+        # Drop the generator frame's reference before fetching the next page so driver memory
+        # never holds two pages at once.
+        del page
+        if continue_token is None:
+            return
 
 
 class K8sHelper:
@@ -603,20 +655,23 @@ class K8sHelper:
         namespace: str,
         label_selector: str,
         _request_timeout: float | tuple[float, float] | None = None,
-    ) -> tuple[List[dict[str, Any]], str]:
-        """Lists full SandboxClaim objects matching a label selector. Also return the list's
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Lists full SandboxClaim objects matching a label selector. Also returns the list's
         resourceVersion, so a subsequent watch does not miss any events.
+
+        Args:
+            _request_timeout: Optional timeout (seconds, or a ``(connect, read)``
+                pair) forwarded to the underlying urllib3 request of each page.
         """
-        response = cast(dict[str, Any], self.custom_objects_api.list_namespaced_custom_object(
-            group=CLAIM_API_GROUP,
-            version=CLAIM_API_VERSION,
-            namespace=namespace,
-            plural=CLAIM_PLURAL_NAME,
-            label_selector=label_selector,
-            _request_timeout=_request_timeout,
-        ))
-        items = response.get("items", [])
-        resource_version = (response.get("metadata") or {}).get("resourceVersion", "0")
+        items: list[dict[str, Any]] = []
+        resource_version = "0"
+        for page, first in _claim_list_pages(
+            self.custom_objects_api.list_namespaced_custom_object, namespace, label_selector, _request_timeout
+        ):
+            if first:
+                items = []
+                resource_version = (page.get("metadata") or {}).get("resourceVersion", "0")
+            items.extend(page.get("items", []))
         return items, resource_version
 
     def watch_sandbox_claims(

@@ -1000,6 +1000,7 @@ class TestAsyncK8sHelperApiClientInjection(unittest.IsolatedAsyncioTestCase):
 
 class TestAsyncK8sHelperClientCompatibility(unittest.IsolatedAsyncioTestCase):
     async def test_incluster_token_and_uid_reach_the_request(self):
+        """Exercise real in-cluster auth and delete serialization without network I/O."""
         original = client.Configuration.get_default_copy()
         self.addCleanup(client.Configuration.set_default, original)
         helper = AsyncK8sHelper()
@@ -1027,6 +1028,7 @@ class TestAsyncK8sHelperClientCompatibility(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(request.call_args.kwargs["body"]["preconditions"], {"uid": "claim-uid"})
 
     async def test_real_watch_preserves_readiness_uid_and_cancellation(self):
+        """Exercise the installed Watch across adoption, replacement and cancellation."""
         async with client.ApiClient() as api_client:
             helper = AsyncK8sHelper(api_client=api_client)
             for outcome in ("ready", "replaced", "cancelled"):

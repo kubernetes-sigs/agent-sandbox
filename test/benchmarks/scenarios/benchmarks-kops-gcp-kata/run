@@ -1,0 +1,113 @@
+#!/bin/bash
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Kata Containers e2e tests on a kOps GCE cluster with nested virtualization.
+#
+# Creates a small kOps cluster (3 workers by default), enables nested
+# virtualization on GCE worker instances, installs kata via kata-deploy,
+# deploys the agent-sandbox controller, and runs the RuntimeClass-aware
+# e2e test suite with SANDBOX_RUNTIME_CLASS=kata-qemu.
+#
+# This scenario sources dev/ci/shared/kops-gcp-lifecycle.sh for the
+# Boskos/kOps lifecycle and adds kata-specific steps (nested virt,
+# kata install) between cluster creation and test execution. The goal
+# is functional verification of the controller under kata's ~8-12s
+# cold starts, not throughput measurement.
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+# shellcheck source=dev/ci/shared/kops-gcp-lifecycle.sh
+source "${REPO_ROOT}/dev/ci/shared/kops-gcp-lifecycle.sh"
+
+kops_install_tools
+kops_acquire_project
+
+kata_capture_logs() {
+  echo "Capturing controller diagnostics..."
+  local out_dir="${ARTIFACTS:-${REPO_ROOT}/bin}"
+  mkdir -p "${out_dir}"
+  kubectl logs deployment/agent-sandbox-controller \
+    --namespace agent-sandbox-system --tail=-1 > "${out_dir}/controller.log" 2>/dev/null || true
+}
+KOPS_PRE_CLEANUP_HOOK=kata_capture_logs
+kops_register_cleanup
+
+kops_setup_images "agent-sandbox-controller"
+kops_create_bucket
+
+# Cluster sizing: 3 worker nodes (n2-standard-8, 24 vCPUs total) for
+# kata e2e with pool size 8, batch cap 2 (~10 VMs at peak burst).
+# n2 is required for GCE nested virtualization (n2d/AMD and c3/c4 do
+# not support it). Control plane is small since we're running
+# functional tests, not benchmarks.
+kops_create_cluster "sandbox-kata-${UNIQUE_SUFFIX}" "us-central1-a"
+
+kops_apply_and_validate
+
+# ─── Install kata with nested virtualization ─────────────────────────────────
+
+echo ""
+echo "=== Installing Kata Containers ==="
+
+KATA_VERSION="${KATA_VERSION:-4.2.0}"
+RUNTIME_CLASS="${SANDBOX_RUNTIME_CLASS:-kata-qemu}"
+
+"${REPO_ROOT}/dev/ci/shared/install-kata-kops" \
+  --cluster-name "${CLUSTER_NAME}" \
+  --zone "${ZONE}" \
+  --project "${PROJECT_ID}" \
+  --kata-version "${KATA_VERSION}" \
+  --runtime-class "${RUNTIME_CLASS}" \
+  --shims "${KATA_SHIMS:-qemu}"
+
+# ─── Deploy controller ───────────────────────────────────────────────────────
+
+echo ""
+echo "=== Deploying controller ==="
+
+dev/tools/deploy-to-kube --image-prefix="${IMAGE_PREFIX}" --extensions \
+  ${CONTROLLER_ARGS:+--controller-args="${CONTROLLER_ARGS}"}
+
+echo "Waiting for controller to be ready..."
+kubectl rollout status deployment agent-sandbox-controller \
+  --namespace agent-sandbox-system --timeout=10m
+
+# ─── Run e2e tests ───────────────────────────────────────────────────────────
+
+echo ""
+echo "=== Running RuntimeClass e2e tests with ${RUNTIME_CLASS} ==="
+
+ARTIFACT_DIR="${ARTIFACTS:-${REPO_ROOT}/bin}"
+mkdir -p "${ARTIFACT_DIR}"
+
+export SANDBOX_RUNTIME_CLASS="${RUNTIME_CLASS}"
+export SANDBOX_POOL_SIZES="${SANDBOX_POOL_SIZES:-8}"
+export SANDBOX_BATCH_CAP="${SANDBOX_BATCH_CAP:-2}"
+export KUBECONFIG
+
+go tool -modfile="${REPO_ROOT}/dev/tools/go.mod" gotestsum \
+  --junitfile="${ARTIFACT_DIR}/junit_e2e-kata.xml" \
+  -- \
+  ./test/e2e/extensions/... \
+  -run RuntimeClass \
+  -v \
+  --parallel=1 \
+  -timeout "${E2E_TIMEOUT:-30m}"
+
+echo "Kata e2e tests completed successfully."

@@ -38,6 +38,10 @@ type fakeForwarder struct {
 	// does once it has bound its listeners) before blocking.
 	signalReady bool
 
+	// die, when set, makes a ready ForwardPorts return the error sent on it,
+	// like the real forwarder does when it loses the connection to the pod.
+	die chan error
+
 	stopChan  <-chan struct{}
 	readyChan chan struct{}
 	errOut    io.Writer
@@ -58,8 +62,12 @@ func (f *fakeForwarder) ForwardPorts() error {
 		}
 		return f.forwardErr
 	}
-	<-f.stopChan
-	return nil
+	select {
+	case <-f.stopChan:
+		return nil
+	case err := <-f.die:
+		return err
+	}
 }
 
 func (f *fakeForwarder) GetPorts() ([]portforward.ForwardedPort, error) {

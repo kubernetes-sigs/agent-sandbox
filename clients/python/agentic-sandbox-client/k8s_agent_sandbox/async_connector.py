@@ -47,7 +47,7 @@ from .models import (
     SandboxdPodTunnelConnectionConfig,
     SandboxdInClusterConnectionConfig,
 )
-from .utils import async_kubectl_kubeconfig_args, merge_headers
+from .utils import async_kubectl_kubeconfig_args, merge_headers, sandboxd_auth_headers
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +84,7 @@ async def _capture_streamed_error_body(response: httpx.Response) -> None:
         logger.debug("Unable to capture streamed error response body", exc_info=True)
 
 
-def _router_timeout_header_value(timeout) -> str | None:
+def _router_timeout_header_value(timeout: Any) -> str | None:
     """Return a positive read timeout suitable for the router header."""
     value = None
     if isinstance(timeout, bool):
@@ -144,6 +144,7 @@ class AsyncSandboxConnector:
         self.id = sandbox_id
         self.namespace = namespace
         self.connection_config = connection_config
+        self._sandboxd_auth_headers = sandboxd_auth_headers(connection_config)
         self.k8s_helper = k8s_helper
         self._get_pod_ip = get_pod_ip
         self._get_service_fqdn = get_service_fqdn
@@ -323,8 +324,10 @@ class AsyncSandboxConnector:
 
         allowed_statuses = kwargs.pop("allowed_statuses", None)
         disable_retries = kwargs.pop("_disable_retries", False)
-        # Precedence: config < caller < SDK routing headers.
-        headers = merge_headers(self._extra_headers, kwargs.pop("headers", None))
+        # Precedence: config < caller < sandboxd auth / SDK routing headers.
+        headers = merge_headers(
+            self._extra_headers, kwargs.pop("headers", None), self._sandboxd_auth_headers
+        )
         # For security and SSRF mitigation, the SDK explicitly mandates blocking all HTTP redirects
         # to the internal sandbox endpoints. Any user-provided redirect settings are overridden and
         # ignored. We pop 'follow_redirects' here to prevent a TypeError due to duplicate keyword
@@ -543,7 +546,16 @@ class AsyncSandboxConnector:
                         await result
                     self._grpc_channel = None
                     self._grpc_channel_target = None
-                self._grpc_channel = grpc.aio.insecure_channel(self.grpc_target)
+                authorization = self._sandboxd_auth_headers.get("authorization")
+                if authorization is None:
+                    channel = grpc.aio.insecure_channel(self.grpc_target)
+                else:
+                    from ._grpc_auth import async_auth_interceptors
+
+                    channel = grpc.aio.insecure_channel(
+                        self.grpc_target, interceptors=async_auth_interceptors(authorization)
+                    )
+                self._grpc_channel = channel
                 self._grpc_channel_target = self.grpc_target
                 return self._grpc_channel
 
@@ -664,7 +676,7 @@ class AsyncSandboxdPodTunnelStrategy:
         """Return an unused loopback port for ``kubectl`` to bind."""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.bind(("127.0.0.1", 0))
-            return sock.getsockname()[1]
+            return int(sock.getsockname()[1])
 
     @staticmethod
     async def _is_port_open(port: int) -> bool:

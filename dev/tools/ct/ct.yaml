@@ -1,0 +1,10 @@
+# chart-testing config for dev/tools/lint-helm.
+charts:
+  - helm
+lint-conf: dev/tools/ct/lintconf.yaml
+chart-yaml-schema: dev/tools/ct/chart_schema.yaml
+# The chart maintainer is the kubernetes-sigs org, not a GitHub user.
+validate-maintainers: false
+# dev/tools/verify-chart-version owns the version bump policy.
+check-version-increment: false
+helm-lint-extra-args: --set image.tag=v0.0.0-lint

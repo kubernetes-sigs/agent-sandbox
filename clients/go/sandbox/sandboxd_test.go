@@ -30,7 +30,11 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/status"
+	fakekube "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/portforward"
 
 	processv1 "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1"
 )
@@ -482,6 +486,108 @@ func TestSandboxdRun_DirectURLUnsupported(t *testing.T) {
 	}
 	if errors.Is(err, ErrNotReady) {
 		t.Errorf("a permanent failure must not look retryable, got: %v", err)
+	}
+}
+
+// Once the pod port-forward dies, Run and Start must report ErrNotReady
+// wrapping ErrPortForwardDied, as REST calls do, so callers know to call
+// Open. The published gRPC target is a local port of the dead tunnel.
+func TestSandboxdRun_PodTunnelDeathReturnsErrNotReady(t *testing.T) {
+	opts := defaultTestOpts()
+	opts.APIURL = ""
+	opts.Runtime = RuntimeSandboxd
+	c, _, _ := newTestSandbox(opts)
+
+	// serve stands in for one tunnel's gRPC local port.
+	serve := func(stdout string) (*grpc.Server, uint16) {
+		lis, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("failed to listen: %v", err)
+		}
+		srv := grpc.NewServer()
+		processv1.RegisterProcessServiceServer(srv, &fakeProcessService{response: &processv1.ExecuteResponse{Stdout: []byte(stdout)}})
+		go func() { _ = srv.Serve(lis) }()
+		t.Cleanup(srv.Stop)
+		return srv, uint16(lis.Addr().(*net.TCPAddr).Port)
+	}
+	forwarder := func(grpcLocal uint16) *fakeForwarder {
+		return &fakeForwarder{
+			ports: []portforward.ForwardedPort{
+				{Local: 12345, Remote: uint16(opts.SandboxdRESTPort)},
+				{Local: grpcLocal, Remote: uint16(opts.SandboxdGRPCPort)},
+			},
+			signalReady: true,
+			die:         make(chan error, 1),
+			returned:    make(chan struct{}),
+		}
+	}
+
+	grpcServer, grpcLocal := serve("first\n")
+	fw := forwarder(grpcLocal)
+	stub := newTestPortForwardTunnel(fw)
+	pts := c.connector.strategy.(*podTunnelStrategy)
+	pts.tunnel.coreClient = fakekube.NewSimpleClientset().CoreV1() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	pts.tunnel.restConfig = &rest.Config{}
+	pts.tunnel.dial = stub.dial
+	pts.tunnel.newForwarder = stub.newForwarder
+
+	c.setState(&sandboxState{SandboxName: "sb", PodName: "sb"})
+	if err := c.connector.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect() error: %v", err)
+	}
+	if _, err := c.Run(context.Background(), "echo hi"); err != nil {
+		t.Fatalf("Run() before tunnel death: %v", err)
+	}
+	deadConn, err := c.connector.GRPCConn()
+	if err != nil {
+		t.Fatalf("GRPCConn() before tunnel death: %v", err)
+	}
+
+	// client-go closes its local listeners when it loses the pod connection.
+	grpcServer.Stop()
+	fw.die <- portforward.ErrLostConnectionToPod
+	waitForwardReturned(t, fw)
+	deadline := time.Now().Add(2 * time.Second)
+	for c.IsReady() {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the monitor to report tunnel death")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	_, err = c.Run(context.Background(), "echo hi")
+	if !errors.Is(err, ErrNotReady) || !errors.Is(err, ErrPortForwardDied) {
+		t.Fatalf("expected ErrNotReady wrapping ErrPortForwardDied, got: %v", err)
+	}
+	if _, err := c.Commands().Start(context.Background(), "echo hi"); !errors.Is(err, ErrNotReady) || !errors.Is(err, ErrPortForwardDied) {
+		t.Errorf("expected Start to return ErrNotReady wrapping ErrPortForwardDied, got: %v", err)
+	}
+	// SetLastError closes the conn after releasing the connector lock.
+	deadline = time.Now().Add(2 * time.Second)
+	for deadConn.GetState() != connectivity.Shutdown {
+		if time.Now().After(deadline) {
+			t.Fatalf("expected the dead tunnel's gRPC conn to be closed, got state %s", deadConn.GetState())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Reconnecting, as Open does, must publish the new tunnel's target.
+	_, grpcLocal = serve("second\n")
+	fw2 := forwarder(grpcLocal)
+	pts.tunnel.newForwarder = newTestPortForwardTunnel(fw2).newForwarder
+	if err := c.connector.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect() after tunnel death: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = pts.tunnel.Close()
+		waitForwardReturned(t, fw2)
+	})
+	result, err := c.Run(context.Background(), "echo hi")
+	if err != nil {
+		t.Fatalf("Run() after reconnect: %v", err)
+	}
+	if result.Stdout != "second\n" {
+		t.Errorf("expected Run to reach the new tunnel, got stdout %q", result.Stdout)
 	}
 }
 

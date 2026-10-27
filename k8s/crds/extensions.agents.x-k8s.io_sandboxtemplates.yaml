@@ -35,6 +35,12 @@ spec:
                 - Overrides
                 - Disallowed
                 type: string
+              failedPodPolicy:
+                default: Retain
+                enum:
+                - Retain
+                - Recreate
+                type: string
               networkPolicy:
                 properties:
                   egress:

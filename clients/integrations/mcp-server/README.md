@@ -28,7 +28,11 @@ The MCP server exposes the following tools:
     * `namespace` (str)
     * `command` (str)
     * `timeout` (int, default: 60)
-  * **Returns**: Execution exit code, stdout, and stderr.
+    * `max_output_chars` (int, default: 30000, min: 128, max: 300000) — Combined stdout/stderr character budget, including omission markers.
+  * **Returns**: `exit_code`, `stdout`, and `stderr`, plus `stdout_total_chars`, `stderr_total_chars`, `stdout_truncated`, and `stderr_truncated`.
+  * **Output budget**: stdout and stderr initially share the budget equally (stderr gets the odd character), and unused capacity is available to the other stream. Short output is unchanged. Each oversized stream keeps equal-sized beginning and end excerpts, with at most one extra character at the end, separated by `[... N characters omitted ...]`. The marker and its surrounding newlines count toward the budget; the minimum leaves room for a marker in both streams.
+    Character counts use Unicode code points, not UTF-8 bytes, visual characters, or model tokens. The `*_total_chars` fields describe the SDK's output before this tool truncates it; the `*_truncated` fields indicate whether this tool omitted content. Truncation preserves the original exit code, including nonzero exits, and never reruns the command.
+  * **Compatibility**: Output exceeding the default budget is now truncated, and the response includes four new metadata fields. Callers needing a larger excerpt can set `max_output_chars` up to 300000; clients with strict response schemas must accept the new fields. No output files are created. This limit applies to stdout/stderr text in completed results, not exception messages or the complete serialized MCP response. The SDK has already received the full result, so this does not reduce runtime capture memory.
 
 * **`upload_file`**: Uploads a file to a target sandbox.
   * **Arguments**:
@@ -84,7 +88,7 @@ The server is configured using environment variables via `pydantic-settings` and
 
 ### Connection Configuration
 
-You must specify the connection method to the Kubernetes backend via the `K8S_SANDBOX_CONNECTION__TYPE` variable. It accepts three possible values: `"gateway"`, `"direct"`, or `"in-cluster"`. Depending on the chosen type, different environment variables apply:
+You must specify the connection method to the Kubernetes backend via the `K8S_SANDBOX_CONNECTION__TYPE` variable. It accepts four possible values: `"gateway"`, `"direct"`, `"in-cluster"`, or `"sandboxd-in-cluster"`. Depending on the chosen type, different environment variables apply:
 
 #### 1. Gateway Connection (`K8S_SANDBOX_CONNECTION__TYPE="gateway"`)
 Connects via a Kubernetes Gateway API resource.
@@ -102,6 +106,14 @@ Connects directly to the Sandbox router API URL.
 Connects directly to the sandbox pod from within the cluster (bypassing the router) using stable K8s DNS or the Pod IP.
 * `K8S_SANDBOX_CONNECTION__USE_POD_IP`: If set to `true`, connect via the Pod IP fetched from the Sandbox status instead of cluster DNS. (Default: `false`)
 * `K8S_SANDBOX_CONNECTION__SERVER_PORT`: Port the sandbox container listens on. (Default: `8888`)
+
+#### 4. sandboxd In-Cluster Connection (`K8S_SANDBOX_CONNECTION__TYPE="sandboxd-in-cluster"`)
+Connects directly to [sandboxd](../../../packages/sandboxd/USER_GUIDE.md) in the sandbox pod from within the cluster. It needs no sandbox-router and no `kubectl port-forward`. Commands run over sandboxd's gRPC port and file tools use its REST port.
+* `K8S_SANDBOX_CONNECTION__MODE`: `in-cluster-service` (uses `Sandbox.status.serviceFQDN`, so the template needs `spec.service: true`) or `in-cluster-pod-ip` (uses `Sandbox.status.podIPs`). Neither falls back to the other. (Required)
+* `K8S_SANDBOX_CONNECTION__REST_PORT`: sandboxd REST port. (Default: `8080`)
+* `K8S_SANDBOX_CONNECTION__GRPC_PORT`: sandboxd gRPC port. (Default: `9090`)
+
+The warm pool's template must run sandboxd, as in [examples/sandboxd-sandbox](../../../examples/sandboxd-sandbox/sandbox-template.yaml). The default `Managed` network policy admits only sandbox-router, so add a `spec.networkPolicy.ingress` rule to the template that admits the MCP server on TCP ports `8080` and `9090`. Supplying `spec.networkPolicy` replaces all secure defaults, so also add the `spec.networkPolicy.egress` rules the sandbox needs: an omitted egress list denies all outbound traffic. The server's service account needs `create`, `get`, `list`, `watch` and `delete` on `sandboxclaims`, and `get`, `list` and `watch` on `sandboxes`. It needs no `pods/portforward`. See the [sandboxd guide](../../../packages/sandboxd/USER_GUIDE.md#agent-sandbox-sdk-access) for details.
 
 
 ### General Settings

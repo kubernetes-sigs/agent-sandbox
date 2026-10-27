@@ -30,9 +30,11 @@ import logging
 import math
 import signal
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from collections.abc import Mapping
 from typing import Optional
 from collections.abc import Callable
 
@@ -42,17 +44,22 @@ from . import constants, sizing
 from .cluster import Cluster, ClusterRegistry
 from .config import ClusterConfig, FleetConfig, run_namespace
 from .exceptions import (
+    SandboxStartError,
     FleetError,
     FleetOvercommitError,
     OwnedByAnotherRunError,
     PoolNotFoundError,
     PreflightError,
 )
-from .handles import SandboxHandle
+from .handles import SandboxHandle, forget_claim_in_client
+from .failfast import ClaimWatchdog
 from .observability import Observer, repo_family
 from .placement import get_placement
 from .snapshots import pod_restore_status
 from .sources import Task, to_tasks
+
+# verify_teardown re-lists after the reaper; force-deleted pods take a moment to go.
+_VERIFY_SETTLE_S: tuple[float, ...] = (1.0, 2.0, 4.0)
 
 logger = logging.getLogger("agent_sandbox_rl.fleet")
 
@@ -89,6 +96,10 @@ class PlanEntry:
   # rather than sized and created by this fleet. An adopted entry's ``replicas``
   # is the pool's *observed* depth, which nothing here owns or may change.
   adopted: bool = False
+  # Container that runs the task image in this entry's pods: None for a
+  # template this fleet writes (always ``agent-runtime``), the discovered name
+  # for an adopted template, whose lone container may be called anything.
+  runtime_container: Optional[str] = None
 
 
 class FleetPlan:
@@ -101,6 +112,15 @@ class FleetPlan:
 
   def for_image(self, image: str) -> Optional[PlanEntry]:
     return self._by_image.get(image)
+
+  def add(self, entry: PlanEntry) -> None:
+    """Append an entry (see `SandboxFleet.add_tasks`); an image already planned
+    is replaced."""
+    old = self._by_image.get(entry.image)
+    if old is not None:
+      self.entries.remove(old)
+    self.entries.append(entry)
+    self._by_image[entry.image] = entry
 
   @property
   def total_replicas(self) -> int:
@@ -135,6 +155,7 @@ class SandboxFleet:
     # and pool name sees the final values.
     self.config.apply_run_isolation(self.run_id)
     self._created_namespaces: set[tuple[str, str]] = set()  # (cluster, ns) this run made
+    self._deleted_namespaces: set[tuple[str, str]] = set()  # deleted by a teardown
     # Owned namespaces whose `run_namespace_setup` hook completed. Separate from
     # ownership: a namespace whose rollback delete failed stays owned, and the
     # next attempt must still run the hook on it.
@@ -145,6 +166,9 @@ class SandboxFleet:
     self._atexit_registered = False
     self._torndown = False
     self._teardown_lock = threading.Lock()   # makes _teardown idempotent/reentrant
+    # Held for the whole sweep: a second caller returns early on _torndown, and
+    # its verify_teardown must wait for the sweep instead of reaping beside it.
+    self._sweep_lock = threading.Lock()
     # Honor an explicitly-passed registry even when empty — `ClusterRegistry`
     # defines `__len__`, so `registry or …` would treat `ClusterRegistry([])` as
     # falsy and build a default ambient Cluster (which loads kube-config). Only
@@ -402,11 +426,14 @@ class SandboxFleet:
     return ClusterRegistry([Cluster(ClusterConfig(), labels=config.labels)])
 
   # --- inputs ------------------------------------------------------------ #
-  def load_tasks(self, source, *, image_rewrite=None) -> list[Task]:
+  def load_tasks(self, source, *, image_rewrite=None, image_field=None,
+                 id_field=None) -> list[Task]:
     """Load tasks from ``source``. ``image_rewrite`` is an optional
     ``image -> image`` hook (e.g. ``registry_rewrite.make_rewriter(...)``) applied
-    to each task's image; the original is stashed in ``metadata['original_image']``."""
-    tasks = to_tasks(source)
+    to each task's image; the original is stashed in ``metadata['original_image']``.
+    ``image_field`` / ``id_field`` say where dataset rows keep their image and id
+    (see `extract_image`)."""
+    tasks = to_tasks(source, image_field=image_field, id_field=id_field)
     if image_rewrite is not None:
       # Copy rather than mutate: to_tasks may hand back the caller's own Task
       # objects (e.g. a list[Task] / caching TaskSource), so rewriting in place
@@ -424,6 +451,128 @@ class SandboxFleet:
     logger.info("Loaded %d tasks (%d unique images)",
                 len(self.tasks), len({t.image for t in self.tasks}))
     return self.tasks
+
+  def add_tasks(self, source, *, image_rewrite=None) -> list[Task]:
+    """Append tasks to the fleet and extend the current plan in place.
+
+    The streaming counterpart of `load_tasks` + `plan`: a trainer that learns its
+    prompts batch by batch registers each batch's images here, instead of
+    reloading every task and re-planning per new image. New images are placed
+    and sized like `plan` does (same placement, same per-cluster budget split,
+    same ``max_warmpool_size`` cap); images already planned only gain task
+    counts (their pool size is not revisited). Without a plan yet this only
+    appends; with ``adopt_existing`` the plan is rebuilt against the namespace's
+    pools (an unserved image raises `PoolNotFoundError`, as in `plan`).
+    Thread-safe; returns the tasks added.
+    """
+    new_tasks = to_tasks(source)
+    if image_rewrite is not None:
+      rewritten = []
+      for t in new_tasks:
+        new = image_rewrite(t.image)
+        if new != t.image:
+          t = t.model_copy(update={
+              "image": new, "metadata": {**t.metadata, "original_image": t.image}})
+        rewritten.append(t)
+      new_tasks = rewritten
+    if not new_tasks:
+      return []
+    counts = collections.Counter(t.image for t in new_tasks)
+    fresh: list[tuple[str, int, Cluster]] = []
+    with self._lock:
+      plan = self.plan_
+      # Adopt mode validates even before a plan exists: otherwise an unserved
+      # image is appended, the later plan() raises for it, and every plan after
+      # that fails too.
+      adopt = self.config.adopt_existing
+      if plan is not None and not adopt:
+        # Resolve every placement before touching the tasks or the plan: a
+        # NoClusterAvailableError must leave both as they were, or a retry
+        # appends the batch twice and double-counts the known images.
+        cluster_totals: dict[str, int] = collections.defaultdict(int)
+        for e in plan.entries:
+          cluster_totals[e.cluster] += e.tasks
+        bump: list[tuple[PlanEntry, int]] = []
+        for image, n in counts.items():
+          e = plan.for_image(image)
+          if e is not None:
+            cluster_totals[e.cluster] += n          # counts toward the budget split
+            bump.append((e, n))
+            continue
+          c = self.placement.select(image, self.registry)
+          cluster_totals[c.name] += n
+          fresh.append((image, n, c))
+        entries: list[PlanEntry] = []
+        if fresh:
+          used = [self.registry.get(name) for name in cluster_totals]
+          budget = _split_budget(self.config.max_concurrent,
+                                 {c.name: c.config.weight for c in used})
+          for image, n, c in fresh:
+            replicas = sizing.compute_replicas(
+                n, cluster_totals[c.name], budget[c.name],
+                self.config.max_warmpool_size, per_task=self.config.warm_per_task)
+            entries.append(PlanEntry(
+                cluster=c.name, image=image, template=self.config.template_name(image),
+                pool=self.config.pool_name(image), replicas=replicas, tasks=n))
+        for e, n in bump:
+          e.tasks += n
+        for entry in entries:
+          plan.add(entry)
+      self.tasks = list(self.tasks) + list(new_tasks)
+    if adopt:
+      try:
+        self._plan_adopt()
+      except Exception:
+        with self._lock:                            # an unserved image: undo the append
+          added = {id(t) for t in new_tasks}
+          self.tasks = [t for t in self.tasks if id(t) not in added]
+        raise
+    if plan is not None:
+      logger.info("add_tasks: %d task(s), %d new image(s) added to the plan",
+                  len(new_tasks), len(fresh))
+    return new_tasks
+
+  def wait_pools_ready(self, images, *, timeout: float | None = None,
+                       replicas: "Mapping[str, int] | None" = None) -> dict[str, bool]:
+    """Best-effort readiness barrier: ``image -> ready`` for each planned image,
+    waiting up to ``timeout`` seconds (default ``ready_timeout``) on each pool
+    concurrently. Never raises: a pool that is slow, an image not in the plan, a
+    missing plan or a watch error reads as ``False`` and is logged. The replica
+    count waited for is what this fleet asked of the pool (one for an adopted or
+    borrowed pool), lowered to ``replicas[image]`` when given: a caller that
+    shares a pool across batches waits for its own share, not the sum."""
+    images = list(dict.fromkeys(images))
+    if not images:
+      return {}
+    try:
+      plan = self.plan_ or self.plan()
+    except Exception as exc:  # noqa: BLE001 — best-effort by contract
+      logger.warning("wait_pools_ready: no plan (%s)", exc)
+      return {img: False for img in images}
+    limit = self.config.ready_timeout if timeout is None else timeout
+    with self._lock:
+      warmed = dict(self._warmed)
+
+    def _one(image: str) -> bool:
+      e = plan.for_image(image)
+      if e is None:
+        logger.warning("wait_pools_ready: image %s is not in the plan", image)
+        return False
+      want = 1 if (e.adopted or image not in warmed) else max(1, warmed[image])
+      if replicas and replicas.get(image):
+        want = max(1, min(int(replicas[image]), want))
+      try:
+        c = self.registry.get(e.cluster)
+        return bool(c.resources.wait_for_pool_ready(e.pool, want, timeout=limit))
+      except Exception as exc:  # noqa: BLE001 — best-effort by contract
+        logger.warning("wait_pools_ready: pool %s on %s: %s", e.pool, e.cluster, exc)
+        return False
+
+    workers = max(1, min(len(images), self.config.max_concurrent))
+    if workers == 1:
+      return {img: _one(img) for img in images}
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="pool-ready") as ex:
+      return dict(zip(images, ex.map(_one, images)))
 
   def image_counts(self) -> "collections.OrderedDict[str, int]":
     counts: "collections.OrderedDict[str, int]" = collections.OrderedDict()
@@ -752,7 +901,8 @@ class SandboxFleet:
       cname, dp = hits[0]
       entries.append(PlanEntry(
           cluster=cname, image=image, template=dp.template, pool=dp.pool,
-          replicas=dp.replicas, tasks=counts[image], adopted=True))
+          replicas=dp.replicas, tasks=counts[image], adopted=True,
+          runtime_container=dp.runtime_container))
     if missing:
       raise PoolNotFoundError(self._adopt_miss_message(missing, discovered))
 
@@ -1213,23 +1363,42 @@ class SandboxFleet:
     elif delta < 0:
       c.release_replicas(-delta)
 
-  def prepull(self, wait: bool = True) -> None:
-    """Pre-pull each cluster's planned images via a DaemonSet (optional)."""
+  def prepull(self, wait: bool = True, **overrides) -> bool:
+    """Pre-pull each cluster's planned images via DaemonSets (optional).
+
+    Batching, pacing, cleanup and the page-cache drop come from the
+    ``prepull_*`` fields of `FleetConfig`; ``overrides`` are passed through to
+    `prepull.prepull` (``images_per_pod``, ``max_parallel``, ``delete_when_done``,
+    ``drop_caches``, ``timeout``, ...) and win over the template-derived values.
+    The pods inherit the template's node selector, runtime class, pull secret
+    and tolerations, so they land where the sandboxes do. Returns whether every
+    cluster finished within its budget.
+    """
     from .prepull import prepull as _do_prepull
     plan = self.plan_ or self.plan()
+    cfg = self.config
+    base = dict(images_per_pod=cfg.prepull_images_per_pod,
+                max_parallel=cfg.prepull_max_parallel,
+                delete_when_done=cfg.prepull_delete_when_done,
+                drop_caches=cfg.prepull_drop_caches)
+    ok = True
     with self._obs.phase("prepull"):
       for cname, entries in plan.by_cluster().items():
         c = self.registry.get(cname)
-        ts = c.template_spec(self.config.template)
-        _do_prepull(c, [e.image for e in entries],
-                    node_selector=ts.node_selector,
-                    image_pull_secret=ts.image_pull_secret,
-                    labels=self.config.labels, wait=wait)
+        ts = c.template_spec(cfg.template)
+        kwargs = dict(base, node_selector=ts.node_selector,
+                      tolerations=(ts.extra_pod_spec or {}).get("tolerations"),
+                      runtime_class=ts.runtime_class,
+                      image_pull_secret=ts.image_pull_secret, labels=cfg.labels)
+        kwargs.update(overrides)
+        done = _do_prepull(c, [e.image for e in entries], wait=wait, **kwargs)
+        ok = ok and bool(done)
+    return ok
 
   def prepull_delete(self) -> None:
     from .prepull import prepull_delete as _do_prepull_delete
     for c in self.registry:
-      _do_prepull_delete(c)
+      _do_prepull_delete(c, labels=self.config.labels)
 
   def setup(self, prepull: bool = False,
             create_budget: int | None = None) -> "SandboxFleet":
@@ -1240,14 +1409,16 @@ class SandboxFleet:
     if self.config.install_teardown_hooks:
       self._install_teardown_hooks()          # (#4) clean up even on kill/crash
     self._torndown = False
+    self._deleted_namespaces.clear()          # this cycle recreates what it needs
     with self._lock:
       # A fresh cycle starts with a clean slate; a slot leaked by a crashed
       # prior cycle must not pre-charge this one's max_live_sandboxes.
       self._claims_reserved = 0
     self.preflight()
     self.plan()
-    if prepull:
-      self.prepull(wait=True)
+    if prepull and not self.prepull(wait=True):
+      logger.warning("pre-pull did not finish within its budget; the warm pools "
+                     "start anyway and pull what is missing")
     self.start_warmpools(wait=True, create_budget=create_budget)
     return self
 
@@ -1339,24 +1510,55 @@ class SandboxFleet:
 
     fam = repo_family(task)
     sandbox = None
+    # The claim is named here rather than by the SDK so the fail-fast watchdog
+    # can find its pod while the SDK's readiness wait is still blocking. The SDK
+    # does not roll back caller-named claims, so the except path deletes it.
+    claim_name = f"sandbox-claim-{uuid.uuid4().hex[:12]}"
+    watchdog = None
+    if self.config.fail_fast.enabled:
+      watchdog = ClaimWatchdog(cluster, claim_name, self.config.fail_fast)
+      watchdog.start()
     try:
       with self._obs.phase("claim", cluster=cluster.name, family=fam):
         sandbox = cluster.sandbox_client.create_sandbox(
             warmpool=pool, namespace=cluster.namespace,
-            sandbox_ready_timeout=self.config.ready_timeout,
-            labels=dict(self.config.labels), **extra)
+            sandbox_ready_timeout=self.config.effective_claim_timeout(),
+            labels=dict(self.config.labels), claim_name=claim_name, **extra)
+        if watchdog is not None and watchdog.stop() is not None:
+          # The watchdog committed a verdict (and deleted the claim) in the
+          # window where the SDK wait was already returning. The sandbox behind
+          # this handle is going away, so report the failed start instead.
+          v = watchdog.verdict
+          raise SandboxStartError(v.reason, v.message, claim_name=claim_name,
+                                  pod_name=v.pod_name, image=task.image)
         pod = sandbox.get_pod_name()
         try:
           pod_ip = sandbox.get_pod_ip()
         except Exception:  # noqa: BLE001
           pod_ip = None
-    except Exception:  # noqa: BLE001 — roll back partial state, then re-raise
+    except Exception as exc:  # noqa: BLE001 — roll back partial state, then re-raise
+      verdict = watchdog.stop() if watchdog is not None else None
+      claim_gone = watchdog is not None and watchdog.deleted_claim
+      if sandbox is None and not claim_gone and not (
+          isinstance(exc, client.ApiException) and exc.status == 409):
+        # create_sandbox raised before returning a handle. The SDK leaves a
+        # caller-named claim in place, so delete it here unless the watchdog
+        # confirmed its own delete (a verdict alone is not confirmation). A 409
+        # means the name is someone else's claim: leave that one alone.
+        try:
+          cluster.resources.delete_claim(claim_name)
+        except Exception:  # noqa: BLE001
+          logger.warning("failed to delete claim %s after acquire error",
+                         claim_name, exc_info=True)
       if sandbox is not None:
         try:
           sandbox.terminate()
         except Exception:  # noqa: BLE001
           logger.warning("failed to terminate sandbox after acquire error",
                          exc_info=True)
+      # However the claim went (deleted here, by the watchdog, or never
+      # created), the SDK client still tracks its name and object: prune them.
+      forget_claim_in_client(cluster, claim_name)
       # If this call created the on-demand pool, undo it fully (delete pool +
       # template, release the replica, forget it) so a failed acquire leaves no
       # trace. A reused pool is left for the next acquire.
@@ -1382,13 +1584,28 @@ class SandboxFleet:
         cluster.release_replicas(1)
         with self._lock:
           self._ondemand.discard(key)
+      if verdict is not None:
+        # The watchdog deleted the claim, which is what ended the SDK wait; the
+        # error the caller needs is the pod's, not "claim was deleted".
+        self._obs.claim(cluster.name, "start_failed")
+        if isinstance(exc, SandboxStartError):
+          raise
+        raise SandboxStartError(
+            verdict.reason, verdict.message, claim_name=claim_name,
+            pod_name=verdict.pod_name, image=task.image) from exc
       self._obs.claim(cluster.name, "error")
       raise
+    finally:
+      if watchdog is not None:
+        watchdog.stop()
 
     handle = SandboxHandle(
         task=task, cluster_name=cluster.name, claim_name=sandbox.claim_name,
         sandbox_id=sandbox.sandbox_id, pod_name=pod, hostname=sandbox.sandbox_id,
-        pod_ip=pod_ip, sandbox=sandbox, _cluster=cluster)
+        pod_ip=pod_ip, sandbox=sandbox, _cluster=cluster,
+        runtime_container=((entry.runtime_container if entry is not None else None)
+                           or constants.RUNTIME_CONTAINER))
+    handle.record_pod_identity()
     # The remote create ran outside the lock, and the breaker thread can tear
     # the fleet down in that window. _teardown flips _torndown under this same
     # lock before it sweeps, so exactly one of two things is true here: the
@@ -1405,6 +1622,7 @@ class SandboxFleet:
       except Exception:  # noqa: BLE001
         logger.warning("failed to terminate sandbox created during teardown",
                        exc_info=True)
+      forget_claim_in_client(cluster, claim_name)
       self._obs.claim(cluster.name, "error")
       raise FleetError(
           "fleet was torn down while this claim was in flight; the claim has "
@@ -1614,11 +1832,103 @@ class SandboxFleet:
       self.release(h)
 
   # --- teardown ---------------------------------------------------------- #
-  def teardown(self, delete_namespace: bool = False) -> None:
+  def teardown(self, delete_namespace: bool = False, *,
+               verify: bool = False) -> "dict[str, dict] | None":
     """Release all claims and delete every resource this fleet created. With a
-    shared `FleetConfig.run_id`, only the pools this fleet warmed are deleted."""
+    shared `FleetConfig.run_id`, only the pools this fleet warmed are deleted.
+
+    ``verify`` follows the sweep with `verify_teardown`: the run-scoped reaper
+    runs on every cluster, deletes whatever of this run is still there, and the
+    per-cluster counts come back (all zero means the teardown was clean)."""
     with self._obs.phase("teardown"):
       self._teardown(delete_namespace)
+    if not verify:
+      return None
+    return self.verify_teardown()
+
+  def verify_teardown(self) -> "dict[str, dict]":
+    """Check (and finish) a teardown with the run-scoped reaper.
+
+    For every cluster: this run's pods are counted, then ``reap(run_id=<this
+    run>)`` lists and deletes this run's claims, pools and templates (Sandbox
+    CRs go with their claims) and force-deletes its pods by label, so a delete
+    that failed inside `teardown` or a pod the controller had not removed yet
+    is both reported and cleaned. Returns ``{cluster_name: counts}`` with
+    ``claims``, ``warmpools``, ``sandboxes``, ``templates`` and ``pods`` as
+    integers (what the reaper found; all zero means the teardown was clean) and
+    ``remaining``, the same kinds re-listed after the reaper with a short settle
+    (all zero means the namespace is verified clean; anything else is logged as
+    a warning, because the reaper counts what it listed, not what is gone).
+    Waits for a teardown sweep another thread is still running. Skipped, with a note in the result, for a shared
+    run id (the id spans other processes' resources), for ``adopt_existing``
+    (adopted pools may carry this run's label from an earlier run) and for a
+    namespace this teardown deleted. A reaper error is recorded under
+    ``"error"``, not raised.
+
+    Raises `FleetError` when called before `teardown`: the reaper deletes, so
+    it is not a mid-run inspection.
+    """
+    from .reaper import reap
+    if not self._torndown:
+      raise FleetError("verify_teardown() runs the run-scoped reaper, which deletes "
+                       "this run's resources; call teardown() first")
+    out: dict[str, dict] = {}
+    with self._sweep_lock:                    # an in-progress sweep finishes first
+      for c in self.registry:
+        out[c.name] = self._verify_cluster(c, reap)
+    return out
+
+  def _run_leftovers(self, c: "Cluster") -> dict[str, int]:
+    """What of this run is in the namespace right now, by kind."""
+    return {
+        "claims": len(c.resources.list_claims(label_selector=self.run_selector())),
+        "warmpools": len(c.resources.list_warmpools(label_selector=self.run_selector())),
+        "templates": len(c.resources.list_templates(label_selector=self.run_selector())),
+        "pods": int(c.resources.count_pods(label_selector=self.pod_run_selector())),
+    }
+
+  def _verify_cluster(self, c: "Cluster", reap) -> dict:
+    if self._shared_run_id:
+      return {"skipped": "shared run id: the reaper would reach other processes"}
+    if self.config.adopt_existing:
+      return {"skipped": "adopt_existing: adopted pools are not this run's to reap"}
+    if (c.name, c.namespace) in self._deleted_namespaces:
+      return {"skipped": f"namespace {c.namespace} was deleted"}
+    cfg = c.config
+    with self._obs.phase("verify_teardown", cluster=c.name):
+      try:
+        # Counted before the reaper's delete-collection, which does not count.
+        pods = int(c.resources.count_pods(label_selector=self.pod_run_selector()))
+        counts = reap(run_id=self.run_id, context=getattr(cfg, "context", None),
+                      namespace=c.namespace, kubeconfig=getattr(cfg, "kubeconfig", None),
+                      in_cluster=bool(getattr(cfg, "in_cluster", False)))
+        if "pods" not in counts:              # reap logs a failed delete-collection
+          counts["error"] = "pod delete-collection failed; see the reaper log"
+        counts["pods"] = pods
+        # The reaper counts what it listed, not what is gone: a delete can fail
+        # and a force-deleted pod takes a moment to leave. Re-list, with a short
+        # settle, and report what is still there separately.
+        remaining = self._run_leftovers(c)
+        for delay in _VERIFY_SETTLE_S:
+          if not any(remaining.values()):
+            break
+          time.sleep(delay)
+          remaining = self._run_leftovers(c)
+        counts["remaining"] = remaining
+      except Exception as exc:  # noqa: BLE001 — verification must not fail the caller
+        logger.warning("verify_teardown: reaper failed on cluster %s: %s", c.name, exc)
+        return {"error": f"{type(exc).__name__}: {exc}"}
+    found = {k: v for k, v in counts.items() if isinstance(v, int) and v > 0}
+    left = {k: v for k, v in counts["remaining"].items() if v > 0}
+    if left:
+      logger.warning("verify_teardown: cluster %s is NOT verified clean for run %s: "
+                     "still present after the reaper: %s", c.name, self.run_id, left)
+    elif found:
+      logger.warning("verify_teardown: cluster %s still had %s of run %s; reaped, "
+                     "now clean", c.name, found, self.run_id)
+    else:
+      logger.info("verify_teardown: cluster %s clean for run %s", c.name, self.run_id)
+    return counts
 
   def _teardown(self, delete_namespace: bool) -> None:
     # Idempotent/reentrant: the breaker thread, a strategy's teardown, __exit__,
@@ -1634,99 +1944,101 @@ class SandboxFleet:
       # will see the flag and terminate its own claim.
       with self._lock:
         self._torndown = True
-    self.release_all()
-    if self._shared_run_id:
-      # A sweep by a shared id would tear down the whole job; unwarm only what
-      # this fleet warmed and leave the rest for the reaper.
-      with self._lock:
-        warmed = list(self._warmed)
-      if warmed and self.plan_:
-        try:
-          self.unwarm_images(warmed)
-        except Exception as exc:  # noqa: BLE001 — best-effort, like the sweep
-          logger.exception("teardown: failed to unwarm this fleet's pools: %s", exc)
-    for c in self.registry:
-      # Run-scoped on purpose. Every claim, pool and template this fleet created
-      # carries this run's id label; the namespace-wide managed label also matches
-      # every OTHER agent-sandbox-rl run in the namespace, and sweeping by it once
-      # deleted a concurrent tenant's whole warm fleet. Leftovers of a run that
-      # crashed without tearing down are the reaper's job (`reap(run_id=…)`, or
-      # the explicit `all_managed=True` sweep).
-      sel = self.run_selector()
+    with self._sweep_lock:
+      self.release_all()
       if self._shared_run_id:
-        claims, pools, tmpls = [], [], []
-      else:
-        logger.info("teardown: sweeping run %s on cluster %s (%s)",
-                    self.run_id, c.name, sel)
-        # Sweep any stray claims first (defensive: untracked/leaked claims keep
-        # their adopted sandbox alive even after the pool is gone).
-        try:
-          claims = c.resources.list_claims(label_selector=sel)
-          pools = c.resources.list_warmpools(label_selector=sel)
-          tmpls = c.resources.list_templates(label_selector=sel)
-        except Exception as exc:
-          logger.exception("Failed to list resources on cluster %s during teardown: %s", c.name, exc)
+        # A sweep by a shared id would tear down the whole job; unwarm only what
+        # this fleet warmed and leave the rest for the reaper.
+        with self._lock:
+          warmed = list(self._warmed)
+        if warmed and self.plan_:
+          try:
+            self.unwarm_images(warmed)
+          except Exception as exc:  # noqa: BLE001 — best-effort, like the sweep
+            logger.exception("teardown: failed to unwarm this fleet's pools: %s", exc)
+      for c in self.registry:
+        # Run-scoped on purpose. Every claim, pool and template this fleet created
+        # carries this run's id label; the namespace-wide managed label also matches
+        # every OTHER agent-sandbox-rl run in the namespace, and sweeping by it once
+        # deleted a concurrent tenant's whole warm fleet. Leftovers of a run that
+        # crashed without tearing down are the reaper's job (`reap(run_id=…)`, or
+        # the explicit `all_managed=True` sweep).
+        sel = self.run_selector()
+        if self._shared_run_id:
           claims, pools, tmpls = [], [], []
-      # Adopted pools/templates are swept out of the delete set explicitly. They
-      # normally don't carry our managed label at all, but they can — adopting a
-      # pool an earlier run of this SDK left behind is a legitimate use — and
-      # deleting the fleet's warm pods on the way out is not a recoverable
-      # mistake. Claims stay in: those we created, and they must be released.
-      if self._adopted_pools or self._adopted_templates:
-        kept_p = [p for p in pools if (c.name, p) in self._adopted_pools]
-        kept_t = [t for t in tmpls if (c.name, t) in self._adopted_templates]
-        if kept_p or kept_t:
-          logger.info("teardown: leaving %d adopted pool(s) and %d adopted "
-                      "template(s) on cluster %s in place",
-                      len(kept_p), len(kept_t), c.name)
-        pools = [p for p in pools if (c.name, p) not in self._adopted_pools]
-        tmpls = [t for t in tmpls if (c.name, t) not in self._adopted_templates]
-      total_items = len(claims) + len(pools) + len(tmpls)
-      if total_items > 0:
-        workers = max(1, min(total_items, self.config.max_concurrent))
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-          # Phase 1: Sweep stray claims first so adopted sandboxes aren't leaked.
-          if claims:
-            claim_futs = [ex.submit(c.resources.delete_claim, claim) for claim in claims]
-            for f in as_completed(claim_futs):
-              try:
-                f.result()
-              except Exception as exc:
-                logger.exception("Failed to delete claim during teardown: %s", exc)
-          # Phase 2: Delete pools and templates concurrently.
-          rest_futs = [ex.submit(c.resources.delete_warmpool, pool) for pool in pools]
-          rest_futs.extend(ex.submit(c.resources.delete_template, tmpl) for tmpl in tmpls)
-          if rest_futs:
-            for f in as_completed(rest_futs):
-              try:
-                f.result()
-              except Exception as exc:
-                logger.exception("Failed to delete pool/template during teardown: %s", exc)
-      c.reset_counts()
-      # A namespace this run created (run_isolation="namespace") goes with it;
-      # a pre-existing one, or a shared run id's, only when the caller asks.
-      key = (c.name, c.namespace)
-      if delete_namespace or (key in self._created_namespaces
-                              and not self._shared_run_id):
-        try:
-          c.resources.delete_namespace(c.namespace)
-        except Exception as exc:  # noqa: BLE001 — best-effort, like the sweeps above
-          # Keep the ownership record, as the rollback path does, so the next
-          # teardown cycle retries the delete instead of leaking the namespace.
-          logger.warning("teardown: failed to delete namespace '%s' on cluster %s: %s",
-                         c.namespace, c.name, exc)
-          continue
-        self._created_namespaces.discard(key)
-        self._namespaces_set_up.discard(key)
-    self._namespaces_ensured = False
-    self._obs.warm_reset()
-    with self._lock:
-      self._warmed.clear()
-      self._ondemand.clear()
-    self._adopted_pools.clear()
-    self._adopted_templates.clear()
-    self.plan_ = None
-    self._remove_teardown_hooks()
+        else:
+          logger.info("teardown: sweeping run %s on cluster %s (%s)",
+                      self.run_id, c.name, sel)
+          # Sweep any stray claims first (defensive: untracked/leaked claims keep
+          # their adopted sandbox alive even after the pool is gone).
+          try:
+            claims = c.resources.list_claims(label_selector=sel)
+            pools = c.resources.list_warmpools(label_selector=sel)
+            tmpls = c.resources.list_templates(label_selector=sel)
+          except Exception as exc:
+            logger.exception("Failed to list resources on cluster %s during teardown: %s", c.name, exc)
+            claims, pools, tmpls = [], [], []
+        # Adopted pools/templates are swept out of the delete set explicitly. They
+        # normally don't carry our managed label at all, but they can — adopting a
+        # pool an earlier run of this SDK left behind is a legitimate use — and
+        # deleting the fleet's warm pods on the way out is not a recoverable
+        # mistake. Claims stay in: those we created, and they must be released.
+        if self._adopted_pools or self._adopted_templates:
+          kept_p = [p for p in pools if (c.name, p) in self._adopted_pools]
+          kept_t = [t for t in tmpls if (c.name, t) in self._adopted_templates]
+          if kept_p or kept_t:
+            logger.info("teardown: leaving %d adopted pool(s) and %d adopted "
+                        "template(s) on cluster %s in place",
+                        len(kept_p), len(kept_t), c.name)
+          pools = [p for p in pools if (c.name, p) not in self._adopted_pools]
+          tmpls = [t for t in tmpls if (c.name, t) not in self._adopted_templates]
+        total_items = len(claims) + len(pools) + len(tmpls)
+        if total_items > 0:
+          workers = max(1, min(total_items, self.config.max_concurrent))
+          with ThreadPoolExecutor(max_workers=workers) as ex:
+            # Phase 1: Sweep stray claims first so adopted sandboxes aren't leaked.
+            if claims:
+              claim_futs = [ex.submit(c.resources.delete_claim, claim) for claim in claims]
+              for f in as_completed(claim_futs):
+                try:
+                  f.result()
+                except Exception as exc:
+                  logger.exception("Failed to delete claim during teardown: %s", exc)
+            # Phase 2: Delete pools and templates concurrently.
+            rest_futs = [ex.submit(c.resources.delete_warmpool, pool) for pool in pools]
+            rest_futs.extend(ex.submit(c.resources.delete_template, tmpl) for tmpl in tmpls)
+            if rest_futs:
+              for f in as_completed(rest_futs):
+                try:
+                  f.result()
+                except Exception as exc:
+                  logger.exception("Failed to delete pool/template during teardown: %s", exc)
+        c.reset_counts()
+        # A namespace this run created (run_isolation="namespace") goes with it;
+        # a pre-existing one, or a shared run id's, only when the caller asks.
+        key = (c.name, c.namespace)
+        if delete_namespace or (key in self._created_namespaces
+                                and not self._shared_run_id):
+          try:
+            c.resources.delete_namespace(c.namespace)
+            self._deleted_namespaces.add(key)
+          except Exception as exc:  # noqa: BLE001 — best-effort, like the sweeps above
+            # Keep the ownership record, as the rollback path does, so the next
+            # teardown cycle retries the delete instead of leaking the namespace.
+            logger.warning("teardown: failed to delete namespace '%s' on cluster %s: %s",
+                           c.namespace, c.name, exc)
+            continue
+          self._created_namespaces.discard(key)
+          self._namespaces_set_up.discard(key)
+      self._namespaces_ensured = False
+      self._obs.warm_reset()
+      with self._lock:
+        self._warmed.clear()
+        self._ondemand.clear()
+      self._adopted_pools.clear()
+      self._adopted_templates.clear()
+      self.plan_ = None
+      self._remove_teardown_hooks()
 
   def __enter__(self) -> "SandboxFleet":
     return self.setup()

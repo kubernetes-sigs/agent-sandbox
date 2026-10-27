@@ -17,7 +17,7 @@ import logging
 import math
 import time
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import aiohttp
 from kubernetes_asyncio import client, config, watch
@@ -35,6 +35,7 @@ from .constants import (
     CREATED_BY_LABEL,
     TERMINAL_CLAIM_READY_REASONS,
 )
+from .models import AdditionalPodMetadata
 from .exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
 from .utils import (
     construct_sandbox_claim_env_spec,
@@ -86,19 +87,20 @@ class AsyncK8sHelper:
         name: str,
         warmpool: str,
         namespace: str,
-        annotations: dict | None = None,
-        labels: dict | None = None,
-        lifecycle: dict | None = None,
-        volume_claim_templates: list[dict] | None = None,
-        pod_metadata: dict | None = None,
+        annotations: dict[str, str] | None = None,
+        labels: dict[str, str] | None = None,
+        lifecycle: dict[str, Any] | None = None,
+        volume_claim_templates: list[dict[str, Any]] | None = None,
+        pod_metadata: AdditionalPodMetadata | dict[str, Any] | None = None,
         env: dict[str, str] | None = None,
-    ):
+    ) -> dict[str, Any]:
         """Creates a SandboxClaim custom resource.
 
         Args:
-            pod_metadata: Optional ``{"labels": {...}, "annotations": {...}}``
-                dict emitted as ``spec.additionalPodMetadata`` so the labels and
-                annotations propagate onto the running Sandbox Pod (as opposed to
+            pod_metadata: Optional ``AdditionalPodMetadata`` (or an equivalent
+                ``dict``, validated via ``model_validate``) serialized as
+                ``spec.additionalPodMetadata`` so the labels and annotations
+                propagate onto the running Sandbox Pod (as opposed to
                 ``labels``, which only land on the SandboxClaim object).
         """
         await self._ensure_initialized()
@@ -126,7 +128,9 @@ class AsyncK8sHelper:
         if volume_claim_templates:
             spec["volumeClaimTemplates"] = volume_claim_templates
         if pod_metadata:
-            spec["additionalPodMetadata"] = pod_metadata
+            if isinstance(pod_metadata, dict):
+                pod_metadata = AdditionalPodMetadata.model_validate(pod_metadata)
+            spec["additionalPodMetadata"] = pod_metadata.model_dump(exclude_none=True)
         env_spec = construct_sandbox_claim_env_spec(env)
         if env_spec:
             spec["env"] = [
@@ -143,13 +147,13 @@ class AsyncK8sHelper:
         logger.info(
             f"Creating SandboxClaim '{name}' in namespace '{namespace}' using warm pool '{warmpool}'..."
         )
-        return await self.custom_objects_api.create_namespaced_custom_object(
+        return cast(dict[str, Any], await self.custom_objects_api.create_namespaced_custom_object(
             group=CLAIM_API_GROUP,
             version=CLAIM_API_VERSION,
             namespace=namespace,
             plural=CLAIM_PLURAL_NAME,
             body=manifest,
-        )
+        ))
 
     async def resolve_sandbox_name(
         self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None
@@ -169,7 +173,8 @@ class AsyncK8sHelper:
 
     async def wait_for_claim_ready(
         self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None,
-        *, expected_uid: str | None = None, initial_claim: dict | None = None,
+        *, expected_uid: str | None = None, initial_claim: dict[str, Any] | None = None,
+        require_current_generation: bool = False,
     ) -> str:
         """Watches the SandboxClaim until it is bound to a sandbox AND its
         Ready condition is True, then returns the sandbox name.
@@ -188,14 +193,19 @@ class AsyncK8sHelper:
             expected_uid: If provided, reject events for a same-name replacement.
             initial_claim: Optional create/GET response to evaluate before
                 waiting for future watch events.
+            require_current_generation: If True, also require the Ready condition's
+                observedGeneration to equal metadata.generation in each snapshot.
+                Missing generation fields remain pending. Defaults to False.
         """
         return await self._watch_claim(claim_name, namespace, timeout, require_ready=True,
                                        resource_version=resource_version,
-                                       expected_uid=expected_uid, initial_claim=initial_claim)
+                                       expected_uid=expected_uid, initial_claim=initial_claim,
+                                       require_current_generation=require_current_generation)
 
     async def _watch_claim(self, claim_name: str, namespace: str, timeout: int, require_ready: bool,
                            resource_version: str | None = None,
-                           *, expected_uid: str | None = None, initial_claim: dict | None = None) -> str:
+                           *, expected_uid: str | None = None, initial_claim: dict[str, Any] | None = None,
+                           require_current_generation: bool = False) -> str:
         """Shared SandboxClaim watch loop.
 
         Returns the sandbox name once ``status.sandbox.name`` is populated;
@@ -231,7 +241,7 @@ class AsyncK8sHelper:
                 )
             w = watch.Watch()
             try:
-                async def events():
+                async def events() -> Any:
                     # An already-ready GET may never produce another watch event.
                     if initial_claim is not None:
                         yield {"type": "ADDED", "object": initial_claim}
@@ -295,7 +305,10 @@ class AsyncK8sHelper:
                                     f"SandboxClaim '{claim_name}' failed with terminal reason "
                                     f"{cond.get('reason')}: {cond.get('message', '')}"
                                 )
-                            if cond.get("type") == "Ready" and cond.get("status") == "True":
+                            if (cond.get("type") == "Ready" and cond.get("status") == "True"
+                                    and (not require_current_generation
+                                         or (metadata.get("generation") is not None
+                                             and cond.get("observedGeneration") == metadata["generation"]))):
                                 ready = True
 
                         sandbox_status = status.get("sandbox", {})
@@ -306,7 +319,7 @@ class AsyncK8sHelper:
                                 f"Resolved sandbox name '{name}' from claim status"
                                 + (" (claim Ready)" if ready else "")
                             )
-                            return name
+                            return cast(str, name)
             except client.ApiException as e:
                 if e.status == 410:
                     # The requested resourceVersion was compacted away:
@@ -430,30 +443,30 @@ class AsyncK8sHelper:
         await self._ensure_initialized()
 
         try:
-            return await self.custom_objects_api.get_namespaced_custom_object(
+            return cast(dict[str, Any], await self.custom_objects_api.get_namespaced_custom_object(
                 group=SANDBOX_API_GROUP,
                 version=SANDBOX_API_VERSION,
                 namespace=namespace,
                 plural=SANDBOX_PLURAL_NAME,
                 name=name,
-            )
+            ))
         except client.ApiException as e:
             if e.status == 404:
                 return None
             raise
 
-    async def get_sandbox_claim(self, name: str, namespace: str):
+    async def get_sandbox_claim(self, name: str, namespace: str) -> dict[str, Any] | None:
         """Gets a SandboxClaim custom resource (or ``None`` if it doesn't exist)."""
         await self._ensure_initialized()
 
         try:
-            return await self.custom_objects_api.get_namespaced_custom_object(
+            return cast(dict[str, Any], await self.custom_objects_api.get_namespaced_custom_object(
                 group=CLAIM_API_GROUP,
                 version=CLAIM_API_VERSION,
                 namespace=namespace,
                 plural=CLAIM_PLURAL_NAME,
                 name=name,
-            )
+            ))
         except client.ApiException as e:
             if e.status == 404:
                 return None
@@ -473,7 +486,7 @@ class AsyncK8sHelper:
         await self._ensure_initialized()
 
         try:
-            kwargs: dict = dict(
+            kwargs: dict[str, Any] = dict(
                 group=CLAIM_API_GROUP,
                 version=CLAIM_API_VERSION,
                 namespace=namespace,
@@ -541,7 +554,7 @@ class AsyncK8sHelper:
                                 continue
 
                             logger.info(f"Gateway ready. IP: {ip_address}")
-                            return ip_address
+                            return cast(str, ip_address)
             finally:
                 await w.close()
 

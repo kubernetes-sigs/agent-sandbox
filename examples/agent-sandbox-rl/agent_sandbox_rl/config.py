@@ -37,10 +37,21 @@ PLACEMENTS = ("round-robin", "least-loaded", "capacity-weighted", "image-affinit
 
 
 class ResourceSpec(BaseModel):
-  """Per-sandbox container resource requests."""
+  """Runtime container resources: requests, and optional limits (unset = none)."""
 
   cpu: str = "250m"
   memory: str = "512Mi"
+  cpu_limit: str | None = None
+  memory_limit: str | None = None
+
+  @field_validator("cpu", "memory", "cpu_limit", "memory_limit")
+  @classmethod
+  def _quantity_nonempty(cls, v: str | None) -> str | None:
+    # An empty string is neither "unset" nor a quantity: rendering would drop
+    # the limit the caller meant to set, or send "" as a request.
+    if v is not None and not v.strip():
+      raise ValueError("resource quantities must be non-empty (use None for no limit)")
+    return v
 
 
 class TemplateSpec(BaseModel):
@@ -75,6 +86,20 @@ class TemplateSpec(BaseModel):
   # onto a pre-existing template it owns.
   # See examples/agent-sandbox-rl-network-policy.
   network_policy_management: str | None = None
+  # Pod hardening, stated explicitly in the rendered spec: no ServiceAccount
+  # token (the controller already defaults automount to false on the pods it
+  # creates) and no shared PID namespace (the Kubernetes default; a grading
+  # sidecar must neither see nor be seen by the agent's processes). Set either
+  # to True for a workload that needs them.
+  automount_service_account_token: bool = False
+  share_process_namespace: bool = False
+  # Extra keys merged into the SandboxTemplate `spec` next to `podTemplate` and
+  # `networkPolicyManagement`, for template fields this model has no knob for.
+  # `podTemplate` and `networkPolicyManagement` are rejected here: they have
+  # knobs (extra_pod_spec, network_policy_management) that the SDK's own logic
+  # reads. Keys the SandboxTemplate CRD does not know are pruned by the API
+  # server, silently.
+  extra_template_spec: dict = Field(default_factory=dict)
 
   @field_validator("image_pull_policy")
   @classmethod
@@ -88,6 +113,18 @@ class TemplateSpec(BaseModel):
   def _valid_network_policy_management(cls, v: str | None) -> str | None:
     if v is not None and v not in ("Managed", "Unmanaged"):
       raise ValueError("network_policy_management must be Managed|Unmanaged")
+    return v
+
+  @field_validator("extra_template_spec")
+  @classmethod
+  def _extra_template_spec_not_pod_template(cls, v: dict) -> dict:
+    if "podTemplate" in v:
+      raise ValueError("extra_template_spec must not carry podTemplate; "
+                       "use extra_pod_spec for pod-spec keys")
+    if "networkPolicyManagement" in v:
+      raise ValueError("extra_template_spec must not carry networkPolicyManagement; "
+                       "use network_policy_management (preflight and the template "
+                       "patch read that field)")
     return v
 
 
@@ -134,6 +171,47 @@ class ClusterConfig(BaseModel):
     return v
 
 
+class FailFastPolicy(BaseModel):
+  """When to give up on a claimed sandbox whose pod is not coming up.
+
+  `SandboxFleet.acquire` runs a watchdog next to the SDK's claim wait (see
+  `failfast.py`). Reasons that never clear on their own (``InvalidImageName``, a
+  ``Failed`` pod, an OOM-killed container) fail at once. The graced classes are
+  opt-in: with ``grace_s`` set, reasons that can be transient
+  (``ImagePullBackOff``, ``CreateContainerConfigError``, ``CrashLoopBackOff``,
+  ...) fail once they have persisted that long; with ``unschedulable_grace_s``
+  set, an ``Unschedulable`` pod fails after that long. Unset (the default) leaves
+  them to ``claim_timeout``: a GPU or node-auto-provisioning scale-up often
+  outlasts a few minutes of ``Unschedulable``, and failing a pull during registry
+  throttling makes the caller retry on a new pod whose pull starts at once
+  (kubelet's pull backoff is per pod), adding load while the registry is already
+  throttling. ``enabled=False`` restores the plain wait, bounded only by
+  ``claim_timeout`` / ``ready_timeout``.
+  """
+
+  enabled: bool = True
+  # Warm adoptions are Ready within a second or two; do not poll pods for those.
+  initial_delay_s: float = 10.0
+  poll_s: float = 5.0
+  # None = this class of reason is left to claim_timeout (see the docstring).
+  grace_s: float | None = None
+  unschedulable_grace_s: float | None = None
+
+  @field_validator("initial_delay_s", "grace_s", "unschedulable_grace_s")
+  @classmethod
+  def _non_negative(cls, v: float | None) -> float | None:
+    if v is not None and v < 0:
+      raise ValueError("must be >= 0")
+    return v
+
+  @field_validator("poll_s")
+  @classmethod
+  def _poll_positive(cls, v: float) -> float:
+    if v <= 0:
+      raise ValueError("poll_s must be > 0")
+    return v
+
+
 class FleetConfig(BaseModel):
   """Top-level fleet configuration."""
 
@@ -148,6 +226,22 @@ class FleetConfig(BaseModel):
   warm_per_task: bool = False
   window_size: int | None = None            # sliding: None = auto from max_concurrent
   ready_timeout: int = 900
+  # Seconds `acquire()` waits for ONE claim to become Ready. None = ready_timeout,
+  # which also bounds whole-pool fills and is sized for those (15 minutes); a
+  # single claim that is not Ready after a few minutes is stuck, and an RL step
+  # cannot absorb the difference. Pair with `fail_fast` for the cases that can be
+  # recognised before the timeout.
+  claim_timeout: int | None = None
+  fail_fast: FailFastPolicy = Field(default_factory=FailFastPolicy)
+  # Pre-pull (setup(prepull=True) / fleet.prepull()): images per DaemonSet pod,
+  # how many DaemonSets pull at once per node, whether each is deleted once its
+  # nodes are ready, and whether to drop the page cache afterwards (privileged
+  # one-shot DaemonSet; for runs that must start cold). The sandbox template's
+  # tolerations are applied to the pre-pull pods automatically.
+  prepull_images_per_pod: int = 25
+  prepull_max_parallel: int = 4
+  prepull_delete_when_done: bool = False
+  prepull_drop_caches: bool = False
   # Stage the warm fill in waves of <= this many sandbox creates in flight,
   # waiting for each wave to reach Ready before the next. Bounds the controller's
   # concurrent create burst (Σ pools×replicas). On controllers <= v0.5.3 this
@@ -222,12 +316,24 @@ class FleetConfig(BaseModel):
   # None => conservative single-node bound (safe when the pool size is unknown).
   cluster_nodes: int | None = None
 
-  @field_validator("max_concurrent", "max_warmpool_size")
+  @field_validator("max_concurrent", "max_warmpool_size", "prepull_images_per_pod",
+                   "prepull_max_parallel")
   @classmethod
   def _positive(cls, v: int) -> int:
     if v < 1:
       raise ValueError("must be >= 1")
     return v
+
+  @field_validator("claim_timeout")
+  @classmethod
+  def _claim_timeout_positive(cls, v: int | None) -> int | None:
+    if v is not None and v < 1:
+      raise ValueError("claim_timeout must be >= 1 or None")
+    return v
+
+  def effective_claim_timeout(self) -> int:
+    """Per-claim readiness bound: ``claim_timeout`` if set, else ``ready_timeout``."""
+    return self.claim_timeout if self.claim_timeout is not None else self.ready_timeout
 
   @field_validator("avg_image_gb", "node_ephemeral_gb")
   @classmethod

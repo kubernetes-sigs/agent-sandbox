@@ -66,6 +66,12 @@ class Cluster:
         self.custom_api, self.core_api, self.namespace, labels=labels)
     self._k8s_helper = None
     self._sandbox_client = None
+    # Concurrent first acquires would otherwise each build a SandboxClient,
+    # and every build loads the kubeconfig.
+    self._sandbox_client_lock = threading.Lock()
+    # Separate from _sandbox_client_lock, which is held while sandbox_client reads
+    # k8s_helper, because threading.Lock is not reentrant.
+    self._k8s_helper_lock = threading.Lock()
     self.tracer_config = None                 # optional SDK SandboxTracerConfig
     # Placement / capacity bookkeeping. Mutated from parallel claim workers, so
     # guard with a per-cluster lock and only touch via the methods below.
@@ -93,13 +99,18 @@ class Cluster:
   @property
   def k8s_helper(self):
     """SDK K8sHelper pointed at this cluster's context (lazy, injected)."""
-    if self._k8s_helper is None:
-      from k8s_agent_sandbox.k8s_helper import K8sHelper
-      helper = K8sHelper()
-      helper.custom_objects_api = self.custom_api
-      helper.core_v1_api = self.core_api
-      self._k8s_helper = helper
-    return self._k8s_helper
+    if self._k8s_helper is not None:
+      return self._k8s_helper
+    with self._k8s_helper_lock:
+      if self._k8s_helper is None:
+        from k8s_agent_sandbox.k8s_helper import K8sHelper
+        # With an ApiClient the helper loads no kubeconfig, so the process-wide
+        # default Configuration stays untouched.
+        helper = K8sHelper(api_client=self.api_client)
+        helper.custom_objects_api = self.custom_api
+        helper.core_v1_api = self.core_api
+        self._k8s_helper = helper
+      return self._k8s_helper
 
   @property
   def sandbox_client(self):
@@ -110,17 +121,24 @@ class Cluster:
     suspend / resume / restore — see `agent_sandbox_rl.snapshots`), bound to
     this cluster's helper *before* its CRD check runs.
     """
-    if self._sandbox_client is None:
-      if getattr(self.config, "snapshots", False):
-        from .snapshots import build_snapshot_client
-        c = build_snapshot_client(self.k8s_helper, tracer_config=self.tracer_config)
-      else:
-        from k8s_agent_sandbox import SandboxClient
-        c = (SandboxClient(tracer_config=self.tracer_config)
-             if self.tracer_config is not None else SandboxClient())
-        c.k8s_helper = self.k8s_helper
-      self._sandbox_client = c
-    return self._sandbox_client
+    if self._sandbox_client is not None:
+      return self._sandbox_client
+    with self._sandbox_client_lock:
+      if self._sandbox_client is None:
+        if getattr(self.config, "snapshots", False):
+          from .snapshots import build_snapshot_client
+          c = build_snapshot_client(self.k8s_helper, tracer_config=self.tracer_config,
+                                    api_client=self.api_client)
+        else:
+          from k8s_agent_sandbox import SandboxClient
+          # The api_client keeps the helper this builds from loading a kubeconfig,
+          # since it is replaced right after.
+          c = (SandboxClient(tracer_config=self.tracer_config, api_client=self.api_client)
+               if self.tracer_config is not None
+               else SandboxClient(api_client=self.api_client))
+          c.k8s_helper = self.k8s_helper
+        self._sandbox_client = c
+      return self._sandbox_client
 
   def template_spec(self, base: TemplateSpec) -> TemplateSpec:
     """Merge per-cluster overrides onto a base TemplateSpec."""

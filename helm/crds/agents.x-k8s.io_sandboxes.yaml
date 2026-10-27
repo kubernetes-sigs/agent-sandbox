@@ -38,6 +38,12 @@ spec:
             type: object
           spec:
             properties:
+              failedPodPolicy:
+                default: Retain
+                enum:
+                - Retain
+                - Recreate
+                type: string
               operatingMode:
                 default: Running
                 enum:

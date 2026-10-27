@@ -162,6 +162,10 @@ const (
 	SandboxWarmPoolLabel = "agents.x-k8s.io/warm-pool-sandbox"
 	// SandboxTemplateRefHashLabel identifies which SandboxTemplate a Sandbox originated from.
 	SandboxTemplateRefHashLabel = "agents.x-k8s.io/sandbox-template-ref-hash"
+	// SandboxNameHashLabel is the tracking label the controller stamps on every
+	// Pod, Service and PVC it creates or adopts for a Sandbox. Its value is the
+	// hash of the Sandbox name.
+	SandboxNameHashLabel = "agents.x-k8s.io/sandbox-name-hash"
 )
 
 type PodMetadata struct {
@@ -249,6 +253,19 @@ const (
 	SandboxOperatingModeSuspended SandboxOperatingMode = "Suspended"
 )
 
+// FailedPodPolicy controls behavior when the backing Pod reaches phase Failed.
+// +kubebuilder:validation:Enum=Retain;Recreate
+type FailedPodPolicy string
+
+const (
+	// FailedPodPolicyRetain leaves a Failed Pod in place and surfaces Finished=True.
+	// This is the default.
+	FailedPodPolicyRetain FailedPodPolicy = "Retain"
+	// FailedPodPolicyRecreate deletes the controller-owned Failed Pod so a new one
+	// is created. The Sandbox identity and any Sandbox-owned PVCs are retained.
+	FailedPodPolicyRecreate FailedPodPolicy = "Recreate"
+)
+
 // NOTE: When adding, removing, or renaming a field in SandboxBlueprint,
 // also update compareSandboxBlueprint() in extensions/controllers/sandboxwarmpool_controller.go
 // so the SandboxWarmPool staleness check accounts for it. A field left out of that comparison
@@ -298,6 +315,20 @@ type SandboxBlueprint struct {
 	//nolint:kubeapilinter // Enum not used to avoid duplicating the Service API; field is not expected to extend (issue #746).
 	// +optional
 	Service *bool `json:"service,omitempty"`
+
+	// failedPodPolicy controls what happens when the backing Pod enters phase Failed.
+	// Retain (default): leave the Failed pod and surface Finished=True.
+	// Recreate: delete the controller-owned Failed pod so a new one is created;
+	// the Sandbox identity and any Sandbox-owned PVCs are retained.
+	// Combined with restartPolicy Never and a container that always exits non-zero,
+	// Recreate can recreate the Pod repeatedly; the controller applies Deployment-style
+	// in-memory exponential backoff (5s, doubling up to 5m) between creates so a crash
+	// loop cannot hot-loop the API server. Backoff resets after the replacement Pod has
+	// been continuously observed Running for 10 minutes. Backoff state is not persisted
+	// in status.
+	// +kubebuilder:default=Retain
+	// +optional
+	FailedPodPolicy FailedPodPolicy `json:"failedPodPolicy,omitempty"`
 }
 
 // SandboxSpec defines the desired state of Sandbox.

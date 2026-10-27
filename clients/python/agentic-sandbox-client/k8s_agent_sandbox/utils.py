@@ -24,10 +24,23 @@ import json
 import os
 import tempfile
 import time
-from typing import Any
+from typing import Any, Callable, ParamSpec, TypeVar, cast
 
 from .constants import SANDBOX_NAME_HASH_LABEL
-from .models import SandboxClaimEnvVar
+from .models import (
+    SandboxClaimEnvVar,
+    SandboxConnectionConfig,
+    SandboxdInClusterConnectionConfig,
+    SandboxdPodTunnelConnectionConfig,
+)
+
+
+def sandboxd_auth_headers(config: SandboxConnectionConfig) -> dict[str, str]:
+    """Share the runtime credential across REST headers and gRPC metadata."""
+    if isinstance(config, (SandboxdPodTunnelConnectionConfig, SandboxdInClusterConnectionConfig)):
+        if config.auth_token is not None:
+            return {"authorization": f"Bearer {config.auth_token.get_secret_value()}"}
+    return {}
 
 
 def merge_headers(*layers: Mapping[str, str] | None) -> dict[str, str]:
@@ -42,14 +55,18 @@ def merge_headers(*layers: Mapping[str, str] | None) -> dict[str, str]:
     return dict(merged.values())
 
 
-def record_latency(metric):
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def record_latency(metric: Any) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Decorator to measure and record execution latency to a Prometheus metric.
 
     Does not record metrics if self._skip_latency_metric is set to True during execution.
     """
-    def decorator(func):
+    def decorator(func: Callable[P, R]) -> Callable[P, R]:
         @functools.wraps(func)
-        def wrapper(self, *args, **kwargs):
+        def wrapper(self: Any, *args: P.args, **kwargs: P.kwargs) -> R:
             self._skip_latency_metric = False
             start_time = time.perf_counter()
             response = None
@@ -67,7 +84,7 @@ def record_latency(metric):
                     duration = (time.perf_counter() - start_time) * 1000.0
                     status = "success" if getattr(response, "success", False) else "failure"
                     metric.labels(status=status).observe(duration)
-        return wrapper
+        return cast(Callable[P, R], wrapper)
     return decorator
 
 def construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds: int) -> dict[str, str]:

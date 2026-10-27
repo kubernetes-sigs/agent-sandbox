@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any
+from typing import Any, cast
 from k8s_agent_sandbox.connector import SandboxConnector
 from k8s_agent_sandbox.models import ExecutionResult, LegacyExecuteRequest
 from k8s_agent_sandbox.trace_manager import trace, trace_span
@@ -190,16 +190,17 @@ class CommandExecutor:
         try:
             response = stub.Execute(request, timeout=timeout)
         except grpc.RpcError as e:
-            if report_timeout and e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
+            rpc_error = cast("grpc.Call", e)
+            if report_timeout and rpc_error.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
                 return ExecutionResult(
                     stderr=f"Command timed out after {timeout:g} seconds",
                     exit_code=124,
                     timed_out=True,
                 )
-            if e.code() == grpc.StatusCode.UNAVAILABLE:
+            if rpc_error.code() == grpc.StatusCode.UNAVAILABLE:
                 self.connector.invalidate_sandboxd_transport(channel)
             raise RuntimeError(
-                f"sandboxd process service failed ({e.code()}): {e.details()}"
+                f"sandboxd process service failed ({rpc_error.code()}): {rpc_error.details()}"
             ) from e
         return ExecutionResult(
             stdout=response.stdout.decode("utf-8", errors="replace"),

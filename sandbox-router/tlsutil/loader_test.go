@@ -19,6 +19,7 @@ import (
 	"crypto/x509"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -157,6 +158,9 @@ func TestCertReloader_KubernetesAtomicWriterRotation(t *testing.T) {
 		t.Fatalf("write v1 key: %v", err)
 	}
 	if err := os.Symlink(filepath.Base(dataV1), filepath.Join(dir, "..data")); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlinks on Windows need a privilege this account may lack: %v", err)
+		}
 		t.Fatalf("symlink ..data: %v", err)
 	}
 	certPath := filepath.Join(dir, "tls.crt")

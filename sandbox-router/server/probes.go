@@ -17,13 +17,20 @@ package server
 import (
 	"net/http"
 	"sync/atomic"
+	"time"
 )
 
-// Probes serves /healthz and /readyz. Liveness (/healthz) is always 200.
-// Readiness (/readyz) flips to 503 once MarkUnready is called, which lets
-// load balancers drain the pod ahead of shutdown.
+// Probes serves /healthz and /readyz. Liveness (/healthz) returns 200 unless
+// startup has run past the deadline set by SetStartupDeadline. Readiness
+// (/readyz) flips to 503 once MarkUnready is called, which lets load
+// balancers drain the pod ahead of shutdown.
 type Probes struct {
 	ready atomic.Bool
+	// started is set on the first MarkReady and never cleared, so shutdown
+	// (MarkUnready) does not turn liveness red.
+	started atomic.Bool
+	// startupDeadline is Unix nanoseconds; zero means no deadline.
+	startupDeadline atomic.Int64
 }
 
 // NewProbes returns a Probes initialized to not-yet-ready. Call MarkReady
@@ -32,8 +39,16 @@ func NewProbes() *Probes {
 	return &Probes{}
 }
 
+// SetStartupDeadline makes /healthz return 503 if the pod has not been marked
+// ready by t. This bounds how long a startup step can hang before the kubelet
+// restarts the container.
+func (p *Probes) SetStartupDeadline(t time.Time) {
+	p.startupDeadline.Store(t.UnixNano())
+}
+
 // MarkReady advertises the pod as ready.
 func (p *Probes) MarkReady() {
+	p.started.Store(true)
 	p.ready.Store(true)
 }
 
@@ -42,9 +57,16 @@ func (p *Probes) MarkUnready() {
 	p.ready.Store(false)
 }
 
-// Healthz always returns 200 OK with the Python-compatible JSON body so
-// tooling that parses {"status":"ok"} keeps working.
+// Healthz returns 200 OK with the Python-compatible JSON body so tooling that
+// parses {"status":"ok"} keeps working. It returns 503 only when startup has
+// missed its deadline.
 func (p *Probes) Healthz(w http.ResponseWriter, _ *http.Request) {
+	if deadline := p.startupDeadline.Load(); deadline != 0 &&
+		!p.started.Load() && time.Now().UnixNano() > deadline {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"status":"startup timed out"}`))
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"ok"}`))

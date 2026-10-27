@@ -36,8 +36,6 @@ import (
 // else is ignored and reported as skipped so typos surface immediately.
 // Do not modify after init.
 var tunableFlags = map[string]bool{
-	"pprof-block-profile-rate":                         true,
-	"pprof-mutex-profile-fraction":                     true,
 	"kube-api-qps":                                     true,
 	"kube-api-burst":                                   true,
 	"api-connections":                                  true,

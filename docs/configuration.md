@@ -376,8 +376,7 @@ list, so typos surface immediately instead of silently falling back to
 defaults. Keys set via CLI are also logged so the precedence decision is
 visible.
 
-Settable flags: `pprof-block-profile-rate`, `pprof-mutex-profile-fraction`,
-`kube-api-qps`, `kube-api-burst`, `api-connections`,
+Settable flags: `kube-api-qps`, `kube-api-burst`, `api-connections`,
 `separate-watch-connection`, `sandbox-concurrent-workers`,
 `sandbox-claim-concurrent-workers`, `sandbox-warm-pool-concurrent-workers`,
 `sandbox-template-concurrent-workers`, `sandbox-warm-pool-max-batch-size`,

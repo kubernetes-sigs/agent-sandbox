@@ -1093,22 +1093,31 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, p
 	return activeSandboxes, terminatingReplicas, allErrors
 }
 
-// computePodTemplateHash computes a hash of the sandbox template's Spec.PodTemplate.
-func computePodTemplateHash(template *extensionsv1beta1.SandboxTemplate) (string, error) {
-	specJSON, err := json.Marshal(template.Spec.PodTemplate)
+// hashJSON hashes the JSON encoding of v. The what argument names v in the error.
+func hashJSON(v any, what string) (string, error) {
+	specJSON, err := json.Marshal(v)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal pod template for hashing: %w", err)
+		return "", fmt.Errorf("failed to marshal %s for hashing: %w", what, err)
 	}
 	return sandboxcontrollers.NameHash(string(specJSON)), nil
 }
 
+// computePodTemplateHash computes a hash of the sandbox template's Spec.PodTemplate.
+func computePodTemplateHash(template *extensionsv1beta1.SandboxTemplate) (string, error) {
+	return hashJSON(template.Spec.PodTemplate, "pod template")
+}
+
 // computeSandboxBlueprintHash computes a hash of the sandbox template's Spec.SandboxBlueprint.
+// It skips the metadata that compareSandboxBlueprint ignores, so a label or annotation edit
+// does not make every warm sandbox look stale.
 func computeSandboxBlueprintHash(template *extensionsv1beta1.SandboxTemplate) (string, error) {
-	specJSON, err := json.Marshal(template.Spec.SandboxBlueprint)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal sandbox blueprint for hashing: %w", err)
+	blueprint := template.Spec.SandboxBlueprint.DeepCopy()
+	blueprint.PodTemplate.ObjectMeta = sandboxv1beta1.PodMetadata{}
+	for i := range blueprint.VolumeClaimTemplates {
+		blueprint.VolumeClaimTemplates[i].Labels = nil
+		blueprint.VolumeClaimTemplates[i].Annotations = nil
 	}
-	return sandboxcontrollers.NameHash(string(specJSON)), nil
+	return hashJSON(blueprint, "sandbox blueprint")
 }
 
 // fetchTemplateAndHash fetches the sandbox template and computes its hash.

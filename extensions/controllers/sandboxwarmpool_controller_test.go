@@ -2307,6 +2307,8 @@ func TestReconcilePool_TemplateUpdateRecreate(t *testing.T) {
 			require.NoError(t, err)
 			if tt.expectRecreation {
 				require.NotEqual(t, initialHash, updatedHash, "sandbox blueprint hash should change after template update")
+			} else {
+				require.Equal(t, initialHash, updatedHash, "sandbox blueprint hash should ignore metadata-only drift")
 			}
 
 			// Recreate strategy should delete the stale sandbox on the first
@@ -2354,8 +2356,24 @@ func TestComputeSandboxBlueprintHash(t *testing.T) {
 	svcEnabled := template.DeepCopy()
 	svcEnabled.Spec.Service = new(true)
 
+	podMetadata := template.DeepCopy()
+	podMetadata.Spec.PodTemplate.ObjectMeta = sandboxv1beta1.PodMetadata{
+		Labels:      map[string]string{"new-label": "value"},
+		Annotations: map[string]string{"new-annotation": "value"},
+	}
+
+	// The base and variant carry one VCT each so that only the VCT metadata differs.
+	baseWithVCT := template.DeepCopy()
+	baseWithVCT.Spec.VolumeClaimTemplates = []sandboxv1beta1.PersistentVolumeClaimTemplate{createVolumeClaimTemplate("data", "standard")}
+	vctMetadata := baseWithVCT.DeepCopy()
+	vctMetadata.Spec.VolumeClaimTemplates[0].Labels = map[string]string{"new-label": "value"}
+	vctMetadata.Spec.VolumeClaimTemplates[0].Annotations = map[string]string{"new-annotation": "value"}
+	vctRenamed := baseWithVCT.DeepCopy()
+	vctRenamed.Spec.VolumeClaimTemplates[0].Name = "cache"
+
 	testCases := []struct {
 		name        string
+		base        *extensionsv1beta1.SandboxTemplate
 		template    *extensionsv1beta1.SandboxTemplate
 		equalToBase bool
 	}{
@@ -2379,21 +2397,42 @@ func TestComputeSandboxBlueprintHash(t *testing.T) {
 			template:    svcEnabled,
 			equalToBase: false,
 		},
+		{
+			name:        "pod template metadata change produces same hash",
+			template:    podMetadata,
+			equalToBase: true,
+		},
+		{
+			name:        "VCT metadata change produces same hash",
+			base:        baseWithVCT,
+			template:    vctMetadata,
+			equalToBase: true,
+		},
+		{
+			name:        "VCT name change produces different hash",
+			base:        baseWithVCT,
+			template:    vctRenamed,
+			equalToBase: false,
+		},
 	}
-
-	currentSandboxHash, err := computeSandboxBlueprintHash(template)
-	require.NoError(t, err)
-	require.NotEmpty(t, currentSandboxHash)
 
 	for _, tt := range testCases {
 		t.Run(tt.name, func(t *testing.T) {
+			base := tt.base
+			if base == nil {
+				base = template
+			}
+			baseHash, err := computeSandboxBlueprintHash(base)
+			require.NoError(t, err)
+			require.NotEmpty(t, baseHash)
+
 			sandboxHash, err := computeSandboxBlueprintHash(tt.template)
 			require.NoError(t, err)
 			require.NotEmpty(t, sandboxHash)
 			if tt.equalToBase {
-				require.Equal(t, currentSandboxHash, sandboxHash)
+				require.Equal(t, baseHash, sandboxHash)
 			} else {
-				require.NotEqual(t, currentSandboxHash, sandboxHash)
+				require.NotEqual(t, baseHash, sandboxHash)
 			}
 		})
 	}

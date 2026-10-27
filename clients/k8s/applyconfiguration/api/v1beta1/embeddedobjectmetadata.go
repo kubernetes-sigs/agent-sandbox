@@ -20,8 +20,7 @@ package v1beta1
 // with apply.
 type EmbeddedObjectMetadataApplyConfiguration struct {
 	// name is the pod volume name and the prefix of the PVC name, which is
-	// "<name>-<sandbox name>". It can be at most 63 characters, the pod volume name limit.
-	// Cannot be updated.
+	// named after the template and the Sandbox, joined by a hyphen. It can be at most 63 characters, the pod volume name limit.
 	Name *string `json:"name,omitempty"`
 	// labels defines the map of string keys and values that can be used to organize and categorize
 	// (scope and select) objects. May match selectors of replication controllers

@@ -186,8 +186,7 @@ type PodMetadata struct {
 
 type EmbeddedObjectMetadata struct {
 	// name is the pod volume name and the prefix of the PVC name, which is
-	// "<name>-<sandbox name>". It can be at most 63 characters, the pod volume name limit.
-	// Cannot be updated.
+	// named after the template and the Sandbox, joined by a hyphen. It can be at most 63 characters, the pod volume name limit.
 	// +kubebuilder:validation:MaxLength=63
 	// +optional
 	Name string `json:"name,omitempty"`

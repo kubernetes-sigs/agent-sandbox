@@ -124,6 +124,9 @@ type Session struct {
 	// We currently only snapshot and restore this directory.
 	HomeDir string
 
+	// stateDir is the root directory for session state and snapshots.
+	stateDir string
+
 	// sessionStore is the store for session state.
 	sessionStore sessions.Store
 
@@ -321,14 +324,23 @@ func (s *Sandbox) ExecCommand(ctx context.Context, opts tools.ExecCommandOptions
 	return res, nil
 }
 
+// SetStateDir configures the state directory for this session.
+func (s *Session) SetStateDir(dir string) {
+	s.stateDir = dir
+}
+
 // getBackupDir gets the backup directory for the session.
 // It creates the directory if it doesn't exist.
 func (s *Session) getBackupDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get user home directory: %w", err)
+	base := s.stateDir
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("failed to get user home directory: %w", err)
+		}
+		base = filepath.Join(home, ".local", "sandboxed-tools")
 	}
-	dir := filepath.Join(home, ".local", "sandboxed-tools", s.Name, "fs")
+	dir := filepath.Join(base, s.Name, "fs")
 
 	// Ensure the session's backup directory exists;
 	// use mode 700 because it might contain sensitive data.
@@ -602,6 +614,8 @@ func (c *SandboxClient) DeleteAllSandboxes(ctx context.Context) error {
 
 // RunOptions are the options for running the agent.
 type RunOptions struct {
+	StateDir string
+
 	Namespace string
 	Image     string
 
@@ -690,6 +704,16 @@ type Harness struct {
 
 	// opts contains the options for the run command.
 	opts RunOptions
+
+	// sandboxOverride allows substituting a custom tools.Sandbox implementation
+	// (e.g. for testing without a Kubernetes cluster).
+	sandboxOverride tools.Sandbox
+}
+
+// SetSandboxOverride allows setting a custom tools.Sandbox implementation
+// (e.g. for testing without a Kubernetes cluster or network).
+func (h *Harness) SetSandboxOverride(sb tools.Sandbox) {
+	h.sandboxOverride = sb
 }
 
 // NewHarness constructs a Harness.
@@ -723,6 +747,7 @@ func (h *Harness) NewSession(ctx context.Context, sessionStore sessions.Store, s
 		Name:         sessionName,
 		client:       h.sandboxClient,
 		HomeDir:      h.opts.HomeDir,
+		stateDir:     h.opts.StateDir,
 		sessionStore: sessionStore,
 		Metadata:     metadata,
 		sandboxID: types.NamespacedName{
@@ -754,6 +779,7 @@ func (h *Harness) LoadSession(ctx context.Context, sessionStore sessions.Store, 
 		Name:         sessionName,
 		client:       h.sandboxClient,
 		HomeDir:      h.opts.HomeDir,
+		stateDir:     h.opts.StateDir,
 		sessionStore: sessionStore,
 		Metadata:     meta,
 		messages:     messages,
@@ -863,8 +889,10 @@ func (h *Harness) RunTurn(ctx context.Context, session *Session, input string, e
 
 				// The tool call could take a while, so extend the lifecycle.
 				// This might need more careful handling later; what if the command takes 20 minutes to run?
-				if err := sandbox.ExtendLifecycle(ctx, SandboxInactivityTimeout); err != nil {
-					log.Error(err, "extending sandbox lifecycle")
+				if sb, ok := sandbox.(*Sandbox); ok {
+					if err := sb.ExtendLifecycle(ctx, SandboxInactivityTimeout); err != nil {
+						log.Error(err, "extending sandbox lifecycle")
+					}
 				}
 			}
 
@@ -880,7 +908,11 @@ func (h *Harness) RunTurn(ctx context.Context, session *Session, input string, e
 // ensureSandbox returns the session's running sandbox, creating it (and
 // restoring its filesystem from the latest snapshot) if it does not exist
 // or was cleaned up due to inactivity.
-func (h *Harness) ensureSandbox(ctx context.Context, session *Session) (*Sandbox, error) {
+func (h *Harness) ensureSandbox(ctx context.Context, session *Session) (tools.Sandbox, error) {
+	if h.sandboxOverride != nil {
+		return h.sandboxOverride, nil
+	}
+
 	log := klog.FromContext(ctx)
 
 	if sb := session.activeSandbox; sb != nil {

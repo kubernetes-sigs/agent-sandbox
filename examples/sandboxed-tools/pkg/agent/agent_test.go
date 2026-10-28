@@ -240,3 +240,28 @@ func TestNewAndLoadSession_Metadata(t *testing.T) {
 		t.Error("NewSession on existing legacy session should fail")
 	}
 }
+
+func TestHarness_SetSandboxOverrideAndStateDir(t *testing.T) {
+	ctx := t.Context()
+	stateDir := t.TempDir()
+	store := sessions.NewFileStore(stateDir)
+
+	harness := NewHarness(nil, nil, nil, RunOptions{
+		StateDir:  stateDir,
+		Namespace: "ns",
+		HomeDir:   "/home/x",
+	})
+
+	sess, err := harness.NewSession(ctx, store, "testseam", sessions.Metadata{Toolset: "basic"})
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	backupDir, err := sess.getBackupDir()
+	if err != nil {
+		t.Fatalf("getBackupDir: %v", err)
+	}
+	if !filepath.HasPrefix(backupDir, stateDir) {
+		t.Errorf("expected backupDir %q to be inside stateDir %q", backupDir, stateDir)
+	}
+}

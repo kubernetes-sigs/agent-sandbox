@@ -14,7 +14,9 @@
 
 """Unit tests for the async Sandbox connection lifecycle."""
 
+import gc
 import unittest
+import weakref
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -26,7 +28,10 @@ pytest.importorskip("kubernetes_asyncio")
 from k8s_agent_sandbox.async_sandbox import AsyncSandbox
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
+    SandboxInClusterConnectionConfig,
     SandboxTracerConfig,
+    SandboxdInClusterConnectionConfig,
+    SandboxdPodTunnelConnectionConfig,
 )
 
 
@@ -454,6 +459,30 @@ class TestAsyncSandboxTerminateIdempotent(unittest.IsolatedAsyncioTestCase):
         await sandbox.terminate()
         self.assertEqual(helper.delete_sandbox_claim.await_count, 2)
         self.assertIsNone(sandbox.claim_name)
+
+
+CALLBACK_MODES = {
+    "direct": SandboxDirectConnectionConfig(api_url="http://sandbox.invalid"),
+    "in-cluster": SandboxInClusterConnectionConfig(),
+    "sandboxd-pod-tunnel": SandboxdPodTunnelConnectionConfig(),
+    "sandboxd-in-cluster": SandboxdInClusterConnectionConfig(mode="in-cluster-pod-ip"),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("config", CALLBACK_MODES.values(), ids=CALLBACK_MODES.keys())
+async def test_closed_handle_is_freed_without_the_cycle_collector(config):
+    # With the collector off, only reference counting can free the handle.
+    gc.disable()
+    try:
+        sandbox = AsyncSandbox("claim", "sandbox-id", "ns", connection_config=config, k8s_helper=MagicMock())
+        handle, connector = weakref.ref(sandbox), weakref.ref(sandbox.connector)
+        await sandbox.close_connection()
+        del sandbox
+        assert handle() is None
+        assert connector() is None
+    finally:
+        gc.enable()
 
 
 if __name__ == "__main__":

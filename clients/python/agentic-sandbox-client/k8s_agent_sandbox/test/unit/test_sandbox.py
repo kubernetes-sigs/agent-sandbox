@@ -12,16 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gc
+import threading
 import unittest
+import weakref
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 
 from k8s_agent_sandbox.sandbox import Sandbox
 from k8s_agent_sandbox.models import (
+    SandboxDirectConnectionConfig,
     SandboxInClusterConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
     SandboxTracerConfig,
+    SandboxdInClusterConnectionConfig,
+    SandboxdPodTunnelConnectionConfig,
 )
 from k8s_agent_sandbox.utils import select_pod_ip
 
@@ -433,6 +440,58 @@ class TestSelectPodIP(unittest.TestCase):
             ObjWithIP("10.244.0.42"),
         ]
         self.assertEqual(select_pod_ip(mixed_ips), "10.244.0.42")
+
+
+CALLBACK_MODES = {
+    "direct": SandboxDirectConnectionConfig(api_url="http://sandbox.invalid"),
+    "in-cluster": SandboxInClusterConnectionConfig(),
+    "sandboxd-pod-tunnel": SandboxdPodTunnelConnectionConfig(),
+    "sandboxd-in-cluster": SandboxdInClusterConnectionConfig(mode="in-cluster-pod-ip"),
+}
+
+
+@pytest.mark.parametrize("config", CALLBACK_MODES.values(), ids=CALLBACK_MODES.keys())
+def test_closed_handle_is_freed_without_the_cycle_collector(config):
+    # With the collector off, only reference counting can free the handle.
+    gc.disable()
+    try:
+        sandbox = Sandbox("claim", "sandbox-id", "ns", connection_config=config, k8s_helper=MagicMock())
+        handle, connector = weakref.ref(sandbox), weakref.ref(sandbox.connector)
+        sandbox.close_connection()
+        del sandbox
+        assert handle() is None
+        assert connector() is None
+    finally:
+        gc.enable()
+
+
+def test_callbacks_are_released_only_between_transport_operations():
+    config = SandboxdInClusterConnectionConfig(mode="in-cluster-pod-ip")
+    sandbox = Sandbox("claim", "sandbox-id", "ns", connection_config=config, k8s_helper=MagicMock())
+    connector = sandbox.connector
+    # Holding the lock stands in for a connect() on another thread that is between checking a callback and calling it.
+    with connector._transport_lock:
+        release = threading.Thread(target=connector._release_sandbox_callbacks)
+        release.start()
+        release.join(timeout=0.2)
+        assert connector.strategy._get_pod_ip is not None
+    release.join()
+    assert connector.strategy._get_pod_ip is None
+    sandbox.close_connection()
+
+
+def test_request_keeps_the_pod_ip_callback_it_connected_with():
+    config = SandboxDirectConnectionConfig(api_url="http://sandbox.invalid")
+    sandbox = Sandbox("claim", "sandbox-id", "ns", connection_config=config, k8s_helper=MagicMock())
+    sandbox.k8s_helper.get_sandbox.return_value = {"status": {"podIPs": [{"ip": "10.0.0.5"}]}}
+    connector = sandbox.connector
+    connector.session = MagicMock()
+    connector.session.request.return_value = MagicMock(is_redirect=False, status_code=200)
+    # The release stands in for a close_connection() on another thread right after the request connected.
+    with patch.object(connector.strategy, "verify_connection", side_effect=connector._release_sandbox_callbacks):
+        connector.send_request("GET", "health")
+    assert connector.session.request.call_args.kwargs["headers"]["X-Sandbox-Pod-IP"] == "10.0.0.5"
+    sandbox.close_connection()
 
 
 if __name__ == '__main__':

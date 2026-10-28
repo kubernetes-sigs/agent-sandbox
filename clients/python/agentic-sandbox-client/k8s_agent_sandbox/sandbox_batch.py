@@ -56,6 +56,7 @@ from .models import BatchEvent, BatchGroup, GroupOutcome, Member, MemberState
 from .utils import construct_sandbox_claim_lifecycle_spec, select_pod_ip
 
 if TYPE_CHECKING:
+    from .k8s_helper import K8sHelper
     from .sandbox import Sandbox
     from .sandbox_client import SandboxClient
 
@@ -1890,7 +1891,7 @@ class SandboxBatch:
                 raise
 
 
-def _precheck_pools(helper: Any, warmpools: Iterable[str], namespace: str) -> dict[str, int]:
+def _precheck_pools(helper: "K8sHelper", warmpools: Iterable[str], namespace: str) -> dict[str, int]:
     """Checks that each warm pool and the SandboxTemplate it references exist, and returns each
     pool's Ready replica count.
 
@@ -1924,7 +1925,7 @@ def _precheck_pools(helper: Any, warmpools: Iterable[str], namespace: str) -> di
 
 
 def _take_batch_lease(
-    helper: Any,
+    helper: "K8sHelper",
     namespace: str,
     batch_id: str,
     lease_name: str,
@@ -1981,7 +1982,7 @@ def _take_batch_lease(
 
 
 def _delete_batch_objects(
-    helper: Any,
+    helper: "K8sHelper",
     namespace: str,
     batch_id: str,
     lease_name: str,
@@ -2033,7 +2034,7 @@ def _delete_batch_objects(
 
 
 def _delete_claims_in_rounds(
-    helper: Any,
+    helper: "K8sHelper",
     namespace: str,
     label_selector: str,
     description: str,

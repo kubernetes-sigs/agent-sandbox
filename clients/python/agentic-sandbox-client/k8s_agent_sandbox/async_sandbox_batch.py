@@ -60,6 +60,7 @@ from .models import BatchEvent, BatchGroup, GroupOutcome, Member, MemberState
 from .utils import construct_sandbox_claim_lifecycle_spec, select_pod_ip
 
 if TYPE_CHECKING:
+    from .async_k8s_helper import AsyncK8sHelper
     from .async_sandbox import AsyncSandbox
     from .async_sandbox_client import AsyncSandboxClient
 
@@ -1888,7 +1889,7 @@ class AsyncSandboxBatch:
                 raise
 
 
-async def _precheck_pools(helper: Any, warmpools: Iterable[str], namespace: str) -> dict[str, int]:
+async def _precheck_pools(helper: "AsyncK8sHelper", warmpools: Iterable[str], namespace: str) -> dict[str, int]:
     """Checks that each warm pool and the SandboxTemplate it references exist, and returns each
     pool's Ready replica count.
 
@@ -1922,7 +1923,7 @@ async def _precheck_pools(helper: Any, warmpools: Iterable[str], namespace: str)
 
 
 async def _take_batch_lease(
-    helper: Any,
+    helper: "AsyncK8sHelper",
     namespace: str,
     batch_id: str,
     lease_name: str,
@@ -1979,7 +1980,7 @@ async def _take_batch_lease(
 
 
 async def _delete_batch_objects(
-    helper: Any,
+    helper: "AsyncK8sHelper",
     namespace: str,
     batch_id: str,
     lease_name: str,
@@ -2030,7 +2031,7 @@ async def _delete_batch_objects(
 
 
 async def _delete_claims_in_rounds(
-    helper: Any,
+    helper: "AsyncK8sHelper",
     namespace: str,
     label_selector: str,
     description: str,

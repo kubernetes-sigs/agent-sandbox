@@ -53,6 +53,8 @@ type SandboxBlueprintApplyConfiguration struct {
 	// object is deleted.
 	// On a Sandbox this list is immutable after creation.
 	// NOTE: This list is atomic. Updates to this field will replace the entire list rather than merging with existing entries.
+	// Each entry must have a unique, non-empty metadata.name.
+	// At most 128 entries: the cap only bounds the CEL cost of the uniqueness rule.
 	VolumeClaimTemplates []PersistentVolumeClaimTemplateApplyConfiguration `json:"volumeClaimTemplates,omitempty"`
 	// service controls whether the controller should automatically create a
 	// headless Service for the Sandbox workload.

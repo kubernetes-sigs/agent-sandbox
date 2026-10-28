@@ -803,6 +803,19 @@ func (r *SandboxReconciler) computeFinishedCondition(sandbox *sandboxv1beta1.San
 		return nil
 	}
 
+	// Suspend deletes the Pod, and the kubelet moves a deleted Pod to
+	// Succeeded or Failed before removing it. That terminal phase comes from
+	// our own deletion, not the workload finishing, and SandboxClaim mirrors
+	// Finished to start ttlSecondsAfterFinished. Don't report it as a finish;
+	// keep whatever Finished was recorded before the suspend.
+	if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
+		if existing := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished)); existing != nil {
+			kept := *existing
+			return &kept
+		}
+		return nil
+	}
+
 	condition := &metav1.Condition{
 		Type:               string(sandboxv1beta1.SandboxConditionFinished),
 		Status:             metav1.ConditionTrue,

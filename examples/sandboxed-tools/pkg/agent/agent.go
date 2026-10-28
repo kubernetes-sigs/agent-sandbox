@@ -72,19 +72,21 @@ type SandboxClient struct {
 }
 
 // GetRESTConfig loads the kubernetes client configuration, preferring
-// in-cluster configuration and falling back to the local kubeconfig.
+// local kubeconfig (or KUBECONFIG) if present, and falling back to
+// in-cluster configuration.
 func GetRESTConfig() (*rest.Config, error) {
-	restConfig, err := rest.InClusterConfig()
-	if err != nil {
-		restConfig, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-			clientcmd.NewDefaultClientConfigLoadingRules(),
-			&clientcmd.ConfigOverrides{},
-		).ClientConfig()
-		if err != nil {
-			return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
-		}
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	configOverrides := &clientcmd.ConfigOverrides{}
+	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
+	restConfig, err := kubeConfig.ClientConfig()
+	if err == nil {
+		return restConfig, nil
 	}
-	return restConfig, nil
+	restConfig, inClusterErr := rest.InClusterConfig()
+	if inClusterErr == nil {
+		return restConfig, nil
+	}
+	return nil, fmt.Errorf("failed to load kubeconfig (%v) or in-cluster config (%w)", err, inClusterErr)
 }
 
 // NewSandboxClient initializes a new SandboxClient using the provided rest.Config.

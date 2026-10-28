@@ -914,10 +914,14 @@ class SandboxBatch:
                 if outcome == batch_utils.CreateOutcome.SUCCESS:
                     return
                 if outcome == batch_utils.CreateOutcome.RETRY:
+                    # A backoff belongs to this create alone, so the create waits it out here and then takes a
+                    # normal pacing slot. client-go retries the same way. The apiserver computes a Retry-After for a
+                    # whole priority level, so a Retry-After moves the shared slot and every create waits for it.
+                    retry_after = batch_utils.retry_after_seconds(e)
+                    if retry_after is None and self._stop_creating.wait(batch_utils.retry_delay(attempt, None)):
+                        return
                     with self._lock:
-                        slot = self._reserve_create_slot(
-                            time.monotonic() + batch_utils.retry_delay(attempt, e)
-                        )
+                        slot = self._reserve_create_slot(time.monotonic() + (retry_after or 0.0))
                     if self._stop_creating.wait(max(0.0, slot - time.monotonic())):
                         return
                     attempt += 1

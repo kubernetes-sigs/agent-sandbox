@@ -1656,6 +1656,36 @@ class TestClaimBatchCreation(BaseClaimBatchTest):
             (MemberState.FAILED, "CreateFailed", "sandboxclaims is forbidden"),
         )
 
+    async def test_a_backoff_retry_leaves_the_next_pacing_slot_free_and_a_retry_after_takes_it(self):
+        throttled = k8s_client.ApiException(status=429)
+        throttled.headers = {"Retry-After": "7"}
+        for name, error, earliest, latest in (
+            # Another create takes the next slot while this one backs off.
+            ("a transport error", aiohttp.ClientConnectionError("boom"), 0, 0.2),
+            # The apiserver throttles every create, so the next slot comes after its Retry-After.
+            ("a Retry-After", throttled, 7, 7.4),
+        ):
+            with self.subTest(name):
+                handle = _make_handle(self.client)
+                handle._claim_annotations = {"pool-a": {}}
+                handle._create_interval = 0.2
+                self.cluster.helper.create_sandbox_claim.reset_mock()
+                self.cluster.helper.create_sandbox_claim.side_effect = [error, None]
+                next_free_slot = []
+
+                async def wait(timeout):
+                    # Another create reserves a slot during this create's first wait.
+                    if not next_free_slot:
+                        now = time.monotonic()
+                        async with handle._lock:
+                            next_free_slot.append(handle._reserve_create_slot(now) - now)
+                    return False
+
+                handle._wait_for_stop = wait
+                await handle._create_one("b1-0", BatchGroup(warmpool="pool-a", size=1))
+                self.assertEqual(self.cluster.helper.create_sandbox_claim.call_count, 2)
+                self.assertTrue(earliest <= next_free_slot[0] < latest, next_free_slot)
+
 
 class TestRelease(BaseClaimBatchTest):
 

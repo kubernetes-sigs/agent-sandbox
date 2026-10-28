@@ -33,6 +33,7 @@ import aiohttp
 from kubernetes_asyncio import client as k8s_client
 
 from k8s_agent_sandbox import async_sandbox_batch, batch_state, batch_utils
+from k8s_agent_sandbox.async_k8s_helper import AsyncK8sHelper
 from k8s_agent_sandbox.async_sandbox_batch import AsyncSandboxBatch
 from k8s_agent_sandbox.async_sandbox_client import AsyncSandboxClient
 from k8s_agent_sandbox.batch_utils import (
@@ -4670,6 +4671,54 @@ class TestAcquire(BaseClaimBatchTest):
         self.assertEqual(member.claim_name, "b1-1")
         self.assertEqual(wakes, ["set"])
         self.assertEqual(batch._acquire_waiters, {})
+
+    async def test_pod_annotations_are_sent_on_create_and_retries_and_omitted_when_empty(self):
+        real_helper = AsyncK8sHelper()
+        bodies: list[dict] = []
+        unavailable = k8s_client.ApiException(status=503)
+        unavailable.headers = {"Retry-After": "0"}
+        retried = False
+
+        async def create_custom_object(**kwargs):
+            nonlocal retried
+            body = kwargs["body"]
+            bodies.append(body)
+            name = body["metadata"]["name"]
+            if name == "b1-1" and not retried:
+                retried = True
+                raise unavailable
+            await self.cluster._create(
+                name,
+                body["spec"]["warmPoolRef"]["name"],
+                kwargs["namespace"],
+                annotations=body["metadata"]["annotations"],
+            )
+            return body
+
+        real_helper.custom_objects_api = MagicMock(
+            create_namespaced_custom_object=AsyncMock(side_effect=create_custom_object)
+        )
+        real_helper._initialized = True
+        self.cluster.helper.create_sandbox_claim.side_effect = real_helper.create_sandbox_claim
+
+        batch = await self.claim([BatchGroup(warmpool="pool-a", size=1)])
+        await _wait_until(lambda: len(batch.members()) == 1)
+        with self.assertRaises(ValueError):
+            await batch.acquire("pool-unseen", pod_annotations={"bad": None})  # type: ignore[dict-item]
+        self.assertEqual([c.args[0] for c in self.cluster.helper.get_sandbox_warmpool.call_args_list], ["pool-a"])
+
+        pin = {"podsnapshot.gke.io/ps-name": "snap-1"}
+        member = await batch.acquire("pool-a", pod_annotations=pin)
+        await batch.acquire("pool-a")
+        await batch.acquire("pool-a", pod_annotations={})
+
+        self.assertEqual(member.claim_name, "b1-1")
+        self.assertEqual([b["metadata"]["name"] for b in bodies], ["b1-0", "b1-1", "b1-1", "b1-2", "b1-3"])
+        for body in bodies[1:3]:
+            self.assertEqual(body["spec"]["additionalPodMetadata"], {"annotations": pin})
+            self.assertNotIn("podsnapshot.gke.io/ps-name", body["metadata"]["annotations"])
+        for body in (bodies[0], bodies[3], bodies[4]):
+            self.assertNotIn("additionalPodMetadata", body["spec"])
 
 
 @patch.object(AsyncSandboxBatch, "_start", lambda self: None)

@@ -160,7 +160,7 @@ iteration (Python).
 |---|---|---|
 | `GET` | `/v1/files/{path}` | File → raw bytes (`application/octet-stream`); directory → JSON `DirectoryListing`. |
 | `HEAD` | `/v1/files/{path}` | Existence/metadata probe without transferring the body. |
-| `PUT` | `/v1/files/{path}` | Atomic write (temp file + rename), auto-creates parents. Optional `mode` query (`^0[0-7]{3}$`, default `0644`). Accepts raw bytes or `multipart/form-data` (`file` part). |
+| `PUT` | `/v1/files/{path}` | Atomic write (temp file + rename), auto-creates parents. Optional `mode` query (`^0[0-7]{3}$`, default `0644`). `append=true` adds to the end of the file instead (not atomic). Accepts raw bytes or `multipart/form-data` (`file` part). |
 | `DELETE` | `/v1/files/{path}` | Remove a file or directory; `recursive=true` for `rm -rf` behavior; `409` on a non-empty directory otherwise. |
 | `GET` | `/v1/health` | Readiness probe: `200 {"status":"ok"}` or `503` during shutdown. |
 | `GET` | `/v1/metadata` | Orchestrator-injected, non-sensitive environment variables (allowlisted by prefix, default `SANDBOX_`). |
@@ -172,8 +172,8 @@ default) via symlink-aware sanitization; traversal attempts return
 ### Concurrency semantics
 
 Requests are handled in parallel, with no server-side serialization. The
-atomic-write strategy prevents partial file contents, but it does not impose an
-ordering across requests:
+atomic-write strategy prevents partial file contents for replacement writes (not
+appends, see below), but it does not impose an ordering across requests:
 
 - **Write vs. read** — a successful read sees either the complete previous
   file or the complete new one, never partial content. A read racing with a
@@ -185,6 +185,9 @@ ordering across requests:
   complete after the path is deleted; a read that has not opened it may fail.
 - **Concurrent writes to one path** — each successful rename is atomic; the
   last successful rename determines the final contents.
+- **Appends (`append=true`)** are written in place, not atomically: a read can
+  see a partial append, and concurrent appends to one path can interleave. A
+  retried append adds the body again.
 
 There is no cross-request transaction or compare-and-swap; agents that need
 ordering or coordination on shared paths must layer it themselves.
@@ -259,6 +262,9 @@ curl -sf localhost:8080/v1/files/src
 
 # Existence probe
 curl -sf -I localhost:8080/v1/files/src/main.py
+
+# Append
+curl -sf -X PUT --data-binary "more" "localhost:8080/v1/files/src/main.py?append=true"
 
 # Delete recursively
 curl -sf -X DELETE "localhost:8080/v1/files/src?recursive=true"

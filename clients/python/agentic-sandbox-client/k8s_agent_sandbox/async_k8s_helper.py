@@ -172,6 +172,7 @@ class AsyncK8sHelper:
         *,
         log_level: int = logging.INFO,
         _request_timeout: float | None = None,
+        batch: bool = False,
     ) -> dict[str, Any]:
         """Creates a SandboxClaim custom resource.
 
@@ -185,6 +186,8 @@ class AsyncK8sHelper:
                 garbage collector deletes it once its owner is gone.
             log_level: Log level for the logger during this function call.
             _request_timeout: Optional total timeout in seconds, forwarded to kubernetes_asyncio.
+            batch: Accepted for parity with ``K8sHelper.create_sandbox_claim``;
+                ``aiohttp`` does not retry requests.
         """
         await self._ensure_initialized()
 
@@ -494,13 +497,15 @@ class AsyncK8sHelper:
 
     async def delete_sandbox_claim(
         self, name: str, namespace: str, *, expected_uid: str | None = None,
-        log_level: int = logging.INFO, _request_timeout: float | None = None,
+        log_level: int = logging.INFO, _request_timeout: float | None = None, batch: bool = False,
     ) -> None:
         """Deletes a SandboxClaim, optionally requiring a matching UID.
 
         Args:
             log_level: Log level for the logger during this function call.
             _request_timeout: Optional total timeout in seconds, forwarded to kubernetes_asyncio.
+            batch: Accepted for parity with ``K8sHelper.delete_sandbox_claim``;
+                ``aiohttp`` does not retry requests.
         """
         await self._ensure_initialized()
 

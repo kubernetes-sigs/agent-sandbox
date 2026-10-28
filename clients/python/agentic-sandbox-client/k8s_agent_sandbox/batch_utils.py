@@ -72,13 +72,11 @@ _GENERATED_BATCH_ID_RANDOM_LENGTH = 11
 
 BATCH_DEFAULT_CREATE_RPS = 50.0
 BATCH_DEFAULT_MAX_IN_FLIGHT = 20
-# A batch runs up to max_in_flight creates at once and needs two more API connections on top.
-# One is for the watch, which keeps its connection open while it streams. The other is for Lease
-# renewals. If the pool is too small, the async client (aiohttp) makes a renewal wait for a free
-# connection, and a long enough wait lets the Lease expire. The sync client renews over its own
-# pool, so it only needs the one for the watch and the second is spare. A full sync pool (urllib3)
-# doesn't make requests wait. It opens one-off connections that close after a single request, so
-# each pays a fresh handshake.
+# A batch runs up to max_in_flight requests at once and needs two more API connections in the shared
+# batch pool: one for the watch stream and one for Lease renewals. If the pool is too small, the
+# async client (aiohttp) makes a renewal wait for a free connection, and a long enough wait lets the
+# Lease expire. A full sync pool (urllib3) doesn't make requests wait; it opens one-off connections
+# that close after a single request, so each pays a fresh handshake.
 BATCH_POOL_HEADROOM = 2
 # How long acquire() waits before re-reading a warm pool's Ready count once callers spend its credit,
 # so a burst of acquires on one pool sends about one GET a second rather than one per acquire.

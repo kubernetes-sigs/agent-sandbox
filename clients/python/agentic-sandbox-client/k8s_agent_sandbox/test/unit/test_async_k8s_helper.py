@@ -1401,8 +1401,11 @@ class TestAsyncK8sHelperBatchMethods(unittest.IsolatedAsyncioTestCase):
                 "batch-b1", "default", _request_timeout=30),
              coord.delete_namespaced_lease, {}),
             ("delete_sandbox_claim", lambda: helper.delete_sandbox_claim(
-                "b1-0", "default", _request_timeout=30),
+                "b1-0", "default", _request_timeout=30, batch=True),
              api.delete_namespaced_custom_object, {"plural": "sandboxclaims", "name": "b1-0"}),
+            ("create_sandbox_claim", lambda: helper.create_sandbox_claim(
+                "b1-0", "pool-a", "default", _request_timeout=30, batch=True),
+             api.create_namespaced_custom_object, {"plural": "sandboxclaims"}),
         ]
         for name, call, api_method, expected in cases:
             with self.subTest(name):

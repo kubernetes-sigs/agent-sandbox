@@ -1168,6 +1168,7 @@ class AsyncSandboxBatch:
                         self.namespace,
                         _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
                         log_level=logging.DEBUG,
+                        batch=True,
                     )
                 break
             except asyncio.CancelledError:
@@ -1814,6 +1815,7 @@ class AsyncSandboxBatch:
                 labels=labels,
                 lifecycle=lifecycle,
                 owner_references=self._owner_references,
+                batch=True,
                 log_level=logging.DEBUG,
                 _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
             )

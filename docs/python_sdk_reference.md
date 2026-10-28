@@ -294,6 +294,46 @@ Shell command to run.
 
 Limit on how long the command may run; omitted when unset.
 
+<a id="k8s_agent_sandbox.models.ProcessOutputEvent"></a>
+
+### ProcessOutputEvent Objects
+
+```python
+class ProcessOutputEvent(BaseModel)
+```
+
+A chunk of stdout or stderr from a process started with commands.start().
+
+``data`` is raw bytes, not text: a multi-byte character can be split
+across two chunks, so callers decode the stream rather than each chunk.
+A PTY process never produces ``stderr`` events, because the terminal
+merges stderr into stdout.
+
+<a id="k8s_agent_sandbox.models.ProcessExitEvent"></a>
+
+### ProcessExitEvent Objects
+
+```python
+class ProcessExitEvent(BaseModel)
+```
+
+Terminal event of a process started with commands.start().
+
+``exit_code`` is -1 when the process was killed by a signal: sandboxd
+reports Go's ExitCode(), not the shell's 128+N convention.
+
+<a id="k8s_agent_sandbox.models.PtySize"></a>
+
+### PtySize Objects
+
+```python
+class PtySize(BaseModel)
+```
+
+Pseudo-terminal geometry for commands.start().
+
+Mirrors the TypeScript SDK's ``PtySize``.
+
 <a id="k8s_agent_sandbox.models.FileEntry"></a>
 
 ### FileEntry Objects

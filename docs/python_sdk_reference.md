@@ -46,8 +46,8 @@ Initializes the SandboxClient.
   Defaults to an empty SandboxTracerConfig (tracing disabled).
 - `cleanup` - If True, registers an atexit hook to automatically delete
   tracked sandboxes when the program terminates, excluding claims
-  explicitly named through create_sandbox(), and to stop tracked
-  batches' Lease renewal. Defaults to False.
+  explicitly named through create_sandbox(), and to release tracked
+  batches. Defaults to False.
 - `api_client` - Optional pre-configured Kubernetes ``ApiClient`` forwarded
   to the underlying ``K8sHelper`` to target a specific cluster/context.
 
@@ -186,6 +186,83 @@ for the given namespace.
   >>> print(client.list_all_sandboxes(namespace="default"))
   ['sandbox-claim-1234abcd', 'sandbox-claim-5678efgh']
 
+<a id="k8s_agent_sandbox.sandbox_client.SandboxClient.claim_batch"></a>
+
+##### claim\_batch
+
+```python
+def claim_batch(groups: Sequence[BatchGroup],
+                *,
+                namespace: str = "default",
+                labels: dict[str, str] | None = None,
+                batch_id: str | None = None,
+                create_rps: float | None = None,
+                max_in_flight: int | None = None,
+                work_budget: int | None = None,
+                quorum_timeout: int | None = None,
+                lease_duration: int | None = None) -> SandboxBatch
+```
+
+Claims a batch of sandboxes across one or more warm pools, returning its handle at once.
+
+Checks that every group's ``SandboxWarmPool`` and its ``SandboxTemplate`` exist, creates the
+batch Lease ``batch-<id>``, and starts the batch's watch. The claims ``<id>-0`` to
+``<id>-<N-1>``, where ``N`` is the sum of the group sizes, are then created in the background
+until ``err()`` is set. Each group's claims get consecutive ordinals in group order. Each
+group's first ``min_ready`` claims are created first, one group after another in group
+order, and the rest follow in the same order. Use ``members()`` to see them as they become
+Ready, and ``release()`` to delete the batch.
+
+Every claim gets the same ``shutdownTime``, the time of this call plus ``N / create_rps``
+seconds (rounded up) plus ``quorum_timeout`` plus ``work_budget`` plus 600 seconds, so an
+abandoned batch is eventually deleted by the controller. ``work_budget`` is a hard cap.
+Nothing extends a claim's ``shutdownTime``, so a batch held for a whole run sets
+``work_budget`` to the run's length.
+
+Of the errors below, only ``BatchExistsError`` is a ``BatchError``. The others mean a bad
+argument, a missing pool or template, or an API error. Failures after this call returns
+aren't raised here. A failed create shows in ``members()`` as a ``CreateFailed`` member, and
+an error that stops the watch or Lease renewal shows in ``err()``.
+
+**Arguments**:
+
+- `groups` - One ``BatchGroup`` per warm pool, each with ``size`` at least 1.
+- `namespace` - Kubernetes namespace for the claims and the Lease.
+- `labels` - Optional labels for every claim.
+- `batch_id` - Optional batch id; a DNS-1123 label starting with a letter, at most 52
+  characters. Generated if omitted.
+- `create_rps` - Maximum claim creates started per second. Defaults to 50.
+- `max_in_flight` - Maximum claim creates in flight at once. Defaults to 20.
+- `work_budget` - Seconds the caller expects to work with the batch after it is Ready;
+  part of each claim's ``shutdownTime``. Defaults to 3600.
+- `quorum_timeout` - Seconds the caller allows for the batch's claims to become Ready;
+  part of each claim's ``shutdownTime``. Defaults to 600.
+- `lease_duration` - Seconds the batch Lease stays valid without renewal. Defaults to 60.
+  
+
+**Raises**:
+
+- `ValueError` - If an argument is invalid.
+- `SandboxWarmPoolNotFoundError` - If a group's warm pool doesn't exist.
+- `SandboxTemplateNotFoundError` - If a warm pool's template doesn't exist, or it names none.
+- `BatchExistsError` - If a Lease or claims with this batch id already exist.
+- `ApiException` - For any other API error before the first claim is created, such as a
+  403. If the Lease was already created, it is deleted first.
+  
+
+**Example**:
+
+  
+  >>> client = SandboxClient()
+  >>> batch = client.claim_batch([BatchGroup(warmpool="python-sandbox-pool", size=4)])
+  >>> try:
+  ...     while not any(m.state is MemberState.READY for m in batch.members()):
+  ...         time.sleep(1)
+  ...     member = next(m for m in batch.members() if m.state is MemberState.READY)
+  ...     batch.connect(member).commands.run("echo hello")
+  ... finally:
+  ...     batch.release()
+
 <a id="k8s_agent_sandbox.sandbox_client.SandboxClient.get_batch"></a>
 
 ##### get\_batch
@@ -251,11 +328,7 @@ Stops the client side connection and deletes the Kubernetes resources.
 def delete_all() -> None
 ```
 
-Cleanup all tracked sandboxes managed by this client, and stop every tracked batch's
-background watch and Lease renewal and close its cached sandbox connections.
-
-It stops each tracked batch's Lease renewal without releasing the Lease, so ``get_batch``
-can't re-attach a batch that wasn't detached with ``detach()``.
+Cleanup all tracked sandboxes managed by this client, and release every tracked batch.
 
 **Example**:
 
@@ -695,11 +768,13 @@ Sync handle for using a claimed or re-attached sandbox batch.
 class SandboxBatch()
 ```
 
-A handle to an existing batch's claims, obtained via ``SandboxClient.get_batch``.
+A handle to a batch's claims, obtained via ``SandboxClient.claim_batch`` or
+``SandboxClient.get_batch``.
 
 Keeps a live cache of the batch's claims through one label-scoped watch
 (a background daemon thread), renews the batch Lease on another daemon
 thread, and exposes methods for connecting to ready sandboxes and detaching from the batch.
+A claimed batch also creates its claims on background worker threads.
 
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.groups"></a>
 
@@ -759,6 +834,9 @@ def err() -> Exception | None
 Returns the error that stopped the batch's watch or background
 Lease renewal (e.g., ``BatchLeaseExpiredError``), or ``None`` while healthy.
 
+A failed claim create doesn't set it. That claim shows in ``members()`` as a ``FAILED``
+member with reason ``CreateFailed``.
+
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.lease_degraded"></a>
 
 ##### lease\_degraded
@@ -771,6 +849,37 @@ Returns whether background Lease renewal is failing.
 
 ``True`` from the first failed renewal until a renewal succeeds. It stays ``True`` once
 renewal stops on an error, such as the Lease expiring, so it can be polled at any time.
+
+<a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.release"></a>
+
+##### release
+
+```python
+def release() -> None
+```
+
+Stops creating claims, stops the background watch and Lease renewal, closes cached
+sandbox connections, then deletes the batch's claims and finally its Lease. Idempotent.
+
+Claims are deleted with label-scoped deletecollection requests, re-listing between rounds
+until no claim is left that isn't already being deleted. A transient error moves on to the
+next round, and release gives up after ``BATCH_RELEASE_MAX_IDLE_ROUNDS`` rounds in a row
+that delete nothing. On failure the Lease is kept, and calling ``release`` again retries.
+Before each round, release writes the batch's Lease with this handle as its holder, so no
+other handle can attach while claims are deleted. If the batch is another handle's, it
+raises ``BatchInUseError`` and deletes nothing. While it runs, a ``detach()`` call raises
+``BatchError``, and another ``release()`` call waits for it to finish.
+
+**Raises**:
+
+- `BatchInUseError` - If another handle holds the batch's Lease, or the Lease changed hands
+  since this handle last held it. Nothing more is deleted, and this handle is done
+  with the batch.
+- `BatchError` - If this handle has been detached, an earlier call raised
+  ``BatchInUseError``, or claims are still not being deleted after the last round.
+- `ApiException` - For a non-transient error such as a 403, which is raised at once.
+  After the last round, the last transient error is raised (an ``ApiException``
+  or a transport error).
 
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.detach"></a>
 
@@ -789,9 +898,11 @@ If the Lease release fails, the error propagates and this handle stays in a deta
 the Lease still held. Call ``detach`` again to retry; steps that already completed are skipped.
 A retry without ``grace`` keeps the earlier call's Lease duration, and if no retry is made,
 client cleanup makes one.
+A batch that is still creating claims stops creating first, and every claim is left in place.
 
 **Raises**:
 
 - `ValueError` - If ``grace`` is not a valid Lease duration.
+- `BatchError` - If a release has started on this handle, including one that failed.
 - `ApiException` - If the Lease release fails (an ``ApiException`` or a transport error).
 

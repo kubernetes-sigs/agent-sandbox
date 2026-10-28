@@ -26,6 +26,8 @@ from .constants import (
     CLAIM_API_GROUP,
     CLAIM_API_VERSION,
     CLAIM_PLURAL_NAME,
+    TEMPLATE_PLURAL_NAME,
+    WARMPOOL_PLURAL_NAME,
     CLIENT_REQUEST_TIME_ANNOTATION,
     GATEWAY_API_GROUP,
     GATEWAY_API_VERSION,
@@ -95,6 +97,9 @@ class AsyncK8sHelper:
         volume_claim_templates: list[dict[str, Any]] | None = None,
         pod_metadata: AdditionalPodMetadata | dict[str, Any] | None = None,
         env: dict[str, str] | None = None,
+        *,
+        log_level: int = logging.INFO,
+        _request_timeout: float | None = None,
     ) -> dict[str, Any]:
         """Creates a SandboxClaim custom resource.
 
@@ -104,6 +109,8 @@ class AsyncK8sHelper:
                 ``spec.additionalPodMetadata`` so the labels and annotations
                 propagate onto the running Sandbox Pod (as opposed to
                 ``labels``, which only land on the SandboxClaim object).
+            log_level: Log level for the logger during this function call.
+            _request_timeout: Optional total timeout in seconds, forwarded to kubernetes_asyncio.
         """
         await self._ensure_initialized()
 
@@ -146,8 +153,9 @@ class AsyncK8sHelper:
             "metadata": metadata,
             "spec": spec,
         }
-        logger.info(
-            f"Creating SandboxClaim '{name}' in namespace '{namespace}' using warm pool '{warmpool}'..."
+        logger.log(
+            log_level,
+            f"Creating SandboxClaim '{name}' in namespace '{namespace}' using warm pool '{warmpool}'...",
         )
         return cast(dict[str, Any], await self.custom_objects_api.create_namespaced_custom_object(
             group=CLAIM_API_GROUP,
@@ -155,6 +163,7 @@ class AsyncK8sHelper:
             namespace=namespace,
             plural=CLAIM_PLURAL_NAME,
             body=manifest,
+            _request_timeout=_request_timeout,
         ))
 
     async def resolve_sandbox_name(
@@ -597,7 +606,9 @@ class AsyncK8sHelper:
                 allow_watch_bookmarks=True,
                 _request_timeout=_request_timeout,
             ):
-                if event is not None:
+                # kubernetes_asyncio returns a line it can't decode as a str, which the sync client
+                # drops like an empty line. Dropping it here too keeps both watches the same.
+                if isinstance(event, dict):
                     yield event
         finally:
             await w.close()
@@ -634,6 +645,99 @@ class AsyncK8sHelper:
         return await self.coordination_v1_api.replace_namespaced_lease(
             name, namespace, body, _request_timeout=_request_timeout
         )
+
+    async def create_batch_lease(self, namespace: str, body: Any, _request_timeout: float | None = None) -> Any:
+        """Creates a batch Lease, then returns the created object. Raises a 409 ``ApiException`` if the Lease exists.
+
+        Args:
+            _request_timeout: Optional total timeout in seconds, forwarded to kubernetes_asyncio.
+        """
+        await self._ensure_initialized()
+
+        return await self.coordination_v1_api.create_namespaced_lease(
+            namespace, body, _request_timeout=_request_timeout
+        )
+
+    async def delete_batch_lease(
+        self, name: str, namespace: str, _request_timeout: float | None = None,
+        *, resource_version: str | None = None,
+    ) -> None:
+        """Deletes a batch Lease. A Lease that doesn't exist is treated as deleted.
+
+        Args:
+            _request_timeout: Optional total timeout in seconds, forwarded to kubernetes_asyncio.
+            resource_version: If provided, delete the Lease only at this resourceVersion. A Lease
+                someone has written since is left in place and also treated as deleted.
+        """
+        await self._ensure_initialized()
+
+        delete_kwargs: dict[str, Any] = {}
+        if resource_version is not None:
+            delete_kwargs["body"] = client.V1DeleteOptions(
+                preconditions=client.V1Preconditions(resource_version=resource_version)
+            )
+        try:
+            await self.coordination_v1_api.delete_namespaced_lease(
+                name, namespace, _request_timeout=_request_timeout, **delete_kwargs
+            )
+        except client.ApiException as e:
+            if e.status != 404 and not (e.status == 409 and resource_version is not None):
+                raise
+
+    async def delete_sandbox_claims_by_label(
+        self, namespace: str, label_selector: str, _request_timeout: float | None = None
+    ) -> None:
+        """Deletes every SandboxClaim matching a label selector with one deletecollection request.
+
+        Args:
+            _request_timeout: Optional total timeout in seconds, forwarded to kubernetes_asyncio.
+        """
+        await self._ensure_initialized()
+
+        await self.custom_objects_api.delete_collection_namespaced_custom_object(
+            group=CLAIM_API_GROUP,
+            version=CLAIM_API_VERSION,
+            namespace=namespace,
+            plural=CLAIM_PLURAL_NAME,
+            label_selector=label_selector,
+            _request_timeout=_request_timeout,
+        )
+
+    async def get_sandbox_warmpool(
+        self, name: str, namespace: str, _request_timeout: float | None = None
+    ) -> dict[str, Any] | None:
+        """Gets a SandboxWarmPool custom resource (or ``None`` if it doesn't exist)."""
+        return await self._get_extensions_object(
+            WARMPOOL_PLURAL_NAME, name, namespace, _request_timeout
+        )
+
+    async def get_sandbox_template(
+        self, name: str, namespace: str, _request_timeout: float | None = None
+    ) -> dict[str, Any] | None:
+        """Gets a SandboxTemplate custom resource (or ``None`` if it doesn't exist)."""
+        return await self._get_extensions_object(
+            TEMPLATE_PLURAL_NAME, name, namespace, _request_timeout
+        )
+
+    async def _get_extensions_object(
+        self, plural: str, name: str, namespace: str, _request_timeout: float | None
+    ) -> dict[str, Any] | None:
+        """Gets an object in the extensions API group, or ``None`` if it doesn't exist."""
+        await self._ensure_initialized()
+
+        try:
+            return cast(dict[str, Any], await self.custom_objects_api.get_namespaced_custom_object(
+                group=CLAIM_API_GROUP,
+                version=CLAIM_API_VERSION,
+                namespace=namespace,
+                plural=plural,
+                name=name,
+                _request_timeout=_request_timeout,
+            ))
+        except client.ApiException as e:
+            if e.status == 404:
+                return None
+            raise
 
     async def close(self) -> None:
         """Closes the shared Kubernetes API client session.

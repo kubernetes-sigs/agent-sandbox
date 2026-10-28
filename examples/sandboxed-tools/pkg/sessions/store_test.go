@@ -173,3 +173,54 @@ func TestFileStoreMetadata(t *testing.T) {
 		t.Error("NewSession with an invalid session name should fail")
 	}
 }
+
+func TestFileStoreListSessions(t *testing.T) {
+	ctx := context.Background()
+	store := NewFileStore(t.TempDir())
+
+	// Listing an empty store returns empty slice.
+	list, err := store.ListSessions(ctx)
+	if err != nil {
+		t.Fatalf("ListSessions on empty store: %v", err)
+	}
+	if len(list) != 0 {
+		t.Errorf("ListSessions on empty store got %d items, want 0", len(list))
+	}
+
+	meta1 := Metadata{
+		Parent:    "",
+		Toolset:   "basic",
+		CreatedAt: time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC),
+	}
+	if err := store.NewSession(ctx, "sess1", meta1); err != nil {
+		t.Fatalf("NewSession sess1: %v", err)
+	}
+	content := "hello"
+	if err := store.AppendMessages(ctx, "sess1", llm.Message{Role: "user", Content: &content}); err != nil {
+		t.Fatalf("AppendMessages sess1: %v", err)
+	}
+
+	meta2 := Metadata{
+		Parent:    "sess1",
+		Toolset:   "geminicli",
+		CreatedAt: time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC),
+	}
+	if err := store.NewSession(ctx, "sess2", meta2); err != nil {
+		t.Fatalf("NewSession sess2: %v", err)
+	}
+
+	list, err = store.ListSessions(ctx)
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("ListSessions got %d items, want 2", len(list))
+	}
+
+	if list[0].Name != "sess1" || list[0].MessageCount != 1 || list[0].Metadata.Toolset != "basic" {
+		t.Errorf("list[0] = %+v, want sess1 with 1 message", list[0])
+	}
+	if list[1].Name != "sess2" || list[1].MessageCount != 0 || list[1].Metadata.Toolset != "geminicli" {
+		t.Errorf("list[1] = %+v, want sess2 with 0 messages", list[1])
+	}
+}

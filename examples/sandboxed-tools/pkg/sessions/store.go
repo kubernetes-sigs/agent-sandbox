@@ -15,6 +15,7 @@
 package sessions
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -23,6 +24,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"k8s.io/klog/v2"
@@ -50,6 +53,13 @@ type Metadata struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
+// SessionSummary describes a session's metadata and message count.
+type SessionSummary struct {
+	Name         string
+	Metadata     Metadata
+	MessageCount int
+}
+
 // Store defines the interface for chat session persistence.
 type Store interface {
 	// NewSession creates a new session with the given ID and metadata.
@@ -65,6 +75,9 @@ type Store interface {
 
 	// AppendMessages appends a set of messages to the session's history.
 	AppendMessages(ctx context.Context, sessionID string, messages ...llm.Message) error
+
+	// ListSessions lists all known sessions and their metadata summaries.
+	ListSessions(ctx context.Context) ([]SessionSummary, error)
 }
 
 // FileStore is a JSONL implementation of the Store interface.
@@ -254,4 +267,95 @@ func (s *FileStore) AppendMessages(ctx context.Context, sessionID string, messag
 	}
 
 	return nil
+}
+
+// ListSessions scans the store directory and returns summaries for all valid sessions.
+func (s *FileStore) ListSessions(ctx context.Context) ([]SessionSummary, error) {
+	log := klog.FromContext(ctx)
+
+	entries, err := os.ReadDir(s.basedir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading session store directory %s: %w", s.basedir, err)
+	}
+
+	var summaries []SessionSummary
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if err := ValidateSessionName(name); err != nil {
+			continue
+		}
+
+		metadata, err := s.loadMetadata(ctx, name)
+		if err != nil {
+			log.V(2).Info("failed to load metadata for session", "session", name, "error", err)
+		}
+		var meta Metadata
+		if metadata != nil {
+			meta = *metadata
+		}
+
+		count, err := s.CountMessages(ctx, name)
+		if err != nil {
+			log.V(2).Info("failed to count messages for session", "session", name, "error", err)
+		}
+
+		summaries = append(summaries, SessionSummary{
+			Name:         name,
+			Metadata:     meta,
+			MessageCount: count,
+		})
+	}
+
+	slices.SortFunc(summaries, func(a, b SessionSummary) int {
+		if !a.Metadata.CreatedAt.Equal(b.Metadata.CreatedAt) {
+			if a.Metadata.CreatedAt.Before(b.Metadata.CreatedAt) {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	return summaries, nil
+}
+
+// CountMessages counts the number of persisted messages in a session.
+func (s *FileStore) CountMessages(ctx context.Context, sessionID string) (int, error) {
+	if err := ValidateSessionName(sessionID); err != nil {
+		return 0, err
+	}
+	p := s.messagesPath(sessionID)
+	log := klog.FromContext(ctx)
+
+	f, err := os.Open(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("opening session file %s: %w", p, err)
+	}
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			log.V(2).Info("failed to close session file", "error", closeErr)
+		}
+	}()
+
+	count := 0
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) > 0 {
+			count++
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return count, fmt.Errorf("reading session file %s: %w", p, err)
+	}
+	return count, nil
 }

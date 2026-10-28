@@ -780,8 +780,8 @@ count as unable to become Ready, so releasing members before a group or the quor
 it unreachable. Read a failed member's `reason` before releasing it. The three methods delete nothing once
 `err()` is set and raise `BatchError`, since the handle may no longer hold the batch's Lease.
 
-`acquire(warmpool, timeout=None)` adds a member from any warm pool in the batch's namespace and blocks until
-it is Ready, for example to replace a member released with `release_member()`. Its claim takes the next unused
+`acquire(warmpool, timeout=None, *, pod_annotations=None)` adds a member from any warm pool in the batch's namespace and blocks until
+it is Ready, for example to replace a member released with `release_member()`. Non-empty `pod_annotations` are written to `spec.additionalPodMetadata.annotations` so the controller propagates them onto the sandbox pod. Its claim takes the next unused
 ordinal, so ordinals are never reused, even across `detach()` and `get_batch()`. It isn't one of the initial
 claims, so `events()`, the quorum consumers and `release_not_ready()` leave it alone, but `release_group()` on
 its pool releases it, and its `shutdownTime` counts from its own create. Its create follows the initial
@@ -828,7 +828,7 @@ supports all of the above.
 - `err()`: the error that stopped the background watch/renewal, or `None`. Once it is set, no more claims
   are created.
 - `lease_degraded()`: whether Lease renewal is failing, from the first failed renewal until one succeeds.
-- `acquire(warmpool, timeout=None)`, described above.
+- `acquire(warmpool, timeout=None, *, pod_annotations=None)`, described above.
 - `release_member(member)`, `release_group(warmpool)`, and `release_not_ready()`, described above.
 - `release()` deletes the batch's claims, then its Lease. Idempotent. It raises `BatchInUseError` and deletes
   nothing more if another handle holds the batch's Lease.

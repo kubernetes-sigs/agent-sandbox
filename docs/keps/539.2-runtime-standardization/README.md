@@ -40,6 +40,11 @@ TOC is auto-generated via `make toc-update`.
 - [Extensions](#extensions)
   - [Reusable Sandboxes (Setup &amp; Cleanup)](#reusable-sandboxes-setup--cleanup)
     - [Implementation Considerations for Reusability](#implementation-considerations-for-reusability)
+  - [Process Exit Event Retention and <code>Wait</code> RPC](#process-exit-event-retention-and-wait-rpc)
+    - [Proposed API Additions](#proposed-api-additions)
+    - [Wait Semantics](#wait-semantics)
+    - [Implementation Considerations for Exit Retention](#implementation-considerations-for-exit-retention)
+    - [Non-Goals of This Extension](#non-goals-of-this-extension)
 - [Alternatives](#alternatives)
 <!-- /toc -->
 
@@ -270,6 +275,95 @@ To ensure a truly clean slate and prevent state leakage between tasks, the `Clea
 - **Memory & Kernel State:** Language kernels (like Jupyter) must be restarted to clear in-memory variables and imported modules.
 - **Network State:** Ensuring all ports bound by the agent are released and listening sockets are closed.
 - **Environment Variables:** Resetting the environment block to the default "golden" state.
+
+### Process Exit Event Retention and `Wait` RPC
+
+sandboxd currently ties process exit information to the lifetime of the `Start` stream. The `ExitEvent` is sent on the same server-streaming connection that carries the process's output. When the process exits, `Start` records the exit code on the `ManagedProcess` — including on the disconnect path, where a SIGKILLed process is recorded as `137` (`128 + signal number`, as a shell reports it) — but the handler's deferred `ProcessRegistry.Remove` runs immediately afterwards, so no later RPC can read it: any RPC referencing that process ID fails with `NOT_FOUND`. If the stream breaks while the process is still running, sandboxd additionally kills the process tree (existing `killProcessGroupOnContextDone` behavior, unchanged by this extension), so the recorded outcome is sandboxd's own kill rather than the process's natural exit.
+
+This extension retains each process's exit metadata (exit code, completion time) for a bounded TTL after exit and adds a blocking `Wait` RPC so clients can retrieve it. Without detached execution, it serves three client scenarios today:
+
+- **Waiting from a separate call path.** A client — or a second concurrent consumer — can block on a process's outcome without holding or draining the output stream. A `Wait` timeout or cancellation ends only the RPC and never affects the process.
+- **The natural-exit race.** When a process is reaped on its own around the moment the stream is lost, the kill watcher skips the already-reaped process and the *real* exit code is recorded — but is unreachable today. Retention makes it replayable, so an SDK can distinguish "exited with code N" from "killed by sandboxd" without re-running a non-idempotent command.
+- **A definitive outcome after a disconnect.** A client that reconnects after a mid-run disconnect gets `NOT_FOUND` today and can only guess or re-run. With retention it gets a definitive `137` with a completion time.
+
+What retention alone cannot solve is recovering the natural outcome of a *still-running* process across a mid-run disconnect: under kill-on-disconnect, that outcome is always `137`. Recovering real results in that case requires processes to survive disconnection — detached execution, proposed in #2061. This extension is the retrieval half of that story: `Wait` is fully useful on its own, and `ExitEventStore` is designed now so that once processes survive disconnection, replaying their natural exit codes needs no further API change.
+
+E2B's `envd` retains terminal process events for a bounded window (30 seconds), and a reconnecting client reads them through `Connect`. The precedent validates the retention *mechanism* — a small TTL-bounded store of exit metadata — but envd's reconnect guarantee rests on processes surviving cancellation, which sandboxd does not offer today. This extension adopts the mechanism, not the guarantee.
+
+#### Proposed API Additions
+
+Changes to `packages/sandboxd/spec/process/v1/process.proto` (all additive; no existing message or behavior changes):
+
+```protobuf
+service ProcessService {
+  // Existing: Start, Execute, WriteStdin, SendSignal, ResizeTTY
+  rpc Wait(WaitRequest) returns (WaitResponse);   // new
+}
+
+message WaitRequest {
+  int32 process_id = 1;
+  // Optional per-request timeout for the wait, supplied by the client and
+  // enforced by the server: when it elapses, Wait returns DEADLINE_EXCEEDED.
+  // When unset or 0, the server imposes no timeout of its own and relies on
+  // the gRPC context deadline or cancellation. Servers reject negative
+  // values, and values too large to convert to a duration, with
+  // INVALID_ARGUMENT.
+  optional int64 timeout_ms = 2;
+}
+
+message WaitResponse {
+  int32 exit_code = 1;
+  // Exit time as an RFC 3339 string, matching the modified_at convention
+  // in the filesystem spec.
+  string completed_at = 2;
+}
+```
+
+New sandboxd daemon flags:
+
+| Flag | Default | Behavior |
+|---|---|---|
+| `--exit-event-ttl` | `30s` | How long exit records remain queryable after exit. `0` disables retention; negative values are rejected at startup. |
+| `--exit-event-max-entries` | `1024` | Maximum retained records. When full, the store evicts the oldest record by completion time. Values below `1` are rejected at startup; retention is disabled solely through `--exit-event-ttl=0`, keeping a single disable switch. |
+
+#### Wait Semantics
+
+| Process state | `Wait` result |
+|---|---|
+| Running, exits before timeout | `OK {exit_code, completed_at}` |
+| Running, `timeout_ms` elapses | `DEADLINE_EXCEEDED`; the process is unaffected |
+| Running, caller context cancelled | `CANCELLED`; the process is unaffected |
+| `timeout_ms` negative, or too large to convert to a duration | `INVALID_ARGUMENT`; the process is unaffected |
+| Exited, within TTL | `OK {exit_code, completed_at}` immediately |
+| Unknown process ID, record expired, or record evicted at the entry cap | `NOT_FOUND` |
+| Retention disabled (`--exit-event-ttl=0`) | Blocking waits on running processes still work; a `Wait` arriving after exit returns `NOT_FOUND` |
+
+Key guarantees:
+
+- **`Wait` never kills a process.** It is orthogonal to the stream-disconnect kill path; a timeout or cancellation ends only the RPC.
+- **Concurrent waiters are supported.** Multiple `Wait` calls for the same process ID block on the process's existing `Done` channel. Waiters that remain attached until the process exits all receive the same exit outcome; an individual waiter can instead return `DEADLINE_EXCEEDED` or `CANCELLED` per its own timeout or cancellation, as the semantics table specifies.
+- **Record before remove.** When retention is enabled, `Start`'s teardown records the exit event before removing the process from the registry, so no `Wait` call can observe a window where the process appears in neither store. This ordering holds on every teardown path, including the `InitEvent` send-failure path, where the client never learns the process ID: recording there too keeps the invariant unconditional and the implementation free of special cases. With `--exit-event-ttl=0` nothing is recorded, and a `Wait` arriving after removal returns `NOT_FOUND` as the semantics table specifies.
+
+#### Implementation Considerations for Exit Retention
+
+- A new `ExitEventStore` type in `packages/sandboxd/pkg/processmanager` holds `map[int32]exitRecord` guarded by a mutex. Each record stores only `{exit_code, completed_at}` (~40 bytes); the store must not retain references to `ManagedProcess`, pipes, or PTY handles, so resource cleanup behavior is unchanged.
+- One daemon-wide cleanup goroutine expires records on a ticker. The daemon owns this goroutine and stops it when its context is cancelled during shutdown. When retention is disabled (`--exit-event-ttl=0`) no ticker is started — Go's `time.NewTicker` panics on a non-positive duration. For positive TTLs the tick interval is roughly TTL/2, clamped to a minimum floor (for example, 1s) so very small TTLs do not cause excessive wakeups. The entry cap is enforced inside `Record` by evicting the oldest completion time. With the defaults, the store is bounded at ~40KB and returns to zero when idle.
+- The `Wait` handler resolves the process ID in order: live registry hit → block on the existing `Done` channel, then read the exit code and completion timestamp from the `ManagedProcess`; registry miss but store hit → check the record's `completed_at` against the TTL and replay the outcome only if it has not expired (lazy expiration at lookup time — periodic cleanup alone could leave an expired record queryable until the next tick); both miss, or expired → `NOT_FOUND`.
+- **Authoritative `completed_at`.** `ManagedProcess` today records only the exit code. The exit path extends that shared completion state to record the completion timestamp in the same critical section as the exit code, and both the live `Wait` path and the store's record read this single value. Implementations must not synthesize a timestamp after `Done` closes.
+- **Virtual PID wrap-around:** `ProcessRegistry.NextPID` documents that IDs are unique among concurrently live processes. Retention grows the uniqueness domain to "live plus retained records". With a monotonically increasing counter and a 30s TTL a collision is practically impossible; defensively, `NextPID` must not hand out an ID that is still present in the retention store (it skips to the next value). Reserving retained IDs removes the whole class of stale-waiter confusion, including at the registry level, where a reused ID would otherwise surface a new process to callers holding the old one. `Record` correspondingly never overwrites a retained record. These guarantees are scoped to a single daemon instance; see the next bullet.
+- **Daemon restarts invalidate process IDs.** The registry counter and the retention store are in-memory, so a sandboxd restart clears both and reissues IDs from the beginning. A client that carries a pre-restart ID into the new instance could match an unrelated new process. This exposure predates the extension — `SendSignal`, `WriteStdin`, and `ResizeTTY` share it today — and clients can detect restarts through the existing `/v1/health` `uptime_seconds` field, which drops back after a restart. Scoping process identity to a daemon generation across `ProcessService` is left to future work.
+- `Execute` does not participate: it is a synchronous unary call that returns the exit code atomically and never registers a process.
+- Testing: `ExitEventStore` unit tests (TTL expiry, cap eviction, disabled mode); one test per row of the semantics table, asserting that timeout/cancellation leave the process running; a record-before-remove race test; concurrent waiters; an integration test that drops the stream mid-run and asserts `Wait` replays exit code `137`, documenting the kill-path outcome rather than a survival guarantee; and a natural-exit race test where the process exits on its own before the stream is dropped and `Wait` must replay its real exit code.
+
+#### Non-Goals of This Extension
+
+- Changing the "stream disconnect kills the process tree" behavior. Detached execution (#2061) owns that change; retention reaches its full reconnect value only after it lands.
+- Retaining or replaying `stdout`/`stderr` output; only exit metadata is retained.
+- Stream reattachment (a `Connect` RPC); left to a future extension, most naturally alongside detached execution (#2061).
+- Persisting exit events across sandboxd restarts. In a Pod, child processes do not outlive the daemon.
+- Daemon-generation-scoped process identity. Process IDs are valid only within a single sandboxd instance; making them safe to carry across daemon restarts is a `ProcessService`-wide concern left to future work.
+
+Conformance impact is deferred: `Wait` becomes a candidate for the conformance suite only after the reference implementation lands, so this extension does not change the obligations of third-party runtimes today.
 
 ## Alternatives
 

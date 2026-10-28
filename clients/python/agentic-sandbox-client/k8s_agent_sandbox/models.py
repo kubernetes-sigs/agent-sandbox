@@ -119,6 +119,39 @@ class FileEvent(BaseModel):
     path: str = ""  # Sandbox-relative path; for ``rename`` events the OLD path.
     error: str = ""  # For ``error`` events, a human-readable message; empty otherwise.
 
+class SandboxHealth(BaseModel):
+    """Sandbox liveness/readiness reported by sandboxd's /v1/health endpoint.
+
+    Mirrors the Go SDK's ``sandbox.Health`` and the TypeScript SDK's
+    ``SandboxHealth``.
+    """
+    status: Literal["ok"]  # HealthResponse.status enum in the sandboxd spec.
+    # Required rather than optional because sandboxd always serves it
+    # (HealthResponse.UptimeSeconds is a plain int64), so a body without it is
+    # malformed rather than a sandbox of unknown uptime.
+    uptime_seconds: int = Field(ge=0)  # Seconds sandboxd has been running.
+
+    @classmethod
+    def from_sandboxd(cls, payload: dict[str, Any]) -> "SandboxHealth":
+        """Build from a sandboxd /v1/health response body."""
+        # model_validate so a malformed body surfaces as one pydantic
+        # ValidationError naming every bad field, not a bare KeyError.
+        return cls.model_validate(payload)
+
+class SandboxMetadata(BaseModel):
+    """Runtime environment metadata reported by sandboxd's /v1/metadata endpoint.
+
+    Only non-sensitive orchestrator-injected configuration is exposed here;
+    the sandboxd spec forbids serving credentials from /v1/metadata. Mirrors
+    the Go SDK's ``sandbox.Metadata`` and the TypeScript SDK's
+    ``SandboxMetadata``.
+    """
+    env: dict[str, str] = Field(default_factory=dict)  # Orchestrator-injected environment variables; empty when none apply.
+
+    @classmethod
+    def from_sandboxd(cls, payload: dict[str, Any]) -> "SandboxMetadata":
+        """Build from a sandboxd /v1/metadata response body."""
+        return cls(env=payload.get("env") or {})
 
 class SandboxClaimEnvVar(BaseModel):
     """Represents an environment variable entry in a SandboxClaim spec."""

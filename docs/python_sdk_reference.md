@@ -399,6 +399,74 @@ Sandbox-relative path; for ``rename`` events the OLD path.
 
 For ``error`` events, a human-readable message; empty otherwise.
 
+<a id="k8s_agent_sandbox.models.SandboxHealth"></a>
+
+### SandboxHealth Objects
+
+```python
+class SandboxHealth(BaseModel)
+```
+
+Sandbox liveness/readiness reported by sandboxd's /v1/health endpoint.
+
+Mirrors the Go SDK's ``sandbox.Health`` and the TypeScript SDK's
+``SandboxHealth``.
+
+<a id="k8s_agent_sandbox.models.SandboxHealth.status"></a>
+
+#### status
+
+HealthResponse.status enum in the sandboxd spec.
+
+<a id="k8s_agent_sandbox.models.SandboxHealth.uptime_seconds"></a>
+
+#### uptime\_seconds
+
+Seconds sandboxd has been running.
+
+<a id="k8s_agent_sandbox.models.SandboxHealth.from_sandboxd"></a>
+
+#### from\_sandboxd
+
+```python
+@classmethod
+def from_sandboxd(cls, payload: dict[str, Any]) -> "SandboxHealth"
+```
+
+Build from a sandboxd /v1/health response body.
+
+<a id="k8s_agent_sandbox.models.SandboxMetadata"></a>
+
+### SandboxMetadata Objects
+
+```python
+class SandboxMetadata(BaseModel)
+```
+
+Runtime environment metadata reported by sandboxd's /v1/metadata endpoint.
+
+Only non-sensitive orchestrator-injected configuration is exposed here;
+the sandboxd spec forbids serving credentials from /v1/metadata. Mirrors
+the Go SDK's ``sandbox.Metadata`` and the TypeScript SDK's
+``SandboxMetadata``.
+
+<a id="k8s_agent_sandbox.models.SandboxMetadata.env"></a>
+
+#### env
+
+Orchestrator-injected environment variables; empty when none apply.
+
+<a id="k8s_agent_sandbox.models.SandboxMetadata.from_sandboxd"></a>
+
+#### from\_sandboxd
+
+```python
+@classmethod
+def from_sandboxd(cls, payload: dict[str, Any]) -> "SandboxMetadata"
+```
+
+Build from a sandboxd /v1/metadata response body.
+
 <a id="k8s_agent_sandbox.models.SandboxClaimEnvVar"></a>
 
 ### SandboxClaimEnvVar Objects

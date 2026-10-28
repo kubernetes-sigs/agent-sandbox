@@ -17,7 +17,7 @@ import unittest
 from unittest.mock import patch
 from datetime import UTC, datetime
 
-from kubernetes.client import V1Lease, V1ObjectMeta
+from kubernetes.client import V1Lease, V1LeaseSpec, V1ObjectMeta
 
 from k8s_agent_sandbox import batch_utils
 from k8s_agent_sandbox.batch_utils import (
@@ -114,6 +114,18 @@ class TestLeaseOwnerReference(unittest.TestCase):
             with self.subTest(metadata=metadata):
                 with self.assertRaises(BatchError):
                     batch_utils.lease_owner_reference(V1Lease(metadata=metadata))
+
+
+class TestLeaseParts(unittest.TestCase):
+
+    def test_rejects_a_lease_without_metadata_or_spec(self):
+        for lease in (
+            V1Lease(spec=V1LeaseSpec(holder_identity="h1")),
+            V1Lease(metadata=V1ObjectMeta(name="batch-b1")),
+        ):
+            with self.subTest(lease=lease):
+                with self.assertRaises(BatchError):
+                    batch_utils.lease_parts(lease)
 
 
 class TestRetryableStatus(unittest.TestCase):

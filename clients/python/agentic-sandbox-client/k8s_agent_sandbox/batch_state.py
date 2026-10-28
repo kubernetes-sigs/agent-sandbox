@@ -340,7 +340,7 @@ class BatchState:
         if existing is None:
             # Deleted before this handle ever saw an ADDED/MODIFIED event for it.
             return None
-        update: dict[str, Any] = {"pod_ips": (), "service_fqdn": None}
+        update: dict[str, object] = {"pod_ips": (), "service_fqdn": None}
         if existing.state is not MemberState.FAILED:
             update.update(state=MemberState.LOST, reason=None, message=None)
         lost_member = existing.model_copy(update=update)

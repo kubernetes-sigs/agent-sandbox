@@ -56,6 +56,8 @@ from .models import BatchEvent, BatchGroup, GroupOutcome, Member, MemberState
 from .utils import construct_sandbox_claim_lifecycle_spec, select_pod_ip
 
 if TYPE_CHECKING:
+    from kubernetes_asyncio.client import V1Lease as AsyncV1Lease
+
     from .k8s_helper import K8sHelper
     from .sandbox import Sandbox
     from .sandbox_client import SandboxClient
@@ -362,34 +364,33 @@ class SandboxBatch:
             namespace, label_selector, _request_timeout=batch_utils.BATCH_COLLECTION_REQUEST_TIMEOUT_SECONDS
         )
 
-        if lease is None and not claim_items:
-            raise BatchNotFoundError(f"batch '{batch_id}' not found in namespace '{namespace}'")
+        if lease is None:
+            if not claim_items:
+                raise BatchNotFoundError(f"batch '{batch_id}' not found in namespace '{namespace}'")
+            raise BatchLeaseExpiredError(
+                f"batch '{batch_id}' Lease is missing or stale in namespace '{namespace}'"
+            )
 
-        settings = batch_utils.parse_lease_metadata(
-            lease.metadata.labels if lease is not None else None,
-            lease.metadata.annotations if lease is not None else None,
-        )
+        meta, spec = batch_utils.lease_parts(lease)
+        settings = batch_utils.parse_lease_metadata(meta.labels, meta.annotations)
         duration = settings.lease_duration
 
         # Read before renewTime is stamped, so this handle's expiry is never later than the one
         # other clients see.
         renewed_at = time.monotonic()
         now = batch_utils.lease_now()
-        spec_duration = lease.spec.lease_duration_seconds if lease is not None else None
-        renew_time = lease.spec.renew_time if lease is not None else None
         if (
-            lease is None
-            or renew_time is None
-            or spec_duration is None
-            or batch_utils.is_lease_stale(renew_time, spec_duration, now)
+            spec.renew_time is None
+            or spec.lease_duration_seconds is None
+            or batch_utils.is_lease_stale(spec.renew_time, spec.lease_duration_seconds, now)
         ):
             raise BatchLeaseExpiredError(
                 f"batch '{batch_id}' Lease is missing or stale in namespace '{namespace}'"
             )
 
-        if lease.spec.holder_identity:
+        if spec.holder_identity:
             raise BatchInUseError(
-                f"batch '{batch_id}' is held by '{lease.spec.holder_identity}'"
+                f"batch '{batch_id}' is held by '{spec.holder_identity}'"
             )
 
         groups = batch_state.reconstruct_groups(batch_id, claim_items)
@@ -398,11 +399,11 @@ class SandboxBatch:
         state.count_missing_fill_as_unable()
 
         holder_identity = batch_utils.generate_holder_identity()
-        lease.spec.holder_identity = holder_identity
-        lease.spec.renew_time = now
-        lease.spec.lease_duration_seconds = duration
-        lease.spec.acquire_time = now
-        lease.spec.lease_transitions = (lease.spec.lease_transitions or 0) + 1
+        spec.holder_identity = holder_identity
+        spec.renew_time = now
+        spec.lease_duration_seconds = duration
+        spec.acquire_time = now
+        spec.lease_transitions = (spec.lease_transitions or 0) + 1
         try:
             written = client.k8s_helper.replace_batch_lease(
                 lease_name, namespace, lease, _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
@@ -1371,22 +1372,23 @@ class SandboxBatch:
                     self._lease_name, self.namespace, _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
                 )
                 if lease is not None:
-                    if lease.spec.holder_identity != self._holder_identity:
+                    meta, spec = batch_utils.lease_parts(lease)
+                    if spec.holder_identity != self._holder_identity:
                         logger.info(
                             f"Batch '{self.batch_id}' Lease is held by "
-                            f"'{lease.spec.holder_identity}', not this handle; treating as released"
+                            f"'{spec.holder_identity}', not this handle; treating as released"
                         )
                     else:
                         for attempt in range(2):
-                            lease.spec.holder_identity = None
-                            lease.spec.renew_time = batch_utils.lease_now()
-                            lease.metadata.annotations = {
-                                **(lease.metadata.annotations or {}),
+                            spec.holder_identity = None
+                            spec.renew_time = batch_utils.lease_now()
+                            meta.annotations = {
+                                **(meta.annotations or {}),
                                 BATCH_NEXT_ORDINAL_ANNOTATION: str(next_ordinal),
                             }
                             # Refresh the Lease so it doesn't expire immediately after we release it,
                             # giving other clients a chance to acquire it.
-                            lease.spec.lease_duration_seconds = grace
+                            spec.lease_duration_seconds = grace
                             # A signal handler on this thread can re-enter _lifecycle_lock and run
                             # release() or detach() during any request above or below.
                             with self._lock:
@@ -1413,7 +1415,10 @@ class SandboxBatch:
                                     self.namespace,
                                     _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
                                 )
-                                if lease is None or lease.spec.holder_identity != self._holder_identity:
+                                if lease is None:
+                                    break
+                                meta, spec = batch_utils.lease_parts(lease)
+                                if spec.holder_identity != self._holder_identity:
                                     break
             except Exception:
                 with self._lock:
@@ -1595,11 +1600,12 @@ class SandboxBatch:
                 )
                 if lease is None:
                     return self._stop_renewal(self._lease_gone_error())
-                if lease.spec.holder_identity != self._holder_identity:
+                spec = batch_utils.lease_parts(lease)[1]
+                if spec.holder_identity != self._holder_identity:
                     return self._stop_renewal(
                         BatchInUseError(
                             f"batch '{self.batch_id}' Lease is no longer held by this handle "
-                            f"(current holder: {lease.spec.holder_identity!r})"
+                            f"(current holder: {spec.holder_identity!r})"
                         )
                     )
                 sent_at, written = self._write_renewal(lease)
@@ -1621,15 +1627,16 @@ class SandboxBatch:
             self._notify_all()
         return False
 
-    def _write_renewal(self, lease: Any) -> tuple[float, V1Lease]:
+    def _write_renewal(self, lease: V1Lease) -> tuple[float, V1Lease]:
         """Stamps ``lease`` as renewed now and replaces it, returning the send time and the written Lease."""
         # Neither Kubernetes client has a default request timeout, so a hung apiserver would
         # otherwise stall renewal past the Lease's expiry.
         timeout = self._renew_request_timeout()
         sent_at = time.monotonic()
-        lease.spec.holder_identity = self._holder_identity
-        lease.spec.renew_time = batch_utils.lease_now()
-        lease.spec.lease_duration_seconds = self._lease_duration
+        spec = batch_utils.lease_parts(lease)[1]
+        spec.holder_identity = self._holder_identity
+        spec.renew_time = batch_utils.lease_now()
+        spec.lease_duration_seconds = self._lease_duration
         written = self._client.k8s_helper.replace_batch_lease(
             self._lease_name, self.namespace, lease, _request_timeout=timeout
         )
@@ -1931,7 +1938,7 @@ def _take_batch_lease(
     lease_name: str,
     holder_identity: str,
     lease_duration: int,
-    last_lease: Any,
+    last_lease: "V1Lease | AsyncV1Lease",
 ) -> str | None:
     """Writes the batch's Lease with ``holder_identity`` as its holder and returns the
     resourceVersion written, or returns ``None`` if the Lease is missing. The write is
@@ -1955,18 +1962,20 @@ def _take_batch_lease(
         now = batch_utils.lease_now()
         if lease is None:
             return None
+        meta, spec = batch_utils.lease_parts(lease)
+        last_meta, last_spec = batch_utils.lease_parts(last_lease)
         # Another handle that attached since this handle's last write raised leaseTransitions, and a
         # Lease that was deleted and created again has a new UID. Either Lease can have no holder by
         # now, so the holder check below wouldn't catch it.
-        if lease.metadata.uid != last_lease.metadata.uid or (lease.spec.lease_transitions or 0) != (
-            last_lease.spec.lease_transitions or 0
+        if meta.uid != last_meta.uid or (spec.lease_transitions or 0) != (
+            last_spec.lease_transitions or 0
         ):
             raise BatchInUseError(f"batch '{batch_id}' changed hands since this handle held it")
-        if lease.spec.holder_identity and lease.spec.holder_identity != holder_identity:
-            raise BatchInUseError(f"batch '{batch_id}' is held by '{lease.spec.holder_identity}'")
-        lease.spec.holder_identity = holder_identity
-        lease.spec.renew_time = now
-        lease.spec.lease_duration_seconds = lease_duration
+        if spec.holder_identity and spec.holder_identity != holder_identity:
+            raise BatchInUseError(f"batch '{batch_id}' is held by '{spec.holder_identity}'")
+        spec.holder_identity = holder_identity
+        spec.renew_time = now
+        spec.lease_duration_seconds = lease_duration
         try:
             written = helper.replace_batch_lease(lease_name, namespace, lease, _request_timeout=timeout)
         except ApiException as e:
@@ -1978,7 +1987,8 @@ def _take_batch_lease(
             # only if one of its own renewals landed late, so it is read and written once more.
             retried = True
             continue
-        return str(written.metadata.resource_version)
+        written_meta, _ = batch_utils.lease_parts(written)
+        return str(written_meta.resource_version)
 
 
 def _delete_batch_objects(
@@ -1988,7 +1998,7 @@ def _delete_batch_objects(
     lease_name: str,
     holder_identity: str,
     lease_duration: int,
-    last_lease: Any,
+    last_lease: "V1Lease | AsyncV1Lease",
 ) -> None:
     """Deletes a batch's claims in rounds, then its Lease once no claim is left that isn't
     already being deleted.

@@ -137,12 +137,11 @@ paths:
           schema:
             type: string
             pattern: "^0[0-7]{3}$"
-            default: "0644"
           description: >
             Octal permission bits applied to the written file (e.g. "0755" or "0644").
+            Defaults to "0644" for files and "0755" for directories.
             With append=true, applied only when the request creates the file.
-            With type=directory, the default is "0755" and the bits apply only to a directory the
-            request creates.
+            With type=directory, the bits apply only to a directory the request creates.
         - name: append
           in: query
           required: false
@@ -153,7 +152,8 @@ paths:
             If true, appends the body to the file, creating it if it does not exist.
             Readers can see a partial append, and concurrent appends can interleave.
       requestBody:
-        required: true
+        required: false
+        description: File content. Required unless type=directory, which ignores it.
         content:
           application/octet-stream:
             schema:

@@ -132,7 +132,8 @@ func run(cfg *config.Config, log logr.Logger) error {
 
 	// --- TLS / cert reload --------------------------------------------------
 	var tlsConfig *tls.Config
-	if cfg.HTTPSAddr != "" {
+	var metricsTLSConfig *tls.Config
+	if cfg.HTTPSAddr != "" || cfg.MetricsSecureServing {
 		reloader, err := tlsutil.NewCertReloader(cfg.TLSCertFile, cfg.TLSKeyFile, log.WithName("tls"),
 			func(ok bool, _ error) {
 				outcome := "success"
@@ -147,9 +148,18 @@ func run(cfg *config.Config, log logr.Logger) error {
 		if err := reloader.Start(ctx); err != nil {
 			return fmt.Errorf("cert watcher: %w", err)
 		}
-		tlsConfig, err = tlsutil.BuildServerTLS(cfg, reloader)
-		if err != nil {
-			return fmt.Errorf("build TLS config: %w", err)
+		if cfg.HTTPSAddr != "" {
+			tlsConfig, err = tlsutil.BuildServerTLS(cfg, reloader)
+			if err != nil {
+				return fmt.Errorf("build TLS config: %w", err)
+			}
+		}
+		if cfg.MetricsSecureServing {
+			metricsTLSConfig, err = tlsutil.BuildMetricsTLS(cfg, reloader)
+			if err != nil {
+				return fmt.Errorf("build metrics TLS config: %w", err)
+			}
+			log.Info("metrics server TLS enabled (--metrics-secure-serving)")
 		}
 	}
 
@@ -274,6 +284,7 @@ func run(cfg *config.Config, log logr.Logger) error {
 		proxyOpts.Cache = podCache
 	}
 	handler := proxy.NewHandler(proxyOpts)
+	defer handler.Close()
 
 	// Top-level mux: /healthz reuses the probes implementation so the
 	// Python router's contract (200 OK with {"status":"ok"}) is preserved.
@@ -309,16 +320,17 @@ func run(cfg *config.Config, log logr.Logger) error {
 
 	// --- Server lifecycle --------------------------------------------------
 	srv, err := server.New(server.Options{
-		Log:             log.WithName("server"),
-		Probes:          probes,
-		ProxyHandler:    rootHandler,
-		MetricsHandler:  promhttp.HandlerFor(reg, promhttp.HandlerOpts{}),
-		HTTPAddr:        cfg.HTTPAddr,
-		HTTPSAddr:       cfg.HTTPSAddr,
-		MetricsAddr:     cfg.MetricsAddr,
-		ProbeAddr:       cfg.ProbeAddr,
-		TLSConfig:       tlsConfig,
-		ShutdownTimeout: cfg.ShutdownTimeout,
+		Log:              log.WithName("server"),
+		Probes:           probes,
+		ProxyHandler:     rootHandler,
+		MetricsHandler:   promhttp.HandlerFor(reg, promhttp.HandlerOpts{}),
+		HTTPAddr:         cfg.HTTPAddr,
+		HTTPSAddr:        cfg.HTTPSAddr,
+		MetricsAddr:      cfg.MetricsAddr,
+		ProbeAddr:        cfg.ProbeAddr,
+		TLSConfig:        tlsConfig,
+		MetricsTLSConfig: metricsTLSConfig,
+		ShutdownTimeout:  cfg.ShutdownTimeout,
 	})
 	if err != nil {
 		return fmt.Errorf("server: %w", err)

@@ -19,6 +19,8 @@ This directory packages Agent Sandbox for **OLM** (OperatorHub, OpenShift, and o
 
 For controller development (local kind cluster, image build), see [docs/development.md](../docs/development.md).
 
+**Router ServiceAccount.** The bundle's `sandbox-router` Pod turns off ServiceAccount token automount and projects its own one-hour token, but OLM creates the `sandbox-router` ServiceAccount from the CSV permissions, so the account itself keeps the default automount. Anyone who can create Pods in the operator namespace can run them as `sandbox-router` and use its cluster-wide Pod read grant, so restrict Pod creation in that namespace.
+
 ### Upgrading from v0.5.x to v1.0.0+
 
 Starting in **v1.0.0**, `v1alpha1` support and conversion webhooks are removed. If upgrading an existing OLM-managed cluster from `v0.5.x`:

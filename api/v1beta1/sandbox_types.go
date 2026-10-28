@@ -162,6 +162,10 @@ const (
 	SandboxWarmPoolLabel = "agents.x-k8s.io/warm-pool-sandbox"
 	// SandboxTemplateRefHashLabel identifies which SandboxTemplate a Sandbox originated from.
 	SandboxTemplateRefHashLabel = "agents.x-k8s.io/sandbox-template-ref-hash"
+	// SandboxNameHashLabel is the tracking label the controller stamps on every
+	// Pod, Service and PVC it creates or adopts for a Sandbox. Its value is the
+	// hash of the Sandbox name.
+	SandboxNameHashLabel = "agents.x-k8s.io/sandbox-name-hash"
 )
 
 type PodMetadata struct {
@@ -181,12 +185,9 @@ type PodMetadata struct {
 }
 
 type EmbeddedObjectMetadata struct {
-	// name must be unique within a namespace. Is required when creating resources, although
-	// some resources may allow a client to request the generation of an appropriate name
-	// automatically. Name is primarily intended for creation idempotence and configuration
-	// definition.
-	// Cannot be updated.
-	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names#names
+	// name is the pod volume name and the prefix of the PVC name, which is
+	// named after the template and the Sandbox, joined by a hyphen. It can be at most 63 characters, the pod volume name limit.
+	// +kubebuilder:validation:MaxLength=63
 	// +optional
 	Name string `json:"name,omitempty"`
 
@@ -215,6 +216,7 @@ type PodTemplate struct {
 	ObjectMeta PodMetadata `json:"metadata"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.metadata) && has(self.metadata.name) && size(self.metadata.name) > 0",message="metadata.name must not be empty"
 type PersistentVolumeClaimTemplate struct {
 	// metadata is the PVC's metadata.
 	// +optional
@@ -247,6 +249,19 @@ const (
 	SandboxOperatingModeSuspended SandboxOperatingMode = "Suspended"
 )
 
+// FailedPodPolicy controls behavior when the backing Pod reaches phase Failed.
+// +kubebuilder:validation:Enum=Retain;Recreate
+type FailedPodPolicy string
+
+const (
+	// FailedPodPolicyRetain leaves a Failed Pod in place and surfaces Finished=True.
+	// This is the default.
+	FailedPodPolicyRetain FailedPodPolicy = "Retain"
+	// FailedPodPolicyRecreate deletes the controller-owned Failed Pod so a new one
+	// is created. The Sandbox identity and any Sandbox-owned PVCs are retained.
+	FailedPodPolicyRecreate FailedPodPolicy = "Recreate"
+)
+
 // NOTE: When adding, removing, or renaming a field in SandboxBlueprint,
 // also update compareSandboxBlueprint() in extensions/controllers/sandboxwarmpool_controller.go
 // so the SandboxWarmPool staleness check accounts for it. A field left out of that comparison
@@ -259,13 +274,31 @@ type SandboxBlueprint struct {
 	// Note: When provisioned via a SandboxTemplate (such as by a SandboxClaim or SandboxWarmPool),
 	// if AutomountServiceAccountToken is not specified in the PodSpec, the controller defaults it
 	// to false to ensure a secure-by-default environment.
+	// Changes after creation:
+	//   - On a Sandbox, labels and annotations in podTemplate.metadata are propagated to the
+	//     existing Pod. Other changes do not affect a running Pod; they take effect when the
+	//     controller next creates the Pod, for example after the Pod is deleted or the
+	//     Sandbox is resumed.
+	//   - On a SandboxTemplate, pod spec changes do not update existing Sandboxes directly.
+	//     A SandboxWarmPool using Recreate deletes stale, unclaimed Sandboxes and creates
+	//     replacements from the updated template. OnReplenish leaves stale, unclaimed
+	//     Sandboxes in place. Claimed Sandboxes are never replaced.
 	// +required
 	PodTemplate PodTemplate `json:"podTemplate"`
 
 	// volumeClaimTemplates is a list of claims that the sandbox pod is allowed to reference.
 	// When creating a sandbox, PVCs will be created from these templates.
 	// Every claim in this list must have at least one matching access mode with a provisioner volume.
+	// Each PVC is named after the template and the Sandbox, joined by a hyphen, and is owned
+	// by the Sandbox. It is kept while the Sandbox is suspended or retained after expiry, so a
+	// resumed Pod reattaches it with its data. It is garbage collected when the Sandbox
+	// object is deleted.
+	// On a Sandbox this list is immutable after creation.
 	// NOTE: This list is atomic. Updates to this field will replace the entire list rather than merging with existing entries.
+	// Each entry must have a unique, non-empty metadata.name.
+	// At most 128 entries: the cap only bounds the CEL cost of the uniqueness rule.
+	// +kubebuilder:validation:MaxItems=128
+	// +kubebuilder:validation:XValidation:rule="self.all(a, !has(a.metadata) || !has(a.metadata.name) || self.exists_one(b, has(b.metadata) && has(b.metadata.name) && b.metadata.name == a.metadata.name))",message="volumeClaimTemplates names must be unique"
 	// +optional
 	// +listType=atomic
 	VolumeClaimTemplates []PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
@@ -278,6 +311,20 @@ type SandboxBlueprint struct {
 	//nolint:kubeapilinter // Enum not used to avoid duplicating the Service API; field is not expected to extend (issue #746).
 	// +optional
 	Service *bool `json:"service,omitempty"`
+
+	// failedPodPolicy controls what happens when the backing Pod enters phase Failed.
+	// Retain (default): leave the Failed pod and surface Finished=True.
+	// Recreate: delete the controller-owned Failed pod so a new one is created;
+	// the Sandbox identity and any Sandbox-owned PVCs are retained.
+	// Combined with restartPolicy Never and a container that always exits non-zero,
+	// Recreate can recreate the Pod repeatedly; the controller applies Deployment-style
+	// in-memory exponential backoff (5s, doubling up to 5m) between creates so a crash
+	// loop cannot hot-loop the API server. Backoff resets after the replacement Pod has
+	// been continuously observed Running for 10 minutes. Backoff state is not persisted
+	// in status.
+	// +kubebuilder:default=Retain
+	// +optional
+	FailedPodPolicy FailedPodPolicy `json:"failedPodPolicy,omitempty"`
 }
 
 // SandboxSpec defines the desired state of Sandbox.
@@ -300,7 +347,8 @@ type SandboxSpec struct {
 	// operatingMode specifies the desired operational state of the Sandbox:
 	//   - Running (default): the controller keeps a backing Pod running.
 	//   - Suspended: the controller terminates the backing Pod but retains the
-	//     Sandbox object and its volumes so it can later be resumed.
+	//     Sandbox object and its volumes so it can later be resumed. Resuming creates a new
+	//     Pod from the current podTemplate that reattaches the retained volumes.
 	// This field declares intent only. The observed readiness of the Sandbox is
 	// reported by the Ready condition, and the progress of a suspension by the
 	// Suspended condition; a Sandbox in Running mode is not Ready until its Pod is

@@ -16,9 +16,11 @@ package sandbox
 
 import (
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -28,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/rest"
 
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
@@ -118,6 +121,26 @@ type Options struct {
 	// Must be a valid Kubernetes DNS subdomain (lowercase, [a-z0-9.-]).
 	WarmPoolName string
 
+	// ClaimName is an optional deterministic name for the SandboxClaim.
+	// When empty, Kubernetes generates a unique name with prefix "sandbox-claim-".
+	// When set and a SandboxClaim with this name already exists in Namespace,
+	// Open fails with ErrClaimFailed unless AdoptExisting is also set.
+	// A named claim is caller-owned: a failed Open and
+	// Client.EnableAutoCleanup leave it in place; Close still deletes it.
+	// Must be a valid Kubernetes DNS subdomain (lowercase, [a-z0-9.-]).
+	// NewClient rejects it; use WithClaimName with Client.CreateSandbox.
+	ClaimName string
+
+	// AdoptExisting makes Open attach to an existing SandboxClaim named
+	// ClaimName when creating it returns HTTP 409 Conflict, instead of
+	// failing. The existing claim must reference the same WarmPoolName and
+	// must not be terminating, and Open fails if it is replaced or starts
+	// terminating before its sandbox name resolves. Creation options are not
+	// reapplied to an adopted claim.
+	// Requires ClaimName. NewClient rejects it; use WithAdoptExisting with
+	// Client.CreateSandbox.
+	AdoptExisting bool
+
 	// Runtime selects the in-sandbox runtime API. Default: RuntimeLegacyPython.
 	// RuntimeSandboxd talks to the sandbox pod rather than the sandbox-router,
 	// so GatewayName is not supported with it. APIURL remains available as an
@@ -178,6 +201,22 @@ type Options struct {
 	// gets spec.lifecycle.shutdownTime and the Delete shutdown policy; the
 	// deadline is rounded up to a whole second. Zero (the default) means no expiry.
 	ShutdownAfter time.Duration
+
+	// PodLabels are propagated to the backing Sandbox Pod via
+	// spec.additionalPodMetadata.labels (unlike Labels, which are placed on the
+	// SandboxClaim object itself). Label keys must carry a domain prefix from
+	// the controller's label-domain allowlist (default: sandbox.users.io).
+	PodLabels map[string]string
+
+	// PodAnnotations are propagated to the backing Sandbox Pod via
+	// spec.additionalPodMetadata.annotations.
+	PodAnnotations map[string]string
+
+	// VolumeClaimTemplates is a list of persistent volume claim templates to
+	// create for the sandbox via spec.volumeClaimTemplates. Setting
+	// VolumeClaimTemplates forces a cold start because warm pool pods do not
+	// have these volumes.
+	VolumeClaimTemplates []sandboxv1beta1.PersistentVolumeClaimTemplate
 
 	// SandboxReadyTimeout is how long to wait for the sandbox to become ready. Default: 180s.
 	SandboxReadyTimeout time.Duration
@@ -321,6 +360,22 @@ func (o *Options) setDefaults() {
 			}, funcr.Options{LogTimestamp: true})
 		}
 	}
+	o.Labels = maps.Clone(o.Labels)
+	o.PodLabels = maps.Clone(o.PodLabels)
+	o.PodAnnotations = maps.Clone(o.PodAnnotations)
+	o.Env = slices.Clone(o.Env)
+	o.VolumeClaimTemplates = cloneVolumeClaimTemplates(o.VolumeClaimTemplates)
+}
+
+func cloneVolumeClaimTemplates(in []sandboxv1beta1.PersistentVolumeClaimTemplate) []sandboxv1beta1.PersistentVolumeClaimTemplate {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]sandboxv1beta1.PersistentVolumeClaimTemplate, len(in))
+	for i := range in {
+		in[i].DeepCopyInto(&out[i])
+	}
+	return out
 }
 
 // isValidDNSSubdomain checks RFC 1123 DNS subdomain rules: max 253 chars,
@@ -395,8 +450,17 @@ func (o *Options) validateCommon() error {
 	if err := metav1validation.ValidateLabels(o.Labels, field.NewPath("Labels")).ToAggregate(); err != nil {
 		return fmt.Errorf("sandbox: invalid Labels: %w", err)
 	}
+	if err := metav1validation.ValidateLabels(o.PodLabels, field.NewPath("PodLabels")).ToAggregate(); err != nil {
+		return fmt.Errorf("sandbox: invalid PodLabels: %w", err)
+	}
 	if o.ShutdownAfter < 0 {
 		return fmt.Errorf("sandbox: ShutdownAfter must not be negative, got %s", o.ShutdownAfter)
+	}
+	if o.ClaimName != "" && !isValidDNSSubdomain(o.ClaimName) {
+		return fmt.Errorf("sandbox: ClaimName %q is not a valid Kubernetes DNS subdomain name", o.ClaimName)
+	}
+	if o.AdoptExisting && o.ClaimName == "" {
+		return fmt.Errorf("sandbox: AdoptExisting requires ClaimName")
 	}
 	if !isValidDNSLabel(o.Namespace) {
 		return fmt.Errorf("sandbox: Namespace %q is not a valid Kubernetes namespace (DNS label)", o.Namespace)

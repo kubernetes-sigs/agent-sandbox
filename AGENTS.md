@@ -51,7 +51,7 @@ All standard tasks go through the [Makefile](Makefile). Prefer `make` targets ov
 
 - `make all` — runs `fix-go-generate`, `fix-api-docs`, `build`, `lint-go`, `lint-api`, `test-unit`, `toc-verify`, `verify-olm`. Run this before sending a PR.
 - `make build` — compiles `bin/manager` (`build-controller`), `bin/sandbox-router` (`build-sandbox-router`), and `bin/sandboxd` (`build-sandboxd`).
-- `make test-unit` — runs Go unit tests (`-race`) across all Go modules in the repo, Python `pytest` suites + `mypy` type checks, and TypeScript `vitest` unit tests via `dev/tools/test-unit`.
+- `make test-unit` — runs Go unit tests (`-race`) across all Go modules in the repo, Python `pytest` suites + `mypy` type checks, TypeScript `vitest` unit tests, and the stress report's browser-script tests (`node --test`) via `dev/tools/test-unit`.
 - `make test-e2e` / `make test-e2e-race` — e2e suite against a kind cluster (much slower; e2e is not raced by default).
 - `make lint-go` / `make fix-go` — `golangci-lint` (config in [dev/tools/.golangci.yaml](dev/tools/.golangci.yaml)).
 - `make lint-api` / `make fix-api` — KAL API linter for kubebuilder tags and CRD conventions.
@@ -77,6 +77,7 @@ The Hugo site at [site/](site/) mounts these repo paths into `assets/additional/
 - [packages/sandboxd/USER_GUIDE.md](packages/sandboxd/USER_GUIDE.md) → `/docs/api/runtime/`
 - [clients/go/README.md](clients/go/README.md) → `/docs/go-client/`
 - [clients/python/agentic-sandbox-client/README.md](clients/python/agentic-sandbox-client/README.md) → `/docs/python-client/`
+- [clients/typescript/agentic-sandbox-client/README.md](clients/typescript/agentic-sandbox-client/README.md) → `/docs/typescript-client/`
 - [clients/integrations/nemo-gym/README.md](clients/integrations/nemo-gym/README.md) → `/docs/use-cases/examples/nemo-gym/` (the only `clients/integrations/` README currently mounted in [site/hugo.yaml](site/hugo.yaml))
 - Many `examples/*/README.md` files → pages under `/docs/use-cases/examples/`, `/docs/runtime-templates/`, and `/docs/getting_started/`
 
@@ -85,7 +86,7 @@ If you change one of these, preview the rendered output (`hugo server` from [sit
 ## Coding conventions
 
 - Idiomatic Go, controller-runtime patterns. Reconcile loops must be idempotent and safe under retries; do not assume single execution.
-- Comments explain **why**, not **what**. Identifier names should carry the "what."
+- Comments explain **why**, not **what**. Identifier names should carry the "what." See "Writing" below for style.
 - Keep changes scoped to the task. No drive-by refactors, speculative abstractions, or unrelated formatting churn — bundle one concern per PR.
 - Prefer extending existing files over adding new ones. Do not create new top-level directories without discussion.
 - Errors: wrap with context (`fmt.Errorf("...: %w", err)`); surface meaningful conditions on the resource status rather than swallowing.
@@ -99,6 +100,28 @@ If you change one of these, preview the rendered output (`hugo server` from [sit
 - API design & schema minimization: do not use annotations for alpha/preview features (use API fields instead); avoid toggle proliferation (overlapping configuration mechanisms); keep tenant workload behaviors declarative in Custom Resources rather than global controller CLI flags.
 - Match existing kubebuilder marker style; required vs optional, default values, and validation belong on the type, not in the controller. Use pointers for optional fields where distinguishing between zero and unset is important; prefer `conditions` instead of a `phase` enum; avoid booleans for fields that might evolve to have more states in the future.
 - When modifying CRDs, APIs, or controller logic that interacts with APIs, adhere to the guidelines in [.agents/skills/k8s-api-conventions/SKILL.md](.agents/skills/k8s-api-conventions/SKILL.md).
+
+## Writing
+
+Comments, docstrings, commit messages, PR descriptions, and docs should read clearly to someone new to the code. Aim to follow Google's [Technical Writing](https://developers.google.com/tech-writing/one) and, for details, the [Google developer documentation style guide](https://developers.google.com/style). For doc comments, see [Go doc comments](https://go.dev/doc/comment) and the docstring section of the [Google Python Style Guide](https://google.github.io/styleguide/pyguide.html#38-comments-and-docstrings).
+
+The rules that matter most here:
+
+- **Use active voice.** Say who does what: "the controller deletes the Pod when the claim expires", not "the Pod is deleted upon expiry of the claim".
+- **Write full sentences, one idea each.** Don't chain clauses with colons, semicolons, and parenthetical asides.
+- **Define a term before you use it,** and use the project's existing words (`SandboxClaim`, not "claim object"). Don't coin shorthand.
+- **Say what the code does and why,** not how it got that way. Don't narrate the implementation line by line; the reader has the code.
+- **Match the weight of the comment to the weight of the code.** A two-line helper does not need a docstring that lists every parameter and exception.
+
+For example, rewrite this:
+
+> The claim is awaited until readiness has been observed (the `Ready` condition being polled via the helper): should the timeout elapse, an exception is raised, the claim having been left in place.
+
+as this:
+
+> Wait until the SandboxClaim reports the `Ready` condition. Raise `TimeoutError` if that doesn't happen within `timeout` seconds, and leave the claim in place so the caller can inspect it.
+
+AI-drafted prose gets the same review as hand-written prose. Before sending a PR, read every new comment, docstring, and description and fix the common readability pitfalls: passive constructions with no actor, comments that restate the code, hedging ("this should typically ensure"), and stacked qualifiers.
 
 ## Go SDK conventions
 
@@ -143,9 +166,9 @@ The TypeScript SDK lives at [clients/typescript/agentic-sandbox-client/](clients
 - This is a Kubernetes SIG project: contributors must have a signed [CNCF CLA](https://git.k8s.io/community/CLA.md). PRs without one are not reviewed.
 - CI runs through Prow (configured in [kubernetes/test-infra](https://github.com/kubernetes/test-infra)). The `k8s-ci-robot` merges PRs once they have `lgtm` + `approve` and presubmits pass. Default merge mode is squash; use `/label tide/merge-method-rebase` only when distinct commits matter.
 - CodeRabbit provides automated first-pass reviews on open PRs. **Never click "Commit suggestion" in the GitHub UI** — that adds the AI bot as a co-author, and AI bots cannot sign the Kubernetes CLA, so the CLA check will fail and block the PR. Instead: read the suggestion, apply the change manually in your local checkout, and push it as a normal commit authored by you.
-- Inactive PRs go stale after 30 days and close after 15 more. Reopen freely if you return to the work.
+- Inactive PRs go stale after 15 days and close after 15 more. Reopen freely if you return to the work.
 - Keep PR titles short and conventional; the body should explain motivation and link any issue or KEP.
-- Commit messages must stand alone: a reader with only `git log` should understand what changed and why. Lead with the motivation — the problem or gap that prompted the change — rather than restating the diff, which the reader can see for themselves. Use the terminology already established in the code and docs; do not invent new names for existing concepts. Be clear and concise. Since the default merge mode is squash, the PR title and body usually become the commit message — write them to the same standard.
+- Commit messages must stand alone (and follow the "Writing" section above): a reader with only `git log` should understand what changed and why. Lead with the motivation — the problem or gap that prompted the change — rather than restating the diff, which the reader can see for themselves. Use the terminology already established in the code and docs; do not invent new names for existing concepts. Be clear and concise. Since the default merge mode is squash, the PR title and body usually become the commit message — write them to the same standard.
 
 ## Things to avoid
 

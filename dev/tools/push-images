@@ -21,6 +21,8 @@ import tempfile
 
 from shared import utils
 
+DEFAULT_PLATFORMS = "linux/amd64,linux/arm64"
+
 
 def _get_version_build_args():
     """Returns build args for version info injection into Go binaries."""
@@ -83,7 +85,6 @@ def build_image_with_podman(args, service_name, srcdir, dockerfile_path, image_t
 
 
 def build_and_push_image_with_docker_buildx(args, service_name, srcdir, dockerfile_path, image_tag):
-    platforms = "linux/amd64,linux/arm64"
     build_cmd = [
         "docker",
         "buildx",
@@ -97,7 +98,7 @@ def build_and_push_image_with_docker_buildx(args, service_name, srcdir, dockerfi
             f"--cache-from=type=registry,ref={cache_ref}",
             f"--cache-to=type=registry,ref={cache_ref},mode=max",
         ])
-        build_cmd.append("--platform=" + platforms)
+        build_cmd.append("--platform=" + args.platform)
     image_name = utils.get_full_image_name(args, service_name, tag=image_tag)
     build_cmd.extend(["-t", image_name])
     for tag in args.extra_image_tags:  # additional image tags
@@ -314,6 +315,14 @@ def make_parser():
                         help="List of images to build and push. If not set, all images will be built and pushed",
                         nargs="+",
                         default=[])
+    parser.add_argument("--platform",
+                        dest="platform",
+                        help="Comma-separated platforms for registry pushes. "
+                             "Use the cluster's architecture to avoid QEMU "
+                             "emulation of the others. Ignored with "
+                             "--kind-cluster-name (host platform only).",
+                        type=str,
+                        default=DEFAULT_PLATFORMS)
     parser.add_argument("--container-engine",
                         dest="container_engine",
                         help="Container engine to use (docker or podman). "

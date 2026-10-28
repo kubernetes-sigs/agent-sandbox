@@ -28,10 +28,38 @@ from ..utils import (
 
 
 
+DEFAULT_MAX_OUTPUT_CHARS = 30000
+MAX_OUTPUT_CHARS_LIMIT = 300000
+# Reserve space for an omission marker in both streams, even with a shared budget.
+MIN_OUTPUT_CHARS = 128
+
+
+def _truncate_output(output: str, max_chars: int) -> str:
+    if len(output) <= max_chars:
+        return output
+
+    # The original length is an upper bound on the omitted count, so reserving
+    # its marker leaves enough space even when that count gains a digit.
+    marker = f"\n[... {len(output)} characters omitted ...]\n"
+    retained_chars = max_chars - len(marker)
+    head_chars = retained_chars // 2
+    tail_chars = retained_chars - head_chars
+    omitted_chars = len(output) - retained_chars
+    return (
+        output[:head_chars]
+        + f"\n[... {omitted_chars} characters omitted ...]\n"
+        + output[-tail_chars:]
+    )
+
+
 class ExecuteCommandOutputSchema(BaseModel):
     exit_code: int = Field(description="The exit code of the executed process.")
-    stdout: str = Field(description="The stdout of the executed process.")
-    stderr: str = Field(description="The stderr of the executed process.")
+    stdout: str = Field(description="The stdout of the executed process, possibly truncated with an omission marker.")
+    stderr: str = Field(description="The stderr of the executed process, possibly truncated with an omission marker.")
+    stdout_total_chars: int = Field(description="Unicode character count of stdout received from the SDK before truncation.")
+    stderr_total_chars: int = Field(description="Unicode character count of stderr received from the SDK before truncation.")
+    stdout_truncated: bool = Field(description="Whether this tool omitted part of stdout.")
+    stderr_truncated: bool = Field(description="Whether this tool omitted part of stderr.")
 
 
 async def execute_command(
@@ -50,6 +78,13 @@ async def execute_command(
         gt=0,
         le=TOOL_MAX_TIMEOUT,
     )] = TOOL_DEFAULT_TIMEOUT,
+    max_output_chars: Annotated[int, Field(
+        description="Maximum combined Unicode character count of returned stdout and stderr, "
+                    "including omission markers. Oversized streams retain their beginning "
+                    "and end. This limits returned text, not execution memory or tokens.",
+        ge=MIN_OUTPUT_CHARS,
+        le=MAX_OUTPUT_CHARS_LIMIT,
+    )] = DEFAULT_MAX_OUTPUT_CHARS,
 
 ) -> ExecuteCommandOutputSchema:
     """
@@ -63,9 +98,21 @@ async def execute_command(
     except Exception as e:
         raise RuntimeError(f"Failed to execute command in sandbox: {e}") from e
 
+    stdout = execution_result.stdout
+    stderr = execution_result.stderr
+    # Give both streams a share so verbose stdout cannot hide stderr. Reuse
+    # capacity left by either short stream; stderr gets the odd character.
+    stdout_budget = min(len(stdout), max_output_chars // 2)
+    stderr_budget = min(len(stderr), max_output_chars - stdout_budget)
+    stdout_budget = min(len(stdout), max_output_chars - stderr_budget)
+
     return ExecuteCommandOutputSchema(
         exit_code=execution_result.exit_code,
-        stdout=execution_result.stdout,
-        stderr=execution_result.stderr,
+        stdout=_truncate_output(stdout, stdout_budget),
+        stderr=_truncate_output(stderr, stderr_budget),
+        stdout_total_chars=len(stdout),
+        stderr_total_chars=len(stderr),
+        stdout_truncated=len(stdout) > stdout_budget,
+        stderr_truncated=len(stderr) > stderr_budget,
     )
 

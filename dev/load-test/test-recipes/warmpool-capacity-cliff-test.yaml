@@ -1,0 +1,170 @@
+# WarmPool capacity: one growing pool, or a growing set of pools sharing a
+# template. Exec checks both pool counters and current-revision Ready members.
+{{$scenario := DefaultParam .CL2_WARMPOOL_SCENARIO "single-pool"}}
+{{$stepSize := DefaultParam .CL2_STEP_SIZE 1000}}
+{{$totalSteps := DefaultParam .CL2_TOTAL_STEPS 20}}
+{{$poolSize := DefaultParam .CL2_POOL_SIZE 1}}
+{{$qps := DefaultParam .CL2_QPS 100}}
+{{$timeout := DefaultParam .CL2_WARMPOOL_TIMEOUT_SECONDS 1800}}
+{{$interval := DefaultParam .CL2_WARMPOOL_POLL_SECONDS 10}}
+{{$hold := DefaultParam .CL2_HOLD_DURATION "2m"}}
+{{$image := DefaultParam .CL2_SANDBOX_IMAGE "registry.k8s.io/pause:3.10"}}
+{{$kwok := DefaultParam .CL2_KWOK_NODES "false"}}
+{{$runID := .CL2_WARMPOOL_RUN_ID}}
+{{$prometheus := DefaultParam .CL2_ENABLE_PROMETHEUS true}}
+
+name: warmpool-capacity-cliff-{{$scenario}}
+namespace:
+  number: 1
+  prefix: warmpool-capacity
+
+tuningSets:
+- name: Ramp
+  qpsLoad:
+    qps: {{$qps}}
+
+steps:
+{{range $i := Loop $totalSteps}}
+{{$step := AddInt $i 1}}
+{{$target := MultiplyInt $step $stepSize}}
+{{$pools := 1}}
+{{$replicas := $target}}
+{{$revision := 0}}
+{{if eq $scenario "many-pools"}}
+{{$pools = $target}}
+{{$replicas = $poolSize}}
+{{$revision = $i}}
+{{end}}
+
+{{if $prometheus}}
+- name: Step {{$step}} - Start capacity metrics
+  measurements:
+  - Identifier: WarmPoolCapacity{{$step}}
+    Method: GenericPrometheusQuery
+    Params:
+      action: start
+      metricName: WarmPool capacity step {{$step}}
+      metricVersion: v1
+      unit: count
+      queries:
+      - name: ControllerResidentMemoryBytes
+        query: max(max_over_time(process_resident_memory_bytes{namespace="agent-sandbox-system"}[%v]))
+      - name: WarmPoolWorkqueueDepthMax
+        query: max(max_over_time(workqueue_depth{name="sandboxwarmpool"}[%v]))
+      - name: WarmPoolReconcileTimeP99Seconds
+        query: histogram_quantile(0.99, sum(rate(controller_runtime_reconcile_time_seconds_bucket{controller="sandboxwarmpool"}[%v])) by (le))
+      - name: ControllerRestClient429PerSecond
+        query: sum(rate(rest_client_requests_total{namespace="agent-sandbox-system",code="429"}[%v]))
+      - name: ControllerCPUCores
+        query: sum(rate(process_cpu_seconds_total{namespace="agent-sandbox-system"}[%v]))
+{{end}}
+
+- name: Step {{$step}} - Ensure shared template
+  phases:
+  - namespaceRange: {min: 1, max: 1}
+    replicasPerNamespace: 1
+    tuningSet: Ramp
+    objectBundle:
+    - basename: capacity-template
+      objectTemplatePath: templates/cluster-loader-capacity-warmpool-template.yaml
+      templateFillMap:
+        Group: warmpool-capacity
+        Revision: "{{$revision}}"
+        KwokNodes: "{{$kwok}}"
+        Image: "{{$image}}"
+
+- name: Step {{$step}} - Ramp to {{$pools}} pools with {{$replicas}} replicas each
+  phases:
+  - namespaceRange: {min: 1, max: 1}
+    replicasPerNamespace: {{$pools}}
+    tuningSet: Ramp
+    objectBundle:
+    - basename: capacity-pool
+      objectTemplatePath: templates/cluster-loader-capacity-warmpool.yaml
+      templateFillMap:
+        RunID: "{{$runID}}"
+        Replicas: {{$replicas}}
+
+- name: Step {{$step}} - Wait for pool capacity
+  measurements:
+  - Identifier: WaitForCapacity{{$step}}
+    Method: Exec
+    Params:
+      # The helper owns the convergence deadline. Leave time for diagnostics.
+      timeout: {{AddInt $timeout 180}}s
+      # CL2 Exec applies os.ExpandEnv to each argument before starting the process.
+      command:
+      - python3
+      - $WARMPOOL_TEST_DIR/wait_for_warmpool.py
+      - --pools
+      - "{{$pools}}"
+      - --replicas
+      - "{{$replicas}}"
+      - --revision
+      - "{{$revision}}"
+      - --stage
+      - step-{{$step}}-capacity
+      - --timeout
+      - "{{$timeout}}"
+      - --interval
+      - "{{$interval}}"
+
+{{if eq $scenario "many-pools"}}
+# Changing the container environment triggers Recreate; metadata-only changes
+# are ignored by the controller's semantic blueprint comparison.
+- name: Step {{$step}} - Update shared template to revision {{$step}}
+  phases:
+  - namespaceRange: {min: 1, max: 1}
+    replicasPerNamespace: 1
+    tuningSet: Ramp
+    objectBundle:
+    - basename: capacity-template
+      objectTemplatePath: templates/cluster-loader-capacity-warmpool-template.yaml
+      templateFillMap:
+        Group: warmpool-capacity
+        Revision: "{{$step}}"
+        KwokNodes: "{{$kwok}}"
+        Image: "{{$image}}"
+
+- name: Step {{$step}} - Wait for all pools to adopt revision {{$step}}
+  measurements:
+  - Identifier: WaitForRollout{{$step}}
+    Method: Exec
+    Params:
+      timeout: {{AddInt $timeout 180}}s
+      # CL2 Exec applies os.ExpandEnv to each argument before starting the process.
+      command:
+      - python3
+      - $WARMPOOL_TEST_DIR/wait_for_warmpool.py
+      - --pools
+      - "{{$pools}}"
+      - --replicas
+      - "{{$replicas}}"
+      - --revision
+      - "{{$step}}"
+      - --stage
+      - step-{{$step}}-rollout
+      - --timeout
+      - "{{$timeout}}"
+      - --interval
+      - "{{$interval}}"
+{{end}}
+
+- name: Step {{$step}} - Hold plateau
+  measurements:
+  - Identifier: Hold{{$step}}
+    Method: Sleep
+    Params:
+      duration: {{$hold}}
+
+{{if $prometheus}}
+- name: Step {{$step}} - Gather capacity metrics
+  measurements:
+  - Identifier: WarmPoolCapacity{{$step}}
+    Method: GenericPrometheusQuery
+    Params:
+      action: gather
+      enableViolations: false
+{{end}}
+{{end}}
+# CL2 cleans up its generated namespace, including templates and pools.

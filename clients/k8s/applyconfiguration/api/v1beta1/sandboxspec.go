@@ -37,7 +37,8 @@ type SandboxSpecApplyConfiguration struct {
 	// operatingMode specifies the desired operational state of the Sandbox:
 	// - Running (default): the controller keeps a backing Pod running.
 	// - Suspended: the controller terminates the backing Pod but retains the
-	// Sandbox object and its volumes so it can later be resumed.
+	// Sandbox object and its volumes so it can later be resumed. Resuming creates a new
+	// Pod from the current podTemplate that reattaches the retained volumes.
 	// This field declares intent only. The observed readiness of the Sandbox is
 	// reported by the Ready condition, and the progress of a suspension by the
 	// Suspended condition; a Sandbox in Running mode is not Ready until its Pod is
@@ -78,6 +79,14 @@ func (b *SandboxSpecApplyConfiguration) WithVolumeClaimTemplates(values ...*Pers
 // If called multiple times, the Service field is set to the value of the last call.
 func (b *SandboxSpecApplyConfiguration) WithService(value bool) *SandboxSpecApplyConfiguration {
 	b.SandboxBlueprintApplyConfiguration.Service = &value
+	return b
+}
+
+// WithFailedPodPolicy sets the FailedPodPolicy field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the FailedPodPolicy field is set to the value of the last call.
+func (b *SandboxSpecApplyConfiguration) WithFailedPodPolicy(value apiv1beta1.FailedPodPolicy) *SandboxSpecApplyConfiguration {
+	b.SandboxBlueprintApplyConfiguration.FailedPodPolicy = &value
 	return b
 }
 

@@ -21,7 +21,7 @@
   "scripts": {
     "build": "npm run clean && tsc",
     "clean": "rm -rf dist",
-    "prepare": "npm run build",
+    "prepack": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "biome lint ./src",
@@ -41,7 +41,7 @@
     "@types/node": "^22.0.0",
     "@types/ws": "^8.18.1",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.2"
+    "vitest": "^5.0.5"
   },
   "dependencies": {
     "@kubernetes/client-node": "^2.0.0",

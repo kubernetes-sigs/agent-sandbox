@@ -100,8 +100,8 @@ The following table lists the configurable parameters and their defaults. For fl
 | `controller.sandboxWarmPoolReplenishDelay` | Defer replacement sandbox creation after warm pool members drop out during claim bursts (extensions only) | unset (controller default `0s`) |
 | `controller.sandboxWarmPoolMaxRefillRate` | Max rate (sandboxes/second, per pool) for warm pool replenishment (`0` = unpaced, extensions only) | unset (controller default `0`) |
 | `controller.sandboxClaimWarmCandidateGracePeriod` | How long a newly created SandboxClaim waits for a warm pool candidate to report a Pod IP before falling back to cold creation (extensions only) | unset (controller default `2s`) |
-| `controller.sandboxWarmPoolReadinessGracePeriod` | How long a warm pool sandbox may stay non-Ready before it is considered stuck and replaced, or held if unschedulable (extensions only) | unset (controller default `5m`) |
-| `controller.sandboxWarmPoolUnschedulableRecheckInterval` | Re-check interval for pools holding unschedulable sandboxes past the readiness grace period (extensions only) | unset (controller default `1m`) |
+| `controller.sandboxWarmPoolReadinessGracePeriod` | How long a warm pool sandbox may stay non-Ready, counted from pod scheduling, before it is considered stuck and replaced, or held if unschedulable or scheduling-gated (extensions only) | unset (controller default `5m`) |
+| `controller.sandboxWarmPoolUnschedulableRecheckInterval` | Re-check interval for pools holding unschedulable or scheduling-gated sandboxes past the readiness grace period (extensions only) | unset (controller default `1m`) |
 | `controller.enableWarmPoolEviction` | Mark pods created by a warm pool as safe to evict (extensions only) | `true` |
 | `controller.disableClaimEvents` | Disable Kubernetes `Event` emission from the SandboxClaim controller (extensions only) | unset (controller default `false`) |
 | `controller.disableClaimObservabilityAnnotations` | Skip persisting SandboxClaim observability annotations to save one API write per claim (extensions only) | unset (controller default `false`) |
@@ -161,3 +161,5 @@ That content is versioned by `Chart.yaml` rather than by its own contents, so **
 make verify-chart-version   # check
 make bump-chart-version     # increment the patch version (bump minor/major by hand)
 ```
+
+`make lint-helm` lints the chart with [chart-testing](https://github.com/helm/chart-testing), running `helm lint` once per `ci/*-values.yaml` file. Add a values file there when adding a template that is only rendered under non-default values.

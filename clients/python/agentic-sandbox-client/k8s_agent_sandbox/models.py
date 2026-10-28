@@ -15,8 +15,9 @@
 import re
 import warnings
 from datetime import datetime, timezone
-from typing import Literal, Optional, Union
-from pydantic import BaseModel, Field, field_validator, model_validator
+from typing import Annotated, Any, Literal, Optional, Union
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ModelWrapValidatorHandler, SecretStr, ValidationError, field_validator, model_validator
+from pydantic_core import InitErrorDetails
 
 _ENV_VAR_NAME_RE = re.compile(r"^[-._a-zA-Z][-._a-zA-Z0-9]*$")
 _RESERVED_HEADER_PREFIX = "x-sandbox-"
@@ -24,6 +25,33 @@ _DEPRECATED_IN_CLUSTER_MODES = {
     "service-dns": "in-cluster-service",
     "pod-ip": "in-cluster-pod-ip",
 }
+
+
+def _validate_sandboxd_auth_token(token: SecretStr) -> SecretStr:
+    if not re.fullmatch(r"[\x21-\x7e]+", token.get_secret_value()):
+        raise ValueError("auth_token must be non-empty printable ASCII with no spaces")
+    return token
+
+
+_SandboxdAuthToken = Annotated[
+    SecretStr, Field(strict=True), AfterValidator(_validate_sandboxd_auth_token)
+]
+
+
+def _redact_sandboxd_validation_errors(
+    cls: type[BaseModel], value: Any, handler: ModelWrapValidatorHandler[Any]
+) -> Any:
+    try:
+        return handler(value)
+    except ValidationError as error:
+        # hide_input_in_errors only affects text; structured errors also retain
+        # raw input, including whole configs when a model validator fails.
+        details = [
+            InitErrorDetails(type=item["type"], loc=item["loc"], input=None, ctx=item.get("ctx", {}))
+            for item in error.errors(include_input=False, include_url=False)
+        ]
+        raise ValidationError.from_exception_data(cls.__name__, details, hide_input=True) from None
+
 
 class ExecutionResult(BaseModel):
     """A structured object for holding the result of a command execution."""
@@ -52,7 +80,7 @@ class FileEntry(BaseModel):
     mode: Optional[str] = None  # Octal permission bits (sandboxd only), e.g. "0644".
 
     @classmethod
-    def from_legacy(cls, entry: dict) -> "FileEntry":
+    def from_legacy(cls, entry: dict[str, Any]) -> "FileEntry":
         """Build from the legacy python-runtime listing entry."""
         return cls(
             name=entry["name"],
@@ -62,7 +90,7 @@ class FileEntry(BaseModel):
         )
 
     @classmethod
-    def from_sandboxd(cls, entry: dict) -> "FileEntry":
+    def from_sandboxd(cls, entry: dict[str, Any]) -> "FileEntry":
         """Build from a sandboxd DirectoryListing entry."""
         return cls(
             name=entry["name"],
@@ -71,6 +99,26 @@ class FileEntry(BaseModel):
             modified=datetime.fromisoformat(entry["modified_at"].replace("Z", "+00:00")),
             mode=entry.get("mode"),
         )
+
+
+class FileEvent(BaseModel):
+    """A filesystem change observed by :meth:`FileWatcher.watch`.
+
+    Mirrors the ``watcher.v1.FileEvent`` protobuf message with SDK-idiomatic
+    field names. ``type`` is a string matching the proto names (``create``,
+    ``write``, ``remove``, ``rename``, ``chmod``, ``error``); future proto
+    versions may introduce additional values, so consumers should tolerate
+    unknown types rather than treating the set as closed.
+
+    For ``rename`` events, ``path`` carries the OLD (source) path; when the
+    new name lands inside the watched tree it arrives as a separate
+    ``create`` event. Pair the two to reconstruct renames.
+    """
+
+    type: str  # Kind of change observed (e.g. "create", "write", "rename").
+    path: str = ""  # Sandbox-relative path; for ``rename`` events the OLD path.
+    error: str = ""  # For ``error`` events, a human-readable message; empty otherwise.
+
 
 class SandboxClaimEnvVar(BaseModel):
     """Represents an environment variable entry in a SandboxClaim spec."""
@@ -151,6 +199,9 @@ class SandboxdPodTunnelConnectionConfig(BaseModel):
 
     Doesn't work on Kata or gVisor; use SandboxdInClusterConnectionConfig for those.
     """
+    model_config = ConfigDict(hide_input_in_errors=True)
+
+    auth_token: _SandboxdAuthToken | None = Field(default=None, repr=False)  # Optional bearer token for sandboxd REST and gRPC.
     rest_port: int = 8080  # sandboxd REST filesystem port on the pod.
     grpc_port: int = 9090  # sandboxd gRPC ProcessService port on the pod.
     port_forward_ready_timeout: int = 30  # Seconds to wait for port-forward readiness.
@@ -162,6 +213,8 @@ class SandboxdPodTunnelConnectionConfig(BaseModel):
             raise ValueError("port must be between 1 and 65535")
         return v
 
+    _redact_errors = model_validator(mode="wrap")(_redact_sandboxd_validation_errors)
+
 class SandboxdInClusterConnectionConfig(BaseModel):
     """Connect to sandboxd directly over the selected in-cluster address.
 
@@ -171,6 +224,9 @@ class SandboxdInClusterConnectionConfig(BaseModel):
     REST filesystem listener defaults to port 8080 and its gRPC ProcessService
     listener to port 9090.
     """
+    model_config = ConfigDict(hide_input_in_errors=True)
+
+    auth_token: _SandboxdAuthToken | None = Field(default=None, repr=False)  # Optional bearer token for sandboxd REST and gRPC.
     mode: Literal["in-cluster-service", "in-cluster-pod-ip"]
     rest_port: int = 8080
     grpc_port: int = 9090
@@ -201,6 +257,8 @@ class SandboxdInClusterConnectionConfig(BaseModel):
             raise ValueError("REST and gRPC ports must be different")
         return self
 
+    _redact_errors = model_validator(mode="wrap")(_redact_sandboxd_validation_errors)
+
 class SandboxInClusterConnectionConfig(BaseModel):
     """Configuration for direct in-cluster connection to the sandbox pod, bypassing the router.
 
@@ -218,6 +276,24 @@ SandboxConnectionConfig = Union[
     SandboxdPodTunnelConnectionConfig,
     SandboxdInClusterConnectionConfig,
 ]
+
+class AdditionalPodMetadata(BaseModel):
+    """Wire-format for SandboxClaim ``spec.additionalPodMetadata``.
+
+    Labels and annotations stamped onto the running Sandbox Pod (not the
+    SandboxClaim object). Omit empty sections so the manifest never carries
+    an empty ``additionalPodMetadata``.
+    """
+    labels: dict[str, str] | None = None
+    annotations: dict[str, str] | None = None
+
+class SandboxFileConfig(BaseModel):
+    """Client-side file download limits, shared by read() and read_to()."""
+
+    model_config = ConfigDict(validate_assignment=True)
+
+    max_download_size: int | None = Field(default=None, strict=True, gt=0)  # Maximum file bytes downloaded; None preserves unlimited reads.
+
 
 class SandboxTracerConfig(BaseModel):
     """Configuration for tracer level information"""

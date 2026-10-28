@@ -19,6 +19,10 @@ class SandboxError(RuntimeError):
     """Base class for all sandbox-related errors."""
 
 
+class SandboxResponseTooLargeError(SandboxError):
+    """Raised when a file download exceeds its configured byte limit."""
+
+
 class SandboxNotReadyError(SandboxError):
     """Raised when the sandbox is not ready for communication."""
 

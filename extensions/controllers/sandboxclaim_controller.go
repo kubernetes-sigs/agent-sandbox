@@ -688,6 +688,28 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 	// Cold path: no existing sandbox or warm pool candidate.
 	// Need template to create from scratch.
 	logger.V(1).Info("Cold path: no sandbox found, creating from template", "claim", claim.Name)
+
+	// The cached claim can predate an adoption an earlier pass committed, and no
+	// later pass removes a Sandbox created here. Confirm on a fresh read first.
+	// A claim that forces a cold start never adopts, so it skips the read: its
+	// only Sandbox is named after it and AlreadyExists catches a second create.
+	// A failed read doesn't block the create and falls back to that same guard.
+	if !claimForcesColdStart(claim) {
+		fresh := &extensionsv1beta1.SandboxClaim{}
+		err := r.authoritativeReader().Get(ctx, client.ObjectKeyFromObject(claim), fresh)
+		switch {
+		case k8errors.IsNotFound(err):
+			logger.V(1).Info("Claim deleted before cold create; skipping", "claim", claim.Name)
+			return nil, nil
+		case err != nil:
+			logger.V(1).Info("Fresh claim read before cold create failed; creating anyway", "claim", claim.Name, "error", err)
+		case fresh.UID != claim.UID || fresh.Status.SandboxStatus.Name != "" ||
+			fresh.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] != "":
+			logger.V(1).Info("Cached claim is behind the API server; skipping cold create", "claim", claim.Name)
+			return nil, fmt.Errorf("%w: claim %s is already assigned", errSandboxAlreadyExists, claim.Name)
+		}
+	}
+
 	template, templateErr := r.getTemplate(ctx, claim)
 	if templateErr != nil {
 		return nil, templateErr
@@ -2074,6 +2096,12 @@ func (r *SandboxClaimReconciler) warmCandidateRetryAfter(claim *extensionsv1beta
 	return min(warmCandidateRetryInterval, remaining), true
 }
 
+// claimForcesColdStart reports whether the claim asks for configuration a
+// warm Sandbox cannot have, so it never adopts from the warm pool.
+func claimForcesColdStart(claim *extensionsv1beta1.SandboxClaim) bool {
+	return len(claim.Spec.Env) > 0 || len(claim.Spec.VolumeClaimTemplates) > 0
+}
+
 func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, _ *extensionsv1beta1.SandboxTemplate) (*v1beta1.Sandbox, error) {
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Executing getOrCreateSandbox", "claim", claim.Name)
@@ -2240,7 +2268,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 
 	// Implicit Cold Start Detection (Bypassing the Queue):
 	// If len(claim.Spec.Env) > 0 or len(claim.Spec.VolumeClaimTemplates) > 0, the controller immediately bypasses the warm pool queue.
-	if len(claim.Spec.Env) > 0 || len(claim.Spec.VolumeClaimTemplates) > 0 {
+	if claimForcesColdStart(claim) {
 		logger.Info("Bypassing warm pool adoption because custom configuration is provided (env or volume claim templates)", "claim", claim.Name)
 		return nil, nil
 	}
@@ -2687,21 +2715,6 @@ func (r *SandboxClaimReconciler) recordControllerStartupLatency(ctx context.Cont
 	}
 }
 
-// recordSandboxCreationLatency records the sandbox creation latency.
-func (r *SandboxClaimReconciler) recordSandboxCreationLatency(sandbox *v1beta1.Sandbox, launchType string, templateName string) {
-	if sandbox == nil || sandbox.CreationTimestamp.IsZero() {
-		return
-	}
-	sandboxReady := meta.FindStatusCondition(sandbox.Status.Conditions, string(v1beta1.SandboxConditionReady))
-	if sandboxReady == nil || sandboxReady.Status != metav1.ConditionTrue || sandboxReady.LastTransitionTime.IsZero() {
-		return
-	}
-	latency := sandboxReady.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
-	if latency >= 0 {
-		asmetrics.RecordSandboxCreationLatency(latency, sandbox.Namespace, launchType, templateName)
-	}
-}
-
 // drainObservedTime removes the observedTimes entry for a claim if the UID
 // matches. This is safe to call even when no entry exists.
 func (r *SandboxClaimReconciler) drainObservedTime(claim *extensionsv1beta1.SandboxClaim) {
@@ -2806,7 +2819,6 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 
 	r.recordClaimStartupLatency(ctx, claim, launchType, templateName)
 	r.recordControllerStartupLatency(ctx, claim, launchType, templateName)
-	r.recordSandboxCreationLatency(sandbox, launchType, templateName)
 	r.recordClientClaimStartupLatency(ctx, claim, launchType, templateName)
 
 	// Stamp the first-ready annotation to prevent duplicate metric recording on

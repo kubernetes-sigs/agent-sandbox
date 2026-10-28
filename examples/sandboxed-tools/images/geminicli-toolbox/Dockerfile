@@ -20,7 +20,11 @@
 #   cd examples/sandboxed-tools
 #   go run ./cmd/sandboxed-tools-cli -session mysession -toolset geminicli
 
-FROM golang:1.27-bookworm AS build
+# The builder runs on the build host's native platform and cross-compiles for
+# the target, so only the runtime stage below needs emulation when building
+# for a foreign architecture (e.g. amd64 images from an arm64 workstation).
+FROM --platform=$BUILDPLATFORM golang:1.27.3-bookworm AS build
+ARG TARGETARCH
 WORKDIR /src
 # examples/sandboxed-tools is its own module that replaces the root module
 # and the agentclientprotocol example with local paths, so all three go.mod
@@ -33,7 +37,7 @@ RUN go mod download
 COPY examples/sandboxed-tools /src/examples/sandboxed-tools
 # -buildvcs=false: the build context includes .git, but git metadata is not
 # usable inside the build container (and version stamping is not needed here).
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -ldflags="-s -w" \
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH go build -trimpath -buildvcs=false -ldflags="-s -w" \
       -o /geminicli-toolbox ./cmd/geminicli-toolbox
 
 FROM debian:bookworm-slim

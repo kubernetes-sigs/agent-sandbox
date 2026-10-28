@@ -14,6 +14,7 @@
 """Validation for explicitly named SandboxClaims without freezing mutable spec fields."""
 
 import re
+from typing import Any
 
 from .exceptions import SandboxNotFoundError
 
@@ -39,7 +40,7 @@ def validate_claim_name(name: str) -> None:
         )
 
 
-def validate_claim_for_adoption(claim: dict | None, claim_name: str, warmpool: str) -> None:
+def validate_claim_for_adoption(claim: dict[str, Any] | None, claim_name: str, warmpool: str) -> None:
     """Check the pool, deletion state and identity needed for a UID-pinned watch."""
     if claim is None:
         raise SandboxNotFoundError(

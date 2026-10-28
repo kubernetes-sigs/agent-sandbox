@@ -318,6 +318,22 @@ func TestValidate(t *testing.T) {
 			wantErr: "",
 		},
 		{
+			name: "metrics-secure-serving without cert",
+			mut: func(c *Config) {
+				c.MetricsSecureServing = true
+			},
+			wantErr: "tls-cert-file and --tls-key-file are required when --metrics-secure-serving",
+		},
+		{
+			name: "valid metrics-secure-serving with cert",
+			mut: func(c *Config) {
+				c.MetricsSecureServing = true
+				c.TLSCertFile = "/c"
+				c.TLSKeyFile = "/k"
+			},
+			wantErr: "",
+		},
+		{
 			name:    "negative proxy timeout",
 			mut:     func(c *Config) { c.ProxyTimeout = -1 * time.Second },
 			wantErr: "proxy-timeout",

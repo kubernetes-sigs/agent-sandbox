@@ -776,12 +776,13 @@ func (cl *ClusterClient) IsKindCluster() bool {
 		if strings.HasPrefix(node.Spec.ProviderID, "kind://") {
 			return true
 		}
-		if strings.HasPrefix(node.Spec.ProviderID, "gce://") {
+		// Any other provider id (gce://, aws://, azure://, ...) is a real cluster.
+		if node.Spec.ProviderID != "" {
 			return false
 		}
-		cl.Logf("Unknown node provider id %q", node.Spec.ProviderID)
+		cl.Logf("Node %q has no provider id", node.Name)
 	}
 
-	cl.Fatalf("cannot determine if cluster is kind (no node with recognized providerID)")
+	cl.Fatalf("cannot determine if cluster is kind (no node with a providerID)")
 	return false
 }

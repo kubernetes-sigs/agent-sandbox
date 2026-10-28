@@ -250,6 +250,55 @@ function isValidDNSLabel(s: string): boolean {
   return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(s);
 }
 
+const DNS_SUBDOMAIN_MAX_LENGTH = 253;
+const DNS_SUBDOMAIN_RE =
+  /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/;
+
+function isValidDNSSubdomain(s: string): boolean {
+  return s.length <= DNS_SUBDOMAIN_MAX_LENGTH && DNS_SUBDOMAIN_RE.test(s);
+}
+
+/** Fails when the claim under this name is no longer the one being waited on. */
+function assertClaimUid(
+  claim: Record<string, unknown> | undefined,
+  claimName: string,
+  expectedUid: string | undefined,
+): void {
+  const uid = (claim?.metadata as Record<string, unknown> | undefined)?.uid;
+  if (expectedUid && uid !== expectedUid) {
+    throw new SandboxNotFoundError(
+      `SandboxClaim '${claimName}' was replaced while waiting for it to be resolved.`,
+    );
+  }
+}
+
+/**
+ * Checks that an existing claim can be adopted by a createSandbox() call and
+ * returns its UID, which pins the wait to this exact claim.
+ */
+function assertAdoptable(
+  claim: Record<string, unknown>,
+  claimName: string,
+  warmpool: string,
+): string {
+  const metadata = (claim.metadata as Record<string, unknown>) ?? {};
+  if (metadata.deletionTimestamp) {
+    throw new SandboxError(`SandboxClaim '${claimName}' is terminating.`);
+  }
+  const spec = (claim.spec as Record<string, unknown>) ?? {};
+  const warmPoolRef = (spec.warmPoolRef as Record<string, unknown>) ?? {};
+  if (warmPoolRef.name !== warmpool) {
+    throw new SandboxError(
+      `SandboxClaim '${claimName}' references warm pool '${warmPoolRef.name}', not '${warmpool}'.`,
+    );
+  }
+  // Without a UID the replacement guard in assertClaimUid is silently off.
+  if (typeof metadata.uid !== "string" || metadata.uid === "") {
+    throw new SandboxError(`SandboxClaim '${claimName}' has no metadata.uid.`);
+  }
+  return metadata.uid;
+}
+
 /**
  * Result of a single watch pass.
  * "closed" means the watch stream ended cleanly (done(null)) — caller should re-list.
@@ -331,6 +380,28 @@ function isWatchCleanClose(err: unknown): boolean {
 }
 
 /**
+ * Loads the ambient Kubernetes configuration, failing fast when there is none:
+ * loadFromDefault() otherwise falls back to http://localhost:8080 and every
+ * later call would fail with a connection error instead of a clear message.
+ */
+function loadDefaultKubeConfig(): k8s.KubeConfig {
+  const kubeConfig = new k8s.KubeConfig();
+  kubeConfig.loadFromDefault();
+
+  const clusters = kubeConfig.clusters ?? [];
+  const isOnlyFallback =
+    clusters.length === 0 ||
+    clusters.every((c) => c.server === "http://localhost:8080");
+  if (isOnlyFallback) {
+    throw new SandboxError(
+      "No Kubernetes configuration found. " +
+        "Set KUBECONFIG, provide ~/.kube/config, or run inside a cluster.",
+    );
+  }
+  return kubeConfig;
+}
+
+/**
  * Registry-based client for managing multiple Sandbox handles.
  * Tracks all created sandboxes and supports creating, retrieving,
  * listing, and deleting them.
@@ -374,6 +445,12 @@ export class SandboxClient {
    */
   private readonly cancelledProvisions: Set<string> = new Set();
 
+  /**
+   * Registry keys of caller-named claims. Auto-cleanup releases their handles
+   * but leaves the claims in the cluster.
+   */
+  private readonly namedClaims: Set<string> = new Set();
+
   constructor(options: SandboxClientOptions = {}) {
     if (
       options.sandboxReadyTimeout !== undefined &&
@@ -405,19 +482,7 @@ export class SandboxClient {
     this.logger = resolveLogger(options.logger, options.quiet);
     this.sandboxdOptions = normalizeSandboxdOptions(options.sandboxd);
 
-    this.kubeConfig = new k8s.KubeConfig();
-    this.kubeConfig.loadFromDefault();
-
-    const clusters = this.kubeConfig.clusters ?? [];
-    const isOnlyFallback =
-      clusters.length === 0 ||
-      clusters.every((c) => c.server === "http://localhost:8080");
-    if (isOnlyFallback) {
-      throw new SandboxError(
-        "No Kubernetes configuration found. " +
-          "Set KUBECONFIG, provide ~/.kube/config, or run inside a cluster.",
-      );
-    }
+    this.kubeConfig = options.kubeConfig ?? loadDefaultKubeConfig();
     this.customObjectsApi = this.kubeConfig.makeApiClient(k8s.CustomObjectsApi);
   }
 
@@ -471,10 +536,32 @@ export class SandboxClient {
     // Like the deadline above, checked before any provisioning work starts.
     const specExtras = buildClaimSpecExtras(opts, shutdownTime);
 
+    if (opts?.claimName === undefined && opts?.adoptExisting) {
+      throw new SandboxError("adoptExisting requires an explicit claimName.");
+    }
+    if (opts?.claimName !== undefined && !isValidDNSSubdomain(opts.claimName)) {
+      throw new SandboxError(
+        `claimName must be a valid DNS-1123 subdomain (lowercase alphanumerics, '-' and '.', ` +
+          `max ${DNS_SUBDOMAIN_MAX_LENGTH} characters), got: '${opts.claimName}'`,
+      );
+    }
+
     // Empty string normalizes to defaultNamespace (matches Go client behaviour).
     const ns = namespace || this.defaultNamespace;
-    const claimName = `sandbox-claim-${crypto.randomBytes(4).toString("hex")}`;
+    const claimName =
+      opts?.claimName ??
+      `sandbox-claim-${crypto.randomBytes(4).toString("hex")}`;
     const key = `${ns}/${claimName}`;
+
+    // Generated names cannot collide, but a named claim can be requested twice.
+    if (this.attaching.has(key)) {
+      throw new SandboxError(
+        `SandboxClaim '${claimName}' is already being created or attached by this client.`,
+      );
+    }
+    if (opts?.claimName !== undefined) {
+      this.namedClaims.add(key);
+    }
 
     // Publish the provision under its registry key *before* the claim exists in
     // the cluster, so a concurrent getSandbox() that discovers the claim by
@@ -526,24 +613,41 @@ export class SandboxClient {
     }
 
     let ready: ReadySandbox;
+    const named = opts?.claimName !== undefined;
+    let swept = false;
 
     try {
       const traceContextStr =
         sandboxTracingManager?.getTraceContextJson() ?? "";
-      await this.createClaim(
-        claimName,
-        warmpool,
-        ns,
-        opts?.labels,
-        traceContextStr,
-        sandboxTracer,
-        sandboxTracingManager?.parentContext,
-        specExtras,
-      );
+      let expectedUid: string | undefined;
+      try {
+        const created = await this.createClaim(
+          claimName,
+          warmpool,
+          ns,
+          opts?.labels,
+          traceContextStr,
+          sandboxTracer,
+          sandboxTracingManager?.parentContext,
+          specExtras,
+        );
+        expectedUid = (created?.metadata as Record<string, unknown> | undefined)
+          ?.uid as string | undefined;
+      } catch (err) {
+        if (!(opts?.adoptExisting && isK8s409(err))) {
+          throw err;
+        }
+        expectedUid = assertAdoptable(
+          await this.getClaim(claimName, ns),
+          claimName,
+          warmpool,
+        );
+      }
       // deleteAll() may have swept this key while the claim was being created;
       // it could not delete a claim the apiserver had not accepted yet, so fail
       // here and let the rollback below remove it.
       if (this.cancelledProvisions.delete(`${ns}/${claimName}`)) {
+        swept = true;
         throw new SandboxError(
           `SandboxClaim '${claimName}' was cleaned up while it was being created.`,
         );
@@ -554,13 +658,18 @@ export class SandboxClient {
         sandboxReadyTimeout * 1000,
         sandboxTracer,
         sandboxTracingManager?.parentContext,
+        undefined,
+        true,
+        // Generated names are unique; only a named claim can be replaced.
+        named ? expectedUid : undefined,
       );
     } catch (err) {
       sandboxTracingManager?.endLifecycleSpan();
       // Clean up orphaned claim before re-throwing. A 409 means the name is
-      // already taken by a claim we never created, so deleting it would take
-      // out someone else's Sandbox — skip cleanup in that case.
-      if (isK8s409(err)) {
+      // already taken by a claim we never created, and a named claim belongs
+      // to the caller, so deleting either would take out someone else's
+      // Sandbox. Only a deleteAll() sweep deletes a named claim.
+      if (isK8s409(err) || (named && !swept)) {
         throw err;
       }
       try {
@@ -606,9 +715,19 @@ export class SandboxClient {
       logger: this.logger,
     };
 
+    // A repeated create of a named claim finds its handle already registered.
+    // Keep it, so its connections survive, unless the claim now has a new Sandbox.
+    const key = `${ns}/${claimName}`;
+    const prior = this.registry.get(key);
+    if (prior?.isActive && prior.sandboxName === ready.sandboxName) {
+      sandboxTracingManager?.endLifecycleSpan();
+      return prior;
+    }
+
     const sandbox = new Sandbox(init);
 
-    this.registry.set(`${ns}/${claimName}`, sandbox);
+    this.registry.set(key, sandbox);
+    await prior?.closeLocal().catch(() => {});
     return sandbox;
   }
 
@@ -887,35 +1006,40 @@ export class SandboxClient {
     claimName: string,
     namespace?: string,
   ): Promise<string | undefined> {
-    const ns = namespace || this.defaultNamespace;
-    let claimObj: unknown;
+    const claimObj = await this.getClaim(
+      claimName,
+      namespace || this.defaultNamespace,
+    );
+    const spec = (claimObj?.spec as Record<string, unknown>) ?? {};
+    const warmPoolRef = (spec.warmPoolRef as Record<string, unknown>) ?? {};
+    return warmPoolRef.name as string | undefined;
+  }
+
+  /** Reads a SandboxClaim, mapping a 404 to SandboxNotFoundError. */
+  private async getClaim(
+    claimName: string,
+    namespace: string,
+  ): Promise<Record<string, unknown>> {
     try {
-      claimObj = await this.customObjectsApi.getNamespacedCustomObject({
+      return (await this.customObjectsApi.getNamespacedCustomObject({
         group: CLAIM_API_GROUP,
         version: CLAIM_API_VERSION,
-        namespace: ns,
+        namespace,
         plural: CLAIM_PLURAL_NAME,
         name: claimName,
-      });
+      })) as Record<string, unknown>;
     } catch (err) {
       if (isK8s404(err)) {
         throw new SandboxNotFoundError(
-          `SandboxClaim '${claimName}' not found in namespace '${ns}'.`,
+          `SandboxClaim '${claimName}' not found in namespace '${namespace}'.`,
           { cause: err },
         );
       }
       throw new SandboxError(
-        `Failed to get SandboxClaim '${claimName}' in namespace '${ns}'.`,
+        `Failed to get SandboxClaim '${claimName}' in namespace '${namespace}'.`,
         { cause: err },
       );
     }
-    const spec =
-      ((claimObj as Record<string, unknown>)?.spec as Record<
-        string,
-        unknown
-      >) ?? {};
-    const warmPoolRef = (spec.warmPoolRef as Record<string, unknown>) ?? {};
-    return warmPoolRef.name as string | undefined;
   }
 
   /**
@@ -927,6 +1051,7 @@ export class SandboxClient {
 
     const sandbox = this.registry.get(key);
     this.registry.delete(key);
+    this.namedClaims.delete(key);
 
     if (sandbox) {
       await sandbox.close();
@@ -950,9 +1075,22 @@ export class SandboxClient {
 
   /**
    * Closes and deletes all tracked sandboxes, including the ones still being
-   * created. Best-effort.
+   * created and caller-named ones. Best-effort.
    */
   async deleteAll(): Promise<void> {
+    await this.sweep(false);
+  }
+
+  /**
+   * What auto-cleanup runs: like {@link deleteAll}, but a caller-named claim is
+   * only released locally and stays in the cluster.
+   */
+  private async releaseOnExit(): Promise<void> {
+    await this.sweep(true);
+  }
+
+  private async sweep(keepNamed: boolean): Promise<void> {
+    const isKept = (key: string) => keepNamed && this.namedClaims.has(key);
     const snapshot = new Map(this.registry);
     this.registry.clear();
 
@@ -963,18 +1101,24 @@ export class SandboxClient {
     // The in-flight promise is captured here, not after the deletions below: a
     // create that finishes mid-sweep drops its own {@link attaching} entry, and
     // looking it up later would miss exactly the handle that needs discarding.
-    const pending = [...this.provisioning].map((key) => ({
-      key,
-      inFlight: this.attaching.get(key),
-    }));
+    const pending = [...this.provisioning]
+      .filter((key) => !isKept(key))
+      .map((key) => ({ key, inFlight: this.attaching.get(key) }));
     for (const { key } of pending) {
       this.cancelledProvisions.add(key);
     }
 
     const results = await Promise.allSettled([
-      ...[...snapshot.values()].map((sandbox) => sandbox.close()),
+      ...[...snapshot].map(([key, sandbox]) =>
+        isKept(key) ? sandbox.closeLocal() : sandbox.close(),
+      ),
       ...pending.map(({ key }) => this.deleteProvisioningClaim(key)),
     ]);
+    for (const key of [...snapshot.keys(), ...pending.map((p) => p.key)]) {
+      if (!isKept(key)) {
+        this.namedClaims.delete(key);
+      }
+    }
 
     for (const result of results) {
       if (result.status === "rejected") {
@@ -1096,7 +1240,7 @@ export class SandboxClient {
         client.autoCleanupActive = false;
       }
       void Promise.allSettled(
-        clients.map((client) => client.deleteAll()),
+        clients.map((client) => client.releaseOnExit()),
       ).finally(() => {
         // Re-raise so the default handler terminates the process, now that
         // every client is done deleting.
@@ -1123,7 +1267,9 @@ export class SandboxClient {
 
   private static async cleanupAllClients(): Promise<void> {
     await Promise.allSettled(
-      [...SandboxClient.autoCleanupClients].map((client) => client.deleteAll()),
+      [...SandboxClient.autoCleanupClients].map((client) =>
+        client.releaseOnExit(),
+      ),
     );
   }
 
@@ -1150,7 +1296,7 @@ export class SandboxClient {
     tracer: Tracer | null = null,
     parentContext?: unknown,
     specExtras: ClaimSpecExtras = {},
-  ): Promise<void> {
+  ): Promise<Record<string, unknown> | undefined> {
     if (labels) {
       validateLabels(labels);
     }
@@ -1187,16 +1333,16 @@ export class SandboxClient {
           `using warm pool '${warmpool}'...`,
       );
 
-      await this.customObjectsApi.createNamespacedCustomObject({
+      return (await this.customObjectsApi.createNamespacedCustomObject({
         group: CLAIM_API_GROUP,
         version: CLAIM_API_VERSION,
         namespace,
         plural: CLAIM_PLURAL_NAME,
         body: manifest,
-      });
+      })) as Record<string, unknown> | undefined;
     };
 
-    await withSpan(
+    return withSpan(
       tracer,
       this.traceServiceName,
       "create_claim",
@@ -1215,6 +1361,7 @@ export class SandboxClient {
     namespace: string,
     remainingMs: number,
     resourceVersion?: string,
+    expectedUid?: string,
   ): Promise<WatchPassResult<string>> {
     return new Promise<WatchPassResult<string>>((resolve) => {
       const watcher = new k8s.Watch(this.kubeConfig);
@@ -1264,6 +1411,7 @@ export class SandboxClient {
             if (type === "ADDED" || type === "MODIFIED") {
               const status = (obj.status as Record<string, unknown>) ?? {};
               try {
+                assertClaimUid(obj, claimName, expectedUid);
                 inspectClaimConditions(readConditions(obj));
               } catch (err) {
                 settle({
@@ -1328,6 +1476,7 @@ export class SandboxClient {
     claimName: string,
     namespace: string,
     timeoutMs: number,
+    expectedUid?: string,
   ): Promise<string> {
     this.logger.info(`Resolving sandbox name from claim '${claimName}'...`);
 
@@ -1362,6 +1511,7 @@ export class SandboxClient {
       let resourceVersion: string | undefined;
       if (fetchedClaim !== undefined) {
         const claimObj = fetchedClaim as Record<string, unknown>;
+        assertClaimUid(claimObj, claimName, expectedUid);
         const metadata = (claimObj?.metadata as Record<string, unknown>) ?? {};
         resourceVersion = metadata.resourceVersion as string | undefined;
         const status = (claimObj?.status as Record<string, unknown>) ?? {};
@@ -1389,6 +1539,7 @@ export class SandboxClient {
         namespace,
         remaining,
         resourceVersion,
+        expectedUid,
       );
       if (result.type === "resolved") {
         return result.value;
@@ -1665,6 +1816,7 @@ export class SandboxClient {
     parentContext?: unknown,
     resolveTimeoutMs = totalTimeoutMs,
     waitForReady = true,
+    expectedUid?: string,
   ): Promise<ReadySandbox> {
     const fn = async () => {
       const startTime = Date.now();
@@ -1674,6 +1826,7 @@ export class SandboxClient {
         claimName,
         namespace,
         Math.min(resolveTimeoutMs, totalTimeoutMs),
+        expectedUid,
       );
 
       if (!waitForReady) {

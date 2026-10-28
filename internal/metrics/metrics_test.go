@@ -104,6 +104,21 @@ func TestSandboxCreationLatencyRecording(t *testing.T) {
 	}
 }
 
+func TestLatencyHelpersSkipNegativeDurations(t *testing.T) {
+	t.Run("claim controller startup skips future observed time", func(t *testing.T) {
+		ClaimControllerStartupLatency.Reset()
+		RecordClaimControllerStartupLatency(time.Now().Add(1*time.Second), LaunchTypeCold, "test-tmpl")
+		require.Equal(t, 0, testutil.CollectAndCount(ClaimControllerStartupLatency))
+	})
+
+	t.Run("sandbox creation skips negative duration", func(t *testing.T) {
+		SandboxCreationLatency.Reset()
+		RecordSandboxCreationLatency(-1*time.Second, "default", LaunchTypeCold, "test-tmpl")
+		require.Equal(t, 0, testutil.CollectAndCount(SandboxCreationLatency))
+	})
+
+}
+
 func TestSandboxClaimCreationRecording(t *testing.T) {
 	testCases := []struct {
 		name         string

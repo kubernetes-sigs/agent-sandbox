@@ -39,7 +39,7 @@ from .models import (
     SandboxdInClusterConnectionConfig,
 )
 from .k8s_helper import K8sHelper
-from .utils import kubectl_kubeconfig_args, merge_headers
+from .utils import kubectl_kubeconfig_args, merge_headers, sandboxd_auth_headers
 from .exceptions import (
     SandboxNoServiceError,
     SandboxNotReadyError,
@@ -88,7 +88,7 @@ def _capture_streamed_error_body(response: requests.Response) -> None:
         logger.debug("Unable to capture streamed error response body", exc_info=True)
 
 
-def _router_timeout_header_value(timeout) -> str | None:
+def _router_timeout_header_value(timeout: Any) -> str | None:
     value = None
     if isinstance(timeout, bool):
         return None
@@ -129,7 +129,7 @@ class ConnectionStrategy(ABC):
         """Returns True if X-Sandbox-* router headers should be injected into requests."""
         pass
 
-    def invalidate_pod_ip(self):
+    def invalidate_pod_ip(self) -> None:
         """Drops any Pod IP cached by the strategy so the next connect() re-resolves it,
         without tearing down the connection. No-op unless the strategy caches a Pod IP."""
         pass
@@ -210,7 +210,7 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
         """Finds a free port on localhost."""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(('127.0.0.1', 0))
-            return s.getsockname()[1]
+            return int(s.getsockname()[1])
 
     def _is_port_open(self, port: int) -> bool:
         """Checks if a port is open on localhost."""
@@ -302,7 +302,10 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
                     "-n", self.config.router_namespace,
                     *kube_args,
                 ],
-                stdout=subprocess.PIPE,
+                # kubectl writes a line to stdout for every forwarded connection;
+                # an undrained pipe fills up and blocks new connections. stderr
+                # stays piped for the crash message.
+                stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE
             )
 
@@ -397,7 +400,7 @@ class SandboxdPodTunnelStrategy(ConnectionStrategy):
         self.config = config
         self._get_pod_name = get_pod_name
         self._api_client = api_client
-        self.port_forward_process: subprocess.Popen | None = None
+        self.port_forward_process: subprocess.Popen[Any] | None = None
         self.base_url: str | None = None
         self.grpc_target: str | None = None
         self._lock = threading.RLock()  # Reentrant: connect() calls close().
@@ -405,7 +408,8 @@ class SandboxdPodTunnelStrategy(ConnectionStrategy):
     def _get_free_port(self) -> int:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(('127.0.0.1', 0))
-            return s.getsockname()[1]
+            port = s.getsockname()[1]
+            return int(port)
 
     def _is_port_open(self, port: int) -> bool:
         try:
@@ -457,7 +461,10 @@ class SandboxdPodTunnelStrategy(ConnectionStrategy):
                     "-n", self.namespace,
                     *kube_args,
                 ],
-                stdout=subprocess.PIPE,
+                # kubectl writes a line to stdout for every forwarded connection;
+                # an undrained pipe fills up and blocks new connections. stderr
+                # stays piped for the crash message.
+                stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
             )
             while time.monotonic() - start_time < self.config.port_forward_ready_timeout:
@@ -482,11 +489,11 @@ class SandboxdPodTunnelStrategy(ConnectionStrategy):
             sandbox_client_discovery_latency_ms.labels(
                 mode="sandboxd_pod_tunnel", status=status).observe(latency)
 
-    def close(self):
+    def close(self) -> None:
         with self._lock:
             self._close()
 
-    def _close(self):
+    def _close(self) -> None:
         if self.port_forward_process:
             try:
                 self.port_forward_process.terminate()
@@ -502,7 +509,7 @@ class SandboxdPodTunnelStrategy(ConnectionStrategy):
                 self.base_url = None
                 self.grpc_target = None
 
-    def verify_connection(self):
+    def verify_connection(self) -> None:
         if self.port_forward_process and self.port_forward_process.poll() is not None:
             _, stderr = self.port_forward_process.communicate()
             raise SandboxPortForwardError(
@@ -610,7 +617,7 @@ class InClusterConnectionStrategy(ConnectionStrategy):
         self._resolved = False
         self._cached_pod_ip_url = None
 
-    def invalidate_pod_ip(self):
+    def invalidate_pod_ip(self) -> None:
         self._resolved = False
         self._cached_pod_ip_url = None
 
@@ -635,6 +642,7 @@ class SandboxConnector:
         self.id = sandbox_id
         self.namespace = namespace
         self.connection_config = connection_config
+        self._sandboxd_auth_headers = sandboxd_auth_headers(connection_config)
         self.k8s_helper = k8s_helper
         self._get_pod_ip = get_pod_ip
         self._get_pod_name = get_pod_name
@@ -719,7 +727,7 @@ class SandboxConnector:
             (SandboxdPodTunnelConnectionConfig, SandboxdInClusterConnectionConfig),
         )
 
-    def grpc_channel(self):
+    def grpc_channel(self) -> Any:
         """Return a lazily created gRPC channel to sandboxd's ProcessService.
 
         The channel is plaintext and reaches the selected sandboxd listener.
@@ -728,7 +736,7 @@ class SandboxConnector:
         with self._transport_lock:
             return self._grpc_channel_locked()
 
-    def _grpc_channel_locked(self):
+    def _grpc_channel_locked(self) -> Any:
         if not self.is_sandboxd():
             raise RuntimeError("grpc_channel() is only available for the sandboxd runtime")
         target = getattr(self.strategy, "grpc_target", None)
@@ -754,7 +762,20 @@ class SandboxConnector:
                 "the sandboxd runtime requires gRPC support; install the "
                 "'grpc' extra: pip install k8s-agent-sandbox[grpc]"
             ) from e
-        self._grpc_channel = grpc.insecure_channel(target)
+        authorization = self._sandboxd_auth_headers.get("authorization")
+        if authorization is None:
+            channel = grpc.insecure_channel(target)
+        else:
+            from ._grpc_auth import BearerTokenInterceptor
+
+            interceptor = BearerTokenInterceptor(authorization)
+            channel = grpc.insecure_channel(target)
+            try:
+                channel = grpc.intercept_channel(channel, interceptor)
+            except Exception:
+                channel.close()
+                raise
+        self._grpc_channel = channel
         self._grpc_channel_target = target
         return self._grpc_channel
 
@@ -803,7 +824,7 @@ class SandboxConnector:
                     self._incluster_transport_token = object()
             return base_url
 
-    def close(self):
+    def close(self) -> None:
         with self._transport_lock:
             self._incluster_transport_token = object()
             self._incluster_target = None
@@ -874,8 +895,10 @@ class SandboxConnector:
             # Prepare the request
             url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
 
-            # Precedence: config < caller < SDK routing headers.
-            headers = merge_headers(self._extra_headers, kwargs.get("headers"))
+            # Precedence: config < caller < sandboxd auth / SDK routing headers.
+            headers = merge_headers(
+                self._extra_headers, kwargs.get("headers"), self._sandboxd_auth_headers
+            )
             if self.strategy.should_inject_router_headers():
                 headers["X-Sandbox-ID"] = self.id
                 headers["X-Sandbox-Namespace"] = self.namespace
@@ -920,6 +943,9 @@ class SandboxConnector:
             request_session = (
                 self._no_retry_session if disable_retries else self.session
             )
+            if self._sandboxd_auth_headers:
+                # Explicit auth prevents requests from replacing Bearer via .netrc.
+                kwargs["auth"] = lambda request: request
             response = request_session.request(
                 method, url, allow_redirects=False, **{**self._tls_kwargs, **kwargs}
             )

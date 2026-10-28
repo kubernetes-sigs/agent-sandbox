@@ -2694,6 +2694,9 @@ var schemaYAML = typed.YAMLObject(`types:
     - name: envVarsInjectionPolicy
       type:
         scalar: string
+    - name: failedPodPolicy
+      type:
+        scalar: string
     - name: networkPolicy
       type:
         namedType: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.NetworkPolicySpec

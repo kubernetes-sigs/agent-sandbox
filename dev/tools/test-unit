@@ -27,6 +27,11 @@ PYTHON_SDK_DIR = os.path.join("clients", "python", "agentic-sandbox-client")
 
 PYTHON_TEST_SUITES = [
     {
+        "name": "load-test-recipes",
+        # The convergence helper and its tests use only the standard library.
+        "dir": os.path.join("dev", "load-test", "test-recipes"),
+    },
+    {
         "name": "sandbox-router",
         "dir": os.path.join("clients", "python", "agentic-sandbox-client", "sandbox-router"),
         "requirements": "requirements.txt",
@@ -69,6 +74,14 @@ PYTHON_TEST_SUITES = [
         # governed_run.py is stdlib-only (os, re, shlex); the test exercises
         # the classifier directly, no sandbox/cluster needed.
         "dir": os.path.join("examples", "policy", "command-governance"),
+    },
+    {
+        "name": "deer-flow-sandbox",
+        # test_parsing.py covers the example's stdlib-only parsing helpers
+        # (agent_sandbox_provider/parsing.py); the provider module itself
+        # needs the deer-flow harness and a cluster and is exercised by the
+        # example's main.py instead. Just pytest, no requirements.txt.
+        "dir": os.path.join("examples", "deer-flow-sandbox"),
     },
     {
         "name": "hpa-swp-scaling",
@@ -142,7 +155,7 @@ PYTHON_TEST_SUITES = [
         "name": "integrations-mcp-server",
         "dir": os.path.join("clients", "integrations", "mcp-server"),
         "editable_installs": [
-            (PYTHON_SDK_DIR, "[async]"),
+            (PYTHON_SDK_DIR, "[async,grpc]"),
             (os.path.join("clients", "integrations", "mcp-server"), "[test]"),
         ]
     },
@@ -263,17 +276,19 @@ def run_go_tests(repo_root, artifact_dir):
             print(f"No Go packages in module {module_rel or '.'}; skipping")
             continue
 
-        # Keep the historical junit filename for the root module.
-        junit_name = "junit_unit-go.xml"
-        if module_rel:
-            junit_name = f"junit_unit-go-{module_rel.replace(os.sep, '-')}.xml"
+        # The root module keeps the historical, unsuffixed filenames.
+        suffix = f"-{module_rel.replace(os.sep, '-')}" if module_rel else ""
+        junit_file = os.path.join(artifact_dir, f"junit_unit-go{suffix}.xml")
+        # Not junit*: prow spyglass would try to parse it as a test report.
+        cover_file = os.path.join(artifact_dir, f"coverage_unit-go{suffix}.out")
 
         print(f"\n=== Running Go unit tests: module {module_rel or '(repo root)'} ===")
         result = subprocess.run(utils.go_tool_args(
             "gotestsum",
-            f"--junitfile={os.path.join(artifact_dir, junit_name)}",
+            f"--junitfile={junit_file}",
             "--",
             "-race",
+            f"-coverprofile={cover_file}",
             *packages
         ), cwd=module_dir)
 
@@ -391,21 +406,19 @@ def run_python_tests(repo_root, artifact_dir):
     return returncode
 
 
-def run_typescript_tests(repo_root, artifact_dir):
+def run_typescript_tests(repo_root, artifact_dir, env, npm_path, npx_path):
     """ runs TypeScript unit tests and returns the exit code """
     ts_dir = os.path.join(repo_root, "clients", "typescript", "agentic-sandbox-client")
     if not os.path.isdir(ts_dir):
         print(f"WARNING: TypeScript client directory not found, skipping: {ts_dir}")
         return 0
 
-    env = os.environ.copy()
-    npm_path, npx_path = ensure_node(repo_root, env)
-    if not npm_path or not npx_path:
-        print("Failed to ensure Node.js/npm is available.")
-        return 1
-
     print("\n=== Installing TypeScript dependencies ===")
-    subprocess.check_call([npm_path, "install", "--prefer-offline"], cwd=ts_dir, env=env)
+    # Return rather than raise, so main() still runs the report suite.
+    result = subprocess.run(
+        [npm_path, "install", "--prefer-offline"], cwd=ts_dir, env=env)
+    if result.returncode != 0:
+        return result.returncode
 
     returncode = 0
     for script in ("check", "typecheck"):
@@ -429,6 +442,18 @@ def run_typescript_tests(repo_root, artifact_dir):
     return returncode
 
 
+def run_stress_report_tests(repo_root, artifact_dir, env, node_path):
+    """Runs the report's browser-script tests with Node's built-in runner."""
+    junit_file = os.path.join(artifact_dir, "junit_unit-report.xml")
+    print("\n=== Running report JavaScript unit tests ===")
+    return subprocess.run([
+        node_path, "--test",
+        "--test-reporter=spec", "--test-reporter-destination=stdout",
+        "--test-reporter=junit", f"--test-reporter-destination={junit_file}",
+        "test/stress/generate-report/*_test.js",
+    ], cwd=repo_root, env=env).returncode
+
+
 def main():
     """ invokes unit tests and outputs junit results files """
     repo_root = utils.get_repo_root()
@@ -440,13 +465,24 @@ def main():
 
     go_rc = run_go_tests(repo_root, artifact_dir)
     python_rc = run_python_tests(repo_root, artifact_dir)
-    ts_rc = run_typescript_tests(repo_root, artifact_dir)
+
+    # Resolve Node.js once for both JavaScript suites: ensure_node probes
+    # versions and may download a local install.
+    node_env = os.environ.copy()
+    npm_path, npx_path = ensure_node(repo_root, node_env)
+    if npm_path and npx_path:
+        node_path = shutil.which("node", path=node_env.get("PATH", "")) or "node"
+        ts_rc = run_typescript_tests(repo_root, artifact_dir, node_env, npm_path, npx_path)
+        report_rc = run_stress_report_tests(repo_root, artifact_dir, node_env, node_path)
+    else:
+        print("Failed to ensure Node.js/npm is available.")
+        ts_rc = report_rc = 1
 
     if go_rc != 0:
         return go_rc
     if python_rc != 0:
         return python_rc
-    return ts_rc
+    return ts_rc or report_rc
 
 
 if __name__ == "__main__":

@@ -14,7 +14,8 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "kubernetes",
+    # 36.0.0 drops the in-cluster service account token, so requests are anonymous.
+    "kubernetes!=36.0.0",
     "requests",
     "urllib3",
     "pydantic",
@@ -69,6 +70,8 @@ test = [
     "httpx",
     "kubernetes_asyncio<34.0.0",
     "mypy~=1.14",
+    # Exercise real gRPC channels and authentication interceptors in unit tests.
+    "grpcio>=1.83.0",
 ]
 tracing = [
     "opentelemetry-api>=1.39,<1.42",
@@ -81,10 +84,26 @@ tracing = [
 testpaths = ["k8s_agent_sandbox"]
 
 [tool.mypy]
+strict = true
+# kubernetes / kubernetes_asyncio / watch still expose incompletely typed callables;
+# keep the rest of strict enabled for this package's own code.
+disallow_untyped_calls = false
 ignore_missing_imports = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 show_error_codes = true
+# Unit tests and generated protobuf stubs are not part of the typed public API.
+exclude = [
+  "(^|/)test/",
+  "(^|/)tests/",
+  "(^|/)_proto/",
+]
+
+[[tool.mypy.overrides]]
+module = ["grpc", "grpc.*"]
+# grpcio has annotations but no py.typed marker. Read the actual interceptor
+# interfaces so subclasses are checked without disabling strict diagnostics.
+follow_untyped_imports = true
 
 [[tool.mypy.overrides]]
 module = [

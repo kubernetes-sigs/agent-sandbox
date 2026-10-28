@@ -25,6 +25,11 @@ replacements:
     replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/README.md$1)'
     description: "Python SDK README to GitHub"
 
+  # Python SDK README from examples/* (relative paths) - redirect to GitHub
+  - pattern: '\]\(\.\./\.\./clients/python/agentic-sandbox-client/README\.md(#[^)]+)?\)'
+    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/README.md$1)'
+    description: "Relative Python SDK README to GitHub"
+
   # Examples link - redirect to /docs/use-cases/examples/
   - pattern: '\]\(examples/\)'
     replacement: '](/docs/use-cases/examples/)'
@@ -39,6 +44,25 @@ replacements:
   - pattern: '\]\(\.\./\.\./clients/python/agentic-sandbox-client/\)'
     replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/)'
     description: "Agentic-sandbox-client relative path to GitHub"
+
+  # deer-flow-sandbox README - sandboxd package to GitHub
+  - pattern: '\]\(\.\./\.\./packages/sandboxd/\)'
+    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/packages/sandboxd/)'
+    description: "DeerFlow example sandboxd package to GitHub"
+
+  # deer-flow-sandbox README - sibling examples
+  - pattern: '\]\(\.\./sandboxd-sandbox/\)'
+    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/examples/sandboxd-sandbox/)'
+    description: "DeerFlow example link to sandboxd-sandbox to GitHub"
+
+  - pattern: '\]\(\.\./composing-sandbox-nw-policies/\)'
+    replacement: '](/docs/use-cases/examples/composing-sandbox-nw-policies/)'
+    description: "DeerFlow example link to composing-sandbox-nw-policies docs page"
+
+  # deer-flow-sandbox README - in-directory file links to GitHub
+  - pattern: '\]\(\./(agent_sandbox_provider/provider\.py|agent_sandbox_provider/parsing\.py|test_parsing\.py|sandbox-template\.yaml|warmpool\.yaml|main\.py)\)'
+    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/examples/deer-flow-sandbox/$1)'
+    description: "DeerFlow example file links to GitHub"
 
   # JupyterLab installation guide - specific to experiment.md
   - pattern: '\]\(\./README\.md\)'
@@ -89,6 +113,23 @@ replacements:
   - pattern: '\]\(sandbox/options\.go\)'
     replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/options.go)'
     description: "Go client options.go to GitHub"
+
+  # TypeScript client links
+  - pattern: '\]\(\.\./\.\./go/README\.md\)'
+    replacement: '](/docs/go-client/)'
+    description: "TypeScript client link to Go client docs page"
+
+  - pattern: '\]\(\.\./\.\./python/agentic-sandbox-client/README\.md\)'
+    replacement: '](/docs/python-client/)'
+    description: "TypeScript client link to Python client docs page"
+
+  - pattern: '\]\(package\.json\)'
+    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/typescript/agentic-sandbox-client/package.json)'
+    description: "TypeScript client package.json to GitHub"
+
+  - pattern: '\]\(src/index\.ts\)'
+    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/typescript/agentic-sandbox-client/src/index.ts)'
+    description: "TypeScript client src/index.ts to GitHub"
 
   # Generic relative README.md links (must come after specific rules)
 

@@ -98,7 +98,23 @@ raises a clear error if it's missing. (No `r2egym` extra for that reason.)
 The **OpenHands adapter** (`adapters.openhands`) likewise imports lazily and
 needs the [`openhands-k8s-agent-sandbox`](../../clients/integrations/openhands)
 integration (`pip install -e clients/integrations/openhands`), which pulls the
-OpenHands agent SDK — note the SDK requires **Python >= 3.12**.
+OpenHands agent SDK — note the SDK requires **Python >= 3.12**. Its
+`agent_server_template(...)` builds the `TemplateSpec` such pools need (agent-server
+on `:8000` with `/health` start-up and readiness probes and the session key as
+`OH_SESSION_API_KEYS_0`; a key is required unless `allow_unauthenticated=True`, and the
+pod always carries resource limits), either from task images that contain the server or, with
+`server_image=`, by copying the server out of one agent-server image into every plain
+repo image's pod through an init container — no per-task image rebuild:
+
+```python
+from agent_sandbox_rl.adapters.openhands import agent_server_template, DEFAULT_AGENT_SERVER_IMAGE
+fleet = SandboxFleet(FleetConfig(
+    template=agent_server_template(server_image=DEFAULT_AGENT_SERVER_IMAGE,
+                                   session_key_secret=("openhands-session-key", "key"),
+                                   tolerations=[{"key": "workload", "operator": "Equal",
+                                                 "value": "sandbox", "effect": "NoSchedule"}]),
+    warm_per_task=True, ...))
+```
 
 ### 4. Verify
 
@@ -309,6 +325,33 @@ fleet.run(process_fn, strategy="naive")          # warm everything, full depth, 
 > serializes problems and underfills `max_concurrent` once rollouts do real work
 > (measured: pipelined wall 55 s → 97 s). `pipelined` is for the 1:1 eval case.
 
+### Streaming batches — an external step loop
+
+An RL trainer owns its loop: it dispatches batch after batch from a prompt stream, knows
+the next batch or two ahead of time, and may still be claiming for a batch it dispatched
+two steps ago. `LookaheadWarmer` keeps the pools sized for exactly the batches in flight:
+
+```python
+from agent_sandbox_rl import LookaheadWarmer
+warmer = LookaheadWarmer(fleet, keep_finished=max_staleness)   # cap = max_warmpool_size
+warmer.add(0, {img: prompts * G for img, prompts in batch0}, wait=True)   # start-up barrier
+warmer.add(1, counts_of(batch1))        # lookahead: pools warm while step 0 runs
+...                                     # dispatch, acquire(task) per episode
+warmer.add(2, counts_of(batch2)); warmer.finish(0)   # batch 0 released: its pools stay for
+                                                     # keep_finished more finishes, then go
+warmer.close()
+```
+
+Each `add` / `finish` diffs the desired replicas (sum over live batches plus the kept
+finished ones, capped) against what was asked before and applies it concurrently:
+`warm_image(wait=False)` for new images, `set_pool_replicas` for changed counts,
+`unwarm_image` for images no batch needs. Unknown images are added to the plan first
+(`fleet.add_tasks`). Warm errors land in the returned `WarmReport` and the log, not in
+your step; `fail_fast=True` re-raises a `FleetError` from a pool create after the phase.
+`wait=True` is a best-effort barrier (`fleet.wait_pools_ready`): a pool that exists but
+is slow reports `ready[img] == False` instead of raising, and `add_async` does the same
+on a background thread.
+
 ### Sandbox recycling (reset-and-reuse) — experimental
 
 `warm_per_task` gives each rollout its own *fresh* sandbox; **recycling** instead keeps
@@ -395,6 +438,33 @@ The [load test](tests/loadtest.py) reproduces both: `--tasks-per-image 1` (eval)
 `--tasks-per-image G --warm-per-task --colocate` (RL). Add `reuse` to `--strategies`
 (e.g. `--strategies naive,pipelined,reuse`) to compare recycling against the warm-pool
 strategies in the same run (`--max-reuses`/`--reset-timeout`/`--check-env` tune it).
+
+### Multi-container pods
+
+A template can add containers next to the runtime (via `extra_pod_spec["containers"]`,
+merged by name), for example a fresh container of the task image that grades the
+episode without seeing the agent's scratch files. Give such a sidecar a `command` that
+stays up (the template's keepalive, `["sleep", "infinity"]`): a task image's own
+entrypoint exits at once and the pod never becomes Ready. Every exec names its
+container, because the exec API has no default once a pod has two; the name comes
+from the handle or from the call:
+
+```python
+h.exec("pytest -q")                       # the runtime container (agent-runtime)
+h.exec("pytest -q", container="eval")     # one call in the sidecar
+h.target_container = "eval"               # every exec / session of this handle from now on
+h.open_session()                          # a session is bound to one container; switching
+                                          # containers closes the previous session
+make_fleet_repo_env(h, container="eval")  # R2E-Gym env whose exec/copy target the sidecar
+```
+
+`h.runtime_container` is the container that runs the task image (`agent-runtime` for a
+template the fleet wrote; the discovered name for an adopted one). Recycling
+(`recycle=True`) primes and resets the workspace there regardless of `target_container`.
+
+`SandboxHandle.target_container` is also what the R2E-Gym adapter uses when
+`make_fleet_repo_env` is not given a container, so a framework that holds one handle
+per episode can point grading at the sidecar without touching adapter internals.
 
 ## Multi-cluster
 
@@ -514,7 +584,7 @@ where it would sweep the other processes' resources too.
 
 **FleetConfig:** `clusters`, `placement`, `max_concurrent` (1), `max_warmpool_size`
 (8), `warm_per_task` (False — one warm replica per task for instant claims),
-`window_size` (None=auto), `ready_timeout` (900), `warm_create_budget` (1000 — stage
+`window_size` (None=auto), `ready_timeout` (900), `claim_timeout` (None = `ready_timeout`; bounds one claim's readiness wait), `fail_fast` (`FailFastPolicy`: `enabled` True, `initial_delay_s` 10, `poll_s` 5, `grace_s` None, `unschedulable_grace_s` None — set either to also fail the transient reasons / `Unschedulable` after that many seconds), `warm_create_budget` (1000 — stage
 the warm fill in waves of ≤ N sandbox creates in flight to bound the controller's
 create burst; on controllers ≤ v0.5.3 also pair with a low
 `--sandbox-warm-pool-concurrent-workers` to dodge #1215; `0` = warm all at once), `template`
@@ -544,21 +614,49 @@ agent_sandbox_rl.reaper` is the recovery path — sweeping an orphaned run by la
 Claims, pools and templates carry it as `RUN_ID_LABEL` (`agents.x-k8s.io/asrl-run-id`);
 pods carry it as `POD_RUN_ID_LABEL` (`agent-sandbox-rl/run-id`), because the Sandbox
 controller strips `agents.x-k8s.io/*` labels from pods — select pods by that key
-(`fleet.pod_run_selector()`). `plan()` also emits **advisory** `plan.warnings` (never fatal)
+(`fleet.pod_run_selector()`). Sandboxes carry no run id, and neither do pods created
+before that key existed, so the reaper also reaches them through each pool's
+`status.selector` and each claim's Sandbox. An external reaper that knows which
+drivers are still up calls **`reap_orphans(alive_run_ids)`** (`--orphans
+--alive-run-ids a,b`) to sweep every run it does not list, with `min_age_s` (300)
+protecting runs that just started. A run-scoped reap (and `reap_orphans`) keeps any pool,
+with its template, Sandboxes and pods, that a claim of another live run still points at,
+so a run that adopted an older run's pool keeps it. `reap("")` is rejected rather than
+treated as "all runs". `plan()` also emits **advisory** `plan.warnings` (never fatal)
 for footprint/concurrency beyond what the control plane comfortably absorbs.
 
 **ClusterConfig:** `name`, `kubeconfig`, `context`, `in_cluster`, `namespace`,
-`node_selector`, `runtime_class`, `image_pull_secret`, `weight`, `max_replicas`.
+`node_selector`, `runtime_class`, `image_pull_secret`, `weight`, `max_replicas`,
+`snapshots` (False — GKE Pod Snapshots; see [Snapshots](#snapshots--suspend--resume--restore-gke-opt-in)).
 
-**TemplateSpec:** `resources` (cpu/memory), `keepalive_command` (`sleep infinity`),
+**TemplateSpec:** `resources` (cpu/memory requests; optional `cpu_limit` /
+`memory_limit`), `keepalive_command` (`sleep infinity`),
 `runtime_class`, `node_selector`, `image_pull_secret`, `image_pull_policy`
-(`IfNotPresent` — reuses the node layer cache across epochs), `colocate_replicas`
+(`IfNotPresent` — reuses the node layer cache across epochs; also filled in on
+`{task_image}` containers that name none), `colocate_replicas`
 (False — prefer scheduling a pool's replicas on one node for cache reuse),
-`extra_pod_spec`, `network_policy_management` (None — the controller's default, one
+`automount_service_account_token` / `share_process_namespace` (both False, stated in
+the rendered spec — the controller already defaults the token off and Kubernetes the
+shared PID namespace off; set True for a workload that needs them), `extra_pod_spec` (a container or
+init container whose image is `{task_image}` runs the template's own task image — the
+way to declare a fresh grading sidecar next to the runtime container),
+`extra_template_spec` (extra SandboxTemplate `spec` keys; `podTemplate` and
+`networkPolicyManagement` have their own knobs and are rejected),
+`network_policy_management` (None — the controller's default, one
 NetworkPolicy per template; `"Unmanaged"` to run one namespace-wide policy on the
 shared `app=agent-sandbox-rl` pod label instead, and `preflight()` warns if no policy
 selects the fleet's pods; see
 [examples/agent-sandbox-rl-network-policy](../agent-sandbox-rl-network-policy)).
+
+**Dataset rows and image manifests:** `load_tasks` takes a `TaskSource`, a list of
+images, `Task`s, or dataset rows (dicts). A row's image is found under the SDK's
+`image` key or the R2E-Gym / SWE-bench conventions (`docker_image`, `image_name`,
+`metadata.docker_image`, `metadata.env_config.entry.docker_image`, ...; one-element array
+values are unwrapped), and its id under `id` / `instance_id` / `task_id`; pass
+`image_field=` (a dotted path, several, or a callable) and `id_field=` to override. The
+row stays in `Task.metadata` minus the keys the id and image were read from.
+`ImageListSource(path)` / `load_image_list(path)` read a one-image-per-line manifest from
+a local path or `gs://` (the storage client library if installed, else `gcloud storage cat`).
 
 **Image rewriting (optional):** redirect task images at an in-region mirror /
 pull-through cache without touching the source:
@@ -575,9 +673,48 @@ fleet.load_tasks(source, image_rewrite=make_rewriter(
 
 - **Preflight** (`fleet.preflight()`): per-cluster reachability, v1beta1 CRD
   versions, controller, namespace, and (if configured) runtime class + pull
-  secret. Hard failures raise `PreflightError`; soft issues are warnings.
-- **Pre-pull** (`fleet.prepull()` / `setup(prepull=True)`): a DaemonSet caches
-  task images on every node so warm pools skip the multi-GB pull. This is where
+  secret; on clusters with `snapshots=True` also the PodSnapshot CRDs, a gVisor
+  runtime class, and (warning) a `PodSnapshotPolicy` in the namespace that groups
+  by `agents.x-k8s.io/sandbox-name-hash` — a policy grouped by another label is
+  named in the warning. Hard failures raise `PreflightError`; soft issues are
+  warnings.
+- **Fail fast on claims that cannot start**: the SDK's claim wait sees only the
+  claim, so a pod stuck in `ImagePullBackOff`, `CreateContainerConfigError`,
+  `CrashLoopBackOff`, OOM-killed at start, or `Unschedulable` used to run out
+  `ready_timeout` (15 min) before the caller heard anything. `acquire()` now runs
+  a watchdog on the claim's pod and raises **`SandboxStartError`** (with the
+  Kubernetes reason, pod and image) as soon as the pod is in a state the
+  controller will not recover from: at once for reasons that never clear, and,
+  opt-in, after `FailFastPolicy.grace_s` for ones that can be transient and after
+  `unschedulable_grace_s` for scheduling (unset by default: a GPU or node
+  auto-provisioning scale-up outlasts a few minutes of `Unschedulable`, and failing
+  a throttled pull only moves the load to a new pod). A pod being deleted is not a
+  verdict; the controller recreates it. `FleetConfig.claim_timeout`
+  bounds one claim's wait separately from the pool-fill `ready_timeout`. A pull
+  that flips between `ErrImagePull` and `ImagePullBackOff`, or a crash loop seen
+  between restarts, keeps one grace clock per container. Mid-episode,
+  `handle.exec()` raises **`SandboxLostError`** when the pod is gone (one pod read
+  after a transport error), so a loop can release and re-acquire instead of
+  spending its step timeout on a dead pod. **`handle.is_alive()`** also reports a
+  pod the controller recreated under the same name, or a runtime container that
+  restarted in place: `acquire()` records the pod's UID and restart count. A
+  one-shot `exec()` against such a replacement succeeds without a transport
+  error, so call `is_alive()` at step boundaries when lost state must not go
+  unnoticed.
+- **Pre-pull** (`fleet.prepull()` / `setup(prepull=True)`): DaemonSets cache
+  task images on every node so warm pools skip the multi-GB pull. Images are split
+  into DaemonSets of `prepull_images_per_pod` (25) images, at most
+  `prepull_max_parallel` (4) of them pulling at once per node (with `wait=True`); the
+  pods inherit the template's node selector, runtime class, pull secret and
+  tolerations, so they land on tainted sandbox pools. `prepull_delete_when_done`
+  removes each DaemonSet as its nodes finish (a batch that missed the budget stays so
+  its pull errors can be read; otherwise they stay and cover new nodes;
+  `fleet.prepull_delete()` removes every pre-pull DaemonSet in the namespace, of any
+  run), and `prepull_drop_caches` ends with a privileged one-shot DaemonSet that drops
+  the page cache, for runs that must start cold (a namespace under Pod Security
+  Admission `baseline` or `restricted` rejects that pod; the pre-pull then reports
+  `False` at once instead of spending its budget). `setup(prepull=True)` logs a warning
+  when the budget runs out and starts the warm pools anyway. This is where
   cold-start time goes — `wait_pool_ready` dominates a cold run (the sample report
   shows it as ~34 s of a 48 s run), so pre-pulling (or a persistent node-level
   image cache) is the single biggest lever for repeated/RL runs. See
@@ -587,6 +724,128 @@ fleet.load_tasks(source, image_rewrite=make_rewriter(
   reconnecting and falling back to a short re-check on watch drops.
 - **Cleanup**: everything created is labeled `app=agent-sandbox-rl`; `teardown`
   sweeps claims → pools → templates (defensive against stray claims).
+  `teardown(verify=True)` (or `verify_teardown()` afterwards) then counts this run's
+  pods and runs the run-scoped reaper on every cluster, which deletes whatever of this
+  run is still there (a delete that failed, a pod the controller had not removed yet)
+  and returns `{cluster: counts}` of claims, pools, sandboxes, templates and pods;
+  all-zero counts mean the teardown was clean. Skipped, with a note, for a shared
+  `run_id`, `adopt_existing`, and a namespace the teardown deleted; it refuses to run
+  before `teardown()`, because it deletes.
+
+### Snapshots — suspend / resume / restore (GKE, opt-in)
+
+On GKE clusters with [Pod Snapshots](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/pod-snapshots)
+a claimed sandbox can be **snapshotted (memory + filesystem), suspended, resumed,
+and restored** — park a long-running episode between turns and free the node, or
+checkpoint an episode at a decision point and roll back to it. The fleet exposes
+the `k8s-agent-sandbox` SDK's GKE extension on its handles; nothing about pools,
+sizing, or strategies changes.
+
+**Prerequisites** (cluster side; the SDK creates only the per-snapshot triggers):
+a GKE cluster on **1.35.3-gke.1234000 or later** with Pod Snapshots enabled (see
+[Prepare for Pod snapshots](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/pod-snapshots-prepare))
+and a **gVisor** runtime class;
+a `PodSnapshotStorageConfig` (GCS bucket, `tokenSource: podKSA`) and a
+`PodSnapshotPolicy` whose grouping rules include `agents.x-k8s.io/sandbox-name-hash`
+and whose selector matches your template's pod labels (every fleet pod carries
+`app=agent-sandbox-rl` and `sandbox=<template-name>`); a pod ServiceAccount with the
+Workload Identity bucket grants (`storage.bucketViewer` + `storage.objectUser`); and
+`storage.objectUser` on the same bucket for **GKE's service agent**
+(`service-<PROJECT_NUMBER>@container-engine-robot.iam.gserviceaccount.com`), which is
+what deletes snapshot objects — without that grant deleted `PodSnapshot`s hang in
+`Terminating` on their finalizer, so `release(h, delete_snapshots=True)` burns its full
+timeout per sandbox and leaks the snapshots. See
+[examples/podsnapshot-golden-warmpool](../podsnapshot-golden-warmpool/README.md#2-snapshot-storage-bucket--iam)
+for the exact bindings, and the SDK extension's README and the
+[site docs](https://agent-sandbox.sigs.k8s.io/docs/sandbox/snapshots/) for manifests.
+
+```python
+fleet = SandboxFleet(FleetConfig(
+    clusters=[ClusterConfig(name="gke", namespace="rl", snapshots=True)],   # snapshot-capable client
+    template=TemplateSpec(runtime_class="gvisor",
+                          extra_pod_spec={"serviceAccountName": "podsnap-sa"})))
+fleet.load_tasks(["python:3.12"]); fleet.setup()
+
+h = fleet.acquire(fleet.tasks[0])
+h.exec("echo hello > /tmp/state && nohup bash -c 'while sleep 1; do :; done' >/dev/null 2>&1 &")
+uid = fleet.snapshot(h, "checkpoint")      # memory + filesystem, sandbox keeps running
+fleet.suspend(h)                           # snapshot again, then delete the pod (claim kept)
+fleet.resume(h)                            # new pod restored from the LATEST snapshot
+h.exec("cat /tmp/state")                   # -> hello ; the loop is still running
+fleet.suspend(h, snapshot=False)           # no new snapshot; resume() would restore the latest one
+fleet.restore(h, uid)                      # roll back to the named checkpoint
+fleet.release(h, delete_snapshots=True)    # snapshots outlive the claim otherwise
+```
+
+`suspend(snapshot=False)` skips the capture but does not discard older snapshots:
+`resume()` restores the latest one and cold-boots the template only when none exists.
+For a guaranteed cold boot, call `h.delete_snapshots()` before suspending.
+`release(delete_snapshots=True)` deletes the snapshots only after the claim is gone, so
+a failed release keeps them for the retry.
+
+The same methods exist on the handle (`h.snapshot()`, `h.suspend()`, `h.resume()`,
+`h.restore(uid)`, `h.list_snapshots()`, `h.delete_snapshots()`, `h.is_suspended`); the
+fleet wrappers add run-report phases (`snapshot`/`suspend`/`resume`/`restore`) and a
+`restored`/`cold` resume count. Outside `fleet.run()`, wrap primitive calls in
+`with fleet.recording("label") as report:` to get that report.
+`examples/run_snapshot_demo.py` runs this flow end to end and asserts that both the
+rootfs file and a background process survive.
+
+What to know:
+
+- **A resume or restore is a new pod.** `pod_name` and `pod_ip` change (the handle
+  `refresh()`es itself); `hostname` / `sandbox_id` / `claim_name` are stable. A
+  persistent exec session is dropped — `exec()` falls back to one-shot, call
+  `open_session()` again to re-attach. Code that cached `pod_name` itself must re-read it.
+- **Quiesce before suspending.** An in-flight command is frozen inside the snapshot and
+  resumes into whatever timeout it had.
+- **Failures raise.** The SDK returns result objects; the fleet raises `SnapshotError`
+  with the extension's reason, and `SnapshotsUnavailable` on a cluster/handle without
+  the snapshot client.
+- **Pinning.** `fleet.acquire(task, snapshot_uid=uid)` stamps
+  `podsnapshot.gke.io/ps-name` on the pod so a claim boots from that snapshot instead
+  of the group's latest. It applies at pod creation: a cold start honors it, an adopted
+  already-running warm member does not — and warm adoption is the common path. The
+  fleet reads the new pod's `PodRestored` condition after a pinned acquire: when the pin
+  did not apply it logs at INFO and sets `handle.pending_snapshot_uid`, so the caller
+  can `fleet.suspend(h)` + `fleet.resume(h)` (or `fleet.restore(h, uid)`) to apply it;
+  a resume or restore clears the marker.
+- **Bookkeeping.** `fleet.suspend(h)` gives the claim slot back: a suspended sandbox has
+  no pod, so it stops counting toward `max_live_sandboxes` and the cluster's claim
+  count, and `fleet.resume` / `fleet.restore` take a slot again (raising
+  `FleetOvercommitError` at the cap before touching the sandbox). Parking 10K handles
+  between turns therefore lets the loop acquire 10K new ones. Suspension creates no
+  *warm* capacity, though: the claim still holds its sandbox, so the pool does not
+  refill for it. The bare `h.suspend()` skips this bookkeeping. Snapshots persist after
+  release unless `delete_snapshots=True`; the policy's retention bounds them per
+  sandbox, and the release lists them by the sandbox's label with a 10 s timeout (kept,
+  with a warning, when that fails).
+- **Async.** The SDK calls block. `AsyncSandboxFleet` has the same `snapshot` /
+  `suspend` / `resume` / `restore` (and `acquire(snapshot_uid=…)`,
+  `release(delete_snapshots=…)`) running on its thread pool — use those rather than
+  the handle methods from an event loop.
+- **Scope.** GKE only. Restore targets a sandbox's *own* snapshots; sharing one
+  snapshot across a warm pool is a policy-level pattern (see upstream
+  `examples/podsnapshot-golden-warmpool`).
+
+Limits and failure modes the fakes in the tests cannot show:
+
+- **A wedged sandbox survives restore.** A snapshot taken of a hung sandbox restores a
+  hung sandbox. Plan one-strike eviction: `release(h)` and acquire a new one rather than
+  retrying `restore` on the same handle.
+- **A timed-out trigger blocks the next suspend.** A `PodSnapshotManualTrigger` that was
+  not processed within `timeout=` stays on the cluster (the SDK deletes its triggers only
+  when the sandbox is terminated) and blocks the next snapshot or suspend of that sandbox
+  until it is deleted: `kubectl -n <ns> delete podsnapshotmanualtrigger <name>` (the
+  name starts with the sandbox id).
+- **Propagation has its own clock.** `resume` and `restore` wait up to 30 s, independent
+  of `timeout=`, for the pin annotation to propagate from the claim to the Sandbox. When
+  that lapses the SDK reports `Internal Error: Timed out waiting for …` and the fleet
+  raises `SnapshotError` with it. This is controller lag, not a caller mistake: retry
+  the call.
+- **The policy's grouping label decides what a restore finds.** A policy grouped by any
+  label other than `agents.x-k8s.io/sandbox-name-hash` makes triggers fail with an opaque
+  `runsc error: exit status 128`; `preflight()` names such policies.
 
 ## Observability
 
@@ -762,6 +1021,36 @@ kubectl -n agent-sandbox-system patch deploy agent-sandbox-controller --type=jso
 | Docker Hub `429` on image pulls | Set `image_pull_secret`, or mirror images to a registry / use pre-pull. |
 | `'NoneType' object has no attribute 'decode'` on parallel exec | Handled: `SandboxHandle.exec` builds a fresh `ApiClient` per call (kubernetes `stream()` isn't thread-safe across a shared client). |
 | Async `process_fn` calls `handle.exec` | `exec` is blocking — in async code do `await asyncio.to_thread(h.exec, ...)`, or pass a sync `process_fn` (run in a worker thread automatically). |
+
+### Testing your integration without a cluster
+
+`agent_sandbox_rl.testing.FakeFleet` is the `SandboxFleet` surface with no API server
+behind it: the same methods with the same signatures (`load_tasks` / `add_tasks` /
+`plan` / `setup`, `warm_image` / `warm_images` / `set_pool_replicas` / `unwarm_image` /
+`wait_pools_ready`, `acquire` / `release` / `run` / `recording`, the snapshot wrappers,
+`teardown`), so a test that passes on the fake does not call something the real fleet
+lacks, and a `LookaheadWarmer` runs against it unchanged. Plans are sized with
+the real `sizing.compute_replicas`, `run()` executes the real strategies over the fake
+(warming order, teardown and the `RunReport` are the fleet's), the claim slot moves on
+suspend / resume as it does for real, and the fleet's exceptions are raised where a
+loop can observe them (`FleetOvercommitError` at `max_live_sandboxes`, `KeyError` for
+an unplanned `warm_image`, a torn-down fleet on `acquire`). On top of that surface it
+adds inspection only: `warm_calls`, `scale_calls`, `unwarm_calls`, `wait_calls`,
+`add_tasks_calls`, `acquire_calls`, `release_calls`, `active_pools`,
+`FakeHandle.commands` / `exec_calls` (each command with the container it ran in), and
+`FakeSandboxGone` (exec or snapshot on a released or suspended handle, a guard the real
+handle does not have). Inject failures
+with `fail_warm` / `fail_acquire` and program `exec` with `exec_outputs`:
+
+```python
+from agent_sandbox_rl import FleetConfig
+from agent_sandbox_rl.testing import FakeFleet
+fleet = FakeFleet(FleetConfig(warm_per_task=True, max_warmpool_size=4),
+                  exec_outputs={"pytest": "3 passed\n"})
+fleet.load_tasks(rows); fleet.setup()
+my_trainer_step(fleet)                      # the code under test, unchanged
+assert fleet.active_pools and fleet.release_calls
+```
 
 ## Testing
 

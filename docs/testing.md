@@ -9,6 +9,12 @@ To run all unit tests:
 ```shell
 make test-unit
 ```
+
+Go unit tests also write coverage profiles (`coverage_unit-go*.out`) next to
+the JUnit files in `$ARTIFACTS`, or `bin/` locally. View one with:
+```shell
+go tool cover -html=bin/coverage_unit-go.out
+```
 ## Running the e2e tests (including benchmarks)
 To run all e2e tests:
 ```shell

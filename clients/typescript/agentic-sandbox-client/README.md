@@ -113,6 +113,27 @@ already running without them, so setting this forces a cold start. The
 SandboxTemplate's `envVarsInjectionPolicy` decides whether the controller
 accepts them.
 
+### Named claims
+
+Use `claimName` to pick the SandboxClaim name, and `adoptExisting` to attach to
+the claim if it already exists, for example when a process restarts:
+
+```typescript
+const sandbox = await client.createSandbox("my-warm-pool", "default", {
+  claimName: "my-agent",
+  adoptExisting: true,
+});
+```
+
+This matches the Python SDK's `claim_name` and `adopt_existing`. The name must be
+a DNS-1123 subdomain. Without `adoptExisting`, a name conflict rejects. An
+adopted claim must not be terminating and must use the same warm pool; other
+options are not reapplied.
+
+A named claim belongs to the caller: a failed `createSandbox()` never deletes
+it, and `enableAutoCleanup()` only closes its handle. `deleteSandbox()` and
+`deleteAll()` still delete it.
+
 ### Listing sandboxes
 
 With Kubernetes credentials configured and permission to list SandboxClaims, run
@@ -136,6 +157,24 @@ The optional second argument is a Kubernetes label selector for
 not Pod labels. Omitting the selector or passing an empty string lists all claims
 in the namespace. Omitting the namespace or passing `undefined` or an empty string
 uses the client's configured default namespace.
+
+### Kubernetes credentials
+
+By default the client loads `KUBECONFIG`, then `~/.kube/config`, then the in-cluster
+service account. Pass `kubeConfig` to target a specific cluster or user instead:
+
+```typescript
+import { KubeConfig } from "@kubernetes/client-node";
+
+const kubeConfig = new KubeConfig();
+kubeConfig.loadFromFile("/path/to/other-cluster.yaml");
+
+const client = new SandboxClient({ kubeConfig });
+```
+
+The same config is used for every API call, watch, and port-forward. It is used
+as given, so the "no Kubernetes configuration found" error applies only to the
+default.
 
 ### Timeouts
 
@@ -171,6 +210,20 @@ The in-cluster modes take the apiserver off the data path. Each uses exactly one
 - `getSandbox(claimName, namespace, { waitForReady: false })` skips both checks, because a Sandbox that is not Ready may not have its Service or pod IP yet. The error then surfaces on the first `files` / `commands` call; call `getSandbox()` again once the Sandbox is Ready.
 
 The addresses are available on the handle as `sandbox.podIP` and `sandbox.serviceFQDN`. They are `""` when unknown.
+
+### Authentication
+
+If sandboxd runs with `--auth-token-sha256` or `--auth-token-file`, pass the token as `sandboxd.authToken`:
+
+```ts
+const client = new SandboxClient({
+  sandboxd: { authToken: process.env.SANDBOXD_TOKEN },
+});
+```
+
+The SDK sends it as `Authorization: Bearer <token>` on every REST request and gRPC call, and never logs it or puts it in a trace or error. It must be non-empty printable ASCII with no spaces. A missing or wrong token fails the call with `SandboxdApiError` (`code: "UNAUTHENTICATED"`) for files and metadata, and `SandboxdRpcError` (`code: "unauthenticated"`) for commands. `GET /v1/health` needs no token, so the connect health check passes even with a wrong one and the first real call reports it.
+
+With `port-forward` the token rides the TLS connection to the apiserver. sandboxd has no TLS, so with the in-cluster modes it is sent in plaintext, and `in-cluster-pod-ip` can send it to an unrelated pod if the IP was reassigned. Prefer `in-cluster-service` or `port-forward`. See [Trust boundary](#trust-boundary).
 
 ### Streaming
 
@@ -296,15 +349,20 @@ The atomicity guarantee — the target path never briefly shows partial content 
 
 ### Trust boundary
 
-With `port-forward` connectivity, the local TCP listeners the SDK opens for its port-forward tunnel (`127.0.0.1`, random ports) have no authentication of their own. Any other process in the same network namespace can reach the sandbox's files/run API through them for as long as the connection is open. Treat other local processes as trusted, the same way you would for any other unauthenticated `localhost` service.
+With `port-forward` connectivity, the local TCP listeners the SDK opens for its port-forward tunnel (`127.0.0.1`, random ports) have no authentication of their own. Unless sandboxd requires a token, any other process in the same network namespace can reach the sandbox's files/run API through them for as long as the connection is open. Treat other local processes as trusted, the same way you would for any other unauthenticated `localhost` service.
 
-With the in-cluster modes, REST and gRPC travel in plaintext across the pod network, with no authentication. Anything that can reach the sandbox pod on those ports can use its files/run API. Restrict that access with a NetworkPolicy or a service mesh.
+With the in-cluster modes, REST and gRPC travel in plaintext across the pod network. Unless sandboxd requires a token, anything that can reach the sandbox pod on those ports can use its files/run API, and with a token the token itself is sent in plaintext. Restrict that access with a NetworkPolicy or a service mesh.
 
 ### Differences from the Go and Python clients
 
 - `run()` takes an argv (`command`, `args`) mirroring sandboxd's `ProcessConfig`, plus `env` and `cwd`; the Go/Python clients take a single shell string that they wrap in `/bin/sh -c`.
 - File paths are never recorded in tracing spans or logs (only counts/sizes/booleans are), and absolute paths / `..` segments are rejected by the client itself before any request is sent.
 - RuntimeClass (gVisor/Kata) is not observed or branched on anywhere in this layer; conformance on non-default runtimes is tracked separately and is not implied by this SDK's tests passing on a standard cluster.
+
+### Not supported
+
+- The legacy python-runtime. The SDK only talks to sandboxd.
+- The Gateway and Direct connection modes, and access to sandboxd through sandbox-router ([#1889](https://github.com/kubernetes-sigs/agent-sandbox/issues/1889)). Use one of the `sandboxd.connectivity` values above.
 
 ## Publishing status
 

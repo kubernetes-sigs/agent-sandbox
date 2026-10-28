@@ -15,6 +15,15 @@
 import type * as k8s from "@kubernetes/client-node";
 
 export interface SandboxClientOptions {
+  /**
+   * Kubernetes client configuration used for every API call, watch, and
+   * port-forward. Defaults to `loadFromDefault()` (KUBECONFIG, then
+   * ~/.kube/config, then in-cluster). An injected config is used as given:
+   * the "no Kubernetes configuration found" check applies only to the
+   * default. Mirrors the Python client's `api_client` and the Go client's
+   * `Options.RestConfig`.
+   */
+  kubeConfig?: k8s.KubeConfig;
   namespace?: string;
   sandboxReadyTimeout?: number;
   enableTracing?: boolean;
@@ -85,6 +94,14 @@ export interface SandboxdOptions {
    * transport's receive limit (at most 0xffffffff). Default: 4 MiB.
    */
   maxCommandOutputSize?: number;
+  /**
+   * Bearer token for a sandboxd started with --auth-token-sha256 or
+   * --auth-token-file. Sent as `Authorization: Bearer <token>` on every REST
+   * request and gRPC call, and never logged or put in an error. It is not
+   * encrypted on the wire: with the in-cluster modes it travels in plaintext.
+   * Must be non-empty printable ASCII with no spaces. Default: none.
+   */
+  authToken?: string;
 }
 
 /**
@@ -345,6 +362,19 @@ export interface CreateSandboxOptions {
    * `envVarsInjectionPolicy` decides whether the controller accepts them.
    */
   env?: Record<string, string>;
+  /**
+   * Name for the SandboxClaim (a DNS-1123 subdomain) instead of a generated
+   * one. A named claim is caller-owned: a failed create never deletes it and
+   * `enableAutoCleanup()` only releases its handle. `deleteSandbox()` and
+   * `deleteAll()` still delete it.
+   */
+  claimName?: string;
+  /**
+   * When the named claim already exists, attach to it instead of failing with
+   * a 409. The claim must not be terminating and must reference the same warm
+   * pool. Other creation options are not reapplied. Requires `claimName`.
+   */
+  adoptExisting?: boolean;
 }
 
 export interface GetSandboxOptions {

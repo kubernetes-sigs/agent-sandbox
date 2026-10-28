@@ -1,6 +1,6 @@
 # Sandbox Router (Go)
 
-A Go reimplementation of the Python [`sandbox-router`](../clients/python/agentic-sandbox-client/sandbox-router/README.md) — a small reverse proxy that fans HTTP traffic out to thousands of ephemeral agent sandbox pods in a Kubernetes cluster.
+A Go reimplementation of the Python [`sandbox-router`](../clients/python/agentic-sandbox-client/sandbox-router/README.md) — a small reverse proxy that fans HTTP and native gRPC traffic out to ephemeral agent sandbox pods in a Kubernetes cluster.
 
 It preserves the original `X-Sandbox-*` header contract (so existing clients and `Gateway` / `HTTPRoute` resources keep working) and adds the controls needed for enterprise deployments: TLS, mTLS, Prometheus metrics, OpenTelemetry tracing, hot-reloading certs, dial retries, structured logs, and graceful shutdown.
 
@@ -25,6 +25,9 @@ The SDKs (Go and Python) hard-code `sandbox-router-svc` as their routing target 
 The router **never** creates or looks up Sandbox resources. If the target sandbox doesn't exist, the request fails with 502 (after a short retry window — see [Behavior on missing sandboxes](#behavior-on-missing-sandboxes)).
 
 ## Request contract
+
+The table below describes HTTP requests. Native gRPC requires an explicit
+`X-Sandbox-Port`; see [Native gRPC](#native-grpc).
 
 | Header | Required | Default | Notes |
 |---|---|---|---|
@@ -65,7 +68,7 @@ The router validates the routing headers before constructing the upstream URL, m
 
 ### Error responses
 
-Errors are JSON with a single `detail` field — same shape as the Python router:
+HTTP errors are JSON with a single `detail` field — same shape as the Python router:
 
 | Cause | Status | Body |
 |---|---|---|
@@ -82,7 +85,55 @@ When the target sandbox can't be dialed (DNS doesn't resolve, or the pod isn't l
 
 Defaults: 3 retries (4 attempts total), 200 ms → 400 ms → 800 ms backoff. Tunable via `--upstream-max-retries`, `--upstream-retry-initial-delay`, `--upstream-retry-max-delay`. Set retries to `0` to disable.
 
-The retry budget never exceeds `--proxy-timeout`; the per-request context cuts it short.
+The HTTP retry budget never exceeds `--proxy-timeout`; the per-request context cuts
+it short. Native gRPC does not use this retry wrapper.
+
+## Native gRPC
+
+The same proxy listener accepts HTTP/1 and HTTP/2 prior-knowledge (h2c) on 8080;
+the optional TLS listener accepts HTTP/1 and TLS HTTP/2. Native gRPC is identified
+by HTTP/2 POST with `application/grpc` or `application/grpc+<codec>`. gRPC-Web is
+not supported. The router uses h2c to the backend and does not register or decode
+any business service. Unary and all three streaming forms are forwarded with
+immediate flush, preserving metadata, compression, headers, and terminal trailers.
+
+Send `x-sandbox-id` and **explicit** `x-sandbox-port` (9090 for default sandboxd)
+on every RPC; namespace defaults to `default`. Existing UID, Pod-IP, cache and
+authorizer restrictions apply unchanged. A ClientConn does not pin a target:
+follow-up stdin/signal/resize RPCs must send the same routing metadata. The native
+`/Service/Method` path bypasses browser path-prefix routing. Router-consumed
+Authorization/session credentials are stripped before forwarding.
+
+`--grpc-proxy-timeout=0s` (default) adds no router total-duration cap. A positive
+value caps the RPC; a negative value is invalid. The effective deadline is the
+earliest of caller/context deadline and that cap, starting before routing/authz.
+Only the remaining budget goes upstream. Legacy HTTP proxy/response-header
+timeouts do not truncate gRPC; dialing remains bounded. The flag also works as
+the same YAML key, with CLI precedence and no new environment variable.
+`--max-request-body-bytes` limits cumulative uploaded RPC bytes, not message size.
+
+Router errors use native codes: invalid input → `InvalidArgument`, missing auth →
+`Unauthenticated`, denied target → `PermissionDenied`, unreachable backend →
+`Unavailable`, deadline → `DeadlineExceeded`, cancellation → `Canceled`, body cap
+→ `ResourceExhausted`, and internal failure → `Internal`. Backend status/message/
+details pass through. A command's nonzero exit code is still a successful RPC's
+business result. Broken streams are aborted, never patched with JSON or fake OK.
+
+There is no router business-level gRPC replay/retry. Transport recovery proven
+unprocessed may still occur; neither cancellation nor this policy guarantees
+rollback or exactly-once execution. Configure client/Gateway retries accordingly.
+On shutdown, readiness drops, existing RPCs may finish within `--shutdown-timeout`,
+then remaining request contexts/connections are canceled and pools are closed.
+
+Access logs add `grpc_status`; traces add `grpc.status_code`. Missing/invalid final
+status is `unknown`. Existing HTTP metrics retain their meaning: HTTP 200 does not
+imply gRPC success. Payloads and consumed credentials are not logged.
+
+See the [runnable generated Go client and isolated TLS Gateway example](../examples/sandbox-router-grpc/README.md)
+for deployment, scoped-token auth, CA/server-name verification, long calls,
+NetworkPolicy boundaries, and explicit test/cleanup commands. No public SDK's
+connection modes are changed by this feature. Internal h2c is a trusted-network
+hop, not end-to-end encryption.
 
 ## WebSockets and other protocol upgrades
 
@@ -127,6 +178,7 @@ Run `sandbox-router --help` for the full list. The most relevant:
 | `--http-bind-address` | `:8080` | Plain-HTTP proxy listener. Empty disables. |
 | `--https-bind-address` | `""` | TLS proxy listener. Empty disables. Requires `--tls-cert-file` and `--tls-key-file`. |
 | `--metrics-bind-address` | `:9090` | Prometheus `/metrics`. |
+| `--metrics-secure-serving` | `false` | Serve `/metrics` over TLS using the same certificate as the HTTPS proxy listener. Requires `--tls-cert-file` and `--tls-key-file`. |
 | `--health-probe-bind-address` | `:8081` | `/healthz` and `/readyz`. |
 | `--tls-cert-file` / `--tls-key-file` | — | PEM-encoded server cert and key. Hot-reloaded on file change (via fsnotify on the parent directory, so atomic Secret rotation just works). |
 | `--tls-client-ca-file` | — | CA bundle for verifying client certs when mTLS is on. |
@@ -134,7 +186,8 @@ Run `sandbox-router --help` for the full list. The most relevant:
 | `--tls-cipher-suites` | `""` (Go defaults) | Comma-separated Go cipher-suite names. Honors `TLS_CIPHER_SUITES`. Ignored when min version is TLS 1.3. |
 | `--mtls-mode` | `off` | `off` / `optional` / `required`. |
 | `--cluster-domain` | `cluster.local` | Honors `CLUSTER_DOMAIN` env var (Python parity). |
-| `--proxy-timeout` | `180s` | Per-request upstream timeout. Honors `PROXY_TIMEOUT_SECONDS` (numeric seconds). |
+| `--proxy-timeout` | `180s` | HTTP per-request upstream timeout (not gRPC). Honors `PROXY_TIMEOUT_SECONDS` (numeric seconds). |
+| `--grpc-proxy-timeout` | `0s` | Native gRPC total-duration cap; zero means no router cap. CLI/YAML only. |
 | `--upstream-max-retries` | `3` | Dial retries. `0` disables. |
 | `--max-request-body-bytes` | `0` (unlimited) | Optional cap on inbound body size. |
 | `--allow-loopback-pod-ip` | `false` | Permit loopback addresses in `X-Sandbox-Pod-IP`. Default-off rejects the router's own loopback as an SSRF target. Enable only when the sandbox runs as a sidecar in the router's Pod, or for integration tests against a localhost backend. Link-local / multicast / unspecified stay rejected regardless. |
@@ -194,7 +247,7 @@ Flags:
 | `--authz-tokenreview-require-token` | `false` | When false, tokenless requests pass (transitional). When true, missing token → 401. |
 | `--authz-tokenreview-audiences` | `""` | Comma-separated audience filter — required for projected ServiceAccount tokens minted with `--audience`. |
 
-RBAC: the router's ServiceAccount needs `create` on `tokenreviews.authentication.k8s.io`. The `system:auth-delegator` ClusterRole grants exactly this and is the standard pattern (kubelet, metrics-server, kube-state-metrics all use it). The `deploy/rbac.yaml` example wires it.
+RBAC: the router's ServiceAccount needs `create` on `tokenreviews.authentication.k8s.io`. The `system:auth-delegator` ClusterRole grants this, plus `create` on `subjectaccessreviews.authorization.k8s.io`, and is the standard pattern (kubelet, metrics-server, kube-state-metrics all use it). The `deploy/rbac-tokenreview.yaml` example wires it. The core kustomization leaves that binding out, so apply it alongside the core install: `kubectl apply -f sandbox-router/deploy/rbac-tokenreview.yaml`.
 
 **Scope of v1.** TokenReview only **authenticates** the caller — it verifies the token belongs to a known principal in the cluster. It does **not** check whether that principal is allowed to access the specific sandbox they named in `X-Sandbox-ID`. Tightening to per-sandbox authorization needs an agreed identity contract on the Sandbox CR (owner label, annotation, or a SubjectAccessReview-style policy) and is tracked as follow-up after KEP-NNNN lands.
 
@@ -203,6 +256,8 @@ RBAC: the router's ServiceAccount needs `create` on `tokenreviews.authentication
 Set `--authz-mode=scoped-token` to authorize requests without giving callers a cluster-verifiable K8s credential. The original `v1.<payload>.<signature>` format uses HMAC-SHA256 and binds `(namespace, name, exp)`. It remains the default when only `--authz-scoped-token-secret-file` is set, so existing deployments keep the same behavior.
 
 Scoped-token v2 uses Ed25519 and binds the full `AuthorizationTarget` plus expiry. Its wire format is `v2.<kid>.<payload>.<signature>`. The signature covers the key ID as well as the payload, so changing `kid` cannot select another verification key. Key IDs may contain ASCII letters, digits, hyphens, and underscores. A key file may contain multiple public keys during reader-first rotation. Private signing keys never belong in the router.
+
+The router reads the verification key file once during startup. It does not reload projected file updates. Use a versioned ConfigMap name in the Pod template so each reader-first key-set change rolls the Deployment, and wait for every router replica to accept the overlapping set before issuers use a new `kid`. The [`examples/scoped-token-v2`](examples/scoped-token-v2/) overlay carries the upstream patch and rotation sequence. Helm values, content-hash annotations, and rollout policy belong to the downstream deployment.
 
 V2 requires `--cache-enabled` and rejects `X-Sandbox-Pod-IP`, because a raw address is not part of the signed target. Before authorization, the router resolves the UID and namespace/name indexes together and places the cache-selected Sandbox UID in the canonical target. The current name owner wins over a stale requested UID, so a token from a replaced Sandbox cannot follow the name to its replacement. An unclaimed warm-pool member remains reachable only through its exact UID until adoption adds the name index. When v1 and v2 verification are both configured, legacy namespace/name routing remains available to v1 only during the configured overlap window. V1-only deployments retain their existing behavior.
 
@@ -289,6 +344,10 @@ The HTTPS listener is opt-in (set `--https-bind-address`). Cert and key are read
 
 `tls.Config.MinVersion` defaults to TLS 1.2 and is configurable via `--tls-min-version` (or the `TLS_MIN_VERSION` env var). Cipher suites can be set via `--tls-cipher-suites` (or `TLS_CIPHER_SUITES`); when omitted, Go defaults apply. ALPN advertises `h2` and `http/1.1`. A downstream operator can inject the cluster TLS profile via these flags or env vars.
 
+### Metrics endpoint TLS
+
+Set `--metrics-secure-serving` to serve the `/metrics` endpoint over TLS using the same certificate as the HTTPS proxy listener. The metrics TLS config shares the `--tls-min-version` and `--tls-cipher-suites` settings but does not enable mTLS (Prometheus scraping does not present client certs). Requires `--tls-cert-file` and `--tls-key-file`; `--https-bind-address` is not required — the metrics endpoint can be the only TLS listener.
+
 ## Metrics
 
 All metrics live under a private Prometheus registry (no controller-runtime metrics bleed-through) and serve on `--metrics-bind-address`. Per-sandbox `sandbox_id` labels are **intentionally absent** — a cluster can have 10k+ sandboxes, and exposing one series per sandbox would blow up Prometheus storage. Use traces for per-sandbox debugging.
@@ -306,6 +365,10 @@ All metrics live under a private Prometheus registry (no controller-runtime metr
 | `sandbox_router_authz_decisions_total` | counter | `sandbox_namespace`, `decision` (`allow` / `deny`) |
 | `sandbox_router_cert_reloads_total` | counter | `outcome` (`success` / `failure`) |
 | `sandbox_router_build_info` | gauge (const labels) | `git_version`, `git_commit`, `build_date`, `go_version`, `compiler`, `platform` |
+
+These request, duration and inflight metrics also cover native gRPC traffic;
+HTTP 200 does not imply a successful RPC. Upstream byte-volume counters are not
+currently exported for either HTTP or native gRPC.
 
 ## Tracing
 
@@ -343,6 +406,7 @@ tls-key-file: "/tls/tls.key"
 tls-client-ca-file: "/tls/ca.crt"
 tls-min-version: "VersionTLS12"
 tls-cipher-suites: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
+metrics-secure-serving: true
 mtls-mode: "required"
 cluster-domain: "cluster.local"
 proxy-timeout: "180s"
@@ -358,7 +422,7 @@ enable-otel-metrics: true
 Example K8s manifests live in [`deploy/`](deploy/) — Deployment, Service, PodDisruptionBudget, NetworkPolicy, plus a README that walks through what to tighten before production.
 
 ```sh
-kubectl apply -f sandbox-router/deploy/
+kubectl apply -k sandbox-router/deploy/
 ```
 
 ## Scaling guidance

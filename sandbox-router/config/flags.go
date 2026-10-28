@@ -64,6 +64,9 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 		"Address for the TLS proxy listener (empty disables TLS).")
 	fs.StringVar(&c.MetricsAddr, "metrics-bind-address", c.MetricsAddr,
 		"Address for the Prometheus /metrics endpoint.")
+	fs.BoolVar(&c.MetricsSecureServing, "metrics-secure-serving", c.MetricsSecureServing,
+		"Serve the /metrics endpoint over TLS using the same certificate as "+
+			"the HTTPS proxy listener. Requires --tls-cert-file and --tls-key-file.")
 	fs.StringVar(&c.ProbeAddr, "health-probe-bind-address", c.ProbeAddr,
 		"Address for the /healthz and /readyz endpoints.")
 
@@ -90,10 +93,12 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 		"Kubernetes cluster DNS suffix used to build sandbox FQDNs. "+
 			"Honors "+EnvClusterDomain+".")
 	fs.DurationVar(&c.ProxyTimeout, "proxy-timeout", c.ProxyTimeout,
-		"Total time budget for proxying a single request to a sandbox. "+
+		"Total time budget for proxying a normal HTTP request (not gRPC) to a sandbox. "+
 			"Honors "+EnvProxyTimeout+" (numeric seconds).")
 	fs.DurationVar(&c.ResponseHeaderTimeout, "response-header-timeout", c.ResponseHeaderTimeout,
-		"Maximum time to wait for the upstream response headers.")
+		"Maximum time to wait for HTTP upstream response headers (not gRPC).")
+	fs.DurationVar(&c.GRPCProxyTimeout, "grpc-proxy-timeout", c.GRPCProxyTimeout,
+		"Optional total gRPC duration cap, including authorization. 0 means no router cap; caller deadlines still apply.")
 	fs.DurationVar(&c.ShutdownTimeout, "shutdown-timeout", c.ShutdownTimeout,
 		"Time budget for draining in-flight requests on SIGTERM.")
 	fs.Int64Var(&c.MaxRequestBodyBytes, "max-request-body-bytes", c.MaxRequestBodyBytes,

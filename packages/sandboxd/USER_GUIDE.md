@@ -37,6 +37,7 @@ The specifications live in [`spec/`](spec/):
 | Surface | Spec |
 |---|---|
 | `ProcessService` (gRPC) | [`spec/process/v1/process.proto`](spec/process/v1/process.proto) |
+| `FileWatcherService` (gRPC) | [`spec/watcher/v1/watcher.proto`](spec/watcher/v1/watcher.proto) |
 | Filesystem & Runtime REST API | [`spec/filesystem/v1/filesystem.yaml`](spec/filesystem/v1/filesystem.yaml) |
 
 ## Implementing a compatible runtime
@@ -51,6 +52,15 @@ same workspace and execution environment:
   `InitEvent` before process output, zero or more `stdout`/`stderr` events,
   and one final `ExitEvent`. The process ID from `InitEvent` is the handle
   used by `WriteStdin`, `SendSignal`, and `ResizeTTY`.
+- Optionally serve `watcher.v1.FileWatcherService`. The SDKs reject the call
+  upfront with `ErrUnsupportedByRuntime` (Go) / `RuntimeError` (Python) only
+  when the configured runtime is the legacy python-runtime. Against a runtime
+  that does not serve the service, the `Unimplemented` gRPC status surfaces
+  from the stream instead: the Go SDK delivers it as a terminal `error`
+  FileEvent, and the Python SDK raises `RuntimeError` during iteration. A
+  compatible runtime that wants watcher support must implement `WatchDir` with
+  the same path-confinement and terminal-ERROR semantics as the reference
+  server.
 - Serve the `/v1/files`, `/v1/health`, and `/v1/metadata` REST resources with
   the status codes and JSON shapes in the OpenAPI document. File payloads are
   raw bytes rather than base64; `PUT` accepts both an octet-stream body and a
@@ -112,6 +122,37 @@ process IDs, `PERMISSION_DENIED` for a `cwd` escaping the sandbox root,
 
 `exit_code` is the process's exit status, or `128+n` when signal `n` killed
 it (e.g. `137` for `SIGKILL`), as a shell reports it.
+
+### FileWatcherService (gRPC, `:9090`)
+
+| RPC | Type | Purpose |
+|---|---|---|
+| `WatchDir` | Server stream | Stream filesystem events (create, write, remove, rename, chmod) for a directory. Optional recursive mode. |
+
+Events are batched in ~250ms windows and flushed in order; individual
+events are not merged. For renames, `path` carries the old (source) name;
+when the new name lands inside the watched tree it arrives as a separate
+`create` event — clients reconstruct renames by pairing the two. Each
+event path is re-validated against the sandbox root on delivery to prevent
+symlink-swap escapes. Terminal
+conditions (watched directory removed, unrecoverable watcher error) are
+surfaced as a final `FileEvent` with type `ERROR` before the stream
+closes, rather than as a gRPC status code, so clients can distinguish
+transport failures from intentional termination. Non-fatal problems
+(event overflow, subdirectories that could not be watched in recursive
+mode) also arrive as `ERROR` events, but the stream continues.
+
+Errors that prevent the watch from starting surface as standard gRPC
+status codes (`NOT_FOUND` for a non-existent path, `PERMISSION_DENIED`
+for a path escaping the sandbox root, `INVALID_ARGUMENT` for a
+non-directory path).
+
+`FileWatcherService` is optional for compatible runtimes. The SDKs reject
+the call with `ErrUnsupportedByRuntime` (Go) / `RuntimeError` (Python) when
+the configured runtime is the legacy python-runtime; against a runtime that
+does not serve the service, the `Unimplemented` gRPC status surfaces from the
+stream as a terminal `error` FileEvent (Go) or a `RuntimeError` raised during
+iteration (Python).
 
 ### Filesystem & Runtime REST API (`:8080`)
 

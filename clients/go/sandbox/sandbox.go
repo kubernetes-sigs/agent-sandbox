@@ -28,6 +28,8 @@ import (
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/trace"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+
+	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
 // Sandbox manages the lifecycle of a single agent-sandbox instance.
@@ -37,6 +39,7 @@ type Sandbox struct {
 	connector *connector
 	commands  *Commands
 	files     *Files
+	watchers  *Watchers
 	opts      Options
 	log       logr.Logger
 
@@ -110,15 +113,19 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 		// port-forward directly to the pod (validated earlier: GatewayName is
 		// rejected with RuntimeSandboxd).
 		strategy = &podTunnelStrategy{
-			coreClient: k8s.CoreClient,
-			restConfig: k8s.RestConfig,
-			namespace:  opts.Namespace,
-			restPort:   opts.SandboxdRESTPort,
-			grpcPort:   opts.SandboxdGRPCPort,
-			pfTimeout:  opts.PortForwardReadyTimeout,
-			log:        opts.Logger,
-			tracer:     tracer,
-			svcName:    svcName,
+			restPort: opts.SandboxdRESTPort,
+			grpcPort: opts.SandboxdGRPCPort,
+			log:      opts.Logger,
+			tracer:   tracer,
+			svcName:  svcName,
+			tunnel: &portForwardTunnel{
+				name:       "sandboxd pod port-forward",
+				coreClient: k8s.CoreClient,
+				restConfig: k8s.RestConfig,
+				namespace:  opts.Namespace,
+				pfTimeout:  opts.PortForwardReadyTimeout,
+				log:        opts.Logger,
+			},
 		}
 	case opts.GatewayName != "":
 		strategy = &gatewayStrategy{
@@ -133,14 +140,19 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 		}
 	default:
 		strategy = &tunnelStrategy{
-			coreClient:      k8s.CoreClient,
 			discoveryClient: k8s.DiscoveryClient,
-			restConfig:      k8s.RestConfig,
 			namespace:       opts.Namespace,
-			pfTimeout:       opts.PortForwardReadyTimeout,
 			log:             opts.Logger,
 			tracer:          tracer,
 			svcName:         svcName,
+			tunnel: &portForwardTunnel{
+				name:       "port-forward",
+				coreClient: k8s.CoreClient,
+				restConfig: k8s.RestConfig,
+				namespace:  opts.Namespace,
+				pfTimeout:  opts.PortForwardReadyTimeout,
+				log:        opts.Logger,
+			},
 		}
 	}
 
@@ -161,10 +173,11 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 	// Wire strategy connector references for death notifications (and, for
 	// the pod tunnel, gRPC target publication).
 	if ts, ok := strategy.(*tunnelStrategy); ok {
-		ts.connector = conn
+		ts.tunnel.onDied = conn.SetLastError
 	}
 	if pts, ok := strategy.(*podTunnelStrategy); ok {
 		pts.connector = conn
+		pts.tunnel.onDied = conn.SetLastError
 	}
 	if ics, ok := strategy.(*inClusterStrategy); ok {
 		ics.connector = conn
@@ -207,6 +220,16 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 		trackOp:      trackOp,
 		lifecycleCtx: getLifecycleCtx,
 	}
+	s.watchers = &Watchers{
+		connector:    conn,
+		runtime:      opts.Runtime,
+		tracer:       tracer,
+		svcName:      svcName,
+		log:          opts.Logger,
+		errPrefix:    errPrefix,
+		trackOp:      trackOp,
+		lifecycleCtx: getLifecycleCtx,
+	}
 
 	// The pod tunnel needs the resolved pod name at Connect time.
 	// The in-cluster strategy needs the pod IP.
@@ -223,8 +246,9 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 
 // Open creates a SandboxClaim and waits for the sandbox to become ready,
 // then discovers the API URL based on the configured connection mode.
-// On failure after claim creation, the claim is automatically deleted;
-// if deletion also fails, call Close() to retry.
+// On failure after claim creation, a claim with a generated name is
+// automatically deleted; if deletion also fails, call Close() to retry.
+// A claim named by ClaimName is caller-owned and is left in place.
 func (s *Sandbox) Open(ctx context.Context) (retErr error) {
 	select {
 	case s.lifecycleSem <- struct{}{}:
@@ -293,18 +317,24 @@ func (s *Sandbox) Open(ctx context.Context) (retErr error) {
 		return err
 	}
 
-	// Create claim.
-	claimName, err := s.k8s.createClaim(openCtx, s.opts.Namespace, s.opts.WarmPoolName, s.opts.Env, s.opts.Labels, s.opts.ShutdownAfter, s.tracer, s.traceServiceName)
+	// Create claim, or adopt the existing one on conflict when asked to.
+	claim, err := s.k8s.createClaim(openCtx, newClaim(&s.opts, time.Now()), s.tracer, s.traceServiceName)
 	if err != nil {
-		return err
+		if !s.opts.AdoptExisting || !k8serrors.IsAlreadyExists(err) {
+			return err
+		}
+		if claim, err = s.adoptClaim(openCtx); err != nil {
+			return err
+		}
 	}
+	claimName := claim.Name
 	s.mu.Lock()
 	s.claimName = claimName
 	s.mu.Unlock()
 
 	// Resolve sandbox name (may differ from claim name with warm pool).
 	resolveStart := time.Now()
-	sandboxName, err := s.k8s.resolveSandboxName(openCtx, claimName, s.opts.Namespace, s.opts.SandboxReadyTimeout, s.tracer, s.traceServiceName)
+	sandboxName, err := s.k8s.resolveSandboxName(openCtx, claimName, s.opts.Namespace, claim.UID, s.opts.SandboxReadyTimeout, s.tracer, s.traceServiceName)
 	if err != nil {
 		return s.rollbackOpen(err)
 	}
@@ -330,6 +360,25 @@ func (s *Sandbox) Open(ctx context.Context) (retErr error) {
 	}
 
 	return nil
+}
+
+// adoptClaim fetches the existing claim named by ClaimName after a create
+// conflict and checks that it is safe to attach to: it must not be
+// terminating and must reference exactly the requested warm pool.
+func (s *Sandbox) adoptClaim(ctx context.Context) (*extv1beta1.SandboxClaim, error) {
+	name, ns := s.opts.ClaimName, s.opts.Namespace
+	existing, err := s.k8s.getClaim(ctx, name, ns, s.tracer, s.traceServiceName)
+	if err != nil {
+		return nil, fmt.Errorf("%w: getting existing claim %s in %s after conflict: %w", ErrClaimFailed, name, ns, err)
+	}
+	if existing.DeletionTimestamp != nil {
+		return nil, fmt.Errorf("%w: existing claim %s in %s is terminating", ErrSandboxDeleted, name, ns)
+	}
+	if existing.Spec.WarmPoolRef.Name != s.opts.WarmPoolName {
+		return nil, fmt.Errorf("%w: existing claim %s in %s references warm pool %q, not %q", ErrClaimFailed, name, ns, existing.Spec.WarmPoolRef.Name, s.opts.WarmPoolName)
+	}
+	s.log.Info("claim adopted", "claim", name, "namespace", ns)
+	return existing, nil
 }
 
 func (s *Sandbox) reconnect(ctx context.Context) error {
@@ -400,6 +449,8 @@ func (s *Sandbox) reconnect(ctx context.Context) error {
 	return nil
 }
 
+// rollbackOpen undoes a failed Open. Only a claim with a generated name is
+// deleted: another Open on the same ClaimName may have adopted a named claim.
 func (s *Sandbox) rollbackOpen(originalErr error) error {
 	_ = s.connector.Close()
 
@@ -407,10 +458,13 @@ func (s *Sandbox) rollbackOpen(originalErr error) error {
 	name := s.claimName
 	s.mu.Unlock()
 
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), s.opts.CleanupTimeout)
-	defer cancel()
+	var cleanupErr error
+	if s.opts.ClaimName == "" {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), s.opts.CleanupTimeout)
+		defer cancel()
 
-	cleanupErr := s.k8s.deleteClaim(cleanupCtx, name, s.opts.Namespace)
+		cleanupErr = s.k8s.deleteClaim(cleanupCtx, name, s.opts.Namespace)
+	}
 
 	s.mu.Lock()
 	s.sandboxName = ""
@@ -582,6 +636,10 @@ func (s *Sandbox) Commands() *Commands { return s.commands }
 // Files returns the file operations sub-object.
 func (s *Sandbox) Files() *Files { return s.files }
 
+// Watchers returns the filesystem event streaming sub-object. Requires the
+// sandboxd runtime; WatchDir calls return an error on the legacy runtime.
+func (s *Sandbox) Watchers() *Watchers { return s.watchers }
+
 // Convenience aliases that delegate to sub-objects.
 
 func (s *Sandbox) Run(ctx context.Context, command string, opts ...CallOption) (*ExecutionResult, error) {
@@ -679,6 +737,14 @@ func getSandboxdJSON[T any](ctx context.Context, s *Sandbox, op string, opts []C
 		return fail(fmt.Errorf("%s: failed to decode %s response: %w", s.errPrefix(), op, err))
 	}
 	return &out, nil
+}
+
+// WatchDir streams filesystem events for a sandbox-relative directory path.
+// When recursive is true, subdirectories are watched too. The returned
+// channel is closed when ctx is cancelled or the watch ends.
+// Requires the sandboxd runtime. Convenience alias for Watchers().WatchDir.
+func (s *Sandbox) WatchDir(ctx context.Context, path string, recursive bool, opts ...CallOption) (<-chan FileEvent, error) {
+	return s.watchers.WatchDir(ctx, path, recursive, opts...)
 }
 
 // Info accessors.

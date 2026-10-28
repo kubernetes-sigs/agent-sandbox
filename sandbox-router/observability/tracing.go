@@ -74,12 +74,17 @@ func TracingMiddleware(tracer trace.Tracer, prop propagation.TextMapPropagator, 
 			}
 
 			ww := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+			defer func() {
+				span.SetAttributes(
+					attribute.Int("http.status_code", ww.status),
+					attribute.String("sandbox.id", labels.SandboxID),
+					attribute.String("sandbox.namespace", labels.SandboxNamespace),
+				)
+				if labels.GRPC {
+					span.SetAttributes(attribute.String("grpc.status_code", grpcStatus(w.Header())))
+				}
+			}()
 			next.ServeHTTP(ww, r.WithContext(ctx))
-			span.SetAttributes(
-				attribute.Int("http.status_code", ww.status),
-				attribute.String("sandbox.id", labels.SandboxID),
-				attribute.String("sandbox.namespace", labels.SandboxNamespace),
-			)
 		})
 	}
 }

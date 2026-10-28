@@ -2,6 +2,34 @@ a {
   text-decoration: none;
 }
 
+.td-box--black,
+.td-cover-block.-bg-black,
+.td-section,
+.td-page,
+footer.bg-dark {
+  --bs-link-color: #{$link-color-dark};
+  --bs-link-color-rgb: #{to-rgb($link-color-dark)};
+  --bs-link-hover-color: #{$link-hover-color-dark};
+  --bs-link-hover-color-rgb: #{to-rgb($link-hover-color-dark)};
+
+  // Light components must not inherit the dark surface's link colors.
+  .alert,
+  .feature-state-notice {
+    --bs-link-color: #{$link-color};
+    --bs-link-color-rgb: #{to-rgb($link-color)};
+    --bs-link-hover-color: #{$link-hover-color};
+    --bs-link-hover-color-rgb: #{to-rgb($link-hover-color)};
+  }
+}
+
+// Docsy's cover links use a fixed hover color instead of Bootstrap variables.
+.td-cover-block.-bg-black p:not(.p-initial) > a {
+  &:hover,
+  &:focus {
+    color: $link-hover-color-dark;
+  }
+}
+
 // --------------------------------------------------
 // remove whitespace after footer
 // --------------------------------------------------
@@ -132,14 +160,55 @@ footer {
   }
 }
 
-// Fix sidebar nav link colors for dark background
+// Sidebar nav hierarchy (#1658): smaller type, spacing > wrap gap,
+// and weight/color distinction per Docsy nesting level (.ul-0/.ul-1/...).
 .td-sidebar-nav {
-  .td-sidebar-link__page:not(.active) {
-    color: rgba(255, 255, 255, 0.75) !important;
+  font-size: 0.875rem; // 14px
+  line-height: 1.35;
+
+  .td-sidebar-link {
+    // Docsy default 0.375rem is << 24px line-height, so wrapped lines
+    // look like separate entries. Keep item gap above the wrap gap.
+    padding-bottom: 0.65rem;
+    line-height: 1.35;
   }
 
-  .td-sidebar-nav__section-title a:not(.active) {
-    color: rgba(255, 255, 255, 0.9) !important;
+  // Each level is scoped with child combinators: Docsy 0.12 puts
+  // `.td-sidebar-nav__section-title` on every `li`, and nested links are
+  // `ul.ul-N > li > label > a`, so descendant selectors would leak into
+  // deeper levels. Weight/size rules skip only `.active` (so `a.active`
+  // keeps its bold); color rules also skip `:hover`/`:focus` so the white
+  // hover/focus color below still wins.
+
+  // Root entry: heaviest and brightest.
+  .ul-0 > li > .td-sidebar-link:not(.active) {
+    font-weight: 600;
+  }
+
+  .ul-0 > li > .td-sidebar-link:not(.active):not(:hover):not(:focus) {
+    color: rgba(255, 255, 255, 0.92) !important;
+  }
+
+  // First level under the root.
+  .ul-1 > li > label > .td-sidebar-link:not(.active) {
+    font-weight: 500;
+  }
+
+  .ul-1 > li > label > .td-sidebar-link:not(.active):not(:hover):not(:focus) {
+    color: rgba(255, 255, 255, 0.78) !important;
+  }
+
+  // Deeper nesting (.ul-2 and below): lighter weight and smaller type.
+  .ul-1 ul > li > label > .td-sidebar-link {
+    font-size: 0.8125rem; // 13px
+  }
+
+  .ul-1 ul > li > label > .td-sidebar-link:not(.active) {
+    font-weight: 400;
+  }
+
+  .ul-1 ul > li > label > .td-sidebar-link:not(.active):not(:hover):not(:focus) {
+    color: rgba(255, 255, 255, 0.68) !important;
   }
 
   a:hover,
@@ -149,7 +218,7 @@ footer {
 
   a.active,
   a .td-sidebar-nav-active-item {
-    color: $primary !important;
+    color: $link-color-dark !important;
     font-weight: 700;
   }
 
@@ -493,7 +562,7 @@ h1.text-center {
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: $primary;
+    color: $link-color-dark;
     margin-bottom: 0.25rem;
   }
 

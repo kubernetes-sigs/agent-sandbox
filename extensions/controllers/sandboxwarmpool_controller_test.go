@@ -2639,6 +2639,40 @@ func TestCompareSandboxBlueprint(t *testing.T) {
 			},
 			expectedResult: false,
 		},
+		{
+			name: "Failed Pod policy drift should NOT match",
+			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate:     basePodTemplate,
+				FailedPodPolicy: sandboxv1beta1.FailedPodPolicyRecreate,
+			},
+			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate:     basePodTemplate,
+				FailedPodPolicy: sandboxv1beta1.FailedPodPolicyRetain,
+			},
+			expectedResult: false,
+		},
+		{
+			name: "Failed Pod policy Retain and omitted policy should match",
+			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate:     basePodTemplate,
+				FailedPodPolicy: sandboxv1beta1.FailedPodPolicyRetain,
+			},
+			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: basePodTemplate,
+			},
+			expectedResult: true,
+		},
+		{
+			name: "Failed Pod policy omitted policy and Retain should match",
+			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: basePodTemplate,
+			},
+			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate:     basePodTemplate,
+				FailedPodPolicy: sandboxv1beta1.FailedPodPolicyRetain,
+			},
+			expectedResult: true,
+		},
 	}
 
 	for _, tt := range testCases {
@@ -2660,7 +2694,7 @@ func TestCompareSandboxBlueprint(t *testing.T) {
 // comparison logic is not tracked for drift, so a warm sandbox will not be detected
 // as stale when that field changes.
 func TestSandboxBlueprintFieldsAreCompared(t *testing.T) {
-	expectedFields := []string{"PodTemplate", "VolumeClaimTemplates", "Service"}
+	expectedFields := []string{"PodTemplate", "VolumeClaimTemplates", "Service", "FailedPodPolicy"}
 
 	var actualFields []string
 	blueprintType := reflect.TypeFor[sandboxv1beta1.SandboxBlueprint]()

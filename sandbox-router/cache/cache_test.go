@@ -27,6 +27,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	k8scache "k8s.io/client-go/tools/cache"
+
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 )
 
 const (
@@ -47,7 +49,7 @@ func makePod(name, ns string, sandboxUID types.UID, ip string, ready bool) *core
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
-			Labels:    map[string]string{PodSandboxNameHashLabel: "abc123"},
+			Labels:    map[string]string{sandboxv1beta1.SandboxNameHashLabel: "abc123"},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: SandboxAPIGroup + "/v1beta1",
 				Kind:       SandboxKind,
@@ -346,7 +348,7 @@ func TestCache_GetByNameAfterAdd(t *testing.T) {
 // on adoption; the resulting Pod update makes the entry name-routable.
 func TestCache_UnclaimedWarmPoolPodNotInNameIndex(t *testing.T) {
 	pod := makePod(testPodName, testPodNS, testUID, testPodIP, true)
-	pod.Labels[PodWarmPoolLabel] = "pool-hash"
+	pod.Labels[sandboxv1beta1.SandboxWarmPoolLabel] = "pool-hash"
 	c, client, cancel := newCache(t, pod)
 	defer cancel()
 
@@ -366,7 +368,7 @@ func TestCache_UnclaimedWarmPoolPodNotInNameIndex(t *testing.T) {
 
 	// Adoption: the label is removed → the update indexes the entry.
 	adopted := pod.DeepCopy()
-	delete(adopted.Labels, PodWarmPoolLabel)
+	delete(adopted.Labels, sandboxv1beta1.SandboxWarmPoolLabel)
 	if _, err := client.CoreV1().Pods(testPodNS).Update(t.Context(), adopted, metav1.UpdateOptions{}); err != nil {
 		t.Fatalf("Update: %v", err)
 	}

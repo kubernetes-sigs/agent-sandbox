@@ -103,13 +103,34 @@ paths:
           description: Permission is denied while reading a directory, or another internal filesystem error
 
     put:
-      summary: Write or overwrite a file (Idempotent unless append=true)
+      summary: Write or overwrite a file, or create a directory (Idempotent unless append=true)
       description: >
         Atomically writes request body to the given path using a temporary file and rename strategy.
         Parent directories are created automatically. Supports both new file creation and overwriting.
         With append=true the body is added to the end of the file instead, which is not atomic
         or idempotent: retrying an append adds the body again.
+        With type=directory the request creates an empty directory instead and ignores the body.
+        It succeeds when the directory already exists.
       parameters:
+        - name: type
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [file, directory]
+            default: file
+          description: >
+            Kind of path to create. Use directory to create a directory, which cannot be combined
+            with append=true.
+        - name: parents
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: >
+            Only with type=directory. If true, also creates missing parent directories. Otherwise a
+            missing parent fails with 404.
         - name: mode
           in: query
           required: false
@@ -120,6 +141,8 @@ paths:
           description: >
             Octal permission bits applied to the written file (e.g. "0755" or "0644").
             With append=true, applied only when the request creates the file.
+            With type=directory, the default is "0755" and the bits apply only to a directory the
+            request creates.
         - name: append
           in: query
           required: false
@@ -147,11 +170,15 @@ paths:
                   format: binary
       responses:
         "204":
-          description: File written successfully
+          description: File written or directory created successfully
         "400":
           $ref: "#/components/responses/BadRequest"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -346,8 +373,8 @@ components:
     Conflict:
       description: >
         The path's current state conflicts with the request, for example a directory
-        that is not empty when recursive=false, or a path that is not of the kind
-        requested by the type query
+        that is not empty when recursive=false, a path that is not of the kind
+        requested by the type query, or a file at the path when type=directory
       content:
         application/json:
           schema:

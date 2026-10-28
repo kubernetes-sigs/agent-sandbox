@@ -152,12 +152,42 @@ func (s *RESTServer) boolQuery(w http.ResponseWriter, r *http.Request, name stri
 	return parsed, true
 }
 
-func (s *RESTServer) handleGetFile(w http.ResponseWriter, r *http.Request) {
+// typeQuery reads the optional "type" query parameter. It writes a 400 and
+// returns ok=false when the value is neither "file" nor "directory".
+func (s *RESTServer) typeQuery(w http.ResponseWriter, r *http.Request) (value string, ok bool) {
 	query := r.URL.Query()
-	wantType := query.Get("type")
-	if query.Has("type") && wantType != entryTypeFile && wantType != entryTypeDirectory {
+	value = query.Get("type")
+	if query.Has("type") && value != entryTypeFile && value != entryTypeDirectory {
 		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
-			fmt.Sprintf("type %q must be %q or %q", wantType, entryTypeFile, entryTypeDirectory))
+			fmt.Sprintf("type %q must be %q or %q", value, entryTypeFile, entryTypeDirectory))
+		return "", false
+	}
+	return value, true
+}
+
+// modeQuery reads the optional "mode" query parameter, returning def when it
+// is absent. It writes a 400 and returns ok=false when the value is invalid.
+func (s *RESTServer) modeQuery(w http.ResponseWriter, r *http.Request, def os.FileMode) (os.FileMode, bool) {
+	raw := r.URL.Query().Get("mode")
+	if raw == "" {
+		return def, true
+	}
+	if !modePattern.MatchString(raw) {
+		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+			fmt.Sprintf("mode %q must match ^0[0-7]{3}$", raw))
+		return 0, false
+	}
+	parsed, err := strconv.ParseUint(raw, 8, 32)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return 0, false
+	}
+	return os.FileMode(parsed), true
+}
+
+func (s *RESTServer) handleGetFile(w http.ResponseWriter, r *http.Request) {
+	wantType, ok := s.typeQuery(w, r)
+	if !ok {
 		return
 	}
 
@@ -264,19 +294,19 @@ func (s *RESTServer) serveDirectoryListing(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
-	mode := os.FileMode(0o644)
-	if modeParam := r.URL.Query().Get("mode"); modeParam != "" {
-		if !modePattern.MatchString(modeParam) {
-			s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
-				fmt.Sprintf("mode %q must match ^0[0-7]{3}$", modeParam))
-			return
-		}
-		parsed, err := strconv.ParseUint(modeParam, 8, 32)
-		if err != nil {
-			s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
-			return
-		}
-		mode = os.FileMode(parsed)
+	putType, ok := s.typeQuery(w, r)
+	if !ok {
+		return
+	}
+	makeDirectory := putType == entryTypeDirectory
+
+	defaultMode := os.FileMode(0o644)
+	if makeDirectory {
+		defaultMode = 0o755
+	}
+	mode, ok := s.modeQuery(w, r, defaultMode)
+	if !ok {
+		return
 	}
 
 	appendMode, ok := s.boolQuery(w, r, "append")
@@ -288,6 +318,17 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+
+	if makeDirectory {
+		if appendMode {
+			s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+				"append cannot be used with type=directory")
+			return
+		}
+		s.putDirectory(w, r, target, mode)
+		return
+	}
+
 	if info, err := os.Stat(target); err == nil && info.IsDir() {
 		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "target path is a directory")
 		return
@@ -314,6 +355,59 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// putDirectory handles PUT with type=directory. It ignores the request body.
+func (s *RESTServer) putDirectory(w http.ResponseWriter, r *http.Request, target string, mode os.FileMode) {
+	parents, ok := s.boolQuery(w, r, "parents")
+	if !ok {
+		return
+	}
+
+	if err := makeDirectory(target, mode, parents); err != nil {
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			s.writeError(w, http.StatusNotFound, "NOT_FOUND",
+				"parent directory does not exist; pass parents=true to create it")
+		case errors.Is(err, os.ErrExist):
+			s.writeError(w, http.StatusConflict, "CONFLICT", "path exists and is not a directory")
+		case os.IsPermission(err):
+			s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED", "permission denied")
+		default:
+			s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+		}
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// makeDirectory creates the directory target, and its missing parents when
+// parents is true. It succeeds when target is already a directory, so retries
+// are safe, and applies mode only to a directory it creates.
+func makeDirectory(target string, mode os.FileMode, parents bool) error {
+	if parents {
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return fmt.Errorf("failed to create parent directory: %w", err)
+		}
+	}
+
+	err := os.Mkdir(target, mode)
+	if errors.Is(err, os.ErrExist) {
+		if info, statErr := os.Stat(target); statErr == nil && info.IsDir() {
+			return nil
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	// Mkdir applies the umask; chmod so a new directory gets exactly mode, as
+	// atomicWrite does for files.
+	if err := os.Chmod(target, mode); err != nil {
+		return fmt.Errorf("failed to set directory mode: %w", err)
+	}
+	return nil
 }
 
 // requestFileBody returns the file payload reader for a PUT request: the raw

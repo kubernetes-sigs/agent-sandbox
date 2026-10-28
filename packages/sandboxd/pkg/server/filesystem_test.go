@@ -178,6 +178,96 @@ func TestPutAppendRejections(t *testing.T) {
 	}
 }
 
+func TestPutDirectoryCreatesEmptyDirectory(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+
+	// The body is ignored, and a retry succeeds without touching the mode.
+	for _, target := range []string{"/v1/files/d?type=directory", "/v1/files/d?type=directory&mode=0700"} {
+		rec := doRequest(handler, http.MethodPut, target, []byte("ignored"), nil)
+		require.Equal(t, http.StatusNoContent, rec.Code, target)
+	}
+
+	info, err := os.Stat(filepath.Join(root, "d"))
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
+	require.Equal(t, os.FileMode(0o755), info.Mode().Perm())
+
+	entries, err := os.ReadDir(filepath.Join(root, "d"))
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}
+
+func TestPutDirectoryAppliesMode(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+
+	rec := doRequest(handler, http.MethodPut, "/v1/files/d?type=directory&mode=0700", nil, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	info, err := os.Stat(filepath.Join(root, "d"))
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o700), info.Mode().Perm())
+}
+
+func TestPutDirectoryParents(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+
+	rec := doRequest(handler, http.MethodPut, "/v1/files/a/b?type=directory", nil, nil)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Equal(t, "NOT_FOUND", decodeError(t, rec).Code)
+	require.NoDirExists(t, filepath.Join(root, "a"))
+
+	rec = doRequest(handler, http.MethodPut, "/v1/files/a/b?type=directory&parents=true&mode=0700", nil, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	// Only the requested directory gets the mode; parents get the default.
+	parent, err := os.Stat(filepath.Join(root, "a"))
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o755), parent.Mode().Perm())
+	leaf, err := os.Stat(filepath.Join(root, "a", "b"))
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o700), leaf.Mode().Perm())
+}
+
+func TestPutDirectoryRejections(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o644))
+	outside := t.TempDir()
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "link")))
+
+	tests := []struct {
+		name       string
+		target     string
+		wantStatus int
+		wantCode   string
+	}{
+		{"path is a file", "f.txt?type=directory", http.StatusConflict, "CONFLICT"},
+		{"append", "d?type=directory&append=true", http.StatusBadRequest, "INVALID_ARGUMENT"},
+		{"invalid parents", "d?type=directory&parents=banana", http.StatusBadRequest, "INVALID_ARGUMENT"},
+		{"invalid mode", "d?type=directory&mode=999", http.StatusBadRequest, "INVALID_ARGUMENT"},
+		{"unknown type", "d?type=link", http.StatusBadRequest, "INVALID_ARGUMENT"},
+		{"symlink escape", "link/d?type=directory", http.StatusForbidden, "PERMISSION_DENIED"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doRequest(handler, http.MethodPut, "/v1/files/"+tc.target, nil, nil)
+			require.Equal(t, tc.wantStatus, rec.Code)
+			require.Equal(t, tc.wantCode, decodeError(t, rec).Code)
+		})
+	}
+	require.NoDirExists(t, filepath.Join(outside, "d"))
+}
+
+func TestPutTypeFileWritesFile(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+
+	rec := doRequest(handler, http.MethodPut, "/v1/files/f.txt?type=file", []byte("x"), nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	onDisk, err := os.ReadFile(filepath.Join(root, "f.txt"))
+	require.NoError(t, err)
+	require.Equal(t, "x", string(onDisk))
+}
+
 func TestPutMultipartUpload(t *testing.T) {
 	_, handler, root := newRESTFixture(t)
 

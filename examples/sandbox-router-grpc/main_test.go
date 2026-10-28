@@ -46,7 +46,20 @@ import (
 	"sigs.k8s.io/agent-sandbox/sandbox-router/proxy"
 )
 
+// TestDefaultRouterGRPCEgress checks that the default router policy lets the
+// router reach sandboxd on TCP 9090 in any tenant namespace. The rule must
+// select Pods by the label the Sandbox controller sets, not by labels that only
+// this demo's Pods carry.
 func TestDefaultRouterGRPCEgress(t *testing.T) {
+	wantPeers := []networkingv1.NetworkPolicyPeer{{
+		NamespaceSelector: &metav1.LabelSelector{},
+		PodSelector: &metav1.LabelSelector{
+			MatchExpressions: []metav1.LabelSelectorRequirement{{
+				Key:      "agents.x-k8s.io/sandbox-name-hash",
+				Operator: metav1.LabelSelectorOpExists,
+			}},
+		},
+	}}
 	for _, path := range []string{
 		"../../sandbox-router/deploy/networkpolicy.yaml",
 		"../../olm/config/sandbox-router/networkpolicy.yaml",
@@ -60,24 +73,31 @@ func TestDefaultRouterGRPCEgress(t *testing.T) {
 			if err := yaml.Unmarshal(data, &policy); err != nil {
 				t.Fatal(err)
 			}
-			wantPeers := []networkingv1.NetworkPolicyPeer{{NamespaceSelector: &metav1.LabelSelector{}}}
-			found := false
 			for _, rule := range policy.Spec.Egress {
-				for _, port := range rule.Ports {
-					if port.Port == nil || port.Port.IntValue() != 9090 || (port.Protocol != nil && *port.Protocol != corev1.ProtocolTCP) {
-						continue
-					}
-					found = true
-					if !reflect.DeepEqual(rule.To, wantPeers) {
-						t.Errorf("default gRPC egress must allow tenant namespaces without demo Pod labels; got peers: %+v", rule.To)
-					}
+				if reflect.DeepEqual(rule.To, wantPeers) && allowsTCPPort(rule.Ports, 9090) {
+					return
 				}
 			}
-			if !found {
-				t.Fatal("default router policy has no TCP 9090 egress rule")
-			}
+			t.Fatalf("default router policy has no egress rule to labelled sandbox Pods in any namespace that allows TCP 9090; got rules: %+v", policy.Spec.Egress)
 		})
 	}
+}
+
+// allowsTCPPort reports whether ports permit TCP traffic to port. An empty list
+// permits every port, and so does an entry without a port number.
+func allowsTCPPort(ports []networkingv1.NetworkPolicyPort, port int) bool {
+	if len(ports) == 0 {
+		return true
+	}
+	for _, p := range ports {
+		if p.Protocol != nil && *p.Protocol != corev1.ProtocolTCP {
+			continue
+		}
+		if p.Port == nil || p.Port.IntValue() == port {
+			return true
+		}
+	}
+	return false
 }
 
 func TestExampleThroughRouter(t *testing.T) {

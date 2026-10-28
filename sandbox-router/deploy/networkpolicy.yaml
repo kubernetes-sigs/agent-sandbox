@@ -52,15 +52,17 @@ spec:
       port: 53
     - protocol: TCP
       port: 53
-  # Allow HTTP and sandboxd gRPC forwarding to tenant namespaces. Tighten
-  # via namespaceSelector/podSelector if your tenancy model permits.
+  # Allow the router to reach sandbox Pods, including HTTP on 8888 and sandboxd
+  # gRPC on 9090. The rule has no port filter because X-Sandbox-Port accepts any
+  # port from 1 to 65535. The Pod selector limits it to Pods that the Sandbox
+  # controller labels, so the open ports do not reach other Pods. Tighten the
+  # namespace selector to your permitted tenant range.
   - to:
     - namespaceSelector: {}
-    ports:
-    - protocol: TCP
-      port: 8888
-    - protocol: TCP
-      port: 9090
+      podSelector:
+        matchExpressions:
+        - key: agents.x-k8s.io/sandbox-name-hash
+          operator: Exists
   # OTel collector (if --enable-tracing or --enable-otel-metrics). Tighten
   # to your collector's namespace/pod selector.
   - to:

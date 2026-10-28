@@ -143,6 +143,9 @@ class SandboxBatch:
         # the same thread doesn't hang.
         self._lifecycle_lock = threading.RLock()
         self._connected: dict[str, "Sandbox"] = {}
+        # get_batch sets this, so client exit cleanup detaches the handle instead of deleting a batch that
+        # another client may own.
+        self._attached = False
         self._detached = False
         self._lease_released = False
         # The Lease duration detach() writes, the grace from the last detach() call that gave one or else
@@ -377,6 +380,7 @@ class SandboxBatch:
             lease=written,
             lease_renewed_at=renewed_at,
         )
+        handle._attached = True
         handle._start()
         return handle
 
@@ -549,6 +553,11 @@ class SandboxBatch:
     def _release_started(self) -> bool:
         """Returns whether release() started on this handle."""
         return self._detached and self._detach_grace is None
+
+    def _exit_detaches(self) -> bool:
+        """Returns whether client exit cleanup detaches this handle instead of releasing its batch."""
+        # Client cleanup retries a release() that already started, even on an attached handle.
+        return self._attached and not self._release_started()
 
     def _detach_done(self) -> bool:
         """Returns whether detach() already released the Lease, and raises ``BatchError`` once a

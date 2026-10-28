@@ -1820,8 +1820,8 @@ class TestRelease(BaseClaimBatchTest):
 class TestClientBatchCleanup(BaseClaimBatchTest):
 
     @patch.object(SandboxBatch, "_start", lambda self: None)
-    def test_cleanup_releases_every_tracked_batch(self):
-        for cleanup in ("delete_all", "_delete_automatic_sandboxes"):
+    def test_delete_all_releases_every_tracked_batch_and_exit_cleanup_detaches_attached_ones(self):
+        for cleanup, exiting in (("delete_all", False), ("_delete_automatic_sandboxes", True)):
             with self.subTest(cleanup):
                 self.client._active_batches.clear()
                 claimed = self.claim([BatchGroup(warmpool="pool-a", size=1)], batch_id="b1")
@@ -1831,9 +1831,13 @@ class TestClientBatchCleanup(BaseClaimBatchTest):
                 self.cluster.helper.list_sandbox_claim_objects.return_value = ([], "7")
                 self.assertEqual(set(self.client._active_batches.values()), {claimed, attached})
 
+                self.cluster.helper.read_batch_lease.return_value = _lease(holder_identity=attached._holder_identity)
                 with patch.object(SandboxBatch, "release", autospec=True) as release:
                     getattr(self.client, cleanup)()
-                self.assertEqual({c.args[0] for c in release.call_args_list}, {claimed, attached})
+                released = {claimed} if exiting else {claimed, attached}
+                self.assertEqual({c.args[0] for c in release.call_args_list}, released)
+                self.assertEqual(attached._lease_released, exiting)
+                self.assertEqual(attached in self.client._active_batches.values(), not exiting)
 
                 self.cluster.helper.read_batch_lease.return_value = _lease(holder_identity=claimed._holder_identity)
                 claimed.release()
@@ -1918,6 +1922,7 @@ class TestClientBatchCleanup(BaseClaimBatchTest):
 
     def test_cleanup_releases_a_handle_whose_release_failed_after_a_failed_detach(self):
         handle = _make_handle(self.client)
+        handle._attached = True
         self.client._active_batches[("default", "b1")] = handle
         helper = self.client.k8s_helper
         helper.read_batch_lease.side_effect = lambda *a, **k: _lease(holder_identity=handle._holder_identity)
@@ -1929,12 +1934,51 @@ class TestClientBatchCleanup(BaseClaimBatchTest):
         with self.assertRaises(k8s_client.ApiException):
             handle.release()
 
-        self.client.delete_all()
+        # Exit cleanup still retries a release that started on an attached handle.
+        self.client._delete_automatic_sandboxes()
 
         # After the failed detach write, every Lease write is a release taking the Lease, not a detach.
         written = [c.args[2] for c in helper.replace_batch_lease.call_args_list[1:]]
         self.assertEqual([lease.spec.holder_identity for lease in written], [handle._holder_identity] * 2)
         helper.delete_batch_lease.assert_called_once()
+        self.assertEqual(self.client._active_batches, {})
+
+    def test_a_failed_detach_in_exit_cleanup_is_logged_and_releases_nothing(self):
+        handle = _make_handle(self.client)
+        handle._attached = True
+        self.client._active_batches[("default", "b1")] = handle
+        helper = self.client.k8s_helper
+        helper.read_batch_lease.side_effect = lambda *a, **k: _lease(holder_identity=handle._holder_identity)
+        helper.replace_batch_lease.side_effect = RuntimeError("api down")
+
+        with self.assertLogs(level="ERROR"):
+            self.client._delete_automatic_sandboxes()
+
+        # The detach makes the only Lease write. The handle stays registered so the next cleanup finishes it.
+        self.assertEqual([c.args[2].spec.holder_identity for c in helper.replace_batch_lease.call_args_list], [None])
+        self.assertEqual(self.client._active_batches, {("default", "b1"): handle})
+        helper.delete_sandbox_claims_by_label.assert_not_called()
+
+    def test_exit_cleanup_during_detach_detaches_an_attached_handle(self):
+        handle = _make_handle(self.client)
+        handle._attached = True
+        self.client._active_batches[("default", "b1")] = handle
+        helper = self.client.k8s_helper
+        helper.read_batch_lease.side_effect = lambda *a, **k: _lease(holder_identity=handle._holder_identity)
+        lock = handle._lock = _SignalingLock(handle._lock)
+
+        class CleanupBetweenDetachWrites(SandboxBatch):
+            def __setattr__(self, name, value):
+                super().__setattr__(name, value)
+                # Another thread's exit cleanup runs once detach() has set _detached but not yet _detach_grace.
+                if name == "_detached" and value and not lock.threads:
+                    lock.start_racing(self._client._delete_automatic_sandboxes)
+
+        handle.__class__ = CleanupBetweenDetachWrites
+        handle.detach()
+        lock.threads.pop().join()
+
+        helper.delete_sandbox_claims_by_label.assert_not_called()
         self.assertEqual(self.client._active_batches, {})
 
     def test_a_failed_detach_retry_is_logged_and_keeps_the_handle_registered(self):

@@ -124,7 +124,8 @@ class AsyncSandboxClient(Generic[T]):
 
     By default (``cleanup=True``) an atexit hook is registered that deletes
     tracked sandboxes on program termination, except explicitly named Claims,
-    and releases tracked batches.
+    and releases tracked batches the client claimed. The hook can't await
+    ``detach()``, so it leaves batches attached with ``get_batch`` in place.
     The hook also terminates
     loop-independent local resources such as sandboxd port-forward processes.
     Pass ``cleanup=False`` to opt out of this behavior::
@@ -136,7 +137,9 @@ class AsyncSandboxClient(Generic[T]):
     out-of-the-box cleanup.
 
     Use ``async with`` to delete automatically managed Claims, release tracked
-    batches, and close local connections. Explicitly named Claims remain caller-owned and are not
+    batches the client claimed, detach the batches it attached with ``get_batch``, and close local
+    connections.
+    Explicitly named Claims remain caller-owned and are not
     deleted on context exit. To delete them, explicitly call
     ``await client.delete_sandbox(...)`` or ``await client.delete_all()``
     before closing the client. Outside a context manager, call
@@ -604,6 +607,11 @@ class AsyncSandboxClient(Generic[T]):
         ``members()`` up to date. Only a batch released with ``detach()`` can be re-attached,
         within its grace window.
 
+        Leaving ``async with`` detaches a batch attached here with ``detach()``'s default grace
+        instead of releasing it. The atexit hook can't await ``detach()``, so it leaves the batch in
+        place. Call ``release()`` to delete the batch. If a ``release()`` call fails, client cleanup
+        retries it.
+
         The batch errors below are all ``BatchError``, so ``except BatchError`` handles a batch that
         can't be attached. ``ValueError`` means a bad batch id, ``ApiException`` an API error,
         and a failed request raises the transport's own error.
@@ -699,7 +707,7 @@ class AsyncSandboxClient(Generic[T]):
                 await self.delete_sandbox(claim_name, namespace=ns)
             except Exception as e:
                 logger.error(f"Cleanup failed for {claim_name} in namespace {ns}: {e}")
-        await self._release_batches()
+        await self._release_batches(exiting=False)
 
     async def _delete_automatic_sandboxes(self) -> None:
         async with self._lock:
@@ -707,16 +715,31 @@ class AsyncSandboxClient(Generic[T]):
         for namespace, claim_name in claims:
             if (namespace, claim_name) not in self._explicit_claims:
                 await self.delete_sandbox(claim_name, namespace)
-        await self._release_batches()
+        await self._release_batches(exiting=True)
 
-    async def _release_batches(self) -> None:
-        # A handle that exits without detach() has signaled no handoff, so its batch is released
-        # whether this client claimed it or re-attached to it.
+    async def _release_batches(self, exiting: bool) -> None:
+        """Releases every tracked batch, except that exit cleanup detaches attached ones.
+
+        ``exiting`` says which caller runs the cleanup, while a handle's ``_attached`` says how this
+        client got it. Exit cleanup passes True. It detaches a batch attached with get_batch, because
+        that batch may belong to another client. It releases a claimed batch, because a batch that
+        reaches exit without detach() has no handoff. delete_all() passes False, because it is an
+        explicit request to delete, so it releases attached batches too.
+        """
         await self._retry_closing_batches()
         async with self._lock:
             batches = list(self._active_batches.items())
         for (namespace, batch_id), batch in batches:
             if await self._finish_detach(batch):
+                continue
+            if exiting and batch._exit_detaches():
+                try:
+                    await batch.detach()
+                except Exception as e:
+                    # Cleanup never falls back to release() here. After a failed Lease write, the handle stays
+                    # registered and the next cleanup finishes the detach. A BatchError means a release() call
+                    # has started.
+                    logger.error(f"Failed to detach batch '{batch_id}' in namespace {namespace}: {e}")
                 continue
             try:
                 await batch.release()
@@ -796,7 +819,8 @@ class AsyncSandboxClient(Generic[T]):
                             )
                 for batch in batches:
                     # A batch whose detach() didn't finish was handed off, and an atexit hook can't await detach().
-                    if batch._detach_unfinished():
+                    # The hook leaves an attached batch in place until its Lease goes stale.
+                    if batch._detach_unfinished() or batch._exit_detaches():
                         continue
                     try:
                         _delete_batch_objects_sync(

@@ -81,7 +81,8 @@ class SandboxClient(Generic[T]):
             cleanup: If True, registers an atexit hook to automatically delete
                 tracked sandboxes when the program terminates, excluding claims
                 explicitly named through create_sandbox(), and to release tracked
-                batches. Defaults to False.
+                batches this client claimed and detach the ones it attached to with
+                get_batch(). Defaults to False.
             api_client: Optional pre-configured Kubernetes ``ApiClient`` forwarded
                 to the underlying ``K8sHelper`` to target a specific cluster/context.
         """
@@ -446,6 +447,10 @@ class SandboxClient(Generic[T]):
         ``members()`` up to date. Only a batch released with ``detach()`` can be re-attached,
         within its grace window.
 
+        Client exit cleanup detaches a batch attached here with ``detach()``'s default grace instead
+        of releasing it. Call ``release()`` to delete the batch. If a ``release()`` call fails,
+        client cleanup retries it.
+
         The batch errors below are all ``BatchError``, so ``except BatchError`` handles a batch that
         can't be attached. ``ValueError`` means a bad batch id, ``ApiException`` an API error,
         and a failed request raises the transport's own error.
@@ -557,7 +562,7 @@ class SandboxClient(Generic[T]):
                 logger.error(
                     f"Cleanup failed for {claim_name} in namespace {ns}: {e}"
                 )
-        self._release_batches()
+        self._release_batches(exiting=False)
 
     def _delete_automatic_sandboxes(self) -> None:
         for key, sandbox in list(self._active_connection_sandboxes.items()):
@@ -569,16 +574,35 @@ class SandboxClient(Generic[T]):
                     self.delete_sandbox(claim_name, namespace)
             except Exception as e:
                 logger.error(f"Cleanup failed for {claim_name} in namespace {namespace}: {e}")
-        self._release_batches()
+        self._release_batches(exiting=True)
 
-    def _release_batches(self) -> None:
-        # A handle that exits without detach() has signaled no handoff, so its batch is released
-        # whether this client claimed it or re-attached to it.
+    def _release_batches(self, exiting: bool) -> None:
+        """Releases every tracked batch, except that exit cleanup detaches attached ones.
+
+        ``exiting`` says which caller runs the cleanup, while a handle's ``_attached`` says how this
+        client got it. Exit cleanup passes True. It detaches a batch attached with get_batch, because
+        that batch may belong to another client. It releases a claimed batch, because a batch that
+        reaches exit without detach() has no handoff. delete_all() passes False, because it is an
+        explicit request to delete, so it releases attached batches too.
+        """
         self._retry_closing_batches()
         with self._batches_lock:
             batches = list(self._active_batches.items())
         for (namespace, batch_id), batch in batches:
             if self._finish_detach(batch):
+                continue
+            # detach() sets _detached and _detach_grace under the handle's lock. A read between the two writes
+            # looks like a started release, so cleanup makes its choice under the same lock.
+            with batch._lock:
+                detaches = exiting and batch._exit_detaches()
+            if detaches:
+                try:
+                    batch.detach()
+                except Exception as e:
+                    # Cleanup never falls back to release() here. After a failed Lease write, the handle stays
+                    # registered and the next cleanup finishes the detach. A BatchError means a release() call
+                    # has started.
+                    logger.error(f"Failed to detach batch '{batch_id}' in namespace {namespace}: {e}")
                 continue
             try:
                 batch.release()

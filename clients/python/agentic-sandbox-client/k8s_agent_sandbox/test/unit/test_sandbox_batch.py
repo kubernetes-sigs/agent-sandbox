@@ -1641,9 +1641,9 @@ class TestRelease(BaseClaimBatchTest):
                 helper.read_batch_lease.side_effect = (
                     lambda *a, **k: _lease(holder_identity=holder, resource_version=resource_version)
                 )
-                written = iter(
-                    [_lease(resource_version="11"), k8s_client.ApiException(status=503), _lease(resource_version="13")]
-                )
+                # urllib3 doesn't retry Lease requests, so release() sees the raw connect error.
+                refused = urllib3.exceptions.NewConnectionError(None, "refused")
+                written = iter([_lease(resource_version="11"), refused, _lease(resource_version="13")])
 
                 def replace(*args, **kwargs):
                     self.cluster.calls.append("take")

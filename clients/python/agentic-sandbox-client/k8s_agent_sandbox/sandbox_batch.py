@@ -72,6 +72,9 @@ _TRANSPORT_ERRORS = (
     urllib3.exceptions.ProtocolError,
     urllib3.exceptions.ReadTimeoutError,
     urllib3.exceptions.MaxRetryError,
+    # urllib3 doesn't retry Lease requests, so a refused or timed-out connect raises this error instead
+    # of a MaxRetryError. NewConnectionError subclasses it.
+    urllib3.exceptions.ConnectTimeoutError,
     ConnectionError,
     # A peer that closes the TLS connection early (e.g. a load balancer during a control-plane upgrade)
     # is transient like a connection reset. Certificate and other TLS failures are not.

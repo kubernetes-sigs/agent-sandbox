@@ -2,7 +2,7 @@ apiVersion: v2
 name: sandbox-router
 description: Reverse proxy that routes SDK and browser traffic to Agent Sandbox sandboxes
 type: application
-version: 0.1.0
+version: 0.1.1
 keywords:
   - agent
   - sandbox

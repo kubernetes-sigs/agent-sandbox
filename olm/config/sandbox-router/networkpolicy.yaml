@@ -54,9 +54,12 @@ spec:
       port: 53
   # Allow the router to reach sandbox Pods, including HTTP on 8888 and sandboxd
   # gRPC on 9090. The rule has no port filter because X-Sandbox-Port accepts any
-  # port from 1 to 65535. The Pod selector limits it to Pods that the Sandbox
-  # controller labels, so the open ports do not reach other Pods. Tighten the
-  # namespace selector to your permitted tenant range.
+  # port from 1 to 65535. The Pod selector matches any Pod that carries the
+  # agents.x-k8s.io/sandbox-name-hash label, which the Sandbox controller sets on
+  # sandbox Pods. Nothing in this manifest reserves that label, so anyone who can
+  # create or label Pods in a permitted namespace can make a Pod match. Reserve
+  # the label with admission control, and tighten the namespace selector to your
+  # permitted tenant range.
   - to:
     - namespaceSelector: {}
       podSelector:

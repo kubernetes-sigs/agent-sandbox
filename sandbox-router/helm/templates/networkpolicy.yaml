@@ -48,10 +48,11 @@ spec:
       port: 53
   # Forwarding to sandbox pods. No port filter: X-Sandbox-Port accepts any port
   # from 1 to 65535 (8888 is only the default), so a port allow-list would block
-  # sandboxes that listen elsewhere. The peer is limited to sandbox-owned Pods
-  # through the label the controller stamps on every one of them (the same one
-  # the router's informer filters on), so the open ports do not extend to every
-  # Pod in the cluster.
+  # sandboxes that listen elsewhere. The Pod selector matches any Pod that
+  # carries the label the controller sets on sandbox Pods, the same one the
+  # router's informer filters on. The chart does not reserve that label, so
+  # anyone who can create or label Pods in the cluster can make a Pod match.
+  # Reserve the label with admission control.
   - to:
     - namespaceSelector: {}
       podSelector:

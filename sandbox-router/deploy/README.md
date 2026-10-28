@@ -26,8 +26,11 @@ does not encrypt the full chain.
 
 `networkpolicy.yaml` allows egress to sandbox Pods on any port across namespaces,
 because `X-Sandbox-Port` accepts any port. That covers legacy TCP 8888 and sandboxd
-gRPC TCP 9090. A Pod selector limits the rule to Pods that the Sandbox controller
-labels. Tighten its namespace selector to your permitted tenant range. The
+gRPC TCP 9090. The rule selects Pods by the `agents.x-k8s.io/sandbox-name-hash`
+label, which the Sandbox controller sets on sandbox Pods. The manifest does not
+reserve that label, so any Pod that carries it in a permitted namespace matches.
+Reserve the label with admission control, and tighten the namespace selector to
+your permitted tenant range. The
 [gRPC example workload](../../examples/sandbox-router-grpc/workload.yaml) has its
 own restricted egress policy for the demo router, separate from these defaults.
 Verify both allowed and forbidden targets with an enforcing CNI. Applying a

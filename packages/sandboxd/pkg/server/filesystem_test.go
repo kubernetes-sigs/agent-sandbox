@@ -253,6 +253,7 @@ func TestGetTypeExpectation(t *testing.T) {
 		{"directory expected, file found", "f.txt?type=directory", http.StatusConflict, "CONFLICT"},
 		{"missing path stays not found", "nope?type=file", http.StatusNotFound, "NOT_FOUND"},
 		{"unknown type is invalid", "f.txt?type=link", http.StatusBadRequest, "INVALID_ARGUMENT"},
+		{"empty type is invalid", "f.txt?type=", http.StatusBadRequest, "INVALID_ARGUMENT"},
 		{"unknown type is invalid before lookup", "nope?type=link", http.StatusBadRequest, "INVALID_ARGUMENT"},
 	}
 	for _, tc := range tests {

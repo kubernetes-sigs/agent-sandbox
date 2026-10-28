@@ -137,8 +137,9 @@ func (s *RESTServer) resolvePath(w http.ResponseWriter, r *http.Request) (string
 }
 
 func (s *RESTServer) handleGetFile(w http.ResponseWriter, r *http.Request) {
-	wantType := r.URL.Query().Get("type")
-	if wantType != "" && wantType != entryTypeFile && wantType != entryTypeDirectory {
+	query := r.URL.Query()
+	wantType := query.Get("type")
+	if query.Has("type") && wantType != entryTypeFile && wantType != entryTypeDirectory {
 		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
 			fmt.Sprintf("type %q must be %q or %q", wantType, entryTypeFile, entryTypeDirectory))
 		return

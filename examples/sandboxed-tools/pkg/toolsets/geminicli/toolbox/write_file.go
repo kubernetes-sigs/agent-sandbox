@@ -38,11 +38,13 @@ func writeFile(root string, params WriteFileParams) (string, error) {
 	p := resolvePath(root, params.FilePath)
 
 	existed := false
-	if info, err := os.Stat(p); err == nil {
-		if info.IsDir() {
+	if fi, err := os.Stat(p); err == nil {
+		if fi.IsDir() {
 			return "", fmt.Errorf("path is a directory, not a file: %s", p)
 		}
 		existed = true
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("failed to check file existence %s: %w", p, err)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {

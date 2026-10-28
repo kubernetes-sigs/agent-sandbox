@@ -15,7 +15,6 @@
 package tools
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -48,7 +47,7 @@ func TestListFilesRun_DefaultsToCurrentDirectory(t *testing.T) {
 	}
 	tool := &ListFilesTool{Path: ""}
 
-	msg, err := tool.Run(context.Background(), sandbox)
+	msg, err := tool.Run(t.Context(), sandbox)
 	if err != nil {
 		t.Fatalf("Run() returned error: %v", err)
 	}
@@ -68,7 +67,7 @@ func TestListFilesRun_UsesGivenPath(t *testing.T) {
 	}
 	tool := &ListFilesTool{Path: "/tmp/dir"}
 
-	_, err := tool.Run(context.Background(), sandbox)
+	_, err := tool.Run(t.Context(), sandbox)
 	if err != nil {
 		t.Fatalf("Run() returned error: %v", err)
 	}
@@ -85,7 +84,7 @@ func TestListFilesRun_NonZeroExitReturnsFailureMessage(t *testing.T) {
 	}
 	tool := &ListFilesTool{Path: "/tmp/missing"}
 
-	msg, err := tool.Run(context.Background(), sandbox)
+	msg, err := tool.Run(t.Context(), sandbox)
 	if err != nil {
 		t.Fatalf("Run() returned error for a non-zero exit code: %v", err)
 	}
@@ -102,7 +101,7 @@ func TestListFilesRun_SandboxError(t *testing.T) {
 	sandbox := &fakeSandbox{responses: []fakeResponse{{err: sandboxErr}}}
 	tool := &ListFilesTool{Path: "/tmp/dir"}
 
-	msg, err := tool.Run(context.Background(), sandbox)
+	msg, err := tool.Run(t.Context(), sandbox)
 	if !errors.Is(err, sandboxErr) {
 		t.Errorf("err = %v, want %v", err, sandboxErr)
 	}

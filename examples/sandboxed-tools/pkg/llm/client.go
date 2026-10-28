@@ -144,7 +144,11 @@ func (c *Client) CreateChatCompletion(ctx context.Context, req ChatCompletionReq
 	if err != nil {
 		return nil, fmt.Errorf("llm: http request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.V(2).Info("failed to close response body", "error", closeErr)
+		}
+	}()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {

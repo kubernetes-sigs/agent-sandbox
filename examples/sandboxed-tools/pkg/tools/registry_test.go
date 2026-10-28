@@ -96,7 +96,7 @@ func TestRegistryCall_ToolNotFound(t *testing.T) {
 	r := NewRegistry()
 	sandbox := &fakeSandbox{}
 
-	_, err := r.Call(context.Background(), sandbox, llm.ToolCall{
+	_, err := r.Call(t.Context(), sandbox, llm.ToolCall{
 		ID:       "call_1",
 		Function: llm.FunctionCall{Name: "missing", Arguments: "{}"},
 	})
@@ -113,7 +113,7 @@ func TestRegistryCall_InvalidArgumentsJSON(t *testing.T) {
 	r.Add(&RunCommand{})
 	sandbox := &fakeSandbox{}
 
-	_, err := r.Call(context.Background(), sandbox, llm.ToolCall{
+	_, err := r.Call(t.Context(), sandbox, llm.ToolCall{
 		ID:       "call_1",
 		Function: llm.FunctionCall{Name: "run_command", Arguments: "not json"},
 	})
@@ -134,7 +134,7 @@ func TestRegistryCall_RunError(t *testing.T) {
 	runErr := errors.New("exec failed")
 	sandbox := &fakeSandbox{responses: []fakeResponse{{err: runErr}}}
 
-	_, err := r.Call(context.Background(), sandbox, llm.ToolCall{
+	_, err := r.Call(t.Context(), sandbox, llm.ToolCall{
 		ID:       "call_1",
 		Function: llm.FunctionCall{Name: "run_command", Arguments: `{"command":"echo hi"}`},
 	})
@@ -156,7 +156,7 @@ func TestRegistryCall_Success(t *testing.T) {
 		responses: []fakeResponse{{result: &ExecCommandResult{Stdout: "hi\n", ExitCode: 0}}},
 	}
 
-	msg, err := r.Call(context.Background(), sandbox, llm.ToolCall{
+	msg, err := r.Call(t.Context(), sandbox, llm.ToolCall{
 		ID:       "call_1",
 		Function: llm.FunctionCall{Name: "run_command", Arguments: `{"command":"echo hi"}`},
 	})
@@ -184,7 +184,7 @@ func TestRegistryCall_DoesNotMutateRegisteredTemplate(t *testing.T) {
 		responses: []fakeResponse{{result: &ExecCommandResult{ExitCode: 0}}},
 	}
 
-	_, err := r.Call(context.Background(), sandbox, llm.ToolCall{
+	_, err := r.Call(t.Context(), sandbox, llm.ToolCall{
 		ID:       "call_1",
 		Function: llm.FunctionCall{Name: "run_command", Arguments: `{"command":"echo from-call"}`},
 	})
@@ -211,7 +211,7 @@ func TestRegistryCall_SucceedsWithTimeoutConfigured(t *testing.T) {
 		responses: []fakeResponse{{result: &ExecCommandResult{Stdout: "hi\n", ExitCode: 0}}},
 	}
 
-	msg, err := r.Call(context.Background(), sandbox, llm.ToolCall{
+	msg, err := r.Call(t.Context(), sandbox, llm.ToolCall{
 		ID:       "call_1",
 		Function: llm.FunctionCall{Name: "run_command", Arguments: `{"command":"echo hi"}`},
 	})
@@ -234,7 +234,7 @@ func TestRegistryCall_TimeoutCancelsBlockingTool(t *testing.T) {
 		responses: []fakeResponse{{block: true}},
 	}
 
-	_, err := r.Call(context.Background(), sandbox, llm.ToolCall{
+	_, err := r.Call(t.Context(), sandbox, llm.ToolCall{
 		ID:       "call_1",
 		Function: llm.FunctionCall{Name: "run_command", Arguments: `{"command":"sleep 99999"}`},
 	})
@@ -263,7 +263,7 @@ func TestRegistryCall_ParentCancellationIsNotReportedAsTimeout(t *testing.T) {
 		responses: []fakeResponse{{block: true}},
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel() // Parent is already done before Call ever runs.
 
 	_, err := r.Call(ctx, sandbox, llm.ToolCall{
@@ -300,7 +300,7 @@ func TestRegistryCall_ParentDeadlineIsNotReportedAsToolTimeout(t *testing.T) {
 	// synchronously inherits the parent's already-set cause when
 	// constructing runCtx (see context.propagateCancel), so this never
 	// waits on a timer.
-	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Hour))
+	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Hour))
 	defer cancel()
 
 	_, err := r.Call(ctx, sandbox, llm.ToolCall{
@@ -331,7 +331,7 @@ func TestRegistryCall_ZeroTimeoutDisablesWrapping(t *testing.T) {
 		responses: []fakeResponse{{result: &ExecCommandResult{ExitCode: 0}}},
 	}
 
-	_, err := r.Call(context.Background(), sandbox, llm.ToolCall{
+	_, err := r.Call(t.Context(), sandbox, llm.ToolCall{
 		ID:       "call_1",
 		Function: llm.FunctionCall{Name: "run_command", Arguments: `{"command":"echo hi"}`},
 	})
@@ -354,7 +354,7 @@ func TestRegistryCall_ConfiguredTimeoutSetsDeadline(t *testing.T) {
 		responses: []fakeResponse{{result: &ExecCommandResult{ExitCode: 0}}},
 	}
 
-	_, err := r.Call(context.Background(), sandbox, llm.ToolCall{
+	_, err := r.Call(t.Context(), sandbox, llm.ToolCall{
 		ID:       "call_1",
 		Function: llm.FunctionCall{Name: "run_command", Arguments: `{"command":"echo hi"}`},
 	})

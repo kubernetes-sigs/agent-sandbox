@@ -63,9 +63,11 @@ func listDirectory(root string, params ListDirectoryParams) (string, error) {
 		}
 		it := item{name: entry.Name(), isDir: entry.IsDir()}
 		if !it.isDir {
-			if info, err := entry.Info(); err == nil {
-				it.size = info.Size()
+			info, err := entry.Info()
+			if err != nil {
+				continue
 			}
+			it.size = info.Size()
 		}
 		items = append(items, it)
 	}

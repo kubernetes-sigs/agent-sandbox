@@ -286,18 +286,26 @@ fileLoop:
 	}
 	out := tools.NewLimitedWriter(maxGrepResponseSize)
 
-	fmt.Fprintf(out, "Found %d %s for pattern %q %s%s%s:\n---\n",
-		totalMatches, matchTerm, params.Pattern, searchLocation, filterSuffix, truncationSuffix)
+	if _, err := fmt.Fprintf(out, "Found %d %s for pattern %q %s%s%s:\n---\n",
+		totalMatches, matchTerm, params.Pattern, searchLocation, filterSuffix, truncationSuffix); err != nil {
+		return "", err
+	}
 	for _, file := range matchedFiles {
-		fmt.Fprintf(out, "File: %s\n", file)
+		if _, err := fmt.Fprintf(out, "File: %s\n", file); err != nil {
+			return "", err
+		}
 		for _, line := range matchesByFile[file] {
 			separator := ":"
 			if line.isContext {
 				separator = "-"
 			}
-			fmt.Fprintf(out, "L%d%s %s\n", line.number, separator, truncateLine(strings.TrimRight(line.text, " \t\r")))
+			if _, err := fmt.Fprintf(out, "L%d%s %s\n", line.number, separator, truncateLine(strings.TrimRight(line.text, " \t\r"))); err != nil {
+				return "", err
+			}
 		}
-		fmt.Fprintf(out, "---\n")
+		if _, err := fmt.Fprintf(out, "---\n"); err != nil {
+			return "", err
+		}
 	}
 
 	output := out.String()

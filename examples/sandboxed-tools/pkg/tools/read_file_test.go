@@ -15,7 +15,6 @@
 package tools
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -45,7 +44,7 @@ func TestReadFileRun_EmptyPathIsRejected(t *testing.T) {
 	sandbox := &fakeSandbox{}
 	tool := &ReadFileTool{Path: ""}
 
-	_, err := tool.Run(context.Background(), sandbox)
+	_, err := tool.Run(t.Context(), sandbox)
 	if err == nil {
 		t.Fatal("Run() with empty path returned nil error")
 	}
@@ -60,7 +59,7 @@ func TestReadFileRun_Success(t *testing.T) {
 	}
 	tool := &ReadFileTool{Path: "/tmp/foo.txt"}
 
-	msg, err := tool.Run(context.Background(), sandbox)
+	msg, err := tool.Run(t.Context(), sandbox)
 	if err != nil {
 		t.Fatalf("Run() returned error: %v", err)
 	}
@@ -81,7 +80,7 @@ func TestReadFileRun_NonZeroExitReturnsFailureMessage(t *testing.T) {
 	}
 	tool := &ReadFileTool{Path: "/tmp/missing.txt"}
 
-	msg, err := tool.Run(context.Background(), sandbox)
+	msg, err := tool.Run(t.Context(), sandbox)
 	if err != nil {
 		t.Fatalf("Run() returned error for a non-zero exit code: %v", err)
 	}
@@ -98,7 +97,7 @@ func TestReadFileRun_SandboxError(t *testing.T) {
 	sandbox := &fakeSandbox{responses: []fakeResponse{{err: sandboxErr}}}
 	tool := &ReadFileTool{Path: "/tmp/foo.txt"}
 
-	msg, err := tool.Run(context.Background(), sandbox)
+	msg, err := tool.Run(t.Context(), sandbox)
 	if !errors.Is(err, sandboxErr) {
 		t.Errorf("err = %v, want %v", err, sandboxErr)
 	}

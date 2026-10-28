@@ -15,7 +15,6 @@
 package tools
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -46,7 +45,7 @@ func TestWriteFileRun_EmptyPathIsRejected(t *testing.T) {
 	sandbox := &fakeSandbox{}
 	tool := &WriteFileTool{Path: "", Content: "hello"}
 
-	_, err := tool.Run(context.Background(), sandbox)
+	_, err := tool.Run(t.Context(), sandbox)
 	if err == nil {
 		t.Fatal("Run() with empty path returned nil error")
 	}
@@ -64,7 +63,7 @@ func TestWriteFileRun_Success(t *testing.T) {
 	}
 	tool := &WriteFileTool{Path: "/tmp/sub/foo.txt", Content: "hello world"}
 
-	msg, err := tool.Run(context.Background(), sandbox)
+	msg, err := tool.Run(t.Context(), sandbox)
 	if err != nil {
 		t.Fatalf("Run() returned error: %v", err)
 	}
@@ -102,7 +101,7 @@ func TestWriteFileRun_MkdirFailureStopsBeforeWrite(t *testing.T) {
 	}
 	tool := &WriteFileTool{Path: "/root/foo.txt", Content: "hello"}
 
-	msg, err := tool.Run(context.Background(), sandbox)
+	msg, err := tool.Run(t.Context(), sandbox)
 	if !errors.Is(err, mkdirErr) {
 		t.Errorf("err = %v, want wrapped %v", err, mkdirErr)
 	}
@@ -124,7 +123,7 @@ func TestWriteFileRun_WriteExecError(t *testing.T) {
 	}
 	tool := &WriteFileTool{Path: "/tmp/foo.txt", Content: "hello"}
 
-	msg, err := tool.Run(context.Background(), sandbox)
+	msg, err := tool.Run(t.Context(), sandbox)
 	if !errors.Is(err, writeErr) {
 		t.Errorf("err = %v, want %v", err, writeErr)
 	}
@@ -142,7 +141,7 @@ func TestWriteFileRun_NonZeroExitOnWrite(t *testing.T) {
 	}
 	tool := &WriteFileTool{Path: "/tmp/foo.txt", Content: "hello"}
 
-	msg, err := tool.Run(context.Background(), sandbox)
+	msg, err := tool.Run(t.Context(), sandbox)
 	if err != nil {
 		t.Fatalf("Run() returned error for a non-zero exit code: %v", err)
 	}

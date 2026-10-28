@@ -49,6 +49,8 @@ func replace(root string, params ReplaceParams) (string, error) {
 	if params.OldString == "" {
 		if _, err := os.Stat(p); err == nil {
 			return "", fmt.Errorf("failed to edit: file already exists and old_string is empty: %s (to overwrite it, use write_file; to edit it, provide the exact text to replace in old_string)", p)
+		} else if !os.IsNotExist(err) {
+			return "", fmt.Errorf("failed to check file existence %s: %w", p, err)
 		}
 		result, err := writeFile(root, WriteFileParams{FilePath: params.FilePath, Content: params.NewString})
 		if err != nil {

@@ -15,7 +15,6 @@
 package llm
 
 import (
-	"context"
 	"encoding/json"
 	"testing"
 )
@@ -27,7 +26,7 @@ func userMessage(text string) Message {
 func TestElizaReflectsUserMessage(t *testing.T) {
 	client := &ElizaClient{}
 
-	resp, err := client.CreateChatCompletion(context.Background(), ChatCompletionRequest{
+	resp, err := client.CreateChatCompletion(t.Context(), ChatCompletionRequest{
 		Messages: []Message{userMessage("What is the capital of France?")},
 	})
 	if err != nil {
@@ -47,7 +46,7 @@ func TestElizaReflectsUserMessage(t *testing.T) {
 func TestElizaRunCommand(t *testing.T) {
 	client := &ElizaClient{}
 
-	resp, err := client.CreateChatCompletion(context.Background(), ChatCompletionRequest{
+	resp, err := client.CreateChatCompletion(t.Context(), ChatCompletionRequest{
 		Messages: []Message{userMessage("run: uname -a")},
 	})
 	if err != nil {
@@ -77,7 +76,7 @@ func TestElizaReportsToolResult(t *testing.T) {
 	client := &ElizaClient{}
 
 	toolOutput := "stdout:\nLinux"
-	resp, err := client.CreateChatCompletion(context.Background(), ChatCompletionRequest{
+	resp, err := client.CreateChatCompletion(t.Context(), ChatCompletionRequest{
 		Messages: []Message{
 			userMessage("run: uname"),
 			{Role: "tool", ToolCallID: "eliza-run-1", Content: &toolOutput},

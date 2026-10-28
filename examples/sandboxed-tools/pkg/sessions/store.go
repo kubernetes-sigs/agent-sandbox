@@ -161,12 +161,16 @@ func (s *FileStore) NewSession(ctx context.Context, sessionID string, metadata M
 		return fmt.Errorf("failed to create session metadata %s: %w", p, err)
 	}
 	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		_ = os.Remove(p)
-		return fmt.Errorf("failed to write session metadata %s: %w", p, err)
+		closeErr := f.Close()
+		if rmErr := os.Remove(p); rmErr != nil && !os.IsNotExist(rmErr) {
+			log.V(2).Info("failed to remove session metadata on write error", "error", rmErr)
+		}
+		return fmt.Errorf("failed to write session metadata %s (close error: %v): %w", p, closeErr, err)
 	}
 	if err := f.Close(); err != nil {
-		_ = os.Remove(p)
+		if rmErr := os.Remove(p); rmErr != nil && !os.IsNotExist(rmErr) {
+			log.V(2).Info("failed to remove session metadata on close error", "error", rmErr)
+		}
 		return fmt.Errorf("failed to close session metadata %s: %w", p, err)
 	}
 	return nil
@@ -197,7 +201,11 @@ func (s *FileStore) LoadSession(ctx context.Context, sessionID string) ([]llm.Me
 		}
 		return nil, nil, fmt.Errorf("failed to open session file %s: %w", p, err)
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			log.V(2).Info("failed to close session file", "error", closeErr)
+		}
+	}()
 
 	var messages []llm.Message
 	decoder := json.NewDecoder(file)
@@ -247,10 +255,14 @@ func (s *FileStore) AppendMessages(ctx context.Context, sessionID string, messag
 	if err != nil {
 		return fmt.Errorf("failed to open session file %s: %w", p, err)
 	}
-	defer file.Close()
 
 	if _, err := b.WriteTo(file); err != nil {
-		return fmt.Errorf("failed to write messages to session file: %w", err)
+		closeErr := file.Close()
+		return fmt.Errorf("failed to write messages to session file %s (close error: %v): %w", p, closeErr, err)
+	}
+
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("failed to close session file %s: %w", p, err)
 	}
 
 	return nil

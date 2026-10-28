@@ -15,7 +15,6 @@
 package tools
 
 import (
-	"context"
 	"errors"
 	"testing"
 
@@ -46,7 +45,7 @@ func TestRunCommandRun_Success(t *testing.T) {
 	}
 	tool := &RunCommand{Command: "echo hello"}
 
-	msg, err := tool.Run(context.Background(), sandbox)
+	msg, err := tool.Run(t.Context(), sandbox)
 	if err != nil {
 		t.Fatalf("Run() returned error: %v", err)
 	}
@@ -68,7 +67,7 @@ func TestRunCommandRun_NonZeroExitIsNotAnError(t *testing.T) {
 	}
 	tool := &RunCommand{Command: "nonexistent-binary"}
 
-	msg, err := tool.Run(context.Background(), sandbox)
+	msg, err := tool.Run(t.Context(), sandbox)
 	if err != nil {
 		t.Fatalf("Run() returned error for a non-zero exit code: %v", err)
 	}
@@ -86,7 +85,7 @@ func TestRunCommandRun_SandboxError(t *testing.T) {
 	sandbox := &fakeSandbox{responses: []fakeResponse{{err: sandboxErr}}}
 	tool := &RunCommand{Command: "echo hello"}
 
-	msg, err := tool.Run(context.Background(), sandbox)
+	msg, err := tool.Run(t.Context(), sandbox)
 	if !errors.Is(err, sandboxErr) {
 		t.Errorf("err = %v, want %v", err, sandboxErr)
 	}

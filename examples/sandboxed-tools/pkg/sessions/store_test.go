@@ -15,7 +15,6 @@
 package sessions
 
 import (
-	"context"
 	"errors"
 	"os"
 	"testing"
@@ -26,7 +25,7 @@ import (
 )
 
 func TestFileStore(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	tempDir, err := os.MkdirTemp("", "sessions-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
@@ -119,7 +118,7 @@ func TestFileStore(t *testing.T) {
 }
 
 func TestFileStoreMetadata(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	store := NewFileStore(t.TempDir())
 
 	// A legacy session (messages recorded before metadata existed) returns an

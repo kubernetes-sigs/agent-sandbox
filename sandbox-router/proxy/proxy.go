@@ -611,10 +611,21 @@ func (t *metricsTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	// so the counter is incremented lazily as bytes flow — SSE /
 	// streaming responses are accounted for correctly because the
 	// counting happens per Read, not per response.
-	if resp.Body != nil {
-		resp.Body = &upstreamCountingReadCloser{
-			rc:      resp.Body,
+	if body := resp.Body; body != nil {
+		counting := &upstreamCountingReadCloser{
+			rc:      body,
 			counter: t.metrics.UpstreamRxBytesTotal.WithLabelValues(namespace),
+		}
+		resp.Body = counting
+		// http.Transport returns a writable body for a 101 response, and
+		// ReverseProxy only hijacks the connection if the body is still an
+		// io.ReadWriteCloser. Keep Write available so upgrades do not 502.
+		if w, ok := body.(io.Writer); ok {
+			resp.Body = &upstreamCountingReadWriteCloser{
+				upstreamCountingReadCloser: counting,
+				w:                          w,
+				writeCounter:               t.metrics.UpstreamTxBytesTotal.WithLabelValues(namespace),
+			}
 		}
 	}
 
@@ -633,12 +644,39 @@ type upstreamCountingReadCloser struct {
 
 func (c *upstreamCountingReadCloser) Read(p []byte) (int, error) {
 	n, err := c.rc.Read(p)
-	if n > 0 {
-		c.counter.Add(float64(n))
-	}
+	addBytes(c.counter, n)
 	return n, err
 }
 
 func (c *upstreamCountingReadCloser) Close() error {
 	return c.rc.Close()
+}
+
+// upstreamCountingReadWriteCloser also counts bytes written to the upstream.
+// It wraps the body of an upgraded (101) response, where Read carries
+// upstream-to-client bytes and Write carries client-to-upstream bytes.
+type upstreamCountingReadWriteCloser struct {
+	*upstreamCountingReadCloser
+	w            io.Writer
+	writeCounter prometheus.Counter
+}
+
+func (c *upstreamCountingReadWriteCloser) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	addBytes(c.writeCounter, n)
+	return n, err
+}
+
+// CloseWrite lets ReverseProxy half-close the upstream, as net/http's own body does.
+func (c *upstreamCountingReadWriteCloser) CloseWrite() error {
+	if cw, ok := c.w.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return http.ErrNotSupported
+}
+
+func addBytes(counter prometheus.Counter, n int) {
+	if n > 0 {
+		counter.Add(float64(n))
+	}
 }

@@ -35,8 +35,9 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
   conventions (`image_field=` / `id_field=`); `load_image_list` / `ImageListSource` read
   one-image-per-line manifests from a local path or `gs://`.
 - **Verified teardown** ([#1966](https://github.com/kubernetes-sigs/agent-sandbox/pull/1966)): `teardown(verify=True)` / `verify_teardown()`
-  run the run-scoped reaper after the sweep and return `{cluster: counts}` of what was
-  left (all zero = clean).
+  run the run-scoped reaper after the sweep and return `{cluster: counts}`: what the
+  reaper found per kind (all zero = the teardown was clean) plus `remaining`, the same
+  kinds re-listed after the reaper ran.
 - **Test double** ([#1967](https://github.com/kubernetes-sigs/agent-sandbox/pull/1967)): `agent_sandbox_rl.testing.FakeFleet` / `FakeHandle`
   are the `SandboxFleet` surface in memory (`add_tasks` and `wait_pools_ready`
   included, so a `LookaheadWarmer` runs against it), with the real strategies,
@@ -45,11 +46,13 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 
 ### Changed (pre-pull at hundreds of images — [#1965](https://github.com/kubernetes-sigs/agent-sandbox/pull/1965))
 - **`prepull` batches**: images are split into DaemonSets of `prepull_images_per_pod`
-  (25) with at most `prepull_max_parallel` (4) live at once; tolerations and runtime
-  class come from the template; the selector no longer carries the run id (it is
-  immutable); `prepull_delete_when_done` removes finished batches and
-  `prepull_drop_caches` drops the page cache afterwards. `fleet.prepull` returns
-  whether every cluster finished within the budget.
+  images (default 25); with `wait=True` at most `prepull_max_parallel` (default 4) are
+  live at once, `prepull_delete_when_done` removes finished batches,
+  `prepull_drop_caches` drops the page cache afterwards, and `fleet.prepull` returns
+  whether every cluster finished within the budget. With `wait=False` every batch is
+  created at once and the call returns immediately, without those steps. Tolerations
+  and runtime class come from the template, and the selector no longer carries the
+  run id (it is immutable).
 
 ### Added (template knobs for multi-container, hardened sandbox pods)
 - **`ResourceSpec.cpu_limit` / `memory_limit`**: optional limits on the runtime

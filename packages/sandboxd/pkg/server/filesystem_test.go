@@ -234,6 +234,40 @@ func TestHeadFileExistenceProbe(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+func TestGetTypeExpectation(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("hi"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "d"), 0o755))
+
+	tests := []struct {
+		name       string
+		path       string
+		wantStatus int
+		wantCode   string
+	}{
+		{"file expected, file found", "f.txt?type=file", http.StatusOK, ""},
+		{"directory expected, directory found", "d?type=directory", http.StatusOK, ""},
+		{"no expectation, file", "f.txt", http.StatusOK, ""},
+		{"no expectation, directory", "d", http.StatusOK, ""},
+		{"file expected, directory found", "d?type=file", http.StatusConflict, "CONFLICT"},
+		{"directory expected, file found", "f.txt?type=directory", http.StatusConflict, "CONFLICT"},
+		{"missing path stays not found", "nope?type=file", http.StatusNotFound, "NOT_FOUND"},
+		{"unknown type is invalid", "f.txt?type=link", http.StatusBadRequest, "INVALID_ARGUMENT"},
+		{"unknown type is invalid before lookup", "nope?type=link", http.StatusBadRequest, "INVALID_ARGUMENT"},
+	}
+	for _, tc := range tests {
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			t.Run(tc.name+"/"+method, func(t *testing.T) {
+				rec := doRequest(handler, method, "/v1/files/"+tc.path, nil, nil)
+				require.Equal(t, tc.wantStatus, rec.Code)
+				if tc.wantCode != "" && method == http.MethodGet {
+					require.Equal(t, tc.wantCode, decodeError(t, rec).Code)
+				}
+			})
+		}
+	}
+}
+
 func TestTraversalRejected(t *testing.T) {
 	_, handler, _ := newRESTFixture(t)
 

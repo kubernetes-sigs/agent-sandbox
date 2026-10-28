@@ -41,6 +41,12 @@ import (
 
 var modePattern = regexp.MustCompile(`^0[0-7]{3}$`)
 
+// Values of FileEntry.Type, also accepted by the "type" query on GET and HEAD.
+const (
+	entryTypeFile      = "file"
+	entryTypeDirectory = "directory"
+)
+
 // RESTServer implements the sandboxd Filesystem & Runtime REST API on top of
 // net/http. All file paths are confined to rootDir via pathutil.SanitizePath.
 type RESTServer struct {
@@ -131,6 +137,13 @@ func (s *RESTServer) resolvePath(w http.ResponseWriter, r *http.Request) (string
 }
 
 func (s *RESTServer) handleGetFile(w http.ResponseWriter, r *http.Request) {
+	wantType := r.URL.Query().Get("type")
+	if wantType != "" && wantType != entryTypeFile && wantType != entryTypeDirectory {
+		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+			fmt.Sprintf("type %q must be %q or %q", wantType, entryTypeFile, entryTypeDirectory))
+		return
+	}
+
 	target, ok := s.resolvePath(w, r)
 	if !ok {
 		return
@@ -145,6 +158,11 @@ func (s *RESTServer) handleGetFile(w http.ResponseWriter, r *http.Request) {
 		} else {
 			s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 		}
+		return
+	}
+
+	if msg := typeMismatch(wantType, info.IsDir()); msg != "" {
+		s.writeError(w, http.StatusConflict, "CONFLICT", msg)
 		return
 	}
 
@@ -172,6 +190,17 @@ func (s *RESTServer) handleGetFile(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, "", info.ModTime(), f)
 }
 
+// typeMismatch returns why the path disagrees with the "type" query, or "".
+func typeMismatch(want string, isDir bool) string {
+	switch {
+	case want == entryTypeFile && isDir:
+		return "path is a directory, not a file"
+	case want == entryTypeDirectory && !isDir:
+		return "path is a file, not a directory"
+	}
+	return ""
+}
+
 func (s *RESTServer) serveDirectoryListing(w http.ResponseWriter, r *http.Request, target string) {
 	dirEntries, err := os.ReadDir(target) // sorted by name
 	if err != nil {
@@ -197,9 +226,9 @@ func (s *RESTServer) serveDirectoryListing(w http.ResponseWriter, r *http.Reques
 				continue
 			}
 		}
-		entryType := "file"
+		entryType := entryTypeFile
 		if info.IsDir() {
-			entryType = "directory"
+			entryType = entryTypeDirectory
 		}
 		entries = append(entries, FileEntry{
 			Name:       entry.Name(),

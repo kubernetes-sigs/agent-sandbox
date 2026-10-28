@@ -435,6 +435,8 @@ func (e *acpTurnEvents) ToolCallFinished(_ context.Context, call llm.ToolCall, e
 	e.conn.sendUpdate(e.sessionID, update)
 }
 
+func (e *acpTurnEvents) MessageAppended(_ context.Context, _ llm.Message) {}
+
 // toolCallUpdate renders an LLM tool call as an ACP tool_call update.
 func toolCallUpdate(call llm.ToolCall, status string) acp.SessionUpdate {
 	update := acp.SessionUpdate{

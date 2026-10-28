@@ -674,6 +674,9 @@ type TurnEvents interface {
 	// ToolCallFinished is called after a tool executes; err is non-nil if
 	// the tool failed.
 	ToolCallFinished(ctx context.Context, call llm.ToolCall, err error)
+
+	// MessageAppended is called whenever a message is added to the session history.
+	MessageAppended(ctx context.Context, msg llm.Message)
 }
 
 // Harness wires the LLM, the tool registry, and the sandbox client together
@@ -787,6 +790,7 @@ func (h *Harness) RunTurn(ctx context.Context, session *Session, input string, e
 	if err := session.AddMessages(ctx, userMsg); err != nil {
 		return fmt.Errorf("adding user message: %w", err)
 	}
+	events.MessageAppended(ctx, userMsg)
 
 	shouldSnapshot := false
 	for {
@@ -809,6 +813,7 @@ func (h *Harness) RunTurn(ctx context.Context, session *Session, input string, e
 		if err := session.AddMessages(ctx, assistantMessage); err != nil {
 			return fmt.Errorf("adding assistant message: %w", err)
 		}
+		events.MessageAppended(ctx, assistantMessage)
 
 		log.V(1).Info("got message from LLM", "msg", assistantMessage)
 
@@ -871,6 +876,7 @@ func (h *Harness) RunTurn(ctx context.Context, session *Session, input string, e
 			if err := session.AddMessages(ctx, toolMsg); err != nil {
 				return fmt.Errorf("adding tool response: %w", err)
 			}
+			events.MessageAppended(ctx, toolMsg)
 		}
 
 		// Here we continue the LLM loop, with the tool responses at the tail of the chat thread.

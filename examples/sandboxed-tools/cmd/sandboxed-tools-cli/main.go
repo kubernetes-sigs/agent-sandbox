@@ -238,6 +238,8 @@ func (e *consoleEvents) ToolCallStarted(_ context.Context, _ llm.ToolCall) {}
 
 func (e *consoleEvents) ToolCallFinished(_ context.Context, _ llm.ToolCall, _ error) {}
 
+func (e *consoleEvents) MessageAppended(_ context.Context, _ llm.Message) {}
+
 // readLine reads a single line from os.Stdin.
 func readLine() ([]byte, error) {
 	var line []byte

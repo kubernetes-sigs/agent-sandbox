@@ -20,6 +20,7 @@ Requires the ``async`` optional dependencies::
 """
 
 import atexit
+import functools
 import asyncio
 import contextlib
 import logging
@@ -374,6 +375,7 @@ class AsyncSandboxClient(Generic[T]):
 
         async with self._lock:
             previous = self._active_connection_sandboxes.get((namespace, claim_name))
+            sandbox._on_terminated = functools.partial(self._untrack, self._active_connection_sandboxes)
             self._active_connection_sandboxes[(namespace, claim_name)] = sandbox
         if previous is not None:
             await previous.close_connection()
@@ -470,6 +472,7 @@ class AsyncSandboxClient(Generic[T]):
         )
 
         async with self._lock:
+            new_handle._on_terminated = functools.partial(self._untrack, self._active_connection_sandboxes)
             self._active_connection_sandboxes[key] = new_handle
         return new_handle
 
@@ -480,6 +483,19 @@ class AsyncSandboxClient(Generic[T]):
                 if not obj.is_active:
                     self._active_connection_sandboxes.pop(key, None)
             return list(self._active_connection_sandboxes.keys())
+
+    @staticmethod
+    def _untrack(registry: dict[tuple[str, str], T], sandbox: AsyncSandbox) -> None:
+        # terminate() calls this after a successful delete, while claim_name is still
+        # set, so the None check only narrows its type. A newer handle may have
+        # replaced this one for the same claim, so remove only this exact handle.
+        # This is static and bound to the registry with functools.partial, so a tracked
+        # handle never keeps the client alive. An instance method would keep it alive.
+        if sandbox.claim_name is None:
+            return
+        key = (sandbox.namespace, sandbox.claim_name)
+        if registry.get(key) is sandbox:
+            del registry[key]
 
     async def list_all_sandboxes(self, namespace: str = "default", label_selector: str | None = None) -> list[str]:
         """Lists all SandboxClaim names in the Kubernetes cluster for a namespace.

@@ -562,6 +562,42 @@ async def test_failed_lookup_never_deletes_claim(sdk_client, claim_name, failure
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('tracked_by', ['create_sandbox', 'get_sandbox'])
+async def test_terminate_stops_tracking_the_handle(sdk_client, tracked_by):
+    _, client, _ = sdk_client
+    sandbox = await invoke(client.create_sandbox, 'pool-a', claim_name='workflow-a')
+    if tracked_by == 'get_sandbox':
+        await invoke(sandbox.close_connection)
+        sandbox = await invoke(client.get_sandbox, 'workflow-a')
+    await invoke(sandbox.terminate)
+    assert client._active_connection_sandboxes == {}
+    assert sandbox._on_terminated is None
+
+
+@pytest.mark.asyncio
+async def test_failed_terminate_stays_tracked_for_exit_cleanup(sdk_client):
+    api, client, register = sdk_client
+    sandbox = await invoke(client.create_sandbox, 'pool-a')
+    with patch.object(api, 'delete_namespaced_custom_object', side_effect=ApiException(status=500)), \
+            pytest.raises(Exception):
+        await invoke(sandbox.terminate)
+    assert client._active_connection_sandboxes == {('default', sandbox.claim_name): sandbox}
+    register.call_args.args[0]()
+    assert api.remaining(C.CLAIM_PLURAL_NAME) == []
+
+
+@pytest.mark.asyncio
+async def test_terminating_a_replaced_handle_keeps_its_replacement(sdk_client):
+    _, client, _ = sdk_client
+    stale = await invoke(client.create_sandbox, 'pool-a', claim_name='workflow-a')
+    await invoke(stale.close_connection)
+    replacement = await invoke(client.get_sandbox, 'workflow-a')
+    await invoke(stale.terminate)
+    assert client._active_connection_sandboxes == {('default', 'workflow-a'): replacement}
+    await invoke(replacement.close_connection)
+
+
+@pytest.mark.asyncio
 async def test_uid_guard_survives_watch_compaction(sdk_client):
     api, client, _ = sdk_client
     api.claim_ready = False

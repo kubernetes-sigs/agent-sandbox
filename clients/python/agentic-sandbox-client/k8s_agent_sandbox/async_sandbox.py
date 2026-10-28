@@ -15,6 +15,7 @@
 """Async handle for one running Sandbox and its local client resources."""
 
 import logging
+from typing import Callable
 
 from .async_connector import AsyncSandboxConnector
 from .async_k8s_helper import AsyncK8sHelper
@@ -49,6 +50,10 @@ class AsyncSandbox:
     Unlike the sync ``Sandbox``, ``connection_config`` is required because the
     async client does not support ``SandboxLocalTunnelConnectionConfig``.
     """
+
+    # The client that tracks this handle sets this hook, so terminate() can drop the
+    # client's entry once the claim is gone.
+    _on_terminated: Callable[["AsyncSandbox"], None] | None = None
 
     def __init__(
         self,
@@ -280,6 +285,13 @@ class AsyncSandbox:
             return
 
         await self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace)
+
+        # The client stops tracking the handle here because its claim is gone. Call
+        # _on_terminated before clearing claim_name, because that name is the client's key.
+        # Drop the hook afterwards, so a kept handle does not keep the client's registry alive.
+        if self._on_terminated is not None:
+            self._on_terminated(self)
+            self._on_terminated = None
 
         # Clear only after success so a failed delete can be retried.
         self.claim_name = None

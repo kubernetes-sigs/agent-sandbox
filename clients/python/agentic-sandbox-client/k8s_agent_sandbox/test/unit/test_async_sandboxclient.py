@@ -15,6 +15,7 @@
 """Tests for AsyncSandboxClient lifecycle and transport behavior."""
 
 import asyncio
+import gc
 import json
 import os
 import shutil
@@ -24,6 +25,7 @@ import sys
 import tempfile
 import unittest
 import warnings
+import weakref
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
@@ -2149,6 +2151,27 @@ asyncio.run(main())
         self._run_atexit_script(kubeconfig_path, tmpdir=leak_dir)
 
         self.assertEqual(os.listdir(leak_dir), [])
+
+
+@pytest.mark.asyncio
+async def test_tracked_handle_does_not_keep_its_client_alive():
+    with patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper"):
+        client = AsyncSandboxClient(
+            connection_config=SandboxDirectConnectionConfig(api_url="http://sandbox.invalid"), cleanup=False
+        )
+    client.sandbox_class = AsyncSandbox
+    client.k8s_helper.wait_for_claim_ready = AsyncMock(return_value="sandbox-id")
+    with patch.object(client, "_create_claim", new_callable=AsyncMock, return_value={}):
+        sandbox = await client.create_sandbox("pool", "ns")
+    # With the collector off, only reference counting can free the client.
+    gc.disable()
+    try:
+        client_ref = weakref.ref(client)
+        del client
+        assert client_ref() is None
+    finally:
+        gc.enable()
+        await sandbox.close_connection()
 
 
 if __name__ == "__main__":

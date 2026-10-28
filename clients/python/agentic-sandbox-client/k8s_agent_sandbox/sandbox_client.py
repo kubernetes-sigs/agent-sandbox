@@ -19,6 +19,7 @@ file I/O) via the Sandbox resource handle.
 
 import uuid
 import atexit
+import functools
 import logging
 from types import TracebackType
 from typing import Any, Dict, Generic, List, Self, Tuple, Type, TypeVar
@@ -98,12 +99,17 @@ class SandboxClient(Generic[T]):
         self.k8s_helper = K8sHelper(api_client=api_client)
         
         # Tracks all the active client side connections to the created sandbox claims
+        # The exit hook holds these two containers, so the client changes them in place and never rebinds them.
         self._active_connection_sandboxes: Dict[Tuple[str, str], T] = {}
         self._explicit_claims: set[tuple[str, str]] = set()
         
         # Optional automatic cleanup of sandboxes on program termination
         if cleanup:
-            atexit.register(self._delete_automatic_sandboxes)
+            # Register a static method bound to the cleanup data with functools.partial, so the hook
+            # never keeps the client alive. A bound method of the client would keep it alive until exit.
+            atexit.register(functools.partial(
+                self._delete_automatic_sandboxes, self._active_connection_sandboxes, self._explicit_claims
+            ))
 
     def __enter__(self) -> Self:
         return self
@@ -115,7 +121,7 @@ class SandboxClient(Generic[T]):
         exc_tb: TracebackType | None,
     ) -> None:
         # Same cleanup as the atexit hook and AsyncSandboxClient.__aexit__.
-        self._delete_automatic_sandboxes()
+        self._delete_automatic_sandboxes(self._active_connection_sandboxes, self._explicit_claims)
 
     def create_sandbox(
         self,
@@ -258,6 +264,7 @@ class SandboxClient(Generic[T]):
             raise
 
         previous = self._active_connection_sandboxes.get((namespace, claim_name))
+        sandbox._on_terminated = functools.partial(self._untrack, self._active_connection_sandboxes)
         self._active_connection_sandboxes[(namespace, claim_name)] = sandbox
         if previous is not None:
             previous.close_connection()
@@ -321,6 +328,7 @@ class SandboxClient(Generic[T]):
             **({"file_config": self.file_config} if self.file_config is not None else {}),
         )
 
+        new_handle._on_terminated = functools.partial(self._untrack, self._active_connection_sandboxes)
         self._active_connection_sandboxes[key] = new_handle
         return new_handle
     
@@ -340,6 +348,19 @@ class SandboxClient(Generic[T]):
                 self._active_connection_sandboxes.pop(key, None)
         return list(self._active_connection_sandboxes.keys())
       
+    @staticmethod
+    def _untrack(registry: Dict[Tuple[str, str], T], sandbox: Sandbox) -> None:
+        # terminate() calls this after a successful delete, while claim_name is still
+        # set, so the None check only narrows its type. A newer handle may have
+        # replaced this one for the same claim, so remove only this exact handle.
+        # This is static and bound to the registry with functools.partial, so a tracked
+        # handle never keeps the client alive. An instance method would keep it alive.
+        if sandbox.claim_name is None:
+            return
+        key = (sandbox.namespace, sandbox.claim_name)
+        if registry.get(key) is sandbox:
+            del registry[key]
+
     def list_all_sandboxes(self, namespace: str = "default", label_selector: str | None = None) -> List[str]:
         """
         Lists all SandboxClaim names currently existing in the Kubernetes cluster
@@ -370,12 +391,11 @@ class SandboxClient(Generic[T]):
         """
         key = (namespace, claim_name)
         sandbox = self._active_connection_sandboxes.get(key)
+        if sandbox:
+            self._delete_tracked_sandbox(self._active_connection_sandboxes, key, sandbox)
+            return
         try:
-            if sandbox:
-                sandbox.terminate()
-                self._active_connection_sandboxes.pop(key, None)
-            else:
-                self._delete_claim(claim_name, namespace)
+            self._delete_claim(claim_name, namespace)
         except Exception as e:
             logger.error(f"Failed to delete sandbox '{claim_name}' in namespace '{namespace}': {e}")
             
@@ -398,14 +418,27 @@ class SandboxClient(Generic[T]):
                     f"Cleanup failed for {claim_name} in namespace {ns}: {e}"
                 )
 
-    def _delete_automatic_sandboxes(self) -> None:
-        for key, sandbox in list(self._active_connection_sandboxes.items()):
+    @staticmethod
+    def _delete_tracked_sandbox(registry: Dict[Tuple[str, str], T], key: Tuple[str, str], sandbox: Sandbox) -> None:
+        # delete_sandbox and exit cleanup both call this, so they delete a tracked sandbox the same way.
+        namespace, claim_name = key
+        try:
+            sandbox.terminate()
+            registry.pop(key, None)
+        except Exception as e:
+            logger.error(f"Failed to delete sandbox '{claim_name}' in namespace '{namespace}': {e}")
+
+    @staticmethod
+    def _delete_automatic_sandboxes(
+        registry: Dict[Tuple[str, str], T], explicit_claims: set[tuple[str, str]]
+    ) -> None:
+        for key, sandbox in list(registry.items()):
             namespace, claim_name = key
             try:
-                if key in self._explicit_claims:
+                if key in explicit_claims:
                     sandbox.close_connection()
                 else:
-                    self.delete_sandbox(claim_name, namespace)
+                    SandboxClient._delete_tracked_sandbox(registry, key, sandbox)
             except Exception as e:
                 logger.error(f"Cleanup failed for {claim_name} in namespace {namespace}: {e}")
 

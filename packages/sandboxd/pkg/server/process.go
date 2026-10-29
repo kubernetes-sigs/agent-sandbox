@@ -33,6 +33,7 @@ import (
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"sigs.k8s.io/agent-sandbox/packages/sandboxd/pkg/pathutil"
 	"sigs.k8s.io/agent-sandbox/packages/sandboxd/pkg/processmanager"
@@ -324,14 +325,55 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 
 // Execute runs a command synchronously and returns its buffered output.
 func (s *ProcessServer) Execute(ctx context.Context, req *processv1.ExecuteRequest) (*processv1.ExecuteResponse, error) {
-	cmd, err := s.buildCommand(ctx, req.GetConfig())
+	result, err := s.execute(ctx, req.GetConfig(), 0, 0)
+	if err != nil {
+		return nil, err
+	}
+	return &processv1.ExecuteResponse{ExitCode: result.ExitCode, Stdout: result.Stdout, Stderr: result.Stderr}, nil
+}
+
+// ExecuteWithLimits retains bounded output without interrupting pipe draining.
+func (s *ProcessServer) ExecuteWithLimits(ctx context.Context, req *processv1.ExecuteWithLimitsRequest) (*processv1.ExecuteWithLimitsResponse, error) {
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "request is required")
+	}
+	if req.StdoutLimitBytes != nil && req.GetStdoutLimitBytes() == 0 || req.StderrLimitBytes != nil && req.GetStderrLimitBytes() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "output limits must be positive when specified")
+	}
+	return s.execute(ctx, req.GetConfig(), req.GetStdoutLimitBytes(), req.GetStderrLimitBytes())
+}
+
+// outputCapture accepts the entire stream while retaining only its prefix.
+// A zero internal limit preserves the unconfigured, unlimited behavior.
+type outputCapture struct {
+	buffer    bytes.Buffer
+	limit     uint64
+	truncated bool
+}
+
+func (b *outputCapture) Write(p []byte) (int, error) {
+	n := len(p)
+	if b.limit != 0 {
+		remaining := b.limit - uint64(b.buffer.Len())
+		if uint64(n) > remaining {
+			p = p[:int(remaining)]
+			b.truncated = true
+		}
+	}
+	_, err := b.buffer.Write(p)
+	return n, err
+}
+
+func (s *ProcessServer) execute(ctx context.Context, config *processv1.ProcessConfig, stdoutLimit, stderrLimit uint64) (*processv1.ExecuteWithLimitsResponse, error) {
+	cmd, err := s.buildCommand(ctx, config)
 	if err != nil {
 		return nil, err
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = waitDelay
 
-	var stdoutBuf, stderrBuf bytes.Buffer
+	stdoutBuf := outputCapture{limit: stdoutLimit}
+	stderrBuf := outputCapture{limit: stderrLimit}
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
 
@@ -340,6 +382,7 @@ func (s *ProcessServer) Execute(ctx context.Context, req *processv1.ExecuteReque
 		return nil, status.FromContextError(err).Err()
 	}
 
+	started := time.Now()
 	if err := cmd.Start(); err != nil {
 		return nil, mapCommandError(err, "failed to execute command")
 	}
@@ -368,10 +411,14 @@ func (s *ProcessServer) Execute(ctx context.Context, req *processv1.ExecuteReque
 		return nil, status.FromContextError(err).Err()
 	}
 
-	return &processv1.ExecuteResponse{
-		ExitCode: exitCode,
-		Stdout:   stdoutBuf.Bytes(),
-		Stderr:   stderrBuf.Bytes(),
+	return &processv1.ExecuteWithLimitsResponse{
+		ExitCode:          exitCode,
+		Stdout:            stdoutBuf.buffer.Bytes(),
+		Stderr:            stderrBuf.buffer.Bytes(),
+		TerminationReason: processv1.ExecuteTerminationReason_EXECUTE_TERMINATION_REASON_EXITED,
+		ElapsedDuration:   durationpb.New(time.Since(started)),
+		StdoutTruncated:   stdoutBuf.truncated,
+		StderrTruncated:   stderrBuf.truncated,
 	}, nil
 }
 

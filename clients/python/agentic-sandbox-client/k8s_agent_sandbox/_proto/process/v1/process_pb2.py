@@ -37,9 +37,10 @@ _sym_db = _symbol_database.Default()
 
 
 from google.protobuf import empty_pb2 as google_dot_protobuf_dot_empty__pb2
+from google.protobuf import duration_pb2 as google_dot_protobuf_dot_duration__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x18process/v1/process.proto\x12\nprocess.v1\x1a\x1bgoogle/protobuf/empty.proto\"-\n\x03PTY\x12\x12\n\x04\x63ols\x18\x01 \x01(\rR\x04\x63ols\x12\x12\n\x04rows\x18\x02 \x01(\rR\x04rows\"\xc7\x01\n\rProcessConfig\x12\x18\n\x07\x63ommand\x18\x01 \x03(\tR\x07\x63ommand\x12\x41\n\x08\x65nv_vars\x18\x02 \x03(\x0b\x32&.process.v1.ProcessConfig.EnvVarsEntryR\x07\x65nvVars\x12\x15\n\x03\x63wd\x18\x03 \x01(\tH\x00R\x03\x63wd\x88\x01\x01\x1a:\n\x0c\x45nvVarsEntry\x12\x10\n\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n\x05value\x18\x02 \x01(\tR\x05value:\x02\x38\x01\x42\x06\n\x04_cwd\"q\n\x0cStartRequest\x12\x31\n\x06\x63onfig\x18\x01 \x01(\x0b\x32\x19.process.v1.ProcessConfigR\x06\x63onfig\x12&\n\x03pty\x18\x02 \x01(\x0b\x32\x0f.process.v1.PTYH\x00R\x03pty\x88\x01\x01\x42\x06\n\x04_pty\"*\n\tInitEvent\x12\x1d\n\nprocess_id\x18\x01 \x01(\x05R\tprocessId\"(\n\tExitEvent\x12\x1b\n\texit_code\x18\x01 \x01(\x05R\x08\x65xitCode\"\xa6\x01\n\rStartResponse\x12+\n\x04init\x18\x01 \x01(\x0b\x32\x15.process.v1.InitEventH\x00R\x04init\x12\x18\n\x06stdout\x18\x02 \x01(\x0cH\x00R\x06stdout\x12\x18\n\x06stderr\x18\x03 \x01(\x0cH\x00R\x06stderr\x12+\n\x04\x65xit\x18\x04 \x01(\x0b\x32\x15.process.v1.ExitEventH\x00R\x04\x65xitB\x07\n\x05\x65vent\"C\n\x0e\x45xecuteRequest\x12\x31\n\x06\x63onfig\x18\x01 \x01(\x0b\x32\x19.process.v1.ProcessConfigR\x06\x63onfig\"^\n\x0f\x45xecuteResponse\x12\x1b\n\texit_code\x18\x01 \x01(\x05R\x08\x65xitCode\x12\x16\n\x06stdout\x18\x02 \x01(\x0cR\x06stdout\x12\x16\n\x06stderr\x18\x03 \x01(\x0cR\x06stderr\"\x81\x01\n\x11WriteStdinRequest\x12\x1d\n\nprocess_id\x18\x01 \x01(\x05R\tprocessId\x12\x16\n\x05input\x18\x02 \x01(\x0cH\x00R\x05input\x12*\n\x03\x65of\x18\x03 \x01(\x0b\x32\x16.google.protobuf.EmptyH\x00R\x03\x65ofB\t\n\x07payload\"\x14\n\x12WriteStdinResponse\"^\n\x11SendSignalRequest\x12\x1d\n\nprocess_id\x18\x01 \x01(\x05R\tprocessId\x12*\n\x06signal\x18\x02 \x01(\x0e\x32\x12.process.v1.SignalR\x06signal\"\x14\n\x12SendSignalResponse\"Y\n\x10ResizeTTYRequest\x12\x1d\n\nprocess_id\x18\x01 \x01(\x05R\tprocessId\x12\x12\n\x04\x63ols\x18\x02 \x01(\rR\x04\x63ols\x12\x12\n\x04rows\x18\x03 \x01(\rR\x04rows\"\x13\n\x11ResizeTTYResponse*[\n\x06Signal\x12\x16\n\x12SIGNAL_UNSPECIFIED\x10\x00\x12\x11\n\rSIGNAL_SIGINT\x10\x02\x12\x12\n\x0eSIGNAL_SIGKILL\x10\t\x12\x12\n\x0eSIGNAL_SIGTERM\x10\x0f\x32\xf8\x02\n\x0eProcessService\x12>\n\x05Start\x12\x18.process.v1.StartRequest\x1a\x19.process.v1.StartResponse0\x01\x12\x42\n\x07\x45xecute\x12\x1a.process.v1.ExecuteRequest\x1a\x1b.process.v1.ExecuteResponse\x12K\n\nWriteStdin\x12\x1d.process.v1.WriteStdinRequest\x1a\x1e.process.v1.WriteStdinResponse\x12K\n\nSendSignal\x12\x1d.process.v1.SendSignalRequest\x1a\x1e.process.v1.SendSignalResponse\x12H\n\tResizeTTY\x12\x1c.process.v1.ResizeTTYRequest\x1a\x1d.process.v1.ResizeTTYResponseB\xae\x01\n\x0e\x63om.process.v1B\x0cProcessProtoP\x01ZEsigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1;processv1\xa2\x02\x03PXX\xaa\x02\nProcess.V1\xca\x02\nProcess\\V1\xe2\x02\x16Process\\V1\\GPBMetadata\xea\x02\x0bProcess::V1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x18process/v1/process.proto\x12\nprocess.v1\x1a\x1bgoogle/protobuf/empty.proto\x1a\x1egoogle/protobuf/duration.proto\"-\n\x03PTY\x12\x12\n\x04\x63ols\x18\x01 \x01(\rR\x04\x63ols\x12\x12\n\x04rows\x18\x02 \x01(\rR\x04rows\"\xc7\x01\n\rProcessConfig\x12\x18\n\x07\x63ommand\x18\x01 \x03(\tR\x07\x63ommand\x12\x41\n\x08\x65nv_vars\x18\x02 \x03(\x0b\x32&.process.v1.ProcessConfig.EnvVarsEntryR\x07\x65nvVars\x12\x15\n\x03\x63wd\x18\x03 \x01(\tH\x00R\x03\x63wd\x88\x01\x01\x1a:\n\x0c\x45nvVarsEntry\x12\x10\n\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n\x05value\x18\x02 \x01(\tR\x05value:\x02\x38\x01\x42\x06\n\x04_cwd\"q\n\x0cStartRequest\x12\x31\n\x06\x63onfig\x18\x01 \x01(\x0b\x32\x19.process.v1.ProcessConfigR\x06\x63onfig\x12&\n\x03pty\x18\x02 \x01(\x0b\x32\x0f.process.v1.PTYH\x00R\x03pty\x88\x01\x01\x42\x06\n\x04_pty\"*\n\tInitEvent\x12\x1d\n\nprocess_id\x18\x01 \x01(\x05R\tprocessId\"(\n\tExitEvent\x12\x1b\n\texit_code\x18\x01 \x01(\x05R\x08\x65xitCode\"\xa6\x01\n\rStartResponse\x12+\n\x04init\x18\x01 \x01(\x0b\x32\x15.process.v1.InitEventH\x00R\x04init\x12\x18\n\x06stdout\x18\x02 \x01(\x0cH\x00R\x06stdout\x12\x18\n\x06stderr\x18\x03 \x01(\x0cH\x00R\x06stderr\x12+\n\x04\x65xit\x18\x04 \x01(\x0b\x32\x15.process.v1.ExitEventH\x00R\x04\x65xitB\x07\n\x05\x65vent\"C\n\x0e\x45xecuteRequest\x12\x31\n\x06\x63onfig\x18\x01 \x01(\x0b\x32\x19.process.v1.ProcessConfigR\x06\x63onfig\"^\n\x0f\x45xecuteResponse\x12\x1b\n\texit_code\x18\x01 \x01(\x05R\x08\x65xitCode\x12\x16\n\x06stdout\x18\x02 \x01(\x0cR\x06stdout\x12\x16\n\x06stderr\x18\x03 \x01(\x0cR\x06stderr\"\xe1\x01\n\x18\x45xecuteWithLimitsRequest\x12\x31\n\x06\x63onfig\x18\x01 \x01(\x0b\x32\x19.process.v1.ProcessConfigR\x06\x63onfig\x12\x31\n\x12stdout_limit_bytes\x18\x02 \x01(\x04H\x00R\x10stdoutLimitBytes\x88\x01\x01\x12\x31\n\x12stderr_limit_bytes\x18\x03 \x01(\x04H\x01R\x10stderrLimitBytes\x88\x01\x01\x42\x15\n\x13_stdout_limit_bytesB\x15\n\x13_stderr_limit_bytes\"\xd9\x02\n\x19\x45xecuteWithLimitsResponse\x12\x1b\n\texit_code\x18\x01 \x01(\x05R\x08\x65xitCode\x12\x16\n\x06stdout\x18\x02 \x01(\x0cR\x06stdout\x12\x16\n\x06stderr\x18\x03 \x01(\x0cR\x06stderr\x12S\n\x12termination_reason\x18\x04 \x01(\x0e\x32$.process.v1.ExecuteTerminationReasonR\x11terminationReason\x12\x44\n\x10\x65lapsed_duration\x18\x05 \x01(\x0b\x32\x19.google.protobuf.DurationR\x0f\x65lapsedDuration\x12)\n\x10stdout_truncated\x18\x06 \x01(\x08R\x0fstdoutTruncated\x12)\n\x10stderr_truncated\x18\x07 \x01(\x08R\x0fstderrTruncated\"\x81\x01\n\x11WriteStdinRequest\x12\x1d\n\nprocess_id\x18\x01 \x01(\x05R\tprocessId\x12\x16\n\x05input\x18\x02 \x01(\x0cH\x00R\x05input\x12*\n\x03\x65of\x18\x03 \x01(\x0b\x32\x16.google.protobuf.EmptyH\x00R\x03\x65ofB\t\n\x07payload\"\x14\n\x12WriteStdinResponse\"^\n\x11SendSignalRequest\x12\x1d\n\nprocess_id\x18\x01 \x01(\x05R\tprocessId\x12*\n\x06signal\x18\x02 \x01(\x0e\x32\x12.process.v1.SignalR\x06signal\"\x14\n\x12SendSignalResponse\"Y\n\x10ResizeTTYRequest\x12\x1d\n\nprocess_id\x18\x01 \x01(\x05R\tprocessId\x12\x12\n\x04\x63ols\x18\x02 \x01(\rR\x04\x63ols\x12\x12\n\x04rows\x18\x03 \x01(\rR\x04rows\"\x13\n\x11ResizeTTYResponse*[\n\x06Signal\x12\x16\n\x12SIGNAL_UNSPECIFIED\x10\x00\x12\x11\n\rSIGNAL_SIGINT\x10\x02\x12\x12\n\x0eSIGNAL_SIGKILL\x10\t\x12\x12\n\x0eSIGNAL_SIGTERM\x10\x0f*m\n\x18\x45xecuteTerminationReason\x12*\n&EXECUTE_TERMINATION_REASON_UNSPECIFIED\x10\x00\x12%\n!EXECUTE_TERMINATION_REASON_EXITED\x10\x01\x32\xda\x03\n\x0eProcessService\x12>\n\x05Start\x12\x18.process.v1.StartRequest\x1a\x19.process.v1.StartResponse0\x01\x12\x42\n\x07\x45xecute\x12\x1a.process.v1.ExecuteRequest\x1a\x1b.process.v1.ExecuteResponse\x12`\n\x11\x45xecuteWithLimits\x12$.process.v1.ExecuteWithLimitsRequest\x1a%.process.v1.ExecuteWithLimitsResponse\x12K\n\nWriteStdin\x12\x1d.process.v1.WriteStdinRequest\x1a\x1e.process.v1.WriteStdinResponse\x12K\n\nSendSignal\x12\x1d.process.v1.SendSignalRequest\x1a\x1e.process.v1.SendSignalResponse\x12H\n\tResizeTTY\x12\x1c.process.v1.ResizeTTYRequest\x1a\x1d.process.v1.ResizeTTYResponseB\xae\x01\n\x0e\x63om.process.v1B\x0cProcessProtoP\x01ZEsigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1;processv1\xa2\x02\x03PXX\xaa\x02\nProcess.V1\xca\x02\nProcess\\V1\xe2\x02\x16Process\\V1\\GPBMetadata\xea\x02\x0bProcess::V1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -49,38 +50,44 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._serialized_options = b'\n\016com.process.v1B\014ProcessProtoP\001ZEsigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1;processv1\242\002\003PXX\252\002\nProcess.V1\312\002\nProcess\\V1\342\002\026Process\\V1\\GPBMetadata\352\002\013Process::V1'
   _globals['_PROCESSCONFIG_ENVVARSENTRY']._loaded_options = None
   _globals['_PROCESSCONFIG_ENVVARSENTRY']._serialized_options = b'8\001'
-  _globals['_SIGNAL']._serialized_start=1237
-  _globals['_SIGNAL']._serialized_end=1328
-  _globals['_PTY']._serialized_start=69
-  _globals['_PTY']._serialized_end=114
-  _globals['_PROCESSCONFIG']._serialized_start=117
-  _globals['_PROCESSCONFIG']._serialized_end=316
-  _globals['_PROCESSCONFIG_ENVVARSENTRY']._serialized_start=250
-  _globals['_PROCESSCONFIG_ENVVARSENTRY']._serialized_end=308
-  _globals['_STARTREQUEST']._serialized_start=318
-  _globals['_STARTREQUEST']._serialized_end=431
-  _globals['_INITEVENT']._serialized_start=433
-  _globals['_INITEVENT']._serialized_end=475
-  _globals['_EXITEVENT']._serialized_start=477
-  _globals['_EXITEVENT']._serialized_end=517
-  _globals['_STARTRESPONSE']._serialized_start=520
-  _globals['_STARTRESPONSE']._serialized_end=686
-  _globals['_EXECUTEREQUEST']._serialized_start=688
-  _globals['_EXECUTEREQUEST']._serialized_end=755
-  _globals['_EXECUTERESPONSE']._serialized_start=757
-  _globals['_EXECUTERESPONSE']._serialized_end=851
-  _globals['_WRITESTDINREQUEST']._serialized_start=854
-  _globals['_WRITESTDINREQUEST']._serialized_end=983
-  _globals['_WRITESTDINRESPONSE']._serialized_start=985
-  _globals['_WRITESTDINRESPONSE']._serialized_end=1005
-  _globals['_SENDSIGNALREQUEST']._serialized_start=1007
-  _globals['_SENDSIGNALREQUEST']._serialized_end=1101
-  _globals['_SENDSIGNALRESPONSE']._serialized_start=1103
-  _globals['_SENDSIGNALRESPONSE']._serialized_end=1123
-  _globals['_RESIZETTYREQUEST']._serialized_start=1125
-  _globals['_RESIZETTYREQUEST']._serialized_end=1214
-  _globals['_RESIZETTYRESPONSE']._serialized_start=1216
-  _globals['_RESIZETTYRESPONSE']._serialized_end=1235
-  _globals['_PROCESSSERVICE']._serialized_start=1331
-  _globals['_PROCESSSERVICE']._serialized_end=1707
+  _globals['_SIGNAL']._serialized_start=1845
+  _globals['_SIGNAL']._serialized_end=1936
+  _globals['_EXECUTETERMINATIONREASON']._serialized_start=1938
+  _globals['_EXECUTETERMINATIONREASON']._serialized_end=2047
+  _globals['_PTY']._serialized_start=101
+  _globals['_PTY']._serialized_end=146
+  _globals['_PROCESSCONFIG']._serialized_start=149
+  _globals['_PROCESSCONFIG']._serialized_end=348
+  _globals['_PROCESSCONFIG_ENVVARSENTRY']._serialized_start=282
+  _globals['_PROCESSCONFIG_ENVVARSENTRY']._serialized_end=340
+  _globals['_STARTREQUEST']._serialized_start=350
+  _globals['_STARTREQUEST']._serialized_end=463
+  _globals['_INITEVENT']._serialized_start=465
+  _globals['_INITEVENT']._serialized_end=507
+  _globals['_EXITEVENT']._serialized_start=509
+  _globals['_EXITEVENT']._serialized_end=549
+  _globals['_STARTRESPONSE']._serialized_start=552
+  _globals['_STARTRESPONSE']._serialized_end=718
+  _globals['_EXECUTEREQUEST']._serialized_start=720
+  _globals['_EXECUTEREQUEST']._serialized_end=787
+  _globals['_EXECUTERESPONSE']._serialized_start=789
+  _globals['_EXECUTERESPONSE']._serialized_end=883
+  _globals['_EXECUTEWITHLIMITSREQUEST']._serialized_start=886
+  _globals['_EXECUTEWITHLIMITSREQUEST']._serialized_end=1111
+  _globals['_EXECUTEWITHLIMITSRESPONSE']._serialized_start=1114
+  _globals['_EXECUTEWITHLIMITSRESPONSE']._serialized_end=1459
+  _globals['_WRITESTDINREQUEST']._serialized_start=1462
+  _globals['_WRITESTDINREQUEST']._serialized_end=1591
+  _globals['_WRITESTDINRESPONSE']._serialized_start=1593
+  _globals['_WRITESTDINRESPONSE']._serialized_end=1613
+  _globals['_SENDSIGNALREQUEST']._serialized_start=1615
+  _globals['_SENDSIGNALREQUEST']._serialized_end=1709
+  _globals['_SENDSIGNALRESPONSE']._serialized_start=1711
+  _globals['_SENDSIGNALRESPONSE']._serialized_end=1731
+  _globals['_RESIZETTYREQUEST']._serialized_start=1733
+  _globals['_RESIZETTYREQUEST']._serialized_end=1822
+  _globals['_RESIZETTYRESPONSE']._serialized_start=1824
+  _globals['_RESIZETTYRESPONSE']._serialized_end=1843
+  _globals['_PROCESSSERVICE']._serialized_start=2050
+  _globals['_PROCESSSERVICE']._serialized_end=2524
 # @@protoc_insertion_point(module_scope)

@@ -112,6 +112,7 @@ explicitly as shown in [Agent Sandbox SDK access](#agent-sandbox-sdk-access).
 |---|---|---|
 | `Start` | Server stream | Run a command, stream `stdout`/`stderr` in real time until `ExitEvent`. Optional PTY. |
 | `Execute` | Unary | Run a command synchronously, return `stdout`/`stderr`/`exit_code` atomically. |
+| `ExecuteWithLimits` | Unary | Run a command with independent stdout/stderr capture limits and explicit truncation flags. |
 | `WriteStdin` | Unary | Send `stdin` bytes or `EOF` to a running process. |
 | `SendSignal` | Unary | Deliver `SIGINT`/`SIGTERM`/`SIGKILL` to the process group. |
 | `ResizeTTY` | Unary | Resize the pseudo-terminal window (`cols`, `rows`). |
@@ -122,6 +123,14 @@ process IDs, `PERMISSION_DENIED` for a `cwd` escaping the sandbox root,
 
 `exit_code` is the process's exit status, or `128+n` when signal `n` killed
 it (e.g. `137` for `SIGKILL`), as a shell reports it.
+
+`ExecuteWithLimits` accepts optional positive `stdout_limit_bytes` and
+`stderr_limit_bytes`. Each stream keeps its prefix within its own byte budget.
+Additional output is drained and discarded without terminating the program.
+The response reports each stream's truncation flag and elapsed duration.
+Unspecified limits preserve unlimited capture until deployment policy is set.
+Older runtimes reject the new RPC with `UNIMPLEMENTED` before running a command;
+clients must not retry it through `Execute` without the requested limits.
 
 ### FileWatcherService (gRPC, `:9090`)
 

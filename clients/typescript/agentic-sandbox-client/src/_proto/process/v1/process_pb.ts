@@ -18,15 +18,15 @@
 
 import type { GenEnum, GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
 import { enumDesc, fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
-import type { Empty } from "@bufbuild/protobuf/wkt";
-import { file_google_protobuf_empty } from "@bufbuild/protobuf/wkt";
+import type { Duration, Empty } from "@bufbuild/protobuf/wkt";
+import { file_google_protobuf_duration, file_google_protobuf_empty } from "@bufbuild/protobuf/wkt";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file process/v1/process.proto.
  */
 export const file_process_v1_process: GenFile = /*@__PURE__*/
-  fileDesc("Chhwcm9jZXNzL3YxL3Byb2Nlc3MucHJvdG8SCnByb2Nlc3MudjEiIQoDUFRZEgwKBGNvbHMYASABKA0SDAoEcm93cxgCIAEoDSKkAQoNUHJvY2Vzc0NvbmZpZxIPCgdjb21tYW5kGAEgAygJEjgKCGVudl92YXJzGAIgAygLMiYucHJvY2Vzcy52MS5Qcm9jZXNzQ29uZmlnLkVudlZhcnNFbnRyeRIQCgNjd2QYAyABKAlIAIgBARouCgxFbnZWYXJzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4AUIGCgRfY3dkImQKDFN0YXJ0UmVxdWVzdBIpCgZjb25maWcYASABKAsyGS5wcm9jZXNzLnYxLlByb2Nlc3NDb25maWcSIQoDcHR5GAIgASgLMg8ucHJvY2Vzcy52MS5QVFlIAIgBAUIGCgRfcHR5Ih8KCUluaXRFdmVudBISCgpwcm9jZXNzX2lkGAEgASgFIh4KCUV4aXRFdmVudBIRCglleGl0X2NvZGUYASABKAUiigEKDVN0YXJ0UmVzcG9uc2USJQoEaW5pdBgBIAEoCzIVLnByb2Nlc3MudjEuSW5pdEV2ZW50SAASEAoGc3Rkb3V0GAIgASgMSAASEAoGc3RkZXJyGAMgASgMSAASJQoEZXhpdBgEIAEoCzIVLnByb2Nlc3MudjEuRXhpdEV2ZW50SABCBwoFZXZlbnQiOwoORXhlY3V0ZVJlcXVlc3QSKQoGY29uZmlnGAEgASgLMhkucHJvY2Vzcy52MS5Qcm9jZXNzQ29uZmlnIkQKD0V4ZWN1dGVSZXNwb25zZRIRCglleGl0X2NvZGUYASABKAUSDgoGc3Rkb3V0GAIgASgMEg4KBnN0ZGVychgDIAEoDCJqChFXcml0ZVN0ZGluUmVxdWVzdBISCgpwcm9jZXNzX2lkGAEgASgFEg8KBWlucHV0GAIgASgMSAASJQoDZW9mGAMgASgLMhYuZ29vZ2xlLnByb3RvYnVmLkVtcHR5SABCCQoHcGF5bG9hZCIUChJXcml0ZVN0ZGluUmVzcG9uc2UiSwoRU2VuZFNpZ25hbFJlcXVlc3QSEgoKcHJvY2Vzc19pZBgBIAEoBRIiCgZzaWduYWwYAiABKA4yEi5wcm9jZXNzLnYxLlNpZ25hbCIUChJTZW5kU2lnbmFsUmVzcG9uc2UiQgoQUmVzaXplVFRZUmVxdWVzdBISCgpwcm9jZXNzX2lkGAEgASgFEgwKBGNvbHMYAiABKA0SDAoEcm93cxgDIAEoDSITChFSZXNpemVUVFlSZXNwb25zZSpbCgZTaWduYWwSFgoSU0lHTkFMX1VOU1BFQ0lGSUVEEAASEQoNU0lHTkFMX1NJR0lOVBACEhIKDlNJR05BTF9TSUdLSUxMEAkSEgoOU0lHTkFMX1NJR1RFUk0QDzL4AgoOUHJvY2Vzc1NlcnZpY2USPgoFU3RhcnQSGC5wcm9jZXNzLnYxLlN0YXJ0UmVxdWVzdBoZLnByb2Nlc3MudjEuU3RhcnRSZXNwb25zZTABEkIKB0V4ZWN1dGUSGi5wcm9jZXNzLnYxLkV4ZWN1dGVSZXF1ZXN0GhsucHJvY2Vzcy52MS5FeGVjdXRlUmVzcG9uc2USSwoKV3JpdGVTdGRpbhIdLnByb2Nlc3MudjEuV3JpdGVTdGRpblJlcXVlc3QaHi5wcm9jZXNzLnYxLldyaXRlU3RkaW5SZXNwb25zZRJLCgpTZW5kU2lnbmFsEh0ucHJvY2Vzcy52MS5TZW5kU2lnbmFsUmVxdWVzdBoeLnByb2Nlc3MudjEuU2VuZFNpZ25hbFJlc3BvbnNlEkgKCVJlc2l6ZVRUWRIcLnByb2Nlc3MudjEuUmVzaXplVFRZUmVxdWVzdBodLnByb2Nlc3MudjEuUmVzaXplVFRZUmVzcG9uc2VCrgEKDmNvbS5wcm9jZXNzLnYxQgxQcm9jZXNzUHJvdG9QAVpFc2lncy5rOHMuaW8vYWdlbnQtc2FuZGJveC9wYWNrYWdlcy9zYW5kYm94ZC9zcGVjL3Byb2Nlc3MvdjE7cHJvY2Vzc3YxogIDUFhYqgIKUHJvY2Vzcy5WMcoCClByb2Nlc3NcVjHiAhZQcm9jZXNzXFYxXEdQQk1ldGFkYXRh6gILUHJvY2Vzczo6VjFiBnByb3RvMw", [file_google_protobuf_empty]);
+  fileDesc("Chhwcm9jZXNzL3YxL3Byb2Nlc3MucHJvdG8SCnByb2Nlc3MudjEiIQoDUFRZEgwKBGNvbHMYASABKA0SDAoEcm93cxgCIAEoDSKkAQoNUHJvY2Vzc0NvbmZpZxIPCgdjb21tYW5kGAEgAygJEjgKCGVudl92YXJzGAIgAygLMiYucHJvY2Vzcy52MS5Qcm9jZXNzQ29uZmlnLkVudlZhcnNFbnRyeRIQCgNjd2QYAyABKAlIAIgBARouCgxFbnZWYXJzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4AUIGCgRfY3dkImQKDFN0YXJ0UmVxdWVzdBIpCgZjb25maWcYASABKAsyGS5wcm9jZXNzLnYxLlByb2Nlc3NDb25maWcSIQoDcHR5GAIgASgLMg8ucHJvY2Vzcy52MS5QVFlIAIgBAUIGCgRfcHR5Ih8KCUluaXRFdmVudBISCgpwcm9jZXNzX2lkGAEgASgFIh4KCUV4aXRFdmVudBIRCglleGl0X2NvZGUYASABKAUiigEKDVN0YXJ0UmVzcG9uc2USJQoEaW5pdBgBIAEoCzIVLnByb2Nlc3MudjEuSW5pdEV2ZW50SAASEAoGc3Rkb3V0GAIgASgMSAASEAoGc3RkZXJyGAMgASgMSAASJQoEZXhpdBgEIAEoCzIVLnByb2Nlc3MudjEuRXhpdEV2ZW50SABCBwoFZXZlbnQiOwoORXhlY3V0ZVJlcXVlc3QSKQoGY29uZmlnGAEgASgLMhkucHJvY2Vzcy52MS5Qcm9jZXNzQ29uZmlnIkQKD0V4ZWN1dGVSZXNwb25zZRIRCglleGl0X2NvZGUYASABKAUSDgoGc3Rkb3V0GAIgASgMEg4KBnN0ZGVychgDIAEoDCK1AQoYRXhlY3V0ZVdpdGhMaW1pdHNSZXF1ZXN0EikKBmNvbmZpZxgBIAEoCzIZLnByb2Nlc3MudjEuUHJvY2Vzc0NvbmZpZxIfChJzdGRvdXRfbGltaXRfYnl0ZXMYAiABKARIAIgBARIfChJzdGRlcnJfbGltaXRfYnl0ZXMYAyABKARIAYgBAUIVChNfc3Rkb3V0X2xpbWl0X2J5dGVzQhUKE19zdGRlcnJfbGltaXRfYnl0ZXMi+QEKGUV4ZWN1dGVXaXRoTGltaXRzUmVzcG9uc2USEQoJZXhpdF9jb2RlGAEgASgFEg4KBnN0ZG91dBgCIAEoDBIOCgZzdGRlcnIYAyABKAwSQAoSdGVybWluYXRpb25fcmVhc29uGAQgASgOMiQucHJvY2Vzcy52MS5FeGVjdXRlVGVybWluYXRpb25SZWFzb24SMwoQZWxhcHNlZF9kdXJhdGlvbhgFIAEoCzIZLmdvb2dsZS5wcm90b2J1Zi5EdXJhdGlvbhIYChBzdGRvdXRfdHJ1bmNhdGVkGAYgASgIEhgKEHN0ZGVycl90cnVuY2F0ZWQYByABKAgiagoRV3JpdGVTdGRpblJlcXVlc3QSEgoKcHJvY2Vzc19pZBgBIAEoBRIPCgVpbnB1dBgCIAEoDEgAEiUKA2VvZhgDIAEoCzIWLmdvb2dsZS5wcm90b2J1Zi5FbXB0eUgAQgkKB3BheWxvYWQiFAoSV3JpdGVTdGRpblJlc3BvbnNlIksKEVNlbmRTaWduYWxSZXF1ZXN0EhIKCnByb2Nlc3NfaWQYASABKAUSIgoGc2lnbmFsGAIgASgOMhIucHJvY2Vzcy52MS5TaWduYWwiFAoSU2VuZFNpZ25hbFJlc3BvbnNlIkIKEFJlc2l6ZVRUWVJlcXVlc3QSEgoKcHJvY2Vzc19pZBgBIAEoBRIMCgRjb2xzGAIgASgNEgwKBHJvd3MYAyABKA0iEwoRUmVzaXplVFRZUmVzcG9uc2UqWwoGU2lnbmFsEhYKElNJR05BTF9VTlNQRUNJRklFRBAAEhEKDVNJR05BTF9TSUdJTlQQAhISCg5TSUdOQUxfU0lHS0lMTBAJEhIKDlNJR05BTF9TSUdURVJNEA8qbQoYRXhlY3V0ZVRlcm1pbmF0aW9uUmVhc29uEioKJkVYRUNVVEVfVEVSTUlOQVRJT05fUkVBU09OX1VOU1BFQ0lGSUVEEAASJQohRVhFQ1VURV9URVJNSU5BVElPTl9SRUFTT05fRVhJVEVEEAEy2gMKDlByb2Nlc3NTZXJ2aWNlEj4KBVN0YXJ0EhgucHJvY2Vzcy52MS5TdGFydFJlcXVlc3QaGS5wcm9jZXNzLnYxLlN0YXJ0UmVzcG9uc2UwARJCCgdFeGVjdXRlEhoucHJvY2Vzcy52MS5FeGVjdXRlUmVxdWVzdBobLnByb2Nlc3MudjEuRXhlY3V0ZVJlc3BvbnNlEmAKEUV4ZWN1dGVXaXRoTGltaXRzEiQucHJvY2Vzcy52MS5FeGVjdXRlV2l0aExpbWl0c1JlcXVlc3QaJS5wcm9jZXNzLnYxLkV4ZWN1dGVXaXRoTGltaXRzUmVzcG9uc2USSwoKV3JpdGVTdGRpbhIdLnByb2Nlc3MudjEuV3JpdGVTdGRpblJlcXVlc3QaHi5wcm9jZXNzLnYxLldyaXRlU3RkaW5SZXNwb25zZRJLCgpTZW5kU2lnbmFsEh0ucHJvY2Vzcy52MS5TZW5kU2lnbmFsUmVxdWVzdBoeLnByb2Nlc3MudjEuU2VuZFNpZ25hbFJlc3BvbnNlEkgKCVJlc2l6ZVRUWRIcLnByb2Nlc3MudjEuUmVzaXplVFRZUmVxdWVzdBodLnByb2Nlc3MudjEuUmVzaXplVFRZUmVzcG9uc2VCrgEKDmNvbS5wcm9jZXNzLnYxQgxQcm9jZXNzUHJvdG9QAVpFc2lncy5rOHMuaW8vYWdlbnQtc2FuZGJveC9wYWNrYWdlcy9zYW5kYm94ZC9zcGVjL3Byb2Nlc3MvdjE7cHJvY2Vzc3YxogIDUFhYqgIKUHJvY2Vzcy5WMcoCClByb2Nlc3NcVjHiAhZQcm9jZXNzXFYxXEdQQk1ldGFkYXRh6gILUHJvY2Vzczo6VjFiBnByb3RvMw", [file_google_protobuf_empty, file_google_protobuf_duration]);
 
 /**
  * @generated from message process.v1.PTY
@@ -227,6 +227,86 @@ export const ExecuteResponseSchema: GenMessage<ExecuteResponse> = /*@__PURE__*/
   messageDesc(file_process_v1_process, 7);
 
 /**
+ * @generated from message process.v1.ExecuteWithLimitsRequest
+ */
+export type ExecuteWithLimitsRequest = Message<"process.v1.ExecuteWithLimitsRequest"> & {
+  /**
+   * @generated from field: process.v1.ProcessConfig config = 1;
+   */
+  config?: ProcessConfig | undefined;
+
+  /**
+   * Omitted limits inherit deployment policy. Explicit limits must be positive.
+   *
+   * @generated from field: optional uint64 stdout_limit_bytes = 2;
+   */
+  stdoutLimitBytes?: bigint | undefined;
+
+  /**
+   * @generated from field: optional uint64 stderr_limit_bytes = 3;
+   */
+  stderrLimitBytes?: bigint | undefined;
+};
+
+/**
+ * Describes the message process.v1.ExecuteWithLimitsRequest.
+ * Use `create(ExecuteWithLimitsRequestSchema)` to create a new message.
+ */
+export const ExecuteWithLimitsRequestSchema: GenMessage<ExecuteWithLimitsRequest> = /*@__PURE__*/
+  messageDesc(file_process_v1_process, 8);
+
+/**
+ * @generated from message process.v1.ExecuteWithLimitsResponse
+ */
+export type ExecuteWithLimitsResponse = Message<"process.v1.ExecuteWithLimitsResponse"> & {
+  /**
+   * @generated from field: int32 exit_code = 1;
+   */
+  exitCode: number;
+
+  /**
+   * Each stream retains its prefix. Additional output is drained and discarded.
+   *
+   * @generated from field: bytes stdout = 2;
+   */
+  stdout: Uint8Array;
+
+  /**
+   * @generated from field: bytes stderr = 3;
+   */
+  stderr: Uint8Array;
+
+  /**
+   * @generated from field: process.v1.ExecuteTerminationReason termination_reason = 4;
+   */
+  terminationReason: ExecuteTerminationReason;
+
+  /**
+   * Wall-clock time from launch preparation through termination and I/O cleanup.
+   *
+   * @generated from field: google.protobuf.Duration elapsed_duration = 5;
+   */
+  elapsedDuration?: Duration | undefined;
+
+  /**
+   * @generated from field: bool stdout_truncated = 6;
+   */
+  stdoutTruncated: boolean;
+
+  /**
+   * @generated from field: bool stderr_truncated = 7;
+   */
+  stderrTruncated: boolean;
+};
+
+/**
+ * Describes the message process.v1.ExecuteWithLimitsResponse.
+ * Use `create(ExecuteWithLimitsResponseSchema)` to create a new message.
+ */
+export const ExecuteWithLimitsResponseSchema: GenMessage<ExecuteWithLimitsResponse> = /*@__PURE__*/
+  messageDesc(file_process_v1_process, 9);
+
+/**
  * @generated from message process.v1.WriteStdinRequest
  */
 export type WriteStdinRequest = Message<"process.v1.WriteStdinRequest"> & {
@@ -258,7 +338,7 @@ export type WriteStdinRequest = Message<"process.v1.WriteStdinRequest"> & {
  * Use `create(WriteStdinRequestSchema)` to create a new message.
  */
 export const WriteStdinRequestSchema: GenMessage<WriteStdinRequest> = /*@__PURE__*/
-  messageDesc(file_process_v1_process, 8);
+  messageDesc(file_process_v1_process, 10);
 
 /**
  * WriteStdinResponse is returned on successful delivery of standard input.
@@ -275,7 +355,7 @@ export type WriteStdinResponse = Message<"process.v1.WriteStdinResponse"> & {
  * Use `create(WriteStdinResponseSchema)` to create a new message.
  */
 export const WriteStdinResponseSchema: GenMessage<WriteStdinResponse> = /*@__PURE__*/
-  messageDesc(file_process_v1_process, 9);
+  messageDesc(file_process_v1_process, 11);
 
 /**
  * @generated from message process.v1.SendSignalRequest
@@ -297,7 +377,7 @@ export type SendSignalRequest = Message<"process.v1.SendSignalRequest"> & {
  * Use `create(SendSignalRequestSchema)` to create a new message.
  */
 export const SendSignalRequestSchema: GenMessage<SendSignalRequest> = /*@__PURE__*/
-  messageDesc(file_process_v1_process, 10);
+  messageDesc(file_process_v1_process, 12);
 
 /**
  * SendSignalResponse is returned on successful delivery of a signal.
@@ -313,7 +393,7 @@ export type SendSignalResponse = Message<"process.v1.SendSignalResponse"> & {
  * Use `create(SendSignalResponseSchema)` to create a new message.
  */
 export const SendSignalResponseSchema: GenMessage<SendSignalResponse> = /*@__PURE__*/
-  messageDesc(file_process_v1_process, 11);
+  messageDesc(file_process_v1_process, 13);
 
 /**
  * @generated from message process.v1.ResizeTTYRequest
@@ -340,7 +420,7 @@ export type ResizeTTYRequest = Message<"process.v1.ResizeTTYRequest"> & {
  * Use `create(ResizeTTYRequestSchema)` to create a new message.
  */
 export const ResizeTTYRequestSchema: GenMessage<ResizeTTYRequest> = /*@__PURE__*/
-  messageDesc(file_process_v1_process, 12);
+  messageDesc(file_process_v1_process, 14);
 
 /**
  * @generated from message process.v1.ResizeTTYResponse
@@ -353,7 +433,7 @@ export type ResizeTTYResponse = Message<"process.v1.ResizeTTYResponse"> & {
  * Use `create(ResizeTTYResponseSchema)` to create a new message.
  */
 export const ResizeTTYResponseSchema: GenMessage<ResizeTTYResponse> = /*@__PURE__*/
-  messageDesc(file_process_v1_process, 13);
+  messageDesc(file_process_v1_process, 15);
 
 /**
  * @generated from enum process.v1.Signal
@@ -387,6 +467,29 @@ export const SignalSchema: GenEnum<Signal> = /*@__PURE__*/
   enumDesc(file_process_v1_process, 0);
 
 /**
+ * @generated from enum process.v1.ExecuteTerminationReason
+ */
+export enum ExecuteTerminationReason {
+  /**
+   * @generated from enum value: EXECUTE_TERMINATION_REASON_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * The program exited normally or due to a signal other than an execution limit.
+   *
+   * @generated from enum value: EXECUTE_TERMINATION_REASON_EXITED = 1;
+   */
+  EXITED = 1,
+}
+
+/**
+ * Describes the enum process.v1.ExecuteTerminationReason.
+ */
+export const ExecuteTerminationReasonSchema: GenEnum<ExecuteTerminationReason> = /*@__PURE__*/
+  enumDesc(file_process_v1_process, 1);
+
+/**
  * ProcessService manages process execution, lifecycle, signals, and interactive terminals (PTY).
  *
  * @generated from service process.v1.ProcessService
@@ -414,6 +517,17 @@ export const ProcessService: GenService<{
     methodKind: "unary";
     input: typeof ExecuteRequestSchema;
     output: typeof ExecuteResponseSchema;
+  },
+  /**
+   * ExecuteWithLimits captures bounded output and reports execution outcomes.
+   * Older runtimes reject this method instead of ignoring requested limits.
+   *
+   * @generated from rpc process.v1.ProcessService.ExecuteWithLimits
+   */
+  executeWithLimits: {
+    methodKind: "unary";
+    input: typeof ExecuteWithLimitsRequestSchema;
+    output: typeof ExecuteWithLimitsResponseSchema;
   },
   /**
    * WriteStdin sends standard input bytes or EOF to an active running process.

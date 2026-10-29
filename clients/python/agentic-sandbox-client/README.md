@@ -707,8 +707,41 @@ finally:
     batch.release()
 ```
 
-A batch's claims are consumed in one of two modes, fixed by whichever method is called first.
+`wait_for_quorum()` instead waits until every group has `min_ready` Ready members, so work starts with
+the whole batch at once.
 
+```python
+from k8s_agent_sandbox import BatchEventType, BatchGroup, SandboxClient
+
+client = SandboxClient()
+batch = client.claim_batch(
+    [BatchGroup(warmpool="python-sandbox-pool", size=8, min_ready=6)],
+    namespace="default",
+)
+
+try:
+    for member in batch.wait_for_quorum():
+        batch.connect(member).commands.run("echo hello")
+    # Members beyond the quorum are handed out as they become Ready, until the batch settles.
+    for event in batch.events():
+        if event.type is BatchEventType.MEMBER_READY:
+            batch.connect(event.member).commands.run("echo hello")
+finally:
+    batch.release()
+```
+
+A batch's claims are consumed in one of three modes, fixed by whichever method is called first.
+
+- `wait_for_quorum()` (quorum mode) waits until every group has `min_ready` Ready members and
+  returns them in one list, each group's first `min_ready` in the order they became Ready, with the groups in
+  batch order. It raises `QuorumUnreachableError` once any group has too few members that can still become
+  Ready, and `BatchTimeoutError` if the quorum isn't reached within `quorum_timeout` of the batch's last claim
+  create. After that no members are handed out and no more claims are created, and the same holds if the wait
+  ends with any other exception, such as a cancellation or `KeyboardInterrupt`. It raises `BatchError` if the
+  batch's watch or Lease renewal stops with an error while it waits, and it can be called only once.
+  If every group has `min_ready=0`, it returns an empty list at once. The handle checks the deadline only
+  while a consumer waits or claims are still being created, so a quorum reached after the deadline, before any
+  consumer checks it, still succeeds.
 - `group_outcomes()` (group mode) yields one `GroupOutcome` per group, holding either its first
   `min_ready` Ready members, in the order they became Ready, or an `error`. A group fails with `QuorumUnreachableError` once
   too few of its members can still become Ready, and with `BatchTimeoutError` if it hasn't reached `min_ready`
@@ -720,7 +753,9 @@ A batch's claims are consumed in one of two modes, fixed by whichever method is 
   and `MEMBER_LOST` for claims that fail or are deleted.
   Called first (stream mode), it streams every Ready member. Called after `group_outcomes()`, it hands out a
   group's members only after that group has yielded successfully, starting with the Ready members beyond
-  its first `min_ready` and then later ones as they become Ready. `group_outcomes()` can't be called after `events()`.
+  its first `min_ready` and then later ones as they become Ready. Called after `wait_for_quorum()`, it hands
+  out the Ready members the quorum didn't return once the quorum is reached. `group_outcomes()` and
+  `wait_for_quorum()` can't be called after `events()` or after each other.
 
 Both iterators can be called again to continue where they stopped. They also end early if the batch's
 watch or Lease renewal stops with an error, so check `batch.err()` after the loop. `release()` deletes the
@@ -750,7 +785,7 @@ supports all of the above.
 - `batch_id`, `namespace`, `groups`, `size`: the batch's identity and its per-warmpool `BatchGroup`s.
 - `members(warmpool=None)`: a snapshot of every `Member`, sorted by ordinal. A member's `state` is `PENDING`, `READY`, `FAILED` or `LOST`.
 - `connect(member)`: a connected `Sandbox`/`AsyncSandbox` for a ready member.
-- `events()` and `group_outcomes()`, the two consumers described above.
+- `wait_for_quorum()`, `group_outcomes()`, and `events()`, the three consumers described above.
 - `err()`: the error that stopped the background watch/renewal, or `None`. Once it is set, no more claims
   are created.
 - `lease_degraded()`: whether Lease renewal is failing, from the first failed renewal until one succeeds.

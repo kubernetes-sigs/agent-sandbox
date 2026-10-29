@@ -1,0 +1,17 @@
+title: SandboxWarmPool Warmup Concurrency Strategy
+kep-number: 2103
+authors:
+  - "@Dimss"
+status: provisional
+creation-date: "2026-10-29"
+last-updated: "2026-10-29"
+stage: alpha
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+see-also:
+  - "https://github.com/kubernetes-sigs/agent-sandbox/issues/2103"
+  - "https://github.com/kubernetes-sigs/agent-sandbox/issues/1293"
+  - "https://github.com/kubernetes-sigs/agent-sandbox/issues/1215"

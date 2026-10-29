@@ -298,10 +298,10 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	makeDirectory := putType == entryTypeDirectory
+	isDirectory := putType == entryTypeDirectory
 
 	defaultMode := os.FileMode(0o644)
-	if makeDirectory {
+	if isDirectory {
 		defaultMode = 0o755
 	}
 	mode, ok := s.modeQuery(w, r, defaultMode)
@@ -319,7 +319,7 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if makeDirectory {
+	if isDirectory {
 		if appendMode {
 			s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
 				"append cannot be used with type=directory")
@@ -330,6 +330,10 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if info, err := os.Stat(target); err == nil && info.IsDir() {
+		if msg := typeMismatch(putType, true); msg != "" {
+			s.writeError(w, http.StatusConflict, "CONFLICT", msg)
+			return
+		}
 		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "target path is a directory")
 		return
 	}
@@ -371,7 +375,7 @@ func (s *RESTServer) putDirectory(w http.ResponseWriter, r *http.Request, target
 				"parent directory does not exist; pass parents=true to create it")
 		case errors.Is(err, os.ErrExist):
 			s.writeError(w, http.StatusConflict, "CONFLICT", "path exists and is not a directory")
-		case os.IsPermission(err):
+		case errors.Is(err, os.ErrPermission):
 			s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED", "permission denied")
 		default:
 			s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())

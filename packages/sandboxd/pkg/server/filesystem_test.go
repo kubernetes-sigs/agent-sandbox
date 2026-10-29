@@ -268,6 +268,27 @@ func TestPutTypeFileWritesFile(t *testing.T) {
 	require.Equal(t, "x", string(onDisk))
 }
 
+func TestPutTypeFileOnDirectoryConflicts(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.Mkdir(filepath.Join(root, "d"), 0o755))
+
+	rec := doRequest(handler, http.MethodPut, "/v1/files/d?type=file", []byte("x"), nil)
+	require.Equal(t, http.StatusConflict, rec.Code)
+	require.Equal(t, "CONFLICT", decodeError(t, rec).Code)
+}
+
+func TestPutDirectoryPermissionDenied(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.Mkdir(filepath.Join(root, "ro"), 0o500))
+
+	rec := doRequest(handler, http.MethodPut, "/v1/files/ro/d?type=directory", nil, nil)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	require.Equal(t, "PERMISSION_DENIED", decodeError(t, rec).Code)
+}
+
 func TestPutMultipartUpload(t *testing.T) {
 	_, handler, root := newRESTFixture(t)
 

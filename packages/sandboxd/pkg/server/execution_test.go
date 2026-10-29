@@ -17,7 +17,14 @@ package server
 import (
 	"context"
 	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
@@ -27,6 +34,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	processv1 "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1"
 )
@@ -118,4 +126,130 @@ func TestExecuteWithLimitsOldService(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Zero(t, resp.GetExitCode(), "unsupported method must not execute or fall back")
+}
+
+func TestExecuteWithLimitsTimeout(t *testing.T) {
+	client := newProcessClient(t, t.TempDir())
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	resp, err := client.ExecuteWithLimits(ctx, &processv1.ExecuteWithLimitsRequest{
+		Config:           &processv1.ProcessConfig{Command: []string{"sh", "-c", "printf started; exec sleep 30"}},
+		TimeLimit:        durationpb.New(100 * time.Millisecond),
+		StdoutLimitBytes: proto.Uint64(7),
+	})
+	require.NoError(t, err)
+	require.NoError(t, ctx.Err(), "execution limit must leave the RPC active")
+	require.Equal(t, "started", string(resp.GetStdout()))
+	require.Equal(t, int32(137), resp.GetExitCode())
+	require.Equal(t, processv1.ExecuteTerminationReason_EXECUTE_TERMINATION_REASON_TIME_LIMIT_EXCEEDED, resp.GetTerminationReason())
+	require.GreaterOrEqual(t, resp.GetElapsedDuration().AsDuration(), 100*time.Millisecond)
+	resp, err = client.ExecuteWithLimits(testCtx(t), &processv1.ExecuteWithLimitsRequest{
+		Config:    &processv1.ProcessConfig{Command: []string{"echo", "still available"}},
+		TimeLimit: durationpb.New(time.Second),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "still available\n", string(resp.GetStdout()))
+	require.Equal(t, processv1.ExecuteTerminationReason_EXECUTE_TERMINATION_REASON_EXITED, resp.GetTerminationReason())
+}
+
+func TestExecuteWithLimitsRPCDeadline(t *testing.T) {
+	client := newProcessClient(t, t.TempDir())
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	resp, err := client.ExecuteWithLimits(ctx, &processv1.ExecuteWithLimitsRequest{
+		Config:    &processv1.ProcessConfig{Command: []string{"sleep", "30"}},
+		TimeLimit: durationpb.New(2 * time.Second),
+	})
+	require.Nil(t, resp)
+	require.Equal(t, codes.DeadlineExceeded, status.Code(err))
+	resp, err = client.ExecuteWithLimits(testCtx(t), &processv1.ExecuteWithLimitsRequest{
+		Config: &processv1.ProcessConfig{Command: []string{"true"}},
+	})
+	require.NoError(t, err)
+	require.Zero(t, resp.GetExitCode())
+}
+
+func TestExecuteWithLimitsInvalidRequest(t *testing.T) {
+	client := newProcessClient(t, t.TempDir())
+	for _, tc := range []struct {
+		name string
+		req  *processv1.ExecuteWithLimitsRequest
+	}{
+		{"zero stdout", &processv1.ExecuteWithLimitsRequest{StdoutLimitBytes: proto.Uint64(0)}},
+		{"zero stderr", &processv1.ExecuteWithLimitsRequest{StderrLimitBytes: proto.Uint64(0)}},
+		{"zero time", &processv1.ExecuteWithLimitsRequest{TimeLimit: durationpb.New(0)}},
+		{"negative time", &processv1.ExecuteWithLimitsRequest{TimeLimit: durationpb.New(-time.Second)}},
+		{"overflow time", &processv1.ExecuteWithLimitsRequest{TimeLimit: &durationpb.Duration{Seconds: 10000000000}}},
+		{"invalid duration", &processv1.ExecuteWithLimitsRequest{TimeLimit: &durationpb.Duration{Nanos: 1000000000}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.req.Config = &processv1.ProcessConfig{Command: []string{"touch", "invalid-request-ran"}}
+			_, err := client.ExecuteWithLimits(testCtx(t), tc.req)
+			require.Equal(t, codes.InvalidArgument, status.Code(err))
+		})
+	}
+	resp, err := client.Execute(testCtx(t), &processv1.ExecuteRequest{
+		Config: &processv1.ProcessConfig{Command: []string{"sh", "-c", "test ! -e invalid-request-ran"}},
+	})
+	require.NoError(t, err)
+	require.Zero(t, resp.GetExitCode(), "invalid requests must be rejected before execution")
+}
+
+func TestExecuteWithLimitsConcurrent(t *testing.T) {
+	client := newProcessClient(t, t.TempDir())
+	t.Run("executions", func(t *testing.T) {
+		for _, limited := range []bool{true, false} {
+			t.Run(strconv.FormatBool(limited), func(t *testing.T) {
+				t.Parallel()
+				cmd, limit := "printf independent; sleep 0.3; printf complete", 2*time.Second
+				if limited {
+					cmd, limit = "printf limited; exec sleep 30", 100*time.Millisecond
+				}
+				resp, err := client.ExecuteWithLimits(testCtx(t), &processv1.ExecuteWithLimitsRequest{
+					Config:    &processv1.ProcessConfig{Command: []string{"sh", "-c", cmd}},
+					TimeLimit: durationpb.New(limit),
+				})
+				require.NoError(t, err)
+				if limited {
+					require.Equal(t, processv1.ExecuteTerminationReason_EXECUTE_TERMINATION_REASON_TIME_LIMIT_EXCEEDED, resp.GetTerminationReason())
+				} else {
+					require.Zero(t, resp.GetExitCode())
+					require.Equal(t, "independentcomplete", string(resp.GetStdout()))
+				}
+			})
+		}
+	})
+}
+
+func TestExecuteWithLimitsIncompletePipeCleanup(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires Linux setsid and /proc")
+	}
+	skipIfGVisor(t)
+	_, err := exec.LookPath("setsid")
+	if err != nil {
+		t.Skip("setsid is unavailable")
+	}
+	root := t.TempDir()
+	client := newProcessClient(t, root)
+	t.Cleanup(func() {
+		data, err := os.ReadFile(filepath.Join(root, "escaped.pid"))
+		if err == nil {
+			pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+			if err == nil {
+				p, err := os.FindProcess(pid)
+				if err == nil {
+					_ = p.Kill()
+				}
+			}
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, err = client.ExecuteWithLimits(ctx, &processv1.ExecuteWithLimitsRequest{
+		Config:    &processv1.ProcessConfig{Command: []string{"sh", "-c", "setsid sh -c 'sleep 30 & echo $! > escaped.pid'; exec sleep 30"}},
+		TimeLimit: durationpb.New(200 * time.Millisecond),
+	})
+	require.Equal(t, codes.Internal, status.Code(err), "unclosed output pipes must not look like complete cleanup")
+	require.NoError(t, ctx.Err(), "cleanup must finish before the independent RPC deadline")
 }

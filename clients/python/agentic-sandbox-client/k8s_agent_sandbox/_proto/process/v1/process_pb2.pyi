@@ -22,12 +22,14 @@ class ExecuteTerminationReason(int, metaclass=_enum_type_wrapper.EnumTypeWrapper
     __slots__ = ()
     EXECUTE_TERMINATION_REASON_UNSPECIFIED: _ClassVar[ExecuteTerminationReason]
     EXECUTE_TERMINATION_REASON_EXITED: _ClassVar[ExecuteTerminationReason]
+    EXECUTE_TERMINATION_REASON_TIME_LIMIT_EXCEEDED: _ClassVar[ExecuteTerminationReason]
 SIGNAL_UNSPECIFIED: Signal
 SIGNAL_SIGINT: Signal
 SIGNAL_SIGKILL: Signal
 SIGNAL_SIGTERM: Signal
 EXECUTE_TERMINATION_REASON_UNSPECIFIED: ExecuteTerminationReason
 EXECUTE_TERMINATION_REASON_EXITED: ExecuteTerminationReason
+EXECUTE_TERMINATION_REASON_TIME_LIMIT_EXCEEDED: ExecuteTerminationReason
 
 class PTY(_message.Message):
     __slots__ = ("cols", "rows")
@@ -103,14 +105,16 @@ class ExecuteResponse(_message.Message):
     def __init__(self, exit_code: _Optional[int] = ..., stdout: _Optional[bytes] = ..., stderr: _Optional[bytes] = ...) -> None: ...
 
 class ExecuteWithLimitsRequest(_message.Message):
-    __slots__ = ("config", "stdout_limit_bytes", "stderr_limit_bytes")
+    __slots__ = ("config", "stdout_limit_bytes", "stderr_limit_bytes", "time_limit")
     CONFIG_FIELD_NUMBER: _ClassVar[int]
     STDOUT_LIMIT_BYTES_FIELD_NUMBER: _ClassVar[int]
     STDERR_LIMIT_BYTES_FIELD_NUMBER: _ClassVar[int]
+    TIME_LIMIT_FIELD_NUMBER: _ClassVar[int]
     config: ProcessConfig
     stdout_limit_bytes: int
     stderr_limit_bytes: int
-    def __init__(self, config: _Optional[_Union[ProcessConfig, _Mapping]] = ..., stdout_limit_bytes: _Optional[int] = ..., stderr_limit_bytes: _Optional[int] = ...) -> None: ...
+    time_limit: _duration_pb2.Duration
+    def __init__(self, config: _Optional[_Union[ProcessConfig, _Mapping]] = ..., stdout_limit_bytes: _Optional[int] = ..., stderr_limit_bytes: _Optional[int] = ..., time_limit: _Optional[_Union[datetime.timedelta, _duration_pb2.Duration, _Mapping]] = ...) -> None: ...
 
 class ExecuteWithLimitsResponse(_message.Message):
     __slots__ = ("exit_code", "stdout", "stderr", "termination_reason", "elapsed_duration", "stdout_truncated", "stderr_truncated")

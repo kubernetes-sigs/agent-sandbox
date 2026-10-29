@@ -111,12 +111,15 @@ message ExecuteWithLimitsRequest {
   // Omitted limits inherit deployment policy. Explicit limits must be positive.
   optional uint64 stdout_limit_bytes = 2;
   optional uint64 stderr_limit_bytes = 3;
+  // Independent of the RPC deadline. Includes launch and output collection.
+  google.protobuf.Duration time_limit = 4;
 }
 
 enum ExecuteTerminationReason {
   EXECUTE_TERMINATION_REASON_UNSPECIFIED = 0;
   // The program exited normally or due to a signal other than an execution limit.
   EXECUTE_TERMINATION_REASON_EXITED = 1;
+  EXECUTE_TERMINATION_REASON_TIME_LIMIT_EXCEEDED = 2;
 }
 
 message ExecuteWithLimitsResponse {

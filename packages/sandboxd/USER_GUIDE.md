@@ -132,6 +132,15 @@ Unspecified limits preserve unlimited capture until deployment policy is set.
 Older runtimes reject the new RPC with `UNIMPLEMENTED` before running a command;
 clients must not retry it through `Execute` without the requested limits.
 
+The optional positive `time_limit` is a protobuf Duration independent of the RPC
+deadline. It covers launch and output collection. At expiry the daemon attempts
+to kill the process group and descendants, then waits up to 10 seconds for
+termination and cleanup. If cleanup completes while the RPC remains active,
+the response reports `EXECUTE_TERMINATION_REASON_TIME_LIMIT_EXCEEDED`, the actual
+exit code, and retained output. `elapsed_duration` includes cleanup, so it can
+exceed `time_limit`. Incomplete cleanup returns `INTERNAL`. An earlier RPC
+cancellation or deadline still returns its gRPC error without a result.
+
 ### FileWatcherService (gRPC, `:9090`)
 
 | RPC | Type | Purpose |

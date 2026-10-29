@@ -50,6 +50,8 @@ const (
 	// child exits. Without it, a grandchild holding the stdout/stderr
 	// write ends keeps Wait blocked indefinitely.
 	waitDelay = 10 * time.Second
+	// executionCleanupTimeout bounds waiting for unary termination and reaping.
+	executionCleanupTimeout = 10 * time.Second
 )
 
 // Options configures a sandboxd Server.

@@ -66,6 +66,21 @@ _ERROR_BODY_LIMIT = 64 * 1024
 _KUBECTL_STDERR_TAIL_LIMIT = 8 * 1024
 
 
+def _start_kubectl(argv: list[str], stderr_log: IO[bytes]) -> subprocess.Popen[bytes]:
+    """Start kubectl, closing stderr_log if the process never starts.
+
+    kubectl writes a line to stdout for every forwarded connection and to
+    stderr for every reset one, without exiting. An undrained pipe fills up
+    and blocks forwarding, so stderr goes to a file and the crash message
+    stays available.
+    """
+    try:
+        return subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=stderr_log)
+    except Exception:
+        stderr_log.close()
+        raise
+
+
 def _kubectl_stderr_tail(log: IO[bytes] | None) -> str:
     """Return the end of a tunnel's kubectl stderr log, where its fatal error is.
 
@@ -312,21 +327,20 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
                 f"Starting tunnel for Sandbox {self.sandbox_id}")
 
             self._stderr_log = tempfile.TemporaryFile()
-            self.port_forward_process = subprocess.Popen(
-                [
-                    "kubectl", "port-forward",
-                    ROUTER_SERVICE_NAME,
-                    f"{local_port}:8080",
-                    "-n", self.config.router_namespace,
-                    *kube_args,
-                ],
-                # kubectl writes a line to stdout for every forwarded connection
-                # and to stderr for every reset one, without exiting; an
-                # undrained pipe fills up and blocks forwarding. stderr goes to
-                # a file so the crash message is still available.
-                stdout=subprocess.DEVNULL,
-                stderr=self._stderr_log,
-            )
+            try:
+                self.port_forward_process = _start_kubectl(
+                    [
+                        "kubectl", "port-forward",
+                        ROUTER_SERVICE_NAME,
+                        f"{local_port}:8080",
+                        "-n", self.config.router_namespace,
+                        *kube_args,
+                    ],
+                    self._stderr_log,
+                )
+            except Exception:
+                self._stderr_log = None
+                raise
 
             # Record the start of the port-forward readiness wait separately so that
             # preflight check latency (up to 10 s on slow API responses or network
@@ -474,22 +488,21 @@ class SandboxdPodTunnelStrategy(ConnectionStrategy):
             grpc_local = self._get_free_port()
             logger.info(f"Starting sandboxd pod tunnel for {self.sandbox_id}")
             self._stderr_log = tempfile.TemporaryFile()
-            self.port_forward_process = subprocess.Popen(
-                [
-                    "kubectl", "port-forward",
-                    f"pod/{pod_name}",
-                    f"{rest_local}:{self.config.rest_port}",
-                    f"{grpc_local}:{self.config.grpc_port}",
-                    "-n", self.namespace,
-                    *kube_args,
-                ],
-                # kubectl writes a line to stdout for every forwarded connection
-                # and to stderr for every reset one, without exiting; an
-                # undrained pipe fills up and blocks forwarding. stderr goes to
-                # a file so the crash message is still available.
-                stdout=subprocess.DEVNULL,
-                stderr=self._stderr_log,
-            )
+            try:
+                self.port_forward_process = _start_kubectl(
+                    [
+                        "kubectl", "port-forward",
+                        f"pod/{pod_name}",
+                        f"{rest_local}:{self.config.rest_port}",
+                        f"{grpc_local}:{self.config.grpc_port}",
+                        "-n", self.namespace,
+                        *kube_args,
+                    ],
+                    self._stderr_log,
+                )
+            except Exception:
+                self._stderr_log = None
+                raise
             while time.monotonic() - start_time < self.config.port_forward_ready_timeout:
                 if self.port_forward_process.poll() is not None:
                     raise SandboxPortForwardError(

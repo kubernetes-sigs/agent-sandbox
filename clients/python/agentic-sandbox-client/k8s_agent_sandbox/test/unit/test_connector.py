@@ -1310,6 +1310,45 @@ class TestTunnelKubectlOutput(unittest.TestCase):
         self.assertEqual(kwargs["stdout"], subprocess.DEVNULL)
         self.assertNotEqual(kwargs["stderr"], subprocess.PIPE)
 
+    def _closed_when_kubectl_fails_to_start(self, strategy):
+        opened = []
+        real_temporary_file = tempfile.TemporaryFile
+
+        def track_open(*args, **kwargs):
+            log = real_temporary_file(*args, **kwargs)
+            opened.append(log)
+            return log
+
+        with patch(
+            "k8s_agent_sandbox.connector.tempfile.TemporaryFile",
+            side_effect=track_open,
+        ):
+            with self.assertRaises(OSError):
+                strategy.connect()
+
+        self.assertEqual(len(opened), 1)
+        self.assertTrue(opened[0].closed)
+        self.assertIsNone(strategy._stderr_log)
+        self.assertIsNone(strategy.port_forward_process)
+
+    @patch.object(LocalTunnelConnectionStrategy, "_preflight_check_router_service")
+    @patch("subprocess.Popen", side_effect=OSError("kubectl not found"))
+    def test_local_tunnel_closes_stderr_log_when_kubectl_fails_to_start(self, *_):
+        self._closed_when_kubectl_fails_to_start(
+            LocalTunnelConnectionStrategy(
+                "sb", "ns", SandboxLocalTunnelConnectionConfig()
+            )
+        )
+
+    @patch("subprocess.Popen", side_effect=OSError("kubectl not found"))
+    def test_sandboxd_tunnel_closes_stderr_log_when_kubectl_fails_to_start(self, _):
+        self._closed_when_kubectl_fails_to_start(
+            SandboxdPodTunnelStrategy(
+                "sb", "ns", SandboxdPodTunnelConnectionConfig(),
+                get_pod_name=lambda: "sb-pod",
+            )
+        )
+
 
 @unittest.skipIf(sys.platform == "win32", "fake kubectl is a shebang script")
 class TestTunnelKubectlStderr(unittest.TestCase):

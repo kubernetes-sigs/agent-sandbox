@@ -294,6 +294,10 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if info, err := os.Stat(target); err == nil && info.IsDir() {
+		if createOnly {
+			s.writePathExists(w)
+			return
+		}
 		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "target path is a directory")
 		return
 	}
@@ -312,7 +316,7 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 	if err := write(target, body, mode, createOnly); err != nil {
 		switch {
 		case createOnly && errors.Is(err, os.ErrExist):
-			s.writeError(w, http.StatusPreconditionFailed, "FAILED_PRECONDITION", "path already exists")
+			s.writePathExists(w)
 		case os.IsPermission(err):
 			s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED", "permission denied")
 		default:
@@ -322,6 +326,12 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// writePathExists writes the 412 returned when a create-only PUT finds an
+// existing path.
+func (s *RESTServer) writePathExists(w http.ResponseWriter) {
+	s.writeError(w, http.StatusPreconditionFailed, "FAILED_PRECONDITION", "path already exists")
 }
 
 // createOnly reports whether the request carries "If-None-Match: *". sandboxd

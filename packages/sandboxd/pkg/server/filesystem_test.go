@@ -201,30 +201,48 @@ func TestPutCreateOnly(t *testing.T) {
 	}
 }
 
+func TestPutCreateOnlyExistingDirectory(t *testing.T) {
+	for _, query := range []string{"", "?append=true"} {
+		t.Run("query"+query, func(t *testing.T) {
+			_, handler, root := newRESTFixture(t)
+			require.NoError(t, os.MkdirAll(filepath.Join(root, "d"), 0o755))
+			header := http.Header{"If-None-Match": []string{"*"}}
+
+			rec := doRequest(handler, http.MethodPut, "/v1/files/d"+query, []byte("x"), header)
+			require.Equal(t, http.StatusPreconditionFailed, rec.Code)
+			require.Equal(t, "FAILED_PRECONDITION", decodeError(t, rec).Code)
+		})
+	}
+}
+
 func TestPutCreateOnlyRacesToOneWinner(t *testing.T) {
-	_, handler, root := newRESTFixture(t)
-	header := http.Header{"If-None-Match": []string{"*"}}
+	for _, query := range []string{"", "?append=true"} {
+		t.Run("query"+query, func(t *testing.T) {
+			_, handler, root := newRESTFixture(t)
+			header := http.Header{"If-None-Match": []string{"*"}}
 
-	const writers = 16
-	codes := make(chan int, writers)
-	for i := 0; i < writers; i++ {
-		go func() {
-			codes <- doRequest(handler, http.MethodPut, "/v1/files/f.txt", []byte("x"), header).Code
-		}()
-	}
-	created := 0
-	for i := 0; i < writers; i++ {
-		if code := <-codes; code == http.StatusNoContent {
-			created++
-		} else {
-			require.Equal(t, http.StatusPreconditionFailed, code)
-		}
-	}
-	require.Equal(t, 1, created)
+			const writers = 16
+			codes := make(chan int, writers)
+			for i := 0; i < writers; i++ {
+				go func() {
+					codes <- doRequest(handler, http.MethodPut, "/v1/files/f.txt"+query, []byte("x"), header).Code
+				}()
+			}
+			created := 0
+			for i := 0; i < writers; i++ {
+				if code := <-codes; code == http.StatusNoContent {
+					created++
+				} else {
+					require.Equal(t, http.StatusPreconditionFailed, code)
+				}
+			}
+			require.Equal(t, 1, created)
 
-	entries, err := os.ReadDir(root)
-	require.NoError(t, err)
-	require.Len(t, entries, 1, "no temp file may be left behind")
+			entries, err := os.ReadDir(root)
+			require.NoError(t, err)
+			require.Len(t, entries, 1, "no temp file may be left behind")
+		})
+	}
 }
 
 func TestPutIfNoneMatchRejectsOtherValues(t *testing.T) {

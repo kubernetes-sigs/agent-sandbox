@@ -97,7 +97,9 @@ paths:
         "200":
           description: Path exists
         "400":
-          description: The type, recursive, or max_depth query is invalid
+          description: >
+            The type, recursive, or max_depth query is invalid, or a recursive listing
+            exceeds 10000 entries
         "403":
           description: Path escapes sandbox root, or permission is denied during path lookup or file open
         "404":
@@ -255,7 +257,8 @@ components:
         minimum: 1
       description: >
         With recursive=true, the number of directory levels to list. 1 lists only the
-        direct children. Omit it for no limit. Ignored unless recursive=true.
+        direct children. Omit it for no depth limit. A listing of more than 10000
+        entries fails with 400. Ignored unless recursive=true.
 
   schemas:
     DirectoryListing:

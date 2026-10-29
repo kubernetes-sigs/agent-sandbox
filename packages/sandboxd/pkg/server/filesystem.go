@@ -49,6 +49,12 @@ const (
 	entryTypeDirectory = "directory"
 )
 
+// maxRecursiveEntries caps a recursive listing, which sandboxd buffers in
+// memory before encoding it, so one request cannot exhaust the daemon.
+const maxRecursiveEntries = 10000
+
+var errListingTooLarge = errors.New("listing too large")
+
 // RESTServer implements the sandboxd Filesystem & Runtime REST API on top of
 // net/http. All file paths are confined to rootDir via pathutil.SanitizePath.
 type RESTServer struct {
@@ -61,6 +67,8 @@ type RESTServer struct {
 
 	// environ is swappable for tests; defaults to os.Environ.
 	environ func() []string
+	// maxListEntries is swappable for tests; defaults to maxRecursiveEntries.
+	maxListEntries int
 	// metadataEnv returns the filtered /v1/metadata env map, computed once
 	// on first use: the daemon's environment is immutable after start.
 	metadataEnv func() map[string]string
@@ -85,6 +93,7 @@ func NewRESTServer(rootDir, metadataEnvPrefix string, log logr.Logger) *RESTServ
 		startTime:         time.Now(),
 		log:               log,
 		environ:           os.Environ,
+		maxListEntries:    maxRecursiveEntries,
 	}
 	s.ready.Store(true)
 	s.metadataEnv = sync.OnceValue(s.buildMetadataEnv)
@@ -273,6 +282,9 @@ func (s *RESTServer) serveDirectoryListing(w http.ResponseWriter, r *http.Reques
 		if !ok {
 			return nil
 		}
+		if maxDepth > 1 && len(entries) >= s.maxListEntries {
+			return errListingTooLarge
+		}
 		entries = append(entries, entry)
 		// SkipDir on a non-directory would skip the rest of its parent.
 		if d.IsDir() && strings.Count(entry.Name, "/")+1 >= maxDepth {
@@ -280,6 +292,11 @@ func (s *RESTServer) serveDirectoryListing(w http.ResponseWriter, r *http.Reques
 		}
 		return nil
 	})
+	if errors.Is(err, errListingTooLarge) {
+		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+			fmt.Sprintf("listing exceeds %d entries; lower max_depth or list a subdirectory", s.maxListEntries))
+		return
+	}
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 		return

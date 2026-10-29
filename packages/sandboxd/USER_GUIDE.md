@@ -158,7 +158,7 @@ iteration (Python).
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| `GET` | `/v1/files/{path}` | File → raw bytes (`application/octet-stream`); directory → JSON `DirectoryListing`. Optional `type` query (`file` or `directory`, also on `HEAD`): `409` if the path is the other kind. `recursive=true` lists nested directories too, and `max_depth=N` limits how deep (entry names become paths relative to the listed directory). |
+| `GET` | `/v1/files/{path}` | File → raw bytes (`application/octet-stream`); directory → JSON `DirectoryListing`. Optional `type` query (`file` or `directory`, also on `HEAD`): `409` if the path is the other kind. `recursive=true` lists nested directories too, and `max_depth=N` limits how deep (entry names become paths relative to the listed directory). A recursive listing over 10000 entries fails with `400`. |
 | `HEAD` | `/v1/files/{path}` | Existence/metadata probe without transferring the body. |
 | `PUT` | `/v1/files/{path}` | Atomic write (temp file + rename), auto-creates parents. Optional `mode` query (`^0[0-7]{3}$`, default `0644`). `append=true` adds to the end of the file instead (not atomic). Accepts raw bytes or `multipart/form-data` (`file` part). |
 | `DELETE` | `/v1/files/{path}` | Remove a file or directory; `recursive=true` for `rm -rf` behavior; `409` on a non-empty directory otherwise. |

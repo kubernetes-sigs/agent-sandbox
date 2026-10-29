@@ -307,6 +307,27 @@ func TestGetRecursiveListing(t *testing.T) {
 	}
 }
 
+func TestGetRecursiveListingEntryCap(t *testing.T) {
+	s, handler, root := newRESTFixture(t)
+	s.maxListEntries = 5
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "a", "b"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "a", "b", "c.txt"), []byte("c"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "a", "x.txt"), []byte("x"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "b.txt"), []byte("b"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "z.txt"), []byte("z"), 0o644))
+
+	// The full tree has 6 entries: one over the cap.
+	rec := doRequest(handler, http.MethodGet, "/v1/files/?recursive=true", nil, nil)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Equal(t, "INVALID_ARGUMENT", decodeError(t, rec).Code)
+
+	// Exactly at the cap is allowed, and so are listings that are not recursive.
+	rec = doRequest(handler, http.MethodGet, "/v1/files/?recursive=true&max_depth=2", nil, nil)
+	require.Len(t, listingNames(t, rec), 5)
+	rec = doRequest(handler, http.MethodGet, "/v1/files/", nil, nil)
+	require.Len(t, listingNames(t, rec), 3)
+}
+
 func TestGetRecursiveListingIsRelativeToRequestedDirectory(t *testing.T) {
 	_, handler, root := newRESTFixture(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "a", "b"), 0o755))

@@ -20,10 +20,12 @@ TOC is auto-generated via `make toc-update`.
     - [Implementation Guidance](#implementation-guidance)
       - [Where the gate goes](#where-the-gate-goes)
       - [Counting warming sandboxes](#counting-warming-sandboxes)
+      - [What the bound does and does not guarantee](#what-the-bound-does-and-does-not-guarantee)
       - [Resolving maxConcurrent](#resolving-maxconcurrent)
       - [Driving the next create](#driving-the-next-create)
       - [Status](#status)
       - [Interaction with the readiness grace period](#interaction-with-the-readiness-grace-period)
+      - [Interaction with the Recreate update strategy](#interaction-with-the-recreate-update-strategy)
       - [Interaction with the existing shaping controls](#interaction-with-the-existing-shaping-controls)
       - [Test plan](#test-plan)
 - [Scalability](#scalability)
@@ -222,7 +224,13 @@ type SandboxWarmPoolWarmupStrategy struct {
 	// The pool creates a new sandbox only once an earlier one finishes warming
 	// up, so this bound holds regardless of how long warmup takes. Sandboxes
 	// whose Pods are unschedulable or waiting on scheduling gates do not count
-	// against it, because they consume no node resources.
+	// against it, because they consume no node resources; they can therefore
+	// all be scheduled at once when capacity returns.
+	//
+	// This bounds the sandboxes the pool itself is warming, not total warmup
+	// load on the cluster. A sandbox adopted by a SandboxClaim before it
+	// becomes Ready leaves the pool and stops counting while its startup work
+	// continues.
 	//
 	// Leaving this unset creates the whole deficit at once.
 	// +optional
@@ -298,19 +306,64 @@ refund path exists for the expectations gate only.
 The reconciler already walks the pool's active members to classify them by
 readiness and scheduling state. Count warming members in that same loop:
 
-> A member is warming up when it is active, is not `Ready`, and its mirrored
-> `PodScheduled` condition is `True`.
+> A member is warming up when it is active, is not `Ready`, and
+> `podNotScheduledReason` returns neither `Unschedulable` nor
+> `SchedulingGated`.
 
-Requiring `PodScheduled=True` is deliberate and load-bearing. A Pod that is
-unschedulable or waiting on scheduling gates is not running and consumes no node
-CPU or memory, so it is not the kind of work the bound exists to limit. Counting
-it would also deadlock the pool: the reconciler holds unschedulable and gated
-members indefinitely rather than replacing them, so a pool with
-`maxConcurrent: 1` whose single member cannot be scheduled would never create
-anything again. Excluding them means a pool short on capacity keeps trying.
+The predicate is stated as an exclusion rather than as `PodScheduled=True`, and
+that distinction is load-bearing in both directions.
 
-Reuse the existing `podNotScheduledReason` helper rather than reading Pods; the
-`PodScheduled` condition is already mirrored onto `Sandbox.status`.
+**Excluding unschedulable and gated members prevents a deadlock.** A Pod in
+either state is not running and consumes no node CPU or memory, so it is not the
+work the bound exists to limit. The reconciler also holds such members
+indefinitely rather than replacing them, so counting them would mean a pool with
+`maxConcurrent: 1` whose single member cannot be scheduled never creates
+anything again.
+
+**Counting members that have not been scheduled yet prevents an overshoot.** A
+just-created member has no mirrored `PodScheduled` condition at all. Under a
+strict `PodScheduled=True` test the reconcile fired by that member's own add
+event would see `warmingUp = 0` and create another, repeating until the pool is
+full and defeating the bound entirely. Treating "not yet scheduled" as occupying
+a slot closes that window, because the slot is held from creation onward.
+
+This is exactly what the existing `podNotScheduledReason` helper already
+provides, so no new condition parsing is needed. The helper returns `""` for a
+`True`, `Unknown`, or absent condition alike, and returns the reason only when
+`PodScheduled=False`. Every case the helper collapses into `""` is a case that
+should hold a slot, so the ambiguity is harmless here rather than something to
+work around. Reuse the helper rather than reading Pods; the condition is already
+mirrored onto `Sandbox.status`.
+
+##### What the bound does and does not guarantee
+
+The bound applies to the sandboxes a pool is currently warming. It is not a cap
+on total warmup load across the cluster, and the KEP should not be read as
+promising one. Two cases make the difference visible, and both should be stated
+in the field's godoc.
+
+**A claim can adopt a member mid-warmup.** `getCandidate` prefers a `Ready`
+candidate, but when none exists it parks an unready one as a fallback and adopts
+it. `completeAdoption` then deletes `warmPoolSandboxLabel` from the sandbox, so
+it leaves the pool's label selector and stops counting against `maxConcurrent`
+while its startup work continues on the node. The pool then refills, and the
+replacement starts warming beside it. With `maxConcurrent: 1` and a steady
+stream of claims, node load can therefore exceed one concurrent warmup even
+though the pool never has more than one warming member of its own.
+
+Tracking adopted sandboxes through their startup would mean the pool controller
+reasoning about objects it no longer owns, which is a significant expansion of
+the pool's responsibility. This KEP proposes narrowing the documented guarantee
+instead: `maxConcurrent` bounds the pool's own warming members.
+
+**Members excluded while unschedulable can schedule together.** Unschedulable
+and gated members hold no slot, so a pool short on capacity keeps creating up to
+`maxConcurrent` more. When capacity later frees up, every held member can be
+scheduled at once and exceed the bound. This is the direct cost of the deadlock
+avoidance above, and the trade is deliberate: a pool that stops creating forever
+is worse than a transient overshoot when capacity returns. Operators who need a
+hard cap under capacity pressure should also set pod resource requests, so the
+scheduler admits members at the rate the cluster can actually hold.
 
 ##### Resolving maxConcurrent
 
@@ -366,6 +419,26 @@ makes no progress for that long. This is visible in
 `status.warmingUpReplicas` and is the correct trade, since the alternative is
 replacing a member that might simply be slow.
 
+##### Interaction with the Recreate update strategy
+
+A pool using the `Recreate` update strategy deletes all of its stale unclaimed
+members as soon as the template changes. Refill is then gated, so the pool sits
+near-empty for roughly `(replicas / maxConcurrent) × warmup duration` while it
+rebuilds. With `maxConcurrent: 1` and a long warmup that is a multi-hour window
+in which claims fall through to cold start.
+
+The gate does not cause this — `Recreate` empties the pool today just as
+quickly — but it extends how long the pool stays empty afterward, so operators
+must see it stated before choosing both settings together. `OnReplenish`, the
+default, does not have this problem, because it replaces stale members only as
+they are claimed or deleted.
+
+This is the concrete reason the `maxUnavailable` follow-up listed in
+[Non-Goals](#non-goals) matters: staging the delete side would let a `Recreate`
+rollout keep serving claims while it rolls. Until that exists, the KEP proposes
+documenting `Recreate` plus a low `maxConcurrent` as a combination to adopt
+deliberately.
+
 ##### Interaction with the existing shaping controls
 
 The clamps compose and the tightest one wins. Guidance to document, as a
@@ -391,8 +464,14 @@ following the existing fake-client and fake-clock harness used by
   creates the second only after the first reports `Ready`.
 - `maxConcurrent: "50%"` of 10 replicas creates 5, then 5 more.
 - Percentages round up and floor at 1: `"10%"` of 5 replicas resolves to 1.
+- A member with no mirrored `PodScheduled` condition occupies a slot. This is
+  the regression test for the overshoot described above: the reconcile fired by
+  a new member's own add event must not create a second one.
+- A member whose `PodScheduled` condition is `Unknown` occupies a slot.
 - An unschedulable member does not occupy a slot. This is the regression test
   for the deadlock described above.
+- A member adopted by a claim while still warming leaves the count and frees its
+  slot, matching the narrowed guarantee rather than contradicting it.
 - An unset `warmupStrategy` reproduces current at-once behavior.
 - The gate composes correctly with `MaxRefillRate` and `MaxBatchSize`.
 - `status.warmingUpReplicas` matches the members the gate counts.

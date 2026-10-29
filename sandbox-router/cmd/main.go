@@ -235,6 +235,11 @@ func run(ctx context.Context, cfg *config.Config, log logr.Logger) (err error) {
 		ok := podCache.WaitForSync(syncCtx)
 		syncCancel()
 		if !ok {
+			// Shutdown cancels ctx, which also fails the sync. Report that
+			// instead of suggesting an RBAC problem.
+			if err := ctx.Err(); err != nil {
+				return fmt.Errorf("shutdown during initial cache sync: %w", err)
+			}
 			return fmt.Errorf("pod cache failed initial sync (check RBAC for pods get/list/watch)")
 		}
 		log.Info("pod cache synced", "entries", podCache.Len(), "namespace", cfg.CacheNamespace)

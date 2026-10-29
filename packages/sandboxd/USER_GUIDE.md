@@ -18,10 +18,12 @@ sandboxd (runtime daemon)
   plain HTTP client works without generated stubs.
 
 Both listeners bind to `--listen-host` (default `0.0.0.0`), so the daemon is
-reachable through the Pod IP, a Kubernetes Service, or an SDK pod
-port-forward. The current `sandbox-router` accepts HTTP/2 client connections,
-but disables HTTP/2 on its upstream connections and therefore cannot carry the
-gRPC `ProcessService`, so it is not a complete `sandboxd` transport.
+reachable through the Pod IP, a Kubernetes Service, an SDK pod port-forward, or
+the `sandbox-router`, which proxies both the REST API and native gRPC (see
+[Native gRPC](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/sandbox-router/README.md#native-grpc)).
+The router strips `Authorization` before forwarding, so it can't carry calls to
+a `sandboxd` that requires a bearer token (see
+[Client authentication](#client-authentication)).
 Containment is provided by pod isolation and NetworkPolicy, not loopback
 binding; pass `--listen-host=127.0.0.1` to restrict to loopback (e.g. local
 development).
@@ -333,9 +335,11 @@ auto-detect it. They select the runtime and transport explicitly. The Go SDK
 and both Python client variants (synchronous and asynchronous) can use a direct
 **pod port-forward** for `:8080` and `:9090`. From inside the cluster, both
 SDKs can instead dial the Pod IP or the Sandbox's headless Service directly.
-Filesystem calls use REST and `Run` uses
-gRPC. The current `sandbox-router` cannot provide this combined transport
-because it does not proxy gRPC.
+Filesystem calls use REST and `Run` uses gRPC. These SDK modes connect to the
+pod without the `sandbox-router`. The router can proxy both protocols, so a
+plain gRPC client can also reach `sandboxd` through it by sending `x-sandbox-id`
+and `x-sandbox-port: 9090` on every RPC (see
+[Native gRPC](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/sandbox-router/README.md#native-grpc)).
 
 > **Where commands run:** `ProcessService` executes commands inside the
 > container that hosts `sandboxd` (see

@@ -16,6 +16,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"mime/multipart"
 	"net/http"
@@ -263,6 +264,126 @@ func TestGetEmptyDirectoryListsEmptyEntries(t *testing.T) {
 	rec := doRequest(handler, http.MethodGet, "/v1/files/", nil, nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, rec.Body.String(), `"entries":[]`, "entries must be [] not null")
+}
+
+func listingNames(t *testing.T, rec *httptest.ResponseRecorder) []string {
+	t.Helper()
+	require.Equal(t, http.StatusOK, rec.Code)
+	var listing DirectoryListing
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &listing))
+	names := make([]string, 0, len(listing.Entries))
+	for _, e := range listing.Entries {
+		names = append(names, e.Name)
+	}
+	return names
+}
+
+func TestGetRecursiveListing(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "a", "b"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "a", "b", "c.txt"), []byte("c"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "a", "x.txt"), []byte("x"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "b.txt"), []byte("b"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "z.txt"), []byte("z"), 0o644))
+
+	tests := []struct {
+		name  string
+		query string
+		want  []string
+	}{
+		{"flat by default", "", []string{"a", "b.txt", "z.txt"}},
+		{"unlimited depth", "recursive=true", []string{"a", "a/b", "a/b/c.txt", "a/x.txt", "b.txt", "z.txt"}},
+		{"depth 1 is flat", "recursive=true&max_depth=1", []string{"a", "b.txt", "z.txt"}},
+		{"depth 2", "recursive=true&max_depth=2", []string{"a", "a/b", "a/x.txt", "b.txt", "z.txt"}},
+		{"depth beyond tree", "recursive=true&max_depth=9", []string{"a", "a/b", "a/b/c.txt", "a/x.txt", "b.txt", "z.txt"}},
+		{"max_depth needs recursive", "max_depth=3", []string{"a", "b.txt", "z.txt"}},
+		{"recursive=false is flat", "recursive=false", []string{"a", "b.txt", "z.txt"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doRequest(handler, http.MethodGet, "/v1/files/?"+tc.query, nil, nil)
+			require.Equal(t, tc.want, listingNames(t, rec))
+		})
+	}
+}
+
+func TestGetRecursiveListingIsRelativeToRequestedDirectory(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "a", "b"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "a", "b", "c.txt"), []byte("c"), 0o644))
+
+	rec := doRequest(handler, http.MethodGet, "/v1/files/a?recursive=true", nil, nil)
+	require.Equal(t, []string{"b", "b/c.txt"}, listingNames(t, rec))
+
+	var listing DirectoryListing
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &listing))
+	require.Equal(t, "/a", listing.Path)
+	require.Equal(t, "directory", listing.Entries[0].Type)
+	require.Equal(t, "file", listing.Entries[1].Type)
+	require.Equal(t, int64(1), listing.Entries[1].Size)
+}
+
+func TestGetRecursiveListingInvalidQuery(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o644))
+
+	for _, query := range []string{
+		"recursive=banana",
+		"recursive=true&max_depth=0",
+		"recursive=true&max_depth=-1",
+		"recursive=true&max_depth=deep",
+		"max_depth=0",
+	} {
+		// The query is rejected for files and missing paths too, before lookup.
+		for _, path := range []string{"", "f.txt", "nope"} {
+			rec := doRequest(handler, http.MethodGet, "/v1/files/"+path+"?"+query, nil, nil)
+			require.Equal(t, http.StatusBadRequest, rec.Code, "%s?%s", path, query)
+			require.Equal(t, "INVALID_ARGUMENT", decodeError(t, rec).Code)
+		}
+	}
+}
+
+func TestGetRecursiveListingSkipsSymlinkTargets(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	outside := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "a"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "a", "f.txt"), []byte("f"), 0o644))
+	// A link inside the root is listed but not entered; one that leaves the
+	// root is omitted even when nested.
+	require.NoError(t, os.Symlink(filepath.Join(root, "a"), filepath.Join(root, "link")))
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "a", "escape")))
+
+	rec := doRequest(handler, http.MethodGet, "/v1/files/?recursive=true", nil, nil)
+	require.Equal(t, []string{"a", "a/f.txt", "link"}, listingNames(t, rec))
+}
+
+func TestGetRecursiveListingKeepsUnreadableSubdirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	_, handler, root := newRESTFixture(t)
+	locked := filepath.Join(root, "locked")
+	require.NoError(t, os.MkdirAll(filepath.Join(locked, "inner"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "z.txt"), []byte("z"), 0o644))
+	require.NoError(t, os.Chmod(locked, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	rec := doRequest(handler, http.MethodGet, "/v1/files/?recursive=true", nil, nil)
+	require.Equal(t, []string{"locked", "z.txt"}, listingNames(t, rec))
+}
+
+func TestGetRecursiveListingStopsWhenRequestCanceled(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "a"), 0o755))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodGet, "/v1/files/?recursive=true", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	require.Equal(t, "INTERNAL", decodeError(t, rec).Code)
 }
 
 func TestGetMissingFileNotFound(t *testing.T) {

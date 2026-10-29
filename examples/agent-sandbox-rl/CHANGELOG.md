@@ -154,9 +154,6 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
   empty.
 - **`reap("")`** and `--run-id ""` are rejected; an empty id used to select every
   managed run.
-- The core SDK's `SandboxClient.delete_sandbox` (sync and async) forgets an
-  explicitly named claim once it is deleted. `acquire()` names its claims, and
-  the set used to grow by one per claim for the life of the process.
 - `OwnedByAnotherRunError` is now exported from the package root.
 
 ### Fixed

@@ -16,8 +16,8 @@ syntax = "proto3";
 
 package process.v1;
 
-import "google/protobuf/empty.proto";
 import "google/protobuf/duration.proto";
+import "google/protobuf/empty.proto";
 
 option go_package = "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1;processv1";
 option java_multiple_files = true;
@@ -54,9 +54,9 @@ service ProcessService {
 
 enum Signal {
   SIGNAL_UNSPECIFIED = 0;
-  SIGNAL_SIGINT      = 2;
-  SIGNAL_SIGKILL     = 9;
-  SIGNAL_SIGTERM     = 15;
+  SIGNAL_SIGINT = 2;
+  SIGNAL_SIGKILL = 9;
+  SIGNAL_SIGTERM = 15;
 }
 
 message PTY {
@@ -145,8 +145,7 @@ message WriteStdinRequest {
 // WriteStdinResponse is returned on successful delivery of standard input.
 // It is intentionally empty because process output (stdout/stderr) streams
 // continuously through the StartResponse stream to prevent race conditions.
-message WriteStdinResponse {
-}
+message WriteStdinResponse {}
 
 message SendSignalRequest {
   int32 process_id = 1;
@@ -155,8 +154,7 @@ message SendSignalRequest {
 
 // SendSignalResponse is returned on successful delivery of a signal.
 // Failure cases are communicated via gRPC status codes rather than fields in this message.
-message SendSignalResponse {
-}
+message SendSignalResponse {}
 
 message ResizeTTYRequest {
   int32 process_id = 1;
@@ -164,6 +162,4 @@ message ResizeTTYRequest {
   uint32 rows = 3;
 }
 
-message ResizeTTYResponse {
-}
-
+message ResizeTTYResponse {}

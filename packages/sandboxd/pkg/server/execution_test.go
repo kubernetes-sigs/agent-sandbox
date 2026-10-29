@@ -169,6 +169,32 @@ func TestExecuteWithLimitsRPCDeadline(t *testing.T) {
 	require.Zero(t, resp.GetExitCode())
 }
 
+func TestExecuteWithLimitsRPCCancelled(t *testing.T) {
+	root := t.TempDir()
+	client := newProcessClient(t, root)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := client.ExecuteWithLimits(ctx, &processv1.ExecuteWithLimitsRequest{
+			Config:    &processv1.ProcessConfig{Command: []string{"sh", "-c", "touch ready; exec sleep 30"}},
+			TimeLimit: durationpb.New(20 * time.Second),
+		})
+		result <- err
+	}()
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(root, "ready"))
+		return err == nil
+	}, 5*time.Second, 10*time.Millisecond)
+	cancel()
+	select {
+	case err := <-result:
+		require.Equal(t, codes.Canceled, status.Code(err))
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled request did not finish")
+	}
+}
+
 func TestExecuteWithLimitsInvalidRequest(t *testing.T) {
 	client := newProcessClient(t, t.TempDir())
 	for _, tc := range []struct {

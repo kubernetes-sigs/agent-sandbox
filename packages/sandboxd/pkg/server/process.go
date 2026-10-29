@@ -65,6 +65,7 @@ type ProcessServer struct {
 	rootDir         string
 	registry        *processmanager.ProcessRegistry
 	streamChunkSize int
+	executionPolicy ExecutionPolicy
 	log             logr.Logger
 }
 
@@ -325,9 +326,19 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 
 // Execute runs a command synchronously and returns its buffered output.
 func (s *ProcessServer) Execute(ctx context.Context, req *processv1.ExecuteRequest) (*processv1.ExecuteResponse, error) {
-	result, err := s.execute(ctx, req.GetConfig(), executionLimits{})
+	limits, err := s.executionPolicy.resolve(nil)
 	if err != nil {
 		return nil, err
+	}
+	result, err := s.execute(ctx, req.GetConfig(), limits)
+	if err != nil {
+		return nil, err
+	}
+	if result.TerminationReason == processv1.ExecuteTerminationReason_EXECUTE_TERMINATION_REASON_TIME_LIMIT_EXCEEDED {
+		return nil, status.Error(codes.ResourceExhausted, "Execute exceeded its execution time limit; ExecuteWithLimits reports structured outcomes")
+	}
+	if result.StdoutTruncated || result.StderrTruncated {
+		return nil, status.Error(codes.ResourceExhausted, "Execute output was truncated by deployment policy; ExecuteWithLimits reports retained output")
 	}
 	return &processv1.ExecuteResponse{ExitCode: result.ExitCode, Stdout: result.Stdout, Stderr: result.Stderr}, nil
 }
@@ -337,16 +348,11 @@ func (s *ProcessServer) ExecuteWithLimits(ctx context.Context, req *processv1.Ex
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is required")
 	}
-	if req.StdoutLimitBytes != nil && req.GetStdoutLimitBytes() == 0 || req.StderrLimitBytes != nil && req.GetStderrLimitBytes() == 0 {
-		return nil, status.Error(codes.InvalidArgument, "output limits must be positive when specified")
-	}
-	timeLimit, err := requestedTimeLimit(req.GetTimeLimit())
+	limits, err := s.executionPolicy.resolve(req)
 	if err != nil {
 		return nil, err
 	}
-	return s.execute(ctx, req.GetConfig(), executionLimits{
-		timeLimit: timeLimit, stdoutBytes: req.GetStdoutLimitBytes(), stderrBytes: req.GetStderrLimitBytes(),
-	})
+	return s.execute(ctx, req.GetConfig(), limits)
 }
 
 type executionLimits struct {

@@ -16,12 +16,14 @@
 
 import logging
 import math
+import os
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import IO, Any
 
 import requests
 from abc import ABC, abstractmethod
@@ -61,6 +63,35 @@ ROUTER_NAMESPACE_HINT = (
 # side effects after the server handled a request but returned a 5xx response.
 RETRYABLE_METHODS = frozenset({"GET", "PUT", "DELETE"})
 _ERROR_BODY_LIMIT = 64 * 1024
+_KUBECTL_STDERR_TAIL_LIMIT = 8 * 1024
+
+
+def _start_kubectl(argv: list[str], stderr_log: IO[bytes]) -> subprocess.Popen[bytes]:
+    """Start kubectl, closing stderr_log if the process never starts.
+
+    kubectl writes a line to stdout for every forwarded connection and to
+    stderr for every reset one, without exiting. An undrained pipe fills up
+    and blocks forwarding, so stderr goes to a file and the crash message
+    stays available.
+    """
+    try:
+        return subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=stderr_log)
+    except Exception:
+        stderr_log.close()
+        raise
+
+
+def _kubectl_stderr_tail(log: IO[bytes] | None) -> str:
+    """Return the end of a tunnel's kubectl stderr log, where its fatal error is.
+
+    Only call once kubectl has exited: the log shares its file offset with
+    kubectl, so seeking while it still writes would misplace its output.
+    """
+    if log is None:
+        return ""
+    size = log.seek(0, os.SEEK_END)
+    log.seek(max(0, size - _KUBECTL_STDERR_TAIL_LIMIT))
+    return log.read().decode(errors="replace")
 
 
 def _capture_streamed_error_body(response: requests.Response) -> None:
@@ -203,6 +234,7 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
         # Injected client whose cluster kubectl must target instead of the ambient one.
         self._api_client = api_client
         self.port_forward_process: subprocess.Popen[bytes] | None = None
+        self._stderr_log: IO[bytes] | None = None
         self.base_url: str | None = None
         self._lock = threading.RLock()  # Reentrant: connect() calls close().
 
@@ -294,20 +326,21 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
             logger.info(
                 f"Starting tunnel for Sandbox {self.sandbox_id}")
 
-            self.port_forward_process = subprocess.Popen(
-                [
-                    "kubectl", "port-forward",
-                    ROUTER_SERVICE_NAME,
-                    f"{local_port}:8080",
-                    "-n", self.config.router_namespace,
-                    *kube_args,
-                ],
-                # kubectl writes a line to stdout for every forwarded connection;
-                # an undrained pipe fills up and blocks new connections. stderr
-                # stays piped for the crash message.
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE
-            )
+            self._stderr_log = tempfile.TemporaryFile()
+            try:
+                self.port_forward_process = _start_kubectl(
+                    [
+                        "kubectl", "port-forward",
+                        ROUTER_SERVICE_NAME,
+                        f"{local_port}:8080",
+                        "-n", self.config.router_namespace,
+                        *kube_args,
+                    ],
+                    self._stderr_log,
+                )
+            except Exception:
+                self._stderr_log = None
+                raise
 
             # Record the start of the port-forward readiness wait separately so that
             # preflight check latency (up to 10 s on slow API responses or network
@@ -317,8 +350,7 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
             logger.info("Waiting for port-forwarding to be ready...")
             while time.monotonic() - port_forward_start < self.config.port_forward_ready_timeout:
                 if self.port_forward_process.poll() is not None:
-                    _, stderr = self.port_forward_process.communicate()
-                    stderr_text = stderr.decode(errors="replace")
+                    stderr_text = _kubectl_stderr_tail(self._stderr_log)
                     hint = ROUTER_NAMESPACE_HINT if "not found" in stderr_text.lower() else ""
                     raise SandboxPortForwardError(
                         f"Tunnel to router service '{ROUTER_SERVICE_NAME}' in namespace "
@@ -365,13 +397,15 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
             else:
                 self.port_forward_process = None
                 self.base_url = None
+        if self._stderr_log and not self.port_forward_process:
+            self._stderr_log.close()
+            self._stderr_log = None
 
     def verify_connection(self) -> None:
         if self.port_forward_process and self.port_forward_process.poll() is not None:
-            _, stderr = self.port_forward_process.communicate()
             raise SandboxPortForwardError(
                 f"Kubectl Port-Forward crashed!\n"
-                f"Stderr: {stderr.decode(errors='replace')}"
+                f"Stderr: {_kubectl_stderr_tail(self._stderr_log)}"
             )
 
     def should_inject_router_headers(self) -> bool:
@@ -401,6 +435,7 @@ class SandboxdPodTunnelStrategy(ConnectionStrategy):
         self._get_pod_name = get_pod_name
         self._api_client = api_client
         self.port_forward_process: subprocess.Popen[Any] | None = None
+        self._stderr_log: IO[bytes] | None = None
         self.base_url: str | None = None
         self.grpc_target: str | None = None
         self._lock = threading.RLock()  # Reentrant: connect() calls close().
@@ -452,26 +487,26 @@ class SandboxdPodTunnelStrategy(ConnectionStrategy):
             rest_local = self._get_free_port()
             grpc_local = self._get_free_port()
             logger.info(f"Starting sandboxd pod tunnel for {self.sandbox_id}")
-            self.port_forward_process = subprocess.Popen(
-                [
-                    "kubectl", "port-forward",
-                    f"pod/{pod_name}",
-                    f"{rest_local}:{self.config.rest_port}",
-                    f"{grpc_local}:{self.config.grpc_port}",
-                    "-n", self.namespace,
-                    *kube_args,
-                ],
-                # kubectl writes a line to stdout for every forwarded connection;
-                # an undrained pipe fills up and blocks new connections. stderr
-                # stays piped for the crash message.
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
+            self._stderr_log = tempfile.TemporaryFile()
+            try:
+                self.port_forward_process = _start_kubectl(
+                    [
+                        "kubectl", "port-forward",
+                        f"pod/{pod_name}",
+                        f"{rest_local}:{self.config.rest_port}",
+                        f"{grpc_local}:{self.config.grpc_port}",
+                        "-n", self.namespace,
+                        *kube_args,
+                    ],
+                    self._stderr_log,
+                )
+            except Exception:
+                self._stderr_log = None
+                raise
             while time.monotonic() - start_time < self.config.port_forward_ready_timeout:
                 if self.port_forward_process.poll() is not None:
-                    _, stderr = self.port_forward_process.communicate()
                     raise SandboxPortForwardError(
-                        f"Tunnel crashed: {stderr.decode(errors='replace')}")
+                        f"Tunnel crashed: {_kubectl_stderr_tail(self._stderr_log)}")
                 if self._is_port_open(rest_local) and self._is_port_open(grpc_local):
                     self.base_url = f"http://127.0.0.1:{rest_local}"
                     self.grpc_target = f"127.0.0.1:{grpc_local}"
@@ -508,12 +543,15 @@ class SandboxdPodTunnelStrategy(ConnectionStrategy):
                 self.port_forward_process = None
                 self.base_url = None
                 self.grpc_target = None
+        if self._stderr_log and not self.port_forward_process:
+            self._stderr_log.close()
+            self._stderr_log = None
 
     def verify_connection(self) -> None:
         if self.port_forward_process and self.port_forward_process.poll() is not None:
-            _, stderr = self.port_forward_process.communicate()
             raise SandboxPortForwardError(
-                f"sandboxd pod tunnel crashed!\nStderr: {stderr.decode(errors='replace')}")
+                "sandboxd pod tunnel crashed!\n"
+                f"Stderr: {_kubectl_stderr_tail(self._stderr_log)}")
 
     def should_inject_router_headers(self) -> bool:
         return False

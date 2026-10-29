@@ -76,9 +76,39 @@ func TestExtractControllerMetrics(t *testing.T) {
 			Labels: []string{"namespace", "launch_type", "sandbox_template"},
 		},
 		{
+			Name:   "agent_sandbox_expired_total",
+			Type:   typeCounter,
+			Labels: []string{"namespace", "sandbox_template", "owned_by", "shutdown_policy"},
+		},
+		{
+			Name:   "agent_sandbox_finished_total",
+			Type:   typeCounter,
+			Labels: []string{"namespace", "sandbox_template", "owned_by", "reason"},
+		},
+		{
+			Name:   "agent_sandbox_resume_latency_ms",
+			Type:   typeHistogram,
+			Labels: []string{"namespace", "sandbox_template", "owned_by"},
+		},
+		{
+			Name:   "agent_sandbox_resume_total",
+			Type:   typeCounter,
+			Labels: []string{"namespace", "sandbox_template", "owned_by", "result"},
+		},
+		{
 			Name:   "agent_sandbox_stage_latency_ms",
 			Type:   typeHistogram,
 			Labels: []string{"namespace", "launch_type", "owned_by", "stage"},
+		},
+		{
+			Name:   "agent_sandbox_suspend_latency_ms",
+			Type:   typeHistogram,
+			Labels: []string{"namespace", "sandbox_template", "owned_by"},
+		},
+		{
+			Name:   "agent_sandbox_suspend_total",
+			Type:   typeCounter,
+			Labels: []string{"namespace", "sandbox_template", "owned_by", "result"},
 		},
 		{
 			Name:   "agent_sandbox_template_reconcile_errors_total",

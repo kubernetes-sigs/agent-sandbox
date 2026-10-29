@@ -1307,6 +1307,8 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 		sandboxIsExpired           bool
 		isWarmPool                 bool
 		sandboxNotOwned            bool // sandbox exists at statusName but belongs to a different owner
+		noShutdownTime             bool // no expiry configured at all
+		sandboxFinished            bool // sandbox reports Finished=True
 		expectClaimDeleted         bool
 		expectSandboxDeleted       bool
 		expectSandboxStatusCleared bool // SandboxStatus.Name, PodIPs, and ServiceFQDN must be empty
@@ -1350,6 +1352,15 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 			expectStatus:         "",
 		},
 		{
+			name:                 "Policy=Delete, no expiry, Sandbox Finished -> Should Retain Claim and Sandbox",
+			claim:                createClaim("delete-claim-no-expiry", extensionsv1beta1.ShutdownPolicyDelete),
+			noShutdownTime:       true,
+			sandboxFinished:      true,
+			expectClaimDeleted:   false,
+			expectSandboxDeleted: false,
+			expectStatus:         "SandboxReady",
+		},
+		{
 			name:                 "Policy=Delete && Sandbox Running -> Should Delete Claim immediately",
 			claim:                createClaim("delete-claim-race", extensionsv1beta1.ShutdownPolicyDelete),
 			sandboxIsExpired:     false,
@@ -1381,6 +1392,18 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			scheme := newScheme(t)
 			sandbox := createSandbox(tc.claim.Name, tc.sandboxIsExpired)
+
+			if tc.noShutdownTime {
+				tc.claim.Spec.Lifecycle.ShutdownTime = nil
+			}
+			if tc.sandboxFinished {
+				sandbox.Status.Conditions = append(sandbox.Status.Conditions, metav1.Condition{
+					Type:               string(sandboxv1beta1.SandboxConditionFinished),
+					Status:             metav1.ConditionTrue,
+					Reason:             sandboxv1beta1.SandboxReasonPodSucceeded,
+					LastTransitionTime: metav1.NewTime(time.Now().Add(-time.Minute)),
+				})
+			}
 
 			// Hack: Simulate warmPool adopted sandbox
 			if tc.isWarmPool {
@@ -1614,6 +1637,7 @@ func TestSandboxClaimTTLAfterFinishedCleanupPolicy(t *testing.T) {
 	testCases := []struct {
 		name                 string
 		policy               extensionsv1beta1.ShutdownPolicy
+		sandboxTerminating   bool // a finalizer keeps the Sandbox around after it is deleted
 		expectClaimDeleted   bool
 		expectSandboxDeleted bool
 	}{
@@ -1622,6 +1646,19 @@ func TestSandboxClaimTTLAfterFinishedCleanupPolicy(t *testing.T) {
 			policy:               extensionsv1beta1.ShutdownPolicyRetain,
 			expectClaimDeleted:   false,
 			expectSandboxDeleted: true,
+		},
+		{
+			name:                 "retain preserves finished condition while sandbox terminates",
+			policy:               extensionsv1beta1.ShutdownPolicyRetain,
+			sandboxTerminating:   true,
+			expectClaimDeleted:   false,
+			expectSandboxDeleted: false,
+		},
+		{
+			name:                 "delete deletes claim",
+			policy:               extensionsv1beta1.ShutdownPolicyDelete,
+			expectClaimDeleted:   true,
+			expectSandboxDeleted: false,
 		},
 		{
 			name:                 "delete foreground deletes claim",
@@ -1635,6 +1672,10 @@ func TestSandboxClaimTTLAfterFinishedCleanupPolicy(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			claim := createClaim(tc.name, tc.policy)
 			sandbox := createSandbox(claim)
+			if tc.sandboxTerminating {
+				sandbox.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+				sandbox.Finalizers = []string{"test-finalizer"}
+			}
 			client := fake.NewClientBuilder().WithScheme(scheme).
 				WithObjects(claim, sandbox, warmPool, template).
 				WithStatusSubresource(claim).
@@ -1653,14 +1694,20 @@ func TestSandboxClaimTTLAfterFinishedCleanupPolicy(t *testing.T) {
 			require.NoError(t, err)
 			require.Greater(t, result.RequeueAfter, time.Duration(0))
 
+			requireExpiredAndFinished := func(claim *extensionsv1beta1.SandboxClaim) {
+				t.Helper()
+				readyCondition := meta.FindStatusCondition(claim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+				require.NotNil(t, readyCondition)
+				require.Equal(t, extensionsv1beta1.ClaimExpiredReason, readyCondition.Reason)
+				finishedCondition := meta.FindStatusCondition(claim.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished))
+				require.NotNil(t, finishedCondition)
+				require.Equal(t, metav1.ConditionTrue, finishedCondition.Status)
+				require.Equal(t, sandboxv1beta1.SandboxReasonPodSucceeded, finishedCondition.Reason)
+			}
+
 			updatedClaim := &extensionsv1beta1.SandboxClaim{}
 			require.NoError(t, client.Get(context.Background(), req.NamespacedName, updatedClaim))
-			readyCondition := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
-			require.NotNil(t, readyCondition)
-			require.Equal(t, extensionsv1beta1.ClaimExpiredReason, readyCondition.Reason)
-			finishedCondition := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished))
-			require.NotNil(t, finishedCondition)
-			require.Equal(t, sandboxv1beta1.SandboxReasonPodSucceeded, finishedCondition.Reason)
+			requireExpiredAndFinished(updatedClaim)
 
 			updatedSandbox := &sandboxv1beta1.Sandbox{}
 			require.NoError(t, client.Get(context.Background(), req.NamespacedName, updatedSandbox))
@@ -1674,12 +1721,7 @@ func TestSandboxClaimTTLAfterFinishedCleanupPolicy(t *testing.T) {
 				require.True(t, k8errors.IsNotFound(err))
 			} else {
 				require.NoError(t, err)
-				readyCondition = meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
-				require.NotNil(t, readyCondition)
-				require.Equal(t, extensionsv1beta1.ClaimExpiredReason, readyCondition.Reason)
-				finishedCondition = meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished))
-				require.NotNil(t, finishedCondition)
-				require.Equal(t, sandboxv1beta1.SandboxReasonPodSucceeded, finishedCondition.Reason)
+				requireExpiredAndFinished(updatedClaim)
 			}
 
 			err = client.Get(context.Background(), req.NamespacedName, updatedSandbox)
@@ -1688,6 +1730,26 @@ func TestSandboxClaimTTLAfterFinishedCleanupPolicy(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
+
+			if tc.expectClaimDeleted {
+				return
+			}
+
+			// A retained claim must keep its expired and finished status after the
+			// sandbox is gone, not only while it is being deleted.
+			if tc.sandboxTerminating {
+				updatedSandbox.Finalizers = nil
+				require.NoError(t, client.Update(context.Background(), updatedSandbox))
+			}
+			result, err = reconciler.Reconcile(context.Background(), req)
+			require.NoError(t, err)
+			require.Zero(t, result.RequeueAfter)
+
+			require.NoError(t, client.Get(context.Background(), req.NamespacedName, updatedClaim))
+			requireExpiredAndFinished(updatedClaim)
+			require.Empty(t, updatedClaim.Status.SandboxStatus.Name)
+			err = client.Get(context.Background(), req.NamespacedName, &sandboxv1beta1.Sandbox{})
+			require.True(t, k8errors.IsNotFound(err))
 		})
 	}
 }
@@ -7022,6 +7084,26 @@ func TestSandboxStatusRelevantChange(t *testing.T) {
 			},
 			expected: false,
 		},
+		{
+			name: "OwnerReferences changed",
+			oldSb: &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					OwnerReferences: []metav1.OwnerReference{{
+						Kind: "SandboxWarmPool",
+						Name: "pool-1",
+					}},
+				},
+			},
+			newSb: &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					OwnerReferences: []metav1.OwnerReference{{
+						Kind: "SandboxClaim",
+						Name: "claim-1",
+					}},
+				},
+			},
+			expected: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -7408,6 +7490,509 @@ func TestSandboxClaimAdoptionConflictRetriedInPass(t *testing.T) {
 	require.Equal(t, types.UID("claim-uid-123"), controllerRef.UID, "candidate must be owned by the claim after the retried adoption")
 }
 
+// TestSandboxClaimStatusConflictRetriedOnFreshBase verifies that when an optimistic-lock
+// 409 conflict occurs on the initial claim status patch (e.g. because earlier in-pass
+// metadata updates committed a newer resourceVersion to the API server), the controller
+// performs an in-pass authoritative retry on the fresh base and successfully finalizes
+// the status rather than silently dropping the uncommitted Ready state.
+func TestSandboxClaimStatusConflictRetriedOnFreshBase(t *testing.T) {
+	scheme := newScheme(t)
+	claim, template, warmPool, adopted := newOptimisticLockTestObjects()
+	claim.Annotations[asmetrics.WebhookAnnotation] = time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano)
+	delete(claim.Annotations, asmetrics.ObservabilityAnnotation)
+
+	asmetrics.ClaimStartupLatency.Reset()
+	asmetrics.ClaimControllerStartupLatency.Reset()
+
+	conflict := k8errors.NewConflict(
+		schema.GroupResource{Group: "extensions.agents.x-k8s.io", Resource: "sandboxclaims"},
+		claim.Name,
+		errors.New("the object has been modified; please apply your changes to the latest version and try again"),
+	)
+
+	rawClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim, adopted).
+		WithStatusSubresource(claim).
+		Build()
+
+	conflictOnce := true
+	statusPatchAttempts := 0
+
+	cachedClient := interceptor.NewClient(rawClient, interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok && subResourceName == "status" {
+				statusPatchAttempts++
+				if conflictOnce {
+					conflictOnce = false
+					// Simulate an intervening write that bumped the live claim's resourceVersion
+					claimCopy := &extensionsv1beta1.SandboxClaim{}
+					if err := rawClient.Get(ctx, client.ObjectKeyFromObject(claim), claimCopy); err != nil {
+						return err
+					}
+					if claimCopy.Annotations == nil {
+						claimCopy.Annotations = make(map[string]string)
+					}
+					claimCopy.Annotations["concurrent-write"] = "true"
+					if updateErr := rawClient.Update(ctx, claimCopy); updateErr != nil {
+						return updateErr
+					}
+					return conflict
+				}
+			}
+			return c.SubResource(subResourceName).Patch(ctx, obj, patch, opts...)
+		},
+	})
+
+	reconciler := &SandboxClaimReconciler{
+		Client:                          cachedClient,
+		APIReader:                       rawClient,
+		Scheme:                          scheme,
+		Recorder:                        events.NewFakeRecorder(10),
+		Tracer:                          asmetrics.NewNoOp(),
+		WarmSandboxQueue:                queue.NewSimpleSandboxQueue(),
+		DisableObservabilityAnnotations: true,
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
+	res, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err, "expected status conflict to be resolved in-pass without error")
+	require.True(t, res.IsZero(), "expected no requeue when status conflict is resolved in-pass")
+	require.Equal(t, 2, statusPatchAttempts, "expected exactly 2 status patch attempts (1 initial conflict + 1 successful authoritative retry)")
+
+	updatedClaim := &extensionsv1beta1.SandboxClaim{}
+	require.NoError(t, rawClient.Get(context.Background(), req.NamespacedName, updatedClaim))
+	require.Equal(t, "adopted-sb", updatedClaim.Status.SandboxStatus.Name, "status must be finalized with adopted sandbox name")
+	readyCond := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	require.NotNil(t, readyCond, "status must have Ready condition")
+	require.Equal(t, metav1.ConditionTrue, readyCond.Status, "status must be Ready=True")
+
+	// Verify metrics recorded exactly once
+	require.Equal(t, uint64(1), histogramSampleCount(t, asmetrics.ClaimStartupLatency), "startup latency must be recorded exactly once")
+	require.Equal(t, uint64(1), histogramSampleCount(t, asmetrics.ClaimControllerStartupLatency), "controller latency must be recorded exactly once")
+}
+
+// TestIsClaimStatusSatisfied verifies the status satisfaction check used by
+// retryStatusPatchOnFreshBase across pre-Ready regressions, post-Ready transitions,
+// and Ready field updates.
+func TestIsClaimStatusSatisfied(t *testing.T) {
+	t1 := metav1.NewTime(time.Now().Add(-time.Minute).Truncate(time.Second))
+	t2 := metav1.NewTime(time.Now().Truncate(time.Second))
+
+	readyTrue := func(ts metav1.Time) metav1.Condition {
+		return metav1.Condition{
+			Type:               string(sandboxv1beta1.SandboxConditionReady),
+			Status:             metav1.ConditionTrue,
+			Reason:             "Ready",
+			LastTransitionTime: ts,
+		}
+	}
+	readyFalse := func(reason string) metav1.Condition {
+		return metav1.Condition{
+			Type:               string(sandboxv1beta1.SandboxConditionReady),
+			Status:             metav1.ConditionFalse,
+			Reason:             reason,
+			LastTransitionTime: t2,
+		}
+	}
+
+	tests := []struct {
+		name      string
+		oldStatus *extensionsv1beta1.SandboxClaimStatus
+		current   *extensionsv1beta1.SandboxClaimStatus
+		desired   *extensionsv1beta1.SandboxClaimStatus
+		expected  bool
+	}{
+		{
+			name:      "stale pre-Ready view does not regress committed Ready=True",
+			oldStatus: &extensionsv1beta1.SandboxClaimStatus{},
+			current: &extensionsv1beta1.SandboxClaimStatus{
+				SandboxStatus: extensionsv1beta1.SandboxStatus{Name: "sb-1"},
+				Conditions:    []metav1.Condition{readyTrue(t1)},
+			},
+			desired: &extensionsv1beta1.SandboxClaimStatus{
+				SandboxStatus: extensionsv1beta1.SandboxStatus{Name: "sb-1"},
+				Conditions:    []metav1.Condition{readyFalse("SandboxNotReady")},
+			},
+			expected: true,
+		},
+		{
+			name: "legitimate post-Ready transition (Ready=True -> Ready=False) is not treated as satisfied",
+			oldStatus: &extensionsv1beta1.SandboxClaimStatus{
+				SandboxStatus: extensionsv1beta1.SandboxStatus{Name: "sb-1"},
+				Conditions:    []metav1.Condition{readyTrue(t1)},
+			},
+			current: &extensionsv1beta1.SandboxClaimStatus{
+				SandboxStatus: extensionsv1beta1.SandboxStatus{Name: "sb-1"},
+				Conditions:    []metav1.Condition{readyTrue(t1)},
+			},
+			desired: &extensionsv1beta1.SandboxClaimStatus{
+				SandboxStatus: extensionsv1beta1.SandboxStatus{Name: "sb-1"},
+				Conditions:    []metav1.Condition{readyFalse(extensionsv1beta1.ClaimExpiredReason)},
+			},
+			expected: false,
+		},
+		{
+			name:      "identical Ready=True status with different LastTransitionTime is satisfied",
+			oldStatus: &extensionsv1beta1.SandboxClaimStatus{},
+			current: &extensionsv1beta1.SandboxClaimStatus{
+				SandboxStatus: extensionsv1beta1.SandboxStatus{Name: "sb-1", PodIPs: []string{"10.0.0.1"}},
+				Conditions:    []metav1.Condition{readyTrue(t1)},
+			},
+			desired: &extensionsv1beta1.SandboxClaimStatus{
+				SandboxStatus: extensionsv1beta1.SandboxStatus{Name: "sb-1", PodIPs: []string{"10.0.0.1"}},
+				Conditions:    []metav1.Condition{readyTrue(t2)},
+			},
+			expected: true,
+		},
+		{
+			name: "Ready=True with updated ServiceFQDN is not satisfied",
+			oldStatus: &extensionsv1beta1.SandboxClaimStatus{
+				SandboxStatus: extensionsv1beta1.SandboxStatus{Name: "sb-1"},
+				Conditions:    []metav1.Condition{readyTrue(t1)},
+			},
+			current: &extensionsv1beta1.SandboxClaimStatus{
+				SandboxStatus: extensionsv1beta1.SandboxStatus{Name: "sb-1"},
+				Conditions:    []metav1.Condition{readyTrue(t1)},
+			},
+			desired: &extensionsv1beta1.SandboxClaimStatus{
+				SandboxStatus: extensionsv1beta1.SandboxStatus{Name: "sb-1", ServiceFQDN: "sb-1.default.svc"},
+				Conditions:    []metav1.Condition{readyTrue(t1)},
+			},
+			expected: false,
+		},
+		{
+			name: "Ready=True with updated PodIPs is not satisfied",
+			oldStatus: &extensionsv1beta1.SandboxClaimStatus{
+				SandboxStatus: extensionsv1beta1.SandboxStatus{Name: "sb-1", PodIPs: []string{"10.0.0.1"}},
+				Conditions:    []metav1.Condition{readyTrue(t1)},
+			},
+			current: &extensionsv1beta1.SandboxClaimStatus{
+				SandboxStatus: extensionsv1beta1.SandboxStatus{Name: "sb-1", PodIPs: []string{"10.0.0.1"}},
+				Conditions:    []metav1.Condition{readyTrue(t1)},
+			},
+			desired: &extensionsv1beta1.SandboxClaimStatus{
+				SandboxStatus: extensionsv1beta1.SandboxStatus{Name: "sb-1", PodIPs: []string{"10.0.0.1", "fd00::1"}},
+				Conditions:    []metav1.Condition{readyTrue(t1)},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.expected, isClaimStatusSatisfied(tt.oldStatus, tt.current, tt.desired))
+		})
+	}
+}
+
+// TestSandboxClaimStatusConflictPostReadyTransitionRetried verifies that when an
+// already-Ready claim updates ServiceFQDN or transitions to Ready=False (e.g.
+// when the underlying sandbox becomes unready) and encounters a 409 conflict on
+// the status patch, the fresh-base retry persists the update and does not
+// double-record startup latency metrics.
+func TestSandboxClaimStatusConflictPostReadyTransitionRetried(t *testing.T) {
+	scheme := newScheme(t)
+	claim, template, warmPool, adopted := newOptimisticLockTestObjects()
+	claim.Annotations[asmetrics.WebhookAnnotation] = time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano)
+	delete(claim.Annotations, asmetrics.ObservabilityAnnotation)
+
+	asmetrics.ClaimStartupLatency.Reset()
+	asmetrics.ClaimControllerStartupLatency.Reset()
+
+	conflict := k8errors.NewConflict(
+		schema.GroupResource{Group: "extensions.agents.x-k8s.io", Resource: "sandboxclaims"},
+		claim.Name,
+		errors.New("the object has been modified; please apply your changes to the latest version and try again"),
+	)
+
+	rawClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim, adopted).
+		WithStatusSubresource(claim).
+		Build()
+
+	conflictOnNextStatusPatch := false
+	cachedClient := interceptor.NewClient(rawClient, interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok && subResourceName == "status" && conflictOnNextStatusPatch {
+				conflictOnNextStatusPatch = false
+				claimCopy := &extensionsv1beta1.SandboxClaim{}
+				if err := rawClient.Get(ctx, client.ObjectKeyFromObject(claim), claimCopy); err != nil {
+					return err
+				}
+				claimCopy.Annotations["concurrent-touch"] = time.Now().Format(time.RFC3339Nano)
+				if err := rawClient.Update(ctx, claimCopy); err != nil {
+					return err
+				}
+				return conflict
+			}
+			return c.SubResource(subResourceName).Patch(ctx, obj, patch, opts...)
+		},
+	})
+
+	reconciler := &SandboxClaimReconciler{
+		Client:                          cachedClient,
+		APIReader:                       rawClient,
+		Scheme:                          scheme,
+		Recorder:                        events.NewFakeRecorder(10),
+		Tracer:                          asmetrics.NewNoOp(),
+		WarmSandboxQueue:                queue.NewSimpleSandboxQueue(),
+		DisableObservabilityAnnotations: true,
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
+
+	// Pass 1: initial Ready=True transition.
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), histogramSampleCount(t, asmetrics.ClaimStartupLatency))
+
+	// Pin the server's Ready LastTransitionTime to an earlier timestamp, while the
+	// sandbox's Ready condition carries a newer timestamp. On Pass 2 (when only
+	// ServiceFQDN changes), the fresh-base retry must preserve the server's LTT.
+	serverReadyTime := metav1.NewTime(time.Now().Add(-10 * time.Minute).Truncate(time.Second))
+	claimOnServer := &extensionsv1beta1.SandboxClaim{}
+	require.NoError(t, rawClient.Get(context.Background(), req.NamespacedName, claimOnServer))
+	for i := range claimOnServer.Status.Conditions {
+		if claimOnServer.Status.Conditions[i].Type == string(sandboxv1beta1.SandboxConditionReady) {
+			claimOnServer.Status.Conditions[i].LastTransitionTime = serverReadyTime
+		}
+	}
+	require.NoError(t, rawClient.Status().Update(context.Background(), claimOnServer))
+
+	// Pass 2: sandbox gains ServiceFQDN while Ready=True (with a newer LTT on the sandbox);
+	// status patch conflicts once.
+	liveSb := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, rawClient.Get(context.Background(), types.NamespacedName{Name: adopted.Name, Namespace: "default"}, liveSb))
+	liveSb.Status.ServiceFQDN = "adopted-sb.default.svc.cluster.local"
+	liveSb.Status.Conditions = []metav1.Condition{{
+		Type:               string(sandboxv1beta1.SandboxConditionReady),
+		Status:             metav1.ConditionTrue,
+		Reason:             "DependenciesReady",
+		LastTransitionTime: metav1.NewTime(time.Now().Truncate(time.Second)),
+	}}
+	require.NoError(t, rawClient.Update(context.Background(), liveSb))
+
+	conflictOnNextStatusPatch = true
+	_, err = reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+
+	updatedClaim := &extensionsv1beta1.SandboxClaim{}
+	require.NoError(t, rawClient.Get(context.Background(), req.NamespacedName, updatedClaim))
+	require.Equal(t, "adopted-sb.default.svc.cluster.local", updatedClaim.Status.SandboxStatus.ServiceFQDN,
+		"ServiceFQDN update on a Ready claim must be persisted by the fresh-base retry")
+	readyAfterPass2 := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	require.NotNil(t, readyAfterPass2)
+	require.True(t, readyAfterPass2.LastTransitionTime.Equal(&serverReadyTime),
+		"fresh-base retry must preserve server's LastTransitionTime when Ready status did not transition (got %v, want %v)",
+		readyAfterPass2.LastTransitionTime, serverReadyTime)
+	require.Equal(t, uint64(1), histogramSampleCount(t, asmetrics.ClaimStartupLatency),
+		"post-Ready status retry must not re-record startup latency")
+
+	// Pass 3: sandbox transitions to Ready=False; status patch conflicts once.
+	require.NoError(t, rawClient.Get(context.Background(), types.NamespacedName{Name: adopted.Name, Namespace: "default"}, liveSb))
+	liveSb.Status.Conditions = []metav1.Condition{{
+		Type:   string(sandboxv1beta1.SandboxConditionReady),
+		Status: metav1.ConditionFalse,
+		Reason: "DependenciesNotReady",
+	}}
+	require.NoError(t, rawClient.Update(context.Background(), liveSb))
+
+	conflictOnNextStatusPatch = true
+	_, err = reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+
+	require.NoError(t, rawClient.Get(context.Background(), req.NamespacedName, updatedClaim))
+	readyCond := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	require.NotNil(t, readyCond)
+	require.Equal(t, metav1.ConditionFalse, readyCond.Status,
+		"Ready=True -> Ready=False transition must be persisted by the fresh-base retry")
+}
+
+// TestSandboxClaimStatusConflictRecreatedClaimUIDMismatch verifies that if a claim
+// is deleted and recreated with the same name (new UID) when a status conflict
+// triggers retryStatusPatchOnFreshBase, the retry aborts without overwriting the
+// newly created claim's status.
+func TestSandboxClaimStatusConflictRecreatedClaimUIDMismatch(t *testing.T) {
+	scheme := newScheme(t)
+	claim, template, warmPool, adopted := newOptimisticLockTestObjects()
+
+	conflict := k8errors.NewConflict(
+		schema.GroupResource{Group: "extensions.agents.x-k8s.io", Resource: "sandboxclaims"},
+		claim.Name,
+		errors.New("the object has been modified; please apply your changes to the latest version and try again"),
+	)
+
+	rawClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim, adopted).
+		WithStatusSubresource(claim).
+		Build()
+
+	conflictOnce := true
+	cachedClient := interceptor.NewClient(rawClient, interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok && subResourceName == "status" && conflictOnce {
+				conflictOnce = false
+				// Simulate the claim being deleted and recreated with a new UID.
+				if err := rawClient.Delete(ctx, claim); err != nil {
+					return err
+				}
+				recreated := &extensionsv1beta1.SandboxClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      claim.Name,
+						Namespace: claim.Namespace,
+						UID:       "recreated-claim-uid-999",
+					},
+					Spec: claim.Spec,
+				}
+				if err := rawClient.Create(ctx, recreated); err != nil {
+					return err
+				}
+				return conflict
+			}
+			return c.SubResource(subResourceName).Patch(ctx, obj, patch, opts...)
+		},
+	})
+
+	reconciler := &SandboxClaimReconciler{
+		Client:                          cachedClient,
+		APIReader:                       rawClient,
+		Scheme:                          scheme,
+		Recorder:                        events.NewFakeRecorder(10),
+		Tracer:                          asmetrics.NewNoOp(),
+		WarmSandboxQueue:                queue.NewSimpleSandboxQueue(),
+		DisableObservabilityAnnotations: true,
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+
+	recreated := &extensionsv1beta1.SandboxClaim{}
+	require.NoError(t, rawClient.Get(context.Background(), req.NamespacedName, recreated))
+	require.Equal(t, types.UID("recreated-claim-uid-999"), recreated.UID)
+	require.Empty(t, recreated.Status.SandboxStatus.Name, "recreated claim status must not be overwritten with old claim's sandbox")
+}
+
+// TestSandboxClaimStatusConflictGenerationMismatch verifies that if a claim's
+// Generation advances on the server while a pass computed status against an older
+// generation, retryStatusPatchOnFreshBase bails out so it does not write an older
+// ObservedGeneration over the newer generation.
+func TestSandboxClaimStatusConflictGenerationMismatch(t *testing.T) {
+	scheme := newScheme(t)
+	claim, template, warmPool, adopted := newOptimisticLockTestObjects()
+	claim.Generation = 1
+
+	conflict := k8errors.NewConflict(
+		schema.GroupResource{Group: "extensions.agents.x-k8s.io", Resource: "sandboxclaims"},
+		claim.Name,
+		errors.New("the object has been modified; please apply your changes to the latest version and try again"),
+	)
+
+	rawClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim, adopted).
+		WithStatusSubresource(claim).
+		Build()
+
+	conflictOnce := true
+	statusPatchAttempts := 0
+	cachedClient := interceptor.NewClient(rawClient, interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok && subResourceName == "status" {
+				statusPatchAttempts++
+				if conflictOnce {
+					conflictOnce = false
+					live := &extensionsv1beta1.SandboxClaim{}
+					if err := rawClient.Get(ctx, client.ObjectKeyFromObject(claim), live); err != nil {
+						return err
+					}
+					live.Generation = 2
+					if err := rawClient.Update(ctx, live); err != nil {
+						return err
+					}
+					return conflict
+				}
+			}
+			return c.SubResource(subResourceName).Patch(ctx, obj, patch, opts...)
+		},
+	})
+
+	reconciler := &SandboxClaimReconciler{
+		Client:                          cachedClient,
+		APIReader:                       rawClient,
+		Scheme:                          scheme,
+		Recorder:                        events.NewFakeRecorder(10),
+		Tracer:                          asmetrics.NewNoOp(),
+		WarmSandboxQueue:                queue.NewSimpleSandboxQueue(),
+		DisableObservabilityAnnotations: true,
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	require.Equal(t, 1, statusPatchAttempts, "fresh-base retry must bail out without issuing a second status patch when Generation changed")
+
+	live := &extensionsv1beta1.SandboxClaim{}
+	require.NoError(t, rawClient.Get(context.Background(), req.NamespacedName, live))
+	require.Empty(t, live.Status.Conditions, "fresh-base retry must not write conditions with stale ObservedGeneration")
+}
+
+// TestSandboxClaimStatusConflictRetryErrorPropagated verifies that a non-conflict
+// error from retryStatusPatchOnFreshBase (e.g. authoritative reader failure or 5xx
+// on the retry patch) is returned from updateStatus and Reconcile so the workqueue
+// rate-limiter requeues the claim instead of silently dropping the update.
+func TestSandboxClaimStatusConflictRetryErrorPropagated(t *testing.T) {
+	scheme := newScheme(t)
+	claim, template, warmPool, adopted := newOptimisticLockTestObjects()
+
+	conflict := k8errors.NewConflict(
+		schema.GroupResource{Group: "extensions.agents.x-k8s.io", Resource: "sandboxclaims"},
+		claim.Name,
+		errors.New("the object has been modified; please apply your changes to the latest version and try again"),
+	)
+	retryFailure := k8errors.NewInternalError(errors.New("apiserver unavailable during retry"))
+
+	rawClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim, adopted).
+		WithStatusSubresource(claim).
+		Build()
+
+	apiReader := interceptor.NewClient(rawClient, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok {
+				return retryFailure
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+
+	cachedClient := interceptor.NewClient(rawClient, interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok && subResourceName == "status" {
+				return conflict
+			}
+			return c.SubResource(subResourceName).Patch(ctx, obj, patch, opts...)
+		},
+	})
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           cachedClient,
+		APIReader:        apiReader,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.ErrorIs(t, err, retryFailure, "non-conflict error from fresh-base status retry must be returned so the claim is requeued")
+}
+
 // newPoolCandidateSandbox builds a Ready, adoptable warm-pool member for the
 // default/test-pool + test-template fixtures.
 func newPoolCandidateSandbox(name string) *sandboxv1beta1.Sandbox {
@@ -7583,12 +8168,13 @@ func TestSandboxClaimStaleAdoptionRepatchIdempotentWithoutWrite(t *testing.T) {
 	})
 
 	reconciler := &SandboxClaimReconciler{
-		Client:           cachedClient,
-		APIReader:        rawClient,
-		Scheme:           scheme,
-		Recorder:         events.NewFakeRecorder(10),
-		Tracer:           asmetrics.NewNoOp(),
-		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+		Client:                          cachedClient,
+		APIReader:                       rawClient,
+		Scheme:                          scheme,
+		Recorder:                        events.NewFakeRecorder(10),
+		Tracer:                          asmetrics.NewNoOp(),
+		WarmSandboxQueue:                queue.NewSimpleSandboxQueue(),
+		DisableObservabilityAnnotations: true,
 	}
 
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
@@ -7768,12 +8354,13 @@ func TestSandboxClaimAdoptionCompletionExhaustedContentionKeepsReference(t *test
 	})
 
 	reconciler := &SandboxClaimReconciler{
-		Client:           cachedClient,
-		APIReader:        rawClient,
-		Scheme:           scheme,
-		Recorder:         events.NewFakeRecorder(10),
-		Tracer:           asmetrics.NewNoOp(),
-		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+		Client:                          cachedClient,
+		APIReader:                       rawClient,
+		Scheme:                          scheme,
+		Recorder:                        events.NewFakeRecorder(10),
+		Tracer:                          asmetrics.NewNoOp(),
+		WarmSandboxQueue:                queue.NewSimpleSandboxQueue(),
+		DisableObservabilityAnnotations: true,
 	}
 
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
@@ -7843,12 +8430,13 @@ func TestSandboxClaimAdoptionCleanupFailureKeepsReferenceAndRetries(t *testing.T
 	})
 
 	reconciler := &SandboxClaimReconciler{
-		Client:           cachedClient,
-		APIReader:        rawClient,
-		Scheme:           scheme,
-		Recorder:         events.NewFakeRecorder(10),
-		Tracer:           asmetrics.NewNoOp(),
-		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+		Client:                          cachedClient,
+		APIReader:                       rawClient,
+		Scheme:                          scheme,
+		Recorder:                        events.NewFakeRecorder(10),
+		Tracer:                          asmetrics.NewNoOp(),
+		WarmSandboxQueue:                queue.NewSimpleSandboxQueue(),
+		DisableObservabilityAnnotations: true,
 	}
 
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
@@ -8027,12 +8615,13 @@ func TestSandboxClaimAdoptionCleanupCancellationPropagates(t *testing.T) {
 	})
 
 	reconciler := &SandboxClaimReconciler{
-		Client:           cachedClient,
-		APIReader:        rawClient,
-		Scheme:           scheme,
-		Recorder:         events.NewFakeRecorder(10),
-		Tracer:           asmetrics.NewNoOp(),
-		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+		Client:                          cachedClient,
+		APIReader:                       rawClient,
+		Scheme:                          scheme,
+		Recorder:                        events.NewFakeRecorder(10),
+		Tracer:                          asmetrics.NewNoOp(),
+		WarmSandboxQueue:                queue.NewSimpleSandboxQueue(),
+		DisableObservabilityAnnotations: true,
 	}
 
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
@@ -8094,12 +8683,13 @@ func TestSandboxClaimAdoptionResolveCancellationPropagates(t *testing.T) {
 	})
 
 	reconciler := &SandboxClaimReconciler{
-		Client:           cachedClient,
-		APIReader:        rawClient,
-		Scheme:           scheme,
-		Recorder:         events.NewFakeRecorder(10),
-		Tracer:           asmetrics.NewNoOp(),
-		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+		Client:                          cachedClient,
+		APIReader:                       rawClient,
+		Scheme:                          scheme,
+		Recorder:                        events.NewFakeRecorder(10),
+		Tracer:                          asmetrics.NewNoOp(),
+		WarmSandboxQueue:                queue.NewSimpleSandboxQueue(),
+		DisableObservabilityAnnotations: true,
 	}
 
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
@@ -8169,12 +8759,13 @@ func TestSandboxClaimAdoptionResolveConflictThenCancellationPropagates(t *testin
 	})
 
 	reconciler := &SandboxClaimReconciler{
-		Client:           cachedClient,
-		APIReader:        rawClient,
-		Scheme:           scheme,
-		Recorder:         events.NewFakeRecorder(10),
-		Tracer:           asmetrics.NewNoOp(),
-		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+		Client:                          cachedClient,
+		APIReader:                       rawClient,
+		Scheme:                          scheme,
+		Recorder:                        events.NewFakeRecorder(10),
+		Tracer:                          asmetrics.NewNoOp(),
+		WarmSandboxQueue:                queue.NewSimpleSandboxQueue(),
+		DisableObservabilityAnnotations: true,
 	}
 
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}

@@ -294,6 +294,46 @@ Shell command to run.
 
 Limit on how long the command may run; omitted when unset.
 
+<a id="k8s_agent_sandbox.models.ProcessOutputEvent"></a>
+
+### ProcessOutputEvent Objects
+
+```python
+class ProcessOutputEvent(BaseModel)
+```
+
+A chunk of stdout or stderr from a process started with commands.start().
+
+``data`` is raw bytes, not text: a multi-byte character can be split
+across two chunks, so callers decode the stream rather than each chunk.
+A PTY process never produces ``stderr`` events, because the terminal
+merges stderr into stdout.
+
+<a id="k8s_agent_sandbox.models.ProcessExitEvent"></a>
+
+### ProcessExitEvent Objects
+
+```python
+class ProcessExitEvent(BaseModel)
+```
+
+Terminal event of a process started with commands.start().
+
+``exit_code`` is -1 when the process was killed by a signal: sandboxd
+reports Go's ExitCode(), not the shell's 128+N convention.
+
+<a id="k8s_agent_sandbox.models.PtySize"></a>
+
+### PtySize Objects
+
+```python
+class PtySize(BaseModel)
+```
+
+Pseudo-terminal geometry for commands.start().
+
+Mirrors the TypeScript SDK's ``PtySize``.
+
 <a id="k8s_agent_sandbox.models.FileEntry"></a>
 
 ### FileEntry Objects
@@ -398,6 +438,74 @@ Sandbox-relative path; for ``rename`` events the OLD path.
 #### error
 
 For ``error`` events, a human-readable message; empty otherwise.
+
+<a id="k8s_agent_sandbox.models.SandboxHealth"></a>
+
+### SandboxHealth Objects
+
+```python
+class SandboxHealth(BaseModel)
+```
+
+Sandbox liveness/readiness reported by sandboxd's /v1/health endpoint.
+
+Mirrors the Go SDK's ``sandbox.Health`` and the TypeScript SDK's
+``SandboxHealth``.
+
+<a id="k8s_agent_sandbox.models.SandboxHealth.status"></a>
+
+#### status
+
+HealthResponse.status enum in the sandboxd spec.
+
+<a id="k8s_agent_sandbox.models.SandboxHealth.uptime_seconds"></a>
+
+#### uptime\_seconds
+
+Seconds sandboxd has been running.
+
+<a id="k8s_agent_sandbox.models.SandboxHealth.from_sandboxd"></a>
+
+#### from\_sandboxd
+
+```python
+@classmethod
+def from_sandboxd(cls, payload: dict[str, Any]) -> "SandboxHealth"
+```
+
+Build from a sandboxd /v1/health response body.
+
+<a id="k8s_agent_sandbox.models.SandboxMetadata"></a>
+
+### SandboxMetadata Objects
+
+```python
+class SandboxMetadata(BaseModel)
+```
+
+Runtime environment metadata reported by sandboxd's /v1/metadata endpoint.
+
+Only non-sensitive orchestrator-injected configuration is exposed here;
+the sandboxd spec forbids serving credentials from /v1/metadata. Mirrors
+the Go SDK's ``sandbox.Metadata`` and the TypeScript SDK's
+``SandboxMetadata``.
+
+<a id="k8s_agent_sandbox.models.SandboxMetadata.env"></a>
+
+#### env
+
+Orchestrator-injected environment variables; empty when none apply.
+
+<a id="k8s_agent_sandbox.models.SandboxMetadata.from_sandboxd"></a>
+
+#### from\_sandboxd
+
+```python
+@classmethod
+def from_sandboxd(cls, payload: dict[str, Any]) -> "SandboxMetadata"
+```
+
+Build from a sandboxd /v1/metadata response body.
 
 <a id="k8s_agent_sandbox.models.SandboxClaimEnvVar"></a>
 

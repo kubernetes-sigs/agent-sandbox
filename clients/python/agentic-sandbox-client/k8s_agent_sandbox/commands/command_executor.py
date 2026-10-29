@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import threading
 from typing import Any, cast
+from k8s_agent_sandbox.commands._process_handle import ProcessHandle
 from k8s_agent_sandbox.connector import SandboxConnector
-from k8s_agent_sandbox.models import ExecutionResult, LegacyExecuteRequest
+from k8s_agent_sandbox.models import ExecutionResult, LegacyExecuteRequest, PtySize
 from k8s_agent_sandbox.trace_manager import trace, trace_span
 
 # Extra time the HTTP read waits beyond command_timeout, so the response the
@@ -151,6 +153,101 @@ class CommandExecutor:
         if span.is_recording():
             span.set_attribute("sandbox.exit_code", result.exit_code)
         return result
+
+    @trace_span("start")
+    def start(
+        self,
+        command: str,
+        timeout: float = 60,
+        *,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        pty: PtySize | None = None,
+    ) -> ProcessHandle:
+        """Start a command and stream its output as it is produced.
+
+        Unlike :meth:`run`, which buffers until the command exits, this
+        returns a :class:`ProcessHandle` whose ``events()`` yields output as
+        it arrives and whose ``signal()`` can cancel the running process.
+
+        Args:
+            command: The shell command to run in the sandbox.
+            timeout: Seconds to wait for sandboxd to report the process
+                started. It does not bound the process's own lifetime.
+            env: Extra environment variables for the command, overriding the
+                sandbox's own.
+            cwd: Working directory for the command, confined to the sandbox
+                root.
+            pty: Allocate a pseudo-terminal of this size. stderr is then
+                merged into stdout, so no stderr events are produced.
+
+        Only the sandboxd runtime implements ProcessService.Start; the legacy
+        python-runtime raises ``NotImplementedError``.
+        """
+        sandboxd = self.connector.is_sandboxd()
+        if not sandboxd:
+            raise NotImplementedError(
+                "commands.start() requires the sandboxd runtime; the legacy "
+                "python-runtime does not expose a streaming exec endpoint"
+            )
+        _check_process_options(env, cwd, sandboxd)
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute(
+                "sandbox.command.executable", _extract_executable(command))
+
+        try:
+            import grpc
+            from k8s_agent_sandbox.commands._process_stubs import (
+                process_pb2,
+                process_pb2_grpc,
+            )
+        except ImportError as e:
+            raise ImportError(
+                "the sandboxd runtime requires gRPC support; install the "
+                "'grpc' extra: pip install k8s-agent-sandbox[grpc]"
+            ) from e
+
+        # Publish the selected sandboxd gRPC target before dialing, as
+        # _run_sandboxd does: a direct Pod IP connection refreshes its target
+        # for every command.
+        self.connector.connect()
+        channel = self.connector.grpc_channel()
+        stub = process_pb2_grpc.ProcessServiceStub(channel)
+        request = process_pb2.StartRequest(
+            config=_process_config(process_pb2, command, env, cwd),
+            pty=process_pb2.PTY(cols=pty.cols, rows=pty.rows) if pty else None,
+        )
+        # No gRPC deadline on the call itself: that would cap the process's
+        # lifetime, not just the wait for Init. A timer cancels the stream if
+        # Init does not arrive, and is cancelled as soon as it does.
+        stream_call = stub.Start(request)
+        start_timed_out = threading.Event()
+
+        def _cancel_unstarted() -> None:
+            start_timed_out.set()
+            stream_call.cancel()
+
+        timer = threading.Timer(timeout, _cancel_unstarted)
+        timer.start()
+        # A sync streaming call reports failures on the first read, not on the
+        # call itself, so both are covered by one handler.
+        try:
+            return ProcessHandle.from_stream(stub, process_pb2, stream_call)
+        except grpc.RpcError as e:
+            if start_timed_out.is_set():
+                raise TimeoutError(
+                    f"sandboxd did not report the process started within "
+                    f"{timeout}s"
+                ) from e
+            rpc_error = cast("grpc.Call", e)
+            if rpc_error.code() == grpc.StatusCode.UNAVAILABLE:
+                self.connector.invalidate_sandboxd_transport(channel)
+            raise RuntimeError(
+                f"sandboxd Start failed ({rpc_error.code()}): {rpc_error.details()}"
+            ) from e
+        finally:
+            timer.cancel()
 
     def _run_sandboxd(
         self,

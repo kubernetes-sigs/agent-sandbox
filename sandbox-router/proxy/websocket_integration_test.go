@@ -17,8 +17,11 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -29,11 +32,14 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/gorilla/websocket"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"k8s.io/apimachinery/pkg/types"
 
 	"sigs.k8s.io/agent-sandbox/sandbox-router/authz"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/cache"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/observability"
 )
 
 // echoUpgrader is a permissive WebSocket upgrader for tests — origin
@@ -65,27 +71,48 @@ func startEchoBackend(t *testing.T) *httptest.Server {
 	}))
 }
 
-// dialThroughRouter opens a WebSocket connection to routerURL (the
-// router's http base) with the sandbox routing headers pointed at
-// backendURL.
-func dialThroughRouter(t *testing.T, routerURL, backendURL string) *websocket.Conn {
+// routingHeaders returns the sandbox routing headers pointed at backendURL.
+func routingHeaders(t *testing.T, backendURL string) http.Header {
 	t.Helper()
 	bu, err := url.Parse(backendURL)
 	if err != nil {
 		t.Fatalf("parse backend: %v", err)
 	}
-	// ws:// scheme so gorilla/websocket sends the right Upgrade headers.
-	wsURL := strings.Replace(routerURL, "http://", "ws://", 1) + "/"
 	hdrs := http.Header{}
 	hdrs.Set(HeaderSandboxID, "ws-sandbox")
 	hdrs.Set(HeaderSandboxNamespace, "test")
 	hdrs.Set(HeaderSandboxPodIP, bu.Hostname())
 	hdrs.Set(HeaderSandboxPort, bu.Port())
+	return hdrs
+}
+
+// newMetricsRouter starts a router with Metrics set, as cmd/main.go does.
+func newMetricsRouter(t *testing.T) (*httptest.Server, *observability.Metrics) {
+	t.Helper()
+	cfg := config.Defaults()
+	cfg.AllowLoopbackPodIP = true // httptest binds to 127.0.0.1
+	metrics := observability.NewMetrics(prometheus.NewRegistry())
+	router := httptest.NewServer(NewHandler(Options{
+		Config:  &cfg,
+		Metrics: metrics,
+		Logger:  logr.Discard(),
+	}))
+	t.Cleanup(router.Close)
+	return router, metrics
+}
+
+// dialThroughRouter opens a WebSocket connection to routerURL (the
+// router's http base) with the sandbox routing headers pointed at
+// backendURL.
+func dialThroughRouter(t *testing.T, routerURL, backendURL string) *websocket.Conn {
+	t.Helper()
+	// ws:// scheme so gorilla/websocket sends the right Upgrade headers.
+	wsURL := strings.Replace(routerURL, "http://", "ws://", 1) + "/"
 
 	dialer := websocket.DefaultDialer
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, resp, err := dialer.DialContext(ctx, wsURL, hdrs)
+	conn, resp, err := dialer.DialContext(ctx, wsURL, routingHeaders(t, backendURL))
 	if err != nil {
 		status := -1
 		if resp != nil {
@@ -124,6 +151,84 @@ func TestIntegration_WebSocketUpgradeRoundTrips(t *testing.T) {
 		if string(got) != msg {
 			t.Fatalf("echo: got %q want %q", got, msg)
 		}
+	}
+}
+
+// TestIntegration_WebSocketUpgradeWithMetrics is the regression test for
+// upgrades returning 502 once Metrics is set, as cmd/main.go always does.
+// It also checks that upgraded traffic is counted in both directions.
+func TestIntegration_WebSocketUpgradeWithMetrics(t *testing.T) {
+	backend := startEchoBackend(t)
+	defer backend.Close()
+
+	router, metrics := newMetricsRouter(t)
+
+	conn := dialThroughRouter(t, router.URL, backend.URL)
+	defer conn.Close()
+
+	if err := conn.WriteMessage(websocket.TextMessage, []byte("hello")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	// NewHandler alone does not attach the namespace label, so the bytes land under "-".
+	for name, counter := range map[string]prometheus.Counter{
+		"upstream_rx_bytes_total": metrics.UpstreamRxBytesTotal.WithLabelValues("-"),
+		"upstream_tx_bytes_total": metrics.UpstreamTxBytesTotal.WithLabelValues("-"),
+	} {
+		if testutil.ToFloat64(counter) == 0 {
+			t.Errorf("%s: want upgraded bytes counted, got 0", name)
+		}
+	}
+}
+
+// TestIntegration_UpgradeHalfCloseWithMetrics checks that a reply sent after
+// the client half-closes still arrives once Metrics is set.
+func TestIntegration_UpgradeHalfCloseWithMetrics(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, brw, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Errorf("backend hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		_, _ = brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: test\r\n\r\n")
+		_ = brw.Flush()
+		_, _ = io.Copy(io.Discard, conn) // returns when the client half-closes
+		_, _ = conn.Write([]byte("late"))
+	}))
+	defer backend.Close()
+	router, _ := newMetricsRouter(t)
+
+	conn, err := net.Dial("tcp", strings.TrimPrefix(router.URL, "http://"))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	req, err := http.NewRequest(http.MethodGet, router.URL+"/", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header = routingHeaders(t, backend.URL)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "test")
+	if err := req.Write(conn); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, req)
+	if err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("handshake: resp=%v err=%v", resp, err)
+	}
+
+	if err := conn.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatalf("close write: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if got, _ := io.ReadAll(br); string(got) != "late" {
+		t.Errorf("reply after half-close: got %q, want %q", got, "late")
 	}
 }
 

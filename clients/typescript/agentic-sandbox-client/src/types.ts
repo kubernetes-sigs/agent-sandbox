@@ -395,3 +395,19 @@ export interface GetSandboxOptions {
    */
   waitForReady?: boolean;
 }
+
+export interface GetSandboxByNameOptions {
+  /**
+   * Wait for the Sandbox to become Ready before returning (default `true`).
+   * With `false`, getSandboxByName() only checks that the Sandbox exists. The
+   * handle's `podIP` and `serviceFQDN` are then taken from the Sandbox as it is
+   * at that moment and may still be empty, in which case in-cluster
+   * connectivity fails on first use.
+   */
+  waitForReady?: boolean;
+  /**
+   * Seconds to wait for the Sandbox to become Ready. Must be a positive
+   * number. Defaults to the client's `sandboxReadyTimeout`.
+   */
+  sandboxReadyTimeout?: number;
+}

@@ -1,0 +1,66 @@
+{{- if and .Values.rbac.create .Values.router.cacheEnabled }}
+{{- /*
+RBAC for the Pod-IP cache. The router watches sandbox-owned Pods so it can dial
+the live PodIP instead of hitting cluster DNS on every request. RBAC cannot
+express "every namespace except the system ones", so the cluster-wide grant is
+an upper bound: at runtime the informer filters server-side on the
+agents.x-k8s.io/sandbox-name-hash label, which only sandbox Pods carry. Set
+router.cacheNamespace to narrow the grant to a Role in a single namespace.
+*/}}
+{{- $ns := include "sandbox-router.namespace" . }}
+{{- if .Values.router.cacheNamespace }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sandbox-router
+  namespace: {{ .Values.router.cacheNamespace }}
+  labels:
+    {{- include "sandbox-router.labels" . | nindent 4 }}
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sandbox-router
+  namespace: {{ .Values.router.cacheNamespace }}
+  labels:
+    {{- include "sandbox-router.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sandbox-router
+subjects:
+- kind: ServiceAccount
+  name: sandbox-router
+  namespace: {{ $ns }}
+{{- else }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sandbox-router
+  labels:
+    {{- include "sandbox-router.labels" . | nindent 4 }}
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sandbox-router
+  labels:
+    {{- include "sandbox-router.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sandbox-router
+subjects:
+- kind: ServiceAccount
+  name: sandbox-router
+  namespace: {{ $ns }}
+{{- end }}
+{{- end }}

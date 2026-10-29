@@ -13,11 +13,13 @@
 # limitations under the License.
 
 import ast
+import gc
 import json
 import subprocess
 import sys
 import threading
 import unittest
+import weakref
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -29,6 +31,7 @@ from urllib3.util.retry import Retry
 
 from kubernetes import config as k8s_config
 from k8s_agent_sandbox.sandbox_client import SandboxClient
+from k8s_agent_sandbox.sandbox import Sandbox
 from k8s_agent_sandbox.connector import SandboxConnector
 from k8s_agent_sandbox.models import AdditionalPodMetadata
 from k8s_agent_sandbox.pod_metadata import validate_labels
@@ -984,6 +987,24 @@ class TestLibraryLogging(unittest.TestCase):
                         and node.func.attr in root_calls):
                     offenders.append(f"{path.name}:{node.lineno}")
         self.assertEqual(offenders, [])
+
+
+def test_tracked_handle_does_not_keep_its_client_alive():
+    with patch('k8s_agent_sandbox.sandbox_client.K8sHelper'):
+        client = SandboxClient(connection_config=SandboxDirectConnectionConfig(api_url="http://sandbox.invalid"))
+    client.sandbox_class = Sandbox
+    client.k8s_helper.wait_for_claim_ready.return_value = "sandbox-id"
+    with patch.object(client, '_create_claim', return_value={}):
+        sandbox = client.create_sandbox("pool", "ns")
+    # With the collector off, only reference counting can free the client.
+    gc.disable()
+    try:
+        client_ref = weakref.ref(client)
+        del client
+        assert client_ref() is None
+    finally:
+        gc.enable()
+        sandbox.close_connection()
 
 
 if __name__ == '__main__':

@@ -72,6 +72,9 @@ test = [
     "mypy~=1.14",
     # Exercise real gRPC channels and authentication interceptors in unit tests.
     "grpcio>=1.83.0",
+    # The vendored ProcessService stubs need a protobuf runtime; without it the
+    # sandboxd gRPC tests skip themselves instead of running.
+    "protobuf>=7.36.1",
 ]
 tracing = [
     "opentelemetry-api>=1.39,<1.42",

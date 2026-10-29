@@ -127,6 +127,57 @@ func TestPutOverwritesAtomically(t *testing.T) {
 	require.Len(t, entries, 1)
 }
 
+func TestPutAppendAddsToFile(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+
+	// The first append creates the file, including its parent directories.
+	for _, chunk := range []string{"one,", "two"} {
+		rec := doRequest(handler, http.MethodPut, "/v1/files/a/log.txt?append=true", []byte(chunk), nil)
+		require.Equal(t, http.StatusNoContent, rec.Code)
+	}
+
+	onDisk, err := os.ReadFile(filepath.Join(root, "a", "log.txt"))
+	require.NoError(t, err)
+	require.Equal(t, "one,two", string(onDisk))
+}
+
+func TestPutAppendAppliesModeOnlyToNewFile(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+
+	for _, mode := range []string{"0755", "0600"} {
+		rec := doRequest(handler, http.MethodPut, "/v1/files/run.sh?append=true&mode="+mode, []byte("x"), nil)
+		require.Equal(t, http.StatusNoContent, rec.Code)
+	}
+
+	info, err := os.Stat(filepath.Join(root, "run.sh"))
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o755), info.Mode().Perm())
+}
+
+func TestPutAppendFalseOverwrites(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+
+	require.Equal(t, http.StatusNoContent,
+		doRequest(handler, http.MethodPut, "/v1/files/f.txt", []byte("old"), nil).Code)
+	require.Equal(t, http.StatusNoContent,
+		doRequest(handler, http.MethodPut, "/v1/files/f.txt?append=false", []byte("new"), nil).Code)
+
+	onDisk, err := os.ReadFile(filepath.Join(root, "f.txt"))
+	require.NoError(t, err)
+	require.Equal(t, "new", string(onDisk))
+}
+
+func TestPutAppendRejections(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "d"), 0o755))
+
+	for _, target := range []string{"/v1/files/f.txt?append=banana", "/v1/files/d?append=true"} {
+		rec := doRequest(handler, http.MethodPut, target, []byte("x"), nil)
+		require.Equal(t, http.StatusBadRequest, rec.Code, target)
+		require.Equal(t, "INVALID_ARGUMENT", decodeError(t, rec).Code)
+	}
+}
+
 func TestPutMultipartUpload(t *testing.T) {
 	_, handler, root := newRESTFixture(t)
 
@@ -232,6 +283,41 @@ func TestHeadFileExistenceProbe(t *testing.T) {
 
 	rec = doRequest(handler, http.MethodHead, "/v1/files/absent.txt", nil, nil)
 	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestGetTypeExpectation(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("hi"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "d"), 0o755))
+
+	tests := []struct {
+		name       string
+		path       string
+		wantStatus int
+		wantCode   string
+	}{
+		{"file expected, file found", "f.txt?type=file", http.StatusOK, ""},
+		{"directory expected, directory found", "d?type=directory", http.StatusOK, ""},
+		{"no expectation, file", "f.txt", http.StatusOK, ""},
+		{"no expectation, directory", "d", http.StatusOK, ""},
+		{"file expected, directory found", "d?type=file", http.StatusConflict, "CONFLICT"},
+		{"directory expected, file found", "f.txt?type=directory", http.StatusConflict, "CONFLICT"},
+		{"missing path stays not found", "nope?type=file", http.StatusNotFound, "NOT_FOUND"},
+		{"unknown type is invalid", "f.txt?type=link", http.StatusBadRequest, "INVALID_ARGUMENT"},
+		{"empty type is invalid", "f.txt?type=", http.StatusBadRequest, "INVALID_ARGUMENT"},
+		{"unknown type is invalid before lookup", "nope?type=link", http.StatusBadRequest, "INVALID_ARGUMENT"},
+	}
+	for _, tc := range tests {
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			t.Run(tc.name+"/"+method, func(t *testing.T) {
+				rec := doRequest(handler, method, "/v1/files/"+tc.path, nil, nil)
+				require.Equal(t, tc.wantStatus, rec.Code)
+				if tc.wantCode != "" && method == http.MethodGet {
+					require.Equal(t, tc.wantCode, decodeError(t, rec).Code)
+				}
+			})
+		}
+	}
 }
 
 func TestTraversalRejected(t *testing.T) {

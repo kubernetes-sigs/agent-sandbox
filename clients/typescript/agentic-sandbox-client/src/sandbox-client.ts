@@ -55,6 +55,7 @@ import {
 } from "./trace-manager.js";
 import type {
   CreateSandboxOptions,
+  GetSandboxByNameOptions,
   GetSandboxOptions,
   Logger,
   PodMetadata,
@@ -258,6 +259,19 @@ function isValidDNSSubdomain(s: string): boolean {
   return s.length <= DNS_SUBDOMAIN_MAX_LENGTH && DNS_SUBDOMAIN_RE.test(s);
 }
 
+/**
+ * Rejects a non-positive or non-finite ready timeout. A NaN or Infinity would
+ * slip through `??` and defeat every deadline check in the ready-wait loop
+ * (`NaN <= 0` is false), hanging the caller.
+ */
+function validateSandboxReadyTimeout(seconds: number | undefined): void {
+  if (seconds !== undefined && (!Number.isFinite(seconds) || seconds <= 0)) {
+    throw new SandboxError(
+      `sandboxReadyTimeout must be a positive number, got: ${seconds}`,
+    );
+  }
+}
+
 /** Fails when the claim under this name is no longer the one being waited on. */
 function assertClaimUid(
   claim: Record<string, unknown> | undefined,
@@ -452,15 +466,7 @@ export class SandboxClient {
   private readonly namedClaims: Set<string> = new Set();
 
   constructor(options: SandboxClientOptions = {}) {
-    if (
-      options.sandboxReadyTimeout !== undefined &&
-      (!Number.isFinite(options.sandboxReadyTimeout) ||
-        options.sandboxReadyTimeout <= 0)
-    ) {
-      throw new SandboxError(
-        `sandboxReadyTimeout must be a positive number, got: ${options.sandboxReadyTimeout}`,
-      );
-    }
+    validateSandboxReadyTimeout(options.sandboxReadyTimeout);
     if (options.namespace !== undefined && options.namespace.length === 0) {
       throw new SandboxError("namespace must be a non-empty string");
     }
@@ -499,19 +505,7 @@ export class SandboxClient {
       throw new SandboxError("Warmpool name cannot be empty.");
     }
 
-    // Validate the per-call override with the same rule as the constructor
-    // applies to the client default. A non-finite value (NaN, Infinity) would
-    // otherwise slip through `??` and defeat every deadline check in the
-    // ready-wait loop (`NaN <= 0` is false), hanging the caller.
-    if (
-      opts?.sandboxReadyTimeout !== undefined &&
-      (!Number.isFinite(opts.sandboxReadyTimeout) ||
-        opts.sandboxReadyTimeout <= 0)
-    ) {
-      throw new SandboxError(
-        `sandboxReadyTimeout must be a positive number, got: ${opts.sandboxReadyTimeout}`,
-      );
-    }
+    validateSandboxReadyTimeout(opts?.sandboxReadyTimeout);
 
     let shutdownTime: string | undefined;
     if (opts?.shutdownAfterSeconds !== undefined) {
@@ -600,17 +594,10 @@ export class SandboxClient {
     const sandboxReadyTimeout =
       opts?.sandboxReadyTimeout ?? this.defaultSandboxReadyTimeout;
 
-    await this.ensureTracer();
-
     // Create the per-sandbox tracer manager BEFORE createClaim so that
     // createClaim and waitForSandboxReady run as children of the lifecycle span.
-    let sandboxTracingManager: TracerManager | null = null;
-    let sandboxTracer: Tracer | null = null;
-    if (this.enableTracing) {
-      sandboxTracingManager = new TracerManager(this.traceServiceName);
-      sandboxTracer = sandboxTracingManager.tracer;
-      sandboxTracingManager.startLifecycleSpan();
-    }
+    const { sandboxTracingManager, sandboxTracer } =
+      await this.beginSandboxTracing();
 
     let ready: ReadySandbox;
     const named = opts?.claimName !== undefined;
@@ -700,20 +687,7 @@ export class SandboxClient {
       throw err;
     }
 
-    const init: SandboxInit = {
-      claimName,
-      sandboxName: ready.sandboxName,
-      podName: ready.podName,
-      podIP: ready.podIP,
-      serviceFQDN: ready.serviceFQDN,
-      namespace: ns,
-      customObjectsApi: this.customObjectsApi,
-      kubeConfig: this.kubeConfig,
-      sandboxdOptions: this.sandboxdOptions,
-      tracingManager: sandboxTracingManager,
-      traceServiceName: this.traceServiceName,
-      logger: this.logger,
-    };
+    const init = this.sandboxInit(claimName, ns, ready, sandboxTracingManager);
 
     // A repeated create of a named claim finds its handle already registered.
     // Keep it, so its connections survive, unless the claim now has a new Sandbox.
@@ -902,15 +876,8 @@ export class SandboxClient {
       );
     }
 
-    await this.ensureTracer();
-
-    let sandboxTracingManager: TracerManager | null = null;
-    let sandboxTracer: Tracer | null = null;
-    if (this.enableTracing) {
-      sandboxTracingManager = new TracerManager(this.traceServiceName);
-      sandboxTracer = sandboxTracingManager.tracer;
-      sandboxTracingManager.startLifecycleSpan();
-    }
+    const { sandboxTracingManager, sandboxTracer } =
+      await this.beginSandboxTracing();
 
     // Resolve the sandbox identity and wait for readiness
     let ready: ReadySandbox;
@@ -931,25 +898,72 @@ export class SandboxClient {
       throw err;
     }
 
-    const init: SandboxInit = {
-      claimName,
-      sandboxName: ready.sandboxName,
-      podName: ready.podName,
-      podIP: ready.podIP,
-      serviceFQDN: ready.serviceFQDN,
-      namespace: ns,
-      customObjectsApi: this.customObjectsApi,
-      kubeConfig: this.kubeConfig,
-      sandboxdOptions: this.sandboxdOptions,
-      tracingManager: sandboxTracingManager,
-      traceServiceName: this.traceServiceName,
-      logger: this.logger,
-    };
-
-    const sandbox = new Sandbox(init);
+    const sandbox = new Sandbox(
+      this.sandboxInit(claimName, ns, ready, sandboxTracingManager),
+    );
 
     this.registry.set(key, sandbox);
     return sandbox;
+  }
+
+  /**
+   * Returns a handle for an existing Sandbox, found by its own name rather than
+   * through a SandboxClaim. Use it for core Sandbox resources that you create
+   * yourself. The handle's `claimName` is "".
+   *
+   * With the default `waitForReady: true`, this waits for the Sandbox to become
+   * Ready. Either way it rejects with {@link SandboxNotFoundError} straight away
+   * if the Sandbox does not exist.
+   *
+   * The client does not track the returned handle, so `deleteAll()`,
+   * `deleteSandbox()`, `listActiveSandboxes()` and `enableAutoCleanup()` ignore
+   * it. There is no claim to delete, so `close()` only releases the handle's
+   * connections and leaves the Sandbox running. Delete the Sandbox yourself when
+   * you no longer need it.
+   */
+  async getSandboxByName(
+    sandboxName: string,
+    namespace?: string,
+    opts?: GetSandboxByNameOptions,
+  ): Promise<Sandbox> {
+    // The name goes into a watch field selector, so reject anything that is not
+    // a valid object name before it reaches the API server.
+    if (!sandboxName || !isValidDNSSubdomain(sandboxName)) {
+      throw new SandboxError(
+        `sandboxName must be a valid DNS-1123 subdomain (lowercase alphanumerics, '-' and '.', ` +
+          `max ${DNS_SUBDOMAIN_MAX_LENGTH} characters), got: '${sandboxName}'`,
+      );
+    }
+    validateSandboxReadyTimeout(opts?.sandboxReadyTimeout);
+
+    const ns = namespace || this.defaultNamespace;
+    const timeoutMs =
+      (opts?.sandboxReadyTimeout ?? this.defaultSandboxReadyTimeout) * 1000;
+
+    const { sandboxTracingManager, sandboxTracer } =
+      await this.beginSandboxTracing();
+
+    let ready: ReadySandbox;
+    try {
+      ready = await withSpan(
+        sandboxTracer,
+        this.traceServiceName,
+        "wait_for_sandbox_ready",
+        async () => {
+          // The ready watch below treats a failed GET as "not there yet" and
+          // would wait out the whole timeout for a Sandbox that never existed.
+          const snapshot = await this.getSandboxSnapshot(sandboxName, ns);
+          if (opts?.waitForReady === false) return snapshot;
+          return this.awaitReadySandbox(sandboxName, ns, timeoutMs);
+        },
+        sandboxTracingManager?.parentContext,
+      );
+    } catch (err) {
+      sandboxTracingManager?.endLifecycleSpan();
+      throw err;
+    }
+
+    return new Sandbox(this.sandboxInit("", ns, ready, sandboxTracingManager));
   }
 
   /**
@@ -1285,6 +1299,74 @@ export class SandboxClient {
     if (this.tracerInitialized || !this.enableTracing) return;
     await initializeTracer(this.traceServiceName, this.logger);
     this.tracerInitialized = true;
+  }
+
+  /**
+   * Starts a per-sandbox lifecycle span when tracing is enabled. The handle
+   * ends the span when it closes, so a caller that fails before building one
+   * must end it itself.
+   */
+  private async beginSandboxTracing(): Promise<{
+    sandboxTracingManager: TracerManager | null;
+    sandboxTracer: Tracer | null;
+  }> {
+    await this.ensureTracer();
+    if (!this.enableTracing) {
+      return { sandboxTracingManager: null, sandboxTracer: null };
+    }
+    const sandboxTracingManager = new TracerManager(this.traceServiceName);
+    sandboxTracingManager.startLifecycleSpan();
+    return {
+      sandboxTracingManager,
+      sandboxTracer: sandboxTracingManager.tracer,
+    };
+  }
+
+  private sandboxInit(
+    claimName: string,
+    namespace: string,
+    ready: ReadySandbox,
+    tracingManager: TracerManager | null,
+  ): SandboxInit {
+    return {
+      claimName,
+      sandboxName: ready.sandboxName,
+      podName: ready.podName,
+      podIP: ready.podIP,
+      serviceFQDN: ready.serviceFQDN,
+      namespace,
+      customObjectsApi: this.customObjectsApi,
+      kubeConfig: this.kubeConfig,
+      sandboxdOptions: this.sandboxdOptions,
+      tracingManager,
+      traceServiceName: this.traceServiceName,
+      logger: this.logger,
+    };
+  }
+
+  /**
+   * Waits for the Sandbox to become Ready. Fails here rather than on the first
+   * files/commands call when the connectivity mode needs an in-cluster address
+   * the Sandbox lacks, the same point at which the Go client's Open() fails.
+   */
+  private async awaitReadySandbox(
+    sandboxName: string,
+    namespace: string,
+    timeoutMs: number,
+  ): Promise<ReadySandbox> {
+    const ready = await this.watchForSandboxReady(
+      sandboxName,
+      namespace,
+      timeoutMs,
+    );
+    if (this.sandboxdOptions.connectivity !== "port-forward") {
+      resolveInClusterHost(
+        this.sandboxdOptions.connectivity,
+        ready.podIP,
+        ready.serviceFQDN,
+      );
+    }
+    return ready;
   }
 
   private async createClaim(
@@ -1848,20 +1930,11 @@ export class SandboxClient {
           `Sandbox name resolution for claim '${claimName}' consumed the entire timeout budget.`,
         );
       }
-      const ready = await this.watchForSandboxReady(
+      const ready = await this.awaitReadySandbox(
         sandboxName,
         namespace,
         remainingMs,
       );
-      // Fail here rather than on the first files/commands call, the same
-      // point at which the Go client's Open() fails.
-      if (this.sandboxdOptions.connectivity !== "port-forward") {
-        resolveInClusterHost(
-          this.sandboxdOptions.connectivity,
-          ready.podIP,
-          ready.serviceFQDN,
-        );
-      }
       return { ...ready, sandboxName };
     };
 

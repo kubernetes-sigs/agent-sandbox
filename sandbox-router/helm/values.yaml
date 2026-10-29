@@ -1,0 +1,156 @@
+namespace:
+  # name is the namespace the router is deployed into. Empty means the release
+  # namespace (helm install --namespace). The chart does not create it: use
+  # `helm install --create-namespace`, or install after the controller chart,
+  # which creates agent-sandbox-system by default.
+  name: ""
+
+image:
+  repository: registry.k8s.io/agent-sandbox/sandbox-router-go
+  tag: ""  # required, eg. v1.0.8
+  pullPolicy: IfNotPresent
+
+# imagePullSecrets adds image pull secrets to the router PodSpec.
+# Example:
+# imagePullSecrets:
+#   - name: my-registry-creds
+imagePullSecrets: []
+
+# 2 is the HA minimum, not a capacity recommendation.
+replicaCount: 2
+
+router:
+  clusterDomain: cluster.local
+  proxyTimeout: 180s
+  upstreamMaxRetries: 3
+  # cacheEnabled turns on the Pod-IP cache. It needs the Pod read RBAC rendered
+  # by rbac.create. Set to false for DNS-only routing, which also drops the RBAC.
+  cacheEnabled: true
+  # cacheNamespace restricts the Pod informer (and the RBAC) to one namespace.
+  # Empty means cluster-wide.
+  cacheNamespace: ""
+  ##### Unset flags are omitted
+  # enableTracing: true
+  # enableOtelMetrics: true
+  # accessLog: true
+  # maxRequestBodyBytes: 0
+  # pathRoutingPrefix: ""
+  ##### extraArgs passes additional flags not listed above (see sandbox-router --help).
+  extraArgs: []
+
+authz:
+  # mode is one of allow-all, tokenreview or scoped-token. tokenreview also binds
+  # the stock system:auth-delegator ClusterRole to the router ServiceAccount.
+  mode: allow-all
+
+tls:
+  # enabled adds the HTTPS listener (8443), mounts the Secret below at /tls and
+  # exposes the port on the Service and in the NetworkPolicy.
+  enabled: false
+  # secretName must hold tls.crt and tls.key (cert-manager is the typical source).
+  secretName: sandbox-router-tls
+  # metricsSecureServing serves /metrics over TLS with the same certificate. It
+  # requires tls.enabled and sets prometheus.io/scheme: https on the Pod unless
+  # podAnnotations already sets one.
+  metricsSecureServing: false
+
+# extraEnv, extraVolumes and extraVolumeMounts cover what the chart does not
+# model, such as OTEL_EXPORTER_OTLP_ENDPOINT or the scoped-token key set.
+extraEnv: []
+  # - name: OTEL_EXPORTER_OTLP_ENDPOINT
+  #   value: http://otel-collector.observability:4317
+extraVolumes: []
+extraVolumeMounts: []
+
+# podAnnotations are added to the router pod template. The defaults let
+# Prometheus scrape the metrics port without a ServiceMonitor.
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "9090"
+  prometheus.io/path: "/metrics"
+
+# podLabels are added to the router pod template, in addition to the chart's
+# selector labels.
+podLabels: {}
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: "2"
+    memory: 1Gi
+
+# Pod-level securityContext. Default null: omitted unless set.
+podSecurityContext: null
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities:
+    drop: ["ALL"]
+  seccompProfile:
+    type: RuntimeDefault
+
+# topologySpread spreads replicas across zones and nodes so a single failure
+# does not take the router fleet offline.
+topologySpread:
+  enabled: true
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# Give in-flight requests a chance to finish before SIGKILL. Keep it slightly
+# larger than the router's own --shutdown-timeout (30s by default).
+terminationGracePeriodSeconds: 45
+
+service:
+  # name is kept as sandbox-router-svc so existing Gateway/HTTPRoute resources
+  # keep working.
+  name: sandbox-router-svc
+  type: ClusterIP
+
+serviceAccount:
+  annotations: {}
+
+rbac:
+  # create renders the Pod read grant used by the Pod-IP cache (and the
+  # auth-delegator binding when authz.mode is tokenreview).
+  create: true
+
+pdb:
+  enabled: true
+  minAvailable: 1
+
+networkPolicy:
+  enabled: true
+  # proxyIngressFrom lists the peers allowed to reach the proxy ports. The
+  # default allows every namespace: tighten it to your Gateway namespace.
+  proxyIngressFrom:
+    - namespaceSelector: {}
+  # metricsIngressFrom lists the peers allowed to scrape the metrics port.
+  metricsIngressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+  # apiServerCIDRs lists the CIDRs of the Kubernetes API server endpoints
+  # (control-plane node IPs or the external load balancer), allowed on ports 443
+  # and 6443. Needed on enforcing clusters whose apiserver is not a Pod in the
+  # default namespace: without it the Pod-IP cache cannot sync and TokenReview
+  # calls fail. Example:
+  # apiServerCIDRs:
+  #   - 10.0.0.2/32
+  apiServerCIDRs: []
+  # otlpEgressTo lists the peers allowed to receive OTLP gRPC export, as
+  # NetworkPolicy `to` entries. Empty keeps the default: Pods in any namespace.
+  # Set it when the collector is outside the cluster, e.g.
+  # otlpEgressTo:
+  #   - ipBlock:
+  #       cidr: 10.1.0.0/24
+  otlpEgressTo: []
+  # otlpPort is the TCP port of the OTLP gRPC collector.
+  otlpPort: 4317

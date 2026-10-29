@@ -41,6 +41,12 @@ import (
 
 var modePattern = regexp.MustCompile(`^0[0-7]{3}$`)
 
+// Values of FileEntry.Type, also accepted by the "type" query on GET and HEAD.
+const (
+	entryTypeFile      = "file"
+	entryTypeDirectory = "directory"
+)
+
 // RESTServer implements the sandboxd Filesystem & Runtime REST API on top of
 // net/http. All file paths are confined to rootDir via pathutil.SanitizePath.
 type RESTServer struct {
@@ -130,7 +136,31 @@ func (s *RESTServer) resolvePath(w http.ResponseWriter, r *http.Request) (string
 	return target, true
 }
 
+// boolQuery reads an optional boolean query parameter. It writes a 400 and
+// returns ok=false when the value does not parse.
+func (s *RESTServer) boolQuery(w http.ResponseWriter, r *http.Request, name string) (value, ok bool) {
+	raw := r.URL.Query().Get(name)
+	if raw == "" {
+		return false, true
+	}
+	parsed, err := strconv.ParseBool(raw)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+			fmt.Sprintf("%s %q must be a boolean", name, raw))
+		return false, false
+	}
+	return parsed, true
+}
+
 func (s *RESTServer) handleGetFile(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	wantType := query.Get("type")
+	if query.Has("type") && wantType != entryTypeFile && wantType != entryTypeDirectory {
+		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+			fmt.Sprintf("type %q must be %q or %q", wantType, entryTypeFile, entryTypeDirectory))
+		return
+	}
+
 	target, ok := s.resolvePath(w, r)
 	if !ok {
 		return
@@ -145,6 +175,11 @@ func (s *RESTServer) handleGetFile(w http.ResponseWriter, r *http.Request) {
 		} else {
 			s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 		}
+		return
+	}
+
+	if msg := typeMismatch(wantType, info.IsDir()); msg != "" {
+		s.writeError(w, http.StatusConflict, "CONFLICT", msg)
 		return
 	}
 
@@ -172,6 +207,17 @@ func (s *RESTServer) handleGetFile(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, "", info.ModTime(), f)
 }
 
+// typeMismatch returns why the path disagrees with the "type" query, or "".
+func typeMismatch(want string, isDir bool) string {
+	switch {
+	case want == entryTypeFile && isDir:
+		return "path is a directory, not a file"
+	case want == entryTypeDirectory && !isDir:
+		return "path is a file, not a directory"
+	}
+	return ""
+}
+
 func (s *RESTServer) serveDirectoryListing(w http.ResponseWriter, r *http.Request, target string) {
 	dirEntries, err := os.ReadDir(target) // sorted by name
 	if err != nil {
@@ -197,9 +243,9 @@ func (s *RESTServer) serveDirectoryListing(w http.ResponseWriter, r *http.Reques
 				continue
 			}
 		}
-		entryType := "file"
+		entryType := entryTypeFile
 		if info.IsDir() {
-			entryType = "directory"
+			entryType = entryTypeDirectory
 		}
 		entries = append(entries, FileEntry{
 			Name:       entry.Name(),
@@ -233,6 +279,11 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 		mode = os.FileMode(parsed)
 	}
 
+	appendMode, ok := s.boolQuery(w, r, "append")
+	if !ok {
+		return
+	}
+
 	target, ok := s.resolvePath(w, r)
 	if !ok {
 		return
@@ -249,7 +300,11 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 	}
 	defer cleanup()
 
-	if err := atomicWrite(target, body, mode); err != nil {
+	write := atomicWrite
+	if appendMode {
+		write = appendWrite
+	}
+	if err := write(target, body, mode); err != nil {
 		if os.IsPermission(err) {
 			s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED", "permission denied")
 		} else {
@@ -333,6 +388,43 @@ func atomicWrite(target string, src io.Reader, mode os.FileMode) (err error) {
 	return nil
 }
 
+// appendWrite streams src to the end of target. It creates target, and its
+// parent directories, when missing, and applies mode only to a file it creates.
+// Unlike atomicWrite, readers can see a partial append, and concurrent appends
+// can interleave between writes.
+func appendWrite(target string, src io.Reader, mode os.FileMode) (err error) {
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return fmt.Errorf("failed to create parent directory: %w", err)
+	}
+
+	// O_EXCL tells us whether this request created the file.
+	f, err := os.OpenFile(target, os.O_WRONLY|os.O_APPEND|os.O_CREATE|os.O_EXCL, mode)
+	created := err == nil
+	if errors.Is(err, os.ErrExist) {
+		f, err = os.OpenFile(target, os.O_WRONLY|os.O_APPEND, 0)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to open file: %w", err)
+	}
+	defer func() {
+		if cerr := f.Close(); err == nil && cerr != nil {
+			err = fmt.Errorf("failed to close file: %w", cerr)
+		}
+	}()
+
+	// OpenFile applies the umask; chmod so a new file gets exactly mode, as
+	// atomicWrite does.
+	if created {
+		if err = f.Chmod(mode); err != nil {
+			return fmt.Errorf("failed to set file mode: %w", err)
+		}
+	}
+	if _, err = io.Copy(f, src); err != nil {
+		return fmt.Errorf("failed to append file contents: %w", err)
+	}
+	return nil
+}
+
 func (s *RESTServer) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	target, ok := s.resolvePath(w, r)
 	if !ok {
@@ -348,15 +440,9 @@ func (s *RESTServer) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	recursive := false
-	if recParam := r.URL.Query().Get("recursive"); recParam != "" {
-		parsed, err := strconv.ParseBool(recParam)
-		if err != nil {
-			s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
-				fmt.Sprintf("recursive %q must be a boolean", recParam))
-			return
-		}
-		recursive = parsed
+	recursive, ok := s.boolQuery(w, r, "recursive")
+	if !ok {
+		return
 	}
 
 	// With --root-dir=/ the root is the whole filesystem; clearing it would

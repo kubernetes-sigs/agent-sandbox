@@ -58,6 +58,9 @@ paths:
       description: >
         If the path points to a file, returns raw file bytes (application/octet-stream).
         If the path points to a directory, returns a structured directory listing (application/json).
+        Pass type to fail with 409 instead when the path is not of the expected kind.
+      parameters:
+        - $ref: "#/components/parameters/ExpectedType"
       responses:
         "200":
           description: File contents or directory listing
@@ -69,31 +72,43 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/DirectoryListing"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
     head:
       summary: Check whether a file or directory exists
       description: Returns the same status and metadata headers as GET without a response body.
+      parameters:
+        - $ref: "#/components/parameters/ExpectedType"
       responses:
         "200":
           description: Path exists
+        "400":
+          description: The type query is not file or directory
         "403":
           description: Path escapes sandbox root, or permission is denied during path lookup or file open
         "404":
           description: Path does not exist within the sandbox
+        "409":
+          description: Path exists but is not of the kind requested by the type query
         "500":
           description: Permission is denied while reading a directory, or another internal filesystem error
 
     put:
-      summary: Write or overwrite a file (Idempotent)
+      summary: Write or overwrite a file (Idempotent unless append=true)
       description: >
         Atomically writes request body to the given path using a temporary file and rename strategy.
         Parent directories are created automatically. Supports both new file creation and overwriting.
+        With append=true the body is added to the end of the file instead, which is not atomic
+        or idempotent: retrying an append adds the body again.
       parameters:
         - name: mode
           in: query
@@ -102,7 +117,18 @@ paths:
             type: string
             pattern: "^0[0-7]{3}$"
             default: "0644"
-          description: Octal permission bits applied to the written file (e.g. "0755" or "0644").
+          description: >
+            Octal permission bits applied to the written file (e.g. "0755" or "0644").
+            With append=true, applied only when the request creates the file.
+        - name: append
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: >
+            If true, appends the body to the file, creating it if it does not exist.
+            Readers can see a partial append, and concurrent appends can interleave.
       requestBody:
         required: true
         content:
@@ -192,6 +218,19 @@ paths:
                 $ref: "#/components/schemas/MetadataResponse"
 
 components:
+  parameters:
+    ExpectedType:
+      name: type
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [file, directory]
+      description: >
+        Kind of path the client expects. If the path exists but is the other kind,
+        the request fails with 409 instead of returning the other representation.
+        Omit it to accept either.
+
   schemas:
     DirectoryListing:
       type: object
@@ -305,7 +344,10 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
     Conflict:
-      description: Directory not empty when recursive=false
+      description: >
+        The path's current state conflicts with the request, for example a directory
+        that is not empty when recursive=false, or a path that is not of the kind
+        requested by the type query
       content:
         application/json:
           schema:

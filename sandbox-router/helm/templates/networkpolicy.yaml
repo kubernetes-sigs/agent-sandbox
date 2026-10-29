@@ -1,0 +1,90 @@
+{{- if .Values.networkPolicy.enabled }}
+# Egress is intentionally broad because the router dials arbitrary sandbox pods
+# in tenant namespaces: narrow it if your tenancy model constrains which
+# namespaces are valid targets.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandbox-router
+  namespace: {{ include "sandbox-router.namespace" . }}
+  labels:
+    {{- include "sandbox-router.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "sandbox-router.selectorLabels" . | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+  # Proxy traffic.
+  - from:
+    {{- toYaml .Values.networkPolicy.proxyIngressFrom | nindent 4 }}
+    ports:
+    - protocol: TCP
+      port: 8080
+    {{- if .Values.tls.enabled }}
+    - protocol: TCP
+      port: 8443
+    {{- end }}
+  # Metrics scrape.
+  - from:
+    {{- toYaml .Values.networkPolicy.metricsIngressFrom | nindent 4 }}
+    ports:
+    - protocol: TCP
+      port: 9090
+  # Kubelet probes hit the pod IP directly.
+  - ports:
+    - protocol: TCP
+      port: 8081
+  egress:
+  # DNS for resolving sandbox FQDNs.
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  # Forwarding to sandbox pods. No port filter: X-Sandbox-Port accepts any port
+  # from 1 to 65535 (8888 is only the default), so a port allow-list would block
+  # sandboxes that listen elsewhere. The peer is limited to sandbox-owned Pods
+  # through the label the controller stamps on every one of them (the same one
+  # the router's informer filters on), so the open ports do not extend to every
+  # Pod in the cluster.
+  - to:
+    - namespaceSelector: {}
+      podSelector:
+        matchExpressions:
+        - key: agents.x-k8s.io/sandbox-name-hash
+          operator: Exists
+  # OTel collector (if tracing or OTel metrics are enabled).
+  - to:
+    {{- with .Values.networkPolicy.otlpEgressTo }}
+    {{- toYaml . | nindent 4 }}
+    {{- else }}
+    - namespaceSelector: {}
+    {{- end }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.networkPolicy.otlpPort }}
+  # Kubernetes API server, required by the Pod-IP cache and by
+  # --authz-mode=tokenreview. NetworkPolicy cannot name the apiserver, and a
+  # namespaceSelector only matches Pods, so the default namespace below covers
+  # clusters whose apiserver is backed by Pods there. Everywhere else, list the
+  # apiserver endpoint CIDRs (control-plane node IPs or the external load
+  # balancer) in networkPolicy.apiServerCIDRs.
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: default
+    {{- range .Values.networkPolicy.apiServerCIDRs }}
+    - ipBlock:
+        cidr: {{ . | quote }}
+    {{- end }}
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 6443
+{{- end }}

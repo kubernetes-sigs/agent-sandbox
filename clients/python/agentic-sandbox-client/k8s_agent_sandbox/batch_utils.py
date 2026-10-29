@@ -313,9 +313,9 @@ def create_error_outcome(status: int | None, attempt: int) -> CreateOutcome:
     return CreateOutcome.FAIL
 
 
-def retry_delay(attempt: int, error: BaseException | None) -> float:
-    """How long to wait before retry number ``attempt``. Uses the error's ``Retry-After`` seconds
-    when it has one (capped at ``BATCH_BACKOFF_MAX_SECONDS``), or otherwise a jittered backoff.
+def retry_after_seconds(error: BaseException | None) -> float | None:
+    """Returns the error's ``Retry-After`` seconds, capped at ``BATCH_BACKOFF_MAX_SECONDS``, or
+    ``None`` if it has none.
     """
     headers = getattr(error, "headers", None)
     retry_after = headers.get("Retry-After") if headers else None
@@ -324,7 +324,31 @@ def retry_delay(attempt: int, error: BaseException | None) -> float:
     # accepts digits such as "²" that float() can't parse.
     if seconds.isascii() and seconds.isdigit():
         return min(float(seconds), BATCH_BACKOFF_MAX_SECONDS)
+    return None
+
+
+def retry_delay(attempt: int, error: BaseException | None) -> float:
+    """How long to wait before retry number ``attempt``. Uses ``retry_after_seconds(error)`` when
+    the error has a ``Retry-After``, or otherwise a jittered backoff.
+    """
+    retry_after = retry_after_seconds(error)
+    if retry_after is not None:
+        return retry_after
     return backoff_delay(attempt, BATCH_BACKOFF_BASE_SECONDS, BATCH_BACKOFF_MAX_SECONDS)
+
+
+def parse_quorum_timeout_annotation(value: str | None) -> int:
+    """Parses ``BATCH_QUORUM_TIMEOUT_ANNOTATION`` upon ``get_batch``. If missing, falls back to the default.
+    """
+    if value is None:
+        return BATCH_DEFAULT_QUORUM_TIMEOUT_SECONDS
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = 0
+    if parsed <= 0:
+        raise BatchError(f"batch quorum timeout annotation {value!r} is not a positive integer")
+    return parsed
 
 
 def batch_lease_metadata(

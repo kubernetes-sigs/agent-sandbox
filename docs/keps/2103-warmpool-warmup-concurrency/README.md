@@ -107,9 +107,15 @@ concurrency, which raises contention:
 | 80 min | 4 | 1 |
 
 The degradation the operator is trying to prevent is what drives the overshoot.
-A concurrency bound cannot overshoot, because it releases a new create only when
-an existing warmup finishes. This is the ordinary reason resource-bound work
-uses a semaphore rather than a rate limiter.
+A concurrency bound does not drift this way, because it releases a new create
+only when an existing warmup finishes, so a longer warmup delays the next create
+instead of stacking another one on top. This is the ordinary reason
+resource-bound work uses a semaphore rather than a rate limiter.
+
+The bound is not absolute, and
+[What the bound does and does not guarantee](#what-the-bound-does-and-does-not-guarantee)
+sets out the two cases where concurrent warmups can still exceed it. Neither is
+driven by warmup duration, which is the failure mode this table is about.
 
 **The values are not expressible in practice.** Holding one 20-minute warmup at
 a time requires `rate = 1/1200 ≈ 0.00083`. That number is a magic constant
@@ -361,9 +367,14 @@ and gated members hold no slot, so a pool short on capacity keeps creating up to
 `maxConcurrent` more. When capacity later frees up, every held member can be
 scheduled at once and exceed the bound. This is the direct cost of the deadlock
 avoidance above, and the trade is deliberate: a pool that stops creating forever
-is worse than a transient overshoot when capacity returns. Operators who need a
-hard cap under capacity pressure should also set pod resource requests, so the
-scheduler admits members at the rate the cluster can actually hold.
+is worse than a transient overshoot when capacity returns.
+
+Pod resource requests limit the damage but do not close the gap. They bound what
+a node admits by resource capacity, so they cap how much warmup work lands on
+any one node. They do not enforce `maxConcurrent`, and nothing proposed here
+does under this condition: a cluster with capacity for every held member will
+schedule them all at once. Operators who cannot tolerate that should keep the
+pool smaller than the burst they are willing to absorb.
 
 ##### Resolving maxConcurrent
 

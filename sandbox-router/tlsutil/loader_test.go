@@ -17,10 +17,12 @@ package tlsutil
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -158,7 +160,9 @@ func TestCertReloader_KubernetesAtomicWriterRotation(t *testing.T) {
 		t.Fatalf("write v1 key: %v", err)
 	}
 	if err := os.Symlink(filepath.Base(dataV1), filepath.Join(dir, "..data")); err != nil {
-		if runtime.GOOS == "windows" {
+		// 1314 is ERROR_PRIVILEGE_NOT_HELD: Windows refuses symlinks without
+		// SeCreateSymbolicLinkPrivilege. Any other failure should fail the test.
+		if runtime.GOOS == "windows" && errors.Is(err, syscall.Errno(1314)) {
 			t.Skipf("symlinks on Windows need a privilege this account may lack: %v", err)
 		}
 		t.Fatalf("symlink ..data: %v", err)

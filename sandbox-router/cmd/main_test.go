@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -90,8 +91,20 @@ users:
 	cfg.CacheNamespace = "default"
 	cfg.Kubeconfig = kubeconfig
 
-	runErr := make(chan error, 1)
-	go func() { runErr <- run(&cfg, logr.Discard()) }()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := run(ctx, &cfg, logr.Discard()); err != nil {
+			t.Logf("run returned: %v", err)
+		}
+	}()
+	// Cancel run and wait for it to exit, even when an assertion fails, so
+	// the informer and probe listener do not outlive the test.
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
 
 	client := &http.Client{
 		Timeout:   2 * time.Second,
@@ -111,8 +124,8 @@ users:
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		select {
-		case err := <-runErr:
-			t.Fatalf("run() returned before the probes were checked: %v", err)
+		case <-done:
+			t.Fatalf("run() returned before the probes were checked")
 		default:
 		}
 		code, err := get("/healthz")

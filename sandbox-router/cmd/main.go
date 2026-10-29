@@ -91,7 +91,9 @@ func main() {
 		os.Exit(2)
 	}
 
-	if err := run(&cfg, log); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := run(ctx, &cfg, log); err != nil {
 		log.Error(err, "exited with error")
 		os.Exit(1)
 	}
@@ -106,9 +108,9 @@ const cacheSyncTimeout = 60 * time.Second
 // startup steps, so a slow but healthy start does not trigger a restart loop.
 const probeStartupTimeout = cacheSyncTimeout + 60*time.Second
 
-func run(cfg *config.Config, log logr.Logger) error {
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+func run(ctx context.Context, cfg *config.Config, log logr.Logger) (err error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	// Start probes before the slow steps below (OTel setup, initial cache
 	// sync) so /healthz answers while /readyz stays false until the proxy
@@ -118,10 +120,19 @@ func run(cfg *config.Config, log logr.Logger) error {
 	// A probe listener that dies after startup cancels ctx, so run() exits
 	// with an error and the kubelet restarts the container.
 	probeErrs := make(chan error, 1)
+	// A dead probe listener cancels ctx, so the error from any step below can
+	// be a symptom, such as a failed cache sync. Report the probe failure instead.
+	defer func() {
+		select {
+		case perr := <-probeErrs:
+			err = fmt.Errorf("probe server: %w", perr)
+		default:
+		}
+	}()
 	if cfg.ProbeAddr != "" {
 		stopProbes, err := server.StartProbes(cfg.ProbeAddr, probes, log.WithName("probes"), func(err error) {
 			probeErrs <- err
-			stop()
+			cancel()
 		})
 		if err != nil {
 			return err
@@ -374,13 +385,7 @@ func run(cfg *config.Config, log logr.Logger) error {
 		"cache", cfg.CacheEnabled,
 		"authz", cfg.AuthzMode,
 	)
-	runErr := srv.Run(ctx)
-	select {
-	case err := <-probeErrs:
-		return fmt.Errorf("probe server: %w", err)
-	default:
-		return runErr
-	}
+	return srv.Run(ctx)
 }
 
 // buildKubernetesClient returns a typed client built from kubeconfigPath

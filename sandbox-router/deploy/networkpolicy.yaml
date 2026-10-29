@@ -1,10 +1,33 @@
-# Example NetworkPolicy. Adjust the ingress source — most deployments have
-# the router behind a Gateway in a specific namespace; tighten the from:
-# selector to that namespace + labels to prevent direct cluster-wide ingress.
+# Default NetworkPolicy for the sandbox-router.
 #
-# Egress is intentionally broad because the router dials arbitrary sandbox
-# pods in tenant namespaces — narrow it via labels if your tenancy model
-# constrains which pods/namespaces are valid targets.
+# Ingress is open to all namespaces on the proxy port because the router is the
+# entry point for sandbox traffic — clients, SDKs, and Gateway controllers can
+# live in any namespace. --authz-mode defaults to allow-all and the OLM
+# deployment does not override it, so the default install has no L4 or L7
+# authorization layer restricting access. To harden:
+#   1. Set --authz-mode=tokenreview (or scoped-token) for L7 authz, and/or
+#   2. Tighten the from: namespaceSelector to a known set of caller namespaces.
+#
+# Limitations and workarounds:
+#
+#   namespaceSelector: {} only matches sources on the pod network.
+#   Host-network callers and L7 load balancers that send directly to pod IPs
+#   are not matched by any namespaceSelector — they need an ipBlock rule.
+#
+#   Metrics scraping is restricted to the "monitoring" namespace. If your
+#   Prometheus runs elsewhere, you need an extra policy for its namespace.
+#
+#   OLM-managed installs cannot edit this policy directly (the operator owns
+#   it), but NetworkPolicies are additive — if *any* policy in the namespace
+#   allows the traffic, it is allowed. Deploy a second NetworkPolicy to cover
+#   additional sources.
+#
+# Egress to sandbox pods is unrestricted on port because the upstream port is
+# caller-specified (X-Sandbox-Port header, default 8888). Destinations are
+# limited to pods carrying the controller-stamped
+# agents.x-k8s.io/sandbox-name-hash label (the same selector the router cache
+# uses). Tighten namespaceSelector further if your tenancy model constrains
+# valid targets.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -20,7 +43,7 @@ spec:
       app.kubernetes.io/component: sandbox-router
   policyTypes: ["Ingress", "Egress"]
   ingress:
-  # Proxy traffic — replace this from: clause with your Gateway namespace.
+  # Proxy traffic — open to all namespaces; see header comment.
   - from:
     - namespaceSelector: {}
     ports:
@@ -37,35 +60,32 @@ spec:
     ports:
     - protocol: TCP
       port: 9090
-  # Kubelet probes hit the pod IP directly; allow all.
+  # Kubelet probes hit the pod IP directly; allow all sources.
   - ports:
     - protocol: TCP
       port: 8081
   egress:
-  # DNS for resolving sandbox FQDNs.
-  - to:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: kube-system
-    ports:
+  # DNS for resolving sandbox FQDNs. Port-only (no namespace restriction)
+  # because DNS services may run outside kube-system on some distributions.
+  - ports:
     - protocol: UDP
       port: 53
     - protocol: TCP
       port: 53
-  # Allow the router to reach sandbox Pods, including HTTP on 8888 and sandboxd
-  # gRPC on 9090. The rule has no port filter because X-Sandbox-Port accepts any
-  # port from 1 to 65535. The Pod selector matches any Pod that carries the
-  # agents.x-k8s.io/sandbox-name-hash label, which the Sandbox controller sets on
-  # sandbox Pods. Nothing in this manifest reserves that label, so anyone who can
-  # create or label Pods in a permitted namespace can make a Pod match. Reserve
-  # the label with admission control, and tighten the namespace selector to your
-  # permitted tenant range.
+  # Forward traffic to sandbox pods. The upstream port is caller-specified
+  # (X-Sandbox-Port header, default 8888; sandboxd gRPC listens on 9090) so
+  # the port is unrestricted. Destinations are limited to pods that carry
+  # agents.x-k8s.io/sandbox-name-hash (stamped by the controller on every
+  # sandbox pod) so a compromised router cannot reach arbitrary cluster
+  # workloads. Sandboxes can live in any namespace.
   - to:
     - namespaceSelector: {}
       podSelector:
         matchExpressions:
         - key: agents.x-k8s.io/sandbox-name-hash
           operator: Exists
+    ports:
+    - protocol: TCP
   # OTel collector (if --enable-tracing or --enable-otel-metrics). Tighten
   # to your collector's namespace/pod selector.
   - to:
@@ -74,21 +94,28 @@ spec:
     - protocol: TCP
       port: 4317
   # Kubernetes API server — required when --cache-enabled or
-  # --authz-mode=tokenreview. The cache informer LIST/WATCHes Pods and
-  # the TokenReview authorizer POSTs to authentication.k8s.io. Without
-  # this rule, cache sync hangs and tokenreview every-request fails
-  # closed. The apiserver lives at the cluster-wide kubernetes service;
-  # NetworkPolicy can't name it directly, so we allow egress to the
-  # default namespace on the standard API port. Many clusters also
-  # accept apiserver traffic over the public LB IP — if your cluster
-  # routes that way, add an ipBlock for the LB CIDR alongside this
-  # rule. Skip this rule entirely when running with --cache-enabled=false
-  # AND --authz-mode=allow-all.
-  - to:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: default
-    ports:
+  # --authz-mode=tokenreview. The API server typically runs on host-network
+  # control plane nodes, not as regular pods, so neither a namespaceSelector
+  # nor a podSelector matches it. This port-only rule (no "to" restriction)
+  # allows egress on the standard API ports to any destination.
+  #
+  # To restrict the destination, target the API server endpoint addresses, not
+  # the ClusterIP of the kubernetes Service. kube-proxy rewrites the ClusterIP
+  # to an endpoint address before the CNI evaluates this policy, so an ipBlock
+  # for the ClusterIP matches nothing and blocks all API traffic; the router
+  # then cannot reach the API server and its informer cache never syncs. Read
+  # the endpoint addresses and port with:
+  #   kubectl get endpointslice -n default \
+  #     -l kubernetes.io/service-name=kubernetes -o wide
+  # A scoped rule must allow that endpoint port, not the Service port.
+  # Endpoint addresses change when control-plane nodes are replaced, so a CIDR
+  # for the control-plane subnet is easier to maintain than per-node /32
+  # entries. On a CNI that evaluates policy before the rewrite, the ClusterIP
+  # is what matches; list both as peers to cover either dataplane.
+  #
+  # Skip this rule only when running with --cache-enabled=false AND
+  # --authz-mode=allow-all.
+  - ports:
     - protocol: TCP
       port: 443
     - protocol: TCP

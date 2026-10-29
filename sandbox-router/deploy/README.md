@@ -13,7 +13,7 @@ Drop-in starting point for running the Go sandbox-router in Kubernetes. These ma
 | `deployment.yaml` | 2 replicas, topology spread, distroless image, restricted SecurityContext, liveness/readiness probes. Enables `--cache-enabled=true` by default. |
 | `service.yaml` | Cluster-IP service named `sandbox-router-svc` (preserves the Python router's name — existing Gateway/HTTPRoute resources work unchanged). |
 | `pdb.yaml` | Prevents voluntary disruptions from taking the whole fleet offline. |
-| `networkpolicy.yaml` | Locks down ingress to proxy/metrics/probe ports; egress to DNS, sandbox Pods, OTel collector. **Tighten the selectors for your tenancy model.** |
+| `networkpolicy.yaml` | Locks down ingress to proxy/metrics/probe ports; egress to DNS, sandbox port, OTel collector. **Tighten the selectors for your tenancy model.** |
 | `examples/gateway-gke.yaml` | Optional GKE Gateway, HTTPRoute, and HealthCheckPolicy for external ingress in front of `sandbox-router-svc`. |
 
 Native gRPC is accepted on the same proxy ports, but needs an HTTP/2 path all the
@@ -24,13 +24,10 @@ legacy HTTP Service/GKE resources above are not changed. Router-consumed scoped
 credentials and verified public TLS are required in that example; internal h2c
 does not encrypt the full chain.
 
-`networkpolicy.yaml` allows egress to sandbox Pods on any port across namespaces,
-because `X-Sandbox-Port` accepts any port. That covers legacy TCP 8888 and sandboxd
-gRPC TCP 9090. The rule selects Pods by the `agents.x-k8s.io/sandbox-name-hash`
-label, which the Sandbox controller sets on sandbox Pods. The manifest does not
-reserve that label, so any Pod that carries it in a permitted namespace matches.
-Reserve the label with admission control, and tighten the namespace selector to
-your permitted tenant range. The
+`networkpolicy.yaml` allows TCP on any port to Pods that carry the
+controller-stamped `agents.x-k8s.io/sandbox-name-hash` label, in any namespace,
+because callers choose the upstream port with `X-Sandbox-Port`. Tighten its
+namespace and Pod selectors to your permitted tenant range. The
 [gRPC example workload](../../examples/sandbox-router-grpc/workload.yaml) has its
 own restricted egress policy for the demo router, separate from these defaults.
 Verify both allowed and forbidden targets with an enforcing CNI. Applying a

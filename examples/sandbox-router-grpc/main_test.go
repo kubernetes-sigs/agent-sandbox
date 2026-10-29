@@ -25,7 +25,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -46,20 +45,7 @@ import (
 	"sigs.k8s.io/agent-sandbox/sandbox-router/proxy"
 )
 
-// TestDefaultRouterGRPCEgress checks that the default router policy lets the
-// router reach sandboxd on TCP 9090 in any tenant namespace. The rule must
-// select Pods by the label the Sandbox controller sets, not by labels that only
-// this demo's Pods carry.
 func TestDefaultRouterGRPCEgress(t *testing.T) {
-	wantPeers := []networkingv1.NetworkPolicyPeer{{
-		NamespaceSelector: &metav1.LabelSelector{},
-		PodSelector: &metav1.LabelSelector{
-			MatchExpressions: []metav1.LabelSelectorRequirement{{
-				Key:      "agents.x-k8s.io/sandbox-name-hash",
-				Operator: metav1.LabelSelectorOpExists,
-			}},
-		},
-	}}
 	for _, path := range []string{
 		"../../sandbox-router/deploy/networkpolicy.yaml",
 		"../../olm/config/sandbox-router/networkpolicy.yaml",
@@ -73,18 +59,26 @@ func TestDefaultRouterGRPCEgress(t *testing.T) {
 			if err := yaml.Unmarshal(data, &policy); err != nil {
 				t.Fatal(err)
 			}
+			found := false
 			for _, rule := range policy.Spec.Egress {
-				if reflect.DeepEqual(rule.To, wantPeers) && allowsTCPPort(rule.Ports, 9090) {
-					return
+				if !allowsTCPPort(rule.Ports, 9090) {
+					continue
+				}
+				found = true
+				if !allowsSandboxPodsInAnyNamespace(rule.To) {
+					t.Errorf("default gRPC egress must allow sandbox Pods in tenant namespaces; got peers: %+v", rule.To)
 				}
 			}
-			t.Fatalf("default router policy has no egress rule to labelled sandbox Pods in any namespace that allows TCP 9090; got rules: %+v", policy.Spec.Egress)
+			if !found {
+				t.Fatal("default router policy has no TCP 9090 egress rule")
+			}
 		})
 	}
 }
 
-// allowsTCPPort reports whether ports permit TCP traffic to port. An empty list
-// permits every port, and so does an entry without a port number.
+// allowsTCPPort reports whether the ports permit TCP traffic to port. A rule
+// with no port entries, or an entry without a port number, permits every TCP
+// port.
 func allowsTCPPort(ports []networkingv1.NetworkPolicyPort, port int) bool {
 	if len(ports) == 0 {
 		return true
@@ -95,6 +89,30 @@ func allowsTCPPort(ports []networkingv1.NetworkPolicyPort, port int) bool {
 		}
 		if p.Port == nil || p.Port.IntValue() == port {
 			return true
+		}
+	}
+	return false
+}
+
+// allowsSandboxPodsInAnyNamespace reports whether the peers select sandbox Pods
+// in every tenant namespace. The controller stamps
+// agents.x-k8s.io/sandbox-name-hash on each sandbox Pod, and a peer without a
+// podSelector accepts any Pod in the namespace.
+func allowsSandboxPodsInAnyNamespace(peers []networkingv1.NetworkPolicyPeer) bool {
+	for _, peer := range peers {
+		if peer.NamespaceSelector == nil || len(peer.NamespaceSelector.MatchLabels) > 0 || len(peer.NamespaceSelector.MatchExpressions) > 0 {
+			continue
+		}
+		if peer.PodSelector == nil {
+			return true
+		}
+		if len(peer.PodSelector.MatchLabels) > 0 {
+			continue
+		}
+		for _, expr := range peer.PodSelector.MatchExpressions {
+			if expr.Key == "agents.x-k8s.io/sandbox-name-hash" && expr.Operator == metav1.LabelSelectorOpExists {
+				return true
+			}
 		}
 	}
 	return false

@@ -3,7 +3,7 @@
 # To re-generate a bundle for another specific version without changing the standard setup, you can:
 # - use the VERSION as arg of the bundle target (e.g make bundle VERSION=0.0.2)
 # - use environment variables to overwrite this value (e.g export VERSION=0.0.2)
-VERSION ?= 1.0.5
+VERSION ?= 1.0.8
 
 # CHANNELS define the bundle channels used in the bundle.
 # Add a new line here if you would like to change its default config. (E.g CHANNELS = "candidate,fast,stable")
@@ -114,6 +114,7 @@ copy-k8s-config: ## Copy ../k8s into config/ (CRDs, RBAC .generated.yaml → rol
 	cp $(K8S_ROOT)/rbac.generated.yaml $(CONFIG_DIR)/rbac/role.yaml
 	cp $(K8S_ROOT)/extensions-rbac.generated.yaml $(CONFIG_DIR)/rbac/extensions_role.yaml
 	cp $(K8S_ROOT)/extensions.yaml $(CONFIG_DIR)/rbac/extensions_role_binding.yaml
+	cp $(K8S_ROOT)/hardening/networkpolicy.yaml $(CONFIG_DIR)/network-policy/networkpolicy.yaml
 	mkdir -p $(CONFIG_DIR)/sandbox-router
 	rm -rf $(CONFIG_DIR)/sandbox-router/*
 	cp $(REPO_ROOT)/sandbox-router/deploy/*.yaml $(CONFIG_DIR)/sandbox-router/
@@ -304,6 +305,7 @@ endif
 
 .PHONY: bundle
 bundle: manifests kustomize operator-sdk ## Generate bundle manifests and metadata, then validate generated files.
+	rm -rf bundle/*
 	$(OPERATOR_SDK) generate kustomize manifests -q
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
 	cd config/default && $(KUSTOMIZE) edit set image registry.k8s.io/agent-sandbox/sandbox-router-go=$(ROUTER_IMG)

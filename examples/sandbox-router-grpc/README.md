@@ -183,9 +183,10 @@ not silently count as a pass.
 ## Network policy and verification
 
 The [default router policy](../../sandbox-router/deploy/networkpolicy.yaml) allows
-egress to sandbox Pods on any port across namespaces, which covers legacy TCP 8888
-and sandboxd gRPC TCP 9090; production deployments should tighten its namespace
-selector to their permitted tenant range.
+TCP on any port to Pods that carry the controller-stamped
+`agents.x-k8s.io/sandbox-name-hash` label, in any namespace, because callers choose
+the upstream port with `X-Sandbox-Port`. Production deployments should tighten its
+selectors to their permitted tenant range.
 
 `workload.yaml` instead includes an egress-only policy selecting this demo's router.
 It permits DNS to `kube-system` and TCP 9090 only to labelled sandboxd Pods in

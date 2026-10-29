@@ -188,7 +188,7 @@ func TestRun_BindFailureSurfacesSynchronously(t *testing.T) {
 	// Critical assertion: readiness must NOT have been flipped to true when
 	// startup failed — otherwise a freshly-launched pod would briefly tell
 	// the LB it's ready while the proxy port is unreachable.
-	if probes.ready.Load() {
+	if probes.isReady() {
 		t.Errorf("readiness must remain false when bind fails")
 	}
 }
@@ -398,7 +398,7 @@ func TestRun_ReadyOnlyAfterAllBindsSucceed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if probes.ready.Load() {
+	if probes.isReady() {
 		t.Fatalf("ready should start false")
 	}
 
@@ -410,12 +410,12 @@ func TestRun_ReadyOnlyAfterAllBindsSucceed(t *testing.T) {
 	// this loop should succeed on the first or second tick.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if probes.ready.Load() {
+		if probes.isReady() {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if !probes.ready.Load() {
+	if !probes.isReady() {
 		cancel()
 		if err := <-done; err != nil {
 			t.Logf("Run returned error: %v", err)
@@ -427,7 +427,7 @@ func TestRun_ReadyOnlyAfterAllBindsSucceed(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Errorf("Run returned error: %v", err)
 	}
-	if probes.ready.Load() {
+	if probes.isReady() {
 		t.Errorf("ready should be false after shutdown")
 	}
 }

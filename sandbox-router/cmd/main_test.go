@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -93,11 +94,10 @@ users:
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
+	var runErr error
 	go func() {
 		defer close(done)
-		if err := run(ctx, &cfg, logr.Discard()); err != nil {
-			t.Logf("run returned: %v", err)
-		}
+		runErr = run(ctx, &cfg, logr.Discard())
 	}()
 	// Cancel run and wait for it to exit, even when an assertion fails, so
 	// the informer and probe listener do not outlive the test.
@@ -147,5 +147,12 @@ users:
 	}
 	if code != http.StatusServiceUnavailable {
 		t.Fatalf("readyz during sync: got %d want 503", code)
+	}
+
+	// Cancelling during the sync should report the shutdown, not an RBAC problem.
+	cancel()
+	<-done
+	if !errors.Is(runErr, context.Canceled) {
+		t.Fatalf("run() after cancel: got %v, want context.Canceled", runErr)
 	}
 }

@@ -63,7 +63,7 @@ func (p *Probes) SetStartupDeadline(t time.Time) {
 
 // MarkReady advertises the pod as ready.
 func (p *Probes) MarkReady() {
-	p.state.Store(int32(stateReady))
+	p.state.CompareAndSwap(int32(stateStarting), int32(stateReady))
 }
 
 // MarkUnready forces /readyz to 503. Before the first MarkReady it does

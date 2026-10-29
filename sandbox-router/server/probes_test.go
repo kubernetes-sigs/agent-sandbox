@@ -163,3 +163,25 @@ func TestHealthz_FailsAfterStartupDeadline(t *testing.T) {
 		t.Fatalf("after ready then unready: got %d want 200", rec.Code)
 	}
 }
+
+func TestMarkReadyIsOneTime(t *testing.T) {
+	p := NewProbes()
+	p.MarkReady()
+	p.MarkUnready()
+	p.MarkReady() // a drain must not be undone by a second MarkReady
+	if p.isReady() {
+		t.Fatal("MarkReady after MarkUnready made the pod ready again")
+	}
+}
+
+func TestMarkUnreadyBeforeReadyKeepsStarting(t *testing.T) {
+	p := NewProbes()
+	p.MarkUnready()
+	if p.isReady() {
+		t.Fatal("MarkUnready before MarkReady reported ready")
+	}
+	p.MarkReady()
+	if !p.isReady() {
+		t.Fatal("MarkReady after an early MarkUnready did not become ready")
+	}
+}

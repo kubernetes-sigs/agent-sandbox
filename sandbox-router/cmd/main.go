@@ -101,12 +101,12 @@ func main() {
 
 // cacheSyncTimeout bounds the initial pod LIST. A slow API server should not
 // fail the pod, but a misconfigured RBAC should fail fast.
-const cacheSyncTimeout = 60 * time.Second
+const cacheSyncTimeout = 90 * time.Second
 
 // probeStartupTimeout bounds how long the pod may take to become ready before
-// /healthz fails. It covers the cache sync plus 60s of headroom for the other
-// startup steps, so a slow but healthy start does not trigger a restart loop.
-const probeStartupTimeout = cacheSyncTimeout + 60*time.Second
+// /healthz fails. It must exceed cacheSyncTimeout, leaving headroom for the
+// other startup steps, so a slow but healthy start does not trigger a restart loop.
+const probeStartupTimeout = 120 * time.Second
 
 func run(ctx context.Context, cfg *config.Config, log logr.Logger) (err error) {
 	ctx, cancel := context.WithCancel(ctx)

@@ -160,7 +160,7 @@ iteration (Python).
 |---|---|---|
 | `GET` | `/v1/files/{path}` | File → raw bytes (`application/octet-stream`); directory → JSON `DirectoryListing`. Optional `type` query (`file` or `directory`, also on `HEAD`): `409` if the path is the other kind. |
 | `HEAD` | `/v1/files/{path}` | Existence/metadata probe without transferring the body. |
-| `PUT` | `/v1/files/{path}` | Atomic write (temp file + rename), auto-creates parents. Optional `mode` query (`^0[0-7]{3}$`, default `0644`). `append=true` adds to the end of the file instead (not atomic). Accepts raw bytes or `multipart/form-data` (`file` part). |
+| `PUT` | `/v1/files/{path}` | Atomic write (temp file + rename), auto-creates parents. Optional `mode` query (`^0[0-7]{3}$`, default `0644`). `append=true` adds to the end of the file instead (not atomic). `If-None-Match: *` creates the file only if the path does not exist, else `412`. Accepts raw bytes or `multipart/form-data` (`file` part). |
 | `DELETE` | `/v1/files/{path}` | Remove a file or directory; `recursive=true` for `rm -rf` behavior; `409` on a non-empty directory otherwise. |
 | `GET` | `/v1/health` | Readiness probe: `200 {"status":"ok"}` or `503` during shutdown. |
 | `GET` | `/v1/metadata` | Orchestrator-injected, non-sensitive environment variables (allowlisted by prefix, default `SANDBOX_`). |
@@ -185,6 +185,8 @@ appends, see below), but it does not impose an ordering across requests:
   complete after the path is deleted; a read that has not opened it may fail.
 - **Concurrent writes to one path** — each successful rename is atomic; the
   last successful rename determines the final contents.
+- **Create-only writes (`If-None-Match: *`)** — when several race to create one
+  path, exactly one succeeds and the rest get `412`.
 - **Appends (`append=true`)** are written in place, not atomically: a read can
   see a partial append, and concurrent appends to one path can interleave. A
   retried append adds the body again.
@@ -265,6 +267,9 @@ curl -sf -I localhost:8080/v1/files/src/main.py
 
 # Append
 curl -sf -X PUT --data-binary "more" "localhost:8080/v1/files/src/main.py?append=true"
+
+# Create only if missing (412 if it exists)
+curl -sf -X PUT -H "If-None-Match: *" --data-binary "x" localhost:8080/v1/files/src/new.py
 
 # Delete recursively
 curl -sf -X DELETE "localhost:8080/v1/files/src?recursive=true"

@@ -284,6 +284,11 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	createOnly, ok := s.createOnly(w, r)
+	if !ok {
+		return
+	}
+
 	target, ok := s.resolvePath(w, r)
 	if !ok {
 		return
@@ -304,16 +309,35 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 	if appendMode {
 		write = appendWrite
 	}
-	if err := write(target, body, mode); err != nil {
-		if os.IsPermission(err) {
+	if err := write(target, body, mode, createOnly); err != nil {
+		switch {
+		case createOnly && errors.Is(err, os.ErrExist):
+			s.writeError(w, http.StatusPreconditionFailed, "FAILED_PRECONDITION", "path already exists")
+		case os.IsPermission(err):
 			s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED", "permission denied")
-		} else {
+		default:
 			s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 		}
 		return
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// createOnly reports whether the request carries "If-None-Match: *". sandboxd
+// has no ETags, so it rejects any other value instead of ignoring a
+// precondition the client relies on. It writes a 400 and returns ok=false in
+// that case.
+func (s *RESTServer) createOnly(w http.ResponseWriter, r *http.Request) (createOnly, ok bool) {
+	values := r.Header.Values("If-None-Match")
+	if len(values) == 0 {
+		return false, true
+	}
+	if len(values) == 1 && strings.TrimSpace(values[0]) == "*" {
+		return true, true
+	}
+	s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", `If-None-Match must be "*"`)
+	return false, false
 }
 
 // requestFileBody returns the file payload reader for a PUT request: the raw
@@ -344,14 +368,17 @@ func requestFileBody(r *http.Request) (io.Reader, func(), error) {
 }
 
 // atomicWrite streams src into target using the temp-file-then-rename
-// strategy. Parent directories are created automatically.
+// strategy. Parent directories are created automatically. With createOnly,
+// the write fails with an error wrapping os.ErrExist when target exists:
+// link(2) never replaces its destination, so the check and the create are one
+// atomic step.
 //
 // Concurrency: handlers run in parallel (one goroutine per request, no
 // cross-request locking). Each successful rename(2) publishes a complete file
 // atomically, so an already-open reader sees either the previous complete file
 // or the new one. A concurrent delete can remove the temporary file or its
 // parent directory before rename, in which case the write fails.
-func atomicWrite(target string, src io.Reader, mode os.FileMode) (err error) {
+func atomicWrite(target string, src io.Reader, mode os.FileMode, createOnly bool) (err error) {
 	dir := filepath.Dir(target)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("failed to create parent directory: %w", err)
@@ -382,17 +409,25 @@ func atomicWrite(target string, src io.Reader, mode os.FileMode) (err error) {
 	if err = tmpFile.Close(); err != nil {
 		return fmt.Errorf("failed to close file: %w", err)
 	}
-	if err = os.Rename(tmpFile.Name(), target); err != nil {
+	place := os.Rename
+	if createOnly {
+		place = os.Link
+	}
+	if err = place(tmpFile.Name(), target); err != nil {
 		return fmt.Errorf("failed to move file into place: %w", err)
+	}
+	if createOnly {
+		_ = os.Remove(tmpFile.Name())
 	}
 	return nil
 }
 
 // appendWrite streams src to the end of target. It creates target, and its
 // parent directories, when missing, and applies mode only to a file it creates.
-// Unlike atomicWrite, readers can see a partial append, and concurrent appends
-// can interleave between writes.
-func appendWrite(target string, src io.Reader, mode os.FileMode) (err error) {
+// With createOnly, it fails with an error wrapping os.ErrExist when target
+// exists. Unlike atomicWrite, readers can see a partial append, and concurrent
+// appends can interleave between writes.
+func appendWrite(target string, src io.Reader, mode os.FileMode, createOnly bool) (err error) {
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return fmt.Errorf("failed to create parent directory: %w", err)
 	}
@@ -400,7 +435,7 @@ func appendWrite(target string, src io.Reader, mode os.FileMode) (err error) {
 	// O_EXCL tells us whether this request created the file.
 	f, err := os.OpenFile(target, os.O_WRONLY|os.O_APPEND|os.O_CREATE|os.O_EXCL, mode)
 	created := err == nil
-	if errors.Is(err, os.ErrExist) {
+	if errors.Is(err, os.ErrExist) && !createOnly {
 		f, err = os.OpenFile(target, os.O_WRONLY|os.O_APPEND, 0)
 	}
 	if err != nil {

@@ -178,6 +178,66 @@ func TestPutAppendRejections(t *testing.T) {
 	}
 }
 
+func TestPutCreateOnly(t *testing.T) {
+	for _, query := range []string{"", "?append=true"} {
+		t.Run("query"+query, func(t *testing.T) {
+			_, handler, root := newRESTFixture(t)
+			header := http.Header{"If-None-Match": []string{"*"}}
+
+			rec := doRequest(handler, http.MethodPut, "/v1/files/a/f.txt"+query, []byte("first"), header)
+			require.Equal(t, http.StatusNoContent, rec.Code)
+
+			rec = doRequest(handler, http.MethodPut, "/v1/files/a/f.txt"+query, []byte("second"), header)
+			require.Equal(t, http.StatusPreconditionFailed, rec.Code)
+			require.Equal(t, "FAILED_PRECONDITION", decodeError(t, rec).Code)
+
+			onDisk, err := os.ReadFile(filepath.Join(root, "a", "f.txt"))
+			require.NoError(t, err)
+			require.Equal(t, "first", string(onDisk))
+			entries, err := os.ReadDir(filepath.Join(root, "a"))
+			require.NoError(t, err)
+			require.Len(t, entries, 1, "no temp file may be left behind")
+		})
+	}
+}
+
+func TestPutCreateOnlyRacesToOneWinner(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	header := http.Header{"If-None-Match": []string{"*"}}
+
+	const writers = 16
+	codes := make(chan int, writers)
+	for i := 0; i < writers; i++ {
+		go func() {
+			codes <- doRequest(handler, http.MethodPut, "/v1/files/f.txt", []byte("x"), header).Code
+		}()
+	}
+	created := 0
+	for i := 0; i < writers; i++ {
+		if code := <-codes; code == http.StatusNoContent {
+			created++
+		} else {
+			require.Equal(t, http.StatusPreconditionFailed, code)
+		}
+	}
+	require.Equal(t, 1, created)
+
+	entries, err := os.ReadDir(root)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "no temp file may be left behind")
+}
+
+func TestPutIfNoneMatchRejectsOtherValues(t *testing.T) {
+	_, handler, _ := newRESTFixture(t)
+
+	for _, value := range []string{`"etag"`, "W/*", ""} {
+		header := http.Header{"If-None-Match": []string{value}}
+		rec := doRequest(handler, http.MethodPut, "/v1/files/f.txt", []byte("x"), header)
+		require.Equal(t, http.StatusBadRequest, rec.Code, "value %q must be rejected", value)
+		require.Equal(t, "INVALID_ARGUMENT", decodeError(t, rec).Code)
+	}
+}
+
 func TestPutMultipartUpload(t *testing.T) {
 	_, handler, root := newRESTFixture(t)
 

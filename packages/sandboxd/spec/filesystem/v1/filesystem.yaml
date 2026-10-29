@@ -129,6 +129,15 @@ paths:
           description: >
             If true, appends the body to the file, creating it if it does not exist.
             Readers can see a partial append, and concurrent appends can interleave.
+        - name: If-None-Match
+          in: header
+          required: false
+          schema:
+            type: string
+            enum: ["*"]
+          description: >
+            Set to "*" to create the file only if the path does not exist. If it exists, the
+            request fails with 412 and writes nothing. Other values are rejected with 400.
       requestBody:
         required: true
         content:
@@ -152,6 +161,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "412":
+          description: If-None-Match is "*" and the path already exists
         "500":
           $ref: "#/components/responses/InternalServerError"
 

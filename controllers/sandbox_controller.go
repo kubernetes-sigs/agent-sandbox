@@ -2405,7 +2405,7 @@ func (r *SandboxReconciler) prepareStageLatencies(ctx context.Context, sandbox *
 	}
 	logger := log.FromContext(ctx)
 	now := time.Now()
-	t0 := entry.observedAt
+	t0 := entry.observedAt.Truncate(time.Second)
 	recorded := entry.recorded
 	var pending []pendingStageLatency
 
@@ -2419,6 +2419,9 @@ func (r *SandboxReconciler) prepareStageLatencies(ctx context.Context, sandbox *
 		if endTime.IsZero() {
 			endTime = now
 		}
+		// Match the precision of Kubernetes API timestamps for every stage,
+		// including controller-observed PVC binding and fallback timestamps.
+		endTime = endTime.Truncate(time.Second)
 		// Stages reached before the controller started observing (warm launch or
 		// pre-existing sandboxes after upgrade) are marked recorded without
 		// observing, to avoid a spike of near-zero histogram samples.

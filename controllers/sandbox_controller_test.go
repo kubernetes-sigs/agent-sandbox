@@ -7132,6 +7132,56 @@ func TestRecordStageLatenciesOneShot(t *testing.T) {
 	require.Equal(t, uint64(5), histogramSampleCount(t, asmetrics.SandboxStageLatency))
 }
 
+func TestStageLatenciesSecondGranularity(t *testing.T) {
+	baseline := time.Date(2026, time.October, 29, 12, 0, 0, 750000000, time.UTC)
+	for _, tc := range []struct {
+		name string
+		end  time.Time
+		want time.Duration
+		skip bool
+	}{
+		{name: "earlier second", end: baseline.Truncate(time.Second).Add(-time.Second), skip: true},
+		{name: "same second API timestamp", end: baseline.Truncate(time.Second)},
+		{name: "same second observation", end: baseline.Add(100 * time.Millisecond)},
+		{name: "next second API timestamp", end: baseline.Truncate(time.Second).Add(time.Second), want: time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			asmetrics.SandboxStageLatency.Reset()
+			sandbox := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{UID: sandboxUID}}
+			sandbox.Spec.Service = new(true)
+			r := &SandboxReconciler{}
+			r.trackSandboxCreationMetrics(sandbox)
+			r.pendingStageMetrics[sandbox.UID].observedAt = baseline
+			stamp := metav1.NewTime(tc.end)
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{CreationTimestamp: stamp},
+				Status: corev1.PodStatus{
+					Phase:     corev1.PodRunning,
+					StartTime: &stamp,
+					PodIPs:    []corev1.PodIP{{IP: "10.0.0.1"}},
+					Conditions: []corev1.PodCondition{
+						{Type: corev1.PodScheduled, Status: corev1.ConditionTrue, LastTransitionTime: stamp},
+						{Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: stamp},
+					},
+				},
+			}
+			svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{CreationTimestamp: stamp}}
+			pending := r.prepareStageLatencies(t.Context(), sandbox, pod, svc)
+			if tc.skip {
+				require.Empty(t, pending)
+			} else {
+				require.Len(t, pending, 5)
+				for _, sample := range pending {
+					require.Equal(t, tc.want, sample.latency, sample.stage)
+				}
+			}
+			emitStageLatencies(t.Context(), sandbox, pending)
+			require.Equal(t, uint64(len(pending)), histogramSampleCount(t, asmetrics.SandboxStageLatency))
+			require.Empty(t, r.prepareStageLatencies(t.Context(), sandbox, pod, svc))
+		})
+	}
+}
+
 func TestRecordStageLatenciesSkipsPreObservationStages(t *testing.T) {
 	asmetrics.SandboxStageLatency.Reset()
 
@@ -7242,7 +7292,13 @@ func TestRecordStageLatenciesPVCBoundUsesObservationTime(t *testing.T) {
 	r.trackSandboxCreationMetrics(sandbox)
 	r.pendingStageMetrics[sandbox.UID].observedAt = observedAt
 
+	before := time.Now().Truncate(time.Second)
 	pending := r.prepareStageLatencies(context.Background(), sandbox, nil, nil)
+	after := time.Now().Truncate(time.Second)
+	require.Len(t, pending, 1)
+	require.Zero(t, pending[0].latency%time.Second)
+	require.GreaterOrEqual(t, pending[0].latency, before.Sub(observedAt.Truncate(time.Second)))
+	require.LessOrEqual(t, pending[0].latency, after.Sub(observedAt.Truncate(time.Second)))
 	emitStageLatencies(context.Background(), sandbox, pending)
 
 	require.Equal(t, uint64(1), histogramSampleCount(t, asmetrics.SandboxStageLatency))

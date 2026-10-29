@@ -175,6 +175,7 @@ var (
 		prometheus.HistogramOpts{
 			Name: "agent_sandbox_stage_latency_ms",
 			Help: "Latency from the first active Sandbox reconcile to each Ready-path stage in milliseconds. " +
+				"Baseline and stage timestamps are truncated to whole seconds, including controller-observed PVC binding; stages in the baseline's second record zero. " +
 				"Sandboxes in the initial informer inventory and stages reached before the baseline are omitted. Tracking is in memory, so startups spanning controller restarts may be omitted. Each stage is recorded at most once; readiness flaps do not record another sample.",
 			Buckets: creationLatencyBuckets,
 		},

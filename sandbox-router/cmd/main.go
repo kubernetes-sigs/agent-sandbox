@@ -91,15 +91,54 @@ func main() {
 		os.Exit(2)
 	}
 
-	if err := run(&cfg, log); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := run(ctx, &cfg, log); err != nil {
 		log.Error(err, "exited with error")
 		os.Exit(1)
 	}
 }
 
-func run(cfg *config.Config, log logr.Logger) error {
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+// cacheSyncTimeout bounds the initial pod LIST. A slow API server should not
+// fail the pod, but a misconfigured RBAC should fail fast.
+const cacheSyncTimeout = 90 * time.Second
+
+// probeStartupTimeout bounds how long the pod may take to become ready before
+// /healthz fails. It must exceed cacheSyncTimeout, leaving headroom for the
+// other startup steps, so a slow but healthy start does not trigger a restart loop.
+const probeStartupTimeout = 120 * time.Second
+
+func run(ctx context.Context, cfg *config.Config, log logr.Logger) (err error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Start probes before the slow steps below (OTel setup, initial cache
+	// sync) so /healthz answers while /readyz stays false until the proxy
+	// listeners are bound.
+	probes := server.NewProbes()
+	probes.SetStartupDeadline(time.Now().Add(probeStartupTimeout))
+	// A probe listener that dies after startup cancels ctx, so run() exits
+	// with an error and the kubelet restarts the container.
+	probeErrs := make(chan error, 1)
+	// A dead probe listener cancels ctx, so the error from any step below can
+	// be a symptom, such as a failed cache sync. Report the probe failure instead.
+	defer func() {
+		select {
+		case perr := <-probeErrs:
+			err = fmt.Errorf("probe server: %w", perr)
+		default:
+		}
+	}()
+	if cfg.ProbeAddr != "" {
+		stopProbes, err := server.StartProbes(cfg.ProbeAddr, probes, log.WithName("probes"), func(err error) {
+			probeErrs <- err
+			cancel()
+		})
+		if err != nil {
+			return err
+		}
+		defer stopProbes()
+	}
 
 	// --- Tracing -----------------------------------------------------------
 	if cfg.EnableTracing {
@@ -192,7 +231,7 @@ func run(cfg *config.Config, log logr.Logger) error {
 		// here so a slow API server doesn't make us flap, but bound it
 		// so a misconfigured RBAC fails fast at startup rather than
 		// silently serving DNS-only.
-		syncCtx, syncCancel := context.WithTimeout(ctx, 60*time.Second)
+		syncCtx, syncCancel := context.WithTimeout(ctx, cacheSyncTimeout)
 		ok := podCache.WaitForSync(syncCtx)
 		syncCancel()
 		if !ok {
@@ -289,7 +328,6 @@ func run(cfg *config.Config, log logr.Logger) error {
 	// Top-level mux: /healthz reuses the probes implementation so the
 	// Python router's contract (200 OK with {"status":"ok"}) is preserved.
 	// All other paths fall through to the proxy.
-	probes := server.NewProbes()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", probes.Healthz)
 	mux.Handle("/", handler)
@@ -327,7 +365,6 @@ func run(cfg *config.Config, log logr.Logger) error {
 		HTTPAddr:         cfg.HTTPAddr,
 		HTTPSAddr:        cfg.HTTPSAddr,
 		MetricsAddr:      cfg.MetricsAddr,
-		ProbeAddr:        cfg.ProbeAddr,
 		TLSConfig:        tlsConfig,
 		MetricsTLSConfig: metricsTLSConfig,
 		ShutdownTimeout:  cfg.ShutdownTimeout,

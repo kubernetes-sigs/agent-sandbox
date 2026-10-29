@@ -36,7 +36,7 @@ Summarizes whether the Sandbox can serve traffic. It is `True` only when the bac
 | `False` | `SandboxSuspended` | The Sandbox is suspending or suspended (`spec.operatingMode: Suspended`). |
 | `False` | `PodSucceeded` | The Pod completed successfully. |
 | `False` | `PodFailed` | The Pod failed. |
-| `False` | `PodTerminating` | The Pod has a deletion timestamp, even if it already reached Failed or Succeeded, which `Finished` reports. With `spec.failedPodPolicy: Recreate`, the controller replaces a Failed Pod instead, so Ready is `DependenciesNotReady` and `Finished` is absent. |
+| `False` | `PodTerminating` | The Pod has a deletion timestamp, even if it already reached Failed or Succeeded, which `Finished` reports. With `spec.failedPodPolicy: Recreate`, the controller replaces a Failed Pod instead, so Ready is `DependenciesNotReady` and `Finished` is `False`/`NotFinished`. |
 | `False` | `SandboxExpired` | `spec.shutdownTime` was reached. Resource cleanup may still be pending or in progress. See [shutdown time]({{< ref "/docs/sandbox/lifecycle" >}}). |
 
 ### Suspended
@@ -53,21 +53,25 @@ Reports progress of a suspension. It is never removed: a running Sandbox reports
 
 ### Finished
 
-Present only while the controller reports an owned Pod in a terminal phase. It is always `True`. With `spec.failedPodPolicy: Recreate`, a Failed Pod is left out of status while a replacement is pending, so this condition is absent then. Expiry does not create it, but `shutdownPolicy: Retain` keeps an existing one. `Delete` removes the Sandbox.
+Reports whether the backing Pod reached a terminal phase. It is never removed: it is `False` with reason `NotFinished` until a Pod owned by the Sandbox has `Succeeded` or `Failed`. While a Sandbox is suspended, `Finished` keeps its last value, so a SandboxClaim's `ttlSecondsAfterFinished` keeps running for a finished Sandbox and can delete it while suspended. `Finished` becomes `False` again when the Sandbox resumes. It also keeps its last value while its Pod is terminating, so deleting a running Pod or evicting it through the API (for example, `kubectl drain`) doesn't mark the Sandbox finished. Expiry keeps the last value when `shutdownPolicy: Retain` keeps the Sandbox. `Delete` removes the Sandbox.
 
 | Status | Reason | Meaning |
 | --- | --- | --- |
 | `True` | `PodSucceeded` | The Pod completed successfully. |
 | `True` | `PodFailed` | The Pod failed. |
+| `False` | `NotFinished` | The Pod has not reached a terminal phase, or the Sandbox has no Pod. With `failedPodPolicy: Recreate`, `Finished` stays `False` while the controller replaces a failed Pod. |
+| `Unknown` | `PodStateUnknown` | Reconciling the Pod failed before `Finished` was first set. A later failure keeps the last value. |
 
 ### PodScheduled
 
-Mirrors the backing Pod's `PodScheduled` condition, so you can see why a Sandbox is not scheduled without reading the Pod. It is absent when the Pod is confirmed absent or not owned by the Sandbox. A failed Pod lookup does not remove it, see `PodSchedulingUnknown`.
+Mirrors the backing Pod's `PodScheduled` condition, so you can see why a Sandbox is not scheduled without reading the Pod. It is never removed: while the Sandbox has no Pod of its own, it is `False` with reason `PodAbsent`.
 
-The status, reason and message are copied from the Pod unless an unscheduled Pod is terminating, so reasons set by the scheduler (such as `Unschedulable` or `SchedulingGated`) pass through unchanged. The controller adds three reasons of its own:
+The status, reason and message are copied from the Pod unless an unscheduled Pod is terminating, so reasons set by the scheduler (such as `Unschedulable` or `SchedulingGated`) pass through unchanged. The controller adds reasons of its own:
 
 | Status | Reason | Meaning |
 | --- | --- | --- |
 | `True` | `PodScheduled` | The Pod is scheduled to a node. Used when the Pod condition has no reason. |
 | `False` | `PodTerminating` | An unscheduled Pod is terminating (`deletionTimestamp` is set). Scheduled Pods keep `True`. |
 | `False` or `Unknown` | `PodSchedulingUnknown` | The Pod has not reported a `PodScheduled` condition yet, the Pod condition is not `True` and has no reason, or the Pod state could not be read. |
+| `False` | `PodAbsent` | The Sandbox has no Pod, for example before the Pod is created, while a failed Pod is replaced, or while the Sandbox is suspended. While the Sandbox is suspended, a Pod with its name that it does not own counts as absent. |
+| `False` | `SandboxExpired` | `spec.shutdownTime` was reached. The controller deletes the Pod and stops updating this condition. |

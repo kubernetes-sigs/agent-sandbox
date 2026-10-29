@@ -111,8 +111,9 @@ const (
 	// Unschedulable, SchedulingGated) without reading the Pod. The Pod
 	// condition's status, reason and message are copied through verbatim,
 	// except when an unscheduled Pod is terminating (Status is False with
-	// reason PodTerminating); the condition is absent while the Sandbox has
-	// no backing Pod.
+	// reason PodTerminating). The condition is never removed: while the
+	// Sandbox has no backing Pod it reports False with reason PodAbsent, and
+	// once the Sandbox has expired, False with reason SandboxExpired.
 	SandboxConditionPodScheduled ConditionType = "PodScheduled"
 	// SandboxReasonPodScheduled indicates the backing Pod has been scheduled
 	// to a node. Used when the Pod's PodScheduled condition carries no reason
@@ -126,19 +127,35 @@ const (
 	// timestamp. Ready keeps it even after the Pod reaches Failed or Succeeded,
 	// which Finished reports. With failedPodPolicy Recreate, the controller
 	// replaces a Failed Pod instead, so Ready is DependenciesNotReady and
-	// Finished is absent.
+	// Finished is False/NotFinished.
 	SandboxReasonPodTerminating = "PodTerminating"
+	// SandboxReasonPodAbsent indicates the PodScheduled condition is False because
+	// the Sandbox has no backing Pod, for example before the Pod is created, while
+	// a failed Pod is replaced, or while the Sandbox is suspended. While the Sandbox
+	// is suspended, a Pod with its name that it does not own counts as absent.
+	SandboxReasonPodAbsent = "PodAbsent"
 
-	// SandboxConditionFinished reports that the backing Pod reached a terminal phase.
-	// It is set (Status True) only after the Pod has Succeeded or Failed, with the reason
-	// recording which; it is absent while the Pod is still running or does not exist.
+	// SandboxConditionFinished reports whether the backing Pod reached a terminal phase.
+	// Status is True once the Pod has Succeeded or Failed, with the reason recording
+	// which. The condition is never removed. It is False with reason NotFinished while
+	// the Pod has not finished or does not exist, and Unknown with reason
+	// PodStateUnknown if the Pod cannot be read before the condition is first set.
+	// It keeps its last value while the Sandbox is suspended, while its Pod is
+	// terminating, and when a later Pod read fails.
 	SandboxConditionFinished ConditionType = "Finished"
 	// SandboxReasonPodSucceeded indicates the backing Pod completed successfully.
 	SandboxReasonPodSucceeded = "PodSucceeded"
 	// SandboxReasonPodFailed indicates the backing Pod completed unsuccessfully.
 	SandboxReasonPodFailed = "PodFailed"
+	// SandboxReasonNotFinished indicates the Finished condition is False because the
+	// Sandbox has no backing Pod or its Pod has not reached a terminal phase.
+	SandboxReasonNotFinished = "NotFinished"
+	// SandboxReasonPodStateUnknown indicates the Finished condition is Unknown because
+	// reconciling the Pod failed before the condition was first set, so its phase
+	// cannot be determined.
+	SandboxReasonPodStateUnknown = "PodStateUnknown"
 
-	// SandboxReasonExpired is a Ready=False reason: the Sandbox reached its shutdownTime.
+	// SandboxReasonExpired is a Ready=False and PodScheduled=False reason: the Sandbox reached its shutdownTime.
 	// Teardown of its underlying resources may still be pending (see Lifecycle).
 	SandboxReasonExpired = "SandboxExpired"
 

@@ -2,7 +2,7 @@
 
 Run [OpenCode](https://opencode.ai/), an open-source AI coding agent, inside a `Sandbox` pod. The example bakes the official `opencode-ai` CLI into a container image and runs prompts non-interactively with `opencode run`. Two paths share the same image:
 
-1. **kubectl path** — a plain `Sandbox`; drive it with `kubectl exec` (or attach to the OpenCode TUI). Needs only the core controller.
+1. **kubectl path** — a plain `Sandbox`; drive it with `kubectl exec` (one-shot `opencode run` or the interactive TUI). Needs only the core controller.
 2. **SDK path** — a `SandboxTemplate` + `SandboxWarmPool`; drive it from Python with the [`k8s-agent-sandbox`](../../clients/python/agentic-sandbox-client/README.md) SDK. Needs the extension controllers and the sandbox-router.
 
 By default OpenCode uses its free [OpenCode Zen](https://opencode.ai/docs/zen/) model, so no API key is required.
@@ -46,21 +46,23 @@ Build and load the image, then apply the Sandbox:
 ```bash
 docker build -t opencode-sandbox:v1 .
 kind load docker-image opencode-sandbox:v1 --name "${KIND_CLUSTER_NAME:-agent-sandbox}"  # kind only
-kubectl apply -f sandbox.yaml
-kubectl wait --for=condition=Ready pod/opencode-sandbox --timeout=300s
+kubectl -n "${SANDBOX_NAMESPACE:-default}" apply -f sandbox.yaml
+kubectl -n "${SANDBOX_NAMESPACE:-default}" wait --for=condition=Ready pod/opencode-sandbox --timeout=300s
 ```
+
+The commands assume the current kubectl context points at the cluster you loaded the image into. On kind with a custom cluster name, add `--context "kind-${KIND_CLUSTER_NAME:-agent-sandbox}"` to every `kubectl` command below.
 
 Run a prompt non-interactively (the `Sandbox` CR creates a pod with the same name):
 
 ```bash
-kubectl exec pod/opencode-sandbox -- \
+kubectl -n "${SANDBOX_NAMESPACE:-default}" exec pod/opencode-sandbox -- \
   opencode run "Compute 1+1 and reply with only the final number."
 ```
 
 Or start the interactive OpenCode TUI:
 
 ```bash
-kubectl exec -it pod/opencode-sandbox -- opencode
+kubectl -n "${SANDBOX_NAMESPACE:-default}" exec -it pod/opencode-sandbox -- opencode
 ```
 
 **Non-kind clusters:** push `opencode-sandbox:v1` to a registry you control, then edit `image:` in `sandbox.yaml` (and `template.yaml` for path 2) before applying.
@@ -72,7 +74,9 @@ kubectl exec -it pod/opencode-sandbox -- opencode
 ./run-test-kind.sh
 
 # Claim a warm sandbox and run one opencode turn
-SANDBOX_KUBE_CONTEXT=kind-agent-sandbox python3 run_opencode.py
+SANDBOX_KUBE_CONTEXT="kind-${KIND_CLUSTER_NAME:-agent-sandbox}" \
+SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-default}" \
+python3 run_opencode.py
 ```
 
 Expected tail of the output:
@@ -86,18 +90,20 @@ SUCCESS: opencode run completed inside the sandbox.
 
 ## Cleanup
 
+Use the same namespace the resources were deployed to, and add the `--context` flag on kind as noted above:
+
 ```bash
 # Path 1
-kubectl delete -f sandbox.yaml
-kubectl delete pvc -l sandbox=opencode-sandbox --ignore-not-found
+kubectl -n "${SANDBOX_NAMESPACE:-default}" delete -f sandbox.yaml
+kubectl -n "${SANDBOX_NAMESPACE:-default}" delete pvc -l sandbox=opencode-sandbox --ignore-not-found
 
 # Path 2 (run_opencode.py terminates its own claim; clean up stragglers by name)
-kubectl delete -f warmpool.yaml -f template.yaml
-kubectl get sandboxclaim                 # list any remaining claims
-# kubectl delete sandboxclaim <name>     # delete stragglers individually
+kubectl -n "${SANDBOX_NAMESPACE:-default}" delete -f warmpool.yaml -f template.yaml
+kubectl -n "${SANDBOX_NAMESPACE:-default}" get sandboxclaim                 # list any remaining claims
+# kubectl -n "${SANDBOX_NAMESPACE:-default}" delete sandboxclaim <name>     # delete stragglers individually
 
 # Optional Secret
-kubectl delete secret opencode-api-keys --ignore-not-found
+kubectl -n "${SANDBOX_NAMESPACE:-default}" delete secret opencode-api-keys --ignore-not-found
 ```
 
 ## Configuration

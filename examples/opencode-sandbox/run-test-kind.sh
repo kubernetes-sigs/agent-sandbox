@@ -39,8 +39,15 @@ echo "Applying template and warmpool..."
 # changes do not bump the pool's generation, so neither drift is visible to a
 # status-based wait. Deleting by the pool's own selector only touches
 # unclaimed warm members (claiming strips the label), never claimed sandboxes.
-pool_selector="$("${KUBECTL[@]}" -n "${NAMESPACE}" get sandboxwarmpool opencode-pool \
-  -o jsonpath='{.status.selector}' 2>/dev/null || true)"
+# A failing read is fatal: silently skipping the delete could leave a stale
+# member that the readiness check then passes on the previous image.
+if ! pool_selector="$("${KUBECTL[@]}" -n "${NAMESPACE}" get sandboxwarmpool opencode-pool \
+  -o jsonpath='{.status.selector}')"; then
+  echo "Failed to read sandboxwarmpool/opencode-pool in namespace '${NAMESPACE}'." >&2
+  exit 1
+fi
+# An empty selector is normal on a first deploy: the controller has not
+# populated status yet, and no warm member exists to be stale.
 if [[ -n "${pool_selector}" ]]; then
   echo "Recreating warm sandboxes from the current template and image..."
   "${KUBECTL[@]}" -n "${NAMESPACE}" delete sandbox -l "${pool_selector}" --ignore-not-found

@@ -537,6 +537,16 @@ func (s *ProcessServer) waitExecution(ctx context.Context, run unaryExecution, t
 	var pendingKill chan struct{}
 	var cleanupDone, drainDone <-chan time.Time
 	var cleanupTimer, drainTimer *time.Timer
+	var drainErr error
+	startCleanup := func() {
+		ctxDone, timeExpired = nil, nil
+		if cleanupTimer != nil {
+			return
+		}
+		pendingKill = s.terminateExecution(run.cmd)
+		cleanupTimer = time.NewTimer(executionCleanupTimeout)
+		cleanupDone = cleanupTimer.C
+	}
 	defer func() {
 		if cleanupTimer != nil {
 			cleanupTimer.Stop()
@@ -559,23 +569,23 @@ func (s *ProcessServer) waitExecution(ctx context.Context, run unaryExecution, t
 			pendingErr = nil
 		case <-pendingKill:
 			pendingKill = nil
+			if drainErr != nil {
+				run.stdout.close()
+				run.stderr.close()
+			}
 		case <-ctxDone:
 			ctxDone, timeExpired = nil, nil
 			if run.finished(waitDone) {
 				continue
 			}
-			pendingKill = s.terminateExecution(run.cmd)
-			cleanupTimer = time.NewTimer(executionCleanupTimeout)
-			cleanupDone = cleanupTimer.C
+			startCleanup()
 		case <-timeExpired:
 			ctxDone, timeExpired = nil, nil
 			if run.finished(waitDone) {
 				continue
 			}
 			limited = true
-			pendingKill = s.terminateExecution(run.cmd)
-			cleanupTimer = time.NewTimer(executionCleanupTimeout)
-			cleanupDone = cleanupTimer.C
+			startCleanup()
 		case <-cleanupDone:
 			if run.finished(waitDone) && (pendingKill == nil || channelClosed(pendingKill)) {
 				cleanupDone = nil
@@ -590,10 +600,15 @@ func (s *ProcessServer) waitExecution(ctx context.Context, run unaryExecution, t
 				drainDone = nil
 				continue
 			}
-			if err := ctx.Err(); err != nil {
-				return nil, false, status.FromContextError(err).Err()
+			// A failed drain still owns the group. Finish its termination
+			// attempt before closing readers and returning the drain error.
+			drainDone = nil
+			drainErr = status.Error(codes.Internal, "command output pipes did not finish draining")
+			startCleanup()
+			if pendingKill == nil {
+				run.stdout.close()
+				run.stderr.close()
 			}
-			return nil, false, status.Error(codes.Internal, "command output pipes did not finish draining")
 		}
 		if pendingOut == nil && pendingErr == nil && drainTimer != nil {
 			drainTimer.Stop()
@@ -602,6 +617,9 @@ func (s *ProcessServer) waitExecution(ctx context.Context, run unaryExecution, t
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, false, status.FromContextError(err).Err()
+	}
+	if drainErr != nil {
+		return nil, false, drainErr
 	}
 	if run.stdout.err != nil {
 		return nil, false, status.Errorf(codes.Internal, "failed to collect stdout: %v", run.stdout.err)

@@ -356,3 +356,67 @@ func TestProcessGroupCancellationAfterLeaderExit(t *testing.T) {
 		})
 	}
 }
+
+func TestExecuteDrainTimeoutTerminatesProcessGroup(t *testing.T) {
+	skipIfGVisor(t)
+	for _, rpc := range []string{"Execute", "ExecuteWithLimits"} {
+		for _, stream := range []string{"stdout", "stderr"} {
+			t.Run(rpc+"/"+stream, func(t *testing.T) {
+				t.Parallel()
+				root := t.TempDir()
+				srv, err := New(Options{RootDir: root, ExecutionPolicy: ExecutionPolicy{MaxTimeLimit: 20 * time.Second}})
+				require.NoError(t, err)
+				g := grpc.NewServer()
+				srv.RegisterGRPC(g)
+				client := connectProcessClient(t, g)
+				pidFile := filepath.Join(root, "child.pid")
+				t.Cleanup(func() {
+					data, err := os.ReadFile(pidFile)
+					if err != nil {
+						return
+					}
+					pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+					if err != nil {
+						return
+					}
+					p, err := os.FindProcess(pid)
+					if err == nil {
+						_ = p.Kill()
+					}
+				})
+				command := "sleep 30 2>/dev/null & echo $! > child.pid; exit 0"
+				if stream == "stderr" {
+					command = "sleep 30 >/dev/null & echo $! > child.pid; exit 0"
+				}
+				config := &processv1.ProcessConfig{Command: []string{"sh", "-c", command}}
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				defer cancel()
+				if rpc == "Execute" {
+					resp, err := client.Execute(ctx, &processv1.ExecuteRequest{Config: config})
+					require.Nil(t, resp)
+					require.Equal(t, codes.Internal, status.Code(err))
+				} else {
+					resp, err := client.ExecuteWithLimits(ctx, &processv1.ExecuteWithLimitsRequest{Config: config})
+					require.Nil(t, resp)
+					require.Equal(t, codes.Internal, status.Code(err))
+				}
+				require.NoError(t, ctx.Err(), "drain failure must complete within the RPC budget")
+				data, err := os.ReadFile(pidFile)
+				require.NoError(t, err)
+				pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+				require.NoError(t, err)
+				require.Eventually(t, func() bool {
+					if runtime.GOOS == "linux" {
+						return isProcessDead(pid)
+					}
+					return syscall.Kill(pid, 0) == syscall.ESRCH
+				}, 2*time.Second, 10*time.Millisecond, "drain failure left a same-group child running")
+				resp, err := client.ExecuteWithLimits(testCtx(t), &processv1.ExecuteWithLimitsRequest{
+					Config: &processv1.ProcessConfig{Command: []string{"true"}},
+				})
+				require.NoError(t, err)
+				require.Zero(t, resp.GetExitCode())
+			})
+		}
+	}
+}

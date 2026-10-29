@@ -143,6 +143,9 @@ cancellation or deadline still returns its gRPC error without a result.
 Check `termination_reason` alongside `exit_code`: descendant output collection
 can reach the time limit after the direct child has exited successfully.
 
+If output draining times out, the daemon attempts bounded termination of the
+remaining process group before reporting the failure.
+
 Both unary RPCs resolve each limit independently: request value, deployment
 default, deployment maximum, then unlimited if none is configured. A request
 above its deployment maximum returns `INVALID_ARGUMENT` before starting the

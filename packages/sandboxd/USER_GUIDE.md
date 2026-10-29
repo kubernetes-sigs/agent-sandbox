@@ -140,6 +140,8 @@ the response reports `EXECUTE_TERMINATION_REASON_TIME_LIMIT_EXCEEDED`, the actua
 exit code, and retained output. `elapsed_duration` includes cleanup, so it can
 exceed `time_limit`. Incomplete cleanup returns `INTERNAL`. An earlier RPC
 cancellation or deadline still returns its gRPC error without a result.
+Check `termination_reason` alongside `exit_code`: descendant output collection
+can reach the time limit after the direct child has exited successfully.
 
 Both unary RPCs resolve each limit independently: request value, deployment
 default, deployment maximum, then unlimited if none is configured. A request

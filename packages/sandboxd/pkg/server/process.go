@@ -603,8 +603,11 @@ func (s *ProcessServer) waitExecution(ctx context.Context, run unaryExecution, t
 	if err := ctx.Err(); err != nil {
 		return nil, false, status.FromContextError(err).Err()
 	}
-	if run.stdout.err != nil || run.stderr.err != nil {
-		return nil, false, status.Error(codes.Internal, "failed to collect command output")
+	if run.stdout.err != nil {
+		return nil, false, status.Errorf(codes.Internal, "failed to collect stdout: %v", run.stdout.err)
+	}
+	if run.stderr.err != nil {
+		return nil, false, status.Errorf(codes.Internal, "failed to collect stderr: %v", run.stderr.err)
 	}
 	return runErr, limited, nil
 }
@@ -733,10 +736,8 @@ func (s *ProcessServer) killProcessGroupOnContextDone(ctx context.Context, cmd *
 }
 
 func (s *ProcessServer) killProcessTree(ctx context.Context, cmd *exec.Cmd) {
-	// Wait may already have reaped the child while its output pipes drain.
-	if errors.Is(cmd.Process.Signal(syscall.Signal(0)), os.ErrProcessDone) {
-		return
-	}
+	// The group can outlive its leader and keep output pipes open. Reaping
+	// the leader must not suppress termination of the remaining group.
 	pid := cmd.Process.Pid
 	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 		s.log.Error(err, "failed to kill process group", "pgid", pid)

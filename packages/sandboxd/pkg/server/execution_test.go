@@ -16,13 +16,13 @@ package server
 
 import (
 	"context"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -30,9 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
-	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 
@@ -108,15 +106,8 @@ func TestExecuteWithLimitsOldService(t *testing.T) {
 	}
 	grpcServer := grpc.NewServer()
 	grpcServer.RegisterService(&desc, NewProcessServer(t.TempDir(), nil, 0, logr.Discard()))
-	lis := bufconn.Listen(1024 * 1024)
-	go func() { _ = grpcServer.Serve(lis) }()
-	conn, err := grpc.NewClient("passthrough:///old-runtime",
-		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return lis.DialContext(ctx) }),
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = conn.Close(); grpcServer.Stop(); _ = lis.Close() })
-	client := processv1.NewProcessServiceClient(conn)
-	_, err = client.ExecuteWithLimits(testCtx(t), &processv1.ExecuteWithLimitsRequest{
+	client := connectProcessClient(t, grpcServer)
+	_, err := client.ExecuteWithLimits(testCtx(t), &processv1.ExecuteWithLimitsRequest{
 		Config:           &processv1.ProcessConfig{Command: []string{"sh", "-c", "touch should-not-exist"}},
 		StdoutLimitBytes: proto.Uint64(4),
 	})
@@ -126,6 +117,19 @@ func TestExecuteWithLimitsOldService(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Zero(t, resp.GetExitCode(), "unsupported method must not execute or fall back")
+}
+
+func TestExecuteWithLimitsTimeoutAfterLeaderExit(t *testing.T) {
+	skipIfGVisor(t)
+	client := newProcessClient(t, t.TempDir())
+	resp, err := client.ExecuteWithLimits(testCtx(t), &processv1.ExecuteWithLimitsRequest{
+		Config:    &processv1.ProcessConfig{Command: []string{"sh", "-c", "sleep 30 & printf started; exit 0"}},
+		TimeLimit: durationpb.New(200 * time.Millisecond),
+	})
+	require.NoError(t, err)
+	require.Zero(t, resp.GetExitCode(), "preserve the actual direct-child exit status")
+	require.Equal(t, "started", string(resp.GetStdout()))
+	require.Equal(t, processv1.ExecuteTerminationReason_EXECUTE_TERMINATION_REASON_TIME_LIMIT_EXCEEDED, resp.GetTerminationReason())
 }
 
 func TestExecuteWithLimitsTimeout(t *testing.T) {
@@ -278,4 +282,77 @@ func TestExecuteWithLimitsIncompletePipeCleanup(t *testing.T) {
 	})
 	require.Equal(t, codes.Internal, status.Code(err), "unclosed output pipes must not look like complete cleanup")
 	require.NoError(t, ctx.Err(), "cleanup must finish before the independent RPC deadline")
+}
+
+func TestProcessGroupCancellationAfterLeaderExit(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires /proc to observe parent reaping")
+	}
+	skipIfGVisor(t)
+	for _, rpc := range []string{"Start", "Execute", "ExecuteWithLimits"} {
+		t.Run(rpc, func(t *testing.T) {
+			root := t.TempDir()
+			client := newProcessClient(t, root)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var childPID int
+			t.Cleanup(func() {
+				if childPID > 0 {
+					p, err := os.FindProcess(childPID)
+					if err == nil {
+						_ = p.Kill()
+					}
+				}
+			})
+			config := &processv1.ProcessConfig{Command: []string{"sh", "-c", "sleep 30 & printf '%s %s' $$ $! > pids; exit 0"}}
+			result := make(chan error, 1)
+			switch rpc {
+			case "Start":
+				stream, err := client.Start(ctx, &processv1.StartRequest{Config: config})
+				require.NoError(t, err)
+				_, err = stream.Recv()
+				require.NoError(t, err)
+				go func() {
+					for {
+						if _, err := stream.Recv(); err != nil {
+							result <- err
+							return
+						}
+					}
+				}()
+			case "Execute":
+				go func() { _, err := client.Execute(ctx, &processv1.ExecuteRequest{Config: config}); result <- err }()
+			case "ExecuteWithLimits":
+				go func() {
+					_, err := client.ExecuteWithLimits(ctx, &processv1.ExecuteWithLimitsRequest{Config: config})
+					result <- err
+				}()
+			}
+			require.Eventually(t, func() bool {
+				data, err := os.ReadFile(filepath.Join(root, "pids"))
+				if err != nil {
+					return false
+				}
+				fields := strings.Fields(string(data))
+				if len(fields) != 2 {
+					return false
+				}
+				parentPID, err := strconv.Atoi(fields[0])
+				if err != nil {
+					return false
+				}
+				childPID, err = strconv.Atoi(fields[1])
+				return err == nil && syscall.Kill(parentPID, 0) == syscall.ESRCH
+			}, 2*time.Second, 10*time.Millisecond, "parent was not reaped before cancellation")
+			cancel()
+			select {
+			case err := <-result:
+				require.Equal(t, codes.Canceled, status.Code(err))
+			case <-time.After(2 * time.Second):
+				t.Fatal("cancelled RPC did not end")
+			}
+			require.Eventually(t, func() bool { return isProcessDead(childPID) }, 2*time.Second, 10*time.Millisecond,
+				"surviving same-group child must be terminated after its leader exits")
+		})
+	}
 }

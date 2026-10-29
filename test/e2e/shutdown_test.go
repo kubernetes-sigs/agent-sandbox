@@ -103,6 +103,13 @@ func TestSandboxShutdownTime(t *testing.T) {
 					Message:            "Sandbox is not suspended",
 				},
 				{
+					Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: 2,
+					Reason:             sandboxv1beta1.SandboxReasonExpired,
+					Message:            "Sandbox has expired",
+				},
+				{
 					Type:               string(sandboxv1beta1.SandboxConditionReady),
 					Status:             metav1.ConditionFalse,
 					ObservedGeneration: 2,

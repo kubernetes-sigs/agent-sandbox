@@ -20,12 +20,14 @@
 //
 // Both listeners bind to --listen-host (default 0.0.0.0), so the daemon is
 // reachable through the Pod IP, a Service, or the sandbox-router, which proxies
-// both surfaces like any other in-pod service. Containment comes from pod
-// isolation and NetworkPolicy, not loopback binding; pass
-// --listen-host=127.0.0.1 to restrict to loopback for local development, and
-// --auth-token-sha256 (or --auth-token-file) to require a bearer token from
-// clients. The sandbox-router strips Authorization before forwarding, so
-// token-protected daemons must be reached directly.
+// both surfaces like any other in-pod service. gRPC callers going through the
+// router must send x-sandbox-id and x-sandbox-port on every RPC (see "Native
+// gRPC" in sandbox-router/README.md). Containment comes from pod isolation and
+// NetworkPolicy, not loopback binding; pass --listen-host=127.0.0.1 to restrict
+// to loopback for local development, and --auth-token-sha256 (or
+// --auth-token-file) to require a bearer token from clients. The sandbox-router
+// strips Authorization before forwarding, so token-protected daemons must be
+// reached directly.
 package main
 
 import (

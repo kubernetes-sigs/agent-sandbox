@@ -13,9 +13,9 @@
 # limitations under the License.
 
 # Path 1 (kubectl): a plain Sandbox. Run prompts with:
-#   kubectl exec sandbox/opencode-sandbox -- opencode run "your prompt"
-# Attach to the OpenCode TUI with:
-#   kubectl attach -it pod/opencode-sandbox
+#   kubectl exec pod/opencode-sandbox -- opencode run "your prompt"
+# Start the interactive OpenCode TUI with:
+#   kubectl exec -it pod/opencode-sandbox -- opencode
 # All Secret keys are optional: without the opencode-api-keys Secret,
 # OpenCode uses its free default model.
 apiVersion: agents.x-k8s.io/v1beta1
@@ -36,7 +36,7 @@ spec:
         - name: opencode
           image: opencode-sandbox:v1
           imagePullPolicy: IfNotPresent
-          # Keeps a shell alive so `kubectl attach` can open the TUI.
+          # Keep stdin and a TTY so `kubectl exec -it` can run the OpenCode TUI.
           stdin: true
           tty: true
           env:
@@ -51,12 +51,6 @@ spec:
                 secretKeyRef:
                   name: opencode-api-keys
                   key: OPENCODE_API_KEY
-                  optional: true
-            - name: OPENCODE_MODEL
-              valueFrom:
-                secretKeyRef:
-                  name: opencode-api-keys
-                  key: OPENCODE_MODEL
                   optional: true
           resources:
             requests:

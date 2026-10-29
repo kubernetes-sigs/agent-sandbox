@@ -7,7 +7,7 @@ Run [OpenCode](https://opencode.ai/), an open-source AI coding agent, inside a `
 
 By default OpenCode uses its free [OpenCode Zen](https://opencode.ai/docs/zen/) model, so no API key is required.
 
-> **Warning:** The free model is offered for a limited time. Do not send private code, credentials, or other confidential data to it; review the provider's data-use terms first. Set `OPENCODE_MODEL` (in the `opencode-api-keys` Secret, or in the driver's environment for the SDK path) to use an authenticated model instead.
+> **Warning:** The free model is offered for a limited time. Do not send private code, credentials, or other confidential data to it; review the provider's data-use terms first. To use a different model, pass `--model <provider/model>` to `opencode run` (kubectl path) or export `OPENCODE_MODEL` on your machine before running `run_opencode.py` (SDK path).
 
 ## Prerequisites
 
@@ -30,13 +30,13 @@ By default OpenCode uses its free [OpenCode Zen](https://opencode.ai/docs/zen/) 
 
 ## Optional: create the API key Secret
 
-Skip this to use the free default model. Otherwise create the Secret once (use `--from-file` so keys stay out of shell history; include only the keys you need):
+Skip this to use the free default model. Otherwise create the Secret once, in the same namespace where you deploy the resources (`SANDBOX_NAMESPACE` for `run-test-kind.sh`; `default` here). Use `--from-file` so keys stay out of shell history, and include only the keys you need:
 
 ```bash
-kubectl -n default create secret generic opencode-api-keys \
+kubectl -n "${SANDBOX_NAMESPACE:-default}" create secret generic opencode-api-keys \
   --from-file=ANTHROPIC_API_KEY=/path/to/anthropic-api-key
-# Optional OpenCode Zen overrides:
-#   --from-literal=OPENCODE_API_KEY=... --from-literal=OPENCODE_MODEL=anthropic/claude-...
+# Optional OpenCode Zen key:
+#   --from-literal=OPENCODE_API_KEY=...
 ```
 
 ## Path 1: kubectl
@@ -50,17 +50,17 @@ kubectl apply -f sandbox.yaml
 kubectl wait --for=condition=Ready pod/opencode-sandbox --timeout=300s
 ```
 
-Run a prompt non-interactively:
+Run a prompt non-interactively (the `Sandbox` CR creates a pod with the same name):
 
 ```bash
-kubectl exec sandbox/opencode-sandbox -- \
+kubectl exec pod/opencode-sandbox -- \
   opencode run "Compute 1+1 and reply with only the final number."
 ```
 
-Or attach to the OpenCode TUI (detach with `Ctrl+P`, `Ctrl+Q`):
+Or start the interactive OpenCode TUI:
 
 ```bash
-kubectl attach -it pod/opencode-sandbox
+kubectl exec -it pod/opencode-sandbox -- opencode
 ```
 
 **Non-kind clusters:** push `opencode-sandbox:v1` to a registry you control, then edit `image:` in `sandbox.yaml` (and `template.yaml` for path 2) before applying.
@@ -82,7 +82,7 @@ Expected tail of the output:
 SUCCESS: opencode run completed inside the sandbox.
 ```
 
-`run_opencode.py` honors `SANDBOX_NAMESPACE` (default `default`), `SANDBOX_WARMPOOL_NAME` (default `opencode-pool`), `SANDBOX_KUBE_CONTEXT` (unset uses the current context), and `OPENCODE_MODEL` (default `opencode/deepseek-v4-flash-free`, passed as `opencode run --model`).
+`run_opencode.py` honors `SANDBOX_NAMESPACE` (default `default`), `SANDBOX_WARMPOOL_NAME` (default `opencode-pool`), `SANDBOX_KUBE_CONTEXT` (unset uses the current context), and `OPENCODE_MODEL` (default `opencode/deepseek-v4.1-flash-free`). All four are read from the client host environment; `OPENCODE_MODEL` is passed as `opencode run --model`.
 
 ## Cleanup
 
@@ -102,7 +102,7 @@ kubectl delete secret opencode-api-keys --ignore-not-found
 
 ## Configuration
 
-- **Different provider/model:** put `OPENCODE_MODEL` (and the matching API key) into the `opencode-api-keys` Secret, or export `OPENCODE_MODEL` for `run_opencode.py`. See [OpenCode Providers](https://opencode.ai/docs/providers) for per-provider environment variables.
+- **Different provider/model:** the OpenCode CLI selects models via its `--model` flag or config file, not via a pod environment variable. Pass `--model <provider/model>` to `opencode run` (kubectl path), or export `OPENCODE_MODEL` on the client host for `run_opencode.py`. Put the matching API key into the `opencode-api-keys` Secret. See [OpenCode Providers](https://opencode.ai/docs/providers) for per-provider environment variables and [OpenCode Models](https://opencode.ai/docs/models/) for model selection.
 - **PVC sizes:** edit `volumeClaimTemplates` in `sandbox.yaml` / `template.yaml`.
 - **Newer OpenCode:** bump the version in `Dockerfile` (`opencode-ai@<new-version>`) and rebuild.
 

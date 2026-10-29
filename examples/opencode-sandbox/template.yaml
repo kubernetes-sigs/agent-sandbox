@@ -59,12 +59,6 @@ spec:
               name: opencode-api-keys
               key: OPENCODE_API_KEY
               optional: true
-        - name: OPENCODE_MODEL
-          valueFrom:
-            secretKeyRef:
-              name: opencode-api-keys
-              key: OPENCODE_MODEL
-              optional: true
         resources:
           requests:
             cpu: "500m"

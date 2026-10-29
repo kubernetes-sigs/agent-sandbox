@@ -16,9 +16,10 @@
 
 Claims a sandbox from the opencode-pool warm pool and runs one
 non-interactive `opencode run` turn with a simple arithmetic prompt. The
-default model is the free OpenCode Zen offering; set OPENCODE_MODEL (and the
-matching API key in the opencode-api-keys Secret) to use an authenticated
-model instead. Do not send confidential code to the free model.
+default model is the free OpenCode Zen offering. To use a different model,
+export OPENCODE_MODEL on the client host before running this script; it is
+passed to `opencode run --model`. Do not send confidential code to the free
+model.
 """
 
 import os
@@ -26,7 +27,6 @@ import shlex
 import sys
 
 from k8s_agent_sandbox import SandboxClient
-from kubernetes import client as k8s_client
 from kubernetes import config as k8s_config
 
 NAMESPACE = os.getenv("SANDBOX_NAMESPACE", "default")
@@ -34,8 +34,9 @@ WARMPOOL = os.getenv("SANDBOX_WARMPOOL_NAME", "opencode-pool")
 # Optional kubeconfig context, e.g. "kind-agent-sandbox". Keep this in sync
 # with the cluster run-test-kind.sh deploys to; unset uses the current context.
 KUBE_CONTEXT = os.getenv("SANDBOX_KUBE_CONTEXT", "")
-# Model ID in provider/model format for `opencode run --model`.
-OPENCODE_MODEL = os.getenv("OPENCODE_MODEL", "opencode/deepseek-v4-flash-free")
+# Model ID in provider/model format for `opencode run --model`. Read from the
+# client host environment; the OpenCode CLI itself does not read this variable.
+OPENCODE_MODEL = os.getenv("OPENCODE_MODEL", "opencode/deepseek-v4.1-flash-free")
 # LLM turns are slow; keep under the sandbox-router --proxy-timeout (180s).
 COMMAND_TIMEOUT = 120.0
 
@@ -44,9 +45,8 @@ def main() -> None:
     if KUBE_CONTEXT:
         # Pin the control plane (claims) and the data plane (the tunnel's
         # kubectl port-forward reuses this api_client) to one cluster.
-        kube_config = k8s_config.load_kube_config(context=KUBE_CONTEXT)
         client = SandboxClient(
-            api_client=k8s_client.ApiClient(configuration=kube_config)
+            api_client=k8s_config.new_client_from_config(context=KUBE_CONTEXT)
         )
     else:
         client = SandboxClient()

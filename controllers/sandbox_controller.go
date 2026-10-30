@@ -1596,6 +1596,11 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 			service.Spec.Ports = desiredPorts
 			needsUpdate = true
 		}
+		// A Service created before v1.0 still names its Sandbox as v1alpha1.
+		if refs, changed := utils.RefreshedOwnerReferences(service.OwnerReferences, sandbox.UID, sandboxv1beta1.GroupVersion.String()); changed {
+			service.OwnerReferences = refs
+			needsUpdate = true
+		}
 
 		if needsUpdate {
 			logger.Info("Reconciling owned service drift", "Service.Namespace", service.Namespace, "Service.Name", service.Name, "Sandbox.Namespace", sandbox.Namespace, "Sandbox.Name", sandbox.Name)
@@ -2188,6 +2193,11 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 		pod.Annotations[sandboxv1beta1.SandboxPropagatedAnnotationsAnnotation] = newAnnotationsStr
 		updated = true
 	}
+	// A Pod created before v1.0 still names its Sandbox as v1alpha1.
+	if refs, changed := utils.RefreshedOwnerReferences(pod.OwnerReferences, sandbox.UID, sandboxv1beta1.GroupVersion.String()); changed {
+		pod.OwnerReferences = refs
+		updated = true
+	}
 	return updated
 }
 
@@ -2234,7 +2244,14 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 				}
 
 			case resourceOwnedBySandbox:
-				// Already owned by this sandbox — no action needed.
+				// A PVC created before v1.0 still names its Sandbox as v1alpha1.
+				if refs, changed := utils.RefreshedOwnerReferences(pvc.OwnerReferences, sandbox.UID, sandboxv1beta1.GroupVersion.String()); changed {
+					patch := client.MergeFrom(pvc.DeepCopy())
+					pvc.OwnerReferences = refs
+					if err := r.Patch(ctx, pvc, patch); err != nil {
+						return fmt.Errorf("failed to refresh owner reference on PVC: %w", err)
+					}
+				}
 			}
 			continue
 		}

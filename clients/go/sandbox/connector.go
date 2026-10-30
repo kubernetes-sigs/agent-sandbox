@@ -179,6 +179,9 @@ func (c *connector) Connect(ctx context.Context) error {
 		mode = "gateway"
 	case *tunnelStrategy:
 		mode = "port-forward"
+		if s.routerREST {
+			mode = string(ConnectivityRouterPortForward)
+		}
 	case *podTunnelStrategy:
 		mode = "sandboxd-pod-tunnel"
 	case *inClusterStrategy:
@@ -222,6 +225,9 @@ func (c *connector) GRPCConn() (*grpc.ClientConn, error) {
 		// be published. Say so rather than report ErrNotReady forever.
 		if _, direct := c.strategy.(*DirectStrategy); direct {
 			return nil, fmt.Errorf("%s: %w: APIURL reaches only the sandboxd REST API, so Run needs port-forward or in-cluster connectivity", prefix, ErrUnsupportedByRuntime)
+		}
+		if ts, ok := c.strategy.(*tunnelStrategy); ok && ts.routerREST {
+			return nil, fmt.Errorf("%s: %w: router port-forward reaches only the sandbox HTTP server; the sandbox-router cannot carry gRPC, so Run needs pod port-forward or in-cluster connectivity", prefix, ErrUnsupportedByRuntime)
 		}
 		if c.lastError != nil {
 			return nil, fmt.Errorf("%s: %w: %w", prefix, ErrNotReady, c.lastError)

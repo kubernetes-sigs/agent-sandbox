@@ -50,6 +50,7 @@ def test_rows_and_summary(tmp_path: Path):
     _write(job, "hello-world__a", _result("hello-world", "hello-world__a", reward=1))
     _write(job, "regex-log__b", _result("regex-log", "regex-log__b", reward=0))
     _write(job, "broken__c", _result("broken", "broken__c", exc="AgentTimeoutError"))
+    (job / "result.json").write_text(json.dumps({"id": "job-level", "stats": {}}))   # skipped
     rows = report.load_rows(job)
     assert [r["outcome"] for r in rows] == ["error: AgentTimeoutError", "pass", "fail"]
     assert rows[1]["env_setup_s"] == 12.5 and rows[1]["agent_s"] == 60.0 and rows[1]["verifier_s"] is None

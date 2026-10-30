@@ -74,7 +74,10 @@ def load_rows(job_dir: Path) -> list[dict[str, Any]]:
     rows = []
     for path in sorted(job_dir.rglob("result.json")):
         try:
-            rows.append(summarize_trial(json.loads(path.read_text())))
+            result = json.loads(path.read_text())
+            if "trial_name" not in result:
+                continue          # the job-level result.json, not a trial
+            rows.append(summarize_trial(result))
         except (OSError, ValueError) as exc:
             rows.append({"task": path.parent.name, "trial": path.parent.name, "reward": None,
                          "outcome": f"unreadable result.json: {exc}", "env_setup_s": None,

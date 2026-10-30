@@ -15,6 +15,11 @@
 package server
 
 import (
+	"archive/tar"
+	"bufio"
+	"bytes"
+	"compress/flate"
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -188,6 +193,21 @@ func (s *RESTServer) typeQuery(w http.ResponseWriter, r *http.Request) (value st
 		return "", false
 	}
 	return value, true
+}
+
+// extractQuery reports whether the request carries "extract=tar". It writes a
+// 400 and returns ok=false for any other value.
+func (s *RESTServer) extractQuery(w http.ResponseWriter, r *http.Request) (extract, ok bool) {
+	query := r.URL.Query()
+	if !query.Has("extract") {
+		return false, true
+	}
+	if value := query.Get("extract"); value != "tar" {
+		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+			fmt.Sprintf("extract %q must be %q", value, "tar"))
+		return false, false
+	}
+	return true, true
 }
 
 // modeQuery reads the optional "mode" query parameter, returning def when it
@@ -390,8 +410,13 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 	}
 	isDirectory := putType == entryTypeDirectory
 
+	extract, ok := s.extractQuery(w, r)
+	if !ok {
+		return
+	}
+
 	defaultMode := os.FileMode(0o644)
-	if isDirectory {
+	if isDirectory || extract {
 		defaultMode = 0o755
 	}
 	mode, ok := s.modeQuery(w, r, defaultMode)
@@ -406,6 +431,16 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 
 	target, ok := s.resolvePath(w, r)
 	if !ok {
+		return
+	}
+
+	if extract {
+		if appendMode || putType != "" {
+			s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+				"extract cannot be used with append or type")
+			return
+		}
+		s.putArchive(w, r, target, mode)
 		return
 	}
 
@@ -459,19 +494,25 @@ func (s *RESTServer) putDirectory(w http.ResponseWriter, r *http.Request, target
 	}
 
 	if err := makeDirectory(target, mode, parents); err != nil {
-		switch {
-		case errors.Is(err, os.ErrNotExist):
-			s.writeError(w, http.StatusNotFound, "NOT_FOUND",
-				"parent directory does not exist; pass parents=true to create it")
-		case errors.Is(err, os.ErrExist):
-			s.writeError(w, http.StatusConflict, "CONFLICT", "path exists and is not a directory")
-		default:
-			s.writeFSError(w, err)
-		}
+		s.writeMakeDirectoryError(w, err)
 		return
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// writeMakeDirectoryError maps a makeDirectory failure to the status the spec
+// documents for it.
+func (s *RESTServer) writeMakeDirectoryError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		s.writeError(w, http.StatusNotFound, "NOT_FOUND",
+			"parent directory does not exist; pass parents=true to create it")
+	case errors.Is(err, os.ErrExist):
+		s.writeError(w, http.StatusConflict, "CONFLICT", "path exists and is not a directory")
+	default:
+		s.writeFSError(w, err)
+	}
 }
 
 // makeDirectory creates the directory target, and its missing parents when
@@ -609,6 +650,150 @@ func appendWrite(target string, src io.Reader, mode os.FileMode) (err error) {
 		return fmt.Errorf("failed to append file contents: %w", err)
 	}
 	return nil
+}
+
+var (
+	// errBadArchive marks an archive that cannot be extracted as sent.
+	errBadArchive = errors.New("invalid archive")
+	// errArchiveConflict marks an entry whose type clashes with what already
+	// exists at its path.
+	errArchiveConflict = errors.New("archive entry conflicts with an existing path")
+
+	gzipMagic = []byte{0x1f, 0x8b}
+)
+
+// putArchive handles PUT with extract=tar. It unpacks the request body, a tar
+// stream that may be gzip-compressed, into target and creates target first
+// when it is missing. Extraction is not atomic: an error leaves the entries
+// written so far in place.
+func (s *RESTServer) putArchive(w http.ResponseWriter, r *http.Request, target string, mode os.FileMode) {
+	if err := makeDirectory(target, mode, true); err != nil {
+		s.writeMakeDirectoryError(w, err)
+		return
+	}
+
+	body, cleanup, err := requestFileBody(r)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	defer cleanup()
+
+	if err := s.extractTar(body, target); err != nil {
+		s.writeExtractError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// extractTar writes the entries of the tar stream src below dir.
+func (s *RESTServer) extractTar(src io.Reader, dir string) error {
+	buffered := bufio.NewReader(src)
+	src = buffered
+	if magic, _ := buffered.Peek(len(gzipMagic)); bytes.Equal(magic, gzipMagic) {
+		gz, err := gzip.NewReader(buffered)
+		if err != nil {
+			return fmt.Errorf("reading archive: %w", err)
+		}
+		defer func() { _ = gz.Close() }()
+		src = gz
+	}
+
+	tr := tar.NewReader(src)
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("reading archive: %w", err)
+		}
+		if err := s.extractEntry(tr, hdr, dir); err != nil {
+			return err
+		}
+	}
+}
+
+// extractEntry writes one archive entry below dir. It supports regular files,
+// directories, and symlinks. It rejects hard links, which could alias a file
+// outside the sandbox root, and device and FIFO entries.
+func (s *RESTServer) extractEntry(body io.Reader, hdr *tar.Header, dir string) error {
+	if hdr.Typeflag == tar.TypeXGlobalHeader {
+		return nil // `git archive` writes one that carries the commit ID.
+	}
+	switch hdr.Typeflag {
+	case tar.TypeDir, tar.TypeReg, tar.TypeSymlink:
+	default:
+		return fmt.Errorf("%w: entry %q has unsupported type %q", errBadArchive, hdr.Name, hdr.Typeflag)
+	}
+	name := filepath.Clean(filepath.FromSlash(hdr.Name))
+	if name == "." {
+		return nil
+	}
+	if !filepath.IsLocal(name) {
+		return fmt.Errorf("%w: entry %q", pathutil.ErrPathEscapes, hdr.Name)
+	}
+
+	// Resolve only the parent, so an existing symlink at the entry's own path
+	// is replaced and never followed. Resolving the parent also stops an entry
+	// from writing through a symlink an earlier entry planted.
+	parent, err := pathutil.SanitizePath(s.rootDir, filepath.Join(dir, filepath.Dir(name)))
+	if err != nil {
+		return err
+	}
+	leaf := filepath.Join(parent, filepath.Base(name))
+
+	// A directory entry may only meet a directory, and any other entry only a
+	// non-directory. Lstat reports a symlink as a non-directory.
+	isDir := hdr.Typeflag == tar.TypeDir
+	if existing, err := os.Lstat(leaf); err == nil && existing.IsDir() != isDir {
+		return fmt.Errorf("%w: %q", errArchiveConflict, hdr.Name)
+	}
+
+	perm := hdr.FileInfo().Mode().Perm()
+	switch hdr.Typeflag {
+	case tar.TypeDir:
+		// Keep owner access so the entries below the directory can be written.
+		return makeDirectory(leaf, perm|0o700, true)
+	case tar.TypeReg:
+		return atomicWrite(leaf, body, perm)
+	default:
+		return replaceSymlink(leaf, hdr.Linkname)
+	}
+}
+
+// replaceSymlink makes link a symlink to target, replacing an existing file or
+// symlink and creating missing parent directories.
+func replaceSymlink(link, target string) error {
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		return fmt.Errorf("failed to create parent directory: %w", err)
+	}
+	if err := os.Remove(link); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("failed to replace symlink: %w", err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		return fmt.Errorf("failed to create symlink: %w", err)
+	}
+	return nil
+}
+
+// writeExtractError maps an extraction failure to the status the spec
+// documents for it.
+func (s *RESTServer) writeExtractError(w http.ResponseWriter, err error) {
+	var corrupt flate.CorruptInputError
+	switch {
+	case errors.Is(err, pathutil.ErrPathEscapes):
+		s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED",
+			"archive entry outside the destination directory is forbidden")
+	case errors.Is(err, errArchiveConflict), errors.Is(err, syscall.ENOTDIR):
+		s.writeError(w, http.StatusConflict, "CONFLICT",
+			"an archive entry conflicts with an existing file or directory")
+	case errors.Is(err, errBadArchive), errors.Is(err, tar.ErrHeader), errors.Is(err, io.ErrUnexpectedEOF),
+		errors.Is(err, gzip.ErrHeader), errors.Is(err, gzip.ErrChecksum), errors.As(err, &corrupt):
+		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+	default:
+		s.writeFSError(w, err)
+	}
 }
 
 func (s *RESTServer) handleDeleteFile(w http.ResponseWriter, r *http.Request) {

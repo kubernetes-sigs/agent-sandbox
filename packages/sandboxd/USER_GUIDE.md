@@ -162,7 +162,7 @@ iteration (Python).
 |---|---|---|
 | `GET` | `/v1/files/{path}` | File → raw bytes (`application/octet-stream`); directory → JSON `DirectoryListing`. Optional `type` query (`file` or `directory`, also on `HEAD`): `409` if the path is the other kind. `recursive=true` lists nested directories too, and `max_depth=N` limits how deep (entry names become paths relative to the listed directory). A recursive listing over 10000 entries fails with `400`. |
 | `HEAD` | `/v1/files/{path}` | Existence/metadata probe without transferring the body. |
-| `PUT` | `/v1/files/{path}` | Atomic write (temp file + rename), auto-creates parents. Optional `mode` query (`^0[0-7]{3}$`, default `0644`). `append=true` adds to the end of the file instead (not atomic). `type=directory` creates a directory instead (body ignored, `parents=true` also creates missing parents, default mode `0755`). Accepts raw bytes or `multipart/form-data` (`file` part). |
+| `PUT` | `/v1/files/{path}` | Atomic write (temp file + rename), auto-creates parents. Optional `mode` query (`^0[0-7]{3}$`, default `0644`). `append=true` adds to the end of the file instead (not atomic). `type=directory` creates a directory instead (body ignored, `parents=true` also creates missing parents, default mode `0755`). `extract=tar` unpacks a tar body, optionally gzipped, into the directory at the path (not atomic). Accepts raw bytes or `multipart/form-data` (`file` part). |
 | `DELETE` | `/v1/files/{path}` | Remove a file or directory; `recursive=true` for `rm -rf` behavior; `409` on a non-empty directory otherwise. |
 | `GET` | `/v1/health` | Readiness probe: `200 {"status":"ok"}` or `503` during shutdown. |
 | `GET` | `/v1/metadata` | Orchestrator-injected, non-sensitive environment variables (allowlisted by prefix, default `SANDBOX_`). |
@@ -190,6 +190,8 @@ appends, see below), but it does not impose an ordering across requests:
 - **Appends (`append=true`)** are written in place, not atomically: a read can
   see a partial append, and concurrent appends to one path can interleave. A
   retried append adds the body again.
+- **Archive extraction (`extract=tar`)** writes each file atomically but the
+  archive as a whole is not: an error leaves the entries written so far.
 
 There is no cross-request transaction or compare-and-swap; agents that need
 ordering or coordination on shared paths must layer it themselves.
@@ -273,6 +275,9 @@ curl -sf -X PUT --data-binary "more" "localhost:8080/v1/files/src/main.py?append
 
 # Create a directory (with missing parents)
 curl -sf -X PUT "localhost:8080/v1/files/src/pkg?type=directory&parents=true"
+
+# Extract a tarball (plain or gzipped) into a directory
+curl -sf -X PUT --data-binary @repo.tar.gz "localhost:8080/v1/files/src?extract=tar"
 
 # Delete recursively
 curl -sf -X DELETE "localhost:8080/v1/files/src?recursive=true"

@@ -685,12 +685,22 @@ func copyTree(src, dst string, mode os.FileMode) error {
 func copyLeaf(src, dst string, info os.FileInfo) error {
 	switch {
 	case info.Mode().IsRegular():
-		f, err := os.Open(src)
+		// A process in the sandbox can swap the file after the caller's Lstat.
+		// O_NOFOLLOW and O_NONBLOCK stop a swapped-in symlink from being
+		// followed and a swapped-in named pipe from blocking the open.
+		f, err := os.OpenFile(src, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 		if err != nil {
 			return err
 		}
 		defer func() { _ = f.Close() }()
-		return atomicWrite(dst, f, info.Mode().Perm())
+		opened, err := f.Stat()
+		if err != nil {
+			return err
+		}
+		if !opened.Mode().IsRegular() {
+			return fmt.Errorf("%w: %s", errUnsupportedFileType, filepath.Base(src))
+		}
+		return atomicWrite(dst, f, opened.Mode().Perm())
 	case info.Mode()&os.ModeSymlink != 0:
 		target, err := os.Readlink(src)
 		if err != nil {

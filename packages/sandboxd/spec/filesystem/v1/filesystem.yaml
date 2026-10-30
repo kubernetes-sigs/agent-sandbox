@@ -180,6 +180,7 @@ paths:
         A file moves atomically. The destination must not exist, except that overwrite=true
         replaces an existing file with a file. A directory is never replaced and cannot move
         into itself. The check for an existing destination is not atomic with the move.
+        As for the other file operations, a symlink in either path is followed.
       parameters:
         - $ref: "#/components/parameters/Destination"
         - $ref: "#/components/parameters/Overwrite"
@@ -205,11 +206,12 @@ paths:
       description: >
         Copies the path to the destination query path, creating missing parent directories.
         A directory is copied recursively. A file keeps its permission bits, and a symlink
-        is copied as a link rather than followed. Each copy is published atomically, so a
-        failed copy leaves no partial destination. The destination must not exist, except
+        inside a copied directory is copied as a link. Each copy is published atomically, so
+        a failed copy leaves no partial destination. The destination must not exist, except
         that overwrite=true replaces an existing file with a file. A directory is never
         replaced and cannot be copied into itself. The check for an existing destination is
-        not atomic with the copy.
+        not atomic with the copy. As for the other file operations, a symlink in either path
+        is followed.
       parameters:
         - $ref: "#/components/parameters/Destination"
         - $ref: "#/components/parameters/Overwrite"

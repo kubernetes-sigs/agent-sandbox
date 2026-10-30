@@ -716,6 +716,41 @@ func TestCopyUnsupportedFileType(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 }
 
+func TestMoveFollowsSymlinkInPath(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	writeFiles(t, root, map[string]string{"real.txt": "data"})
+	require.NoError(t, os.Symlink("real.txt", filepath.Join(root, "link")))
+
+	rec := doAction(handler, actionMove, "link", url.Values{"destination": {"moved.txt"}})
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+	onDisk, err := os.ReadFile(filepath.Join(root, "moved.txt"))
+	require.NoError(t, err)
+	require.Equal(t, "data", string(onDisk))
+	_, err = os.Lstat(filepath.Join(root, "real.txt"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestCopyLeafRefusesSwappedFile(t *testing.T) {
+	root := t.TempDir()
+	writeFiles(t, root, map[string]string{"real": "data", "secret": "s"})
+	// The stale info says "regular file", as if the path was swapped after the
+	// caller's Lstat.
+	stale, err := os.Lstat(filepath.Join(root, "real"))
+	require.NoError(t, err)
+	require.NoError(t, os.Symlink(filepath.Join(root, "secret"), filepath.Join(root, "link")))
+	require.NoError(t, syscall.Mkfifo(filepath.Join(root, "pipe"), 0o644))
+
+	for _, name := range []string{"link", "pipe"} {
+		t.Run(name, func(t *testing.T) {
+			dst := filepath.Join(root, "copy-of-"+name)
+			require.Error(t, copyLeaf(filepath.Join(root, name), dst, stale))
+			_, err := os.Lstat(dst)
+			require.ErrorIs(t, err, os.ErrNotExist)
+		})
+	}
+}
+
 func TestMoveEntryFallsBackToCopyAcrossFilesystems(t *testing.T) {
 	crossDevice := func(oldPath, newPath string) error {
 		return &os.LinkError{Op: "rename", Old: oldPath, New: newPath, Err: syscall.EXDEV}

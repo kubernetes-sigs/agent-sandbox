@@ -56,6 +56,11 @@ PYTHON_TEST_SUITES = [
         "dir": os.path.join("dev", "ci", "presubmits", "shared"),
     },
     {
+        "name": "harbor-terminal-bench",
+        # scripts/report.py and its test use the standard library only.
+        "dir": os.path.join("examples", "harbor-terminal-bench"),
+    },
+    {
         "name": "hermes-agent",
         # chat_hermes.py only uses stdlib (urllib.request, json), so the test
         # needs no requirements.txt -- just pytest, installed unconditionally

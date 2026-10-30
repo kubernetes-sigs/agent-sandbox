@@ -1,0 +1,21 @@
+# Terminal-Bench 2.0, 89 tasks, Terminus 2 with a model, 5 attempts per task.
+# Set the model and, on GKE, the image mirror (scripts/mirror-images.sh):
+#
+#   harbor run -c examples/harbor-terminal-bench/configs/tb2.yaml \
+#     -m anthropic/claude-sonnet-4-5 --ek image_mirror=us-central1-docker.pkg.dev/<proj>/hub-mirror
+jobs_dir: jobs/harbor-terminal-bench
+n_attempts: 5
+n_concurrent_trials: 50
+environment:
+  import_path: k8s_agent_sandbox_harbor:AgentSandboxEnvironment
+  delete: true
+  kwargs:
+    namespace: harbor
+    ready_timeout_s: "600"
+    warm_replicas: "0"          # 1 keeps one pod per task image ready between attempts
+    memory_limit_multiplier: "2"
+agents:
+  - name: terminus-2
+datasets:
+  - name: terminal-bench
+    version: "2.0"

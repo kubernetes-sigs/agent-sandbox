@@ -211,9 +211,12 @@ async def test_download_tar_reads_binary_and_rejects_failures(transport):
     transport.responses.append(FakeResp(stdout=b"TARDATA", returncode=0))
     assert await transport.download_tar("/logs/verifier") == b"TARDATA"
     assert transport.calls[0]["command"][2] == "cd /logs/verifier && tar cf - ."
-    transport.responses.append(FakeResp(stderr=b"tar: cannot cd", returncode=2))
-    with pytest.raises(RuntimeError, match="cannot cd"):
+    transport.responses.append(FakeResp(stderr=b"sh: 1: cd: can't cd to /missing", returncode=2))
+    with pytest.raises(FileNotFoundError, match="does not exist"):
         await transport.download_tar("/missing")
+    transport.responses.append(FakeResp(stderr=b"tar: write error", returncode=2))
+    with pytest.raises(RuntimeError, match="write error"):
+        await transport.download_tar("/logs")
 
 
 def test_archive_round_trip(tmp_path: Path):

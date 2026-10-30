@@ -193,9 +193,10 @@ scales automatically when I change `spec.replicas`.
 #### Story 3: a mixed fleet
 
 As an operator, I run a heavy build pool and a lightweight pool in one cluster.
-A controller flag forces one setting on both. I want the heavy pool serialized
-and the lightweight pool to fill at once, so I set `maxConcurrent` on the heavy
-pool and leave it unset on the other.
+`--sandbox-warm-pool-max-refill-rate` is a controller flag, so whatever I set to
+protect the heavy pool also throttles the lightweight one. I want the heavy pool
+serialized and the lightweight pool to fill at once, so I set `maxConcurrent` on
+the heavy pool and leave it unset on the other.
 
 ### High-Level Design
 
@@ -233,10 +234,12 @@ type SandboxWarmPoolWarmupStrategy struct {
 	// below 1, so the pool always makes progress.
 	//
 	// The pool creates a new sandbox only once an earlier one finishes warming
-	// up, so this bound holds regardless of how long warmup takes. Sandboxes
-	// whose Pods are unschedulable or waiting on scheduling gates do not count
-	// against it, because they consume no node resources; they can therefore
-	// all be scheduled at once when capacity returns.
+	// up, so a slower warmup delays the next create rather than adding one
+	// beside it. Sandboxes whose Pods are unschedulable or waiting on
+	// scheduling gates do not count against this field, because they consume no
+	// node resources; they can therefore all be scheduled at once when capacity
+	// returns, which is the one case where more sandboxes warm up concurrently
+	// than this field allows.
 	//
 	// This bounds the sandboxes the pool itself is warming, not total warmup
 	// load on the cluster. A sandbox adopted by a SandboxClaim before it
@@ -390,10 +393,13 @@ pool smaller than the burst they are willing to absorb.
 
 Resolve the value against `desiredReplicas` with
 `intstr.GetScaledValueFromIntOrPercent(value, int(desiredReplicas), true)`,
-rounding up. Clamp the result to a floor of 1 so that a small percentage of a
-small pool, such as `"10%"` of 5 replicas, never resolves to 0 and wedges the
-pool. When `WarmupStrategy` or `MaxConcurrent` is nil, skip the clamp entirely
-so the unset path keeps its current behavior and cost.
+rounding up, so a small percentage of a small pool such as `"10%"` of 5
+replicas resolves to 1 rather than 0. Also clamp the result to a floor of 1.
+Rounding up already covers every value the validation admits, so the floor is
+defensive: it keeps a future change to the validation, or a pool whose
+`spec.replicas` is 0, from producing a zero bound that wedges the pool. When
+`WarmupStrategy` or `MaxConcurrent` is nil, skip the clamp entirely so the unset
+path keeps its current behavior and cost.
 
 ##### Driving the next create
 
@@ -471,9 +477,11 @@ decision rule rather than a recommended configuration:
 | Node CPU and memory during warmup | `spec.warmupStrategy.maxConcurrent` |
 | Both | Both |
 
-`maxConcurrent` does nothing for write pressure: `maxConcurrent: 500` still
-issues a 500-create burst. For short and uniform warmups the rate flag remains
-the better tool.
+`maxConcurrent` does nothing for write pressure. A pool whose `maxConcurrent` is
+at or above its current deficit withholds nothing, so its creates are shaped
+only by `--sandbox-warm-pool-max-batch-size` and
+`--sandbox-warm-pool-max-refill-rate`, exactly as they are today. For short and
+uniform warmups the rate flag remains the better tool.
 
 ##### Test plan
 

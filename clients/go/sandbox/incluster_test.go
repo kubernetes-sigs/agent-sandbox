@@ -409,6 +409,25 @@ func TestValidation_Connectivity(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "router port-forward with sandboxd",
+			opts: Options{WarmPoolName: "pool", Runtime: RuntimeSandboxd, Connectivity: ConnectivityRouterPortForward},
+		},
+		{
+			name:    "router port-forward with legacy runtime",
+			opts:    Options{WarmPoolName: "pool", Runtime: RuntimeLegacyPython, Connectivity: ConnectivityRouterPortForward},
+			wantErr: true,
+		},
+		{
+			name:    "router port-forward with APIURL",
+			opts:    Options{WarmPoolName: "pool", Runtime: RuntimeSandboxd, Connectivity: ConnectivityRouterPortForward, APIURL: "http://localhost:9999"},
+			wantErr: true,
+		},
+		{
+			name:    "router port-forward with GatewayName",
+			opts:    Options{WarmPoolName: "pool", Runtime: RuntimeSandboxd, Connectivity: ConnectivityRouterPortForward, GatewayName: "gw"},
+			wantErr: true,
+		},
+		{
 			name:    "unknown Connectivity",
 			opts:    Options{WarmPoolName: "pool", Runtime: RuntimeSandboxd, Connectivity: "sidecar"},
 			wantErr: true,

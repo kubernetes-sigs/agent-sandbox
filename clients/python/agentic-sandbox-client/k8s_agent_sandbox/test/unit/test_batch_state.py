@@ -17,7 +17,7 @@ import unittest
 from pydantic import ValidationError
 
 from k8s_agent_sandbox import batch_state
-from k8s_agent_sandbox.exceptions import BatchError, BatchTimeoutError, QuorumUnreachableError
+from k8s_agent_sandbox.exceptions import BatchError, BatchTimeoutError, QuorumUnreachableError, TerminalMemberError
 from k8s_agent_sandbox.models import BatchEventType, BatchGroup, MemberState
 from k8s_agent_sandbox.constants import (
     BATCH_GROUP_MIN_READY_ANNOTATION,
@@ -721,6 +721,219 @@ class TestReattachedFill(unittest.TestCase):
         [result] = _drain_groups(state)
         self.assertIsNone(result.error)
         self.assertEqual([m.claim_name for m in result.members], ["b1-2", "b1-3"])
+
+
+class TestRelease(unittest.TestCase):
+
+    def test_released_members_leave_members_count_as_unable_and_ignore_later_events(self):
+        state = _state(BatchGroup(warmpool="pool-a", size=4, min_ready=2), mode=batch_state.ConsumerMode.GROUP)
+        state.upsert_claim(_pending("b1-0"))
+        state.upsert_claim(_claim("b1-1", conditions=_TERMINAL, annotations=_FILL))
+        state.upsert_claim(_pending("b1-2"))
+        state.upsert_claim(_ready("b1-9", fill=False))
+        _drain_events(state)
+        for name in ("b1-0", "b1-1", "b1-9"):
+            state.release_member(name)
+        self.assertEqual([m.claim_name for m in state.members()], ["b1-2"])
+        # b1-2 and b1-3 can still reach min_ready. A non-fill member doesn't count against the group.
+        self.assertEqual(_drain_groups(state), [])
+
+        state.release_member("b1-2")
+        [result] = _drain_groups(state)
+        self.assertEqual(
+            (result.error.failed, result.error.lost, result.error.released), (1, 0, 2)
+        )
+        # The claims' later updates and deletes change nothing and emit no MEMBER_LOST.
+        state.upsert_claim(_ready("b1-0"))
+        state.mark_lost("b1-2")
+        self.assertEqual(state.members(), [])
+        self.assertEqual(_drain_events(state), [])
+
+    def test_release_member_deletes_until_noted_and_raises_for_unknown_claims(self):
+        state = _state(BatchGroup(warmpool="pool-a", size=3))
+        state.upsert_claim(_pending("b1-0"))
+        state.upsert_claim(_pending("b1-1"))
+        state.mark_lost("b1-1")
+        state.record_create_failure("b1-2", "pool-a", "conflict")
+        self.assertTrue(state.release_member("b1-0"))
+        self.assertTrue(state.release_member("b1-0"))  # Its delete hasn't succeeded yet.
+        state.note_deleted("b1-0")
+        self.assertFalse(state.release_member("b1-0"))
+        # A lost member's claim is gone, and a failed create's name may be another client's claim.
+        self.assertFalse(state.release_member("b1-1"))
+        self.assertFalse(state.release_member("b1-2"))
+        with self.assertRaises(ValueError):
+            state.release_member("b1-9")
+
+    def test_a_ready_event_queued_before_release_is_not_handed_out(self):
+        state = _state(BatchGroup(warmpool="pool-a", size=2), mode=batch_state.ConsumerMode.STREAM)
+        state.upsert_claim(_ready("b1-0"))
+        state.upsert_claim(_ready("b1-1"))
+        state.release_member("b1-0")
+        self.assertEqual(_drain_events(state), [(BatchEventType.MEMBER_READY, "b1-1")])
+
+    def test_release_not_ready_keeps_ready_handed_out_and_non_fill_members_and_ends_the_fill(self):
+        state = _state(BatchGroup(warmpool="pool-a", size=5), mode=batch_state.ConsumerMode.STREAM)
+        state.upsert_claim(_ready("b1-0"))
+        state.upsert_claim(_ready("b1-1"))
+        _drain_events(state)
+        state.upsert_claim(_pending("b1-1"))  # Handed out, then not Ready.
+        state.upsert_claim(_pending("b1-2"))
+        state.upsert_claim(_claim("b1-3", conditions=_TERMINAL, annotations=_FILL))
+        state.upsert_claim(_claim("b1-9", conditions=_NOT_READY))  # No group annotations.
+        _drain_events(state)
+
+        self.assertEqual(sorted(state.release_not_ready()), ["b1-2", "b1-3"])
+        self.assertEqual([m.claim_name for m in state.members()], ["b1-0", "b1-1", "b1-9"])
+        # A released member that turns Ready, and a fill claim created before the fill ended, are
+        # never handed out.
+        state.upsert_claim(_ready("b1-2"))
+        state.upsert_claim(_ready("b1-4"))
+        self.assertEqual(_drain_events(state), [])
+        self.assertTrue(state.fill_creates_released("pool-a"))
+
+    def test_released_fill_members_count_toward_settling_the_fill(self):
+        state = _state(BatchGroup(warmpool="pool-a", size=2), mode=batch_state.ConsumerMode.STREAM)
+        state.upsert_claim(_ready("b1-0"))
+        state.upsert_claim(_pending("b1-1"))
+        _drain_events(state)
+        self.assertFalse(state.events_done())
+        state.release_not_ready()
+        self.assertTrue(state.events_done())
+
+    def test_a_missing_claim_released_when_it_lands_late_takes_back_its_missing_count(self):
+        state = _state(BatchGroup(warmpool="pool-a", size=3, min_ready=2))
+        state.seed_from_claims([_ready("b1-0")])
+        state.count_missing_fill_as_unable()
+        state.release_not_ready()
+        # b1-1's create timed out before the batch was re-attached, then landed. It is released at once.
+        state.upsert_claim(_pending("b1-1"))
+        state.upsert_claim(_pending("b1-0"))
+        state.set_mode(batch_state.ConsumerMode.STREAM)
+        self.assertEqual([m.claim_name for m in state.members()], ["b1-0"])
+        self.assertFalse(state.events_done())
+        state.upsert_claim(_ready("b1-0"))
+        self.assertEqual(_drain_events(state), [(BatchEventType.MEMBER_READY, "b1-0")])
+        self.assertTrue(state.events_done())
+
+    def test_release_group_releases_its_pool_and_any_fill_claim_that_lands_later(self):
+        state = _state(
+            BatchGroup(warmpool="pool-a", size=3), BatchGroup(warmpool="pool-b", size=1),
+            mode=batch_state.ConsumerMode.GROUP,
+        )
+        state.upsert_claim(_ready("b1-0"))
+        state.upsert_claim(_ready("b1-3", "pool-b"))
+        # acquire() claims from the pool go too, Ready or still in flight, but aren't counted.
+        state.upsert_claim(_ready("b1-9", fill=False))
+        in_flight = state.start_acquire("pool-a")
+        self.assertEqual(state.release_group("pool-a"), ["b1-0", "b1-9"])
+        with self.assertRaisesRegex(BatchError, "released before it was Ready"):
+            state.acquired_member(in_flight)
+        # Its create may land after the label delete, so acquire() deletes it by name.
+        self.assertTrue(state.drop_acquired(in_flight, created=True))
+        state.upsert_claim(_ready("b1-1"))
+        state.record_create_failure("b1-2", "pool-a", "forbidden")
+
+        self.assertEqual([m.claim_name for m in state.members()], ["b1-3"])
+        self.assertFalse(state.fill_creates_released("pool-b"))
+        outcomes = {r.warmpool: r for r in _drain_groups(state)}
+        self.assertEqual(outcomes["pool-a"].error.released, 1)  # Decided at the first release.
+        self.assertEqual([m.claim_name for m in outcomes["pool-b"].members], ["b1-3"])
+        self.assertTrue(state.fill_settled())
+
+
+class TestSizeZeroGroups(unittest.TestCase):
+
+    def test_quorum_consumers_skip_a_size_zero_group(self):
+        groups = (BatchGroup(warmpool="pool-a", size=1), BatchGroup(warmpool="pool-b", size=0))
+        group_mode = _state(*groups, mode=batch_state.ConsumerMode.GROUP)
+        quorum_mode = _state(*groups, mode=batch_state.ConsumerMode.QUORUM)
+        for state in (group_mode, quorum_mode):
+            state.upsert_claim(_ready("b1-0"))
+            # A member acquire() adds to the size-0 group doesn't change either consumer.
+            state.upsert_claim(_ready("b1-1", warmpool="pool-b", fill=False))
+        self.assertEqual(
+            [(g.warmpool, [m.claim_name for m in g.members]) for g in _drain_groups(group_mode)],
+            [("pool-a", ["b1-0"])],
+        )
+        self.assertTrue(group_mode.groups_done())
+        self.assertEqual(_quorum(quorum_mode), ["b1-0"])
+
+        expired = _state(*groups, mode=batch_state.ConsumerMode.GROUP)
+        expired.expire_fill()
+        self.assertEqual([g.warmpool for g in _drain_groups(expired)], ["pool-a"])
+
+        only_size_zero = _state(BatchGroup(warmpool="pool-b", size=0), mode=batch_state.ConsumerMode.QUORUM)
+        self.assertEqual(_quorum(only_size_zero), [])
+
+
+class TestOrdinals(unittest.TestCase):
+
+    def test_claim_names_continue_past_the_fill_listed_claims_and_a_recorded_ordinal(self):
+        state = _state(BatchGroup(warmpool="pool-a", size=2))
+        self.assertEqual(state.start_acquire("pool-a"), "b1-2")
+        state.upsert_claim(_ready("b1-5", fill=False))
+        self.assertEqual(state.start_acquire("pool-a"), "b1-6")
+        for recorded, want in ((9, ("b1-9", 10)), (1, ("b1-2", 3))):
+            reattached = batch_state.BatchState("b1", [BatchGroup(warmpool="pool-a", size=2)], recorded)
+            self.assertEqual((reattached.start_acquire("pool-a"), reattached.next_ordinal), want)
+
+
+class TestAcquired(unittest.TestCase):
+
+    def test_outcomes_drop_and_deletes(self):
+        cases = {
+            "ready": (_ready("b1-1", fill=False), "ready", ["b1-1"]),
+            "pending": (_claim("b1-1", conditions=_NOT_READY), None, ["b1-1"]),
+            "terminal": (_claim("b1-1", conditions=_TERMINAL), MemberState.FAILED, ["b1-1"]),
+            "lost": (_claim("b1-1", conditions=_NOT_READY), MemberState.LOST, []),
+            "not seen yet": (None, None, ["b1-1"]),
+        }
+        for name, (claim, outcome, deletes) in cases.items():
+            with self.subTest(name):
+                state = _state(BatchGroup(warmpool="pool-a", size=1, min_ready=1), mode=batch_state.ConsumerMode.GROUP)
+                if claim is not None:
+                    state.upsert_claim(claim)
+                if outcome is MemberState.LOST:
+                    state.mark_lost("b1-1")
+                if outcome in (MemberState.FAILED, MemberState.LOST):
+                    with self.assertRaises(TerminalMemberError) as raised:
+                        state.acquired_member("b1-1")
+                    self.assertEqual(raised.exception.member.state, outcome)
+                elif outcome == "ready":
+                    self.assertEqual(state.acquired_member("b1-1").state, MemberState.READY)
+                else:
+                    self.assertIsNone(state.acquired_member("b1-1"))
+                # An acquired claim in a fill pool is never part of the fill.
+                self.assertEqual((_drain_events(state), _drain_groups(state)), ([], []))
+
+                self.assertEqual(state.drop_acquired("b1-1", created=True), bool(deletes))
+                state.upsert_claim(_ready("b1-1", fill=False))
+                self.assertEqual(state.members(), [])
+                # A failed delete is retried by release_not_ready().
+                self.assertEqual(state.release_not_ready(), deletes)
+
+        state = _state(BatchGroup(warmpool="pool-a", size=1))
+        self.assertFalse(state.drop_acquired("b1-1", created=False))
+        state.upsert_claim(_ready("b1-1", fill=False))
+        self.assertEqual(state.members(), [])
+
+    def test_has_pool_covers_groups_members_and_acquires_in_flight(self):
+        state = _state(BatchGroup(warmpool="pool-a", size=1))
+        state.upsert_claim(_ready("b1-5", "pool-b", fill=False))
+        state.start_acquire("pool-c")
+        self.assertEqual([state.has_pool(p) for p in ("pool-a", "pool-b", "pool-c", "pool-d")], [True, True, True, False])
+
+    def test_releasing_a_pending_acquired_member_ends_its_wait(self):
+        state = _state(BatchGroup(warmpool="pool-a", size=1))
+        state.upsert_claim(_claim("b1-1", conditions=_NOT_READY))
+        self.assertTrue(state.release_member("b1-1"))
+        with self.assertRaisesRegex(BatchError, "released before it was Ready"):
+            state.acquired_member("b1-1")
+        # release_member owns the delete, so acquire's cleanup doesn't add another.
+        state.note_deleted("b1-1")
+        self.assertFalse(state.drop_acquired("b1-1", created=True))
+        self.assertEqual(state.release_not_ready(), [])
 
 
 if __name__ == "__main__":

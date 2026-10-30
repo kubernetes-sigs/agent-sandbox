@@ -1329,13 +1329,19 @@ class TestK8sHelperBatchMethods(unittest.TestCase):
                 for key, value in expected.items():
                     self.assertEqual(kwargs[key], value)
 
-    def test_create_sandbox_claim_logs_at_the_given_level(
+    def test_claim_create_and_delete_log_at_the_given_level(
         self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
     ):
         helper = K8sHelper()
-        with self.assertLogs(level="DEBUG") as logs:
-            helper.create_sandbox_claim("b1-0", "pool-a", "default", log_level=logging.DEBUG)
-        self.assertEqual([r.levelno for r in logs.records], [logging.DEBUG])
+        calls = {
+            "create": lambda: helper.create_sandbox_claim("b1-0", "pool-a", "default", log_level=logging.DEBUG),
+            "delete": lambda: helper.delete_sandbox_claim("b1-0", "default", log_level=logging.DEBUG),
+        }
+        for name, call in calls.items():
+            with self.subTest(name):
+                with self.assertLogs(level="DEBUG") as logs:
+                    call()
+                self.assertEqual([r.levelno for r in logs.records], [logging.DEBUG])
 
     def test_warmpool_and_template_gets_return_none_and_lease_delete_ignores_404_other_errors_raise(
         self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls

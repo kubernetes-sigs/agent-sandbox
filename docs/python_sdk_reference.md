@@ -227,9 +227,11 @@ an error that stops the watch or Lease renewal shows in ``err()``.
 
 **Arguments**:
 
-- `groups` - One ``BatchGroup`` per warm pool, each with ``size`` at least 1.
+- `groups` - One ``BatchGroup`` per warm pool. A group with ``size`` 0 creates no claims
+  and gets its members from ``acquire()``, and the quorum consumers skip it.
 - `namespace` - Kubernetes namespace for the claims and the Lease.
-- `labels` - Optional labels for every claim.
+- `labels` - Optional labels for every claim. They are also set on the Lease, so a handle
+  from ``get_batch`` puts them on the claims it adds with ``acquire()``.
 - `batch_id` - Optional batch id; a DNS-1123 label starting with a letter, at most 52
   characters. Generated if omitted.
 - `create_rps` - Maximum claim creates started per second. Defaults to 50.
@@ -978,6 +980,142 @@ created, so a quorum reached after the deadline, before any consumer checks it, 
 - `BatchError` - If ``events()`` or ``group_outcomes()`` was called first, this method
   was already called, ``err()`` is set while waiting, or this handle has been
   detached or released, when called or while waiting.
+
+<a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.acquire"></a>
+
+##### acquire
+
+```python
+def acquire(warmpool: str, timeout: float | None = None) -> Member
+```
+
+Adds a member from ``warmpool`` to the batch, waits until it is Ready, and returns it.
+
+The pool can be any warm pool in the batch's namespace. A pool that isn't one of the batch's
+groups is checked once per handle, like ``claim_batch`` checks its pools. The claim takes the
+next unused ordinal and carries its pool's group label but no group annotations, so it is
+never one of the initial claims. ``events()``, ``group_outcomes()``, ``wait_for_quorum()``
+and ``release_not_ready()`` leave it alone, and ``release_group()`` on its pool releases it
+with the pool's other members. Its ``shutdownTime`` is the
+time of its create plus ``quorum_timeout`` plus ``work_budget`` plus 600 seconds, and its
+create is retried and paced like the initial claims'.
+
+If it raises, including on a cancellation, the member is dropped from ``members()`` and its
+claim is deleted, unless the claim is already gone or its create was rejected. A failed delete is
+retried by ``release_not_ready()`` and ``release()``. Once ``err()`` is set the claim is kept,
+since the handle may no longer hold the batch's Lease, and ``release()`` deletes it. It never
+creates a second claim, so call it again to try again. A member it returned that fails later
+shows in ``members()`` like any other, and ``release_member`` frees it.
+
+``TerminalMemberError`` and ``BatchTimeoutError`` are both ``BatchError``, so
+``except BatchError`` handles every runtime failure. The other errors mean a bad argument
+or a missing pool or template.
+
+**Arguments**:
+
+- `warmpool` - The warm pool to claim the member from.
+- `timeout` - Seconds to wait for the member to be Ready. Defaults to the batch's
+  ``quorum_timeout``.
+  
+
+**Raises**:
+
+- `ValueError` - If ``timeout`` isn't a positive finite number.
+- `SandboxWarmPoolNotFoundError` - If the warm pool doesn't exist.
+- `SandboxTemplateNotFoundError` - If the warm pool's template doesn't exist, or it names none.
+- `TerminalMemberError` - If the create fails (the member is ``FAILED`` with reason
+  ``CreateFailed``), the member fails terminally, or someone else deletes its claim
+  (the member is ``LOST``) before it is Ready.
+- `BatchTimeoutError` - If the member isn't Ready within ``timeout``. A create or create retry
+  that ``create_rps`` pacing can't start within it isn't sent.
+- `BatchError` - If this handle has been detached or released, or ``err()`` is set, when
+  called or while waiting, or if ``release_member`` or ``release_group`` releases the
+  member before it is Ready.
+
+<a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.release_member"></a>
+
+##### release\_member
+
+```python
+def release_member(member: Member) -> None
+```
+
+Deletes one member's claim and drops the member from ``members()``.
+
+The member is never handed out afterwards and emits no ``MEMBER_LOST``. A member of the
+initial claims counts as unable to become Ready, so releasing one before a quorum consumer
+has decided can make its group or the quorum unreachable. A claim that is already gone
+counts as deleted, and transient errors are retried. If the delete fails, calling
+``release_member`` again retries it.
+
+**Raises**:
+
+- `ValueError` - If the member isn't in this batch.
+- `BatchError` - If this handle has been detached or released, or once ``err()`` is set,
+  since the handle may no longer hold the batch's Lease.
+- `ApiException` - For a non-transient error such as a 403, or the last transient error
+  after ``BATCH_DELETE_ATTEMPTS`` attempts (an ``ApiException`` or a transport error).
+
+<a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.release_not_ready"></a>
+
+##### release\_not\_ready
+
+```python
+def release_not_ready() -> None
+```
+
+Ends the fill and deletes every initial claim that isn't Ready and was never handed out.
+
+Creates not yet sent are skipped, and a create that lands afterwards is deleted. A member
+that was handed out is kept, even if it has since gone not Ready. Members are picked and
+released in one step under the batch lock, so none can turn Ready and be handed out in
+between, as could happen when calling ``release_member`` on each member that ``members()``
+lists as not Ready. Released members are dropped from ``members()``, emit no
+``MEMBER_LOST``, and count as unable to become Ready, so calling this before a quorum
+consumer has decided can make a group or the quorum unreachable. Call it once you have
+what you need.
+
+Each claim is deleted like ``release_member``, up to ``BATCH_DEFAULT_MAX_IN_FLIGHT`` at
+once. If a delete fails, calling ``release_not_ready`` again retries it.
+
+**Raises**:
+
+- `BatchError` - If this handle has been detached or released, or once ``err()`` is set,
+  since the handle may no longer hold the batch's Lease.
+- `ApiException` - The first error a delete ended with, once every delete has been tried
+  (an ``ApiException`` or a transport error).
+
+<a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.release_group"></a>
+
+##### release\_group
+
+```python
+def release_group(warmpool: str) -> None
+```
+
+Deletes every claim the batch holds from one pool, pending ones included, and drops their
+members from ``members()``. That covers the group's initial claims and the members
+``acquire()`` added from the pool, and an ``acquire()`` still waiting on the pool raises
+``BatchError``.
+
+The group's creates not yet sent are skipped, and a create that lands afterwards is deleted.
+Its members are never handed out afterwards and emit no ``MEMBER_LOST``. The initial ones
+count as unable to become Ready, so releasing a group before a quorum consumer has decided
+makes it, or the quorum, unreachable. Works with any consumer, typically on a group that
+``group_outcomes()`` yields with an error.
+
+Claims are deleted like ``release()`` deletes the batch's, with deletecollection rounds
+scoped to the group's label. If they fail, calling ``release_group`` again retries.
+
+**Raises**:
+
+- `ValueError` - If the batch has no group, member or ``acquire()`` in flight for ``warmpool``.
+- `BatchError` - If this handle has been detached or released, once ``err()`` is set,
+  since the handle may no longer hold the batch's Lease, or if claims are still not
+  being deleted after the last round.
+- `ApiException` - For a non-transient error such as a 403, which is raised at once.
+  After the last round, the last transient error is raised (an ``ApiException``
+  or a transport error).
 
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.release"></a>
 

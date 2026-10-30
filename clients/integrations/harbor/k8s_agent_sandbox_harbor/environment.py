@@ -97,6 +97,7 @@ class AgentSandboxEnvironment(BaseEnvironment):
         self._sandbox: Any = None
         self._transport: PodExecTransport | None = None
         self._pool: str | None = None
+        self._uid: int | None = None
         self._timings: dict[str, float] = {}
         super().__init__(*args, **kwargs)
         dockerfile = self.environment_dir / _DOCKERFILE
@@ -273,10 +274,22 @@ class AgentSandboxEnvironment(BaseEnvironment):
                          self._sandbox.sandbox_id, self.environment_name,
                          self._timings["claim_ready_s"], self._timings["exec_ready_s"], pod)
 
+        # The uid the exec session runs as, so a request for root on a root
+        # session skips ``su`` (see exec); the probe itself must not use su.
+        whoami = await self._transport.exec("id -u")
+        if whoami.return_code == 0 and (whoami.stdout or "").strip().isdigit():
+            self._uid = int((whoami.stdout or "").strip())
+
         paths = EnvironmentPaths.for_os(self.os)
         dirs = [str(p) for p in (paths.agent_dir, paths.verifier_dir, paths.artifacts_dir,
                                  paths.tests_dir, paths.solution_dir)]
-        await self.ensure_dirs(self._mount_targets(writable_only=True) + dirs)
+        made = await self.ensure_dirs(self._mount_targets(writable_only=True) + dirs)
+        if made is not None and made.return_code != 0:
+            # Harbor ignores this result; a sandbox without /logs fails later
+            # in confusing ways (missing logs, verifier errors), so stop here.
+            raise RuntimeError(
+                f"could not create Harbor's directories in the sandbox (exit "
+                f"{made.return_code}): {(made.stderr or made.stdout or '').strip()}")
         await self._upload_environment_dir_after_start()
 
     async def stop(self, delete: bool) -> None:
@@ -313,7 +326,20 @@ class AgentSandboxEnvironment(BaseEnvironment):
         transport = self._require_transport()
         return await transport.exec(
             command, cwd=self._exec_cwd(cwd), env=self._merge_env(env),
-            user=self._resolve_user(user), timeout_sec=timeout_sec)
+            user=self._effective_user(user), timeout_sec=timeout_sec)
+
+    def _effective_user(self, user: str | int | None) -> str | int | None:
+        """Harbor's user for the command, minus a redundant ``su``.
+
+        Harbor asks for ``root`` for its own setup commands. When the session
+        already runs as uid 0, ``su root`` adds nothing and can fail where PAM
+        is unhappy (emulated amd64 images on an arm64 kind node, images with a
+        locked root), so it is dropped. Any other user still goes through su.
+        """
+        resolved = self._resolve_user(user)
+        if resolved in ("root", 0) and self._uid == 0:
+            return None
+        return resolved
 
     async def upload_file(self, source_path: Path | str, target_path: str) -> None:
         source = Path(source_path)

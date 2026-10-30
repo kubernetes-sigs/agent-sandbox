@@ -280,3 +280,26 @@ async def test_start_fails_when_the_directories_cannot_be_created(task_dir, tria
     env = make_env(task_dir, trial_paths, env_config)
     with pytest.raises(RuntimeError, match="Authentication failure"):
         await env.start(force_build=False)
+
+
+async def test_close_clients_closes_the_api_client_and_executor():
+    import concurrent.futures
+
+    from k8s_agent_sandbox_harbor import _clients as mod
+    from k8s_agent_sandbox_harbor.options import EnvironmentOptions
+    from k8s_agent_sandbox_harbor.templates import TemplateStore
+
+    class Closable:
+        closed = 0
+
+        async def close(self):
+            self.closed += 1
+
+    api, sc = Closable(), Closable()
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    mod._clients[("ctx", "ns")] = mod.Clients(sandbox_client=sc, custom_objects=object(),
+                                             core_v1_factory=lambda: None, executor=ex,
+                                             templates=TemplateStore(object(), "ns", EnvironmentOptions()),
+                                             api_client=api)
+    await mod.close_clients()
+    assert api.closed == 1 and sc.closed == 1 and mod._clients == {} and ex._shutdown

@@ -54,13 +54,16 @@ async def _cleanup(args: argparse.Namespace) -> int:
         values["kube_context"] = args.kube_context
     options = EnvironmentOptions.from_kwargs(values)
     clients = await _clients.get_clients(options)
-    if args.session:
-        counts = await clients.templates.delete_managed(
-            plurals=(CLAIMS,), extra_selector=f"{LABEL_TRIAL}={label_value(args.session)}")
-    elif args.claims:
-        counts = await clients.templates.delete_managed(plurals=(CLAIMS,))
-    else:
-        counts = await clients.templates.delete_managed(plurals=(CLAIMS, POOLS, TEMPLATES))
+    try:
+        if args.session:
+            counts = await clients.templates.delete_managed(
+                plurals=(CLAIMS,), extra_selector=f"{LABEL_TRIAL}={label_value(args.session)}")
+        elif args.claims:
+            counts = await clients.templates.delete_managed(plurals=(CLAIMS,))
+        else:
+            counts = await clients.templates.delete_managed(plurals=(CLAIMS, POOLS, TEMPLATES))
+    finally:
+        await _clients.close_clients()
     for plural, n in counts.items():
         print(f"deleted {n} {plural} in {options.namespace}")
     return 0

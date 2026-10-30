@@ -51,6 +51,8 @@ class Clients:
     """Sync ``CoreV1Api`` per thread, for the exec websockets."""
     executor: concurrent.futures.ThreadPoolExecutor
     templates: TemplateStore
+    api_client: Any = None
+    """The ``kubernetes_asyncio`` ``ApiClient`` behind the two clients above."""
 
 
 _clients: dict[tuple[str | None, str], Clients] = {}
@@ -108,9 +110,29 @@ async def get_clients(options: EnvironmentOptions) -> Clients:
             core_v1_factory=ThreadLocalCoreV1(_sync_configuration(options.kube_context)),
             executor=executor,
             templates=TemplateStore(custom_objects, options.namespace, options, logger),
+            api_client=api_client,
         )
         _clients[key] = clients
         return clients
+
+
+async def close_clients() -> None:
+    """Close every shared client; for the end of a process that owns the loop
+    (the cleanup command). Harbor's own exit closes its loop without this."""
+    for clients in list(_clients.values()):
+        close = getattr(clients.sandbox_client, "close", None)
+        if close is not None:
+            try:
+                await close()
+            except Exception:  # noqa: BLE001 - best effort at exit
+                pass
+        if clients.api_client is not None:
+            try:
+                await clients.api_client.close()
+            except Exception:  # noqa: BLE001
+                pass
+        clients.executor.shutdown(wait=False)
+    _clients.clear()
 
 
 def reset_clients_for_tests() -> None:

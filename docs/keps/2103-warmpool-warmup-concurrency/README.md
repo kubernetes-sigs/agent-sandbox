@@ -161,7 +161,9 @@ interval.
 Add an optional `warmupStrategy` to `SandboxWarmPoolSpec` with a single field,
 `maxConcurrent`. Before issuing creates, the reconciler counts the pool members
 that are currently warming up and creates at most
-`maxConcurrent - warmingUp` sandboxes.
+`max(0, maxConcurrent - warmingUp)` sandboxes. The floor matters: warming
+members can exceed `maxConcurrent` when members held while unschedulable are
+scheduled together, so the subtraction can go negative.
 
 ### User Stories
 
@@ -240,13 +242,17 @@ type SandboxWarmPoolWarmupStrategy struct {
 	//
 	// Leaving this unset creates the whole deficit at once.
 	// +optional
+	// +kubebuilder:validation:XIntOrString
+	// +kubebuilder:validation:XValidation:rule="(type(self) == int && self >= 1) || (type(self) == string && self.matches('^([1-9][0-9]?|100)%$'))",message="maxConcurrent must be an integer of at least 1 or a percentage from 1% to 100%"
 	MaxConcurrent *intstr.IntOrString `json:"maxConcurrent,omitempty"`
 }
 ```
 
-Validation uses the same CEL and marker approach as `Deployment`'s `maxSurge`
-and `maxUnavailable`, which this field deliberately mirrors: an integer must be
-at least 1, and a string must match a percentage between `"1%"` and `"100%"`.
+The field mirrors `Deployment`'s `maxSurge` and `maxUnavailable`.
+`+kubebuilder:validation:XIntOrString` is required for controller-tools to emit
+the `x-kubernetes-int-or-string` schema, and the CEL rule enforces both accepted
+forms: an integer of at least 1, or a percentage string from `"1%"` to `"100%"`.
+The exact rule is a starting point for review rather than a settled detail.
 
 A new status field reports the count the gate acts on:
 
@@ -255,9 +261,10 @@ A new status field reports the count the gate acts on:
 type SandboxWarmPoolStatus struct {
 	// ... existing fields ...
 
-	// warmingUpReplicas is the number of pool sandboxes whose Pods are
-	// scheduled but which have not reported Ready yet. These sandboxes consume
-	// node resources and count against spec.warmupStrategy.maxConcurrent.
+	// warmingUpReplicas is the number of active pool sandboxes that have not
+	// reported Ready, excluding those whose mirrored PodScheduled condition
+	// reports Unschedulable or SchedulingGated. These are the sandboxes that
+	// count against spec.warmupStrategy.maxConcurrent.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	WarmingUpReplicas int32 `json:"warmingUpReplicas,omitempty"`
@@ -297,15 +304,15 @@ deficit = desiredReplicas - totalReplicas
   |
   |-- 1. ReplenishDelay    skip this pass entirely?            (existing)
   |-- 2. MaxBatchSize      clamp to the per-pass cap           (existing)
-  |-- 3. warmup slots      clamp to maxConcurrent - warmingUp  (NEW)
+  |-- 3. warmup slots      clamp to max(0, maxConcurrent - warmingUp)  (NEW)
   |-- 4. MaxRefillRate     token bucket                        (existing)
   |-- 5. expectations      have prior writes been observed?    (existing)
   |-- 6. slowStartBatch    issue the creates                   (existing)
 ```
 
-Place the clamp before the token bucket. Taking tokens for creates the gate
-would then withhold would force a refund on every gated pass, and the bucket's
-refund path exists for the expectations gate only.
+Place the clamp before the token bucket. Taking tokens first would spend them on
+a pass the warmup gate then withholds, so every gated pass would need a refund,
+and the bucket's refund path exists for the expectations gate only.
 
 ##### Counting warming sandboxes
 
@@ -507,7 +514,10 @@ a nil check. No additional API calls or cache reads.
 once per completed warmup plus the fallback requeue, which is far less often
 than an ungated pool filling the same deficit.
 
-**API server load.** Strictly lower. The gate withholds creates, so a pool using
+**API server load.** No higher, and lower whenever the gate is active. A pool
+whose `maxConcurrent` is unset, or is at least as large as the current deficit,
+withholds nothing and issues exactly the writes it does today. The gate
+withholds creates, so a pool using
 it issues the same total number of creates spread over a longer period. It never
 increases burst size.
 

@@ -4,12 +4,12 @@ authors:
   - "@Dimss"
 status: implementable
 creation-date: "2026-10-29"
-last-updated: "2026-10-29"
+last-updated: "2026-10-30"
 stage: alpha
 reviewers:
-  - TBD
+  - "@aditya-shantanu"
 approvers:
-  - TBD
+  - "@aditya-shantanu"
 
 see-also:
   - "https://github.com/kubernetes-sigs/agent-sandbox/issues/2103"

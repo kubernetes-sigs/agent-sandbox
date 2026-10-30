@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"mime"
 	"net/http"
 	"os"
@@ -46,16 +47,6 @@ const (
 	entryTypeFile      = "file"
 	entryTypeDirectory = "directory"
 )
-
-// Actions of POST /v1/files/{path}:{action}.
-const (
-	actionMove = "move"
-	actionCopy = "copy"
-)
-
-// errUnsupportedFileType marks a copy source that is neither a regular file,
-// a directory, nor a symlink, such as a socket or a named pipe.
-var errUnsupportedFileType = errors.New("unsupported file type")
 
 // RESTServer implements the sandboxd Filesystem & Runtime REST API on top of
 // net/http. All file paths are confined to rootDir via pathutil.SanitizePath.
@@ -131,16 +122,32 @@ func (s *RESTServer) writeError(w http.ResponseWriter, httpCode int, code, messa
 	s.writeJSON(w, httpCode, APIError{Code: code, Message: message})
 }
 
+// writeFSError maps a filesystem error to the status the spec documents for it.
+func (s *RESTServer) writeFSError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		s.writeError(w, http.StatusNotFound, "NOT_FOUND", "path does not exist within the sandbox")
+	case errors.Is(err, os.ErrPermission):
+		s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED", "permission denied")
+	case errors.Is(err, syscall.ENOTEMPTY), errors.Is(err, syscall.EEXIST):
+		s.writeError(w, http.StatusConflict, "CONFLICT", "path conflicts with an existing file or directory")
+	default:
+		s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+	}
+}
+
 // resolvePath sanitizes the {path...} wildcard against the sandbox root,
 // writing the spec-mandated error response on failure.
 func (s *RESTServer) resolvePath(w http.ResponseWriter, r *http.Request) (string, bool) {
-	return s.resolveUserPath(w, r.PathValue("path"))
+	return s.resolveUserPath(w, r.PathValue("path"), pathutil.SanitizePath)
 }
 
 // resolveUserPath is resolvePath for any client-supplied path, such as a
-// destination query.
-func (s *RESTServer) resolveUserPath(w http.ResponseWriter, userPath string) (string, bool) {
-	target, err := pathutil.SanitizePath(s.rootDir, userPath)
+// destination query. sanitize is pathutil.SanitizePath, or
+// pathutil.SanitizeEntryPath to leave a final symlink unresolved.
+func (s *RESTServer) resolveUserPath(w http.ResponseWriter, userPath string,
+	sanitize func(rootDir, userPath string) (string, error)) (string, bool) {
+	target, err := sanitize(s.rootDir, userPath)
 	if err != nil {
 		if errors.Is(err, pathutil.ErrPathEscapes) {
 			s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED",
@@ -374,7 +381,7 @@ func atomicWrite(target string, src io.Reader, mode os.FileMode) (err error) {
 		return fmt.Errorf("failed to create parent directory: %w", err)
 	}
 
-	tmpFile, err := os.CreateTemp(dir, ".sandboxd-tmp-*")
+	tmpFile, err := os.CreateTemp(dir, tmpPattern)
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
@@ -515,6 +522,19 @@ func (s *RESTServer) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// Actions of POST /v1/files/{path}:{action}.
+const (
+	actionMove = "move"
+	actionCopy = "copy"
+)
+
+// tmpPattern names the temporary entries sandboxd creates beside a target.
+const tmpPattern = ".sandboxd-tmp-*"
+
+// errUnsupportedFileType marks a copy source that is neither a regular file,
+// a directory, nor a symlink, such as a socket or a named pipe.
+var errUnsupportedFileType = errors.New("unsupported file type")
+
 // handleFileAction serves POST /v1/files/{path}:move and :copy. A net/http
 // pattern cannot match a literal suffix after a wildcard, so the action is
 // split off the path value here.
@@ -540,11 +560,13 @@ func (s *RESTServer) handleFileAction(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "destination is required")
 		return
 	}
-	src, ok := s.resolveUserPath(w, rawPath[:sep])
+	// A symlink in the final component is the entry to move or copy, not a
+	// pointer to it.
+	src, ok := s.resolveUserPath(w, rawPath[:sep], pathutil.SanitizeEntryPath)
 	if !ok {
 		return
 	}
-	dst, ok := s.resolveUserPath(w, destParam)
+	dst, ok := s.resolveUserPath(w, destParam, pathutil.SanitizeEntryPath)
 	if !ok {
 		return
 	}
@@ -577,11 +599,11 @@ func (s *RESTServer) handleFileAction(w http.ResponseWriter, r *http.Request) {
 
 	err = os.MkdirAll(filepath.Dir(dst), 0o755)
 	if err == nil {
-		if action == actionMove {
-			err = moveEntry(os.Rename, src, dst, srcInfo)
-		} else {
-			err = copyEntry(src, dst, srcInfo)
-		}
+		err = s.moveOrCopy(action, src, dst)
+	}
+	if errors.Is(err, errUnsupportedFileType) {
+		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return
 	}
 	if err != nil {
 		s.writeFSError(w, err)
@@ -590,20 +612,19 @@ func (s *RESTServer) handleFileAction(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// writeFSError maps a filesystem error to the status the spec documents for it.
-func (s *RESTServer) writeFSError(w http.ResponseWriter, err error) {
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		s.writeError(w, http.StatusNotFound, "NOT_FOUND", "path does not exist within the sandbox")
-	case errors.Is(err, os.ErrPermission):
-		s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED", "permission denied")
-	case errors.Is(err, syscall.ENOTEMPTY), errors.Is(err, syscall.EEXIST):
-		s.writeError(w, http.StatusConflict, "CONFLICT", "path conflicts with an existing file or directory")
-	case errors.Is(err, errUnsupportedFileType):
-		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
-	default:
-		s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+// moveOrCopy runs action on src and dst, which are resolved paths. Sources are
+// read through a handle on the sandbox root, so a path swapped for a symlink
+// during the operation cannot lead outside it.
+func (s *RESTServer) moveOrCopy(action, src, dst string) error {
+	root, err := os.OpenRoot(s.resolvedRoot)
+	if err != nil {
+		return err
 	}
+	defer func() { _ = root.Close() }()
+	if action == actionMove {
+		return moveEntry(os.Rename, root, src, dst)
+	}
+	return copyEntry(root, src, dst)
 }
 
 // isWithin reports whether path lies strictly inside dir. Both must be clean
@@ -616,29 +637,61 @@ func isWithin(dir, path string) bool {
 // moveEntry renames src to dst. rename(2) fails with EXDEV when they sit on
 // different filesystems, for example when a volume is mounted under the
 // sandbox root. Then it copies src and removes the original.
-func moveEntry(rename func(oldPath, newPath string) error, src, dst string, info os.FileInfo) error {
+func moveEntry(rename func(oldPath, newPath string) error, root *os.Root, src, dst string) error {
 	err := rename(src, dst)
 	if !errors.Is(err, syscall.EXDEV) {
 		return err
 	}
-	if err := copyEntry(src, dst, info); err != nil {
+	// Claim the source under a private name first: a request that replaces
+	// src while the copy runs must not be deleted with the original.
+	staged, err := stageEntry(src)
+	if err != nil {
 		return err
 	}
-	return os.RemoveAll(src)
+	if err := copyEntry(root, staged, dst); err != nil {
+		if _, statErr := os.Lstat(src); errors.Is(statErr, os.ErrNotExist) {
+			_ = os.Rename(staged, src)
+		}
+		return err
+	}
+	return os.RemoveAll(staged)
+}
+
+// stageEntry renames src to a fresh private name in the same directory, which
+// cannot fail with EXDEV, and returns that name.
+func stageEntry(src string) (string, error) {
+	staged := tmpPath(filepath.Dir(src))
+	if err := os.Rename(src, staged); err != nil {
+		return "", err
+	}
+	return staged, nil
+}
+
+// tmpPath returns an unused path for a temporary entry in dir.
+func tmpPath(dir string) string {
+	return filepath.Join(dir, strings.Replace(tmpPattern, "*", strconv.FormatUint(rand.Uint64(), 36), 1))
 }
 
 // copyEntry copies the file, symlink, or directory tree at src to dst. It
 // builds a directory in a temporary sibling and renames it into place, so a
 // failed copy leaves no partial dst.
-func copyEntry(src, dst string, info os.FileInfo) error {
-	if !info.IsDir() {
-		return copyLeaf(src, dst, info)
+func copyEntry(root *os.Root, src, dst string) error {
+	rel, err := filepath.Rel(root.Name(), src)
+	if err != nil {
+		return err
 	}
-	tmp, err := os.MkdirTemp(filepath.Dir(dst), ".sandboxd-tmp-*")
+	info, err := root.Lstat(rel)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return copyLeaf(root, rel, dst, info)
+	}
+	tmp, err := os.MkdirTemp(filepath.Dir(dst), tmpPattern)
 	if err != nil {
 		return fmt.Errorf("failed to create temp directory: %w", err)
 	}
-	if err := copyTree(src, tmp, info.Mode().Perm()); err != nil {
+	if err := copyTree(root, rel, tmp, info.Mode().Perm()); err != nil {
 		_ = os.RemoveAll(tmp)
 		return err
 	}
@@ -649,22 +702,27 @@ func copyEntry(src, dst string, info os.FileInfo) error {
 	return nil
 }
 
-// copyTree copies the entries of directory src into the existing directory
-// dst, then sets dst to mode. The mode comes last so a read-only source
-// directory does not block writing its children.
-func copyTree(src, dst string, mode os.FileMode) error {
-	entries, err := os.ReadDir(src)
+// copyTree copies the entries of directory rel, a path below root, into the
+// existing directory dst, then sets dst to mode. The mode comes last so a
+// read-only source directory does not block writing its children.
+func copyTree(root *os.Root, rel, dst string, mode os.FileMode) error {
+	dir, err := root.Open(rel)
+	if err != nil {
+		return err
+	}
+	entries, err := dir.ReadDir(-1)
+	_ = dir.Close()
 	if err != nil {
 		return err
 	}
 	for _, entry := range entries {
-		info, err := entry.Info()
+		from, to := filepath.Join(rel, entry.Name()), filepath.Join(dst, entry.Name())
+		info, err := root.Lstat(from)
 		if err != nil {
 			return err
 		}
-		from, to := filepath.Join(src, entry.Name()), filepath.Join(dst, entry.Name())
 		if !info.IsDir() {
-			if err := copyLeaf(from, to, info); err != nil {
+			if err := copyLeaf(root, from, to, info); err != nil {
 				return err
 			}
 			continue
@@ -672,23 +730,23 @@ func copyTree(src, dst string, mode os.FileMode) error {
 		if err := os.Mkdir(to, 0o700); err != nil {
 			return err
 		}
-		if err := copyTree(from, to, info.Mode().Perm()); err != nil {
+		if err := copyTree(root, from, to, info.Mode().Perm()); err != nil {
 			return err
 		}
 	}
 	return os.Chmod(dst, mode)
 }
 
-// copyLeaf copies one regular file or symlink. It recreates a symlink rather
-// than following it, so a copy never reads outside the sandbox root through a
-// link inside a copied tree.
-func copyLeaf(src, dst string, info os.FileInfo) error {
+// copyLeaf copies the regular file or symlink at rel below root to dst. It
+// recreates a symlink rather than following it, so a copy never reads outside
+// the sandbox root through a link inside a copied tree.
+func copyLeaf(root *os.Root, rel, dst string, info os.FileInfo) error {
 	switch {
 	case info.Mode().IsRegular():
 		// A process in the sandbox can swap the file after the caller's Lstat.
 		// O_NOFOLLOW and O_NONBLOCK stop a swapped-in symlink from being
 		// followed and a swapped-in named pipe from blocking the open.
-		f, err := os.OpenFile(src, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+		f, err := root.OpenFile(rel, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 		if err != nil {
 			return err
 		}
@@ -698,18 +756,32 @@ func copyLeaf(src, dst string, info os.FileInfo) error {
 			return err
 		}
 		if !opened.Mode().IsRegular() {
-			return fmt.Errorf("%w: %s", errUnsupportedFileType, filepath.Base(src))
+			return fmt.Errorf("%w: %s", errUnsupportedFileType, filepath.Base(rel))
 		}
 		return atomicWrite(dst, f, opened.Mode().Perm())
 	case info.Mode()&os.ModeSymlink != 0:
-		target, err := os.Readlink(src)
+		target, err := root.Readlink(rel)
 		if err != nil {
 			return err
 		}
-		return os.Symlink(target, dst)
+		return atomicSymlink(target, dst)
 	default:
-		return fmt.Errorf("%w: %s", errUnsupportedFileType, filepath.Base(src))
+		return fmt.Errorf("%w: %s", errUnsupportedFileType, filepath.Base(rel))
 	}
+}
+
+// atomicSymlink makes dst a symlink to target, replacing an existing file or
+// symlink in one rename.
+func atomicSymlink(target, dst string) error {
+	tmp := tmpPath(filepath.Dir(dst))
+	if err := os.Symlink(target, tmp); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func (s *RESTServer) handleHealth(w http.ResponseWriter, _ *http.Request) {

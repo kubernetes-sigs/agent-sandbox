@@ -162,7 +162,7 @@ iteration (Python).
 | `HEAD` | `/v1/files/{path}` | Existence/metadata probe without transferring the body. |
 | `PUT` | `/v1/files/{path}` | Atomic write (temp file + rename), auto-creates parents. Optional `mode` query (`^0[0-7]{3}$`, default `0644`). `append=true` adds to the end of the file instead (not atomic). Accepts raw bytes or `multipart/form-data` (`file` part). |
 | `DELETE` | `/v1/files/{path}` | Remove a file or directory; `recursive=true` for `rm -rf` behavior; `409` on a non-empty directory otherwise. |
-| `POST` | `/v1/files/{path}:move` | Rename or move to the required `destination` query path, auto-creating parents. `409` if the destination exists, except that `overwrite=true` replaces a file with a file. Directories are never replaced. |
+| `POST` | `/v1/files/{path}:move` | Rename or move to the required `destination` query path, auto-creating parents. `409` if the destination exists, except that `overwrite=true` replaces a file with a file. Directories are never replaced. A symlink as the last path component is moved or replaced itself, not followed. |
 | `POST` | `/v1/files/{path}:copy` | Same as `:move`, but copies. Directories are copied recursively, files keep their mode, and symlinks inside a directory are copied as links. |
 | `GET` | `/v1/health` | Readiness probe: `200 {"status":"ok"}` or `503` during shutdown. |
 | `GET` | `/v1/metadata` | Orchestrator-injected, non-sensitive environment variables (allowlisted by prefix, default `SANDBOX_`). |
@@ -271,12 +271,12 @@ curl -sf -I localhost:8080/v1/files/src/main.py
 # Append
 curl -sf -X PUT --data-binary "more" "localhost:8080/v1/files/src/main.py?append=true"
 
+# Delete recursively
+curl -sf -X DELETE "localhost:8080/v1/files/src?recursive=true"
+
 # Move or copy (missing parents of the destination are created)
 curl -sf -X POST "localhost:8080/v1/files/src/main.py:move?destination=lib/main.py"
 curl -sf -X POST "localhost:8080/v1/files/src:copy?destination=backup/src"
-
-# Delete recursively
-curl -sf -X DELETE "localhost:8080/v1/files/src?recursive=true"
 
 # Probes
 curl -sf localhost:8080/v1/health

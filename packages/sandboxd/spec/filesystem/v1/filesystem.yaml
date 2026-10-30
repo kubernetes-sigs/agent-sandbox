@@ -180,7 +180,8 @@ paths:
         A file moves atomically. The destination must not exist, except that overwrite=true
         replaces an existing file with a file. A directory is never replaced and cannot move
         into itself. The check for an existing destination is not atomic with the move.
-        As for the other file operations, a symlink in either path is followed.
+        A symlink in the final component of either path is not followed: the move applies
+        to the link itself. Symlinks in parent directories are followed within the sandbox root.
       parameters:
         - $ref: "#/components/parameters/Destination"
         - $ref: "#/components/parameters/Overwrite"
@@ -210,8 +211,9 @@ paths:
         a failed copy leaves no partial destination. The destination must not exist, except
         that overwrite=true replaces an existing file with a file. A directory is never
         replaced and cannot be copied into itself. The check for an existing destination is
-        not atomic with the copy. As for the other file operations, a symlink in either path
-        is followed.
+        not atomic with the copy. A symlink in the final component of either path is not
+        followed: a copied symlink is recreated as a link. Symlinks in parent directories are
+        followed within the sandbox root.
       parameters:
         - $ref: "#/components/parameters/Destination"
         - $ref: "#/components/parameters/Overwrite"

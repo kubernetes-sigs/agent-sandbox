@@ -193,8 +193,9 @@ appends, see below), but it does not impose an ordering across requests:
   see a partial append, and concurrent appends to one path can interleave. A
   retried append adds the body again.
 - **Move and copy** use one `rename` per move and publish each copied file or
-  directory atomically. The check for an existing destination is not atomic
-  with them, so a concurrent writer can win the race.
+  directory atomically. A move across filesystems copies and then removes the
+  source, so both paths are briefly absent. The check for an existing
+  destination is not atomic with them, so a concurrent writer can win the race.
 
 There is no cross-request transaction or compare-and-swap; agents that need
 ordering or coordination on shared paths must layer it themselves.

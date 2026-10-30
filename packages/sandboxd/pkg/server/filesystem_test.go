@@ -1070,16 +1070,21 @@ func openTestRoot(t *testing.T, dir string) *os.Root {
 
 func TestCopyLeafRefusesSwappedFile(t *testing.T) {
 	dir := t.TempDir()
-	writeFiles(t, dir, map[string]string{"real": "data", "secret": "s"})
+	outside := t.TempDir()
+	writeFiles(t, dir, map[string]string{"real": "data"})
+	writeFiles(t, outside, map[string]string{"secret": "s"})
 	// The stale info says "regular file", as if the path was swapped after the
 	// caller's Lstat.
 	stale, err := os.Lstat(filepath.Join(dir, "real"))
 	require.NoError(t, err)
-	require.NoError(t, os.Symlink(filepath.Join(dir, "secret"), filepath.Join(dir, "link")))
+	relOutside, err := filepath.Rel(dir, filepath.Join(outside, "secret"))
+	require.NoError(t, err)
+	require.NoError(t, os.Symlink(filepath.Join(outside, "secret"), filepath.Join(dir, "link")))
+	require.NoError(t, os.Symlink(relOutside, filepath.Join(dir, "rellink")))
 	require.NoError(t, syscall.Mkfifo(filepath.Join(dir, "pipe"), 0o644))
 	root := openTestRoot(t, dir)
 
-	for _, name := range []string{"link", "pipe"} {
+	for _, name := range []string{"link", "rellink", "pipe"} {
 		t.Run(name, func(t *testing.T) {
 			dst := filepath.Join(dir, "copy-of-"+name)
 			require.Error(t, copyLeaf(root, name, dst, stale))

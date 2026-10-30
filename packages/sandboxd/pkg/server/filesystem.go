@@ -916,9 +916,10 @@ func copyLeaf(root *os.Root, rel, dst string, info os.FileInfo) error {
 	switch {
 	case info.Mode().IsRegular():
 		// A process in the sandbox can swap the file after the caller's Lstat.
-		// O_NOFOLLOW and O_NONBLOCK stop a swapped-in symlink from being
-		// followed and a swapped-in named pipe from blocking the open.
-		f, err := root.OpenFile(rel, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+		// OpenFile refuses a swapped-in symlink that leaves the sandbox root,
+		// O_NONBLOCK keeps a swapped-in named pipe from blocking the open, and
+		// the Stat below rejects anything that is not a regular file.
+		f, err := root.OpenFile(rel, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 		if err != nil {
 			return err
 		}

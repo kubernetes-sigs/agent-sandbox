@@ -211,7 +211,8 @@ paths:
       summary: Move or rename a file or directory
       description: >
         Renames the path to the destination query path, creating missing parent directories.
-        A file moves atomically. The destination must not exist, except that overwrite=true
+        A move within one filesystem is atomic. Across filesystems it copies and then removes
+        the source, so both paths are briefly absent. The destination must not exist, except that overwrite=true
         replaces an existing file with a file. A directory is never replaced and cannot move
         into itself. The check for an existing destination is not atomic with the move.
         A symlink in the final component of either path is not followed: the move applies

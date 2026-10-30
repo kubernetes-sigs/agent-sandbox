@@ -54,9 +54,12 @@ exactly as they do today.
 
 ## Motivation
 
-A pool member is "warming up" from the moment its Pod is scheduled until the
-`Sandbox` reports `Ready`. During that window the Pod consumes node CPU and
-memory. For a trivial sandbox the window is a few seconds and nobody notices.
+A pool member is "warming up" from the moment it is created until the `Sandbox`
+reports `Ready`. Once its Pod is scheduled the member consumes node CPU and
+memory for the rest of that window. The window is counted from creation rather
+than from scheduling so that a member holds its place as soon as it exists,
+which is what keeps the bound in this KEP from being overshot. For a trivial
+sandbox the window is a few seconds and nobody notices.
 For a sandbox that builds an application on startup the window can be tens of
 minutes of near-saturated CPU.
 
@@ -218,11 +221,11 @@ type SandboxWarmPoolSpec struct {
 }
 
 // SandboxWarmPoolWarmupStrategy bounds how many sandboxes a pool warms up
-// concurrently. A sandbox warms up from the moment its Pod is scheduled until
-// the Sandbox reports Ready, and it consumes node CPU and memory for that whole
-// window. Pools whose sandboxes do heavy startup work, such as compiling an
-// application or downloading model weights, can overload a cluster when they
-// fill a large deficit all at once.
+// concurrently. A sandbox warms up from the moment it is created until the
+// Sandbox reports Ready, and it consumes node CPU and memory from the point its
+// Pod is scheduled onward. Pools whose sandboxes do heavy startup work, such as
+// compiling an application or downloading model weights, can overload a cluster
+// when they fill a large deficit all at once.
 type SandboxWarmPoolWarmupStrategy struct {
 	// maxConcurrent is the largest number of sandboxes the pool warms up at the
 	// same time, as an absolute number (for example 1) or as a percentage of

@@ -24,13 +24,15 @@ laptop / CI runner                                   Kubernetes cluster
 
 Harbor does not know Kubernetes here. It calls the environment's `start`,
 `exec`, `upload_dir`, `download_dir` and `stop`; the integration maps them onto
-agent-sandbox objects and the pod exec API. The task image is the one Terminal-Bench
-publishes for each task (`alexgshaw/<task>:<tag>`); nothing is installed in it.
+agent-sandbox objects and the pod exec API. The task image is the one each task names
+in its `task.toml` (`ghcr.io/laude-institute/terminal-bench/<task>:2.0` for the sample,
+30 MB to 1.3 GB each); nothing is installed in it.
 
 ## How one trial works
 
-Take the sample task `hello-world` (1 CPU, 2 GiB, image `alexgshaw/hello-world:<tag>`),
-run with the oracle agent, which applies the task's reference solution:
+Take the sample task `regex-log` (1 CPU, 2 GiB, image
+`ghcr.io/laude-institute/terminal-bench/regex-log:2.0`), run with the oracle agent,
+which applies the task's reference solution:
 
 1. **Preflight.** Harbor imports `AgentSandboxEnvironment` and calls `preflight()`:
    the kubeconfig loads and the cluster serves `extensions.agents.x-k8s.io`.
@@ -69,7 +71,10 @@ restores the controller default for tasks that need no network.
 ## Run on kind
 
 Requirements: Docker, kind, Python 3.12 or newer, about 10 GB of disk for the sample
-images.
+images. The task images are `linux/amd64` only. On an Apple Silicon machine kind runs
+them under emulation: that is fine for a smoke test, but the two QEMU tasks of the
+sample fail there (no nested virtualization) and `su` misbehaves in some images, so
+treat kind on arm64 as a plumbing check and use an amd64 host or GKE for scores.
 
 ```bash
 # 1. A kind cluster with the controller and the extension controllers.
@@ -88,7 +93,8 @@ examples/harbor-terminal-bench/scripts/run-sample.sh
 ```
 
 `run-sample.sh` applies the namespace, runs `harbor run -c configs/sample.yaml`,
-lists leftover claims (expect none) and prints the report. While it runs:
+lists leftover claims (expect none) and prints the report. On a network that blocks
+Harbor's telemetry endpoint, set `HARBOR_TELEMETRY=0` first. While it runs:
 
 ```bash
 kubectl -n harbor get sandboxtemplates,sandboxwarmpools,sandboxclaims
@@ -151,20 +157,64 @@ output in, not the key.
 ```
 | task | trial | reward | outcome | env setup s | agent s | verifier s |
 |---|---|---|---|---|---|---|
-| hello-world | hello-world__a1b2c3 | 1 | pass | 14.2 | 3.1 | 22.7 |
+| chess-best-move | chess-best-move__ec5rWV9 | 1 | pass | 15.9 | 13.8 | 11.4 |
 ...
-10/10 passed, 0 infrastructure errors, env setup p50 12.9 s / p95 48.0 s
+7/10 passed, 0 infrastructure errors, env setup p50 6.6 s / p95 24.1 s
 ```
 
 `env setup` is Harbor's own timing of `start()`: template and pool creation (once per
-image), the claim becoming Ready (image pull on a cold node dominates), and the exec
-readiness probe. `outcome` is `pass` for reward 1, `fail` for a lower reward, and
-`error: <type>` when Harbor recorded an exception; an `error` row is an
-infrastructure or harness problem, not a model failure, and the count of those is the
+image), the claim becoming Ready (the image pull on a cold node dominates), and the
+exec readiness probe. `outcome` is `pass` for reward 1, `fail` for a lower reward,
+and `error: <type>` when Harbor recorded an exception. An `error` row is an
+infrastructure or harness problem, not a model or task failure; that count is the
 number to watch when changing the cluster.
 
-The results table for the recorded runs on kind and GKE is added to this README
-once this example has run on both.
+## Recorded runs
+
+Oracle agent on `terminal-bench-sample@2.0`, 2026-10-30, the integration at the
+state of this PR. Both runs ended with every claim deleted; `cleanup --all` then
+removed the 10 templates and 10 pools and their NetworkPolicies.
+
+| Cluster | Trials | Pass | Infra errors | env setup p50 / p95 | Notes |
+| --- | --- | --- | --- | --- | --- |
+| GKE, `barkland-test`, controller v1.0.8, e2-standard-4 default pool, 4 concurrent | 10 | 7 | 0 | 6.6 s / 24.1 s (first run on cold nodes: 4.4 s / 66 s, the 1.3 GB `qemu-alpine-ssh` pull) | x86 nodes |
+| kind on an Apple Silicon laptop, controller built from this tree, 2 concurrent | 10 | 7 | 0 | 1.0 s / 1.6 s (images already on the node) | amd64 images under emulation |
+
+Per task, GKE run:
+
+| task | reward | env setup s | agent s | verifier s |
+|---|---|---|---|---|
+| build-cython-ext | 0 | 24.1 | 131.0 | 14.8 |
+| chess-best-move | 1 | 15.9 | 13.8 | 11.4 |
+| configure-git-webserver | 1 | 5.4 | 52.8 | 15.6 |
+| fix-code-vulnerability | 1 | 14.0 | 2.1 | 18.2 |
+| log-summary-date-ranges | 1 | 7.0 | 18.4 | 10.8 |
+| polyglot-c-py | 1 | 11.3 | 2.0 | 21.2 |
+| qemu-alpine-ssh | 0 | 5.0 | 152.2 | 8.4 |
+| qemu-startup | 0 | 3.8 | 129.6 | 5.7 |
+| regex-log | 1 | 3.7 | 2.0 | 26.2 |
+| sqlite-with-gcov | 1 | 6.6 | 79.1 | 21.7 |
+
+The three zero rewards are on the task side, the same three on both clusters:
+
+- `qemu-startup` and `qemu-alpine-ssh`: the oracle boots the VM (the agent log shows
+  the Alpine login prompt), but the verifier's `apt-get install curl` fails with 404s
+  from `deb.debian.org` for `bullseye-security` packages, so `uv` and pytest never
+  install. The index and the pool disagree on that mirror at times; `qemu-alpine-ssh`
+  passed on GKE in an earlier run of the same day. A retry (`-k 2`) or a Debian
+  mirror of your own fixes it; it is not an egress problem, the other packages in the
+  same `apt-get` download fine.
+- `build-cython-ext`: 10 of 11 verifier tests pass; the last one runs the repository's
+  own test suite, which exits 1 inside this image.
+
+On kind, `qemu-*` fail for a second reason too: the amd64 images run under emulation
+on the arm64 node and QEMU has no nested virtualization there. The first kind run
+also failed `fix-code-vulnerability` with `su: Authentication failure`, which is how
+the integration learned to skip `su` when the session already runs as root.
+
+Harbor prints one `Unclosed client session` warning when it exits: it closes its
+event loop before the integration can close the shared Kubernetes client. It is
+cosmetic.
 
 ## Files
 

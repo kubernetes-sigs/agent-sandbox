@@ -256,6 +256,9 @@ Complete, runnable manifests for both (plus an end-to-end SDK client) live in
 curl -sf -X PUT -H "Content-Type: application/octet-stream" \
   --data-binary @local.py "localhost:8080/v1/files/src/main.py?mode=0644"
 
+# Create only if missing (412 if it exists)
+curl -sf -X PUT -H "If-None-Match: *" --data-binary "x" localhost:8080/v1/files/src/new.py
+
 # Read it back
 curl -sf localhost:8080/v1/files/src/main.py
 
@@ -267,9 +270,6 @@ curl -sf -I localhost:8080/v1/files/src/main.py
 
 # Append
 curl -sf -X PUT --data-binary "more" "localhost:8080/v1/files/src/main.py?append=true"
-
-# Create only if missing (412 if it exists)
-curl -sf -X PUT -H "If-None-Match: *" --data-binary "x" localhost:8080/v1/files/src/new.py
 
 # Delete recursively
 curl -sf -X DELETE "localhost:8080/v1/files/src?recursive=true"

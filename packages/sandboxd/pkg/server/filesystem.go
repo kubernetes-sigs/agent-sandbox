@@ -120,6 +120,20 @@ func (s *RESTServer) writeError(w http.ResponseWriter, httpCode int, code, messa
 	s.writeJSON(w, httpCode, APIError{Code: code, Message: message})
 }
 
+// writeFSError maps a filesystem error to the status the spec documents for it.
+func (s *RESTServer) writeFSError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		s.writeError(w, http.StatusNotFound, "NOT_FOUND", "path does not exist within the sandbox")
+	case errors.Is(err, os.ErrPermission):
+		s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED", "permission denied")
+	case errors.Is(err, syscall.ENOTEMPTY), errors.Is(err, syscall.EEXIST):
+		s.writeError(w, http.StatusConflict, "CONFLICT", "path conflicts with an existing file or directory")
+	default:
+		s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+	}
+}
+
 // resolvePath sanitizes the {path...} wildcard against the sandbox root,
 // writing the spec-mandated error response on failure.
 func (s *RESTServer) resolvePath(w http.ResponseWriter, r *http.Request) (string, bool) {
@@ -375,10 +389,8 @@ func (s *RESTServer) putDirectory(w http.ResponseWriter, r *http.Request, target
 				"parent directory does not exist; pass parents=true to create it")
 		case errors.Is(err, os.ErrExist):
 			s.writeError(w, http.StatusConflict, "CONFLICT", "path exists and is not a directory")
-		case errors.Is(err, os.ErrPermission):
-			s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED", "permission denied")
 		default:
-			s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+			s.writeFSError(w, err)
 		}
 		return
 	}

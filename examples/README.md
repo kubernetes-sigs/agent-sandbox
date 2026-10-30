@@ -26,6 +26,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**gemini-cu-sandbox**](./gemini-cu-sandbox): An example of a Python runtime sandbox for Gemini Computer Use Agent.
 - [**gke-swap**](./gke-swap): Demonstrates how to configure GKE node memory swap with dedicated Local SSDs to drastically increase Chrome pod density from 120 to 200 pods per node.
 - [**gpu-l4-snapshot-sandbox**](./gpu-l4-snapshot-sandbox): Snapshot an L4 GPU sandbox on GKE, suspend it to release the GPU, and resume it with its process and GPU memory restored.
+- [**harbor-terminal-bench**](./harbor-terminal-bench): Terminal-Bench 2.0 through the Harbor evaluation framework with every trial in a `SandboxClaim` (the `clients/integrations/harbor` environment): kind smoke run with the oracle agent, the full benchmark on GKE, and a results report.
 - [**hello-world-sandbox**](./hello-world-sandbox): A simple "Hello World" sandbox example.
 - [**hermes-agent**](./hermes-agent): An example of running Hermes Agent with persistence and custom skills.
 - [**hermes-agents-as-a-service**](./hermes-agents-as-a-service): The multi-user platform pattern distilled from a real agents-as-a-service product: per-user claims over a warm pool, suspend/resume as the cost dial, PVC state survival, and injection-policy enforcement.

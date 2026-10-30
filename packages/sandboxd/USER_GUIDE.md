@@ -185,7 +185,7 @@ appends, see below), but it does not impose an ordering across requests:
   complete after the path is deleted; a read that has not opened it may fail.
 - **Concurrent writes to one path** — each successful rename is atomic; the
   last successful rename determines the final contents.
-- **Create-only writes (`If-None-Match: *`)** — when several race to create one
+- **Create-only writes (`If-None-Match: *`)** - when several race to create one
   path, exactly one succeeds and the rest get `412`.
 - **Appends (`append=true`)** are written in place, not atomically: a read can
   see a partial append, and concurrent appends to one path can interleave. A

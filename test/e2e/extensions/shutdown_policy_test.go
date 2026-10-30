@@ -21,12 +21,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const holdDeleteFinalizer = "e2e.agent-sandbox.dev/hold-delete"
@@ -210,4 +212,109 @@ func createTemplate(t *testing.T, tc *framework.TestContext, namespace, name str
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), template))
 	return template
+}
+
+// TestWarmPoolTTLCollectsUnclaimedMembers verifies real Kubernetes garbage
+// collection while preserving the identity of a member adopted by a claim.
+func TestWarmPoolTTLCollectsUnclaimedMembers(t *testing.T) {
+	tc := framework.NewTestContext(t)
+	ctx := t.Context()
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "pool-ttl-gc-"}}
+	require.NoError(t, tc.CreateWithCleanup(ctx, ns))
+	template := newWarmPoolTemplate(ns.Name)
+	template.Spec.PodTemplate.Spec.TerminationGracePeriodSeconds = new(int64(1))
+	require.NoError(t, tc.CreateWithCleanup(ctx, template))
+	pool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "ttl-pool", Namespace: ns.Name},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{Replicas: new(int32(2)), TTLSecondsAfterCreated: new(int32(300)), TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+	}
+	require.NoError(t, tc.CreateWithCleanup(ctx, pool))
+	// Wait for actual ready Pods as well as Sandboxes, recording their UIDs.
+	readyMembers := func() map[string]types.UID {
+		members := map[string]types.UID{}
+		list := &sandboxv1beta1.SandboxList{}
+		if err := tc.List(ctx, list, client.InNamespace(ns.Name)); err != nil {
+			return members
+		}
+		for _, sb := range list.Items {
+			if !metav1.IsControlledBy(&sb, pool) || !sb.DeletionTimestamp.IsZero() || !isSandboxReady(&sb) {
+				continue
+			}
+			pod := &corev1.Pod{}
+			if err := tc.Get(ctx, types.NamespacedName{Name: sb.Name, Namespace: ns.Name}, pod); err != nil {
+				continue
+			}
+			if !metav1.IsControlledBy(pod, &sb) || !pod.DeletionTimestamp.IsZero() {
+				continue
+			}
+			for _, condition := range pod.Status.Conditions {
+				if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+					members[sb.Name] = sb.UID
+				}
+			}
+		}
+		return members
+	}
+	var original map[string]types.UID
+	require.Eventually(t, func() bool { original = readyMembers(); return len(original) == 2 }, 90*time.Second, time.Second, "initial pool must have two ready members")
+	originalPods := map[string]types.UID{}
+	for name := range original {
+		pod := &corev1.Pod{}
+		require.NoError(t, tc.Get(ctx, types.NamespacedName{Name: name, Namespace: ns.Name}, pod))
+		originalPods[name] = pod.UID
+	}
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "surviving-claim", Namespace: ns.Name},
+		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: pool.Name}},
+	}
+	require.NoError(t, tc.CreateWithCleanup(ctx, claim))
+	waitForClaimReady(t, tc, claim)
+	claimedKey := types.NamespacedName{Name: claim.Status.SandboxStatus.Name, Namespace: ns.Name}
+	require.Contains(t, original, claimedKey.Name, "claim must adopt a pre-existing member")
+	claimed := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, tc.Get(ctx, claimedKey, claimed))
+	require.Equal(t, original[claimed.Name], claimed.UID)
+	require.True(t, metav1.IsControlledBy(claimed, claim))
+	require.Len(t, claimed.OwnerReferences, 1)
+	var unclaimed map[string]types.UID
+	require.Eventually(t, func() bool { unclaimed = readyMembers(); return len(unclaimed) == 2 }, 90*time.Second, time.Second, "pool must replenish to two unclaimed members")
+	all := &sandboxv1beta1.SandboxList{}
+	require.NoError(t, tc.List(ctx, all, client.InNamespace(ns.Name)))
+	require.Len(t, all.Items, 3, "two unclaimed members plus the claimed member")
+
+	// Keep setup independent of expiry: shorten the creation-based deadline
+	// only after adoption and refill, then let the controller delete the pool.
+	framework.MustUpdateObject(tc.ClusterClient, pool, func(latest *extensionsv1beta1.SandboxWarmPool) {
+		latest.Spec.TTLSecondsAfterCreated = new(int32(time.Since(latest.CreationTimestamp.Time)/time.Second) + 10)
+		require.Less(t, *latest.Spec.TTLSecondsAfterCreated, int32(300))
+	})
+	require.Eventually(t, func() bool {
+		if !apierrors.IsNotFound(tc.Get(ctx, client.ObjectKeyFromObject(pool), &extensionsv1beta1.SandboxWarmPool{})) {
+			return false
+		}
+		for name := range unclaimed {
+			key := types.NamespacedName{Name: name, Namespace: ns.Name}
+			if !apierrors.IsNotFound(tc.Get(ctx, key, &sandboxv1beta1.Sandbox{})) || !apierrors.IsNotFound(tc.Get(ctx, key, &corev1.Pod{})) {
+				return false
+			}
+		}
+		return true
+	}, 90*time.Second, time.Second, "TTL must delete the pool and Kubernetes GC must collect both unclaimed Sandboxes and Pods")
+	t.Logf("Pool and unclaimed Sandboxes/Pods garbage-collected: %v", unclaimed)
+	// No simulated GC or test-issued member deletes: the original claimed
+	// Sandbox and Pod must remain ready after the real cascade completes.
+	require.NoError(t, tc.Get(ctx, client.ObjectKeyFromObject(claim), claim))
+	require.True(t, isClaimReady(claim))
+	require.NoError(t, tc.Get(ctx, claimedKey, claimed))
+	require.Equal(t, original[claimedKey.Name], claimed.UID)
+	require.True(t, metav1.IsControlledBy(claimed, claim))
+	require.True(t, claimed.DeletionTimestamp.IsZero())
+	require.True(t, isSandboxReady(claimed))
+	pod := &corev1.Pod{}
+	require.NoError(t, tc.Get(ctx, claimedKey, pod))
+	require.Equal(t, originalPods[claimedKey.Name], pod.UID)
+	require.True(t, metav1.IsControlledBy(pod, claimed))
+	require.True(t, pod.DeletionTimestamp.IsZero())
+	tc.MustMatchPredicates(pod, predicates.ReadyConditionIsTrue)
+	t.Logf("Claimed Sandbox %s (UID %s) and Pod (UID %s) survived pool TTL", claimed.Name, claimed.UID, pod.UID)
 }

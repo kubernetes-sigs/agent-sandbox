@@ -1206,6 +1206,7 @@ class TestAsyncK8sHelperBatchMethods(unittest.IsolatedAsyncioTestCase):
         for method in (
             "create_namespaced_custom_object", "list_namespaced_custom_object",
             "delete_collection_namespaced_custom_object", "get_namespaced_custom_object",
+            "delete_namespaced_custom_object",
         ):
             setattr(api, method, AsyncMock(return_value={"items": [], "metadata": {}}))
         coord.create_namespaced_lease = AsyncMock()
@@ -1240,6 +1241,9 @@ class TestAsyncK8sHelperBatchMethods(unittest.IsolatedAsyncioTestCase):
             ("delete_batch_lease", lambda: helper.delete_batch_lease(
                 "batch-b1", "default", _request_timeout=30),
              coord.delete_namespaced_lease, {}),
+            ("delete_sandbox_claim", lambda: helper.delete_sandbox_claim(
+                "b1-0", "default", _request_timeout=30),
+             api.delete_namespaced_custom_object, {"plural": "sandboxclaims", "name": "b1-0"}),
         ]
         for name, call, api_method, expected in cases:
             with self.subTest(name):
@@ -1250,13 +1254,20 @@ class TestAsyncK8sHelperBatchMethods(unittest.IsolatedAsyncioTestCase):
                 for key, value in expected.items():
                     self.assertEqual(kwargs[key], value)
 
-    async def test_create_sandbox_claim_logs_at_the_given_level(self):
+    async def test_claim_create_and_delete_log_at_the_given_level(self):
         self.helper.custom_objects_api.create_namespaced_custom_object = AsyncMock()
-        with self.assertLogs(level="DEBUG") as logs:
-            await self.helper.create_sandbox_claim(
+        self.helper.custom_objects_api.delete_namespaced_custom_object = AsyncMock()
+        calls = {
+            "create": lambda: self.helper.create_sandbox_claim(
                 "b1-0", "pool-a", "default", log_level=logging.DEBUG
-            )
-        self.assertEqual([r.levelno for r in logs.records], [logging.DEBUG])
+            ),
+            "delete": lambda: self.helper.delete_sandbox_claim("b1-0", "default", log_level=logging.DEBUG),
+        }
+        for name, call in calls.items():
+            with self.subTest(name):
+                with self.assertLogs(level="DEBUG") as logs:
+                    await call()
+                self.assertEqual([r.levelno for r in logs.records], [logging.DEBUG])
 
     async def test_warmpool_and_template_gets_return_none_and_lease_delete_ignores_404_other_errors_raise(self):
         api = self.helper.custom_objects_api

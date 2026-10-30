@@ -59,8 +59,11 @@ paths:
         If the path points to a file, returns raw file bytes (application/octet-stream).
         If the path points to a directory, returns a structured directory listing (application/json).
         Pass type to fail with 409 instead when the path is not of the expected kind.
+        Pass recursive=true to also list nested directories.
       parameters:
         - $ref: "#/components/parameters/ExpectedType"
+        - $ref: "#/components/parameters/ListRecursive"
+        - $ref: "#/components/parameters/ListMaxDepth"
       responses:
         "200":
           description: File contents or directory listing
@@ -88,11 +91,15 @@ paths:
       description: Returns the same status and metadata headers as GET without a response body.
       parameters:
         - $ref: "#/components/parameters/ExpectedType"
+        - $ref: "#/components/parameters/ListRecursive"
+        - $ref: "#/components/parameters/ListMaxDepth"
       responses:
         "200":
           description: Path exists
         "400":
-          description: The type query is not file or directory
+          description: >
+            The type, recursive, or max_depth query is invalid, or a recursive listing
+            exceeds 10000 entries
         "403":
           description: Path escapes sandbox root, or permission is denied during path lookup or file open
         "404":
@@ -257,6 +264,28 @@ components:
         Kind of path the client expects. If the path exists but is the other kind,
         the request fails with 409 instead of returning the other representation.
         Omit it to accept either.
+    ListRecursive:
+      name: recursive
+      in: query
+      required: false
+      schema:
+        type: boolean
+        default: false
+      description: >
+        If true, a directory listing also includes the contents of nested directories.
+        Symlinks to directories are listed but not entered. A subdirectory that cannot
+        be read is listed without its contents. Ignored for files.
+    ListMaxDepth:
+      name: max_depth
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+      description: >
+        With recursive=true, the number of directory levels to list. 1 lists only the
+        direct children. Omit it for no depth limit. A listing of more than 10000
+        entries fails with 400. Ignored unless recursive=true.
 
   schemas:
     DirectoryListing:
@@ -283,6 +312,9 @@ components:
       properties:
         name:
           type: string
+          description: >
+            Entry name. In a recursive listing, the path relative to the listed directory
+            with "/" separators, and a directory comes before its contents.
           example: "main.py"
         size:
           type: integer

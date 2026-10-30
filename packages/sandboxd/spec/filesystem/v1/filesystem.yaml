@@ -106,11 +106,11 @@ paths:
       summary: Write or overwrite a file, or create a directory (Idempotent unless append=true)
       description: >
         Atomically writes request body to the given path using a temporary file and rename strategy.
-        Parent directories are created automatically. Supports both new file creation and overwriting.
+        File writes create missing parent directories automatically. Supports both new file creation and overwriting.
         With append=true the body is added to the end of the file instead, which is not atomic
         or idempotent: retrying an append adds the body again.
         With type=directory the request creates an empty directory instead and ignores the body.
-        It succeeds when the directory already exists.
+        It succeeds when the directory already exists. Missing parents need parents=true.
       parameters:
         - name: type
           in: query

@@ -187,3 +187,63 @@ def test_dockerfile_workdir_parsing():
     assert dockerfile_workdir("FROM x\nWORKDIR /app\nworkdir src\n") == "/app/src"
     assert dockerfile_workdir("FROM x\nWORKDIR $HOME/app\n") is None
     assert dockerfile_workdir("FROM x\nRUN true\n") is None
+
+
+class _Groups:
+    def __init__(self, names):
+        self.groups = [type("G", (), {"name": n})() for n in names]
+
+
+def _patch_kube(monkeypatch, *, groups=None, error=None, incluster=False):
+    """Stand in for the kubernetes config loader and the discovery API."""
+    from kubernetes import client as sync_client
+    from kubernetes import config as sync_config
+
+    calls = {}
+
+    def load_kube_config(context=None, client_configuration=None):
+        calls["context"] = context
+        client_configuration.host = "https://api.example"
+
+    def load_incluster_config(client_configuration=None):
+        if not incluster:
+            raise sync_config.ConfigException("not in cluster")
+
+    class FakeApis:
+        def __init__(self, api_client):
+            pass
+
+        def get_api_versions(self, _request_timeout=None):
+            calls["timeout"] = _request_timeout
+            if error:
+                raise error
+            return _Groups(groups or [])
+
+    monkeypatch.setattr(sync_config, "load_kube_config", load_kube_config)
+    monkeypatch.setattr(sync_config, "load_incluster_config", load_incluster_config)
+    monkeypatch.setattr(sync_client, "ApisApi", FakeApis)
+    return calls
+
+
+def test_preflight_passes_with_the_crds_and_bounds_the_call(monkeypatch):
+    calls = _patch_kube(monkeypatch, groups=["apps", "extensions.agents.x-k8s.io"])
+    monkeypatch.setenv("K8S_SANDBOX_HARBOR_KUBE_CONTEXT", "prod")
+    AgentSandboxEnvironment.preflight()
+    assert calls == {"context": "prod", "timeout": 15}
+
+
+def test_preflight_fails_without_the_crds(monkeypatch):
+    _patch_kube(monkeypatch, groups=["apps"])
+    with pytest.raises(SystemExit, match="extensions.agents.x-k8s.io"):
+        AgentSandboxEnvironment.preflight()
+
+
+def test_preflight_unreachable_named_context_fails_but_current_context_only_warns(monkeypatch, caplog):
+    _patch_kube(monkeypatch, error=TimeoutError("connect timeout"))
+    monkeypatch.delenv("K8S_SANDBOX_HARBOR_KUBE_CONTEXT", raising=False)
+    with caplog.at_level("WARNING"):
+        AgentSandboxEnvironment.preflight()                 # warns, does not exit
+    assert "cannot reach the API server of the current context" in caplog.text
+    monkeypatch.setenv("K8S_SANDBOX_HARBOR_KUBE_CONTEXT", "prod")
+    with pytest.raises(SystemExit, match="cannot reach the API server of prod"):
+        AgentSandboxEnvironment.preflight()

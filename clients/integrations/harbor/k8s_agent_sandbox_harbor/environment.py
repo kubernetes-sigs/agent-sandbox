@@ -57,6 +57,7 @@ ENVIRONMENT_TYPE = "agent-sandbox"
 _DOCKERFILE = "Dockerfile"
 _COMPOSE = "docker-compose.yaml"
 _TERMINATE_ATTEMPTS = 3
+_PREFLIGHT_TIMEOUT_S = 15
 
 
 def dockerfile_workdir(text: str) -> str | None:
@@ -123,12 +124,22 @@ class AgentSandboxEnvironment(BaseEnvironment):
 
     @classmethod
     def preflight(cls) -> None:
-        """Fail before any trial is queued when the cluster is not reachable
-        or the agent-sandbox extension CRDs are not served."""
+        """Fail before any trial is queued when the kubeconfig is unusable or
+        the cluster does not serve the agent-sandbox extension CRDs.
+
+        Harbor calls this without the ``--ek`` options, so the context comes
+        from ``K8S_SANDBOX_HARBOR_KUBE_CONTEXT`` or the kubeconfig's current
+        context. An unreachable current context is reported as a warning, not
+        a failure, when no context was named: the trials may target another
+        one through ``--ek kube_context``, and each trial's ``start()`` fails
+        fast with its own error. The API call is bounded, so a context behind
+        an unreachable network never hangs the run.
+        """
         from kubernetes import client as sync_client
         from kubernetes import config as sync_config
 
         options = EnvironmentOptions.from_kwargs({})
+        named = options.kube_context is not None
         configuration = sync_client.Configuration()
         try:
             try:
@@ -140,9 +151,17 @@ class AgentSandboxEnvironment(BaseEnvironment):
             raise SystemExit(f"agent-sandbox environment: no usable kubeconfig: {exc}") from exc
         api = sync_client.ApisApi(sync_client.ApiClient(configuration))
         try:
-            groups = {g.name for g in api.get_api_versions().groups}
+            groups = {g.name for g in api.get_api_versions(_request_timeout=_PREFLIGHT_TIMEOUT_S).groups}
         except Exception as exc:  # noqa: BLE001
-            raise SystemExit(f"agent-sandbox environment: cannot reach the API server: {exc}") from exc
+            message = (f"agent-sandbox environment: cannot reach the API server of "
+                       f"{options.kube_context or 'the current context'} ({configuration.host}): "
+                       f"{type(exc).__name__}: {str(exc).splitlines()[0] if str(exc) else ''}")
+            if named:
+                raise SystemExit(message) from exc
+            logging.getLogger(__name__).warning(
+                "%s; set K8S_SANDBOX_HARBOR_KUBE_CONTEXT or --ek kube_context to pick the cluster",
+                message)
+            return
         if "extensions.agents.x-k8s.io" not in groups:
             raise SystemExit("agent-sandbox environment: the cluster does not serve "
                              "extensions.agents.x-k8s.io (install agent-sandbox with "

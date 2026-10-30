@@ -19,6 +19,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"math"
 	"mime"
 	"net/http"
 	"os"
@@ -47,6 +49,12 @@ const (
 	entryTypeDirectory = "directory"
 )
 
+// maxRecursiveEntries caps a recursive listing, which sandboxd buffers in
+// memory before encoding it, so one request cannot exhaust the daemon.
+const maxRecursiveEntries = 10000
+
+var errListingTooLarge = errors.New("listing too large")
+
 // RESTServer implements the sandboxd Filesystem & Runtime REST API on top of
 // net/http. All file paths are confined to rootDir via pathutil.SanitizePath.
 type RESTServer struct {
@@ -59,6 +67,8 @@ type RESTServer struct {
 
 	// environ is swappable for tests; defaults to os.Environ.
 	environ func() []string
+	// maxListEntries is swappable for tests; defaults to maxRecursiveEntries.
+	maxListEntries int
 	// metadataEnv returns the filtered /v1/metadata env map, computed once
 	// on first use: the daemon's environment is immutable after start.
 	metadataEnv func() map[string]string
@@ -83,6 +93,7 @@ func NewRESTServer(rootDir, metadataEnvPrefix string, log logr.Logger) *RESTServ
 		startTime:         time.Now(),
 		log:               log,
 		environ:           os.Environ,
+		maxListEntries:    maxRecursiveEntries,
 	}
 	s.ready.Store(true)
 	s.metadataEnv = sync.OnceValue(s.buildMetadataEnv)
@@ -120,6 +131,20 @@ func (s *RESTServer) writeError(w http.ResponseWriter, httpCode int, code, messa
 	s.writeJSON(w, httpCode, APIError{Code: code, Message: message})
 }
 
+// writeFSError maps a filesystem error to the status the spec documents for it.
+func (s *RESTServer) writeFSError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		s.writeError(w, http.StatusNotFound, "NOT_FOUND", "path does not exist within the sandbox")
+	case errors.Is(err, os.ErrPermission):
+		s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED", "permission denied")
+	case errors.Is(err, syscall.ENOTEMPTY), errors.Is(err, syscall.EEXIST):
+		s.writeError(w, http.StatusConflict, "CONFLICT", "path conflicts with an existing file or directory")
+	default:
+		s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+	}
+}
+
 // resolvePath sanitizes the {path...} wildcard against the sandbox root,
 // writing the spec-mandated error response on failure.
 func (s *RESTServer) resolvePath(w http.ResponseWriter, r *http.Request) (string, bool) {
@@ -152,12 +177,46 @@ func (s *RESTServer) boolQuery(w http.ResponseWriter, r *http.Request, name stri
 	return parsed, true
 }
 
-func (s *RESTServer) handleGetFile(w http.ResponseWriter, r *http.Request) {
+// typeQuery reads the optional "type" query parameter. It writes a 400 and
+// returns ok=false when the value is neither "file" nor "directory".
+func (s *RESTServer) typeQuery(w http.ResponseWriter, r *http.Request) (value string, ok bool) {
 	query := r.URL.Query()
-	wantType := query.Get("type")
-	if query.Has("type") && wantType != entryTypeFile && wantType != entryTypeDirectory {
+	value = query.Get("type")
+	if query.Has("type") && value != entryTypeFile && value != entryTypeDirectory {
 		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
-			fmt.Sprintf("type %q must be %q or %q", wantType, entryTypeFile, entryTypeDirectory))
+			fmt.Sprintf("type %q must be %q or %q", value, entryTypeFile, entryTypeDirectory))
+		return "", false
+	}
+	return value, true
+}
+
+// modeQuery reads the optional "mode" query parameter, returning def when it
+// is absent. It writes a 400 and returns ok=false when the value is invalid.
+func (s *RESTServer) modeQuery(w http.ResponseWriter, r *http.Request, def os.FileMode) (os.FileMode, bool) {
+	raw := r.URL.Query().Get("mode")
+	if raw == "" {
+		return def, true
+	}
+	if !modePattern.MatchString(raw) {
+		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+			fmt.Sprintf("mode %q must match ^0[0-7]{3}$", raw))
+		return 0, false
+	}
+	parsed, err := strconv.ParseUint(raw, 8, 32)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return 0, false
+	}
+	return os.FileMode(parsed), true
+}
+
+func (s *RESTServer) handleGetFile(w http.ResponseWriter, r *http.Request) {
+	wantType, ok := s.typeQuery(w, r)
+	if !ok {
+		return
+	}
+	maxDepth, ok := s.listDepth(w, r)
+	if !ok {
 		return
 	}
 
@@ -184,7 +243,7 @@ func (s *RESTServer) handleGetFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if info.IsDir() {
-		s.serveDirectoryListing(w, r, target)
+		s.serveDirectoryListing(w, r, target, maxDepth)
 		return
 	}
 
@@ -218,65 +277,126 @@ func typeMismatch(want string, isDir bool) string {
 	return ""
 }
 
-func (s *RESTServer) serveDirectoryListing(w http.ResponseWriter, r *http.Request, target string) {
-	dirEntries, err := os.ReadDir(target) // sorted by name
+// listDepth returns how many directory levels a listing descends: 1 unless
+// recursive=true, then max_depth when given and unlimited otherwise. It writes
+// a 400 and returns ok=false on an invalid value.
+func (s *RESTServer) listDepth(w http.ResponseWriter, r *http.Request) (depth int, ok bool) {
+	recursive, ok := s.boolQuery(w, r, "recursive")
+	if !ok {
+		return 0, false
+	}
+	depth = math.MaxInt
+	if raw := r.URL.Query().Get("max_depth"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+				fmt.Sprintf("max_depth %q must be a positive integer", raw))
+			return 0, false
+		}
+		depth = n
+	}
+	if !recursive {
+		depth = 1
+	}
+	return depth, true
+}
+
+// serveDirectoryListing lists target up to maxDepth levels deep. Entry names
+// are paths relative to target, so a flat listing yields plain names.
+func (s *RESTServer) serveDirectoryListing(w http.ResponseWriter, r *http.Request, target string, maxDepth int) {
+	requestPath := r.PathValue("path")
+	entries := []FileEntry{}
+	// WalkDir visits each directory's entries in name order and does not
+	// follow symlinks, so a link to a directory is listed but never entered.
+	err := filepath.WalkDir(target, func(p string, d fs.DirEntry, walkErr error) error {
+		if err := r.Context().Err(); err != nil {
+			return err
+		}
+		if p == target {
+			return walkErr
+		}
+		if walkErr != nil {
+			return nil // Unreadable subdirectory: keep it listed, without contents.
+		}
+		rel, err := filepath.Rel(target, p)
+		if err != nil {
+			return err
+		}
+		entry, ok := s.fileEntry(d, filepath.ToSlash(rel), filepath.Join(requestPath, rel))
+		if !ok {
+			return nil
+		}
+		if maxDepth > 1 && len(entries) >= s.maxListEntries {
+			return errListingTooLarge
+		}
+		entries = append(entries, entry)
+		// SkipDir on a non-directory would skip the rest of its parent.
+		if d.IsDir() && strings.Count(entry.Name, "/")+1 >= maxDepth {
+			return fs.SkipDir
+		}
+		return nil
+	})
+	if errors.Is(err, errListingTooLarge) {
+		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+			fmt.Sprintf("listing exceeds %d entries; lower max_depth or list a subdirectory", s.maxListEntries))
+		return
+	}
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 		return
 	}
 
-	entries := make([]FileEntry, 0, len(dirEntries))
-	for _, entry := range dirEntries {
-		info, err := entry.Info()
-		if err != nil {
-			continue // entry vanished between ReadDir and Info
-		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			// Resolve the link's type through SanitizePath so links escaping
-			// the sandbox root are omitted from the listing. Broken links are also omitted.
-			resolved, sanErr := pathutil.SanitizePath(s.rootDir, filepath.Join(r.PathValue("path"), entry.Name()))
-			if sanErr != nil {
-				continue
-			}
-			info, err = os.Stat(resolved)
-			if err != nil {
-				continue
-			}
-		}
-		entryType := entryTypeFile
-		if info.IsDir() {
-			entryType = entryTypeDirectory
-		}
-		entries = append(entries, FileEntry{
-			Name:       entry.Name(),
-			Size:       info.Size(),
-			Type:       entryType,
-			ModifiedAt: info.ModTime().UTC().Format(time.RFC3339),
-			Mode:       fmt.Sprintf("%04o", info.Mode().Perm()),
-		})
-	}
-
-	relPath := r.PathValue("path")
+	relPath := requestPath
 	if !strings.HasPrefix(relPath, "/") {
 		relPath = "/" + relPath
 	}
 	s.writeJSON(w, http.StatusOK, DirectoryListing{Path: relPath, Entries: entries})
 }
 
-func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
-	mode := os.FileMode(0o644)
-	if modeParam := r.URL.Query().Get("mode"); modeParam != "" {
-		if !modePattern.MatchString(modeParam) {
-			s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
-				fmt.Sprintf("mode %q must match ^0[0-7]{3}$", modeParam))
-			return
-		}
-		parsed, err := strconv.ParseUint(modeParam, 8, 32)
+// fileEntry describes d, which lives at sandboxPath below the sandbox root, as
+// a listing row called name. It returns ok=false for entries a listing omits:
+// ones that vanished, and symlinks that are broken or leave the sandbox root.
+func (s *RESTServer) fileEntry(d fs.DirEntry, name, sandboxPath string) (entry FileEntry, ok bool) {
+	info, err := d.Info()
+	if err != nil {
+		return FileEntry{}, false
+	}
+	if d.Type()&os.ModeSymlink != 0 {
+		resolved, err := pathutil.SanitizePath(s.rootDir, sandboxPath)
 		if err != nil {
-			s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
-			return
+			return FileEntry{}, false
 		}
-		mode = os.FileMode(parsed)
+		if info, err = os.Stat(resolved); err != nil {
+			return FileEntry{}, false
+		}
+	}
+	entryType := entryTypeFile
+	if info.IsDir() {
+		entryType = entryTypeDirectory
+	}
+	return FileEntry{
+		Name:       name,
+		Size:       info.Size(),
+		Type:       entryType,
+		ModifiedAt: info.ModTime().UTC().Format(time.RFC3339),
+		Mode:       fmt.Sprintf("%04o", info.Mode().Perm()),
+	}, true
+}
+
+func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
+	putType, ok := s.typeQuery(w, r)
+	if !ok {
+		return
+	}
+	isDirectory := putType == entryTypeDirectory
+
+	defaultMode := os.FileMode(0o644)
+	if isDirectory {
+		defaultMode = 0o755
+	}
+	mode, ok := s.modeQuery(w, r, defaultMode)
+	if !ok {
+		return
 	}
 
 	appendMode, ok := s.boolQuery(w, r, "append")
@@ -293,9 +413,30 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+
+	if isDirectory {
+		if appendMode {
+			s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+				"append cannot be used with type=directory")
+			return
+		}
+		// Directory creation is idempotent, so it cannot honor the precondition.
+		if createOnly {
+			s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+				"If-None-Match cannot be used with type=directory")
+			return
+		}
+		s.putDirectory(w, r, target, mode)
+		return
+	}
+
 	if info, err := os.Stat(target); err == nil && info.IsDir() {
 		if createOnly {
 			s.writePathExists(w)
+			return
+		}
+		if msg := typeMismatch(putType, true); msg != "" {
+			s.writeError(w, http.StatusConflict, "CONFLICT", msg)
 			return
 		}
 		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "target path is a directory")
@@ -329,6 +470,57 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// putDirectory handles PUT with type=directory. It ignores the request body.
+func (s *RESTServer) putDirectory(w http.ResponseWriter, r *http.Request, target string, mode os.FileMode) {
+	parents, ok := s.boolQuery(w, r, "parents")
+	if !ok {
+		return
+	}
+
+	if err := makeDirectory(target, mode, parents); err != nil {
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			s.writeError(w, http.StatusNotFound, "NOT_FOUND",
+				"parent directory does not exist; pass parents=true to create it")
+		case errors.Is(err, os.ErrExist):
+			s.writeError(w, http.StatusConflict, "CONFLICT", "path exists and is not a directory")
+		default:
+			s.writeFSError(w, err)
+		}
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// makeDirectory creates the directory target, and its missing parents when
+// parents is true. It succeeds when target is already a directory, so retries
+// are safe, and applies mode only to a directory it creates.
+func makeDirectory(target string, mode os.FileMode, parents bool) error {
+	if parents {
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return fmt.Errorf("failed to create parent directory: %w", err)
+		}
+	}
+
+	err := os.Mkdir(target, mode)
+	if errors.Is(err, os.ErrExist) {
+		if info, statErr := os.Stat(target); statErr == nil && info.IsDir() {
+			return nil
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	// Mkdir applies the umask; chmod so a new directory gets exactly mode, as
+	// atomicWrite does for files.
+	if err := os.Chmod(target, mode); err != nil {
+		return fmt.Errorf("failed to set directory mode: %w", err)
+	}
+	return nil
 }
 
 // requestFileBody returns the file payload reader for a PUT request: the raw

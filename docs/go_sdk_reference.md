@@ -158,7 +158,8 @@ var (
     ErrResponseTooLarge = errors.New("response exceeded 16 MB limit")
     // ErrUnsupportedByRuntime is returned by operations the selected
     // runtime or connection cannot perform (e.g. Delete on the legacy
-    // python-runtime, or Run with RuntimeSandboxd and APIURL).
+    // python-runtime, or Run with RuntimeSandboxd and APIURL or
+    // ConnectivityRouterPortForward).
     ErrUnsupportedByRuntime = errors.New("operation not supported by the sandbox runtime")
     // ErrProcessProtocol indicates an invalid or incomplete process event stream.
     ErrProcessProtocol = errors.New("invalid process event stream")
@@ -382,10 +383,31 @@ const (
     //
     // With RuntimeSandboxd the forward targets the sandbox pod itself, which
     // does not work for Kata or gVisor pods: their workload does not listen in
-    // the pod's host-side network namespace. Use an in-cluster mode for those.
+    // the pod's host-side network namespace. Use an in-cluster mode, or
+    // ConnectivityRouterPortForward for the HTTP API. gRPC still needs a
+    // direct path.
     // RuntimeLegacyPython forwards to the sandbox-router instead and is
     // unaffected.
     ConnectivityPortForward Connectivity = "port-forward"
+
+    // ConnectivityRouterPortForward port-forwards the sandbox-router HTTP
+    // server and proxies to sandboxd's REST port (X-Sandbox-Port:
+    // SandboxdRESTPort). Requires RuntimeSandboxd. The legacy runtime already
+    // uses ConnectivityPortForward for the same tunnel.
+    //
+    // This mode exposes only the router's HTTP API. The router itself carries
+    // native gRPC, but that is not wired into this path, so Run and Start
+    // return ErrUnsupportedByRuntime. This is the laptop or CI path for Kata
+    // and gVisor sandboxes, which pod port-forward cannot reach.
+    //
+    // Two sandboxd features stay out of reach through the router today. The
+    // router strips the Authorization header before forwarding, so sandboxd
+    // started with --auth-token-* rejects every routed call except
+    // GET /v1/health (see #2102). The router also caps each request at its
+    // ProxyTimeout (default 180s), so a file transfer longer than that fails
+    // even with a larger RequestTimeout; raise the router's ProxyTimeout to
+    // match.
+    ConnectivityRouterPortForward Connectivity = "router-port-forward"
     // ConnectivityInClusterService dials the Sandbox's headless Service by
     // its in-cluster DNS name (Status.ServiceFQDN), taking the apiserver —
     // and, for RuntimeLegacyPython, the sandbox-router, off the data path.
@@ -901,17 +923,18 @@ type Options struct {
     AdoptExisting bool
 
     // Runtime selects the in-sandbox runtime API. Default: RuntimeLegacyPython.
-    // RuntimeSandboxd talks to the sandbox pod rather than the sandbox-router,
-    // so GatewayName is not supported with it. APIURL remains available as an
-    // advanced/testing escape hatch for the REST endpoint only: Run needs the
-    // gRPC endpoint and returns ErrUnsupportedByRuntime with it.
+    // RuntimeSandboxd talks to sandboxd on the sandbox pod, so GatewayName is
+    // not supported with it. APIURL remains available as an advanced/testing
+    // escape hatch for the REST endpoint only: Run needs the gRPC endpoint and
+    // returns ErrUnsupportedByRuntime with it.
     Runtime Runtime
 
     // Connectivity selects the transport. Default: ConnectivityPortForward.
     //
     // The in-cluster values conflict with both GatewayName and APIURL, and
     // require that this process runs inside the same cluster as the sandbox
-    // pods.
+    // pods. ConnectivityRouterPortForward also conflicts with GatewayName and
+    // APIURL.
     Connectivity Connectivity
 
     // SandboxdRESTPort is the pod port of sandboxd's Filesystem & Runtime
@@ -925,6 +948,10 @@ type Options struct {
     // Namespace where the SandboxClaim will be created. Default: "default".
     // Must be a valid Kubernetes DNS label (lowercase, [a-z0-9-]).
     Namespace string
+
+    // RouterNamespace is where port-forward modes find sandbox-router-svc
+    // (shipped manifests use "agent-sandbox-system"). Default: Namespace.
+    RouterNamespace string
 
     // GatewayName enables Gateway mode. The client watches this Gateway resource
     // for an external IP, then routes through the sandbox-router.
@@ -1049,6 +1076,14 @@ type Options struct {
     // pod IP is available. Use in environments with strict network policies,
     // service meshes, or secure overlays where direct pod-to-pod IP routing is
     // restricted but service-based DNS routing works correctly.
+    //
+    // ConnectivityRouterPortForward sends X-Sandbox-Pod-IP by default, which
+    // makes the router dial the stored pod IP directly and skip its cache and
+    // DNS lookup. If the sandbox pod was rescheduled, that stale IP may now
+    // belong to another pod. Set DisablePodIPRouting: true when the router runs
+    // with --cache-enabled or the Sandbox has a headless Service
+    // (spec.service: true), so the router resolves the live pod by cache or
+    // DNS instead.
     // Note: this only affects router-based transports that send X-Sandbox-* headers.
     // Default: false (header is sent when router headers are enabled and a pod IP is present).
     DisablePodIPRouting bool

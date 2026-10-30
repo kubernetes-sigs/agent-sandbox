@@ -16,6 +16,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"mime/multipart"
 	"net/http"
@@ -178,6 +179,117 @@ func TestPutAppendRejections(t *testing.T) {
 	}
 }
 
+func TestPutDirectoryCreatesEmptyDirectory(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+
+	// The body is ignored, and a retry succeeds without touching the mode.
+	for _, target := range []string{"/v1/files/d?type=directory", "/v1/files/d?type=directory&mode=0700"} {
+		rec := doRequest(handler, http.MethodPut, target, []byte("ignored"), nil)
+		require.Equal(t, http.StatusNoContent, rec.Code, target)
+	}
+
+	info, err := os.Stat(filepath.Join(root, "d"))
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
+	require.Equal(t, os.FileMode(0o755), info.Mode().Perm())
+
+	entries, err := os.ReadDir(filepath.Join(root, "d"))
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}
+
+func TestPutDirectoryAppliesMode(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+
+	rec := doRequest(handler, http.MethodPut, "/v1/files/d?type=directory&mode=0700", nil, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	info, err := os.Stat(filepath.Join(root, "d"))
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o700), info.Mode().Perm())
+}
+
+func TestPutDirectoryParents(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+
+	rec := doRequest(handler, http.MethodPut, "/v1/files/a/b?type=directory", nil, nil)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Equal(t, "NOT_FOUND", decodeError(t, rec).Code)
+	require.NoDirExists(t, filepath.Join(root, "a"))
+
+	rec = doRequest(handler, http.MethodPut, "/v1/files/a/b?type=directory&parents=true&mode=0700", nil, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	// Only the requested directory gets the mode; parents get the default.
+	parent, err := os.Stat(filepath.Join(root, "a"))
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o755), parent.Mode().Perm())
+	leaf, err := os.Stat(filepath.Join(root, "a", "b"))
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o700), leaf.Mode().Perm())
+}
+
+func TestPutDirectoryRejections(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o644))
+	outside := t.TempDir()
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "link")))
+
+	tests := []struct {
+		name       string
+		target     string
+		wantStatus int
+		wantCode   string
+	}{
+		{"path is a file", "f.txt?type=directory", http.StatusConflict, "CONFLICT"},
+		{"append", "d?type=directory&append=true", http.StatusBadRequest, "INVALID_ARGUMENT"},
+		{"invalid parents", "d?type=directory&parents=banana", http.StatusBadRequest, "INVALID_ARGUMENT"},
+		{"invalid mode", "d?type=directory&mode=999", http.StatusBadRequest, "INVALID_ARGUMENT"},
+		{"unknown type", "d?type=link", http.StatusBadRequest, "INVALID_ARGUMENT"},
+		{"symlink escape", "link/d?type=directory", http.StatusForbidden, "PERMISSION_DENIED"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doRequest(handler, http.MethodPut, "/v1/files/"+tc.target, nil, nil)
+			require.Equal(t, tc.wantStatus, rec.Code)
+			require.Equal(t, tc.wantCode, decodeError(t, rec).Code)
+		})
+	}
+	require.NoDirExists(t, filepath.Join(outside, "d"))
+}
+
+func TestPutTypeFileWritesFile(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+
+	rec := doRequest(handler, http.MethodPut, "/v1/files/f.txt?type=file", []byte("x"), nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	onDisk, err := os.ReadFile(filepath.Join(root, "f.txt"))
+	require.NoError(t, err)
+	require.Equal(t, "x", string(onDisk))
+}
+
+func TestPutTypeFileOnDirectoryConflicts(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.Mkdir(filepath.Join(root, "d"), 0o755))
+
+	rec := doRequest(handler, http.MethodPut, "/v1/files/d?type=file", []byte("x"), nil)
+	require.Equal(t, http.StatusConflict, rec.Code)
+	require.Equal(t, "CONFLICT", decodeError(t, rec).Code)
+}
+
+func TestPutDirectoryPermissionDenied(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.Mkdir(filepath.Join(root, "ro"), 0o500))
+
+	rec := doRequest(handler, http.MethodPut, "/v1/files/ro/d?type=directory", nil, nil)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	require.Equal(t, "PERMISSION_DENIED", decodeError(t, rec).Code)
+}
+
 func TestPutMultipartUpload(t *testing.T) {
 	_, handler, root := newRESTFixture(t)
 
@@ -266,6 +378,20 @@ func TestPutCreateOnlyExistingDirectory(t *testing.T) {
 			require.Equal(t, "FAILED_PRECONDITION", decodeError(t, rec).Code)
 		})
 	}
+}
+
+func TestPutCreateOnlyWithType(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "d"), 0o755))
+	header := http.Header{"If-None-Match": []string{"*"}}
+
+	rec := doRequest(handler, http.MethodPut, "/v1/files/d?type=directory", nil, header)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Equal(t, "INVALID_ARGUMENT", decodeError(t, rec).Code)
+
+	// The precondition outranks the type mismatch.
+	rec = doRequest(handler, http.MethodPut, "/v1/files/d?type=file", []byte("x"), header)
+	require.Equal(t, http.StatusPreconditionFailed, rec.Code)
 }
 
 func TestPutCreateOnlyRacesToOneWinner(t *testing.T) {
@@ -358,6 +484,147 @@ func TestGetEmptyDirectoryListsEmptyEntries(t *testing.T) {
 	rec := doRequest(handler, http.MethodGet, "/v1/files/", nil, nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, rec.Body.String(), `"entries":[]`, "entries must be [] not null")
+}
+
+func listingNames(t *testing.T, rec *httptest.ResponseRecorder) []string {
+	t.Helper()
+	require.Equal(t, http.StatusOK, rec.Code)
+	var listing DirectoryListing
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &listing))
+	names := make([]string, 0, len(listing.Entries))
+	for _, e := range listing.Entries {
+		names = append(names, e.Name)
+	}
+	return names
+}
+
+func TestGetRecursiveListing(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "a", "b"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "a", "b", "c.txt"), []byte("c"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "a", "x.txt"), []byte("x"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "b.txt"), []byte("b"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "z.txt"), []byte("z"), 0o644))
+
+	tests := []struct {
+		name  string
+		query string
+		want  []string
+	}{
+		{"flat by default", "", []string{"a", "b.txt", "z.txt"}},
+		{"unlimited depth", "recursive=true", []string{"a", "a/b", "a/b/c.txt", "a/x.txt", "b.txt", "z.txt"}},
+		{"depth 1 is flat", "recursive=true&max_depth=1", []string{"a", "b.txt", "z.txt"}},
+		{"depth 2", "recursive=true&max_depth=2", []string{"a", "a/b", "a/x.txt", "b.txt", "z.txt"}},
+		{"depth beyond tree", "recursive=true&max_depth=9", []string{"a", "a/b", "a/b/c.txt", "a/x.txt", "b.txt", "z.txt"}},
+		{"max_depth needs recursive", "max_depth=3", []string{"a", "b.txt", "z.txt"}},
+		{"recursive=false is flat", "recursive=false", []string{"a", "b.txt", "z.txt"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doRequest(handler, http.MethodGet, "/v1/files/?"+tc.query, nil, nil)
+			require.Equal(t, tc.want, listingNames(t, rec))
+		})
+	}
+}
+
+func TestGetRecursiveListingEntryCap(t *testing.T) {
+	s, handler, root := newRESTFixture(t)
+	s.maxListEntries = 5
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "a", "b"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "a", "b", "c.txt"), []byte("c"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "a", "x.txt"), []byte("x"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "b.txt"), []byte("b"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "z.txt"), []byte("z"), 0o644))
+
+	// The full tree has 6 entries: one over the cap.
+	rec := doRequest(handler, http.MethodGet, "/v1/files/?recursive=true", nil, nil)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Equal(t, "INVALID_ARGUMENT", decodeError(t, rec).Code)
+
+	// Exactly at the cap is allowed, and so are listings that are not recursive.
+	rec = doRequest(handler, http.MethodGet, "/v1/files/?recursive=true&max_depth=2", nil, nil)
+	require.Len(t, listingNames(t, rec), 5)
+	rec = doRequest(handler, http.MethodGet, "/v1/files/", nil, nil)
+	require.Len(t, listingNames(t, rec), 3)
+}
+
+func TestGetRecursiveListingIsRelativeToRequestedDirectory(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "a", "b"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "a", "b", "c.txt"), []byte("c"), 0o644))
+
+	rec := doRequest(handler, http.MethodGet, "/v1/files/a?recursive=true", nil, nil)
+	require.Equal(t, []string{"b", "b/c.txt"}, listingNames(t, rec))
+
+	var listing DirectoryListing
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &listing))
+	require.Equal(t, "/a", listing.Path)
+	require.Equal(t, "directory", listing.Entries[0].Type)
+	require.Equal(t, "file", listing.Entries[1].Type)
+	require.Equal(t, int64(1), listing.Entries[1].Size)
+}
+
+func TestGetRecursiveListingInvalidQuery(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o644))
+
+	for _, query := range []string{
+		"recursive=banana",
+		"recursive=true&max_depth=0",
+		"recursive=true&max_depth=-1",
+		"recursive=true&max_depth=deep",
+		"max_depth=0",
+	} {
+		// The query is rejected for files and missing paths too, before lookup.
+		for _, path := range []string{"", "f.txt", "nope"} {
+			rec := doRequest(handler, http.MethodGet, "/v1/files/"+path+"?"+query, nil, nil)
+			require.Equal(t, http.StatusBadRequest, rec.Code, "%s?%s", path, query)
+			require.Equal(t, "INVALID_ARGUMENT", decodeError(t, rec).Code)
+		}
+	}
+}
+
+func TestGetRecursiveListingSkipsSymlinkTargets(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	outside := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "a"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "a", "f.txt"), []byte("f"), 0o644))
+	// A link inside the root is listed but not entered; one that leaves the
+	// root is omitted even when nested.
+	require.NoError(t, os.Symlink(filepath.Join(root, "a"), filepath.Join(root, "link")))
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "a", "escape")))
+
+	rec := doRequest(handler, http.MethodGet, "/v1/files/?recursive=true", nil, nil)
+	require.Equal(t, []string{"a", "a/f.txt", "link"}, listingNames(t, rec))
+}
+
+func TestGetRecursiveListingKeepsUnreadableSubdirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	_, handler, root := newRESTFixture(t)
+	locked := filepath.Join(root, "locked")
+	require.NoError(t, os.MkdirAll(filepath.Join(locked, "inner"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "z.txt"), []byte("z"), 0o644))
+	require.NoError(t, os.Chmod(locked, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	rec := doRequest(handler, http.MethodGet, "/v1/files/?recursive=true", nil, nil)
+	require.Equal(t, []string{"locked", "z.txt"}, listingNames(t, rec))
+}
+
+func TestGetRecursiveListingStopsWhenRequestCanceled(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "a"), 0o755))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodGet, "/v1/files/?recursive=true", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	require.Equal(t, "INTERNAL", decodeError(t, rec).Code)
 }
 
 func TestGetMissingFileNotFound(t *testing.T) {

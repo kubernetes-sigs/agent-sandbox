@@ -414,11 +414,10 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
 class SandboxdPodTunnelStrategy(ConnectionStrategy):
     """Port-forwards directly to the sandbox pod for the sandboxd runtime.
 
-    sandboxd binds to the pod network by default, but the current
-    sandbox-router cannot proxy its gRPC ProcessService. This strategy forwards
-    both sandboxd listeners directly from the pod: the REST filesystem port and
-    the gRPC ProcessService port. ``connect()`` returns the REST base URL; the
-    gRPC target is exposed via ``grpc_target``.
+    This strategy forwards both sandboxd listeners directly from the pod,
+    without going through the sandbox-router: the REST filesystem port and the
+    gRPC ProcessService port. ``connect()`` returns the REST base URL; the gRPC
+    target is exposed via ``grpc_target``.
     """
 
     def __init__(

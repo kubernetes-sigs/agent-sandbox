@@ -105,6 +105,11 @@ PYTHON_TEST_SUITES = [
         "extra_packages": ["fastapi", "httpx", "python-multipart"],
     },
     {
+        "name": "hyperlight-sandbox",
+        # The runtime and its tests use only the standard library.
+        "dir": os.path.join("examples", "hyperlight-sandbox"),
+    },
+    {
         "name": "gke-swap-python-density",
         # parse_telemetry.py is stdlib-only (csv, json), so the test needs no
         # requirements.txt -- just pytest, installed unconditionally below.

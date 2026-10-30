@@ -1,0 +1,4 @@
+# The rootfs build copies main.py and nothing else from here.
+.hluk/
+snapshot/
+initrd.cpio

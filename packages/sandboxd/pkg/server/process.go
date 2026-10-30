@@ -428,6 +428,11 @@ type unaryExecution struct {
 	drainGrace     time.Duration
 }
 
+type executionOutcome struct {
+	exitCode          int32
+	timeLimitExceeded bool
+}
+
 func channelClosed(done <-chan struct{}) bool {
 	select {
 	case <-done:
@@ -490,29 +495,20 @@ func (s *ProcessServer) execute(ctx context.Context, config *processv1.ProcessCo
 		<-stderrBuf.done
 	}()
 
-	runErr, limited, err := s.waitExecution(ctx, unaryExecution{cmd, stdoutBuf, stderrBuf, drainGrace}, timeExpired)
+	outcome, err := s.waitExecution(ctx, unaryExecution{cmd, stdoutBuf, stderrBuf, drainGrace}, timeExpired)
 	if err != nil {
 		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, status.FromContextError(err).Err()
 	}
-	exitCode := int32(0)
-	if runErr != nil {
-		if exitErr, ok := errors.AsType[*exec.ExitError](runErr); ok {
-			exitCode = exitStatus(exitErr)
-		} else {
-			return nil, mapCommandError(runErr, "failed to execute command")
-		}
-	}
-
 	reason := processv1.ExecuteTerminationReason_EXECUTE_TERMINATION_REASON_EXITED
-	if limited {
+	if outcome.timeLimitExceeded {
 		reason = processv1.ExecuteTerminationReason_EXECUTE_TERMINATION_REASON_TIME_LIMIT_EXCEEDED
 	}
 
 	return &processv1.ExecuteWithLimitsResponse{
-		ExitCode:          exitCode,
+		ExitCode:          outcome.exitCode,
 		Stdout:            stdoutBuf.buffer.Bytes(),
 		Stderr:            stderrBuf.buffer.Bytes(),
 		TerminationReason: reason,
@@ -524,32 +520,35 @@ func (s *ProcessServer) execute(ctx context.Context, config *processv1.ProcessCo
 
 // waitExecution owns the sole Wait call and joins termination before inspecting
 // output. Even if cleanup times out, the Wait goroutine still reaps the child.
-func (s *ProcessServer) waitExecution(ctx context.Context, run unaryExecution, timeExpired <-chan time.Time) (error, bool, error) {
+func (s *ProcessServer) waitExecution(ctx context.Context, run unaryExecution, timeExpired <-chan time.Time) (executionOutcome, error) {
 	waitDone := make(chan struct{})
 	var runErr error
 	go func() {
 		runErr = run.cmd.Wait()
 		close(waitDone)
 	}()
-	limited := false
+	var outcome executionOutcome
 	pendingWait, pendingOut, pendingErr := waitDone, run.stdout.done, run.stderr.done
 	ctxDone := ctx.Done()
 	var pendingKill chan struct{}
-	var cleanupDone, drainDone <-chan time.Time
-	var cleanupTimer, drainTimer *time.Timer
+	var cleanupDone <-chan struct{}
+	var cleanupCancel context.CancelFunc
+	var drainDone <-chan time.Time
+	var drainTimer *time.Timer
 	var drainErr error
 	startCleanup := func() {
 		ctxDone, timeExpired = nil, nil
-		if cleanupTimer != nil {
+		if cleanupCancel != nil {
 			return
 		}
-		pendingKill = s.terminateExecution(run.cmd)
-		cleanupTimer = time.NewTimer(executionCleanupTimeout)
-		cleanupDone = cleanupTimer.C
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), executionCleanupTimeout)
+		cleanupCancel = cancel
+		cleanupDone = cleanupCtx.Done()
+		pendingKill = s.terminateExecution(cleanupCtx, run.cmd)
 	}
 	defer func() {
-		if cleanupTimer != nil {
-			cleanupTimer.Stop()
+		if cleanupCancel != nil {
+			cleanupCancel()
 		}
 		if drainTimer != nil {
 			drainTimer.Stop()
@@ -584,7 +583,7 @@ func (s *ProcessServer) waitExecution(ctx context.Context, run unaryExecution, t
 			if run.finished(waitDone) {
 				continue
 			}
-			limited = true
+			outcome.timeLimitExceeded = true
 			startCleanup()
 		case <-cleanupDone:
 			if run.finished(waitDone) && (pendingKill == nil || channelClosed(pendingKill)) {
@@ -592,9 +591,9 @@ func (s *ProcessServer) waitExecution(ctx context.Context, run unaryExecution, t
 				continue
 			}
 			if err := ctx.Err(); err != nil {
-				return nil, false, status.FromContextError(err).Err()
+				return executionOutcome{}, status.FromContextError(err).Err()
 			}
-			return nil, false, status.Error(codes.Internal, "command cleanup exceeded its waiting limit")
+			return executionOutcome{}, status.Error(codes.Internal, "command cleanup exceeded its waiting limit")
 		case <-drainDone:
 			if channelClosed(run.stdout.done) && channelClosed(run.stderr.done) {
 				drainDone = nil
@@ -616,27 +615,32 @@ func (s *ProcessServer) waitExecution(ctx context.Context, run unaryExecution, t
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, false, status.FromContextError(err).Err()
+		return executionOutcome{}, status.FromContextError(err).Err()
 	}
 	if drainErr != nil {
-		return nil, false, drainErr
+		return executionOutcome{}, drainErr
 	}
 	if run.stdout.err != nil {
-		return nil, false, status.Errorf(codes.Internal, "failed to collect stdout: %v", run.stdout.err)
+		return executionOutcome{}, status.Errorf(codes.Internal, "failed to collect stdout: %v", run.stdout.err)
 	}
 	if run.stderr.err != nil {
-		return nil, false, status.Errorf(codes.Internal, "failed to collect stderr: %v", run.stderr.err)
+		return executionOutcome{}, status.Errorf(codes.Internal, "failed to collect stderr: %v", run.stderr.err)
 	}
-	return runErr, limited, nil
+	if runErr != nil {
+		if exitErr, ok := errors.AsType[*exec.ExitError](runErr); ok {
+			outcome.exitCode = exitStatus(exitErr)
+		} else {
+			return executionOutcome{}, mapCommandError(runErr, "failed to execute command")
+		}
+	}
+	return outcome, nil
 }
 
-func (s *ProcessServer) terminateExecution(cmd *exec.Cmd) chan struct{} {
+func (s *ProcessServer) terminateExecution(ctx context.Context, cmd *exec.Cmd) chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), executionCleanupTimeout)
-		defer cancel()
-		s.killProcessTree(cleanupCtx, cmd)
+		s.killProcessTree(ctx, cmd)
 	}()
 	return done
 }

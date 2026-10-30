@@ -395,9 +395,18 @@ const (
     // SandboxdRESTPort). Requires RuntimeSandboxd. The legacy runtime already
     // uses ConnectivityPortForward for the same tunnel.
     //
-    // The router does not carry gRPC, so Run and Start return
-    // ErrUnsupportedByRuntime. This is the laptop or CI path for Kata and
-    // gVisor sandboxes, which pod port-forward cannot reach.
+    // This mode exposes only the router's HTTP API. The router itself carries
+    // native gRPC, but that is not wired into this path, so Run and Start
+    // return ErrUnsupportedByRuntime. This is the laptop or CI path for Kata
+    // and gVisor sandboxes, which pod port-forward cannot reach.
+    //
+    // Two sandboxd features stay out of reach through the router today. The
+    // router strips the Authorization header before forwarding, so sandboxd
+    // started with --auth-token-* rejects every routed call except
+    // GET /v1/health (see #2102). The router also caps each request at its
+    // ProxyTimeout (default 180s), so a file transfer longer than that fails
+    // even with a larger RequestTimeout; raise the router's ProxyTimeout to
+    // match.
     ConnectivityRouterPortForward Connectivity = "router-port-forward"
     // ConnectivityInClusterService dials the Sandbox's headless Service by
     // its in-cluster DNS name (Status.ServiceFQDN), taking the apiserver —
@@ -1067,6 +1076,14 @@ type Options struct {
     // pod IP is available. Use in environments with strict network policies,
     // service meshes, or secure overlays where direct pod-to-pod IP routing is
     // restricted but service-based DNS routing works correctly.
+    //
+    // ConnectivityRouterPortForward sends X-Sandbox-Pod-IP by default, which
+    // makes the router dial the stored pod IP directly and skip its cache and
+    // DNS lookup. If the sandbox pod was rescheduled, that stale IP may now
+    // belong to another pod. Set DisablePodIPRouting: true when the router runs
+    // with --cache-enabled or the Sandbox has a headless Service
+    // (spec.service: true), so the router resolves the live pod by cache or
+    // DNS instead.
     // Note: this only affects router-based transports that send X-Sandbox-* headers.
     // Default: false (header is sent when router headers are enabled and a pod IP is present).
     DisablePodIPRouting bool

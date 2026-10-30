@@ -324,7 +324,11 @@ All options are documented on the `Options` struct in
   `in-cluster-service`, or `in-cluster-pod-ip`. `router-port-forward`
   port-forwards the sandbox-router HTTP server so it can proxy to the sandbox
   HTTP port. sandboxd `Run` and `Start` need gRPC and are not available on that
-  path.
+  path. It cannot reach authenticated sandboxd (the router strips
+  `Authorization`, see #2102), and each request is capped by the router's
+  `ProxyTimeout`. Set `DisablePodIPRouting: true` to route by cache or DNS
+  instead of a stored pod IP when the router has `--cache-enabled` or the
+  Sandbox has a headless Service.
 - `RouterNamespace`: namespace of `sandbox-router-svc` for the port-forward
   modes that go through the router. Defaults to the claim namespace. Set it to
   `agent-sandbox-system` when using the shipped router manifests, which deploy

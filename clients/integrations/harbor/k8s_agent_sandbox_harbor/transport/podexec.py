@@ -269,8 +269,12 @@ class PodExecTransport:
         code = self._return_code(resp)
         text = err.decode("utf-8", "replace")
         if code != 0:
-            raise RuntimeError(f"tar of {source_dir}{'/' + single if single else ''} on pod "
-                               f"{self.pod} failed ({code}): {text.strip()}")
+            what = f"{source_dir}{'/' + single if single else ''}"
+            if "No such file or directory" in text or "can't cd" in text or "cannot cd" in text:
+                # Harbor collects some paths best-effort; give it the error it
+                # expects instead of a generic failure.
+                raise FileNotFoundError(f"{what} does not exist in pod {self.pod}: {text.strip()}")
+            raise RuntimeError(f"tar of {what} on pod {self.pod} failed ({code}): {text.strip()}")
         return b"".join(chunks), text
 
     async def download_tar(self, source_dir: str, single: str | None = None) -> bytes:

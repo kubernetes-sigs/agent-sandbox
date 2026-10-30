@@ -88,8 +88,10 @@ async def test_start_exec_files_stop_lifecycle(task_dir, trial_paths, env_config
     assert claim["labels"][LABEL_TRIAL] == SESSION and claim["labels"][LABEL_ENVIRONMENT] == "hello-world"
     assert LABEL_MANAGED_BY in claim["labels"]
     assert transport.ready_waits == 1 and transport.pod == "sb-1-pod"
-    # Harbor's standard directories exist (created as root with chmod 777).
-    first = transport.execs[0]
+    # The session user is probed first; then Harbor's standard directories are
+    # created. The local stand-in is not root, so Harbor's root request stays.
+    assert transport.execs[0]["script"] == "id -u" and transport.execs[0]["user"] is None
+    first = transport.execs[1]
     assert first["user"] == "root" and "mkdir -p" in first["script"] and "/logs/agent" in first["script"]
     assert (transport.root / "logs" / "verifier").is_dir() and (transport.root / "tests").is_dir()
 
@@ -247,3 +249,34 @@ def test_preflight_unreachable_named_context_fails_but_current_context_only_warn
     monkeypatch.setenv("K8S_SANDBOX_HARBOR_KUBE_CONTEXT", "prod")
     with pytest.raises(SystemExit, match="cannot reach the API server of prod"):
         AgentSandboxEnvironment.preflight()
+
+
+async def test_root_session_skips_su_for_root_requests(task_dir, trial_paths, env_config, fake_clients):
+    env = make_env(task_dir, trial_paths, env_config)
+    await env.start(force_build=False)
+    env._uid = 0                                            # as on a real root sandbox
+    await env.exec("true", user="root")
+    await env.exec("true", user=0)
+    await env.exec("true", user="agent")
+    users = [e["user"] for e in fake_clients["transport"].execs[-3:]]
+    assert users == [None, None, "agent"]
+    env._uid = 1000
+    await env.exec("true", user="root")
+    assert fake_clients["transport"].execs[-1]["user"] == "root"
+
+
+async def test_start_fails_when_the_directories_cannot_be_created(task_dir, trial_paths, env_config,
+                                                                   fake_clients, monkeypatch):
+    transport = fake_clients["transport"]
+    real_exec = transport.exec
+
+    async def failing_exec(script, **kw):
+        if "mkdir -p" in script:
+            from harbor.environments.base import ExecResult
+            return ExecResult(stdout="", stderr="su: Authentication failure", return_code=1)
+        return await real_exec(script, **kw)
+
+    monkeypatch.setattr(transport, "exec", failing_exec)
+    env = make_env(task_dir, trial_paths, env_config)
+    with pytest.raises(RuntimeError, match="Authentication failure"):
+        await env.start(force_build=False)

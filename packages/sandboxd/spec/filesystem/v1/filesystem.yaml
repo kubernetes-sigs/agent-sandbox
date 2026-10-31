@@ -160,7 +160,7 @@ paths:
             Only later requests through this API are confined to the sandbox root.
             More than 100000 entries or 1 GiB of file data fails with 413 before the entry that
             crosses the cap is written.
-            Cannot be combined with append=true or type.
+            Cannot be combined with append=true, type, or If-None-Match.
         - name: append
           in: query
           required: false
@@ -179,7 +179,7 @@ paths:
           description: >
             Set to "*" to create the file only if the path does not exist. If it exists, including
             as a directory, the request fails with 412 and writes nothing. Other values are rejected
-            with 400, as is combining it with type=directory. With append=true the body is created,
+            with 400, as is combining it with type=directory or extract=tar. With append=true the body is created,
             not appended.
       requestBody:
         required: false

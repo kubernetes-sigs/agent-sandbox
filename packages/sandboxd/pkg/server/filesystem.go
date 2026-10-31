@@ -462,9 +462,9 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if extract {
-		if appendMode || putType != "" {
+		if appendMode || createOnly || putType != "" {
 			s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
-				"extract cannot be used with append or type")
+				"extract cannot be used with append, type, or If-None-Match")
 			return
 		}
 		s.putArchive(w, r, target, mode)

@@ -1483,6 +1483,7 @@ func TestExtractTarRejections(t *testing.T) {
 		name       string
 		setup      func(t *testing.T, root string)
 		query      string
+		header     http.Header
 		archive    func(t *testing.T, outside string) []byte
 		wantStatus int
 		wantCode   string
@@ -1592,6 +1593,13 @@ func TestExtractTarRejections(t *testing.T) {
 			wantStatus: http.StatusBadRequest, wantCode: "INVALID_ARGUMENT",
 		},
 		{
+			name:       "with if-none-match",
+			query:      "?extract=tar",
+			header:     http.Header{"If-None-Match": {"*"}},
+			archive:    func(t *testing.T, _ string) []byte { return valid(t) },
+			wantStatus: http.StatusBadRequest, wantCode: "INVALID_ARGUMENT",
+		},
+		{
 			name:       "with type",
 			query:      "?extract=tar&type=directory",
 			archive:    func(t *testing.T, _ string) []byte { return valid(t) },
@@ -1616,7 +1624,7 @@ func TestExtractTarRejections(t *testing.T) {
 				query = "?extract=tar"
 			}
 
-			rec := doRequest(handler, http.MethodPut, "/v1/files/dest"+query, tc.archive(t, outside), nil)
+			rec := doRequest(handler, http.MethodPut, "/v1/files/dest"+query, tc.archive(t, outside), tc.header)
 			require.Equal(t, tc.wantStatus, rec.Code, rec.Body.String())
 			require.Equal(t, tc.wantCode, decodeError(t, rec).Code)
 

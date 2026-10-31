@@ -87,6 +87,7 @@ type config struct {
 	authTokenSHA256   string
 	authTokenFile     string
 	printVersion      bool
+	executionPolicy   server.ExecutionPolicy
 }
 
 func main() {
@@ -109,6 +110,18 @@ func main() {
 		"Close idle HTTP keep-alive connections after this duration.")
 	flag.IntVar(&cfg.streamChunkSize, "stream-chunk-size", 0,
 		"Buffer size in bytes for streaming process stdout/stderr chunks. 0 selects the default (4096).")
+	flag.DurationVar(&cfg.executionPolicy.DefaultTimeLimit, "execute-default-time-limit", 0,
+		"Default time limit for unary command execution. 0 leaves the default unset.")
+	flag.DurationVar(&cfg.executionPolicy.MaxTimeLimit, "execute-max-time-limit", 0,
+		"Maximum unary execution time limit. 0 leaves the maximum unset.")
+	flag.Uint64Var(&cfg.executionPolicy.DefaultStdoutLimitBytes, "execute-default-stdout-limit-bytes", 0,
+		"Default stdout capture bytes per unary execution. 0 leaves the default unset.")
+	flag.Uint64Var(&cfg.executionPolicy.MaxStdoutLimitBytes, "execute-max-stdout-limit-bytes", 0,
+		"Maximum stdout capture bytes per unary execution. 0 leaves the maximum unset.")
+	flag.Uint64Var(&cfg.executionPolicy.DefaultStderrLimitBytes, "execute-default-stderr-limit-bytes", 0,
+		"Default stderr capture bytes per unary execution. 0 leaves the default unset.")
+	flag.Uint64Var(&cfg.executionPolicy.MaxStderrLimitBytes, "execute-max-stderr-limit-bytes", 0,
+		"Maximum stderr capture bytes per unary execution. 0 leaves the maximum unset.")
 	flag.StringVar(&cfg.authTokenSHA256, "auth-token-sha256", "",
 		"Hex SHA-256 digest of a bearer token required on every gRPC call and REST request except GET /v1/health. The token itself never reaches the daemon. Mutually exclusive with --auth-token-file; both empty disables authentication.")
 	flag.StringVar(&cfg.authTokenFile, "auth-token-file", "",
@@ -183,6 +196,7 @@ func run(cfg *config, log logr.Logger) error {
 		RootDir:           cfg.rootDir,
 		MetadataEnvPrefix: cfg.metadataEnvPrefix,
 		StreamChunkSize:   cfg.streamChunkSize,
+		ExecutionPolicy:   cfg.executionPolicy,
 		AuthTokenSHA256:   authDigest,
 		Log:               log.WithName("rest"),
 	})

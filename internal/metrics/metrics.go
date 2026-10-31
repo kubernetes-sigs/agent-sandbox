@@ -20,7 +20,9 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/internal/utils"
@@ -33,6 +35,32 @@ const (
 	LaunchTypeWarm    = "warm"    // Pod from a SandboxWarmPool
 	LaunchTypeCold    = "cold"    // Pod not from a SandboxWarmPool
 	LaunchTypeUnknown = "unknown" // Used when Sandbox is nil during failure
+
+	OwnedBySandboxClaim    = extensionsv1beta1.SandboxClaimKind
+	OwnedBySandboxWarmPool = extensionsv1beta1.SandboxWarmPoolKind
+
+	// Stage names for agent_sandbox_stage_latency_ms.
+	StagePodCreated   = "pod_created"
+	StagePodScheduled = "pod_scheduled"
+	StagePodRunning   = "pod_running"
+	StagePodReady     = "pod_ready"
+	StagePVCBound     = "pvc_bound"
+	StageServiceReady = "service_ready"
+
+	// Child resource names for agent_sandbox_child_reconcile_errors_total.
+	ResourcePod           = "pod"
+	ResourcePVC           = "pvc"
+	ResourceService       = "service"
+	ResourceNetworkPolicy = "networkpolicy"
+
+	// Allowlisted reconcile error reasons.
+	ReasonCreateFailed      = "create_failed"
+	ReasonUpdateConflict    = "update_conflict"
+	ReasonOwnershipConflict = "ownership_conflict"
+	ReasonAdoptRefused      = "adopt_refused"
+	ReasonDeleteFailed      = "delete_failed"
+	ReasonForbidden         = "forbidden"
+	ReasonOther             = "other"
 
 	// SuspendResult values for agent_sandbox_suspend_total.
 	SuspendResultRequested     = "requested"
@@ -77,6 +105,9 @@ const (
 	// WebhookAnnotation is the annotation key for the time the webhook first saw the claim.
 	WebhookAnnotation = "agents.x-k8s.io/webhook-first-observed-at"
 )
+
+// creationLatencyBuckets are shared by SandboxCreationLatency and SandboxStageLatency.
+var creationLatencyBuckets = []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000, 300000, 600000}
 
 var (
 	// ClaimStartupLatency measures the time from the webhook first observing the SandboxClaim to SandboxClaim Ready state.
@@ -145,9 +176,52 @@ var (
 		prometheus.HistogramOpts{
 			Name:    "agent_sandbox_creation_latency_ms",
 			Help:    "Latency from Sandbox creation to its first transition to Ready in milliseconds; source timestamps have second-level Kubernetes precision. Sandboxes in the controller's initial inventory are excluded, so startups spanning restarts, upgrades, or leader failover may be omitted. Readiness flaps do not record another sample. For warm-pool sandboxes, observed at pool-member Ready (including unclaimed pool sandboxes), not at claim adoption.",
-			Buckets: []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000, 300000, 600000},
+			Buckets: creationLatencyBuckets,
 		},
 		[]string{"namespace", "launch_type", "sandbox_template"},
+	)
+
+	// SandboxStageLatency measures time from Sandbox first-observed to each Ready-path stage.
+	// Labels:
+	// - namespace: the namespace of the sandbox
+	// - launch_type: "warm", "cold", "unknown"
+	// - owned_by: "SandboxClaim" | "SandboxWarmPool" | "None"
+	// - stage: allowlisted stage name (see Stage* constants).
+	// sandbox_template is omitted: template names are unbounded user input.
+	SandboxStageLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "agent_sandbox_stage_latency_ms",
+			Help: "Latency from the first active Sandbox reconcile to each Ready-path stage in milliseconds. " +
+				"Baseline and stage timestamps are truncated to whole seconds, including controller-observed PVC binding; stages in the baseline's second record zero. " +
+				"Sandboxes in the initial informer inventory and stages reached before the baseline are omitted. Tracking is in memory, so startups spanning controller restarts may be omitted. Each stage is recorded at most once; readiness flaps do not record another sample.",
+			Buckets: creationLatencyBuckets,
+		},
+		[]string{"namespace", "launch_type", "owned_by", "stage"},
+	)
+
+	// ChildReconcileErrors counts Sandbox child-resource reconcile failures.
+	// Labels:
+	// - namespace: the namespace of the sandbox
+	// - resource: "pod" | "pvc" | "service" | "networkpolicy"
+	// - reason: allowlisted reconcile error reason.
+	ChildReconcileErrors = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "agent_sandbox_child_reconcile_errors_total",
+			Help: "Total number of Sandbox child-resource reconcile failures, labeled by namespace, resource, and allowlisted reason.",
+		},
+		[]string{"namespace", "resource", "reason"},
+	)
+
+	// TemplateReconcileErrors counts SandboxTemplate controller reconcile failures.
+	// Labels:
+	// - namespace: the namespace of the template
+	// - reason: allowlisted reconcile error reason.
+	TemplateReconcileErrors = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "agent_sandbox_template_reconcile_errors_total",
+			Help: "Total number of SandboxTemplate reconcile failures, labeled by namespace and allowlisted reason.",
+		},
+		[]string{"namespace", "reason"},
 	)
 
 	// SandboxSuspendTotal counts Sandbox suspend lifecycle transitions by result.
@@ -273,9 +347,8 @@ var (
 	// - ready_condition: "true" | "false"
 	// - expired: "true" | "false"
 	// - launch_type: "warm" | "cold"
-	// - sandbox_template: sandboxTemplateRef, or "unknown" when the Sandbox carries no template annotation.
-	//   Note this sentinel differs from the "__unknown__" the SandboxClaim metrics use, so the two
-	//   families do not join on sandbox_template for templateless Sandboxes.
+	// - sandbox_template: the SandboxTemplateRef, or "unknown" when the Sandbox carries no
+	//   template annotation.
 	// - owned_by: "SandboxClaim" | "SandboxWarmPool" | "None".
 	// - created_by: the component that created the sandbox (e.g. "go-client", "python-client", "controller", "unknown").
 	AgentSandboxesDesc = prometheus.NewDesc(
@@ -324,6 +397,9 @@ func init() {
 	metrics.Registry.MustRegister(ClaimControllerStartupLatency)
 	metrics.Registry.MustRegister(ClientClaimStartupLatency)
 	metrics.Registry.MustRegister(SandboxCreationLatency)
+	metrics.Registry.MustRegister(SandboxStageLatency)
+	metrics.Registry.MustRegister(ChildReconcileErrors)
+	metrics.Registry.MustRegister(TemplateReconcileErrors)
 	metrics.Registry.MustRegister(SandboxSuspendTotal)
 	metrics.Registry.MustRegister(SandboxSuspendLatency)
 	metrics.Registry.MustRegister(SandboxResumeTotal)
@@ -367,6 +443,27 @@ func recordLatencyDuration(histogram *prometheus.HistogramVec, duration time.Dur
 	histogram.WithLabelValues(labelValues...).Observe(float64(duration.Milliseconds()))
 }
 
+// RecordStageLatency records the measured latency for a single Sandbox Ready-path stage.
+// The stage value is normalized to the allowlist; unknown stages become ReasonOther-equivalent "other".
+func RecordStageLatency(duration time.Duration, namespace, launchType, ownedBy, stage string) {
+	SandboxStageLatency.WithLabelValues(
+		namespace,
+		launchType,
+		ownedBy,
+		NormalizeStage(stage),
+	).Observe(float64(duration.Milliseconds()))
+}
+
+// RecordChildReconcileError increments the child reconcile error counter.
+func RecordChildReconcileError(namespace, resource, reason string) {
+	ChildReconcileErrors.WithLabelValues(namespace, NormalizeResource(resource), NormalizeReason(reason)).Inc()
+}
+
+// RecordTemplateReconcileError increments the template reconcile error counter.
+func RecordTemplateReconcileError(namespace, reason string) {
+	TemplateReconcileErrors.WithLabelValues(namespace, NormalizeReason(reason)).Inc()
+}
+
 // NormalizeCreatedBy returns the createdBy label normalized to a known allow-list
 // (go-client, python-client, controller) or "unknown" for anything else.
 func NormalizeCreatedBy(createdBy string) string {
@@ -376,6 +473,71 @@ func NormalizeCreatedBy(createdBy string) string {
 	default:
 		return "unknown"
 	}
+}
+
+// NormalizeStage returns an allowlisted stage name or "other".
+func NormalizeStage(stage string) string {
+	switch stage {
+	case StagePodCreated, StagePodScheduled, StagePodRunning, StagePodReady, StagePVCBound, StageServiceReady:
+		return stage
+	default:
+		return ReasonOther
+	}
+}
+
+// NormalizeResource returns an allowlisted child resource name or "other".
+func NormalizeResource(resource string) string {
+	switch resource {
+	case ResourcePod, ResourcePVC, ResourceService, ResourceNetworkPolicy:
+		return resource
+	default:
+		return ReasonOther
+	}
+}
+
+// NormalizeReason returns an allowlisted reconcile error reason or "other".
+func NormalizeReason(reason string) string {
+	switch reason {
+	case ReasonCreateFailed, ReasonUpdateConflict, ReasonOwnershipConflict, ReasonAdoptRefused, ReasonDeleteFailed, ReasonForbidden, ReasonOther:
+		return reason
+	default:
+		return ReasonOther
+	}
+}
+
+// ClassifyReconcileError maps an API error and optional semantic hint to an allowlisted reason.
+// Forbidden and conflict take precedence over the hint so label values stay tied to API semantics.
+func ClassifyReconcileError(err error, hint string) string {
+	if err != nil {
+		if apierrors.IsForbidden(err) {
+			return ReasonForbidden
+		}
+		if apierrors.IsConflict(err) {
+			return ReasonUpdateConflict
+		}
+	}
+	return NormalizeReason(hint)
+}
+
+// SandboxMetricLabels holds common Prometheus labels derived from a Sandbox.
+type SandboxMetricLabels struct {
+	Namespace  string
+	LaunchType string
+	OwnedBy    string
+}
+
+// LabelsFromSandbox derives metric labels from a Sandbox's metadata and controller owner.
+func LabelsFromSandbox(sandbox *sandboxv1beta1.Sandbox) SandboxMetricLabels {
+	labels := SandboxMetricLabels{
+		Namespace:  sandbox.Namespace,
+		LaunchType: LaunchTypeCold,
+		OwnedBy:    OwnedByNone,
+	}
+	if sandbox.Labels[sandboxv1beta1.SandboxLaunchTypeLabel] == sandboxv1beta1.SandboxLaunchTypeWarm {
+		labels.LaunchType = LaunchTypeWarm
+	}
+	labels.OwnedBy = SandboxOwnedByLabel(sandbox)
+	return labels
 }
 
 // SandboxTemplateLabel extracts the sandbox_template label value from a Sandbox's annotations,

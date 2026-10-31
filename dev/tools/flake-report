@@ -302,9 +302,16 @@ def test_source_paths(name):
     this test the PR's own regression rather than a flake. SDK suites
     (pytest, vitest) match their whole SDK and e2e trees, since a change to
     the SDK implementation or harness breaks tests in any file; Go suites
-    match their package."""
+    match their package.
+
+    TestGrid reports every pytest test as "pytest.<name>" with no suite, and
+    dev/tools/test-unit runs pytest suites from the Python SDK, the
+    integrations, the examples and the dev tooling, so a pytest name has to
+    match all of those roots. Otherwise a PR that adds a failing test to an
+    integration is reported as main-wide breakage."""
     if name.startswith("pytest."):
-        return ["test/e2e/clients/python/", "clients/python/"]
+        return ["test/e2e/clients/python/", "clients/python/",
+                "clients/integrations/", "examples/", "dev/"]
     if re.match(r"(.*?\.test\.ts)", name):
         return ["test/e2e/clients/typescript/",
                 "clients/typescript/agentic-sandbox-client/"]

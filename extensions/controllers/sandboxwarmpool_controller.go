@@ -50,6 +50,7 @@ import (
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+	"sigs.k8s.io/agent-sandbox/internal/utils"
 )
 
 const (
@@ -1047,6 +1048,15 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, p
 		if !isOrphan && !isControlledByPool {
 			logger.Info("Ignoring sandbox with different controller", "sandbox", sb.Name, "controller", controllerRef.Name)
 			continue
+		}
+
+		// A pool Sandbox created before v1.0 still names its SandboxWarmPool as v1alpha1.
+		if refs, changed := utils.RefreshedOwnerReferences(sb.OwnerReferences, warmPool.UID, extensionsv1beta1.GroupVersion.String()); changed {
+			patch := client.MergeFrom(sb.DeepCopy())
+			sb.OwnerReferences = refs
+			if err := r.Patch(ctx, &sb, patch); err != nil {
+				allErrors = errors.Join(allErrors, fmt.Errorf("failed to refresh owner reference on sandbox %q: %w", sb.Name, err))
+			}
 		}
 
 		if tmplErr == nil && (updateStrategy == extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType || isOrphan) {

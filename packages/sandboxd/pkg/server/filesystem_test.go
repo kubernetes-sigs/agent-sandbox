@@ -343,6 +343,115 @@ func TestPutEncodedSlashesCreateNestedFile(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestPutCreateOnly(t *testing.T) {
+	for _, query := range []string{"", "?append=true"} {
+		t.Run("query"+query, func(t *testing.T) {
+			_, handler, root := newRESTFixture(t)
+			header := http.Header{"If-None-Match": []string{"*"}}
+
+			rec := doRequest(handler, http.MethodPut, "/v1/files/a/f.txt"+query, []byte("first"), header)
+			require.Equal(t, http.StatusNoContent, rec.Code)
+
+			rec = doRequest(handler, http.MethodPut, "/v1/files/a/f.txt"+query, []byte("second"), header)
+			require.Equal(t, http.StatusPreconditionFailed, rec.Code)
+			require.Equal(t, "FAILED_PRECONDITION", decodeError(t, rec).Code)
+
+			onDisk, err := os.ReadFile(filepath.Join(root, "a", "f.txt"))
+			require.NoError(t, err)
+			require.Equal(t, "first", string(onDisk))
+			entries, err := os.ReadDir(filepath.Join(root, "a"))
+			require.NoError(t, err)
+			require.Len(t, entries, 1, "no temp file may be left behind")
+		})
+	}
+}
+
+func TestPutCreateOnlyExistingDirectory(t *testing.T) {
+	for _, query := range []string{"", "?append=true"} {
+		t.Run("query"+query, func(t *testing.T) {
+			_, handler, root := newRESTFixture(t)
+			require.NoError(t, os.MkdirAll(filepath.Join(root, "d"), 0o755))
+			header := http.Header{"If-None-Match": []string{"*"}}
+
+			rec := doRequest(handler, http.MethodPut, "/v1/files/d"+query, []byte("x"), header)
+			require.Equal(t, http.StatusPreconditionFailed, rec.Code)
+			require.Equal(t, "FAILED_PRECONDITION", decodeError(t, rec).Code)
+		})
+	}
+}
+
+func TestPutCreateOnlyWithType(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "d"), 0o755))
+	header := http.Header{"If-None-Match": []string{"*"}}
+
+	rec := doRequest(handler, http.MethodPut, "/v1/files/d?type=directory", nil, header)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Equal(t, "INVALID_ARGUMENT", decodeError(t, rec).Code)
+
+	// The precondition outranks the type mismatch.
+	rec = doRequest(handler, http.MethodPut, "/v1/files/d?type=file", []byte("x"), header)
+	require.Equal(t, http.StatusPreconditionFailed, rec.Code)
+}
+
+func TestPutCreateOnlyRacesToOneWinner(t *testing.T) {
+	for _, query := range []string{"", "?append=true"} {
+		t.Run("query"+query, func(t *testing.T) {
+			_, handler, root := newRESTFixture(t)
+			header := http.Header{"If-None-Match": []string{"*"}}
+
+			const writers = 16
+			codes := make(chan int, writers)
+			for range writers {
+				go func() {
+					codes <- doRequest(handler, http.MethodPut, "/v1/files/f.txt"+query, []byte("x"), header).Code
+				}()
+			}
+			created := 0
+			for range writers {
+				if code := <-codes; code == http.StatusNoContent {
+					created++
+				} else {
+					require.Equal(t, http.StatusPreconditionFailed, code)
+				}
+			}
+			require.Equal(t, 1, created)
+
+			entries, err := os.ReadDir(root)
+			require.NoError(t, err)
+			require.Len(t, entries, 1, "no temp file may be left behind")
+		})
+	}
+}
+
+func TestPutIfNoneMatchRejectsOtherValues(t *testing.T) {
+	_, handler, _ := newRESTFixture(t)
+
+	for _, value := range []string{`"etag"`, "W/*", ""} {
+		header := http.Header{"If-None-Match": []string{value}}
+		rec := doRequest(handler, http.MethodPut, "/v1/files/f.txt", []byte("x"), header)
+		require.Equal(t, http.StatusBadRequest, rec.Code, "value %q must be rejected", value)
+		require.Equal(t, "INVALID_ARGUMENT", decodeError(t, rec).Code)
+	}
+}
+
+func TestPutPermissionDenied(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	for _, query := range []string{"", "?append=true"} {
+		t.Run("query"+query, func(t *testing.T) {
+			_, handler, root := newRESTFixture(t)
+			require.NoError(t, os.Mkdir(filepath.Join(root, "ro"), 0o500))
+			t.Cleanup(func() { _ = os.Chmod(filepath.Join(root, "ro"), 0o755) })
+
+			rec := doRequest(handler, http.MethodPut, "/v1/files/ro/f.txt"+query, []byte("x"), nil)
+			require.Equal(t, http.StatusForbidden, rec.Code)
+			require.Equal(t, "PERMISSION_DENIED", decodeError(t, rec).Code)
+		})
+	}
+}
+
 func TestGetDirectoryListing(t *testing.T) {
 	_, handler, root := newRESTFixture(t)
 	require.NoError(t, os.WriteFile(filepath.Join(root, "b.txt"), []byte("bb"), 0o600))

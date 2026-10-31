@@ -404,6 +404,11 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	createOnly, ok := s.createOnly(w, r)
+	if !ok {
+		return
+	}
+
 	target, ok := s.resolvePath(w, r)
 	if !ok {
 		return
@@ -415,11 +420,21 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 				"append cannot be used with type=directory")
 			return
 		}
+		// Directory creation is idempotent, so it cannot honor the precondition.
+		if createOnly {
+			s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+				"If-None-Match cannot be used with type=directory")
+			return
+		}
 		s.putDirectory(w, r, target, mode)
 		return
 	}
 
 	if info, err := os.Stat(target); err == nil && info.IsDir() {
+		if createOnly {
+			s.writePathExists(w)
+			return
+		}
 		if msg := typeMismatch(putType, true); msg != "" {
 			s.writeError(w, http.StatusConflict, "CONFLICT", msg)
 			return
@@ -436,13 +451,19 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 	defer cleanup()
 
 	write := atomicWrite
-	if appendMode {
+	switch {
+	case createOnly:
+		write = atomicCreate
+	case appendMode:
 		write = appendWrite
 	}
 	if err := write(target, body, mode); err != nil {
-		if os.IsPermission(err) {
+		switch {
+		case createOnly && errors.Is(err, os.ErrExist):
+			s.writePathExists(w)
+		case errors.Is(err, os.ErrPermission):
 			s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED", "permission denied")
-		} else {
+		default:
 			s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 		}
 		return
@@ -529,6 +550,28 @@ func requestFileBody(r *http.Request) (io.Reader, func(), error) {
 	return r.Body, func() {}, nil
 }
 
+// writePathExists writes the 412 returned when a create-only PUT finds an
+// existing path.
+func (s *RESTServer) writePathExists(w http.ResponseWriter) {
+	s.writeError(w, http.StatusPreconditionFailed, "FAILED_PRECONDITION", "path already exists")
+}
+
+// createOnly reports whether the request carries "If-None-Match: *". sandboxd
+// has no ETags, so it rejects any other value instead of ignoring a
+// precondition the client relies on. It writes a 400 and returns ok=false in
+// that case.
+func (s *RESTServer) createOnly(w http.ResponseWriter, r *http.Request) (createOnly, ok bool) {
+	values := r.Header.Values("If-None-Match")
+	if len(values) == 0 {
+		return false, true
+	}
+	if len(values) == 1 && strings.TrimSpace(values[0]) == "*" {
+		return true, true
+	}
+	s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", `If-None-Match must be "*"`)
+	return false, false
+}
+
 // atomicWrite streams src into target using the temp-file-then-rename
 // strategy. Parent directories are created automatically.
 //
@@ -537,7 +580,26 @@ func requestFileBody(r *http.Request) (io.Reader, func(), error) {
 // atomically, so an already-open reader sees either the previous complete file
 // or the new one. A concurrent delete can remove the temporary file or its
 // parent directory before rename, in which case the write fails.
-func atomicWrite(target string, src io.Reader, mode os.FileMode) (err error) {
+func atomicWrite(target string, src io.Reader, mode os.FileMode) error {
+	return writeViaTemp(target, src, mode, os.Rename)
+}
+
+// atomicCreate is atomicWrite for a target that must not exist: when it does,
+// the write fails with an error wrapping os.ErrExist. link(2) never replaces
+// its destination, so the check and the create are one atomic step.
+func atomicCreate(target string, src io.Reader, mode os.FileMode) error {
+	return writeViaTemp(target, src, mode, func(tmp, target string) error {
+		if err := os.Link(tmp, target); err != nil {
+			return err
+		}
+		_ = os.Remove(tmp)
+		return nil
+	})
+}
+
+// writeViaTemp writes src to a synced temporary file beside target, then calls
+// place to put it at target.
+func writeViaTemp(target string, src io.Reader, mode os.FileMode, place func(tmp, target string) error) (err error) {
 	dir := filepath.Dir(target)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("failed to create parent directory: %w", err)
@@ -568,7 +630,7 @@ func atomicWrite(target string, src io.Reader, mode os.FileMode) (err error) {
 	if err = tmpFile.Close(); err != nil {
 		return fmt.Errorf("failed to close file: %w", err)
 	}
-	if err = os.Rename(tmpFile.Name(), target); err != nil {
+	if err = place(tmpFile.Name(), target); err != nil {
 		return fmt.Errorf("failed to move file into place: %w", err)
 	}
 	return nil

@@ -143,6 +143,32 @@ func TestSandboxClaimCreationRecording(t *testing.T) {
 	}
 }
 
+func TestInitSandboxClaimCreation(t *testing.T) {
+	SandboxClaimCreationTotal.Reset()
+	InitSandboxClaimCreation("default", "test-tmpl", "test-pool")
+	seeded := testutil.CollectAndCount(SandboxClaimCreationTotal)
+	require.Equal(t, 3*len(createdByValues), seeded)
+
+	InitSandboxClaimCreation("default", "test-tmpl", "test-pool")
+	require.Equal(t, seeded, testutil.CollectAndCount(SandboxClaimCreationTotal), "seeding must be idempotent")
+
+	// Every series a claim against the pool records must already exist at zero.
+	for _, createdBy := range []string{"go-client", "python-client", "controller", "some-other-client"} {
+		RecordSandboxClaimCreation("default", "test-tmpl", LaunchTypeWarm, "test-pool", PodConditionReady, createdBy)
+		RecordSandboxClaimCreation("default", "test-tmpl", LaunchTypeWarm, "test-pool", PodConditionNotReady, createdBy)
+		RecordSandboxClaimCreation("default", "test-tmpl", LaunchTypeCold, "test-pool", PodConditionNotReady, createdBy)
+	}
+	require.Equal(t, seeded, testutil.CollectAndCount(SandboxClaimCreationTotal), "recording must not create unseeded series")
+	require.InDelta(t, 1.0, testutil.ToFloat64(SandboxClaimCreationTotal.WithLabelValues("default", "test-tmpl", LaunchTypeWarm, "test-pool", PodConditionReady, "go-client")), 0)
+}
+
+func TestCreatedByValuesMatchNormalization(t *testing.T) {
+	for _, value := range createdByValues {
+		require.Equal(t, value, NormalizeCreatedBy(value))
+	}
+	require.Contains(t, createdByValues, NormalizeCreatedBy("some-other-client"))
+}
+
 func TestBuildInfo(t *testing.T) {
 	expected := strings.TrimSpace(`
 		# HELP agent_sandbox_build_info Agent sandbox controller build metadata exposed as labels with a constant value of 1.

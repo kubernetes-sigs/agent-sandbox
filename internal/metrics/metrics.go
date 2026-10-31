@@ -34,6 +34,10 @@ const (
 	LaunchTypeCold    = "cold"    // Pod not from a SandboxWarmPool
 	LaunchTypeUnknown = "unknown" // Used when Sandbox is nil during failure
 
+	// PodCondition values for agent_sandbox_claim_creation_total.
+	PodConditionReady    = "ready"
+	PodConditionNotReady = "not_ready"
+
 	// SuspendResult values for agent_sandbox_suspend_total.
 	SuspendResultRequested     = "requested"
 	SuspendResultPodTerminated = "pod_terminated"
@@ -444,4 +448,19 @@ func RecordSandboxExpired(namespace, templateName, ownedBy, shutdownPolicy strin
 // The createdBy value is automatically normalized.
 func RecordSandboxClaimCreation(namespace, templateName, launchType, warmPoolName, podCondition, createdBy string) {
 	SandboxClaimCreationTotal.WithLabelValues(namespace, templateName, launchType, warmPoolName, podCondition, NormalizeCreatedBy(createdBy)).Inc()
+}
+
+// createdByValues lists every created_by value NormalizeCreatedBy returns.
+var createdByValues = []string{"go-client", "python-client", "controller", "unknown"}
+
+// InitSandboxClaimCreation exports, at zero, every agent_sandbox_claim_creation_total
+// series that a claim against the given warm pool can increment. Without it a pool has
+// no series until its first claim, so rate() queries and external-metrics consumers such
+// as a HorizontalPodAutoscaler see a missing metric instead of zero demand.
+func InitSandboxClaimCreation(namespace, templateName, warmPoolName string) {
+	for _, createdBy := range createdByValues {
+		SandboxClaimCreationTotal.WithLabelValues(namespace, templateName, LaunchTypeWarm, warmPoolName, PodConditionReady, createdBy)
+		SandboxClaimCreationTotal.WithLabelValues(namespace, templateName, LaunchTypeWarm, warmPoolName, PodConditionNotReady, createdBy)
+		SandboxClaimCreationTotal.WithLabelValues(namespace, templateName, LaunchTypeCold, warmPoolName, PodConditionNotReady, createdBy)
+	}
 }

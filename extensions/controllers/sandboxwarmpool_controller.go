@@ -50,6 +50,7 @@ import (
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
 const (
@@ -453,6 +454,8 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		r.forgetPool(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
+
+	asmetrics.InitSandboxClaimCreation(warmPool.Namespace, warmPool.Spec.TemplateRef.Name, warmPool.Name)
 
 	// Save old status for comparison
 	oldStatus := warmPool.Status.DeepCopy()

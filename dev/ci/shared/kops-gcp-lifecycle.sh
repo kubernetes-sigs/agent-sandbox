@@ -46,13 +46,34 @@ UNIQUE_SUFFIX="$(date +%Y%m%d-%H%M%S)"
 
 KOPS_VERSION="${KOPS_VERSION:-v1.36.0}"
 
+# kops_go_install retries `go install` so a transient checksum-database or
+# module-proxy error does not fail a 30-minute lane before a cluster exists.
+# Compiling kOps verifies a few hundred modules against sum.golang.org, and
+# its HTTP/2 stream errors show up as "verifying module: ... INTERNAL_ERROR".
+# Downloaded modules stay cached between attempts, so a retry only re-reads
+# the tiles that failed; checksum verification is never bypassed.
+kops_go_install() {
+  local attempt
+  for attempt in 1 2 3; do
+    if GOBIN="${BINDIR}" go install "$@"; then
+      return 0
+    fi
+    if [[ "${attempt}" -lt 3 ]]; then
+      echo "go install $* failed (attempt ${attempt}/3); retrying in 15s..." >&2
+      sleep 15
+    fi
+  done
+  echo "go install $* failed after 3 attempts" >&2
+  return 1
+}
+
 kops_install_tools() {
   echo "Installing kOps ${KOPS_VERSION} to ${BINDIR}..."
-  GOBIN="${BINDIR}" go install "k8s.io/kops/cmd/kops@${KOPS_VERSION}"
+  kops_go_install "k8s.io/kops/cmd/kops@${KOPS_VERSION}"
 
   echo "Installing resourcectl to ${BINDIR}..."
   pushd dev/tools >/dev/null
-  GOBIN="${BINDIR}" go install ./resourcectl
+  kops_go_install ./resourcectl
   popd >/dev/null
 }
 

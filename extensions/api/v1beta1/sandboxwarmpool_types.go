@@ -71,7 +71,11 @@ const (
 	// RecreateSandboxWarmPoolUpdateStrategyType deletes stale unclaimed sandboxes immediately
 	// so the pool only holds fresh sandboxes matching the current template. Already-claimed
 	// sandboxes are never touched.
-	// Note: This applies to changes in the template's SandboxBlueprint only. Changes to annotations, labels, or template-level policies do not trigger recreate.
+	// Note: Changes to annotations, labels, or template-level policies do not trigger recreate.
+	// The pool copies podTemplate label and annotation edits to its unclaimed sandboxes, and the
+	// Sandbox controller applies them to the running Pods without restarting them. Edits that only
+	// matter at Pod creation, such as an annotation an admission webhook reads, take effect only
+	// on new Pods.
 	RecreateSandboxWarmPoolUpdateStrategyType SandboxWarmPoolUpdateStrategyType = "Recreate"
 	// OnReplenishSandboxWarmPoolUpdateStrategyType leaves stale unclaimed sandboxes in place.
 	// A stale sandbox is only replaced with a fresh one when it is manually deleted, or when it

@@ -603,7 +603,7 @@ _Appears in:_
 
 | Field | Description |
 | --- | --- |
-| `Recreate` | RecreateSandboxWarmPoolUpdateStrategyType deletes stale unclaimed sandboxes immediately<br />so the pool only holds fresh sandboxes matching the current template. Already-claimed<br />sandboxes are never touched.<br />Note: This applies to changes in the template's SandboxBlueprint only. Changes to annotations, labels, or template-level policies do not trigger recreate.<br /> |
+| `Recreate` | RecreateSandboxWarmPoolUpdateStrategyType deletes stale unclaimed sandboxes immediately<br />so the pool only holds fresh sandboxes matching the current template. Already-claimed<br />sandboxes are never touched.<br />Note: Changes to annotations, labels, or template-level policies do not trigger recreate.<br />The pool copies podTemplate label and annotation edits to its unclaimed sandboxes, and the<br />Sandbox controller applies them to the running Pods without restarting them. Edits that only<br />matter at Pod creation, such as an annotation an admission webhook reads, take effect only<br />on new Pods.<br /> |
 | `OnReplenish` | OnReplenishSandboxWarmPoolUpdateStrategyType leaves stale unclaimed sandboxes in place.<br />A stale sandbox is only replaced with a fresh one when it is manually deleted, or when it<br />is claimed by a SandboxClaim (which removes it from the pool and triggers replenishment).<br />Already-claimed sandboxes are never touched.<br /> |
 
 

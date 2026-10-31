@@ -521,7 +521,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	// terminatingReplicas counts pool-owned sandboxes that are deleting (or
 	// were deleted by us but not yet observed by the cache): they are not
 	// active, but they still occupy capacity until fully gone.
-	activeSandboxes, terminatingReplicas, allErrors := r.filterActiveSandboxes(ctx, poolKey, warmPool, sandboxList.Items, template, currentSandboxBlueprintHash, tmplErr)
+	activeSandboxes, terminatingReplicas, allErrors := r.filterActiveSandboxes(ctx, poolKey, warmPool, sandboxList.Items, template, currentPodTemplateHash, currentSandboxBlueprintHash, tmplErr)
 
 	now := r.clockNow()
 	var healthySandboxes []sandboxv1beta1.Sandbox
@@ -998,13 +998,14 @@ func setWarmLaunchTypeLabelIfNeeded(sb *sandboxv1beta1.Sandbox) bool {
 }
 
 // filterActiveSandboxes filters the list of sandboxes, deleting stale ones and adopting orphans.
-// It returns the pool's active sandboxes plus the number of pool-owned
+// Under the Recreate strategy it also applies template label and annotation edits to the
+// pool's sandboxes in place. It returns the pool's active sandboxes plus the number of pool-owned
 // terminating sandboxes: ones with a deletion timestamp, ones this controller
 // deleted but whose deletion the cache has not observed yet, and ones deleted
 // as stale in this pass. Terminating sandboxes are excluded from active (and
 // so from Ready accounting), but still occupy capacity, so the create path
 // must count them against spec.replicas (#1215).
-func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, poolKey types.NamespacedName, warmPool *extensionsv1beta1.SandboxWarmPool, sandboxes []sandboxv1beta1.Sandbox, template *extensionsv1beta1.SandboxTemplate, currentSandboxBlueprintHash string, tmplErr error) ([]sandboxv1beta1.Sandbox, int32, error) {
+func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, poolKey types.NamespacedName, warmPool *extensionsv1beta1.SandboxWarmPool, sandboxes []sandboxv1beta1.Sandbox, template *extensionsv1beta1.SandboxTemplate, currentPodTemplateHash, currentSandboxBlueprintHash string, tmplErr error) ([]sandboxv1beta1.Sandbox, int32, error) {
 	logger := log.FromContext(ctx)
 	var activeSandboxes []sandboxv1beta1.Sandbox
 	terminatingReplicas := int32(0)
@@ -1019,6 +1020,11 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, p
 		raw.Type != extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType &&
 		raw.Type != extensionsv1beta1.OnReplenishSandboxWarmPoolUpdateStrategyType {
 		logger.Info("Unknown update strategy, defaulting to OnReplenish", "strategy", raw.Type)
+	}
+
+	var desiredPodMetadata *sandboxv1beta1.PodMetadata
+	if tmplErr == nil && updateStrategy == extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType {
+		desiredPodMetadata = new(r.buildPoolPodMetadata(warmPool, sandboxcontrollers.NameHash(warmPool.Name), template, currentPodTemplateHash, currentSandboxBlueprintHash))
 	}
 
 	for _, sb := range sandboxes {
@@ -1079,6 +1085,18 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, p
 			}
 		}
 
+		// Under Recreate, a sandbox that reaches this point is not stale, so its blueprint
+		// differs from the template at most in labels and annotations.
+		if desiredPodMetadata != nil && isControlledByPool &&
+			sb.Labels[sandboxv1beta1.SandboxTemplateHashLabel] != currentSandboxBlueprintHash {
+			if err := r.syncPoolPodMetadata(ctx, &sb, desiredPodMetadata); err != nil {
+				// Keep counting the sandbox as active so the create path cannot
+				// overshoot spec.replicas; a later reconcile retries the update.
+				logger.Error(err, "Failed to update pool sandbox pod metadata", "sandbox", sb.Name)
+				allErrors = errors.Join(allErrors, err)
+			}
+		}
+
 		if isOrphan {
 			logger.Info("Adopting orphaned sandbox", "sandbox", sb.Name)
 			if err := r.adoptSandbox(ctx, warmPool, &sb); err != nil {
@@ -1091,6 +1109,73 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, p
 		activeSandboxes = append(activeSandboxes, sb)
 	}
 	return activeSandboxes, terminatingReplicas, allErrors
+}
+
+// buildPoolPodMetadata returns the template's pod labels and annotations plus the keys the
+// pool adds to every pool sandbox.
+func (r *SandboxWarmPoolReconciler) buildPoolPodMetadata(
+	warmPool *extensionsv1beta1.SandboxWarmPool,
+	poolNameHash string,
+	template *extensionsv1beta1.SandboxTemplate,
+	currentPodTemplateHash string,
+	currentSandboxBlueprintHash string,
+) sandboxv1beta1.PodMetadata {
+	var podMeta sandboxv1beta1.PodMetadata
+	template.Spec.PodTemplate.ObjectMeta.DeepCopyInto(&podMeta)
+
+	// Propagate pool and template labels to pod template for consistency and targeting
+	if podMeta.Labels == nil {
+		podMeta.Labels = make(map[string]string)
+	}
+	podMeta.Labels[warmPoolSandboxLabel] = poolNameHash
+	podMeta.Labels[sandboxTemplateRefHash] = SandboxTemplateRefHash(warmPool.Spec.TemplateRef.Name)
+	podMeta.Labels[sandboxv1beta1.DeprecatedSandboxPodTemplateHashLabel] = currentPodTemplateHash
+	podMeta.Labels[sandboxv1beta1.SandboxTemplateHashLabel] = currentSandboxBlueprintHash
+
+	// Respect the template's custom eviction annotation if explicitly specified.
+	// Only apply the default eviction behavior if the annotation is not defined.
+	if _, exists := podMeta.Annotations[autoscalerSafeToEvictAnnotation]; !exists {
+		if r.EnableWarmPoolEviction {
+			if podMeta.Annotations == nil {
+				podMeta.Annotations = make(map[string]string)
+			}
+			podMeta.Annotations[autoscalerSafeToEvictAnnotation] = "true"
+		}
+	}
+	return podMeta
+}
+
+// syncPoolPodMetadata applies the pool's current pod template metadata to an existing pool
+// sandbox and stamps the current blueprint hash on it. The Sandbox controller then updates
+// the running Pod's labels and annotations without restarting it.
+func (r *SandboxWarmPoolReconciler) syncPoolPodMetadata(ctx context.Context, sb *sandboxv1beta1.Sandbox, desired *sandboxv1beta1.PodMetadata) error {
+	// Ignore the hash labels so that a hash change alone, such as one caused by a
+	// controller upgrade, does not rewrite every sandbox.
+	if podMetadataEqualIgnoreHash(desired, &sb.Spec.PodTemplate.ObjectMeta) {
+		return nil
+	}
+	desired.DeepCopyInto(&sb.Spec.PodTemplate.ObjectMeta)
+	sb.Labels[sandboxv1beta1.DeprecatedSandboxPodTemplateHashLabel] = desired.Labels[sandboxv1beta1.DeprecatedSandboxPodTemplateHashLabel]
+	sb.Labels[sandboxv1beta1.SandboxTemplateHashLabel] = desired.Labels[sandboxv1beta1.SandboxTemplateHashLabel]
+	if err := r.Update(ctx, sb); err != nil {
+		// A conflict means a newer version of the sandbox exists, for example because a claim
+		// adopted it. The watch event for that version requeues the pool.
+		if k8serrors.IsConflict(err) {
+			return nil
+		}
+		return err
+	}
+	log.FromContext(ctx).Info("Updated pool sandbox pod metadata from template", "sandbox", sb.Name)
+	return nil
+}
+
+func podMetadataEqualIgnoreHash(a, b *sandboxv1beta1.PodMetadata) bool {
+	a, b = a.DeepCopy(), b.DeepCopy()
+	for _, m := range []map[string]string{a.Labels, b.Labels} {
+		delete(m, sandboxv1beta1.DeprecatedSandboxPodTemplateHashLabel)
+		delete(m, sandboxv1beta1.SandboxTemplateHashLabel)
+	}
+	return equality.Semantic.DeepEqual(a, b)
 }
 
 // computePodTemplateHash computes a hash of the sandbox template's Spec.PodTemplate.
@@ -1169,26 +1254,7 @@ func (r *SandboxWarmPoolReconciler) buildSandboxCR(
 			SandboxBlueprint: *template.Spec.SandboxBlueprint.DeepCopy(),
 		},
 	}
-
-	// Propagate pool and template labels to pod template for consistency and targeting
-	if sandbox.Spec.PodTemplate.ObjectMeta.Labels == nil {
-		sandbox.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
-	}
-	sandbox.Spec.PodTemplate.ObjectMeta.Labels[warmPoolSandboxLabel] = poolNameHash
-	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = SandboxTemplateRefHash(warmPool.Spec.TemplateRef.Name)
-	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxv1beta1.DeprecatedSandboxPodTemplateHashLabel] = currentPodTemplateHash
-	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxv1beta1.SandboxTemplateHashLabel] = currentSandboxBlueprintHash
-
-	// Respect the template's custom eviction annotation if explicitly specified.
-	// Only apply the default eviction behavior if the annotation is not defined.
-	if _, exists := sandbox.Spec.PodTemplate.ObjectMeta.Annotations[autoscalerSafeToEvictAnnotation]; !exists {
-		if r.EnableWarmPoolEviction {
-			if sandbox.Spec.PodTemplate.ObjectMeta.Annotations == nil {
-				sandbox.Spec.PodTemplate.ObjectMeta.Annotations = make(map[string]string)
-			}
-			sandbox.Spec.PodTemplate.ObjectMeta.Annotations[autoscalerSafeToEvictAnnotation] = "true"
-		}
-	}
+	sandbox.Spec.PodTemplate.ObjectMeta = r.buildPoolPodMetadata(warmPool, poolNameHash, template, currentPodTemplateHash, currentSandboxBlueprintHash)
 
 	// Apply secure defaults to the sandbox pod spec
 	ApplySandboxSecureDefaults(template, &sandbox.Spec.PodTemplate.Spec)

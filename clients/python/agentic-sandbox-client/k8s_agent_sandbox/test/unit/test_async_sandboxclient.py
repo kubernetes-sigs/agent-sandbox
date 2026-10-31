@@ -15,6 +15,7 @@
 """Tests for AsyncSandboxClient lifecycle and transport behavior."""
 
 import asyncio
+import contextlib
 import gc
 import json
 import os
@@ -26,12 +27,14 @@ import tempfile
 import unittest
 import warnings
 import weakref
+from pathlib import Path
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
+import certifi
 
 httpx = pytest.importorskip("httpx")
 pytest.importorskip("kubernetes_asyncio")
@@ -1244,6 +1247,7 @@ class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):
                 connection_config=config,
                 k8s_helper=MagicMock(),
             )
+            connector._ensure_client()
         try:
             create_context.assert_called_once_with(cafile="/ca.pem")
             context.load_cert_chain.assert_called_once_with("/c.crt", "/c.key")
@@ -1268,6 +1272,7 @@ class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):
                 connection_config=config,
                 k8s_helper=MagicMock(),
             )
+            connector._ensure_client()
         try:
             create_context.assert_called_once_with()
             stdlib_context.assert_not_called()
@@ -1275,7 +1280,7 @@ class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):
         finally:
             await connector.close()
 
-    async def test_no_custom_context_without_tls_options(self):
+    async def test_default_context_verifies_certificates_and_hostnames(self):
         with patch(
             "k8s_agent_sandbox.async_connector.httpx.AsyncHTTPTransport",
             wraps=httpx.AsyncHTTPTransport,
@@ -1286,10 +1291,309 @@ class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):
                 connection_config=SandboxDirectConnectionConfig(api_url="https://router"),
                 k8s_helper=MagicMock(),
             )
+            transport.assert_not_called()
+            connector._ensure_client()
         try:
-            self.assertIs(transport.call_args.kwargs["verify"], True)
+            context = transport.call_args.kwargs["verify"]
+            self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+            self.assertTrue(context.check_hostname)
         finally:
             await connector.close()
+
+
+class TestAsyncTLSContextReuse(unittest.IsolatedAsyncioTestCase):
+    """Check allocation and ownership without replacing the HTTPX transport."""
+
+    def setUp(self):
+        env = dict(os.environ)
+        for name in ("SSL_CERT_FILE", "SSL_CERT_DIR", "SSLKEYLOGFILE"):
+            env.pop(name, None)
+        environment = patch.dict(os.environ, env, clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.client = self._make_client()
+        self.addAsyncCleanup(self.client.close)
+
+    def _make_client(self, config=None):
+        client = AsyncSandboxClient(
+            config or SandboxDirectConnectionConfig(api_url="http://router.invalid"),
+            cleanup=False,
+        )
+        helper = client.k8s_helper
+        helper.create_sandbox_claim = AsyncMock(return_value={"metadata": {"uid": "u"}})
+        helper.wait_for_claim_ready = AsyncMock(side_effect=lambda name, *a, **kw: name)
+        helper.resolve_sandbox_name = AsyncMock(side_effect=lambda name, *a, **kw: name)
+        helper.get_sandbox = AsyncMock(return_value={"metadata": {"name": "sandbox"}})
+        return client
+
+    async def test_unused_handles_and_cleanup_do_not_load_certificates(self):
+        with patch("ssl.create_default_context", wraps=ssl.create_default_context) as create:
+            for _ in range(5):
+                handle = await self.client.create_sandbox("pool")
+                await handle.close_connection()
+            await self.client.close()
+        create.assert_not_called()
+
+    async def test_concurrent_handles_load_default_trust_once(self):
+        async def connect():
+            handle = await self.client.create_sandbox("pool")
+            return handle.connector.client
+
+        with patch("ssl.create_default_context", wraps=ssl.create_default_context) as create:
+            clients = await asyncio.gather(*(connect() for _ in range(5)))
+            attached = await self.client.get_sandbox("attached-claim")
+            attached_client = attached.connector.client
+        create.assert_called_once()
+        self.assertEqual(len({id(client) for client in clients + [attached_client]}), 6)
+
+    async def test_independent_sdk_clients_do_not_share_contexts(self):
+        other = self._make_client()
+        self.addAsyncCleanup(other.close)
+        with patch("ssl.create_default_context", wraps=ssl.create_default_context) as create:
+            first = await self.client.create_sandbox("pool")
+            second = await other.create_sandbox("pool")
+            first.connector._ensure_client()
+            second.connector._ensure_client()
+        self.assertEqual(create.call_count, 2)
+
+    async def test_close_releases_default_trust(self):
+        contexts = []
+        create_context = httpx.create_ssl_context
+
+        def create():
+            context = create_context()
+            contexts.append(weakref.ref(context))
+            return context
+
+        with patch("httpx.create_ssl_context", side_effect=create):
+            handle = await self.client.create_sandbox("pool")
+            handle.connector._ensure_client()
+            await self.client.close()
+            del handle
+            gc.collect()
+        self.assertEqual(len(contexts), 1)
+        self.assertIsNone(contexts[0]())
+
+    async def test_ca_file_replacement_reloads_trust(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ca = Path(directory) / "ca.pem"
+            ca.write_bytes(Path(certifi.where()).read_bytes())
+            os.environ["SSL_CERT_FILE"] = str(ca)
+            with patch("ssl.create_default_context", wraps=ssl.create_default_context) as create:
+                first = await self.client.create_sandbox("pool")
+                first.connector._ensure_client()
+                replacement = Path(directory) / "replacement.pem"
+                replacement.write_bytes(ca.read_bytes())
+                # Preserve size and mtime so atomic replacement needs inode/ctime detection.
+                info = ca.stat()
+                os.utime(replacement, ns=(info.st_atime_ns, info.st_mtime_ns))
+                replacement.replace(ca)
+                second = await self.client.create_sandbox("pool")
+                second.connector._ensure_client()
+                third = await self.client.create_sandbox("pool")
+                third.connector._ensure_client()
+            self.assertEqual(create.call_count, 2)
+
+    async def test_environment_change_reloads_trust(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ca = Path(directory) / "ca.pem"
+            ca.write_bytes(Path(certifi.where()).read_bytes())
+            with patch("ssl.create_default_context", wraps=ssl.create_default_context) as create:
+                first = await self.client.create_sandbox("pool")
+                first.connector._ensure_client()
+                os.environ["SSL_CERT_FILE"] = str(ca)
+                second = await self.client.create_sandbox("pool")
+                second.connector._ensure_client()
+                del os.environ["SSL_CERT_FILE"]
+                third = await self.client.create_sandbox("pool")
+                third.connector._ensure_client()
+            self.assertEqual(create.call_count, 3)
+
+    async def test_directory_trust_is_loaded_for_each_handle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            os.environ["SSL_CERT_DIR"] = directory
+            with patch("ssl.create_default_context", wraps=ssl.create_default_context) as create:
+                first = await self.client.create_sandbox("pool")
+                first.connector._ensure_client()
+                second = await self.client.create_sandbox("pool")
+                second.connector._ensure_client()
+            self.assertEqual(create.call_count, 2)
+
+    def test_httpx_default_trust_selection_contract(self):
+        """Fail if HTTPX's trust selection no longer matches the cache's assumptions."""
+        with tempfile.TemporaryDirectory() as directory:
+            ca = Path(directory) / "ca.pem"
+            ca.write_bytes(Path(certifi.where()).read_bytes())
+            cases = [
+                ({}, {"cafile": certifi.where()}),
+                ({"SSL_CERT_FILE": str(ca)}, {"cafile": str(ca)}),
+                ({"SSL_CERT_DIR": directory}, {"capath": directory}),
+                ({"SSL_CERT_FILE": str(ca), "SSL_CERT_DIR": directory}, {"cafile": str(ca)}),
+            ]
+            for environment, expected in cases:
+                with self.subTest(environment=environment), patch.dict(os.environ, environment):
+                    with patch("ssl.create_default_context", wraps=ssl.create_default_context) as create:
+                        httpx.create_ssl_context()
+                    create.assert_called_once_with(**expected)
+
+    def test_missing_ca_uses_httpx_error_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            os.environ["SSL_CERT_FILE"] = str(Path(directory) / "missing.pem")
+            with self.assertRaises(FileNotFoundError) as expected:
+                httpx.create_ssl_context()
+            with self.assertRaises(FileNotFoundError) as actual:
+                self.client._default_ssl_context()
+            self.assertEqual(actual.exception.args, expected.exception.args)
+            self.assertEqual(actual.exception.filename, expected.exception.filename)
+
+    async def test_key_logging_contexts_are_loaded_for_each_handle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            os.environ["SSLKEYLOGFILE"] = str(Path(directory) / "keys.log")
+            with patch("ssl.create_default_context", wraps=ssl.create_default_context) as create:
+                first = await self.client.create_sandbox("pool")
+                first.connector._ensure_client()
+                second = await self.client.create_sandbox("pool")
+                second.connector._ensure_client()
+            self.assertEqual(create.call_count, 2)
+
+    async def test_explicit_ca_is_loaded_for_each_handle(self):
+        self.client.connection_config.ca_cert = certifi.where()
+        with patch("ssl.create_default_context", wraps=ssl.create_default_context) as create:
+            await self.client.create_sandbox("pool")
+            await self.client.create_sandbox("pool")
+        self.assertEqual(create.call_count, 2)
+
+    async def test_failed_context_creation_can_be_retried(self):
+        handle = await self.client.create_sandbox("pool")
+        with patch("httpx.create_ssl_context", side_effect=OSError("cannot load CA")):
+            with self.assertRaisesRegex(OSError, "cannot load CA"):
+                handle.connector._ensure_client()
+        self.assertIsInstance(handle.connector.client, httpx.AsyncClient)
+
+    async def test_closed_unused_handle_cannot_open_http_client(self):
+        handle = await self.client.create_sandbox("pool")
+        await handle.close_connection()
+        with patch("ssl.create_default_context", wraps=ssl.create_default_context) as create:
+            with self.assertRaisesRegex(RuntimeError, "connector is closed"):
+                handle.connector._ensure_client()
+        create.assert_not_called()
+
+    async def test_subclass_does_not_need_new_constructor_arguments(self):
+        class ExtensionSandbox(AsyncSandbox):
+            def __init__(self, claim_name, sandbox_id, namespace, connection_config,
+                         tracer_config, k8s_helper):
+                super().__init__(claim_name, sandbox_id, namespace, connection_config,
+                                 tracer_config, k8s_helper)
+
+        self.client.sandbox_class = ExtensionSandbox
+        with patch("ssl.create_default_context", wraps=ssl.create_default_context) as create:
+            first = await self.client.create_sandbox("pool")
+            attached = await self.client.get_sandbox("attached-claim")
+            self.assertIsInstance(first, ExtensionSandbox)
+            self.assertIsInstance(attached, ExtensionSandbox)
+            first.connector._ensure_client()
+            attached.connector._ensure_client()
+        create.assert_called_once()
+
+    def _tls_certificates(self):
+        if shutil.which("openssl") is None:
+            self.skipTest("openssl is required for loopback TLS certificates")
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        certificates = []
+        for index in range(2):
+            cert = Path(directory.name) / f"cert-{index}.pem"
+            key = Path(directory.name) / f"key-{index}.pem"
+            subprocess.run([
+                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost",
+                "-addext", "basicConstraints=critical,CA:TRUE",
+                "-keyout", str(key), "-out", str(cert),
+            ], check=True, capture_output=True)
+            certificates.append((cert, key))
+        return certificates
+
+    async def _tls_server(self, cert, key, require_client_cert=False):
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(cert, key)
+        if require_client_cert:
+            context.verify_mode = ssl.CERT_REQUIRED
+            context.load_verify_locations(cafile=cert)
+
+        async def respond(reader, writer):
+            try:
+                await reader.readuntil(b"\r\n\r\n")
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                await writer.drain()
+            finally:
+                writer.close()
+                with contextlib.suppress(ConnectionError):
+                    await writer.wait_closed()
+
+        server = await asyncio.start_server(respond, "127.0.0.1", 0, ssl=context)
+        async def close_server():
+            server.close()
+            await server.wait_closed()
+        self.addAsyncCleanup(close_server)
+        return server.sockets[0].getsockname()[1]
+
+    async def test_real_tls_verification_rotation_and_handle_isolation(self):
+        (cert, key), (untrusted, _) = self._tls_certificates()
+        port = await self._tls_server(cert, key)
+        url = f"https://localhost:{port}"
+        self.client.connection_config.api_url = url
+        ca = cert.parent / "trust.pem"
+        ca.write_bytes(Path(certifi.where()).read_bytes() + b"\n" + cert.read_bytes())
+        os.environ["SSL_CERT_FILE"] = str(ca)
+
+        with patch("ssl.create_default_context", wraps=ssl.create_default_context) as create:
+            first = await self.client.create_sandbox("pool")
+            second = await self.client.create_sandbox("pool")
+            for handle in (first, second):
+                response = await handle.connector.send_request("GET", "health", _disable_retries=True)
+                self.assertEqual(response.text, "ok")
+            create.assert_called_once()
+        first.connector.client.cookies.set("private", "first")
+        self.assertNotIn("private", second.connector.client.cookies)
+        await first.close_connection()
+        response = await second.connector.send_request("GET", "health", _disable_retries=True)
+        self.assertEqual(response.text, "ok")
+
+        wrong_host = self._make_client(SandboxDirectConnectionConfig(api_url=f"https://127.0.0.1:{port}"))
+        self.addAsyncCleanup(wrong_host.close)
+        handle = await wrong_host.create_sandbox("pool")
+        with self.assertRaises(SandboxRequestError) as error:
+            await handle.connector.send_request("GET", "health", _disable_retries=True)
+        self.assertIn("mismatch", str(error.exception.__cause__))
+
+        replacement = ca.with_suffix(".replacement")
+        replacement.write_bytes(untrusted.read_bytes())
+        replacement.replace(ca)
+        handle = await self.client.create_sandbox("pool")
+        with self.assertRaises(SandboxRequestError) as error:
+            await handle.connector.send_request("GET", "health", _disable_retries=True)
+        self.assertIn("CERTIFICATE_VERIFY_FAILED", str(error.exception.__cause__))
+        # Existing handles retain their original trust even on a fresh handshake.
+        response = await second.connector.send_request("GET", "health", _disable_retries=True)
+        self.assertEqual(response.text, "ok")
+
+    async def test_real_mtls_keeps_client_identities_separate(self):
+        (cert, key), (other_cert, other_key) = self._tls_certificates()
+        port = await self._tls_server(cert, key, require_client_cert=True)
+        for identity, succeeds in ((None, False), ((cert, key), True), ((other_cert, other_key), False)):
+            with self.subTest(identity=identity):
+                client = self._make_client(SandboxDirectConnectionConfig(
+                    api_url=f"https://localhost:{port}", ca_cert=str(cert),
+                    client_cert=tuple(map(str, identity)) if identity else None,
+                ))
+                self.addAsyncCleanup(client.close)
+                handle = await client.create_sandbox("pool")
+                if succeeds:
+                    response = await handle.connector.send_request("GET", "health", _disable_retries=True)
+                    self.assertEqual(response.text, "ok")
+                else:
+                    with self.assertRaises(SandboxRequestError):
+                        await handle.connector.send_request("GET", "health", _disable_retries=True)
 
 
 class AsyncSandboxHandler(BaseHTTPRequestHandler):

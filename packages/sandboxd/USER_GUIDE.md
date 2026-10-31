@@ -162,8 +162,10 @@ iteration (Python).
 |---|---|---|
 | `GET` | `/v1/files/{path}` | File → raw bytes (`application/octet-stream`); directory → JSON `DirectoryListing`. Optional `type` query (`file` or `directory`, also on `HEAD`): `409` if the path is the other kind. `recursive=true` lists nested directories too, and `max_depth=N` limits how deep (entry names become paths relative to the listed directory). A recursive listing over 10000 entries fails with `400`. |
 | `HEAD` | `/v1/files/{path}` | Existence/metadata probe without transferring the body. |
-| `PUT` | `/v1/files/{path}` | Atomic write (temp file + rename), auto-creates parents. Optional `mode` query (`^0[0-7]{3}$`, default `0644`). `append=true` adds to the end of the file instead (not atomic). `type=directory` creates a directory instead (body ignored, `parents=true` also creates missing parents, default mode `0755`). `extract=tar` unpacks a tar body, optionally gzipped, into the directory at the path (not atomic). Accepts raw bytes or `multipart/form-data` (`file` part). |
+| `PUT` | `/v1/files/{path}` | Atomic write (temp file + rename), auto-creates parents. Optional `mode` query (`^0[0-7]{3}$`, default `0644`). `append=true` adds to the end of the file instead (not atomic). `type=directory` creates a directory instead (body ignored, `parents=true` also creates missing parents, default mode `0755`). `If-None-Match: *` creates the file only if the path does not exist, else `412`. `extract=tar` unpacks a tar body, optionally gzipped, into the directory at the path (not atomic). Accepts raw bytes or `multipart/form-data` (`file` part). |
 | `DELETE` | `/v1/files/{path}` | Remove a file or directory; `recursive=true` for `rm -rf` behavior; `409` on a non-empty directory otherwise. |
+| `POST` | `/v1/files/{path}:move` | Rename or move to the required `destination` query path, auto-creating parents. `409` if the destination exists, except that `overwrite=true` replaces a file with a file. Directories are never replaced. A symlink as the last path component is moved or replaced itself, not followed. |
+| `POST` | `/v1/files/{path}:copy` | Same as `:move`, but copies. Directories are copied recursively, files keep their mode, and symlinks inside a directory are copied as links. |
 | `GET` | `/v1/health` | Readiness probe: `200 {"status":"ok"}` or `503` during shutdown. |
 | `GET` | `/v1/metadata` | Orchestrator-injected, non-sensitive environment variables (allowlisted by prefix, default `SANDBOX_`). |
 
@@ -187,9 +189,16 @@ appends, see below), but it does not impose an ordering across requests:
   complete after the path is deleted; a read that has not opened it may fail.
 - **Concurrent writes to one path** — each successful rename is atomic; the
   last successful rename determines the final contents.
+- **Create-only writes (`If-None-Match: *`)** - when several race to create one
+  path, exactly one succeeds and the rest get `412`. It needs hard link support,
+  so it fails on volumes without it, such as GCS FUSE.
 - **Appends (`append=true`)** are written in place, not atomically: a read can
   see a partial append, and concurrent appends to one path can interleave. A
   retried append adds the body again.
+- **Move and copy** use one `rename` per move and publish each copied file or
+  directory atomically. A move across filesystems copies and then removes the
+  source, so both paths are briefly absent. The check for an existing
+  destination is not atomic with them, so a concurrent writer can win the race.
 - **Archive extraction (`extract=tar`)** writes each file atomically but the
   archive as a whole is not: an error leaves the entries written so far.
 
@@ -258,6 +267,9 @@ Complete, runnable manifests for both (plus an end-to-end SDK client) live in
 curl -sf -X PUT -H "Content-Type: application/octet-stream" \
   --data-binary @local.py "localhost:8080/v1/files/src/main.py?mode=0644"
 
+# Create only if missing (412 if it exists)
+curl -sf -X PUT -H "If-None-Match: *" --data-binary "x" localhost:8080/v1/files/src/new.py
+
 # Read it back
 curl -sf localhost:8080/v1/files/src/main.py
 
@@ -281,6 +293,10 @@ curl -sf -X PUT --data-binary @repo.tar.gz "localhost:8080/v1/files/src?extract=
 
 # Delete recursively
 curl -sf -X DELETE "localhost:8080/v1/files/src?recursive=true"
+
+# Move or copy (missing parents of the destination are created)
+curl -sf -X POST "localhost:8080/v1/files/src/main.py:move?destination=lib/main.py"
+curl -sf -X POST "localhost:8080/v1/files/src:copy?destination=backup/src"
 
 # Probes
 curl -sf localhost:8080/v1/health

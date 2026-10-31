@@ -26,6 +26,7 @@ import (
 	"io"
 	"io/fs"
 	"math"
+	"math/rand/v2"
 	"mime"
 	"net/http"
 	"os"
@@ -119,6 +120,7 @@ func (s *RESTServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/files/{path...}", s.handleGetFile)
 	mux.HandleFunc("PUT /v1/files/{path...}", s.handlePutFile)
 	mux.HandleFunc("DELETE /v1/files/{path...}", s.handleDeleteFile)
+	mux.HandleFunc("POST /v1/files/{path...}", s.handleFileAction)
 	mux.HandleFunc("GET /v1/health", s.handleHealth)
 	mux.HandleFunc("GET /v1/metadata", s.handleMetadata)
 	return mux
@@ -153,7 +155,15 @@ func (s *RESTServer) writeFSError(w http.ResponseWriter, err error) {
 // resolvePath sanitizes the {path...} wildcard against the sandbox root,
 // writing the spec-mandated error response on failure.
 func (s *RESTServer) resolvePath(w http.ResponseWriter, r *http.Request) (string, bool) {
-	target, err := pathutil.SanitizePath(s.rootDir, r.PathValue("path"))
+	return s.resolveUserPath(w, r.PathValue("path"), pathutil.SanitizePath)
+}
+
+// resolveUserPath is resolvePath for any client-supplied path, such as a
+// destination query. sanitize is pathutil.SanitizePath, or
+// pathutil.SanitizeEntryPath to leave a final symlink unresolved.
+func (s *RESTServer) resolveUserPath(w http.ResponseWriter, userPath string,
+	sanitize func(rootDir, userPath string) (string, error)) (string, bool) {
+	target, err := sanitize(s.rootDir, userPath)
 	if err != nil {
 		if errors.Is(err, pathutil.ErrPathEscapes) {
 			s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED",
@@ -429,6 +439,11 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	createOnly, ok := s.createOnly(w, r)
+	if !ok {
+		return
+	}
+
 	target, ok := s.resolvePath(w, r)
 	if !ok {
 		return
@@ -450,11 +465,21 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 				"append cannot be used with type=directory")
 			return
 		}
+		// Directory creation is idempotent, so it cannot honor the precondition.
+		if createOnly {
+			s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+				"If-None-Match cannot be used with type=directory")
+			return
+		}
 		s.putDirectory(w, r, target, mode)
 		return
 	}
 
 	if info, err := os.Stat(target); err == nil && info.IsDir() {
+		if createOnly {
+			s.writePathExists(w)
+			return
+		}
 		if msg := typeMismatch(putType, true); msg != "" {
 			s.writeError(w, http.StatusConflict, "CONFLICT", msg)
 			return
@@ -471,13 +496,19 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 	defer cleanup()
 
 	write := atomicWrite
-	if appendMode {
+	switch {
+	case createOnly:
+		write = atomicCreate
+	case appendMode:
 		write = appendWrite
 	}
 	if err := write(target, body, mode); err != nil {
-		if os.IsPermission(err) {
+		switch {
+		case createOnly && errors.Is(err, os.ErrExist):
+			s.writePathExists(w)
+		case errors.Is(err, os.ErrPermission):
 			s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED", "permission denied")
-		} else {
+		default:
 			s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 		}
 		return
@@ -570,6 +601,28 @@ func requestFileBody(r *http.Request) (io.Reader, func(), error) {
 	return r.Body, func() {}, nil
 }
 
+// writePathExists writes the 412 returned when a create-only PUT finds an
+// existing path.
+func (s *RESTServer) writePathExists(w http.ResponseWriter) {
+	s.writeError(w, http.StatusPreconditionFailed, "FAILED_PRECONDITION", "path already exists")
+}
+
+// createOnly reports whether the request carries "If-None-Match: *". sandboxd
+// has no ETags, so it rejects any other value instead of ignoring a
+// precondition the client relies on. It writes a 400 and returns ok=false in
+// that case.
+func (s *RESTServer) createOnly(w http.ResponseWriter, r *http.Request) (createOnly, ok bool) {
+	values := r.Header.Values("If-None-Match")
+	if len(values) == 0 {
+		return false, true
+	}
+	if len(values) == 1 && strings.TrimSpace(values[0]) == "*" {
+		return true, true
+	}
+	s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", `If-None-Match must be "*"`)
+	return false, false
+}
+
 // atomicWrite streams src into target using the temp-file-then-rename
 // strategy. Parent directories are created automatically.
 //
@@ -578,13 +631,32 @@ func requestFileBody(r *http.Request) (io.Reader, func(), error) {
 // atomically, so an already-open reader sees either the previous complete file
 // or the new one. A concurrent delete can remove the temporary file or its
 // parent directory before rename, in which case the write fails.
-func atomicWrite(target string, src io.Reader, mode os.FileMode) (err error) {
+func atomicWrite(target string, src io.Reader, mode os.FileMode) error {
+	return writeViaTemp(target, src, mode, os.Rename)
+}
+
+// atomicCreate is atomicWrite for a target that must not exist: when it does,
+// the write fails with an error wrapping os.ErrExist. link(2) never replaces
+// its destination, so the check and the create are one atomic step.
+func atomicCreate(target string, src io.Reader, mode os.FileMode) error {
+	return writeViaTemp(target, src, mode, func(tmp, target string) error {
+		if err := os.Link(tmp, target); err != nil {
+			return err
+		}
+		_ = os.Remove(tmp)
+		return nil
+	})
+}
+
+// writeViaTemp writes src to a synced temporary file beside target, then calls
+// place to put it at target.
+func writeViaTemp(target string, src io.Reader, mode os.FileMode, place func(tmp, target string) error) (err error) {
 	dir := filepath.Dir(target)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("failed to create parent directory: %w", err)
 	}
 
-	tmpFile, err := os.CreateTemp(dir, ".sandboxd-tmp-*")
+	tmpFile, err := os.CreateTemp(dir, tmpPattern)
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
@@ -609,7 +681,7 @@ func atomicWrite(target string, src io.Reader, mode os.FileMode) (err error) {
 	if err = tmpFile.Close(); err != nil {
 		return fmt.Errorf("failed to close file: %w", err)
 	}
-	if err = os.Rename(tmpFile.Name(), target); err != nil {
+	if err = place(tmpFile.Name(), target); err != nil {
 		return fmt.Errorf("failed to move file into place: %w", err)
 	}
 	return nil
@@ -868,6 +940,283 @@ func (s *RESTServer) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// Actions of POST /v1/files/{path}:{action}.
+const (
+	actionMove = "move"
+	actionCopy = "copy"
+)
+
+// tmpPattern names the temporary entries sandboxd creates beside a target.
+const tmpPattern = ".sandboxd-tmp-*"
+
+// errUnsupportedFileType marks a copy source that is neither a regular file,
+// a directory, nor a symlink, such as a socket or a named pipe.
+var errUnsupportedFileType = errors.New("unsupported file type")
+
+// handleFileAction serves POST /v1/files/{path}:move and :copy. A net/http
+// pattern cannot match a literal suffix after a wildcard, so the action is
+// split off the path value here.
+func (s *RESTServer) handleFileAction(w http.ResponseWriter, r *http.Request) {
+	rawPath := r.PathValue("path")
+	sep := strings.LastIndexByte(rawPath, ':')
+	action := ""
+	if sep >= 0 {
+		action = rawPath[sep+1:]
+	}
+	if action != actionMove && action != actionCopy {
+		s.writeError(w, http.StatusNotFound, "NOT_FOUND",
+			fmt.Sprintf("unknown action; use :%s or :%s", actionMove, actionCopy))
+		return
+	}
+
+	overwrite, ok := s.boolQuery(w, r, "overwrite")
+	if !ok {
+		return
+	}
+	destParam := r.URL.Query().Get("destination")
+	if destParam == "" {
+		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "destination is required")
+		return
+	}
+	// A symlink in the final component is the entry to move or copy, not a
+	// pointer to it.
+	src, ok := s.resolveUserPath(w, rawPath[:sep], pathutil.SanitizeEntryPath)
+	if !ok {
+		return
+	}
+	dst, ok := s.resolveUserPath(w, destParam, pathutil.SanitizeEntryPath)
+	if !ok {
+		return
+	}
+
+	srcInfo, err := os.Lstat(src)
+	if err != nil {
+		s.writeFSError(w, err)
+		return
+	}
+	if src == dst {
+		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "source and destination are the same path")
+		return
+	}
+	if srcInfo.IsDir() && isWithin(src, dst) {
+		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "cannot move or copy a directory into itself")
+		return
+	}
+
+	switch dstInfo, err := os.Lstat(dst); {
+	case err == nil && !overwrite:
+		s.writeError(w, http.StatusConflict, "CONFLICT", "destination exists; pass overwrite=true to replace a file")
+		return
+	case err == nil && (dstInfo.IsDir() || srcInfo.IsDir()):
+		s.writeError(w, http.StatusConflict, "CONFLICT", "overwrite replaces a file with a file, never a directory")
+		return
+	case err != nil && !errors.Is(err, os.ErrNotExist):
+		s.writeFSError(w, err)
+		return
+	}
+
+	err = os.MkdirAll(filepath.Dir(dst), 0o755)
+	if err == nil {
+		err = s.moveOrCopy(action, src, dst)
+	}
+	if errors.Is(err, errUnsupportedFileType) {
+		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	if err != nil {
+		s.writeFSError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// moveOrCopy runs action on src and dst, which are resolved paths. Sources are
+// read through a handle on the sandbox root, so a path swapped for a symlink
+// during the operation cannot lead outside it.
+func (s *RESTServer) moveOrCopy(action, src, dst string) error {
+	root, err := os.OpenRoot(s.resolvedRoot)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	if action == actionMove {
+		return moveEntry(os.Rename, root, src, dst)
+	}
+	return copyEntry(root, src, dst)
+}
+
+// isWithin reports whether path lies strictly inside dir. Both must be clean
+// absolute paths.
+func isWithin(dir, path string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// moveEntry renames src to dst. rename(2) fails with EXDEV when they sit on
+// different filesystems, for example when a volume is mounted under the
+// sandbox root. Then it copies src and removes the original.
+func moveEntry(rename func(oldPath, newPath string) error, root *os.Root, src, dst string) error {
+	err := rename(src, dst)
+	if !errors.Is(err, syscall.EXDEV) {
+		return err
+	}
+	// Claim the source under a private name first: a request that replaces
+	// src while the copy runs must not be deleted with the original.
+	staged, err := stageEntry(src)
+	if err != nil {
+		return err
+	}
+	if err := copyEntry(root, staged, dst); err != nil {
+		if _, statErr := os.Lstat(src); errors.Is(statErr, os.ErrNotExist) {
+			_ = os.Rename(staged, src)
+		}
+		return err
+	}
+	return removeTree(staged)
+}
+
+// stageEntry renames src to a fresh private name in the same directory, which
+// cannot fail with EXDEV, and returns that name.
+func stageEntry(src string) (string, error) {
+	staged := tmpPath(filepath.Dir(src))
+	if err := os.Rename(src, staged); err != nil {
+		return "", err
+	}
+	return staged, nil
+}
+
+// tmpPath returns an unused path for a temporary entry in dir.
+func tmpPath(dir string) string {
+	return filepath.Join(dir, strings.Replace(tmpPattern, "*", strconv.FormatUint(rand.Uint64(), 36), 1))
+}
+
+// copyEntry copies the file, symlink, or directory tree at src to dst. It
+// builds a directory in a temporary sibling and renames it into place, so a
+// failed copy leaves no partial dst.
+func copyEntry(root *os.Root, src, dst string) error {
+	rel, err := filepath.Rel(root.Name(), src)
+	if err != nil {
+		return err
+	}
+	info, err := root.Lstat(rel)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return copyLeaf(root, rel, dst, info)
+	}
+	tmp, err := os.MkdirTemp(filepath.Dir(dst), tmpPattern)
+	if err != nil {
+		return fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	if err := copyTree(root, rel, tmp, info.Mode().Perm()); err != nil {
+		_ = removeTree(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		_ = removeTree(tmp)
+		return fmt.Errorf("failed to move directory into place: %w", err)
+	}
+	return nil
+}
+
+// removeTree is os.RemoveAll after making every directory owner-writable, so a
+// read-only one does not block removal.
+func removeTree(path string) error {
+	_ = filepath.WalkDir(path, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr == nil && d.IsDir() {
+			if info, err := d.Info(); err == nil {
+				_ = os.Chmod(p, info.Mode().Perm()|0o700)
+			}
+		}
+		return nil
+	})
+	return os.RemoveAll(path)
+}
+
+// copyTree copies the entries of directory rel, a path below root, into the
+// existing directory dst, then sets dst to mode. The mode comes last so a
+// read-only source directory does not block writing its children.
+func copyTree(root *os.Root, rel, dst string, mode os.FileMode) error {
+	dir, err := root.Open(rel)
+	if err != nil {
+		return err
+	}
+	entries, err := dir.ReadDir(-1)
+	_ = dir.Close()
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		from, to := filepath.Join(rel, entry.Name()), filepath.Join(dst, entry.Name())
+		info, err := root.Lstat(from)
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			if err := copyLeaf(root, from, to, info); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.Mkdir(to, 0o700); err != nil {
+			return err
+		}
+		if err := copyTree(root, from, to, info.Mode().Perm()); err != nil {
+			return err
+		}
+	}
+	return os.Chmod(dst, mode)
+}
+
+// copyLeaf copies the regular file or symlink at rel below root to dst. It
+// recreates a symlink rather than following it, so a copy never reads outside
+// the sandbox root through a link inside a copied tree.
+func copyLeaf(root *os.Root, rel, dst string, info os.FileInfo) error {
+	switch {
+	case info.Mode().IsRegular():
+		// A process in the sandbox can swap the file after the caller's Lstat.
+		// OpenFile refuses a swapped-in symlink that leaves the sandbox root,
+		// O_NONBLOCK keeps a swapped-in named pipe from blocking the open, and
+		// the Stat below rejects anything that is not a regular file.
+		f, err := root.OpenFile(rel, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = f.Close() }()
+		opened, err := f.Stat()
+		if err != nil {
+			return err
+		}
+		if !opened.Mode().IsRegular() {
+			return fmt.Errorf("%w: %s", errUnsupportedFileType, filepath.Base(rel))
+		}
+		return atomicWrite(dst, f, opened.Mode().Perm())
+	case info.Mode()&os.ModeSymlink != 0:
+		target, err := root.Readlink(rel)
+		if err != nil {
+			return err
+		}
+		return atomicSymlink(target, dst)
+	default:
+		return fmt.Errorf("%w: %s", errUnsupportedFileType, filepath.Base(rel))
+	}
+}
+
+// atomicSymlink makes dst a symlink to target, replacing an existing file or
+// symlink in one rename.
+func atomicSymlink(target, dst string) error {
+	tmp := tmpPath(filepath.Dir(dst))
+	if err := os.Symlink(target, tmp); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func (s *RESTServer) handleHealth(w http.ResponseWriter, _ *http.Request) {

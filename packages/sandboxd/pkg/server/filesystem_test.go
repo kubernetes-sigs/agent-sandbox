@@ -20,11 +20,16 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io/fs"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -343,6 +348,115 @@ func TestPutEncodedSlashesCreateNestedFile(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, rec.Code)
 	_, err := os.Stat(filepath.Join(root, "dir", "sub", "file.txt"))
 	require.NoError(t, err)
+}
+
+func TestPutCreateOnly(t *testing.T) {
+	for _, query := range []string{"", "?append=true"} {
+		t.Run("query"+query, func(t *testing.T) {
+			_, handler, root := newRESTFixture(t)
+			header := http.Header{"If-None-Match": []string{"*"}}
+
+			rec := doRequest(handler, http.MethodPut, "/v1/files/a/f.txt"+query, []byte("first"), header)
+			require.Equal(t, http.StatusNoContent, rec.Code)
+
+			rec = doRequest(handler, http.MethodPut, "/v1/files/a/f.txt"+query, []byte("second"), header)
+			require.Equal(t, http.StatusPreconditionFailed, rec.Code)
+			require.Equal(t, "FAILED_PRECONDITION", decodeError(t, rec).Code)
+
+			onDisk, err := os.ReadFile(filepath.Join(root, "a", "f.txt"))
+			require.NoError(t, err)
+			require.Equal(t, "first", string(onDisk))
+			entries, err := os.ReadDir(filepath.Join(root, "a"))
+			require.NoError(t, err)
+			require.Len(t, entries, 1, "no temp file may be left behind")
+		})
+	}
+}
+
+func TestPutCreateOnlyExistingDirectory(t *testing.T) {
+	for _, query := range []string{"", "?append=true"} {
+		t.Run("query"+query, func(t *testing.T) {
+			_, handler, root := newRESTFixture(t)
+			require.NoError(t, os.MkdirAll(filepath.Join(root, "d"), 0o755))
+			header := http.Header{"If-None-Match": []string{"*"}}
+
+			rec := doRequest(handler, http.MethodPut, "/v1/files/d"+query, []byte("x"), header)
+			require.Equal(t, http.StatusPreconditionFailed, rec.Code)
+			require.Equal(t, "FAILED_PRECONDITION", decodeError(t, rec).Code)
+		})
+	}
+}
+
+func TestPutCreateOnlyWithType(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "d"), 0o755))
+	header := http.Header{"If-None-Match": []string{"*"}}
+
+	rec := doRequest(handler, http.MethodPut, "/v1/files/d?type=directory", nil, header)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Equal(t, "INVALID_ARGUMENT", decodeError(t, rec).Code)
+
+	// The precondition outranks the type mismatch.
+	rec = doRequest(handler, http.MethodPut, "/v1/files/d?type=file", []byte("x"), header)
+	require.Equal(t, http.StatusPreconditionFailed, rec.Code)
+}
+
+func TestPutCreateOnlyRacesToOneWinner(t *testing.T) {
+	for _, query := range []string{"", "?append=true"} {
+		t.Run("query"+query, func(t *testing.T) {
+			_, handler, root := newRESTFixture(t)
+			header := http.Header{"If-None-Match": []string{"*"}}
+
+			const writers = 16
+			codes := make(chan int, writers)
+			for range writers {
+				go func() {
+					codes <- doRequest(handler, http.MethodPut, "/v1/files/f.txt"+query, []byte("x"), header).Code
+				}()
+			}
+			created := 0
+			for range writers {
+				if code := <-codes; code == http.StatusNoContent {
+					created++
+				} else {
+					require.Equal(t, http.StatusPreconditionFailed, code)
+				}
+			}
+			require.Equal(t, 1, created)
+
+			entries, err := os.ReadDir(root)
+			require.NoError(t, err)
+			require.Len(t, entries, 1, "no temp file may be left behind")
+		})
+	}
+}
+
+func TestPutIfNoneMatchRejectsOtherValues(t *testing.T) {
+	_, handler, _ := newRESTFixture(t)
+
+	for _, value := range []string{`"etag"`, "W/*", ""} {
+		header := http.Header{"If-None-Match": []string{value}}
+		rec := doRequest(handler, http.MethodPut, "/v1/files/f.txt", []byte("x"), header)
+		require.Equal(t, http.StatusBadRequest, rec.Code, "value %q must be rejected", value)
+		require.Equal(t, "INVALID_ARGUMENT", decodeError(t, rec).Code)
+	}
+}
+
+func TestPutPermissionDenied(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	for _, query := range []string{"", "?append=true"} {
+		t.Run("query"+query, func(t *testing.T) {
+			_, handler, root := newRESTFixture(t)
+			require.NoError(t, os.Mkdir(filepath.Join(root, "ro"), 0o500))
+			t.Cleanup(func() { _ = os.Chmod(filepath.Join(root, "ro"), 0o755) })
+
+			rec := doRequest(handler, http.MethodPut, "/v1/files/ro/f.txt"+query, []byte("x"), nil)
+			require.Equal(t, http.StatusForbidden, rec.Code)
+			require.Equal(t, "PERMISSION_DENIED", decodeError(t, rec).Code)
+		})
+	}
 }
 
 func TestGetDirectoryListing(t *testing.T) {
@@ -738,6 +852,485 @@ func TestDeleteFilesystemRootRefused(t *testing.T) {
 		require.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", path, rec.Body.String())
 		require.Equal(t, "PERMISSION_DENIED", decodeError(t, rec).Code)
 	}
+}
+
+// doAction posts a :move or :copy request for src.
+func doAction(handler http.Handler, action, src string, query url.Values) *httptest.ResponseRecorder {
+	return doRequest(handler, http.MethodPost, "/v1/files/"+src+":"+action+"?"+query.Encode(), nil, nil)
+}
+
+// writeFiles creates the named files under root. A name ending in "/" creates
+// an empty directory.
+func writeFiles(t *testing.T, root string, files map[string]string) {
+	t.Helper()
+	for name, content := range files {
+		path := filepath.Join(root, name)
+		if strings.HasSuffix(name, "/") {
+			require.NoError(t, os.MkdirAll(path, 0o755))
+			continue
+		}
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+	}
+}
+
+// readTree maps every path below dir, relative to it, to its content. A
+// directory maps to "" and carries a trailing "/", and a symlink or other
+// special file maps to a description of itself.
+func readTree(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	tree := map[string]string{}
+	require.NoError(t, filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		require.NoError(t, err)
+		rel, err := filepath.Rel(dir, path)
+		require.NoError(t, err)
+		switch {
+		case rel == ".":
+		case d.IsDir():
+			tree[rel+"/"] = ""
+		case d.Type()&os.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			require.NoError(t, err)
+			tree[rel] = "-> " + target
+		case !d.Type().IsRegular():
+			tree[rel] = "(" + d.Type().String() + ")"
+		default:
+			data, err := os.ReadFile(path)
+			require.NoError(t, err)
+			tree[rel] = string(data)
+		}
+		return nil
+	}))
+	return tree
+}
+
+func TestMoveAndCopyFile(t *testing.T) {
+	for _, action := range []string{actionMove, actionCopy} {
+		t.Run(action, func(t *testing.T) {
+			_, handler, root := newRESTFixture(t)
+			src := filepath.Join(root, "a.txt")
+			writeFiles(t, root, map[string]string{"a.txt": "data"})
+			require.NoError(t, os.Chmod(src, 0o755))
+
+			rec := doAction(handler, action, "a.txt", url.Values{"destination": {"x/y/b.txt"}})
+			require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+			dst := filepath.Join(root, "x", "y", "b.txt")
+			onDisk, err := os.ReadFile(dst)
+			require.NoError(t, err)
+			require.Equal(t, "data", string(onDisk))
+			info, err := os.Stat(dst)
+			require.NoError(t, err)
+			require.Equal(t, os.FileMode(0o755), info.Mode().Perm())
+
+			_, err = os.Stat(src)
+			if action == actionMove {
+				require.ErrorIs(t, err, os.ErrNotExist)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestMoveAndCopyDirectory(t *testing.T) {
+	for _, action := range []string{actionMove, actionCopy} {
+		t.Run(action, func(t *testing.T) {
+			_, handler, root := newRESTFixture(t)
+			writeFiles(t, root, map[string]string{"d/f.txt": "f", "d/sub/g.txt": "g", "d/empty/": ""})
+			want := readTree(t, filepath.Join(root, "d"))
+
+			rec := doAction(handler, action, "d", url.Values{"destination": {"x/e"}})
+			require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+			require.Equal(t, want, readTree(t, filepath.Join(root, "x", "e")))
+			_, err := os.Stat(filepath.Join(root, "d"))
+			if action == actionMove {
+				require.ErrorIs(t, err, os.ErrNotExist)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestCopyDirectoryKeepsModesAndSymlinks(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	outside := filepath.Join(t.TempDir(), "secret")
+	require.NoError(t, os.WriteFile(outside, []byte("s"), 0o644))
+	writeFiles(t, root, map[string]string{"d/f.txt": "f"})
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "d", "link")))
+	// A read-only directory must still receive its children before it is
+	// made read-only itself.
+	src, dst := filepath.Join(root, "d"), filepath.Join(root, "copy")
+	require.NoError(t, os.Chmod(src, 0o555))
+	t.Cleanup(func() {
+		_ = os.Chmod(src, 0o755)
+		_ = os.Chmod(dst, 0o755)
+	})
+
+	rec := doAction(handler, actionCopy, "d", url.Values{"destination": {"copy"}})
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+	info, err := os.Stat(dst)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o555), info.Mode().Perm())
+	// The link is recreated, not followed, so nothing outside the root is read.
+	target, err := os.Readlink(filepath.Join(dst, "link"))
+	require.NoError(t, err)
+	require.Equal(t, outside, target)
+}
+
+func TestMoveAndCopyDestinationConflicts(t *testing.T) {
+	tests := []struct {
+		name      string
+		src, dst  string
+		overwrite string
+		wantCode  int
+		wantData  string // content of dst afterwards, when it stays a file
+	}{
+		{name: "file exists", src: "a.txt", dst: "b.txt", wantCode: http.StatusConflict, wantData: "old"},
+		{name: "overwrite replaces file", src: "a.txt", dst: "b.txt", overwrite: "true", wantCode: http.StatusNoContent, wantData: "new"},
+		{name: "overwrite onto directory", src: "a.txt", dst: "dir", overwrite: "true", wantCode: http.StatusConflict},
+		{name: "overwrite directory onto file", src: "dir", dst: "b.txt", overwrite: "true", wantCode: http.StatusConflict, wantData: "old"},
+		{name: "directory onto directory", src: "dir", dst: "dir2", overwrite: "true", wantCode: http.StatusConflict},
+	}
+	for _, action := range []string{actionMove, actionCopy} {
+		for _, tt := range tests {
+			t.Run(action+"/"+tt.name, func(t *testing.T) {
+				_, handler, root := newRESTFixture(t)
+				writeFiles(t, root, map[string]string{"a.txt": "new", "b.txt": "old", "dir/f": "f", "dir2/": ""})
+
+				query := url.Values{"destination": {tt.dst}}
+				if tt.overwrite != "" {
+					query.Set("overwrite", tt.overwrite)
+				}
+				rec := doAction(handler, action, tt.src, query)
+				require.Equal(t, tt.wantCode, rec.Code, rec.Body.String())
+				if tt.wantCode == http.StatusConflict {
+					require.Equal(t, "CONFLICT", decodeError(t, rec).Code)
+				}
+				if tt.wantData != "" {
+					data, err := os.ReadFile(filepath.Join(root, "b.txt"))
+					require.NoError(t, err)
+					require.Equal(t, tt.wantData, string(data))
+				}
+			})
+		}
+	}
+}
+
+func TestMoveAndCopyRejections(t *testing.T) {
+	tests := []struct {
+		name     string
+		src      string
+		query    url.Values
+		wantCode int
+		wantErr  string
+	}{
+		{"missing destination", "a.txt", url.Values{}, http.StatusBadRequest, "INVALID_ARGUMENT"},
+		{"invalid overwrite", "a.txt", url.Values{"destination": {"b"}, "overwrite": {"maybe"}}, http.StatusBadRequest, "INVALID_ARGUMENT"},
+		{"missing source", "nope.txt", url.Values{"destination": {"b"}}, http.StatusNotFound, "NOT_FOUND"},
+		{"same path", "a.txt", url.Values{"destination": {"a.txt"}}, http.StatusBadRequest, "INVALID_ARGUMENT"},
+		{"directory into itself", "d", url.Values{"destination": {"d/sub/d"}}, http.StatusBadRequest, "INVALID_ARGUMENT"},
+		{"sandbox root", "", url.Values{"destination": {"d/root"}}, http.StatusBadRequest, "INVALID_ARGUMENT"},
+		{"source traversal", "%2E%2E/%2E%2E/etc/passwd", url.Values{"destination": {"b"}}, http.StatusForbidden, "PERMISSION_DENIED"},
+		{"destination traversal", "a.txt", url.Values{"destination": {"../../etc/passwd"}}, http.StatusForbidden, "PERMISSION_DENIED"},
+		{"source through escaping symlink", "link/secret", url.Values{"destination": {"b"}}, http.StatusForbidden, "PERMISSION_DENIED"},
+		{"destination through escaping symlink", "a.txt", url.Values{"destination": {"link/b"}}, http.StatusForbidden, "PERMISSION_DENIED"},
+	}
+	for _, action := range []string{actionMove, actionCopy} {
+		for _, tt := range tests {
+			t.Run(action+"/"+tt.name, func(t *testing.T) {
+				_, handler, root := newRESTFixture(t)
+				writeFiles(t, root, map[string]string{"a.txt": "a", "d/sub/": ""})
+				outside := t.TempDir()
+				require.NoError(t, os.WriteFile(filepath.Join(outside, "secret"), []byte("s"), 0o644))
+				require.NoError(t, os.Symlink(outside, filepath.Join(root, "link")))
+
+				rec := doAction(handler, action, tt.src, tt.query)
+				require.Equal(t, tt.wantCode, rec.Code, rec.Body.String())
+				require.Equal(t, tt.wantErr, decodeError(t, rec).Code)
+			})
+		}
+	}
+}
+
+func TestFileActionUnknown(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	writeFiles(t, root, map[string]string{"a.txt": "a"})
+
+	for _, target := range []string{"/v1/files/a.txt", "/v1/files/a.txt:rename?destination=b", "/v1/files/a.txt:?destination=b"} {
+		rec := doRequest(handler, http.MethodPost, target, nil, nil)
+		require.Equal(t, http.StatusNotFound, rec.Code, target)
+		require.Equal(t, "NOT_FOUND", decodeError(t, rec).Code)
+	}
+	require.Equal(t, map[string]string{"a.txt": "a"}, readTree(t, root))
+}
+
+func TestCopyUnsupportedFileType(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	writeFiles(t, root, map[string]string{"d/f.txt": "f"})
+	require.NoError(t, syscall.Mkfifo(filepath.Join(root, "d", "pipe"), 0o644))
+
+	// The copy fails part way through the tree and must not leave a partial
+	// destination or temporary directory behind.
+	rec := doAction(handler, actionCopy, "d", url.Values{"destination": {"x"}})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Equal(t, "INVALID_ARGUMENT", decodeError(t, rec).Code)
+	entries, err := os.ReadDir(root)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, "d", entries[0].Name())
+
+	// A move only renames, so it does not care about file types.
+	rec = doAction(handler, actionMove, "d/pipe", url.Values{"destination": {"moved"}})
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+}
+
+func TestMoveAndCopyActOnSymlinkItself(t *testing.T) {
+	for _, action := range []string{actionMove, actionCopy} {
+		t.Run(action, func(t *testing.T) {
+			_, handler, root := newRESTFixture(t)
+			outside := filepath.Join(t.TempDir(), "secret")
+			require.NoError(t, os.WriteFile(outside, []byte("s"), 0o644))
+			writeFiles(t, root, map[string]string{"real.txt": "data", "dir/f": "f"})
+			// A relative link, one to a directory, and one that escapes the root.
+			require.NoError(t, os.Symlink("real.txt", filepath.Join(root, "link")))
+			require.NoError(t, os.Symlink("dir", filepath.Join(root, "dirlink")))
+			require.NoError(t, os.Symlink(outside, filepath.Join(root, "escape")))
+
+			for src, want := range map[string]string{"link": "real.txt", "dirlink": "dir", "escape": outside} {
+				rec := doAction(handler, action, src, url.Values{"destination": {"moved-" + src}})
+				require.Equal(t, http.StatusNoContent, rec.Code, src+": "+rec.Body.String())
+
+				target, err := os.Readlink(filepath.Join(root, "moved-"+src))
+				require.NoError(t, err, src)
+				require.Equal(t, want, target, src)
+				_, err = os.Lstat(filepath.Join(root, src))
+				if action == actionMove {
+					require.ErrorIs(t, err, os.ErrNotExist, src)
+				} else {
+					require.NoError(t, err, src)
+				}
+			}
+			// The targets are untouched.
+			require.Equal(t, "data", readFile(t, filepath.Join(root, "real.txt")))
+			require.Equal(t, "f", readFile(t, filepath.Join(root, "dir", "f")))
+			require.Equal(t, "s", readFile(t, outside))
+		})
+	}
+}
+
+func TestMoveAndCopyOverwriteReplacesSymlinkItself(t *testing.T) {
+	for _, action := range []string{actionMove, actionCopy} {
+		for _, srcIsLink := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/srcIsLink=%t", action, srcIsLink), func(t *testing.T) {
+				_, handler, root := newRESTFixture(t)
+				writeFiles(t, root, map[string]string{"a.txt": "new", "keep.txt": "keep"})
+				require.NoError(t, os.Symlink("keep.txt", filepath.Join(root, "dst")))
+				src := "a.txt"
+				if srcIsLink {
+					require.NoError(t, os.Symlink("a.txt", filepath.Join(root, "srclink")))
+					src = "srclink"
+				}
+
+				rec := doAction(handler, action, src, url.Values{"destination": {"dst"}, "overwrite": {"true"}})
+				require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+				// The link at dst is replaced, not written through.
+				require.Equal(t, "keep", readFile(t, filepath.Join(root, "keep.txt")))
+				info, err := os.Lstat(filepath.Join(root, "dst"))
+				require.NoError(t, err)
+				require.Equal(t, srcIsLink, info.Mode()&os.ModeSymlink != 0)
+				require.Equal(t, "new", readFile(t, filepath.Join(root, "dst")))
+			})
+		}
+	}
+}
+
+func TestMoveAndCopyBrokenSymlinkDestinationConflicts(t *testing.T) {
+	for _, action := range []string{actionMove, actionCopy} {
+		t.Run(action, func(t *testing.T) {
+			_, handler, root := newRESTFixture(t)
+			writeFiles(t, root, map[string]string{"a.txt": "a"})
+			require.NoError(t, os.Symlink("missing", filepath.Join(root, "dangling")))
+
+			rec := doAction(handler, action, "a.txt", url.Values{"destination": {"dangling"}})
+			require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+			_, err := os.Stat(filepath.Join(root, "missing"))
+			require.ErrorIs(t, err, os.ErrNotExist)
+		})
+	}
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	return string(data)
+}
+
+func openTestRoot(t *testing.T, dir string) *os.Root {
+	t.Helper()
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = root.Close() })
+	return root
+}
+
+func TestCopyLeafRefusesSwappedFile(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	writeFiles(t, dir, map[string]string{"real": "data"})
+	writeFiles(t, outside, map[string]string{"secret": "s"})
+	// The stale info says "regular file", as if the path was swapped after the
+	// caller's Lstat.
+	stale, err := os.Lstat(filepath.Join(dir, "real"))
+	require.NoError(t, err)
+	relOutside, err := filepath.Rel(dir, filepath.Join(outside, "secret"))
+	require.NoError(t, err)
+	require.NoError(t, os.Symlink(filepath.Join(outside, "secret"), filepath.Join(dir, "link")))
+	require.NoError(t, os.Symlink(relOutside, filepath.Join(dir, "rellink")))
+	require.NoError(t, syscall.Mkfifo(filepath.Join(dir, "pipe"), 0o644))
+	root := openTestRoot(t, dir)
+
+	for _, name := range []string{"link", "rellink", "pipe"} {
+		t.Run(name, func(t *testing.T) {
+			dst := filepath.Join(dir, "copy-of-"+name)
+			require.Error(t, copyLeaf(root, name, dst, stale))
+			_, err := os.Lstat(dst)
+			require.ErrorIs(t, err, os.ErrNotExist)
+		})
+	}
+}
+
+func TestCopyTreeStaysInsideRoot(t *testing.T) {
+	base := t.TempDir()
+	dir, outside := filepath.Join(base, "root"), filepath.Join(base, "outside")
+	writeFiles(t, base, map[string]string{"root/d/f": "f", "outside/secret": "s"})
+	// A directory swapped for a symlink out of the root, as if after the
+	// caller's Lstat, is not read through.
+	require.NoError(t, os.Symlink(outside, filepath.Join(dir, "swapped")))
+	root := openTestRoot(t, dir)
+	dst := filepath.Join(t.TempDir(), "copy")
+	require.NoError(t, os.Mkdir(dst, 0o755))
+
+	require.Error(t, copyTree(root, "swapped", dst, 0o755))
+	require.Empty(t, readTree(t, dst))
+
+	require.NoError(t, copyTree(root, "d", dst, 0o755))
+	require.Equal(t, map[string]string{"f": "f"}, readTree(t, dst))
+}
+
+func TestMoveEntryFallsBackToCopyAcrossFilesystems(t *testing.T) {
+	crossDevice := func(oldPath, newPath string) error {
+		return &os.LinkError{Op: "rename", Old: oldPath, New: newPath, Err: syscall.EXDEV}
+	}
+	for name, files := range map[string]map[string]string{
+		"file":      {"src": "data"},
+		"directory": {"src/f.txt": "f", "src/sub/g.txt": "g"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFiles(t, dir, files)
+			src, dst := filepath.Join(dir, "src"), filepath.Join(dir, "dst")
+			want := map[string]string{}
+			for rel, content := range readTree(t, dir) {
+				want[strings.Replace(rel, "src", "dst", 1)] = content
+			}
+
+			require.NoError(t, moveEntry(crossDevice, openTestRoot(t, dir), src, dst))
+
+			// Only dst is left: neither src nor a staged copy of it remains.
+			require.Equal(t, want, readTree(t, dir))
+		})
+	}
+
+	t.Run("read-only subdirectory is removed with the source", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses directory permissions")
+		}
+		dir := t.TempDir()
+		writeFiles(t, dir, map[string]string{"src/sub/f.txt": "f"})
+		require.NoError(t, os.Chmod(filepath.Join(dir, "src", "sub"), 0o555))
+		t.Cleanup(func() { _ = os.Chmod(filepath.Join(dir, "dst", "sub"), 0o755) })
+
+		require.NoError(t, moveEntry(crossDevice, openTestRoot(t, dir), filepath.Join(dir, "src"), filepath.Join(dir, "dst")))
+		require.Equal(t, map[string]string{"dst/": "", "dst/sub/": "", "dst/sub/f.txt": "f"}, readTree(t, dir))
+	})
+
+	t.Run("failed copy restores the source", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFiles(t, dir, map[string]string{"src/f.txt": "f"})
+		require.NoError(t, syscall.Mkfifo(filepath.Join(dir, "src", "pipe"), 0o644))
+		want := readTree(t, dir)
+
+		err := moveEntry(crossDevice, openTestRoot(t, dir), filepath.Join(dir, "src"), filepath.Join(dir, "dst"))
+		require.ErrorIs(t, err, errUnsupportedFileType)
+		require.Equal(t, want, readTree(t, dir))
+	})
+
+	t.Run("other rename errors are returned", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFiles(t, dir, map[string]string{"src": "data"})
+		src, dst := filepath.Join(dir, "src"), filepath.Join(dir, "dst")
+
+		err := moveEntry(func(string, string) error { return syscall.EACCES }, openTestRoot(t, dir), src, dst)
+		require.ErrorIs(t, err, syscall.EACCES)
+		_, err = os.Lstat(dst)
+		require.ErrorIs(t, err, os.ErrNotExist)
+	})
+}
+
+func TestCopyEntryFailureRemovesReadOnlyDirectories(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{"src/sub/f.txt": "f", "dst/keep": "k"})
+	sub := filepath.Join(dir, "src", "sub")
+	require.NoError(t, os.Chmod(sub, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(sub, 0o755) })
+	want := readTree(t, dir)
+
+	// The copy cannot replace the non-empty dst, so its temporary tree goes.
+	require.Error(t, copyEntry(openTestRoot(t, dir), filepath.Join(dir, "src"), filepath.Join(dir, "dst")))
+	require.Equal(t, want, readTree(t, dir), "no temporary copy may be left behind")
+}
+
+func TestStageEntryKeepsReplacementSource(t *testing.T) {
+	for name, files := range map[string]map[string]string{
+		"file":      {"src": "old"},
+		"directory": {"src/f": "old"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFiles(t, dir, files)
+			src := filepath.Join(dir, "src")
+
+			staged, err := stageEntry(src)
+			require.NoError(t, err)
+			require.Equal(t, dir, filepath.Dir(staged))
+			_, err = os.Lstat(src)
+			require.ErrorIs(t, err, os.ErrNotExist)
+
+			// A new file at src is not the staged entry, so removing the
+			// staged entry leaves it alone.
+			writeFiles(t, dir, map[string]string{"src": "new"})
+			require.NoError(t, os.RemoveAll(staged))
+			require.Equal(t, "new", readFile(t, src))
+		})
+	}
+}
+
+func TestMoveFilesystemRootRefused(t *testing.T) {
+	handler := NewRESTServer("/", "SANDBOX_", logr.Discard()).Handler()
+	// Only :move is probed. If the guard regresses, rename(2) of "/" fails
+	// harmlessly, whereas a :copy would start copying the whole filesystem.
+	rec := doAction(handler, actionMove, "", url.Values{"destination": {filepath.Join(t.TempDir(), "x")}})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Equal(t, "INVALID_ARGUMENT", decodeError(t, rec).Code)
 }
 
 type tarEntry struct {

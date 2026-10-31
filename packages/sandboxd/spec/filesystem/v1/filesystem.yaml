@@ -154,8 +154,12 @@ paths:
             path and creates the directory, with missing parents, if it does not exist. Existing
             files are replaced and existing directories are merged. Regular files, directories,
             and symlinks are extracted with their permission bits, and other entry types such as
-            hard links and devices fail with 400. An entry that leaves the directory fails with 403,
-            and an entry whose type conflicts with an existing path fails with 409.
+            hard links and devices fail with 400. An entry path that leaves the directory fails
+            with 403, and an entry whose type conflicts with an existing path fails with 409.
+            A symlink target is written as given, so a link can point outside the directory.
+            Only later requests through this API are confined to the sandbox root.
+            More than 100000 entries or 1 GiB of file data fails with 413 before the entry that
+            crosses the cap is written.
             Cannot be combined with append=true or type.
         - name: append
           in: query
@@ -207,6 +211,12 @@ paths:
           $ref: "#/components/responses/Conflict"
         "412":
           description: If-None-Match is "*" and the path already exists
+        "413":
+          description: With extract=tar, the archive is over the entry or byte cap
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalServerError"
 

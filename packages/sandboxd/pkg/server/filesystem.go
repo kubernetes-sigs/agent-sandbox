@@ -61,6 +61,13 @@ const maxRecursiveEntries = 10000
 
 var errListingTooLarge = errors.New("listing too large")
 
+// Caps on one extract=tar request. A small gzip body can expand a thousand
+// times over, so these keep one request from filling the sandbox disk or inodes.
+const (
+	maxExtractEntries = 100000
+	maxExtractBytes   = 1 << 30
+)
+
 // RESTServer implements the sandboxd Filesystem & Runtime REST API on top of
 // net/http. All file paths are confined to rootDir via pathutil.SanitizePath.
 type RESTServer struct {
@@ -75,6 +82,9 @@ type RESTServer struct {
 	environ func() []string
 	// maxListEntries is swappable for tests; defaults to maxRecursiveEntries.
 	maxListEntries int
+	// maxExtractEntries and maxExtractBytes are swappable for tests.
+	maxExtractEntries int
+	maxExtractBytes   int64
 	// metadataEnv returns the filtered /v1/metadata env map, computed once
 	// on first use: the daemon's environment is immutable after start.
 	metadataEnv func() map[string]string
@@ -100,6 +110,8 @@ func NewRESTServer(rootDir, metadataEnvPrefix string, log logr.Logger) *RESTServ
 		log:               log,
 		environ:           os.Environ,
 		maxListEntries:    maxRecursiveEntries,
+		maxExtractEntries: maxExtractEntries,
+		maxExtractBytes:   maxExtractBytes,
 	}
 	s.ready.Store(true)
 	s.metadataEnv = sync.OnceValue(s.buildMetadataEnv)
@@ -730,6 +742,8 @@ var (
 	// errArchiveConflict marks an entry whose type clashes with what already
 	// exists at its path.
 	errArchiveConflict = errors.New("archive entry conflicts with an existing path")
+	// errArchiveTooLarge marks an archive over the entry or byte cap.
+	errArchiveTooLarge = errors.New("archive too large")
 
 	gzipMagic = []byte{0x1f, 0x8b}
 )
@@ -771,7 +785,10 @@ func (s *RESTServer) extractTar(src io.Reader, dir string) error {
 		src = gz
 	}
 
+	// tar.Reader yields exactly hdr.Size bytes per file, so the header size
+	// is what the entry writes and the cap can fail before writing anything.
 	tr := tar.NewReader(src)
+	entries, bytesLeft := 0, s.maxExtractBytes
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -779,6 +796,13 @@ func (s *RESTServer) extractTar(src io.Reader, dir string) error {
 		}
 		if err != nil {
 			return fmt.Errorf("reading archive: %w", err)
+		}
+		entries++
+		if hdr.Typeflag == tar.TypeReg {
+			bytesLeft -= hdr.Size
+		}
+		if entries > s.maxExtractEntries || bytesLeft < 0 {
+			return errArchiveTooLarge
 		}
 		if err := s.extractEntry(tr, hdr, dir); err != nil {
 			return err
@@ -858,6 +882,9 @@ func (s *RESTServer) writeExtractError(w http.ResponseWriter, err error) {
 	case errors.Is(err, pathutil.ErrPathEscapes):
 		s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED",
 			"archive entry outside the destination directory is forbidden")
+	case errors.Is(err, errArchiveTooLarge):
+		s.writeError(w, http.StatusRequestEntityTooLarge, "RESOURCE_EXHAUSTED",
+			fmt.Sprintf("archive exceeds %d entries or %d bytes of file data", s.maxExtractEntries, s.maxExtractBytes))
 	case errors.Is(err, errArchiveConflict), errors.Is(err, syscall.ENOTDIR):
 		s.writeError(w, http.StatusConflict, "CONFLICT",
 			"an archive entry conflicts with an existing file or directory")

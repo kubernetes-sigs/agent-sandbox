@@ -1641,3 +1641,60 @@ func TestExtractTarLeavesNoTempFileOnTruncatedBody(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, entries, "a failed entry leaves no partial file or temp file")
 }
+
+func TestExtractTarCaps(t *testing.T) {
+	tests := []struct {
+		name    string
+		entries int
+		bytes   int64
+		archive []tarEntry
+		// wantWritten lists the files that exist after the request.
+		wantWritten []string
+		wantStatus  int
+	}{
+		{
+			name: "entries at the cap", entries: 2, bytes: 100,
+			archive:     []tarEntry{tarFile("a", "A", 0o644), tarFile("b", "B", 0o644)},
+			wantWritten: []string{"a", "b"}, wantStatus: http.StatusNoContent,
+		},
+		{
+			name: "entries over the cap", entries: 2, bytes: 100,
+			archive:     []tarEntry{tarFile("a", "A", 0o644), tarDir("d/", 0o755), tarFile("b", "B", 0o644)},
+			wantWritten: []string{"a"}, wantStatus: http.StatusRequestEntityTooLarge,
+		},
+		{
+			name: "bytes at the cap", entries: 10, bytes: 8,
+			archive:     []tarEntry{tarFile("a", "AAAA", 0o644), tarFile("b", "BBBB", 0o644)},
+			wantWritten: []string{"a", "b"}, wantStatus: http.StatusNoContent,
+		},
+		{
+			name: "bytes over the cap", entries: 10, bytes: 8,
+			archive:     []tarEntry{tarFile("a", "AAAA", 0o644), tarFile("b", "BBBBB", 0o644)},
+			wantWritten: []string{"a"}, wantStatus: http.StatusRequestEntityTooLarge,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s, handler, root := newRESTFixture(t)
+			s.maxExtractEntries = tc.entries
+			s.maxExtractBytes = tc.bytes
+			archive := gzipped(t, buildTar(t, tc.archive...))
+
+			rec := doRequest(handler, http.MethodPut, "/v1/files/dest?extract=tar", archive, nil)
+			require.Equal(t, tc.wantStatus, rec.Code, rec.Body.String())
+			if tc.wantStatus != http.StatusNoContent {
+				require.Equal(t, "RESOURCE_EXHAUSTED", decodeError(t, rec).Code)
+			}
+
+			var written []string
+			dirEntries, err := os.ReadDir(filepath.Join(root, "dest"))
+			require.NoError(t, err)
+			for _, e := range dirEntries {
+				if !e.IsDir() {
+					written = append(written, e.Name())
+				}
+			}
+			require.Equal(t, tc.wantWritten, written)
+		})
+	}
+}

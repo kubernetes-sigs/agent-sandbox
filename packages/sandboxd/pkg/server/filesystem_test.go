@@ -1136,6 +1136,19 @@ func TestMoveEntryFallsBackToCopyAcrossFilesystems(t *testing.T) {
 		})
 	}
 
+	t.Run("read-only subdirectory is removed with the source", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses directory permissions")
+		}
+		dir := t.TempDir()
+		writeFiles(t, dir, map[string]string{"src/sub/f.txt": "f"})
+		require.NoError(t, os.Chmod(filepath.Join(dir, "src", "sub"), 0o555))
+		t.Cleanup(func() { _ = os.Chmod(filepath.Join(dir, "dst", "sub"), 0o755) })
+
+		require.NoError(t, moveEntry(crossDevice, openTestRoot(t, dir), filepath.Join(dir, "src"), filepath.Join(dir, "dst")))
+		require.Equal(t, map[string]string{"dst/": "", "dst/sub/": "", "dst/sub/f.txt": "f"}, readTree(t, dir))
+	})
+
 	t.Run("failed copy restores the source", func(t *testing.T) {
 		dir := t.TempDir()
 		writeFiles(t, dir, map[string]string{"src/f.txt": "f"})
@@ -1157,6 +1170,22 @@ func TestMoveEntryFallsBackToCopyAcrossFilesystems(t *testing.T) {
 		_, err = os.Lstat(dst)
 		require.ErrorIs(t, err, os.ErrNotExist)
 	})
+}
+
+func TestCopyEntryFailureRemovesReadOnlyDirectories(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{"src/sub/f.txt": "f", "dst/keep": "k"})
+	sub := filepath.Join(dir, "src", "sub")
+	require.NoError(t, os.Chmod(sub, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(sub, 0o755) })
+	want := readTree(t, dir)
+
+	// The copy cannot replace the non-empty dst, so its temporary tree goes.
+	require.Error(t, copyEntry(openTestRoot(t, dir), filepath.Join(dir, "src"), filepath.Join(dir, "dst")))
+	require.Equal(t, want, readTree(t, dir), "no temporary copy may be left behind")
 }
 
 func TestStageEntryKeepsReplacementSource(t *testing.T) {

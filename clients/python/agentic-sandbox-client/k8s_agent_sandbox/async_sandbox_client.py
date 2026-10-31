@@ -36,6 +36,7 @@ from kubernetes_asyncio.client import ApiException
 
 from .claim_adoption import validate_claim_name, validate_claim_for_adoption
 from .async_k8s_helper import AsyncK8sHelper
+from .async_connector import _DefaultSSLContext
 from .async_sandbox import AsyncSandbox
 from .exceptions import SandboxNotFoundError
 from .k8s_helper import K8sHelper
@@ -199,6 +200,7 @@ class AsyncSandboxClient(Generic[T]):
         self._active_connection_sandboxes: dict[tuple[str, str], T] = {}
         self._explicit_claims: set[tuple[str, str]] = set()
         self._lock = asyncio.Lock()
+        self._default_ssl_context = _DefaultSSLContext()
 
         if cleanup:
             atexit.register(self._atexit_cleanup)
@@ -232,6 +234,13 @@ class AsyncSandboxClient(Generic[T]):
                 else:
                     self._active_connection_sandboxes.pop(key, None)
         await self.k8s_helper.close()
+        self._default_ssl_context = _DefaultSSLContext()
+
+    def _attach_handle(self, sandbox: T) -> None:
+        """Attach client-owned TLS setup and termination tracking to a handle."""
+        # Preserve existing sandbox_class constructor signatures.
+        sandbox.connector._default_ssl_context = self._default_ssl_context
+        sandbox._on_terminated = functools.partial(self._untrack, self._active_connection_sandboxes)
 
     async def create_sandbox(
         self,
@@ -363,6 +372,7 @@ class AsyncSandboxClient(Generic[T]):
                 k8s_helper=self.k8s_helper,
                 **({"file_config": self.file_config} if self.file_config is not None else {}),
             )
+            self._attach_handle(sandbox)
         except (Exception, asyncio.CancelledError):
             if cleanup_generated:
                 # Preserve legacy rollback even if the create response was lost.
@@ -375,7 +385,6 @@ class AsyncSandboxClient(Generic[T]):
 
         async with self._lock:
             previous = self._active_connection_sandboxes.get((namespace, claim_name))
-            sandbox._on_terminated = functools.partial(self._untrack, self._active_connection_sandboxes)
             self._active_connection_sandboxes[(namespace, claim_name)] = sandbox
         if previous is not None:
             await previous.close_connection()
@@ -470,9 +479,9 @@ class AsyncSandboxClient(Generic[T]):
             k8s_helper=self.k8s_helper,
             **({"file_config": self.file_config} if self.file_config is not None else {}),
         )
+        self._attach_handle(new_handle)
 
         async with self._lock:
-            new_handle._on_terminated = functools.partial(self._untrack, self._active_connection_sandboxes)
             self._active_connection_sandboxes[key] = new_handle
         return new_handle
 

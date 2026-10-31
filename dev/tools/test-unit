@@ -56,6 +56,11 @@ PYTHON_TEST_SUITES = [
         "dir": os.path.join("dev", "ci", "presubmits", "shared"),
     },
     {
+        "name": "harbor-terminal-bench",
+        # scripts/report.py and its test use the standard library only.
+        "dir": os.path.join("examples", "harbor-terminal-bench"),
+    },
+    {
         "name": "hermes-agent",
         # chat_hermes.py only uses stdlib (urllib.request, json), so the test
         # needs no requirements.txt -- just pytest, installed unconditionally
@@ -241,6 +246,18 @@ PYTHON_TEST_SUITES = [
         "editable_installs": [
             (PYTHON_SDK_DIR, ""),
             (os.path.join("clients", "integrations", "openhands"), "[test]"),
+        ],
+    },
+    {
+        "name": "integrations-harbor",
+        "dir": os.path.join("clients", "integrations", "harbor"),
+        # Harbor itself requires Python >= 3.12. The harness is a test
+        # dependency: the suite exercises the environment against Harbor's
+        # real BaseEnvironment, so a Harbor signature change fails here.
+        "min_python": (3, 12),
+        "editable_installs": [
+            (os.path.join("clients", "python", "agentic-sandbox-client"), "[async]"),
+            (os.path.join("clients", "integrations", "harbor"), "[test]"),
         ],
     },
 ]

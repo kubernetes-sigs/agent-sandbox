@@ -1,0 +1,21 @@
+# Smoke run: the oracle agent (applies the reference solution) on the 10-task
+# Terminal-Bench 2.0 sample. Every trial must score 1.0; the run proves the
+# cluster, the images, DNS egress and the exec path, not a model.
+#
+#   harbor run -c examples/harbor-terminal-bench/configs/sample.yaml
+#
+# Override anything on the command line, e.g. --ek namespace=other -n 2.
+jobs_dir: jobs/harbor-terminal-bench
+n_attempts: 1
+n_concurrent_trials: 4
+environment:
+  import_path: k8s_agent_sandbox_harbor:AgentSandboxEnvironment
+  delete: true
+  kwargs:
+    namespace: harbor
+    ready_timeout_s: "600"      # first pull of each image on a fresh node
+agents:
+  - name: oracle
+datasets:
+  - name: terminal-bench-sample
+    version: "2.0"

@@ -1,0 +1,22 @@
+# Least privilege for the identity that runs `harbor run`: the agent-sandbox
+# extension objects the environment creates and deletes, the core Sandbox the
+# SDK reads for the pod name, and pod exec. Bind it with:
+#   kubectl -n harbor create rolebinding harbor-runner --role=harbor-runner --user=<you>
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: harbor-runner
+  namespace: harbor
+rules:
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxclaims", "sandboxtemplates", "sandboxwarmpools"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]

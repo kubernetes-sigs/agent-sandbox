@@ -106,6 +106,22 @@ kubectl exec -it $POD_NAME -- uname -r
 * **Success**: The output is a different kernel version (e.g., `6.1.38`). This proves the agent is running inside its own VM with its own kernel, isolated from the host.
 * **Failure**: The output is identical to the host node's kernel. This indicates the sandbox is not using the Kata runtime correctly.
 
+## Optional: Use Cloud Hypervisor Instead of QEMU
+
+The Kata installer also installs the [Cloud Hypervisor](https://www.cloudhypervisor.org) runtime, `kata-clh`. To use it, register its RuntimeClass and request it in the `Sandbox`.
+
+1.  Register the RuntimeClass. Pass the same options as in Step 1, plus `--reuse-cluster` if the cluster already exists:
+    ```shell
+    ./setup.sh --runtime-class-name kata-clh --reuse-cluster
+    ```
+
+2.  Create a second sandbox from the same manifest, with the runtime and the name swapped:
+    ```shell
+    sed -e 's/kata-qemu/kata-clh/' -e 's/kata-gke-example/kata-gke-example-clh/' sandbox-kata-gke.yaml | kubectl apply -f -
+    ```
+
+3.  Repeat Steps 4 and 5 with `sandbox/kata-gke-example-clh`.
+
 # Troubleshooting
 
 | Error                                           | Cause                                                                                  | Solution                                                                                       |

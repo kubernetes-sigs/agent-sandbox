@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools_scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "k8s-agent-sandbox-harbor"
+dynamic = ["version"]
+description = "Harbor evaluation-framework environment backed by agent-sandbox SandboxClaims"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+# Harbor requires Python 3.12.
+requires-python = ">=3.12"
+dependencies = [
+    "harbor>=0.25,<1",
+    "k8s-agent-sandbox[async]>=1.0.6,<2",
+    "kubernetes>=32.0.0",
+    "pydantic>=2",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "pytest-asyncio"]
+
+[tool.setuptools_scm]
+root = "../../.."
+
+[tool.setuptools.packages.find]
+include = ["k8s_agent_sandbox_harbor*"]
+exclude = ["tests*"]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["test/*", "tests/*", "*/test/*", "*/tests/*", "test_*.py", "*_test.py"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

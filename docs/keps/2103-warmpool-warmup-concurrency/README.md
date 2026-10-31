@@ -249,7 +249,7 @@ type SandboxWarmPoolWarmupStrategy struct {
 	// Leaving this unset creates the whole deficit at once.
 	// +optional
 	// +kubebuilder:validation:XIntOrString
-	// +kubebuilder:validation:XValidation:rule="(type(self) == int && self >= 1) || (type(self) == string && self.matches('^([1-9][0-9]?|100)%$'))",message="maxConcurrent must be an integer of at least 1 or a percentage from 1% to 100%"
+	// +kubebuilder:validation:XValidation:rule="(type(self) == int && self >= 1 && self <= 2147483647) || (type(self) == string && self.matches('^([1-9][0-9]?|100)%$'))",message="maxConcurrent must be an integer from 1 to 2147483647 or a percentage from 1% to 100%"
 	MaxConcurrent *intstr.IntOrString `json:"maxConcurrent,omitempty"`
 }
 ```
@@ -257,8 +257,12 @@ type SandboxWarmPoolWarmupStrategy struct {
 The field mirrors `Deployment`'s `maxSurge` and `maxUnavailable`.
 `+kubebuilder:validation:XIntOrString` is required for controller-tools to emit
 the `x-kubernetes-int-or-string` schema, and the CEL rule enforces both accepted
-forms: an integer of at least 1, or a percentage string from `"1%"` to `"100%"`.
-The exact rule is a starting point for review rather than a settled detail.
+forms: an integer from 1 to 2147483647, or a percentage string from `"1%"` to
+`"100%"`. The upper bound matches `intstr.IntOrString`, which stores its numeric
+value in an `int32`. Without it the rule would admit integers the field cannot
+hold, and the API server would reject them with a decode error instead of the
+message above. The exact rule is a starting point for review rather than a
+settled detail.
 
 A new status field reports the count the gate acts on:
 

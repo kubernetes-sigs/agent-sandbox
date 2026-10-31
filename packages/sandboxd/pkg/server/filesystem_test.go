@@ -919,6 +919,16 @@ func TestExtractTarRejections(t *testing.T) {
 			wantStatus: http.StatusForbidden, wantCode: "PERMISSION_DENIED",
 		},
 		{
+			name: "write through a symlink to a sibling directory in the root",
+			setup: func(t *testing.T, root string) {
+				require.NoError(t, os.MkdirAll(filepath.Join(root, "other"), 0o755))
+			},
+			archive: func(t *testing.T, _ string) []byte {
+				return buildTar(t, tarSymlink("ln", "../other"), tarFile("ln/evil", "x", 0o644))
+			},
+			wantStatus: http.StatusForbidden, wantCode: "PERMISSION_DENIED",
+		},
+		{
 			name: "hard link",
 			archive: func(t *testing.T, _ string) []byte {
 				return buildTar(t, tarEntry{hdr: tar.Header{Name: "h", Typeflag: tar.TypeLink, Linkname: "/etc/passwd", Mode: 0o644}})
@@ -1018,6 +1028,7 @@ func TestExtractTarRejections(t *testing.T) {
 			require.Equal(t, tc.wantCode, decodeError(t, rec).Code)
 
 			require.NoFileExists(t, filepath.Join(root, "evil"))
+			require.NoFileExists(t, filepath.Join(root, "other", "evil"))
 			require.NoFileExists(t, filepath.Join(filepath.Dir(root), "evil"))
 			outsideEntries, err := os.ReadDir(outside)
 			require.NoError(t, err)

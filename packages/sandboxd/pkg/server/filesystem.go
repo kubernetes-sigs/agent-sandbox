@@ -736,8 +736,9 @@ func (s *RESTServer) extractEntry(body io.Reader, hdr *tar.Header, dir string) e
 
 	// Resolve only the parent, so an existing symlink at the entry's own path
 	// is replaced and never followed. Resolving the parent also stops an entry
-	// from writing through a symlink an earlier entry planted.
-	parent, err := pathutil.SanitizePath(s.rootDir, filepath.Join(dir, filepath.Dir(name)))
+	// from writing through a symlink an earlier entry planted. Confine it to
+	// dir, which is already resolved.
+	parent, err := pathutil.SanitizePath(dir, filepath.Dir(name))
 	if err != nil {
 		return err
 	}

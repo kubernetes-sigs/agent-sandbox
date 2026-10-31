@@ -15,7 +15,9 @@
 package server
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -1329,4 +1331,378 @@ func TestMoveFilesystemRootRefused(t *testing.T) {
 	rec := doAction(handler, actionMove, "", url.Values{"destination": {filepath.Join(t.TempDir(), "x")}})
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	require.Equal(t, "INVALID_ARGUMENT", decodeError(t, rec).Code)
+}
+
+type tarEntry struct {
+	hdr  tar.Header
+	body string
+}
+
+func tarFile(name, body string, mode int64) tarEntry {
+	return tarEntry{tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: mode}, body}
+}
+
+func tarDir(name string, mode int64) tarEntry {
+	return tarEntry{tar.Header{Name: name, Typeflag: tar.TypeDir, Mode: mode}, ""}
+}
+
+func tarSymlink(name, target string) tarEntry {
+	return tarEntry{tar.Header{Name: name, Typeflag: tar.TypeSymlink, Linkname: target, Mode: 0o777}, ""}
+}
+
+func buildTar(t *testing.T, entries ...tarEntry) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, e := range entries {
+		hdr := e.hdr
+		if hdr.Typeflag == tar.TypeReg {
+			hdr.Size = int64(len(e.body))
+		}
+		require.NoError(t, tw.WriteHeader(&hdr))
+		_, err := tw.Write([]byte(e.body))
+		require.NoError(t, err)
+	}
+	require.NoError(t, tw.Close())
+	return buf.Bytes()
+}
+
+func gzipped(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	_, err := gw.Write(data)
+	require.NoError(t, err)
+	require.NoError(t, gw.Close())
+	return buf.Bytes()
+}
+
+func TestExtractTar(t *testing.T) {
+	archive := buildTar(t,
+		tarDir("d/", 0o755),
+		tarFile("d/a.txt", "A", 0o644),
+		tarFile("d/run.sh", "#!/bin/sh", 0o755),
+		tarFile("top.txt", "T", 0o600),
+		// No directory entries for the parents: extraction creates them.
+		tarFile("x/y/z.txt", "Z", 0o644),
+		tarSymlink("d/ln", "a.txt"),
+	)
+	for name, body := range map[string][]byte{"plain": archive, "gzip": gzipped(t, archive)} {
+		t.Run(name, func(t *testing.T) {
+			_, handler, root := newRESTFixture(t)
+
+			rec := doRequest(handler, http.MethodPut, "/v1/files/dest?extract=tar", body, nil)
+			require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+			for path, want := range map[string]string{"d/a.txt": "A", "d/run.sh": "#!/bin/sh", "top.txt": "T", "x/y/z.txt": "Z"} {
+				got, err := os.ReadFile(filepath.Join(root, "dest", path))
+				require.NoError(t, err)
+				require.Equal(t, want, string(got))
+			}
+			for path, want := range map[string]os.FileMode{"d/run.sh": 0o755, "top.txt": 0o600, "d": 0o755} {
+				info, err := os.Stat(filepath.Join(root, "dest", path))
+				require.NoError(t, err)
+				require.Equal(t, want, info.Mode().Perm(), path)
+			}
+			link, err := os.Readlink(filepath.Join(root, "dest", "d", "ln"))
+			require.NoError(t, err)
+			require.Equal(t, "a.txt", link)
+		})
+	}
+}
+
+func TestExtractTarMultipart(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	part, err := mw.CreateFormFile("file", "a.tar")
+	require.NoError(t, err)
+	_, err = part.Write(buildTar(t, tarFile("a.txt", "A", 0o644)))
+	require.NoError(t, err)
+	require.NoError(t, mw.Close())
+
+	header := http.Header{"Content-Type": []string{mw.FormDataContentType()}}
+	rec := doRequest(handler, http.MethodPut, "/v1/files/dest?extract=tar", buf.Bytes(), header)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	got, err := os.ReadFile(filepath.Join(root, "dest", "a.txt"))
+	require.NoError(t, err)
+	require.Equal(t, "A", string(got))
+}
+
+func TestExtractTarMergesAndReplacesInPlace(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "dest"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "dest", "a.txt"), []byte("old"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "dest", "keep.txt"), []byte("keep"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "victim"), []byte("victim"), 0o644))
+	require.NoError(t, os.Symlink(filepath.Join(root, "victim"), filepath.Join(root, "dest", "link")))
+
+	archive := buildTar(t, tarFile("a.txt", "new", 0o644), tarFile("link", "new", 0o644))
+	rec := doRequest(handler, http.MethodPut, "/v1/files/dest?extract=tar", archive, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+	for path, want := range map[string]string{"dest/a.txt": "new", "dest/keep.txt": "keep", "dest/link": "new", "victim": "victim"} {
+		got, err := os.ReadFile(filepath.Join(root, path))
+		require.NoError(t, err)
+		require.Equal(t, want, string(got), path)
+	}
+	info, err := os.Lstat(filepath.Join(root, "dest", "link"))
+	require.NoError(t, err)
+	require.True(t, info.Mode().IsRegular(), "the symlink is replaced, not followed")
+}
+
+func TestExtractTarSkipsGlobalHeaderAndRoot(t *testing.T) {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	// `git archive` starts with a pax global header, and many tools add "./".
+	require.NoError(t, tw.WriteHeader(&tar.Header{
+		Typeflag: tar.TypeXGlobalHeader, Name: "pax_global_header", PAXRecords: map[string]string{"comment": "abc"},
+	}))
+	require.NoError(t, tw.WriteHeader(&tar.Header{Name: "./", Typeflag: tar.TypeDir, Mode: 0o755}))
+	require.NoError(t, tw.WriteHeader(&tar.Header{Name: "./f.txt", Typeflag: tar.TypeReg, Mode: 0o644, Size: 1}))
+	_, err := tw.Write([]byte("f"))
+	require.NoError(t, err)
+	require.NoError(t, tw.Close())
+
+	_, handler, root := newRESTFixture(t)
+	rec := doRequest(handler, http.MethodPut, "/v1/files/dest?extract=tar", buf.Bytes(), nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+	entries, err := os.ReadDir(filepath.Join(root, "dest"))
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, "f.txt", entries[0].Name())
+}
+
+func TestExtractTarRejections(t *testing.T) {
+	valid := func(t *testing.T) []byte {
+		return buildTar(t, tarFile("a.txt", "A", 0o644), tarFile("b.txt", "BBBBBBBBBB", 0o644))
+	}
+	tests := []struct {
+		name       string
+		setup      func(t *testing.T, root string)
+		query      string
+		header     http.Header
+		archive    func(t *testing.T, outside string) []byte
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name:       "parent traversal",
+			archive:    func(t *testing.T, _ string) []byte { return buildTar(t, tarFile("../evil", "x", 0o644)) },
+			wantStatus: http.StatusForbidden, wantCode: "PERMISSION_DENIED",
+		},
+		{
+			name:       "traversal inside a path",
+			archive:    func(t *testing.T, _ string) []byte { return buildTar(t, tarFile("a/../../evil", "x", 0o644)) },
+			wantStatus: http.StatusForbidden, wantCode: "PERMISSION_DENIED",
+		},
+		{
+			name: "absolute path",
+			archive: func(t *testing.T, outside string) []byte {
+				return buildTar(t, tarFile(filepath.Join(outside, "evil"), "x", 0o644))
+			},
+			wantStatus: http.StatusForbidden, wantCode: "PERMISSION_DENIED",
+		},
+		{
+			name: "write through a symlink planted by an earlier entry",
+			archive: func(t *testing.T, outside string) []byte {
+				return buildTar(t, tarSymlink("out", outside), tarFile("out/evil", "x", 0o644))
+			},
+			wantStatus: http.StatusForbidden, wantCode: "PERMISSION_DENIED",
+		},
+		{
+			name: "write through a symlink to a sibling directory in the root",
+			setup: func(t *testing.T, root string) {
+				require.NoError(t, os.MkdirAll(filepath.Join(root, "other"), 0o755))
+			},
+			archive: func(t *testing.T, _ string) []byte {
+				return buildTar(t, tarSymlink("ln", "../other"), tarFile("ln/evil", "x", 0o644))
+			},
+			wantStatus: http.StatusForbidden, wantCode: "PERMISSION_DENIED",
+		},
+		{
+			name: "hard link",
+			archive: func(t *testing.T, _ string) []byte {
+				return buildTar(t, tarEntry{hdr: tar.Header{Name: "h", Typeflag: tar.TypeLink, Linkname: "/etc/passwd", Mode: 0o644}})
+			},
+			wantStatus: http.StatusBadRequest, wantCode: "INVALID_ARGUMENT",
+		},
+		{
+			name: "fifo",
+			archive: func(t *testing.T, _ string) []byte {
+				return buildTar(t, tarEntry{hdr: tar.Header{Name: "p", Typeflag: tar.TypeFifo, Mode: 0o644}})
+			},
+			wantStatus: http.StatusBadRequest, wantCode: "INVALID_ARGUMENT",
+		},
+		{
+			name: "file over directory",
+			setup: func(t *testing.T, root string) {
+				require.NoError(t, os.MkdirAll(filepath.Join(root, "dest", "d"), 0o755))
+			},
+			archive:    func(t *testing.T, _ string) []byte { return buildTar(t, tarFile("d", "x", 0o644)) },
+			wantStatus: http.StatusConflict, wantCode: "CONFLICT",
+		},
+		{
+			name: "directory over file",
+			setup: func(t *testing.T, root string) {
+				require.NoError(t, os.MkdirAll(filepath.Join(root, "dest"), 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(root, "dest", "f"), []byte("x"), 0o644))
+			},
+			archive:    func(t *testing.T, _ string) []byte { return buildTar(t, tarDir("f/", 0o755)) },
+			wantStatus: http.StatusConflict, wantCode: "CONFLICT",
+		},
+		{
+			name: "file below a file",
+			setup: func(t *testing.T, root string) {
+				require.NoError(t, os.MkdirAll(filepath.Join(root, "dest"), 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(root, "dest", "f"), []byte("x"), 0o644))
+			},
+			archive:    func(t *testing.T, _ string) []byte { return buildTar(t, tarFile("f/g", "x", 0o644)) },
+			wantStatus: http.StatusConflict, wantCode: "CONFLICT",
+		},
+		{
+			name: "destination is a file",
+			setup: func(t *testing.T, root string) {
+				require.NoError(t, os.WriteFile(filepath.Join(root, "dest"), []byte("x"), 0o644))
+			},
+			archive:    func(t *testing.T, _ string) []byte { return valid(t) },
+			wantStatus: http.StatusConflict, wantCode: "CONFLICT",
+		},
+		{
+			name:       "not a tar",
+			archive:    func(*testing.T, string) []byte { return bytes.Repeat([]byte("x"), 1024) },
+			wantStatus: http.StatusBadRequest, wantCode: "INVALID_ARGUMENT",
+		},
+		{
+			name:       "bad gzip header",
+			archive:    func(*testing.T, string) []byte { return []byte{0x1f, 0x8b, 0xff, 0xff, 0xff} },
+			wantStatus: http.StatusBadRequest, wantCode: "INVALID_ARGUMENT",
+		},
+		{
+			name:       "unknown format",
+			query:      "?extract=zip",
+			archive:    func(t *testing.T, _ string) []byte { return valid(t) },
+			wantStatus: http.StatusBadRequest, wantCode: "INVALID_ARGUMENT",
+		},
+		{
+			name:       "with append",
+			query:      "?extract=tar&append=true",
+			archive:    func(t *testing.T, _ string) []byte { return valid(t) },
+			wantStatus: http.StatusBadRequest, wantCode: "INVALID_ARGUMENT",
+		},
+		{
+			name:       "with if-none-match",
+			query:      "?extract=tar",
+			header:     http.Header{"If-None-Match": {"*"}},
+			archive:    func(t *testing.T, _ string) []byte { return valid(t) },
+			wantStatus: http.StatusBadRequest, wantCode: "INVALID_ARGUMENT",
+		},
+		{
+			name:       "with type",
+			query:      "?extract=tar&type=directory",
+			archive:    func(t *testing.T, _ string) []byte { return valid(t) },
+			wantStatus: http.StatusBadRequest, wantCode: "INVALID_ARGUMENT",
+		},
+		{
+			name:       "invalid mode",
+			query:      "?extract=tar&mode=999",
+			archive:    func(t *testing.T, _ string) []byte { return valid(t) },
+			wantStatus: http.StatusBadRequest, wantCode: "INVALID_ARGUMENT",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, handler, root := newRESTFixture(t)
+			outside := t.TempDir()
+			if tc.setup != nil {
+				tc.setup(t, root)
+			}
+			query := tc.query
+			if query == "" {
+				query = "?extract=tar"
+			}
+
+			rec := doRequest(handler, http.MethodPut, "/v1/files/dest"+query, tc.archive(t, outside), tc.header)
+			require.Equal(t, tc.wantStatus, rec.Code, rec.Body.String())
+			require.Equal(t, tc.wantCode, decodeError(t, rec).Code)
+
+			require.NoFileExists(t, filepath.Join(root, "evil"))
+			require.NoFileExists(t, filepath.Join(root, "other", "evil"))
+			require.NoFileExists(t, filepath.Join(filepath.Dir(root), "evil"))
+			outsideEntries, err := os.ReadDir(outside)
+			require.NoError(t, err)
+			require.Empty(t, outsideEntries, "nothing may be written outside the sandbox root")
+		})
+	}
+}
+
+func TestExtractTarLeavesNoTempFileOnTruncatedBody(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	archive := buildTar(t, tarFile("big.txt", string(bytes.Repeat([]byte("x"), 4096)), 0o644))
+
+	rec := doRequest(handler, http.MethodPut, "/v1/files/dest?extract=tar", archive[:1024], nil)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	entries, err := os.ReadDir(filepath.Join(root, "dest"))
+	require.NoError(t, err)
+	require.Empty(t, entries, "a failed entry leaves no partial file or temp file")
+}
+
+func TestExtractTarCaps(t *testing.T) {
+	tests := []struct {
+		name    string
+		entries int
+		bytes   int64
+		archive []tarEntry
+		// wantWritten lists the files that exist after the request.
+		wantWritten []string
+		wantStatus  int
+	}{
+		{
+			name: "entries at the cap", entries: 2, bytes: 100,
+			archive:     []tarEntry{tarFile("a", "A", 0o644), tarFile("b", "B", 0o644)},
+			wantWritten: []string{"a", "b"}, wantStatus: http.StatusNoContent,
+		},
+		{
+			name: "entries over the cap", entries: 2, bytes: 100,
+			archive:     []tarEntry{tarFile("a", "A", 0o644), tarDir("d/", 0o755), tarFile("b", "B", 0o644)},
+			wantWritten: []string{"a"}, wantStatus: http.StatusRequestEntityTooLarge,
+		},
+		{
+			name: "bytes at the cap", entries: 10, bytes: 8,
+			archive:     []tarEntry{tarFile("a", "AAAA", 0o644), tarFile("b", "BBBB", 0o644)},
+			wantWritten: []string{"a", "b"}, wantStatus: http.StatusNoContent,
+		},
+		{
+			name: "bytes over the cap", entries: 10, bytes: 8,
+			archive:     []tarEntry{tarFile("a", "AAAA", 0o644), tarFile("b", "BBBBB", 0o644)},
+			wantWritten: []string{"a"}, wantStatus: http.StatusRequestEntityTooLarge,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s, handler, root := newRESTFixture(t)
+			s.maxExtractEntries = tc.entries
+			s.maxExtractBytes = tc.bytes
+			archive := gzipped(t, buildTar(t, tc.archive...))
+
+			rec := doRequest(handler, http.MethodPut, "/v1/files/dest?extract=tar", archive, nil)
+			require.Equal(t, tc.wantStatus, rec.Code, rec.Body.String())
+			if tc.wantStatus != http.StatusNoContent {
+				require.Equal(t, "RESOURCE_EXHAUSTED", decodeError(t, rec).Code)
+			}
+
+			var written []string
+			dirEntries, err := os.ReadDir(filepath.Join(root, "dest"))
+			require.NoError(t, err)
+			for _, e := range dirEntries {
+				if !e.IsDir() {
+					written = append(written, e.Name())
+				}
+			}
+			require.Equal(t, tc.wantWritten, written)
+		})
+	}
 }

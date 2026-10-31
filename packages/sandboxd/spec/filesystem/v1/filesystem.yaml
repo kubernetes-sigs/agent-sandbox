@@ -42,16 +42,7 @@ servers:
 paths:
   /files/{path}:
     parameters:
-      - name: path
-        in: path
-        required: true
-        schema:
-          type: string
-        description: >
-          Sandbox-relative path (e.g. main.py or src/main.py).
-          Nested paths may use literal '/' separators or percent-encoded '%2F'.
-          The supported SDKs encode the complete path value. The server decodes
-          the request path before resolving it against the sandbox root.
+      - $ref: "#/components/parameters/FilePath"
 
     get:
       summary: Read a file or list a directory
@@ -226,6 +217,68 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /files/{path}:move:
+    parameters:
+      - $ref: "#/components/parameters/FilePath"
+    post:
+      summary: Move or rename a file or directory
+      description: >
+        Renames the path to the destination query path, creating missing parent directories.
+        A move within one filesystem is atomic. Across filesystems it copies and then removes
+        the source, so both paths are briefly absent. The destination must not exist, except that overwrite=true
+        replaces an existing file with a file. A directory is never replaced and cannot move
+        into itself. The check for an existing destination is not atomic with the move.
+        A symlink in the final component of either path is not followed: the move applies
+        to the link itself. Symlinks in parent directories are followed within the sandbox root.
+      parameters:
+        - $ref: "#/components/parameters/Destination"
+        - $ref: "#/components/parameters/Overwrite"
+      responses:
+        "204":
+          description: Moved successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /files/{path}:copy:
+    parameters:
+      - $ref: "#/components/parameters/FilePath"
+    post:
+      summary: Copy a file or directory
+      description: >
+        Copies the path to the destination query path, creating missing parent directories.
+        A directory is copied recursively. A file keeps its permission bits, and a symlink
+        inside a copied directory is copied as a link. Each copy is published atomically, so
+        a failed copy leaves no partial destination. The destination must not exist, except
+        that overwrite=true replaces an existing file with a file. A directory is never
+        replaced and cannot be copied into itself. The check for an existing destination is
+        not atomic with the copy. A symlink in the final component of either path is not
+        followed: a copied symlink is recreated as a link. Symlinks in parent directories are
+        followed within the sandbox root.
+      parameters:
+        - $ref: "#/components/parameters/Destination"
+        - $ref: "#/components/parameters/Overwrite"
+      responses:
+        "204":
+          description: Copied successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
   /health:
     get:
       security: []
@@ -266,6 +319,35 @@ paths:
 
 components:
   parameters:
+    FilePath:
+      name: path
+      in: path
+      required: true
+      schema:
+        type: string
+      description: >
+        Sandbox-relative path (e.g. main.py or src/main.py).
+        Nested paths may use literal '/' separators or percent-encoded '%2F'.
+        The supported SDKs encode the complete path value. The server decodes
+        the request path before resolving it against the sandbox root.
+
+    Destination:
+      name: destination
+      in: query
+      required: true
+      schema:
+        type: string
+      description: Sandbox-relative path to move or copy to, resolved like the path parameter.
+
+    Overwrite:
+      name: overwrite
+      in: query
+      required: false
+      schema:
+        type: boolean
+        default: false
+      description: If true, replaces an existing destination file with a file. Directories are never replaced.
+
     ExpectedType:
       name: type
       in: query

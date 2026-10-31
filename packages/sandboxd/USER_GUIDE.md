@@ -164,6 +164,8 @@ iteration (Python).
 | `HEAD` | `/v1/files/{path}` | Existence/metadata probe without transferring the body. |
 | `PUT` | `/v1/files/{path}` | Atomic write (temp file + rename), auto-creates parents. Optional `mode` query (`^0[0-7]{3}$`, default `0644`). `append=true` adds to the end of the file instead (not atomic). `type=directory` creates a directory instead (body ignored, `parents=true` also creates missing parents, default mode `0755`). `If-None-Match: *` creates the file only if the path does not exist, else `412`. Accepts raw bytes or `multipart/form-data` (`file` part). |
 | `DELETE` | `/v1/files/{path}` | Remove a file or directory; `recursive=true` for `rm -rf` behavior; `409` on a non-empty directory otherwise. |
+| `POST` | `/v1/files/{path}:move` | Rename or move to the required `destination` query path, auto-creating parents. `409` if the destination exists, except that `overwrite=true` replaces a file with a file. Directories are never replaced. A symlink as the last path component is moved or replaced itself, not followed. |
+| `POST` | `/v1/files/{path}:copy` | Same as `:move`, but copies. Directories are copied recursively, files keep their mode, and symlinks inside a directory are copied as links. |
 | `GET` | `/v1/health` | Readiness probe: `200 {"status":"ok"}` or `503` during shutdown. |
 | `GET` | `/v1/metadata` | Orchestrator-injected, non-sensitive environment variables (allowlisted by prefix, default `SANDBOX_`). |
 
@@ -193,6 +195,10 @@ appends, see below), but it does not impose an ordering across requests:
 - **Appends (`append=true`)** are written in place, not atomically: a read can
   see a partial append, and concurrent appends to one path can interleave. A
   retried append adds the body again.
+- **Move and copy** use one `rename` per move and publish each copied file or
+  directory atomically. A move across filesystems copies and then removes the
+  source, so both paths are briefly absent. The check for an existing
+  destination is not atomic with them, so a concurrent writer can win the race.
 
 There is no cross-request transaction or compare-and-swap; agents that need
 ordering or coordination on shared paths must layer it themselves.
@@ -282,6 +288,10 @@ curl -sf -X PUT "localhost:8080/v1/files/src/pkg?type=directory&parents=true"
 
 # Delete recursively
 curl -sf -X DELETE "localhost:8080/v1/files/src?recursive=true"
+
+# Move or copy (missing parents of the destination are created)
+curl -sf -X POST "localhost:8080/v1/files/src/main.py:move?destination=lib/main.py"
+curl -sf -X POST "localhost:8080/v1/files/src:copy?destination=backup/src"
 
 # Probes
 curl -sf localhost:8080/v1/health

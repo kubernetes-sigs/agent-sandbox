@@ -38,33 +38,10 @@ var ErrPathEscapes = errors.New("path escapes sandbox root")
 // evaluated on the nearest existing ancestor directory instead, so new files
 // cannot be smuggled outside the root through a symlinked parent.
 func SanitizePath(rootDir, userPath string) (string, error) {
-	if rootDir == "" {
-		return "", errors.New("sandbox rootDir is required and cannot be empty")
-	}
-	cleanRoot, err := filepath.Abs(filepath.Clean(rootDir))
+	cleanRoot, joined, err := joinUnderRoot(rootDir, userPath)
 	if err != nil {
-		return "", fmt.Errorf("invalid sandbox root dir: %w", err)
+		return "", err
 	}
-	lexicalRoot := cleanRoot
-
-	cleanRootSymlink, err := filepath.EvalSymlinks(cleanRoot)
-	if err == nil {
-		cleanRoot = cleanRootSymlink
-	}
-
-	// Join root with user path directly to preserve relative ".." components
-	// so they are neutralized by Clean before symlink evaluation. Trim
-	// either root prefix with a separator boundary if the user supplied a
-	// full absolute path through the lexical or resolved root.
-	userPathClean := filepath.Clean(userPath)
-	if userPathClean == cleanRoot || userPathClean == lexicalRoot {
-		userPathClean = "."
-	} else if after, found := strings.CutPrefix(userPathClean, dirPrefix(cleanRoot)); found {
-		userPathClean = after
-	} else if after, found := strings.CutPrefix(userPathClean, dirPrefix(lexicalRoot)); found {
-		userPathClean = after
-	}
-	joined := filepath.Clean(filepath.Join(cleanRoot, userPathClean))
 
 	// Resolve symlinks. If the joined path doesn't exist yet (e.g. Write or
 	// MkdirAll targets), walk up to the nearest existing ancestor to resolve
@@ -102,6 +79,59 @@ func SanitizePath(rootDir, userPath string) (string, error) {
 	}
 
 	return resolved, nil
+}
+
+// SanitizeEntryPath is SanitizePath, except that a symlink in the final path
+// component is not resolved, so the caller can act on the link itself. Every
+// parent directory is still resolved and confined to the sandbox root.
+func SanitizeEntryPath(rootDir, userPath string) (string, error) {
+	cleanRoot, joined, err := joinUnderRoot(rootDir, userPath)
+	if err != nil {
+		return "", err
+	}
+	if joined == cleanRoot {
+		return cleanRoot, nil
+	}
+	if !strings.HasPrefix(joined, dirPrefix(cleanRoot)) {
+		return "", fmt.Errorf("access denied: path %q: %w", userPath, ErrPathEscapes)
+	}
+	parent, err := SanitizePath(rootDir, filepath.Dir(joined))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(parent, filepath.Base(joined)), nil
+}
+
+// joinUnderRoot returns the symlink-resolved sandbox root and userPath cleaned
+// and joined onto it, without evaluating symlinks in userPath.
+func joinUnderRoot(rootDir, userPath string) (cleanRoot, joined string, err error) {
+	if rootDir == "" {
+		return "", "", errors.New("sandbox rootDir is required and cannot be empty")
+	}
+	cleanRoot, err = filepath.Abs(filepath.Clean(rootDir))
+	if err != nil {
+		return "", "", fmt.Errorf("invalid sandbox root dir: %w", err)
+	}
+	lexicalRoot := cleanRoot
+
+	cleanRootSymlink, err := filepath.EvalSymlinks(cleanRoot)
+	if err == nil {
+		cleanRoot = cleanRootSymlink
+	}
+
+	// Join root with user path directly to preserve relative ".." components
+	// so they are neutralized by Clean before symlink evaluation. Trim
+	// either root prefix with a separator boundary if the user supplied a
+	// full absolute path through the lexical or resolved root.
+	userPathClean := filepath.Clean(userPath)
+	if userPathClean == cleanRoot || userPathClean == lexicalRoot {
+		userPathClean = "."
+	} else if after, found := strings.CutPrefix(userPathClean, dirPrefix(cleanRoot)); found {
+		userPathClean = after
+	} else if after, found := strings.CutPrefix(userPathClean, dirPrefix(lexicalRoot)); found {
+		userPathClean = after
+	}
+	return cleanRoot, filepath.Clean(filepath.Join(cleanRoot, userPathClean)), nil
 }
 
 // dirPrefix returns dir with exactly one trailing separator, the prefix every

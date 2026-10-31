@@ -21,9 +21,18 @@ package v1beta1
 //
 // SandboxWarmPoolSpec defines the desired state of SandboxWarmPool.
 type SandboxWarmPoolSpecApplyConfiguration struct {
-	// replicas is the desired number of sandboxes in the pool.
-	// This field is controlled by an HPA if specified.
+	// replicas is the desired standby count, or its ceiling when
+	// replenishmentCapacity is set. HPA scaling is supported only when
+	// replenishmentCapacity is unset.
 	Replicas *int32 `json:"replicas,omitempty"`
+	// replenishmentCapacity reduces the standby target by the number of
+	// still-existing Sandboxes attributed to this pool that are no longer its
+	// standby inventory. The target is the smaller of replicas and the remaining
+	// capacity, with a minimum of zero. Unset preserves fixed-standby behavior;
+	// zero maintains no standby. This is not an admission limit: cold creation
+	// remains available. Presence is immutable after creation, but the value
+	// may change. HPA/KEDA scaling is not supported with this field set.
+	ReplenishmentCapacity *int32 `json:"replenishmentCapacity,omitempty"`
 	// sandboxTemplateRef - name of the SandboxTemplate to be used for creating a Sandbox
 	// Warning: Any change to the json tag "sandboxTemplateRef" must be synchronized with the TemplateRefField constant.
 	TemplateRef *SandboxTemplateRefApplyConfiguration `json:"sandboxTemplateRef,omitempty"`
@@ -49,6 +58,14 @@ func SandboxWarmPoolSpec() *SandboxWarmPoolSpecApplyConfiguration {
 // If called multiple times, the Replicas field is set to the value of the last call.
 func (b *SandboxWarmPoolSpecApplyConfiguration) WithReplicas(value int32) *SandboxWarmPoolSpecApplyConfiguration {
 	b.Replicas = &value
+	return b
+}
+
+// WithReplenishmentCapacity sets the ReplenishmentCapacity field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the ReplenishmentCapacity field is set to the value of the last call.
+func (b *SandboxWarmPoolSpecApplyConfiguration) WithReplenishmentCapacity(value int32) *SandboxWarmPoolSpecApplyConfiguration {
+	b.ReplenishmentCapacity = &value
 	return b
 }
 

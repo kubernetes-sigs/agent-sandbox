@@ -35,21 +35,25 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+	"sigs.k8s.io/agent-sandbox/internal/utils"
 )
 
 const (
@@ -57,6 +61,10 @@ const (
 	warmPoolSandboxLabel            = sandboxv1beta1.SandboxWarmPoolLabel
 	sandboxCreateDeleteMaxBatchSize = 300
 	autoscalerSafeToEvictAnnotation = "cluster-autoscaler.kubernetes.io/safe-to-evict"
+	// Source survives ownership transfer; membership labels do not.
+	sourceWarmPoolNameAnnotation  = "agents.x-k8s.io/source-warmpool-name"
+	sourceWarmPoolUIDAnnotation   = "agents.x-k8s.io/source-warmpool-uid"
+	warmPoolCreateTokenAnnotation = "agents.x-k8s.io/warmpool-create-token"
 	// sandboxWarmPoolLabelIndex is the cache field index over the warmPoolSandboxLabel
 	// value on warm sandboxes, so reconcilePool's member lookup is O(pool members) instead
 	// of O(sandboxes-in-namespace).
@@ -139,8 +147,10 @@ type SandboxWarmPoolReconciler struct {
 	// notProgressingMu guards notProgressing, the active not-progressing
 	// reasons per pool, each with its current event action (used to emit each
 	// transition event exactly once).
-	notProgressingMu sync.Mutex
-	notProgressing   map[types.NamespacedName]map[string]string
+	notProgressingMu     sync.Mutex
+	notProgressing       map[types.NamespacedName]map[string]string
+	poolUIDs             map[types.NamespacedName]types.UID
+	accountingIncomplete map[types.NamespacedName]struct{}
 
 	// now is a test hook for the reconciler's clock; nil means time.Now.
 	now func() time.Time
@@ -480,8 +490,25 @@ func (r *SandboxWarmPoolReconciler) forgetPool(key types.NamespacedName) {
 	r.exp().Forget(key)
 	r.notProgressingMu.Lock()
 	delete(r.notProgressing, key)
+	delete(r.poolUIDs, key)
+	delete(r.accountingIncomplete, key)
 	r.notProgressingMu.Unlock()
 	r.forgetReplenishState(key)
+}
+
+func (r *SandboxWarmPoolReconciler) observePoolIncarnation(key types.NamespacedName, uid types.UID) {
+	r.notProgressingMu.Lock()
+	defer r.notProgressingMu.Unlock()
+	if previous, exists := r.poolUIDs[key]; exists && previous != uid {
+		r.exp().Forget(key)
+		delete(r.notProgressing, key)
+		delete(r.accountingIncomplete, key)
+		r.forgetReplenishState(key)
+	}
+	if r.poolUIDs == nil {
+		r.poolUIDs = make(map[types.NamespacedName]types.UID)
+	}
+	r.poolUIDs[key] = uid
 }
 
 // reconcilePool ensures the correct number of pre-allocated sandboxes exist in the pool.
@@ -492,6 +519,8 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	logger := log.FromContext(ctx)
 
 	poolKey := types.NamespacedName{Namespace: warmPool.Namespace, Name: warmPool.Name}
+	expectationKey := warmPoolIdentity{NamespacedName: poolKey, UID: warmPool.UID}
+	r.observePoolIncarnation(poolKey, warmPool.UID)
 	var requeueAfter time.Duration
 
 	// Compute hash of the warm pool name for the pool label
@@ -499,11 +528,26 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 
 	// List all Sandbox CRs with the warm pool label
 	sandboxList := &sandboxv1beta1.SandboxList{}
+	warmPool.Status.OccupiedReplicas = nil
+	warmPool.Status.DesiredStandbyReplicas = nil
+	desiredReplicas := desiredStandbyReplicas(&warmPool.Spec, 0)
 	labelSelector := labels.SelectorFromSet(labels.Set{
 		warmPoolSandboxLabel: poolNameHash,
 	})
 
-	if err := r.List(ctx, sandboxList,
+	if warmPool.Spec.ReplenishmentCapacity != nil {
+		inventory, occupied, err := r.observeClaimAwarePool(ctx, warmPool)
+		if errors.Is(err, errPoolAccountingPending) {
+			return time.Second, nil
+		}
+		if err != nil {
+			r.setAccountingIncomplete(warmPool, poolKey, true, err.Error())
+			return expectationsPendingRequeueDelay, err
+		}
+		r.setAccountingIncomplete(warmPool, poolKey, false, "")
+		sandboxList.Items = inventory
+		desiredReplicas = desiredStandbyReplicas(&warmPool.Spec, occupied)
+	} else if err := r.List(ctx, sandboxList,
 		client.InNamespace(warmPool.Namespace),
 		client.MatchingFields{sandboxWarmPoolLabelIndex: poolNameHash},
 	); err != nil {
@@ -571,9 +615,9 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			logger.Info("Deleting stuck warm pool sandbox",
 				"sandbox", sb.Name,
 				"age", age.Round(time.Second))
-			r.exp().ExpectDeletion(poolKey, sb.UID)
-			if err := r.Delete(ctx, &sb); err != nil {
-				r.exp().DeletionObserved(poolKey, sb.UID)
+			r.exp().ExpectDeletion(expectationKey, sb.UID)
+			if err := r.Delete(ctx, &sb, client.Preconditions{UID: &sb.UID, ResourceVersion: &sb.ResourceVersion}); err != nil {
+				r.exp().DeletionObserved(expectationKey, sb.UID)
 				logger.Error(err, "Failed to delete stuck sandbox", "sandbox", sb.Name)
 				allErrors = errors.Join(allErrors, err)
 				// The sandbox still exists; keep counting it as active so the
@@ -591,10 +635,6 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	}
 	activeSandboxes = healthySandboxes
 
-	desiredReplicas := int32(1)
-	if warmPool.Spec.Replicas != nil {
-		desiredReplicas = *warmPool.Spec.Replicas
-	}
 	currentReplicas := int32(len(activeSandboxes))
 	// totalReplicas is the pool's whole live population: active plus
 	// terminating-but-still-present. Creates are gated on this so the
@@ -691,6 +731,10 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		}
 		if sandboxesToCreate > 0 {
 			sandboxCR, err := r.buildSandboxCR(warmPool, poolNameHash, template, currentPodTemplateHash, currentSandboxBlueprintHash)
+			createTokens := make([]string, sandboxesToCreate)
+			for i := range createTokens {
+				createTokens[i] = string(uuid.NewUUID())
+			}
 			switch {
 			case err != nil:
 				logger.Error(err, "Failed to build sandbox CR blueprint")
@@ -702,7 +746,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			// creating against it would overshoot the target (the #1215 runaway),
 			// so we skip and let the watch (or a fallback requeue) retrigger us.
 			// The granted tokens are refunded: no POST was issued for them.
-			case !r.exp().TryExpectCreations(poolKey, int(sandboxesToCreate)):
+			case !r.exp().TryExpectCreations(expectationKey, createTokens):
 				logger.Info("Skipping sandbox creation: waiting for in-flight creates/deletes to be observed",
 					"poolName", warmPool.Name)
 				r.refundRefillTokens(poolKey, sandboxesToCreate)
@@ -710,17 +754,24 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			default:
 				logger.Info("Creating new pool sandboxes", "count", sandboxesToCreate)
 				// Parallel sandbox creation with adaptive slow-start batching (starts with 1 and doubles on success)
-				successes, createErr := slowStartBatch(ctx, int(sandboxesToCreate), 1, func(_ int) error {
-					return r.createPoolSandbox(ctx, warmPool, sandboxCR)
+				attempted := make([]bool, len(createTokens))
+				successes, createErr := slowStartBatch(ctx, int(sandboxesToCreate), 1, func(index int) error {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+					attempted[index] = true
+					err := r.createPoolSandbox(ctx, warmPool, sandboxCR, createTokens[index])
+					if k8serrors.IsInvalid(err) || k8serrors.IsForbidden(err) || k8serrors.IsUnauthorized(err) || k8serrors.IsAlreadyExists(err) || k8serrors.IsBadRequest(err) || k8serrors.IsTooManyRequests(err) {
+						r.exp().CreationObserved(expectationKey, createTokens[index])
+					}
+					return err
 				})
-				// Creates that never happened will never produce a watch event;
-				// lower their expectations immediately so the pool is not blocked
-				// until the expectations timeout. lower cannot be negative
-				// (slowStartBatch reports at most the requested count of
-				// successes); the > 0 guard only skips a no-op tracker call on
-				// the everything-succeeded path.
-				if lower := int(sandboxesToCreate) - successes; lower > 0 {
-					r.exp().LowerCreations(poolKey, lower)
+				// Unknown POST results may already exist at the server. Only
+				// cancel operations known not to have been sent or accepted.
+				for i, wasAttempted := range attempted {
+					if !wasAttempted {
+						r.exp().CreationObserved(expectationKey, createTokens[i])
+					}
 				}
 				r.noteReplenishCreates(poolKey, int32(successes))
 				if createErr != nil {
@@ -736,7 +787,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	// expectations are unsatisfied: a stale list could otherwise show a
 	// phantom surplus and delete healthy sandboxes.
 	if currentReplicas > desiredReplicas {
-		if !r.exp().SatisfiedExpectations(poolKey) {
+		if !r.exp().SatisfiedExpectations(expectationKey) {
 			logger.Info("Skipping excess sandbox deletion: waiting for in-flight creates/deletes to be observed",
 				"poolName", warmPool.Name)
 			requeueAfter = minNonZeroDuration(requeueAfter, expectationsPendingRequeueDelay)
@@ -762,8 +813,8 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			// Parallel sandbox deletion with adaptive slow-start batching (starts with 1 and doubles on success)
 			_, deleteErr := slowStartBatch(ctx, int(toDeleteCount), 1, func(idx int) error {
 				sb := &activeSandboxes[idx]
-				r.exp().ExpectDeletion(poolKey, sb.UID)
-				err := r.Delete(ctx, sb)
+				r.exp().ExpectDeletion(expectationKey, sb.UID)
+				err := r.Delete(ctx, sb, client.Preconditions{UID: &sb.UID, ResourceVersion: &sb.ResourceVersion})
 				if err == nil {
 					return nil
 				}
@@ -774,7 +825,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 				// the pool is not blocked until the expectations timeout —
 				// the same recovery kube's ReplicaSet controller applies to
 				// failed deletes.
-				r.exp().DeletionObserved(poolKey, sb.UID)
+				r.exp().DeletionObserved(expectationKey, sb.UID)
 				if k8serrors.IsNotFound(err) {
 					// Not an error for the batch: the desired outcome
 					// (sandbox gone) already holds.
@@ -820,6 +871,11 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 
 	if tmplErr != nil && !k8serrors.IsNotFound(tmplErr) {
 		allErrors = errors.Join(allErrors, tmplErr)
+	}
+	if warmPool.Spec.ReplenishmentCapacity != nil {
+		// A failed association lookup in a watch must not leave accounting
+		// indefinitely stale. Normal source events still reconcile immediately.
+		requeueAfter = minNonZeroDuration(requeueAfter, expectationsPendingRequeueDelay)
 	}
 
 	return requeueAfter, allErrors
@@ -1005,6 +1061,7 @@ func setWarmLaunchTypeLabelIfNeeded(sb *sandboxv1beta1.Sandbox) bool {
 // so from Ready accounting), but still occupy capacity, so the create path
 // must count them against spec.replicas (#1215).
 func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, poolKey types.NamespacedName, warmPool *extensionsv1beta1.SandboxWarmPool, sandboxes []sandboxv1beta1.Sandbox, template *extensionsv1beta1.SandboxTemplate, currentSandboxBlueprintHash string, tmplErr error) ([]sandboxv1beta1.Sandbox, int32, error) {
+	expectationKey := warmPoolIdentity{NamespacedName: poolKey, UID: warmPool.UID}
 	logger := log.FromContext(ctx)
 	var activeSandboxes []sandboxv1beta1.Sandbox
 	terminatingReplicas := int32(0)
@@ -1039,7 +1096,7 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, p
 		// A sandbox this controller already deleted may still show up in the
 		// (lagging) cache without a deletion timestamp; treat it as
 		// terminating, not active.
-		if isControlledByPool && r.exp().IsPendingDeletion(poolKey, sb.UID) {
+		if isControlledByPool && r.exp().IsPendingDeletion(expectationKey, sb.UID) {
 			terminatingReplicas++
 			continue
 		}
@@ -1056,14 +1113,20 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, p
 				// watch handler can only map owned delete events back to the
 				// pool, and only owned sandboxes count against the target.
 				if isControlledByPool {
-					r.exp().ExpectDeletion(poolKey, sb.UID)
+					r.exp().ExpectDeletion(expectationKey, sb.UID)
 				}
-				if err := r.Delete(ctx, &sb); err != nil {
+				if err := r.Delete(ctx, &sb, client.Preconditions{UID: &sb.UID, ResourceVersion: &sb.ResourceVersion}); err != nil {
 					if isControlledByPool {
-						r.exp().DeletionObserved(poolKey, sb.UID)
+						r.exp().DeletionObserved(expectationKey, sb.UID)
 					}
 					logger.Error(err, "Failed to delete stale sandbox", "sandbox", sb.Name)
 					allErrors = errors.Join(allErrors, err)
+					if isControlledByPool {
+						// A failed DELETE leaves the observed member occupying
+						// capacity; dropping it here would create a replacement
+						// even when a Claim won the ownership race.
+						activeSandboxes = append(activeSandboxes, sb)
+					}
 				} else if isControlledByPool {
 					terminatingReplicas++
 				}
@@ -1075,6 +1138,7 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, p
 			if err := r.Update(ctx, &sb); err != nil {
 				logger.Error(err, "Failed to update sandbox launch type label", "sandbox", sb.Name)
 				allErrors = errors.Join(allErrors, err)
+				activeSandboxes = append(activeSandboxes, sb)
 				continue
 			}
 		}
@@ -1135,6 +1199,27 @@ func (r *SandboxWarmPoolReconciler) fetchTemplateAndHash(ctx context.Context, wa
 	return template, currentPodTemplateHash, currentSandboxBlueprintHash, tmplErr
 }
 
+// ensureWarmPoolSource never replaces a recorded incarnation with a same-name
+// pool. Its caller must supply the identity resolved for this operation, or a
+// still-present WarmPool controller owner before transferring ownership.
+func ensureWarmPoolSource(sandbox *sandboxv1beta1.Sandbox, name string, uid types.UID) error {
+	if uid == "" {
+		return nil
+	}
+	if recorded := sandbox.Annotations[sourceWarmPoolUIDAnnotation]; recorded != "" && recorded != string(uid) {
+		return fmt.Errorf("sandbox %q source pool UID conflicts with its owner", sandbox.Name)
+	}
+	if recorded := sandbox.Annotations[sourceWarmPoolNameAnnotation]; recorded != "" && recorded != name {
+		return fmt.Errorf("sandbox %q source pool name conflicts with its owner", sandbox.Name)
+	}
+	if sandbox.Annotations == nil {
+		sandbox.Annotations = make(map[string]string)
+	}
+	sandbox.Annotations[sourceWarmPoolNameAnnotation] = name
+	sandbox.Annotations[sourceWarmPoolUIDAnnotation] = string(uid)
+	return nil
+}
+
 // buildSandboxCR constructs the base Sandbox CR (with pod template and volume claim templates) for the warm pool.
 func (r *SandboxWarmPoolReconciler) buildSandboxCR(
 	warmPool *extensionsv1beta1.SandboxWarmPool,
@@ -1155,6 +1240,8 @@ func (r *SandboxWarmPoolReconciler) buildSandboxCR(
 	// Build annotations for the Sandbox CR
 	sandboxAnnotations := map[string]string{
 		sandboxv1beta1.SandboxTemplateRefAnnotation: warmPool.Spec.TemplateRef.Name,
+		sourceWarmPoolNameAnnotation:                warmPool.Name,
+		sourceWarmPoolUIDAnnotation:                 string(warmPool.UID),
 	}
 
 	sandbox := &sandboxv1beta1.Sandbox{
@@ -1202,9 +1289,10 @@ func (r *SandboxWarmPoolReconciler) buildSandboxCR(
 }
 
 // createPoolSandbox creates a full Sandbox CR for the warm pool using a pre-built sandboxCR.
-func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmPool *extensionsv1beta1.SandboxWarmPool, sandboxCR *sandboxv1beta1.Sandbox) error {
+func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmPool *extensionsv1beta1.SandboxWarmPool, sandboxCR *sandboxv1beta1.Sandbox, createToken string) error {
 	logger := log.FromContext(ctx)
 	sandbox := sandboxCR.DeepCopy()
+	sandbox.Annotations[warmPoolCreateTokenAnnotation] = createToken
 	if err := r.Create(ctx, sandbox); err != nil {
 		logger.Error(err, "Failed to create pool sandbox")
 		return err
@@ -1402,20 +1490,81 @@ func warmPoolControllerKey(obj client.Object) (types.NamespacedName, bool) {
 type warmPoolSandboxEventHandler struct {
 	handler.EventHandler
 	expectations *warmPoolExpectations
+	reader       client.Reader
 }
 
 func (h *warmPoolSandboxEventHandler) Create(ctx context.Context, evt event.CreateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
-	if key, ok := warmPoolControllerKey(evt.Object); ok {
-		h.expectations.CreationObserved(key)
-	}
+	h.observe(evt.Object, false)
+	h.enqueueSource(ctx, evt.Object, q)
 	h.EventHandler.Create(ctx, evt, q)
 }
 
 func (h *warmPoolSandboxEventHandler) Delete(ctx context.Context, evt event.DeleteEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
-	if key, ok := warmPoolControllerKey(evt.Object); ok {
-		h.expectations.DeletionObserved(key, evt.Object.GetUID())
-	}
+	h.observe(evt.Object, true)
+	h.enqueueSource(ctx, evt.Object, q)
 	h.EventHandler.Delete(ctx, evt, q)
+}
+
+func (h *warmPoolSandboxEventHandler) Update(ctx context.Context, evt event.UpdateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	h.observe(evt.ObjectNew, false)
+	h.enqueueSource(ctx, evt.ObjectOld, q)
+	h.enqueueSource(ctx, evt.ObjectNew, q)
+	h.EventHandler.Update(ctx, evt, q)
+}
+
+func (h *warmPoolSandboxEventHandler) observe(obj client.Object, deleted bool) {
+	if obj == nil {
+		return
+	}
+	annotations := obj.GetAnnotations()
+	if name, uid := annotations[sourceWarmPoolNameAnnotation], annotations[sourceWarmPoolUIDAnnotation]; name != "" && uid != "" {
+		identity := warmPoolIdentity{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: name}, UID: types.UID(uid)}
+		if obj.GetLabels()[sandboxv1beta1.SandboxLaunchTypeLabel] == sandboxv1beta1.SandboxLaunchTypeWarm {
+			h.expectations.CreationObserved(identity, annotations[warmPoolCreateTokenAnnotation])
+		}
+		if deleted {
+			h.expectations.DeletionObserved(identity, obj.GetUID())
+		}
+	}
+	if deleted {
+		if key, ok := warmPoolControllerKey(obj); ok {
+			h.expectations.DeletionObserved(warmPoolIdentity{NamespacedName: key, UID: metav1.GetControllerOf(obj).UID}, obj.GetUID())
+		}
+	}
+}
+
+func (h *warmPoolSandboxEventHandler) enqueueSource(ctx context.Context, obj client.Object, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	if obj == nil || q == nil {
+		return
+	}
+	if name := obj.GetAnnotations()[sourceWarmPoolNameAnnotation]; name != "" {
+		q.Add(reconcile.Request{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: name}})
+		return
+	}
+	if h.reader == nil {
+		return
+	}
+	owner := metav1.GetControllerOf(obj)
+	if utils.MatchesGroupKind(owner, extensionsv1beta1.GroupVersion.Group, extensionsv1beta1.SandboxClaimKind) {
+		claim := &extensionsv1beta1.SandboxClaim{}
+		if err := h.reader.Get(ctx, client.ObjectKey{Namespace: obj.GetNamespace(), Name: owner.Name}, claim); err != nil {
+			if !k8serrors.IsNotFound(err) {
+				log.FromContext(ctx).Error(err, "Unable to route Sandbox event through Claim owner", "sandbox", obj.GetName())
+			}
+		} else if claim.UID == owner.UID && claim.Spec.WarmPoolRef.Name != "" {
+			q.Add(reconcile.Request{NamespacedName: types.NamespacedName{Namespace: claim.Namespace, Name: claim.Spec.WarmPoolRef.Name}})
+		}
+	}
+	if membership := obj.GetLabels()[warmPoolSandboxLabel]; membership != "" {
+		pools := &extensionsv1beta1.SandboxWarmPoolList{}
+		if err := h.reader.List(ctx, pools, client.InNamespace(obj.GetNamespace()), client.MatchingFields{warmPoolNameHashIndex: membership}); err != nil {
+			log.FromContext(ctx).Error(err, "Unable to route Sandbox membership event", "sandbox", obj.GetName())
+			return
+		}
+		for i := range pools.Items {
+			q.Add(reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&pools.Items[i])})
+		}
+	}
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -1425,12 +1574,24 @@ func (r *SandboxWarmPoolReconciler) SetupWithManager(mgr ctrl.Manager, concurren
 	}
 
 	// Index sandboxes by the warm pool label value
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &sandboxv1beta1.Sandbox{}, sandboxSourcePoolUIDIndex, sandboxSourcePoolUIDIndexer); err != nil {
+		return fmt.Errorf("index sandboxes by source pool UID: %w", err)
+	}
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &sandboxv1beta1.Sandbox{}, sandboxSourcePoolNameIndex, sandboxSourcePoolNameIndexer); err != nil {
+		return fmt.Errorf("index sandboxes by source pool name: %w", err)
+	}
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &sandboxv1beta1.Sandbox{}, sandboxClaimOwnerUIDIndex, sandboxClaimOwnerUIDIndexer); err != nil {
+		return fmt.Errorf("index sandboxes by claim owner UID: %w", err)
+	}
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &sandboxv1beta1.Sandbox{},
 		sandboxWarmPoolLabelIndex, sandboxWarmPoolLabelIndexer); err != nil {
 		return fmt.Errorf("failed to index sandboxes by warm pool label: %w", err)
 	}
 
 	// Index warm pools by the template reference name
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &extensionsv1beta1.SandboxWarmPool{}, warmPoolNameHashIndex, warmPoolNameHashIndexer); err != nil {
+		return fmt.Errorf("index pool membership names: %w", err)
+	}
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &extensionsv1beta1.SandboxWarmPool{},
 		extensionsv1beta1.TemplateRefField, sandboxTemplateRefNameIndexer); err != nil {
 		return fmt.Errorf("failed to index warm pools by template reference name: %w", err)
@@ -1442,11 +1603,18 @@ func (r *SandboxWarmPoolReconciler) SetupWithManager(mgr ctrl.Manager, concurren
 		EventHandler: handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(),
 			&extensionsv1beta1.SandboxWarmPool{}, handler.OnlyControllerOwner()),
 		expectations: r.exp(),
+		reader:       mgr.GetClient(),
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extensionsv1beta1.SandboxWarmPool{}).
 		Watches(&sandboxv1beta1.Sandbox{}, sandboxHandler).
+		Watches(&extensionsv1beta1.SandboxClaim{}, handler.EnqueueRequestsFromMapFunc(warmPoolForClaim),
+			builder.WithPredicates(predicate.Funcs{UpdateFunc: func(e event.UpdateEvent) bool {
+				oldClaim, oldOK := e.ObjectOld.(*extensionsv1beta1.SandboxClaim)
+				newClaim, newOK := e.ObjectNew.(*extensionsv1beta1.SandboxClaim)
+				return oldOK && newOK && (oldClaim.UID != newClaim.UID || oldClaim.Spec.WarmPoolRef != newClaim.Spec.WarmPoolRef)
+			}})).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Watches(
 			&extensionsv1beta1.SandboxTemplate{},

@@ -170,7 +170,7 @@ func TestReconcilePool_NoOverCreationWithStaleCache(t *testing.T) {
 		h.Create(ctx, event.CreateEvent{Object: &created.Items[i]}, nil)
 	}
 	poolKey := types.NamespacedName{Namespace: warmPool.Namespace, Name: warmPool.Name}
-	require.True(t, r.exp().SatisfiedExpectations(poolKey),
+	require.True(t, r.exp().SatisfiedExpectations(warmPoolIdentity{NamespacedName: poolKey, UID: warmPool.UID}),
 		"watch-observed adds must satisfy the recorded expectations")
 
 	// Further reconciles are steady-state: no additional creates.
@@ -843,9 +843,9 @@ func TestReconcilePool_ExcessDeleteNotFoundLowersExpectation(t *testing.T) {
 
 	// The deletion expectation must be lowered synchronously: no watch event
 	// will ever arrive for the phantom.
-	require.True(t, r.exp().SatisfiedExpectations(poolKey),
+	require.True(t, r.exp().SatisfiedExpectations(warmPoolIdentity{NamespacedName: poolKey, UID: warmPool.UID}),
 		"NotFound delete must lower its expectation immediately, not wait for the 5m timeout")
-	require.False(t, r.exp().IsPendingDeletion(poolKey, phantom.UID))
+	require.False(t, r.exp().IsPendingDeletion(warmPoolIdentity{NamespacedName: poolKey, UID: warmPool.UID}, phantom.UID))
 
 	// All real sandboxes survived.
 	for _, name := range []string{real1.Name, real2.Name, real3.Name} {
@@ -1230,13 +1230,15 @@ func TestWarmPoolSandboxEventHandler_ObservesOwnedEvents(t *testing.T) {
 	e := newWarmPoolExpectations()
 	h := &warmPoolSandboxEventHandler{EventHandler: handler.Funcs{}, expectations: e}
 	ctx := context.Background()
-	poolKey := types.NamespacedName{Namespace: "default", Name: "test-pool"}
+	poolKey := warmPoolIdentity{NamespacedName: types.NamespacedName{Namespace: "default", Name: "test-pool"}, UID: "warmpool-uid"}
 
 	controller := true
 	owned := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{
-		Name:      "owned",
-		Namespace: "default",
-		UID:       "uid-owned",
+		Name:        "owned",
+		Namespace:   "default",
+		UID:         "uid-owned",
+		Annotations: map[string]string{sourceWarmPoolNameAnnotation: poolKey.Name, sourceWarmPoolUIDAnnotation: string(poolKey.UID), warmPoolCreateTokenAnnotation: "warm-op"},
+		Labels:      map[string]string{sandboxv1beta1.SandboxLaunchTypeLabel: sandboxv1beta1.SandboxLaunchTypeWarm},
 		OwnerReferences: []metav1.OwnerReference{{
 			APIVersion: extensionsv1beta1.GroupVersion.String(),
 			Kind:       "SandboxWarmPool",
@@ -1249,10 +1251,12 @@ func TestWarmPoolSandboxEventHandler_ObservesOwnedEvents(t *testing.T) {
 		Name: "orphan", Namespace: "default", UID: "uid-orphan",
 	}}
 	foreign := owned.DeepCopy()
+	foreign.Annotations = nil
+	foreign.Labels = nil
 	foreign.OwnerReferences[0].Kind = "ReplicaSet"
 	foreign.OwnerReferences[0].APIVersion = "apps/v1"
 
-	require.True(t, e.TryExpectCreations(poolKey, 1))
+	require.True(t, e.TryExpectCreations(poolKey, []string{"warm-op"}))
 	h.Create(ctx, event.CreateEvent{Object: orphan}, nil)
 	h.Create(ctx, event.CreateEvent{Object: foreign}, nil)
 	require.False(t, e.SatisfiedExpectations(poolKey), "unowned/foreign adds must not lower expectations")

@@ -165,8 +165,10 @@ paths:
             type: string
             enum: ["*"]
           description: >
-            Set to "*" to create the file only if the path does not exist. If it exists, the
-            request fails with 412 and writes nothing. Other values are rejected with 400.
+            Set to "*" to create the file only if the path does not exist. If it exists, including
+            as a directory, the request fails with 412 and writes nothing. Other values are rejected
+            with 400, as is combining it with type=directory. With append=true the body is created,
+            not appended.
       requestBody:
         required: false
         description: File content. Required unless type=directory, which ignores it.

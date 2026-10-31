@@ -188,7 +188,8 @@ appends, see below), but it does not impose an ordering across requests:
 - **Concurrent writes to one path** — each successful rename is atomic; the
   last successful rename determines the final contents.
 - **Create-only writes (`If-None-Match: *`)** - when several race to create one
-  path, exactly one succeeds and the rest get `412`.
+  path, exactly one succeeds and the rest get `412`. It needs hard link support,
+  so it fails on volumes without it, such as GCS FUSE.
 - **Appends (`append=true`)** are written in place, not atomically: a read can
   see a partial append, and concurrent appends to one path can interleave. A
   retried append adds the body again.

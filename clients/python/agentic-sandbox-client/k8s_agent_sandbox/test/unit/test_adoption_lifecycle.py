@@ -643,6 +643,7 @@ async def test_async_context_cleanup_preserves_explicit_claim(sdk_client):
 async def test_async_close_can_retry_failed_connection_cleanup(sdk_client):
     _, client, _ = sdk_client
     sandbox = await client.create_sandbox('pool-a', claim_name='workflow-a')
+    sandbox.connector._ensure_client()  # Open the HTTP client whose cleanup fails below.
     with patch('httpx.AsyncClient.aclose', side_effect=RuntimeError('connection close failed')):
         await client.close()
     assert await client.list_active_sandboxes() == [('default', 'workflow-a')]

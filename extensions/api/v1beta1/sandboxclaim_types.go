@@ -43,18 +43,14 @@ const (
 type ShutdownPolicy string
 
 const (
-	// ShutdownPolicyDelete deletes the SandboxClaim (and cascadingly the Sandbox) when expired.
+	// ShutdownPolicyDelete deletes the SandboxClaim on expiry.
 	ShutdownPolicyDelete ShutdownPolicy = "Delete"
 
-	// ShutdownPolicyDeleteForeground deletes the SandboxClaim when expired using foreground
-	// cascade deletion. The claim remains in the API (with a deletionTimestamp) until its
-	// underlying Sandbox and Pod are fully terminated. This allows external systems to observe
-	// shutdown progress by checking whether the claim still exists.
+	// ShutdownPolicyDeleteForeground deletes the SandboxClaim on expiry with foreground cascade deletion.
 	ShutdownPolicyDeleteForeground ShutdownPolicy = "DeleteForeground"
 
-	// ShutdownPolicyRetain keeps the SandboxClaim when expired (Status will show Expired).
-	// The underlying SandboxClaim resources (Sandbox, Pod, Service) are deleted to save resources,
-	// but the SandboxClaim object itself remains.
+	// ShutdownPolicyRetain keeps the SandboxClaim on expiry and sets its Ready condition to False
+	// with reason ClaimExpired.
 	ShutdownPolicyRetain ShutdownPolicy = "Retain"
 )
 
@@ -64,7 +60,9 @@ type Lifecycle struct {
 	// This time governs the lifecycle of the claim. It is not propagated to the
 	// underlying Sandbox. Instead, the SandboxClaim controller enforces this
 	// expiration by deleting the Sandbox resources when the time is reached.
-	// If this field is omitted or set to nil, the SandboxClaim itself won't expire.
+	// If this field is omitted or set to nil, the SandboxClaim does not expire at a
+	// scheduled time and lives until it is deleted, unless ttlSecondsAfterFinished
+	// expires it after its Sandbox finishes.
 	// This implies unsetting a Sandbox's ShutdownTime via SandboxClaim isn't supported.
 	// +kubebuilder:validation:Format="date-time"
 	// +optional
@@ -76,7 +74,15 @@ type Lifecycle struct {
 	// +optional
 	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
 
-	// shutdownPolicy determines the behavior when the SandboxClaim expires.
+	// shutdownPolicy determines what happens to the SandboxClaim object when it
+	// expires, either at shutdownTime or after ttlSecondsAfterFinished, whichever
+	// comes first. The controller always deletes the underlying Sandbox on expiry.
+	//   - Retain (default): the controller keeps the SandboxClaim and sets its Ready
+	//     condition to False with reason ClaimExpired.
+	//   - Delete: the controller deletes the SandboxClaim.
+	//   - DeleteForeground: like Delete, but the SandboxClaim remains, with a
+	//     deletionTimestamp, until the Sandbox and its Pod are fully terminated.
+	// This field has no effect while the SandboxClaim cannot expire.
 	// +kubebuilder:default=Retain
 	// +optional
 	ShutdownPolicy ShutdownPolicy `json:"shutdownPolicy,omitempty"`

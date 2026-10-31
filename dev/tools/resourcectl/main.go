@@ -506,16 +506,19 @@ func runHeartbeat(ctx context.Context, name, owner string) error {
 		owner = getBoskosOwner()
 	}
 	url := fmt.Sprintf("%s/update?name=%s&state=busy&owner=%s", boskosHost, url.QueryEscape(name), url.QueryEscape(owner))
-	log.Info("starting heartbeat", "name", name, "owner", owner)
+	log.Info("starting heartbeat", "name", name, "owner", owner, "interval", heartbeatInterval)
 
-	// Send initial heartbeat
-	if err := sendOneHeartbeat(ctx, url); err != nil {
-		return fmt.Errorf("error sending initial heartbeat: %v", err)
-	}
-
+	// Wait one interval before the first /update rather than firing immediately:
+	// /acquire already set LastUpdate on the Boskos ResourceObject, whereas
+	// Boskos serves /update reads from a controller-runtime informer cache that
+	// often has not yet observed the /acquire write (~30-70ms later), rejecting
+	// an immediate /update with 401 ("owner mismatch ..., currently owned by ").
+	// Keeping every refresh inside the ticker loop also ensures transient errors
+	// never terminate the detached heartbeat process.
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
+	confirmed := false
 	failing := false
 	for {
 		select {
@@ -531,6 +534,10 @@ func runHeartbeat(ctx context.Context, name, owner string) error {
 			case failing:
 				log.Info("heartbeat recovered", "name", name)
 				failing = false
+				confirmed = true
+			case !confirmed:
+				log.Info("first heartbeat succeeded", "name", name)
+				confirmed = true
 			}
 		}
 	}

@@ -42,6 +42,10 @@ spec:
             type: object
           spec:
             properties:
+              readinessGracePeriodSeconds:
+                format: int32
+                minimum: 1
+                type: integer
               replicas:
                 default: 1
                 format: int32

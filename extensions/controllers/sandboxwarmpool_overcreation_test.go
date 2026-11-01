@@ -32,6 +32,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -1198,6 +1199,161 @@ func TestReconcilePool_ConfigurableGraceAndRecheck(t *testing.T) {
 	}
 }
 
+// newGraceTestPool builds a one-replica pool whose single sandbox is non-Ready
+// and was created age before base, so tests can place it on either side of a
+// grace period. unschedulable adds the PodScheduled=False/Unschedulable signal
+// the sandbox controller mirrors onto Sandbox.status.
+func newGraceTestPool(base time.Time, age time.Duration, graceSeconds *int32, unschedulable bool) (*extensionsv1beta1.SandboxWarmPool, *sandboxv1beta1.Sandbox, *extensionsv1beta1.SandboxTemplate) {
+	const poolName = "test-pool"
+	const poolNamespace = "default"
+	replicas := int32(1)
+	template := createTemplate(poolNamespace)
+	poolNameHash := sandboxcontrollers.NameHash(poolName)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: poolName, Namespace: poolNamespace, UID: "warmpool-uid-1293"},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:                    &replicas,
+			TemplateRef:                 extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+			ReadinessGracePeriodSeconds: graceSeconds,
+		},
+	}
+	controller := true
+	sb := createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-grace")
+	sb.UID = "uid-grace"
+	sb.CreationTimestamp = metav1.Time{Time: base.Add(-age)}
+	sb.Status.Conditions = []metav1.Condition{{
+		Type:   string(sandboxv1beta1.SandboxConditionReady),
+		Status: metav1.ConditionFalse,
+	}}
+	if unschedulable {
+		sb.Status.Conditions = append(sb.Status.Conditions, metav1.Condition{
+			Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+			Status:             metav1.ConditionFalse,
+			Reason:             corev1.PodReasonUnschedulable,
+			LastTransitionTime: metav1.Now(),
+		})
+	}
+	sb.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: extensionsv1beta1.GroupVersion.String(),
+		Kind:       "SandboxWarmPool",
+		Name:       poolName,
+		UID:        warmPool.UID,
+		Controller: &controller,
+	}}
+	return warmPool, sb, template
+}
+
+// TestReconcilePool_PerPoolReadinessGracePeriod: spec.readinessGracePeriodSeconds
+// wins over the controller-level value in both directions (#1293), and leaves
+// the controller-level unschedulable recheck interval alone.
+func TestReconcilePool_PerPoolReadinessGracePeriod(t *testing.T) {
+	zeroGraceJitter(t)
+	const controllerGrace = 5 * time.Minute
+	const controllerRecheck = 45 * time.Second
+
+	tests := []struct {
+		name          string
+		age           time.Duration
+		poolGraceSecs *int32
+		unschedulable bool
+		wantDeleted   bool
+		wantRequeue   time.Duration
+	}{
+		{
+			name:          "longer pool grace keeps a sandbox the controller value would replace",
+			age:           6 * time.Minute,
+			poolGraceSecs: new(int32(600)),
+			wantRequeue:   10*time.Minute - 6*time.Minute + graceRequeueSlack,
+		},
+		{
+			name:          "shorter pool grace replaces a sandbox the controller value would keep",
+			age:           90 * time.Second,
+			poolGraceSecs: new(int32(60)),
+			wantDeleted:   true,
+		},
+		{
+			name:        "unset pool grace uses the controller value",
+			age:         90 * time.Second,
+			wantRequeue: controllerGrace - 90*time.Second + graceRequeueSlack,
+		},
+		{
+			name:          "unschedulable past the pool grace is held and rechecked at the controller interval",
+			age:           90 * time.Second,
+			poolGraceSecs: new(int32(60)),
+			unschedulable: true,
+			wantRequeue:   controllerRecheck,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			base := time.Now().Truncate(time.Second)
+			warmPool, sb, template := newGraceTestPool(base, tc.age, tc.poolGraceSecs, tc.unschedulable)
+			scheme := newTestScheme()
+			r := SandboxWarmPoolReconciler{
+				Client:                       newLaggingClient(newFakeClient(scheme, template, warmPool, sb)),
+				Scheme:                       scheme,
+				MaxBatchSize:                 sandboxCreateDeleteMaxBatchSize,
+				Recorder:                     events.NewFakeRecorder(16),
+				ReadinessGracePeriod:         controllerGrace,
+				UnschedulableRecheckInterval: controllerRecheck,
+				now:                          func() time.Time { return base },
+			}
+			ctx := context.Background()
+
+			requeueAfter, err := r.reconcilePool(ctx, warmPool)
+			require.NoError(t, err)
+
+			getErr := r.Get(ctx, types.NamespacedName{Namespace: sb.Namespace, Name: sb.Name}, &sandboxv1beta1.Sandbox{})
+			if tc.wantDeleted {
+				require.True(t, k8serrors.IsNotFound(getErr), "sandbox past the pool grace must be deleted, got: %v", getErr)
+				return
+			}
+			require.NoError(t, getErr, "sandbox must be kept")
+			require.Equal(t, tc.wantRequeue, requeueAfter)
+		})
+	}
+}
+
+// TestReconcilePool_ReadinessGracePeriodEditDoesNotChurn: editing
+// spec.readinessGracePeriodSeconds must not mark sandboxes stale (staleness is
+// derived from the template only), and shortening it takes effect on the very
+// next reconcile for a sandbox that is already past the new value.
+func TestReconcilePool_ReadinessGracePeriodEditDoesNotChurn(t *testing.T) {
+	zeroGraceJitter(t)
+	base := time.Now().Truncate(time.Second)
+	warmPool, sb, template := newGraceTestPool(base, 4*time.Minute, nil, false)
+	scheme := newTestScheme()
+	lc := newLaggingClient(newFakeClient(scheme, template, warmPool, sb))
+	r := SandboxWarmPoolReconciler{
+		Client:       lc,
+		Scheme:       scheme,
+		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+		Recorder:     events.NewFakeRecorder(16),
+		now:          func() time.Time { return base },
+	}
+	ctx := context.Background()
+	key := types.NamespacedName{Namespace: sb.Namespace, Name: sb.Name}
+
+	// 4m old, inside the 5m default: kept.
+	_, err := r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(ctx, key, &sandboxv1beta1.Sandbox{}))
+
+	// Lengthening the grace changes nothing: no delete, no create.
+	warmPool.Spec.ReadinessGracePeriodSeconds = new(int32(1800))
+	_, err = r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(ctx, key, &sandboxv1beta1.Sandbox{}), "editing the field must not replace a healthy-in-grace sandbox")
+	require.Equal(t, 0, lc.createCount())
+
+	// Shortening it below the sandbox's age takes effect immediately.
+	warmPool.Spec.ReadinessGracePeriodSeconds = new(int32(120))
+	_, err = r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	require.True(t, k8serrors.IsNotFound(r.Get(ctx, key, &sandboxv1beta1.Sandbox{})),
+		"a sandbox older than the new, shorter grace must be replaced on the next reconcile")
+}
+
 // TestWarmPoolDefaults pins the exported defaults behind the
 // --sandbox-warm-pool-readiness-grace-period and
 // --sandbox-warm-pool-unschedulable-recheck-interval flags. These are the
@@ -1217,7 +1373,7 @@ func TestWarmPoolDefaults(t *testing.T) {
 	// rejects explicit non-positive flag values, so a zero field can only come
 	// from a programmatically constructed reconciler (or a test).
 	var r SandboxWarmPoolReconciler
-	require.Equal(t, DefaultWarmPoolReadinessGracePeriod, r.readinessGracePeriod(),
+	require.Equal(t, DefaultWarmPoolReadinessGracePeriod, r.readinessGracePeriod(nil),
 		"zero ReadinessGracePeriod must fall back to the default")
 	require.Equal(t, DefaultUnschedulableRecheckInterval, r.unschedulableRecheckInterval(),
 		"zero UnschedulableRecheckInterval must fall back to the default")

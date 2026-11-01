@@ -60,6 +60,23 @@ type SandboxWarmPoolSpec struct {
 	// Defaults to OnReplenish.
 	// +optional
 	UpdateStrategy *SandboxWarmPoolUpdateStrategy `json:"updateStrategy,omitempty"`
+
+	// readinessGracePeriodSeconds is how long a sandbox in this pool may stay
+	// non-Ready before the controller treats it as stuck and replaces it. The
+	// period is counted from the later of the sandbox's creation and its Pod
+	// being scheduled, not from when it last lost readiness. A sandbox whose Pod
+	// is unschedulable or waiting on scheduling gates is held rather than
+	// replaced. Pools backed by slow-starting runtimes generally
+	// need a longer grace period than pools backed by fast ones.
+	// If unset, the controller-level value is used (the
+	// --sandbox-warm-pool-readiness-grace-period flag or the controller
+	// ConfigMap), which defaults to 300 seconds.
+	// Changing this field does not mark existing sandboxes stale. Shortening it
+	// can still replace a non-Ready sandbox that is already older than the new
+	// value.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	ReadinessGracePeriodSeconds *int32 `json:"readinessGracePeriodSeconds,omitempty"`
 }
 
 // SandboxWarmPoolUpdateStrategyType is a string enumeration type that enumerates

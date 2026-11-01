@@ -259,10 +259,17 @@ The field mirrors `Deployment`'s `maxSurge` and `maxUnavailable`.
 the `x-kubernetes-int-or-string` schema, and the CEL rule enforces both accepted
 forms: an integer from 1 to 2147483647, or a percentage string from `"1%"` to
 `"100%"`. The upper bound matches `intstr.IntOrString`, which stores its numeric
-value in an `int32`. Without it the rule would admit integers the field cannot
-hold, and the API server would reject them with a decode error instead of the
-message above. The exact rule is a starting point for review rather than a
-settled detail.
+value in an `int32`, and it protects the controller rather than merely improving
+an error message.
+
+The API server serves custom resources as unstructured JSON and never decodes
+them through the controller's Go types, so nothing enforces the `int32` range
+unless the CEL rule does. Without the bound the API server accepts and persists
+a value such as `2147483648`. The failure then surfaces in the controller, whose
+typed decode of that object fails inside the informer's `List`, which breaks the
+`List` for every `SandboxWarmPool` rather than only the pool holding the bad
+value. The exact rule is a starting point for review rather than a settled
+detail.
 
 A new status field reports the count the gate acts on:
 

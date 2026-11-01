@@ -19,6 +19,7 @@ TOC is auto-generated via `make toc-update`.
     - [API Changes](#api-changes)
     - [Implementation Guidance](#implementation-guidance)
       - [Where the gate goes](#where-the-gate-goes)
+      - [What the gate paces depends on the readiness signal](#what-the-gate-paces-depends-on-the-readiness-signal)
       - [Counting warming sandboxes](#counting-warming-sandboxes)
       - [What the bound does and does not guarantee](#what-the-bound-does-and-does-not-guarantee)
       - [Resolving maxConcurrent](#resolving-maxconcurrent)
@@ -246,6 +247,13 @@ type SandboxWarmPoolWarmupStrategy struct {
 	// becomes Ready leaves the pool and stops counting while its startup work
 	// continues.
 	//
+	// The pool paces on the Ready condition, so how much work this field
+	// spreads out depends on what readiness means for the sandbox. Without a
+	// readiness or startup probe a container reports ready as soon as it
+	// starts, so this field paces scheduling, image pulls and container
+	// starts. To pace work the container does after that, such as a build or a
+	// model download, run it in an init container or behind a probe.
+	//
 	// Leaving this unset creates the whole deficit at once.
 	// +optional
 	// +kubebuilder:validation:XIntOrString
@@ -330,6 +338,40 @@ deficit = desiredReplicas - totalReplicas
 Place the clamp before the token bucket. Taking tokens first would spend them on
 a pass the warmup gate then withholds, so every gated pass would need a refund,
 and the bucket's refund path exists for the expectations gate only.
+
+##### What the gate paces depends on the readiness signal
+
+The gate always behaves the same way: it releases the next create once a member
+reports `Ready`. How much work that paces depends on what `Ready` means for a
+given sandbox, which is the template author's choice rather than something this
+field constrains.
+
+`Sandbox` reports `Ready` once its Pod is Running with the Pod `Ready`
+condition true and an IP assigned. Kubernetes marks a container ready as soon
+as it is running unless the container declares a `readinessProbe` or
+`startupProbe`, and holds the Pod back entirely until init containers finish.
+So:
+
+- With **no probe**, `Ready` marks the point where the Pod is scheduled, the
+  image is pulled and the container has started. `maxConcurrent` serializes
+  those, which still matters for a large image, but not work the container does
+  after it reports healthy.
+- With a **readiness or startup probe**, or with the work in an **init
+  container**, `Ready` marks the point where that work finishes, and
+  `maxConcurrent` paces the whole warmup.
+
+Neither is wrong, and the field does not require either. An operator pacing
+heavy post-start work, such as a build or a model download, gets the bound they
+expect only if that work is reflected in readiness. An operator whose cost is
+the image pull needs nothing extra.
+
+This is worth documenting alongside the field because the two cases look
+identical from the pool's side and produce very different fill times.
+`status.warmingUpReplicas` is what distinguishes them in practice: it sits at
+the configured bound while real work is being paced, and stays near 0 when
+members report `Ready` almost immediately. The controller deliberately does not
+try to detect a missing probe, since a legitimately fast sandbox and an
+unprobed slow one are indistinguishable to it.
 
 ##### Counting warming sandboxes
 

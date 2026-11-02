@@ -54,10 +54,13 @@ envsubst < 20-sandbox.yaml | kubectl apply -f -
 kubectl wait sandbox/$SB --for=condition=Ready --timeout=900s
 
 echo "=== 2. Seed GPU state"
+# A rerun can find the Sandbox from a previous run, or a pod restored from
+# its snapshot, so assert relative to the counter at the start.
+START=$(field "$(call GET /state)" counter)
 for _ in 1 2 3; do call POST /bump >/dev/null; done
 BEFORE=$(call GET /state)
 echo "before: $BEFORE"
-[ "$(field "$BEFORE" counter)" = 3 ] || { echo "FAIL: counter is not 3"; exit 1; }
+[ "$(field "$BEFORE" counter)" = $((START + 3)) ] || { echo "FAIL: counter is not $((START + 3))"; exit 1; }
 
 echo "=== 3. Snapshot"
 T0=$(date +%s)
@@ -85,6 +88,6 @@ done
 
 echo "=== 6. GPU still usable after restore"
 BUMPED=$(call POST /bump)
-[ "$(field "$BUMPED" counter)" = 4 ] || { echo "FAIL: counter is not 4 after bump"; exit 1; }
+[ "$(field "$BUMPED" counter)" = $((START + 4)) ] || { echo "FAIL: counter is not $((START + 4)) after bump"; exit 1; }
 
 echo "PASS: the L4 sandbox restored its process and GPU memory from $SNAP"

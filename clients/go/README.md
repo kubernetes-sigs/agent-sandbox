@@ -174,11 +174,10 @@ meta, err := sb.Metadata(ctx)   // meta.Env (non-sensitive, SANDBOX_-prefixed by
 
 `sb.Commands().Start` runs a command with the same shell-string semantics as
 `Run` (`/bin/sh -c`), but lets you read output before the command exits. It needs
-`RuntimeSandboxd` and a gRPC connection established through pod port-forward or
-in-cluster connectivity. The legacy runtime, a REST-only `APIURL`, and
-`ConnectivityRouterPortForward` return `ErrUnsupportedByRuntime`. That mode
-port-forwards the sandbox-router HTTP server and can carry the sandbox HTTP
-API, not gRPC. This does not add a Gateway+sandboxd connection mode.
+`RuntimeSandboxd` and a gRPC connection established through pod port-forward,
+`ConnectivityRouterPortForward`, or in-cluster connectivity. The legacy runtime
+and a REST-only `APIURL` return `ErrUnsupportedByRuntime`. This does not add a
+Gateway+sandboxd connection mode.
 
 The example assumes `sb` is already open with `RuntimeSandboxd`. Import
 `context`, `io`, `os`, `time`, and the `sandbox` SDK package:
@@ -322,13 +321,12 @@ All options are documented on the `Options` struct in
   crashed client does not leak sandboxes. Unset by default (no expiry).
 - `Connectivity`: `port-forward` (default), `router-port-forward`,
   `in-cluster-service`, or `in-cluster-pod-ip`. `router-port-forward`
-  port-forwards the sandbox-router HTTP server so it can proxy to the sandbox
-  HTTP port. sandboxd `Run` and `Start` need gRPC and are not available on that
-  path. It cannot reach sandboxd when authentication is enabled (the router
-  strips `Authorization`, see #2102), and each request is capped by the
-  router's `ProxyTimeout`. Set `DisablePodIPRouting: true` to route by cache
-  or DNS
-  instead of a stored pod IP when the router has `--cache-enabled` or the
+  port-forwards the sandbox-router, which proxies sandboxd's REST and gRPC
+  APIs. gRPC (`Run`, `Start`, and watchers) needs sandbox-router v1.0.9 or
+  later. It cannot reach sandboxd when authentication is enabled because the
+  router strips `Authorization` (see #2102), and the router's `ProxyTimeout`
+  caps each REST request. Set `DisablePodIPRouting: true` to route by cache or
+  DNS instead of a stored pod IP when the router has `--cache-enabled` or the
   Sandbox has a headless Service.
 - `RouterNamespace`: namespace of `sandbox-router-svc` for the port-forward
   modes that go through the router. Defaults to the claim namespace. Set it to

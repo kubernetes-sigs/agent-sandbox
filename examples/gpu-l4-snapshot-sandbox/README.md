@@ -182,6 +182,22 @@ GKE reports **no error and no event** when a restore does not match a
 snapshot. It cold-starts the pod silently. Thus, the in-band nonce check is
 the only reliable proof of a restore.
 
+## Use the Python SDK instead
+
+The [Python SDK snapshot extension](../../clients/python/agentic-sandbox-client/k8s_agent_sandbox/gke_extensions/snapshots/README.md)
+(`pip install k8s-agent-sandbox`) runs steps 6 to 8 for you. It creates the
+`PodSnapshotManualTrigger`, waits for the snapshot to become `Ready`, and
+sets `operatingMode`. The SDK works with a `SandboxClaim`, so it needs the
+agent-sandbox extensions. It also needs a `SandboxTemplate` and a
+`SandboxWarmPool` that carry the pod template from `20-sandbox.yaml`.
+Keep the `gpu-snapshot-demo: l4` label so that the same
+`PodSnapshotPolicy` applies. Then call
+`sandbox = PodSnapshotSandboxClient().create_sandbox(warmpool=...)`,
+`sandbox.suspend()`, and `sandbox.resume()`. By default, `suspend()` takes
+a snapshot first. `resume()` restores from the latest `Ready` snapshot and
+reports its UID in the response. The measured results below come from the
+`kubectl` flow, not from the SDK.
+
 ## Measured results
 
 One run on GKE Standard, control plane `1.36.4-gke.2046003`, node pool
@@ -218,9 +234,7 @@ scales from zero, add the time to get an L4 node.
 - **Trigger RBAC is the access boundary.** A user who can create
   `PodSnapshotManualTrigger` objects in the namespace can checkpoint the
   memory of each sandbox in it, including secrets in memory.
-- For the Python SDK version of this flow, see the
-  [snapshot extension](../../clients/python/agentic-sandbox-client/k8s_agent_sandbox/gke_extensions/snapshots/README.md).
-  To start a warm pool from one primed snapshot, see
+- To start a warm pool from one primed snapshot, see
   [podsnapshot-golden-warmpool](../podsnapshot-golden-warmpool).
 
 ## Cleanup

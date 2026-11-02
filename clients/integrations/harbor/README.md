@@ -11,8 +11,11 @@ harbor run -d terminal-bench@2.0 -a terminus-2 -m <model> -k 5 -n 50 \
 
 Each trial gets one claim against a warm pool that holds the task's image, and
 every `exec` and file transfer goes through the Kubernetes pod exec API, so the
-task image needs nothing installed. Terminal-Bench 2.0's 89 tasks all ship a
-prebuilt image and run unchanged.
+task image needs no agent or server: only `sh`, `bash`, `tar` and `sleep`, plus
+`su` and `getent` when Harbor runs a command as another user, and coreutils
+`timeout` for deadlines (the command still runs without it, then without a
+sandbox-side deadline). Every Debian, Ubuntu and `python` base image has them.
+Terminal-Bench 2.0's 89 tasks all ship a prebuilt image and run unchanged.
 
 ## Quick install
 
@@ -22,8 +25,12 @@ pip install "git+https://github.com/kubernetes-sigs/agent-sandbox.git@<tag>#subd
 
 Requirements: Python >= 3.12 (Harbor's floor), a kubeconfig for a cluster with
 Agent Sandbox and its extension controllers (`SandboxTemplate`, `SandboxWarmPool`,
-`SandboxClaim`), and RBAC for the user running `harbor`: create, get, list and
-delete on those three kinds, get and list on pods, and create on `pods/exec`.
+`SandboxClaim`), and RBAC for the user running `harbor`: create, get, list, watch
+and delete on those three kinds (the SDK watches the claim until it is Ready); get,
+list and watch on `sandboxes` in `agents.x-k8s.io` (the SDK reads the Sandbox for
+the pod name); get and list on pods; and get and create on `pods/exec` (the exec
+websocket is a GET). The example in `examples/harbor-terminal-bench/deploy/rbac.yaml`
+has the Role.
 
 ## How a trial runs
 

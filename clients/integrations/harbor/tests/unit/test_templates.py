@@ -53,6 +53,8 @@ def test_render_template_pod_spec_and_network():
     assert t["spec"]["networkPolicy"]["ingress"] == []
     assert egress[0]["ports"] == [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]
     assert "10.0.0.0/8" in egress[1]["to"][0]["ipBlock"]["except"]
+    assert "100.64.0.0/10" in egress[1]["to"][0]["ipBlock"]["except"]
+    assert egress[1]["to"][1]["ipBlock"] == {"cidr": "::/0", "except": ["fc00::/7", "fe80::/10"]}
 
 
 def test_managed_default_network_and_no_root_leave_fields_out():
@@ -71,6 +73,9 @@ def test_template_name_tracks_the_rendered_spec():
     assert a != template_name_for(opts, "img:2", RES, "/app")
     assert a != template_name_for(opts, "img:1", ResourceSpec(cpu_request="2"), "/app")
     assert a != template_name_for(EnvironmentOptions(runtime_class="gvisor"), "img:1", RES, "/app")
+    # A different replica count or label set is a different pair, not a silent reuse.
+    assert a != template_name_for(EnvironmentOptions(warm_replicas=2), "img:1", RES, "/app")
+    assert a != template_name_for(EnvironmentOptions(extra_labels={"team": "x"}), "img:1", RES, "/app")
 
 
 def test_render_pool():

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import functools
 import logging
 import shlex
@@ -31,7 +32,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, AsyncIterator, Callable
 
 from harbor.environments.base import ExecResult
 from kubernetes import client
@@ -96,12 +97,16 @@ class PodExecTransport:
 
     def __init__(self, *, api_factory: Callable[[], client.CoreV1Api], pod: str, namespace: str,
                  container: str, executor: concurrent.futures.Executor,
-                 logger: logging.Logger | None = None, max_output_bytes: int = 0):
+                 logger: logging.Logger | None = None, max_output_bytes: int = 0,
+                 slots: asyncio.Semaphore | None = None):
         self._api_factory = api_factory
         self.pod = pod
         self.namespace = namespace
         self.container = container
         self._executor = executor
+        # One slot per executor thread. A call waits for a slot before its
+        # timeout starts, so a queued command is never reported as timed out.
+        self._slots = slots
         self._logger = logger or logging.getLogger(__name__)
         self._max_output = max_output_bytes
         self.exec_count = 0
@@ -109,6 +114,14 @@ class PodExecTransport:
     async def _run(self, fn: Callable[..., Any], *args: Any) -> Any:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self._executor, functools.partial(fn, *args))
+
+    @contextlib.asynccontextmanager
+    async def _slot(self) -> AsyncIterator[None]:
+        if self._slots is None:
+            yield
+            return
+        async with self._slots:
+            yield
 
     def _open(self, command: list[str], *, stdin: bool, binary: bool) -> Any:
         api = self._api_factory()
@@ -186,17 +199,19 @@ class PodExecTransport:
         holder: dict[str, Any] = {}
         self.exec_count += 1
         deadline = (timeout_sec + _LOCAL_TIMEOUT_GRACE_S) if timeout_sec else None
-        try:
-            stdout, stderr, code = await asyncio.wait_for(
-                self._run(self._exec_blocking, command, holder), timeout=deadline)
-        except asyncio.TimeoutError:
-            resp = holder.get("resp")
-            if resp is not None:
-                await self._run(resp.close)
-            return ExecResult(stdout=None, stderr=f"Command timed out after {timeout_sec} seconds",
-                              return_code=124)
-        except ApiException as exc:
-            raise self._translate(exc) from exc
+        async with self._slot():
+            try:
+                stdout, stderr, code = await asyncio.wait_for(
+                    self._run(self._exec_blocking, command, holder), timeout=deadline)
+            except asyncio.TimeoutError:
+                resp = holder.get("resp")
+                if resp is not None:
+                    await self._run(resp.close)
+                return ExecResult(stdout=None,
+                                  stderr=f"Command timed out after {timeout_sec} seconds",
+                                  return_code=124)
+            except ApiException as exc:
+                raise self._translate(exc) from exc
         return ExecResult(stdout=self._cap(stdout), stderr=self._cap(stderr), return_code=code)
 
     # --- files ----------------------------------------------------------------
@@ -235,7 +250,8 @@ class PodExecTransport:
             info.size = 0
             tar.addfile(info)
         try:
-            stderr = await self._run(self._upload_blocking, buf.getvalue(), target_dir)
+            async with self._slot():
+                stderr = await self._run(self._upload_blocking, buf.getvalue(), target_dir)
         except ApiException as exc:
             raise self._translate(exc) from exc
         marker_path = f"{target_dir.rstrip('/')}/{marker}"
@@ -280,7 +296,8 @@ class PodExecTransport:
     async def download_tar(self, source_dir: str, single: str | None = None) -> bytes:
         """A tar stream of ``source_dir`` (or of one entry ``single`` inside it)."""
         try:
-            data, _ = await self._run(self._download_blocking, source_dir, single)
+            async with self._slot():
+                data, _ = await self._run(self._download_blocking, source_dir, single)
         except ApiException as exc:
             raise self._translate(exc) from exc
         return data

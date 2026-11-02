@@ -232,3 +232,32 @@ def test_archive_round_trip(tmp_path: Path):
     single = archive.pack_file(src / "a.sh", "renamed.sh")
     archive.unpack(single, tmp_path / "one")
     assert (tmp_path / "one" / "renamed.sh").read_text() == "echo a"
+
+
+async def test_exec_waits_for_a_slot_before_its_timeout_starts(monkeypatch):
+    """A queued call must not be reported as timed out: the semaphore is taken
+    outside wait_for, so the timer covers only the running command."""
+    import asyncio
+    import k8s_agent_sandbox_harbor.transport.podexec as mod
+
+    slots = asyncio.Semaphore(1)
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    calls: list[str] = []
+
+    def fake_stream(fn, pod, namespace, **kwargs):
+        resp = FakeResp(stdout="ok")
+        calls.append(kwargs["command"][2])
+        return resp
+
+    monkeypatch.setattr(mod, "stream", fake_stream)
+    api = types.SimpleNamespace(connect_get_namespaced_pod_exec=object())
+    t = PodExecTransport(api_factory=lambda: api, pod="p", namespace="ns", container="main",
+                         executor=ex, slots=slots)
+    await slots.acquire()                                  # the one slot is busy
+    task = asyncio.create_task(t.exec("echo hi", timeout_sec=1))
+    await asyncio.sleep(1.3)                               # longer than timeout + nothing ran
+    assert not task.done() and calls == []
+    slots.release()
+    result = await asyncio.wait_for(task, timeout=5)
+    assert result.return_code == 0 and result.stdout == "ok"
+    ex.shutdown(wait=False)

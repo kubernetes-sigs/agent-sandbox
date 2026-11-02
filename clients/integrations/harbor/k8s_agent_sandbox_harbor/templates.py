@@ -17,8 +17,8 @@
 A Harbor task names an image and its resources. The template renders that as
 the pod the controller runs, the pool is the claim target (``replicas: 0``
 means every claim cold-starts from the template, ``warm_replicas`` keeps pods
-ready). Objects are named by a hash of the rendered spec, so a task whose image
-or resources change gets a new pair and an existing pair is never edited.
+ready). Objects are named by a hash of the rendered spec, the replica count and the
+labels, so a changed input gets a new pair and an existing pair is never edited.
 """
 
 from __future__ import annotations
@@ -43,7 +43,11 @@ CONTAINER = "main"
 
 # Private ranges the controller's default policy blocks; kept blocked here so
 # a task reaches the internet and cluster DNS, and nothing else inside the VPC.
-_PRIVATE_V4 = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"]
+# 100.64.0.0/10 is the shared-address range some clusters use for pods or
+# nodes; the IPv6 list covers unique-local and link-local addresses.
+_PRIVATE_V4 = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16",
+               "100.64.0.0/10"]
+_PRIVATE_V6 = ["fc00::/7", "fe80::/10"]
 
 
 @dataclass(frozen=True)
@@ -87,7 +91,7 @@ def dns_public_egress() -> list[dict[str, Any]]:
         {
             "to": [
                 {"ipBlock": {"cidr": "0.0.0.0/0", "except": list(_PRIVATE_V4)}},
-                {"ipBlock": {"cidr": "::/0"}},
+                {"ipBlock": {"cidr": "::/0", "except": list(_PRIVATE_V6)}},
             ],
         },
     ]
@@ -173,9 +177,13 @@ def render_pool(*, name: str, namespace: str, template_name: str, replicas: int,
 
 def template_name_for(options: EnvironmentOptions, image: str, resources: ResourceSpec,
                       workdir: str | None) -> str:
-    """Name from the rendered pod spec, so equal specs share one template."""
+    """Name from everything that shapes the pair, so equal inputs share one
+    template and pool, and a changed input (a new image, other resources, a
+    different replica count or labels) gets a new pair instead of a silent reuse."""
     pod = render_pod_spec(image, resources, options, workdir)
-    key = json.dumps({"pod": pod, "network": options.network}, sort_keys=True)
+    key = json.dumps({"pod": pod, "network": options.network,
+                      "replicas": options.warm_replicas, "labels": common_labels(options)},
+                     sort_keys=True)
     return object_name(options.template_prefix, key)
 
 

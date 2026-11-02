@@ -13,7 +13,8 @@ requires-python = ">=3.12"
 dependencies = [
     "harbor>=0.25,<1",
     "k8s-agent-sandbox[async]>=1.0.6,<2",
-    "kubernetes>=32.0.0",
+    # 36.0.0 stores the in-cluster token where its API client does not read it.
+    "kubernetes>=32.0.0,!=36.0.0",
     "pydantic>=2",
 ]
 

@@ -361,6 +361,8 @@ What "retrying" safely means differs per method:
 | `start()` and its handle's `write()`/`signal()`/`resize()` | No | Start the process again | A failed `start()` may have launched the process; a failed `write()` may have delivered a prefix of its data. A process interrupted by a lost connection is killed, not resumed. |
 | `read()` | No | Call it again | The file may have changed between attempts. |
 | `write()` | No | Resend the same `content` | sandboxd replaces the target atomically via a temporary file and rename, so a failed call never leaves the target partially written. But if the acknowledgement was lost, the write may already have committed server-side, and a retry can overwrite a concurrent update from someone else. |
+| `write()` with `append` | No | Check the file first | The append is not atomic, and a retry adds the content again. |
+| `write()` with `createOnly` | No | Call it again | If the acknowledgement was lost, the retry fails with `FAILED_PRECONDITION` because the file exists. |
 | `mkdir()` | No | Call it again | Idempotent: it succeeds when the directory already exists. |
 | `move()` / `copy()` | No | Check the source and destination first | If the acknowledgement was lost, the operation may already have happened. A repeated `move()` then fails with `NOT_FOUND` because the source is gone. A repeated `copy()` fails with `CONFLICT` because the destination exists, unless `overwrite` replaces a destination file. |
 | `readStream()` | No | Call it again from the beginning | Discard any partial output and reset your destination first — a partial download is never resumed. The file may have changed between attempts. |

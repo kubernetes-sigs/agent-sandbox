@@ -1312,8 +1312,7 @@ export class Sandbox {
         }
       },
       undefined,
-      (gen, signal) =>
-        gen.rest.write(path, bytes, { mode: opts?.mode }, signal),
+      (gen, signal) => gen.rest.write(path, bytes, opts ?? {}, signal),
     );
   }
 
@@ -1565,7 +1564,7 @@ export class Sandbox {
           }
         },
         (gen, signal) =>
-          gen.rest.writeStream(path, content, { mode: opts?.mode }, signal),
+          gen.rest.writeStream(path, content, opts ?? {}, signal),
       );
     } catch (err) {
       if (err instanceof SourceFailure) {

@@ -93,6 +93,10 @@ export class SandboxFiles {
    *
    * A trailing `/` or the sandbox root itself is rejected — write() never
    * targets a directory.
+   *
+   * With `opts.append`, sandboxd adds `content` to the end of the file instead
+   * of replacing it. This is not atomic. With `opts.createOnly`, the call
+   * fails with `FAILED_PRECONDITION` if `path` already exists.
    */
   write(
     path: string,

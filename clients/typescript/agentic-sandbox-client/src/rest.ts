@@ -56,6 +56,32 @@ function invalidArgument(message: string): SandboxError {
   return new SandboxError(message, { telemetryCode: "invalid_argument" });
 }
 
+/** The write options that become part of the PUT request. @internal */
+export interface WriteRequestOptions {
+  mode?: string;
+  append?: boolean;
+  createOnly?: boolean;
+}
+
+/** Query and headers of a PUT file request for the given write options. */
+function writeRequestParts(opts: WriteRequestOptions): {
+  query?: Record<string, string>;
+  headers: Record<string, string>;
+} {
+  validateMode(opts.mode);
+  const query: Record<string, string> = {};
+  if (opts.mode) query.mode = opts.mode;
+  if (opts.append) query.append = "true";
+  const headers: Record<string, string> = {
+    "Content-Type": "application/octet-stream",
+  };
+  if (opts.createOnly) headers["If-None-Match"] = "*";
+  return {
+    query: Object.keys(query).length > 0 ? query : undefined,
+    headers,
+  };
+}
+
 /** Throws before any request when `mode` is not four octal digits. @internal */
 export function validateMode(mode: string | undefined): void {
   if (mode !== undefined && !/^0[0-7]{3}$/.test(mode)) {
@@ -431,6 +457,7 @@ const KNOWN_API_CODES: ReadonlySet<string> = new Set([
   "NOT_FOUND",
   "PERMISSION_DENIED",
   "CONFLICT",
+  "FAILED_PRECONDITION",
   "INTERNAL",
 ]);
 
@@ -450,6 +477,8 @@ function normalizeApiCode(
       return "PERMISSION_DENIED";
     case 409:
       return "CONFLICT";
+    case 412:
+      return "FAILED_PRECONDITION";
     case 500:
       return "INTERNAL";
     default:
@@ -766,10 +795,10 @@ export class SandboxdRestClient {
   async write(
     path: string,
     content: Uint8Array,
-    opts: { mode?: string },
+    opts: WriteRequestOptions,
     signal: AbortSignal,
   ): Promise<void> {
-    validateMode(opts.mode);
+    const { query, headers } = writeRequestParts(opts);
     if (content.byteLength > this.opts.maxUploadSize) {
       throw invalidArgument(
         `content of ${content.byteLength} bytes exceeds the configured upload limit of ${this.opts.maxUploadSize} bytes`,
@@ -778,8 +807,8 @@ export class SandboxdRestClient {
     const encoded = resolveSandboxPath(path, "write");
     await this.requestNoContent("PUT", `/v1/files/${encoded}`, {
       signal,
-      query: opts.mode ? { mode: opts.mode } : undefined,
-      headers: { "Content-Type": "application/octet-stream" },
+      query,
+      headers,
       body: content as BodyInit,
     });
   }
@@ -804,10 +833,10 @@ export class SandboxdRestClient {
   async writeStream(
     path: string,
     content: ReadableStream<Uint8Array>,
-    opts: { mode?: string },
+    opts: WriteRequestOptions,
     signal: AbortSignal,
   ): Promise<number> {
-    validateMode(opts.mode);
+    const { query, headers } = writeRequestParts(opts);
     if (content.locked) {
       throw invalidArgument(
         "writeStream content is already locked by another reader",
@@ -838,8 +867,8 @@ export class SandboxdRestClient {
         signal,
         controller,
         duplex: "half",
-        query: opts.mode ? { mode: opts.mode } : undefined,
-        headers: { "Content-Type": "application/octet-stream" },
+        query,
+        headers,
         body: body as BodyInit,
       }));
     } catch (err) {

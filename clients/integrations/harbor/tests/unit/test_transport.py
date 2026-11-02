@@ -261,3 +261,34 @@ async def test_exec_waits_for_a_slot_before_its_timeout_starts(monkeypatch):
     result = await asyncio.wait_for(task, timeout=5)
     assert result.return_code == 0 and result.stdout == "ok"
     ex.shutdown(wait=False)
+
+
+async def test_timed_out_exec_closes_the_stream_off_the_exec_pool(monkeypatch):
+    """With the single exec thread hung, the close must still run (on the
+    default executor) and a failing close must not hide the timeout result."""
+    import asyncio
+    import threading
+    import k8s_agent_sandbox_harbor.transport.podexec as mod
+
+    release = threading.Event()
+
+    class HangingResp(FakeResp):
+        def is_open(self):
+            return not release.is_set()
+
+        def update(self, timeout=None):
+            release.wait(0.05)
+
+        def close(self):
+            release.set()
+            raise RuntimeError("close failed")
+
+    monkeypatch.setattr(mod, "stream", lambda fn, pod, ns, **kw: HangingResp())
+    monkeypatch.setattr(mod, "_LOCAL_TIMEOUT_GRACE_S", 0)
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    api = types.SimpleNamespace(connect_get_namespaced_pod_exec=object())
+    t = PodExecTransport(api_factory=lambda: api, pod="p", namespace="ns", container="main",
+                         executor=ex, slots=asyncio.Semaphore(1))
+    result = await asyncio.wait_for(t.exec("sleep 100", timeout_sec=1), timeout=5)
+    assert result.return_code == 124 and release.is_set()
+    ex.shutdown(wait=True)

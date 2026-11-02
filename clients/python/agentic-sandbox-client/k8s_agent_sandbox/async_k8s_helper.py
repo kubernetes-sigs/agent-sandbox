@@ -416,8 +416,16 @@ class AsyncK8sHelper:
             finally:
                 await w.close()
 
-    async def delete_sandbox_claim(self, name: str, namespace: str, *, expected_uid: str | None = None) -> None:
-        """Deletes a SandboxClaim, optionally requiring a matching UID."""
+    async def delete_sandbox_claim(
+        self, name: str, namespace: str, *, expected_uid: str | None = None,
+        log_level: int = logging.INFO, _request_timeout: float | None = None,
+    ) -> None:
+        """Deletes a SandboxClaim, optionally requiring a matching UID.
+
+        Args:
+            log_level: Log level for the logger during this function call.
+            _request_timeout: Optional total timeout in seconds, forwarded to kubernetes_asyncio.
+        """
         await self._ensure_initialized()
 
         delete_kwargs: dict[str, Any] = {}
@@ -432,9 +440,10 @@ class AsyncK8sHelper:
                 namespace=namespace,
                 plural=CLAIM_PLURAL_NAME,
                 name=name,
+                _request_timeout=_request_timeout,
                 **delete_kwargs,
             )
-            logger.info(f"Terminated SandboxClaim: {name}")
+            logger.log(log_level, f"Terminated SandboxClaim: {name}")
         except client.ApiException as e:
             if e.status != 404:
                 logger.error(f"Error terminating SandboxClaim {name}: {e}")

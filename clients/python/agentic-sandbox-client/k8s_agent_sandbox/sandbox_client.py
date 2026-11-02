@@ -405,7 +405,7 @@ class SandboxClient(Generic[T]):
             batch_id: Optional batch id; a DNS-1123 label starting with a letter, at most 52
                 characters. Generated if omitted.
             create_rps: Maximum claim creates started per second. Defaults to 50.
-            max_in_flight: Maximum claim creates in flight at once. Defaults to 20.
+            max_in_flight: Maximum claim creates and member deletes in flight at once. Defaults to 20.
             work_budget: Seconds the caller expects to work with the batch after it is Ready;
                 part of each claim's ``shutdownTime``. Defaults to 3600.
             quorum_timeout: Seconds after the last claim create that a group may take to reach

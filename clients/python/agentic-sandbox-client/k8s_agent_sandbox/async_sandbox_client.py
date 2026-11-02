@@ -252,11 +252,14 @@ class AsyncSandboxClient(Generic[T]):
             if await self._finish_detach(batch):
                 continue
             try:
-                # The handle stops renewing its Lease, so connect() must not hand out new connections.
+                # Stop new connects, creates, and deletes and drain in-flight deletes before
+                # cancelling Lease renewal or closing the caller's API session.
                 async with batch._lock:
                     batch._detached = True
+                    batch._stop_creating.set()
                     batch._changed.notify_all()
                 try:
+                    await batch._wait_active_deletes()
                     await batch._stop_background_tasks()
                 finally:
                     # A failed stop must not leave port-forwards open.
@@ -564,7 +567,7 @@ class AsyncSandboxClient(Generic[T]):
             batch_id: Optional batch id; a DNS-1123 label starting with a letter, at most 52
                 characters. Generated if omitted.
             create_rps: Maximum claim creates started per second. Defaults to 50.
-            max_in_flight: Maximum claim creates in flight at once. Defaults to 20.
+            max_in_flight: Maximum claim creates and member deletes in flight at once. Defaults to 20.
             work_budget: Seconds the caller expects to work with the batch after it is Ready;
                 part of each claim's ``shutdownTime``. Defaults to 3600.
             quorum_timeout: Seconds after the last claim create that a group may take to reach

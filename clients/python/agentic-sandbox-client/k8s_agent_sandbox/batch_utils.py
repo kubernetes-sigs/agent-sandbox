@@ -14,6 +14,7 @@
 
 """Validation, Lease, and retry helpers shared by both sync and async batch handles."""
 
+import hashlib
 import json
 import math
 import os
@@ -30,6 +31,7 @@ from itertools import accumulate
 from typing import Any, NamedTuple
 
 from .constants import (
+    BATCH_GROUP_LABEL,
     BATCH_ID_LABEL,
     BATCH_LEASE_DURATION_ANNOTATION,
     BATCH_QUORUM_TIMEOUT_ANNOTATION,
@@ -61,6 +63,7 @@ BATCH_DEFAULT_WORK_BUDGET_SECONDS = 3600
 # Added to each claim's shutdownTime
 BATCH_SHUTDOWN_MARGIN_SECONDS = 600
 BATCH_CREATE_ATTEMPTS = 3
+BATCH_DELETE_ATTEMPTS = 3
 # Extra wait past BATCH_REQUEST_TIMEOUT_SECONDS when stopping the creators, so a create that just
 # timed out has time to return and its worker to exit.
 BATCH_CREATOR_STOP_GRACE_SECONDS = 1
@@ -246,8 +249,9 @@ def validate_claim_batch_args(
         raise ValueError(f"create_rps must be a positive number, got {create_rps!r}")
 
     labels = dict(labels or {})
-    if BATCH_ID_LABEL in labels:
-        raise ValueError(f"labels must not set {BATCH_ID_LABEL}; claim_batch sets it")
+    for reserved in (BATCH_ID_LABEL, BATCH_GROUP_LABEL):
+        if reserved in labels:
+            raise ValueError(f"labels must not set {reserved}; claim_batch sets it")
     if labels:
         validate_labels(labels)
 
@@ -272,6 +276,20 @@ def validate_claim_batch_args(
             else validate_lease_duration_value(lease_duration)
         ),
     )
+
+
+def group_label_value(warmpool: str) -> str:
+    """Returns the ``BATCH_GROUP_LABEL`` value for a pool, a hash of its name that fits a label value.
+
+    64 bits of SHA-256, so two pools of one batch practically never share a value, which would make
+    ``release_group`` delete the other pool's claims too.
+    """
+    return hashlib.sha256(warmpool.encode()).hexdigest()[:16]
+
+
+def group_label_selector(batch_id: str, warmpool: str) -> str:
+    """Returns the label selector for one group's fill claims."""
+    return f"{BATCH_ID_LABEL}={batch_id},{BATCH_GROUP_LABEL}={group_label_value(warmpool)}"
 
 
 def fill_create_plan(batch_id: str, groups: Sequence[BatchGroup]) -> list[tuple[str, BatchGroup]]:

@@ -55,6 +55,7 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     --job-name=*) job_name=${args[$i]#--job-name=} ;;
     --jobs-dir|-o) jobs_dir=${args[$((i + 1))]:-$jobs_dir} ;;
     --jobs-dir=*) jobs_dir=${args[$i]#--jobs-dir=} ;;
+    -o?*) jobs_dir=${args[$i]#-o} ;;
   esac
 done
 echo "== harbor run: terminal-bench-sample@2.0, oracle agent, namespace $NAMESPACE, job $job_name"

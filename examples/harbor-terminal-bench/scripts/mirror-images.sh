@@ -37,6 +37,25 @@ images=$(grep -rhoE '^docker_image\s*=\s*"[^"]+"' "$work/tasks" --include=task.t
 count=$(echo "$images" | grep -c . || true)
 echo "mirroring $count images to $mirror"
 fail=0
+# Canonical source reference: Docker Hub shorthand expanded, so that
+# python:3.13 and docker.io/library/python:3.13 are one image, not two.
+canonical_source() {
+  local image=$1 first rest
+  first=${image%%/*}
+  rest=${image#*/}
+  if [[ "$image" == */* && ( "$first" == *.* || "$first" == *:* || "$first" == localhost ) ]]; then
+    case "$first" in
+      docker.io|index.docker.io|registry-1.docker.io)
+        [[ "$rest" == */* ]] || rest="library/$rest"
+        printf 'docker.io/%s' "$rest" ;;
+      *) printf '%s' "$image" ;;
+    esac
+  else
+    [[ "$image" == */* ]] || image="library/$image"
+    printf 'docker.io/%s' "$image"
+  fi
+}
+
 # Destination path = the path the integration's rewrite_registry() requests:
 # the registry host is dropped, and a Docker Hub image without a namespace
 # gets "library/" (so python:3.13 -> library/python:3.13).
@@ -57,9 +76,11 @@ mirror_path() {
   printf '%s' "$path"
 }
 
-# Two sources that map to one destination (the same path under two
-# registries) would overwrite each other; refuse before copying anything.
-collisions=$(while read -r image; do [[ -n "$image" ]] && printf '%s %s\n' "$(mirror_path "$image")" "$image"; done <<< "$images" \
+# Aliases of one image (python:3.13, docker.io/library/python:3.13) are copied
+# once. Two different sources that map to one destination (the same path
+# under two registries) would overwrite each other: refuse before any copy.
+sources=$(while read -r image; do [[ -n "$image" ]] && printf '%s %s\n' "$(canonical_source "$image")" "$image"; done <<< "$images" | sort -u -k1,1)
+collisions=$(while read -r canon image; do printf '%s %s\n' "$(mirror_path "$image")" "$canon"; done <<< "$sources" \
   | sort | awk '{ if ($1 == prev) { print prevline; print $0 } prev = $1; prevline = $0 }' | sort -u)
 if [[ -n "$collisions" ]]; then
   echo "refusing to mirror: these images map to the same destination path:" >&2
@@ -67,7 +88,7 @@ if [[ -n "$collisions" ]]; then
   exit 1
 fi
 
-while read -r image; do
+while read -r canon image; do
   [[ -z "$image" ]] && continue
   path=$(mirror_path "$image")
   if crane copy "$image" "$mirror/$path" >/dev/null 2>&1; then
@@ -75,6 +96,6 @@ while read -r image; do
   else
     echo "FAIL $image"; fail=$((fail + 1))
   fi
-done <<< "$images"
+done <<< "$sources"
 echo "done, $fail failures"
 exit $(( fail > 0 ))

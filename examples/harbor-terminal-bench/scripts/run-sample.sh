@@ -42,11 +42,25 @@ fi
 
 extra=()
 [[ -n "${KUBE_CONTEXT:-}" ]] && extra+=(--ek "kube_context=$KUBE_CONTEXT")
-job_name="sample-$(date +%Y%m%d-%H%M%S)"
+
+# The job name carries the time and this process id, so two launches in the
+# same second do not share a job directory. A caller's own --job-name or
+# --jobs-dir/-o (passed through in "$@") wins, and the report follows it.
+job_name="sample-$(date +%Y%m%d-%H%M%S)-$$"
+jobs_dir="jobs/harbor-terminal-bench"
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case "${args[$i]}" in
+    --job-name) job_name=${args[$((i + 1))]:-$job_name} ;;
+    --job-name=*) job_name=${args[$i]#--job-name=} ;;
+    --jobs-dir|-o) jobs_dir=${args[$((i + 1))]:-$jobs_dir} ;;
+    --jobs-dir=*) jobs_dir=${args[$i]#--jobs-dir=} ;;
+  esac
+done
 echo "== harbor run: terminal-bench-sample@2.0, oracle agent, namespace $NAMESPACE, job $job_name"
 harbor run -c "$here/configs/sample.yaml" --job-name "$job_name" --ek "namespace=$NAMESPACE" "${extra[@]}" "$@"
 
 echo "== leftovers in $NAMESPACE (expect none):"
 kubectl "${ctx_flag[@]}" -n "$NAMESPACE" get sandboxclaims 2>/dev/null || true
 echo "== report for $job_name:"
-python "$here/scripts/report.py" "jobs/harbor-terminal-bench/$job_name"
+python "$here/scripts/report.py" "$jobs_dir/$job_name"

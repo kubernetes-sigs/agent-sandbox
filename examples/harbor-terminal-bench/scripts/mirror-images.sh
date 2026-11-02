@@ -57,6 +57,16 @@ mirror_path() {
   printf '%s' "$path"
 }
 
+# Two sources that map to one destination (the same path under two
+# registries) would overwrite each other; refuse before copying anything.
+collisions=$(while read -r image; do [[ -n "$image" ]] && printf '%s %s\n' "$(mirror_path "$image")" "$image"; done <<< "$images" \
+  | sort | awk '{ if ($1 == prev) { print prevline; print $0 } prev = $1; prevline = $0 }' | sort -u)
+if [[ -n "$collisions" ]]; then
+  echo "refusing to mirror: these images map to the same destination path:" >&2
+  echo "$collisions" >&2
+  exit 1
+fi
+
 while read -r image; do
   [[ -z "$image" ]] && continue
   path=$(mirror_path "$image")

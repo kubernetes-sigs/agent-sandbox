@@ -18,6 +18,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -111,6 +112,7 @@ upstream-max-retries: 7
 mtls-mode: "optional"
 access-log: false
 enable-tracing: true
+grpc-web-allowed-origins: "https://app.example.com,https://admin.example.com:8443"
 `)
 	if err := LoadFromFile(path, fs); err != nil {
 		t.Fatalf("LoadFromFile: %v", err)
@@ -136,6 +138,9 @@ enable-tracing: true
 	}
 	if !cfg.EnableTracing {
 		t.Errorf("EnableTracing should be true")
+	}
+	if want := []string{"https://app.example.com", "https://admin.example.com:8443"}; !reflect.DeepEqual(cfg.GRPCWebAllowedOrigins, want) {
+		t.Errorf("GRPCWebAllowedOrigins: %v, want %v", cfg.GRPCWebAllowedOrigins, want)
 	}
 }
 

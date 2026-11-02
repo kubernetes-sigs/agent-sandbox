@@ -223,6 +223,17 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 			"client-supplied one first; otherwise a client with direct "+
 			"network access to the router could forge its own scheme. Has "+
 			"no effect without --authz-cookie-name.")
+	stringSliceVar(fs, &c.GRPCWebAllowedOrigins, "grpc-web-allowed-origins",
+		"Comma-separated allowlist of scheme://host[:port] browser origins "+
+			"permitted to call the router with gRPC-Web (Content-Type "+
+			"application/grpc-web). Listed origins get CORS response headers "+
+			"(same-origin requests are always allowed those too) and their "+
+			"CORS preflights are answered by the router; every other OPTIONS "+
+			"request is proxied unchanged. When empty (the default), "+
+			"cross-origin browser callers get no CORS headers and the browser "+
+			"blocks the response; non-browser clients are unaffected either "+
+			"way. This list gates only gRPC-Web traffic — plain HTTP CORS "+
+			"behavior is unchanged.")
 
 	fs.BoolVar(&c.CacheEnabled, "cache-enabled", c.CacheEnabled,
 		"Enable the in-process Pod-IP cache (KEP-NNNN fast path). When on, "+

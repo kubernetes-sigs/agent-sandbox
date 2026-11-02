@@ -251,21 +251,29 @@ class AgentSandboxEnvironment(BaseEnvironment):
         self._timings["template_s"] = time.monotonic() - t0
 
         t1 = time.monotonic()
-        self._sandbox = await clients.sandbox_client.create_sandbox(
-            self._pool, namespace=opts.namespace,
-            sandbox_ready_timeout=opts.ready_timeout_s,
-            claim_name=self.claim_name,
-            shutdown_after_seconds=opts.claim_ttl_s or None,
-            labels=self._claim_labels(),
-            pod_annotations={ANNOTATION_SESSION: self.session_id},
-        )
+        try:
+            self._sandbox = await clients.sandbox_client.create_sandbox(
+                self._pool, namespace=opts.namespace,
+                sandbox_ready_timeout=opts.ready_timeout_s,
+                claim_name=self.claim_name,
+                shutdown_after_seconds=opts.claim_ttl_s or None,
+                labels=self._claim_labels(),
+                pod_annotations={ANNOTATION_SESSION: self.session_id},
+            )
+        except BaseException:
+            # The SDK keeps a claim it was given a name for, even when it never
+            # became Ready; without this the claim lives until its shutdown time.
+            with contextlib.suppress(Exception):
+                await asyncio.shield(clients.sandbox_client.delete_sandbox(
+                    self.claim_name, namespace=opts.namespace))
+            raise
         self._timings["claim_ready_s"] = time.monotonic() - t1
 
         pod = await self._sandbox.get_pod_name()
         self._transport = PodExecTransport(
             api_factory=clients.core_v1_factory, pod=pod, namespace=opts.namespace,
             container=CONTAINER, executor=clients.executor, logger=self.logger,
-            max_output_bytes=opts.max_output_bytes)
+            max_output_bytes=opts.max_output_bytes, slots=clients.exec_slots)
         t2 = time.monotonic()
         remaining = max(30.0, opts.ready_timeout_s - (time.monotonic() - t1))
         await self._transport.wait_ready(remaining)

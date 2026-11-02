@@ -303,3 +303,22 @@ async def test_close_clients_closes_the_api_client_and_executor():
                                              api_client=api)
     await mod.close_clients()
     assert api.closed == 1 and sc.closed == 1 and mod._clients == {} and ex._shutdown
+
+
+async def test_a_failed_create_deletes_the_named_claim(task_dir, trial_paths, env_config, fake_clients):
+    sc = fake_clients["sandbox_client"]
+    deleted: list[tuple[str, str]] = []
+
+    async def failing_create(*a, **kw):
+        raise TimeoutError("claim not Ready in time")
+
+    async def delete_sandbox(claim_name, namespace="default"):
+        deleted.append((claim_name, namespace))
+
+    sc.create_sandbox = failing_create
+    sc.delete_sandbox = delete_sandbox
+    env = make_env(task_dir, trial_paths, env_config, namespace="harbor")
+    with pytest.raises(TimeoutError):
+        await env.start(force_build=False)
+    assert deleted == [(env.claim_name, "harbor")]
+    await env.stop(delete=True)                              # nothing to delete, no error

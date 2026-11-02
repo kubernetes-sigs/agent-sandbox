@@ -537,7 +537,7 @@ func (r *signalReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// A PUT that waits for replaceMu must publish the time of its rename, not the
+// A PUT that waits for its path lock must publish the time of its rename, not the
 // time it finished staging, or a later conditional PUT could miss it.
 func TestAtomicReplaceStampsRenameTime(t *testing.T) {
 	s, _, root := newRESTFixture(t)
@@ -546,25 +546,26 @@ func TestAtomicReplaceStampsRenameTime(t *testing.T) {
 
 	staged := make(chan struct{})
 	src := &signalReader{Reader: strings.NewReader("new"), eof: staged}
-	s.replaceMu.Lock()
+	mu := s.replaceLocks.mutex(path)
+	mu.Lock()
 	done := make(chan error, 1)
 	go func() { done <- s.atomicReplace(nil)(path, src, 0o644) }()
 
 	select {
 	case <-staged:
 	case err := <-done:
-		s.replaceMu.Unlock()
+		mu.Unlock()
 		require.FailNow(t, "write failed before staging", "err=%v", err)
 	}
 	time.Sleep(20 * time.Millisecond)
 	select {
 	case err := <-done:
-		s.replaceMu.Unlock()
-		require.FailNow(t, "write finished while replaceMu was held", "err=%v", err)
+		mu.Unlock()
+		require.FailNow(t, "write finished while the path lock was held", "err=%v", err)
 	default:
 	}
 	released := time.Now()
-	s.replaceMu.Unlock()
+	mu.Unlock()
 	require.NoError(t, <-done)
 
 	info, err := os.Stat(path)
@@ -596,6 +597,48 @@ func TestAtomicReplaceDoesNotFollowTempSymlink(t *testing.T) {
 	info, err := os.Stat(outside)
 	require.NoError(t, err)
 	require.True(t, info.ModTime().Equal(old), "outside mtime changed to %v", info.ModTime())
+}
+
+// An overwrite of one path must not wait for the lock of another.
+func TestAtomicReplaceDoesNotBlockOtherPaths(t *testing.T) {
+	s, _, root := newRESTFixture(t)
+	held := filepath.Join(root, "held.txt")
+	other := held
+	for i := 0; s.replaceLocks.mutex(other) == s.replaceLocks.mutex(held); i++ {
+		other = filepath.Join(root, fmt.Sprintf("other%d.txt", i))
+	}
+
+	mu := s.replaceLocks.mutex(held)
+	mu.Lock()
+	defer mu.Unlock()
+	require.NoError(t, s.atomicReplace(nil)(other, strings.NewReader("x"), 0o644))
+}
+
+// A regular file in an archive is replaced under the lock of its path, so it
+// cannot slip between the check and the rename of a conditional PUT.
+func TestExtractTarWaitsForPathLock(t *testing.T) {
+	s, handler, root := newRESTFixture(t)
+	mu := s.replaceLocks.mutex(filepath.Join(s.resolvedRoot, "dest", "a.txt"))
+	mu.Lock()
+
+	archive := buildTar(t, tarFile("a.txt", "new", 0o644))
+	done := make(chan int, 1)
+	go func() {
+		done <- doRequest(handler, http.MethodPut, "/v1/files/dest?extract=tar", archive, nil).Code
+	}()
+
+	select {
+	case code := <-done:
+		mu.Unlock()
+		require.FailNow(t, "extraction finished while the path lock was held", "code=%d", code)
+	case <-time.After(50 * time.Millisecond):
+	}
+	mu.Unlock()
+	require.Equal(t, http.StatusNoContent, <-done)
+
+	got, err := os.ReadFile(filepath.Join(root, "dest", "a.txt"))
+	require.NoError(t, err)
+	require.Equal(t, "new", string(got))
 }
 
 func TestPutIfUnmodifiedSinceRacesToOneWinner(t *testing.T) {

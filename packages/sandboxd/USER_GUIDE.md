@@ -175,7 +175,8 @@ default) via symlink-aware sanitization; traversal attempts return
 
 ### Concurrency semantics
 
-Requests are handled in parallel, with no server-side serialization. The
+Requests are handled in parallel, with no server-side serialization, except that
+overwrites of one path take a short lock around the rename. The
 atomic-write strategy prevents partial file contents for replacement writes (not
 appends, see below), but it does not impose an ordering across requests:
 
@@ -196,7 +197,7 @@ appends, see below), but it does not impose an ordering across requests:
   file's modification time at one-second precision, so a change in the same
   second as the date is not detected, and two writers with that date can both
   succeed. The check and the rename are atomic against other overwriting `PUT`
-  requests, but not against `DELETE`, `POST`, `append=true`, or processes in the
+  requests and file entries of `extract=tar`, but not against `DELETE`, `POST`, `append=true`, or processes in the
   sandbox. A missing path or a directory gets `412`.
 - **Appends (`append=true`)** are written in place, not atomically: a read can
   see a partial append, and concurrent appends to one path can interleave. A

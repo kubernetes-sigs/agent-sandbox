@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"io/fs"
 	"math"
@@ -73,6 +74,18 @@ const (
 // If-Unmodified-Since.
 var errChanged = errors.New("path changed")
 
+// replaceLocks serializes the overwrites of one path. A path hashes to one of a
+// fixed set of mutexes, so overwrites of different paths rarely wait for each
+// other.
+type replaceLocks [64]sync.Mutex
+
+// mutex returns the mutex that guards path.
+func (l *replaceLocks) mutex(path string) *sync.Mutex {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(path))
+	return &l[h.Sum32()%uint32(len(l))]
+}
+
 // RESTServer implements the sandboxd Filesystem & Runtime REST API on top of
 // net/http. All file paths are confined to rootDir via pathutil.SanitizePath.
 type RESTServer struct {
@@ -83,10 +96,11 @@ type RESTServer struct {
 	ready             atomic.Bool
 	log               logr.Logger
 
-	// replaceMu is held across the rename of every PUT that overwrites a file,
-	// and across the check of an If-Unmodified-Since write, so the check and
-	// the rename of a conditional write cannot interleave with another PUT.
-	replaceMu sync.Mutex
+	// replaceLocks is held across the rename of every PUT that overwrites a
+	// file, and across the check of an If-Unmodified-Since write, so the check
+	// and the rename of a conditional write cannot interleave with another
+	// overwrite of the same path.
+	replaceLocks replaceLocks
 
 	// environ is swappable for tests; defaults to os.Environ.
 	environ func() []string
@@ -716,7 +730,7 @@ func (s *RESTServer) unmodifiedCheck(w http.ResponseWriter, r *http.Request) (ch
 	}, true
 }
 
-// atomicReplace is atomicWrite that holds replaceMu around the rename. When
+// atomicReplace is atomicWrite that holds the lock of target around the rename. When
 // check is not nil, it also runs check before writing, so a rejected request
 // leaves nothing behind, and again under the lock just before the rename. It
 // stamps the file with the rename time, so a write that waited for the lock
@@ -730,8 +744,9 @@ func (s *RESTServer) atomicReplace(check func(target string) error) func(target 
 			return err
 		}
 		return writeViaTemp(target, src, mode, func(tmp, target string) error {
-			s.replaceMu.Lock()
-			defer s.replaceMu.Unlock()
+			mu := s.replaceLocks.mutex(target)
+			mu.Lock()
+			defer mu.Unlock()
 			if err := check(target); err != nil {
 				return err
 			}
@@ -963,7 +978,7 @@ func (s *RESTServer) extractEntry(body io.Reader, hdr *tar.Header, dir string) e
 		// Keep owner access so the entries below the directory can be written.
 		return makeDirectory(leaf, perm|0o700, true)
 	case tar.TypeReg:
-		return atomicWrite(leaf, body, perm)
+		return s.atomicReplace(nil)(leaf, body, perm)
 	default:
 		return replaceSymlink(leaf, hdr.Linkname)
 	}

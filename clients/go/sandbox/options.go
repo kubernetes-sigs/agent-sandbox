@@ -76,29 +76,23 @@ const (
 	// With RuntimeSandboxd the forward targets the sandbox pod itself, which
 	// does not work for Kata or gVisor pods: their workload does not listen in
 	// the pod's host-side network namespace. Use an in-cluster mode, or
-	// ConnectivityRouterPortForward for the HTTP API. gRPC still needs a
-	// direct path.
+	// ConnectivityRouterPortForward.
 	// RuntimeLegacyPython forwards to the sandbox-router instead and is
 	// unaffected.
 	ConnectivityPortForward Connectivity = "port-forward"
 
-	// ConnectivityRouterPortForward port-forwards the sandbox-router HTTP
-	// server and proxies to sandboxd's REST port (X-Sandbox-Port:
-	// SandboxdRESTPort). Requires RuntimeSandboxd. The legacy runtime already
-	// uses ConnectivityPortForward for the same tunnel.
+	// ConnectivityRouterPortForward port-forwards the sandbox-router, which
+	// proxies sandboxd's REST API to SandboxdRESTPort and its gRPC API (Run,
+	// Start, and Watchers) to SandboxdGRPCPort. gRPC needs sandbox-router
+	// v1.0.9 or later. Requires RuntimeSandboxd. The legacy runtime already
+	// uses ConnectivityPortForward for the same tunnel. This is the laptop or
+	// CI path for Kata and gVisor sandboxes, which pod port-forward cannot
+	// reach.
 	//
-	// This mode exposes only the router's HTTP API. The router itself carries
-	// native gRPC, but that is not wired into this path, so Run and Start
-	// return ErrUnsupportedByRuntime. This is the laptop or CI path for Kata
-	// and gVisor sandboxes, which pod port-forward cannot reach.
-	//
-	// Two sandboxd features stay out of reach through the router today. The
-	// router strips the Authorization header before forwarding, so sandboxd
-	// started with --auth-token-* rejects every routed call except
-	// GET /v1/health (see #2102). The router also caps each request at its
-	// ProxyTimeout (default 180s), so a file transfer longer than that fails
-	// even with a larger RequestTimeout; raise the router's ProxyTimeout to
-	// match.
+	// The router strips the Authorization header, so sandboxd rejects every
+	// routed call except GET /v1/health when it runs with --auth-token-*
+	// (#2102). The router also caps each REST request at its ProxyTimeout
+	// (default 180s), so raise ProxyTimeout for longer file transfers.
 	ConnectivityRouterPortForward Connectivity = "router-port-forward"
 	// ConnectivityInClusterService dials the Sandbox's headless Service by
 	// its in-cluster DNS name (Status.ServiceFQDN), taking the apiserver —
@@ -554,7 +548,7 @@ func (o *Options) validateCommon() error {
 	}
 	if o.Runtime == RuntimeSandboxd {
 		if o.GatewayName != "" {
-			return fmt.Errorf("sandbox: RuntimeSandboxd cannot be combined with GatewayName: Gateway mode does not support sandboxd yet; use %s for the REST API, or pod port-forward or an in-cluster mode when Run is required", ConnectivityRouterPortForward)
+			return fmt.Errorf("sandbox: RuntimeSandboxd cannot be combined with GatewayName: Gateway mode does not support sandboxd yet; use %s, pod port-forward, or an in-cluster mode", ConnectivityRouterPortForward)
 		}
 		if o.SandboxdRESTPort <= 0 || o.SandboxdRESTPort > 65535 {
 			return fmt.Errorf("sandbox: SandboxdRESTPort must be between 1 and 65535, got %d", o.SandboxdRESTPort)

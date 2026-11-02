@@ -108,7 +108,7 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 		}
 		strategy = ics
 	case opts.Connectivity == ConnectivityRouterPortForward:
-		// REST through the sandbox-router. gRPC is not forwarded.
+		// REST and gRPC both go through the sandbox-router.
 		strategy = newTunnelStrategy(k8s, opts, tracer, svcName, true)
 	case opts.Runtime == RuntimeSandboxd:
 		// sandboxd talks to the sandbox pod, not the sandbox-router, and the
@@ -156,6 +156,7 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 		Strategy:            strategy,
 		Namespace:           opts.Namespace,
 		ServerPort:          serverPort,
+		SandboxdGRPCPort:    opts.SandboxdGRPCPort,
 		RouterHeaders:       routerHeaders,
 		RequestTimeout:      opts.RequestTimeout,
 		PerAttemptTimeout:   opts.PerAttemptTimeout,

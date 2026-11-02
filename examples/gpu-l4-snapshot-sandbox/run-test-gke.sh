@@ -27,8 +27,9 @@ cd "$(dirname "$0")"
 : "${DEMO_IMAGE:?set DEMO_IMAGE}"
 SB=gpu-l4-sandbox
 
-# The manifests create their objects in default. Pin each kubectl call to
-# it, so that the script works with any current namespace.
+# The namespaced objects are in default (the PodSnapshotStorageConfig is
+# cluster-scoped). Pin each kubectl call to default, so that the script
+# works with any current namespace.
 kubectl() { command kubectl --namespace=default "$@"; }
 
 call() { # call <GET|POST> <path> -> prints the JSON reply

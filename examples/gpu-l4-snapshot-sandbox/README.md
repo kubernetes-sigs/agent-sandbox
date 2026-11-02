@@ -118,10 +118,11 @@ docker buildx build --platform linux/amd64 --push -t "$DEMO_IMAGE" image/
 
 ## 4. Deploy the snapshot config and the Sandbox
 
-The manifests create their objects in the `default` namespace, and the
-commands below use unqualified names. If your current namespace is
-different, run `kubectl config set-context --current --namespace=default`
-first.
+The `Sandbox`, its `ServiceAccount`, the `PodSnapshotPolicy`, and the
+trigger are in the `default` namespace. The `PodSnapshotStorageConfig` is
+cluster-scoped. The commands below use unqualified names. If your current
+namespace is different, run
+`kubectl config set-context --current --namespace=default` first.
 
 ```sh
 envsubst < 00-storageconfig.yaml | kubectl apply -f -

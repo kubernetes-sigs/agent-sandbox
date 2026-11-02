@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # Copyright 2026 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -36,14 +37,29 @@ images=$(grep -rhoE '^docker_image\s*=\s*"[^"]+"' "$work/tasks" --include=task.t
 count=$(echo "$images" | grep -c . || true)
 echo "mirroring $count images to $mirror"
 fail=0
+# Destination path = the path the integration's rewrite_registry() requests:
+# the registry host is dropped, and a Docker Hub image without a namespace
+# gets "library/" (so python:3.13 -> library/python:3.13).
+mirror_path() {
+  local image=$1 first rest path
+  first=${image%%/*}
+  rest=${image#*/}
+  if [[ "$image" == */* && ( "$first" == *.* || "$first" == *:* || "$first" == localhost ) ]]; then
+    path=$rest
+    case "$first" in
+      docker.io|index.docker.io|registry-1.docker.io)
+        [[ "$path" == */* ]] || path="library/$path" ;;
+    esac
+  else
+    path=$image
+    [[ "$path" == */* ]] || path="library/$path"
+  fi
+  printf '%s' "$path"
+}
+
 while read -r image; do
   [[ -z "$image" ]] && continue
-  path=$image
-  case "$path" in
-    */*) ;;
-    *) path="library/$path" ;;
-  esac
-  path=${path#docker.io/}
+  path=$(mirror_path "$image")
   if crane copy "$image" "$mirror/$path" >/dev/null 2>&1; then
     echo "ok   $image"
   else

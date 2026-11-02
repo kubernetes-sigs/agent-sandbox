@@ -101,10 +101,13 @@ kubectl -n harbor get sandboxtemplates,sandboxwarmpools,sandboxclaims
 kubectl -n harbor get pods -w
 ```
 
-Expected outcome: 10 of 10 trials pass with reward 1.0. The first trial of each
-task pays the image pull on the kind node (one to three minutes for the larger
-images; `ready_timeout_s` is 600 in the sample config for that reason); later
-attempts of the same task start in seconds.
+The target is 10 of 10 trials with reward 1.0 and no `error` row. The recorded
+runs below scored 7 of 10 on both kind and GKE, with the same three task-side
+failures each time (see "Recorded runs"); an `error` row, not a zero reward, is
+what points at the cluster or this integration. The first trial of each task pays
+the image pull on the kind node (one to three minutes for the larger images;
+`ready_timeout_s` is 600 in the sample config for that reason); later attempts of
+the same task start in seconds.
 
 To keep a sandbox for inspection, add `--no-delete`:
 
@@ -124,6 +127,9 @@ examples/harbor-terminal-bench/scripts/cleanup.sh harbor --claims
 2. **RBAC.** `kubectl apply -f deploy/namespace.yaml -f deploy/rbac.yaml`, then bind
    the role to the identity that runs Harbor:
    `kubectl -n harbor create rolebinding harbor-runner --role=harbor-runner --user=<you>`.
+   The Role grants create, get, list, watch and delete on the three extension kinds,
+   read on `sandboxes`, read on pods, and `get` plus `create` on `pods/exec` (the
+   exec websocket is a GET).
 3. **Images.** Docker Hub rate-limits anonymous pulls, and a 50-wide run pulls 89
    images across many nodes. Mirror them once into Artifact Registry, then point
    the run at the mirror:
@@ -221,12 +227,12 @@ cosmetic.
 | Path | What it is |
 | --- | --- |
 | `deploy/namespace.yaml` | The `harbor` namespace with Pod Security Admission `baseline` (Harbor needs root in the pod). |
-| `deploy/rbac.yaml` | A Role with the verbs the runner needs: the three extension kinds, `sandboxes` read, pods read, `pods/exec`. |
+| `deploy/rbac.yaml` | A Role with the verbs the runner needs: the three extension kinds (incl. watch), `sandboxes` read, pods read, `get` and `create` on `pods/exec`. |
 | `configs/sample.yaml` | Oracle agent on `terminal-bench-sample@2.0`, 4 concurrent trials. |
 | `configs/tb2.yaml` | Terminus 2 on `terminal-bench@2.0`, 5 attempts, 50 concurrent. |
 | `configs/gvisor.yaml` | Overlay: gVisor runtime class, node selector and toleration for a GKE Sandbox pool. |
 | `scripts/run-sample.sh` | The kind smoke run end to end. |
-| `scripts/mirror-images.sh` | Copies a dataset's task images into a registry with `crane`. |
+| `scripts/mirror-images.sh` | Copies a dataset's task images into a registry with `crane`, at the paths `--ek image_mirror` will request (registry host dropped, `library/` added for Docker Hub shorthand). |
 | `scripts/cleanup.sh` | Deletes leftover claims, or everything the integration created. |
 | `scripts/report.py` | Summarizes a job directory; standard library only, tested in `tests/`. |
 

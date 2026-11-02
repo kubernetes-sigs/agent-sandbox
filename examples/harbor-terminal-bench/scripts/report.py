@@ -80,7 +80,7 @@ def load_rows(job_dir: Path) -> list[dict[str, Any]]:
             rows.append(summarize_trial(result))
         except (OSError, ValueError) as exc:
             rows.append({"task": path.parent.name, "trial": path.parent.name, "reward": None,
-                         "outcome": f"unreadable result.json: {exc}", "env_setup_s": None,
+                         "outcome": f"error: unreadable result.json ({exc})", "env_setup_s": None,
                          "agent_s": None, "verifier_s": None})
     return rows
 

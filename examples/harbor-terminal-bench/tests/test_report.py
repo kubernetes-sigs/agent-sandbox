@@ -51,8 +51,11 @@ def test_rows_and_summary(tmp_path: Path):
     _write(job, "regex-log__b", _result("regex-log", "regex-log__b", reward=0))
     _write(job, "broken__c", _result("broken", "broken__c", exc="AgentTimeoutError"))
     (job / "result.json").write_text(json.dumps({"id": "job-level", "stats": {}}))   # skipped
+    (job / "garbled__d").mkdir()
+    (job / "garbled__d" / "result.json").write_text("{not json")
     rows = report.load_rows(job)
-    assert [r["outcome"] for r in rows] == ["error: AgentTimeoutError", "pass", "fail"]
+    assert [r["outcome"][:20] for r in rows] == ["error: AgentTimeoutE", "error: unreadable re", "pass", "fail"]
+    rows = [r for r in rows if not r["outcome"].startswith("error: unreadable")]
     assert rows[1]["env_setup_s"] == 12.5 and rows[1]["agent_s"] == 60.0 and rows[1]["verifier_s"] is None
     s = report.summary(rows)
     assert (s["trials"], s["passed"], s["errors"], s["pass_rate"]) == (3, 1, 1, 0.333)

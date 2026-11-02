@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # Copyright 2026 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -41,10 +42,11 @@ fi
 
 extra=()
 [[ -n "${KUBE_CONTEXT:-}" ]] && extra+=(--ek "kube_context=$KUBE_CONTEXT")
-echo "== harbor run: terminal-bench-sample@2.0, oracle agent, namespace $NAMESPACE"
-harbor run -c "$here/configs/sample.yaml" --ek "namespace=$NAMESPACE" "${extra[@]}" "$@"
+job_name="sample-$(date +%Y%m%d-%H%M%S)"
+echo "== harbor run: terminal-bench-sample@2.0, oracle agent, namespace $NAMESPACE, job $job_name"
+harbor run -c "$here/configs/sample.yaml" --job-name "$job_name" --ek "namespace=$NAMESPACE" "${extra[@]}" "$@"
 
 echo "== leftovers in $NAMESPACE (expect none):"
 kubectl "${ctx_flag[@]}" -n "$NAMESPACE" get sandboxclaims 2>/dev/null || true
-echo "== report:"
-python "$here/scripts/report.py" jobs/harbor-terminal-bench
+echo "== report for $job_name:"
+python "$here/scripts/report.py" "jobs/harbor-terminal-bench/$job_name"

@@ -135,7 +135,9 @@ export class SandboxFiles {
    * stream producing the same content. sandboxd replaces the target
    * atomically using a temporary file and rename. A failed call may already
    * have committed the write if the acknowledgement was lost, and retrying
-   * may overwrite concurrent updates. `sandboxd.maxUploadSize` is enforced
+   * may overwrite concurrent updates. With `append`, the write is not atomic:
+   * an oversized or interrupted stream can leave a prefix in the target, and a
+   * retry appends it again. `sandboxd.maxUploadSize` is enforced
    * before forwarding each chunk; the server may receive a prefix within the
    * limit before an oversized upload is aborted. `opts.timeoutMs` covers
    * connection setup until the server acknowledges the write, including time

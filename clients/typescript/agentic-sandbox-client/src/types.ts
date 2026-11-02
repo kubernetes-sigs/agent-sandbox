@@ -235,9 +235,15 @@ export interface ProcessCallOptions {
 export interface WriteOptions extends RuntimeCallOptions {
   /** POSIX file mode, e.g. "0644". Must match `^0[0-7]{3}$`. */
   mode?: string;
-  /** Add to the end of the file instead of replacing it. Not atomic. Default: false. */
+  /**
+   * Add to the end of the file instead of replacing it. Not atomic. Default:
+   * false. A sandboxd that predates this option ignores it and replaces the file.
+   */
   append?: boolean;
-  /** Fail with `FAILED_PRECONDITION` if `path` already exists. Default: false. */
+  /**
+   * Fail with `FAILED_PRECONDITION` if `path` already exists. Default: false. A
+   * sandboxd that predates this option ignores it and replaces the file.
+   */
   createOnly?: boolean;
 }
 

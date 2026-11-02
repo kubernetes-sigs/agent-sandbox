@@ -362,11 +362,11 @@ What "retrying" safely means differs per method:
 | `read()` | No | Call it again | The file may have changed between attempts. |
 | `write()` | No | Resend the same `content` | sandboxd replaces the target atomically via a temporary file and rename, so a failed call never leaves the target partially written. But if the acknowledgement was lost, the write may already have committed server-side, and a retry can overwrite a concurrent update from someone else. |
 | `write()` with `append` | No | Check the file first | The append is not atomic, and a retry adds the content again. |
-| `write()` with `createOnly` | No | Call it again | If the acknowledgement was lost, the retry fails with `FAILED_PRECONDITION` because the file exists. |
+| `write()` with `createOnly` | No | Call it again | If the acknowledgement was lost, the retry fails with `FAILED_PRECONDITION` because the file exists. A sandboxd that predates `append` and `createOnly` ignores them and replaces the file, so use them only with a matching sandboxd. |
 | `mkdir()` | No | Call it again | Idempotent: it succeeds when the directory already exists. |
 | `move()` / `copy()` | No | Check the source and destination first | If the acknowledgement was lost, the operation may already have happened. A repeated `move()` then fails with `NOT_FOUND` because the source is gone. A repeated `copy()` fails with `CONFLICT` because the destination exists, unless `overwrite` replaces a destination file. |
 | `readStream()` | No | Call it again from the beginning | Discard any partial output and reset your destination first — a partial download is never resumed. The file may have changed between attempts. |
-| `writeStream()` | No | Provide a fresh stream producing the same content | The input stream is consumed at most once, so retrying needs a new stream instance, not the same one rewound. Same atomicity/acknowledgement/concurrent-update caveats as `write()`. |
+| `writeStream()` | No | Provide a fresh stream producing the same content | The input stream is consumed at most once, so retrying needs a new stream instance, not the same one rewound. Same atomicity/acknowledgement/concurrent-update caveats as `write()`. With `append`, an oversized or interrupted stream can leave a prefix in the target, and a retry adds it again. |
 
 The atomicity guarantee — the target path never briefly shows partial content — is independent of whether *you* can tell a given call actually completed server-side, and of whether a retry might overwrite someone else's concurrent write.
 

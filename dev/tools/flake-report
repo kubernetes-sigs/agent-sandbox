@@ -306,12 +306,18 @@ def test_source_paths(name):
 
     TestGrid reports every pytest test as "pytest.<name>" with no suite, and
     dev/tools/test-unit runs pytest suites from the Python SDK, the
-    integrations, the examples and the dev tooling, so a pytest name has to
-    match all of those roots. Otherwise a PR that adds a failing test to an
-    integration is reported as main-wide breakage."""
+    integrations, the examples and three dev tooling directories, so a
+    pytest name has to match all of those roots. Otherwise a PR that adds a
+    failing test to an integration is reported as main-wide breakage. The
+    cost is that a genuine SDK flake on a PR touching one of these trees is
+    counted as that PR's regression; flaky still needs two distinct PRs, so
+    a real flake surfaces on the next unrelated PR. Attributing a pytest
+    name to its exact suite would need the per-run junit file names."""
     if name.startswith("pytest."):
         return ["test/e2e/clients/python/", "clients/python/",
-                "clients/integrations/", "examples/", "dev/"]
+                "clients/integrations/", "examples/",
+                "dev/tools/", "dev/ci/presubmits/shared/",
+                "dev/load-test/test-recipes/"]
     if re.match(r"(.*?\.test\.ts)", name):
         return ["test/e2e/clients/typescript/",
                 "clients/typescript/agentic-sandbox-client/"]

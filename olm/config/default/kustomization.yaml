@@ -25,4 +25,4 @@ resources:
 images:
 - name: registry.k8s.io/agent-sandbox/sandbox-router-go
   newName: registry.k8s.io/agent-sandbox/sandbox-router-go
-  newTag: v1.0.8
+  newTag: v1.0.9

@@ -206,7 +206,14 @@ class PodExecTransport:
             except asyncio.TimeoutError:
                 resp = holder.get("resp")
                 if resp is not None:
-                    await self._run(resp.close)
+                    # Close on the default executor, not the exec pool: the
+                    # timed-out call still holds one of the pool's threads, and
+                    # when every thread is held by a hung stream the close is
+                    # the only thing that frees them. A close error must not
+                    # replace the timeout result.
+                    loop = asyncio.get_running_loop()
+                    with contextlib.suppress(Exception):
+                        await loop.run_in_executor(None, resp.close)
                 return ExecResult(stdout=None,
                                   stderr=f"Command timed out after {timeout_sec} seconds",
                                   return_code=124)

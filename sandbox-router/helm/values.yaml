@@ -139,9 +139,7 @@ networkPolicy:
           kubernetes.io/metadata.name: monitoring
   # apiServerCIDRs lists the CIDRs of the Kubernetes API server endpoints
   # (control-plane node IPs or the external load balancer), allowed on ports 443
-  # and 6443. Needed on enforcing clusters whose apiserver is not a Pod in the
-  # default namespace: without it the Pod-IP cache cannot sync and TokenReview
-  # calls fail. Example:
+  # and 6443. Empty allows those ports to any destination. Example:
   # apiServerCIDRs:
   #   - 10.0.0.2/32
   apiServerCIDRs: []

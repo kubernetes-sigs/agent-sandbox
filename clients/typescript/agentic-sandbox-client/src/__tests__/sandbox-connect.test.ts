@@ -153,10 +153,12 @@ async function startRestBackend(
   port: number;
   healthHits: number;
   putBodies: Buffer[];
+  fileRequests: string[];
   close(): Promise<void>;
 }> {
   const counter = { healthHits: 0 };
   const putBodies: Buffer[] = [];
+  const fileRequests: string[] = [];
   const server = http.createServer((req, res) => {
     // Like sandboxd's --auth-token-*: everything but /v1/health needs the token.
     if (
@@ -211,6 +213,14 @@ async function startRestBackend(
       setTimeout(() => req.socket.destroy(), 20);
       return;
     }
+    if (req.url?.startsWith("/v1/files/")) {
+      fileRequests.push(`${req.method} ${req.url}`);
+    }
+    if (req.method === "POST" && req.url?.startsWith("/v1/files/")) {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
     if (req.method === "PUT" && req.url?.startsWith("/v1/files/")) {
       const chunks: Buffer[] = [];
       req.on("data", (c: Buffer) => chunks.push(c));
@@ -241,6 +251,7 @@ async function startRestBackend(
       return counter.healthHits;
     },
     putBodies,
+    fileRequests,
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };
 }
@@ -1144,6 +1155,52 @@ describe("Sandbox streaming integration", () => {
     for (const event of events) {
       expect(event).not.toContain(SENTINEL);
     }
+  });
+
+  it("mkdir, move and copy reach sandboxd and record the operation", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    const { tracingManager, events } = makeRecordingTracerManager();
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+      tracingManager,
+    });
+
+    await sandbox.files.mkdir("a/b", { parents: true, mode: "0700" });
+    await sandbox.files.move("a/b", "c", { overwrite: true });
+    await sandbox.files.copy("c", "d");
+
+    expect(restBackend.fileRequests).toEqual([
+      "PUT /v1/files/a%2Fb?type=directory&parents=true&mode=0700",
+      "POST /v1/files/a%2Fb:move?destination=c&overwrite=true",
+      "POST /v1/files/c:copy?destination=d",
+    ]);
+    for (const op of ["mkdir", "move", "copy"]) {
+      expect(events).toContain(`attr:sandbox.file.operation=${op}`);
+    }
+    // One shared connect served all three calls.
+    expect(restBackend.healthHits).toBe(1);
+  });
+
+  it("mkdir, move and copy reject bad input before connecting", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+    });
+
+    await expect(sandbox.files.mkdir("")).rejects.toThrow(SandboxError);
+    await expect(sandbox.files.mkdir("a", { mode: "755" })).rejects.toThrow(
+      SandboxError,
+    );
+    await expect(sandbox.files.move("a", "../b")).rejects.toThrow(SandboxError);
+    await expect(sandbox.files.copy(".", "b")).rejects.toThrow(SandboxError);
+    expect(restBackend.healthHits).toBe(0);
+    expect(restBackend.fileRequests).toEqual([]);
   });
 
   it("writeStream sends the exact content and reuses the generation for the next call", async () => {

@@ -105,6 +105,14 @@ describe("resolveSandboxPath", () => {
     expect(() => resolveSandboxPath("./", "write")).toThrow(SandboxError);
   });
 
+  it("rejects the sandbox root for mkdir/move/copy but allows a trailing slash", () => {
+    for (const op of ["mkdir", "move", "copy"] as const) {
+      expect(() => resolveSandboxPath("", op)).toThrow(SandboxError);
+      expect(() => resolveSandboxPath("./", op)).toThrow(SandboxError);
+      expect(resolveSandboxPath("dir/", op)).toBe("dir%2F");
+    }
+  });
+
   it("rejects a trailing slash for write/delete but not read/list/exists", () => {
     expect(() => resolveSandboxPath("dir/", "write")).toThrow(SandboxError);
     expect(() => resolveSandboxPath("dir/", "delete")).toThrow(SandboxError);
@@ -112,7 +120,16 @@ describe("resolveSandboxPath", () => {
   });
 
   it("rejects absolute paths for every operation", () => {
-    for (const op of ["read", "write", "exists", "list", "delete"] as const) {
+    for (const op of [
+      "read",
+      "write",
+      "exists",
+      "list",
+      "delete",
+      "mkdir",
+      "move",
+      "copy",
+    ] as const) {
       expect(() => resolveSandboxPath("/etc/passwd", op)).toThrow(SandboxError);
     }
   });
@@ -1238,6 +1255,163 @@ describe("SandboxdRestClient.delete", () => {
     await expect(
       client.delete("", {}, new AbortController().signal),
     ).rejects.toThrow(SandboxError);
+    expect(activeServer.requests).toHaveLength(0);
+  });
+});
+
+// ---------- mkdir ----------
+
+describe("SandboxdRestClient.mkdir", () => {
+  it("PUTs type=directory with no body and succeeds on 204", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await client.mkdir("a/b", {}, new AbortController().signal);
+    const req = activeServer.requests[0];
+    expect(req.method).toBe("PUT");
+    expect(req.url).toBe("/v1/files/a%2Fb?type=directory");
+    expect(req.body).toHaveLength(0);
+  });
+
+  it("sends parents and mode only when set", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await client.mkdir(
+      "a",
+      { parents: true, mode: "0700" },
+      new AbortController().signal,
+    );
+    expect(activeServer.requests[0].url).toBe(
+      "/v1/files/a?type=directory&parents=true&mode=0700",
+    );
+  });
+
+  it("maps 404 and 409 to SandboxdApiError", async () => {
+    for (const [status, code] of [
+      [404, "NOT_FOUND"],
+      [409, "CONFLICT"],
+    ] as const) {
+      activeServer = await startServer((_req, res) => {
+        res.writeHead(status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ code, message: "nope" }));
+      });
+      const client = makeClient(activeServer.baseUrl);
+      await expect(
+        client.mkdir("a/b", {}, new AbortController().signal),
+      ).rejects.toMatchObject({
+        status,
+        code,
+      } satisfies Partial<SandboxdApiError>);
+      await activeServer.close();
+      activeServer = undefined;
+    }
+  });
+
+  it("rejects the sandbox root and a bad mode before sending any request", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await expect(
+      client.mkdir("", {}, new AbortController().signal),
+    ).rejects.toThrow(SandboxError);
+    await expect(
+      client.mkdir("a", { mode: "755" }, new AbortController().signal),
+    ).rejects.toThrow(SandboxError);
+    expect(activeServer.requests).toHaveLength(0);
+  });
+});
+
+// ---------- move / copy ----------
+
+describe.each(["move", "copy"] as const)("SandboxdRestClient.%s", (action) => {
+  it("POSTs the action with the destination and succeeds on 204", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await client[action](
+      "src/a.txt",
+      "dst/a.txt",
+      {},
+      new AbortController().signal,
+    );
+    const req = activeServer.requests[0];
+    expect(req.method).toBe("POST");
+    expect(req.url).toBe(
+      `/v1/files/src%2Fa.txt:${action}?destination=dst%2Fa.txt`,
+    );
+  });
+
+  it("sends overwrite=true only when requested", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await client[action](
+      "a",
+      "b",
+      { overwrite: true },
+      new AbortController().signal,
+    );
+    expect(activeServer.requests[0].url).toBe(
+      `/v1/files/a:${action}?destination=b&overwrite=true`,
+    );
+  });
+
+  it("keeps names with ':', spaces and '+' intact on the wire", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await client[action]("a:b c", "d+e f", {}, new AbortController().signal);
+    const url = new URL(activeServer.requests[0].url, "http://sandboxd");
+    // sandboxd splits the action off the last ':' of the decoded path.
+    expect(decodeURIComponent(url.pathname)).toBe(`/v1/files/a:b c:${action}`);
+    expect(url.searchParams.get("destination")).toBe("d+e f");
+  });
+
+  it("maps a 409 to SandboxdApiError with code CONFLICT", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(409, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ code: "CONFLICT", message: "exists" }));
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await expect(
+      client[action]("a", "b", {}, new AbortController().signal),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "CONFLICT",
+    } satisfies Partial<SandboxdApiError>);
+  });
+
+  it("rejects an invalid source or destination before sending any request", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    const signal = new AbortController().signal;
+    for (const [src, dst] of [
+      ["", "b"],
+      ["a", "."],
+      ["a", "../b"],
+      ["a", "/etc/b"],
+      ["../a", "b"],
+    ]) {
+      await expect(client[action](src, dst, {}, signal)).rejects.toThrow(
+        SandboxError,
+      );
+    }
     expect(activeServer.requests).toHaveLength(0);
   });
 });

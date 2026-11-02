@@ -47,10 +47,20 @@ export type SandboxPathOperation =
   | "write"
   | "exists"
   | "list"
-  | "delete";
+  | "delete"
+  | "mkdir"
+  | "move"
+  | "copy";
 
 function invalidArgument(message: string): SandboxError {
   return new SandboxError(message, { telemetryCode: "invalid_argument" });
+}
+
+/** Throws before any request when `mode` is not four octal digits. @internal */
+export function validateMode(mode: string | undefined): void {
+  if (mode !== undefined && !/^0[0-7]{3}$/.test(mode)) {
+    throw invalidArgument(`invalid mode '${mode}': must match ^0[0-7]{3}$`);
+  }
 }
 
 function invalidResponse(message: string, cause?: unknown): SandboxError {
@@ -98,6 +108,15 @@ function hasParentSegment(p: string): boolean {
   return p.split("/").some((seg) => seg === "..");
 }
 
+/** Operations that reject the sandbox root, and how the error words it. */
+const ROOT_REJECTED_AS: Partial<Record<SandboxPathOperation, string>> = {
+  write: "written to",
+  delete: "deleted",
+  mkdir: "created",
+  move: "moved",
+  copy: "copied",
+};
+
 /**
  * Validates a caller-supplied sandbox-root-relative path WITHOUT decoding or
  * normalizing it first, then returns the single encodeURIComponent-encoded
@@ -126,11 +145,10 @@ export function resolveSandboxPath(
     );
   }
   if (isRootAlias(input)) {
-    if (operation === "write" || operation === "delete") {
+    const rejectedAs = ROOT_REJECTED_AS[operation];
+    if (rejectedAs) {
       throw invalidArgument(
-        `invalid path '${input}': the sandbox root cannot be ${
-          operation === "write" ? "written to" : "deleted"
-        } directly`,
+        `invalid path '${input}': the sandbox root cannot be ${rejectedAs} directly`,
       );
     }
     return "";
@@ -561,6 +579,35 @@ export class SandboxdRestClient {
     );
   }
 
+  /** Sends a request that must return 204, and drains the empty body. */
+  private async requestNoContent(
+    method: string,
+    reqPath: string,
+    init: {
+      query?: Record<string, string>;
+      body?: BodyInit;
+      headers?: Record<string, string>;
+      signal: AbortSignal;
+    },
+  ): Promise<void> {
+    const { response, controller } = await this.request(method, reqPath, init);
+    if (response.status !== 204) {
+      throw await this.buildApiError(
+        response,
+        controller,
+        method,
+        reqPath,
+        init.signal,
+      );
+    }
+    await readBoundedBody(
+      response,
+      this.opts.maxMetadataResponseSize,
+      controller,
+      init.signal,
+    ).catch(() => {});
+  }
+
   async health(signal: AbortSignal): Promise<SandboxHealth> {
     const { response, controller } = await this.request("GET", "/v1/health", {
       signal,
@@ -722,39 +769,19 @@ export class SandboxdRestClient {
     opts: { mode?: string },
     signal: AbortSignal,
   ): Promise<void> {
-    if (opts.mode !== undefined && !/^0[0-7]{3}$/.test(opts.mode)) {
-      throw invalidArgument(
-        `invalid mode '${opts.mode}': must match ^0[0-7]{3}$`,
-      );
-    }
+    validateMode(opts.mode);
     if (content.byteLength > this.opts.maxUploadSize) {
       throw invalidArgument(
         `content of ${content.byteLength} bytes exceeds the configured upload limit of ${this.opts.maxUploadSize} bytes`,
       );
     }
     const encoded = resolveSandboxPath(path, "write");
-    const reqPath = `/v1/files/${encoded}`;
-    const { response, controller } = await this.request("PUT", reqPath, {
+    await this.requestNoContent("PUT", `/v1/files/${encoded}`, {
       signal,
       query: opts.mode ? { mode: opts.mode } : undefined,
       headers: { "Content-Type": "application/octet-stream" },
       body: content as BodyInit,
     });
-    if (response.status !== 204) {
-      throw await this.buildApiError(
-        response,
-        controller,
-        "PUT",
-        reqPath,
-        signal,
-      );
-    }
-    await readBoundedBody(
-      response,
-      this.opts.maxMetadataResponseSize,
-      controller,
-      signal,
-    ).catch(() => {});
   }
 
   /**
@@ -780,11 +807,7 @@ export class SandboxdRestClient {
     opts: { mode?: string },
     signal: AbortSignal,
   ): Promise<number> {
-    if (opts.mode !== undefined && !/^0[0-7]{3}$/.test(opts.mode)) {
-      throw invalidArgument(
-        `invalid mode '${opts.mode}': must match ^0[0-7]{3}$`,
-      );
-    }
+    validateMode(opts.mode);
     if (content.locked) {
       throw invalidArgument(
         "writeStream content is already locked by another reader",
@@ -924,26 +947,62 @@ export class SandboxdRestClient {
     signal: AbortSignal,
   ): Promise<void> {
     const encoded = resolveSandboxPath(path, "delete");
-    const reqPath = `/v1/files/${encoded}`;
-    const { response, controller } = await this.request("DELETE", reqPath, {
+    await this.requestNoContent("DELETE", `/v1/files/${encoded}`, {
       signal,
       query: opts.recursive ? { recursive: "true" } : undefined,
     });
-    if (response.status !== 204) {
-      throw await this.buildApiError(
-        response,
-        controller,
-        "DELETE",
-        reqPath,
-        signal,
-      );
-    }
-    await readBoundedBody(
-      response,
-      this.opts.maxMetadataResponseSize,
-      controller,
+  }
+
+  async mkdir(
+    path: string,
+    opts: { parents?: boolean; mode?: string },
+    signal: AbortSignal,
+  ): Promise<void> {
+    validateMode(opts.mode);
+    const encoded = resolveSandboxPath(path, "mkdir");
+    const query: Record<string, string> = { type: "directory" };
+    if (opts.parents) query.parents = "true";
+    if (opts.mode) query.mode = opts.mode;
+    await this.requestNoContent("PUT", `/v1/files/${encoded}`, {
       signal,
-    ).catch(() => {});
+      query,
+    });
+  }
+
+  move(
+    source: string,
+    destination: string,
+    opts: { overwrite?: boolean },
+    signal: AbortSignal,
+  ): Promise<void> {
+    return this.transfer("move", source, destination, opts, signal);
+  }
+
+  copy(
+    source: string,
+    destination: string,
+    opts: { overwrite?: boolean },
+    signal: AbortSignal,
+  ): Promise<void> {
+    return this.transfer("copy", source, destination, opts, signal);
+  }
+
+  private async transfer(
+    action: "move" | "copy",
+    source: string,
+    destination: string,
+    opts: { overwrite?: boolean },
+    signal: AbortSignal,
+  ): Promise<void> {
+    const encoded = resolveSandboxPath(source, action);
+    // Validation only: `destination` goes in the query string.
+    resolveSandboxPath(destination, action);
+    const query: Record<string, string> = { destination };
+    if (opts.overwrite) query.overwrite = "true";
+    await this.requestNoContent("POST", `/v1/files/${encoded}:${action}`, {
+      signal,
+      query,
+    });
   }
 }
 

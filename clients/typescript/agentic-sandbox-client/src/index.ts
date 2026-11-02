@@ -42,6 +42,8 @@ export type {
   GetSandboxByNameOptions,
   GetSandboxOptions,
   Logger,
+  MkdirOptions,
+  MoveCopyOptions,
   PodMetadata,
   ProcessCallOptions,
   ProcessEvent,

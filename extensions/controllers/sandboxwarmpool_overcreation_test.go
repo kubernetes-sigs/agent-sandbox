@@ -1289,11 +1289,12 @@ func TestReconcilePool_PerPoolReadinessGracePeriod(t *testing.T) {
 			base := time.Now().Truncate(time.Second)
 			warmPool, sb, template := newGraceTestPool(base, tc.age, tc.poolGraceSecs, tc.unschedulable)
 			scheme := newTestScheme()
+			recorder := events.NewFakeRecorder(16)
 			r := SandboxWarmPoolReconciler{
 				Client:                       newLaggingClient(newFakeClient(scheme, template, warmPool, sb)),
 				Scheme:                       scheme,
 				MaxBatchSize:                 sandboxCreateDeleteMaxBatchSize,
-				Recorder:                     events.NewFakeRecorder(16),
+				Recorder:                     recorder,
 				ReadinessGracePeriod:         controllerGrace,
 				UnschedulableRecheckInterval: controllerRecheck,
 				now:                          func() time.Time { return base },
@@ -1310,6 +1311,19 @@ func TestReconcilePool_PerPoolReadinessGracePeriod(t *testing.T) {
 			}
 			require.NoError(t, getErr, "sandbox must be kept")
 			require.Equal(t, tc.wantRequeue, requeueAfter)
+
+			if tc.unschedulable {
+				// The hold event quotes the grace period it used, so it proves the
+				// message reads the pool value and not the controller-level one.
+				select {
+				case e := <-recorder.Events:
+					require.Contains(t, e, reasonWarmPoolNotProgressing)
+					require.Contains(t, e, "past the 1m0s readiness grace period")
+					require.NotContains(t, e, controllerGrace.String())
+				default:
+					t.Fatal("expected a WarmPoolNotProgressing event for the held sandbox")
+				}
+			}
 		})
 	}
 }

@@ -89,10 +89,13 @@ async def test_start_exec_files_stop_lifecycle(task_dir, trial_paths, env_config
     assert LABEL_MANAGED_BY in claim["labels"]
     assert transport.ready_waits == 1 and transport.pod == "sb-1-pod"
     # The session user is probed first; then Harbor's standard directories are
-    # created. The local stand-in is not root, so Harbor's root request stays.
+    # created as root. The local stand-in runs as this process's user: on a
+    # root CI runner the su wrapper is dropped, elsewhere Harbor's "root" stays.
+    import os
     assert transport.execs[0]["script"] == "id -u" and transport.execs[0]["user"] is None
     first = transport.execs[1]
-    assert first["user"] == "root" and "mkdir -p" in first["script"] and "/logs/agent" in first["script"]
+    expected_user = None if os.getuid() == 0 else "root"
+    assert first["user"] == expected_user and "mkdir -p" in first["script"] and "/logs/agent" in first["script"]
     assert (transport.root / "logs" / "verifier").is_dir() and (transport.root / "tests").is_dir()
 
     # exec resolves cwd from the Dockerfile WORKDIR and merges persistent env.

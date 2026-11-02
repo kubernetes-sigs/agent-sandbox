@@ -289,6 +289,23 @@ async def test_timed_out_exec_closes_the_stream_off_the_exec_pool(monkeypatch):
     api = types.SimpleNamespace(connect_get_namespaced_pod_exec=object())
     t = PodExecTransport(api_factory=lambda: api, pod="p", namespace="ns", container="main",
                          executor=ex, slots=asyncio.Semaphore(1))
-    result = await asyncio.wait_for(t.exec("sleep 100", timeout_sec=1), timeout=5)
-    assert result.return_code == 124 and release.is_set()
-    ex.shutdown(wait=True)
+    try:
+        result = await asyncio.wait_for(t.exec("sleep 100", timeout_sec=1), timeout=5)
+        assert result.return_code == 124 and release.is_set()
+    finally:
+        release.set()                                      # never leave the worker hung
+        ex.shutdown(wait=True)
+
+
+def test_connect_timeout_is_set_only_when_unset(monkeypatch):
+    import websocket
+    import k8s_agent_sandbox_harbor.transport.podexec as mod
+
+    monkeypatch.setattr(websocket, "setdefaulttimeout", lambda s: setattr(websocket, "_t", s))
+    monkeypatch.setattr(websocket, "getdefaulttimeout", lambda: None)
+    mod.ensure_connect_timeout(12)
+    assert websocket._t == 12
+    monkeypatch.setattr(websocket, "getdefaulttimeout", lambda: 5)
+    websocket._t = None
+    mod.ensure_connect_timeout(12)
+    assert websocket._t is None                            # a caller's setting is kept

@@ -27,6 +27,10 @@ cd "$(dirname "$0")"
 : "${DEMO_IMAGE:?set DEMO_IMAGE}"
 SB=gpu-l4-sandbox
 
+# The manifests create their objects in default. Pin each kubectl call to
+# it, so that the script works with any current namespace.
+kubectl() { command kubectl --namespace=default "$@"; }
+
 call() { # call <GET|POST> <path> -> prints the JSON reply
     kubectl exec "$SB" -c probe -- python -c \
         "import urllib.request as u;print(u.urlopen(u.Request('http://localhost:8888$2',data=b'' if '$1'=='POST' else None,method='$1')).read().decode())"

@@ -109,6 +109,9 @@ paths:
         or idempotent: retrying an append adds the body again.
         With type=directory the request creates an empty directory instead and ignores the body.
         It succeeds when the directory already exists. Missing parents need parents=true.
+        With extract=tar the body is a tar archive, optionally gzip-compressed, that the request
+        unpacks into the directory at the path. Extraction is not atomic: after an error, the
+        entries written so far stay in place.
       parameters:
         - name: type
           in: query
@@ -139,7 +142,25 @@ paths:
             Octal permission bits applied to the written file (e.g. "0755" or "0644").
             Defaults to "0644" for files and "0755" for directories.
             With append=true, applied only when the request creates the file.
-            With type=directory, the bits apply only to a directory the request creates.
+            With type=directory or extract=tar, the bits apply only to a directory the request creates.
+        - name: extract
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [tar]
+          description: >
+            Unpacks the body, a tar archive that may be gzip-compressed, into the directory at the
+            path and creates the directory, with missing parents, if it does not exist. Existing
+            files are replaced and existing directories are merged. Regular files, directories,
+            and symlinks are extracted with their permission bits, and other entry types such as
+            hard links and devices fail with 400. An entry path that leaves the directory fails
+            with 403, and an entry whose type conflicts with an existing path fails with 409.
+            A symlink target is written as given, so a link can point outside the directory.
+            Only later requests through this API are confined to the sandbox root.
+            More than 100000 entries or 1 GiB of file data fails with 413 before the entry that
+            crosses the cap is written.
+            Cannot be combined with append=true, type, or If-None-Match.
         - name: append
           in: query
           required: false
@@ -158,11 +179,11 @@ paths:
           description: >
             Set to "*" to create the file only if the path does not exist. If it exists, including
             as a directory, the request fails with 412 and writes nothing. Other values are rejected
-            with 400, as is combining it with type=directory. With append=true the body is created,
+            with 400, as is combining it with type=directory or extract=tar. With append=true the body is created,
             not appended.
       requestBody:
         required: false
-        description: File content. Required unless type=directory, which ignores it.
+        description: File content, or the archive with extract=tar. Required unless type=directory, which ignores it.
         content:
           application/octet-stream:
             schema:
@@ -179,7 +200,7 @@ paths:
                   format: binary
       responses:
         "204":
-          description: File written or directory created successfully
+          description: File written, directory created, or archive extracted successfully
         "400":
           $ref: "#/components/responses/BadRequest"
         "403":
@@ -190,6 +211,12 @@ paths:
           $ref: "#/components/responses/Conflict"
         "412":
           description: If-None-Match is "*" and the path already exists
+        "413":
+          description: With extract=tar, the archive is over the entry or byte cap
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalServerError"
 

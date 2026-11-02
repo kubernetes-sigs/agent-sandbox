@@ -162,7 +162,7 @@ iteration (Python).
 |---|---|---|
 | `GET` | `/v1/files/{path}` | File → raw bytes (`application/octet-stream`); directory → JSON `DirectoryListing`. Optional `type` query (`file` or `directory`, also on `HEAD`): `409` if the path is the other kind. `recursive=true` lists nested directories too, and `max_depth=N` limits how deep (entry names become paths relative to the listed directory). A recursive listing over 10000 entries fails with `400`. |
 | `HEAD` | `/v1/files/{path}` | Existence/metadata probe without transferring the body. |
-| `PUT` | `/v1/files/{path}` | Atomic write (temp file + rename), auto-creates parents. Optional `mode` query (`^0[0-7]{3}$`, default `0644`). `append=true` adds to the end of the file instead (not atomic). `type=directory` creates a directory instead (body ignored, `parents=true` also creates missing parents, default mode `0755`). `If-None-Match: *` creates the file only if the path does not exist, else `412`. Accepts raw bytes or `multipart/form-data` (`file` part). |
+| `PUT` | `/v1/files/{path}` | Atomic write (temp file + rename), auto-creates parents. Optional `mode` query (`^0[0-7]{3}$`, default `0644`). `append=true` adds to the end of the file instead (not atomic). `type=directory` creates a directory instead (body ignored, `parents=true` also creates missing parents, default mode `0755`). `If-None-Match: *` creates the file only if the path does not exist, else `412`. `extract=tar` unpacks a tar body, optionally gzipped, into the directory at the path (not atomic). Accepts raw bytes or `multipart/form-data` (`file` part). |
 | `DELETE` | `/v1/files/{path}` | Remove a file or directory; `recursive=true` for `rm -rf` behavior; `409` on a non-empty directory otherwise. |
 | `POST` | `/v1/files/{path}:move` | Rename or move to the required `destination` query path, auto-creating parents. `409` if the destination exists, except that `overwrite=true` replaces a file with a file. Directories are never replaced. A symlink as the last path component is moved or replaced itself, not followed. |
 | `POST` | `/v1/files/{path}:copy` | Same as `:move`, but copies. Directories are copied recursively, files keep their mode, and symlinks inside a directory are copied as links. |
@@ -199,6 +199,12 @@ appends, see below), but it does not impose an ordering across requests:
   directory atomically. A move across filesystems copies and then removes the
   source, so both paths are briefly absent. The check for an existing
   destination is not atomic with them, so a concurrent writer can win the race.
+- **Archive extraction (`extract=tar`)** writes each file atomically but the
+  archive as a whole is not: an error leaves the entries written so far. An
+  archive over 100000 entries or 1 GiB of file data fails with `413`. Symlink
+  targets are written as given, so a link can point outside the extraction
+  directory. Only later requests through the API are confined to the sandbox
+  root.
 
 There is no cross-request transaction or compare-and-swap; agents that need
 ordering or coordination on shared paths must layer it themselves.
@@ -285,6 +291,9 @@ curl -sf -X PUT --data-binary "more" "localhost:8080/v1/files/src/main.py?append
 
 # Create a directory (with missing parents)
 curl -sf -X PUT "localhost:8080/v1/files/src/pkg?type=directory&parents=true"
+
+# Extract a tarball (plain or gzipped) into a directory
+curl -sf -X PUT --data-binary @repo.tar.gz "localhost:8080/v1/files/src?extract=tar"
 
 # Delete recursively
 curl -sf -X DELETE "localhost:8080/v1/files/src?recursive=true"

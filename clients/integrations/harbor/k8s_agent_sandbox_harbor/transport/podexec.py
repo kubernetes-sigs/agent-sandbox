@@ -34,6 +34,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable
 
+import websocket
 from harbor.environments.base import ExecResult
 from kubernetes import client
 from kubernetes.client.rest import ApiException
@@ -44,10 +45,21 @@ from kubernetes.stream import stream
 _LOCAL_TIMEOUT_GRACE_S = 15
 _UPLOAD_SETTLE_S = 30
 _TRUNCATED_MARK = "\n[output truncated by k8s-agent-sandbox-harbor]\n"
+# The kubernetes websocket client opens its socket with the websocket-client
+# library's default timeout, which is None (block forever). A stalled open
+# cannot be cancelled from the event loop and would hold an executor thread
+# for good, so the default is set once, when it is still unset.
+_CONNECT_TIMEOUT_S = 60
 
 # Indirection so tests can drive the deadlines without touching time.monotonic,
 # which the event loop uses too.
 _now = time.monotonic
+
+
+def ensure_connect_timeout(seconds: float = _CONNECT_TIMEOUT_S) -> None:
+    """Give websocket connects a deadline if the process has none yet."""
+    if websocket.getdefaulttimeout() is None:
+        websocket.setdefaulttimeout(seconds)
 
 
 class ExecStreamClosedError(RuntimeError):
@@ -104,6 +116,7 @@ class PodExecTransport:
         self.namespace = namespace
         self.container = container
         self._executor = executor
+        ensure_connect_timeout()
         # One slot per executor thread. A call waits for a slot before its
         # timeout starts, so a queued command is never reported as timed out.
         self._slots = slots

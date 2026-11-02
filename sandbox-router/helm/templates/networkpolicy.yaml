@@ -37,11 +37,7 @@ spec:
       port: 8081
   egress:
   # DNS for resolving sandbox FQDNs.
-  - to:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: kube-system
-    ports:
+  - ports:
     - protocol: UDP
       port: 53
     - protocol: TCP
@@ -74,21 +70,18 @@ spec:
       port: {{ .Values.networkPolicy.otlpPort }}
   # Kubernetes API server, required by the Pod-IP cache and by
   # --authz-mode=tokenreview. NetworkPolicy cannot name the apiserver, and a
-  # namespaceSelector only matches Pods, so the default namespace below covers
-  # clusters whose apiserver is backed by Pods there. Everywhere else, list the
-  # apiserver endpoint CIDRs (control-plane node IPs or the external load
-  # balancer) in networkPolicy.apiServerCIDRs.
-  - to:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: default
-    {{- range .Values.networkPolicy.apiServerCIDRs }}
-    - ipBlock:
-        cidr: {{ . | quote }}
-    {{- end }}
-    ports:
+  # namespaceSelector only matches Pods, so this rule is port-only unless
+  # networkPolicy.apiServerCIDRs lists the apiserver endpoint CIDRs.
+  - ports:
     - protocol: TCP
       port: 443
     - protocol: TCP
       port: 6443
+    {{- with .Values.networkPolicy.apiServerCIDRs }}
+    to:
+    {{- range . }}
+    - ipBlock:
+        cidr: {{ . | quote }}
+    {{- end }}
+    {{- end }}
 {{- end }}

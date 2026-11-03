@@ -45,10 +45,11 @@ from kubernetes.stream import stream
 _LOCAL_TIMEOUT_GRACE_S = 15
 _UPLOAD_SETTLE_S = 30
 _TRUNCATED_MARK = "\n[output truncated by k8s-agent-sandbox-harbor]\n"
-# The kubernetes websocket client opens its socket with the websocket-client
-# library's default timeout, which is None (block forever). A stalled open
-# cannot be cancelled from the event loop and would hold an executor thread
-# for good, so the default is set once, when it is still unset.
+# The kubernetes client opens the exec socket with ``WebSocket.connect()`` and
+# passes no timeout, and that path ignores websocket-client's global default
+# (only ``create_connection`` reads it), so the open blocks for good when the
+# API server does not answer. A stalled open cannot be cancelled from the event
+# loop and holds an executor thread, so ``connect`` gets a default deadline.
 _CONNECT_TIMEOUT_S = 60
 
 # Indirection so tests can drive the deadlines without touching time.monotonic,
@@ -56,10 +57,31 @@ _CONNECT_TIMEOUT_S = 60
 _now = time.monotonic
 
 
+_connect_wrapped = False
+
+
 def ensure_connect_timeout(seconds: float = _CONNECT_TIMEOUT_S) -> None:
-    """Give websocket connects a deadline if the process has none yet."""
-    if websocket.getdefaulttimeout() is None:
-        websocket.setdefaulttimeout(seconds)
+    """Give ``websocket.WebSocket.connect`` a default socket timeout.
+
+    Installed once per process. A caller that passes its own ``timeout`` to
+    ``connect`` or set one on the socket keeps it; only the "no timeout at
+    all" case changes, and only to a deadline. The timeout also bounds a
+    blocked read, which the exec loop never does: it reads after ``select``
+    reports data.
+    """
+    global _connect_wrapped
+    if _connect_wrapped:
+        return
+    original = websocket.WebSocket.connect
+
+    @functools.wraps(original)
+    def connect(self: Any, url: str, **options: Any) -> Any:
+        if "timeout" not in options and getattr(self.sock_opt, "timeout", None) is None:
+            options["timeout"] = seconds
+        return original(self, url, **options)
+
+    websocket.WebSocket.connect = connect  # type: ignore[method-assign]
+    _connect_wrapped = True
 
 
 class ExecStreamClosedError(RuntimeError):

@@ -297,15 +297,26 @@ async def test_timed_out_exec_closes_the_stream_off_the_exec_pool(monkeypatch):
         ex.shutdown(wait=True)
 
 
-def test_connect_timeout_is_set_only_when_unset(monkeypatch):
+def test_connect_gets_a_default_timeout_only_when_none_is_set(monkeypatch):
     import websocket
     import k8s_agent_sandbox_harbor.transport.podexec as mod
 
-    monkeypatch.setattr(websocket, "setdefaulttimeout", lambda s: setattr(websocket, "_t", s))
-    monkeypatch.setattr(websocket, "getdefaulttimeout", lambda: None)
+    seen: list[dict] = []
+
+    def fake_connect(self, url, **options):
+        seen.append(options)
+
+    monkeypatch.setattr(websocket.WebSocket, "connect", fake_connect)
+    monkeypatch.setattr(mod, "_connect_wrapped", False)
     mod.ensure_connect_timeout(12)
-    assert websocket._t == 12
-    monkeypatch.setattr(websocket, "getdefaulttimeout", lambda: 5)
-    websocket._t = None
-    mod.ensure_connect_timeout(12)
-    assert websocket._t is None                            # a caller's setting is kept
+    mod.ensure_connect_timeout(12)                          # idempotent: wraps once
+
+    class Sock:
+        def __init__(self, timeout=None):
+            self.sock_opt = types.SimpleNamespace(timeout=timeout)
+
+    websocket.WebSocket.connect(Sock(), "wss://x")          # no timeout anywhere -> default
+    websocket.WebSocket.connect(Sock(), "wss://x", timeout=3)   # caller's wins
+    websocket.WebSocket.connect(Sock(timeout=5), "wss://x")     # socket's wins
+    assert [o.get("timeout") for o in seen] == [12, 3, None]
+    assert websocket.WebSocket.connect.__wrapped__ is fake_connect

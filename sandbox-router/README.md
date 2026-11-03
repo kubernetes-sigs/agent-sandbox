@@ -361,9 +361,10 @@ Set `--authz-mode=scoped-token` to authorize requests without giving callers a c
 
 V1 is a legacy format. A v1 token carries no Sandbox UID, so if a Sandbox is deleted and recreated under the same namespace and name, an unexpired v1 token for the old Sandbox authorizes the new one. Use v2 when Sandbox names are reused or when tokens outlive a Sandbox. A router configured with only `--authz-scoped-token-secret-file` logs a warning at startup. To move from v1 to v2:
 
-1. Start the routers with both `--authz-scoped-token-verification-keys-file` and `--authz-scoped-token-v1-accept-until` set to a time later than step 2 finishes plus your longest v1 token lifetime.
-2. After every router replica runs the new configuration, switch your token issuers to `authz.MintScopedTokenV2`.
-3. After the cutoff passes, remove `--authz-scoped-token-secret-file` and `--authz-scoped-token-v1-accept-until`.
+1. Enable the Pod-IP cache with `--cache-enabled` and apply the RBAC in `deploy/rbac.yaml`. The router rejects `--authz-scoped-token-verification-keys-file` while the cache is disabled. The RBAC binds only the `agent-sandbox-system/sandbox-router` ServiceAccount. If the router runs under another namespace or ServiceAccount, change the `subjects` entry to match. Otherwise, the cache cannot list Pods, and the router exits with `pod cache failed initial sync` after 90 seconds.
+2. Start the routers with both `--authz-scoped-token-verification-keys-file` and `--authz-scoped-token-v1-accept-until`. Set the cutoff to a time later than step 3 finishes plus your longest v1 token lifetime.
+3. Update your clients, then switch your token issuers to v2. A token from `authz.MintScopedTokenV2` binds the Sandbox UID, port, HTTP method, and path, so a client can no longer reuse one token for several targets. For example, a token for `GET /index.html` is rejected for `GET /app.js`. Make each client request a token for every target it calls before you switch the issuers. If a client sends one token on every call, such as the Python SDK's router mode, mint a sandbox-scoped token for it with `authz.MintScopedTokenV2Sandbox` instead.
+4. After the cutoff passes, remove `--authz-scoped-token-secret-file` and `--authz-scoped-token-v1-accept-until`.
 
 Scoped-token v2 uses Ed25519 and binds the full `AuthorizationTarget` plus expiry, or only the Sandbox for a sandbox-scoped token. Its wire format is `v2.<kid>.<payload>.<signature>`. The signature covers the key ID as well as the payload, so changing `kid` cannot select another verification key. Key IDs may contain ASCII letters, digits, hyphens, and underscores. A key file may contain multiple public keys during reader-first rotation. Private signing keys never belong in the router.
 

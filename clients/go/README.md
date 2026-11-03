@@ -154,7 +154,18 @@ fmt.Printf("downloaded %d bytes\n", written)
 
 // Check existence
 exists, err := sb.Exists(ctx, "script.py")
+
+// Create a directory, rename a file, and copy it (sandboxd runtime only)
+err = sb.Mkdir(ctx, "out/logs", true) // parents
+if err != nil { log.Fatal(err) }
+err = sb.Move(ctx, "script.py", "out/script.py", false) // overwrite
+if err != nil { log.Fatal(err) }
+err = sb.Copy(ctx, "out/script.py", "backup.py", false)
+if err != nil { log.Fatal(err) }
 ```
+
+`Move()` and `Copy()` do not retry unless you pass `WithMaxAttempts`, because a
+repeat after a lost response fails.
 
 `Read()` and `ReadTo()` responses are capped by `MaxDownloadSize` (256 MB by
 default). `Run()` responses are capped at 16 MB; `List()`/`Exists()` at 8 MB.

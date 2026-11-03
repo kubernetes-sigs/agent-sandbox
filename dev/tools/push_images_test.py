@@ -313,6 +313,45 @@ class DockerfileOverridesTest(unittest.TestCase):
         self.assertEqual(context_dir, ".")
 
 
+class RepoImageNamesUniqueTest(unittest.TestCase):
+    """Every Dockerfile in the repo must map to a distinct image name.
+
+    Presubmits pass an explicit --images list, so only the postsubmit image
+    push walks the whole tree. A colliding directory name (e.g. two examples
+    each with an image/ directory) then fails that job after merge and skips
+    every image later in the walk, including core ones.
+    """
+
+    def test_no_duplicate_image_names(self):
+        repo_root = os.path.dirname(os.path.dirname(_SCRIPT_DIR))
+        args = argparse.Namespace(
+            controller_only=False,
+            image_tag="testtag",
+            images=[],
+            container_engine="docker",
+            kind_cluster_name=None,
+        )
+        old_cwd = os.getcwd()
+        os.chdir(repo_root)
+        self.addCleanup(os.chdir, old_cwd)
+        with (
+            mock.patch.object(
+                push_images,
+                "create_buildx_builder_if_not_exists",
+            ),
+            mock.patch.object(
+                push_images,
+                "build_and_push_image",
+            ) as build_image,
+            mock.patch("builtins.print"),
+        ):
+            try:
+                push_images.main(args)
+            except SystemExit as e:
+                self.fail(str(e))
+        self.assertGreater(build_image.call_count, 1)
+
+
 class KindLoadImagesExtraTagsTest(unittest.TestCase):
     """kind load docker-images should include extra tags as well."""
 

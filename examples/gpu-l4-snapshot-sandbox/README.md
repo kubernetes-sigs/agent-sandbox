@@ -30,7 +30,7 @@ the state back onto the GPU. See
 
 | File | Purpose |
 |---|---|
-| `image/` | GPU state probe. It keeps a boot nonce in host memory and a buffer and a counter in GPU memory. |
+| `gpu-snapshot-probe/` | GPU state probe. It keeps a boot nonce in host memory and a buffer and a counter in GPU memory. |
 | `00-storageconfig.yaml` | `PodSnapshotStorageConfig` that points to a GCS bucket |
 | `10-podsnapshotpolicy.yaml` | Per-sandbox policy with manual triggers |
 | `20-sandbox.yaml` | gVisor `Sandbox` that requests one L4, and the pod `ServiceAccount` |
@@ -113,7 +113,7 @@ pod reports a new nonce, a zero counter, and a different checksum.
 
 ```sh
 export DEMO_IMAGE=$REGION-docker.pkg.dev/$PROJECT_ID/<repo>/gpu-snapshot-probe:v1
-docker buildx build --platform linux/amd64 --push -t "$DEMO_IMAGE" image/
+docker buildx build --platform linux/amd64 --push -t "$DEMO_IMAGE" gpu-snapshot-probe/
 ```
 
 ## 4. Deploy the snapshot config and the Sandbox

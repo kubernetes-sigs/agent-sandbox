@@ -180,11 +180,6 @@ spec:
 
               echo "Initialization complete!"
           env:
-            - name: HF_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: jupyter-hf-token
-                  key: token
             - name: HF_HOME
               value: /home/jovyan/.cache/huggingface
             - name: PIP_CACHE_DIR

@@ -27,6 +27,14 @@ test's own sources; such PR-local failures are listed but never filed. A test
 whose failures cluster in one breakage window that has since cleared is
 recovered breakage, also listed but never filed.
 
+Postsubmit and periodic jobs that write no junit (image pushes, release
+builds) have no per-test rows, so a breakage there only shows in the
+job-level Overall cell. When every recent run of such a job failed, the
+report lists the job as consistently failing and, with --update-issues,
+files a `kind/failing-test` issue that names the first failing commit. The
+report skips junit-less presubmit tabs (lint, autogen): a red run there is
+the PR's own change, not a broken main.
+
 With --update-issues it also files or refreshes one `kind/flake` GitHub issue
 per flaky test, so the issue tracker is the durable state: reruns are
 idempotent and no local files are written. Requires `gh` to be authenticated
@@ -71,6 +79,7 @@ JOB_LEVEL_ROW = re.compile(r"\.(Overall|Pod)$")
 
 ISSUE_MARKER_PREFIX = "<!-- flake-report:test="
 INFRA_MARKER_PREFIX = "<!-- flake-report:infra-tab="
+JOB_MARKER_PREFIX = "<!-- flake-report:job="
 
 
 def fetch_text(url):
@@ -363,6 +372,67 @@ def is_recovered_breakage(fail_cols, pass_cols, recent):
     return dense and bool(recent) and recent[0] in PASS_STATUSES
 
 
+def is_presubmit_tab(gcs_query, tab):
+    """True for tabs whose runs belong to PRs rather than to main.
+
+    Prow writes presubmit results under pr-logs/ and everything else under
+    logs/. When the table has no query, the tab name prefix decides. An
+    unrecognized tab counts as presubmit, so the report stays quiet about
+    its job-level failures rather than filing a false breakage.
+    """
+    if gcs_query:
+        return "/pr-logs/" in gcs_query
+    return not tab.startswith(("post-", "periodic-", "ci-"))
+
+
+def job_breakage(tab, overall, timestamps, fetcher, job_history):
+    """Returns a finding when a job's newest completed runs all failed, else None.
+
+    Reads only the job-level Overall row, for jobs that write no per-test
+    results. The newest RECENT_RUNS completed, non-aborted runs must all have
+    failed, and there must be at least two of them, so one failed run of a
+    brand-new job does not file an issue. The finding names the first run of
+    the failing streak because its commit is where the breakage landed.
+    """
+    def cell(i):
+        return overall[i] if i < len(overall) else 0
+
+    def aborted(i):
+        finished = fetcher(i)("finished.json") or {}
+        return (finished.get("result") or "").upper() == "ABORTED"
+
+    completed = [i for i in range(len(overall))
+                 if cell(i) not in (0, RUNNING_STATUS)]
+    recent = []
+    for i in completed:
+        if cell(i) in FAIL_STATUSES and aborted(i):
+            continue
+        recent.append(i)
+        if len(recent) == RECENT_RUNS:
+            break
+    if len(recent) < 2 or not all(cell(i) in FAIL_STATUSES for i in recent):
+        return None
+
+    streak = []
+    for i in completed:
+        if cell(i) not in FAIL_STATUSES:
+            break
+        streak.append(i)
+    first = streak[-1]
+    finished = fetcher(first)("finished.json") or {}
+    return {
+        "job": True,
+        "tab": tab,
+        "test": f"{tab}.Overall",
+        "short": tab,
+        "fails": len(streak),
+        "first_failure_ts": timestamps[first] if first < len(timestamps) else 0,
+        "first_failing_commit": finished.get("revision") or "",
+        "last_failure_ts": timestamps[streak[0]] if streak[0] < len(timestamps) else 0,
+        "job_history": job_history,
+    }
+
+
 def analyze_tab(dashboard, tab, window, pr_files=None):
     """Returns (flaky, consistent, infra, pr_local, recovered) for one tab.
 
@@ -622,6 +692,15 @@ def analyze_tab(dashboard, tab, window, pr_files=None):
             ),
             "job_history": job_history,
         }
+
+    # A junit-less postsubmit or periodic job has no test rows for the
+    # per-test rules above to see, so the Overall row decides whether it is
+    # broken. Presubmit tabs stay out: a red lint or autogen run is the PR's
+    # own doing.
+    if not test_rows and overall is not None and not is_presubmit_tab(gcs_query, tab):
+        breakage = job_breakage(tab, overall, timestamps, fetcher, job_history)
+        if breakage:
+            consistent.append(breakage)
     return flaky, consistent, infra, pr_local, recovered
 
 
@@ -655,7 +734,14 @@ def render_report(dashboard, flaky, consistent, infra, window, pr_local=(),
     lines += ["", "## Consistently failing (not flakes — investigate as breakage)"]
     if consistent:
         for f in consistent:
-            lines.append(f"- `{f['test']}` ({f['tab']}): failing at head")
+            if f.get("job"):
+                lines.append(
+                    f"- `{f['tab']}` (job): every run since "
+                    f"{fmt_ts(f['first_failure_ts'])} failed ({f['fails']} run(s), "
+                    f"first failing commit {f['first_failing_commit'][:12] or 'unknown'})"
+                    f" — see {f['job_history']}")
+            else:
+                lines.append(f"- `{f['test']}` ({f['tab']}): failing at head")
     else:
         lines.append("- none")
     lines += ["", "## Recovered breakage (not flakes, failures clustered in "
@@ -815,23 +901,44 @@ or triage manually per [docs/testing.md](https://github.com/kubernetes-sigs/agen
 """
 
 
-def update_issues(repo, flaky, infra, dry_run):
-    existing = json.loads(
-        gh(
-            "issue", "list", "--repo", repo, "--label", "kind/flake",
-            "--state", "open", "--limit", "200", "--json", "number,title,body",
-        )
-    )
+def issue_body_for_job(b, marker, repo):
+    sha = b["first_failing_commit"]
+    commit = (f"[`{sha[:12]}`](https://github.com/{repo}/commit/{sha})"
+              if sha else "unknown")
+    return f"""{marker}
+**Job failing on every recent run, detected by [`dev/tools/flake-report`](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/dev/tools/flake-report).**
+
+| | |
+|---|---|
+| Job | `{b['tab']}` |
+| Consecutive failing runs | {b['fails']} |
+| First failing run | {fmt_ts(b['first_failure_ts'])} at commit {commit} |
+| Last failure | {fmt_ts(b['last_failure_ts'])} |
+| Job history | {b['job_history']} |
+
+This job writes no per-test results, so the failure is the job itself:
+`main` is broken for whatever it builds, pushes, or publishes. Start from
+the first failing commit, and open the newest failed run in the job history
+for the build log. This is not a flaky test; do not retry it.
+
+Close this issue once the job is green again. The report does not close it.
+
+/kind failing-test
+"""
+
+
+def list_issues(repo, label, state, fields):
+    return json.loads(
+        gh("issue", "list", "--repo", repo, "--label", label,
+           "--state", state, "--limit", "200", "--json", fields))
+
+
+def update_issues(repo, flaky, infra, dry_run, breakages=()):
+    existing = list_issues(repo, "kind/flake", "open", "number,title,body")
     # Closed issues participate in dedup too: a maintainer closing a
     # verified false positive must not have it re-filed while the stale
     # failing columns are still inside the TestGrid window.
-    closed = json.loads(
-        gh(
-            "issue", "list", "--repo", repo, "--label", "kind/flake",
-            "--state", "closed", "--limit", "200",
-            "--json", "number,body,closedAt",
-        )
-    )
+    closed = list_issues(repo, "kind/flake", "closed", "number,body,closedAt")
     actions = []
     for f in flaky:
         marker = f"{ISSUE_MARKER_PREFIX}{f['test']} -->"
@@ -919,6 +1026,40 @@ this count.
                 gh("issue", "create", "--repo", repo,
                    "--title", f"[FLAKE] {i['tab']}: infrastructure failures before tests ran",
                    "--label", "kind/flake", "--body", body)
+
+    # Broken jobs are tracked as kind/failing-test, so they are listed and
+    # deduplicated separately from the flake issues above.
+    if breakages:
+        existing = list_issues(repo, "kind/failing-test", "open", "number,title,body")
+        closed = list_issues(repo, "kind/failing-test", "closed", "number,body,closedAt")
+    for b in breakages:
+        marker = f"{JOB_MARKER_PREFIX}{b['tab']} -->"
+        title = f"[FAILING] {b['tab']}: job fails on every recent run"
+        body = (issue_body_for_job(b, marker, repo)
+                + f"\n<!-- last-reported-failure={b['last_failure_ts']} -->\n")
+        issue = find_existing_issue(existing, marker)
+        if issue:
+            m = re.search(r"last-reported-failure=(\d+)", issue["body"])
+            if m and int(m.group(1)) >= b["last_failure_ts"]:
+                actions.append(f"skip #{issue['number']} (no new failures): job {b['tab']}")
+                continue
+            actions.append(f"update #{issue['number']}: job {b['tab']}")
+            if not dry_run:
+                gh("issue", "edit", str(issue["number"]), "--repo", repo, "--body", body)
+        else:
+            prior = find_closed_issue(closed, marker)
+            if prior and should_skip_for_closed(
+                    prior.get("closedAt"), b["last_failure_ts"]):
+                actions.append(
+                    f"skip (closed #{prior['number']}, no failures since "
+                    f"close): job {b['tab']}")
+                continue
+            if prior:
+                body += lineage_note(prior)
+            actions.append(f"create: {title}")
+            if not dry_run:
+                gh("issue", "create", "--repo", repo, "--title", title,
+                   "--label", "kind/failing-test", "--body", body)
     return actions
 
 
@@ -934,7 +1075,9 @@ def main():
                         help="minimum flake events before an issue is filed "
                              "(retest flips always qualify)")
     parser.add_argument("--update-issues", action="store_true",
-                        help="file/refresh kind/flake GitHub issues (default: report only)")
+                        help="file/refresh kind/flake issues for flaky tests and "
+                             "kind/failing-test issues for broken postsubmit/periodic "
+                             "jobs (default: report only)")
     parser.add_argument("--dry-run", action="store_true",
                         help="with --update-issues, print planned issue actions only")
     parser.add_argument("--json", dest="json_out", metavar="PATH",
@@ -989,7 +1132,8 @@ def main():
             f for f in merge_flaky_by_test(flaky)
             if f["retest_flips"] or f["flaky_cells"] or f["fails"] >= args.min_flakes
         ]
-        actions = update_issues(args.repo, issue_worthy, infra, args.dry_run)
+        actions = update_issues(args.repo, issue_worthy, infra, args.dry_run,
+                                [c for c in consistent if c.get("job")])
         prefix = "[dry-run] " if args.dry_run else ""
         for a in actions:
             print(f"{prefix}{a}")

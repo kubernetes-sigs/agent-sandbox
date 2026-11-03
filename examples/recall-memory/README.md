@@ -25,11 +25,11 @@ The agent posts that token to `POST /v1/auth/kubernetes`. The server creates a `
 - The agent is the claim's name, found as below.
 - The session is the pod's name, so the record still says which pod did the work.
 
-When the key expires, the agent exchanges its token again. A key copied out of a pod dies at its TTL. As the token dies with the TTL, nothing else can mint a key for a deleted pod.
+When the key expires, the agent exchanges its token again. A key copied out of a pod stops working at its TTL. Once the pod is deleted, its token no longer passes TokenReview, so no new key can be minted for it.
 
 ## Identity from the SandboxClaim
 
-A pod handed out by a warm pool has a generated name like `recall-agents-x7k2q` which changes every time, so we cannot use it for agent's identity. The claim's name however lasts across pod creation. The controllers already record the chain as controller owner reference.
+A pod handed out by a warm pool has a generated name like `recall-agents-x7k2q` which changes every time, so it cannot be the agent's identity. The claim's name stays the same when a new pod is created. The controllers already record the chain as controller owner references.
 
 ```
 Pod recall-agents-x7k2q
@@ -37,7 +37,7 @@ Pod recall-agents-x7k2q
     ownerReferences: SandboxClaim run-1          (extensions.agents.x-k8s.io)
 ```
 
-The server reads the pod, then the Sandbox, then the SandboxClaim, and uses `run-1` as the agent. The API server writes owner references, so the pod cannot choose them. At each hop the server checks that the reference is matched, so a pod left over from a deleted claim gets no key for a new claim with the same name.
+The server reads the pod, then the Sandbox, then the SandboxClaim, and uses `run-1` as the agent. The API server writes owner references, so the pod cannot choose them. At each hop the server checks that the reference's UID matches the object it reads, so a pod left over from a deleted claim gets no key for a new claim with the same name.
 
 | Owner of the pod's Sandbox | Agent |
 | --- | --- |
@@ -77,8 +77,8 @@ A template with no `networkPolicy` gets the Secure-by-Default policy including p
 
 - docker, [kind](https://kind.sigs.k8s.io/), kubectl, openssl and perl
 - No account and no API key. Both images are public:
-  - `ghcr.io/polign/recall:0.18.0`
-  - `ghcr.io/polign/polign-server:0.14.0`
+  - `ghcr.io/polign/recall:0.24.0`
+  - `ghcr.io/polign/polign-server:0.15.0`
 
 kind's default network plugin enforces NetworkPolicy, so the policy is real on a plain kind cluster.
 
@@ -88,7 +88,7 @@ kind's default network plugin enforces NetworkPolicy, so the policy is real on a
 ./run-kind.sh
 ```
 
-The script creates a kind cluster named `recall-memory` (or reuses it), installs agent-sandbox v1.0.6, applies the files below, and checks from inside the sandboxes.
+The script creates a kind cluster named `recall-memory` (or reuses it), installs agent-sandbox v1.0.9, applies the files below, and checks from inside the sandboxes.
 
 1. A sandbox still in the warm pool is refused a key (HTTP 401, "still in warm pool"). It only gets the key when claim `run-1` takes that same pod.
 2. Claim `run-1` gets a key for `agents:run-1`, remembers a preference twice, and saves working state.
@@ -98,7 +98,7 @@ The script creates a kind cluster named `recall-memory` (or reuses it), installs
 
 Each check exits non-zero with a `FAIL:` line if the result is wrong.
 
-To apply the files by hand on a cluster that already runs agent-sandbox-
+To apply the files by hand on a cluster that already runs agent-sandbox:
 
 ```sh
 kubectl apply -f namespace.yaml -f serviceaccount.yaml
@@ -131,17 +131,17 @@ curl -sS -H 'Content-Type: application/json' \
 
 ## What we measured
 
-kind v0.33 on an Apple Silicon laptop, Kubernetes v1.37 node, runc, agent-sandbox v1.0.6, recall 0.17.0, polign_db 0.14.0, 2026-10-12. Four runs of `run-kind.sh` on a fresh cluster, then 200 more recall calls and 100 more exchanges from inside a claimed sandbox.
+kind v0.33 on an Apple Silicon laptop, Kubernetes v1.37 node, runc, agent-sandbox v1.0.9, recall 0.24.0, polign_db 0.15.0, 2026-10-30. Three runs of `run-kind.sh`, each on a fresh cluster. Each run makes 100 token exchanges and 200 recall calls from inside a claimed sandbox.
 
 | What | Result |
 | --- | --- |
-| Claim to pod Ready, from the warm pool | 0.2 to 0.5 s |
-| Token exchange: TokenReview, three reads (pod, Sandbox, SandboxClaim), key mint | p50 5.8 to 6.4 ms, p99 13 to 53 ms |
-| recall over REST with a key | p50 1.4 ms, p99 2.6 to 6.8 ms |
+| Claim to pod Ready, from the warm pool | 0.2 to 0.4 s |
+| Token exchange: TokenReview, three reads (pod, Sandbox, SandboxClaim), key mint | p50 5.2 to 6.1 ms, p99 16 to 26 ms |
+| recall over REST with a key | p50 1.4 to 1.6 ms, p99 3.3 to 5.7 ms |
 | Claim deleted and created again | new pod, same `agents:run-1`, current value `helix` with `vim` as replaced, working state resumed |
 | Key for `run-2` against `run-1` | HTTP 403 on recall, `namespace_mismatch` on resume |
 
-One recall call took 2.5 s in one run, right after the first writes. It did not repeat in 400 later calls.
+Two calls out of 900 took 2.5 s: one recall call in one run and one token exchange in another. Every other call finished within 63 ms.
 
 ## What this example does not do
 

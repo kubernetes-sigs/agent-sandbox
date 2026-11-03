@@ -43,7 +43,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: polign-db
-          image: ghcr.io/polign/polign-server:0.14.0
+          image: ghcr.io/polign/polign-server:0.15.0
           args:
             - -store=fs:/var/lib/polign
             - -http=:23000
@@ -178,14 +178,14 @@ spec:
           type: RuntimeDefault
       containers:
         - name: recall
-          image: ghcr.io/polign/recall:0.18.0
+          image: ghcr.io/polign/recall:0.24.0
           args:
             - -backend=polign
             - -url=http://polign-db.recall.svc:23000
             - serve
             - -listen=:8080
             # The typed tools: the agent names subject, predicate and value.
-            # recall 0.18 serves the text tools without this.
+            # Without it, recall serves the text tools.
             - -typed
             - -agent=true
             - -kubernetes
@@ -193,7 +193,7 @@ spec:
             - -kubernetes-key-ttl=15m
             - -kubernetes-sandbox-claims
           env:
-            - name: POLIGN_API_KEY
+            - name: RECALL_BACKEND_KEY
               valueFrom:
                 secretKeyRef:
                   name: polign-key

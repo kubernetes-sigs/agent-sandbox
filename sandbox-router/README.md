@@ -255,6 +255,12 @@ RBAC: the router's ServiceAccount needs `create` on `tokenreviews.authentication
 
 Set `--authz-mode=scoped-token` to authorize requests without giving callers a cluster-verifiable K8s credential. The original `v1.<payload>.<signature>` format uses HMAC-SHA256 and binds `(namespace, name, exp)`. It remains the default when only `--authz-scoped-token-secret-file` is set, so existing deployments keep the same behavior.
 
+V1 is a legacy format. A v1 token carries no Sandbox UID, so if a Sandbox is deleted and recreated under the same namespace and name, an unexpired v1 token for the old Sandbox authorizes the new one. Use v2 when Sandbox names are reused or when tokens outlive a Sandbox. A router configured with only `--authz-scoped-token-secret-file` logs a warning at startup. To move from v1 to v2:
+
+1. Start the routers with both `--authz-scoped-token-verification-keys-file` and `--authz-scoped-token-v1-accept-until` set to a time later than step 2 finishes plus your longest v1 token lifetime.
+2. After every router replica runs the new configuration, switch your token issuers to `authz.MintScopedTokenV2`.
+3. After the cutoff passes, remove `--authz-scoped-token-secret-file` and `--authz-scoped-token-v1-accept-until`.
+
 Scoped-token v2 uses Ed25519 and binds the full `AuthorizationTarget` plus expiry. Its wire format is `v2.<kid>.<payload>.<signature>`. The signature covers the key ID as well as the payload, so changing `kid` cannot select another verification key. Key IDs may contain ASCII letters, digits, hyphens, and underscores. A key file may contain multiple public keys during reader-first rotation. Private signing keys never belong in the router.
 
 The router reads the verification key file once during startup. It does not reload projected file updates. Use a versioned ConfigMap name in the Pod template so each reader-first key-set change rolls the Deployment, and wait for every router replica to accept the overlapping set before issuers use a new `kid`. The [`examples/scoped-token-v2`](examples/scoped-token-v2/) overlay carries the upstream patch and rotation sequence. Helm values, content-hash annotations, and rollout policy belong to the downstream deployment.

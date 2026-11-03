@@ -929,13 +929,9 @@ func readinessGraceStart(sb *sandboxv1beta1.Sandbox) time.Time {
 // fetching the Pod. Anything but False/Unschedulable or False/SchedulingGated
 // (see isSandboxPodSchedulingGated) takes the stuck-sandbox path.
 //
-// Reading the mirror costs two things the Pod read gave us:
-//   - A Pod wedged terminating still reports its last reason, so it holds a
-//     slot until the Pod goes (#1748). LastTransitionTime cannot bound this --
-//     meta.SetStatusCondition only advances it when Status changes.
-//   - A sandbox controller predating the mirror writes no condition, making
-//     every member look stuck. Unreachable in-tree (both controllers ship in one
-//     binary), but possible if extensions ever runs as its own process.
+// A sandbox controller predating the mirror writes no condition, making every
+// member look stuck. Unreachable in-tree (both controllers ship in one binary),
+// but possible if extensions ever runs as its own process.
 func isSandboxPodUnschedulable(sb *sandboxv1beta1.Sandbox) bool {
 	return podNotScheduledReason(sb) == corev1.PodReasonUnschedulable
 }

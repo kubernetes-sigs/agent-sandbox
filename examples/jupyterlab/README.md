@@ -327,7 +327,7 @@ kubectl delete sandbox jupyterlab-sandbox
 
 # Delete ConfigMap (and the Secret, only if you created the optional one)
 kubectl delete configmap jupyter-init-files
-kubectl delete secret jupyter-hf-token
+kubectl delete secret jupyter-hf-token --ignore-not-found
 ```
 
 ### Keep Data, Remove Deployment

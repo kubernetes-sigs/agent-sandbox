@@ -313,6 +313,116 @@ func TestDelete_LegacyRuntimeUnsupported(t *testing.T) {
 	}
 }
 
+func TestSandboxdFileOps_Requests(t *testing.T) {
+	tests := []struct {
+		name       string
+		call       func(*Sandbox) error
+		wantMethod string
+		wantPath   string
+		wantQuery  string
+	}{
+		{"mkdir", func(c *Sandbox) error { return c.Mkdir(context.Background(), "a/b", false) },
+			http.MethodPut, "/v1/files/a%2Fb", "type=directory"},
+		{"mkdir parents", func(c *Sandbox) error { return c.Mkdir(context.Background(), "a/b", true) },
+			http.MethodPut, "/v1/files/a%2Fb", "parents=true&type=directory"},
+		{"move", func(c *Sandbox) error { return c.Move(context.Background(), "a", "dir/b c", false) },
+			http.MethodPost, "/v1/files/a:move", "destination=dir%2Fb+c"},
+		{"copy overwrite", func(c *Sandbox) error { return c.Copy(context.Background(), "a", "b", true) },
+			http.MethodPost, "/v1/files/a:copy", "destination=b&overwrite=true"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotMethod, gotPath, gotQuery string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotMethod, gotPath, gotQuery = r.Method, r.URL.EscapedPath(), r.URL.RawQuery
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer server.Close()
+
+			if err := tt.call(newReadySandboxdTestSandbox(server.URL)); err != nil {
+				t.Fatalf("error: %v", err)
+			}
+			if gotMethod != tt.wantMethod || gotPath != tt.wantPath || gotQuery != tt.wantQuery {
+				t.Errorf("got %s %s?%s, want %s %s?%s", gotMethod, gotPath, gotQuery, tt.wantMethod, tt.wantPath, tt.wantQuery)
+			}
+		})
+	}
+}
+
+func TestSandboxdFileOps_RetryDefaults(t *testing.T) {
+	tests := []struct {
+		name      string
+		call      func(*Sandbox) error
+		wantCalls int32
+	}{
+		{"mkdir retries", func(c *Sandbox) error { return c.Mkdir(context.Background(), "d", false) }, 2},
+		{"move does not retry", func(c *Sandbox) error { return c.Move(context.Background(), "a", "b", false) }, 1},
+		{"copy does not retry", func(c *Sandbox) error { return c.Copy(context.Background(), "a", "b", false) }, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if calls.Add(1) == 1 {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer server.Close()
+
+			err := tt.call(newReadySandboxdTestSandbox(server.URL))
+			if tt.wantCalls == 2 && err != nil {
+				t.Fatalf("expected the retry to succeed, got: %v", err)
+			}
+			if tt.wantCalls == 1 && err == nil {
+				t.Fatal("expected the 503 to be returned without a retry")
+			}
+			if got := calls.Load(); got != tt.wantCalls {
+				t.Errorf("server saw %d calls, want %d", got, tt.wantCalls)
+			}
+		})
+	}
+}
+
+func TestSandboxdFileOps_Validation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("an invalid call must not reach the server")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	c := newReadySandboxdTestSandbox(server.URL)
+	if err := c.Mkdir(context.Background(), "", false); err == nil {
+		t.Error("Mkdir with an empty path: expected error")
+	}
+	if err := c.Move(context.Background(), "", "b", false); err == nil {
+		t.Error("Move with an empty source: expected error")
+	}
+	if err := c.Copy(context.Background(), "a", "", false); err == nil {
+		t.Error("Copy with an empty destination: expected error")
+	}
+}
+
+func TestSandboxdFileOps_LegacyRuntimeUnsupported(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("legacy calls must not reach the server")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	c := newReadyTestSandbox(server.URL)
+	for name, err := range map[string]error{
+		"Mkdir": c.Mkdir(context.Background(), "d", false),
+		"Move":  c.Move(context.Background(), "a", "b", false),
+		"Copy":  c.Copy(context.Background(), "a", "b", false),
+	} {
+		if !errors.Is(err, ErrUnsupportedByRuntime) {
+			t.Errorf("%s: expected ErrUnsupportedByRuntime, got: %v", name, err)
+		}
+	}
+}
+
 func TestSandboxdError_DecodesAPIError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusForbidden)

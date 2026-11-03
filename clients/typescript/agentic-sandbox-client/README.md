@@ -368,7 +368,7 @@ What "retrying" safely means differs per method:
 | `readStream()` | No | Call it again from the beginning | Discard any partial output and reset your destination first — a partial download is never resumed. The file may have changed between attempts. |
 | `writeStream()` | No | Provide a fresh stream producing the same content | The input stream is consumed at most once, so retrying needs a new stream instance, not the same one rewound. Same atomicity/acknowledgement/concurrent-update caveats as `write()`. With `append`, an oversized or interrupted stream can leave a prefix in the target, and a retry adds it again. |
 
-The atomicity guarantee, which does not apply to `append`: the target path never briefly shows partial content — is independent of whether *you* can tell a given call actually completed server-side, and of whether a retry might overwrite someone else's concurrent write.
+Replacement writes never briefly show partial content at the target path (`append` does not). That guarantee is independent of whether *you* can tell a given call actually completed server-side, and of whether a retry might overwrite someone else's concurrent write.
 
 ### Trust boundary
 

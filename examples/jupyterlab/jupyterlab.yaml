@@ -121,11 +121,6 @@ spec:
                 --ServerApp.allow_origin='*' \
                 --ServerApp.disable_check_xsrf=True
           env:
-            - name: HF_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: jupyter-hf-token
-                  key: token
             - name: JUPYTER_ENABLE_LAB
               value: "yes"
             - name: HF_HOME

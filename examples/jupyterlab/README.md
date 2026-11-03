@@ -163,7 +163,7 @@ kubectl port-forward --address 0.0.0.0 pod/jupyterlab-sandbox 8888:8888
 
 ### Resources
 
-1. **Secret** (`jupyter-hf-token`): Stores your HuggingFace token
+1. **Secret** (`jupyter-hf-token`): Stores your HuggingFace token. Only the init container reads it; it is not passed to the JupyterLab container, so notebook code cannot read it from its environment
 2. **ConfigMap** (`jupyter-init-files`): Contains Python scripts and notebooks
 3. **Sandbox** (`jupyterlab-sandbox`): Creates the JupyterLab environment with:
    - Init container: Downloads models and installs dependencies

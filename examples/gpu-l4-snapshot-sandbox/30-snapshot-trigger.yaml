@@ -1,0 +1,10 @@
+# Takes a snapshot of the sandbox pod. The pod name is the same as the
+# Sandbox name. Each trigger needs a new name, thus bump ${TRIGGER_SUFFIX}
+# for each subsequent snapshot.
+apiVersion: podsnapshot.gke.io/v1
+kind: PodSnapshotManualTrigger
+metadata:
+  name: gpu-l4-sandbox-${TRIGGER_SUFFIX}
+  namespace: default
+spec:
+  targetPod: gpu-l4-sandbox

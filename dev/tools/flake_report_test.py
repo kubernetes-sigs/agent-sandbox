@@ -929,6 +929,26 @@ class JobBreakageTest(unittest.TestCase):
             {"b0": {"finished.json": {"result": "ABORTED"}}})
         self.assertEqual(consistent, [])
 
+    def test_aborted_runs_inside_the_streak_are_skipped(self):
+        # Columns 1 and 3 were cancelled: they neither end the streak nor
+        # count as failures, and the first failing run is column 4's.
+        statuses = [12, 12, 12, 12, 12, 1]
+        artifacts = {
+            "b0": {"finished.json": {"result": "FAILURE", "revision": "sha0"}},
+            "b1": {"finished.json": {"result": "ABORTED", "revision": "sha1"}},
+            "b2": {"finished.json": {"result": "FAILURE", "revision": "sha2"}},
+            "b3": {"finished.json": {"result": "ABORTED", "revision": "sha3"}},
+            "b4": {"finished.json": {"result": "FAILURE", "revision": "sha4"}},
+        }
+        (_, consistent, _, _, _), fetched = self.analyze(
+            self.table(self.POST_QUERY, statuses), artifacts)
+        (finding,) = consistent
+        self.assertEqual((finding["fails"], finding["first_failing_commit"],
+                          finding["first_failure_ts"], finding["last_failure_ts"]),
+                         (3, "sha4", 200, 600))
+        # One finished.json per column, shared by the recent and streak scans.
+        self.assertEqual(len(fetched), len(set(fetched)))
+
     def test_tab_with_test_rows_uses_the_per_test_rules(self):
         # Periodic e2e tabs report per-test rows; their red runs are already
         # handled by the per-test and infra accounting, not the job rule.

@@ -397,9 +397,15 @@ def job_breakage(tab, overall, timestamps, fetcher, job_history):
     def cell(i):
         return overall[i] if i < len(overall) else 0
 
+    finished_cache = {}
+
+    def finished_of(i):
+        if i not in finished_cache:
+            finished_cache[i] = fetcher(i)("finished.json") or {}
+        return finished_cache[i]
+
     def aborted(i):
-        finished = fetcher(i)("finished.json") or {}
-        return (finished.get("result") or "").upper() == "ABORTED"
+        return (finished_of(i).get("result") or "").upper() == "ABORTED"
 
     completed = [i for i in range(len(overall))
                  if cell(i) not in (0, RUNNING_STATUS)]
@@ -413,13 +419,17 @@ def job_breakage(tab, overall, timestamps, fetcher, job_history):
     if len(recent) < 2 or not all(cell(i) in FAIL_STATUSES for i in recent):
         return None
 
+    # An aborted run inside the streak is neither a pass nor a failure: it
+    # neither ends the streak nor counts toward it.
     streak = []
     for i in completed:
         if cell(i) not in FAIL_STATUSES:
             break
+        if aborted(i):
+            continue
         streak.append(i)
     first = streak[-1]
-    finished = fetcher(first)("finished.json") or {}
+    finished = finished_of(first)
     return {
         "job": True,
         "tab": tab,

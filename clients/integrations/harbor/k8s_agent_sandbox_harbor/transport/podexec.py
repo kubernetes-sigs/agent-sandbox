@@ -196,7 +196,11 @@ class PodExecTransport:
         attempt = 0
         while True:
             try:
-                await self._run(self._probe)
+                # The probe takes a slot like any other call, so a burst of
+                # starting trials cannot fill the pool and starve an exec
+                # whose timeout is already running.
+                async with self._slot():
+                    await self._run(self._probe)
                 return
             except ApiException as exc:
                 if exc.status == 404:

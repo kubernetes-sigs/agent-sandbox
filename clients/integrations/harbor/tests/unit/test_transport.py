@@ -320,3 +320,24 @@ def test_connect_gets_a_default_timeout_only_when_none_is_set(monkeypatch):
     websocket.WebSocket.connect(Sock(timeout=5), "wss://x")     # socket's wins
     assert [o.get("timeout") for o in seen] == [12, 3, None]
     assert websocket.WebSocket.connect.__wrapped__ is fake_connect
+
+
+async def test_wait_ready_probe_takes_a_slot(monkeypatch):
+    import asyncio
+    import k8s_agent_sandbox_harbor.transport.podexec as mod
+
+    slots = asyncio.Semaphore(1)
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    probes: list[int] = []
+    monkeypatch.setattr(mod, "stream", lambda fn, pod, ns, **kw: (probes.append(1), FakeResp())[1])
+    api = types.SimpleNamespace(connect_get_namespaced_pod_exec=object())
+    t = PodExecTransport(api_factory=lambda: api, pod="p", namespace="ns", container="main",
+                         executor=ex, slots=slots)
+    await slots.acquire()                                  # the one slot is busy
+    task = asyncio.create_task(t.wait_ready(timeout_s=60))
+    await asyncio.sleep(0.3)
+    assert probes == [] and not task.done()                # no probe without a slot
+    slots.release()
+    await asyncio.wait_for(task, timeout=5)
+    assert probes == [1]
+    ex.shutdown(wait=True)

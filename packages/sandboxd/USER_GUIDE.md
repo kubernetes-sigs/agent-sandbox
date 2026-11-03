@@ -549,7 +549,16 @@ digest is `<hex>` on:
 
 Either transport also accepts the bare token in `X-Sandboxd-Token: <token>`
 (`x-sandboxd-token` in gRPC metadata). Use it through the `sandbox-router`,
-which drops `Authorization` before it forwards a request.
+which drops `Authorization` before it forwards a request. A router enforcing
+TokenReview or scoped-token auth does not read this header, so also send its
+own credential in `Authorization`:
+
+```bash
+curl -sf -H "Authorization: Bearer $ROUTER_TOKEN" \
+  -H "X-Sandboxd-Token: $TOKEN" \
+  -H "X-Sandbox-ID: my-sandbox" -H "X-Sandbox-Port: 8080" \
+  "$ROUTER_URL/v1/files/src"
+```
 
 `/v1/health` stays open so a kubelet `httpGet` readiness probe works without
 the token. Comparison is constant time.

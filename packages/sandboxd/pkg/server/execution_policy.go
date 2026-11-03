@@ -85,12 +85,12 @@ func (p ExecutionPolicy) resolve(req *processv1.ExecuteWithLimitsRequest) (execu
 	return executionLimits{timeLimit: timeLimit, stdoutBytes: stdout, stderrBytes: stderr}, nil
 }
 
-func resolveByteLimit(name string, requested *uint64, def, max uint64) (uint64, error) {
+func resolveByteLimit(name string, requested *uint64, def, maxLimit uint64) (uint64, error) {
 	if requested != nil {
 		if *requested == 0 {
 			return 0, status.Errorf(codes.InvalidArgument, "%s must be positive", name)
 		}
-		if max > 0 && *requested > max {
+		if maxLimit > 0 && *requested > maxLimit {
 			return 0, status.Errorf(codes.InvalidArgument, "%s exceeds deployment maximum", name)
 		}
 		return *requested, nil
@@ -98,5 +98,5 @@ func resolveByteLimit(name string, requested *uint64, def, max uint64) (uint64, 
 	if def != 0 {
 		return def, nil
 	}
-	return max, nil
+	return maxLimit, nil
 }

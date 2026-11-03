@@ -19,7 +19,7 @@
 #
 # Required env:
 #   SNAPSHOT_BUCKET  GCS bucket for snapshots (IAM already granted, README §2)
-#   DEMO_IMAGE       pushed image built from image/ (README §3)
+#   DEMO_IMAGE       pushed image built from gpu-snapshot-probe/ (README §3)
 set -euo pipefail
 cd "$(dirname "$0")"
 

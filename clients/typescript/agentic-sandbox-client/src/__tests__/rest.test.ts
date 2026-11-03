@@ -686,6 +686,46 @@ describe("SandboxdRestClient.write", () => {
     expect(activeServer.requests).toHaveLength(0);
   });
 
+  it("sends append as a query parameter and createOnly as If-None-Match", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    const signal = new AbortController().signal;
+    await client.write("a.txt", new Uint8Array(), { append: true }, signal);
+    await client.write("b.txt", new Uint8Array(), { createOnly: true }, signal);
+    await client.write("c.txt", new Uint8Array(), {}, signal);
+    const [appendReq, createReq, plainReq] = activeServer.requests;
+    expect(appendReq.url).toBe("/v1/files/a.txt?append=true");
+    expect(appendReq.headers["if-none-match"]).toBeUndefined();
+    expect(createReq.url).toBe("/v1/files/b.txt");
+    expect(createReq.headers["if-none-match"]).toBe("*");
+    expect(plainReq.url).toBe("/v1/files/c.txt");
+    expect(plainReq.headers["if-none-match"]).toBeUndefined();
+  });
+
+  it("maps 412 to FAILED_PRECONDITION", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(412, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({ code: "FAILED_PRECONDITION", message: "exists" }),
+      );
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await expect(
+      client.write(
+        "a.txt",
+        new Uint8Array(),
+        { createOnly: true },
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({
+      status: 412,
+      code: "FAILED_PRECONDITION",
+    } satisfies Partial<SandboxdApiError>);
+  });
+
   it("rejects content over maxUploadSize before sending any request", async () => {
     activeServer = await startServer((_req, res) => {
       res.writeHead(204);
@@ -817,6 +857,24 @@ describe("SandboxdRestClient.writeStream", () => {
       new AbortController().signal,
     );
     expect(activeServer.requests[0].url).toBe("/v1/files/a.txt?mode=0755");
+  });
+
+  it("sends append and createOnly like write()", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await client.writeStream(
+      "a.txt",
+      toReadableStream([]),
+      { mode: "0644", append: true, createOnly: true },
+      new AbortController().signal,
+    );
+    expect(activeServer.requests[0].url).toBe(
+      "/v1/files/a.txt?mode=0644&append=true",
+    );
+    expect(activeServer.requests[0].headers["if-none-match"]).toBe("*");
   });
 
   it("rejects an invalid mode before ever touching the source stream", async () => {

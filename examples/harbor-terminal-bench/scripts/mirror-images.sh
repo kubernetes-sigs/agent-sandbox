@@ -37,10 +37,23 @@ images=$(grep -rhoE '^docker_image\s*=\s*"[^"]+"' "$work/tasks" --include=task.t
 count=$(echo "$images" | grep -c . || true)
 echo "mirroring $count images to $mirror"
 fail=0
+# A reference without a tag or digest means :latest; make that explicit so
+# acme/task and acme/task:latest are the same destination in the checks.
+with_tag() {
+  local image=$1 last
+  last=${image##*/}
+  if [[ "$last" == *@* || "$last" == *:* ]]; then
+    printf '%s' "$image"
+  else
+    printf '%s:latest' "$image"
+  fi
+}
+
 # Canonical source reference: Docker Hub shorthand expanded, so that
 # python:3.13 and docker.io/library/python:3.13 are one image, not two.
 canonical_source() {
-  local image=$1 first rest
+  local image first rest
+  image=$(with_tag "$1")
   first=${image%%/*}
   rest=${image#*/}
   if [[ "$image" == */* && ( "$first" == *.* || "$first" == *:* || "$first" == localhost ) ]]; then
@@ -60,7 +73,8 @@ canonical_source() {
 # the registry host is dropped, and a Docker Hub image without a namespace
 # gets "library/" (so python:3.13 -> library/python:3.13).
 mirror_path() {
-  local image=$1 first rest path
+  local image first rest path
+  image=$(with_tag "$1")
   first=${image%%/*}
   rest=${image#*/}
   if [[ "$image" == */* && ( "$first" == *.* || "$first" == *:* || "$first" == localhost ) ]]; then

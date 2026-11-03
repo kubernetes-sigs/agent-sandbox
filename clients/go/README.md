@@ -157,8 +157,11 @@ exists, err := sb.Exists(ctx, "script.py")
 
 // Create a directory, rename a file, and copy it (sandboxd runtime only)
 err = sb.Mkdir(ctx, "out/logs", true) // parents
+if err != nil { log.Fatal(err) }
 err = sb.Move(ctx, "script.py", "out/script.py", false) // overwrite
+if err != nil { log.Fatal(err) }
 err = sb.Copy(ctx, "out/script.py", "backup.py", false)
+if err != nil { log.Fatal(err) }
 ```
 
 `Move()` and `Copy()` do not retry unless you pass `WithMaxAttempts`, because a

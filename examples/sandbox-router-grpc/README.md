@@ -61,9 +61,10 @@ kubectl --context "$CONTEXT" -n grpc-router-demo wait \
 ```
 
 The existing scoped-token v1 authorizer binds this demo token to namespace/name
-and rejects UID/Pod-IP overrides. It does **not** bind port, method or incarnation;
-for production use the existing scoped-token v2 cache-backed contract when those
-restrictions are required. Only a trusted issuer should have the signing secret.
+and rejects UID/Pod-IP overrides. It does **not** bind port, method or incarnation,
+so the token also authorizes a Sandbox that is recreated under the same name. For
+production use the existing scoped-token v2 cache-backed contract when those
+restrictions are required (see the [router README](../../sandbox-router/README.md#scoped-token-authorizer)). Only a trusted issuer should have the signing secret.
 The client reads a token file and sends `authorization: Bearer …` on every RPC;
 the router consumes it and does not forward it to sandboxd. Never publish an
 allow-all router as an authenticated public endpoint. Renew the token if it expires.

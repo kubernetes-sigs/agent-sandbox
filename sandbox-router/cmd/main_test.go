@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 
 	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
 )
@@ -147,5 +148,28 @@ users:
 	}
 	if code != http.StatusServiceUnavailable {
 		t.Fatalf("readyz during sync: got %d want 503", code)
+	}
+}
+
+func TestWarnIfScopedTokenV1Only(t *testing.T) {
+	tests := []struct {
+		name        string
+		hasV1Secret bool
+		hasV2Keys   bool
+		wantWarning bool
+	}{
+		{name: "v1 only warns", hasV1Secret: true, wantWarning: true},
+		{name: "v2 only is silent", hasV2Keys: true},
+		{name: "v1 and v2 overlap is silent", hasV1Secret: true, hasV2Keys: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var lines []string
+			log := funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{})
+			warnIfScopedTokenV1Only(log, tc.hasV1Secret, tc.hasV2Keys)
+			if got := len(lines) > 0; got != tc.wantWarning {
+				t.Fatalf("warning logged = %v, want %v (lines: %q)", got, tc.wantWarning, lines)
+			}
+		})
 	}
 }

@@ -104,6 +104,37 @@ func TestRESTRequiresBearerToken(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, put("bearer "+testToken))
 }
 
+func TestRESTAcceptsTokenHeader(t *testing.T) {
+	srv, _ := newAuthServer(t, testToken)
+	handler := srv.RESTHandler()
+	put := func(h http.Header) int {
+		return doRequest(handler, http.MethodPut, "/v1/files/a.txt", []byte("x"), h).Code
+	}
+
+	require.Equal(t, http.StatusUnauthorized, put(http.Header{"X-Sandboxd-Token": {"wrong"}}))
+	require.Equal(t, http.StatusUnauthorized, put(http.Header{"X-Sandboxd-Token": {"Bearer " + testToken}}))
+	require.Equal(t, http.StatusNoContent, put(http.Header{"X-Sandboxd-Token": {testToken}}))
+	// The router drops Authorization, but a client may still send both.
+	require.Equal(t, http.StatusNoContent,
+		put(http.Header{"Authorization": {"Bearer wrong"}, "X-Sandboxd-Token": {testToken}}))
+}
+
+func TestGRPCAcceptsTokenHeader(t *testing.T) {
+	srv, _ := newAuthServer(t, testToken)
+	client := newAuthGRPCClient(t, srv)
+	req := &processv1.ExecuteRequest{Config: &processv1.ProcessConfig{Command: []string{"true"}}}
+	withHeader := func(v string) context.Context {
+		return metadata.AppendToOutgoingContext(testCtx(t), "x-sandboxd-token", v)
+	}
+
+	_, err := client.Execute(withHeader("wrong"), req)
+	require.Equal(t, codes.Unauthenticated, status.Code(err))
+
+	resp, err := client.Execute(withHeader(testToken), req)
+	require.NoError(t, err)
+	require.Equal(t, int32(0), resp.GetExitCode())
+}
+
 func TestRESTHealthOpenWithoutToken(t *testing.T) {
 	srv, _ := newAuthServer(t, testToken)
 	rec := doRequest(srv.RESTHandler(), http.MethodGet, "/v1/health", nil, nil)

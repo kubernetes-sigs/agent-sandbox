@@ -577,10 +577,11 @@ class AsyncSandboxClient(Generic[T]):
                 ``create_rps`` pacing, so only ``max_in_flight`` bounds them. When the apiserver
                 answers a create with 429, the batch pauses warm-pool credit for ``Retry-After``
                 (at least 5 seconds) and paces creates at ``create_rps`` until cooldown ends.
-            max_in_flight: Maximum claim creates and member deletes in flight at once. Defaults to
-                20, clamped to ``pool_size - 2`` when the client's Kubernetes API connection pool
-                is smaller. The pool must hold at least ``max_in_flight + 2``, since the batch's
-                watch and its Lease renewal each need a connection too.
+            max_in_flight: Maximum claim creates, ``acquire()`` pool reads, and member deletes in
+                flight at once. Defaults to 20, clamped to ``pool_size - 2`` when the client's
+                Kubernetes API connection pool is smaller. The pool must hold at least
+                ``max_in_flight + 2``, since the batch's watch and its Lease renewal each need a
+                connection too.
             work_budget: Seconds the caller expects to work with the batch after it is Ready;
                 part of each claim's ``shutdownTime``. Defaults to 3600.
             quorum_timeout: Seconds after the last claim create that a group may take to reach

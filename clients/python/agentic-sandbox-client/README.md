@@ -783,7 +783,11 @@ it unreachable. Read a failed member's `reason` before releasing it. The three m
 it is Ready, for example to replace a member released with `release_member()`. Its claim takes the next unused
 ordinal, so ordinals are never reused, even across `detach()` and `get_batch()`. It isn't one of the initial
 claims, so `events()`, the quorum consumers and `release_not_ready()` leave it alone, but `release_group()` on
-its pool releases it, and its `shutdownTime` counts from its own create. It raises `TerminalMemberError` if the create fails or the
+its pool releases it, and its `shutdownTime` counts from its own create. Its create follows the initial
+claims' pacing, except that a create the pool's Ready sandboxes cover skips `create_rps` pacing. Once callers spend the
+count from the pool's check and `create_rps` pacing would delay the next create, `acquire()` reads the pool again at most
+once a second per pool. Its create and pool reads also share `max_in_flight` with
+the initial claims and member deletes. `acquire()` raises `TerminalMemberError` if the create fails or the
 member fails or is deleted before it is Ready, and `BatchTimeoutError` if it isn't Ready within `timeout`,
 which defaults to `quorum_timeout`. Both are `BatchError`, so `except BatchError` catches every runtime
 failure. If it raises, including on a cancellation, `acquire()` drops the member from `members()` and deletes

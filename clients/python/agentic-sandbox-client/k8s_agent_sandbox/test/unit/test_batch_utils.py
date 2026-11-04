@@ -357,8 +357,9 @@ class TestWarmCredit(unittest.TestCase):
         with patch.object(batch_utils.time, "monotonic", side_effect=lambda: now[0]):
             credit = batch_utils.WarmCredit()
             credit.record("pool-a", 4)
+            self.assertFalse(credit.refresh_due("pool-a"))
             self.assertTrue(credit.take("pool-a"))
-            # Default 5s cooldown starts once and suppresses repeated log triggers inside the window.
+            # Default 5s cooldown starts once and suppresses both unpaced takes and pool refreshes.
             self.assertTrue(credit.throttle())
             self.assertFalse(credit.throttle(2.0))
             self.assertFalse(credit.take("pool-a"))
@@ -367,16 +368,27 @@ class TestWarmCredit(unittest.TestCase):
             credit.spend("pool-a")
             now[0] += 4.9
             self.assertFalse(credit.take("pool-a"))
+            self.assertFalse(credit.refresh_due("pool-a"))
             now[0] += 0.2
+            # Remaining credit > 0 suppresses refresh until callers spend the last warm sandbox.
+            self.assertFalse(credit.refresh_due("pool-a"))
             self.assertTrue(credit.take("pool-a"))
             self.assertFalse(credit.take("pool-a"))
-            # A longer Retry-After extends the cooldown window, and a new window reports True again.
-            credit.record("pool-a", 2)
+            self.assertTrue(credit.refresh_due("pool-a"))
+            # A fresh zero-Ready read waits BATCH_WARM_CREDIT_REFRESH_SECONDS before refreshing again.
+            credit.record("pool-a", 0)
+            self.assertFalse(credit.refresh_due("pool-a"))
+            now[0] += 0.9
+            self.assertFalse(credit.refresh_due("pool-a"))
+            now[0] += 0.1
+            self.assertTrue(credit.refresh_due("pool-a"))
+            # Even with zero credit and an aged read, an active Retry-After cooldown suppresses refresh.
             self.assertTrue(credit.throttle(12.0))
+            self.assertFalse(credit.refresh_due("pool-a"))
             now[0] += 11.9
-            self.assertFalse(credit.take("pool-a"))
+            self.assertFalse(credit.refresh_due("pool-a"))
             now[0] += 0.2
-            self.assertTrue(credit.take("pool-a"))
+            self.assertTrue(credit.refresh_due("pool-a"))
 
 
 if __name__ == "__main__":

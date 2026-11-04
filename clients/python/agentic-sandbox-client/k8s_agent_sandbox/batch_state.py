@@ -19,7 +19,7 @@ Contains methods for modifying and re-populating a batch's state that operate on
 Kubernetes objects and thus do not perform any network I/O, threading, or locking of their own.
 """
 
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Sequence
 from enum import Enum
 from operator import itemgetter
@@ -261,6 +261,11 @@ class BatchState:
         # The pool of each acquire() claim that isn't Ready yet, so release_group() can release it
         # before the watch has seen it.
         self._acquiring: dict[str, str] = {}
+        # Count of acquire() calls per pool that have not reserved a claim ordinal yet, so
+        # release_group() recognizes the pool during its first check or warm-credit refresh
+        # without burning an ordinal.
+        self._checking_acquires: Counter[str] = Counter()
+        self._pool_release_seq: dict[str, int] = {}
 
     def seed_from_claims(self, claim_objs: Sequence[dict[str, Any]]) -> None:
         """Reconstructs state from the batch's existing claims."""
@@ -392,6 +397,7 @@ class BatchState:
         handle can close their connections. It deletes them by label, not by name.
         """
         self._fill_stopped_pools.add(warmpool)
+        self._pool_release_seq[warmpool] = self._pool_release_seq.get(warmpool, 0) + 1
         names = [name for name, member in self._members.items() if member.warmpool == warmpool]
         acquiring = [name for name, pool in self._acquiring.items() if pool == warmpool]
         for name in [*names, *acquiring]:
@@ -408,6 +414,7 @@ class BatchState:
             or warmpool in self._fill_stopped_pools
             or any(m.warmpool == warmpool for m in self._members.values())
             or warmpool in self._acquiring.values()
+            or warmpool in self._checking_acquires
         )
 
     def _take_deletes(self, released: Sequence[Member]) -> list[str]:
@@ -425,6 +432,25 @@ class BatchState:
     def next_ordinal(self) -> int:
         """The lowest ordinal no claim of the batch has taken."""
         return self._next_ordinal
+
+    def enter_acquire(self, warmpool: str) -> int:
+        """Marks an ``acquire()`` from ``warmpool`` as in flight before it takes an ordinal, and
+        returns the pool's release sequence so ``release_group()`` can stop it.
+        """
+        self._checking_acquires[warmpool] += 1
+        return self._pool_release_seq.get(warmpool, 0)
+
+    def exit_acquire(self, warmpool: str) -> None:
+        """Clears an ``enter_acquire()`` count once ``acquire()`` takes an ordinal or exits."""
+        remaining = self._checking_acquires[warmpool] - 1
+        if remaining > 0:
+            self._checking_acquires[warmpool] = remaining
+        else:
+            self._checking_acquires.pop(warmpool, None)
+
+    def pool_release_seq(self, warmpool: str) -> int:
+        """Returns how many times ``release_group()`` has released ``warmpool``."""
+        return self._pool_release_seq.get(warmpool, 0)
 
     def start_acquire(self, warmpool: str) -> str:
         """Returns a ``<batch-id>-<ordinal>`` claim name with the next unused ordinal for an

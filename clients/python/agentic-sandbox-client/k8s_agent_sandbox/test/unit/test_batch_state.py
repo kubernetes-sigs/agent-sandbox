@@ -942,10 +942,18 @@ class TestAcquired(unittest.TestCase):
         state = _state(BatchGroup(warmpool="pool-a", size=1))
         state.upsert_claim(_ready("b1-5", "pool-b", fill=False))
         state.start_acquire("pool-c")
+        self.assertEqual(state.enter_acquire("pool-e"), 0)
         self.assertEqual(
-            [state.has_pool(p) for p in ("pool-a", "pool-b", "pool-c", "pool-d")],
-            [True, True, True, False],
+            [state.has_pool(p) for p in ("pool-a", "pool-b", "pool-c", "pool-d", "pool-e")],
+            [True, True, True, False, True],
         )
+        state.release_group("pool-e")
+        self.assertEqual(state.pool_release_seq("pool-e"), 1)
+        state.exit_acquire("pool-e")
+        self.assertEqual(state._checking_acquires, {})
+        self.assertEqual(state.enter_acquire("pool-e"), 1)
+        state.exit_acquire("pool-e")
+        self.assertEqual(state._checking_acquires, {})
         state.release_group("pool-b")
         self.assertTrue(state.has_pool("pool-b"))
         # Stopping an undeclared pool still ignores late fill claims or create failures without

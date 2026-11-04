@@ -76,6 +76,9 @@ BATCH_DEFAULT_MAX_IN_FLIGHT = 20
 # doesn't make requests wait. It opens one-off connections that close after a single request, so
 # each pays a fresh handshake.
 BATCH_POOL_HEADROOM = 2
+# How long acquire() waits before re-reading a warm pool's Ready count once callers spend its credit,
+# so a burst of acquires on one pool sends about one GET a second rather than one per acquire.
+BATCH_WARM_CREDIT_REFRESH_SECONDS = 1.0
 # Minimum cooldown after a 429 create response before warm-pool credit skips create_rps pacing
 # again, so a brief apiserver burst backs off immediately without throttling later steps on a
 # long-lived batch.
@@ -529,16 +532,18 @@ class WarmCredit:
 
     A covered create skips ``create_rps`` pacing, so only ``max_in_flight`` bounds it. Pacing
     exists so that a burst of cold claims doesn't start many pods on a node at once, and a claim
-    a Ready sandbox takes starts no pod. Prechecks read the initial count, so if another client
-    takes those sandboxes first, the stale credit lets some claims start pods unpaced, just as
-    per-claim creates do. A 429 response pauses the credit for ``Retry-After`` (at least
-    ``BATCH_WARM_CREDIT_THROTTLE_SECONDS``) so an active burst backs off to ``create_rps`` while a
-    long-lived batch recovers warm speed once the apiserver clears. The handles call this class
-    with their lock held.
+    a Ready sandbox takes starts no pod. Prechecks read the initial count, and ``acquire()`` reads
+    the pool again once callers spend that credit and ``create_rps`` pacing would otherwise delay
+    a create. If another client takes those sandboxes first, the stale credit lets some claims
+    start pods unpaced, just as per-claim creates do. A 429 response pauses the credit for
+    ``Retry-After`` (at least ``BATCH_WARM_CREDIT_THROTTLE_SECONDS``) so an active burst backs off
+    to ``create_rps`` while a long-lived batch recovers warm speed once the apiserver clears. The
+    handles call this class with their lock held.
     """
 
     def __init__(self) -> None:
         self._credit: dict[str, int] = {}
+        self._read_at: dict[str, float] = {}
         self._throttled_until = -math.inf
 
     def _is_throttled(self) -> bool:
@@ -546,8 +551,17 @@ class WarmCredit:
         return time.monotonic() < self._throttled_until
 
     def record(self, warmpool: str, ready: int) -> None:
-        """Sets the pool's credit to its Ready replica count."""
+        """Sets the pool's credit to its Ready replica count, just read."""
         self._credit[warmpool] = ready
+        self._read_at[warmpool] = time.monotonic()
+
+    def refresh_due(self, warmpool: str) -> bool:
+        """Whether callers spent the pool's credit, no 429 cooldown is active, and the last read
+        happened at least ``BATCH_WARM_CREDIT_REFRESH_SECONDS`` ago, making a new read worthwhile.
+        """
+        if self._is_throttled() or self._credit.get(warmpool, 0) > 0:
+            return False
+        return time.monotonic() - self._read_at.get(warmpool, -math.inf) >= BATCH_WARM_CREDIT_REFRESH_SECONDS
 
     def take(self, warmpool: str) -> bool:
         """Spends one of the pool's credit when unthrottled, returning whether it covered the create."""

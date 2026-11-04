@@ -3129,6 +3129,10 @@ class TestAcquire(BaseClaimBatchTest):
         groups = [BatchGroup(warmpool="pool-a", size=2), BatchGroup(warmpool="pool-b", size=0)]
         batch = await self.claim(groups, labels={"team": "rl"}, quorum_timeout=90, work_budget=120)
         await _wait_until(lambda: len(batch.members()) == 2)
+        # So a pool's Ready count isn't read again, which would add GETs to the checks counted below.
+        refresh = patch.object(batch_utils, "BATCH_WARM_CREDIT_REFRESH_SECONDS", 3600)
+        refresh.start()
+        self.addCleanup(refresh.stop)
         _SteppingDatetime.calls = 0
         with patch("k8s_agent_sandbox.utils.datetime", _SteppingDatetime):
             member = await batch.acquire("pool-c")
@@ -3238,6 +3242,46 @@ class TestAcquire(BaseClaimBatchTest):
         self.assertTrue(second.cancelled())
         self.assertEqual(checked, ["pool-a", "pool-b", "pool-b"])
 
+        # Cancelling a check while _lock is contended right after _precheck_pools (including after
+        # recording warm credit) still clears _prechecks and _checking_acquires without hanging.
+        in_template = asyncio.Event()
+        release_template = asyncio.Event()
+        release_blocker = asyncio.Event()
+        blocker_held = asyncio.Event()
+        self.addCleanup(release_template.set)
+        self.addCleanup(release_blocker.set)
+
+        async def get_template(name, *args, **kwargs):
+            if "pool-c" in checked:
+                in_template.set()
+                await release_template.wait()
+            return {}
+
+        async def hold_lock():
+            async with batch._lock:
+                blocker_held.set()
+                await release_blocker.wait()
+
+        self.cluster.helper.get_sandbox_template.side_effect = get_template
+        leader = asyncio.create_task(batch.acquire("pool-c"))
+        await asyncio.wait_for(in_template.wait(), timeout=2)
+        async with batch._lock:
+            release_template.set()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            blocker = asyncio.create_task(hold_lock())
+            await asyncio.sleep(0)
+        await asyncio.wait_for(blocker_held.wait(), timeout=2)
+        await asyncio.sleep(0)
+        leader.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(leader, timeout=2)
+        release_blocker.set()
+        await asyncio.wait_for(blocker, timeout=2)
+        self.assertEqual(batch._prechecks, {})
+        self.assertEqual(batch._state._checking_acquires, {})
+        self.assertEqual((await asyncio.wait_for(batch.acquire("pool-c"), timeout=2)).warmpool, "pool-c")
+
     async def test_an_acquire_waiting_on_another_acquires_pool_check_stops_at_its_timeout(self):
         helper = self.cluster.helper
         checked: list[str] = []
@@ -3322,6 +3366,262 @@ class TestAcquire(BaseClaimBatchTest):
         await batch.release_not_ready()
         self.assertEqual(helper.create_sandbox_claim.await_count, 3)
         self.assertEqual([c.args[0] for c in helper.delete_sandbox_claim.call_args_list], ["b1-2"])
+
+    async def test_release_group_during_warm_credit_refresh_stops_acquire(self):
+        helper = self.cluster.helper
+        read_started = asyncio.Event()
+        read_gate: asyncio.Event | None = None
+        ready = {"pool-a": 0, "pool-unseen": 2, "pool-refresh": 2}
+
+        async def get_warmpool(name, *args, **kwargs):
+            gate = read_gate
+            if gate is not None and name in ("pool-unseen", "pool-refresh"):
+                read_started.set()
+                await gate.wait()
+            return {"spec": {"sandboxTemplateRef": {"name": "tmpl"}}, "status": {"readyReplicas": ready[name]}}
+
+        helper.get_sandbox_warmpool.side_effect = get_warmpool
+        offset = [0.0]
+        fake_time = SimpleNamespace(monotonic=lambda: time.monotonic() + offset[0])
+        with patch.object(batch_utils, "time", fake_time):
+            batch = await self.claim([BatchGroup(warmpool="pool-a", size=0)])
+
+            # Releasing an unseen pool during its first-use check stops the in-flight acquire
+            # without raising ValueError or burning an ordinal.
+            helper.create_sandbox_claim.reset_mock()
+            helper.delete_sandbox_claim.reset_mock()
+            read_gate = asyncio.Event()
+            self.addCleanup(read_gate.set)
+            checking = asyncio.create_task(batch.acquire("pool-unseen", timeout=5))
+            await asyncio.wait_for(read_started.wait(), 5)
+            await batch.release_group("pool-unseen")
+            read_gate.set()
+            with self.assertRaisesRegex(BatchError, "was released while acquiring"):
+                await asyncio.wait_for(checking, 5)
+            read_gate = None
+            read_started.clear()
+            helper.create_sandbox_claim.assert_not_called()
+            helper.delete_sandbox_claim.assert_not_called()
+            self.assertEqual(batch._state.next_ordinal, 0)
+            self.assertEqual(batch._state._checking_acquires, {})
+            self.assertEqual(batch._state._released, set())
+
+            # Timing out with no create slot after a warm-credit refresh finds 0 Ready replicas
+            # neither advances next_ordinal nor records a released claim.
+            offset[0] += 1.0
+            batch._next_create_at = time.monotonic() + 10.0
+            with self.assertRaisesRegex(BatchTimeoutError, "no create slot for warm pool 'pool-a'"):
+                await batch.acquire("pool-a", timeout=0.2)
+            self.assertEqual(batch._state.next_ordinal, 0)
+            self.assertEqual(batch._state._checking_acquires, {})
+            self.assertEqual(batch._state._released, set())
+
+            batch._next_create_at = 0.0
+            first = await batch.acquire("pool-refresh")
+            second = await batch.acquire("pool-refresh")
+            await batch.release_member(first)
+            await batch.release_member(second)
+            self.assertFalse(batch._state.has_pool("pool-refresh"))
+
+            offset[0] += 1.0
+            batch._next_create_at = time.monotonic() + 0.3
+            helper.create_sandbox_claim.reset_mock()
+            helper.delete_sandbox_claim.reset_mock()
+            read_gate = asyncio.Event()
+            self.addCleanup(read_gate.set)
+            acquiring = asyncio.create_task(batch.acquire("pool-refresh", timeout=5))
+            await asyncio.wait_for(read_started.wait(), 5)
+            await batch.release_group("pool-refresh")
+            read_gate.set()
+            with self.assertRaisesRegex(BatchError, "was released while acquiring"):
+                await asyncio.wait_for(acquiring, 5)
+            helper.create_sandbox_claim.assert_not_called()
+            helper.delete_sandbox_claim.assert_not_called()
+            self.assertEqual(batch._state.next_ordinal, 2)
+            self.assertEqual(batch._state._checking_acquires, {})
+            self.assertEqual(batch._state._acquiring, {})
+            self.assertEqual(batch._state._released, {"b1-0", "b1-1"})
+            self.assertEqual(batch._acquire_waiters, {})
+
+    async def test_acquires_the_warm_pool_covers_skip_pacing_and_reread_its_count_once_a_second(self):
+        helper = self.cluster.helper
+        ready = {"pool-a": 2}
+        short_read_started = asyncio.Event()
+        short_timeouts: list[float] = []
+
+        async def get_warmpool(name, *args, **kwargs):
+            timeout = kwargs.get("_request_timeout")
+            if timeout is not None and timeout < 1:
+                short_timeouts.append(timeout)
+                short_read_started.set()
+                await asyncio.sleep(5)
+            # Slow enough that concurrent acquires would overlap their reads.
+            await asyncio.sleep(0.05)
+            return {"spec": {"sandboxTemplateRef": {"name": "tmpl"}}, "status": {"readyReplicas": ready[name]}}
+
+        helper.get_sandbox_warmpool.side_effect = get_warmpool
+        offset = [0.0]
+        fake_time = SimpleNamespace(monotonic=lambda: time.monotonic() + offset[0])
+        with patch.object(batch_utils, "time", fake_time):
+            batch = await self.claim([BatchGroup(warmpool="pool-a", size=0)], max_in_flight=4, create_rps=2)
+            start = time.monotonic()
+            await asyncio.gather(*(batch.acquire("pool-a") for _ in range(4)))
+            started = sorted(t - start for _, t in self.cluster.created)
+            # Two are covered and the first paced one takes its slot at once. The count was just
+            # read, so it isn't read again.
+            self.assertLess(started[2], 0.15)
+            self.assertGreaterEqual(started[3], 0.499)
+            self.assertEqual(helper.get_sandbox_warmpool.call_count, 1)
+
+            ready["pool-a"] = 3
+            offset[0] += 1.0
+            self.cluster.created.clear()
+            start = time.monotonic()
+            await asyncio.gather(*(batch.acquire("pool-a") for _ in range(3)))
+            # One read covers all three, which would otherwise wait for pacing slots.
+            self.assertLess(max(t - start for _, t in self.cluster.created), 0.2)
+            self.assertEqual(helper.get_sandbox_warmpool.call_count, 2)
+
+            # When the next pacing slot is already free, acquire() starts at once without paying a
+            # pool GET, while advancing _next_create_at for concurrent callers behind it.
+            offset[0] += 1.0
+            batch._next_create_at = 0.0
+            self.cluster.created.clear()
+            start = time.monotonic()
+            await batch.acquire("pool-a")
+            self.assertLess(self.cluster.created[0][1] - start, 0.1)
+            self.assertEqual(helper.get_sandbox_warmpool.call_count, 2)
+
+            # A short-deadline acquire caps its pool read to its deadline and doesn't suppress
+            # concurrent refreshes when its own deadline cuts the read short.
+            ready["pool-a"] = 2
+            self.cluster.created.clear()
+            start = time.monotonic()
+            short = asyncio.create_task(batch.acquire("pool-a", timeout=0.15))
+            await asyncio.wait_for(short_read_started.wait(), 5)
+            longer = [asyncio.create_task(batch.acquire("pool-a", timeout=5)) for _ in range(2)]
+            with self.assertRaises(BatchTimeoutError):
+                await asyncio.wait_for(short, 5)
+            await asyncio.wait_for(asyncio.gather(*longer), 5)
+            self.assertEqual(len(short_timeouts), 1)
+            self.assertLessEqual(short_timeouts[0], 0.15)
+            self.assertLess(max(t - start for _, t in self.cluster.created), 0.35)
+            self.assertEqual(helper.get_sandbox_warmpool.call_count, 4)
+
+            # During a 429 cooldown, acquire() paces without re-reading the pool, then refreshes
+            # again once the cooldown expires.
+            ready["pool-a"] = 2
+            offset[0] += 1.0
+            batch._warm_credit.throttle()
+            batch._next_create_at = time.monotonic() + 0.05
+            await batch.acquire("pool-a")
+            self.assertEqual(helper.get_sandbox_warmpool.call_count, 4)
+            offset[0] += 5.0
+            self.cluster.created.clear()
+            start = time.monotonic()
+            await asyncio.gather(*(batch.acquire("pool-a") for _ in range(2)))
+            self.assertLess(max(t - start for _, t in self.cluster.created), 0.2)
+            self.assertEqual(helper.get_sandbox_warmpool.call_count, 5)
+
+            # A pool that isn't one of the batch's groups gets its credit from its check.
+            ready["pool-c"] = 1
+            self.cluster.created.clear()
+            start = time.monotonic()
+            await batch.acquire("pool-c")
+            self.assertLess(self.cluster.created[0][1] - start, 0.2)
+
+    async def test_fill_and_acquire_creates_share_max_in_flight(self):
+        gate = asyncio.Event()
+        delete_gate = asyncio.Event()
+        delete_started = asyncio.Event()
+        self.addCleanup(gate.set)
+        self.addCleanup(delete_gate.set)
+
+        async def hook(name):
+            if name == "b1-0":
+                await gate.wait()
+
+        self.cluster.create_hook = hook
+        batch = await self.claim([BatchGroup(warmpool="pool-a", size=1)], max_in_flight=1)
+        helper = self.cluster.helper
+        await _wait_until(lambda: helper.create_sandbox_claim.call_count == 1)
+        with self.assertRaisesRegex(BatchTimeoutError, "no create in flight slot"):
+            await batch.acquire("pool-a", timeout=0.05)
+        self.assertEqual(self.cluster.helper.create_sandbox_claim.call_count, 1)
+        self.cluster.helper.delete_sandbox_claim.assert_not_called()
+
+        # First-use pool checks share max_in_flight too, and a short-deadline leader that times out
+        # waiting for a slot hands the check to a longer-deadline follower.
+        leader_waiting = asyncio.Event()
+        follower_waiting = asyncio.Event()
+        self.addCleanup(follower_waiting.set)
+        orig_shield = asyncio.shield
+        orig_in_flight_acquire = batch._in_flight.acquire
+        leader_calls = 0
+
+        def shield_and_signal(arg):
+            follower_waiting.set()
+            return orig_shield(arg)
+
+        async def leader_times_out_after_follower_waits():
+            nonlocal leader_calls
+            leader_calls += 1
+            if leader_calls == 1:
+                leader_waiting.set()
+                await asyncio.wait_for(follower_waiting.wait(), 5)
+                async with asyncio.timeout(0.01):
+                    return await orig_in_flight_acquire()
+            return await orig_in_flight_acquire()
+
+        with (
+            patch.object(asyncio, "shield", side_effect=shield_and_signal),
+            patch.object(batch._in_flight, "acquire", side_effect=leader_times_out_after_follower_waits),
+        ):
+            short_check = asyncio.create_task(batch.acquire("pool-b", timeout=5))
+            await asyncio.wait_for(leader_waiting.wait(), 5)
+            follower = asyncio.create_task(batch.acquire("pool-b", timeout=5))
+            await asyncio.wait_for(follower_waiting.wait(), 5)
+            with self.assertRaisesRegex(BatchTimeoutError, "warm pool 'pool-b' wasn't checked"):
+                await asyncio.wait_for(short_check, 5)
+            self.assertEqual(helper.get_sandbox_warmpool.call_count, 1)
+            gate.set()
+            checked_member = await asyncio.wait_for(follower, 5)
+        self.assertEqual(checked_member.warmpool, "pool-b")
+        await _wait_until(lambda: all(c.done() for c in batch._creators))
+        fill_member = next(m for m in batch.members() if m.claim_name == "b1-0")
+        self.assertEqual((await batch.acquire("pool-a")).claim_name, "b1-3")
+        offset = [0.0]
+        fake_time = SimpleNamespace(monotonic=lambda: time.monotonic() + offset[0])
+
+        async def expire_during_pacing(_t):
+            offset[0] += 10.0
+            return False
+
+        with (
+            patch.object(async_sandbox_batch, "time", fake_time),
+            patch.object(batch, "_wait_for_stop", side_effect=expire_during_pacing),
+        ):
+            with self.assertRaisesRegex(BatchTimeoutError, "no create in flight slot"):
+                await batch.acquire("pool-a", timeout=5)
+        self.assertEqual(self.cluster.helper.create_sandbox_claim.call_count, 3)
+        self.cluster.helper.delete_sandbox_claim.assert_not_called()
+
+        # Warm-credit refreshes share max_in_flight with member deletes as well.
+        async def slow_delete(*args, **kwargs):
+            delete_started.set()
+            await delete_gate.wait()
+
+        helper.delete_sandbox_claim.side_effect = slow_delete
+        with patch.object(batch_utils, "BATCH_WARM_CREDIT_REFRESH_SECONDS", 0.0):
+            deleting = asyncio.create_task(batch.release_member(fill_member))
+            await asyncio.wait_for(delete_started.wait(), 5)
+            batch._next_create_at = time.monotonic() + 0.5
+            before_reads = helper.get_sandbox_warmpool.call_count
+            with self.assertRaisesRegex(BatchTimeoutError, "no create slot for warm pool 'pool-a'"):
+                await batch.acquire("pool-a", timeout=0.03)
+            self.assertEqual(helper.get_sandbox_warmpool.call_count, before_reads)
+            delete_gate.set()
+            await asyncio.wait_for(deleting, 5)
 
     async def test_failures_drop_the_member_and_delete_a_claim_that_may_exist(self):
         terminal = [{"type": "Ready", "status": "False", "reason": "InvalidConfiguration"}]

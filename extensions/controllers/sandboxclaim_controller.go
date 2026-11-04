@@ -292,7 +292,7 @@ type SandboxClaimReconciler struct {
 // move the current state of the cluster closer to the desired state.
 func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	logger.V(1).Info("Start of Reconcile loop for SandboxClaim", "request", req.NamespacedName)
+	logger.V(4).Info("Start of Reconcile loop for SandboxClaim", "request", req.NamespacedName)
 	claim := &extensionsv1beta1.SandboxClaim{}
 	if err := r.Get(ctx, req.NamespacedName, claim); err != nil {
 		if k8errors.IsNotFound(err) {
@@ -361,7 +361,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 		return ctrl.Result{RequeueAfter: immediateRequeueDelay}, nil
 	}
-	logger.V(1).Info("Expiration check", "isExpired", claimExpired, "timeLeft", timeLeft, "request", req.NamespacedName)
+	logger.V(4).Info("Expiration check", "isExpired", claimExpired, "timeLeft", timeLeft, "request", req.NamespacedName)
 
 	// Handle "Delete" and "DeleteForeground" policies immediately.
 	// If we delete the claim, we return immediately.
@@ -518,7 +518,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	errs := errors.Join(reconcileErr, metricsErr)
-	logger.V(1).Info("End of Reconcile loop SandboxClaim", "result", result, "error", errs, "request", req.NamespacedName)
+	logger.V(4).Info("End of Reconcile loop SandboxClaim", "result", result, "error", errs, "request", req.NamespacedName)
 	return result, errs
 }
 
@@ -579,7 +579,7 @@ func (r *SandboxClaimReconciler) checkExpiration(claim *extensionsv1beta1.Sandbo
 // reconcileActive handles the creation and updates of running sandboxes.
 func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (*v1beta1.Sandbox, error) {
 	logger := log.FromContext(ctx)
-	logger.V(1).Info("Reconciling active claim", "claim", claim.Name)
+	logger.V(4).Info("Reconciling active claim", "claim", claim.Name)
 
 	// Upfront validation of additional metadata to skip unnecessary processing
 	if err := r.validateAdditionalPodMetadata(&claim.Spec.AdditionalPodMetadata); err != nil {
@@ -588,22 +588,20 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 
 	// Fast path: try to find existing or adopt from warm pool before template lookup.
 	sandbox, err := r.getOrCreateSandbox(ctx, claim, nil)
-	logger.V(1).Info("getOrCreateSandbox result", "sandboxFound", sandbox != nil, "err", err, "claim", claim.Name)
+	logger.V(4).Info("getOrCreateSandbox result", "sandboxFound", sandbox != nil, "err", err, "claim", claim.Name)
 	if err != nil {
 		return nil, err
 	}
 	if sandbox != nil {
-		// Found or adopted. Reconcile network policy (best effort, non blocking).
-		logger.V(1).Info("Fast path: sandbox found or adopted, reconciling network policy", "claim", claim.Name)
+		logger.V(4).Info("Fast path: sandbox found or adopted, propagating metadata", "claim", claim.Name)
 		template, templateErr := r.getTemplate(ctx, claim)
 		if templateErr != nil {
-			logger.Error(templateErr, "failed to get template of the warmpool for network policy reconciliation (non-fatal)", "claim", claim.Name, "warmPool", claim.Spec.WarmPoolRef.Name)
-
-			// If we can't get the template but we have metadata to propagate, we should fail
-			// to ensure consistency and enforce the "No Overrides" rule.
-			if len(claim.Spec.AdditionalPodMetadata.Labels) > 0 || len(claim.Spec.AdditionalPodMetadata.Annotations) > 0 {
-				return nil, fmt.Errorf("failed to get template for metadata propagation: %w", templateErr)
+			// Without the template, the controller can't tell template keys from claim keys,
+			// so it can't check the No-Overrides rule or remove a key the claim dropped.
+			if !podMetadataApplied(&claim.Spec.AdditionalPodMetadata, &sandbox.Spec.PodTemplate.ObjectMeta) {
+				return sandbox, fmt.Errorf("failed to get template for metadata propagation: %w", templateErr)
 			}
+			logger.V(4).Info("Template lookup failed, but the Sandbox already carries the claim's pod metadata", "claim", claim.Name, "warmPool", claim.Spec.WarmPoolRef.Name, "error", templateErr)
 		}
 
 		if template != nil {
@@ -628,7 +626,7 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 			}
 
 			if err := r.mergePodMetadata(&mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
-				return nil, err
+				return sandbox, err
 			}
 
 			needsUpdate := !equality.Semantic.DeepEqual(&mergedMeta, &sandbox.Spec.PodTemplate.ObjectMeta)
@@ -701,7 +699,7 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 // reconcileExpired ensures the Sandbox is deleted for Retained claims.
 func (r *SandboxClaimReconciler) reconcileExpired(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (*v1beta1.Sandbox, error) {
 	logger := log.FromContext(ctx)
-	logger.V(1).Info("Reconciling Expired claim", "claim", claim.Name)
+	logger.V(4).Info("Reconciling Expired claim", "claim", claim.Name)
 
 	// Fall back to claim.Name when status is unset.
 	statusName := claim.Name
@@ -1903,6 +1901,22 @@ func (r *SandboxClaimReconciler) mergePodMetadata(templateMeta *v1beta1.PodMetad
 	return nil
 }
 
+// podMetadataApplied reports whether have carries every label and annotation in want
+// with the same value.
+func podMetadataApplied(want, have *v1beta1.PodMetadata) bool {
+	for k, v := range want.Labels {
+		if hv, ok := have.Labels[k]; !ok || hv != v {
+			return false
+		}
+	}
+	for k, v := range want.Annotations {
+		if hv, ok := have.Annotations[k]; !ok || hv != v {
+			return false
+		}
+	}
+	return true
+}
+
 func (r *SandboxClaimReconciler) injectEnvs(logger logr.Logger, container *corev1.Container, envsToInject []extensionsv1beta1.EnvVar, policy extensionsv1beta1.EnvVarsInjectionPolicy, claimName string) error {
 	if policy == extensionsv1beta1.EnvVarsInjectionPolicyAllowed && len(container.EnvFrom) > 0 {
 		return fmt.Errorf("%w: container %q uses EnvFrom sources; Allowed policy cannot safely prevent overriding EnvFrom-provided variables", ErrEnvVarsInjectionRejected, container.Name)
@@ -2229,11 +2243,11 @@ func claimForcesColdStart(claim *extensionsv1beta1.SandboxClaim) bool {
 
 func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, _ *extensionsv1beta1.SandboxTemplate) (*v1beta1.Sandbox, error) {
 	logger := log.FromContext(ctx)
-	logger.V(1).Info("Executing getOrCreateSandbox", "claim", claim.Name)
+	logger.V(4).Info("Executing getOrCreateSandbox", "claim", claim.Name)
 
 	// Check if a previously adopted sandbox is recorded in claim status
 	if statusName := claim.Status.SandboxStatus.Name; statusName != "" {
-		logger.V(1).Info("Checking status for sandbox name", "claim.Status.SandboxStatus.Name", statusName, "claim", claim.Name)
+		logger.V(4).Info("Checking status for sandbox name", "claim.Status.SandboxStatus.Name", statusName, "claim", claim.Name)
 		sandbox := &v1beta1.Sandbox{}
 		if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: statusName}, sandbox); err == nil {
 			if metav1.IsControlledBy(sandbox, claim) {
@@ -2268,7 +2282,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	}
 
 	if sbName != "" {
-		logger.V(1).Info("Checking assigned sandbox name", "sandboxName", sbName, "fromLabel", fromLabel, "claim", claim.Name)
+		logger.V(4).Info("Checking assigned sandbox name", "sandboxName", sbName, "fromLabel", fromLabel, "claim", claim.Name)
 		sandbox := &v1beta1.Sandbox{}
 		if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: sbName}, sandbox); err == nil {
 			if metav1.IsControlledBy(sandbox, claim) {
@@ -2364,7 +2378,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	}
 
 	// Try name-based lookup (sandbox created by createSandbox uses claim.Name)
-	logger.V(1).Info("Trying name-based lookup for sandbox", "claim", claim.Name)
+	logger.V(4).Info("Trying name-based lookup for sandbox", "claim", claim.Name)
 	sandbox := &v1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: claim.Namespace,

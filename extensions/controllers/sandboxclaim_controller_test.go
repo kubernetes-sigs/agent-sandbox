@@ -6773,6 +6773,121 @@ func TestSandboxClaimReconcile_TransientLookupErrorPreservesStatus(t *testing.T)
 	require.Equal(t, "warm-sandbox", updatedClaim.Status.SandboxStatus.Name, "status.sandbox.name must not be wiped out when sandbox lookup fails with transient error")
 }
 
+func TestSandboxClaimMetadataErrorsKeepMirroringSandbox(t *testing.T) {
+	scheme := newScheme(t)
+	claimLabels := map[string]string{"sandbox.users.io/run": "r1"}
+	claimAnnotations := map[string]string{"example.com/run": "r1"}
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"}},
+	}
+	conflictingTemplate := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			ObjectMeta: sandboxv1beta1.PodMetadata{Annotations: map[string]string{"example.com/run": "r2"}},
+		}}},
+	}
+
+	testCases := []struct {
+		name            string
+		existingObjects []client.Object
+		sandboxMetadata sandboxv1beta1.PodMetadata
+		expectedReason  string
+		expectError     bool
+	}{
+		{
+			name:            "warm pool deleted, sandbox carries claim metadata",
+			sandboxMetadata: sandboxv1beta1.PodMetadata{Labels: claimLabels, Annotations: claimAnnotations},
+			expectedReason:  sandboxv1beta1.SandboxReasonPodSucceeded,
+		},
+		{
+			name:            "warm pool deleted, sandbox lacks claim label",
+			sandboxMetadata: sandboxv1beta1.PodMetadata{Annotations: claimAnnotations},
+			expectedReason:  "WarmPoolNotFound",
+		},
+		{
+			name:            "template deleted, sandbox has stale claim annotation",
+			existingObjects: []client.Object{warmPool},
+			sandboxMetadata: sandboxv1beta1.PodMetadata{Labels: claimLabels, Annotations: map[string]string{"example.com/run": "r0"}},
+			expectedReason:  "TemplateNotFound",
+		},
+		{
+			name:            "template conflicts with claim metadata",
+			existingObjects: []client.Object{warmPool, conflictingTemplate},
+			sandboxMetadata: sandboxv1beta1.PodMetadata{Labels: claimLabels, Annotations: claimAnnotations},
+			expectedReason:  sandboxv1beta1.SandboxReasonReconcilerError,
+			expectError:     true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			claim := &extensionsv1beta1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "bound-claim", Namespace: "default", UID: "claim-uid"},
+				Spec: extensionsv1beta1.SandboxClaimSpec{
+					WarmPoolRef:           extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
+					AdditionalPodMetadata: sandboxv1beta1.PodMetadata{Labels: claimLabels, Annotations: claimAnnotations},
+				},
+				Status: extensionsv1beta1.SandboxClaimStatus{
+					SandboxStatus: extensionsv1beta1.SandboxStatus{Name: "warm-sb", PodIPs: []string{"10.0.0.1"}},
+				},
+			}
+			sandbox := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "warm-sb", Namespace: "default",
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: extensionsv1beta1.GroupVersion.String(), Kind: extensionsv1beta1.SandboxClaimKind,
+						Name: "bound-claim", UID: "claim-uid", Controller: new(true),
+					}},
+				},
+				Spec: sandboxv1beta1.SandboxSpec{
+					SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{ObjectMeta: tc.sandboxMetadata}},
+				},
+				Status: sandboxv1beta1.SandboxStatus{
+					PodIPs: []string{"10.0.0.2"},
+					Conditions: []metav1.Condition{
+						{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: sandboxv1beta1.SandboxReasonPodSucceeded},
+						{Type: string(sandboxv1beta1.SandboxConditionFinished), Status: metav1.ConditionTrue, Reason: sandboxv1beta1.SandboxReasonPodSucceeded},
+					},
+				},
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(append([]client.Object{claim, sandbox}, tc.existingObjects...)...).
+				WithStatusSubresource(claim).
+				Build()
+
+			reconciler := &SandboxClaimReconciler{
+				Client:           fakeClient,
+				Scheme:           scheme,
+				Recorder:         events.NewFakeRecorder(10),
+				Tracer:           asmetrics.NewNoOp(),
+				WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+			}
+
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: "default"}}
+			_, err := reconciler.Reconcile(context.Background(), req)
+			if tc.expectError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			updatedClaim := &extensionsv1beta1.SandboxClaim{}
+			require.NoError(t, fakeClient.Get(context.Background(), req.NamespacedName, updatedClaim))
+			readyCondition := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+			require.NotNil(t, readyCondition)
+			require.Equal(t, tc.expectedReason, readyCondition.Reason)
+			finishedCondition := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished))
+			require.NotNil(t, finishedCondition)
+			require.Equal(t, metav1.ConditionTrue, finishedCondition.Status)
+			require.Equal(t, []string{"10.0.0.2"}, updatedClaim.Status.SandboxStatus.PodIPs)
+		})
+	}
+}
+
 func TestReconcilePropagatesAnnotationPatchError(t *testing.T) {
 	asmetrics.ClaimStartupLatency.Reset()
 	asmetrics.ClaimControllerStartupLatency.Reset()

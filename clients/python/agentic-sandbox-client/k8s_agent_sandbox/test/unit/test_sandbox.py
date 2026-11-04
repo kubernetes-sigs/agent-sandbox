@@ -110,7 +110,7 @@ class TestSandbox(unittest.TestCase):
             namespace="custom-ns",
             connection_config=mock_connection_config,
             k8s_helper=mock_k8s_helper_instance,
-            get_pod_ip=sandbox.get_pod_ip,
+            get_pod_ip=sandbox._resolve_pod_ip,
             get_pod_name=sandbox.get_pod_name,
             get_service_fqdn=sandbox.get_service_fqdn,
         )
@@ -144,7 +144,7 @@ class TestSandbox(unittest.TestCase):
 
         callback = mock_connector.call_args.kwargs["get_pod_ip"]
         self.assertIs(callback.__self__, sandbox)
-        self.assertIs(callback.__func__, Sandbox.get_pod_ip)
+        self.assertIs(callback.__func__, Sandbox._resolve_pod_ip)
 
     def test_get_pod_name_with_annotation(self):
         self.mock_k8s_helper.get_sandbox.return_value = {
@@ -318,6 +318,13 @@ class TestSandbox(unittest.TestCase):
             }
         }
         self.assertEqual(self.sandbox.get_pod_ip(), "10.244.0.42")
+
+    def test_seeded_pod_ip_is_used_once_then_read_from_the_sandbox(self):
+        self.mock_k8s_helper.get_sandbox.return_value = {"status": {"podIPs": ["10.244.0.43"]}}
+        self.sandbox._seeded_pod_ip = "10.244.0.42"
+        self.assertEqual(self.sandbox._resolve_pod_ip(), "10.244.0.42")
+        self.mock_k8s_helper.get_sandbox.assert_not_called()
+        self.assertEqual(self.sandbox._resolve_pod_ip(), "10.244.0.43")
 
     def test_get_service_fqdn_uses_status_and_preserves_cluster_domain(self):
         self.mock_k8s_helper.get_sandbox.return_value = {

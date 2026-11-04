@@ -67,6 +67,7 @@ class SandboxClient(Generic[T]):
         tracer_config: SandboxTracerConfig | None = None,
         cleanup: bool = False,
         api_client: client.ApiClient | None = None,
+        pool_size: int | None = None,
     ) -> None:
         """
         Initializes the SandboxClient.
@@ -85,6 +86,9 @@ class SandboxClient(Generic[T]):
                 get_batch(). Defaults to False.
             api_client: Optional pre-configured Kubernetes ``ApiClient`` forwarded
                 to the underlying ``K8sHelper`` to target a specific cluster/context.
+            pool_size: Optional size of the Kubernetes API connection pool. A batch
+                needs at least its ``max_in_flight`` plus 2. Can't be combined with
+                ``api_client``; set ``connection_pool_maxsize`` on its configuration instead.
         """
         # Sandbox related configuration
         self.connection_config = connection_config or SandboxLocalTunnelConnectionConfig()
@@ -96,7 +100,7 @@ class SandboxClient(Generic[T]):
         self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
 
         # Downstream Kubernetes Configuration
-        self.k8s_helper = K8sHelper(api_client=api_client)
+        self.k8s_helper = K8sHelper(api_client=api_client, pool_size=pool_size)
         
         # Tracks all the active client side connections to the created sandbox claims
         self._active_connection_sandboxes: Dict[Tuple[str, str], T] = {}
@@ -407,7 +411,10 @@ class SandboxClient(Generic[T]):
             batch_id: Optional batch id; a DNS-1123 label starting with a letter, at most 52
                 characters. Generated if omitted.
             create_rps: Maximum claim creates started per second. Defaults to 50.
-            max_in_flight: Maximum claim creates and member deletes in flight at once. Defaults to 20.
+            max_in_flight: Maximum claim creates and member deletes in flight at once. Defaults to
+                20, clamped to ``pool_size - 2`` when the client's Kubernetes API connection pool
+                is smaller. The pool must hold at least ``max_in_flight + 2``, since the batch's
+                watch and its Lease renewal each need a connection too.
             work_budget: Seconds the caller expects to work with the batch after it is Ready;
                 part of each claim's ``shutdownTime``. Defaults to 3600.
             quorum_timeout: Seconds after the last claim create that a group may take to reach
@@ -417,7 +424,8 @@ class SandboxClient(Generic[T]):
             lease_duration: Seconds the batch Lease stays valid without renewal. Defaults to 60.
 
         Raises:
-            ValueError: If an argument is invalid.
+            ValueError: If an argument is invalid, an explicit ``max_in_flight`` exceeds
+                ``pool_size - 2``, or the client's connection pool holds fewer than 3 connections.
             SandboxWarmPoolNotFoundError: If a group's warm pool doesn't exist.
             SandboxTemplateNotFoundError: If a warm pool's template doesn't exist, or it names none.
             BatchExistsError: If a Lease or claims with this batch id already exist.
@@ -438,6 +446,13 @@ class SandboxClient(Generic[T]):
         args = batch_utils.validate_claim_batch_args(
             groups, labels, batch_id, create_rps, max_in_flight, work_budget, quorum_timeout,
             lease_duration,
+        )
+        args = args._replace(
+            max_in_flight=batch_utils.check_pool_size(
+                self.k8s_helper.api_pool_size(),
+                args.max_in_flight,
+                explicit=max_in_flight is not None,
+            )
         )
         batch = SandboxBatch._claim(self, args, namespace, self._trace_context_annotations())
         self._register_batch(batch)
@@ -505,7 +520,7 @@ class SandboxClient(Generic[T]):
         # connections.
         key = (batch.namespace, batch.batch_id)
         with self._batches_lock:
-            if batch._connected and self._active_batches.get(key) is not batch:
+            if (batch._connected or batch._stale_connections) and self._active_batches.get(key) is not batch:
                 self._closing_batches.add(batch)
             else:
                 self._closing_batches.discard(batch)

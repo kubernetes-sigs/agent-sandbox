@@ -1045,6 +1045,29 @@ class TestAsyncK8sHelperWatchTimeout(unittest.IsolatedAsyncioTestCase):
             watch_cls.assert_not_called()
 
 
+@patch("k8s_agent_sandbox.async_k8s_helper.config")
+class TestAsyncK8sHelperPoolSize(unittest.IsolatedAsyncioTestCase):
+
+    async def test_pool_size_sizes_the_loaded_clients_pool(self, _):
+        helper = AsyncK8sHelper(pool_size=7)
+        self.assertEqual(await helper.api_pool_size(), 7)
+        connector = helper.custom_objects_api.api_client.rest_client.pool_manager.connector
+        self.assertEqual(connector.limit, 7)
+        self.assertIsNone(helper.injected_api_client)
+        await helper.close()
+
+    async def test_a_zero_limit_reads_as_unbounded(self, _):
+        configuration = client.Configuration()
+        configuration.connection_pool_maxsize = 0
+        injected = client.ApiClient(configuration=configuration)
+        self.assertIsNone(await AsyncK8sHelper(api_client=injected).api_pool_size())
+        await injected.close()
+
+    async def test_rejects_pool_size_with_an_injected_client(self, _):
+        with self.assertRaises(ValueError):
+            AsyncK8sHelper(api_client=MagicMock(), pool_size=5)
+
+
 class TestAsyncK8sHelperBatchMethods(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):

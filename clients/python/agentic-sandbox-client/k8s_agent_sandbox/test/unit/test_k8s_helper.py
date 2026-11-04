@@ -1123,6 +1123,35 @@ class TestLeaseApiClient(unittest.TestCase):
         self.assertIs(lease_api_client.configuration.retries, False)
 
 
+@patch("k8s_agent_sandbox.k8s_helper.config")
+class TestK8sHelperPoolSize(unittest.TestCase):
+
+    def test_pool_size_sizes_the_loaded_clients_pool(self, _):
+        helper = K8sHelper(pool_size=7)
+        pool_manager = helper.custom_objects_api.api_client.rest_client.pool_manager
+        self.assertEqual(pool_manager.connection_pool_kw["maxsize"], 7)
+        self.assertEqual(helper.api_pool_size(), 7)
+        self.assertIsNone(helper.injected_api_client)
+
+    def test_a_zero_limit_reads_as_unbounded(self, _):
+        configuration = client.Configuration()
+        configuration.connection_pool_maxsize = 0
+        with client.ApiClient(configuration=configuration) as injected:
+            self.assertIsNone(K8sHelper(api_client=injected).api_pool_size())
+
+    def test_rejects_an_invalid_pool_size(self, _):
+        cases = {
+            "zero": (0, None),
+            "float": (1.5, None),
+            "bool": (True, None),
+            "with api_client": (5, client.ApiClient()),
+        }
+        for name, (pool_size, api_client) in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(ValueError):
+                    K8sHelper(api_client=api_client, pool_size=pool_size)
+
+
 @patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
 @patch("k8s_agent_sandbox.k8s_helper.client.CoordinationV1Api")
 @patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")

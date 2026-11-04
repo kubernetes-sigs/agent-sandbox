@@ -31,7 +31,8 @@ type: ignore
 def __init__(connection_config: SandboxConnectionConfig | None = None,
              tracer_config: SandboxTracerConfig | None = None,
              cleanup: bool = False,
-             api_client: client.ApiClient | None = None) -> None
+             api_client: client.ApiClient | None = None,
+             pool_size: int | None = None) -> None
 ```
 
 Initializes the SandboxClient.
@@ -51,6 +52,9 @@ Initializes the SandboxClient.
   get_batch(). Defaults to False.
 - `api_client` - Optional pre-configured Kubernetes ``ApiClient`` forwarded
   to the underlying ``K8sHelper`` to target a specific cluster/context.
+- `pool_size` - Optional size of the Kubernetes API connection pool. A batch
+  needs at least its ``max_in_flight`` plus 2. Can't be combined with
+  ``api_client``; set ``connection_pool_maxsize`` on its configuration instead.
 
 <a id="k8s_agent_sandbox.sandbox_client.SandboxClient.create_sandbox"></a>
 
@@ -235,7 +239,10 @@ an error that stops the watch or Lease renewal shows in ``err()``.
 - `batch_id` - Optional batch id; a DNS-1123 label starting with a letter, at most 52
   characters. Generated if omitted.
 - `create_rps` - Maximum claim creates started per second. Defaults to 50.
-- `max_in_flight` - Maximum claim creates and member deletes in flight at once. Defaults to 20.
+- `max_in_flight` - Maximum claim creates and member deletes in flight at once. Defaults to
+  20, clamped to ``pool_size - 2`` when the client's Kubernetes API connection pool
+  is smaller. The pool must hold at least ``max_in_flight + 2``, since the batch's
+  watch and its Lease renewal each need a connection too.
 - `work_budget` - Seconds the caller expects to work with the batch after it is Ready;
   part of each claim's ``shutdownTime``. Defaults to 3600.
 - `quorum_timeout` - Seconds after the last claim create that a group may take to reach
@@ -247,7 +254,8 @@ an error that stops the watch or Lease renewal shows in ``err()``.
 
 **Raises**:
 
-- `ValueError` - If an argument is invalid.
+- `ValueError` - If an argument is invalid, an explicit ``max_in_flight`` exceeds
+  ``pool_size - 2``, or the client's connection pool holds fewer than 3 connections.
 - `SandboxWarmPoolNotFoundError` - If a group's warm pool doesn't exist.
 - `SandboxTemplateNotFoundError` - If a warm pool's template doesn't exist, or it names none.
 - `BatchExistsError` - If a Lease or claims with this batch id already exist.
@@ -865,6 +873,12 @@ def connect(member: Member) -> "Sandbox"
 
 Returns a connected ``Sandbox`` for a ready member. If this handle is already connected
 to the Sandbox, it reuses the existing connection, otherwise it creates a new one and caches it for future calls.
+The connection starts from the pod IP the batch's watch reports, without reading the Sandbox.
+
+The batch closes a cached connection once the member's pod is gone, meaning the member is
+lost or failed or the watch reports another sandbox or pod IP for it, since the old IP may go to another
+sandbox. Call ``connect`` again once the member is Ready to get a new one. A member that is
+only not Ready keeps its connection.
 
 Raises ``SandboxNotReadyError`` if the member isn't ready, even while its connection is
 cached, and ``BatchError`` once ``err()`` is set, since the Lease may be lost and the cache

@@ -29,6 +29,7 @@ from .utils import (
     is_valid_gateway_hostname,
     is_valid_ip,
     select_pod_ip,
+    validate_pool_size,
 )
 from .constants import (
     CLAIM_API_GROUP,
@@ -109,12 +110,21 @@ def _api_client_without_retries(api_client: client.ApiClient | None) -> client.A
 class K8sHelper:
     """Helper class for Kubernetes API interactions."""
 
-    def __init__(self, api_client: client.ApiClient | None = None, *, kube_config_temp_dir: str | None = None) -> None:
+    def __init__(
+        self,
+        api_client: client.ApiClient | None = None,
+        pool_size: int | None = None,
+        *,
+        kube_config_temp_dir: str | None = None,
+    ) -> None:
         """When ``api_client`` is provided it is used directly; otherwise the underlying Kubernetes client
         config is loaded (in-cluster, then ``KUBECONFIG``, falling back to ``~/.kube/config`` if unset).
+        ``pool_size`` sets the loaded client's connection pool size and can't be combined with
+        ``api_client``.
 
         ``kube_config_temp_dir`` is where inline kubeconfig cert data is extracted to files. Pass a directory
         the caller removes when the library's own atexit cleanup of those files cannot be registered."""
+        validate_pool_size(pool_size, api_client)
         # Kept so kubectl subprocesses can target the same cluster.
         self.injected_api_client = api_client
         if api_client is None:
@@ -122,9 +132,22 @@ class K8sHelper:
                 config.load_incluster_config()
             except config.ConfigException:
                 config.load_kube_config(temp_file_path=kube_config_temp_dir)
+            if pool_size is not None:
+                configuration = client.Configuration.get_default_copy()
+                configuration.connection_pool_maxsize = pool_size
+                api_client = client.ApiClient(configuration=configuration)
         self.custom_objects_api = client.CustomObjectsApi(api_client)
         self.core_v1_api = client.CoreV1Api(api_client)
         self.coordination_v1_api = client.CoordinationV1Api(_api_client_without_retries(api_client))
+
+    def api_pool_size(self) -> int | None:
+        """Returns the size of the Kubernetes API connection pool that creates and the watch use, or
+        ``None`` if it is unbounded."""
+        # urllib3 backs its pool with LifoQueue(maxsize), which treats 0 as no limit.
+        maxsize = cast(
+            "int | None", self.custom_objects_api.api_client.configuration.connection_pool_maxsize
+        )
+        return maxsize or None
 
     def create_sandbox_claim(
         self,

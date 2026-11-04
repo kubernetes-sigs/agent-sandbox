@@ -161,7 +161,7 @@ class TestAsyncSandbox(unittest.IsolatedAsyncioTestCase):
             namespace="custom-ns",
             connection_config=mock_connection_config,
             k8s_helper=mock_k8s_helper_instance,
-            get_pod_ip=sandbox.get_pod_ip,
+            get_pod_ip=sandbox._resolve_pod_ip,
             get_pod_name=sandbox.get_pod_name,
             get_service_fqdn=sandbox.get_service_fqdn,
         )
@@ -286,6 +286,13 @@ class TestAsyncSandbox(unittest.IsolatedAsyncioTestCase):
     async def test_get_pod_ip_returns_none_when_missing(self):
         self.mock_k8s_helper.get_sandbox.return_value = {"status": {}}
         self.assertIsNone(await self.sandbox.get_pod_ip())
+
+    async def test_seeded_pod_ip_is_used_once_then_read_from_the_sandbox(self):
+        self.mock_k8s_helper.get_sandbox.return_value = {"status": {"podIPs": ["10.244.0.43"]}}
+        self.sandbox._seeded_pod_ip = "10.244.0.42"
+        self.assertEqual(await self.sandbox._resolve_pod_ip(), "10.244.0.42")
+        self.mock_k8s_helper.get_sandbox.assert_not_called()
+        self.assertEqual(await self.sandbox._resolve_pod_ip(), "10.244.0.43")
 
     async def test_get_service_fqdn_uses_status(self):
         self.mock_k8s_helper.get_sandbox.return_value = {

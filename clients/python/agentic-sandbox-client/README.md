@@ -785,11 +785,16 @@ its claim unless the claim is already gone, its create was rejected, or `err()` 
 and `release()` retry a failed delete, and calling `acquire()` again tries a new claim.
 
 The `claim_batch()` defaults are `create_rps=50`, `max_in_flight=20`, `quorum_timeout=600` seconds,
-`work_budget=3600` seconds, and `lease_duration=60` seconds. Every initial claim gets the same `shutdownTime`, the
-time of the `claim_batch()` call plus `N / create_rps` seconds (rounded up) plus `quorum_timeout` plus
-`work_budget` plus 600 seconds, so the controller deletes an abandoned batch's claims eventually.
-`work_budget` is a hard cap. Nothing extends a claim's `shutdownTime`, so a batch held for a whole run sets
-`work_budget` to the run's length.
+`work_budget=3600` seconds, and `lease_duration=60` seconds. The client's Kubernetes API connection pool must hold
+at least `max_in_flight + 2` connections so the batch's watch and Lease renewal each keep a slot alongside
+in-flight requests. When a caller omits `max_in_flight` on a smaller pool of at least 3 connections,
+`claim_batch()` clamps it down to `pool_size - 2` (a smaller pool raises `ValueError`). Pass `pool_size` to
+`SandboxClient` or `AsyncSandboxClient` (or set `connection_pool_maxsize` on an injected `api_client`'s
+configuration) to size the pool for a larger `max_in_flight` or multiple concurrent batches on one client. Every initial claim gets
+the same `shutdownTime`, the time of the `claim_batch()` call plus `N / create_rps` seconds (rounded up) plus
+`quorum_timeout` plus `work_budget` plus 600 seconds, so the controller deletes an abandoned batch's claims
+eventually. `work_budget` is a hard cap. Nothing extends a claim's `shutdownTime`, so a batch held for a whole run
+sets `work_budget` to the run's length.
 
 The client tracks every batch handle it returns. `delete_all()` releases every tracked batch. The client's
 exit cleanup (`cleanup=True`, or leaving a `with SandboxClient()` or `async with AsyncSandboxClient()`

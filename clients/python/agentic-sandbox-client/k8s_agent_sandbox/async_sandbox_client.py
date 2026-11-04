@@ -154,6 +154,7 @@ class AsyncSandboxClient(Generic[T]):
         tracer_config: SandboxTracerConfig | None = None,
         cleanup: bool = True,
         api_client: async_client.ApiClient | None = None,
+        pool_size: int | None = None,
     ) -> None:
         """
         Args:
@@ -176,6 +177,9 @@ class AsyncSandboxClient(Generic[T]):
             api_client: Optional pre-configured ``kubernetes_asyncio`` ``ApiClient``
                 forwarded to the underlying ``AsyncK8sHelper`` to target a specific
                 cluster/context.
+            pool_size: Optional size of the Kubernetes API connection pool. A batch
+                needs at least its ``max_in_flight`` plus 2. Can't be combined with
+                ``api_client``; set ``connection_pool_maxsize`` on its configuration instead.
         """
         if connection_config is None:
             raise ValueError(
@@ -194,7 +198,7 @@ class AsyncSandboxClient(Generic[T]):
             initialize_tracer(self.tracer_config.trace_service_name)
         self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
 
-        self.k8s_helper = AsyncK8sHelper(api_client=api_client)
+        self.k8s_helper = AsyncK8sHelper(api_client=api_client, pool_size=pool_size)
         # Held so atexit cleanup can read configuration/default_headers/cookie live at cleanup time
         self._injected_api_client = api_client
 
@@ -569,7 +573,10 @@ class AsyncSandboxClient(Generic[T]):
             batch_id: Optional batch id; a DNS-1123 label starting with a letter, at most 52
                 characters. Generated if omitted.
             create_rps: Maximum claim creates started per second. Defaults to 50.
-            max_in_flight: Maximum claim creates and member deletes in flight at once. Defaults to 20.
+            max_in_flight: Maximum claim creates and member deletes in flight at once. Defaults to
+                20, clamped to ``pool_size - 2`` when the client's Kubernetes API connection pool
+                is smaller. The pool must hold at least ``max_in_flight + 2``, since the batch's
+                watch and its Lease renewal each need a connection too.
             work_budget: Seconds the caller expects to work with the batch after it is Ready;
                 part of each claim's ``shutdownTime``. Defaults to 3600.
             quorum_timeout: Seconds after the last claim create that a group may take to reach
@@ -579,7 +586,8 @@ class AsyncSandboxClient(Generic[T]):
             lease_duration: Seconds the batch Lease stays valid without renewal. Defaults to 60.
 
         Raises:
-            ValueError: If an argument is invalid.
+            ValueError: If an argument is invalid, an explicit ``max_in_flight`` exceeds
+                ``pool_size - 2``, or the client's connection pool holds fewer than 3 connections.
             SandboxWarmPoolNotFoundError: If a group's warm pool doesn't exist.
             SandboxTemplateNotFoundError: If a warm pool's template doesn't exist, or it names none.
             BatchExistsError: If a Lease or claims with this batch id already exist.
@@ -600,6 +608,13 @@ class AsyncSandboxClient(Generic[T]):
         args = batch_utils.validate_claim_batch_args(
             groups, labels, batch_id, create_rps, max_in_flight, work_budget, quorum_timeout,
             lease_duration,
+        )
+        args = args._replace(
+            max_in_flight=batch_utils.check_pool_size(
+                await self.k8s_helper.api_pool_size(),
+                args.max_in_flight,
+                explicit=max_in_flight is not None,
+            )
         )
         batch = await AsyncSandboxBatch._claim(self, args, namespace, self._trace_context_annotations())
         # Registered with no await in between, so a cancel here can't leave the batch's tasks
@@ -667,7 +682,7 @@ class AsyncSandboxClient(Generic[T]):
         # A handle that is no longer its batch's live one waits here, and cleanup only closes its
         # connections.
         key = (batch.namespace, batch.batch_id)
-        if batch._connected and self._active_batches.get(key) is not batch:
+        if (batch._connected or batch._stale_connections) and self._active_batches.get(key) is not batch:
             self._closing_batches.add(batch)
         else:
             self._closing_batches.discard(batch)
@@ -781,7 +796,8 @@ class AsyncSandboxClient(Generic[T]):
                 return
 
             # A batch's cached connections hold port-forward processes too.
-            batch_sandboxes = [sandbox for batch in batches + closing for sandbox in batch._connected.values()]
+            batch_sandboxes = [sandbox for batch in batches + closing for sandbox, _ in batch._connected.values()]
+            batch_sandboxes += [sandbox for batch in batches + closing for sandbox in batch._stale_connections]
             for sandbox in [sandbox for _, sandbox in tracked] + batch_sandboxes:
                 try:
                     sandbox._close_for_atexit()

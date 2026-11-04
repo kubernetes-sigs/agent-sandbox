@@ -288,7 +288,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         sentinel = MagicMock(name="ApiClient")
         with patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper") as MockHelper:
             AsyncSandboxClient(connection_config=self.config, cleanup=False, api_client=sentinel)
-            MockHelper.assert_called_once_with(api_client=sentinel)
+            MockHelper.assert_called_once_with(api_client=sentinel, pool_size=None)
 
     def test_cleanup_default_registers_atexit(self):
         """Constructing without cleanup= should default to True and register the hook."""
@@ -821,7 +821,7 @@ class TestAsyncSandbox(unittest.IsolatedAsyncioTestCase):
 
         callback = mock_connector.call_args.kwargs["get_pod_ip"]
         self.assertIs(callback.__self__, sandbox)
-        self.assertIs(callback.__func__, AsyncSandbox.get_pod_ip)
+        self.assertIs(callback.__func__, AsyncSandbox._resolve_pod_ip)
 
 
 class TestAsyncSandboxClientInCluster(unittest.IsolatedAsyncioTestCase):

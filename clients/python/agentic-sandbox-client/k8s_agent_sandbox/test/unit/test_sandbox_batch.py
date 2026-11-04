@@ -439,6 +439,108 @@ class TestWatcher(BaseBatchClientTest):
         handle._watch_loop()
         self.assertEqual(handle._state.get_member("b1-0").state, MemberState.LOST)
 
+    def test_connection_is_closed_once_its_members_pod_is_gone(self):
+        def claim(pod_ip="10.0.0.1", ready="True", reason=None, sandbox="sbx-1"):
+            return _claim(
+                "b1-0",
+                conditions=[{"type": "Ready", "status": ready, "reason": reason}],
+                sandbox={"name": sandbox, "podIPs": [pod_ip] if pod_ip else []},
+            )
+
+        cases = {
+            "same pod IP": ([{"type": "MODIFIED", "object": claim()}], False),
+            "new pod IP": ([{"type": "MODIFIED", "object": claim(pod_ip="10.0.0.2")}], True),
+            "new sandbox on the same pod IP": ([{"type": "MODIFIED", "object": claim(sandbox="sbx-2")}], True),
+            "not Ready on the same pod IP": ([{"type": "MODIFIED", "object": claim(ready="False")}], False),
+            "no pod IP": ([{"type": "MODIFIED", "object": claim(pod_ip=None, ready="False")}], True),
+            "failed": (
+                [{"type": "MODIFIED", "object": claim(ready="False", reason="ClaimExpired")}], True,
+            ),
+            "deleted": ([{"type": "DELETED", "object": claim()}], True),
+            "gone on re-list": (self._terminating_error(status=410), True),
+        }
+        for name, (first_watch, closed) in cases.items():
+            with self.subTest(name):
+                self.mock_sandbox_class.side_effect = lambda **kwargs: MagicMock(sandbox_id=kwargs["sandbox_id"])
+                handle = _make_handle(self.client)
+                handle._state.upsert_claim(claim())
+                sandbox = handle.connect(handle.members()[0])
+                self.mock_k8s_helper.watch_sandbox_claims.side_effect = [
+                    first_watch, self._terminating_error(),
+                ]
+                self.mock_k8s_helper.list_sandbox_claim_objects.return_value = ([], "9")
+                handle._watch_loop()
+                self.assertEqual(sandbox.close_connection.called, closed)
+                self.assertEqual("b1-0" in handle._connected, not closed)
+                self.assertEqual(handle._stale_connections, [])
+                # The 403 that ends the loop sets err(), which connect() would raise first.
+                handle._state._error = None
+                if handle._state.get_member("b1-0").state is not MemberState.READY:
+                    with self.assertRaises(SandboxNotReadyError):
+                        handle.connect(handle.members()[0])
+
+    def test_a_stale_connection_that_fails_to_close_is_retried_by_the_next_client_cleanup(self):
+        def claim(pod_ip):
+            return _claim(
+                "b1-0",
+                conditions=[{"type": "Ready", "status": "True"}],
+                sandbox={"name": "sbx-1", "podIPs": [pod_ip]},
+            )
+
+        self.mock_sandbox_class.side_effect = lambda **kwargs: MagicMock(sandbox_id=kwargs["sandbox_id"])
+        handle = _make_handle(self.client)
+        handle._state.upsert_claim(claim("10.0.0.1"))
+        stale = handle.connect(handle.members()[0])
+        stale.close_connection.side_effect = [RuntimeError("close failed"), None]
+        self.mock_k8s_helper.watch_sandbox_claims.side_effect = [
+            [{"type": "MODIFIED", "object": claim("10.0.0.2")}], self._terminating_error(),
+        ]
+        handle._watch_loop()
+        self.assertEqual(self.client._closing_batches, {handle})
+        # The 403 that ends the loop sets err(), which connect() would raise first.
+        handle._state._error = None
+        self.assertIsNot(handle.connect(handle.members()[0]), stale)
+
+        self.client.delete_all()
+        self.assertEqual(stale.close_connection.call_count, 2)
+        self.assertEqual(handle._stale_connections, [])
+
+    def test_a_stale_connection_another_caller_took_is_not_closed_again(self):
+        self.mock_sandbox_class.side_effect = lambda **kwargs: MagicMock(sandbox_id=kwargs["sandbox_id"])
+        handle = _make_handle(self.client, groups=[BatchGroup(warmpool="pool-a", size=2)])
+        for i in range(2):
+            handle._state.upsert_claim(
+                _claim(
+                    f"b1-{i}",
+                    conditions=[{"type": "Ready", "status": "True"}],
+                    sandbox={"name": f"sbx-{i}", "podIPs": [f"10.0.0.{i}"]},
+                )
+            )
+        sandboxes = [handle.connect(member) for member in handle.members()]
+        closing, proceed = threading.Event(), threading.Event()
+
+        def close_connection():
+            closing.set()
+            proceed.wait(5)
+
+        # The watch blocks closing the first stale connection while client cleanup takes the second.
+        sandboxes[0].close_connection.side_effect = close_connection
+        self.mock_k8s_helper.watch_sandbox_claims.side_effect = [
+            self._terminating_error(status=410), self._terminating_error(),
+        ]
+        self.mock_k8s_helper.list_sandbox_claim_objects.return_value = ([], "9")
+        self.client._closing_batches.add(handle)
+        watch = threading.Thread(target=handle._watch_loop)
+        watch.start()
+        self.assertTrue(closing.wait(5))
+        self.client.delete_all()
+        proceed.set()
+        watch.join(5)
+
+        sandboxes[0].close_connection.assert_called_once()
+        sandboxes[1].close_connection.assert_called_once()
+        self.assertEqual(handle._stale_connections, [])
+
     def test_410_relist_retries_503_then_succeeds_reconciling_lost_claim(self):
         handle = _make_handle(self.client)
         handle._state.upsert_claim(
@@ -827,7 +929,11 @@ class TestConnect(unittest.TestCase):
 
     def test_builds_sandbox_class_without_resolve_or_get_sandbox(self):
         self.handle._state.upsert_claim(
-            _claim("b1-0", conditions=[{"type": "Ready", "status": "True"}], sandbox={"name": "sbx-1"})
+            _claim(
+                "b1-0",
+                conditions=[{"type": "Ready", "status": "True"}],
+                sandbox={"name": "sbx-1", "podIPs": ["10.0.0.1"]},
+            )
         )
         member = self.handle.members()[0]
         sandbox = self.handle.connect(member)
@@ -843,6 +949,7 @@ class TestConnect(unittest.TestCase):
         self.mock_client.k8s_helper.resolve_sandbox_name.assert_not_called()
         self.mock_client.k8s_helper.get_sandbox.assert_not_called()
         self.assertIs(sandbox, self.mock_sandbox_instance)
+        self.assertEqual(sandbox._seeded_pod_ip, "10.0.0.1")
 
     def test_repeat_call_returns_same_handle(self):
         self.handle._state.upsert_claim(
@@ -948,7 +1055,7 @@ class TestDetach(unittest.TestCase):
             holder_identity=self.handle._holder_identity
         )
         mock_sandbox = MagicMock()
-        self.handle._connected["b1-0"] = mock_sandbox
+        self.handle._connected["b1-0"] = (mock_sandbox, None)
 
         self.handle.detach()
 
@@ -1044,7 +1151,7 @@ class TestDetach(unittest.TestCase):
         )
         bad_sandbox = MagicMock()
         bad_sandbox.close_connection.side_effect = RuntimeError("boom")
-        self.handle._connected["b1-0"] = bad_sandbox
+        self.handle._connected["b1-0"] = (bad_sandbox, None)
 
         with self.assertLogs(level="WARNING"):
             self.handle.detach()  # Must not raise.
@@ -1054,12 +1161,12 @@ class TestDetach(unittest.TestCase):
     def test_a_connection_whose_close_is_interrupted_stays_on_the_handle(self):
         cached = MagicMock()
         cached.close_connection.side_effect = KeyboardInterrupt
-        self.handle._connected["b1-0"] = cached
+        self.handle._connected["b1-0"] = (cached, None)
 
         with self.assertRaises(KeyboardInterrupt):
             self.handle._close_cached_connections("detach")
 
-        self.assertEqual(self.handle._connected, {"b1-0": cached})
+        self.assertEqual(self.handle._connected, {"b1-0": (cached, None)})
         self.mock_client._track_closing.assert_called_once_with(self.handle)
 
     def test_foreign_holder_lease_is_left_untouched(self):
@@ -1131,6 +1238,7 @@ class _Cluster:
         # A Lease no handle holds, so release() takes it for its handle.
         h.read_batch_lease.return_value = _lease()
         h.create_batch_lease.return_value = _lease()
+        h.api_pool_size.return_value = None
         h.watch_sandbox_claims.side_effect = self._watch
         h.create_sandbox_claim.side_effect = self._create
         h.delete_sandbox_claims_by_label.side_effect = lambda *a, **k: self.calls.append("deletecollection")
@@ -1340,14 +1448,26 @@ class TestClaimBatchSetup(BaseClaimBatchTest):
     def test_precheck_failure_writes_nothing(self):
         helper = self.cluster.helper
         cases = {
-            "missing warm pool": ("get_sandbox_warmpool", None, SandboxWarmPoolNotFoundError),
-            "missing template": ("get_sandbox_template", None, SandboxTemplateNotFoundError),
-            "warm pool names no template": ("get_sandbox_warmpool", {"spec": {}}, SandboxTemplateNotFoundError),
-            "forbidden": ("get_sandbox_warmpool", k8s_client.ApiException(status=403), k8s_client.ApiException),
+            "missing warm pool": ("get_sandbox_warmpool", None, {}, SandboxWarmPoolNotFoundError),
+            "missing template": ("get_sandbox_template", None, {}, SandboxTemplateNotFoundError),
+            "warm pool names no template": (
+                "get_sandbox_warmpool", {"spec": {}}, {}, SandboxTemplateNotFoundError
+            ),
+            "forbidden": (
+                "get_sandbox_warmpool",
+                k8s_client.ApiException(status=403),
+                {},
+                k8s_client.ApiException,
+            ),
+            "explicit max_in_flight above pool_size - 2": (
+                "api_pool_size", 21, {"max_in_flight": 20}, ValueError
+            ),
+            "connection pool below 3": ("api_pool_size", 2, {}, ValueError),
         }
-        for name, (method, result, error) in cases.items():
+        for name, (method, result, kwargs, error) in cases.items():
             with self.subTest(name):
                 helper.reset_mock()
+                helper.api_pool_size.return_value = None
                 helper.get_sandbox_warmpool.return_value = {"spec": {"sandboxTemplateRef": {"name": "tmpl"}}}
                 helper.get_sandbox_template.return_value = {}
                 helper.get_sandbox_warmpool.side_effect = None
@@ -1356,7 +1476,9 @@ class TestClaimBatchSetup(BaseClaimBatchTest):
                 else:
                     getattr(helper, method).return_value = result
                 with self.assertRaises(error):
-                    self.client.claim_batch([BatchGroup(warmpool="pool-a", size=1)])
+                    self.client.claim_batch([BatchGroup(warmpool="pool-a", size=1)], **kwargs)
+                if method == "api_pool_size":
+                    helper.get_sandbox_warmpool.assert_not_called()
                 helper.create_batch_lease.assert_not_called()
 
     def test_setup_failure_deletes_only_a_lease_it_created(self):
@@ -1388,19 +1510,33 @@ class TestClaimBatchSetup(BaseClaimBatchTest):
 class TestClaimBatchCreation(BaseClaimBatchTest):
 
     def test_creates_are_bounded_by_max_in_flight_and_paced_by_create_rps(self):
-        gate = threading.Event()
-        self.cluster.create_hook = lambda name: gate.wait(5)
-        self.claim([BatchGroup(warmpool="pool-a", size=5)], max_in_flight=2)
-        _wait_until(lambda: self.cluster.helper.create_sandbox_claim.call_count == 2)
-        time.sleep(0.2)
-        self.assertEqual(self.cluster.helper.create_sandbox_claim.call_count, 2)
-        gate.set()
-        _wait_until(lambda: len(self.cluster.created) == 5)
+        for name, batch_id, pool_size, kwargs in (
+            ("explicit", "b1", None, {"max_in_flight": 2}),
+            ("clamped to pool_size - 2", "b2", 4, {}),
+        ):
+            with self.subTest(name):
+                self.cluster.created.clear()
+                self.cluster.helper.create_sandbox_claim.reset_mock()
+                self.cluster.helper.api_pool_size.return_value = pool_size
+                gate = threading.Event()
+                self.addCleanup(gate.set)
+                self.cluster.create_hook = lambda _: gate.wait(5)
+                log_check = self.assertNoLogs if pool_size is None else self.assertLogs
+                with log_check("k8s_agent_sandbox.batch_utils", level="INFO"):
+                    self.claim(
+                        [BatchGroup(warmpool="pool-a", size=5)], batch_id=batch_id, **kwargs
+                    )
+                _wait_until(lambda: self.cluster.helper.create_sandbox_claim.call_count >= 2)
+                time.sleep(0.2)
+                self.assertEqual(self.cluster.helper.create_sandbox_claim.call_count, 2)
+                gate.set()
+                _wait_until(lambda: len(self.cluster.created) == 5)
 
+        self.cluster.helper.api_pool_size.return_value = None
         self.cluster.create_hook = None
         self.cluster.created.clear()
         start = time.monotonic()
-        self.claim([BatchGroup(warmpool="pool-a", size=5)], batch_id="b2", create_rps=20)
+        self.claim([BatchGroup(warmpool="pool-a", size=5)], batch_id="b3", create_rps=20)
         _wait_until(lambda: len(self.cluster.created) == 5)
         starts = sorted(t for _, t in self.cluster.created)
         for k, t in enumerate(starts):
@@ -1833,11 +1969,11 @@ class TestRelease(BaseClaimBatchTest):
         handle = _make_handle(self.client)
         cached = MagicMock()
         cached.close_connection.side_effect = [RuntimeError("close failed"), None]
-        handle._connected["b1-0"] = cached
+        handle._connected["b1-0"] = (cached, None)
 
         with self.assertRaises(k8s_client.ApiException):
             handle.release()
-        self.assertEqual(handle._connected, {"b1-0": cached})
+        self.assertEqual(handle._connected, {"b1-0": (cached, None)})
 
         handle.release()
         self.assertEqual(cached.close_connection.call_count, 2)
@@ -3371,7 +3507,7 @@ class TestClientBatchCleanup(BaseClaimBatchTest):
                 old = _make_handle(self.client)
                 cached = MagicMock()
                 cached.close_connection.side_effect = [RuntimeError("close failed"), None]
-                old._connected["b1-0"] = cached
+                old._connected["b1-0"] = (cached, None)
                 self.client._active_batches[("default", "b1")] = old
                 self.client.k8s_helper.read_batch_lease.return_value = _lease(holder_identity=old._holder_identity)
                 self.client.k8s_helper.replace_batch_lease.side_effect = lease_write_error
@@ -3405,7 +3541,7 @@ class TestClientBatchCleanup(BaseClaimBatchTest):
                 raise RuntimeError("close failed")
 
         cached.close_connection.side_effect = close_connection
-        handle._connected["b1-0"] = cached
+        handle._connected["b1-0"] = (cached, None)
         self.client._active_batches[("default", "b1")] = handle
         # detach() fails after its close, so only the put-back can keep the connection tracked.
         self.client.k8s_helper.read_batch_lease.side_effect = RuntimeError("api down")
@@ -3574,7 +3710,7 @@ class TestClientBatchCleanup(BaseClaimBatchTest):
         handle = _make_handle(self.client)
         cached = MagicMock()
         cached.close_connection.side_effect = [RuntimeError("close failed"), None]
-        handle._connected["b1-0"] = cached
+        handle._connected["b1-0"] = (cached, None)
         self.client._active_batches[("default", "b1")] = handle
         helper = self.client.k8s_helper
         helper.read_batch_lease.return_value = _lease(holder_identity="other-handle")

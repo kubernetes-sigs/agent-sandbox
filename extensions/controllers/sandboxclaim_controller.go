@@ -690,12 +690,16 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 		}
 	}
 
-	template, templateErr := r.getTemplate(ctx, claim)
+	warmPool, err := r.getWarmPool(ctx, claim)
+	if err != nil {
+		return nil, err
+	}
+	template, templateErr := r.getTemplateForWarmPool(ctx, claim.Namespace, warmPool)
 	if templateErr != nil {
 		return nil, templateErr
 	}
 
-	return r.createSandbox(ctx, claim, template)
+	return r.createSandbox(ctx, claim, template, warmPool)
 }
 
 // reconcileExpired ensures the Sandbox is deleted for Retained claims.
@@ -1193,10 +1197,12 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 	var isRecreate bool
 	var recreateResolveErr error
 	var recreateResolved bool
+	var resolvedPool *extensionsv1beta1.SandboxWarmPool
 	resolveRecreate := func() (bool, string, *extensionsv1beta1.SandboxTemplate, error) {
 		if !recreateResolved {
 			recreateResolved = true
 			warmPool, err := r.getWarmPool(ctx, claim)
+			resolvedPool = warmPool
 			if err != nil {
 				recreateResolveErr = err
 			} else if resolveUpdateStrategy(warmPool) == extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType {
@@ -1328,6 +1334,10 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 			skipped = append(skipped, adoptedKey)
 			continue
 		}
+		if err := verifyClaimAwareCandidate(adopted, resolvedPool); err != nil {
+			logger.V(1).Info("Skipping candidate from another pool incarnation", "sandbox", adopted.Name, "error", err.Error())
+			continue
+		}
 		// Under Recreate, mirror the pool controller's isSandboxStale semantics: a hash-label match
 		// means fresh, but a missing/mismatched hash label falls back to the same semantic blueprint
 		// comparison rather than being treated as stale outright. Only drop the candidate when the
@@ -1429,7 +1439,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 
 			// Call helper to complete adoption (patch sandbox)
 			if err := r.completeAdoption(ctx, claim, adopted); err != nil {
-				if !k8errors.IsNotFound(err) && !k8errors.IsConflict(err) {
+				if !k8errors.IsNotFound(err) && !k8errors.IsConflict(err) && !errors.Is(err, errAdoptionConflict) {
 					r.WarmSandboxQueue.Add(namespacedWarmPoolNameForQueue, adoptedKey)
 					logger.Error(err, "Failed to complete adoption for candidate sandbox", "sandbox candidate", adopted.Name, "claim", claim.Name)
 					return false, err
@@ -1476,8 +1486,22 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 }
 
 func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, adopted *v1beta1.Sandbox) error {
+	// Resolve once for this ownership transfer. Re-reading by name later could
+	// combine one incarnation's identity with another incarnation's template.
+	pool := &extensionsv1beta1.SandboxWarmPool{}
+	if err := r.authoritativeReader().Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: claim.Spec.WarmPoolRef.Name}, pool); err != nil {
+		return fmt.Errorf("resolve pool for adoption: %w", err)
+	}
+	if err := verifyClaimAwareCandidate(adopted, pool); err != nil {
+		return err
+	}
 	// Take a snapshot of the sandbox BEFORE we mutate it to generate a clean JSON Patch.
 	originalAdopted := adopted.DeepCopy()
+	if owner := metav1.GetControllerOf(adopted); utils.MatchesGroupKind(owner, extensionsv1beta1.GroupVersion.Group, extensionsv1beta1.SandboxWarmPoolKind) {
+		if err := ensureWarmPoolSource(adopted, owner.Name, owner.UID); err != nil {
+			return err
+		}
+	}
 
 	templateHash := adopted.Labels[sandboxTemplateRefHash]
 
@@ -1515,7 +1539,7 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 	adopted.Spec.PodTemplate.ObjectMeta.Labels = ensureClaimIdentityLabels(adopted.Spec.PodTemplate.ObjectMeta.Labels, claim)
 
 	// Resolve the template hash and metadata used by reconcileActive.
-	template, templateErr := r.getTemplate(ctx, claim)
+	template, templateErr := r.getTemplateForWarmPool(ctx, claim.Namespace, pool)
 	if templateHash == "" && template != nil {
 		templateHash = SandboxTemplateRefHash(template.Name)
 	} else if templateHash == "" && templateErr != nil {
@@ -1933,7 +1957,7 @@ func (r *SandboxClaimReconciler) injectEnvs(logger logr.Logger, container *corev
 	return nil
 }
 
-func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, template *extensionsv1beta1.SandboxTemplate) (*v1beta1.Sandbox, error) {
+func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, template *extensionsv1beta1.SandboxTemplate, warmPool *extensionsv1beta1.SandboxWarmPool) (*v1beta1.Sandbox, error) {
 	logger := log.FromContext(ctx)
 
 	if template == nil {
@@ -1947,6 +1971,9 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 			Namespace: claim.Namespace,
 			Name:      claim.Name,
 		},
+	}
+	if err := ensureWarmPoolSource(sandbox, warmPool.Name, warmPool.UID); err != nil {
+		return nil, err
 	}
 
 	// Propagate the trace context annotation to the Sandbox resource
@@ -2303,7 +2330,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 					}
 				} else {
 					if err := r.completeAdoption(ctx, claim, sandbox); err != nil {
-						if !k8errors.IsNotFound(err) && !k8errors.IsConflict(err) {
+						if !k8errors.IsNotFound(err) && !k8errors.IsConflict(err) && !errors.Is(err, errAdoptionConflict) {
 							return nil, fmt.Errorf("failed to complete adoption of %q: %w", sbName, err)
 						}
 						// A 404/409 only proves the cached view is stale; never
@@ -2705,16 +2732,7 @@ func sandboxStatusRelevantChange(oldSb, newSb *v1beta1.Sandbox) bool {
 func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
 	r.MaxConcurrentReconciles = concurrentWorkers
 
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &extensionsv1beta1.SandboxClaim{}, extensionsv1beta1.WarmPoolRefField, func(rawObj client.Object) []string {
-		claim, ok := rawObj.(*extensionsv1beta1.SandboxClaim)
-		if !ok {
-			return nil
-		}
-		if claim.Spec.WarmPoolRef.Name == "" {
-			return nil
-		}
-		return []string{claim.Spec.WarmPoolRef.Name}
-	}); err != nil {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &extensionsv1beta1.SandboxClaim{}, extensionsv1beta1.WarmPoolRefField, sandboxClaimWarmPoolRefIndexer); err != nil {
 		return err
 	}
 
@@ -2999,8 +3017,12 @@ func (h *sandboxEventHandler) Update(ctx context.Context, e event.UpdateEvent, _
 
 	poolChanged := oldWarmPoolName != newWarmPoolName
 	nodeScheduled := oldSandbox.Status.NodeName != newSandbox.Status.NodeName
+	sourceChanged := oldSandbox.Annotations[sourceWarmPoolNameAnnotation] != newSandbox.Annotations[sourceWarmPoolNameAnnotation] ||
+		oldSandbox.Annotations[sourceWarmPoolUIDAnnotation] != newSandbox.Annotations[sourceWarmPoolUIDAnnotation]
 
-	if (!oldAdoptable && newAdoptable) || (newAdoptable && poolChanged) || (newAdoptable && nodeScheduled) {
+	if newAdoptable && (!oldAdoptable || poolChanged || nodeScheduled || sourceChanged) {
+		// A source conflict can evict otherwise valid stock during selection.
+		// Repairing annotations alone must make that stock selectable again.
 		// Add/update sandbox in the queue
 		key := queue.SandboxKey{
 			Namespace: newSandbox.Namespace,

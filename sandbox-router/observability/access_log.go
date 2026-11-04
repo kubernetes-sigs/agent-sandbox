@@ -161,13 +161,38 @@ func AccessLogMiddleware(base logr.Logger, skip func(*http.Request) bool) func(h
 					"user_agent", r.UserAgent(),
 				}
 				if labels.GRPC {
-					fields = append(fields, "grpc_status", grpcStatus(w.Header()))
+					fields = append(fields, "grpc_status", resolveGRPCStatus(labels, w.Header()))
 				}
 				log.Info("request", fields...)
 			}()
 			next.ServeHTTP(rec, r.WithContext(ctx))
 		})
 	}
+}
+
+// resolveGRPCStatus reports the terminal gRPC status for one request. The
+// Labels value wins when it holds a valid code: a gRPC-Web response delivers
+// its status inside a body trailer frame, so the response headers the
+// fallback sniffs never carry one. An invalid Labels value falls back rather
+// than poisoning the report.
+func resolveGRPCStatus(labels *Labels, headers http.Header) string {
+	if isValidGRPCStatusCode(labels.GRPCStatusCode) {
+		return labels.GRPCStatusCode
+	}
+	return grpcStatus(headers)
+}
+
+func isValidGRPCStatusCode(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, digit := range value {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	code, err := strconv.Atoi(value)
+	return err == nil && code >= 0 && code <= 16
 }
 
 func grpcStatus(headers http.Header) string {
@@ -178,16 +203,10 @@ func grpcStatus(headers http.Header) string {
 	if len(values) != 1 {
 		return "unknown"
 	}
-	for _, digit := range values[0] {
-		if digit < '0' || digit > '9' {
-			return "unknown"
-		}
-	}
-	code, err := strconv.Atoi(values[0])
-	if err != nil || code < 0 || code > 16 {
+	if !isValidGRPCStatusCode(values[0]) {
 		return "unknown"
 	}
-	return strconv.Itoa(code)
+	return values[0]
 }
 
 // SkipHealthAndMetrics is a convenience skip function for the access log

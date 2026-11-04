@@ -81,7 +81,7 @@ func TracingMiddleware(tracer trace.Tracer, prop propagation.TextMapPropagator, 
 					attribute.String("sandbox.namespace", labels.SandboxNamespace),
 				)
 				if labels.GRPC {
-					span.SetAttributes(attribute.String("grpc.status_code", grpcStatus(w.Header())))
+					span.SetAttributes(attribute.String("grpc.status_code", resolveGRPCStatus(labels, w.Header())))
 				}
 			}()
 			next.ServeHTTP(ww, r.WithContext(ctx))

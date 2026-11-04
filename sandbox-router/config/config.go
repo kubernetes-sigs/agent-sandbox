@@ -326,6 +326,13 @@ type Config struct {
 	// same-origin check this exists to make actually match reality.
 	// Has no effect without AuthzCookieName.
 	AuthzTrustForwardedProto bool
+	// GRPCWebAllowedOrigins is the allowlist of browser origins permitted
+	// to call the router with gRPC-Web. A same-origin request is always
+	// allowed regardless of this list. When the list is empty (the
+	// default), only same-origin browser callers receive CORS headers;
+	// cross-origin requests are still proxied but the browser blocks the
+	// response. Each entry has the form scheme://host[:port].
+	GRPCWebAllowedOrigins []string
 }
 
 // Defaults returns a Config populated with the default values used when no
@@ -509,6 +516,11 @@ func (c *Config) Validate() error {
 	}
 	if len(c.AuthzCookieAllowedOrigins) > 0 && c.AuthzCookieName == "" {
 		return errors.New("--authz-cookie-allowed-origins has no effect without --authz-cookie-name, which is what runs the same-origin check it configures")
+	}
+	for _, origin := range c.GRPCWebAllowedOrigins {
+		if !validOriginPattern(origin) {
+			return fmt.Errorf("--grpc-web-allowed-origins entry %q must have the form scheme://host[:port], with no path/query/fragment", origin)
+		}
 	}
 	if c.AuthzTrustForwardedProto && c.AuthzCookieName == "" {
 		return errors.New("--authz-trust-forwarded-proto has no effect without --authz-cookie-name, which is what runs the same-origin check it affects")

@@ -597,10 +597,12 @@ class AsyncSandboxBatch:
                 connection_config=self._client.connection_config,
                 tracer_config=self._client.tracer_config,
                 k8s_helper=self._client.k8s_helper,
+                **({"file_config": self._client.file_config} if self._client.file_config is not None else {}),
             )
             # The watch already has the pod IP, so the first request needs no Sandbox GET.
             pod_ip = select_pod_ip(current.pod_ips)
             sandbox._seeded_pod_ip = pod_ip
+            sandbox.connector._default_ssl_context = self._client._default_ssl_context
             self._connected[member.claim_name] = (sandbox, pod_ip)
             return sandbox
 

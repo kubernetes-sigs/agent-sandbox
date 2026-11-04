@@ -51,6 +51,7 @@ from k8s_agent_sandbox.constants import (
 )
 from k8s_agent_sandbox.exceptions import (
     BatchError,
+    SandboxResponseTooLargeError,
     BatchExistsError,
     BatchInUseError,
     BatchLeaseExpiredError,
@@ -63,7 +64,13 @@ from k8s_agent_sandbox.exceptions import (
     TerminalMemberError,
 )
 from k8s_agent_sandbox.k8s_helper import K8sHelper
-from k8s_agent_sandbox.models import BatchEventType, BatchGroup, MemberState
+from k8s_agent_sandbox.models import (
+    BatchEventType,
+    BatchGroup,
+    MemberState,
+    SandboxDirectConnectionConfig,
+    SandboxFileConfig,
+)
 from k8s_agent_sandbox.sandbox_batch import SandboxBatch
 from k8s_agent_sandbox.sandbox_client import SandboxClient
 
@@ -1099,6 +1106,7 @@ class TestConnect(unittest.TestCase):
 
     def setUp(self):
         self.mock_client = MagicMock()
+        self.mock_client.file_config = None
         self.mock_sandbox_instance = MagicMock()
         self.mock_client.sandbox_class.return_value = self.mock_sandbox_instance
         self.handle = _make_handle(self.mock_client)
@@ -1126,6 +1134,29 @@ class TestConnect(unittest.TestCase):
         self.mock_client.k8s_helper.get_sandbox.assert_not_called()
         self.assertIs(sandbox, self.mock_sandbox_instance)
         self.assertEqual(sandbox._seeded_pod_ip, "10.0.0.1")
+
+    def test_forwards_client_file_config_when_set(self):
+        patcher = patch("k8s_agent_sandbox.sandbox_client.K8sHelper")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        real_client = SandboxClient(
+            connection_config=SandboxDirectConnectionConfig(api_url="http://test-router:8080"),
+            file_config=SandboxFileConfig(max_download_size=4),
+            cleanup=False,
+        )
+        handle = _make_handle(real_client)
+        handle._state.upsert_claim(
+            _claim("b1-0", conditions=[{"type": "Ready", "status": "True"}], sandbox={"name": "sbx-1"})
+        )
+        sandbox = handle.connect(handle.members()[0])
+        self.addCleanup(sandbox.close_connection)
+
+        response = MagicMock(status_code=200, headers={})
+        response.iter_content.return_value = iter([b"oversized"])
+        with patch.object(sandbox.connector, "send_request", return_value=response):
+            with self.assertRaises(SandboxResponseTooLargeError):
+                sandbox.files.read("file.bin")
+        response.close.assert_called_once_with()
 
     def test_repeat_call_returns_same_handle(self):
         self.handle._state.upsert_claim(

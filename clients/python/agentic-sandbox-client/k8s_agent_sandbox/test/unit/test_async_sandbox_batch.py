@@ -59,6 +59,7 @@ from k8s_agent_sandbox.constants import (
 )
 from k8s_agent_sandbox.exceptions import (
     BatchError,
+    SandboxResponseTooLargeError,
     BatchExistsError,
     BatchInUseError,
     BatchLeaseExpiredError,
@@ -70,7 +71,13 @@ from k8s_agent_sandbox.exceptions import (
     SandboxWarmPoolNotFoundError,
     TerminalMemberError,
 )
-from k8s_agent_sandbox.models import BatchEventType, BatchGroup, MemberState, SandboxDirectConnectionConfig
+from k8s_agent_sandbox.models import (
+    BatchEventType,
+    BatchGroup,
+    MemberState,
+    SandboxDirectConnectionConfig,
+    SandboxFileConfig,
+)
 
 
 def _lease(
@@ -1162,6 +1169,7 @@ class TestConnect(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         self.mock_client = MagicMock()
+        self.mock_client.file_config = None
         self.mock_sandbox_instance = MagicMock()
         self.mock_client.sandbox_class.return_value = self.mock_sandbox_instance
         self.handle = _make_handle(self.mock_client)
@@ -1189,6 +1197,33 @@ class TestConnect(unittest.IsolatedAsyncioTestCase):
         self.mock_client.k8s_helper.get_sandbox.assert_not_called()
         self.assertIs(sandbox, self.mock_sandbox_instance)
         self.assertEqual(sandbox._seeded_pod_ip, "10.0.0.1")
+
+    async def test_forwards_client_file_config_when_set(self):
+        patcher = patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        real_client = AsyncSandboxClient(
+            connection_config=SandboxDirectConnectionConfig(api_url="http://test-router:8080"),
+            file_config=SandboxFileConfig(max_download_size=4),
+            cleanup=False,
+        )
+        handle = _make_handle(real_client)
+        handle._state.upsert_claim(
+            _claim("b1-0", conditions=[{"type": "Ready", "status": "True"}], sandbox={"name": "sbx-1"})
+        )
+        sandbox = await handle.connect(handle.members()[0])
+        self.addAsyncCleanup(sandbox.close_connection)
+
+        async def iterate(*, chunk_size: int):
+            del chunk_size
+            yield b"oversized"
+
+        response = MagicMock(status_code=200, headers={}, aclose=AsyncMock())
+        response.aiter_bytes = iterate
+        with patch.object(sandbox.connector, "send_request", new=AsyncMock(return_value=response)):
+            with self.assertRaises(SandboxResponseTooLargeError):
+                await sandbox.files.read("file.bin")
+        response.aclose.assert_awaited_once_with()
 
     async def test_repeat_call_returns_same_handle(self):
         self.handle._state.upsert_claim(
@@ -1250,6 +1285,29 @@ class TestConnect(unittest.IsolatedAsyncioTestCase):
         member = handle.members()[0]
         await handle.connect(member)
         self.assertEqual(real_client._active_connection_sandboxes, {})
+
+    async def test_connected_handles_share_client_default_ssl_context(self):
+        patcher = patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        config = SandboxDirectConnectionConfig(api_url="https://test-router:8443")
+        real_client = AsyncSandboxClient(connection_config=config, cleanup=False)
+        handle = _make_handle(real_client)
+        handle._state.upsert_claim(
+            _claim("b1-0", conditions=[{"type": "Ready", "status": "True"}], sandbox={"name": "sbx-1"})
+        )
+        handle._state.upsert_claim(
+            _claim("b1-1", conditions=[{"type": "Ready", "status": "True"}], sandbox={"name": "sbx-2"})
+        )
+        first_member, second_member = handle.members()
+        with patch("ssl.create_default_context", wraps=ssl.create_default_context) as create:
+            first = await handle.connect(first_member)
+            second = await handle.connect(second_member)
+            self.addAsyncCleanup(first.close_connection)
+            self.addAsyncCleanup(second.close_connection)
+            first.connector._ensure_client()
+            second.connector._ensure_client()
+        create.assert_called_once()
 
 
 class TestDetach(unittest.IsolatedAsyncioTestCase):

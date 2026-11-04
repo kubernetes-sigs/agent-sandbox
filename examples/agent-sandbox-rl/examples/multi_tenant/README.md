@@ -16,6 +16,7 @@ admin provisions once per user.
 - [What a tenant may do](#what-a-tenant-may-do)
 - [Sizing under the quota](#sizing-under-the-quota)
 - [On GKE](#on-gke)
+- [Several clusters](#several-clusters)
 - [Recorded runs](#recorded-runs)
 - [Limits and follow-ups](#limits-and-follow-ups)
 - [Troubleshooting](#troubleshooting)
@@ -220,6 +221,90 @@ The same steps, with three differences:
 Bind a Google identity instead of, or next to, the ServiceAccount:
 `provision.sh alice --user-subject alice@example.com`.
 
+## Several clusters
+
+A fleet with several `ClusterConfig`s changes where things live, not the
+pattern. Each `ClusterConfig` carries its own context, namespace and
+`max_replicas`, and the SDK already loops per cluster for pools, pre-pull,
+teardown and the report. What the example does differently with
+`--contexts a,b`:
+
+| Concern | One cluster | Several clusters |
+| --- | --- | --- |
+| The user's namespace | `rl-<user>` once | `rl-<user>` on **every** cluster: `provision.sh <user> --contexts a,b` applies the tenant manifest per context (GKE Fleets: Config Sync does the same from one repo) |
+| RBAC and quota | one Role, one quota | one per cluster; the budget is per cluster, so each `ClusterConfig.max_replicas` is set from that cluster's quota |
+| Image layers | one node cache, shared by all namespaces on it | **one cache per cluster**: cluster A's nodes do nothing for cluster B. `prepull_shared.py --contexts a,b` pulls on every cluster at once; Image Streaming is per cluster too, and Artifact Registry in the same region serves all of them |
+| Placement | n/a | the default `image-affinity` maps an image to a cluster by the sorted cluster names. The runner names a cluster after the admin's context (`rl-alice@a` and `rl-bob@a` are both `a`), so every user puts an image on the same cluster and finds it in that cluster's cache. `least-loaded` and `capacity-weighted` can put one image on different clusters for different users; then only a pre-pull on every cluster keeps claims warm |
+| Quota fit | one budget | one budget per cluster: the tightest cluster bounds the concurrency (placement may put a whole window there), each budget becomes that cluster's `max_replicas`, and their sum the fleet's `max_live_sandboxes` |
+| Node pools inside one cluster | n/a | names are keyed by image and both configs share the fleet's run id, so two configs with the same context need **distinct namespaces** (package README, "Multiple clusters and multiple node pools"). Rather than a namespace per user per pool, use one config per cluster without `node_selector` and a node affinity in `TemplateSpec.extra_pod_spec` |
+| Teardown and reaper | per run, per namespace | the same, per cluster; the runner prints one reaper command per context |
+
+The commands are the single-cluster ones with a context list:
+
+```bash
+admin/provision.sh alice --contexts kind-agent-sandbox,kind-agent-sandbox-b
+admin/tenant_kubeconfig.sh alice --contexts kind-agent-sandbox,kind-agent-sandbox-b -o /tmp/rl-alice.kubeconfig
+python admin/prepull_shared.py --contexts kind-agent-sandbox,kind-agent-sandbox-b
+python run_many.py --users alice,bob --experiments 2 \
+    --kubeconfig-pattern '/tmp/rl-{user}.kubeconfig' \
+    --contexts-pattern 'rl-{user}@kind-agent-sandbox,rl-{user}@kind-agent-sandbox-b' \
+    -- --tasks-per-image 2 --max-concurrent 3
+./verify.sh alice bob --contexts kind-agent-sandbox,kind-agent-sandbox-b
+```
+
+The tenant kubeconfig holds one context per cluster, `rl-<user>@<ctx>`, and
+`run_many.py` fills `{user}` into the context pattern per user. The table
+gains a "tasks per cluster" column, which shows the affinity split.
+
+### Recorded on two kind clusters
+
+Two kind clusters on one laptop (`kind-agent-sandbox` and `kind-agent-sandbox-b`,
+one node each, the same Docker VM with 6 CPU and 12 GiB), both tenants
+provisioned on both with the default quota, the same ten images and settings as
+the single-cluster runs, `image-affinity` placement. The split the affinity
+chose for these ten images is 4 images on cluster A and 6 on cluster B, so a
+20-task run lands 8 tasks on A and 12 on B, for every user.
+
+**The second user starts from the first user's pulls, on both clusters.**
+Images removed from both nodes, no pre-pull.
+
+| Run | Total | Pool ready, max | Tasks per cluster | Registry pulls, A / B | "already present" events, A / B |
+| --- | --- | --- | --- | --- | --- |
+| alice, both clusters cold | 41.7 s | 13.7 s | A=8 B=12 | 4 / 6 | 8 / 12 |
+| bob, right after | 10.3 s | 1.25 s | A=8 B=12 | 0 / 0 | 12 / 18 |
+
+The registry pulls are the ten images once, split 4 and 6 the way the affinity
+split the images: a cluster pulls only the images whose pools it hosts, and bob
+pulls nothing anywhere.
+
+**Four experiments at once, two per user, on both clusters** (images cached).
+Each runner fitted the quota per cluster, 8 pods each after `--share 2`, and
+lowered its concurrency from 3 to 2.
+
+```
+user   experiment  namespace  claims  tasks per cluster                             claim avg s  claim max s  tasks  errors  total s  teardown clean
+-----  ----------  ---------  ------  --------------------------------------------  -----------  -----------  -----  ------  -------  --------------
+alice  exp1        rl-alice   20      kind-agent-sandbox=8 kind-agent-sandbox-b=12  1.49         6.81         20     0       29.24    True
+alice  exp2        rl-alice   20      kind-agent-sandbox=8 kind-agent-sandbox-b=12  0.96         2.72         20     0       26.67    True
+bob    exp1        rl-bob     20      kind-agent-sandbox=8 kind-agent-sandbox-b=12  1.35         8.03         20     0       30.73    True
+bob    exp2        rl-bob     20      kind-agent-sandbox=8 kind-agent-sandbox-b=12  1.38         5.41         20     0       29.24    True
+```
+
+**The admin pre-pulls on both clusters at once**, after removing the images
+from both nodes again: 65 s for the ten images on two clusters. Then alice and
+bob start together: 15.7 s and 11.7 s, pool ready at most 1.6 s, and `rl-bob`
+shows zero registry pulls on either cluster.
+
+**A quota that differs per cluster.** With bob's quota on cluster B lowered to
+8 pods by hand (A stays at 16), the runner reports budgets of 16 on A and 8 on
+B, lowers the concurrency from 3 to 2 because the tightest cluster bounds it,
+sets `max_replicas` 16 and 8 on the two `ClusterConfig`s, and still fills both
+clusters: 20 tasks, A=8 B=12, 11.3 s, teardown verified clean on both.
+
+`verify.sh alice bob --contexts kind-agent-sandbox,kind-agent-sandbox-b` runs the
+isolation check on each cluster; all eight checks pass, and both namespaces on
+both clusters are empty after every run.
+
 ## Recorded runs
 
 All runs on one kind node (6 CPU, 12 GiB, Kubernetes 1.35, containerd 2.2) with
@@ -303,10 +388,10 @@ pods lingered 30 s and pushed bob's namespace to its 16-pod quota.
 
 - **Warm pools are per user.** A cross-namespace pool would be a controller
   feature; the example states the cost and points at `max_warmpool_size`.
-- **One cluster.** With several `ClusterConfig`s the namespace, the quota and
-  the pre-pull are needed on every cluster, and two node pools inside one
-  cluster need distinct namespaces because names are keyed by image. A
-  follow-up example covers it.
+- **Node pools inside one cluster.** Two `ClusterConfig`s with the same
+  context need distinct namespaces, because names are keyed by image (see
+  [Several clusters](#several-clusters)); the example does not build a
+  namespace per node pool.
 - **Quota per namespace, not per experiment.** Experiments of one user share
   the budget; `--share` is a convention, not an enforcement. A Kueue
   `LocalQueue` per tenant is the next step when fairness between users'
@@ -323,4 +408,5 @@ pods lingered 30 s and pushed bob's namespace to its 16-pod quota.
 | `circuit breaker TRIPPED: N live pods > ceiling` | `max_live_sandboxes` below the footprint; let the runner fit the quota (do not pass `--no-quota-fit` with a small `--max-live`) |
 | `SandboxPodCreateFailed ... exceeded quota` events | another experiment of the same user took the budget; pass `--share`, or raise the quota |
 | `teardown_clean=False` | the reaper found leftovers; the runner prints the `reaper --run-id` command |
+| A second kind cluster never gets past "Starting control-plane"; containerd logs `failed to create cni conf monitor ... fsnotify watcher` | the Docker VM's `fs.inotify.max_user_instances` (128 by default) is used up by the first cluster. Raise it in the VM, then restart containerd and kubelet on the new node: `docker run --rm --privileged --pid=host alpine nsenter -t 1 -m -u -n -i sysctl -w fs.inotify.max_user_instances=8192` |
 | Docker Hub `429` during the cold pull | mirror the images or pre-pull once with `admin/prepull_shared.py` |

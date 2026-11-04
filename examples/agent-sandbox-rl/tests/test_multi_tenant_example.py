@@ -95,6 +95,32 @@ def test_config_stays_in_the_users_namespace():
     assert not key.startswith(constants.RESERVED_POD_LABEL_PREFIXES)
 
 
+def test_several_clusters_share_the_namespace_and_the_cluster_names():
+  # Tenant kubeconfigs name contexts rl-<user>@<ctx>; the cluster name is the
+  # admin's <ctx>, the same for every user, so image-affinity converges.
+  assert run_experiment.cluster_name_for("rl-alice@prod-a") == "prod-a"
+  assert run_experiment.cluster_name_for("rl-bob@prod-a") == "prod-a"
+  assert run_experiment.cluster_name_for("kind-x") == "kind-x"
+  assert run_experiment.cluster_name_for(None) == "default"
+  cfg = run_experiment.build_config(
+      "alice", "exp1", contexts=["rl-alice@a", "rl-alice@b"], kubeconfig="/k",
+      pod_budget=14, cluster_budgets={"a": 8, "b": 6})
+  assert [(c.name, c.context, c.kubeconfig, c.namespace, c.max_replicas) for c in cfg.clusters] == [
+      ("a", "rl-alice@a", "/k", "rl-alice", 8), ("b", "rl-alice@b", "/k", "rl-alice", 6)]
+  assert cfg.max_live_sandboxes == 14 and cfg.placement == "image-affinity"
+  with pytest.raises(ValueError):            # two contexts, one cluster name
+    run_experiment.build_config("alice", "exp1", contexts=["rl-alice@a", "a"])
+
+
+def test_image_affinity_sends_every_user_to_the_same_cluster_per_image():
+  from agent_sandbox_rl import ClusterRegistry, ImageAffinity
+  from conftest import FakeCluster
+  alice = ClusterRegistry([FakeCluster("a", "rl-alice"), FakeCluster("b", "rl-alice")])
+  bob = ClusterRegistry([FakeCluster("b", "rl-bob"), FakeCluster("a", "rl-bob")])
+  for img in IMAGES + ["node:22-slim", "ruby:3.3-slim"]:
+    assert ImageAffinity().select(img, alice).name == ImageAffinity().select(img, bob).name
+
+
 def test_fake_fleet_names_carry_user_experiment_and_run():
   fleet = FakeFleet(run_experiment.build_config("alice", "exp1"))
   fleet.load_tasks(IMAGES)
@@ -159,6 +185,7 @@ def test_drive_runs_every_task_and_tears_down():
   assert all(isinstance(r, dict) and r["output"] for r in out["results"])
   assert {r["image"] for r in out["results"]} == set(IMAGES)
   assert len({r["task"] for r in out["results"]}) == 6
+  assert run_experiment.claims_by_cluster(out["results"]) == {"fake": 6}
   assert fleet.teardowns == 1
   assert out["report"]["tasks_ok"] == 6 and out["report"]["tasks_err"] == 0
   assert out["verify_teardown"] == {}            # the fake has no reaper
@@ -192,11 +219,16 @@ def test_report_round_trip(tmp_path):
   assert doc["run_id"] == fleet.run_id
   assert doc["tasks"] == 3 and doc["task_errors"] == 1
   assert doc["results"][0] == {"error": "task blew up"}
+  assert doc["claims_by_cluster"] == {"fake": 2}       # the failed task has no cluster
   rows = run_many.summarize([doc, {**doc, "user": "alice", "experiment": "exp1"}])
   assert [(r["user"], r["experiment"]) for r in rows] == [("alice", "exp1"), ("bob", "exp2")]
   assert rows[1]["claims"] == 3 and rows[1]["task_errors"] == 1 and rows[1]["teardown_clean"]
   table = run_many.render_table(rows)
   assert table.splitlines()[0].startswith("user") and "rl-bob" in table
+  assert "tasks per cluster" not in table               # one cluster: no column
+  two = {**doc, "claims_by_cluster": {"a": 2, "b": 1}}
+  table = run_many.render_table(run_many.summarize([two]))
+  assert "tasks per cluster" in table and "a=2 b=1" in table
 
 
 def test_run_many_refuses_bad_or_repeated_users():

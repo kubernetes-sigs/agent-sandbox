@@ -26,6 +26,11 @@ node's image cache, below the namespace, so the second user on a node starts
 without a pull. Nothing here pre-pulls: the admin does that once with
 ``admin/prepull_shared.py``.
 
+Several clusters: ``--contexts a,b`` gives the fleet one `ClusterConfig` per
+context, all in the user's namespace, which the admin provisioned on each
+cluster. The quota is fitted per cluster, the tightest one sets the
+concurrency, and each cluster's budget becomes its `max_replicas`.
+
 Example:
 
   python run_experiment.py --user alice --experiment exp1 \\
@@ -87,6 +92,22 @@ def tenant_namespace(user: str) -> str:
     raise ValueError(f"user {user!r} must be a DNS-1123 label (lowercase, digits, '-') "
                      "of at most 60 characters, as given to admin/provision.sh")
   return f"{NAMESPACE_PREFIX}{user}"
+
+
+def cluster_name_for(context: str | None) -> str:
+  """The fleet's name for a cluster, the same for every user.
+
+  `admin/tenant_kubeconfig.sh` names a tenant's contexts ``rl-<user>@<ctx>``,
+  where ``<ctx>`` is the admin's context name. The part after ``@`` is the
+  cluster name, so alice's ``rl-alice@prod-a`` and bob's ``rl-bob@prod-a`` are
+  one cluster ``prod-a`` to both fleets. That matters for the default
+  ``image-affinity`` placement, which maps an image to a cluster by the sorted
+  cluster names: with the same names, every user puts an image on the same
+  cluster and finds it in that cluster's node cache.
+  """
+  if not context:
+    return "default"
+  return context.rsplit("@", 1)[-1] or context
 
 
 def report_path(report_dir: pathlib.Path | str, user: str, experiment: str) -> pathlib.Path:
@@ -175,18 +196,27 @@ def read_quota(core_api, namespace: str) -> tuple[dict, dict]:
   return hard, used
 
 
-def build_config(user: str, experiment: str, *, context: str | None = None,
+def build_config(user: str, experiment: str, *, contexts: list[str] | None = None,
                  kubeconfig: str | None = None, max_concurrent: int = 4,
                  max_warmpool_size: int = 4, cpu: str = "100m", memory: str = "128Mi",
-                 ready_timeout: int = 600, pod_budget: int | None = None) -> FleetConfig:
-  """The fleet of one experiment: the user's namespace, names per user and
-  experiment and run, labels that say whose run it is, and the quota's pod
-  budget as the fleet's own hard ceiling (`max_live_sandboxes`)."""
+                 ready_timeout: int = 600, pod_budget: int | None = None,
+                 cluster_budgets: dict[str, int] | None = None) -> FleetConfig:
+  """The fleet of one experiment: the user's namespace on every cluster, names
+  per user and experiment and run, labels that say whose run it is, the
+  quota's pod budget as the fleet's own hard ceiling (`max_live_sandboxes`),
+  and, with several clusters, each cluster's budget as its `max_replicas`."""
   namespace = tenant_namespace(user)              # refuses a name no admin provisioned
-  cluster = ClusterConfig(name=context or "default", context=context,
-                          kubeconfig=kubeconfig, namespace=namespace)
+  contexts = list(contexts or [None])
+  clusters = []
+  for ctx in contexts:
+    name = cluster_name_for(ctx)
+    clusters.append(ClusterConfig(
+        name=name, context=ctx, kubeconfig=kubeconfig, namespace=namespace,
+        max_replicas=(cluster_budgets or {}).get(name)))
+  if len({c.name for c in clusters}) != len(clusters):
+    raise ValueError(f"contexts {contexts!r} name the same cluster twice")
   return FleetConfig(
-      clusters=[cluster],
+      clusters=clusters,
       run_isolation="names",
       template_name_prefix=name_prefix_for(user, experiment),
       labels={**constants.DEFAULT_LABELS,
@@ -207,7 +237,8 @@ def build_config(user: str, experiment: str, *, context: str | None = None,
 def probe(task, handle) -> dict:
   """The per-task work: one short command, enough to prove the sandbox runs."""
   out = handle.exec(["sh", "-c", "head -1 /etc/os-release; hostname"]).strip()
-  return {"task": task.id, "image": task.image, "output": out}
+  return {"task": task.id, "image": task.image,
+          "cluster": getattr(handle, "cluster_name", None), "output": out}
 
 
 def drive(fleet, images: list[str], *, tasks_per_image: int, strategy: str = "sliding",
@@ -256,6 +287,15 @@ def reaper_found(verify: dict) -> dict[str, int]:
   return out
 
 
+def claims_by_cluster(results: list) -> dict[str, int]:
+  """How many tasks ran on each cluster, from the probe's ``cluster`` field."""
+  out: dict[str, int] = {}
+  for r in results:
+    if isinstance(r, dict) and r.get("cluster"):
+      out[r["cluster"]] = out.get(r["cluster"], 0) + 1
+  return dict(sorted(out.items()))
+
+
 def write_report(path: pathlib.Path, *, user: str, experiment: str,
                  outcome: dict, max_concurrent: int) -> pathlib.Path:
   path.parent.mkdir(parents=True, exist_ok=True)
@@ -265,6 +305,7 @@ def write_report(path: pathlib.Path, *, user: str, experiment: str,
       "user": user, "experiment": experiment, "run_id": outcome.get("run_id"),
       "namespace": tenant_namespace(user), "max_concurrent": max_concurrent,
       "tasks": len(results), "task_errors": len(errors),
+      "claims_by_cluster": claims_by_cluster(results),
       "report": outcome["report"], "verify_teardown": outcome["verify_teardown"],
       "teardown_clean": teardown_clean(outcome["verify_teardown"]),
       "reaper_found": reaper_found(outcome["verify_teardown"]),
@@ -289,7 +330,9 @@ def main(argv=None) -> int:
   p.add_argument("--memory", default="128Mi", help="per-sandbox memory request")
   p.add_argument("--strategy", default="sliding")
   p.add_argument("--ready-timeout", type=int, default=600)
-  p.add_argument("--context", default=None, help="kube context (default: current)")
+  p.add_argument("--contexts", default=None,
+                 help="comma-separated kube contexts, one cluster each (default: the "
+                      "current context); the cluster name is the part after '@'")
   p.add_argument("--kubeconfig", default=None,
                  help="kubeconfig file, e.g. the one admin/tenant_kubeconfig.sh wrote")
   p.add_argument("--report-dir", default="reports",
@@ -311,35 +354,53 @@ def main(argv=None) -> int:
     tenant_namespace(args.user)
   except ValueError as e:
     p.error(str(e))
-  kwargs = dict(context=args.context, kubeconfig=args.kubeconfig,
+  contexts = [c for c in (args.contexts or "").split(",") if c] or None
+  kwargs = dict(contexts=contexts, kubeconfig=args.kubeconfig,
                 max_concurrent=args.max_concurrent, max_warmpool_size=args.max_warmpool_size,
                 cpu=args.cpu, memory=args.memory, ready_timeout=args.ready_timeout)
-  fleet = SandboxFleet(build_config(args.user, args.experiment, **kwargs))
+  try:
+    fleet = SandboxFleet(build_config(args.user, args.experiment, **kwargs))
+  except ValueError as e:
+    p.error(str(e))
   namespace = fleet.config.clusters[0].namespace
 
   max_concurrent = args.max_concurrent
   if not args.no_quota_fit:
-    cluster = next(iter(fleet.registry))
-    hard, used = read_quota(cluster.core_api, namespace)
     counts = {img: args.tasks_per_image for img in images}
-    fits, budget = fit_to_quota(hard, used, cpu=args.cpu, memory=args.memory, counts=counts,
-                                wanted=max_concurrent, max_pool=args.max_warmpool_size,
-                                share=args.share)
-    if budget is not None and fits < 1:
-      logger.error("quota in %s leaves no room for one slot (budget %d pods for this "
-                   "experiment): hard=%s used=%s", namespace, budget, hard, used)
-      return 2
-    if fits < max_concurrent or budget is not None:
+    # Per cluster: what its quota admits for this experiment. The tightest
+    # cluster bounds the concurrency, because placement may put a whole window
+    # there; each cluster's budget caps the warm replicas it takes (max_replicas)
+    # and their sum is the fleet's pod ceiling.
+    budgets: dict[str, int] = {}
+    fits = max_concurrent
+    for cluster in fleet.registry:
+      hard, used = read_quota(cluster.core_api, namespace)
+      fit, budget = fit_to_quota(hard, used, cpu=args.cpu, memory=args.memory, counts=counts,
+                                 wanted=max_concurrent, max_pool=args.max_warmpool_size,
+                                 share=args.share)
+      if budget is None:
+        continue
+      budgets[cluster.name] = budget
+      if fit < 1:
+        logger.error("quota in %s on cluster %s leaves no room for one slot (budget %d "
+                     "pods for this experiment): hard=%s used=%s", namespace, cluster.name,
+                     budget, hard, used)
+        return 2
+      fits = min(fits, fit)
+    if budgets:
       if fits < max_concurrent:
-        logger.warning("quota in %s admits %d pods for this experiment; lowering "
-                       "--max-concurrent from %d to %d", namespace, budget, max_concurrent, fits)
+        logger.warning("quota in %s admits %s pods for this experiment; lowering "
+                       "--max-concurrent from %d to %d", namespace,
+                       ", ".join(f"{b} on {c}" for c, b in budgets.items()),
+                       max_concurrent, fits)
       max_concurrent = fits
-      fleet = SandboxFleet(build_config(args.user, args.experiment,
-                                        **{**kwargs, "max_concurrent": fits},
-                                        pod_budget=budget))
+      fleet = SandboxFleet(build_config(
+          args.user, args.experiment, **{**kwargs, "max_concurrent": fits},
+          pod_budget=sum(budgets.values()),
+          cluster_budgets=budgets if len(budgets) > 1 else None))
     window, peak = footprint(counts, max_concurrent, args.max_warmpool_size)
     logger.info("footprint: %d pools warm at once, up to %d pods at the peak%s",
-                window, peak, f" (quota budget {budget})" if budget is not None else "")
+                window, peak, f" (quota budgets {budgets})" if budgets else "")
   logger.info("user=%s experiment=%s namespace=%s run_id=%s names=%s*", args.user,
               args.experiment, namespace, fleet.run_id, fleet.config.template_name_prefix)
 
@@ -353,9 +414,13 @@ def main(argv=None) -> int:
   clean = teardown_clean(outcome["verify_teardown"])
   print(f"{args.user}/{args.experiment}: run_id={run_id} tasks={len(outcome['results'])} "
         f"errors={errors} teardown_clean={clean} report={path}")
+  by_cluster = claims_by_cluster(outcome["results"])
+  if len(by_cluster) > 1:
+    print("  tasks per cluster: " + "  ".join(f"{c}={n}" for c, n in by_cluster.items()))
   if not clean:
-    print(f"  leftovers: python -m agent_sandbox_rl.reaper --run-id {run_id} "
-          f"--namespace {namespace}" + (f" --context {args.context}" if args.context else ""))
+    for ctx in (contexts or [None]):
+      print(f"  leftovers: python -m agent_sandbox_rl.reaper --run-id {run_id} "
+            f"--namespace {namespace}" + (f" --context {ctx}" if ctx else ""))
   return 0 if errors == 0 and clean else 1
 
 

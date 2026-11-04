@@ -24,6 +24,10 @@ the admin's pre-pull, because the image layers are already on the nodes.
 
   python run_many.py --users alice,bob --experiments 2 \\
       --kubeconfig-pattern '~/.kube/rl-{user}.kubeconfig' --report-dir reports
+
+Several clusters: ``--contexts-pattern 'rl-{user}@a,rl-{user}@b'`` names the
+contexts inside each user's kubeconfig (what ``admin/tenant_kubeconfig.sh
+--contexts a,b`` writes); the table then shows the tasks per cluster.
 """
 
 from __future__ import annotations
@@ -57,6 +61,8 @@ def summarize(reports: list[dict]) -> list[dict]:
         "claim_max_s": claim.get("max_s"),
         "tasks": doc.get("tasks", 0),
         "task_errors": doc.get("task_errors", 0),
+        "clusters": " ".join(f"{c}={n}" for c, n in
+                             sorted((doc.get("claims_by_cluster") or {}).items())),
         "total_s": (doc.get("report") or {}).get("total_s"),
         "teardown_clean": bool(doc.get("teardown_clean")),
     })
@@ -68,6 +74,8 @@ def render_table(rows: list[dict]) -> str:
           ("claims", "claims"), ("claim_avg_s", "claim avg s"), ("claim_max_s", "claim max s"),
           ("tasks", "tasks"), ("task_errors", "errors"), ("total_s", "total s"),
           ("teardown_clean", "teardown clean")]
+  if any(len((r.get("clusters") or "").split()) > 1 for r in rows):
+    cols.insert(4, ("clusters", "tasks per cluster"))
   table = [[h for _, h in cols]]
   for r in rows:
     table.append(["" if r.get(k) is None else str(r.get(k)) for k, _ in cols])
@@ -86,6 +94,9 @@ def main(argv=None) -> int:
   p.add_argument("--experiments", type=int, default=2, help="experiments per user")
   p.add_argument("--kubeconfig-pattern", default="~/.kube/rl-{user}.kubeconfig",
                  help="per-user kubeconfig; '' runs every user as the current identity")
+  p.add_argument("--contexts-pattern", default="",
+                 help="comma-separated contexts in each user's kubeconfig, with {user}; "
+                      "'' uses the kubeconfig's current context")
   p.add_argument("--report-dir", default="reports")
   p.add_argument("--python", default=sys.executable)
   p.add_argument("runner_args", nargs=argparse.REMAINDER,
@@ -116,6 +127,8 @@ def main(argv=None) -> int:
       if args.kubeconfig_pattern:
         cmd += ["--kubeconfig",
                 str(pathlib.Path(args.kubeconfig_pattern.format(user=user)).expanduser())]
+      if args.contexts_pattern:
+        cmd += ["--contexts", args.contexts_pattern.format(user=user)]
       # Only this invocation's reports are read back: a stale report from an
       # earlier run of the same user and experiment is removed first.
       report = report_path(args.report_dir, user, f"exp{n}")

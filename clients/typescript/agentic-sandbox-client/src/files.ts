@@ -16,6 +16,7 @@ import type {
   DeleteOptions,
   DirectoryListing,
   FileCallOptions,
+  ListOptions,
   MkdirOptions,
   MoveCopyOptions,
   WriteOptions,
@@ -46,7 +47,7 @@ export interface FilesOperations {
     opts?: WriteOptions,
   ): Promise<void>;
   exists(path: string, opts?: FileCallOptions): Promise<boolean>;
-  list(path: string, opts?: FileCallOptions): Promise<DirectoryListing>;
+  list(path: string, opts?: ListOptions): Promise<DirectoryListing>;
   delete(path: string, opts?: DeleteOptions): Promise<void>;
   mkdir(path: string, opts?: MkdirOptions): Promise<void>;
   move(
@@ -159,8 +160,13 @@ export class SandboxFiles {
     return this.ops.exists(path, opts);
   }
 
-  /** Lists a directory's immediate entries. Errors if `path` names a file. */
-  list(path: string, opts?: FileCallOptions): Promise<DirectoryListing> {
+  /**
+   * Lists a directory's immediate entries, or its descendants when
+   * `opts.recursive` is true. `opts.maxDepth` limits recursive traversal;
+   * entry names are relative to `path`. Errors if `path` names a file.
+   * Older sandboxd versions ignore these options and return a flat listing.
+   */
+  list(path: string, opts?: ListOptions): Promise<DirectoryListing> {
     return this.ops.list(path, opts);
   }
 

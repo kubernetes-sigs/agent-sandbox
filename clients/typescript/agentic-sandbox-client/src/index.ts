@@ -41,6 +41,7 @@ export type {
   FileEntry,
   GetSandboxByNameOptions,
   GetSandboxOptions,
+  ListOptions,
   Logger,
   MkdirOptions,
   MoveCopyOptions,

@@ -247,6 +247,18 @@ export interface WriteOptions extends RuntimeCallOptions {
   createOnly?: boolean;
 }
 
+/** Options for sandbox.files.list(). */
+export interface ListOptions extends RuntimeCallOptions {
+  /** Include entries in subdirectories. Default: false. */
+  recursive?: boolean;
+  /**
+   * Maximum depth when recursive is true. Must be a positive safe integer;
+   * 1 lists immediate entries only. Omit for unlimited depth. Has no effect
+   * when recursive is false or omitted.
+   */
+  maxDepth?: number;
+}
+
 export interface DeleteOptions extends RuntimeCallOptions {
   /** Delete non-empty directories recursively. Default: false. */
   recursive?: boolean;
@@ -274,6 +286,7 @@ export interface ExecutionResult {
 
 /** One row of a DirectoryListing returned by sandbox.files.list(). */
 export interface FileEntry {
+  /** Path relative to the listed directory, including subdirectories. */
   name: string;
   size: number;
   type: "file" | "directory";

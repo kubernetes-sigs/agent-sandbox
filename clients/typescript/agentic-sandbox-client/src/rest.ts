@@ -924,11 +924,19 @@ export class SandboxdRestClient {
     );
   }
 
-  async list(path: string, signal: AbortSignal): Promise<DirectoryListing> {
+  async list(
+    path: string,
+    opts: { recursive?: boolean; maxDepth?: number },
+    signal: AbortSignal,
+  ): Promise<DirectoryListing> {
     const encoded = resolveSandboxPath(path, "list");
     const reqPath = `/v1/files/${encoded}`;
+    const query: Record<string, string> = {};
+    if (opts.recursive) query.recursive = "true";
+    if (opts.maxDepth !== undefined) query.max_depth = String(opts.maxDepth);
     const { response, controller } = await this.request("GET", reqPath, {
       signal,
+      query: Object.keys(query).length > 0 ? query : undefined,
     });
     if (response.status !== 200) {
       throw await this.buildApiError(

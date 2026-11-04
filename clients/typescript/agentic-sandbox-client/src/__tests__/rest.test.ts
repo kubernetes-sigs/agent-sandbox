@@ -1187,7 +1187,8 @@ describe("SandboxdRestClient.list", () => {
       );
     });
     const client = makeClient(activeServer.baseUrl);
-    const listing = await client.list("dir", new AbortController().signal);
+    const listing = await client.list("dir", {}, new AbortController().signal);
+    expect(activeServer.requests[0].url).toBe("/v1/files/dir");
     expect(listing.path).toBe("/dir");
     expect(listing.entries).toHaveLength(2);
     expect(listing.entries[0]).toEqual({
@@ -1223,7 +1224,7 @@ describe("SandboxdRestClient.list", () => {
       );
     });
     const client = makeClient(activeServer.baseUrl);
-    const listing = await client.list("dir", new AbortController().signal);
+    const listing = await client.list("dir", {}, new AbortController().signal);
     expect(listing.entries.map((e) => e.name)).toEqual(["a.txt"]);
   });
 
@@ -1246,7 +1247,7 @@ describe("SandboxdRestClient.list", () => {
     });
     const client = makeClient(activeServer.baseUrl);
     await expect(
-      client.list("dir", new AbortController().signal),
+      client.list("dir", {}, new AbortController().signal),
     ).rejects.toThrow(SandboxError);
   });
 
@@ -1257,8 +1258,126 @@ describe("SandboxdRestClient.list", () => {
     });
     const client = makeClient(activeServer.baseUrl);
     await expect(
-      client.list("a.txt", new AbortController().signal),
+      client.list("a.txt", {}, new AbortController().signal),
     ).rejects.toThrow(SandboxError);
+  });
+
+  it.each([
+    { opts: { recursive: false }, query: "" },
+    { opts: { recursive: true }, query: "?recursive=true" },
+    {
+      opts: { recursive: true, maxDepth: 1 },
+      query: "?recursive=true&max_depth=1",
+    },
+    {
+      opts: { recursive: true, maxDepth: 3 },
+      query: "?recursive=true&max_depth=3",
+    },
+    { opts: { maxDepth: 2 }, query: "?max_depth=2" },
+    {
+      opts: { recursive: false, maxDepth: 2 },
+      query: "?max_depth=2",
+    },
+  ])("sends list query '$query'", async ({ opts, query }) => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ path: "/dir", entries: [] }));
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await client.list("dir", opts, new AbortController().signal);
+    expect(activeServer.requests[0].url).toBe(`/v1/files/dir${query}`);
+  });
+
+  it("preserves directory-relative paths from a recursive listing", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          path: "/dir/sub",
+          entries: [
+            {
+              name: "nested",
+              size: 0,
+              type: "directory",
+              modified_at: "2026-10-30T12:00:00Z",
+            },
+            {
+              name: "nested/data.txt",
+              size: 5,
+              type: "file",
+              modified_at: "2026-10-30T12:00:00Z",
+            },
+          ],
+        }),
+      );
+    });
+    const client = makeClient(activeServer.baseUrl);
+    const listing = await client.list(
+      "dir/sub",
+      { recursive: true, maxDepth: 2 },
+      new AbortController().signal,
+    );
+    expect(activeServer.requests[0].url).toBe(
+      "/v1/files/dir%2Fsub?recursive=true&max_depth=2",
+    );
+    expect(listing.path).toBe("/dir/sub");
+    expect(listing.entries.map((entry) => entry.name)).toEqual([
+      "nested",
+      "nested/data.txt",
+    ]);
+  });
+
+  it("allows recursive listing of the sandbox root", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ path: "/", entries: [] }));
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await client.list(".", { recursive: true }, new AbortController().signal);
+    expect(activeServer.requests[0].url).toBe("/v1/files/?recursive=true");
+  });
+
+  it("propagates the server's recursive entry limit error without retrying", async () => {
+    const message =
+      "listing exceeds 10000 entries; lower max_depth or list a subdirectory";
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ code: "INVALID_ARGUMENT", message }));
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await expect(
+      client.list("dir", { recursive: true }, new AbortController().signal),
+    ).rejects.toMatchObject({
+      status: 400,
+      code: "UNKNOWN",
+      detail: message,
+    } satisfies Partial<SandboxdApiError>);
+    expect(activeServer.requests).toHaveLength(1);
+  });
+
+  it("bounds recursive responses by maxMetadataResponseSize", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          path: "/dir",
+          entries: [
+            {
+              name: "nested/data.txt",
+              size: 5,
+              type: "file",
+              modified_at: "2026-10-30T12:00:00Z",
+            },
+          ],
+        }),
+      );
+    });
+    const client = makeClient(activeServer.baseUrl, {
+      maxMetadataResponseSize: 64,
+    });
+    await expect(
+      client.list("dir", { recursive: true }, new AbortController().signal),
+    ).rejects.toMatchObject({ telemetryCode: "response_too_large" });
   });
 });
 

@@ -70,6 +70,7 @@ import type {
   DirectoryListing,
   ExecutionResult,
   FileCallOptions,
+  ListOptions,
   Logger,
   MkdirOptions,
   MoveCopyOptions,
@@ -1598,9 +1599,18 @@ export class Sandbox {
 
   private async listImpl(
     path: string,
-    opts?: FileCallOptions,
+    opts?: ListOptions,
   ): Promise<DirectoryListing> {
     resolveSandboxPath(path, "list");
+    const recursive = opts?.recursive;
+    if (recursive !== undefined && typeof recursive !== "boolean") {
+      throw invalidArgumentError("recursive must be a boolean");
+    }
+    const maxDepth = validateBoundedInt(
+      "maxDepth",
+      opts?.maxDepth,
+      Number.MAX_SAFE_INTEGER,
+    );
     const timeoutMs = validateTimeoutMs("timeoutMs", opts?.timeoutMs);
     return this.operate<DirectoryListing>(
       "files.list",
@@ -1614,7 +1624,7 @@ export class Sandbox {
         if (span.isRecording())
           span.setAttribute("sandbox.file.count", result.entries.length);
       },
-      (gen, signal) => gen.rest.list(path, signal),
+      (gen, signal) => gen.rest.list(path, { recursive, maxDepth }, signal),
     );
   }
 

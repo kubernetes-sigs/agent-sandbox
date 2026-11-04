@@ -560,6 +560,9 @@ curl -sf -H "Authorization: Bearer $ROUTER_TOKEN" \
   "$ROUTER_URL/v1/files/src"
 ```
 
+The Python and TypeScript SDKs still send the token only in `Authorization`
+(#2102, #1785), so `auth_token` through the router needs an SDK follow-up.
+
 `/v1/health` stays open so a kubelet `httpGet` readiness probe works without
 the token. Comparison is constant time.
 

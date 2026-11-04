@@ -322,6 +322,11 @@ written = await sandbox.files.read_to(
 )
 ```
 
+On the sandboxd runtime, `files.mkdir(path, parents=False)`,
+`files.move(source, destination, overwrite=False)` and
+`files.copy(source, destination, overwrite=False)` create, rename and copy
+paths. The legacy runtime raises `NotImplementedError`.
+
 ### 6. Async Client
 
 For async applications (FastAPI, aiohttp, async agent orchestrators), use the `AsyncSandboxClient`.

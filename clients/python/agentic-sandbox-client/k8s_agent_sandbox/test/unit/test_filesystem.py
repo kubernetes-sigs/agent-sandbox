@@ -388,6 +388,29 @@ class TestAsyncSandboxdFilesystem(unittest.IsolatedAsyncioTestCase):
 
         self.connector.send_request.assert_not_awaited()
 
+    async def test_mkdir_move_copy_use_sandboxd_endpoints(self):
+        await self.fs.mkdir("a/b", parents=True)
+        await self.fs.move("a", "b", overwrite=True)
+        await self.fs.copy("a", "b")
+
+        calls = [c.args[:2] for c in self.connector.send_request.call_args_list]
+        self.assertEqual(calls, [
+            ("PUT", "v1/files/a%2Fb?type=directory&parents=true"),
+            ("POST", "v1/files/a:move?destination=b&overwrite=true"),
+            ("POST", "v1/files/a:copy?destination=b"),
+        ])
+
+    async def test_mkdir_move_copy_reject_empty_arguments(self):
+        for call in (
+            lambda: self.fs.mkdir(""),
+            lambda: self.fs.move("", "b"),
+            lambda: self.fs.copy("a", ""),
+        ):
+            with self.subTest(), self.assertRaisesRegex(ValueError, "must not be empty"):
+                await call()
+
+        self.connector.send_request.assert_not_awaited()
+
     @patch("k8s_agent_sandbox.files.async_filesystem.trace")
     async def test_delete_records_path_in_trace(self, mock_trace):
         span = MagicMock()

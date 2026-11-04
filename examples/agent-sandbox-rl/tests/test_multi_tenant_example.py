@@ -199,6 +199,12 @@ def test_report_round_trip(tmp_path):
   assert table.splitlines()[0].startswith("user") and "rl-bob" in table
 
 
+def test_run_many_refuses_bad_or_repeated_users():
+  for users in ("alice,alice", "Alice", "bob,alice,bob"):
+    with pytest.raises(SystemExit):
+      run_many.main(["--users", users, "--experiments", "1", "--report-dir", "/nonexistent"])
+
+
 # --- the tenant manifest ----------------------------------------------------- #
 
 VALUES = {"TENANT": "alice", "TENANT_USER": "alice@example.com",
@@ -228,6 +234,10 @@ def test_tenant_manifest_renders_one_isolated_tenant():
   assert quota["spec"]["hard"] == {
       "pods": "16", "requests.cpu": "4", "requests.memory": "8Gi",
       "count/sandboxclaims.extensions.agents.x-k8s.io": "16"}
+  limits = docs[("LimitRange", "rl-tenant")]["spec"]["limits"][0]
+  # The SDK sets requests and no limits, so the default limit must admit any
+  # request the tenant maximum allows.
+  assert limits["default"] == limits["max"] == {"cpu": "2", "memory": "4Gi"}
   binding = docs[("RoleBinding", "rl-tenant")]
   assert {(s["kind"], s["name"]) for s in binding["subjects"]} == {
       ("ServiceAccount", "rl-tenant"), ("User", "alice@example.com")}

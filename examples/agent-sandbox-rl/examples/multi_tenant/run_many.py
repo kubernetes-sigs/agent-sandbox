@@ -100,6 +100,10 @@ def main(argv=None) -> int:
       tenant_namespace(user)
     except ValueError as e:
       p.error(str(e))
+  if len(set(users)) != len(users):
+    # Two runs of one user and experiment would share a report path and a
+    # namespace budget; the same user twice is a typo, not a plan.
+    p.error("--users lists a tenant twice: " + ",".join(sorted({u for u in users if users.count(u) > 1})))
 
   procs = []
   for user in users:

@@ -139,7 +139,9 @@ spec:
 ---
 # A requests quota rejects any pod with no requests. The SDK sets them on every
 # sandbox; the defaults here cover anything else a tenant creates, and `max`
-# keeps one template from holding the whole quota with a single pod.
+# keeps one template from holding the whole quota with a single pod. The
+# default limit equals `max`: the SDK sets requests and no limits, so a sandbox
+# gets the default limit, and a request above it would be refused at admission.
 apiVersion: v1
 kind: LimitRange
 metadata:
@@ -152,8 +154,8 @@ spec:
         cpu: 100m
         memory: 128Mi
       default:
-        cpu: "1"
-        memory: 1Gi
+        cpu: "${LIMIT_MAX_CPU}"
+        memory: ${LIMIT_MAX_MEMORY}
       max:
         cpu: "${LIMIT_MAX_CPU}"
         memory: ${LIMIT_MAX_MEMORY}

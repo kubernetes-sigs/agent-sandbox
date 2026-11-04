@@ -51,7 +51,10 @@ if [[ -z "$ca" ]]; then
 fi
 token="$("${K[@]}" create token rl-tenant -n "$ns" --duration "$duration")"
 
+# umask covers a new file only; an existing one keeps its mode, so tighten it
+# before the token lands in it.
 umask 077
+if [[ -e "$out" ]]; then chmod 600 "$out"; fi
 cat > "$out" <<YAML
 apiVersion: v1
 kind: Config

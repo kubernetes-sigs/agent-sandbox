@@ -1,0 +1,212 @@
+# One tenant of the cluster: a namespace, what the tenant may do in it, how much
+# of the cluster it may hold, and the network policy its sandboxes run under.
+# Rendered by provision.sh (python3 admin/render.py tenant.yaml TENANT=alice ...).
+#
+# The tenant runs agent-sandbox-rl fleets in this namespace and nowhere else.
+# Templates, warm pools, claims, sandboxes and pods are namespaced, so the
+# namespace is the isolation boundary; the image layers those pods run from
+# live in the node's image cache, which every namespace on the node shares.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rl-${TENANT}
+  labels:
+    agent-sandbox-rl/tenant: "${TENANT}"
+    pod-security.kubernetes.io/enforce: baseline
+---
+# The identity a pipeline runs as. tenant_kubeconfig.sh mints a token for it.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rl-tenant
+  namespace: rl-${TENANT}
+---
+# Everything the SDK touches in the namespace, and nothing outside it:
+# templates, pools and claims (create, resize, delete), sandboxes and pods
+# (read, delete; the reaper force-deletes a run's pods by label), pods/exec
+# (the handles run commands over the exec API), pods/status (the handle's
+# liveness check), the namespace object and its quotas (preflight and the
+# runner's quota fit), and NetworkPolicies (preflight checks one covers the
+# fleet's pods). No DaemonSets: pre-pulling is the admin's job.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: rl-tenant
+  namespace: rl-${TENANT}
+rules:
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxtemplates", "sandboxwarmpools", "sandboxclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete", "deletecollection"]
+  - apiGroups: [""]
+    resources: ["pods/status", "pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
+  - apiGroups: [""]
+    resources: ["namespaces", "resourcequotas", "limitranges"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: rl-tenant
+  namespace: rl-${TENANT}
+subjects:
+  - kind: ServiceAccount
+    name: rl-tenant
+    namespace: rl-${TENANT}
+  - kind: User
+    name: ${TENANT_USER}
+roleRef:
+  kind: Role
+  name: rl-tenant
+  apiGroup: rbac.authorization.k8s.io
+---
+# Cluster-scoped reads (CRD definitions, RuntimeClass); see cluster-read.yaml.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rl-tenant-cluster-read-${TENANT}
+subjects:
+  - kind: ServiceAccount
+    name: rl-tenant
+    namespace: rl-${TENANT}
+  - kind: User
+    name: ${TENANT_USER}
+roleRef:
+  kind: ClusterRole
+  name: rl-tenant-cluster-read
+  apiGroup: rbac.authorization.k8s.io
+---
+# Preflight also reads the controller Deployment to report whether it is up.
+# That check is a warning, not a failure; this binding keeps the report clean.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: rl-tenant-controller-view
+  namespace: ${CONTROLLER_NAMESPACE}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get"]
+    resourceNames: ["agent-sandbox-controller"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: rl-tenant-controller-view-${TENANT}
+  namespace: ${CONTROLLER_NAMESPACE}
+subjects:
+  - kind: ServiceAccount
+    name: rl-tenant
+    namespace: rl-${TENANT}
+  - kind: User
+    name: ${TENANT_USER}
+roleRef:
+  kind: Role
+  name: rl-tenant-controller-view
+  apiGroup: rbac.authorization.k8s.io
+---
+# The tenant's share of the cluster. Warm pods and claimed pods both count, as
+# does every SandboxClaim, so a runaway loop stops here, not at the cluster.
+# Quota rejections happen at pod admission, where the fleet's fail-fast cannot
+# see them (no pod exists); run_experiment.py reads this object first and lowers
+# its concurrency to what fits, so a run does not wait out ready_timeout.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: rl-tenant
+  namespace: rl-${TENANT}
+spec:
+  hard:
+    pods: "${QUOTA_PODS}"
+    requests.cpu: "${QUOTA_CPU}"
+    requests.memory: "${QUOTA_MEMORY}"
+    count/sandboxclaims.extensions.agents.x-k8s.io: "${QUOTA_CLAIMS}"
+---
+# A requests quota rejects any pod with no requests. The SDK sets them on every
+# sandbox; the defaults here cover anything else a tenant creates, and `max`
+# keeps one template from holding the whole quota with a single pod.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: rl-tenant
+  namespace: rl-${TENANT}
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi
+      default:
+        cpu: "1"
+        memory: 1Gi
+      max:
+        cpu: "${LIMIT_MAX_CPU}"
+        memory: ${LIMIT_MAX_MEMORY}
+---
+# One NetworkPolicy for every sandbox pod a fleet creates in this namespace. It
+# is the policy of examples/agent-sandbox-rl-network-policy: the fleet's
+# templates are created Unmanaged, so the controller makes none per template.
+# Ingress: the sandbox-router only (the runner reaches sandboxes over the exec
+# API, which goes through the API server, not the pod network). Egress: cluster
+# DNS and public addresses; no private ranges, so no other namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-sandbox-rl-fleet
+  namespace: rl-${TENANT}
+spec:
+  podSelector:
+    matchLabels:
+      app: agent-sandbox-rl
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ${CONTROLLER_NAMESPACE}
+          podSelector:
+            matchLabels:
+              app: sandbox-router
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+        - ipBlock:
+            cidr: ::/0
+            except:
+              - fc00::/7
+              - fe80::/10

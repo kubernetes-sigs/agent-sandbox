@@ -593,17 +593,15 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 		return nil, err
 	}
 	if sandbox != nil {
-		// Found or adopted. Reconcile network policy (best effort, non blocking).
-		logger.V(1).Info("Fast path: sandbox found or adopted, reconciling network policy", "claim", claim.Name)
+		logger.V(1).Info("Fast path: sandbox found or adopted, propagating metadata", "claim", claim.Name)
 		template, templateErr := r.getTemplate(ctx, claim)
 		if templateErr != nil {
-			logger.Error(templateErr, "failed to get template of the warmpool for network policy reconciliation (non-fatal)", "claim", claim.Name, "warmPool", claim.Spec.WarmPoolRef.Name)
-
-			// If we can't get the template but we have metadata to propagate, we should fail
-			// to ensure consistency and enforce the "No Overrides" rule.
-			if len(claim.Spec.AdditionalPodMetadata.Labels) > 0 || len(claim.Spec.AdditionalPodMetadata.Annotations) > 0 {
-				return nil, fmt.Errorf("failed to get template for metadata propagation: %w", templateErr)
+			// Without the template, the controller can't tell template keys from claim keys,
+			// so it can't check the No-Overrides rule or remove a key the claim dropped.
+			if !podMetadataApplied(&claim.Spec.AdditionalPodMetadata, &sandbox.Spec.PodTemplate.ObjectMeta) {
+				return sandbox, fmt.Errorf("failed to get template for metadata propagation: %w", templateErr)
 			}
+			logger.V(4).Info("Template lookup failed, but the Sandbox already carries the claim's pod metadata", "claim", claim.Name, "warmPool", claim.Spec.WarmPoolRef.Name, "error", templateErr)
 		}
 
 		if template != nil {
@@ -628,7 +626,7 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 			}
 
 			if err := r.mergePodMetadata(&mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
-				return nil, err
+				return sandbox, err
 			}
 
 			needsUpdate := !equality.Semantic.DeepEqual(&mergedMeta, &sandbox.Spec.PodTemplate.ObjectMeta)
@@ -1901,6 +1899,22 @@ func (r *SandboxClaimReconciler) mergePodMetadata(templateMeta *v1beta1.PodMetad
 	}
 
 	return nil
+}
+
+// podMetadataApplied reports whether have carries every label and annotation in want
+// with the same value.
+func podMetadataApplied(want, have *v1beta1.PodMetadata) bool {
+	for k, v := range want.Labels {
+		if hv, ok := have.Labels[k]; !ok || hv != v {
+			return false
+		}
+	}
+	for k, v := range want.Annotations {
+		if hv, ok := have.Annotations[k]; !ok || hv != v {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *SandboxClaimReconciler) injectEnvs(logger logr.Logger, container *corev1.Container, envsToInject []extensionsv1beta1.EnvVar, policy extensionsv1beta1.EnvVarsInjectionPolicy, claimName string) error {

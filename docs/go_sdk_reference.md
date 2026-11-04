@@ -79,6 +79,8 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(h \*ProcessHandle\) Recv\(\) \(\*ProcessEvent, error\)](<#ProcessHandle.Recv>)
   - [func \(h \*ProcessHandle\) SendSignal\(ctx context.Context, signal ProcessSignal\) error](<#ProcessHandle.SendSignal>)
 - [type ProcessSignal](<#ProcessSignal>)
+- [type ResizeOption](<#ResizeOption>)
+  - [func WithoutTemplateSync\(\) ResizeOption](<#WithoutTemplateSync>)
 - [type Runtime](<#Runtime>)
 - [type Sandbox](<#Sandbox>)
   - [func New\(\_ context.Context, opts Options\) \(\*Sandbox, error\)](<#New>)
@@ -102,6 +104,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(s \*Sandbox\) PodName\(\) string](<#Sandbox.PodName>)
   - [func \(s \*Sandbox\) Read\(ctx context.Context, path string, opts ...CallOption\) \(\[\]byte, error\)](<#Sandbox.Read>)
   - [func \(s \*Sandbox\) ReadTo\(ctx context.Context, path string, destination io.Writer, opts ...CallOption\) \(int64, error\)](<#Sandbox.ReadTo>)
+  - [func \(s \*Sandbox\) ResizePodResources\(ctx context.Context, containerName string, resources corev1.ResourceRequirements, opts ...ResizeOption\) error](<#Sandbox.ResizePodResources>)
   - [func \(s \*Sandbox\) Run\(ctx context.Context, command string, opts ...CallOption\) \(\*ExecutionResult, error\)](<#Sandbox.Run>)
   - [func \(s \*Sandbox\) SandboxName\(\) string](<#Sandbox.SandboxName>)
   - [func \(s \*Sandbox\) ServiceFQDN\(\) string](<#Sandbox.ServiceFQDN>)
@@ -1220,6 +1223,24 @@ const (
 )
 ```
 
+<a name="ResizeOption"></a>
+### type [ResizeOption](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/resize.go>)
+
+ResizeOption configures per\-call behavior of ResizePodResources.
+
+```go
+type ResizeOption func(*resizeOptions)
+```
+
+<a name="WithoutTemplateSync"></a>
+#### func [WithoutTemplateSync](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/resize.go>)
+
+```go
+func WithoutTemplateSync() ResizeOption
+```
+
+WithoutTemplateSync disables the default Sandbox spec synchronization. By default ResizePodResources also updates Sandbox.Spec.PodTemplate so the Sandbox spec matches the resized Pod; without that sync the two drift apart, which can surprise later template\-driven operations.
+
 <a name="Runtime"></a>
 ### type [Runtime](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/options.go>)
 
@@ -1445,6 +1466,32 @@ func (s *Sandbox) ReadTo(ctx context.Context, path string, destination io.Writer
 ```
 
 ReadTo streams a file into a caller\-owned io.Writer without buffering the complete response. The destination is never closed.
+
+<a name="Sandbox.ResizePodResources"></a>
+#### func \(\*Sandbox\) [ResizePodResources](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/resize.go>)
+
+```go
+func (s *Sandbox) ResizePodResources(ctx context.Context, containerName string, resources corev1.ResourceRequirements, opts ...ResizeOption) error
+```
+
+ResizePodResources requests an in\-place resize of one container's CPU and memory resources on the Sandbox's backing Pod via the Pod /resize subresource \(KEP\-1287\). The Pod is not restarted and keeps its identity.
+
+This operates on the Pod directly instead of going through the Sandbox API, per the project guidance \(issue \#612\): the Sandbox spec stays a user\-owned declaration, and the resize does not freeze a KEP\-1287 subset into the Sandbox API surface.
+
+By default the Sandbox spec is synchronized afterwards so Sandbox.Spec.PodTemplate reflects the new sizing; pass WithoutTemplateSync to skip that write.
+
+Resizing is opt\-in on the cluster side: every container on the Pod must have a RestartPolicy of RestartNotRequired for CPU and memory, and the cluster must serve the Pod resize subresource. The call returns the API server's error unchanged \(wrapped\) when a resize is rejected.
+
+Required RBAC for the caller's credentials: patch on pods/resize, and \(unless WithoutTemplateSync is used\) patch on sandboxes.
+
+Example:
+
+```
+err := sb.ResizePodResources(ctx, "workspace", corev1.ResourceRequirements{
+    Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+    Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")},
+})
+```
 
 <a name="Sandbox.Run"></a>
 #### func \(\*Sandbox\) [Run](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)

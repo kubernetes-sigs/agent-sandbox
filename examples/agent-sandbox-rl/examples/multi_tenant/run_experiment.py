@@ -64,6 +64,7 @@ EXPERIMENT_LABEL = "agent-sandbox-rl/experiment"
 # this its pod lingers for the default 30 s grace period and keeps counting
 # against the quota and the fleet's circuit breaker.
 TERMINATION_GRACE_S = 1
+_NAME = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 
 
 def slug(value: str, limit: int = 12) -> str:
@@ -76,7 +77,21 @@ def slug(value: str, limit: int = 12) -> str:
 
 
 def tenant_namespace(user: str) -> str:
-  return f"{NAMESPACE_PREFIX}{slug(user, 20)}"
+  """``rl-<user>``, the namespace `admin/provision.sh` created for the user.
+
+  The user name is used as is, never cut or lower-cased: the admin's scripts
+  use it verbatim, so any transformation here would point the runner at a
+  namespace nobody provisioned. A name that cannot form a namespace is refused.
+  """
+  if not _NAME.match(user) or len(user) > 60:
+    raise ValueError(f"user {user!r} must be a DNS-1123 label (lowercase, digits, '-') "
+                     "of at most 60 characters, as given to admin/provision.sh")
+  return f"{NAMESPACE_PREFIX}{user}"
+
+
+def report_path(report_dir: pathlib.Path | str, user: str, experiment: str) -> pathlib.Path:
+  """Where one experiment's ``report.json`` goes; `run_many.py` reads the same."""
+  return pathlib.Path(report_dir) / user / slug(experiment, 63) / "report.json"
 
 
 def name_prefix_for(user: str, experiment: str) -> str:
@@ -167,14 +182,15 @@ def build_config(user: str, experiment: str, *, context: str | None = None,
   """The fleet of one experiment: the user's namespace, names per user and
   experiment and run, labels that say whose run it is, and the quota's pod
   budget as the fleet's own hard ceiling (`max_live_sandboxes`)."""
+  namespace = tenant_namespace(user)              # refuses a name no admin provisioned
   cluster = ClusterConfig(name=context or "default", context=context,
-                          kubeconfig=kubeconfig, namespace=tenant_namespace(user))
+                          kubeconfig=kubeconfig, namespace=namespace)
   return FleetConfig(
       clusters=[cluster],
       run_isolation="names",
       template_name_prefix=name_prefix_for(user, experiment),
       labels={**constants.DEFAULT_LABELS,
-              TENANT_LABEL: slug(user, 63), EXPERIMENT_LABEL: slug(experiment, 63)},
+              TENANT_LABEL: user, EXPERIMENT_LABEL: slug(experiment, 63)},
       max_concurrent=max_concurrent,
       max_warmpool_size=max_warmpool_size,
       max_live_sandboxes=pod_budget,
@@ -240,9 +256,9 @@ def reaper_found(verify: dict) -> dict[str, int]:
   return out
 
 
-def write_report(report_dir: pathlib.Path, *, user: str, experiment: str,
+def write_report(path: pathlib.Path, *, user: str, experiment: str,
                  outcome: dict, max_concurrent: int) -> pathlib.Path:
-  report_dir.mkdir(parents=True, exist_ok=True)
+  path.parent.mkdir(parents=True, exist_ok=True)
   results = outcome["results"]
   errors = [r for r in results if isinstance(r, BaseException)]
   doc = {
@@ -255,14 +271,14 @@ def write_report(report_dir: pathlib.Path, *, user: str, experiment: str,
       "results": [r if not isinstance(r, BaseException) else {"error": str(r)}
                   for r in results],
   }
-  path = report_dir / "report.json"
   path.write_text(json.dumps(doc, indent=2, default=str) + "\n")
   return path
 
 
 def main(argv=None) -> int:
   p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-  p.add_argument("--user", required=True, help="tenant name; the namespace is rl-<user>")
+  p.add_argument("--user", required=True,
+                 help="tenant name as given to admin/provision.sh; the namespace is rl-<user>")
   p.add_argument("--experiment", required=True)
   p.add_argument("--images", default=str(pathlib.Path(__file__).with_name("images.txt")),
                  help="one image per line (default: images.txt next to this script)")
@@ -291,6 +307,10 @@ def main(argv=None) -> int:
   images = load_image_list(args.images)
   if not images:
     p.error(f"no images in {args.images}")
+  try:
+    tenant_namespace(args.user)
+  except ValueError as e:
+    p.error(str(e))
   kwargs = dict(context=args.context, kubeconfig=args.kubeconfig,
                 max_concurrent=args.max_concurrent, max_warmpool_size=args.max_warmpool_size,
                 cpu=args.cpu, memory=args.memory, ready_timeout=args.ready_timeout)
@@ -325,9 +345,9 @@ def main(argv=None) -> int:
 
   outcome = drive(fleet, images, tasks_per_image=args.tasks_per_image,
                   strategy=args.strategy)
-  report_dir = pathlib.Path(args.report_dir) / slug(args.user, 63) / slug(args.experiment, 63)
-  path = write_report(report_dir, user=args.user, experiment=args.experiment,
-                      outcome=outcome, max_concurrent=max_concurrent)
+  path = write_report(report_path(args.report_dir, args.user, args.experiment),
+                      user=args.user, experiment=args.experiment, outcome=outcome,
+                      max_concurrent=max_concurrent)
   run_id = outcome["run_id"]
   errors = sum(1 for r in outcome["results"] if isinstance(r, BaseException))
   clean = teardown_clean(outcome["verify_teardown"])

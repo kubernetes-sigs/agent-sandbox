@@ -81,7 +81,7 @@ second user's claims start as fast as the first user's second pass.
 
 | File | Who runs it | What it does |
 | --- | --- | --- |
-| [`admin/tenant.yaml`](admin/tenant.yaml) | admin | Namespace `rl-<user>`, ServiceAccount, Role and bindings, ResourceQuota, LimitRange, NetworkPolicy. Rendered by `render.py`, which refuses to leave a placeholder unfilled. |
+| [`admin/tenant.yaml`](admin/tenant.yaml) | admin | Namespace `rl-<user>`, ServiceAccount, Role and bindings, ResourceQuota, LimitRange, and a NetworkPolicy that selects every pod in the namespace (a tenant may create a template by hand, without the SDK's pod label). Rendered by `render.py`, which refuses to leave a placeholder unfilled. |
 | [`admin/cluster-read.yaml`](admin/cluster-read.yaml) | admin | the one ClusterRole tenants need: `get` on the four CRDs (preflight) and on RuntimeClass. |
 | [`admin/provision.sh`](admin/provision.sh) | admin | `provision.sh <user> [--pods 16 --cpu 4 --memory 8Gi --claims 16]` applies both; `--delete` removes the tenant. |
 | [`admin/tenant_kubeconfig.sh`](admin/tenant_kubeconfig.sh) | admin | writes a kubeconfig with a short-lived token for the tenant's ServiceAccount. |
@@ -101,9 +101,11 @@ pip install -e clients/python/agentic-sandbox-client -e examples/agent-sandbox-r
 cd examples/agent-sandbox-rl/examples/multi_tenant
 ```
 
-**1. The admin provisions two tenants** and a kubeconfig for each. The
-defaults give a tenant 16 pods, 4 CPU, 8 GiB and 16 claims; on kind the
-sandboxes request 100m and 128Mi each.
+**1. The admin provisions two tenants** and a kubeconfig for each. A tenant
+name is a lowercase DNS-1123 label of at most 60 characters and is used as is
+everywhere: the namespace is `rl-<user>`, and `run_experiment.py` refuses a
+name that does not fit. The defaults give a tenant 16 pods, 4 CPU, 8 GiB and
+16 claims; on kind the sandboxes request 100m and 128Mi each.
 
 ```bash
 admin/provision.sh alice

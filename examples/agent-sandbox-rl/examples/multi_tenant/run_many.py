@@ -35,6 +35,8 @@ import subprocess
 import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from run_experiment import report_path, tenant_namespace  # noqa: E402
 
 
 def summarize(reports: list[dict]) -> list[dict]:
@@ -93,6 +95,11 @@ def main(argv=None) -> int:
   users = [u for u in args.users.split(",") if u]
   if not users:
     p.error("--users is empty")
+  for user in users:
+    try:
+      tenant_namespace(user)
+    except ValueError as e:
+      p.error(str(e))
 
   procs = []
   for user in users:
@@ -105,25 +112,32 @@ def main(argv=None) -> int:
       if args.kubeconfig_pattern:
         cmd += ["--kubeconfig",
                 str(pathlib.Path(args.kubeconfig_pattern.format(user=user)).expanduser())]
+      # Only this invocation's reports are read back: a stale report from an
+      # earlier run of the same user and experiment is removed first.
+      report = report_path(args.report_dir, user, f"exp{n}")
+      report.unlink(missing_ok=True)
       log = pathlib.Path(args.report_dir) / user / f"exp{n}.log"
       log.parent.mkdir(parents=True, exist_ok=True)
       print(f"starting {user}/exp{n} (log: {log})")
-      procs.append((user, f"exp{n}", log, subprocess.Popen(
-          cmd, stdout=log.open("w"), stderr=subprocess.STDOUT)))
+      with log.open("w") as out:
+        proc = subprocess.Popen(cmd, stdout=out, stderr=subprocess.STDOUT)
+      procs.append((user, f"exp{n}", log, report, proc))
 
   failed = 0
-  for user, exp, log, proc in procs:
+  reports = []
+  for user, exp, log, report, proc in procs:
     rc = proc.wait()
     if rc != 0:
       failed += 1
       print(f"{user}/{exp}: exit {rc} (see {log})")
-
-  reports = []
-  for path in sorted(pathlib.Path(args.report_dir).glob("*/*/report.json")):
+    if not report.exists():
+      print(f"{user}/{exp}: no report written (see {log})")
+      failed += 1
+      continue
     try:
-      reports.append(json.loads(path.read_text()))
+      reports.append(json.loads(report.read_text()))
     except (OSError, ValueError) as e:
-      print(f"unreadable report {path}: {e}")
+      print(f"{user}/{exp}: unreadable report {report}: {e}")
       failed += 1
   print()
   print(render_table(summarize(reports)))

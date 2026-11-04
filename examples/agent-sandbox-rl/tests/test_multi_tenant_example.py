@@ -59,6 +59,19 @@ def test_name_prefix_names_user_and_experiment():
     run_experiment.name_prefix_for("***", "exp1")
 
 
+def test_tenant_namespace_uses_the_name_as_given():
+  assert run_experiment.tenant_namespace("alice") == "rl-alice"
+  assert run_experiment.tenant_namespace("a" * 60) == "rl-" + "a" * 60
+  # The admin's scripts never transform the name, so neither does the runner.
+  for bad in ("Alice", "alice smith", "a" * 61, "-alice", ""):
+    with pytest.raises(ValueError):
+      run_experiment.tenant_namespace(bad)
+  with pytest.raises(ValueError):
+    run_experiment.build_config("Alice", "exp1")
+  assert run_experiment.report_path("reports", "alice", "exp 1") == \
+      pathlib.Path("reports/alice/exp-1/report.json")
+
+
 def test_config_stays_in_the_users_namespace():
   cfg = run_experiment.build_config("alice", "exp1", max_concurrent=3, cpu="200m",
                                     memory="256Mi")
@@ -170,8 +183,10 @@ def test_report_round_trip(tmp_path):
   fleet = FakeFleet(run_experiment.build_config("bob", "exp2"))
   out = run_experiment.drive(fleet, IMAGES, tasks_per_image=1)
   out["results"][0] = RuntimeError("task blew up")       # one captured failure
-  path = run_experiment.write_report(tmp_path / "bob" / "exp2", user="bob", experiment="exp2",
-                                     outcome=out, max_concurrent=4)
+  path = run_experiment.write_report(run_experiment.report_path(tmp_path, "bob", "exp2"),
+                                     user="bob", experiment="exp2", outcome=out,
+                                     max_concurrent=4)
+  assert path == tmp_path / "bob" / "exp2" / "report.json"
   doc = json.loads(path.read_text())
   assert (doc["user"], doc["experiment"], doc["namespace"]) == ("bob", "exp2", "rl-bob")
   assert doc["run_id"] == fleet.run_id
@@ -196,10 +211,10 @@ def test_render_refuses_a_missing_value():
   text = (EXAMPLE / "admin" / "tenant.yaml").read_text()
   with pytest.raises(KeyError, match="QUOTA_PODS"):
     render.render(text, {k: v for k, v in VALUES.items() if k != "QUOTA_PODS"})
-  with pytest.raises(ValueError):
-    render.check_name("Alice", "tenant")
-  with pytest.raises(ValueError):
-    render.check_name("a_b", "tenant")
+  for bad in ("Alice", "a_b", "a" * 61):
+    with pytest.raises(ValueError):
+      render.check_name(bad, "tenant", 60)
+  assert render.check_name("a" * 60, "tenant", 60) == "a" * 60
 
 
 def test_tenant_manifest_renders_one_isolated_tenant():
@@ -238,5 +253,8 @@ def test_tenant_manifest_renders_one_isolated_tenant():
   assert "get" in verbs("", "pods/status")
   assert "get" in verbs("", "resourcequotas")
   assert "daemonsets" not in str(rules)           # pre-pull is the admin's job
+  # Every pod in the namespace: a tenant's hand-made template may omit the
+  # SDK's pod label, and its pods must not fall outside the policy.
   policy = docs[("NetworkPolicy", "agent-sandbox-rl-fleet")]
-  assert policy["spec"]["podSelector"] == {"matchLabels": {"app": "agent-sandbox-rl"}}
+  assert policy["spec"]["podSelector"] == {}
+  assert set(policy["spec"]["policyTypes"]) == {"Ingress", "Egress"}

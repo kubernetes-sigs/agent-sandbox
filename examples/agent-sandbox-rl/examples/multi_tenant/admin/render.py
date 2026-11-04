@@ -39,10 +39,12 @@ def render(text: str, values: dict[str, str]) -> str:
   return _PLACEHOLDER.sub(lambda m: values[m.group(1)], text)
 
 
-def check_name(value: str, what: str) -> str:
-  """A DNS-1123 label (what object names and label values need)."""
-  if not _NAME.match(value) or len(value) > 63:
-    raise ValueError(f"{what} {value!r} must be a DNS-1123 label (lowercase, digits, '-')")
+def check_name(value: str, what: str, limit: int = 63) -> str:
+  """A DNS-1123 label of at most ``limit`` characters (object names and label
+  values); a tenant name gets 60, so that ``rl-<tenant>`` is a valid namespace."""
+  if not _NAME.match(value) or len(value) > limit:
+    raise ValueError(f"{what} {value!r} must be a DNS-1123 label (lowercase, digits, "
+                     f"'-') of at most {limit} characters")
   return value
 
 
@@ -52,7 +54,7 @@ def main(argv: list[str]) -> int:
     return 2
   values = dict(a.split("=", 1) for a in argv[2:] if "=" in a)
   if "TENANT" in values:
-    check_name(values["TENANT"], "tenant")
+    check_name(values["TENANT"], "tenant", 60)
   sys.stdout.write(render(pathlib.Path(argv[1]).read_text(), values))
   return 0
 

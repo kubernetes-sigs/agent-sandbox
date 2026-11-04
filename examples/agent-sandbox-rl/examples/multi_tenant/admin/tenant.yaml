@@ -158,9 +158,12 @@ spec:
         cpu: "${LIMIT_MAX_CPU}"
         memory: ${LIMIT_MAX_MEMORY}
 ---
-# One NetworkPolicy for every sandbox pod a fleet creates in this namespace. It
-# is the policy of examples/agent-sandbox-rl-network-policy: the fleet's
-# templates are created Unmanaged, so the controller makes none per template.
+# One NetworkPolicy for every pod in this namespace. Its rules are those of
+# examples/agent-sandbox-rl-network-policy: the fleet's templates are created
+# Unmanaged, so the controller makes none per template. It selects every pod,
+# not only pods labelled app=agent-sandbox-rl, because the Role lets a tenant
+# create a SandboxTemplate by hand, and a template may omit that label; the
+# only pods a tenant runs here are sandboxes, and these rules fit them all.
 # Ingress: the sandbox-router only (the runner reaches sandboxes over the exec
 # API, which goes through the API server, not the pod network). Egress: cluster
 # DNS and public addresses; no private ranges, so no other namespace.
@@ -170,9 +173,7 @@ metadata:
   name: agent-sandbox-rl-fleet
   namespace: rl-${TENANT}
 spec:
-  podSelector:
-    matchLabels:
-      app: agent-sandbox-rl
+  podSelector: {}
   policyTypes:
     - Ingress
     - Egress

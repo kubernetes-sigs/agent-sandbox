@@ -84,7 +84,7 @@ for u in "${users[@]}"; do
     && "${K[@]}" get resourcequota rl-tenant -n "$ns" -o json 2>/dev/null | python3 -c '
 import json,sys
 q=json.load(sys.stdin); hard=q["status"].get("hard",{}); used=q["status"].get("used",{})
-print("   quota: " + "  ".join(f"{k}={used.get(k, "0")}/{v}" for k,v in sorted(hard.items())))' \
+print("   quota: " + "  ".join("{}={}/{}".format(k, used.get(k, 0), v) for k, v in sorted(hard.items())))' \
     || { echo "   FAIL no ResourceQuota rl-tenant"; fail=1; }
   if "${K[@]}" get networkpolicy agent-sandbox-rl-fleet -n "$ns" >/dev/null 2>&1; then
     echo "   networkpolicy: agent-sandbox-rl-fleet"

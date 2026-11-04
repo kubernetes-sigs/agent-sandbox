@@ -1655,6 +1655,46 @@ class TestClaimBatchCreation(BaseClaimBatchTest):
         self.assertTrue(all(gap < 0.1 for gap in gaps[1:5]), gaps)
         self.assertTrue(all(gap >= 0.18 for gap in gaps[5:]), gaps)
 
+    def test_cold_claim_on_watch_zeroes_pool_credit_for_remaining_fill_creates(self):
+        for reason in ("SandboxCreatePending", "SandboxNotReady"):
+            with self.subTest(reason):
+                self.cluster = _Cluster(ready_on_create=False)
+                self.client.k8s_helper = self.cluster.helper
+                self.cluster.helper.get_sandbox_warmpool.side_effect = lambda name, *a, **k: {
+                    "spec": {"sandboxTemplateRef": {"name": "tmpl"}},
+                    "status": {"readyReplicas": 10},
+                }
+                batch_ref: dict[str, SandboxBatch] = {}
+                started = threading.Event()
+                self.addCleanup(started.set)
+
+                def hook(name):
+                    if name == "b1-0":
+                        started.wait(5)
+                        cold = [{"type": "Ready", "status": "False", "reason": reason}]
+                        self.cluster.watch_queue.put(
+                            {"type": "ADDED", "object": _claim("b1-0", "pool-a", conditions=cold, annotations=_FILL)}
+                        )
+                        _wait_until(lambda: len(batch_ref["batch"].members()) == 1)
+
+                self.cluster.create_hook = hook
+                batch = batch_ref["batch"] = self.claim(
+                    [BatchGroup(warmpool="pool-a", size=4), BatchGroup(warmpool="pool-b", size=2)],
+                    max_in_flight=1,
+                    create_rps=5,
+                )
+                self.addCleanup(batch._stop_background_threads)
+                started.set()
+                _wait_until(lambda: len(self.cluster.created) == 6)
+                sent_at = dict(self.cluster.created)
+                # b1-0 arrived cold on the watch, zeroing pool-a's credit so b1-1 takes the
+                # first pacing slot and b1-2 and b1-3 pace at 5/s, while pool-b keeps its credit.
+                self.assertGreaterEqual(sent_at["b1-2"] - sent_at["b1-1"], 0.18)
+                self.assertGreaterEqual(sent_at["b1-3"] - sent_at["b1-2"], 0.18)
+                self.assertLess(sent_at["b1-4"] - sent_at["b1-3"], 0.1)
+                self.assertLess(sent_at["b1-5"] - sent_at["b1-4"], 0.1)
+                batch._stop_background_threads()
+
     def test_creates_each_groups_min_ready_claims_first_in_group_order(self):
         self.claim(
             [BatchGroup(warmpool="pool-a", size=6, min_ready=3), BatchGroup(warmpool="pool-b", size=3, min_ready=1)],
@@ -3692,6 +3732,121 @@ class TestAcquire(BaseClaimBatchTest):
             start = time.monotonic()
             batch.acquire("pool-c")
             self.assertLess(self.cluster.created[0][1] - start, 0.2)
+
+    def test_cold_claim_defers_acquire_refresh_fences_in_flight_read_and_zeroes_on_relist(self):
+        helper = self.cluster.helper
+        ready = {"pool-a": 3, "pool-b": 4}
+        in_flight_gate: threading.Event | None = None
+        in_flight_entered = threading.Event()
+
+        def get_warmpool(name, *args, **kwargs):
+            gate = in_flight_gate
+            if gate is not None and name == "pool-a":
+                in_flight_entered.set()
+                gate.wait(5)
+            return {"spec": {"sandboxTemplateRef": {"name": "tmpl"}}, "status": {"readyReplicas": ready[name]}}
+
+        helper.get_sandbox_warmpool.side_effect = get_warmpool
+        offset = [0.0]
+        fake_time = SimpleNamespace(monotonic=lambda: time.monotonic() + offset[0])
+        with patch.object(batch_utils, "time", fake_time):
+            batch = self.claim(
+                [BatchGroup(warmpool="pool-a", size=0), BatchGroup(warmpool="pool-b", size=0)],
+                max_in_flight=4,
+                create_rps=4,
+            )
+            self.assertEqual(helper.get_sandbox_warmpool.call_count, 2)
+            # Age the precheck read past BATCH_WARM_CREDIT_REFRESH_SECONDS so only exhaust()
+            # updating _read_at keeps acquire() from immediately re-reading stale readyReplicas.
+            offset[0] += 2.0
+            self.cluster.ready_on_create = False
+            with ThreadPoolExecutor(1) as pool:
+                first = pool.submit(batch.acquire, "pool-a", timeout=5)
+                _wait_until(lambda: len(self.cluster.created) == 1)
+                cold_pending = [{"type": "Ready", "status": "False", "reason": "SandboxCreatePending"}]
+                self.cluster.watch_queue.put(
+                    {"type": "ADDED", "object": _claim("b1-0", "pool-a", conditions=cold_pending, annotations=None)}
+                )
+                _wait_until(lambda: len(batch.members()) == 1)
+                self.cluster.push("b1-0", "pool-a", ready=True, annotations=None)
+                self.assertEqual(first.result(timeout=5).claim_name, "b1-0")
+
+            self.cluster.ready_on_create = True
+            batch._next_create_at = time.monotonic() + 0.2
+            self.cluster.created.clear()
+            start = time.monotonic()
+            batch.acquire("pool-a")
+            self.assertGreaterEqual(self.cluster.created[0][1] - start, 0.18)
+            self.assertEqual(helper.get_sandbox_warmpool.call_count, 2)
+
+            # pool-b keeps its warm credit while pool-a is exhausted.
+            self.cluster.created.clear()
+            start = time.monotonic()
+            batch.acquire("pool-b")
+            self.assertLess(self.cluster.created[0][1] - start, 0.1)
+            self.assertEqual(helper.get_sandbox_warmpool.call_count, 2)
+
+            # Once BATCH_WARM_CREDIT_REFRESH_SECONDS elapses, acquire() refreshes pool-a again.
+            offset[0] += batch_utils.BATCH_WARM_CREDIT_REFRESH_SECONDS
+            ready["pool-a"] = 2
+            batch._next_create_at = time.monotonic() + 0.3
+            self.cluster.created.clear()
+            start = time.monotonic()
+            batch.acquire("pool-a")
+            self.assertLess(self.cluster.created[0][1] - start, 0.15)
+            self.assertEqual(helper.get_sandbox_warmpool.call_count, 3)
+
+            # Spend pool-a's remaining credit and age _read_at so the next acquire starts a refresh.
+            batch.acquire("pool-a")
+            offset[0] += 2.0
+            ready["pool-a"] = 5
+            in_flight_gate = threading.Event()
+            self.addCleanup(in_flight_gate.set)
+            batch._next_create_at = time.monotonic() + 0.05
+            with ThreadPoolExecutor(1) as pool:
+                refreshing = pool.submit(batch.acquire, "pool-a", timeout=5)
+                self.assertTrue(in_flight_entered.wait(5))
+                cold_not_ready = [{"type": "Ready", "status": "False", "reason": "SandboxNotReady"}]
+                self.cluster.watch_queue.put(
+                    {"type": "ADDED", "object": _claim("b1-90", "pool-a", conditions=cold_not_ready, annotations=None)}
+                )
+                _wait_until(lambda: any(m.claim_name == "b1-90" for m in batch.members()))
+                in_flight_gate.set()
+                in_flight_gate = None
+                refreshing.result(timeout=5)
+            self.assertEqual(helper.get_sandbox_warmpool.call_count, 4)
+
+            # The stale readyReplicas=5 read started before b1-90 arrived did not overwrite 0.
+            batch._next_create_at = time.monotonic() + 0.2
+            self.cluster.created.clear()
+            start = time.monotonic()
+            batch.acquire("pool-a")
+            self.assertGreaterEqual(self.cluster.created[0][1] - start, 0.18)
+            self.assertEqual(helper.get_sandbox_warmpool.call_count, 4)
+
+            # A 410 watch relist containing a cold claim also zeroes that pool's remaining credit.
+            relist_cold = [{"type": "Ready", "status": "False", "reason": "SandboxCreatePending"}]
+            helper.list_sandbox_claim_objects.return_value = (
+                [_claim("b1-99", "pool-b", conditions=relist_cold, annotations=None)],
+                "9",
+            )
+            raise_410 = True
+
+            def watch_with_410(*args, **kwargs):
+                nonlocal raise_410
+                if raise_410:
+                    raise_410 = False
+                    raise k8s_client.ApiException(status=410)
+                yield from self.cluster._watch(*args, **kwargs)
+
+            helper.watch_sandbox_claims.side_effect = watch_with_410
+            _wait_until(lambda: any(m.claim_name == "b1-99" for m in batch.members()))
+            batch._next_create_at = time.monotonic() + 0.2
+            self.cluster.created.clear()
+            start = time.monotonic()
+            batch.acquire("pool-b")
+            self.assertGreaterEqual(self.cluster.created[0][1] - start, 0.18)
+            self.assertEqual(helper.get_sandbox_warmpool.call_count, 4)
 
     def test_fill_and_acquire_creates_share_max_in_flight(self):
         for outcome in ("timeout", "release_group", "err"):

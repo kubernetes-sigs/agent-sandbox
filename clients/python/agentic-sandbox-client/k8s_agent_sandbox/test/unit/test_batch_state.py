@@ -22,6 +22,7 @@ from k8s_agent_sandbox.models import BatchEventType, BatchGroup, Member, MemberS
 from k8s_agent_sandbox.constants import (
     BATCH_GROUP_MIN_READY_ANNOTATION,
     BATCH_GROUP_SIZE_ANNOTATION,
+    COLD_CLAIM_READY_REASONS,
     TERMINAL_CLAIM_READY_REASONS,
 )
 
@@ -963,6 +964,146 @@ class TestAcquired(unittest.TestCase):
         self.assertIsNone(state.upsert_claim(_ready("b1-6", "pool-b")))
         state.record_create_failure("b1-7", "pool-b", "forbidden")
         self.assertEqual([m.claim_name for m in state.members()], [])
+
+    def test_cold_claim_reasons_exhaust_pools_once_for_live_post_attach_claims(self):
+        self.assertEqual(
+            COLD_CLAIM_READY_REASONS,
+            frozenset({"SandboxCreatePending", "SandboxNotReady", "DependenciesNotReady"}),
+        )
+        for reason in ("SandboxCreatePending", "SandboxNotReady", "DependenciesNotReady"):
+            with self.subTest(reason=reason):
+                state = _state(BatchGroup(warmpool="pool-a", size=2))
+                self.assertEqual(state.take_exhausted_pools(), set())
+                state.upsert_claim(
+                    _claim(
+                        "b1-0",
+                        "pool-a",
+                        conditions=[{"type": "Ready", "status": "False", "reason": reason}],
+                        annotations=_FILL,
+                    )
+                )
+                self.assertEqual(state._pending_launch, set())
+                self.assertEqual(state.take_exhausted_pools(), {"pool-a"})
+                self.assertEqual(state.take_exhausted_pools(), set())
+                # Later MODIFIED updates on the same booting cold claim do not re-exhaust.
+                state.upsert_claim(
+                    _claim(
+                        "b1-0",
+                        "pool-a",
+                        conditions=[{"type": "Ready", "status": "False", "reason": "DependenciesNotReady"}],
+                        annotations=_FILL,
+                    )
+                )
+                self.assertEqual(state._pending_launch, set())
+                self.assertEqual(state.take_exhausted_pools(), set())
+
+        # Unreconciled (reason=None) and AdoptionConflict claims stay in _pending_launch until
+        # reconciled; once every claim settles (warm READY, cold SandboxNotReady, FAILED, LOST),
+        # _pending_launch returns to empty, and an already-READY member flapping to
+        # DependenciesNotReady neither enters _pending_launch nor exhausts credit.
+        state = _state(BatchGroup(warmpool="pool-a", size=4), BatchGroup(warmpool="pool-b", size=1))
+        state.upsert_claim(_claim("b1-0", "pool-a", annotations=_FILL))
+        state.upsert_claim(
+            _claim(
+                "b1-1",
+                "pool-a",
+                conditions=[{"type": "Ready", "status": "False", "reason": "AdoptionConflict"}],
+                annotations=_FILL,
+            )
+        )
+        state.upsert_claim(_ready("b1-2", "pool-b"))
+        state.upsert_claim(_claim("b1-3", "pool-a", annotations=_FILL))
+        state.upsert_claim(_claim("b1-4", "pool-a", annotations=_FILL))
+        self.assertEqual(state._pending_launch, {"b1-0", "b1-1", "b1-3", "b1-4"})
+        self.assertEqual(state.take_exhausted_pools(), set())
+        state.upsert_claim(
+            _claim(
+                "b1-2",
+                "pool-b",
+                conditions=[{"type": "Ready", "status": "False", "reason": "DependenciesNotReady"}],
+                sandbox={"name": "sbx-b1-2"},
+                annotations=_FILL,
+            )
+        )
+        self.assertEqual(state._pending_launch, {"b1-0", "b1-1", "b1-3", "b1-4"})
+        self.assertEqual(state.take_exhausted_pools(), set())
+        state.upsert_claim(_pending("b1-1", "pool-a"))
+        self.assertEqual(state.take_exhausted_pools(), {"pool-a"})
+        state.upsert_claim(_ready("b1-3", "pool-a"))
+        state.upsert_claim(
+            _claim(
+                "b1-4",
+                "pool-a",
+                conditions=[{"type": "Ready", "status": "False", "reason": "InvalidConfiguration"}],
+                annotations=_FILL,
+            )
+        )
+        self.assertEqual(state.take_exhausted_pools(), set())
+        self.assertEqual(state._pending_launch, {"b1-0"})
+        state.mark_lost("b1-0")
+        self.assertEqual(state._pending_launch, set())
+
+        # seed_from_claims emits nothing, clears _pending_launch for both cold and status: {}
+        # pre-attach claims, and resync_from_list still exhausts newly cold post-attach claims.
+        attached = _state(BatchGroup(warmpool="pool-a", size=2), BatchGroup(warmpool="pool-b", size=1))
+        attached.seed_from_claims([
+            _pending("b1-0", "pool-a"),
+            _claim("b1-1", "pool-a", annotations=_FILL),
+            _claim(
+                "b1-2",
+                "pool-b",
+                conditions=[{"type": "Ready", "status": "False", "reason": "AdoptionConflict"}],
+                annotations=_FILL,
+            ),
+        ])
+        self.assertEqual(attached._pending_launch, set())
+        self.assertEqual(attached.take_exhausted_pools(), set())
+        attached.upsert_claim(_pending("b1-1", "pool-a"))
+        attached.upsert_claim(_pending("b1-2", "pool-b"))
+        self.assertEqual(attached._pending_launch, set())
+        self.assertEqual(attached.take_exhausted_pools(), set())
+        attached.resync_from_list([
+            _pending("b1-0", "pool-a"),
+            _claim(
+                "b1-9",
+                "pool-b",
+                conditions=[{"type": "Ready", "status": "False", "reason": "SandboxCreatePending"}],
+            ),
+        ])
+        self.assertEqual(attached._pending_launch, set())
+        self.assertEqual(attached.take_exhausted_pools(), {"pool-b"})
+
+        # Release and drop_acquired paths clear _pending_launch and ignore cold claims for
+        # released members or stopped fill groups.
+        cleaned = _state(
+            BatchGroup(warmpool="pool-a", size=2),
+            BatchGroup(warmpool="pool-b", size=2),
+            BatchGroup(warmpool="pool-c", size=2),
+        )
+        cleaned.upsert_claim(_claim("b1-0", "pool-a", annotations=_FILL))
+        cleaned.upsert_claim(_claim("b1-2", "pool-b", annotations=_FILL))
+        cleaned.upsert_claim(_claim("b1-4", "pool-c", annotations=_FILL))
+        acquiring = cleaned.start_acquire("pool-a")
+        cleaned.upsert_claim(_claim(acquiring, "pool-a"))
+        self.assertEqual(cleaned._pending_launch, {"b1-0", "b1-2", "b1-4", acquiring})
+
+        cleaned.release_member("b1-0")
+        self.assertNotIn("b1-0", cleaned._pending_launch)
+        self.assertIsNone(cleaned.upsert_claim(_pending("b1-0", "pool-a")))
+
+        cleaned.drop_acquired(acquiring, created=True)
+        self.assertNotIn(acquiring, cleaned._pending_launch)
+        self.assertIsNone(cleaned.upsert_claim(_claim(acquiring, "pool-a", conditions=_NOT_READY)))
+
+        cleaned.release_group("pool-b")
+        self.assertNotIn("b1-2", cleaned._pending_launch)
+        self.assertIsNone(cleaned.upsert_claim(_pending("b1-3", "pool-b")))
+
+        cleaned.release_not_ready()
+        self.assertEqual(cleaned._pending_launch, set())
+        self.assertIsNone(cleaned.upsert_claim(_pending("b1-5", "pool-c")))
+        self.assertEqual(cleaned._pending_launch, set())
+        self.assertEqual(cleaned.take_exhausted_pools(), set())
 
     def test_releasing_a_pending_acquired_member_ends_its_wait(self):
         state = _state(BatchGroup(warmpool="pool-a", size=1))

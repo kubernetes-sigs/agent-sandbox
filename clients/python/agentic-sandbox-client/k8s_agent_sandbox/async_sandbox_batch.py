@@ -694,6 +694,13 @@ class AsyncSandboxBatch:
         for waiter in self._acquire_waiters.values():
             waiter.set()
 
+    def _exhaust_warm_credit(self) -> None:
+        """Zeroes credit for pools whose claims observed a cold start. Requires ``_lock``."""
+        # A single watch event triggers at most one pool, while a 410 re-list can discover
+        # cold claims across several pools in one resync_from_list() pass.
+        for warmpool in self._state.take_exhausted_pools():
+            self._warm_credit.exhaust(warmpool)
+
     async def acquire(self, warmpool: str, timeout: float | None = None) -> Member:
         """Adds a member from ``warmpool`` to the batch, waits until it is Ready, and returns it.
 
@@ -707,9 +714,11 @@ class AsyncSandboxBatch:
         create follows the initial claims' retries and pacing. Like theirs, a create that the
         pool's Ready sandboxes cover skips ``create_rps`` pacing. Once callers spend the Ready
         count from the pool's check and ``create_rps`` pacing would delay the next create,
-        ``acquire()`` reads the pool again at most once a second per pool. Fill creates,
-        ``acquire()`` creates and pool reads, and member deletes share ``max_in_flight``,
-        which defaults to 20 on a handle from ``get_batch``.
+        ``acquire()`` reads the pool again at most once a second per pool (unless an expired
+        ``timeout`` cuts a read short before recording it). When the watch observes a claim from a
+        pool start cold before becoming Ready, the batch zeroes that pool's credit and defers its
+        next refresh. Fill creates, ``acquire()`` creates and pool reads, and member deletes share
+        ``max_in_flight``, which defaults to 20 on a handle from ``get_batch``.
 
         If it raises, including on a cancellation, the member is dropped from ``members()`` and its
         claim is deleted, unless the claim is already gone or its create was rejected. A failed delete is
@@ -973,8 +982,10 @@ class AsyncSandboxBatch:
                     acquired_slot = True
             if not acquired_slot:
                 return
+            # Snapshot the pool sequence before GET so a refresh finishing after exhaust() cannot overwrite 0.
             async with self._lock:
                 remaining = remaining_if_due()
+                seq = self._warm_credit.seq(warmpool)
             if remaining <= 0:
                 return
             request_timeout = min(float(batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS), remaining)
@@ -995,7 +1006,7 @@ class AsyncSandboxBatch:
                 logger.debug(f"Batch '{self.batch_id}' failed to read warm pool '{warmpool}': {e}")
                 ready = 0
             async with self._lock:
-                self._warm_credit.record(warmpool, ready)
+                self._warm_credit.record(warmpool, ready, seq=seq)
         finally:
             if acquired_slot:
                 self._in_flight.release()
@@ -1427,6 +1438,7 @@ class AsyncSandboxBatch:
                     )
                     async with self._lock:
                         self._state.resync_from_list(items)
+                        self._exhaust_warm_credit()
                         self._notify_all()
                         stale = self._pop_stale_connections(list(self._connected))
                     await self._close_connections(stale, "a re-list")
@@ -1452,6 +1464,7 @@ class AsyncSandboxBatch:
                                 self._wake_acquire(claim_name)
                         elif event_type in ("ADDED", "MODIFIED"):
                             member = self._state.upsert_claim(obj)
+                            self._exhaust_warm_credit()
                             if member is not None and member.state is not MemberState.PENDING:
                                 self._wake_acquire(claim_name)
                         self._changed.notify_all()

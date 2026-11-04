@@ -352,6 +352,39 @@ class TestParseLeaseMetadata(unittest.TestCase):
 
 class TestWarmCredit(unittest.TestCase):
 
+    def test_exhaust_zeroes_target_pool_defers_refresh_and_fences_stale_reads(self):
+        now = [100.0]
+        with patch.object(batch_utils.time, "monotonic", side_effect=lambda: now[0]):
+            credit = batch_utils.WarmCredit()
+            self.assertEqual(credit.seq("pool-a"), 0)
+            credit.record("pool-a", 3)
+            credit.record("pool-b", 2)
+            self.assertEqual(credit.seq("pool-a"), 1)
+            now[0] += 1.5
+            stale_seq = credit.seq("pool-a")
+            credit.exhaust("pool-a")
+            # Only pool-a loses its credit; pool-b keeps its Ready sandboxes.
+            self.assertFalse(credit.take("pool-a"))
+            self.assertTrue(credit.take("pool-b"))
+            self.assertEqual(credit.seq("pool-a"), stale_seq + 1)
+            # An in-flight refresh started before exhaust() neither restores credit under a frozen
+            # monotonic clock nor shifts _read_at when it finishes later.
+            credit.record("pool-a", 5, seq=stale_seq)
+            self.assertFalse(credit.take("pool-a"))
+            self.assertFalse(credit.refresh_due("pool-a"))
+            now[0] += 0.6
+            credit.record("pool-a", 5, seq=stale_seq)
+            self.assertFalse(credit.take("pool-a"))
+            self.assertEqual(credit.seq("pool-a"), stale_seq + 1)
+            self.assertFalse(credit.refresh_due("pool-a"))
+            now[0] += 0.4
+            self.assertTrue(credit.refresh_due("pool-a"))
+            # A subsequent refresh at the current sequence succeeds.
+            current_seq = credit.seq("pool-a")
+            credit.record("pool-a", 2, seq=current_seq)
+            self.assertEqual(credit.seq("pool-a"), current_seq + 1)
+            self.assertTrue(credit.take("pool-a"))
+
     def test_cooldown_tracks_spent_credit_and_recovers(self):
         now = [100.0]
         with patch.object(batch_utils.time, "monotonic", side_effect=lambda: now[0]):

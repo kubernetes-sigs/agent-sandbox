@@ -534,26 +534,44 @@ class WarmCredit:
     exists so that a burst of cold claims doesn't start many pods on a node at once, and a claim
     a Ready sandbox takes starts no pod. Prechecks read the initial count, and ``acquire()`` reads
     the pool again once callers spend that credit and ``create_rps`` pacing would otherwise delay
-    a create. If another client takes those sandboxes first, the stale credit lets some claims
-    start pods unpaced, just as per-claim creates do. A 429 response pauses the credit for
-    ``Retry-After`` (at least ``BATCH_WARM_CREDIT_THROTTLE_SECONDS``) so an active burst backs off
-    to ``create_rps`` while a long-lived batch recovers warm speed once the apiserver clears. The
-    handles call this class with their lock held.
+    a create. When the batch watch sees a claim from a pool report a cold-start ``Ready=False``
+    reason before becoming Ready, ``exhaust()`` zeroes that pool's credit and defers its next
+    refresh so shared-pool bursts fall back to ``create_rps`` once Ready sandboxes run out, and
+    ``seq()`` prevents an already in-flight refresh from overwriting a newer update. A 429
+    response pauses the credit for numeric ``Retry-After`` values up to
+    ``BATCH_BACKOFF_MAX_SECONDS`` (with a ``BATCH_WARM_CREDIT_THROTTLE_SECONDS`` minimum; missing
+    or date-form headers use ``BATCH_WARM_CREDIT_THROTTLE_SECONDS``) so newly scheduled creates
+    back off to ``create_rps`` while a long-lived batch recovers warm speed once the apiserver
+    clears. The handles call this class with their lock held.
     """
 
     def __init__(self) -> None:
         self._credit: dict[str, int] = {}
         self._read_at: dict[str, float] = {}
+        self._seq: dict[str, int] = {}
         self._throttled_until = -math.inf
 
     def _is_throttled(self) -> bool:
         """Returns whether a 429 cooldown is still active."""
         return time.monotonic() < self._throttled_until
 
-    def record(self, warmpool: str, ready: int) -> None:
-        """Sets the pool's credit to its Ready replica count, just read."""
+    def seq(self, warmpool: str) -> int:
+        """Returns the pool's update sequence so an in-flight refresh skips overwriting a newer update."""
+        return self._seq.get(warmpool, 0)
+
+    def record(self, warmpool: str, ready: int, *, seq: int | None = None) -> None:
+        """Sets the pool's credit to its Ready replica count unless ``seq`` is stale."""
+        if seq is not None and self._seq.get(warmpool, 0) != seq:
+            return
         self._credit[warmpool] = ready
         self._read_at[warmpool] = time.monotonic()
+        self._seq[warmpool] = self._seq.get(warmpool, 0) + 1
+
+    def exhaust(self, warmpool: str) -> None:
+        """Zeroes the pool's credit and defers its next refresh after a claim cold-starts."""
+        self._credit[warmpool] = 0
+        self._read_at[warmpool] = time.monotonic()
+        self._seq[warmpool] = self._seq.get(warmpool, 0) + 1
 
     def refresh_due(self, warmpool: str) -> bool:
         """Whether callers spent the pool's credit, no 429 cooldown is active, and the last read

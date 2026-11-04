@@ -412,9 +412,13 @@ class SandboxClient(Generic[T]):
                 characters. Generated if omitted.
             create_rps: Maximum claim creates started per second. Defaults to 50. Claims that a
                 pool's Ready sandboxes cover, counted when ``claim_batch`` checks the pool, skip
-                ``create_rps`` pacing, so only ``max_in_flight`` bounds them. When the apiserver
-                answers a create with 429, the batch pauses warm-pool credit for ``Retry-After``
-                (at least 5 seconds) and paces creates at ``create_rps`` until cooldown ends.
+                ``create_rps`` pacing, so only ``max_in_flight`` bounds them. When the watch
+                observes a claim from a pool start cold before becoming Ready, the batch zeroes
+                that pool's credit and defers its next refresh. When the apiserver answers a
+                create with 429, the batch pauses warm-pool credit for numeric ``Retry-After``
+                values up to 30 seconds (with a 5-second minimum; missing or date-form headers
+                use 5 seconds) and paces newly scheduled creates at ``create_rps`` until cooldown
+                ends.
             max_in_flight: Maximum claim creates, ``acquire()`` pool reads, and member deletes in
                 flight at once. Defaults to 20, clamped to ``pool_size - 2`` when the client's
                 Kubernetes API connection pool is smaller. The pool must hold at least

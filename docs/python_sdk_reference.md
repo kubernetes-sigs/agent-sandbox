@@ -240,9 +240,13 @@ an error that stops the watch or Lease renewal shows in ``err()``.
   characters. Generated if omitted.
 - `create_rps` - Maximum claim creates started per second. Defaults to 50. Claims that a
   pool's Ready sandboxes cover, counted when ``claim_batch`` checks the pool, skip
-  ``create_rps`` pacing, so only ``max_in_flight`` bounds them. When the apiserver
-  answers a create with 429, the batch pauses warm-pool credit for ``Retry-After``
-  (at least 5 seconds) and paces creates at ``create_rps`` until cooldown ends.
+  ``create_rps`` pacing, so only ``max_in_flight`` bounds them. When the watch
+  observes a claim from a pool start cold before becoming Ready, the batch zeroes
+  that pool's credit and defers its next refresh. When the apiserver answers a
+  create with 429, the batch pauses warm-pool credit for numeric ``Retry-After``
+  values up to 30 seconds (with a 5-second minimum; missing or date-form headers
+  use 5 seconds) and paces newly scheduled creates at ``create_rps`` until cooldown
+  ends.
 - `max_in_flight` - Maximum claim creates, ``acquire()`` pool reads, and member deletes in
   flight at once. Defaults to 20, clamped to ``pool_size - 2`` when the client's
   Kubernetes API connection pool is smaller. The pool must hold at least
@@ -1020,9 +1024,11 @@ time of its create plus ``quorum_timeout`` plus ``work_budget`` plus 600 seconds
 create follows the initial claims' retries and pacing. Like theirs, a create that the
 pool's Ready sandboxes cover skips ``create_rps`` pacing. Once callers spend the Ready
 count from the pool's check and ``create_rps`` pacing would delay the next create,
-``acquire()`` reads the pool again at most once a second per pool. Fill creates,
-``acquire()`` creates and pool reads, and member deletes share ``max_in_flight``,
-which defaults to 20 on a handle from ``get_batch``.
+``acquire()`` reads the pool again at most once a second per pool (unless an expired
+``timeout`` cuts a read short before recording it). When the watch observes a claim from a
+pool start cold before becoming Ready, the batch zeroes that pool's credit and defers its
+next refresh. Fill creates, ``acquire()`` creates and pool reads, and member deletes share
+``max_in_flight``, which defaults to 20 on a handle from ``get_batch``.
 
 If it raises, including on a cancellation, the member is dropped from ``members()`` and its
 claim is deleted, unless the claim is already gone or its create was rejected. A failed delete is

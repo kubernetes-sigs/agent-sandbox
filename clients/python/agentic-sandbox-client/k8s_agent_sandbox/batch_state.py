@@ -28,6 +28,7 @@ from typing import Any
 from .constants import (
     BATCH_GROUP_MIN_READY_ANNOTATION,
     BATCH_GROUP_SIZE_ANNOTATION,
+    COLD_CLAIM_READY_REASONS,
     TERMINAL_CLAIM_READY_REASONS,
 )
 from .exceptions import BatchError, BatchTimeoutError, QuorumUnreachableError, TerminalMemberError
@@ -268,11 +269,23 @@ class BatchState:
         # without burning an ordinal.
         self._checking_acquires: Counter[str] = Counter()
         self._pool_release_seq: dict[str, int] = {}
+        # Holds newly seen claims only while unreconciled (status: {} or AdoptionConflict), until
+        # the controller writes their first warm or cold status, rather than while cold pods boot,
+        # so steady-state size stays 0. BatchState tracks every new claim because it does not see
+        # WarmCredit (and watch ADDED can arrive before POST returns), a paced create going cold
+        # still defers the next acquire() refresh, and settling each claim's launch once keeps
+        # later readiness flaps on older READY members from zeroing replenished credit.
+        self._pending_launch: set[str] = set()
+        # Deduplicates pools whose claims reported a cold start since the last drain: 0 or 1 pool
+        # on a single upsert_claim(), and possibly several pools on a 410 resync_from_list().
+        self._exhausted_pools: set[str] = set()
 
     def seed_from_claims(self, claim_objs: Sequence[dict[str, Any]]) -> None:
         """Reconstructs state from the batch's existing claims."""
         for claim_obj in claim_objs:
             self.upsert_claim(claim_obj)
+        self._pending_launch.clear()
+        self._exhausted_pools.clear()
 
     def upsert_claim(self, claim_obj: dict[str, Any]) -> Member | None:
         """Derives a ``Member`` from a claim and inserts or updates it."""
@@ -299,6 +312,18 @@ class BatchState:
                 # creator deletes the claim.
                 self.release_claim(claim_name, member.warmpool)
                 return None
+        # Settle each claim's initial warm-vs-cold launch once: leave _pending_launch as soon as
+        # the controller writes a warm, terminal, or cold status so booting cold pods do not linger
+        # in the set and later readiness flaps on older READY members cannot zero replenished credit.
+        if claim_name and (previous is None or claim_name in self._pending_launch):
+            if member.state is not MemberState.PENDING:
+                self._pending_launch.discard(claim_name)
+            elif member.reason in COLD_CLAIM_READY_REASONS:
+                self._pending_launch.discard(claim_name)
+                if member.warmpool:
+                    self._exhausted_pools.add(member.warmpool)
+            else:
+                self._pending_launch.add(claim_name)
         self._members[claim_name] = member
         self._on_fill_change(claim_name, member)
         return member
@@ -310,6 +335,7 @@ class BatchState:
         become Ready. A lost member drops its reason and message, which described the deleted
         claim's last Ready condition.
         """
+        self._pending_launch.discard(claim_name)
         existing = self._members.get(claim_name)
         if existing is None:
             # Deleted before this handle ever saw an ADDED/MODIFIED event for it.
@@ -339,6 +365,7 @@ class BatchState:
         A released fill member counts as unable to arrive, like a lost one, but emits no
         ``MEMBER_LOST``.
         """
+        self._pending_launch.discard(claim_name)
         if needs_delete:
             self._need_delete(claim_name)
         if claim_name in self._released:
@@ -502,6 +529,7 @@ class BatchState:
         landed after the label delete, or if ``acquire()`` sent a retry that may have landed after
         ``release_member()``.
         """
+        self._pending_launch.discard(claim_name)
         was_acquiring = self._acquiring.pop(claim_name, None) is not None
         if claim_name in self._released:
             # A create in flight during release_group() (was_acquiring) can land after the
@@ -520,6 +548,14 @@ class BatchState:
             self._need_delete(claim_name)
             return True
         return bool(self._take_deletes([member]))
+
+    def take_exhausted_pools(self) -> set[str]:
+        """Drains pools that cold-starting claims triggered since the last call (0 or 1 on an event, or several on a 410 re-list)."""
+        if not self._exhausted_pools:
+            return set()
+        pools = set(self._exhausted_pools)
+        self._exhausted_pools.clear()
+        return pools
 
     def note_deleted(self, claim_name: str, seq: int) -> None:
         """Records that a released claim's delete succeeded if ``seq`` is still its latest queued delete."""

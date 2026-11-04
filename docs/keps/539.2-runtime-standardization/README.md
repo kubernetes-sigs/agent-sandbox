@@ -45,6 +45,11 @@ TOC is auto-generated via `make toc-update`.
     - [Wait Semantics](#wait-semantics)
     - [Implementation Considerations for Exit Retention](#implementation-considerations-for-exit-retention)
     - [Non-Goals of This Extension](#non-goals-of-this-extension)
+  - [Detached Processes](#detached-processes)
+    - [Proposed API Additions for Detached Processes](#proposed-api-additions-for-detached-processes)
+    - [Detached Process Semantics](#detached-process-semantics)
+    - [Implementation Considerations for Detached Processes](#implementation-considerations-for-detached-processes)
+    - [Non-Goals for Detached Processes](#non-goals-for-detached-processes)
 - [Alternatives](#alternatives)
 <!-- /toc -->
 
@@ -287,7 +292,7 @@ This extension retains each process's exit metadata (exit code, completion time)
 - **The natural-exit race.** When a process is reaped on its own around the moment the stream is lost, the kill watcher skips the already-reaped process and the *real* exit code is recorded — but is unreachable today. Retention makes it replayable, so an SDK can distinguish "exited with code N" from "killed by sandboxd" without re-running a non-idempotent command.
 - **A definitive outcome after a disconnect.** A client that reconnects after a mid-run disconnect gets `NOT_FOUND` today and can only guess or re-run. With retention it gets a definitive `137` with a completion time.
 
-What retention alone cannot solve is recovering the natural outcome of a *still-running* process across a mid-run disconnect: under kill-on-disconnect, that outcome is always `137`. Recovering real results in that case requires processes to survive disconnection — detached execution, proposed in #2061. This extension is the retrieval half of that story: `Wait` is fully useful on its own, and `ExitEventStore` is designed now so that once processes survive disconnection, replaying their natural exit codes needs no further API change.
+What retention alone cannot solve is recovering the natural outcome of a *still-running* process across a mid-run disconnect: under kill-on-disconnect, that outcome is always `137`. Recovering real results in that case requires processes to survive disconnection — detached execution, proposed in #2061 and specified in [Detached Processes](#detached-processes). This extension is the retrieval half of that story: `Wait` is fully useful on its own, and `ExitEventStore` is designed now so that once processes survive disconnection, replaying their natural exit codes needs no further API change.
 
 E2B's `envd` retains terminal process events for a bounded window (30 seconds), and a reconnecting client reads them through `Connect`. The precedent validates the retention *mechanism* — a small TTL-bounded store of exit metadata — but envd's reconnect guarantee rests on processes surviving cancellation, which sandboxd does not offer today. This extension adopts the mechanism, not the guarantee.
 
@@ -358,13 +363,180 @@ Key guarantees:
 
 #### Non-Goals of This Extension
 
-- Changing the "stream disconnect kills the process tree" behavior. Detached execution (#2061) owns that change; retention reaches its full reconnect value only after it lands.
+- Changing the "stream disconnect kills the process tree" behavior. Detached execution (#2061, specified in [Detached Processes](#detached-processes)) owns that change; retention reaches its full reconnect value only after it lands.
 - Retaining or replaying `stdout`/`stderr` output; only exit metadata is retained.
-- Stream reattachment (a `Connect` RPC); left to a future extension, most naturally alongside detached execution (#2061).
+- Stream reattachment; [Detached Processes](#detached-processes) adds it as the `Attach` RPC, alongside detached execution (#2061).
 - Persisting exit events across sandboxd restarts. In a Pod, child processes do not outlive the daemon.
 - Daemon-generation-scoped process identity. Process IDs are valid only within a single sandboxd instance; making them safe to carry across daemon restarts is a `ProcessService`-wide concern left to future work.
 
 Conformance impact is deferred: `Wait` becomes a candidate for the conformance suite only after the reference implementation lands, so this extension does not change the obligations of third-party runtimes today.
+
+### Detached Processes
+
+Long-lived sandboxes run dev servers, watchers, and builds that should keep running when the client that started them restarts or reconnects. #2061 asks for this. Today the end of a `Start` stream triggers `killProcessGroupOnContextDone`, which SIGKILLs the process group. #2061 describes the workaround clients use instead. They start the command under a `setsid` launcher, write its output and exit code to files on a volume, poll those files from a follower script, and count zombies as dead because sandboxd does not reap orphans (#1980).
+
+This extension adds detached processes. A detached process is a process that a client starts with the new `StartRequest.detached` field set. sandboxd keeps it running after the `Start` stream ends, keeps its output in a bounded buffer, and keeps its exit record until a client releases it. Clients find detached processes with `List`, read their output with `Attach`, signal them with the existing `SendSignal`, and free them with `Release`.
+
+With detached execution, `Wait` and exit retention from [the previous section](#process-exit-event-retention-and-wait-rpc) return the process's own outcome after a disconnect. Under kill-on-disconnect, a process that is still running when the stream breaks always reports `137`, which is sandboxd's own kill. A detached process keeps running through the disconnect. When the client reconnects, `Wait` returns the exit code the process produced itself, and `Attach` returns the output it wrote in the meantime.
+
+#### Proposed API Additions for Detached Processes
+
+This extension changes `packages/sandboxd/spec/process/v1/process.proto` as follows. All changes are additive, and a `Start` without `detached` behaves as it does today.
+
+```protobuf
+service ProcessService {
+  // Existing RPCs and Wait are unchanged.
+  rpc List(ListRequest) returns (ListResponse);               // new
+  rpc Attach(AttachRequest) returns (stream AttachResponse);  // new
+  rpc Release(ReleaseRequest) returns (ReleaseResponse);      // new
+}
+
+message StartRequest {
+  ProcessConfig config = 1;
+  optional PTY pty = 2;
+  // New. When true, Start sends InitEvent and ends the stream with OK. The
+  // process keeps running and its output goes to buffers that Attach reads.
+  bool detached = 3;
+}
+
+message InitEvent {
+  int32 process_id = 1;
+  // New. True when sandboxd started the process detached.
+  bool detached = 2;
+}
+
+enum ProcessState {
+  PROCESS_STATE_UNSPECIFIED = 0;
+  PROCESS_STATE_RUNNING = 1;
+  PROCESS_STATE_EXITED = 2;
+}
+
+// Offsets count bytes since the process started, so they stay valid after
+// the buffer drops old output.
+message OutputRange {
+  int64 start_offset = 1; // Earliest byte still retained.
+  int64 end_offset = 2;   // Total bytes written so far.
+}
+
+message ProcessInfo {
+  int32 process_id = 1;
+  repeated string command = 2; // ProcessConfig.command; env_vars are omitted.
+  ProcessState state = 3;
+  bool detached = 4;
+  optional int32 exit_code = 5;     // Set when state is EXITED.
+  optional string completed_at = 6; // RFC 3339; set when state is EXITED.
+  OutputRange stdout = 7;           // Detached processes only.
+  OutputRange stderr = 8;           // Detached processes only.
+}
+
+message ListRequest {}
+
+message ListResponse {
+  repeated ProcessInfo processes = 1;
+}
+
+message AttachRequest {
+  int32 process_id = 1;
+  // Offsets to replay from. 0 replays everything still retained. Unset
+  // starts at the current end and streams only new output.
+  optional int64 stdout_offset = 2;
+  optional int64 stderr_offset = 3;
+}
+
+// First event on every Attach stream. Reports where replay starts for each stream.
+message AttachStartEvent {
+  int64 stdout_offset = 1;
+  int64 stderr_offset = 2;
+  // True when the requested offset was older than the earliest retained byte.
+  bool stdout_truncated = 3;
+  bool stderr_truncated = 4;
+}
+
+message OutputChunk {
+  int64 offset = 1; // Offset of the first byte in data.
+  bytes data = 2;
+}
+
+message AttachResponse {
+  oneof event {
+    AttachStartEvent start = 1;
+    OutputChunk stdout = 2;
+    OutputChunk stderr = 3;
+    ExitEvent exit = 4; // Existing message; always the last event.
+  }
+}
+
+message ReleaseRequest {
+  int32 process_id = 1;
+}
+
+message ReleaseResponse {}
+```
+
+This extension names the reattach RPC `Attach`, the term #2061 uses. `Attach` is not wire-compatible with envd's `Connect`, so it does not reuse that name.
+
+New sandboxd daemon flags:
+
+| Flag | Default | Behavior |
+|---|---|---|
+| `--detached-max-processes` | `16` | Maximum detached processes sandboxd tracks, counting running ones and exited ones not yet released. A detached `Start` at the cap evicts the exited detached process with the oldest `completed_at`. If every tracked detached process is still running, `Start` returns `RESOURCE_EXHAUSTED`. `0` disables detached execution, and a detached `Start` returns `FAILED_PRECONDITION`. sandboxd rejects negative values at startup. |
+| `--detached-output-buffer-bytes` | `1048576` (1 MiB) | Size of the ring buffer for each output stream of each detached process. sandboxd rejects values below the stream chunk size (`--stream-chunk-size`, 4096 bytes by default) at startup. |
+
+These two flags also bound retained output for the whole daemon. The bound is `--detached-max-processes` times two streams times `--detached-output-buffer-bytes`, which is 32 MiB with the defaults. A separate total-bytes flag would only restate this product, so this extension does not add one. A sandboxd instance whose clients have gone away therefore holds at most 16 detached processes and 32 MiB of retained output.
+
+#### Detached Process Semantics
+
+| Call | Detached, running | Detached, exited | Non-detached, running |
+|---|---|---|---|
+| `Attach` | Replays from the requested offsets, follows new output, and ends with `ExitEvent` after exit | Replays retained output, then ends with `ExitEvent` | `FAILED_PRECONDITION` |
+| `Wait` | Blocks until exit through the existing registry path | `OK {exit_code, completed_at}` immediately | Unchanged |
+| `SendSignal` | Signals the process group, as today | `OK` without sending a signal, as `ManagedProcess.Signal` does today for a completed process | Unchanged |
+| `WriteStdin` | Unchanged | `FAILED_PRECONDITION` (new check) | Unchanged |
+| `ResizeTTY` | Unchanged | `FAILED_PRECONDITION`, as today for a completed process | Unchanged |
+| `List` | `RUNNING`, with output ranges | `EXITED`, with `exit_code`, `completed_at`, and output ranges | `RUNNING`, without output ranges |
+| `Release` | `FAILED_PRECONDITION`; the process keeps running | Frees the buffers and the exit record | `FAILED_PRECONDITION` |
+
+Every call returns `NOT_FOUND` for an unknown or released process ID, as today. A non-detached process leaves `List` when it exits. After that, only `Wait` can find it, through `ExitEventStore`. `Execute` and `ExecuteWithLimits` never register a process, so `List` never shows them.
+
+| `Attach` offset | Result |
+|---|---|
+| Unset | Starts at the current `end_offset` and streams only new output |
+| From `start_offset` to `end_offset` | Replays from the requested offset |
+| Below `start_offset` | Replays from `start_offset`. `AttachStartEvent` reports that offset and sets the stream's `truncated` flag. |
+| Above `end_offset` | `OUT_OF_RANGE`. No valid offset for this process is that large. The error also catches a client that carries an ID and offsets across a sandboxd restart. |
+| Negative | `INVALID_ARGUMENT` |
+
+Key guarantees:
+
+- **Ending a stream never affects a detached process.** Cancelling or losing a `Start` or `Attach` stream ends only that RPC.
+- **Attachers never slow the process.** sandboxd drains the pipes into the buffers whether or not a client is attached. Today `Start` sends each chunk on the stream, so gRPC flow control can stall a process whose client reads slowly. An attacher that falls behind a detached process loses the oldest bytes instead. The jump in `OutputChunk.offset` shows the attacher where the gap is.
+- **Multiple clients can attach at once.** Each `Attach` stream reads the same buffers with its own offsets, and each one ends with the same `ExitEvent`.
+- **Output before exit.** `Attach` sends `ExitEvent` only after the readers have finished and the stream has sent every retained byte up to the final `end_offset`.
+- **`Release` never kills a process.** To stop and free a detached process, a client calls `SendSignal`, then `Wait`, then `Release`. If an `Attach` stream is still replaying the process, `Release` or eviction ends that stream with `NOT_FOUND`.
+
+#### Implementation Considerations for Detached Processes
+
+- **Ownership.** For a detached process, a daemon-owned goroutine takes over `cmd.Wait`, the output readers, and the registry entry from the `Start` handler. The handler does not call `killProcessGroupOnContextDone` or defer `ProcessRegistry.Remove`, and it returns after sending `InitEvent`. If that send fails, sandboxd kills the process and tears it down like a non-detached process, because the caller never learned the ID.
+- **Output buffers.** A new `OutputBuffer` type in `packages/sandboxd/pkg/processmanager` holds one stream's ring buffer with its `start_offset` and `end_offset`, and wakes waiting attachers on each append. It allocates memory as output arrives, so a process that writes nothing allocates nothing. Readers read in `--stream-chunk-size` chunks, as `Start` does. PTY output goes to the stdout buffer, and the stderr range stays empty. Offsets count bytes, so replay can start inside a UTF-8 character or a terminal escape sequence. #2117 bounds unary `Execute` output with `executionStream`, which keeps the prefix. A follower needs the newest output, so `OutputBuffer` keeps the tail.
+- **Exit.** When the process exits, the owning goroutine applies the same `waitDelay` and `pipeDrainGrace` bounds as `Start`. It then records the exit code and `completed_at` on the `ManagedProcess` and closes `Done`. This is the same completion state the previous section defines. It closes the pipes or PTY. The registry entry then holds only the ID, command, buffers, and exit state. sandboxd does not capture output that a surviving grandchild writes after the drain bound.
+- **Composition with `ExitEventStore`.** Exit records follow one of two retention rules. A non-detached process moves to `ExitEventStore` at teardown and expires after `--exit-event-ttl`. A detached process keeps its record on its `ProcessRegistry` entry until `Release` or eviction, and never enters `ExitEventStore`. `Wait` needs no new code path for detached processes. It finds them in the registry, and the closed `Done` channel makes it return at once. `Release` and eviction do not copy the record into `ExitEventStore`. The store's lazy expiry compares `completed_at` against `--exit-event-ttl`, so a record that sandboxd kept longer than the TTL would expire as soon as it arrived.
+- **Process IDs.** `NextPID` must also skip IDs held by the registry, which extends the previous section's rule for `ExitEventStore`. Detached entries can stay in the registry for hours, much longer than a 30-second exit record. Without this rule, a counter that wraps around could hand out the ID of an entry that still exists.
+- **Process groups and reaping.** A detached process stays a direct child of sandboxd. sandboxd keeps the process group setup it uses today: `Setpgid` for pipe processes and `Setsid` (set by `creack/pty`) for PTY processes. It does not double-fork. The owning goroutine's `cmd.Wait` reaps the process sandboxd started, so sandboxd records its exit code and the process never stays a zombie. The kernel reparents grandchildren that outlive their parent to PID 1. When sandboxd is PID 1, those grandchildren stay zombies after they exit (#1980). Detached execution makes #1980 more pressing, because it targets long-lived trees such as dev servers and shells that background work. This extension depends on #1980 for orphan reaping. That reaper must skip PIDs in the registry. If the reaper collected a tracked child first, `cmd.Wait` would fail with `ECHILD`. sandboxd would then record `-1`, which is what `Start` records today for any `Wait` error that is not an `exec.ExitError`.
+- **Daemon restarts.** Detached processes and their records do not survive a sandboxd restart. `ShutdownProcesses` sends SIGTERM and then SIGKILL to every registered process, detached ones included. The previous section's "Daemon restarts invalidate process IDs" bullet applies unchanged.
+- **Compatibility.** A sandboxd without this extension ignores the unknown `detached` field, keeps the process tied to the stream, and keeps streaming output. It never sets `InitEvent.detached`. An SDK that requested detached execution and receives `InitEvent.detached` unset must report an error instead of treating the process as detached. Older daemons return `UNIMPLEMENTED` for `List`, `Attach`, and `Release`.
+- **Security and limits.** The bearer-token interceptors from `Server.GRPCServerOptions` apply to every RPC on the gRPC server, so the new RPCs need no new authorization code. As with `SendSignal` today, any authorized caller can act on any process ID. `List` omits `env_vars`, which can carry credentials. Retained output can also contain secrets the process printed. It stays in sandboxd memory until `Release` or eviction frees it. `--detached-max-processes` limits detached processes per sandboxd instance.
+- Testing: `OutputBuffer` unit tests (wrap-around, offsets after overwrite, growth up to the cap); one test per row of both semantics tables; an integration test that starts a detached process, cancels the `Start` stream, reattaches with saved offsets, and receives the remaining output and the process's own exit code from `Attach` and `Wait`; concurrent attachers receiving identical bytes; a slow attacher that sees an offset gap while the process keeps running; `Release` on a running process returning `FAILED_PRECONDITION` with the process still alive; eviction order and `RESOURCE_EXHAUSTED` at `--detached-max-processes`; flag validation at startup; `ShutdownProcesses` terminating detached processes; and, once #1980 lands, a test that its reaper leaves a detached process's exit code intact.
+
+#### Non-Goals for Detached Processes
+
+- Changing the default. A `Start` without `detached` still kills the process tree when its stream ends.
+- Output retention or `Attach` for non-detached processes. Their output still flows only through the `Start` stream.
+- Persisting detached processes across sandboxd restarts, and daemon-generation-scoped process IDs. The previous section's non-goals cover both.
+- Client-assigned names or tags. Clients map process IDs to their own names, and `List` returns each process's command.
+- Stdin over `Attach`. Input still goes through `WriteStdin`.
+- Filtering or paging in `List`.
+
+This extension defers conformance in the same way. `List`, `Attach`, `Release`, and `StartRequest.detached` become candidates for the conformance suite only after the reference implementation lands.
 
 ## Alternatives
 

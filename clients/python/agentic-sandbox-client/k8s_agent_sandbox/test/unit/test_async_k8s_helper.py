@@ -56,6 +56,16 @@ class TestAsyncK8sHelperCreateSandboxClaim(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_owner_references_included_in_manifest_only_when_given(self):
+        owner = [{"apiVersion": "coordination.k8s.io/v1", "kind": "Lease", "name": "batch-b1", "uid": "u1"}]
+        create = self.helper.custom_objects_api.create_namespaced_custom_object
+        await self.helper.create_sandbox_claim(
+            "test-claim", "test-warmpool", "test-namespace", owner_references=owner
+        )
+        self.assertEqual(create.call_args.kwargs["body"]["metadata"]["ownerReferences"], owner)
+        await self.helper.create_sandbox_claim("test-claim", "test-warmpool", "test-namespace")
+        self.assertNotIn("ownerReferences", create.call_args.kwargs["body"]["metadata"])
+
     async def test_lifecycle_included_in_manifest(self):
         lifecycle = {
             "shutdownTime": "2026-12-31T23:59:59Z",

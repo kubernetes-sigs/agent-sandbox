@@ -68,7 +68,7 @@ def _lease(
     lease_duration_seconds=BATCH_DEFAULT_LEASE_DURATION_SECONDS,
     annotations=None,
     resource_version="10",
-    uid=None,
+    uid="lease-uid",
     lease_transitions=None,
 ):
     return k8s_client.V1Lease(
@@ -899,6 +899,8 @@ class TestRenewal(BaseBatchClientTest):
                 self.assertFalse(handle._renew_once())
                 self.mock_k8s_helper.replace_batch_lease.assert_called_once()
                 self.assertIsInstance(handle.err(), BatchLeaseExpiredError)
+                # A new Lease would get a new UID, so the garbage collector would delete the claims.
+                self.mock_k8s_helper.create_batch_lease.assert_not_called()
 
 
 class TestMembers(unittest.TestCase):
@@ -1371,7 +1373,9 @@ class TestClaimBatchSetup(BaseClaimBatchTest):
         self.cluster.helper.get_sandbox_warmpool.side_effect = lambda *a, **k: (
             self.cluster.calls.append("precheck") or {"spec": {"sandboxTemplateRef": {"name": "tmpl"}}}
         )
-        self.cluster.helper.create_batch_lease.side_effect = lambda *a, **k: self.cluster.calls.append("lease")
+        self.cluster.helper.create_batch_lease.side_effect = (
+            lambda *a, **k: self.cluster.calls.append("lease") or _lease()
+        )
         self.cluster.helper.list_sandbox_claim_objects.side_effect = (
             lambda *a, **k: self.cluster.calls.append("list") or ([], "7")
         )
@@ -3374,6 +3378,39 @@ class TestAcquire(BaseClaimBatchTest):
         with self.assertRaises(BatchError):
             batch.acquire("pool-unseen")
         helper.get_sandbox_warmpool.assert_not_called()
+
+    def test_fill_and_acquired_claims_are_owned_by_the_lease_the_handle_holds(self):
+        claimed = self.cluster.helper
+        claimed.create_batch_lease.return_value = _lease(uid="uid-claimed")
+        batch = self.claim()
+        _wait_until(lambda: len(batch.members()) == 2)
+        batch.acquire("pool-a")
+        # Stopped so its watch doesn't read the re-attached handle's events.
+        batch._stop_background_threads()
+        self.cluster = _Cluster()
+        self.client.k8s_helper = helper = self.cluster.helper
+        helper.list_sandbox_claim_objects.return_value = ([_claim("b1-0", annotations=_FILL)], "5")
+        helper.read_batch_lease.return_value = _lease(renew_time=datetime.now(UTC), uid="uid-attached")
+        helper.replace_batch_lease.return_value = _lease(renew_time=datetime.now(UTC), uid="uid-attached")
+        batch = self.client.get_batch("b1")
+        self.addCleanup(batch._stop_background_threads)
+        batch.acquire("pool-a")
+
+        def owned_by(uid):
+            return [{"apiVersion": "coordination.k8s.io/v1", "kind": "Lease", "name": "batch-b1", "uid": uid}]
+
+        self.assertCountEqual(
+            [
+                (c.args[0], c.kwargs["owner_references"])
+                for c in claimed.create_sandbox_claim.call_args_list + helper.create_sandbox_claim.call_args_list
+            ],
+            [
+                ("b1-0", owned_by("uid-claimed")),
+                ("b1-1", owned_by("uid-claimed")),
+                ("b1-2", owned_by("uid-claimed")),
+                ("b1-1", owned_by("uid-attached")),
+            ],
+        )
 
     def test_reattached_handle_reads_back_ordinals_labels_and_settings(self):
         helper = self.cluster.helper

@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import signal
+import subprocess
+import sys
 import time
 import uuid
 from datetime import UTC, datetime
@@ -19,7 +22,8 @@ from datetime import UTC, datetime
 import kubernetes
 import pytest
 
-from k8s_agent_sandbox import SandboxClient, batch_utils
+from k8s_agent_sandbox import SandboxClient, batch_reaper, batch_utils
+from k8s_agent_sandbox.k8s_helper import K8sHelper
 from k8s_agent_sandbox.exceptions import BatchNotFoundError, BatchTimeoutError
 from k8s_agent_sandbox.models import BatchEventType, BatchGroup, MemberState, SandboxLocalTunnelConnectionConfig
 
@@ -325,3 +329,178 @@ def test_get_batch_not_found_raises(tc, temp_namespace):
     client = SandboxClient()
     with pytest.raises(BatchNotFoundError):
         client.get_batch("bnonexistent1", namespace=temp_namespace)
+
+
+# Short enough that a test can wait out a Lease, with the smallest skew margin the reaper accepts.
+_REAPER_LEASE_DURATION = 10
+_REAPER_SKEW_MARGIN = batch_utils.CLOCK_SKEW_MARGIN
+
+# A driver that claims a batch, prints its id, and either reports err() and releases on stdin or waits to be killed.
+_DRIVER_SCRIPT = """
+import sys, time
+from k8s_agent_sandbox import BatchGroup, SandboxClient
+batch = SandboxClient().claim_batch(
+    [BatchGroup(warmpool="unready-warmpool", size=2)], namespace=sys.argv[1], lease_duration=int(sys.argv[2])
+)
+print(batch.batch_id, flush=True)
+if sys.stdin.readline():
+    print(repr(batch.err()), flush=True)
+    batch.release()
+else:
+    time.sleep(3600)
+"""
+
+
+def _read_lease(tc, namespace: str, batch_id: str):
+    coordination_api = kubernetes.client.CoordinationV1Api(tc.get_api_client())
+    try:
+        return coordination_api.read_namespaced_lease(f"batch-{batch_id}", namespace)
+    except kubernetes.client.ApiException as e:
+        if e.status == 404:
+            return None
+        raise
+
+
+def _reap_until_reaped(namespace: str, batch_id: str, timeout: float) -> float:
+    """Runs the reaper until it reaps ``batch_id`` and returns when it did, on the monotonic clock."""
+    helper = K8sHelper()
+    deadline = time.monotonic() + timeout
+    while True:
+        reaped, errors = batch_reaper.reap(helper, [namespace], _REAPER_SKEW_MARGIN)
+        assert errors == 0
+        if (namespace, batch_id) in reaped:
+            return time.monotonic()
+        if time.monotonic() > deadline:
+            pytest.fail(f"batch '{batch_id}' was not reaped in time")
+        time.sleep(1)
+
+
+def test_reaper_reaps_a_killed_drivers_batch_and_leaves_a_live_one(tc, temp_namespace):
+    tc.apply_manifest_text(_UNREADY_POOL_MANIFEST, namespace=temp_namespace)
+    client = SandboxClient()
+    driver = subprocess.Popen(
+        [sys.executable, "-c", _DRIVER_SCRIPT, temp_namespace, str(_REAPER_LEASE_DURATION)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        live = client.claim_batch(
+            [BatchGroup(warmpool="unready-warmpool", size=1)],
+            namespace=temp_namespace,
+            lease_duration=_REAPER_LEASE_DURATION,
+        )
+        dead_id = driver.stdout.readline().strip()
+        _wait_for_claims(tc, temp_namespace, f"agents.x-k8s.io/batch-id={dead_id}", [f"{dead_id}-0", f"{dead_id}-1"])
+        driver.kill()
+        driver.wait()
+        killed_at = time.monotonic()
+
+        # The Lease was renewed at most one renew interval before the kill.
+        reaped_at = _reap_until_reaped(temp_namespace, dead_id, timeout=120)
+        renew_interval = _REAPER_LEASE_DURATION // 3
+        assert reaped_at - killed_at >= _REAPER_LEASE_DURATION + _REAPER_SKEW_MARGIN - renew_interval
+        assert _read_lease(tc, temp_namespace, dead_id) is None
+        _wait_for_claims(tc, temp_namespace, f"agents.x-k8s.io/batch-id={dead_id}", [])
+
+        assert live.err() is None
+        assert _read_lease(tc, temp_namespace, live.batch_id) is not None
+        _wait_for_claims(tc, temp_namespace, f"agents.x-k8s.io/batch-id={live.batch_id}", [f"{live.batch_id}-0"])
+    finally:
+        driver.kill()
+        driver.wait()
+        client.delete_all()
+
+
+def test_reaper_leaves_a_paused_drivers_batch_within_lease_duration(tc, temp_namespace):
+    tc.apply_manifest_text(_UNREADY_POOL_MANIFEST, namespace=temp_namespace)
+    lease_duration = 30
+    pause = 11
+    driver = subprocess.Popen(
+        [sys.executable, "-c", _DRIVER_SCRIPT, temp_namespace, str(lease_duration)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        batch_id = driver.stdout.readline().strip()
+        selector = f"agents.x-k8s.io/batch-id={batch_id}"
+        _wait_for_claims(tc, temp_namespace, selector, [f"{batch_id}-0", f"{batch_id}-1"])
+
+        driver.send_signal(signal.SIGSTOP)
+        time.sleep(pause)
+        stopped_lease = _read_lease(tc, temp_namespace, batch_id)
+        assert stopped_lease is not None
+
+        reaped, errors = batch_reaper.reap(K8sHelper(), [temp_namespace], _REAPER_SKEW_MARGIN)
+        assert (reaped, errors) == ([], 0)
+        assert _read_lease(tc, temp_namespace, batch_id) is not None
+        _wait_for_claims(tc, temp_namespace, selector, [f"{batch_id}-0", f"{batch_id}-1"])
+
+        driver.send_signal(signal.SIGCONT)
+        deadline = time.monotonic() + lease_duration
+        while True:
+            lease = _read_lease(tc, temp_namespace, batch_id)
+            assert lease is not None
+            if lease.metadata.resource_version != stopped_lease.metadata.resource_version:
+                break
+            if time.monotonic() > deadline:
+                pytest.fail(f"resumed driver did not renew batch '{batch_id}' in time")
+            time.sleep(0.5)
+
+        driver.stdin.write("release\n")
+        driver.stdin.flush()
+        assert driver.stdout.readline().strip() == "None"
+        assert driver.wait(timeout=60) == 0
+        assert _read_lease(tc, temp_namespace, batch_id) is None
+        _wait_for_claims(tc, temp_namespace, selector, [])
+    finally:
+        driver.kill()
+        driver.wait()
+
+
+def test_reaper_waits_out_a_detach_grace(tc, temp_namespace):
+    tc.apply_manifest_text(_UNREADY_POOL_MANIFEST, namespace=temp_namespace)
+    client = SandboxClient()
+    grace = 20
+    batch = client.claim_batch(
+        [BatchGroup(warmpool="unready-warmpool", size=1)],
+        namespace=temp_namespace,
+        lease_duration=_REAPER_LEASE_DURATION,
+    )
+    batch_id = batch.batch_id
+    _wait_for_claims(tc, temp_namespace, f"agents.x-k8s.io/batch-id={batch_id}", [f"{batch_id}-0"])
+    batch.detach(grace=grace)
+    detached_at = time.monotonic()
+
+    reaped_at = _reap_until_reaped(temp_namespace, batch_id, timeout=120)
+    assert reaped_at - detached_at >= grace + _REAPER_SKEW_MARGIN
+    _wait_for_claims(tc, temp_namespace, f"agents.x-k8s.io/batch-id={batch_id}", [])
+
+
+def test_deleting_a_batch_lease_garbage_collects_its_claims(tc, temp_namespace):
+    tc.apply_manifest_text(_UNREADY_POOL_MANIFEST, namespace=temp_namespace)
+    client = SandboxClient()
+    batch = client.claim_batch([BatchGroup(warmpool="unready-warmpool", size=2)], namespace=temp_namespace)
+    batch_id = batch.batch_id
+    selector = f"agents.x-k8s.io/batch-id={batch_id}"
+    _wait_for_claims(tc, temp_namespace, selector, [f"{batch_id}-0", f"{batch_id}-1"])
+    batch.detach()
+    lease = _read_lease(tc, temp_namespace, batch_id)
+    claims = tc.get_custom_objects_api().list_namespaced_custom_object(
+        group="extensions.agents.x-k8s.io",
+        version="v1beta1",
+        namespace=temp_namespace,
+        plural="sandboxclaims",
+        label_selector=selector,
+    )["items"]
+    for claim in claims:
+        assert [(o["kind"], o["name"], o["uid"]) for o in claim["metadata"]["ownerReferences"]] == [
+            ("Lease", f"batch-{batch_id}", lease.metadata.uid)
+        ]
+
+    # No reaper and no release(), so only the garbage collector deletes the claims.
+    kubernetes.client.CoordinationV1Api(tc.get_api_client()).delete_namespaced_lease(
+        f"batch-{batch_id}", temp_namespace
+    )
+    _wait_for_claims(tc, temp_namespace, selector, [])

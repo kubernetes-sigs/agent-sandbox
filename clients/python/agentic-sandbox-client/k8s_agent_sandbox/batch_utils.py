@@ -29,7 +29,7 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from itertools import accumulate
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from .constants import (
     BATCH_CREATE_RPS_ANNOTATION,
@@ -44,6 +44,10 @@ from .constants import (
 from .exceptions import BatchError
 from .models import BatchGroup
 from .pod_metadata import validate_labels
+
+if TYPE_CHECKING:
+    from kubernetes.client import V1Lease
+    from kubernetes_asyncio.client import V1Lease as AsyncV1Lease
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +171,30 @@ def is_lease_stale(
     so it never acts before the holder has given up.
     """
     return now > renew_time + timedelta(seconds=lease_duration_seconds - skew_margin)
+
+
+def lease_owner_reference(lease: "V1Lease | AsyncV1Lease") -> dict[str, str]:
+    """Returns the ownerReference that points a batch claim at its batch Lease, so the garbage
+    collector deletes the claim once the Lease is gone.
+
+    It must carry the UID of the Lease as the apiserver returned it, since a reference to a UID that
+    doesn't exist counts as a missing owner. It sets neither ``controller`` nor
+    ``blockOwnerDeletion``, so creating claims needs no permission on the Lease beyond what the
+    batch already has.
+
+    Raises:
+        BatchError: If the Lease has no name or UID.
+    """
+    metadata = lease.metadata
+    # The apiserver sets both on every Lease it returns, so only a malformed response lacks one.
+    if metadata is None or not metadata.name or not metadata.uid:
+        raise BatchError("batch Lease has no name or UID to own its claims")
+    return {
+        "apiVersion": "coordination.k8s.io/v1",
+        "kind": "Lease",
+        "name": metadata.name,
+        "uid": metadata.uid,
+    }
 
 
 def lease_now() -> datetime:

@@ -173,6 +173,9 @@ class AsyncSandboxBatch:
         # The Lease from this handle's last successful write. Renewal sends it back without reading
         # the Lease first, and only reads it if the write conflicts.
         self._lease = lease
+        # The claims this handle creates are owned by its Lease, so the garbage collector deletes
+        # them once the Lease is gone, even if no reaper or release() deletes them.
+        self._owner_references = [batch_utils.lease_owner_reference(lease)]
         # When this handle considers its Lease expired. It's a little earlier than the expiry other
         # clients see, so the handle never thinks it holds the batch after someone else could take it.
         self._lease_expires_at = lease_renewed_at + lease_duration
@@ -1585,6 +1588,7 @@ class AsyncSandboxBatch:
                         annotations=annotations,
                         labels=labels,
                         lifecycle=lifecycle,
+                        owner_references=self._owner_references,
                         log_level=logging.DEBUG,
                         _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
                     )

@@ -684,7 +684,10 @@ and `wait_for_quorum()` and `group_outcomes()` skip it. The claims are named `<b
 sum of the group sizes. They carry the `agents.x-k8s.io/batch-id` label and the `agents.x-k8s.io/batch-group`
 label, whose value is a hash of the warm pool's name, and are created in the background, paced at `create_rps` creates per second with at most `max_in_flight` in flight. The batch
 also has a `coordination.k8s.io/v1` Lease named `batch-<batch-id>`, which the handle renews while it is
-alive.
+alive. Every claim has an `ownerReference` to that Lease, so the Kubernetes garbage collector deletes the
+claims once the Lease is gone. Deleting the Lease by hand (`kubectl delete lease batch-<batch-id>`) therefore
+deletes the batch's claims too, in the background. `kubectl delete lease --cascade=orphan` instead keeps the
+claims, which then stay until their `shutdownTime`.
 
 ```python
 from k8s_agent_sandbox import BatchGroup, SandboxClient
@@ -845,6 +848,45 @@ rules:
 
 Connecting to a member uses the same connection modes as a single sandbox, so it also needs the
 access its mode needs, such as running `kubectl port-forward` in tunnel mode.
+
+#### Batch reaper
+
+A driver that dies without running any code (`SIGKILL`, an OOM kill, a lost node) never calls `release()`,
+so its claims would hold their sandboxes until their `shutdownTime`. The batch reaper cleans up such
+batches. Each run lists the batch Leases in its namespaces and picks the ones whose `renewTime` is more
+than the Lease's duration plus `--skew-margin` in the past. Once one renew interval (a third of that Lease's
+duration) has passed since the list, it deletes each picked Lease only if it hasn't changed since it was
+read, so a live driver whose clock runs behind is never reaped. Each Lease waits only for its own interval,
+so a batch with a long duration doesn't hold back the others. It deletes no claims itself. Each claim has an
+`ownerReference` to its Lease, so the garbage collector deletes the claims, and their sandboxes, once the
+Lease is gone.
+
+```bash
+python -m k8s_agent_sandbox.batch_reaper --namespaces team-a,team-b
+```
+
+It takes `--namespaces` (comma-separated, defaulting to the reaper's own namespace, read from
+`POD_NAMESPACE` or else the service account's namespace file), `--skew-margin`
+(seconds, 60 by default and never below 5) and `--dry-run`, which logs the batches it would reap and
+deletes nothing. It runs once and exits, logging one line per reaped batch, with a non-zero exit code if
+any namespace or Lease failed, so it suits a CronJob that runs every one to two minutes with
+`concurrencyPolicy: Forbid` and an `activeDeadlineSeconds` that covers the wait. A run cut short is
+harmless, since every step is a delete and the next run starts over.
+
+Bind the reaper's ServiceAccount to this ClusterRole with a RoleBinding in each namespace it reaps, never
+a ClusterRoleBinding. RBAC can't limit `delete` to batch Leases, so the reaper limits itself to Leases
+named `batch-<batch-id>` that carry that batch's `agents.x-k8s.io/batch-id` label.
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sandbox-batch-reaper
+rules:
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["list", "get", "delete"]
+```
 
 ## Testing
 

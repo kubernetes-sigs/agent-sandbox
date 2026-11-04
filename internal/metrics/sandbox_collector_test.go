@@ -65,7 +65,7 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:true sandbox_template:unknown": 1,
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:true sandbox_template:unknown suspended:false": 1,
 			},
 		},
 		{
@@ -83,7 +83,7 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:false sandbox_template:unknown": 1,
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:false sandbox_template:unknown suspended:false": 1,
 			},
 		},
 		{
@@ -101,7 +101,7 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"created_by:unknown expired:false launch_type:warm namespace:default owned_by:None ready_condition:false sandbox_template:unknown": 1,
+				"created_by:unknown expired:false launch_type:warm namespace:default owned_by:None ready_condition:false sandbox_template:unknown suspended:false": 1,
 			},
 		},
 		{
@@ -173,9 +173,9 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 3, // We expect 3 distinct metric series for the 4 sandboxes
 			expectedLabels: map[string]int{
-				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:true sandbox_template:unknown":     1,
-				"created_by:unknown expired:true launch_type:warm namespace:test-ns owned_by:None ready_condition:false sandbox_template:my-template": 1,
-				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:false sandbox_template:unknown":    2,
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:true sandbox_template:unknown suspended:false":     1,
+				"created_by:unknown expired:true launch_type:warm namespace:test-ns owned_by:None ready_condition:false sandbox_template:my-template suspended:false": 1,
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:false sandbox_template:unknown suspended:false":    2,
 			},
 		},
 		{
@@ -207,7 +207,7 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:SandboxClaim ready_condition:true sandbox_template:unknown": 1,
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:SandboxClaim ready_condition:true sandbox_template:unknown suspended:false": 1,
 			},
 		},
 		{
@@ -239,7 +239,7 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:SandboxWarmPool ready_condition:true sandbox_template:unknown": 1,
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:SandboxWarmPool ready_condition:true sandbox_template:unknown suspended:false": 1,
 			},
 		},
 		{
@@ -274,7 +274,7 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:SandboxWarmPool ready_condition:true sandbox_template:unknown": 1,
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:SandboxWarmPool ready_condition:true sandbox_template:unknown suspended:false": 1,
 			},
 		},
 		{
@@ -300,7 +300,7 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"created_by:go-client expired:false launch_type:cold namespace:default owned_by:None ready_condition:true sandbox_template:unknown": 1,
+				"created_by:go-client expired:false launch_type:cold namespace:default owned_by:None ready_condition:true sandbox_template:unknown suspended:false": 1,
 			},
 		},
 		{
@@ -326,7 +326,7 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"created_by:python-client expired:false launch_type:cold namespace:default owned_by:None ready_condition:true sandbox_template:unknown": 1,
+				"created_by:python-client expired:false launch_type:cold namespace:default owned_by:None ready_condition:true sandbox_template:unknown suspended:false": 1,
 			},
 		},
 		{
@@ -352,7 +352,118 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:true sandbox_template:unknown": 1,
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:true sandbox_template:unknown suspended:false": 1,
+			},
+		},
+		{
+			// A reconcile error replaces the SandboxSuspended reason while the
+			// Sandbox stays suspended, so the label must not depend on the reason.
+			name: "suspended sandbox with a reconcile error is still suspended",
+			sandboxes: []runtime.Object{
+				&sandboxv1beta1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sandbox-suspended-error",
+						Namespace: "default",
+					},
+					Spec: sandboxv1beta1.SandboxSpec{
+						OperatingMode: sandboxv1beta1.SandboxOperatingModeSuspended,
+					},
+					Status: sandboxv1beta1.SandboxStatus{
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(sandboxv1beta1.SandboxConditionReady),
+								Status: metav1.ConditionFalse,
+								Reason: sandboxv1beta1.SandboxReasonReconcilerError,
+							},
+						},
+					},
+				},
+			},
+			expectedCount: 1,
+			expectedLabels: map[string]int{
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:false sandbox_template:unknown suspended:true": 1,
+			},
+		},
+		{
+			// Right after a suspend the Pod is still terminating and Ready has not
+			// flipped yet; the Sandbox is already suspended by intent.
+			name: "suspended sandbox whose pod is still terminating is suspended",
+			sandboxes: []runtime.Object{
+				&sandboxv1beta1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sandbox-suspending",
+						Namespace: "default",
+					},
+					Spec: sandboxv1beta1.SandboxSpec{
+						OperatingMode: sandboxv1beta1.SandboxOperatingModeSuspended,
+					},
+					Status: sandboxv1beta1.SandboxStatus{
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(sandboxv1beta1.SandboxConditionReady),
+								Status: metav1.ConditionTrue,
+							},
+							{
+								Type:   string(sandboxv1beta1.SandboxConditionSuspended),
+								Status: metav1.ConditionFalse,
+								Reason: sandboxv1beta1.SandboxReasonSuspendedPodTerminating,
+							},
+						},
+					},
+				},
+			},
+			expectedCount: 1,
+			expectedLabels: map[string]int{
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:true sandbox_template:unknown suspended:true": 1,
+			},
+		},
+		{
+			// The case the label exists to expose: a starting Sandbox and a
+			// suspended one both report ready_condition="false", but only the
+			// starting one is waiting on capacity.
+			name: "starting and suspended sandboxes are counted apart",
+			sandboxes: []runtime.Object{
+				&sandboxv1beta1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sandbox-starting",
+						Namespace: "default",
+					},
+					Spec: sandboxv1beta1.SandboxSpec{
+						OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+					},
+					Status: sandboxv1beta1.SandboxStatus{
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(sandboxv1beta1.SandboxConditionReady),
+								Status: metav1.ConditionFalse,
+								Reason: sandboxv1beta1.SandboxReasonDependenciesNotReady,
+							},
+						},
+					},
+				},
+				&sandboxv1beta1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sandbox-suspended",
+						Namespace: "default",
+					},
+					Spec: sandboxv1beta1.SandboxSpec{
+						OperatingMode: sandboxv1beta1.SandboxOperatingModeSuspended,
+					},
+					Status: sandboxv1beta1.SandboxStatus{
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(sandboxv1beta1.SandboxConditionReady),
+								Status: metav1.ConditionFalse,
+								Reason: sandboxv1beta1.SandboxReasonSuspended,
+							},
+						},
+					},
+				},
+			},
+			expectedCount: 2,
+			expectedLabels: map[string]int{
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:false sandbox_template:unknown suspended:false": 1,
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:false sandbox_template:unknown suspended:true":  1,
 			},
 		},
 	}

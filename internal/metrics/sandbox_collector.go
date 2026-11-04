@@ -38,6 +38,7 @@ type AgentSandboxesMetricKey struct {
 	Namespace      string
 	ReadyCondition string
 	Expired        string
+	Suspended      string
 	LaunchType     string
 	Template       string
 	OwnedBy        string
@@ -53,6 +54,7 @@ func NewAgentSandboxesConstMetric(count int, key AgentSandboxesMetricKey) promet
 		key.Namespace,
 		key.ReadyCondition,
 		key.Expired,
+		key.Suspended,
 		key.LaunchType,
 		key.Template,
 		key.OwnedBy,
@@ -122,6 +124,14 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 			}
 		}
 
+		// A suspended Sandbox has no Pod and needs no node capacity, so this
+		// separates it from a Sandbox whose Pod is still starting; both report
+		// ready_condition="false".
+		suspendedStr := "false"
+		if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
+			suspendedStr = "true"
+		}
+
 		launchTypeStr := LaunchTypeCold
 		if sandbox.Labels[sandboxv1beta1.SandboxLaunchTypeLabel] == sandboxv1beta1.SandboxLaunchTypeWarm {
 			launchTypeStr = LaunchTypeWarm
@@ -139,6 +149,7 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 			Namespace:      sandbox.Namespace,
 			ReadyCondition: readyConditionStr,
 			Expired:        expiredStr,
+			Suspended:      suspendedStr,
 			LaunchType:     launchTypeStr,
 			Template:       sandboxTemplateStr,
 			OwnedBy:        ownedByStr,

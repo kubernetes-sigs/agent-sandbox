@@ -272,6 +272,9 @@ var (
 	// - namespace: the namespace of the sandbox
 	// - ready_condition: "true" | "false"
 	// - expired: "true" | "false"
+	// - suspended: "true" when spec.operatingMode is Suspended, otherwise "false". Read from the
+	//   spec rather than the Ready reason, so it stays "true" while the Pod is still terminating
+	//   and when a reconcile error replaces the SandboxSuspended reason.
 	// - launch_type: "warm" | "cold"
 	// - sandbox_template: sandboxTemplateRef, or "unknown" when the Sandbox carries no template annotation.
 	//   Note this sentinel differs from the "__unknown__" the SandboxClaim metrics use, so the two
@@ -281,7 +284,7 @@ var (
 	AgentSandboxesDesc = prometheus.NewDesc(
 		"agent_sandboxes",
 		"Monitor the point-in-time number of sandboxes in the cluster.",
-		[]string{"namespace", "ready_condition", "expired", "launch_type", "sandbox_template", "owned_by", "created_by"},
+		[]string{"namespace", "ready_condition", "expired", "suspended", "launch_type", "sandbox_template", "owned_by", "created_by"},
 		nil,
 	)
 

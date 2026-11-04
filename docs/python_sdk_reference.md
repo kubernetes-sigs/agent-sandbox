@@ -238,11 +238,16 @@ an error that stops the watch or Lease renewal shows in ``err()``.
   from ``get_batch`` puts them on the claims it adds with ``acquire()``.
 - `batch_id` - Optional batch id; a DNS-1123 label starting with a letter, at most 52
   characters. Generated if omitted.
-- `create_rps` - Maximum claim creates started per second. Defaults to 50.
-- `max_in_flight` - Maximum claim creates and member deletes in flight at once. Defaults to
-  20, clamped to ``pool_size - 2`` when the client's Kubernetes API connection pool
-  is smaller. The pool must hold at least ``max_in_flight + 2``, since the batch's
-  watch and its Lease renewal each need a connection too.
+- `create_rps` - Maximum claim creates started per second. Defaults to 50. Claims that a
+  pool's Ready sandboxes cover, counted when ``claim_batch`` checks the pool, skip
+  ``create_rps`` pacing, so only ``max_in_flight`` bounds them. When the apiserver
+  answers a create with 429, the batch pauses warm-pool credit for ``Retry-After``
+  (at least 5 seconds) and paces creates at ``create_rps`` until cooldown ends.
+- `max_in_flight` - Maximum claim creates, ``acquire()`` pool reads, and member deletes in
+  flight at once. Defaults to 20, clamped to ``pool_size - 2`` when the client's
+  Kubernetes API connection pool is smaller. The pool must hold at least
+  ``max_in_flight + 2``, since the batch's watch and its Lease renewal each need a
+  connection too.
 - `work_budget` - Seconds the caller expects to work with the batch after it is Ready;
   part of each claim's ``shutdownTime``. Defaults to 3600.
 - `quorum_timeout` - Seconds after the last claim create that a group may take to reach
@@ -1012,7 +1017,12 @@ never one of the initial claims. ``events()``, ``group_outcomes()``, ``wait_for_
 and ``release_not_ready()`` leave it alone, and ``release_group()`` on its pool releases it
 with the pool's other members. Its ``shutdownTime`` is the
 time of its create plus ``quorum_timeout`` plus ``work_budget`` plus 600 seconds, and its
-create is retried and paced like the initial claims'.
+create follows the initial claims' retries and pacing. Like theirs, a create that the
+pool's Ready sandboxes cover skips ``create_rps`` pacing. Once callers spend the Ready
+count from the pool's check and ``create_rps`` pacing would delay the next create,
+``acquire()`` reads the pool again at most once a second per pool. Fill creates,
+``acquire()`` creates and pool reads, and member deletes share ``max_in_flight``,
+which defaults to 20 on a handle from ``get_batch``.
 
 If it raises, including on a cancellation, the member is dropped from ``members()`` and its
 claim is deleted, unless the claim is already gone or its create was rejected. A failed delete is
@@ -1040,8 +1050,9 @@ or a missing pool or template.
 - `TerminalMemberError` - If the create fails (the member is ``FAILED`` with reason
   ``CreateFailed``), the member fails terminally, or someone else deletes its claim
   (the member is ``LOST``) before it is Ready.
-- `BatchTimeoutError` - If the member isn't Ready within ``timeout``. A create or create retry
-  that ``create_rps`` pacing can't start within it isn't sent.
+- `BatchTimeoutError` - If the member isn't Ready within ``timeout``. ``acquire()`` skips
+  sending any create or create retry that ``create_rps`` pacing or ``max_in_flight``
+  cannot start before the deadline.
 - `BatchError` - If this handle has been detached or released, or ``err()`` is set, when
   called or while waiting, or if ``release_member`` or ``release_group`` releases the
   member before it is Ready.

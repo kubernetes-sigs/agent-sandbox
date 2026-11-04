@@ -33,6 +33,7 @@ import (
 
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
+	"sigs.k8s.io/agent-sandbox/internal/utils"
 )
 
 // SandboxTemplateReconciler reconciles a SandboxTemplate object.
@@ -129,8 +130,13 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		if !metav1.IsControlledBy(existingNP, template) {
 			return ctrl.Result{}, fmt.Errorf("refusing to update NetworkPolicy %q as it is not controlled by SandboxTemplate %q", npName, template.Name)
 		}
+		// A NetworkPolicy created before v1.0 still names its SandboxTemplate as v1alpha1.
+		refs, ownerRefRefreshed := utils.RefreshedOwnerReferences(existingNP.OwnerReferences, template.UID, extensionsv1beta1.GroupVersion.String())
+		if ownerRefRefreshed {
+			existingNP.OwnerReferences = refs
+		}
 		// Policy exists: Semantic DeepEqual check for drift
-		if equality.Semantic.DeepEqual(existingNP.Spec, desiredSpec) {
+		if !ownerRefRefreshed && equality.Semantic.DeepEqual(existingNP.Spec, desiredSpec) {
 			return ctrl.Result{}, nil // Perfect match, O(1) efficiency.
 		}
 

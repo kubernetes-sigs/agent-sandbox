@@ -124,9 +124,11 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 			}
 		}
 
-		// A suspended Sandbox has no Pod and needs no node capacity, so this
-		// separates it from a Sandbox whose Pod is still starting; both report
-		// ready_condition="false".
+		// Separates a suspended Sandbox from one whose Pod is still starting;
+		// both report ready_condition="false". The label reports intent: it is
+		// "true" as soon as suspension is requested, while the Pod may still be
+		// terminating and occupying its node. The Suspended condition reports
+		// when that Pod is gone.
 		suspendedStr := "false"
 		if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
 			suspendedStr = "true"

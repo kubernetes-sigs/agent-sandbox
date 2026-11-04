@@ -757,7 +757,9 @@ class TestRelease(unittest.TestCase):
         state.record_create_failure("b1-2", "pool-a", "conflict")
         self.assertTrue(state.release_member("b1-0"))
         self.assertTrue(state.release_member("b1-0"))  # Its delete hasn't succeeded yet.
-        state.note_deleted("b1-0")
+        state.note_deleted("b1-0", 0)  # An older delete finishing late keeps the newer one pending.
+        self.assertTrue(state.release_member("b1-0"))
+        state.note_deleted("b1-0", state.delete_seq("b1-0"))
         self.assertFalse(state.release_member("b1-0"))
         # A lost member's claim is gone, and a failed create's name may be another client's claim.
         self.assertFalse(state.release_member("b1-1"))
@@ -969,7 +971,7 @@ class TestAcquired(unittest.TestCase):
         with self.assertRaisesRegex(BatchError, "released before it was Ready"):
             state.acquired_member("b1-1")
         # release_member owns the delete, so acquire's cleanup doesn't add another.
-        state.note_deleted("b1-1")
+        state.note_deleted("b1-1", state.delete_seq("b1-1"))
         self.assertFalse(state.drop_acquired("b1-1", created=True))
         self.assertEqual(state.release_not_ready(), [])
 

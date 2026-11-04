@@ -488,7 +488,7 @@ These two flags also bound retained output for the whole daemon. The bound is `-
 | Call | Detached, running | Detached, exited | Non-detached, running |
 |---|---|---|---|
 | `Attach` | Replays from the requested offsets, follows new output, and ends with `ExitEvent` after exit | Replays retained output, then ends with `ExitEvent` | `FAILED_PRECONDITION` |
-| `Wait` | Blocks until exit through the existing registry path | `OK {exit_code, completed_at}` immediately | Unchanged |
+| `Wait` | Blocks until exit through the existing registry path | `OK {exit_code, completed_at}` immediately, until `Release` or eviction, even with `--exit-event-ttl=0` | Unchanged |
 | `SendSignal` | Signals the process group, as today | `OK` without sending a signal, as `ManagedProcess.Signal` does today for a completed process | Unchanged |
 | `WriteStdin` | Unchanged | `FAILED_PRECONDITION` (new check) | Unchanged |
 | `ResizeTTY` | Unchanged | `FAILED_PRECONDITION`, as today for a completed process | Unchanged |

@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Configuration and wire-format models for the Python SDK."""
+
 import re
 import warnings
 from datetime import datetime, timezone
@@ -29,7 +31,7 @@ _DEPRECATED_IN_CLUSTER_MODES = {
 
 def _validate_sandboxd_auth_token(token: SecretStr) -> SecretStr:
     if not re.fullmatch(r"[\x21-\x7e]+", token.get_secret_value()):
-        raise ValueError("auth_token must be non-empty printable ASCII with no spaces")
+        raise ValueError("bearer token must be non-empty printable ASCII with no spaces")
     return token
 
 
@@ -271,7 +273,8 @@ class SandboxdPodTunnelConnectionConfig(BaseModel):
     API and the gRPC ProcessService. This config port-forwards directly to the
     sandbox pod, reaching both.
 
-    Doesn't work on Kata or gVisor; use SandboxdInClusterConnectionConfig for those.
+    For Kata or gVisor, use SandboxdRouterTunnelConnectionConfig or
+    SandboxdInClusterConnectionConfig.
     """
     model_config = ConfigDict(hide_input_in_errors=True)
 
@@ -286,6 +289,40 @@ class SandboxdPodTunnelConnectionConfig(BaseModel):
         if v < 1 or v > 65535:
             raise ValueError("port must be between 1 and 65535")
         return v
+
+    _redact_errors = model_validator(mode="wrap")(_redact_sandboxd_validation_errors)
+
+class SandboxdRouterTunnelConnectionConfig(BaseModel):
+    """Connect to sandboxd through a port-forward to sandbox-router-svc.
+
+    REST and gRPC share the router's port 8080. Routing headers and metadata
+    select the Sandbox and its REST or gRPC port. gRPC requires sandbox-router
+    v1.0.9 or later. Set ``router_auth_token`` when the router requires
+    authentication. The SDK sends only that token as ``Authorization``.
+    The router strips that header before forwarding, so token-protected
+    sandboxd is unsupported until credential pass-through is defined (issue
+    2102). The SDK never sends ``auth_token`` in this mode.
+    ``pod_ip_routing`` stays false so the router selects the Pod from its cache
+    or DNS. Scoped tokens reject ``X-Sandbox-Pod-IP``.
+    """
+    model_config = ConfigDict(hide_input_in_errors=True)
+
+    auth_token: _SandboxdAuthToken | None = Field(default=None, repr=False)  # sandboxd bearer token. Not sent in this mode because the router strips Authorization (issue 2102).
+    router_auth_token: _SandboxdAuthToken | None = Field(default=None, repr=False)  # Bearer token for the router. Sent as Authorization on REST and gRPC. The router strips it.
+    rest_port: int = Field(default=8080, ge=1, le=65535)  # sandboxd REST port, not the router port.
+    grpc_port: int = Field(default=9090, ge=1, le=65535)  # sandboxd gRPC port, not the router port.
+    router_namespace: str = Field(
+        default="agent-sandbox-system", min_length=1, max_length=63,
+        pattern=r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+    )  # Namespace of sandbox-router-svc. Defaults to agent-sandbox-system.
+    port_forward_ready_timeout: int = Field(default=30, gt=0)  # Seconds to wait for the router tunnel. Must be positive.
+    pod_ip_routing: bool = False  # Send X-Sandbox-Pod-IP on REST and gRPC. Set true only when the router cache is disabled and the Sandbox has no Service.
+
+    @model_validator(mode="after")
+    def validate_distinct_ports(self) -> "SandboxdRouterTunnelConnectionConfig":
+        if self.rest_port == self.grpc_port:
+            raise ValueError("REST and gRPC ports must be different")
+        return self
 
     _redact_errors = model_validator(mode="wrap")(_redact_sandboxd_validation_errors)
 
@@ -348,6 +385,7 @@ SandboxConnectionConfig = Union[
     SandboxLocalTunnelConnectionConfig,
     SandboxInClusterConnectionConfig,
     SandboxdPodTunnelConnectionConfig,
+    SandboxdRouterTunnelConnectionConfig,
     SandboxdInClusterConnectionConfig,
 ]
 

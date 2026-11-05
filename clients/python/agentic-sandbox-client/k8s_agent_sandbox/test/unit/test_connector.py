@@ -40,6 +40,7 @@ from k8s_agent_sandbox.connector import (
     LocalTunnelConnectionStrategy,
     InClusterConnectionStrategy,
     SandboxdPodTunnelStrategy,
+    SandboxdRouterTunnelStrategy,
     SandboxdInClusterStrategy,
     SandboxConnector,
 )
@@ -56,8 +57,53 @@ from k8s_agent_sandbox.models import (
     SandboxLocalTunnelConnectionConfig,
     SandboxdPodTunnelConnectionConfig,
     SandboxdInClusterConnectionConfig,
+    SandboxdRouterTunnelConnectionConfig,
     SandboxInClusterConnectionConfig,
 )
+
+
+class TestSandboxdRouterTunnel(unittest.TestCase):
+    @patch("k8s_agent_sandbox.connector.subprocess.Popen")
+    @patch.object(LocalTunnelConnectionStrategy, "_preflight_check_router_service")
+    @patch.object(LocalTunnelConnectionStrategy, "_is_port_open", return_value=True)
+    @patch.object(LocalTunnelConnectionStrategy, "_get_free_port", side_effect=[18080, 18081])
+    def test_shared_tunnel_reconnect_and_cleanup(self, free_port, is_open, preflight, popen):
+        processes = [MagicMock(), MagicMock()]
+        for process in processes:
+            process.poll.return_value = None
+        popen.side_effect = processes
+        get_pod_name = MagicMock(side_effect=AssertionError("must target the router"))
+        connector = SandboxConnector(
+            "sandbox", "agents",
+            SandboxdRouterTunnelConnectionConfig(router_namespace="routers", rest_port=8181, grpc_port=9191),
+            SimpleNamespace(injected_api_client=None), get_pod_name=get_pod_name,
+        )
+        try:
+            self.assertIsInstance(connector.strategy, SandboxdRouterTunnelStrategy)
+            self.assertTrue(connector.is_sandboxd())
+            self.assertEqual(connector.connect(), "http://127.0.0.1:18080")
+            first_channel = connector.grpc_channel()
+            self.assertIs(first_channel, connector.grpc_channel())
+            self.assertEqual(connector.connect(), "http://127.0.0.1:18080")
+            popen.assert_called_once_with(
+                ["kubectl", "port-forward", "svc/sandbox-router-svc", "18080:8080", "-n", "routers"],
+                stdout=subprocess.DEVNULL, stderr=connector.strategy._stderr_log,
+            )
+            self.assertIsNotNone(connector.strategy._stderr_log)
+            self.assertEqual(connector.strategy.grpc_target, "127.0.0.1:18080")
+            processes[0].poll.return_value = 1
+            with patch.object(first_channel, "close", wraps=first_channel.close) as close_channel:
+                self.assertEqual(connector.connect(), "http://127.0.0.1:18081")
+                self.assertIsNot(connector.grpc_channel(), first_channel)
+                close_channel.assert_called_once()
+            self.assertEqual(connector.strategy.grpc_target, "127.0.0.1:18081")
+            get_pod_name.assert_not_called()
+        finally:
+            connector.close()
+        for process in processes:
+            process.terminate.assert_called_once()
+        self.assertIsNone(connector.strategy.grpc_target)
+        self.assertIsNone(connector.strategy.port_forward_process)
 
 
 class TestInClusterConnectionStrategy(unittest.TestCase):
@@ -1591,6 +1637,7 @@ class TestTunnelTargetsInjectedApiClient(unittest.TestCase):
         for config, expected in (
             (SandboxLocalTunnelConnectionConfig(), LocalTunnelConnectionStrategy),
             (SandboxdPodTunnelConnectionConfig(), SandboxdPodTunnelStrategy),
+            (SandboxdRouterTunnelConnectionConfig(), SandboxdRouterTunnelStrategy),
         ):
             connector = SandboxConnector(
                 sandbox_id="sb", namespace="ns", connection_config=config, k8s_helper=helper,

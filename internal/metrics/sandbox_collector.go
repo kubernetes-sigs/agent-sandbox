@@ -38,7 +38,7 @@ type AgentSandboxesMetricKey struct {
 	Namespace      string
 	ReadyCondition string
 	Expired        string
-	Suspended      string
+	OperatingMode  string
 	LaunchType     string
 	Template       string
 	OwnedBy        string
@@ -54,7 +54,7 @@ func NewAgentSandboxesConstMetric(count int, key AgentSandboxesMetricKey) promet
 		key.Namespace,
 		key.ReadyCondition,
 		key.Expired,
-		key.Suspended,
+		key.OperatingMode,
 		key.LaunchType,
 		key.Template,
 		key.OwnedBy,
@@ -124,15 +124,7 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 			}
 		}
 
-		// Separates a suspended Sandbox from one whose Pod is still starting;
-		// both report ready_condition="false". The label reports intent: it is
-		// "true" as soon as suspension is requested, while the Pod may still be
-		// terminating and occupying its node. The Suspended condition reports
-		// when that Pod is gone.
-		suspendedStr := "false"
-		if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
-			suspendedStr = "true"
-		}
+		operatingModeStr := SandboxOperatingModeLabel(&sandbox)
 
 		launchTypeStr := LaunchTypeCold
 		if sandbox.Labels[sandboxv1beta1.SandboxLaunchTypeLabel] == sandboxv1beta1.SandboxLaunchTypeWarm {
@@ -151,7 +143,7 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 			Namespace:      sandbox.Namespace,
 			ReadyCondition: readyConditionStr,
 			Expired:        expiredStr,
-			Suspended:      suspendedStr,
+			OperatingMode:  operatingModeStr,
 			LaunchType:     launchTypeStr,
 			Template:       sandboxTemplateStr,
 			OwnedBy:        ownedByStr,

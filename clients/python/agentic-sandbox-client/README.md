@@ -863,12 +863,14 @@ access its mode needs, such as running `kubectl port-forward` in tunnel mode.
 A driver that dies without running any code (`SIGKILL`, an OOM kill, a lost node) never calls `release()`,
 so its claims would hold their sandboxes until their `shutdownTime`. The batch reaper cleans up such
 batches. Each run lists the batch Leases in its namespaces and picks the ones whose `renewTime` is more
-than the Lease's duration plus `--skew-margin` in the past. Once one renew interval (a third of that Lease's
-duration) has passed since the list, it deletes each picked Lease only if it hasn't changed since it was
-read, so a live driver whose clock runs behind is never reaped. Each Lease waits only for its own interval,
-so a batch with a long duration doesn't hold back the others. It deletes no claims itself. Each claim has an
-`ownerReference` to its Lease, so the garbage collector deletes the claims, and their sandboxes, once the
-Lease is gone.
+than the Lease's duration plus `--skew-margin` in the past. Once that Lease's duration has passed since
+the list, it deletes each picked Lease only if it hasn't changed since it was read, so a connected driver
+whose clock runs behind either renews (failing the delete precondition with `409`) or stops locally before
+the delete runs, and a stalled driver has already stopped locally before the delete while clock skew stays
+within `--skew-margin` plus the Lease's duration (minus any in-flight request latency). Runs that find no
+stale Leases exit without waiting, and each picked Lease waits only for its own duration so a long Lease
+never holds back shorter ones. It deletes no claims itself. Each claim has an `ownerReference` to its
+Lease, so the garbage collector deletes the claims, and their sandboxes, once the Lease is gone.
 
 ```bash
 python -m k8s_agent_sandbox.batch_reaper --namespaces team-a,team-b
@@ -879,7 +881,8 @@ It takes `--namespaces` (comma-separated, defaulting to the reaper's own namespa
 (seconds, 60 by default and never below 5) and `--dry-run`, which logs the batches it would reap and
 deletes nothing. It runs once and exits, logging one line per reaped batch, with a non-zero exit code if
 any namespace or Lease failed, so it suits a CronJob that runs every one to two minutes with
-`concurrencyPolicy: Forbid` and an `activeDeadlineSeconds` that covers the wait. A run cut short is
+`concurrencyPolicy: Forbid` and an `activeDeadlineSeconds` that covers the longest Lease duration wait
+plus list and delete slack (for example `600` when running `300`-second Leases). A run cut short is
 harmless, since every step is a delete and the next run starts over.
 
 Bind the reaper's ServiceAccount to this ClusterRole with a RoleBinding in each namespace it reaps, never

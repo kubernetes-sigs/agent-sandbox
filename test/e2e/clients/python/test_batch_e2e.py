@@ -52,26 +52,11 @@ spec:
 """
 
 
-def _batch_manifest(batch_id: str, warmpool: str) -> str:
+def _lease_manifest(batch_id: str) -> str:
     lease_duration = 300
     # metav1.MicroTime parses with RFC3339Micro, which requires exactly six fractional digits.
     renew_time = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-    claims = "\n---\n".join(
-        f"""apiVersion: extensions.agents.x-k8s.io/v1beta1
-kind: SandboxClaim
-metadata:
-  name: {batch_id}-{ordinal}
-  labels:
-    agents.x-k8s.io/batch-id: {batch_id}
-  annotations:
-    agents.x-k8s.io/batch-group-size: "2"
-    agents.x-k8s.io/batch-group-min-ready: "2"
-spec:
-  warmPoolRef:
-    name: {warmpool}"""
-        for ordinal in (0, 1)
-    )
-    lease = f"""apiVersion: coordination.k8s.io/v1
+    return f"""apiVersion: coordination.k8s.io/v1
 kind: Lease
 metadata:
   name: batch-{batch_id}
@@ -81,15 +66,40 @@ metadata:
     agents.x-k8s.io/batch-lease-duration: "{lease_duration}"
 spec:
   leaseDurationSeconds: {lease_duration}
-  renewTime: "{renew_time}\""""
-    return f"{claims}\n---\n{lease}\n"
+  renewTime: "{renew_time}"
+"""
+
+
+def _claims_manifest(batch_id: str, warmpool: str, lease_uid: str) -> str:
+    return "\n---\n".join(
+        f"""apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: {batch_id}-{ordinal}
+  labels:
+    agents.x-k8s.io/batch-id: {batch_id}
+    agents.x-k8s.io/batch-lease-uid: {lease_uid}
+  annotations:
+    agents.x-k8s.io/batch-group-size: "2"
+    agents.x-k8s.io/batch-group-min-ready: "2"
+spec:
+  warmPoolRef:
+    name: {warmpool}"""
+        for ordinal in (0, 1)
+    )
 
 
 def test_batch_get_batch_members_connect_detach(
     tc, temp_namespace, sandbox_warmpool, deploy_router
 ):
     batch_id = f"b{uuid.uuid4().hex[:10]}"
-    tc.apply_manifest_text(_batch_manifest(batch_id, sandbox_warmpool), namespace=temp_namespace)
+    coordination_api = kubernetes.client.CoordinationV1Api(tc.get_api_client())
+    tc.apply_manifest_text(_lease_manifest(batch_id), namespace=temp_namespace)
+    lease = coordination_api.read_namespaced_lease(f"batch-{batch_id}", temp_namespace)
+    tc.apply_manifest_text(
+        _claims_manifest(batch_id, sandbox_warmpool, lease.metadata.uid),
+        namespace=temp_namespace,
+    )
 
     config = SandboxLocalTunnelConnectionConfig(router_namespace=temp_namespace)
     client = SandboxClient(connection_config=config)
@@ -123,7 +133,6 @@ def test_batch_get_batch_members_connect_detach(
             )
             assert claim is not None
 
-        coordination_api = kubernetes.client.CoordinationV1Api(tc.get_api_client())
         lease = coordination_api.read_namespaced_lease(f"batch-{batch_id}", temp_namespace)
         assert lease.spec.holder_identity is None
     finally:

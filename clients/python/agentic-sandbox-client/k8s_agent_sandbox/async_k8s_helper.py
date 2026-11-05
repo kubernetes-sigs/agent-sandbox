@@ -58,6 +58,8 @@ async def _claim_list_pages(
     namespace: str,
     label_selector: str,
     _request_timeout: float | None,
+    *,
+    deadline: float | None = None,
 ) -> AsyncIterator[tuple[dict[str, Any], bool]]:
     """Yields ``(page, first)`` pairs for one paginated ``SandboxClaim`` list.
 
@@ -74,6 +76,12 @@ async def _claim_list_pages(
     continue_token: str | None = None
     restarted = False
     while True:
+        page_timeout = _request_timeout
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("SandboxClaim list exceeded its deadline")
+            page_timeout = remaining if page_timeout is None else min(float(page_timeout), remaining)
         try:
             page = cast(dict[str, Any], await list_page(
                 group=CLAIM_API_GROUP,
@@ -83,7 +91,7 @@ async def _claim_list_pages(
                 label_selector=label_selector,
                 limit=CLAIM_LIST_PAGE_SIZE,
                 _continue=continue_token,
-                _request_timeout=_request_timeout,
+                _request_timeout=page_timeout,
             ))
         except client.ApiException as e:
             # A continue token expires after a few minutes, and a 410 isn't transient. Restarting the
@@ -651,20 +659,32 @@ class AsyncK8sHelper:
                 await w.close()
 
     async def list_sandbox_claim_objects(
-        self, namespace: str, label_selector: str, _request_timeout: float | None = None
+        self,
+        namespace: str,
+        label_selector: str,
+        _request_timeout: float | None = None,
+        *,
+        deadline: float | None = None,
     ) -> tuple[list[dict[str, Any]], str]:
         """Lists full SandboxClaim objects matching a label selector. Also returns the list's
         resourceVersion, so a subsequent watch does not miss any events.
 
         Args:
             _request_timeout: Optional total timeout in seconds for each page, forwarded to kubernetes_asyncio.
+            deadline: Optional ``time.monotonic()`` deadline across the whole paginated list;
+                caps each page's ``_request_timeout`` to the remaining budget and raises
+                ``TimeoutError`` once the deadline passes.
         """
         await self._ensure_initialized()
 
         items: list[dict[str, Any]] = []
         resource_version = "0"
         async for page, first in _claim_list_pages(
-            self.custom_objects_api.list_namespaced_custom_object, namespace, label_selector, _request_timeout
+            self.custom_objects_api.list_namespaced_custom_object,
+            namespace,
+            label_selector,
+            _request_timeout,
+            deadline=deadline,
         ):
             if first:
                 items = []
@@ -799,7 +819,12 @@ class AsyncK8sHelper:
             _request_timeout: Optional total timeout in seconds, forwarded to kubernetes_asyncio.
             resource_version: If provided, delete the Lease only at this resourceVersion. A Lease
                 someone has written since is left in place and also treated as deleted.
+
+        Raises:
+            ValueError: If ``resource_version`` is an empty string.
         """
+        if resource_version is not None and not resource_version:
+            raise ValueError("resource_version must not be empty")
         await self._ensure_initialized()
 
         delete_kwargs: dict[str, Any] = {}

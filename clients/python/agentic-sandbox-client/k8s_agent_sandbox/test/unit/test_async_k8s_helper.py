@@ -1142,6 +1142,58 @@ class TestAsyncK8sHelperBatchMethods(unittest.IsolatedAsyncioTestCase):
                     await self.helper.list_sandbox_claim_objects("default", "agents.x-k8s.io/batch-id=b1")
                 self.assertEqual(raised.exception.status, expected_status)
 
+    async def test_list_sandbox_claim_objects_deadline_caps_page_timeouts_and_stops_once_expired(self):
+        expired = client.ApiException(status=410)
+
+        def page(name, rv, token=None):
+            return {"items": [{"metadata": {"name": name}}], "metadata": {"resourceVersion": rv, "continue": token}}
+
+        list_page = self.helper.custom_objects_api.list_namespaced_custom_object = AsyncMock()
+        for label, req_timeout, expected_timeouts in (
+            ("scalar timeout", 10.0, [10.0, 8.0, 4.0, 1.5]),
+            ("unset timeout", None, [15.0, 8.0, 4.0, 1.5]),
+        ):
+            with self.subTest(label), patch(
+                "k8s_agent_sandbox.async_k8s_helper.time.monotonic", side_effect=[95.0, 102.0, 106.0, 108.5]
+            ):
+                list_page.reset_mock()
+                list_page.side_effect = [
+                    page("old-0", "42", "t1"),
+                    expired,
+                    page("b1-0", "50", "t2"),
+                    page("b1-1", "51"),
+                ]
+                items, rv = await self.helper.list_sandbox_claim_objects(
+                    "default",
+                    "agents.x-k8s.io/batch-id=b1",
+                    _request_timeout=req_timeout,
+                    deadline=110.0,
+                )
+                self.assertEqual([item["metadata"]["name"] for item in items], ["b1-0", "b1-1"])
+                self.assertEqual(rv, "50")
+                self.assertEqual(
+                    [c.kwargs["_request_timeout"] for c in list_page.call_args_list],
+                    expected_timeouts,
+                )
+
+        for label, ticks, pages, expected_calls in (
+            ("expired before first page", [110.0], [page("b1-0", "50")], 0),
+            ("expired before next page", [105.0, 110.0], [page("b1-0", "50", "t1"), page("b1-1", "51")], 1),
+        ):
+            with self.subTest(label), patch(
+                "k8s_agent_sandbox.async_k8s_helper.time.monotonic", side_effect=ticks
+            ):
+                list_page.reset_mock()
+                list_page.side_effect = pages
+                with self.assertRaises(TimeoutError):
+                    await self.helper.list_sandbox_claim_objects(
+                        "default",
+                        "agents.x-k8s.io/batch-id=b1",
+                        _request_timeout=10.0,
+                        deadline=110.0,
+                    )
+                self.assertEqual(list_page.call_count, expected_calls)
+
     async def test_count_live_sandbox_claims_counts_claims_not_being_deleted_across_pages(self):
         class _Page(dict):
             pass
@@ -1450,6 +1502,10 @@ class TestAsyncK8sHelperBatchMethods(unittest.IsolatedAsyncioTestCase):
     async def test_lease_delete_at_a_resource_version_sends_a_precondition_and_counts_a_conflict_as_deleted(self):
         coord = self.helper.coordination_v1_api
         coord.delete_namespaced_lease = AsyncMock()
+
+        with self.assertRaises(ValueError):
+            await self.helper.delete_batch_lease("batch-b1", "default", resource_version="")
+        coord.delete_namespaced_lease.assert_not_awaited()
 
         await self.helper.delete_batch_lease("batch-b1", "default", resource_version="11")
         body = coord.delete_namespaced_lease.await_args.kwargs["body"]

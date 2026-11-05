@@ -37,6 +37,7 @@ from .constants import (
     BATCH_GROUP_LABEL,
     BATCH_ID_LABEL,
     BATCH_LEASE_DURATION_ANNOTATION,
+    BATCH_LEASE_UID_LABEL,
     BATCH_NEXT_ORDINAL_ANNOTATION,
     BATCH_QUORUM_TIMEOUT_ANNOTATION,
     BATCH_WORK_BUDGET_ANNOTATION,
@@ -363,7 +364,7 @@ def validate_claim_batch_args(
         pools.add(group.warmpool)
 
     labels = dict(labels or {})
-    for reserved in (BATCH_ID_LABEL, BATCH_GROUP_LABEL):
+    for reserved in (BATCH_ID_LABEL, BATCH_LEASE_UID_LABEL, BATCH_GROUP_LABEL):
         if reserved in labels:
             raise ValueError(f"labels must not set {reserved}; claim_batch sets it")
     if labels:
@@ -401,9 +402,19 @@ def group_label_value(warmpool: str) -> str:
     return hashlib.sha256(warmpool.encode()).hexdigest()[:16]
 
 
-def group_label_selector(batch_id: str, warmpool: str) -> str:
-    """Returns the label selector for one group's fill claims."""
-    return f"{BATCH_ID_LABEL}={batch_id},{BATCH_GROUP_LABEL}={group_label_value(warmpool)}"
+def batch_claim_label_selector(batch_id: str, lease_uid: str | None = None) -> str:
+    """Returns the label selector for a batch's claims, scoped to ``lease_uid`` when given."""
+    if lease_uid is None:
+        return f"{BATCH_ID_LABEL}={batch_id}"
+    return f"{BATCH_ID_LABEL}={batch_id},{BATCH_LEASE_UID_LABEL}={lease_uid}"
+
+
+def group_label_selector(batch_id: str, warmpool: str, lease_uid: str | None = None) -> str:
+    """Returns the label selector for one group's claims, scoped to ``lease_uid`` when given."""
+    base = f"{BATCH_ID_LABEL}={batch_id},{BATCH_GROUP_LABEL}={group_label_value(warmpool)}"
+    if lease_uid is None:
+        return base
+    return f"{base},{BATCH_LEASE_UID_LABEL}={lease_uid}"
 
 
 def fill_create_plan(batch_id: str, groups: Sequence[BatchGroup]) -> list[tuple[str, BatchGroup]]:
@@ -522,7 +533,11 @@ def parse_lease_metadata(labels: dict[str, str] | None, annotations: dict[str, s
         ),
         next_ordinal=_parse_int_annotation(annotations, BATCH_NEXT_ORDINAL_ANNOTATION, 0, 0),
         create_rps=create_rps,
-        labels={k: v for k, v in (labels or {}).items() if k not in (BATCH_ID_LABEL, CREATED_BY_LABEL)},
+        labels={
+            k: v
+            for k, v in (labels or {}).items()
+            if k not in (BATCH_ID_LABEL, BATCH_LEASE_UID_LABEL, CREATED_BY_LABEL)
+        },
     )
 
 

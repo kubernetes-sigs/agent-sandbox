@@ -78,6 +78,9 @@ COLD_CLAIM_READY_REASONS = frozenset({
 
 # Constants for Sandbox Batches
 BATCH_ID_LABEL = "agents.x-k8s.io/batch-id"
+# Scopes watch, attach, and deletecollection selectors to one Lease incarnation so a stalled
+# release or re-attachment never touches claims owned by a newer Lease that reused batch_id.
+BATCH_LEASE_UID_LABEL = "agents.x-k8s.io/batch-lease-uid"
 BATCH_GROUP_SIZE_ANNOTATION = "agents.x-k8s.io/batch-group-size"
 BATCH_GROUP_MIN_READY_ANNOTATION = "agents.x-k8s.io/batch-group-min-ready"
 # Set on each fill claim to a hash of its pool name, since pool names can be longer than the

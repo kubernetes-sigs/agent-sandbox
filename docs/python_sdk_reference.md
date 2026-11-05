@@ -224,10 +224,11 @@ abandoned batch is eventually deleted by the controller. ``work_budget`` is a ha
 Nothing extends a claim's ``shutdownTime``, so a batch held for a whole run sets
 ``work_budget`` to the run's length.
 
-Of the errors below, only ``BatchExistsError`` is a ``BatchError``. The others mean a bad
-argument, a missing pool or template, or an API error. Failures after this call returns
-aren't raised here. A failed create shows in ``members()`` as a ``CreateFailed`` member, and
-an error that stops the watch or Lease renewal shows in ``err()``.
+Of the errors below, ``BatchExistsError``, ``BatchLeaseExpiredError``, and ``BatchError``
+are ``BatchError`` types. The others mean a bad argument, a missing pool or template, or an
+API or transport error. Failures after this call returns aren't raised here. A failed
+create shows in ``members()`` as a ``CreateFailed`` member, and an error that stops the
+watch or Lease renewal shows in ``err()``.
 
 **Arguments**:
 
@@ -268,8 +269,17 @@ an error that stops the watch or Lease renewal shows in ``err()``.
 - `SandboxWarmPoolNotFoundError` - If a group's warm pool doesn't exist.
 - `SandboxTemplateNotFoundError` - If a warm pool's template doesn't exist, or it names none.
 - `BatchExistsError` - If a Lease or claims with this batch id already exist.
+- `BatchLeaseExpiredError` - If the batch Lease expires before setup finishes; setup deletes
+  the Lease first if its ``resourceVersion`` has not changed.
+- `BatchError` - If the apiserver returns a batch Lease without ``metadata``, ``spec``,
+  ``uid``, or ``resourceVersion``.
 - `ApiException` - For any other API error before the first claim is created, such as a
   403. If the Lease was already created, it is deleted first.
+- `urllib3.exceptions.HTTPError` - If a request fails before the Lease expires, such as on
+  a connection error or request timeout. If the Lease was already created, setup
+  deletes it first if its ``resourceVersion`` has not changed.
+- `TimeoutError` - If listing existing claims exceeds a request timeout before the Lease
+  expires. Setup deletes the Lease first if its ``resourceVersion`` has not changed.
   
 
 **Example**:

@@ -115,6 +115,8 @@ def _claim_list_pages(
     namespace: str,
     label_selector: str,
     _request_timeout: float | tuple[float, float] | None,
+    *,
+    deadline: float | None = None,
 ) -> Iterator[tuple[dict[str, Any], bool]]:
     """Yields ``(page, first)`` pairs for one paginated ``SandboxClaim`` list.
 
@@ -131,6 +133,17 @@ def _claim_list_pages(
     continue_token: str | None = None
     restarted = False
     while True:
+        page_timeout = _request_timeout
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("SandboxClaim list exceeded its deadline")
+            if page_timeout is None:
+                page_timeout = remaining
+            elif isinstance(page_timeout, (int, float)):
+                page_timeout = min(float(page_timeout), remaining)
+            else:
+                page_timeout = (min(page_timeout[0], remaining), min(page_timeout[1], remaining))
         try:
             page = cast(dict[str, Any], list_page(
                 group=CLAIM_API_GROUP,
@@ -140,7 +153,7 @@ def _claim_list_pages(
                 label_selector=label_selector,
                 limit=CLAIM_LIST_PAGE_SIZE,
                 _continue=continue_token,
-                _request_timeout=_request_timeout,
+                _request_timeout=page_timeout,
             ))
         except client.ApiException as e:
             # A continue token expires after a few minutes, and a 410 isn't transient. Restarting the
@@ -673,6 +686,8 @@ class K8sHelper:
         namespace: str,
         label_selector: str,
         _request_timeout: float | tuple[float, float] | None = None,
+        *,
+        deadline: float | None = None,
     ) -> tuple[list[dict[str, Any]], str]:
         """Lists full SandboxClaim objects matching a label selector. Also returns the list's
         resourceVersion, so a subsequent watch does not miss any events.
@@ -680,11 +695,18 @@ class K8sHelper:
         Args:
             _request_timeout: Optional timeout (seconds, or a ``(connect, read)``
                 pair) forwarded to the underlying urllib3 request of each page.
+            deadline: Optional ``time.monotonic()`` deadline across the whole paginated list;
+                caps each page's ``_request_timeout`` to the remaining budget and raises
+                ``TimeoutError`` once the deadline passes.
         """
         items: list[dict[str, Any]] = []
         resource_version = "0"
         for page, first in _claim_list_pages(
-            self._batch_custom_objects_api.list_namespaced_custom_object, namespace, label_selector, _request_timeout
+            self._batch_custom_objects_api.list_namespaced_custom_object,
+            namespace,
+            label_selector,
+            _request_timeout,
+            deadline=deadline,
         ):
             if first:
                 items = []
@@ -820,7 +842,12 @@ class K8sHelper:
                 pair) forwarded to the underlying urllib3 request.
             resource_version: If provided, delete the Lease only at this resourceVersion. A Lease
                 someone has written since is left in place and also treated as deleted.
+
+        Raises:
+            ValueError: If ``resource_version`` is an empty string.
         """
+        if resource_version is not None and not resource_version:
+            raise ValueError("resource_version must not be empty")
         delete_kwargs: dict[str, Any] = {}
         if resource_version is not None:
             delete_kwargs["body"] = client.V1DeleteOptions(

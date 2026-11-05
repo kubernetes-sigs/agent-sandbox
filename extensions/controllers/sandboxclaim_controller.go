@@ -1222,61 +1222,8 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 		}
 	}()
 
-	// Strategy helper to pick candidate using in-memory NodeSpread and FIFO tie-breaking
-	pickSmart := func(keys []queue.SandboxKey) (queue.SandboxKey, bool) {
-		namespaceKeys := keys
-
-		if len(namespaceKeys) == 0 {
-			return queue.SandboxKey{}, false
-		}
-		if len(namespaceKeys) == 1 {
-			return namespaceKeys[0], true
-		}
-
-		// Group candidates into scheduled vs unscheduled
-		var scheduledKeys []queue.SandboxKey
-		var unscheduledKeys []queue.SandboxKey
-		for _, key := range namespaceKeys {
-			if key.NodeName != "" {
-				scheduledKeys = append(scheduledKeys, key)
-			} else {
-				unscheduledKeys = append(unscheduledKeys, key)
-			}
-		}
-
-		// NodeSpread strategy: spread workloads by round-robinning nodes.
-		// We count the remaining warmpool sandboxes per node in the queue.
-		// The node with the most remaining sandboxes has been selected the least.
-		if len(scheduledKeys) > 0 {
-			nodeCounts := make(map[string]int)
-			for _, key := range scheduledKeys {
-				nodeCounts[key.NodeName]++
-			}
-
-			maxCount := 0
-			for _, count := range nodeCounts {
-				if count > maxCount {
-					maxCount = count
-				}
-			}
-
-			var bestCandidates []queue.SandboxKey
-			for _, key := range scheduledKeys {
-				if nodeCounts[key.NodeName] == maxCount {
-					bestCandidates = append(bestCandidates, key)
-				}
-			}
-
-			// Ties (equal counts) are resolved using oldest first (first in the slice)
-			return bestCandidates[0], true
-		}
-
-		// Fall back to oldest first (FIFO) for unscheduled keys
-		return unscheduledKeys[0], true
-	}
-
 	for {
-		adoptedKey, ok := r.WarmSandboxQueue.GetWithStrategy(namespacedWarmPoolName, pickSmart)
+		adoptedKey, ok := queue.GetWithNodeSpread(r.WarmSandboxQueue, namespacedWarmPoolName)
 		if !ok {
 			// No more candidates in our namespace. If we found an unready fallback sandbox, return it.
 			if fallbackSandbox != nil {
@@ -1301,8 +1248,7 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 
 		if err := verifySandboxCandidate(adopted, claim); err != nil {
 			logger.V(1).Info("sandbox candidate can't be adopted", "sandbox", adopted.Name, "warmPool", claim.Spec.WarmPoolRef.Name, "reason", err.Error())
-			// If it is a good sandbox in the wrong namespace, put it back.
-			// (Though pickSmart makes this impossible, we keep it for safety).
+			// Preserve a candidate rejected only for its namespace.
 			if errors.Is(err, ErrCrossNamespaceAdoption) {
 				skipped = append(skipped, adoptedKey)
 			}

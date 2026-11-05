@@ -34,7 +34,7 @@ from kubernetes import client as sync_client
 from kubernetes_asyncio import client as async_client
 from kubernetes_asyncio.client import ApiException
 
-from .claim_adoption import validate_claim_name, validate_claim_for_adoption
+from .claim_adoption import validate_claim_name, validate_claim_for_adoption, is_already_exists
 from .async_k8s_helper import AsyncK8sHelper
 from .async_connector import _DefaultSSLContext
 from .async_sandbox import AsyncSandbox
@@ -270,7 +270,7 @@ class AsyncSandboxClient(Generic[T]):
                 (``SandboxClaim.metadata.labels``).
             claim_name: Optional DNS-1123 Claim name. Explicit names remain
                 caller-owned and are excluded from automatic cleanup.
-            adopt_existing: On 409, attach to the existing named Claim after
+            adopt_existing: On AlreadyExists, attach to the existing named Claim after
                 checking its warm pool and that it is not terminating. Requires
                 claim_name. Creation options are not reapplied on adoption;
                 an existing shutdownTime is preserved.
@@ -335,7 +335,7 @@ class AsyncSandboxClient(Generic[T]):
             except ApiException as error:
                 if error.status == 409:
                     cleanup_generated = False
-                if not (adopt_existing and error.status == 409):
+                if not (adopt_existing and is_already_exists(error)):
                     raise
                 created_claim = await self.k8s_helper.get_sandbox_claim(claim_name, namespace)
             if not generated_name:

@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, patch
 import asyncio
 import contextlib
 import inspect
+import json
 
 import pytest
 import pytest_asyncio
@@ -45,6 +46,12 @@ def merge_patch(target, patch_body):
             target[key] = deepcopy(value)
 
 
+def conflict(reason):
+    error = ApiException(status=409)
+    error.body = json.dumps({'kind': 'Status', 'code': 409, 'reason': reason})
+    return error
+
+
 class MemoryApi:
     def __init__(self):
         self.objects = {}
@@ -56,7 +63,7 @@ class MemoryApi:
         name = body['metadata']['name']
         key = (plural, namespace, name)
         if key in self.objects:
-            raise ApiException(status=409)
+            raise conflict('AlreadyExists')
         obj = deepcopy(body)
         obj['metadata'].update(namespace=namespace, uid=f'uid-{name}', resourceVersion='10', generation=1)
         if plural == C.CLAIM_PLURAL_NAME:
@@ -237,7 +244,9 @@ async def sdk_client(request, environment):
             try:
                 return getattr(api, name)(**kwargs)
             except ApiException as error:
-                raise AsyncApiException(status=error.status) from error
+                converted = AsyncApiException(status=error.status)
+                converted.body = error.body
+                raise converted from error
         return call
 
     class AsyncWatch:
@@ -494,9 +503,21 @@ async def test_incompatible_claim_is_not_adopted_or_deleted(sdk_client, mismatch
 
 
 @pytest.mark.asyncio
+async def test_non_already_exists_conflict_is_not_adopted(sdk_client):
+    api, client, _ = sdk_client
+    with patch.object(api, 'create_namespaced_custom_object', side_effect=conflict('Conflict')):
+        with patch.object(api, 'get_namespaced_custom_object') as get:
+            with pytest.raises((ApiException, AsyncApiException)) as raised:
+                await invoke(client.create_sandbox, 'pool-a', claim_name='workflow-a', adopt_existing=True)
+    assert raised.value.status == 409
+    get.assert_not_called()
+    assert api.deletes == []
+
+
+@pytest.mark.asyncio
 async def test_disappearing_claim_after_conflict_is_retryable(sdk_client):
     api, client, _ = sdk_client
-    with patch.object(api, 'create_namespaced_custom_object', side_effect=ApiException(status=409)):
+    with patch.object(api, 'create_namespaced_custom_object', side_effect=conflict('AlreadyExists')):
         with pytest.raises(SandboxNotFoundError, match='retry'):
             await invoke(client.create_sandbox, 'pool-a', claim_name='workflow-a', adopt_existing=True)
     assert api.deletes == []

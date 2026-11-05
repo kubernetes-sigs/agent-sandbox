@@ -85,7 +85,7 @@ the underlying infrastructure.
   (``SandboxClaim.metadata.labels``).
 - `claim_name` - Optional DNS-1123 Claim name. Explicit names remain
   caller-owned and are excluded from automatic cleanup.
-- `adopt_existing` - On 409, attach to the existing named Claim after
+- `adopt_existing` - On AlreadyExists, attach to the existing named Claim after
   checking its warm pool and that it is not terminating. Requires
   claim_name. Creation options are not reapplied on adoption;
   an existing shutdownTime is preserved.

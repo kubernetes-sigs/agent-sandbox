@@ -13,6 +13,7 @@
 # limitations under the License.
 """Validation for explicitly named SandboxClaims without freezing mutable spec fields."""
 
+import json
 import re
 from typing import Any
 
@@ -38,6 +39,21 @@ def validate_claim_name(name: str) -> None:
             "(lowercase alphanumerics, '-' and '.', starting and ending with an "
             f"alphanumeric; max {_DNS1123_SUBDOMAIN_MAX_LENGTH} characters)."
         )
+
+
+def is_already_exists(error: Any) -> bool:
+    """Report whether an ApiException is a 409 with Status reason AlreadyExists.
+
+    A 409 can also be a plain write Conflict, such as a ResourceQuota update
+    race, where the claim was never created.
+    """
+    if error.status != 409:
+        return False
+    try:
+        body = json.loads(error.body)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(body, dict) and body.get("reason") == "AlreadyExists"
 
 
 def validate_claim_for_adoption(claim: dict[str, Any] | None, claim_name: str, warmpool: str) -> None:

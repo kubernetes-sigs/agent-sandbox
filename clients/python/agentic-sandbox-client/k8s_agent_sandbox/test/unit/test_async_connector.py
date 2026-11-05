@@ -40,6 +40,7 @@ from k8s_agent_sandbox.exceptions import (
 from k8s_agent_sandbox.models import (
     SandboxdInClusterConnectionConfig,
     SandboxdPodTunnelConnectionConfig,
+    SandboxdRouterTunnelConnectionConfig,
 )
 
 
@@ -403,6 +404,70 @@ class TestAsyncSandboxdConnector(unittest.IsolatedAsyncioTestCase):
         self.assertIs(strategy.port_forward_process, process)
         await strategy.close()
         self.assertIsNone(strategy.port_forward_process)
+
+
+class TestAsyncSandboxdRouterTunnel(unittest.IsolatedAsyncioTestCase):
+    @patch("k8s_agent_sandbox.async_connector.asyncio.create_subprocess_exec")
+    @patch.object(AsyncSandboxdPodTunnelStrategy, "_is_port_open", new_callable=AsyncMock, return_value=True)
+    @patch.object(AsyncSandboxdPodTunnelStrategy, "_get_free_port", side_effect=[18080, 18081])
+    async def test_shared_tunnel_reconnect_and_cleanup(self, free_port, is_open, spawn):
+        processes = [MagicMock(returncode=None), MagicMock(returncode=None)]
+        for process in processes:
+            process.wait = AsyncMock()
+        spawn.side_effect = processes
+        get_pod_name = AsyncMock(side_effect=AssertionError("must target the router"))
+        connector = AsyncSandboxConnector(
+            "sandbox", "agents",
+            SandboxdRouterTunnelConnectionConfig(router_namespace="routers", rest_port=8181, grpc_port=9191),
+            SimpleNamespace(injected_api_client=None), get_pod_name=get_pod_name,
+        )
+        try:
+            self.assertTrue(connector.is_sandboxd())
+            self.assertTrue(connector.should_inject_router_headers())
+            results = await asyncio.gather(connector.connect(), connector.connect())
+            self.assertEqual(results, ["http://127.0.0.1:18080"] * 2)
+            first_channel = await connector.grpc_channel()
+            self.assertIs(await connector.grpc_channel(), first_channel)
+            spawn.assert_awaited_once_with(
+                "kubectl", "port-forward", "svc/sandbox-router-svc", "18080:8080", "-n", "routers",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            self.assertEqual(connector.grpc_target, "127.0.0.1:18080")
+            processes[0].returncode = 1
+            self.assertEqual(await connector.connect(), "http://127.0.0.1:18081")
+            self.assertIsNot(await connector.grpc_channel(), first_channel)
+            self.assertEqual(connector.grpc_target, "127.0.0.1:18081")
+            get_pod_name.assert_not_awaited()
+        finally:
+            await connector.close()
+        processes[1].terminate.assert_called_once()
+        self.assertIsNone(connector.grpc_target)
+        self.assertIsNone(connector._sandboxd_strategy.port_forward_process)
+
+    @patch("k8s_agent_sandbox.async_connector.asyncio.create_subprocess_exec")
+    @patch.object(AsyncSandboxdPodTunnelStrategy, "_is_port_open", new_callable=AsyncMock)
+    async def test_cancelled_router_tunnel_is_cleaned_up(self, is_open, spawn):
+        process = MagicMock(returncode=None)
+        process.wait = AsyncMock()
+        spawn.return_value = process
+        is_open.side_effect = asyncio.CancelledError()
+        strategy = AsyncSandboxdPodTunnelStrategy(
+            "sandbox", "agents", SandboxdRouterTunnelConnectionConfig(),
+        )
+        with self.assertRaises(asyncio.CancelledError):
+            await strategy.connect()
+        process.terminate.assert_called_once()
+        self.assertIsNone(strategy.port_forward_process)
+        self.assertIsNone(strategy.grpc_target)
+
+    @patch("k8s_agent_sandbox.async_connector.asyncio.create_subprocess_exec")
+    async def test_router_start_failure_names_service_and_namespace(self, spawn):
+        spawn.side_effect = FileNotFoundError("kubectl not found")
+        strategy = AsyncSandboxdPodTunnelStrategy(
+            "sandbox", "agents", SandboxdRouterTunnelConnectionConfig(router_namespace="routers"),
+        )
+        with self.assertRaisesRegex(SandboxPortForwardError, "routers/svc/sandbox-router-svc"):
+            await strategy.connect()
 
 
 class TestAsyncTunnelTargetsInjectedApiClient(unittest.IsolatedAsyncioTestCase):

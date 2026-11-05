@@ -17,6 +17,60 @@ import sys
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", (False, True))
+@pytest.mark.parametrize("unavailable", (False, True))
+async def test_watch_invalidates_unavailable_transport(asynchronous, unavailable):
+    grpc = pytest.importorskip("grpc")
+    from k8s_agent_sandbox.watcher.async_file_watcher import AsyncFileWatcher
+    from k8s_agent_sandbox.watcher.file_watcher import FileWatcher
+
+    code = grpc.StatusCode.UNAVAILABLE if unavailable else grpc.StatusCode.PERMISSION_DENIED
+
+    class WatchError(grpc.RpcError):
+        def code(self):
+            return code
+
+        def details(self):
+            return "watch failed"
+
+    connector = MagicMock()
+    channel = MagicMock()
+    if asynchronous:
+        connector.connect = AsyncMock()
+        connector.grpc_channel = AsyncMock(return_value=channel)
+        connector.invalidate_sandboxd_transport = AsyncMock()
+    else:
+        connector.grpc_channel.return_value = channel
+    watcher_type = AsyncFileWatcher if asynchronous else FileWatcher
+    watcher = watcher_type(connector, MagicMock(), "test")
+    stub = MagicMock()
+    stream = stub.WatchDir.return_value
+    stream.__iter__.side_effect = WatchError()
+    stream.__aiter__.side_effect = WatchError()
+
+    with patch(
+        "k8s_agent_sandbox.watcher._watcher_stubs.watcher_pb2_grpc.FileWatcherServiceStub",
+        return_value=stub,
+    ):
+        with pytest.raises(RuntimeError, match="watch failed"):
+            if asynchronous:
+                async for _ in watcher.watch("."):
+                    pass
+            else:
+                list(watcher.watch("."))
+
+    if unavailable:
+        if asynchronous:
+            connector.invalidate_sandboxd_transport.assert_awaited_once_with(channel)
+        else:
+            connector.invalidate_sandboxd_transport.assert_called_once_with(channel)
+    else:
+        connector.invalidate_sandboxd_transport.assert_not_called()
+
 
 class TestFileWatcher(unittest.TestCase):
     """Tests for the sync FileWatcher."""

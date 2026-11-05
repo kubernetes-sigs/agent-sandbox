@@ -334,7 +334,8 @@ pip install k8s-agent-sandbox[async]
 The async client requires an explicit connection config — `SandboxLocalTunnelConnectionConfig`
 is not supported because it relies on a synchronous `kubectl port-forward` subprocess. Use
 `SandboxGatewayConnectionConfig`, `SandboxDirectConnectionConfig`,
-`SandboxInClusterConnectionConfig`, `SandboxdPodTunnelConnectionConfig`, or
+`SandboxInClusterConnectionConfig`, `SandboxdPodTunnelConnectionConfig`,
+`SandboxdRouterTunnelConnectionConfig`, or
 `SandboxdInClusterConnectionConfig`. For the portable
 `sandboxd` runtime, install
 both optional extras: `pip install 'k8s-agent-sandbox[async,grpc]'`.
@@ -391,8 +392,9 @@ both forwards without blocking the event loop.
 
 This doesn't work on Kata or gVisor: their workload runs in a separate kernel, so the
 pod's host-side network namespace has nothing listening for the port-forward to reach.
-Use `SandboxdInClusterConnectionConfig` for those, with the client running inside the
-cluster (the Sandbox NetworkPolicy must admit the client; see below).
+Use `SandboxdRouterTunnelConnectionConfig` for those from outside the cluster.
+Use `SandboxdInClusterConnectionConfig` when the client runs inside the cluster
+(the Sandbox NetworkPolicy must admit the client; see below).
 
 ```python
 import asyncio
@@ -532,7 +534,52 @@ repr and validation error messages. Configure the matching token on sandboxd
 separately. It is independent of Kubernetes credentials and does not add TLS;
 in-cluster traffic remains plaintext and requires appropriate network isolation.
 
-### 9. Labels and Pod Metadata
+### 9. sandboxd Router Tunnel Mode
+
+Use `SandboxdRouterTunnelConnectionConfig` to reach sandboxd through
+`sandbox-router-svc`. This supports Kata and gVisor Pods that cannot receive a
+direct Pod port-forward. Install `k8s-agent-sandbox[grpc]` for the synchronous
+client or `k8s-agent-sandbox[async,grpc]` for the asynchronous client.
+
+The SDK opens one `kubectl port-forward` to the router's port 8080. REST requests
+and gRPC calls share that tunnel. The SDK sets `X-Sandbox-ID`,
+`X-Sandbox-Namespace`, and `X-Sandbox-Port` as HTTP headers or lowercase gRPC
+metadata. `rest_port` and `grpc_port` select the sandboxd listeners, which default
+to 8080 and 9090. gRPC requires sandbox-router v1.0.9 or later. The client omits
+`X-Sandbox-Pod-IP` unless `pod_ip_routing` is true, so the router selects the
+current Pod from its cache or DNS. Leave the default for `scoped-token`, which
+rejects that header. Set `pod_ip_routing=True` only when the router cache is
+disabled and the Sandbox has no Service.
+
+```python
+from k8s_agent_sandbox import SandboxClient, SandboxdRouterTunnelConnectionConfig
+
+config = SandboxdRouterTunnelConnectionConfig(
+    router_namespace="agent-sandbox-system",
+)
+with SandboxClient(connection_config=config) as client:
+    sandbox = client.create_sandbox(warmpool="sandboxd-warmpool", namespace="default")
+    sandbox.files.write("hello.txt", b"hello through the router\n")
+    print(sandbox.commands.run("cat hello.txt").stdout)
+```
+
+`AsyncSandboxClient` accepts the same config and manages the tunnel without
+blocking the event loop. `router_namespace` identifies the router's namespace,
+independently of the Sandbox namespace. The router must be able to reach the
+Sandbox on both sandboxd ports. The Kubernetes credentials must permit
+port-forwarding to the router Pod through its Service.
+
+This mode is opt-in. `SandboxdPodTunnelConnectionConfig` continues to connect
+directly to the sandbox Pod. The router caps REST request timeouts at its proxy
+timeout. When the router is not in `allow-all` mode, set `router_auth_token`.
+The SDK sends only that token as `Authorization` on REST requests and gRPC calls.
+Use a Kubernetes bearer token for `tokenreview`, or a scoped token for
+`scoped-token`. The SDK never sends `auth_token` in this mode. The router strips
+`Authorization` before forwarding, so this mode does not support token-protected
+sandboxd until credential pass-through is defined
+([#2102](https://github.com/kubernetes-sigs/agent-sandbox/issues/2102)).
+
+### 10. Labels and Pod Metadata
 
 `create_sandbox` lets you attach metadata at two different levels:
 
@@ -567,7 +614,7 @@ Behavioral notes:
   domain allow-list and system-label restrictions are enforced server-side and
   are not replicated client-side.
 
-### 10. Deterministic, Retry-Safe Claim Creation
+### 11. Deterministic, Retry-Safe Claim Creation
 
 By default, `create_sandbox` continues to generate a new random
 `SandboxClaim` name for every call. For a workflow that may retry after an
@@ -615,7 +662,7 @@ response provided a UID; without one it retains the existing name-based delete.
 A `409` does not trigger rollback of the conflicting Claim. This feature does
 not add thread-safety guarantees or UID tracking to returned handles.
 
-### 11. Custom Volume Claim Templates
+### 12. Custom Volume Claim Templates
 
 You can dynamically request persistent volumes to be attached to your Sandbox Pod by specifying `volume_claim_templates`. This allows the sandbox to mount custom PersistentVolumeClaims (PVCs).
 
@@ -643,7 +690,7 @@ sandbox = client.create_sandbox(
 
 The volume claim templates are validated against the warmpool template's policy and rules (e.g., whether custom volume claims are allowed or if overrides are permitted).
 
-### 12. Startup Latency: How the SDK Waits for Readiness
+### 13. Startup Latency: How the SDK Waits for Readiness
 
 `create_sandbox()` is fully **watch-based** — it never polls the Kubernetes
 API on an interval, so there is no poll-interval latency added on top of the
@@ -673,11 +720,11 @@ Latency guidance:
   for the `kubectl port-forward` startup; the SDK probes the local port every
   50ms while it comes up. Gateway/in-cluster modes do not have this step.
 
-### 13. Targeting a Specific Cluster or Context
+### 14. Targeting a Specific Cluster or Context
 
 By default, `SandboxClient` and `AsyncSandboxClient` load their Kubernetes credentials via an in-cluster config if running inside a pod, otherwise `KUBECONFIG`, falling back to `~/.kube/config`'s `current-context` if unset. To target a different cluster/context instead, pass a pre-configured `api_client`.
 
-> **Note:** The `kubectl` calls in the local-tunnel and sandboxd pod-tunnel modes target the same cluster as `api_client`. The SDK gives `kubectl` a short-lived kubeconfig built from the client's host, CA, client certificate and bearer token. Basic auth is not carried over.
+> **Note:** The `kubectl` calls in the local-tunnel and sandboxd Pod/router tunnel modes target the same cluster as `api_client`. The SDK gives `kubectl` a short-lived kubeconfig built from the client's host, CA, client certificate and bearer token. Basic auth is not carried over.
 
 **A kubeconfig file outside the default location** (e.g. a `pytest-kind` cluster):
 
@@ -714,7 +761,7 @@ The async client takes the same parameter with a `kubernetes_asyncio.client.ApiC
 
 An injected `api_client` is caller-owned: the SDK never closes it, so closing it is up to you.
 
-### 14. Logging
+### 15. Logging
 
 The SDK logs through the `k8s_agent_sandbox` logger hierarchy and does not configure logging itself. To see its progress messages, configure logging in your application:
 

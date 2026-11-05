@@ -35,6 +35,7 @@ from k8s_agent_sandbox.models import (
     FileEntry,
     SandboxdInClusterConnectionConfig,
     SandboxdPodTunnelConnectionConfig,
+    SandboxdRouterTunnelConnectionConfig,
 )
 
 
@@ -68,6 +69,28 @@ class TestFileEntryParsing(unittest.TestCase):
 
 
 class TestSandboxdConfig(unittest.TestCase):
+    def test_router_config_defaults(self):
+        from k8s_agent_sandbox import SandboxdRouterTunnelConnectionConfig as PublicRouterConfig
+
+        self.assertIs(PublicRouterConfig, SandboxdRouterTunnelConnectionConfig)
+        config = SandboxdRouterTunnelConnectionConfig()
+        self.assertEqual((config.rest_port, config.grpc_port), (8080, 9090))
+        self.assertEqual(config.router_namespace, "agent-sandbox-system")
+        self.assertEqual(config.port_forward_ready_timeout, 30)
+        self.assertIsNone(config.router_auth_token)
+        self.assertFalse(config.pod_ip_routing)
+
+    def test_router_config_validation(self):
+        for values in (
+            {"rest_port": 0}, {"grpc_port": 65536},
+            {"rest_port": 9090}, {"port_forward_ready_timeout": 0},
+            {"router_namespace": ""}, {"router_namespace": "Invalid"},
+            {"router_namespace": "a" * 64}, {"router_namespace": "ns\n"},
+            {"router_auth_token": ""}, {"router_auth_token": "has space"},
+        ):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                SandboxdRouterTunnelConnectionConfig(**values)
+
     def test_defaults(self):
         cfg = SandboxdPodTunnelConnectionConfig()
         self.assertEqual(cfg.rest_port, 8080)

@@ -133,6 +133,10 @@ def _iter_multipart_body(
 
 def _sandboxd_files_endpoint(path: str) -> str:
     """Return the sandboxd REST path for a sandbox-relative file path."""
+    # HTTP clients and proxies may decode %2E before the server routes it.
+    # Use the root endpoint directly to avoid a dot-segment redirect.
+    if path == ".":
+        return "v1/files/"
     encoded = []
     for segment in path.split("/"):
         if segment == ".":

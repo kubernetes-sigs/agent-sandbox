@@ -1331,7 +1331,7 @@ func TestSandboxClaimRetainCleanupLookup(t *testing.T) {
 				},
 			}
 			if tc.terminating {
-				sandbox.DeletionTimestamp = ptr.To(metav1.Now())
+				sandbox.DeletionTimestamp = new(metav1.Now())
 				sandbox.Finalizers = []string{"test.agents.x-k8s.io/cleanup"}
 			}
 			builder := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(claim)

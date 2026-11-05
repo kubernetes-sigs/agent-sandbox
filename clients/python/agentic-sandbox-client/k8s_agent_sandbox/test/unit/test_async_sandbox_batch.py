@@ -163,6 +163,7 @@ class BaseAsyncBatchClientTest(unittest.IsolatedAsyncioTestCase):
         config = SandboxDirectConnectionConfig(api_url="http://test-router:8080")
         self.client = AsyncSandboxClient(connection_config=config, cleanup=False)
         self.mock_k8s_helper = self.client.k8s_helper
+        self.mock_k8s_helper.count_live_sandbox_claims = AsyncMock(return_value=0)
         self.mock_sandbox_class = MagicMock()
         self.client.sandbox_class = self.mock_sandbox_class
 
@@ -1479,6 +1480,7 @@ class _Cluster:
         h.get_sandbox_template = AsyncMock(return_value={"metadata": {"name": "tmpl"}})
         h.create_batch_lease = AsyncMock(return_value=_lease())
         h.list_sandbox_claim_objects = AsyncMock(return_value=([], "7"))
+        h.count_live_sandbox_claims = AsyncMock(return_value=0)
         h.api_pool_size = AsyncMock(return_value=None)
         h.watch_sandbox_claims = MagicMock(side_effect=self._watch)
         h.create_sandbox_claim = AsyncMock(side_effect=self._create)
@@ -2256,10 +2258,6 @@ class TestRelease(BaseClaimBatchTest):
     async def test_release_stops_creates_then_deletes_claims_then_the_lease(self):
         batch = await self.claim([BatchGroup(warmpool="pool-a", size=20)], create_rps=10)
         await _wait_until(lambda: len(self.cluster.created) >= 1)
-        self.cluster.helper.list_sandbox_claim_objects.return_value = (
-            [{"metadata": {"name": "b1-0", "deletionTimestamp": "2026-01-01T00:00:00Z"}}],
-            "9",
-        )
         await batch.release()
         await asyncio.sleep(0.3)  # Several pacing slots, in case a creator is still running.
         calls = self.cluster.calls
@@ -2299,29 +2297,28 @@ class TestRelease(BaseClaimBatchTest):
     async def test_release_retries_rounds_until_no_progress(self, _):
         helper = self.cluster.helper
 
-        def live(n):
-            return ([_claim(f"b1-{i}") for i in range(n)], "9")
-
         unavailable = k8s_client.ApiException(status=503)
         cases = {
             "503 then success": (
                 {"delete_sandbox_claims_by_label": [unavailable, None]},
-                {"list_sandbox_claim_objects": [live(1), live(0)]},
+                {"count_live_sandbox_claims": [1, 0]},
                 None,
             ),
             "403 raises at once": ({"delete_sandbox_claims_by_label": [k8s_client.ApiException(status=403)]}, {}, k8s_client.ApiException),
-            "no progress raises BatchError": ({}, {"list_sandbox_claim_objects": [live(2)] * 4}, BatchError),
+            "no progress raises BatchError": ({}, {"count_live_sandbox_claims": [2] * 4}, BatchError),
             "no progress raises the last transient error": (
                 {"delete_sandbox_claims_by_label": [unavailable] * 4},
-                {"list_sandbox_claim_objects": [unavailable] * 4},
+                {"count_live_sandbox_claims": [unavailable] * 4},
                 k8s_client.ApiException,
             ),
-            "progress resets the idle rounds": ({}, {"list_sandbox_claim_objects": [live(5), live(5), live(4), live(4), live(4), live(0)]}, None),
+            "progress resets the idle rounds": ({}, {"count_live_sandbox_claims": [5, 5, 4, 4, 4, 0]}, None),
         }
-        for name, (delete_effects, list_effects, error) in cases.items():
+        for name, (delete_effects, count_effects, error) in cases.items():
             with self.subTest(name):
                 helper.delete_sandbox_claims_by_label = AsyncMock(side_effect=delete_effects.get("delete_sandbox_claims_by_label"))
-                helper.list_sandbox_claim_objects = AsyncMock(side_effect=list_effects.get("list_sandbox_claim_objects", [live(0)] * 4))
+                helper.count_live_sandbox_claims = AsyncMock(
+                    side_effect=count_effects.get("count_live_sandbox_claims", [0] * 4)
+                )
                 helper.delete_batch_lease = AsyncMock()
                 handle = _make_handle(self.client)
                 if error is None:
@@ -2340,7 +2337,7 @@ class TestRelease(BaseClaimBatchTest):
         helper = self.cluster.helper
         self.assertEqual(helper.create_sandbox_claim.call_args.kwargs["_request_timeout"], 30)
         self.assertEqual(helper.delete_sandbox_claims_by_label.call_args.kwargs["_request_timeout"], 90)
-        self.assertEqual(helper.list_sandbox_claim_objects.call_args.kwargs["_request_timeout"], 90)
+        self.assertEqual(helper.count_live_sandbox_claims.call_args.kwargs["_request_timeout"], 90)
         self.assertEqual(helper.delete_batch_lease.call_args.kwargs["_request_timeout"], 30)
 
     async def test_detach_stops_creates_and_deletes_nothing(self):
@@ -2369,7 +2366,7 @@ class TestRelease(BaseClaimBatchTest):
                 helper.reset_mock()
                 self.cluster.calls.clear()
                 helper.read_batch_lease.side_effect = reads
-                helper.list_sandbox_claim_objects.side_effect = [([_claim("b1-0")], "9"), ([], "9")]
+                helper.count_live_sandbox_claims.side_effect = [1, 0]
                 handle = _make_handle(self.client)
                 self.client._active_batches[("default", "b1")] = handle
 
@@ -2455,7 +2452,7 @@ class TestRelease(BaseClaimBatchTest):
 
                 helper.replace_batch_lease.side_effect = replace
                 # The second round's take fails, so only the third round deletes the Lease.
-                helper.list_sandbox_claim_objects.side_effect = [([_claim("b1-0")], "9"), ([], "9"), ([], "9")]
+                helper.count_live_sandbox_claims.side_effect = [1, 0, 0]
                 await handle.release()
                 self.assertEqual(
                     self.cluster.calls, ["take", "deletecollection", "take", "take", "deletecollection", "delete_lease"]
@@ -2946,7 +2943,7 @@ class TestReleaseMembers(BaseClaimBatchTest):
                     helper.read_batch_lease.side_effect = (
                         lambda *a, **k: _lease(holder_identity=handle._holder_identity)
                     )
-                    helper.list_sandbox_claim_objects.return_value = ([], "9")
+                    helper.count_live_sandbox_claims.return_value = 0
                     helper.close = AsyncMock(side_effect=lambda: calls.append("close_helper"))
 
                     async def block_delete(*args, **kwargs):
@@ -2982,8 +2979,12 @@ class TestReleaseMembers(BaseClaimBatchTest):
                         with self.assertRaises(BatchError):
                             await release_task
                         await lifecycle_task
-                        list_selectors = [c.args[1] for c in helper.list_sandbox_claim_objects.call_args_list]
-                        self.assertNotIn(batch_utils.group_label_selector("b1", "pool-a"), list_selectors)
+                        count_selectors = [
+                            c.args[1] for c in helper.count_live_sandbox_claims.call_args_list
+                        ]
+                        self.assertNotIn(
+                            batch_utils.group_label_selector("b1", "pool-a"), count_selectors
+                        )
                     else:
                         await asyncio.gather(release_task, lifecycle_task)
                     self.assertEqual(calls[0], "delete")
@@ -3057,20 +3058,22 @@ class TestReleaseMembers(BaseClaimBatchTest):
             helper.delete_sandbox_claim.assert_awaited_once()
             self.assertTrue(handle._lease_released)
 
-        with self.subTest("detach stops release_group before list and sleep and does not wait for sleep"):
+        with self.subTest(
+            "detach stops release_group before count and sleep and does not wait for sleep"
+        ):
             real_sleep = asyncio.sleep
 
-            # Detach during deletecollection skips list and retry sleep.
+            # Detach during deletecollection skips count and retry sleep.
             helper.reset_mock()
             helper.delete_sandbox_claims_by_label.side_effect = None
-            helper.list_sandbox_claim_objects.side_effect = None
+            helper.count_live_sandbox_claims.side_effect = None
             in_delete, unblock_delete = asyncio.Event(), asyncio.Event()
             handle = _make_handle(self.client)
             helper.read_batch_lease.side_effect = lambda *a, **k: _lease(holder_identity=handle._holder_identity)
             helper.replace_batch_lease.side_effect = (
                 lambda *a, **k: _lease(holder_identity=a[2].spec.holder_identity, resource_version="11")
             )
-            helper.list_sandbox_claim_objects.return_value = ([_claim("b1-0")], "9")
+            helper.count_live_sandbox_claims.return_value = 1
 
             async def block_deletecollection(*args, **kwargs):
                 in_delete.set()
@@ -3089,47 +3092,47 @@ class TestReleaseMembers(BaseClaimBatchTest):
                     await group_task
                 await detach_task
             helper.delete_sandbox_claims_by_label.assert_awaited_once()
-            helper.list_sandbox_claim_objects.assert_not_awaited()
+            helper.count_live_sandbox_claims.assert_not_awaited()
             self.assertEqual(retry_sleeps, [])
             self.assertTrue(handle._lease_released)
 
-            # Detach during list waits for list to finish and skips retry sleep.
+            # Detach during count waits for count to finish and skips retry sleep.
             helper.reset_mock()
             helper.delete_sandbox_claims_by_label.side_effect = None
-            in_list, unblock_list = asyncio.Event(), asyncio.Event()
+            in_count, unblock_count = asyncio.Event(), asyncio.Event()
             handle = _make_handle(self.client)
             helper.read_batch_lease.side_effect = lambda *a, **k: _lease(holder_identity=handle._holder_identity)
             helper.replace_batch_lease.side_effect = (
                 lambda *a, **k: _lease(holder_identity=a[2].spec.holder_identity, resource_version="11")
             )
 
-            async def block_list(*args, **kwargs):
-                in_list.set()
-                await asyncio.wait_for(unblock_list.wait(), 5)
-                return ([_claim("b1-0")], "9")
+            async def block_count(*args, **kwargs):
+                in_count.set()
+                await asyncio.wait_for(unblock_count.wait(), 5)
+                return 1
 
-            helper.list_sandbox_claim_objects.side_effect = block_list
+            helper.count_live_sandbox_claims.side_effect = block_count
             retry_sleeps = []
             with patch("k8s_agent_sandbox.batch_utils.retry_delay", return_value=5), \
                  patch("k8s_agent_sandbox.async_sandbox_batch.asyncio.sleep", side_effect=track_sleep):
                 group_task = asyncio.create_task(handle.release_group("pool-a"))
-                await asyncio.wait_for(in_list.wait(), 5)
+                await asyncio.wait_for(in_count.wait(), 5)
                 detach_task = asyncio.create_task(handle.detach())
                 await _wait_until(lambda: handle._detached)
                 helper.replace_batch_lease.assert_not_awaited()
-                unblock_list.set()
+                unblock_count.set()
                 with self.assertRaises(BatchError):
                     await group_task
                 await detach_task
             helper.delete_sandbox_claims_by_label.assert_awaited_once()
-            helper.list_sandbox_claim_objects.assert_awaited_once()
+            helper.count_live_sandbox_claims.assert_awaited_once()
             self.assertEqual(retry_sleeps, [])
             self.assertTrue(handle._lease_released)
 
             # Detach during retry sleep finishes without waiting for the sleep, and Round 2 does not run.
             helper.reset_mock()
-            helper.list_sandbox_claim_objects.side_effect = None
-            helper.list_sandbox_claim_objects.return_value = ([_claim("b1-0")], "9")
+            helper.count_live_sandbox_claims.side_effect = None
+            helper.count_live_sandbox_claims.return_value = 1
             in_sleep, unblock_sleep = asyncio.Event(), asyncio.Event()
             handle = _make_handle(self.client)
             helper.read_batch_lease.side_effect = lambda *a, **k: _lease(holder_identity=handle._holder_identity)
@@ -3159,7 +3162,7 @@ class TestReleaseMembers(BaseClaimBatchTest):
         with self.subTest("cancelled detach leaves release clearing detach_grace before waiting"):
             helper.reset_mock()
             helper.delete_sandbox_claims_by_label.side_effect = None
-            helper.list_sandbox_claim_objects.side_effect = None
+            helper.count_live_sandbox_claims.side_effect = None
             in_delete, unblock = asyncio.Event(), asyncio.Event()
             handle = _make_handle(self.client)
             handle._state.upsert_claim(_claim("b1-0", conditions=_NOT_READY, annotations=_FILL))
@@ -3278,8 +3281,8 @@ class TestReleaseMembers(BaseClaimBatchTest):
         with self.subTest("err set during release_group deletecollection"):
             for fail in (False, True):
                 helper.reset_mock()
-                helper.list_sandbox_claim_objects.side_effect = None
-                helper.list_sandbox_claim_objects.return_value = ([_claim("b1-0")], "9")
+                helper.count_live_sandbox_claims.side_effect = None
+                helper.count_live_sandbox_claims.return_value = 1
                 handle = handle_with_a_pending_member()
 
                 async def stop_during_deletecollection(*args, **kwargs):
@@ -3294,26 +3297,26 @@ class TestReleaseMembers(BaseClaimBatchTest):
                         await handle.release_group("pool-a")
                 self.assertIs(cm.exception.__cause__, cause)
                 helper.delete_sandbox_claims_by_label.assert_awaited_once()
-                helper.list_sandbox_claim_objects.assert_not_awaited()
+                helper.count_live_sandbox_claims.assert_not_awaited()
                 sleep_mock.assert_not_awaited()
 
-        with self.subTest("err set during release_group list"):
+        with self.subTest("err set during release_group count"):
             helper.reset_mock()
             helper.delete_sandbox_claims_by_label.side_effect = None
             handle = handle_with_a_pending_member()
 
-            async def stop_during_list(*args, **kwargs):
+            async def stop_during_count(*args, **kwargs):
                 handle._state.note_error(cause)
-                return ([_claim("b1-0")], "9")
+                return 1
 
-            helper.list_sandbox_claim_objects.side_effect = stop_during_list
+            helper.count_live_sandbox_claims.side_effect = stop_during_count
             sleep_mock = AsyncMock()
             with patch("k8s_agent_sandbox.async_sandbox_batch.asyncio.sleep", sleep_mock):
                 with self.assertRaises(BatchError) as cm:
                     await handle.release_group("pool-a")
             self.assertIs(cm.exception.__cause__, cause)
             helper.delete_sandbox_claims_by_label.assert_awaited_once()
-            helper.list_sandbox_claim_objects.assert_awaited_once()
+            helper.count_live_sandbox_claims.assert_awaited_once()
             sleep_mock.assert_not_awaited()
 
 

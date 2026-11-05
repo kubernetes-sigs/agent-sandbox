@@ -16,6 +16,7 @@ import logging
 import os
 import tempfile
 import unittest
+import weakref
 from unittest.mock import MagicMock, patch
 
 from kubernetes import client
@@ -1171,25 +1172,135 @@ class TestK8sHelperPoolSize(unittest.TestCase):
 @patch("k8s_agent_sandbox.k8s_helper.config")
 class TestK8sHelperBatchMethods(unittest.TestCase):
 
-    def test_list_sandbox_claim_objects_returns_items_and_resource_version(
+    def test_list_sandbox_claim_objects_pages_and_returns_the_first_pages_resource_version(
         self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
     ):
         mock_api = MagicMock()
         mock_api_cls.return_value = mock_api
-        mock_api.list_namespaced_custom_object.return_value = {
-            "items": [{"metadata": {"name": "b1-0"}}],
-            "metadata": {"resourceVersion": "42"},
-        }
+        mock_api.list_namespaced_custom_object.side_effect = [
+            {
+                "items": [{"metadata": {"name": "b1-0", "managedFields": [{"manager": "sdk"}]}, "spec": {}}],
+                "metadata": {"resourceVersion": "42", "continue": "t1"},
+            },
+            # A page may be empty while more follow.
+            {"items": [], "metadata": {"resourceVersion": "43", "continue": "t2"}},
+            {
+                "items": [{"metadata": {"name": "b1-1", "managedFields": [{"manager": "sdk"}]}, "spec": {}}],
+                "metadata": {"resourceVersion": "44"},
+            },
+        ]
 
         helper = K8sHelper()
         items, rv = helper.list_sandbox_claim_objects("default", "agents.x-k8s.io/batch-id=b1")
 
-        self.assertEqual(items, [{"metadata": {"name": "b1-0"}}])
-        self.assertEqual(rv, "42")
         self.assertEqual(
-            mock_api.list_namespaced_custom_object.call_args.kwargs["label_selector"],
-            "agents.x-k8s.io/batch-id=b1",
+            items,
+            [{"metadata": {"name": "b1-0"}, "spec": {}}, {"metadata": {"name": "b1-1"}, "spec": {}}],
         )
+        self.assertEqual(rv, "42")
+        calls = mock_api.list_namespaced_custom_object.call_args_list
+        self.assertEqual([c.kwargs["_continue"] for c in calls], [None, "t1", "t2"])
+        for c in calls:
+            self.assertEqual(c.kwargs["limit"], 500)
+            self.assertEqual(c.kwargs["label_selector"], "agents.x-k8s.io/batch-id=b1")
+
+    def test_list_sandbox_claim_objects_restarts_once_when_a_continue_token_expires(
+        self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
+    ):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+        expired = client.ApiException(status=410)
+
+        def page(name, rv, token=None):
+            return {"items": [{"metadata": {"name": name}}], "metadata": {"resourceVersion": rv, "continue": token}}
+
+        helper = K8sHelper()
+        mock_api.list_namespaced_custom_object.side_effect = [
+            page("old-0", "42", "t1"), expired, page("b1-0", "50", "t2"), page("b1-1", "51"),
+        ]
+        items, rv = helper.list_sandbox_claim_objects("default", "agents.x-k8s.io/batch-id=b1")
+        self.assertEqual([item["metadata"]["name"] for item in items], ["b1-0", "b1-1"])
+        self.assertEqual(rv, "50")
+        self.assertEqual(
+            [c.kwargs["_continue"] for c in mock_api.list_namespaced_custom_object.call_args_list],
+            [None, "t1", None, "t2"],
+        )
+
+        for label, side_effect, expected_status in (
+            ("second 410 after restart", [page("old-0", "42", "t1"), expired, page("b1-0", "50", "t2"), expired], 410),
+            ("410 on first page", [expired], 410),
+            ("non-410 mid-pagination", [page("old-0", "42", "t1"), client.ApiException(status=500)], 500),
+        ):
+            with self.subTest(label):
+                mock_api.list_namespaced_custom_object.side_effect = side_effect
+                with self.assertRaises(client.ApiException) as raised:
+                    helper.list_sandbox_claim_objects("default", "agents.x-k8s.io/batch-id=b1")
+                self.assertEqual(raised.exception.status, expected_status)
+
+    def test_count_live_sandbox_claims_counts_claims_not_being_deleted_across_pages(
+        self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
+    ):
+        class _Page(dict):
+            pass
+
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+        live = {"metadata": {"name": "live"}}
+        deleting = {"metadata": {"name": "deleting", "deletionTimestamp": "2026-01-01T00:00:00Z"}}
+        pages = [
+            # A restart after an expired continue token drops the earlier pages from the count.
+            _Page({"items": [live, live], "metadata": {"continue": "t0"}}),
+            client.ApiException(status=410),
+            _Page({"items": [live, deleting], "metadata": {"continue": "t1"}}),
+            _Page({"items": [deleting, live, live], "metadata": {}}),
+        ]
+        prev_page_ref = None
+
+        def next_page(**_):
+            nonlocal prev_page_ref
+            if prev_page_ref is not None:
+                self.assertIsNone(prev_page_ref())
+            item = pages.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            prev_page_ref = weakref.ref(item)
+            return item
+
+        mock_api.list_namespaced_custom_object.side_effect = next_page
+
+        helper = K8sHelper()
+
+        self.assertEqual(helper.count_live_sandbox_claims("default", "agents.x-k8s.io/batch-id=b1"), 3)
+
+    def test_delete_sandbox_claims_by_label_drains_the_response_unparsed_and_releases_it(
+        self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
+    ):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+        delete = mock_api.delete_collection_namespaced_custom_object
+        response = delete.return_value
+        response.closed = True
+        chunks = iter([b'{"items": [', b"]}"])
+        response.stream.return_value = chunks
+        helper = K8sHelper()
+
+        helper.delete_sandbox_claims_by_label("default", "agents.x-k8s.io/batch-id=b1")
+
+        self.assertIs(delete.call_args.kwargs["_preload_content"], False)
+        response.stream.assert_called_once_with(decode_content=False)
+        self.assertEqual(list(chunks), [])
+        response.close.assert_not_called()
+        response.release_conn.assert_called_once()
+
+        response.reset_mock()
+        response.closed = False
+        cleanup_order: list[str] = []
+        response.close.side_effect = lambda: cleanup_order.append("close")
+        response.release_conn.side_effect = lambda: cleanup_order.append("release_conn")
+        response.stream.side_effect = urllib3.exceptions.ProtocolError("connection broken")
+        with self.assertRaises(urllib3.exceptions.ProtocolError):
+            helper.delete_sandbox_claims_by_label("default", "agents.x-k8s.io/batch-id=b1")
+        self.assertEqual(cleanup_order, ["close", "release_conn"])
 
     @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
     def test_watch_sandbox_claims_yields_events(
@@ -1348,6 +1459,10 @@ class TestK8sHelperBatchMethods(unittest.TestCase):
                 "b1-0", "pool-a", "default", log_level=logging.DEBUG, _request_timeout=30),
              mock_api.create_namespaced_custom_object, {"plural": "sandboxclaims"}),
             ("list_sandbox_claim_objects", lambda: helper.list_sandbox_claim_objects(
+                "default", selector, _request_timeout=30),
+             mock_api.list_namespaced_custom_object,
+             {"plural": "sandboxclaims", "label_selector": selector}),
+            ("count_live_sandbox_claims", lambda: helper.count_live_sandbox_claims(
                 "default", selector, _request_timeout=30),
              mock_api.list_namespaced_custom_object,
              {"plural": "sandboxclaims", "label_selector": selector}),

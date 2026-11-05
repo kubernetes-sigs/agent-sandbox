@@ -20,6 +20,9 @@ GATEWAY_PLURAL = "gateways"
 CLAIM_API_GROUP = "extensions.agents.x-k8s.io"
 CLAIM_API_VERSION = "v1beta1"
 CLAIM_PLURAL_NAME = "sandboxclaims"
+# List claims in pages of this size, the page size client-go's pager uses, so no single
+# response carries a whole large batch.
+CLAIM_LIST_PAGE_SIZE = 500
 WARMPOOL_PLURAL_NAME = "sandboxwarmpools"
 TEMPLATE_PLURAL_NAME = "sandboxtemplates"
 

@@ -2072,15 +2072,14 @@ async def _delete_claims_in_rounds(
                 raise
             last_error = e
 
-        live: list[dict[str, Any]] | None = None
+        live: int | None = None
         try:
             # A consistent read (no resourceVersion), so a lagging watch cache can't report
             # that no claims are left too early.
             async with guard():
-                items, _ = await helper.list_sandbox_claim_objects(
+                live = await helper.count_live_sandbox_claims(
                     namespace, label_selector, _request_timeout=collection_timeout
                 )
-            live = [c for c in items if not (c.get("metadata") or {}).get("deletionTimestamp")]
         except Exception as e:
             if not _is_transient_error(e):
                 raise
@@ -2088,7 +2087,7 @@ async def _delete_claims_in_rounds(
 
         # Only a round whose hold succeeded can finish. After a failed hold the Lease may still exist,
         # and this round has no resourceVersion to delete it at.
-        if live == [] and held:
+        if live == 0 and held:
             try:
                 if finish is not None:
                     await finish()
@@ -2100,16 +2099,16 @@ async def _delete_claims_in_rounds(
 
         # A round that shrinks the number of live claims doesn't count toward giving up, so a large
         # batch that takes many rounds to delete isn't abandoned while it is still making progress.
-        progressed = live is not None and (remaining_before is None or len(live) < remaining_before)
+        progressed = live is not None and (remaining_before is None or live < remaining_before)
         idle_rounds = 0 if progressed else idle_rounds + 1
         if idle_rounds >= batch_utils.BATCH_RELEASE_MAX_IDLE_ROUNDS:
             if last_error is not None:
                 raise last_error
             raise BatchError(
-                f"{description}: {len(live or [])} claims are still not being deleted"
+                f"{description}: {live or 0} claims are still not being deleted"
             )
         if live is not None:
-            remaining_before = len(live)
+            remaining_before = live
         # Fail fast if the handle detached or stopped instead of sleeping through retry backoff,
         # without counting the sleep itself as an active delete.
         async with guard():

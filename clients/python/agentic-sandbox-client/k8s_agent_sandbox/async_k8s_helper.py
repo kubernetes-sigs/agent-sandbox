@@ -17,14 +17,16 @@ import logging
 import math
 import time
 from datetime import UTC, datetime
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, cast
 
 import aiohttp
 from kubernetes_asyncio import client, config, watch
+from kubernetes_asyncio.client.rest import RESTResponse
 from .constants import (
     CLAIM_API_GROUP,
     CLAIM_API_VERSION,
+    CLAIM_LIST_PAGE_SIZE,
     CLAIM_PLURAL_NAME,
     TEMPLATE_PLURAL_NAME,
     WARMPOOL_PLURAL_NAME,
@@ -49,6 +51,57 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def _claim_list_pages(
+    list_page: Callable[..., Awaitable[Any]],
+    namespace: str,
+    label_selector: str,
+    _request_timeout: float | None,
+) -> AsyncIterator[tuple[dict[str, Any], bool]]:
+    """Yields ``(page, first)`` pairs for one paginated ``SandboxClaim`` list.
+
+    An unpaginated ``SandboxClaim`` list fetches every claim of a batch in one HTTP response,
+    holding the full raw JSON body and decoded text alongside the parsed dicts in driver memory
+    during ``claim_batch``, ``get_batch``, ``410`` watch re-lists, and release counts.
+    ``_claim_list_pages`` fetches the list in ``CLAIM_LIST_PAGE_SIZE`` chunks so driver memory
+    holds only one page's response buffer at a time while keeping a single consistent snapshot
+    at the first page's ``resourceVersion``.
+
+    Yielding ``(page, first)`` tells the caller when the list starts (or restarts after a ``410``
+    continue-token expiry) so the caller discards anything it gathered from earlier pages.
+    """
+    continue_token: str | None = None
+    restarted = False
+    while True:
+        try:
+            page = cast(dict[str, Any], await list_page(
+                group=CLAIM_API_GROUP,
+                version=CLAIM_API_VERSION,
+                namespace=namespace,
+                plural=CLAIM_PLURAL_NAME,
+                label_selector=label_selector,
+                limit=CLAIM_LIST_PAGE_SIZE,
+                _continue=continue_token,
+                _request_timeout=_request_timeout,
+            ))
+        except client.ApiException as e:
+            # A continue token expires after a few minutes, and a 410 isn't transient. Restarting the
+            # list once without the token keeps its pages one consistent snapshot, which a watch
+            # started at the list's resourceVersion relies on.
+            if e.status != 410 or continue_token is None or restarted:
+                raise
+            restarted = True
+            continue_token = None
+            continue
+        yield page, continue_token is None
+        # A page may be empty while more follow, so only the continue token ends the list.
+        continue_token = (page.get("metadata") or {}).get("continue") or None
+        # Drop the generator frame's reference before fetching the next page so driver memory
+        # never holds two pages at once.
+        del page
+        if continue_token is None:
+            return
 
 
 class AsyncK8sHelper:
@@ -595,22 +648,59 @@ class AsyncK8sHelper:
     async def list_sandbox_claim_objects(
         self, namespace: str, label_selector: str, _request_timeout: float | None = None
     ) -> tuple[list[dict[str, Any]], str]:
-        """Lists full SandboxClaim objects matching a label selector. Also return the list's
+        """Lists full SandboxClaim objects matching a label selector. Also returns the list's
         resourceVersion, so a subsequent watch does not miss any events.
+
+        Args:
+            _request_timeout: Optional total timeout in seconds for each page, forwarded to kubernetes_asyncio.
         """
         await self._ensure_initialized()
 
-        response = await self.custom_objects_api.list_namespaced_custom_object(
-            group=CLAIM_API_GROUP,
-            version=CLAIM_API_VERSION,
-            namespace=namespace,
-            plural=CLAIM_PLURAL_NAME,
-            label_selector=label_selector,
-            _request_timeout=_request_timeout,
-        )
-        items = response.get("items", [])
-        resource_version = (response.get("metadata") or {}).get("resourceVersion", "0")
+        items: list[dict[str, Any]] = []
+        resource_version = "0"
+        async for page, first in _claim_list_pages(
+            self.custom_objects_api.list_namespaced_custom_object, namespace, label_selector, _request_timeout
+        ):
+            if first:
+                items = []
+                resource_version = (page.get("metadata") or {}).get("resourceVersion", "0")
+            page_items = page.get("items", [])
+            # Nothing in the SDK reads managedFields, so drop it only in memory from each parsed
+            # dict to lower driver memory without modifying the live SandboxClaim in the cluster.
+            for claim in page_items:
+                (claim.get("metadata") or {}).pop("managedFields", None)
+            items.extend(page_items)
         return items, resource_version
+
+    async def count_live_sandbox_claims(
+        self, namespace: str, label_selector: str, _request_timeout: float | None = None
+    ) -> int:
+        """Counts matching ``SandboxClaim`` objects without ``metadata.deletionTimestamp``,
+        holding one page of the list at a time.
+
+        Between ``deletecollection`` rounds, ``release()`` and ``release_group()`` run a
+        consistent read only to check whether any non-terminating claims still need deletion and
+        whether the round made progress. Calling ``list_sandbox_claim_objects`` would materialize
+        every surviving claim dict in driver memory just to count them (especially after a
+        ``deletecollection`` timeout on a large batch), whereas ``count_live_sandbox_claims``
+        folds one page at a time into an ``int`` and drops each page before advancing the
+        generator.
+
+        Args:
+            _request_timeout: Optional total timeout in seconds for each page, forwarded to kubernetes_asyncio.
+        """
+        await self._ensure_initialized()
+
+        live = 0
+        async for page, first in _claim_list_pages(
+            self.custom_objects_api.list_namespaced_custom_object, namespace, label_selector, _request_timeout
+        ):
+            if first:
+                live = 0
+            live += sum(1 for c in page.get("items", []) if not (c.get("metadata") or {}).get("deletionTimestamp"))
+            # Drop this frame's reference before advancing the generator to fetch the next page.
+            del page
+        return live
 
     async def watch_sandbox_claims(
         self, namespace: str, label_selector: str, resource_version: str, timeout_seconds: int,
@@ -726,14 +816,36 @@ class AsyncK8sHelper:
         """
         await self._ensure_initialized()
 
-        await self.custom_objects_api.delete_collection_namespaced_custom_object(
+        # Drain the response without decoding it because it lists every deleted claim and no caller
+        # reads it. The sync client raises ApiException for a non-2xx response before returning it,
+        # while the async client returns an unread response without checking its status, so only the
+        # async helper checks the status.
+        response = cast(aiohttp.ClientResponse, await self.custom_objects_api.delete_collection_namespaced_custom_object(
             group=CLAIM_API_GROUP,
             version=CLAIM_API_VERSION,
             namespace=namespace,
             plural=CLAIM_PLURAL_NAME,
             label_selector=label_selector,
+            _preload_content=False,
             _request_timeout=_request_timeout,
-        )
+        ))
+        try:
+            if not 200 <= response.status <= 299:
+                # Replace invalid UTF-8 bytes so a binary proxy error page still raises ApiException
+                # instead of UnicodeDecodeError.
+                body = (await response.read()).decode("utf-8", errors="replace")
+                # kubernetes_asyncio 36's stub types http_resp as an aiohttp response and
+                # ApiException.body as bytes | None, though its own REST client passes a
+                # RESTResponse(resp, bytes) and ApiClient.__call_api decodes body to str.
+                err = client.ApiException(http_resp=cast(Any, RESTResponse(response, body.encode("utf-8"))))
+                err.body = cast(Any, body)
+                raise err
+            async for _ in response.content.iter_any():
+                pass
+        finally:
+            # Release the response so an interruption mid-drain cannot leave its pooled connection
+            # checked out; aiohttp closes incomplete transports on release.
+            response.release()
 
     async def get_sandbox_warmpool(
         self, name: str, namespace: str, _request_timeout: float | None = None

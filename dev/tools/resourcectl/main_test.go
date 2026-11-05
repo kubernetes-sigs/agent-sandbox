@@ -358,18 +358,22 @@ func TestRunHeartbeatRefreshesLeasePeriodically(t *testing.T) {
 }
 
 // TestRunGetRefreshesLeaseUntilCleanup exercises the full get -> detached
-// heartbeat subprocess -> cleanup lifecycle against a mock Boskos server,
-// including an initial 401 owner-mismatch response while Boskos's informer
-// cache catches up after /acquire.
+// heartbeat subprocess -> cleanup lifecycle against a mock Boskos server. The
+// mock rejects the first /update calls with the 401 owner-mismatch response
+// that Boskos returns while its informer cache catches up after /acquire, so
+// the test fails if the heartbeat child ever treats that rejection as fatal.
 func TestRunGetRefreshesLeaseUntilCleanup(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("JOB_NAME", "test-job")
 	t.Setenv("BUILD_ID", "12345")
 	const wantOwner = "resourcectl-test-job-12345"
 	const wantResource = "test-project"
+	// Reject by count rather than by elapsed time since /acquire: the child's
+	// first /update lands only after one heartbeatInterval, so a wall-clock
+	// window would close before it arrives and the rejection would never fire.
+	const rejectedUpdates = 2
 
 	var mu sync.Mutex
-	var acquiredAt time.Time
 	var acquires, totalUpdates, okUpdates, releases int
 	var badRequests []string
 
@@ -383,7 +387,6 @@ func TestRunGetRefreshesLeaseUntilCleanup(t *testing.T) {
 			q.Get("type") == "gce-project" && q.Get("state") == "free" &&
 			q.Get("dest") == "busy" && q.Get("owner") == wantOwner:
 			acquires++
-			acquiredAt = time.Now()
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprintf(w, `{"name":%q}`, wantResource)
 
@@ -391,10 +394,7 @@ func TestRunGetRefreshesLeaseUntilCleanup(t *testing.T) {
 			q.Get("name") == wantResource && q.Get("state") == "busy" &&
 			q.Get("owner") == wantOwner:
 			totalUpdates++
-			// Real Boskos serves /update reads from a controller-runtime informer
-			// cache that briefly lags /acquire (< 20ms child tick interval here)
-			// and rejects immediate updates with 401 and an empty current owner.
-			if time.Since(acquiredAt) < 15*time.Millisecond {
+			if totalUpdates <= rejectedUpdates {
 				http.Error(w, fmt.Sprintf("Update failed: %s - busy (%s): owner mismatch request by %s, currently owned by ", wantResource, wantOwner, wantOwner), http.StatusUnauthorized)
 				return
 			}
@@ -480,6 +480,11 @@ func TestRunGetRefreshesLeaseUntilCleanup(t *testing.T) {
 	}
 	if acquires != 1 {
 		t.Errorf("got %d /acquire calls, want 1", acquires)
+	}
+	// Every rejected /update must have been followed by accepted ones from the
+	// same child, which is only possible if it survived the rejections.
+	if totalUpdates-okUpdates != rejectedUpdates {
+		t.Errorf("got %d rejected /update calls out of %d, want %d", totalUpdates-okUpdates, totalUpdates, rejectedUpdates)
 	}
 	if releases != 1 {
 		t.Errorf("got %d /release calls, want 1", releases)

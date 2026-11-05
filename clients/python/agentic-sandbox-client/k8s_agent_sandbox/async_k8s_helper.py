@@ -735,7 +735,9 @@ class AsyncK8sHelper:
         finally:
             await w.close()
 
-    async def read_batch_lease(self, name: str, namespace: str, _request_timeout: float | None = None) -> Any:
+    async def read_batch_lease(
+        self, name: str, namespace: str, _request_timeout: float | None = None
+    ) -> client.V1Lease | None:
         """Reads a batch Lease, or ``None`` if it doesn't exist.
 
         Args:
@@ -753,8 +755,8 @@ class AsyncK8sHelper:
             raise
 
     async def replace_batch_lease(
-        self, name: str, namespace: str, body: Any, _request_timeout: float | None = None
-    ) -> Any:
+        self, name: str, namespace: str, body: client.V1Lease, _request_timeout: float | None = None
+    ) -> client.V1Lease:
         """Replaces a batch Lease, then returns the updated object.
 
         Args:
@@ -768,7 +770,9 @@ class AsyncK8sHelper:
             name, namespace, body, _request_timeout=_request_timeout
         )
 
-    async def create_batch_lease(self, namespace: str, body: Any, _request_timeout: float | None = None) -> Any:
+    async def create_batch_lease(
+        self, namespace: str, body: client.V1Lease, _request_timeout: float | None = None
+    ) -> client.V1Lease:
         """Creates a batch Lease, then returns the created object. Raises a 409 ``ApiException`` if the Lease exists.
 
         Args:

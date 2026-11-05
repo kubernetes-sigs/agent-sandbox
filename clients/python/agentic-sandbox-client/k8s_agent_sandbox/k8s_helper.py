@@ -743,7 +743,7 @@ class K8sHelper:
 
     def read_batch_lease(
         self, name: str, namespace: str, _request_timeout: float | tuple[float, float] | None = None
-    ) -> Any:
+    ) -> client.V1Lease | None:
         """Reads a batch Lease, or ``None`` if it doesn't exist.
 
         Args:
@@ -760,8 +760,12 @@ class K8sHelper:
             raise
 
     def replace_batch_lease(
-        self, name: str, namespace: str, body: Any, _request_timeout: float | tuple[float, float] | None = None
-    ) -> Any:
+        self,
+        name: str,
+        namespace: str,
+        body: client.V1Lease,
+        _request_timeout: float | tuple[float, float] | None = None,
+    ) -> client.V1Lease:
         """Replaces a batch Lease, then returns the updated object.
 
         Args:
@@ -775,8 +779,8 @@ class K8sHelper:
         )
 
     def create_batch_lease(
-        self, namespace: str, body: Any, _request_timeout: float | tuple[float, float] | None = None
-    ) -> Any:
+        self, namespace: str, body: client.V1Lease, _request_timeout: float | tuple[float, float] | None = None
+    ) -> client.V1Lease:
         """Creates a batch Lease, then returns the created object. Raises a 409 ``ApiException`` if the Lease exists.
 
         Args:

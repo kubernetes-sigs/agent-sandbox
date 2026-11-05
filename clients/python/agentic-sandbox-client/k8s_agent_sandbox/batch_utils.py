@@ -30,7 +30,7 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from itertools import accumulate
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, overload
 
 from .constants import (
     BATCH_CREATE_RPS_ANNOTATION,
@@ -47,8 +47,12 @@ from .models import BatchGroup
 from .pod_metadata import validate_labels
 
 if TYPE_CHECKING:
-    from kubernetes.client import V1Lease
-    from kubernetes_asyncio.client import V1Lease as AsyncV1Lease
+    from kubernetes.client import V1Lease, V1LeaseSpec, V1ObjectMeta
+    from kubernetes_asyncio.client import (
+        V1Lease as AsyncV1Lease,
+        V1LeaseSpec as AsyncV1LeaseSpec,
+        V1ObjectMeta as AsyncV1ObjectMeta,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +207,27 @@ def lease_owner_reference(lease: "V1Lease | AsyncV1Lease") -> dict[str, str]:
         "name": metadata.name,
         "uid": metadata.uid,
     }
+
+
+@overload
+def lease_parts(lease: "V1Lease") -> "tuple[V1ObjectMeta, V1LeaseSpec]": ...
+
+
+@overload
+def lease_parts(lease: "AsyncV1Lease") -> "tuple[AsyncV1ObjectMeta, AsyncV1LeaseSpec]": ...
+
+
+def lease_parts(
+    lease: "V1Lease | AsyncV1Lease",
+) -> "tuple[V1ObjectMeta | AsyncV1ObjectMeta, V1LeaseSpec | AsyncV1LeaseSpec]":
+    """Returns a batch Lease's ``(metadata, spec)``.
+
+    Raises:
+        BatchError: If the Lease has no ``metadata`` or ``spec``.
+    """
+    if lease.metadata is None or lease.spec is None:
+        raise BatchError("batch Lease has no metadata or spec")
+    return lease.metadata, lease.spec
 
 
 def lease_now() -> datetime:

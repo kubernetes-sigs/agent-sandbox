@@ -21,8 +21,8 @@ Both listeners bind to `--listen-host` (default `0.0.0.0`), so the daemon is
 reachable through the Pod IP, a Kubernetes Service, an SDK pod port-forward, or
 the `sandbox-router`, which proxies both the REST API and native gRPC (see
 [Native gRPC](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/sandbox-router/README.md#native-grpc)).
-The router strips `Authorization` before forwarding, so it can't carry calls to
-a `sandboxd` that requires a bearer token (see
+The router strips `Authorization` before forwarding, so a client behind the
+router sends the token in `X-Sandboxd-Token` instead (see
 [Client authentication](#client-authentication)).
 Containment is provided by pod isolation and NetworkPolicy, not loopback
 binding; pass `--listen-host=127.0.0.1` to restrict to loopback (e.g. local
@@ -546,6 +546,22 @@ digest is `<hex>` on:
 - every REST request except `GET /v1/health`, `/v1/metadata` included, as the
   header `Authorization: Bearer <token>`. Requests without it get `401` with
   `{"code":"UNAUTHENTICATED"}` and `WWW-Authenticate: Bearer`.
+
+Either transport also accepts the bare token in `X-Sandboxd-Token: <token>`
+(`x-sandboxd-token` in gRPC metadata). Use it through the `sandbox-router`,
+which drops `Authorization` before it forwards a request. A router enforcing
+TokenReview or scoped-token auth does not read this header, so also send its
+own credential in `Authorization`:
+
+```bash
+curl -sf -H "Authorization: Bearer $ROUTER_TOKEN" \
+  -H "X-Sandboxd-Token: $TOKEN" \
+  -H "X-Sandbox-ID: my-sandbox" -H "X-Sandbox-Port: 8080" \
+  "$ROUTER_URL/v1/files/src"
+```
+
+The Python and TypeScript SDKs still send the token only in `Authorization`
+(#2102, #1785), so `auth_token` through the router needs an SDK follow-up.
 
 `/v1/health` stays open so a kubelet `httpGet` readiness probe works without
 the token. Comparison is constant time.

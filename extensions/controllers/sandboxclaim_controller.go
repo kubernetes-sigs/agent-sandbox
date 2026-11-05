@@ -701,14 +701,20 @@ func (r *SandboxClaimReconciler) reconcileExpired(ctx context.Context, claim *ex
 	logger := log.FromContext(ctx)
 	logger.V(4).Info("Reconciling Expired claim", "claim", claim.Name)
 
-	// Fall back to claim.Name when status is unset.
-	statusName := claim.Name
-	if claim.Status.SandboxStatus.Name != "" {
-		statusName = claim.Status.SandboxStatus.Name
+	// Adoption persists the assignment before writing claim status.
+	sandboxName := claim.Status.SandboxStatus.Name
+	if sandboxName == "" {
+		sandboxName = claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation]
+	}
+	if sandboxName == "" {
+		sandboxName = claim.Labels[extensionsv1beta1.DeprecatedAssignedSandboxNameLabel]
+	}
+	if sandboxName == "" {
+		sandboxName = claim.Name
 	}
 
 	sandbox := &v1beta1.Sandbox{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: statusName}, sandbox); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: sandboxName}, sandbox); err != nil {
 		if k8errors.IsNotFound(err) {
 			return nil, nil // Sandbox is gone, life is good.
 		}

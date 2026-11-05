@@ -24,7 +24,10 @@ import (
 	"sigs.k8s.io/agent-sandbox/extensions/controllers/queue"
 )
 
-const benchmarkNodeSpreadPool = "benchmark/warm-pool"
+const (
+	benchmarkNodeSpreadPool       = "benchmark/warm-pool"
+	benchmarkNodeSpreadMaxRetries = 1000
+)
 
 // Copied from sandboxclaim_controller.go at 4d39311ba9d89001d79ff1217ed330c7ea3761ec.
 var benchmarkOriginalNodeSpread = func(keys []queue.SandboxKey) (queue.SandboxKey, bool) {
@@ -88,6 +91,16 @@ func benchmarkNodeSpreadGetter(q *queue.SimpleSandboxQueue) func(string) (queue.
 	return func(pool string) (queue.SandboxKey, bool) {
 		return q.GetWithStrategy(pool, benchmarkOriginalNodeSpread)
 	}
+}
+
+// Yield on an empty pool so other workers can requeue their in-flight claims.
+func claimBenchmarkNodeSpread(get func(string) (queue.SandboxKey, bool)) (queue.SandboxKey, bool) {
+	key, ok := get(benchmarkNodeSpreadPool)
+	for attempt := 0; !ok && attempt < benchmarkNodeSpreadMaxRetries; attempt++ {
+		runtime.Gosched()
+		key, ok = get(benchmarkNodeSpreadPool)
+	}
+	return key, ok
 }
 
 type benchmarkNodeSpreadFixture struct {
@@ -278,8 +291,53 @@ func TestNodeSpreadBenchmarkFixtures(t *testing.T) {
 	}
 }
 
+func TestNodeSpreadBenchmarkClaimRetries(t *testing.T) {
+	key := queue.SandboxKey{Namespace: "benchmark", Name: "claim", NodeName: "node"}
+	tests := []struct {
+		name      string
+		emptyGets int
+		wantCalls int
+		wantOK    bool
+	}{
+		{"immediate", 0, 1, true},
+		{"transient-empty", 3, 4, true},
+		{"last-retry", benchmarkNodeSpreadMaxRetries, benchmarkNodeSpreadMaxRetries + 1, true},
+		{"exhausted", benchmarkNodeSpreadMaxRetries + 1, benchmarkNodeSpreadMaxRetries + 1, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			got, ok := claimBenchmarkNodeSpread(func(pool string) (queue.SandboxKey, bool) {
+				if pool != benchmarkNodeSpreadPool {
+					t.Fatalf("pool = %q, want %q", pool, benchmarkNodeSpreadPool)
+				}
+				calls++
+				if calls > tt.wantCalls {
+					t.Fatal("claim exceeded its retry budget")
+				}
+				if calls <= tt.emptyGets {
+					return queue.SandboxKey{}, false
+				}
+				return key, true
+			})
+			want := queue.SandboxKey{}
+			if tt.wantOK {
+				want = key
+			}
+			if got != want || ok != tt.wantOK || calls != tt.wantCalls {
+				t.Fatalf("claim = (%+v, %t), calls = %d; want (%+v, %t), calls = %d",
+					got, ok, calls, want, tt.wantOK, tt.wantCalls)
+			}
+		})
+	}
+}
+
 func TestNodeSpreadBenchmarkConcurrentFixture(t *testing.T) {
 	for _, size := range []int{16, 64, 256, 1024} {
+		workerCount := 2
+		if size == 16 {
+			workerCount = 32
+		}
 		for _, nodes := range []int{1, 8} {
 			t.Run(fmt.Sprintf("N%d/Nodes%d", size, nodes), func(t *testing.T) {
 				f := newBenchmarkNodeSpreadFixture(size, nodes)
@@ -293,10 +351,10 @@ func TestNodeSpreadBenchmarkConcurrentFixture(t *testing.T) {
 				held := make([]atomic.Bool, size)
 				var failures atomic.Int64
 				var workers sync.WaitGroup
-				for range 2 {
+				for range workerCount {
 					workers.Go(func() {
 						for range 4 * size {
-							key, ok := get(benchmarkNodeSpreadPool)
+							key, ok := claimBenchmarkNodeSpread(get)
 							id, known := ids[key]
 							if !ok || !known || !held[id].CompareAndSwap(false, true) {
 								failures.Add(1)
@@ -383,7 +441,7 @@ func BenchmarkNodeSpreadConcurrentClaimRequeue(b *testing.B) {
 				b.ResetTimer()
 				b.RunParallel(func(pb *testing.PB) {
 					for pb.Next() {
-						key, ok := get(benchmarkNodeSpreadPool)
+						key, ok := claimBenchmarkNodeSpread(get)
 						if !ok {
 							failed.Store(true)
 							return

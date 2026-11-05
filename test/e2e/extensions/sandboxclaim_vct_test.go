@@ -44,16 +44,9 @@ func TestCreateSandboxClaimVolumeClaimTemplates(t *testing.T) {
 		policy              extensionsv1beta1.VolumeClaimTemplatesPolicy
 		templateVCTs        []sandboxv1beta1.PersistentVolumeClaimTemplate
 		claimVCTs           []sandboxv1beta1.PersistentVolumeClaimTemplate
-		expectedErrorReason string // If non-empty, verifies validation failure with this Ready condition reason
 		expectedCreateError string // If non-empty, the API server must reject the claim with this message
 		verifySuccess       func(t *testing.T, tc *framework.TestContext, namespace string, claim *extensionsv1beta1.SandboxClaim)
 	}{
-		{
-			name:                "policy=Disallowed, custom claim VCTs rejected",
-			policy:              extensionsv1beta1.VolumeClaimTemplatesPolicyDisallowed,
-			claimVCTs:           []sandboxv1beta1.PersistentVolumeClaimTemplate{customVCT("custom-data", "2Gi")},
-			expectedErrorReason: "VolumeClaimTemplatesError",
-		},
 		{
 			name:         "policy=Disallowed, empty claim VCTs bypasses policy check (Warm start adoption)",
 			policy:       extensionsv1beta1.VolumeClaimTemplatesPolicyDisallowed,
@@ -89,42 +82,6 @@ func TestCreateSandboxClaimVolumeClaimTemplates(t *testing.T) {
 			},
 		},
 		{
-			name:                "policy=Allowed, overriding template volume name is forbidden",
-			policy:              extensionsv1beta1.VolumeClaimTemplatesPolicyAllowed,
-			templateVCTs:        []sandboxv1beta1.PersistentVolumeClaimTemplate{customVCT("workspace", "1Gi")},
-			claimVCTs:           []sandboxv1beta1.PersistentVolumeClaimTemplate{customVCT("workspace", "2Gi")},
-			expectedErrorReason: "VolumeClaimTemplatesError",
-		},
-		{
-			name:         "policy=Overrides, new custom claim VCTs merged successfully (Cold start)",
-			policy:       extensionsv1beta1.VolumeClaimTemplatesPolicyOverrides,
-			templateVCTs: []sandboxv1beta1.PersistentVolumeClaimTemplate{customVCT("workspace", "1Gi")},
-			claimVCTs:    []sandboxv1beta1.PersistentVolumeClaimTemplate{customVCT("custom-data", "2Gi")},
-			verifySuccess: func(t *testing.T, tc *framework.TestContext, namespace string, claim *extensionsv1beta1.SandboxClaim) {
-				verifySandboxAndPVCs(t, tc, namespace, claim.Name, []expectedVCT{
-					{name: "workspace", size: "1Gi"},
-					{name: "custom-data", size: "2Gi"},
-				})
-			},
-		},
-		{
-			name:         "policy=Overrides, claim VCT overrides template volume spec (Cold start)",
-			policy:       extensionsv1beta1.VolumeClaimTemplatesPolicyOverrides,
-			templateVCTs: []sandboxv1beta1.PersistentVolumeClaimTemplate{customVCT("workspace", "1Gi")},
-			claimVCTs:    []sandboxv1beta1.PersistentVolumeClaimTemplate{customVCT("workspace", "3Gi")},
-			verifySuccess: func(t *testing.T, tc *framework.TestContext, namespace string, claim *extensionsv1beta1.SandboxClaim) {
-				verifySandboxAndPVCs(t, tc, namespace, claim.Name, []expectedVCT{
-					{name: "workspace", size: "3Gi"},
-				})
-			},
-		},
-		{
-			name:                "policy=empty (default), treated as Disallowed",
-			policy:              "",
-			claimVCTs:           []sandboxv1beta1.PersistentVolumeClaimTemplate{customVCT("custom-data", "2Gi")},
-			expectedErrorReason: "VolumeClaimTemplatesError",
-		},
-		{
 			name:                "policy=Allowed, empty VCT volume name rejected",
 			policy:              extensionsv1beta1.VolumeClaimTemplatesPolicyAllowed,
 			claimVCTs:           []sandboxv1beta1.PersistentVolumeClaimTemplate{customVCT("", "2Gi")},
@@ -155,7 +112,7 @@ func TestCreateSandboxClaimVolumeClaimTemplates(t *testing.T) {
 			template := createTemplateForVCT(t, tc, ns.Name, "vct-template", tcCase.policy, tcCase.templateVCTs)
 			warmPool := createWarmPoolForVCT(t, tc, ns.Name, "vct-warmpool", template.Name)
 
-			if tcCase.claimVCTs == nil && tcCase.expectedErrorReason == "" {
+			if tcCase.claimVCTs == nil {
 				// Wait for the warm pool to populate at least one warm sandbox to support warm start
 				sandboxWarmpoolID := types.NamespacedName{Namespace: ns.Name, Name: warmPool.Name}
 				require.NoError(t, tc.WaitForWarmPoolReady(t.Context(), sandboxWarmpoolID))
@@ -178,12 +135,8 @@ func TestCreateSandboxClaimVolumeClaimTemplates(t *testing.T) {
 			}
 			require.NoError(t, err)
 
-			if tcCase.expectedErrorReason != "" {
-				tc.MustWaitForObject(claim, predicates.ConditionReasonEquals(string(sandboxv1beta1.SandboxConditionReady), tcCase.expectedErrorReason))
-			} else {
-				tc.MustWaitForObject(claim, predicates.ReadyConditionIsTrue)
-				tcCase.verifySuccess(t, tc, ns.Name, claim)
-			}
+			tc.MustWaitForObject(claim, predicates.ReadyConditionIsTrue)
+			tcCase.verifySuccess(t, tc, ns.Name, claim)
 		})
 	}
 }

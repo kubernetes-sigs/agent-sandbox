@@ -682,7 +682,11 @@ create from it (`size`), and how many of them must become Ready for the group to
 which defaults to `size`). A group with `size=0` creates no claims and gets its members from `acquire()`,
 and `wait_for_quorum()` and `group_outcomes()` skip it. The claims are named `<batch-id>-0` to `<batch-id>-<N-1>`, where `N` is the
 sum of the group sizes. They carry the `agents.x-k8s.io/batch-id` label and the `agents.x-k8s.io/batch-group`
-label, whose value is a hash of the warm pool's name, and are created in the background, paced at `create_rps` creates per second with at most `max_in_flight` in flight. The batch
+label, whose value is a hash of the warm pool's name, and are created in the background, paced at `create_rps` creates per second with at most `max_in_flight` in flight.
+Claims that a pool's Ready sandboxes cover, counted when `claim_batch()` checks the pool, skip `create_rps` pacing because adopting a Ready sandbox starts
+no pod (the count is a snapshot, not a reservation), so only `max_in_flight` bounds them. When the watch observes a claim from a pool start cold before becoming Ready, the batch
+zeroes that pool's credit and defers its next refresh. When the apiserver answers a create with 429, the batch pauses warm-pool
+credit for numeric `Retry-After` values up to 30 seconds (with a 5-second minimum; missing or date-form headers use 5 seconds) and paces newly scheduled creates at `create_rps` until the cooldown ends. The batch
 also has a `coordination.k8s.io/v1` Lease named `batch-<batch-id>`, which the handle renews while it is
 alive. Every claim has an `ownerReference` to that Lease, so the Kubernetes garbage collector deletes the
 claims once the Lease is gone. Deleting the Lease by hand (`kubectl delete lease batch-<batch-id>`) therefore
@@ -780,7 +784,12 @@ it unreachable. Read a failed member's `reason` before releasing it. The three m
 it is Ready, for example to replace a member released with `release_member()`. Its claim takes the next unused
 ordinal, so ordinals are never reused, even across `detach()` and `get_batch()`. It isn't one of the initial
 claims, so `events()`, the quorum consumers and `release_not_ready()` leave it alone, but `release_group()` on
-its pool releases it, and its `shutdownTime` counts from its own create. It raises `TerminalMemberError` if the create fails or the
+its pool releases it, and its `shutdownTime` counts from its own create. Its create follows the initial
+claims' pacing, except that a create the pool's Ready sandboxes cover skips `create_rps` pacing. Once callers spend the
+count from the pool's check and `create_rps` pacing would delay the next create, `acquire()` reads the pool again at most
+once a second per pool (unless an expired `timeout` cuts a read short before recording it). When the watch observes a claim from a pool start cold before becoming Ready, the batch zeroes that
+pool's credit and defers its next refresh. Its create and pool reads also share `max_in_flight` with
+the initial claims and member deletes. `acquire()` raises `TerminalMemberError` if the create fails or the
 member fails or is deleted before it is Ready, and `BatchTimeoutError` if it isn't Ready within `timeout`,
 which defaults to `quorum_timeout`. Both are `BatchError`, so `except BatchError` catches every runtime
 failure. If it raises, including on a cancellation, `acquire()` drops the member from `members()` and deletes

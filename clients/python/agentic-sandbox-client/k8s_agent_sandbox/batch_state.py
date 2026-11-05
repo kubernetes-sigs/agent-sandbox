@@ -19,7 +19,7 @@ Contains methods for modifying and re-populating a batch's state that operate on
 Kubernetes objects and thus do not perform any network I/O, threading, or locking of their own.
 """
 
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Sequence
 from enum import Enum
 from operator import itemgetter
@@ -28,6 +28,7 @@ from typing import Any
 from .constants import (
     BATCH_GROUP_MIN_READY_ANNOTATION,
     BATCH_GROUP_SIZE_ANNOTATION,
+    COLD_CLAIM_READY_REASONS,
     TERMINAL_CLAIM_READY_REASONS,
 )
 from .exceptions import BatchError, BatchTimeoutError, QuorumUnreachableError, TerminalMemberError
@@ -256,16 +257,35 @@ class BatchState:
         self._released_count: dict[str, int] = dict.fromkeys(self._group_by_pool, 0)
         # Pools whose fill creates the caller stopped with release_group() or release_not_ready().
         self._fill_stopped_pools: set[str] = set()
-        # Released claims whose delete hasn't succeeded yet, so a later release call retries them.
-        self._pending_deletes: set[str] = set()
+        # Released claims whose delete hasn't succeeded yet, mapped to a monotonic sequence so an
+        # older delete finishing after a retry recreated the claim leaves the new delete pending.
+        self._pending_deletes: dict[str, int] = {}
+        self._next_delete_seq = 0
         # The pool of each acquire() claim that isn't Ready yet, so release_group() can release it
         # before the watch has seen it.
         self._acquiring: dict[str, str] = {}
+        # Count of acquire() calls per pool that have not reserved a claim ordinal yet, so
+        # release_group() recognizes the pool during its first check or warm-credit refresh
+        # without burning an ordinal.
+        self._checking_acquires: Counter[str] = Counter()
+        self._pool_release_seq: dict[str, int] = {}
+        # Holds newly seen claims only while unreconciled (status: {} or AdoptionConflict), until
+        # the controller writes their first warm or cold status, rather than while cold pods boot,
+        # so steady-state size stays 0. BatchState tracks every new claim because it does not see
+        # WarmCredit (and watch ADDED can arrive before POST returns), a paced create going cold
+        # still defers the next acquire() refresh, and settling each claim's launch once keeps
+        # later readiness flaps on older READY members from zeroing replenished credit.
+        self._pending_launch: set[str] = set()
+        # Deduplicates pools whose claims reported a cold start since the last drain: 0 or 1 pool
+        # on a single upsert_claim(), and possibly several pools on a 410 resync_from_list().
+        self._exhausted_pools: set[str] = set()
 
     def seed_from_claims(self, claim_objs: Sequence[dict[str, Any]]) -> None:
         """Reconstructs state from the batch's existing claims."""
         for claim_obj in claim_objs:
             self.upsert_claim(claim_obj)
+        self._pending_launch.clear()
+        self._exhausted_pools.clear()
 
     def upsert_claim(self, claim_obj: dict[str, Any]) -> Member | None:
         """Derives a ``Member`` from a claim and inserts or updates it."""
@@ -292,6 +312,18 @@ class BatchState:
                 # creator deletes the claim.
                 self.release_claim(claim_name, member.warmpool)
                 return None
+        # Settle each claim's initial warm-vs-cold launch once: leave _pending_launch as soon as
+        # the controller writes a warm, terminal, or cold status so booting cold pods do not linger
+        # in the set and later readiness flaps on older READY members cannot zero replenished credit.
+        if claim_name and (previous is None or claim_name in self._pending_launch):
+            if member.state is not MemberState.PENDING:
+                self._pending_launch.discard(claim_name)
+            elif member.reason in COLD_CLAIM_READY_REASONS:
+                self._pending_launch.discard(claim_name)
+                if member.warmpool:
+                    self._exhausted_pools.add(member.warmpool)
+            else:
+                self._pending_launch.add(claim_name)
         self._members[claim_name] = member
         self._on_fill_change(claim_name, member)
         return member
@@ -303,6 +335,7 @@ class BatchState:
         become Ready. A lost member drops its reason and message, which described the deleted
         claim's last Ready condition.
         """
+        self._pending_launch.discard(claim_name)
         existing = self._members.get(claim_name)
         if existing is None:
             # Deleted before this handle ever saw an ADDED/MODIFIED event for it.
@@ -326,12 +359,15 @@ class BatchState:
         for name in missing:
             self.mark_lost(name)
 
-    def release_claim(self, claim_name: str, warmpool: str) -> None:
+    def release_claim(self, claim_name: str, warmpool: str, *, needs_delete: bool = False) -> None:
         """Drops a claim the caller released, or a fill create it stopped, from the batch.
 
         A released fill member counts as unable to arrive, like a lost one, but emits no
         ``MEMBER_LOST``.
         """
+        self._pending_launch.discard(claim_name)
+        if needs_delete:
+            self._need_delete(claim_name)
         if claim_name in self._released:
             return
         self._released.add(claim_name)
@@ -368,6 +404,7 @@ class BatchState:
                 return claim_name in self._pending_deletes
             raise ValueError(f"'{claim_name}' is not a member of batch '{self.batch_id}'")
         self.release_claim(claim_name, member.warmpool)
+        self._acquiring.pop(claim_name, None)
         return bool(self._take_deletes([member]))
 
     def release_not_ready(self) -> list[str]:
@@ -392,12 +429,11 @@ class BatchState:
         handle can close their connections. It deletes them by label, not by name.
         """
         self._fill_stopped_pools.add(warmpool)
+        self._pool_release_seq[warmpool] = self._pool_release_seq.get(warmpool, 0) + 1
         names = [name for name, member in self._members.items() if member.warmpool == warmpool]
         acquiring = [name for name, pool in self._acquiring.items() if pool == warmpool]
         for name in [*names, *acquiring]:
             self.release_claim(name, warmpool)
-        # An acquire() create that lands after the label delete is deleted by name when acquire() drops it.
-        self._pending_deletes.update(acquiring)
         return names
 
     def has_pool(self, warmpool: str) -> bool:
@@ -408,7 +444,20 @@ class BatchState:
             or warmpool in self._fill_stopped_pools
             or any(m.warmpool == warmpool for m in self._members.values())
             or warmpool in self._acquiring.values()
+            or warmpool in self._checking_acquires
         )
+
+    def _need_delete(self, claim_name: str) -> None:
+        """Marks ``claim_name`` as needing a delete from this point on."""
+        # Bumping a per-claim sequence keeps a newer cleanup delete pending when an earlier
+        # release_member() delete succeeded right before an in-flight create retry recreated
+        # the claim (201 Created) and that earlier delete records its completion late.
+        self._next_delete_seq += 1
+        self._pending_deletes[claim_name] = self._next_delete_seq
+
+    def delete_seq(self, claim_name: str) -> int:
+        """Returns the current delete sequence for ``claim_name``, or ``0`` if none is pending."""
+        return self._pending_deletes.get(claim_name, 0)
 
     def _take_deletes(self, released: Sequence[Member]) -> list[str]:
         """Records which released members still have a claim to delete, and returns their names."""
@@ -418,13 +467,33 @@ class BatchState:
             # claim this batch never created.
             if m.state is not MemberState.LOST and m.reason != CREATE_FAILED_REASON
         ]
-        self._pending_deletes.update(names)
+        for name in names:
+            self._need_delete(name)
         return names
 
     @property
     def next_ordinal(self) -> int:
         """The lowest ordinal no claim of the batch has taken."""
         return self._next_ordinal
+
+    def enter_acquire(self, warmpool: str) -> int:
+        """Marks an ``acquire()`` from ``warmpool`` as in flight before it takes an ordinal, and
+        returns the pool's release sequence so ``release_group()`` can stop it.
+        """
+        self._checking_acquires[warmpool] += 1
+        return self._pool_release_seq.get(warmpool, 0)
+
+    def exit_acquire(self, warmpool: str) -> None:
+        """Clears an ``enter_acquire()`` count once ``acquire()`` takes an ordinal or exits."""
+        remaining = self._checking_acquires[warmpool] - 1
+        if remaining > 0:
+            self._checking_acquires[warmpool] = remaining
+        else:
+            self._checking_acquires.pop(warmpool, None)
+
+    def pool_release_seq(self, warmpool: str) -> int:
+        """Returns how many times ``release_group()`` has released ``warmpool``."""
+        return self._pool_release_seq.get(warmpool, 0)
 
     def start_acquire(self, warmpool: str) -> str:
         """Returns a ``<batch-id>-<ordinal>`` claim name with the next unused ordinal for an
@@ -452,36 +521,55 @@ class BatchState:
             return member
         raise TerminalMemberError(member)
 
-    def drop_acquired(self, claim_name: str, created: bool) -> bool:
-        """Drops a claim that ``acquire()`` didn't get Ready, so it is never handed out and later
-        watch events for it are ignored. Returns whether its claim still needs deleting, which it
+    def drop_acquired(self, claim_name: str, created: bool, *, retried: bool = False) -> bool:
+        """Drops a claim that ``acquire()`` didn't get Ready, so the batch never hands it out and
+        ignores later watch events for it. Returns whether its claim still needs deleting, which it
         doesn't if it is already gone or its create failed. A claim the caller released needs it only
-        if that release's delete hasn't succeeded, as for a create that landed after ``release_group()``.
+        if ``release_group()`` released it while ``acquire()`` was in flight, so its create may have
+        landed after the label delete, or if ``acquire()`` sent a retry that may have landed after
+        ``release_member()``.
         """
-        self._acquiring.pop(claim_name, None)
+        self._pending_launch.discard(claim_name)
+        was_acquiring = self._acquiring.pop(claim_name, None) is not None
         if claim_name in self._released:
-            if not created:
-                self._pending_deletes.discard(claim_name)
-            return created and claim_name in self._pending_deletes
+            # A create in flight during release_group() (was_acquiring) can land after the
+            # label delete, and a create retry (retried) can land after release_member()'s
+            # name delete and recreate the claim, so both still need a follow-up delete.
+            if created and (was_acquiring or retried):
+                self._need_delete(claim_name)
+                return True
+            return False
         self._released.add(claim_name)
         member = self._members.pop(claim_name, None)
         if not created:
             return False
         if member is None:
             # The create succeeded, but the watch hasn't seen the claim yet.
-            self._pending_deletes.add(claim_name)
+            self._need_delete(claim_name)
             return True
         return bool(self._take_deletes([member]))
 
-    def note_deleted(self, claim_name: str) -> None:
-        """Records that a released claim's delete succeeded."""
-        self._pending_deletes.discard(claim_name)
+    def take_exhausted_pools(self) -> set[str]:
+        """Drains pools that cold-starting claims triggered since the last call (0 or 1 on an event, or several on a 410 re-list)."""
+        if not self._exhausted_pools:
+            return set()
+        pools = set(self._exhausted_pools)
+        self._exhausted_pools.clear()
+        return pools
 
-    def fill_creates_released(self, warmpool: str) -> bool:
+    def note_deleted(self, claim_name: str, seq: int) -> None:
+        """Records that a released claim's delete succeeded if ``seq`` is still its latest queued delete."""
+        if self._pending_deletes.get(claim_name) == seq:
+            del self._pending_deletes[claim_name]
+
+    def fill_creates_released(self, warmpool: str, claim_name: str | None = None) -> bool:
         """Whether the caller stopped the group's fill creates, with ``release_group()`` or
-        ``release_not_ready()``.
+        ``release_not_ready()``, or released ``claim_name``.
         """
-        return warmpool in self._fill_stopped_pools
+        return (
+            (claim_name is not None and claim_name in self._released)
+            or warmpool in self._fill_stopped_pools
+        )
 
     def members(self, warmpool: str | None = None) -> list[Member]:
         """Returns a snapshot of the batch's members, optionally filtered to one pool."""

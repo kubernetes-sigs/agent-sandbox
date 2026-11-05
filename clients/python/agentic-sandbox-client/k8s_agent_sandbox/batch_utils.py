@@ -24,6 +24,7 @@ import re
 import secrets
 import socket
 import string
+import time
 import uuid
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
@@ -75,6 +76,13 @@ BATCH_DEFAULT_MAX_IN_FLIGHT = 20
 # doesn't make requests wait. It opens one-off connections that close after a single request, so
 # each pays a fresh handshake.
 BATCH_POOL_HEADROOM = 2
+# How long acquire() waits before re-reading a warm pool's Ready count once callers spend its credit,
+# so a burst of acquires on one pool sends about one GET a second rather than one per acquire.
+BATCH_WARM_CREDIT_REFRESH_SECONDS = 1.0
+# Minimum cooldown after a 429 create response before warm-pool credit skips create_rps pacing
+# again, so a brief apiserver burst backs off immediately without throttling later steps on a
+# long-lived batch.
+BATCH_WARM_CREDIT_THROTTLE_SECONDS = 5.0
 BATCH_DEFAULT_QUORUM_TIMEOUT_SECONDS = 600
 BATCH_DEFAULT_WORK_BUDGET_SECONDS = 3600
 # Added to each claim's shutdownTime
@@ -511,3 +519,88 @@ def warmpool_template_name(warmpool_obj: dict[str, Any]) -> str | None:
     """Returns the name of the SandboxTemplate a SandboxWarmPool object references, if any."""
     spec = warmpool_obj.get("spec") or {}
     return (spec.get("sandboxTemplateRef") or {}).get("name") or None
+
+
+def warmpool_ready_replicas(warmpool_obj: dict[str, Any]) -> int:
+    """Returns a SandboxWarmPool object's ``status.readyReplicas``, or 0 if it has none."""
+    ready = (warmpool_obj.get("status") or {}).get("readyReplicas")
+    return ready if isinstance(ready, int) and ready > 0 else 0
+
+
+class WarmCredit:
+    """Counts, per warm pool, the creates that the pool's Ready sandboxes can cover.
+
+    A covered create skips ``create_rps`` pacing, so only ``max_in_flight`` bounds it. Pacing
+    exists so that a burst of cold claims doesn't start many pods on a node at once, and a claim
+    a Ready sandbox takes starts no pod. Prechecks read the initial count, and ``acquire()`` reads
+    the pool again once callers spend that credit and ``create_rps`` pacing would otherwise delay
+    a create. When the batch watch sees a claim from a pool report a cold-start ``Ready=False``
+    reason before becoming Ready, ``exhaust()`` zeroes that pool's credit and defers its next
+    refresh so shared-pool bursts fall back to ``create_rps`` once Ready sandboxes run out, and
+    ``seq()`` prevents an already in-flight refresh from overwriting a newer update. A 429
+    response pauses the credit for numeric ``Retry-After`` values up to
+    ``BATCH_BACKOFF_MAX_SECONDS`` (with a ``BATCH_WARM_CREDIT_THROTTLE_SECONDS`` minimum; missing
+    or date-form headers use ``BATCH_WARM_CREDIT_THROTTLE_SECONDS``) so newly scheduled creates
+    back off to ``create_rps`` while a long-lived batch recovers warm speed once the apiserver
+    clears. The handles call this class with their lock held.
+    """
+
+    def __init__(self) -> None:
+        self._credit: dict[str, int] = {}
+        self._read_at: dict[str, float] = {}
+        self._seq: dict[str, int] = {}
+        self._throttled_until = -math.inf
+
+    def _is_throttled(self) -> bool:
+        """Returns whether a 429 cooldown is still active."""
+        return time.monotonic() < self._throttled_until
+
+    def seq(self, warmpool: str) -> int:
+        """Returns the pool's update sequence so an in-flight refresh skips overwriting a newer update."""
+        return self._seq.get(warmpool, 0)
+
+    def record(self, warmpool: str, ready: int, *, seq: int | None = None) -> None:
+        """Sets the pool's credit to its Ready replica count unless ``seq`` is stale."""
+        if seq is not None and self._seq.get(warmpool, 0) != seq:
+            return
+        self._credit[warmpool] = ready
+        self._read_at[warmpool] = time.monotonic()
+        self._seq[warmpool] = self._seq.get(warmpool, 0) + 1
+
+    def exhaust(self, warmpool: str) -> None:
+        """Zeroes the pool's credit and defers its next refresh after a claim cold-starts."""
+        self._credit[warmpool] = 0
+        self._read_at[warmpool] = time.monotonic()
+        self._seq[warmpool] = self._seq.get(warmpool, 0) + 1
+
+    def refresh_due(self, warmpool: str) -> bool:
+        """Whether callers spent the pool's credit, no 429 cooldown is active, and the last read
+        happened at least ``BATCH_WARM_CREDIT_REFRESH_SECONDS`` ago, making a new read worthwhile.
+        """
+        if self._is_throttled() or self._credit.get(warmpool, 0) > 0:
+            return False
+        return time.monotonic() - self._read_at.get(warmpool, -math.inf) >= BATCH_WARM_CREDIT_REFRESH_SECONDS
+
+    def take(self, warmpool: str) -> bool:
+        """Spends one of the pool's credit when unthrottled, returning whether it covered the create."""
+        if self._is_throttled() or self._credit.get(warmpool, 0) <= 0:
+            return False
+        self._credit[warmpool] -= 1
+        return True
+
+    def spend(self, warmpool: str) -> None:
+        """Deducts one credit for a paced create so creates sent during a 429 cooldown still account
+        for the Ready sandboxes they adopt instead of over-crediting cold claims once cooldown ends.
+        """
+        if self._credit.get(warmpool, 0) > 0:
+            self._credit[warmpool] -= 1
+
+    def throttle(self, retry_after: float | None = None) -> bool:
+        """Pauses warm credit for at least ``BATCH_WARM_CREDIT_THROTTLE_SECONDS`` (or ``retry_after``
+        when longer), returning whether this call started a new cooldown window.
+        """
+        now = time.monotonic()
+        first = now >= self._throttled_until
+        cooldown = max(retry_after or 0.0, BATCH_WARM_CREDIT_THROTTLE_SECONDS)
+        self._throttled_until = max(self._throttled_until, now + cooldown)
+        return first

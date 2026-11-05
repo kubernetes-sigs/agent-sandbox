@@ -59,6 +59,20 @@ TERMINAL_CLAIM_READY_REASONS = frozenset({
     "PodSucceeded",          # core SandboxReasonPodSucceeded, forwarded to the claim
 })
 
+# SandboxClaim Ready=False reasons indicating the warm pool had no Ready
+# sandbox when reconciling a claim (see computeReadyCondition in
+# extensions/controllers/sandboxclaim_controller.go): createSandbox emits
+# SandboxNotReady on its initial status write, SandboxCreatePending when an
+# AlreadyExists recovery waits on cache convergence, and DependenciesNotReady
+# once SandboxReconciler reconciles a cold or fallback unready Sandbox.
+# AdoptionConflict is intentionally absent because warm candidates still exist
+# when two claims race.
+COLD_CLAIM_READY_REASONS = frozenset({
+    "SandboxCreatePending",
+    "SandboxNotReady",
+    "DependenciesNotReady",
+})
+
 # Constants for Sandbox Batches
 BATCH_ID_LABEL = "agents.x-k8s.io/batch-id"
 BATCH_GROUP_SIZE_ANNOTATION = "agents.x-k8s.io/batch-group-size"

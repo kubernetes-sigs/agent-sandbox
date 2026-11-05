@@ -1244,6 +1244,8 @@ func TestSandboxClaimReconcile(t *testing.T) {
 	}
 }
 
+// TestSandboxClaimRetainCleanupLookup checks lookup precedence, owner UID guards,
+// and idempotent cleanup without namespace scans.
 func TestSandboxClaimRetainCleanupLookup(t *testing.T) {
 	getErr := errors.New("sandbox GET failed")
 	deleteErr := errors.New("sandbox DELETE failed")

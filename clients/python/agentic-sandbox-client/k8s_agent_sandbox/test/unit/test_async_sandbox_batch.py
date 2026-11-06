@@ -17,8 +17,11 @@
 import asyncio
 import contextlib
 import inspect
+import json
 import logging
+import socket
 import ssl
+import threading
 import time
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -3888,12 +3891,18 @@ class TestAcquire(BaseClaimBatchTest):
         async def get_warmpool(name, *args, **kwargs):
             checked.append(name)
             if name == "pool-d":
-                await asyncio.sleep(0.08)
-            elif name != "pool-a":
+                return {"spec": {"sandboxTemplateRef": {"name": "tmpl-d"}}}
+            if name != "pool-a":
                 await release_check.wait()
             return {"spec": {"sandboxTemplateRef": {"name": "tmpl"}}}
 
+        async def get_template(name, *args, **kwargs):
+            if name == "tmpl-d":
+                await asyncio.sleep(0.08)
+            return {}
+
         helper.get_sandbox_warmpool.side_effect = get_warmpool
+        helper.get_sandbox_template.side_effect = get_template
         batch = await self.claim()
         await _wait_until(lambda: len(batch.members()) == 2)
         first = asyncio.create_task(batch.acquire("pool-b"))
@@ -4297,15 +4306,13 @@ class TestAcquire(BaseClaimBatchTest):
                         if leader_calls == 1:
                             leader_waiting.set()
                             await asyncio.wait_for(follower_waiting.wait(), 5)
-                            async with asyncio.timeout(0.01):
-                                return await orig_in_flight_acquire()
                         return await orig_in_flight_acquire()
 
                     with (
                         patch.object(asyncio, "shield", side_effect=shield_and_signal),
                         patch.object(batch._in_flight, "acquire", side_effect=leader_times_out_after_follower_waits),
                     ):
-                        short_check = asyncio.create_task(batch.acquire("pool-b", timeout=5))
+                        short_check = asyncio.create_task(batch.acquire("pool-b", timeout=0.25))
                         await asyncio.wait_for(leader_waiting.wait(), 5)
                         follower = asyncio.create_task(batch.acquire("pool-b", timeout=5))
                         await asyncio.wait_for(follower_waiting.wait(), 5)
@@ -4719,6 +4726,236 @@ class TestAcquire(BaseClaimBatchTest):
             self.assertNotIn("podsnapshot.gke.io/ps-name", body["metadata"]["annotations"])
         for body in (bodies[0], bodies[3], bodies[4]):
             self.assertNotIn("additionalPodMetadata", body["spec"])
+
+    async def test_pool_check_bounds_reads_by_deadline_and_hands_off_on_timeout(self):
+        stop_server = threading.Event()
+        pool_f_release = threading.Event()
+        pool_e_release = threading.Event()
+        self.addCleanup(stop_server.set)
+        self.addCleanup(pool_f_release.set)
+        self.addCleanup(pool_e_release.set)
+        pool_d_started = threading.Event()
+        pool_f_started = threading.Event()
+        pool_e_started = threading.Event()
+        follower_waiting = threading.Event()
+
+        def http_json(payload: dict) -> bytes:
+            raw = json.dumps(payload).encode()
+            return (
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                + f"Content-Length: {len(raw)}\r\nConnection: close\r\n\r\n".encode()
+                + raw
+            )
+
+        def send_pool(conn: socket.socket, template: str) -> None:
+            try:
+                conn.sendall(
+                    http_json(
+                        {
+                            "spec": {"sandboxTemplateRef": {"name": template}},
+                            "status": {"readyReplicas": 1},
+                        }
+                    )
+                )
+            except OSError:
+                pass
+
+        def handle_conn(conn: socket.socket) -> None:
+            with conn:
+                try:
+                    req = conn.recv(4096).decode("latin1")
+                except OSError:
+                    return
+                first_line = req.splitlines()[0] if req else ""
+                path = first_line.split(" ")[1] if " " in first_line else ""
+                name = path.rsplit("/", 1)[-1]
+                if "/sandboxwarmpools/" in path:
+                    if name == "pool-a":
+                        send_pool(conn, "tmpl-a")
+                        return
+                    if name == "pool-c":
+                        stop_server.wait(0.08)
+                        send_pool(conn, "tmpl-c")
+                        return
+                    if name == "pool-d":
+                        pool_d_started.set()
+                        follower_waiting.wait(2.0)
+                        stop_server.wait(0.18)
+                        send_pool(conn, "tmpl-d")
+                        return
+                    if name == "pool-f":
+                        pool_f_started.set()
+                        pool_f_release.wait(1.2)
+                        send_pool(conn, "tmpl-a")
+                        return
+                    if name == "pool-e":
+                        pool_e_started.set()
+                        pool_e_release.wait(1.2)
+                        send_pool(conn, "tmpl-a")
+                        return
+                    if name == "pool-g":
+                        stop_server.wait(0.25)
+                        send_pool(conn, "tmpl-g")
+                        return
+                    stop_server.wait(1.2)
+                    return
+                if name in ("tmpl-a", "tmpl-d"):
+                    conn.sendall(http_json({"metadata": {"name": name}}))
+                    return
+                stop_server.wait(1.2)
+
+        sock = socket.socket()
+        self.addCleanup(sock.close)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(16)
+        host = f"http://127.0.0.1:{sock.getsockname()[1]}"
+
+        def serve() -> None:
+            while not stop_server.is_set():
+                try:
+                    conn, _ = sock.accept()
+                except OSError:
+                    return
+                threading.Thread(target=handle_conn, args=(conn,), daemon=True).start()
+
+        threading.Thread(target=serve, daemon=True).start()
+
+        configuration = k8s_client.Configuration(host=host)
+        injected = k8s_client.ApiClient(configuration=configuration)
+        self.addAsyncCleanup(injected.close)
+        real_helper = AsyncK8sHelper(api_client=injected)
+        helper = self.cluster.helper
+        helper.get_sandbox_warmpool.side_effect = real_helper.get_sandbox_warmpool
+        helper.get_sandbox_template.side_effect = real_helper.get_sandbox_template
+
+        batch = await self.claim(
+            [BatchGroup(warmpool="pool-a", size=1)], max_in_flight=1, lease_duration=60
+        )
+        await _wait_until(lambda: len(batch.members()) == 1)
+
+        # Stalled warm-pool GET respects timeout and releases the sole max_in_flight slot.
+        start = time.monotonic()
+        with self.assertRaisesRegex(
+            BatchTimeoutError, "warm pool 'pool-b' wasn't checked within 0.12s"
+        ):
+            await batch.acquire("pool-b", timeout=0.12)
+        self.assertLess(time.monotonic() - start, 0.45)
+        self.assertEqual([m.claim_name for m in batch.members()], ["b1-0"])
+        self.assertNotIn("pool-b", batch._checked_pools)
+        self.assertEqual(batch._prechecks, {})
+        self.assertFalse(batch._in_flight.locked())
+
+        # Template GET shares the remaining deadline after the warm-pool GET consumes part of it.
+        start = time.monotonic()
+        with self.assertRaisesRegex(
+            BatchTimeoutError, "warm pool 'pool-c' wasn't checked within 0.16s"
+        ):
+            await batch.acquire("pool-c", timeout=0.16)
+        self.assertLess(time.monotonic() - start, 0.45)
+        self.assertNotIn("pool-c", batch._checked_pools)
+
+        # A short-deadline leader cancels check on BatchTimeoutError so a follower takes over.
+        leader = asyncio.create_task(batch.acquire("pool-d", timeout=0.12))
+        await _wait_until(pool_d_started.is_set)
+        follower = asyncio.create_task(batch.acquire("pool-d", timeout=5.0))
+        await asyncio.sleep(0)
+        follower_waiting.set()
+        with self.assertRaisesRegex(
+            BatchTimeoutError, "warm pool 'pool-d' wasn't checked within 0.12s"
+        ):
+            await asyncio.wait_for(leader, timeout=2.0)
+        member = await asyncio.wait_for(follower, timeout=2.0)
+        self.assertEqual((member.claim_name, member.warmpool), ("b1-1", "pool-d"))
+
+        # A follower whose short timeout expires after release_group() raises BatchError, not
+        # BatchTimeoutError, even while the leader's HTTP read is still stalled.
+        leader = asyncio.create_task(batch.acquire("pool-f", timeout=5.0))
+        await _wait_until(pool_f_started.is_set)
+        follower = asyncio.create_task(batch.acquire("pool-f", timeout=0.16))
+        await asyncio.sleep(0)
+        await batch.release_group("pool-f")
+        with self.assertRaisesRegex(
+            BatchError, "warm pool 'pool-f' was released while acquiring"
+        ) as released_ctx:
+            await asyncio.wait_for(follower, timeout=2.0)
+        self.assertNotIsInstance(released_ctx.exception, BatchTimeoutError)
+        pool_f_release.set()
+        with self.assertRaisesRegex(
+            BatchError, "warm pool 'pool-f' was released while acquiring"
+        ):
+            await asyncio.wait_for(leader, timeout=2.0)
+
+        # A follower with a long timeout wakes at _lease_expires_at with BatchError while the
+        # leader's earlier socket read is still stalled.
+        leader = asyncio.create_task(batch.acquire("pool-e", timeout=5.0))
+        await _wait_until(pool_e_started.is_set)
+        batch._lease_expires_at = time.monotonic() + 0.10
+        start = time.monotonic()
+        follower = asyncio.create_task(batch.acquire("pool-e", timeout=5.0))
+        await asyncio.sleep(0)
+        with self.assertRaises(BatchError) as follower_expired:
+            await asyncio.wait_for(follower, timeout=2.0)
+        self.assertLess(time.monotonic() - start, 0.45)
+        self.assertNotIsInstance(follower_expired.exception, BatchTimeoutError)
+        self.assertIsInstance(follower_expired.exception.__cause__, BatchLeaseExpiredError)
+        pool_e_release.set()
+        with self.assertRaises(BatchError) as leader_expired:
+            await asyncio.wait_for(leader, timeout=2.0)
+        self.assertNotIsInstance(leader_expired.exception, BatchTimeoutError)
+        self.assertIsInstance(leader_expired.exception.__cause__, BatchLeaseExpiredError)
+        await batch._stop_background_tasks()
+
+        # The template GET recomputes remaining Lease time after the pool GET spends most of it.
+        b2 = await self.claim(
+            [BatchGroup(warmpool="pool-a", size=0)],
+            batch_id="b2",
+            max_in_flight=1,
+            lease_duration=60,
+        )
+        b2._lease_expires_at = time.monotonic() + 0.32
+        start = time.monotonic()
+        with self.assertRaises(BatchError) as tmpl_expired:
+            await b2.acquire("pool-g", timeout=5.0)
+        self.assertLess(time.monotonic() - start, 0.50)
+        self.assertNotIsInstance(tmpl_expired.exception, BatchTimeoutError)
+        self.assertIsInstance(tmpl_expired.exception.__cause__, BatchLeaseExpiredError)
+        await b2._stop_background_tasks()
+
+        # A leader blocked on a busy max_in_flight slot re-sleeps across an early wakeup and
+        # wakes at _lease_expires_at with BatchError, not BatchTimeoutError.
+        b3 = await self.claim(
+            [BatchGroup(warmpool="pool-a", size=0)],
+            batch_id="b3",
+            max_in_flight=1,
+            lease_duration=60,
+        )
+        orig_b3_acquire = b3._in_flight.acquire
+        slot_calls = 0
+
+        async def wake_early_once():
+            nonlocal slot_calls
+            slot_calls += 1
+            if slot_calls == 1:
+                async with asyncio.timeout(0.01):
+                    return await orig_b3_acquire()
+            return await orig_b3_acquire()
+
+        await orig_b3_acquire()
+        try:
+            b3._lease_expires_at = time.monotonic() + 0.12
+            start = time.monotonic()
+            with (
+                patch.object(b3._in_flight, "acquire", side_effect=wake_early_once),
+                self.assertRaises(BatchError) as slot_expired,
+            ):
+                await b3.acquire("pool-b", timeout=5.0)
+            self.assertGreaterEqual(slot_calls, 2)
+            self.assertLess(time.monotonic() - start, 0.45)
+            self.assertNotIsInstance(slot_expired.exception, BatchTimeoutError)
+            self.assertIsInstance(slot_expired.exception.__cause__, BatchLeaseExpiredError)
+        finally:
+            b3._in_flight.release()
+            await b3._stop_background_tasks()
 
 
 @patch.object(AsyncSandboxBatch, "_start", lambda self: None)

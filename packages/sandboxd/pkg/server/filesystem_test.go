@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"mime/multipart"
 	"net/http"
@@ -439,6 +440,281 @@ func TestPutIfNoneMatchRejectsOtherValues(t *testing.T) {
 		rec := doRequest(handler, http.MethodPut, "/v1/files/f.txt", []byte("x"), header)
 		require.Equal(t, http.StatusBadRequest, rec.Code, "value %q must be rejected", value)
 		require.Equal(t, "INVALID_ARGUMENT", decodeError(t, rec).Code)
+	}
+}
+
+// putUnmodified writes body to /v1/files/f.txt with If-Unmodified-Since set to
+// since, after backdating the existing file to modified.
+func putUnmodified(t *testing.T, handler http.Handler, root string, modified, since time.Time, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	require.NoError(t, os.Chtimes(filepath.Join(root, "f.txt"), modified, modified))
+	header := http.Header{"If-Unmodified-Since": []string{since.UTC().Format(http.TimeFormat)}}
+	return doRequest(handler, http.MethodPut, "/v1/files/f.txt", []byte(body), header)
+}
+
+func TestPutIfUnmodifiedSince(t *testing.T) {
+	modified := time.Now().Add(-time.Hour).Truncate(time.Second)
+	tests := []struct {
+		name         string
+		modified     time.Time
+		since        time.Time
+		wantCode     int
+		wantContents string
+	}{
+		{"same date", modified, modified, http.StatusNoContent, "new"},
+		{"later date", modified, modified.Add(time.Minute), http.StatusNoContent, "new"},
+		{"sub-second change in the same second", modified.Add(500 * time.Millisecond), modified, http.StatusNoContent, "new"},
+		{"earlier date", modified, modified.Add(-time.Second), http.StatusPreconditionFailed, "old"},
+		{"zero time", modified, time.Time{}, http.StatusPreconditionFailed, "old"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, handler, root := newRESTFixture(t)
+			require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("old"), 0o644))
+
+			rec := putUnmodified(t, handler, root, tt.modified, tt.since, "new")
+			require.Equal(t, tt.wantCode, rec.Code)
+			if tt.wantCode == http.StatusPreconditionFailed {
+				require.Equal(t, "FAILED_PRECONDITION", decodeError(t, rec).Code)
+			}
+
+			onDisk, err := os.ReadFile(filepath.Join(root, "f.txt"))
+			require.NoError(t, err)
+			require.Equal(t, tt.wantContents, string(onDisk))
+			entries, err := os.ReadDir(root)
+			require.NoError(t, err)
+			require.Len(t, entries, 1, "no temp file may be left behind")
+		})
+	}
+}
+
+func TestPutIfUnmodifiedSinceUsesLastModified(t *testing.T) {
+	_, handler, _ := newRESTFixture(t)
+	require.Equal(t, http.StatusNoContent, doRequest(handler, http.MethodPut, "/v1/files/f.txt", []byte("old"), nil).Code)
+
+	head := doRequest(handler, http.MethodHead, "/v1/files/f.txt", nil, nil)
+	header := http.Header{"If-Unmodified-Since": []string{head.Header().Get("Last-Modified")}}
+	rec := doRequest(handler, http.MethodPut, "/v1/files/f.txt", []byte("new"), header)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+func TestPutIfUnmodifiedSinceMissingFile(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	header := http.Header{"If-Unmodified-Since": []string{time.Now().UTC().Format(http.TimeFormat)}}
+
+	rec := doRequest(handler, http.MethodPut, "/v1/files/a/b/f.txt", []byte("x"), header)
+	require.Equal(t, http.StatusPreconditionFailed, rec.Code)
+	require.Equal(t, "FAILED_PRECONDITION", decodeError(t, rec).Code)
+
+	entries, err := os.ReadDir(root)
+	require.NoError(t, err)
+	require.Empty(t, entries, "a rejected write must not create parent directories")
+}
+
+func TestPutIfUnmodifiedSinceDirectory(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.Mkdir(filepath.Join(root, "d"), 0o755))
+	header := http.Header{"If-Unmodified-Since": []string{time.Now().UTC().Format(http.TimeFormat)}}
+
+	for _, target := range []string{"/v1/files/d", "/v1/files/d?type=file"} {
+		rec := doRequest(handler, http.MethodPut, target, []byte("x"), header)
+		require.Equal(t, http.StatusPreconditionFailed, rec.Code, target)
+		require.Equal(t, "FAILED_PRECONDITION", decodeError(t, rec).Code)
+	}
+}
+
+// signalReader closes eof when its Reader is drained.
+type signalReader struct {
+	io.Reader
+	eof chan struct{}
+}
+
+func (r *signalReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	if err == io.EOF {
+		close(r.eof)
+	}
+	return n, err
+}
+
+// A PUT that waits for its path lock must publish the time of its rename, not the
+// time it finished staging, or a later conditional PUT could miss it.
+func TestAtomicReplaceStampsRenameTime(t *testing.T) {
+	s, _, root := newRESTFixture(t)
+	path := filepath.Join(root, "f.txt")
+	require.NoError(t, os.WriteFile(path, []byte("old"), 0o644))
+
+	staged := make(chan struct{})
+	src := &signalReader{Reader: strings.NewReader("new"), eof: staged}
+	mu := s.replaceLocks.mutex(path)
+	mu.Lock()
+	done := make(chan error, 1)
+	go func() { done <- s.atomicReplace(nil)(path, src, 0o644) }()
+
+	select {
+	case <-staged:
+	case err := <-done:
+		mu.Unlock()
+		require.FailNow(t, "write failed before staging", "err=%v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	select {
+	case err := <-done:
+		mu.Unlock()
+		require.FailNow(t, "write finished while the path lock was held", "err=%v", err)
+	default:
+	}
+	released := time.Now()
+	mu.Unlock()
+	require.NoError(t, <-done)
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	if info.ModTime().Nanosecond() == 0 {
+		released = released.Truncate(2 * time.Second) // coarse timestamps
+	}
+	require.False(t, info.ModTime().Before(released), "mtime %v is older than the rename lock release %v", info.ModTime(), released)
+}
+
+// Stamping the temp file must not follow a symlink swapped in at its name.
+func TestAtomicReplaceDoesNotFollowTempSymlink(t *testing.T) {
+	s, _, root := newRESTFixture(t)
+	outside := filepath.Join(t.TempDir(), "outside")
+	require.NoError(t, os.WriteFile(outside, nil, 0o644))
+	old := time.Unix(1e9, 0)
+	require.NoError(t, os.Chtimes(outside, old, old))
+	swap := func(string) error {
+		tmps, err := filepath.Glob(filepath.Join(root, tmpPattern))
+		require.NoError(t, err)
+		for _, tmp := range tmps {
+			require.NoError(t, os.Remove(tmp))
+			require.NoError(t, os.Symlink(outside, tmp))
+		}
+		return nil
+	}
+	require.NoError(t, s.atomicReplace(swap)(filepath.Join(root, "f.txt"), strings.NewReader("x"), 0o644))
+
+	info, err := os.Stat(outside)
+	require.NoError(t, err)
+	require.True(t, info.ModTime().Equal(old), "outside mtime changed to %v", info.ModTime())
+}
+
+// An overwrite of one path must not wait for the lock of another.
+func TestAtomicReplaceDoesNotBlockOtherPaths(t *testing.T) {
+	s, _, root := newRESTFixture(t)
+	held := filepath.Join(root, "held.txt")
+	other := held
+	for i := 0; s.replaceLocks.mutex(other) == s.replaceLocks.mutex(held); i++ {
+		other = filepath.Join(root, fmt.Sprintf("other%d.txt", i))
+	}
+
+	mu := s.replaceLocks.mutex(held)
+	mu.Lock()
+	defer mu.Unlock()
+	require.NoError(t, s.atomicReplace(nil)(other, strings.NewReader("x"), 0o644))
+}
+
+// A regular file in an archive is replaced under the lock of its path, so it
+// cannot slip between the check and the rename of a conditional PUT.
+func TestExtractTarWaitsForPathLock(t *testing.T) {
+	s, handler, root := newRESTFixture(t)
+	mu := s.replaceLocks.mutex(filepath.Join(s.resolvedRoot, "dest", "a.txt"))
+	mu.Lock()
+
+	archive := buildTar(t, tarFile("a.txt", "new", 0o644))
+	done := make(chan int, 1)
+	go func() {
+		done <- doRequest(handler, http.MethodPut, "/v1/files/dest?extract=tar", archive, nil).Code
+	}()
+
+	select {
+	case code := <-done:
+		mu.Unlock()
+		require.FailNow(t, "extraction finished while the path lock was held", "code=%d", code)
+	case <-time.After(50 * time.Millisecond):
+	}
+	mu.Unlock()
+	require.Equal(t, http.StatusNoContent, <-done)
+
+	got, err := os.ReadFile(filepath.Join(root, "dest", "a.txt"))
+	require.NoError(t, err)
+	require.Equal(t, "new", string(got))
+}
+
+func TestPutIfUnmodifiedSinceRacesToOneWinner(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("old"), 0o644))
+	modified := time.Now().Add(-time.Hour)
+	require.NoError(t, os.Chtimes(filepath.Join(root, "f.txt"), modified, modified))
+	header := http.Header{"If-Unmodified-Since": []string{modified.UTC().Format(http.TimeFormat)}}
+
+	const writers = 16
+	codes := make(chan int, writers)
+	for range writers {
+		go func() {
+			codes <- doRequest(handler, http.MethodPut, "/v1/files/f.txt", []byte("x"), header).Code
+		}()
+	}
+	written := 0
+	for range writers {
+		if code := <-codes; code == http.StatusNoContent {
+			written++
+		} else {
+			require.Equal(t, http.StatusPreconditionFailed, code)
+		}
+	}
+	require.Equal(t, 1, written)
+}
+
+// An ordinary PUT that lands between the check and the rename of a conditional
+// PUT must not be overwritten, so the conditional PUT never wins over it.
+func TestPutIfUnmodifiedSinceRacesWithOrdinaryPut(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	modified := time.Now().Add(-time.Hour)
+	header := http.Header{"If-Unmodified-Since": []string{modified.UTC().Format(http.TimeFormat)}}
+
+	for round := range 50 {
+		path := filepath.Join(root, "f.txt")
+		require.NoError(t, os.WriteFile(path, []byte("old"), 0o644))
+		require.NoError(t, os.Chtimes(path, modified, modified))
+
+		done := make(chan struct{})
+		go func() {
+			doRequest(handler, http.MethodPut, "/v1/files/f.txt", []byte("ordinary"), nil)
+			close(done)
+		}()
+		doRequest(handler, http.MethodPut, "/v1/files/f.txt", []byte("conditional"), header)
+		<-done
+
+		onDisk, err := os.ReadFile(path)
+		require.NoError(t, err)
+		require.Equal(t, "ordinary", string(onDisk), "round %d", round)
+	}
+}
+
+func TestPutIfUnmodifiedSinceRejectsInvalidUse(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("old"), 0o644))
+	date := time.Now().UTC().Format(http.TimeFormat)
+
+	tests := []struct {
+		name   string
+		target string
+		header http.Header
+	}{
+		{"not a date", "f.txt", http.Header{"If-Unmodified-Since": []string{"yesterday"}}},
+		{"two dates", "f.txt", http.Header{"If-Unmodified-Since": []string{date, date}}},
+		{"with If-None-Match", "f.txt", http.Header{"If-Unmodified-Since": []string{date}, "If-None-Match": []string{"*"}}},
+		{"with append", "f.txt?append=true", http.Header{"If-Unmodified-Since": []string{date}}},
+		{"with type=directory", "d?type=directory", http.Header{"If-Unmodified-Since": []string{date}}},
+		{"with extract=tar", "d?extract=tar", http.Header{"If-Unmodified-Since": []string{date}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := doRequest(handler, http.MethodPut, "/v1/files/"+tt.target, []byte("x"), tt.header)
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+			require.Equal(t, "INVALID_ARGUMENT", decodeError(t, rec).Code)
+		})
 	}
 }
 

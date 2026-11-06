@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"io/fs"
 	"math"
@@ -40,6 +41,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"golang.org/x/sys/unix"
 
 	"sigs.k8s.io/agent-sandbox/packages/sandboxd/pkg/pathutil"
 )
@@ -68,6 +70,22 @@ const (
 	maxExtractBytes   = 1 << 30
 )
 
+// errChanged means the target is missing or changed after the date in
+// If-Unmodified-Since.
+var errChanged = errors.New("path changed")
+
+// replaceLocks serializes the overwrites of one path. A path hashes to one of a
+// fixed set of mutexes, so overwrites of different paths rarely wait for each
+// other.
+type replaceLocks [64]sync.Mutex
+
+// mutex returns the mutex that guards path.
+func (l *replaceLocks) mutex(path string) *sync.Mutex {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(path))
+	return &l[h.Sum32()%uint32(len(l))]
+}
+
 // RESTServer implements the sandboxd Filesystem & Runtime REST API on top of
 // net/http. All file paths are confined to rootDir via pathutil.SanitizePath.
 type RESTServer struct {
@@ -77,6 +95,12 @@ type RESTServer struct {
 	startTime         time.Time
 	ready             atomic.Bool
 	log               logr.Logger
+
+	// replaceLocks is held across the rename of every PUT that overwrites a
+	// file, and across the check of an If-Unmodified-Since write, so the check
+	// and the rename of a conditional write cannot interleave with another
+	// overwrite of the same path.
+	replaceLocks replaceLocks
 
 	// environ is swappable for tests; defaults to os.Environ.
 	environ func() []string
@@ -456,15 +480,39 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	checkUnmodified, ok := s.unmodifiedCheck(w, r)
+	if !ok {
+		return
+	}
+	conditional := checkUnmodified != nil
+
+	// Name of the precondition header, for the error messages below.
+	var precondition string
+	switch {
+	case createOnly && conditional:
+		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+			"If-None-Match cannot be combined with If-Unmodified-Since")
+		return
+	case conditional && appendMode:
+		// Appending streams in place, so there is no single step to check.
+		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+			"If-Unmodified-Since cannot be used with append")
+		return
+	case createOnly:
+		precondition = "If-None-Match"
+	case conditional:
+		precondition = "If-Unmodified-Since"
+	}
+
 	target, ok := s.resolvePath(w, r)
 	if !ok {
 		return
 	}
 
 	if extract {
-		if appendMode || createOnly || putType != "" {
+		if appendMode || precondition != "" || putType != "" {
 			s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
-				"extract cannot be used with append, type, or If-None-Match")
+				"extract cannot be used with append, type, If-None-Match, or If-Unmodified-Since")
 			return
 		}
 		s.putArchive(w, r, target, mode)
@@ -477,10 +525,10 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 				"append cannot be used with type=directory")
 			return
 		}
-		// Directory creation is idempotent, so it cannot honor the precondition.
-		if createOnly {
+		// Directory creation is idempotent, so it cannot honor a precondition.
+		if precondition != "" {
 			s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT",
-				"If-None-Match cannot be used with type=directory")
+				precondition+" cannot be used with type=directory")
 			return
 		}
 		s.putDirectory(w, r, target, mode)
@@ -490,6 +538,10 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 	if info, err := os.Stat(target); err == nil && info.IsDir() {
 		if createOnly {
 			s.writePathExists(w)
+			return
+		}
+		if conditional {
+			s.writeChanged(w)
 			return
 		}
 		if msg := typeMismatch(putType, true); msg != "" {
@@ -507,7 +559,7 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 	}
 	defer cleanup()
 
-	write := atomicWrite
+	write := s.atomicReplace(checkUnmodified)
 	switch {
 	case createOnly:
 		write = atomicCreate
@@ -518,6 +570,8 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case createOnly && errors.Is(err, os.ErrExist):
 			s.writePathExists(w)
+		case errors.Is(err, errChanged):
+			s.writeChanged(w)
 		case errors.Is(err, os.ErrPermission):
 			s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED", "permission denied")
 		default:
@@ -619,6 +673,13 @@ func (s *RESTServer) writePathExists(w http.ResponseWriter) {
 	s.writeError(w, http.StatusPreconditionFailed, "FAILED_PRECONDITION", "path already exists")
 }
 
+// writeChanged writes the 412 returned when a conditional PUT finds the target
+// missing, not a file, or modified after the date.
+func (s *RESTServer) writeChanged(w http.ResponseWriter) {
+	s.writeError(w, http.StatusPreconditionFailed, "FAILED_PRECONDITION",
+		"path is missing, not a file, or changed after If-Unmodified-Since")
+}
+
 // createOnly reports whether the request carries "If-None-Match: *". sandboxd
 // has no ETags, so it rejects any other value instead of ignoring a
 // precondition the client relies on. It writes a 400 and returns ok=false in
@@ -633,6 +694,70 @@ func (s *RESTServer) createOnly(w http.ResponseWriter, r *http.Request) (createO
 	}
 	s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", `If-None-Match must be "*"`)
 	return false, false
+}
+
+// unmodifiedCheck returns the check for the "If-Unmodified-Since" header, or
+// nil when the header is absent. Like createOnly, it rejects a bad value with a
+// 400 and ok=false instead of ignoring a precondition the client relies on.
+//
+// The check fails with errChanged unless the target exists and was not modified
+// after the date. It compares at one-second precision, like Last-Modified.
+func (s *RESTServer) unmodifiedCheck(w http.ResponseWriter, r *http.Request) (check func(target string) error, ok bool) {
+	values := r.Header.Values("If-Unmodified-Since")
+	if len(values) == 0 {
+		return nil, true
+	}
+	var since time.Time
+	var err error
+	if len(values) == 1 {
+		since, err = http.ParseTime(values[0])
+	}
+	if len(values) != 1 || err != nil {
+		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "If-Unmodified-Since must be one HTTP date")
+		return nil, false
+	}
+	return func(target string) error {
+		info, err := os.Stat(target)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			return errChanged
+		case err != nil:
+			return err
+		case info.ModTime().Unix() > since.Unix():
+			return errChanged
+		}
+		return nil
+	}, true
+}
+
+// atomicReplace is atomicWrite that holds the lock of target around the rename. When
+// check is not nil, it also runs check before writing, so a rejected request
+// leaves nothing behind, and again under the lock just before the rename. It
+// stamps the file with the rename time, so a write that waited for the lock
+// cannot publish an older modification time than the file it replaces.
+func (s *RESTServer) atomicReplace(check func(target string) error) func(target string, src io.Reader, mode os.FileMode) error {
+	if check == nil {
+		check = func(string) error { return nil }
+	}
+	return func(target string, src io.Reader, mode os.FileMode) error {
+		if err := check(target); err != nil {
+			return err
+		}
+		return writeViaTemp(target, src, mode, func(tmp, target string) error {
+			mu := s.replaceLocks.mutex(target)
+			mu.Lock()
+			defer mu.Unlock()
+			if err := check(target); err != nil {
+				return err
+			}
+			// Never follow a symlink swapped in at the temp name.
+			ts := unix.NsecToTimespec(time.Now().UnixNano())
+			if err := unix.UtimesNanoAt(unix.AT_FDCWD, tmp, []unix.Timespec{ts, ts}, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+				return err
+			}
+			return os.Rename(tmp, target)
+		})
+	}
 }
 
 // atomicWrite streams src into target using the temp-file-then-rename
@@ -853,7 +978,7 @@ func (s *RESTServer) extractEntry(body io.Reader, hdr *tar.Header, dir string) e
 		// Keep owner access so the entries below the directory can be written.
 		return makeDirectory(leaf, perm|0o700, true)
 	case tar.TypeReg:
-		return atomicWrite(leaf, body, perm)
+		return s.atomicReplace(nil)(leaf, body, perm)
 	default:
 		return replaceSymlink(leaf, hdr.Linkname)
 	}

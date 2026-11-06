@@ -956,6 +956,8 @@ describe("SandboxdRestClient.writeStream", () => {
         client.writeStream("a.txt", stream, {}, new AbortController().signal),
       ).rejects.toMatchObject({
         status: 400,
+        code: "INVALID_ARGUMENT",
+        telemetryCode: "invalid_argument",
       } satisfies Partial<SandboxdApiError>);
       expect(cancelled).toBe(true);
     } finally {
@@ -1349,7 +1351,8 @@ describe("SandboxdRestClient.list", () => {
       client.list("dir", { recursive: true }, new AbortController().signal),
     ).rejects.toMatchObject({
       status: 400,
-      code: "UNKNOWN",
+      code: "INVALID_ARGUMENT",
+      telemetryCode: "invalid_argument",
       detail: message,
     } satisfies Partial<SandboxdApiError>);
     expect(activeServer.requests).toHaveLength(1);

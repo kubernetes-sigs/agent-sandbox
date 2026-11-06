@@ -453,6 +453,7 @@ function wrapUploadStream(
 }
 
 const KNOWN_API_CODES: ReadonlySet<string> = new Set([
+  "INVALID_ARGUMENT",
   "UNAUTHENTICATED",
   "NOT_FOUND",
   "PERMISSION_DENIED",

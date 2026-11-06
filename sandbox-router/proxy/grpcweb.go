@@ -16,7 +16,9 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"mime"
 	"net/http"
@@ -353,6 +355,11 @@ func (t *grpcWebBodyTransformer) Read(p []byte) (int, error) {
 		t.done = true
 		if err == io.EOF {
 			t.tail = t.terminalFrame()
+		} else if t.deadlineExceeded(err) {
+			// The RPC deadline (grpc-timeout or --grpc-proxy-timeout)
+			// fired mid-stream. Report DeadlineExceeded, mirroring the
+			// mapping the native gRPC path applies in writeProxyError.
+			t.tail = t.synthesizedFrame("4", "context deadline exceeded")
 		} else {
 			// A grpc-web client can only learn the RPC outcome from a
 			// trailer frame; ending the body without one leaves it
@@ -375,6 +382,22 @@ func (t *grpcWebBodyTransformer) terminalFrame() []byte {
 		return trailerFrameFromHeaders(t.resp.Trailer)
 	}
 	return t.synthesizedFrame("13", "backend closed stream without status")
+}
+
+// deadlineExceeded reports whether a mid-stream read failure is the RPC
+// deadline firing rather than a broken upstream connection. The h2 transport
+// may wrap context.DeadlineExceeded in the read error or surface an opaque
+// stream error, so the outbound request's context — which carries the
+// deadline grpcRequestContext derived from grpc-timeout and
+// --grpc-proxy-timeout — is the fallback witness. A canceled context (the
+// client hung up) is deliberately not a deadline: it keeps the Unavailable
+// mapping it had before.
+func (t *grpcWebBodyTransformer) deadlineExceeded(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	req := t.resp.Request
+	return req != nil && grpcContextError(req.Context()) == context.DeadlineExceeded
 }
 
 func (t *grpcWebBodyTransformer) synthesizedFrame(code, message string) []byte {

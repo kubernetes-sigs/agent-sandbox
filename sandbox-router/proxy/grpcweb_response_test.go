@@ -16,11 +16,14 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"testing"
+	"time"
 )
 
 // trailerFillingReader mimics the Go h2 client: the body streams message
@@ -197,6 +200,57 @@ func TestGRPCWebBodyTransformer_MidStreamError(t *testing.T) {
 	}
 	if len(recorded) != 1 || recorded[0] != "14" {
 		t.Fatalf("recorded = %v, want [14]", recorded)
+	}
+}
+
+func TestGRPCWebBodyTransformer_DeadlineExceededMidStream(t *testing.T) {
+	// When the RPC deadline (grpc-timeout or --grpc-proxy-timeout) fires
+	// mid-stream, the body read fails with an error wrapping
+	// context.DeadlineExceeded. The client must see DeadlineExceeded, not
+	// the generic Unavailable the broken-stream path synthesizes.
+	src := &trailerFillingReader{frames: messageFrame("partial"),
+		err: fmt.Errorf("stream read: %w", context.DeadlineExceeded)}
+	resp := &http.Response{Body: src}
+	src.resp = resp
+	var recorded []string
+	tr := newGRPCWebBodyTransformer(resp, func(s string) { recorded = append(recorded, s) })
+
+	got, err := io.ReadAll(tr)
+	if err != nil {
+		t.Fatalf("read must end cleanly with a synthesized frame, got %v", err)
+	}
+	want := append(messageFrame("partial"),
+		encodeTrailerFrame([]byte("grpc-status:4\r\ngrpc-message:context deadline exceeded\r\n"))...)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("output mismatch:\n got %q\nwant %q", got, want)
+	}
+	if len(recorded) != 1 || recorded[0] != "4" {
+		t.Fatalf("recorded = %v, want [4]", recorded)
+	}
+}
+
+func TestGRPCWebBodyTransformer_DeadlineExceededViaRequestContext(t *testing.T) {
+	// The h2 transport can surface the deadline as an opaque stream error
+	// that does not wrap context.DeadlineExceeded. The outbound request's
+	// context carries the RPC deadline, so the transformer must consult it
+	// before falling back to Unavailable.
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	src := &trailerFillingReader{frames: messageFrame("partial"),
+		err: errors.New("http2: stream closed")}
+	resp := &http.Response{Body: src, Request: &http.Request{}}
+	resp.Request = resp.Request.WithContext(ctx)
+	src.resp = resp
+	tr := newGRPCWebBodyTransformer(resp, func(string) {})
+
+	got, err := io.ReadAll(tr)
+	if err != nil {
+		t.Fatalf("read must end cleanly with a synthesized frame, got %v", err)
+	}
+	want := append(messageFrame("partial"),
+		encodeTrailerFrame([]byte("grpc-status:4\r\ngrpc-message:context deadline exceeded\r\n"))...)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("output mismatch:\n got %q\nwant %q", got, want)
 	}
 }
 

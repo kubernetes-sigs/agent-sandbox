@@ -43,6 +43,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 // Create a test scheme with extensions types registered.
@@ -170,6 +171,55 @@ func createVolumeClaimTemplate(name string, storageClass string) sandboxv1beta1.
 			},
 		},
 	}
+}
+
+func TestSandboxWarmPoolReconcileRequeuesForActiveTTL(t *testing.T) {
+	scheme := newTestScheme()
+	ttl := int32(60)
+	zeroReplicas := int32(0)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "active-ttl-pool",
+			Namespace:         "default",
+			CreationTimestamp: metav1.NewTime(now.Add(-30 * time.Second)),
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:               &zeroReplicas,
+			TTLSecondsAfterCreated: &ttl,
+			TemplateRef:            extensionsv1beta1.SandboxTemplateRef{Name: "test-template"},
+		},
+	}
+	client := newFakeClient(scheme, warmPool, createTemplate(warmPool.Namespace))
+	reconciler := &SandboxWarmPoolReconciler{Client: client, Scheme: scheme, now: func() time.Time { return now }}
+
+	result, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: warmPool.Name, Namespace: warmPool.Namespace}})
+	require.NoError(t, err)
+	require.Equal(t, 30*time.Second, result.RequeueAfter)
+}
+
+func TestSandboxWarmPoolReconcileDeletesExpiredTTL(t *testing.T) {
+	scheme := newTestScheme()
+	ttl := int32(60)
+	fakeRecorder := events.NewFakeRecorder(10)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "expired-pool",
+			Namespace:         "default",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-2 * time.Minute)),
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{TTLSecondsAfterCreated: &ttl},
+	}
+	client := newFakeClient(scheme, warmPool)
+	reconciler := &SandboxWarmPoolReconciler{Client: client, Scheme: scheme, Recorder: fakeRecorder}
+
+	_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: warmPool.Name, Namespace: warmPool.Namespace}})
+	require.NoError(t, err)
+
+	fetched := &extensionsv1beta1.SandboxWarmPool{}
+	err = client.Get(context.Background(), types.NamespacedName{Name: warmPool.Name, Namespace: warmPool.Namespace}, fetched)
+	require.True(t, k8serrors.IsNotFound(err))
+	require.Equal(t, "Normal TTLExpired Deleting SandboxWarmPool because ttlSecondsAfterCreated expired", <-fakeRecorder.Events)
 }
 
 func TestReconcilePool(t *testing.T) {

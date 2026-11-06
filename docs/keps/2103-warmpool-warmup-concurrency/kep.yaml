@@ -10,6 +10,7 @@ reviewers:
   - "@aditya-shantanu"
 approvers:
   - "@aditya-shantanu"
+  - "@janetkuo"
 
 see-also:
   - "https://github.com/kubernetes-sigs/agent-sandbox/issues/2103"

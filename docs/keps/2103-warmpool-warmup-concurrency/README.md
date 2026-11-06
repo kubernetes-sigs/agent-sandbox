@@ -234,25 +234,11 @@ type SandboxWarmPoolWarmupStrategy struct {
 	// spec.replicas (for example "25%"). Percentages round up and never resolve
 	// below 1, so the pool always makes progress.
 	//
-	// The pool creates a new sandbox only once an earlier one finishes warming
-	// up, so a slower warmup delays the next create rather than adding one
-	// beside it. Sandboxes whose Pods are unschedulable or waiting on
-	// scheduling gates do not count against this field, because they consume no
-	// node resources; they can therefore all be scheduled at once when capacity
-	// returns, which is the one case where more sandboxes warm up concurrently
-	// than this field allows.
-	//
-	// This bounds the sandboxes the pool itself is warming, not total warmup
-	// load on the cluster. A sandbox adopted by a SandboxClaim before it
-	// becomes Ready leaves the pool and stops counting while its startup work
-	// continues.
-	//
-	// The pool paces on the Ready condition, so how much work this field
-	// spreads out depends on what readiness means for the sandbox. Without a
-	// readiness or startup probe a container reports ready as soon as it
-	// starts, so this field paces scheduling, image pulls and container
-	// starts. To pace work the container does after that, such as a build or a
-	// model download, run it in an init container or behind a probe.
+	// A sandbox counts against this field from creation until it reports
+	// Ready. Sandboxes whose Pods are unschedulable or waiting on scheduling
+	// gates do not count, and neither do sandboxes a SandboxClaim has adopted,
+	// so this bounds the pool's own warming members rather than total warmup
+	// load on the cluster.
 	//
 	// Leaving this unset creates the whole deficit at once.
 	// +optional
@@ -278,6 +264,14 @@ typed decode of that object fails inside the informer's `List`, which breaks the
 `List` for every `SandboxWarmPool` rather than only the pool holding the bad
 value. The exact rule is a starting point for review rather than a settled
 detail.
+
+The godoc is deliberately short, because controller-gen turns it into the CRD
+field description and so into `kubectl explain` output. It carries only the
+contract: the accepted forms, how percentages resolve, and what the count
+excludes. The reasoning behind those exclusions, how the readiness signal
+decides what the field paces, and the guidance for choosing a value belong in
+[docs/configuration.md](../../configuration.md) instead, and the sections below
+are the source for that text.
 
 A new status field reports the count the gate acts on:
 
@@ -456,11 +450,17 @@ path keeps its current behavior and cost.
 
 ##### Driving the next create
 
-No polling is needed. The controller already watches `Sandbox` objects through
-`Owns`-style ownership handling, so a member flipping to `Ready` enqueues its
-pool and the next create follows within milliseconds. Add a conservative
-fallback requeue for the case where the gate withholds every create, so a lost
-watch event cannot idle a pool until the next resync.
+No polling is needed, and no new timer either. The controller already watches
+`Sandbox` objects through `Owns`-style ownership handling, so a member flipping
+to `Ready` enqueues its pool and the next create follows within milliseconds.
+
+A gated pool is also already covered against a lost watch event. Whenever a
+member is not Ready, `reconcilePool` computes `nextGraceDeadline` and folds it
+into the requeue through `minNonZeroDuration`. The gate only withholds creates
+while `warmingUp` is at least `maxConcurrent`, which means at least one member
+is not Ready, so that requeue is always armed when it matters. Any additional
+backstop this feature needs should extend the existing `nextGraceDeadline`
+path rather than introduce a second timer alongside it.
 
 ##### Status
 

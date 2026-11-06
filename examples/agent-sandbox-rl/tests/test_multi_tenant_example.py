@@ -145,8 +145,27 @@ def test_footprint_follows_the_sdk_window():
   assert run_experiment.footprint(COUNTS, 1, 4) == (1, 3)
   fleet = FakeFleet(run_experiment.build_config("alice", "exp1", max_concurrent=3))
   fleet.load_tasks([img for img in COUNTS for _ in range(2)])
-  fleet.plan()
+  plan = fleet.plan()
   assert fleet.recommended_window() == run_experiment.footprint(COUNTS, 3, 4)[0]
+  # naive warms every pool at once; pipelined up to two windows.
+  assert run_experiment.footprint(COUNTS, 3, 4, "naive") == (10, plan.total_replicas + 6)
+  assert run_experiment.footprint(COUNTS, 3, 4, "pipelined") == (6, 12)
+  assert run_experiment.fit_to_quota({"pods": "16"}, {}, cpu="100m", memory="128Mi",
+                                     counts=COUNTS, wanted=8, max_pool=4,
+                                     strategy="naive") == (3, 16)        # 10 + 6
+
+
+def test_fleet_ceilings_only_sum_when_every_cluster_has_a_quota():
+  assert run_experiment.fleet_ceilings({"a": 8, "b": 6}) == (14, {"a": 8, "b": 6})
+  # A quota on one cluster only: that cluster keeps its cap, the fleet-wide
+  # ceiling is left to the SDK, so the quota-free cluster is not capped by a's budget.
+  assert run_experiment.fleet_ceilings({"a": 8, "b": None}) == (None, {"a": 8})
+  assert run_experiment.fleet_ceilings({"a": None}) == (None, {})
+  assert run_experiment.fleet_ceilings({}) == (None, {})
+  cfg = run_experiment.build_config("alice", "exp1", contexts=["a", "b"],
+                                    pod_budget=None, cluster_budgets={"a": 8})
+  assert [(c.name, c.max_replicas) for c in cfg.clusters] == [("a", 8), ("b", None)]
+  assert cfg.max_live_sandboxes is None
 
 
 @pytest.mark.parametrize("hard,used,expect", [

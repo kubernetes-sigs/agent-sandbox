@@ -69,12 +69,18 @@ def main(argv=None) -> int:
   contexts = [c for c in (args.contexts or "").split(",") if c] or [None]
 
   def one(ctx):
-    cluster = Cluster(ClusterConfig(name=ctx or "default", context=ctx,
-                                    namespace=args.namespace))
-    return prepull(cluster, images, node_selector=node_selector,
-                   runtime_class=args.runtime_class,
-                   image_pull_secret=args.image_pull_secret, wait=True,
-                   timeout=args.timeout, delete_when_done=not args.keep)
+    # An API error on one cluster must not hide the other clusters' results.
+    try:
+      cluster = Cluster(ClusterConfig(name=ctx or "default", context=ctx,
+                                      namespace=args.namespace))
+      return prepull(cluster, images, node_selector=node_selector,
+                     runtime_class=args.runtime_class,
+                     image_pull_secret=args.image_pull_secret, wait=True,
+                     timeout=args.timeout, delete_when_done=not args.keep)
+    except Exception as e:  # noqa: BLE001 - reported per cluster below
+      logging.getLogger("multi_tenant.prepull").error(
+          "pre-pull on %s failed: %s", ctx or "current context", e)
+      return False
 
   with concurrent.futures.ThreadPoolExecutor(max_workers=len(contexts)) as pool:
     results = dict(zip(contexts, pool.map(one, contexts)))

@@ -193,10 +193,10 @@ before it starts:
    `requests.memory` into pods at the per-sandbox requests; the tightest wins.
    With `--share N` (set by `run_many.py` to the experiments a user starts at
    once) each experiment takes 1/N of that.
-2. `footprint` is what the `sliding` strategy holds at its peak: the warm
-   replicas of the pools the window keeps warm (the SDK's own
-   `sizing.recommend_window`), plus one claimed pod and one refilling pod per
-   concurrency slot.
+2. `footprint` is what the strategy holds at its peak: the warm replicas of
+   the pools that are warm at once (`sliding`: the SDK's own
+   `sizing.recommend_window`; `pipelined`: up to two windows; `naive`: every
+   pool), plus one claimed pod and one refilling pod per concurrency slot.
 3. `fit_to_quota` lowers `--max-concurrent` until the footprint fits, and the
    budget becomes the fleet's `max_live_sandboxes`, so the fleet's own circuit
    breaker and the quota agree.
@@ -235,7 +235,7 @@ teardown and the report. What the example does differently with
 | RBAC and quota | one Role, one quota | one per cluster; the budget is per cluster, so each `ClusterConfig.max_replicas` is set from that cluster's quota |
 | Image layers | one node cache, shared by all namespaces on it | **one cache per cluster**: cluster A's nodes do nothing for cluster B. `prepull_shared.py --contexts a,b` pulls on every cluster at once; Image Streaming is per cluster too, and Artifact Registry in the same region serves all of them |
 | Placement | n/a | the default `image-affinity` maps an image to a cluster by the sorted cluster names. The runner names a cluster after the admin's context (`rl-alice@a` and `rl-bob@a` are both `a`), so every user puts an image on the same cluster and finds it in that cluster's cache. `least-loaded` and `capacity-weighted` can put one image on different clusters for different users; then only a pre-pull on every cluster keeps claims warm |
-| Quota fit | one budget | one budget per cluster: the tightest cluster bounds the concurrency (placement may put a whole window there), each budget becomes that cluster's `max_replicas`, and their sum the fleet's `max_live_sandboxes` |
+| Quota fit | one budget | one budget per cluster: the tightest cluster bounds the concurrency (placement may put a whole window there) and each budget becomes that cluster's `max_replicas`. The fleet's `max_live_sandboxes` is the sum only when every cluster has a quota; with a quota on some clusters only, the SDK's own ceiling stays, because a sum of the known budgets would also cap the quota-free clusters |
 | Node pools inside one cluster | n/a | names are keyed by image and both configs share the fleet's run id, so two configs with the same context need **distinct namespaces** (package README, "Multiple clusters and multiple node pools"). Rather than a namespace per user per pool, use one config per cluster without `node_selector` and a node affinity in `TemplateSpec.extra_pod_spec` |
 | Teardown and reaper | per run, per namespace | the same, per cluster; the runner prints one reaper command per context |
 

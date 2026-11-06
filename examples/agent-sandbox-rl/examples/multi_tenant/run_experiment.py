@@ -130,20 +130,44 @@ def name_prefix_for(user: str, experiment: str) -> str:
   return prefix
 
 
-def footprint(counts: dict[str, int], max_concurrent: int, max_pool: int) -> tuple[int, int]:
-  """What the sliding strategy holds in the namespace at its peak.
+def footprint(counts: dict[str, int], max_concurrent: int, max_pool: int,
+              strategy: str = "sliding") -> tuple[int, int]:
+  """What a strategy holds in the namespace at its peak.
 
-  Returns ``(window, pods)``: the number of image pools the strategy keeps warm
-  at once (the SDK's own `sizing.recommend_window`) and the pods that costs:
-  those pools' warm replicas, one claimed pod per concurrency slot, and one
-  replacement per slot while a pool refills behind a claim. ``counts`` maps
-  each image to its task count, in task order, as `SandboxFleet.image_counts`.
+  Returns ``(window, pods)``: how many image pools are warm at once and the pods
+  that costs: those pools' warm replicas, one claimed pod per concurrency slot,
+  and one replacement per slot while a pool refills behind a claim. ``sliding``
+  keeps the SDK's own `sizing.recommend_window` pools warm, ``pipelined`` up to
+  two such windows, ``naive`` and ``none`` every pool. ``counts`` maps each image
+  to its task count, in task order, as `SandboxFleet.image_counts`.
   """
   total = sum(counts.values()) or 1
-  window = sizing.recommend_window(counts, max_concurrent, max_pool)
+  n_images = len(counts)
+  if strategy in ("naive", "none"):
+    window = n_images
+  else:
+    window = sizing.recommend_window(counts, max_concurrent, max_pool)
+    if strategy == "pipelined":
+      window = min(n_images, 2 * window)
   warm = sum(sizing.compute_replicas(n, total, max_concurrent, max_pool)
              for n in list(counts.values())[:window])
   return window, warm + 2 * max_concurrent
+
+
+def fleet_ceilings(budgets: dict[str, int | None]) -> tuple[int | None, dict[str, int]]:
+  """The fleet's pod ceiling and the per-cluster caps from per-cluster budgets.
+
+  ``budgets`` maps each cluster to the pods its quota admits, or None for a
+  cluster without a quota. Every cluster with a budget keeps it as its
+  ``max_replicas``. The fleet-wide ``max_live_sandboxes`` is the sum only when
+  every cluster has a budget: with a quota on some clusters only, a sum of the
+  known budgets would cap pods on the quota-free clusters too, and the SDK's own
+  ceiling (expected replicas times its overcommit factor) applies instead.
+  """
+  caps = {c: b for c, b in budgets.items() if b is not None}
+  if budgets and len(caps) == len(budgets):
+    return sum(caps.values()), caps
+  return None, caps
 
 
 def pod_budget(hard: dict, used: dict, *, cpu: str, memory: str) -> int | None:
@@ -166,7 +190,8 @@ def pod_budget(hard: dict, used: dict, *, cpu: str, memory: str) -> int | None:
 
 
 def fit_to_quota(hard: dict, used: dict, *, cpu: str, memory: str, counts: dict[str, int],
-                 wanted: int, max_pool: int, share: int = 1) -> tuple[int, int | None]:
+                 wanted: int, max_pool: int, share: int = 1,
+                 strategy: str = "sliding") -> tuple[int, int | None]:
   """The largest concurrency up to ``wanted`` whose footprint fits the quota.
 
   Returns ``(max_concurrent, budget)``. ``budget`` is this experiment's share of
@@ -181,7 +206,7 @@ def fit_to_quota(hard: dict, used: dict, *, cpu: str, memory: str, counts: dict[
     return wanted, None
   budget //= max(1, share)
   for mc in range(wanted, 0, -1):
-    if footprint(counts, mc, max_pool)[1] <= budget:
+    if footprint(counts, mc, max_pool, strategy)[1] <= budget:
       return mc, budget
   return 0, budget
 
@@ -369,38 +394,42 @@ def main(argv=None) -> int:
     counts = {img: args.tasks_per_image for img in images}
     # Per cluster: what its quota admits for this experiment. The tightest
     # cluster bounds the concurrency, because placement may put a whole window
-    # there; each cluster's budget caps the warm replicas it takes (max_replicas)
-    # and their sum is the fleet's pod ceiling.
-    budgets: dict[str, int] = {}
+    # there; see fleet_ceilings for what becomes max_replicas and the fleet's
+    # pod ceiling.
+    budgets: dict[str, int | None] = {}
     fits = max_concurrent
     for cluster in fleet.registry:
       hard, used = read_quota(cluster.core_api, namespace)
       fit, budget = fit_to_quota(hard, used, cpu=args.cpu, memory=args.memory, counts=counts,
                                  wanted=max_concurrent, max_pool=args.max_warmpool_size,
-                                 share=args.share)
+                                 share=args.share, strategy=args.strategy)
+      budgets[cluster.name] = budget
       if budget is None:
         continue
-      budgets[cluster.name] = budget
       if fit < 1:
         logger.error("quota in %s on cluster %s leaves no room for one slot (budget %d "
                      "pods for this experiment): hard=%s used=%s", namespace, cluster.name,
                      budget, hard, used)
         return 2
       fits = min(fits, fit)
-    if budgets:
+    ceiling, caps = fleet_ceilings(budgets)
+    if caps:
       if fits < max_concurrent:
         logger.warning("quota in %s admits %s pods for this experiment; lowering "
                        "--max-concurrent from %d to %d", namespace,
-                       ", ".join(f"{b} on {c}" for c, b in budgets.items()),
+                       ", ".join(f"{b} on {c}" for c, b in caps.items()),
                        max_concurrent, fits)
+      if ceiling is None:
+        logger.info("no quota on %s; the fleet keeps the SDK's own pod ceiling and "
+                    "max_replicas caps %s", ", ".join(c for c, b in budgets.items() if b is None),
+                    caps)
       max_concurrent = fits
       fleet = SandboxFleet(build_config(
           args.user, args.experiment, **{**kwargs, "max_concurrent": fits},
-          pod_budget=sum(budgets.values()),
-          cluster_budgets=budgets if len(budgets) > 1 else None))
-    window, peak = footprint(counts, max_concurrent, args.max_warmpool_size)
-    logger.info("footprint: %d pools warm at once, up to %d pods at the peak%s",
-                window, peak, f" (quota budgets {budgets})" if budgets else "")
+          pod_budget=ceiling, cluster_budgets=caps))
+    window, peak = footprint(counts, max_concurrent, args.max_warmpool_size, args.strategy)
+    logger.info("footprint (%s): %d pools warm at once, up to %d pods at the peak%s",
+                args.strategy, window, peak, f" (quota budgets {caps})" if caps else "")
   logger.info("user=%s experiment=%s namespace=%s run_id=%s names=%s*", args.user,
               args.experiment, namespace, fleet.run_id, fleet.config.template_name_prefix)
 

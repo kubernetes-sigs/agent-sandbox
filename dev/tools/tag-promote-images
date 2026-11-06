@@ -20,21 +20,13 @@ import subprocess
 import time
 
 from shared.git_ops import run_command, validate_tag, check_tag_exists, check_local_repo_state, create_and_push_tag
+from shared.utils import IMAGES_TO_PROMOTE
 
 # The local clone of k8s.io repo relative to where this script is executed (i.e. make release-promote)
 DEFAULT_K8S_IO_DIR = "../../kubernetes/k8s.io"
 STAGING_REPO_BASE = "us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox"
 # Path within the k8s.io repository
 IMAGES_YAML_PATH = "registry.k8s.io/images/k8s-staging-agent-sandbox/images.yaml"
-
-# List of images to promote
-IMAGES_TO_PROMOTE = [
-    "agent-sandbox-controller",
-    "chrome-sandbox",
-    "python-runtime-sandbox",
-    "sandbox-router-go",
-    "sandboxd"
-]
 
 # Git Remotes defaults are controlled by CLI arguments
 

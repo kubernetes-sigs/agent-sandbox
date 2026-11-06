@@ -874,6 +874,24 @@ def find_existing_issue(existing_issues, marker, test_name=None):
     return None
 
 
+def find_manual_job_issue(existing_issues, tab):
+    """Finds a hand-filed open issue about a job's flakiness, or None.
+
+    A maintainer who files a job's flakiness by hand rarely uses the
+    `[FLAKE] <name>` form, so an issue counts when its title names the tab
+    as a whole word. Issues the tool created carry a marker and are matched
+    by that marker instead, so one tab's issue never stands in for a tab
+    whose name merely contains it.
+    """
+    pattern = re.compile(r"(?<![\w-])" + re.escape(tab) + r"(?![\w-])")
+    for issue in existing_issues:
+        if "<!-- flake-report:" in issue.get("body", ""):
+            continue
+        if pattern.search(issue.get("title", "")):
+            return issue
+    return None
+
+
 def find_closed_issue(closed_issues, marker):
     """Finds the most recently closed issue that tracked this marker, or None.
 
@@ -959,6 +977,7 @@ or triage manually per [docs/testing.md](https://github.com/kubernetes-sigs/agen
 
 
 def issue_body_for_job(b, marker, repo):
+    """Issue text for a junit-less job whose recent runs all failed."""
     sha = b["first_failing_commit"]
     commit = (f"[`{sha[:12]}`](https://github.com/{repo}/commit/{sha})"
               if sha else "unknown")
@@ -987,6 +1006,7 @@ Close this issue once the job is green again. The report does not close it.
 
 
 def issue_body_for_job_flake(f, marker):
+    """Issue text for a junit-less job that fails intermittently."""
     return f"""{marker}
 **Job failing intermittently, detected by [`dev/tools/flake-report`](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/dev/tools/flake-report).**
 
@@ -1008,6 +1028,7 @@ release promotes, so treat it with the same urgency as a flaky test.
 
 
 def list_issues(repo, label, state, fields):
+    """Returns up to 200 issues with the label in the given state."""
     return json.loads(
         gh("issue", "list", "--repo", repo, "--label", label,
            "--state", state, "--limit", "200", "--json", fields))
@@ -1025,11 +1046,8 @@ def update_issues(repo, flaky, infra, dry_run, breakages=()):
             marker = f"{JOB_FLAKE_MARKER_PREFIX}{f['tab']} -->"
             title = f"[FLAKE] {f['tab']}: job fails intermittently"
             body_text = issue_body_for_job_flake(f, marker)
-            # A maintainer who files the job's flakiness by hand rarely uses
-            # the `[FLAKE] <name>` form, so any open issue naming the tab
-            # in its title counts as that issue.
-            issue = find_existing_issue(existing, marker) or next(
-                (i for i in existing if f["tab"] in i.get("title", "")), None)
+            issue = find_existing_issue(existing, marker) or find_manual_job_issue(
+                existing, f["tab"])
         else:
             marker = f"{ISSUE_MARKER_PREFIX}{f['test']} -->"
             title = f"[FLAKE] {f['short']} ({', '.join(f['tabs'])})"

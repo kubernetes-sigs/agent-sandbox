@@ -1150,6 +1150,21 @@ class UpdateIssuesJobBreakageTest(unittest.TestCase):
         self.assertEqual(actions, ["skip #2192 (manually filed): post-agent-sandbox-push-images"])
         self.assertEqual([c for c in calls if c[1] in ("create", "edit")], [])
 
+    def test_manual_match_needs_the_whole_tab_name_and_no_marker(self):
+        # "periodic-x" must not claim the issue for "periodic-x-large", and
+        # an issue the tool filed for another tab (it carries a marker) is
+        # never mistaken for a hand-filed one.
+        existing = [
+            {"number": 1, "body": "", "title": "periodic-x-large keeps failing"},
+            {"number": 2, "body": "<!-- flake-report:job-flake=periodic-x-large -->",
+             "title": "[FLAKE] periodic-x: job fails intermittently"},
+        ]
+        self.assertIsNone(flake_report.find_manual_job_issue(existing, "periodic-x"))
+        self.assertEqual(flake_report.find_manual_job_issue(
+            existing, "periodic-x-large")["number"], 1)
+        self.assertEqual(flake_report.find_manual_job_issue(
+            [{"number": 3, "body": "", "title": "post-x is flaky (post-x)"}], "post-x")["number"], 3)
+
     def test_no_breakages_means_no_failing_test_lookup(self):
         fake_gh, calls = self.gh_stub({})
         with mock.patch.object(flake_report, "gh", fake_gh):

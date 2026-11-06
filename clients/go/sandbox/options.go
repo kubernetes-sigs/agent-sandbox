@@ -89,10 +89,11 @@ const (
 	// CI path for Kata and gVisor sandboxes, which pod port-forward cannot
 	// reach.
 	//
-	// The router strips the Authorization header, so sandboxd rejects every
-	// routed call except GET /v1/health when it runs with --auth-token-*
-	// (#2102). The router also caps each REST request at its ProxyTimeout
-	// (default 180s), so raise ProxyTimeout for longer file transfers.
+	// The router strips the Authorization header, so with --auth-token-* the
+	// SDK sends SandboxdAuthToken as X-Sandboxd-Token instead (sandboxd
+	// accepts both). The router also caps each REST request at its
+	// ProxyTimeout (default 180s), so raise ProxyTimeout for longer file
+	// transfers.
 	ConnectivityRouterPortForward Connectivity = "router-port-forward"
 	// ConnectivityInClusterService dials the Sandbox's headless Service by
 	// its in-cluster DNS name (Status.ServiceFQDN), taking the apiserver —
@@ -178,6 +179,15 @@ type Options struct {
 	// SandboxdGRPCPort is the pod port of sandboxd's gRPC ProcessService.
 	// Only used with RuntimeSandboxd. Default: 9090.
 	SandboxdGRPCPort int
+
+	// SandboxdAuthToken is the token for a sandboxd started with
+	// --auth-token-sha256 or --auth-token-file. The SDK sends it on every
+	// REST request and gRPC call, as "Authorization: Bearer <token>" or, with
+	// ConnectivityRouterPortForward, as "X-Sandboxd-Token" because the router
+	// strips Authorization. Only used with RuntimeSandboxd. Must be printable
+	// ASCII with no spaces. The SDK never logs it. It is not encrypted on the
+	// wire. Default: none.
+	SandboxdAuthToken string
 
 	// Namespace where the SandboxClaim will be created. Default: "default".
 	// Must be a valid Kubernetes DNS label (lowercase, [a-z0-9-]).
@@ -558,6 +568,17 @@ func (o *Options) validateCommon() error {
 		}
 		if o.SandboxdRESTPort == o.SandboxdGRPCPort {
 			return fmt.Errorf("sandbox: SandboxdRESTPort and SandboxdGRPCPort must differ (both %d)", o.SandboxdRESTPort)
+		}
+	}
+	if o.SandboxdAuthToken != "" {
+		if o.Runtime != RuntimeSandboxd {
+			return fmt.Errorf("sandbox: SandboxdAuthToken requires %s", RuntimeSandboxd)
+		}
+		// The error omits the token so a mistyped secret never reaches a log.
+		for i := range len(o.SandboxdAuthToken) {
+			if c := o.SandboxdAuthToken[i]; c <= ' ' || c > '~' {
+				return fmt.Errorf("sandbox: SandboxdAuthToken must be printable ASCII with no spaces")
+			}
 		}
 	}
 	if o.SandboxReadyTimeout <= 0 {

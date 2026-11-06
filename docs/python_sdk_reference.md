@@ -690,10 +690,9 @@ Connect to sandboxd through a port-forward to sandbox-router-svc.
 REST and gRPC share the router's port 8080. Routing headers and metadata
 select the Sandbox and its REST or gRPC port. gRPC requires sandbox-router
 v1.0.9 or later. Set ``router_auth_token`` when the router requires
-authentication. The SDK sends only that token as ``Authorization``.
-The router strips that header before forwarding, so token-protected
-sandboxd is unsupported until credential pass-through is defined (issue
-2102). The SDK never sends ``auth_token`` in this mode.
+authentication. The SDK sends that token as ``Authorization``, which the
+router strips. It sends ``auth_token`` as ``X-Sandboxd-Token``, which the
+router forwards to sandboxd.
 ``pod_ip_routing`` stays false so the router selects the Pod from its cache
 or DNS. Scoped tokens reject ``X-Sandbox-Pod-IP``.
 
@@ -701,7 +700,7 @@ or DNS. Scoped tokens reject ``X-Sandbox-Pod-IP``.
 
 #### auth\_token
 
-sandboxd bearer token. Not sent in this mode because the router strips Authorization (issue 2102).
+sandboxd token. Sent as X-Sandboxd-Token because the router strips Authorization.
 
 <a id="k8s_agent_sandbox.models.SandboxdRouterTunnelConnectionConfig.router_auth_token"></a>
 

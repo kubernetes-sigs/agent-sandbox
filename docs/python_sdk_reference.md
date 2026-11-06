@@ -825,8 +825,8 @@ One group's quorum outcome, yielded by ``SandboxBatch.group_outcomes()``.
 On success, ``members`` holds exactly ``min_ready`` Ready members and ``error`` is ``None``.
 On failure, ``error`` is a ``QuorumUnreachableError`` or ``BatchTimeoutError`` and ``members`` is empty.
 
-This is a dataclass rather than a Pydantic model because ``error`` holds a raw Python
-``Exception`` object (preserving traceback and causes) rather than serializable data.
+This is a dataclass rather than a Pydantic model because ``error`` holds a ``BatchError``
+instance (preserving traceback and causes) rather than serializable data.
 
 <a id="k8s_agent_sandbox.sandbox_batch"></a>
 
@@ -1019,7 +1019,10 @@ created, so a quorum reached after the deadline, before any consumer checks it, 
 ##### acquire
 
 ```python
-def acquire(warmpool: str, timeout: float | None = None) -> Member
+def acquire(warmpool: str,
+            timeout: float | None = None,
+            *,
+            pod_annotations: dict[str, str] | None = None) -> Member
 ```
 
 Adds a member from ``warmpool`` to the batch, waits until it is Ready, and returns it.
@@ -1047,31 +1050,41 @@ since the handle may no longer hold the batch's Lease, and ``release()`` deletes
 creates a second claim, so call it again to try again. A member it returned that fails later
 shows in ``members()`` like any other, and ``release_member`` frees it.
 
-``TerminalMemberError`` and ``BatchTimeoutError`` are both ``BatchError``, so
-``except BatchError`` handles every runtime failure. The other errors mean a bad argument
-or a missing pool or template.
+``TerminalMemberError`` and ``BatchTimeoutError`` both subclass ``BatchError``, and
+``except SandboxError`` also covers a missing pool or template. Bad arguments raise
+``ValueError``, and checking an unchecked pool propagates Kubernetes API or network errors.
 
 **Arguments**:
 
 - `warmpool` - The warm pool to claim the member from.
 - `timeout` - Seconds to wait for the member to be Ready. Defaults to the batch's
   ``quorum_timeout``.
+- `pod_annotations` - Optional annotations that ``acquire()`` writes to
+  ``spec.additionalPodMetadata.annotations`` so the controller propagates them onto
+  the sandbox pod. ``acquire()`` omits ``spec.additionalPodMetadata`` when
+  ``pod_annotations`` is ``None`` or empty.
   
 
 **Raises**:
 
-- `ValueError` - If ``timeout`` isn't a positive finite number.
+- `ValueError` - If ``timeout`` isn't a positive finite number, or ``pod_annotations`` is
+  invalid.
 - `SandboxWarmPoolNotFoundError` - If the warm pool doesn't exist.
 - `SandboxTemplateNotFoundError` - If the warm pool's template doesn't exist, or it names none.
 - `TerminalMemberError` - If the create fails (the member is ``FAILED`` with reason
   ``CreateFailed``), the member fails terminally, or someone else deletes its claim
   (the member is ``LOST``) before it is Ready.
-- `BatchTimeoutError` - If the member isn't Ready within ``timeout``. ``acquire()`` skips
+- `BatchTimeoutError` - If checking an unchecked warm pool, creating the claim, or waiting
+  for the member to be Ready doesn't finish within ``timeout``. ``acquire()`` skips
   sending any create or create retry that ``create_rps`` pacing or ``max_in_flight``
   cannot start before the deadline.
 - `BatchError` - If this handle has been detached or released, or ``err()`` is set, when
   called or while waiting, or if ``release_member`` or ``release_group`` releases the
   member before it is Ready.
+- `ApiException` - If checking an unchecked warm pool fails with an API error such as a
+  403.
+- `urllib3.exceptions.HTTPError` - If checking an unchecked warm pool fails before
+  ``timeout``, such as on a connection error or request timeout.
 
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.release_member"></a>
 

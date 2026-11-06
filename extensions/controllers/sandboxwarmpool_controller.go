@@ -390,7 +390,7 @@ func (r *SandboxWarmPoolReconciler) clockNow() time.Time {
 // spec.readinessGracePeriodSeconds when set, otherwise the controller-level
 // value (flag or ConfigMap, already merged into r.ReadinessGracePeriod),
 // otherwise the default for zero-value construction (tests, bare literals).
-// The field is validated as at least 1 by the CRD, so a set value is used as is.
+// The CRD enforces a minimum on the field, so a set value is used as is.
 func (r *SandboxWarmPoolReconciler) readinessGracePeriod(warmPool *extensionsv1beta1.SandboxWarmPool) time.Duration {
 	if warmPool != nil && warmPool.Spec.ReadinessGracePeriodSeconds != nil {
 		return time.Duration(*warmPool.Spec.ReadinessGracePeriodSeconds) * time.Second

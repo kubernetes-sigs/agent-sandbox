@@ -172,15 +172,21 @@ def known_flakes(repo):
     )
     mapping = {}
     for issue in issues:
-        m = re.search(r"<!-- flake-report:test=(\S+) -->", issue.get("body", ""))
+        body = issue.get("body", "")
+        m = re.search(r"<!-- flake-report:test=(\S+) -->", body)
         if m:
             mapping[m.group(1)] = issue["number"]
-        else:
-            # Fall back to the [FLAKE] <name> title convention (manual issues,
-            # usually a bare short name).
-            t = re.match(r"\[FLAKE\]\s+(\S+)", issue.get("title", ""))
-            if t:
-                mapping[t.group(1)] = issue["number"]
+            continue
+        # Lane-level issues (infra failures, flaky junit-less jobs) describe
+        # a job, not a testcase, so they must not become a test key.
+        if "<!-- flake-report:infra-tab=" in body or "<!-- flake-report:job-flake=" in body:
+            continue
+        # Fall back to the [FLAKE] <name> title convention (manual issues,
+        # usually a bare short name). A `[FLAKE] <job>: ...` title is the
+        # job form, not a test name.
+        t = re.match(r"\[FLAKE\]\s+(\S+)", issue.get("title", ""))
+        if t and not t.group(1).endswith(":"):
+            mapping[t.group(1)] = issue["number"]
     return mapping
 
 

@@ -90,7 +90,7 @@ func TestSimpleSandbox(t *testing.T) {
 		predicates.SandboxHasStatus(sandboxv1beta1.SandboxStatus{
 			Service:       "my-sandbox",
 			ServiceFQDN:   fmt.Sprintf("my-sandbox.%s.svc.cluster.local", ns.Name),
-			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
+			LabelSelector: sandboxv1beta1.SandboxNameHashLabel + "=" + nameHash,
 			Conditions: []metav1.Condition{
 				{
 					Type:               string(sandboxv1beta1.SandboxConditionSuspended),

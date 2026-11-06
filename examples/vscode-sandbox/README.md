@@ -251,6 +251,19 @@ curl -v -H "X-Sandbox-ID: sandbox-example" \
         http://localhost:8080
 ```
 
+#### Option C: Desktop VS Code (Optional)
+
+The sandbox does not run `sshd`, so Remote-SSH does not apply. To use the
+desktop VS Code instead of `code-server`, attach it to the pod with `kubectl`:
+
+1. Install `kubectl` and the VS Code Dev Containers extension.
+2. Run **Dev Containers: Attach to Running Kubernetes Container...** from the
+   Command Palette and pick the `devcontainer-main` container in
+   `sandbox-example`.
+3. Open the `/workspaces` folder.
+
+See [Attach to a container in a Kubernetes cluster](https://code.visualstudio.com/docs/devcontainers/attach-container#_attach-to-a-container-in-a-kubernetes-cluster).
+
 #### Getting VSCode password
 
 If the logs indicate authentication is enabled, retrieve the password.

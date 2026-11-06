@@ -304,7 +304,11 @@ func runGet(ctx context.Context, resourceType string, key string) error {
 		// Start heartbeat process
 		cmd = exec.Command(os.Args[0], "heartbeat", "--name", resource.Name, "--owner", owner)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
-		// TODO: Log stdout/stderr of the heartbeat process
+		// Surface heartbeat failures in the job log: the heartbeat outlives this
+		// process and nothing else reads its output. Stdout stays detached on
+		// purpose, since callers capture `resourcectl get` via $(...) and an
+		// inherited stdout pipe would keep that substitution open forever.
+		cmd.Stderr = os.Stderr
 		if err := cmd.Start(); err != nil {
 			// We will fail the test here, but we don't want a resource to be reclaimed mid test
 			return fmt.Errorf("error starting heartbeat process: %w", err)
@@ -423,6 +427,9 @@ func killHeartbeatProcess(ctx context.Context, r *BoskosResource) error {
 	// issues on those platforms.
 	if runtime.GOOS == "linux" {
 		if !isHeartbeatProcess(r.HeartbeatPID, r.Name) {
+			// A heartbeat that is gone before cleanup means the Boskos lease was
+			// not being refreshed; make that visible rather than silently moving on.
+			log.Info("heartbeat process was not running at cleanup", "name", r.Name, "pid", r.HeartbeatPID)
 			return nil
 		}
 	} else {
@@ -439,10 +446,12 @@ func killHeartbeatProcess(ctx context.Context, r *BoskosResource) error {
 		// from os.Process on Go's newer process-handle implementations); that's
 		// the desired end state, so treat it as success.
 		if errors.Is(err, syscall.ESRCH) || errors.Is(err, os.ErrProcessDone) {
+			log.Info("heartbeat process was not running at cleanup", "name", r.Name, "pid", r.HeartbeatPID)
 			return nil
 		}
 		return fmt.Errorf("error killing heartbeat process: %w", err)
 	}
+	log.Info("stopped heartbeat process", "name", r.Name, "pid", r.HeartbeatPID)
 
 	return nil
 }
@@ -473,6 +482,16 @@ func isHeartbeatProcess(pid int, resourceName string) bool {
 	return hasHeartbeat && hasName
 }
 
+// heartbeatInterval is how often the heartbeat refreshes the Boskos lease. The
+// Boskos reaper resets busy resources whose last update is older than its
+// expiry (30m by default), so this must stay well inside that window.
+var heartbeatInterval = 30 * time.Second
+
+// heartbeatClient bounds each lease refresh. The loop sends heartbeats
+// serially, so a single request that never returns would silently stop all
+// future refreshes and let the reaper reclaim the resource mid-job.
+var heartbeatClient = &http.Client{Timeout: 20 * time.Second}
+
 // runHeartbeat sends periodic heartbeats to Boskos to keep the resource alive.
 // This is run as a child process of runGet.
 func runHeartbeat(ctx context.Context, name, owner string) error {
@@ -494,16 +513,24 @@ func runHeartbeat(ctx context.Context, name, owner string) error {
 		return fmt.Errorf("error sending initial heartbeat: %v", err)
 	}
 
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
+	failing := false
 	for {
 		select {
 		case <-ctx.Done():
+			log.Info("heartbeat stopping", "name", name, "reason", ctx.Err())
 			return ctx.Err()
 		case <-ticker.C:
-			if err := sendOneHeartbeat(ctx, url); err != nil {
-				fmt.Fprintf(os.Stderr, "error sending heartbeat: %v\n", err)
+			err := sendOneHeartbeat(ctx, url)
+			switch {
+			case err != nil:
+				log.Error(err, "heartbeat failed", "name", name)
+				failing = true
+			case failing:
+				log.Info("heartbeat recovered", "name", name)
+				failing = false
 			}
 		}
 	}
@@ -515,7 +542,7 @@ func sendOneHeartbeat(ctx context.Context, url string) error {
 	if err != nil {
 		return fmt.Errorf("error creating request: %v", err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := heartbeatClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("error sending heartbeat: %v", err)
 	}

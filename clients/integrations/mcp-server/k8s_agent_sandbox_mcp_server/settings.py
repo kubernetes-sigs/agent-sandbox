@@ -23,6 +23,7 @@ from k8s_agent_sandbox.models import (
     SandboxGatewayConnectionConfig,
     SandboxDirectConnectionConfig, 
     SandboxInClusterConnectionConfig,
+    SandboxdInClusterConnectionConfig,
 )
 
 
@@ -38,7 +39,16 @@ class InClusterConnectionConfig(SandboxInClusterConnectionConfig):
     type: Literal["in-cluster"] = Field(default="in-cluster")
 
 
-ConnectionType = Union[GatewayConnectionConfig, DirectConnectionConfig, InClusterConnectionConfig]
+class SandboxdConnectionConfig(SandboxdInClusterConnectionConfig):
+    type: Literal["sandboxd-in-cluster"] = Field(default="sandboxd-in-cluster")
+
+
+ConnectionType = Union[
+    GatewayConnectionConfig,
+    DirectConnectionConfig,
+    InClusterConnectionConfig,
+    SandboxdConnectionConfig,
+]
 
 class Settings(BaseSettings):
     connection: ConnectionType = Field(default=..., discriminator='type')

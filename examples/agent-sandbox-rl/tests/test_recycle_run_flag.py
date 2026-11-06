@@ -45,7 +45,7 @@ def _fleet(registry, **cfg):
 
 
 def _patch_clean_exec(monkeypatch):
-  monkeypatch.setattr(SandboxHandle, "exec", lambda self, cmd: _CLEAN)
+  monkeypatch.setattr(SandboxHandle, "exec", lambda self, cmd, **kw: _CLEAN)
 
 
 def _spy_reuse(monkeypatch):

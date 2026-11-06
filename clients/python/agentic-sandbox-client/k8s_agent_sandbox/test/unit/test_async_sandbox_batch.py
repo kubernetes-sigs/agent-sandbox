@@ -16,6 +16,7 @@
 
 import asyncio
 import contextlib
+import gc
 import inspect
 import json
 import logging
@@ -24,6 +25,7 @@ import ssl
 import threading
 import time
 import unittest
+import weakref
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1624,7 +1626,13 @@ class TestClientClose(BaseAsyncBatchClientTest):
 
         with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper"), \
              patch("k8s_agent_sandbox.async_sandbox_client._delete_batch_objects_sync") as delete:
-            self.client._atexit_cleanup()
+            AsyncSandboxClient._atexit_cleanup(
+                self.client._active_connection_sandboxes,
+                self.client._explicit_claims,
+                self.client._active_batches,
+                self.client._closing_batches,
+                None,
+            )
 
         for sandbox in (cached, stale, closing_cached, closing_stale, attached_cached):
             sandbox._close_for_atexit.assert_called_once()
@@ -5100,7 +5108,13 @@ class TestClientBatchCleanup(BaseClaimBatchTest):
         with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper") as sync_helper, \
              patch("k8s_agent_sandbox.async_sandbox_client._delete_batch_objects_sync") as delete:
             delete.side_effect = [RuntimeError("down"), None]
-            self.client._atexit_cleanup()
+            AsyncSandboxClient._atexit_cleanup(
+                self.client._active_connection_sandboxes,
+                self.client._explicit_claims,
+                self.client._active_batches,
+                self.client._closing_batches,
+                None,
+            )
         holder, duration = "host_1234_abcd1234", BATCH_DEFAULT_LEASE_DURATION_SECONDS
         self.assertEqual(
             [c.args for c in delete.call_args_list],
@@ -5118,6 +5132,41 @@ class TestClientBatchCleanup(BaseClaimBatchTest):
         created = len(self.cluster.created)
         await asyncio.sleep(0.3)
         self.assertEqual(len(self.cluster.created), created)
+
+    @patch.object(AsyncSandboxBatch, "_start", lambda self: None)
+    async def test_dropped_client_is_freed_and_its_exit_hook_releases_active_batch(self):
+        config = SandboxDirectConnectionConfig(api_url="http://sandbox.invalid")
+        for released in (True, False):
+            with self.subTest(released=released):
+                with patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper", return_value=self.cluster.helper), \
+                     patch("k8s_agent_sandbox.async_sandbox_client.atexit") as mock_atexit:
+                    client = AsyncSandboxClient(connection_config=config, cleanup=True)
+                exit_hook = mock_atexit.register.call_args.args[0]
+                batch = await client.claim_batch([BatchGroup(warmpool="pool-a", size=1)], batch_id="b1")
+                holder = batch._holder_identity
+                self.cluster.helper.read_batch_lease.return_value = _lease(holder_identity=holder)
+                if released:
+                    await batch.release()
+                sync_helper = MagicMock()
+                sync_helper.count_live_sandbox_claims.return_value = 0
+                sync_helper.read_batch_lease.return_value = _lease(holder_identity=holder)
+                sync_helper.replace_batch_lease.return_value = _lease(holder_identity=holder)
+                # With the collector off, only reference counting can free the client.
+                gc.disable()
+                try:
+                    client_ref = weakref.ref(client)
+                    del batch, client
+                    if released:
+                        self.assertIsNone(client_ref())
+                finally:
+                    gc.enable()
+                with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper", return_value=sync_helper) as MockHelper:
+                    exit_hook()
+                if released:
+                    MockHelper.assert_not_called()
+                else:
+                    sync_helper.delete_sandbox_claims_by_label.assert_called_once()
+                    sync_helper.delete_batch_lease.assert_called_once()
 
 
 if __name__ == "__main__":

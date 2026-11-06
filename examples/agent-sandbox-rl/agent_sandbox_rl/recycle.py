@@ -45,6 +45,14 @@ from .sources import Task
 
 logger = logging.getLogger("agent_sandbox_rl.recycle")
 
+
+def _runtime_exec_kwargs(handle) -> dict:
+  """Pin prime/reset to the container that runs the task image. A handle's
+  ``target_container`` may point at a grading sidecar for the episode; the
+  workspace being reset lives in ``runtime_container`` regardless."""
+  rc = getattr(handle, "runtime_container", None)
+  return {"container": rc} if isinstance(rc, str) and rc else {}
+
 _DEFAULT_WIPE = ("/tmp/*", "/var/tmp/*", "$HOME/.cache/*")
 
 # Sentinel for "task not processed yet" in the results list, so a group's infra
@@ -152,7 +160,8 @@ class GitRestoreReset:
         f'git -C {tb} checkout -q --detach pristine >/dev/null 2>&1; '
         + self._fingerprint_sh())
     try:
-      d = self._parse(handle.exec(["bash", "-lc", script]))
+      d = self._parse(handle.exec(["bash", "-lc", script],
+                                  **_runtime_exec_kwargs(handle)))
     except Exception as e:  # noqa: BLE001 — dead pod / no bash → not recyclable
       logger.warning("prime failed on %s (%s); image treated as non-recyclable",
                      getattr(handle, "pod_name", "?"), e)
@@ -193,7 +202,8 @@ class GitRestoreReset:
         + self._fingerprint_sh())
     t0 = time.monotonic()
     try:
-      d = self._parse(handle.exec(["bash", "-lc", script]))
+      d = self._parse(handle.exec(["bash", "-lc", script],
+                                  **_runtime_exec_kwargs(handle)))
     except Exception as e:  # noqa: BLE001 — exec failed (dead pod / no bash):
       # never raise into the batch; report dirty so the caller quarantines.
       return ResetOutcome(clean=False, seconds=round(time.monotonic() - t0, 3),
@@ -310,7 +320,7 @@ def reuse_git_restore_sandbox(fleet, tasks, process_fn, concurrency, *,
           handle = fleet.acquire(t)
           if use_session:                     # one held-open exec stream per sandbox
             try:
-              handle.open_session()
+              handle.open_session(**_runtime_exec_kwargs(handle))
             except Exception as e:            # noqa: BLE001 — fall back to one-shot exec
               logger.warning("session open failed on %s (%s); one-shot exec",
                              handle.pod_name, e)
@@ -466,7 +476,8 @@ async def reuse_git_restore_sandbox_async(afleet, tasks, process_fn, concurrency
               handle = await afleet.acquire(t)
               if use_session:
                 try:
-                  await afleet._to_thread(handle.open_session)
+                  await afleet._to_thread(handle.open_session,
+                                          **_runtime_exec_kwargs(handle))
                 except Exception as e:           # noqa: BLE001 — fall back to one-shot exec
                   logger.warning("session open failed on %s (%s); one-shot exec",
                                  handle.pod_name, e)

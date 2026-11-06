@@ -23,11 +23,13 @@ import asyncio
 import inspect
 import logging
 import math
+import os
 import socket
 import ssl
 from collections.abc import Callable
 from typing import Any, Awaitable
 
+import certifi
 import httpx
 
 
@@ -47,7 +49,7 @@ from .models import (
     SandboxdPodTunnelConnectionConfig,
     SandboxdInClusterConnectionConfig,
 )
-from .utils import async_kubectl_kubeconfig_args, merge_headers
+from .utils import async_kubectl_kubeconfig_args, merge_headers, sandboxd_auth_headers
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +115,38 @@ def _build_ssl_context(config: SandboxDirectConnectionConfig) -> ssl.SSLContext:
     return context
 
 
+class _DefaultSSLContext:
+    """Reuse default trust within one SDK client while detecting CA replacement.
+
+    Callers must not modify a shared context after it has been returned.
+    """
+
+    def __init__(self) -> None:
+        self._context: ssl.SSLContext | None = None
+        self._key: tuple[str, int, int, int, int, int] | None = None
+
+    def __call__(self) -> ssl.SSLContext:
+        # Match HTTPX 0.28.1's trust selection.
+        # test_httpx_default_trust_selection_contract fails if that selection
+        # changes. Directory trust stores can change below the directory itself. Leave
+        # those, and contexts with key logging, to HTTPX's normal loading path.
+        cafile = os.environ.get("SSL_CERT_FILE")
+        if (not cafile and os.environ.get("SSL_CERT_DIR")) or os.environ.get("SSLKEYLOGFILE"):
+            return httpx.create_ssl_context()
+        cafile = cafile or certifi.where()
+        try:
+            info = os.stat(cafile)
+        except OSError:
+            # Let HTTPX report inaccessible trust stores through its normal path.
+            return httpx.create_ssl_context()
+        key = (cafile, info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        if self._context is None or key != self._key:
+            context = httpx.create_ssl_context()
+            self._context = context
+            self._key = key
+        return self._context
+
+
 class AsyncSandboxConnector:
     """
     Async connector for communicating with a Sandbox over HTTP using httpx.
@@ -144,6 +178,7 @@ class AsyncSandboxConnector:
         self.id = sandbox_id
         self.namespace = namespace
         self.connection_config = connection_config
+        self._sandboxd_auth_headers = sandboxd_auth_headers(connection_config)
         self.k8s_helper = k8s_helper
         self._get_pod_ip = get_pod_ip
         self._get_service_fqdn = get_service_fqdn
@@ -206,16 +241,38 @@ class AsyncSandboxConnector:
         )
 
         self._extra_headers: dict[str, str] = {}
-        verify: ssl.SSLContext | bool = True
+        self._ssl_context: ssl.SSLContext | None = None
+        self._default_ssl_context: Callable[[], ssl.SSLContext] = httpx.create_ssl_context
+        self._client: httpx.AsyncClient | None = None
         if isinstance(connection_config, SandboxDirectConnectionConfig):
             self._extra_headers = connection_config.extra_headers
             if connection_config.ca_cert or connection_config.client_cert:
-                verify = _build_ssl_context(connection_config)
+                # Load explicit certificates per handle so new handles observe
+                # rotations. Report invalid paths during handle construction.
+                self._ssl_context = _build_ssl_context(connection_config)
 
-        transport = httpx.AsyncHTTPTransport(verify=verify)
-        self.client = httpx.AsyncClient(
-            transport=transport, timeout=httpx.Timeout(60.0)
-        )
+    def _ensure_client(self) -> httpx.AsyncClient:
+        """Create the HTTP client on first use within this connector's event loop."""
+        if self._client is None:
+            self._ensure_open()
+            # Initialization is synchronous, so tasks on one event loop cannot
+            # publish competing clients or contexts.
+            context = self._ssl_context or self._default_ssl_context()
+            transport = httpx.AsyncHTTPTransport(verify=context)
+            self._client = httpx.AsyncClient(
+                transport=transport, timeout=httpx.Timeout(60.0)
+            )
+        return self._client
+
+    @property
+    def client(self) -> httpx.AsyncClient:
+        """Return the HTTP client, creating it on first access."""
+        return self._ensure_client()
+
+    @client.setter
+    def client(self, value: httpx.AsyncClient) -> None:
+        # Preserve support for callers that replace the HTTP client.
+        self._client = value
 
     async def _resolve_base_url(self) -> str:
         """Resolve the HTTP endpoint for the configured connection mode."""
@@ -323,8 +380,10 @@ class AsyncSandboxConnector:
 
         allowed_statuses = kwargs.pop("allowed_statuses", None)
         disable_retries = kwargs.pop("_disable_retries", False)
-        # Precedence: config < caller < SDK routing headers.
-        headers = merge_headers(self._extra_headers, kwargs.pop("headers", None))
+        # Precedence: config < caller < sandboxd auth / SDK routing headers.
+        headers = merge_headers(
+            self._extra_headers, kwargs.pop("headers", None), self._sandboxd_auth_headers
+        )
         # For security and SSRF mitigation, the SDK explicitly mandates blocking all HTTP redirects
         # to the internal sandbox endpoints. Any user-provided redirect settings are overridden and
         # ignored. We pop 'follow_redirects' here to prevent a TypeError due to duplicate keyword
@@ -371,18 +430,19 @@ class AsyncSandboxConnector:
         max_retries = 0 if disable_retries else MAX_RETRIES
         for attempt in range(max_retries + 1):
             try:
+                client = self._ensure_client()
                 if stream:
-                    request = self.client.build_request(
+                    request = client.build_request(
                         method, url, headers=headers, **kwargs
                     )
-                    response = await self.client.send(
+                    response = await client.send(
                         request,
                         auth=stream_auth,
                         follow_redirects=False,
                         stream=True,
                     )
                 else:
-                    response = await self.client.request(
+                    response = await client.request(
                         method, url, headers=headers, follow_redirects=False, **kwargs
                     )
                 if (
@@ -543,7 +603,16 @@ class AsyncSandboxConnector:
                         await result
                     self._grpc_channel = None
                     self._grpc_channel_target = None
-                self._grpc_channel = grpc.aio.insecure_channel(self.grpc_target)
+                authorization = self._sandboxd_auth_headers.get("authorization")
+                if authorization is None:
+                    channel = grpc.aio.insecure_channel(self.grpc_target)
+                else:
+                    from ._grpc_auth import async_auth_interceptors
+
+                    channel = grpc.aio.insecure_channel(
+                        self.grpc_target, interceptors=async_auth_interceptors(authorization)
+                    )
+                self._grpc_channel = channel
                 self._grpc_channel_target = self.grpc_target
                 return self._grpc_channel
 
@@ -581,6 +650,19 @@ class AsyncSandboxConnector:
                     self.grpc_target = None
                     self._sandboxd_strategy.invalidate_service_fqdn()
 
+    def _release_sandbox_callbacks(self) -> None:
+        # The callbacks are bound methods of the handle. Keeping them once the handle
+        # is closed for good makes the handle and its connector a reference cycle, which
+        # holds the connector's sessions until the cyclic garbage collector happens to run.
+        self._get_pod_ip = None
+        self._get_service_fqdn = None
+        strategy = self._sandboxd_strategy
+        if isinstance(strategy, AsyncSandboxdPodTunnelStrategy):
+            strategy._get_pod_name = None
+        elif isinstance(strategy, AsyncSandboxdInClusterStrategy):
+            strategy._get_pod_ip = None
+            strategy._get_service_fqdn = None
+
     async def close(self) -> None:
         """Close HTTP, gRPC, and port-forward resources owned by the connector."""
         async with self._lifecycle_lock:
@@ -589,7 +671,8 @@ class AsyncSandboxConnector:
             self._closed = True
             errors: list[BaseException] = []
             try:
-                await self.client.aclose()
+                if self._client is not None:
+                    await self._client.aclose()
             except BaseException as exc:
                 errors.append(exc)
             finally:
@@ -621,6 +704,7 @@ class AsyncSandboxConnector:
                     self._pod_ip = None
                 except BaseException as exc:
                     errors.append(exc)
+                self._release_sandbox_callbacks()
             if errors:
                 # Cancellation must remain observable even when an earlier
                 # cleanup operation raised a regular exception.

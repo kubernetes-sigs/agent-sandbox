@@ -189,7 +189,8 @@ class TestAsyncSandboxdConnector(unittest.IsolatedAsyncioTestCase):
         connector._sandboxd_strategy.close.assert_awaited_once()
         self.assertFalse(connector._close_complete)
 
-    async def test_concurrent_grpc_channel_creates_one_channel(self):
+    @patch("k8s_agent_sandbox.async_connector.httpx.AsyncClient", wraps=httpx.AsyncClient)
+    async def test_concurrent_grpc_channel_creates_one_channel(self, http_client):
         connector = self._build()
         connector._sandboxd_strategy.connect = AsyncMock(
             return_value=("http://127.0.0.1:18080", "127.0.0.1:19090")
@@ -208,6 +209,7 @@ class TestAsyncSandboxdConnector(unittest.IsolatedAsyncioTestCase):
         self.assertIs(first, second)
         insecure_channel.assert_called_once_with("127.0.0.1:19090")
         await connector.close()
+        http_client.assert_not_called()
 
     async def test_missing_grpc_does_not_start_tunnel(self):
         connector = self._build()

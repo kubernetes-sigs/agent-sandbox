@@ -287,3 +287,55 @@ func TestRunCleanup(t *testing.T) {
 		t.Errorf("expected 0 resources left in state.json, but got %d: %+v", len(state.BoskosResources), state.BoskosResources)
 	}
 }
+
+// TestRunHeartbeatRefreshesLeasePeriodically pins the one job the heartbeat
+// exists for: repeated /update calls that keep the Boskos lease ahead of the
+// reaper, surviving transient failures. The kOps lanes lost their projects
+// to the Janitor 30 minutes after acquire because nothing asserted this.
+func TestRunHeartbeatRefreshesLeasePeriodically(t *testing.T) {
+	origInterval := heartbeatInterval
+	heartbeatInterval = 20 * time.Millisecond
+	defer func() { heartbeatInterval = origInterval }()
+
+	var mu sync.Mutex
+	var updates int
+	var badRequests []string
+	mockBoskos := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		q := r.URL.Query()
+		if r.Method != http.MethodPost || r.URL.Path != "/update" ||
+			q.Get("name") != "test-resource" || q.Get("owner") != "test-owner" || q.Get("state") != "busy" {
+			badRequests = append(badRequests, r.Method+" "+r.URL.String())
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		updates++
+		// Fail the second refresh to prove one rejected update does not end the loop.
+		if updates == 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mockBoskos.Close()
+	t.Setenv("BOSKOS_HOST", mockBoskos.URL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	err := runHeartbeat(ctx, "test-resource", "test-owner")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("runHeartbeat returned %v, want it to run until the context expires", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(badRequests) > 0 {
+		t.Errorf("unexpected Boskos requests: %v", badRequests)
+	}
+	// Initial heartbeat plus roughly 25 ticks; only a lower bound is meaningful
+	// on a loaded CI machine.
+	if updates < 5 {
+		t.Errorf("got %d /update calls in 500ms at a 20ms interval, want at least 5", updates)
+	}
+}

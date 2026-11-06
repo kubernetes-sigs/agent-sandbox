@@ -267,16 +267,38 @@ sandbox = client.create_sandbox(warmpool="node-sandbox-warmpool", namespace="def
 
 ### File Operations
 
+Use `SandboxFileConfig` to bound file downloads for every sandbox created or
+attached by a client:
+
+```python
+from k8s_agent_sandbox.models import SandboxFileConfig
+
+client = SandboxClient(
+    file_config=SandboxFileConfig(
+        max_download_size=256 * 1024 * 1024,
+    ),
+)
+sandbox = client.create_sandbox(warmpool="python-sandbox-warmpool")
+```
+
+`AsyncSandboxClient` accepts the same `file_config`; it can also be passed to
+`Sandbox` or `AsyncSandbox` directly. `max_download_size` is a positive byte
+limit shared by `read()` and `read_to()`, for both runtimes. It defaults to
+`None`, preserving unlimited downloads. An oversized download raises
+`SandboxResponseTooLargeError` (a `RuntimeError` subclass) and closes the response.
+Limits are checked while reading, including when the response length is unknown.
+The limit counts file bytes after HTTP content decoding, not compressed wire bytes.
+
 `read()` remains convenient for small files and returns the complete contents as
-`bytes`. Use `read_to()` for large files so the response is copied incrementally
-into a caller-owned binary destination:
+`bytes`; it never returns partial content on overflow. Use `read_to()` for large
+files so the response is copied incrementally into a caller-owned binary destination:
 
 ```python
 with open("artifact-copy.tar", "wb") as destination:
     written = sandbox.files.read_to(
         "artifact.tar",
         destination,
-        max_bytes=512 * 1024 * 1024,
+        max_bytes=128 * 1024 * 1024,
     )
 
 print(f"downloaded {written} bytes")
@@ -284,8 +306,10 @@ print(f"downloaded {written} bytes")
 
 `read_to()` never closes the destination. It always closes the HTTP response,
 including after a size-limit violation or destination error. If an error occurs,
-data already written remains in the destination. Omitting `max_bytes` disables
-the optional per-call download limit.
+data already written remains in the destination. The smaller of the configured
+`max_download_size` and the per-call `max_bytes` applies. Omitting `max_bytes`
+removes only the per-call restriction, not the configured limit; `max_bytes=0`
+allows only empty files. With neither limit set, downloads remain unlimited.
 
 `AsyncFilesystem.read_to()` provides the same behavior for an asynchronous sink
 whose `write(bytes)` method is awaitable and returns the number of bytes accepted:
@@ -294,7 +318,7 @@ whose `write(bytes)` method is awaitable and returns the number of bytes accepte
 written = await sandbox.files.read_to(
     "artifact.tar",
     async_destination,
-    max_bytes=512 * 1024 * 1024,
+    max_bytes=128 * 1024 * 1024,
 )
 ```
 
@@ -481,6 +505,32 @@ asyncio.run(main())
 With sandboxd, `commands.run` also takes `env` and `cwd`, as in the synchronous
 example. `cwd` is confined to the sandbox root. The legacy runtime raises
 `NotImplementedError` for both.
+
+#### sandboxd bearer authentication
+
+If sandboxd requires a bearer token (`--auth-token-sha256` or
+`--auth-token-file`), set `auth_token` on either
+`SandboxdPodTunnelConnectionConfig` or `SandboxdInClusterConnectionConfig`:
+
+```python
+import os
+from k8s_agent_sandbox import SandboxdInClusterConnectionConfig
+
+config = SandboxdInClusterConnectionConfig(
+    mode="in-cluster-service",
+    auth_token=os.environ["SANDBOXD_AUTH_TOKEN"],
+)
+```
+
+Pass this config to `SandboxClient` or `AsyncSandboxClient`. The raw token must
+be non-empty printable ASCII without spaces, matching TypeScript's `authToken`.
+The SDK adds `Bearer ` to REST headers and all unary/streaming gRPC calls,
+including after reconnect. Omit `auth_token` to preserve existing behavior.
+
+This client-level credential is stored as `SecretStr` and hidden from config
+repr and validation error messages. Configure the matching token on sandboxd
+separately. It is independent of Kubernetes credentials and does not add TLS;
+in-cluster traffic remains plaintext and requires appropriate network isolation.
 
 ### 9. Labels and Pod Metadata
 
@@ -674,7 +724,68 @@ import logging
 logging.basicConfig(level=logging.INFO)
 ```
 
-### 15. Batch claims
+### 15. Streaming Exec and Cancellation (sandboxd runtime)
+
+`sandbox.commands.run()` waits for the whole command to finish before returning
+its output — fine for short one-shots, but not for long-running builds, hung
+processes, or anything you might need to cancel from the outside. On the
+**sandboxd runtime**, the SDK also exposes a streaming variant that yields
+stdout/stderr in real time and lets you deliver POSIX signals to the running process through `commands.start()`.
+
+Install the SDK with the `grpc` extra to enable it:
+
+```bash
+pip install "k8s-agent-sandbox[grpc]"
+```
+
+`sandbox.commands.start(command)` returns a `ProcessHandle` context manager.
+Its `process_id` is set before `start()` returns, so you can signal the process
+without first consuming an event. Iterate `handle.events()` for typed events
+(`ProcessOutputEvent`, then a terminal `ProcessExitEvent`) and call
+`handle.signal(sig)` to cancel:
+
+```python
+import sys
+import signal as sig
+from k8s_agent_sandbox import SandboxClient
+from k8s_agent_sandbox.models import SandboxdPodTunnelConnectionConfig
+
+client = SandboxClient(connection_config=SandboxdPodTunnelConnectionConfig())
+sandbox = client.create_sandbox(warmpool="sandboxd-warmpool", namespace="default")
+try:
+    with sandbox.commands.start("python long_task.py") as handle:
+        for event in handle.events():
+            if event.type in ("stdout", "stderr"):
+                sys.stdout.buffer.write(event.data)
+                sys.stdout.buffer.flush()
+            elif event.type == "exit":
+                print(f"exited with {event.exit_code}")
+            if user_hit_ctrl_c():
+                handle.signal(sig.SIGINT)
+finally:
+    sandbox.terminate()
+```
+
+`signal()` accepts either the cross-SDK name (`"SIGINT"`) or Python's own
+`signal.SIGINT`. `env` and `cwd` work as they do on `run()`. Passing
+`pty=PtySize(cols=120, rows=40)` (from `k8s_agent_sandbox.models`) allocates a
+pseudo-terminal, which merges stderr into stdout.
+
+The async client mirrors the interface via `async with` / `async for` /
+`await`:
+
+```python
+async with await sandbox.commands.start("python long_task.py") as handle:
+    async for event in handle.events():
+        ...
+    await handle.signal(sig.SIGINT)
+```
+
+`start()` is only available on the sandboxd runtime and raises
+`NotImplementedError` on the legacy python-runtime connector, which does not
+expose a streaming exec endpoint.
+
+### 16. Batch claims
 
 `SandboxClient.claim_batch()` claims a batch of `SandboxClaims` across one or more warm pools in one call,
 returning a `SandboxBatch` handle right away. Each `BatchGroup` names a warm pool, how many claims to

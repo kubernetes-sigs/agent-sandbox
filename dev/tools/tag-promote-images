@@ -32,7 +32,8 @@ IMAGES_TO_PROMOTE = [
     "agent-sandbox-controller",
     "chrome-sandbox",
     "python-runtime-sandbox",
-    "sandbox-router-go"
+    "sandbox-router-go",
+    "sandboxd"
 ]
 
 # Git Remotes defaults are controlled by CLI arguments

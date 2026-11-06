@@ -15,15 +15,24 @@
 """Async handle for one running Sandbox and its local client resources."""
 
 import logging
+from typing import Callable
 
 from .async_connector import AsyncSandboxConnector
 from .async_k8s_helper import AsyncK8sHelper
 from .commands.async_command_executor import AsyncCommandExecutor
 from .constants import POD_NAME_ANNOTATION
 from .files.async_filesystem import AsyncFilesystem
-from .models import SandboxConnectionConfig, SandboxTracerConfig
+from .models import (
+    SandboxConnectionConfig,
+    SandboxFileConfig,
+    SandboxHealth,
+    SandboxMetadata,
+    SandboxTracerConfig,
+)
 from .trace_manager import create_tracer_manager
+from .trace_manager import async_trace_span
 from .utils import select_pod_ip, extract_sandbox_name_hash
+from .watcher.async_file_watcher import AsyncFileWatcher
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +51,10 @@ class AsyncSandbox:
     async client does not support ``SandboxLocalTunnelConnectionConfig``.
     """
 
+    # The client that tracks this handle sets this hook, so terminate() can drop the
+    # client's entry once the claim is gone.
+    _on_terminated: Callable[["AsyncSandbox"], None] | None = None
+
     def __init__(
         self,
         claim_name: str,
@@ -50,6 +63,8 @@ class AsyncSandbox:
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
         k8s_helper: AsyncK8sHelper | None = None,
+        *,
+        file_config: SandboxFileConfig | None = None,
     ) -> None:
         if connection_config is None:
             raise ValueError(
@@ -84,6 +99,10 @@ class AsyncSandbox:
             self.connector, self.tracer, self.trace_service_name
         )
         self._files: AsyncFilesystem | None = AsyncFilesystem(
+            self.connector, self.tracer, self.trace_service_name,
+            **({"file_config": file_config} if file_config is not None else {}),
+        )
+        self._watcher: AsyncFileWatcher | None = AsyncFileWatcher(
             self.connector, self.tracer, self.trace_service_name
         )
 
@@ -174,6 +193,39 @@ class AsyncSandbox:
 
         return "SandboxNotReady", "Unknown message"
 
+    @async_trace_span("health")
+    async def health(self, timeout: int = 60) -> SandboxHealth:
+        """Query sandboxd's /v1/health endpoint. sandboxd runtime only.
+
+        The legacy python-runtime has no equivalent endpoint and raises
+        ``NotImplementedError``.
+        """
+        if not self.connector.is_sandboxd():
+            raise NotImplementedError(
+                "health() is only supported by the sandboxd runtime; the "
+                "legacy python-runtime has no equivalent endpoint"
+            )
+        response = await self.connector.send_request(
+            "GET", "v1/health", timeout=timeout)
+        return SandboxHealth.from_sandboxd(response.json())
+
+    @async_trace_span("metadata")
+    async def metadata(self, timeout: int = 60) -> SandboxMetadata:
+        """Query sandboxd's /v1/metadata endpoint. sandboxd runtime only.
+
+        Returns orchestrator-injected, non-sensitive runtime configuration
+        (e.g. sandbox id, workspace path, env). The legacy python-runtime
+        has no equivalent endpoint and raises ``NotImplementedError``.
+        """
+        if not self.connector.is_sandboxd():
+            raise NotImplementedError(
+                "metadata() is only supported by the sandboxd runtime; the "
+                "legacy python-runtime has no equivalent endpoint"
+            )
+        response = await self.connector.send_request(
+            "GET", "v1/metadata", timeout=timeout)
+        return SandboxMetadata.from_sandboxd(response.json())
+
     @property
     def commands(self) -> AsyncCommandExecutor | None:
         """Return the command client while this handle is active."""
@@ -183,6 +235,11 @@ class AsyncSandbox:
     def files(self) -> AsyncFilesystem | None:
         """Return the filesystem client while this handle is active."""
         return self._files
+
+    @property
+    def watcher(self) -> AsyncFileWatcher | None:
+        """Filesystem event streaming interface (sandboxd runtime only)."""
+        return self._watcher
 
     @property
     def is_active(self) -> bool:
@@ -206,6 +263,7 @@ class AsyncSandbox:
 
         self._commands = None
         self._files = None
+        self._watcher = None
 
         if self.tracing_manager:
             try:
@@ -221,6 +279,7 @@ class AsyncSandbox:
         self.connector._close_for_atexit()
         self._commands = None
         self._files = None
+        self._watcher = None
         self._is_closed = True
 
     async def terminate(self) -> None:
@@ -239,6 +298,13 @@ class AsyncSandbox:
             return
 
         await self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace)
+
+        # The client stops tracking the handle here because its claim is gone. Call
+        # _on_terminated before clearing claim_name, because that name is the client's key.
+        # Drop the hook afterwards, so a kept handle does not keep the client's registry alive.
+        if self._on_terminated is not None:
+            self._on_terminated(self)
+            self._on_terminated = None
 
         # Clear only after success so a failed delete can be retried.
         self.claim_name = None

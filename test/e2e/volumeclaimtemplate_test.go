@@ -16,6 +16,7 @@ package e2e
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,7 +82,7 @@ func TestSandboxVolumeClaimTemplates(t *testing.T) {
 		predicates.SandboxHasStatus(sandboxv1beta1.SandboxStatus{
 			Service:       "vct-sandbox",
 			ServiceFQDN:   fmt.Sprintf("vct-sandbox.%s.svc.cluster.local", ns.Name),
-			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
+			LabelSelector: sandboxv1beta1.SandboxNameHashLabel + "=" + nameHash,
 			Conditions: []metav1.Condition{
 				{
 					Type:               string(sandboxv1beta1.SandboxConditionSuspended),
@@ -122,7 +123,7 @@ func TestSandboxVolumeClaimTemplates(t *testing.T) {
 	require.True(t, *pvc.OwnerReferences[0].Controller)
 
 	// Verify PVC has the sandbox label
-	require.Equal(t, nameHash, pvc.Labels["agents.x-k8s.io/sandbox-name-hash"])
+	require.Equal(t, nameHash, pvc.Labels[sandboxv1beta1.SandboxNameHashLabel])
 
 	// Verify the pod has a PVC volume mounted
 	pod := &corev1.Pod{}
@@ -193,6 +194,49 @@ func TestSandboxVolumeClaimTemplatesImmutable(t *testing.T) {
 			})
 			require.Error(t, err)
 			require.Contains(t, err.Error(), "volumeClaimTemplates is immutable")
+		})
+	}
+}
+
+func TestSandboxVolumeClaimTemplatesValidation(t *testing.T) {
+	newVCT := func(name string) sandboxv1beta1.PersistentVolumeClaimTemplate {
+		return sandboxv1beta1.PersistentVolumeClaimTemplate{
+			EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: name},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				Resources:   corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}},
+			},
+		}
+	}
+	var tooMany []sandboxv1beta1.PersistentVolumeClaimTemplate
+	for i := range 129 {
+		tooMany = append(tooMany, newVCT(fmt.Sprintf("vol-%d", i)))
+	}
+
+	cases := []struct {
+		name    string
+		vcts    []sandboxv1beta1.PersistentVolumeClaimTemplate
+		wantErr string
+	}{
+		{"empty name", []sandboxv1beta1.PersistentVolumeClaimTemplate{newVCT("")}, "metadata.name must not be empty"},
+		{"duplicate names", []sandboxv1beta1.PersistentVolumeClaimTemplate{newVCT("data"), newVCT("data")}, "volumeClaimTemplates names must be unique"},
+		{"name too long", []sandboxv1beta1.PersistentVolumeClaimTemplate{newVCT(strings.Repeat("a", 64))}, "may not be more than 63 bytes"},
+		{"too many", tooMany, "must have at most 128 items"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tc := framework.NewTestContext(t)
+			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("sandbox-vct-invalid-%d", time.Now().UnixNano())}}
+			require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
+
+			sb := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "vct-invalid", Namespace: ns.Name},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodTemplate:          sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "pause", Image: "registry.k8s.io/pause:3.10"}}}},
+					VolumeClaimTemplates: c.vcts,
+				}},
+			}
+			require.ErrorContains(t, tc.CreateWithCleanup(t.Context(), sb), c.wantErr)
 		})
 	}
 }

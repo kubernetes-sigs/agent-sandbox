@@ -30,7 +30,11 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/status"
+	fakekube "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/portforward"
 
 	processv1 "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1"
 )
@@ -309,6 +313,116 @@ func TestDelete_LegacyRuntimeUnsupported(t *testing.T) {
 	}
 }
 
+func TestSandboxdFileOps_Requests(t *testing.T) {
+	tests := []struct {
+		name       string
+		call       func(*Sandbox) error
+		wantMethod string
+		wantPath   string
+		wantQuery  string
+	}{
+		{"mkdir", func(c *Sandbox) error { return c.Mkdir(context.Background(), "a/b", false) },
+			http.MethodPut, "/v1/files/a%2Fb", "type=directory"},
+		{"mkdir parents", func(c *Sandbox) error { return c.Mkdir(context.Background(), "a/b", true) },
+			http.MethodPut, "/v1/files/a%2Fb", "parents=true&type=directory"},
+		{"move", func(c *Sandbox) error { return c.Move(context.Background(), "a", "dir/b c", false) },
+			http.MethodPost, "/v1/files/a:move", "destination=dir%2Fb+c"},
+		{"copy overwrite", func(c *Sandbox) error { return c.Copy(context.Background(), "a", "b", true) },
+			http.MethodPost, "/v1/files/a:copy", "destination=b&overwrite=true"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotMethod, gotPath, gotQuery string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotMethod, gotPath, gotQuery = r.Method, r.URL.EscapedPath(), r.URL.RawQuery
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer server.Close()
+
+			if err := tt.call(newReadySandboxdTestSandbox(server.URL)); err != nil {
+				t.Fatalf("error: %v", err)
+			}
+			if gotMethod != tt.wantMethod || gotPath != tt.wantPath || gotQuery != tt.wantQuery {
+				t.Errorf("got %s %s?%s, want %s %s?%s", gotMethod, gotPath, gotQuery, tt.wantMethod, tt.wantPath, tt.wantQuery)
+			}
+		})
+	}
+}
+
+func TestSandboxdFileOps_RetryDefaults(t *testing.T) {
+	tests := []struct {
+		name      string
+		call      func(*Sandbox) error
+		wantCalls int32
+	}{
+		{"mkdir retries", func(c *Sandbox) error { return c.Mkdir(context.Background(), "d", false) }, 2},
+		{"move does not retry", func(c *Sandbox) error { return c.Move(context.Background(), "a", "b", false) }, 1},
+		{"copy does not retry", func(c *Sandbox) error { return c.Copy(context.Background(), "a", "b", false) }, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if calls.Add(1) == 1 {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer server.Close()
+
+			err := tt.call(newReadySandboxdTestSandbox(server.URL))
+			if tt.wantCalls == 2 && err != nil {
+				t.Fatalf("expected the retry to succeed, got: %v", err)
+			}
+			if tt.wantCalls == 1 && err == nil {
+				t.Fatal("expected the 503 to be returned without a retry")
+			}
+			if got := calls.Load(); got != tt.wantCalls {
+				t.Errorf("server saw %d calls, want %d", got, tt.wantCalls)
+			}
+		})
+	}
+}
+
+func TestSandboxdFileOps_Validation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("an invalid call must not reach the server")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	c := newReadySandboxdTestSandbox(server.URL)
+	if err := c.Mkdir(context.Background(), "", false); err == nil {
+		t.Error("Mkdir with an empty path: expected error")
+	}
+	if err := c.Move(context.Background(), "", "b", false); err == nil {
+		t.Error("Move with an empty source: expected error")
+	}
+	if err := c.Copy(context.Background(), "a", "", false); err == nil {
+		t.Error("Copy with an empty destination: expected error")
+	}
+}
+
+func TestSandboxdFileOps_LegacyRuntimeUnsupported(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("legacy calls must not reach the server")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	c := newReadyTestSandbox(server.URL)
+	for name, err := range map[string]error{
+		"Mkdir": c.Mkdir(context.Background(), "d", false),
+		"Move":  c.Move(context.Background(), "a", "b", false),
+		"Copy":  c.Copy(context.Background(), "a", "b", false),
+	} {
+		if !errors.Is(err, ErrUnsupportedByRuntime) {
+			t.Errorf("%s: expected ErrUnsupportedByRuntime, got: %v", name, err)
+		}
+	}
+}
+
 func TestSandboxdError_DecodesAPIError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
@@ -482,6 +596,108 @@ func TestSandboxdRun_DirectURLUnsupported(t *testing.T) {
 	}
 	if errors.Is(err, ErrNotReady) {
 		t.Errorf("a permanent failure must not look retryable, got: %v", err)
+	}
+}
+
+// Once the pod port-forward dies, Run and Start must report ErrNotReady
+// wrapping ErrPortForwardDied, as REST calls do, so callers know to call
+// Open. The published gRPC target is a local port of the dead tunnel.
+func TestSandboxdRun_PodTunnelDeathReturnsErrNotReady(t *testing.T) {
+	opts := defaultTestOpts()
+	opts.APIURL = ""
+	opts.Runtime = RuntimeSandboxd
+	c, _, _ := newTestSandbox(opts)
+
+	// serve stands in for one tunnel's gRPC local port.
+	serve := func(stdout string) (*grpc.Server, uint16) {
+		lis, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("failed to listen: %v", err)
+		}
+		srv := grpc.NewServer()
+		processv1.RegisterProcessServiceServer(srv, &fakeProcessService{response: &processv1.ExecuteResponse{Stdout: []byte(stdout)}})
+		go func() { _ = srv.Serve(lis) }()
+		t.Cleanup(srv.Stop)
+		return srv, uint16(lis.Addr().(*net.TCPAddr).Port)
+	}
+	forwarder := func(grpcLocal uint16) *fakeForwarder {
+		return &fakeForwarder{
+			ports: []portforward.ForwardedPort{
+				{Local: 12345, Remote: uint16(opts.SandboxdRESTPort)},
+				{Local: grpcLocal, Remote: uint16(opts.SandboxdGRPCPort)},
+			},
+			signalReady: true,
+			die:         make(chan error, 1),
+			returned:    make(chan struct{}),
+		}
+	}
+
+	grpcServer, grpcLocal := serve("first\n")
+	fw := forwarder(grpcLocal)
+	stub := newTestPortForwardTunnel(fw)
+	pts := c.connector.strategy.(*podTunnelStrategy)
+	pts.tunnel.coreClient = fakekube.NewSimpleClientset().CoreV1() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	pts.tunnel.restConfig = &rest.Config{}
+	pts.tunnel.dial = stub.dial
+	pts.tunnel.newForwarder = stub.newForwarder
+
+	c.setState(&sandboxState{SandboxName: "sb", PodName: "sb"})
+	if err := c.connector.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect() error: %v", err)
+	}
+	if _, err := c.Run(context.Background(), "echo hi"); err != nil {
+		t.Fatalf("Run() before tunnel death: %v", err)
+	}
+	deadConn, err := c.connector.GRPCConn()
+	if err != nil {
+		t.Fatalf("GRPCConn() before tunnel death: %v", err)
+	}
+
+	// client-go closes its local listeners when it loses the pod connection.
+	grpcServer.Stop()
+	fw.die <- portforward.ErrLostConnectionToPod
+	waitForwardReturned(t, fw)
+	deadline := time.Now().Add(2 * time.Second)
+	for c.IsReady() {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the monitor to report tunnel death")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	_, err = c.Run(context.Background(), "echo hi")
+	if !errors.Is(err, ErrNotReady) || !errors.Is(err, ErrPortForwardDied) {
+		t.Fatalf("expected ErrNotReady wrapping ErrPortForwardDied, got: %v", err)
+	}
+	if _, err := c.Commands().Start(context.Background(), "echo hi"); !errors.Is(err, ErrNotReady) || !errors.Is(err, ErrPortForwardDied) {
+		t.Errorf("expected Start to return ErrNotReady wrapping ErrPortForwardDied, got: %v", err)
+	}
+	// SetLastError closes the conn after releasing the connector lock.
+	deadline = time.Now().Add(2 * time.Second)
+	for deadConn.GetState() != connectivity.Shutdown {
+		if time.Now().After(deadline) {
+			t.Fatalf("expected the dead tunnel's gRPC conn to be closed, got state %s", deadConn.GetState())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Reconnecting, as Open does, must publish the new tunnel's target.
+	_, grpcLocal = serve("second\n")
+	fw2 := forwarder(grpcLocal)
+	pts.tunnel.newForwarder = newTestPortForwardTunnel(fw2).newForwarder
+	if err := c.connector.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect() after tunnel death: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = pts.tunnel.Close()
+		waitForwardReturned(t, fw2)
+	})
+	result, err := c.Run(context.Background(), "echo hi")
+	if err != nil {
+		t.Fatalf("Run() after reconnect: %v", err)
+	}
+	if result.Stdout != "second\n" {
+		t.Errorf("expected Run to reach the new tunnel, got stdout %q", result.Stdout)
 	}
 }
 
@@ -681,8 +897,9 @@ func TestOptions_SandboxdRejectsGateway(t *testing.T) {
 		GatewayName:  "gw",
 	}
 	opts.setDefaults()
-	if err := opts.validateCommon(); err == nil {
-		t.Fatal("expected validation error for RuntimeSandboxd + GatewayName")
+	err := opts.validateCommon()
+	if err == nil || !strings.Contains(err.Error(), "Gateway mode does not support sandboxd yet") {
+		t.Fatalf("expected Gateway mode to say it does not support sandboxd yet, got %v", err)
 	}
 }
 

@@ -1,0 +1,32 @@
+# Per-sandbox snapshot policy for GPU sandboxes.
+#
+# The policy groups snapshots by agents.x-k8s.io/sandbox-name-hash. The
+# agent-sandbox controller sets this label on each backing pod, with one
+# value per Sandbox. Each Sandbox thus restores only from its own snapshots.
+# When a suspended Sandbox resumes, GKE restores the new pod from the latest
+# Ready snapshot in its group. No restore-side object is necessary.
+apiVersion: podsnapshot.gke.io/v1
+kind: PodSnapshotPolicy
+metadata:
+  name: gpu-l4-snapshot-policy
+  namespace: default
+spec:
+  storageConfigName: gpu-l4-snapshot-storage
+  selector:
+    # A dedicated key, so that no unrelated pod comes under this policy.
+    matchLabels:
+      gpu-snapshot-demo: l4
+  snapshotScope: whole-pod
+  triggerConfig:
+    # Snapshots happen only when you create a PodSnapshotManualTrigger
+    # (30-snapshot-trigger.yaml).
+    type: manual
+    # The pod keeps running after the checkpoint. The README suspends the
+    # Sandbox as a separate step, after the snapshot is Ready.
+    postCheckpoint: resume
+  snapshotGroupingRules:
+    groupByLabelValue:
+      labels:
+        - agents.x-k8s.io/sandbox-name-hash
+      groupRetentionPolicy:
+        maxSnapshotCountPerGroup: 3

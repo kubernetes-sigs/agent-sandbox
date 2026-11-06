@@ -16,10 +16,14 @@ package server
 
 import (
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/go-logr/logr"
 )
 
 func TestHealthzAlwaysOK(t *testing.T) {
@@ -83,5 +87,79 @@ func TestReadyzDefaultsToUnready(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("default unready: got %d want 503", resp.StatusCode)
+	}
+}
+
+// TestStartProbes_HealthzAnswersBeforeReady covers the slow-startup case:
+// the cache is still syncing, so readiness is false, but liveness must
+// still return 200 or the kubelet restarts the pod.
+func TestStartProbes_HealthzAnswersBeforeReady(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	p := NewProbes() // never marked ready
+	stop, err := StartProbes(addr, p, logr.Discard(), nil)
+	if err != nil {
+		t.Fatalf("StartProbes: %v", err)
+	}
+	defer stop()
+
+	// Disable keep-alives so no idle client connection outlives the test
+	// and trips goleak.
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+
+	resp, err := client.Get("http://" + addr + "/healthz")
+	if err != nil {
+		t.Fatalf("healthz get: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("healthz: got %d want 200", resp.StatusCode)
+	}
+
+	resp, err = client.Get("http://" + addr + "/readyz")
+	if err != nil {
+		t.Fatalf("readyz get: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("readyz: got %d want 503", resp.StatusCode)
+	}
+}
+
+func TestStartProbes_BindFailureReturnsError(t *testing.T) {
+	hog, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("hog listen: %v", err)
+	}
+	defer hog.Close()
+
+	if _, err := StartProbes(hog.Addr().String(), NewProbes(), logr.Discard(), nil); err == nil {
+		t.Fatalf("expected bind error, got nil")
+	}
+}
+
+// TestHealthz_FailsAfterStartupDeadline covers a hung startup step: liveness
+// must turn red once the deadline passes, but only before the first ready.
+func TestHealthz_FailsAfterStartupDeadline(t *testing.T) {
+	p := NewProbes()
+	p.SetStartupDeadline(time.Now().Add(-time.Second)) // already past
+
+	rec := httptest.NewRecorder()
+	p.Healthz(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("past deadline, not ready: got %d want 503", rec.Code)
+	}
+
+	p.MarkReady()
+	p.MarkUnready() // shutdown drain must not fail liveness
+	rec = httptest.NewRecorder()
+	p.Healthz(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("after ready then unready: got %d want 200", rec.Code)
 	}
 }

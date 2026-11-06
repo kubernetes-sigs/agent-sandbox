@@ -61,6 +61,7 @@ class RunGoTestsTest(unittest.TestCase):
                 "gotestsum",
                 f"--junitfile={os.path.join(artifact_dir, 'junit_unit-go.xml')}",
                 "--", "-race",
+                f"-coverprofile={os.path.join(artifact_dir, 'coverage_unit-go.out')}",
                 f"{module}/controllers",
                 f"{module}/test/e2e/framework",
                 f"{module}/test/e2e/framework/predicates",
@@ -68,7 +69,9 @@ class RunGoTestsTest(unittest.TestCase):
             mock.call(test_unit.utils.go_tool_args(
                 "gotestsum",
                 f"--junitfile={os.path.join(artifact_dir, 'junit_unit-go-dev-tools.xml')}",
-                "--", "-race", f"{module}/dev/tools/mdtoc",
+                "--", "-race",
+                f"-coverprofile={os.path.join(artifact_dir, 'coverage_unit-go-dev-tools.out')}",
+                f"{module}/dev/tools/mdtoc",
             ), cwd=os.path.join(repo_root, "dev", "tools")),
         ])
 

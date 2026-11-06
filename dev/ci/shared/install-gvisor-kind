@@ -1,0 +1,155 @@
+#!/bin/bash
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Install gVisor (runsc) on all nodes of an existing KIND cluster.
+#
+# Downloads runsc and its containerd shim, copies them into the KIND node
+# containers, patches containerd to register the runsc runtime handler,
+# restarts containerd, and applies a gvisor RuntimeClass.
+#
+# Reusable by any CI job that needs gVisor on KIND.
+#
+# Usage:
+#   install-gvisor-kind --cluster-name my-cluster
+#   CONTAINER_ENGINE=podman install-gvisor-kind --cluster-name my-cluster
+
+set -euo pipefail
+
+GVISOR_VERSION="${GVISOR_VERSION:-20261012.0}"
+CONTAINER_ENGINE="${CONTAINER_ENGINE:-docker}"
+CLUSTER_NAME=""
+
+usage() {
+  echo "Usage: $(basename "$0") --cluster-name <name> [--version <gvisor-release>]"
+  exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --cluster-name) CLUSTER_NAME="$2"; shift 2 ;;
+    --version)      GVISOR_VERSION="$2"; shift 2 ;;
+    -h|--help)      usage ;;
+    *)              echo "Unknown option: $1" >&2; usage ;;
+  esac
+done
+
+if [[ -z "${CLUSTER_NAME}" ]]; then
+  echo "ERROR: --cluster-name is required" >&2
+  usage
+fi
+
+ARCH="$(uname -m)"
+GVISOR_URL="https://storage.googleapis.com/gvisor/releases/release/${GVISOR_VERSION}/${ARCH}"
+
+TMPDIR="$(mktemp -d)"
+cleanup() { rm -rf "${TMPDIR}"; }
+trap cleanup EXIT
+
+echo "Installing gVisor ${GVISOR_VERSION} (${ARCH}) on KIND cluster '${CLUSTER_NAME}'"
+
+# Download and verify the release tarball (contains runsc, containerd shim, and
+# gvisor-bin/ which runsc needs at runtime; auto-download was removed after
+# September 2026). Prefer zstd (smaller), fall back to bz2 if zstd is not
+# available in the image.
+echo "Downloading gVisor release tarball..."
+if command -v zstd >/dev/null 2>&1; then
+  TARBALL="gvisor.tar.zstd"
+  TAR_FLAG="--zstd"
+else
+  echo "zstd not found, falling back to bz2"
+  TARBALL="gvisor.tar.bz2"
+  TAR_FLAG="--bzip2"
+fi
+curl -fsSL --retry 3 --retry-connrefused "${GVISOR_URL}/${TARBALL}" -o "${TMPDIR}/${TARBALL}"
+curl -fsSL --retry 3 --retry-connrefused "${GVISOR_URL}/${TARBALL}.sha512" -o "${TMPDIR}/${TARBALL}.sha512"
+(cd "${TMPDIR}" && sha512sum -c "${TARBALL}.sha512")
+tar "${TAR_FLAG}" -xf "${TMPDIR}/${TARBALL}" -C "${TMPDIR}"
+chmod +x "${TMPDIR}/runsc" "${TMPDIR}/containerd-shim-runsc-v1"
+
+# Discover KIND node containers
+NODE_CONTAINERS=$("${CONTAINER_ENGINE}" ps \
+  --filter "label=io.x-k8s.kind.cluster=${CLUSTER_NAME}" \
+  --format '{{.Names}}')
+
+if [[ -z "${NODE_CONTAINERS}" ]]; then
+  echo "ERROR: no KIND containers found for cluster '${CLUSTER_NAME}'" >&2
+  exit 1
+fi
+
+echo "Found KIND nodes:"
+echo "${NODE_CONTAINERS}" | sed 's/^/  /'
+
+# Install on each node
+while IFS= read -r node; do
+  echo "Installing gVisor on ${node}..."
+
+  "${CONTAINER_ENGINE}" cp "${TMPDIR}/runsc" "${node}:/usr/local/bin/runsc"
+  "${CONTAINER_ENGINE}" cp "${TMPDIR}/containerd-shim-runsc-v1" "${node}:/usr/local/bin/containerd-shim-runsc-v1"
+  "${CONTAINER_ENGINE}" cp "${TMPDIR}/gvisor-bin" "${node}:/usr/local/bin/gvisor-bin"
+
+  "${CONTAINER_ENGINE}" exec "${node}" bash -c '
+    if ! grep -q "runtimes.runsc" /etc/containerd/config.toml; then
+      cat >> /etc/containerd/config.toml <<EOF
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
+  runtime_type = "io.containerd.runsc.v1"
+EOF
+    fi'
+
+  echo "Restarting containerd on ${node}..."
+  "${CONTAINER_ENGINE}" exec "${node}" systemctl restart containerd
+done <<< "${NODE_CONTAINERS}"
+
+# Wait for nodes to recover after containerd restart
+KUBECTL="kubectl --context kind-${CLUSTER_NAME}"
+
+echo "Waiting for nodes to be Ready..."
+${KUBECTL} wait --for=condition=Ready node --all --timeout=120s
+
+# Apply RuntimeClass
+echo "Applying gvisor RuntimeClass..."
+${KUBECTL} apply -f - <<EOF
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+handler: runsc
+scheduling:
+  nodeSelector:
+    kubernetes.io/os: linux
+EOF
+
+# Smoke test (delete any leftover from a previous retry)
+${KUBECTL} delete pod gvisor-smoke-test --ignore-not-found >/dev/null 2>&1 || true
+echo "Running smoke test..."
+${KUBECTL} run gvisor-smoke-test \
+  --image=busybox:1.36 \
+  --restart=Never \
+  --overrides='{"spec":{"runtimeClassName":"gvisor"}}' \
+  --command -- sleep 120
+
+${KUBECTL} wait --for=condition=Ready pod/gvisor-smoke-test --timeout=60s
+
+kernel=$(${KUBECTL} exec gvisor-smoke-test -- uname -r 2>/dev/null || echo "unknown")
+${KUBECTL} delete pod gvisor-smoke-test --ignore-not-found >/dev/null 2>&1 || true
+
+if [[ "${kernel}" == *gvisor* ]]; then
+  echo "Smoke test passed: kernel=${kernel}"
+else
+  echo "ERROR: expected gVisor kernel, got: ${kernel}" >&2
+  exit 1
+fi
+
+echo "gVisor installation complete on KIND cluster '${CLUSTER_NAME}'"

@@ -27,7 +27,20 @@ import time
 from typing import Any, Callable, ParamSpec, TypeVar, cast
 
 from .constants import SANDBOX_NAME_HASH_LABEL
-from .models import SandboxClaimEnvVar
+from .models import (
+    SandboxClaimEnvVar,
+    SandboxConnectionConfig,
+    SandboxdInClusterConnectionConfig,
+    SandboxdPodTunnelConnectionConfig,
+)
+
+
+def sandboxd_auth_headers(config: SandboxConnectionConfig) -> dict[str, str]:
+    """Share the runtime credential across REST headers and gRPC metadata."""
+    if isinstance(config, (SandboxdPodTunnelConnectionConfig, SandboxdInClusterConnectionConfig)):
+        if config.auth_token is not None:
+            return {"authorization": f"Bearer {config.auth_token.get_secret_value()}"}
+    return {}
 
 
 def merge_headers(*layers: Mapping[str, str] | None) -> dict[str, str]:

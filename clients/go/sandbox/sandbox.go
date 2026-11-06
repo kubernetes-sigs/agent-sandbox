@@ -158,6 +158,7 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 		ServerPort:          serverPort,
 		SandboxdGRPCPort:    opts.SandboxdGRPCPort,
 		RouterHeaders:       routerHeaders,
+		SandboxdAuthToken:   opts.SandboxdAuthToken,
 		RequestTimeout:      opts.RequestTimeout,
 		PerAttemptTimeout:   opts.PerAttemptTimeout,
 		HTTPTransport:       opts.HTTPTransport,

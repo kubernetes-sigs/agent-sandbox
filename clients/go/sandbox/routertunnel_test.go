@@ -421,7 +421,13 @@ func (r *fakeGRPCRouter) lastGRPCHeaders(t *testing.T) http.Header {
 // listener on routerLocal.
 func newRouterPortForwardSandbox(t *testing.T, routerLocal uint16) (*Sandbox, *fakeForwarder, *[]string) {
 	t.Helper()
-	opts := routerPortForwardOpts()
+	return newRouterPortForwardSandboxWith(t, routerLocal, routerPortForwardOpts())
+}
+
+// newRouterPortForwardSandboxWith is newRouterPortForwardSandbox with
+// caller-supplied Options.
+func newRouterPortForwardSandboxWith(t *testing.T, routerLocal uint16, opts Options) (*Sandbox, *fakeForwarder, *[]string) {
+	t.Helper()
 	opts.RequestTimeout = 5 * time.Second
 	opts.PerAttemptTimeout = 2 * time.Second
 	sb, _, _ := newTestSandbox(opts)
@@ -504,6 +510,27 @@ func TestRouterPortForward_RunReachesSandboxdThroughRouter(t *testing.T) {
 	health, err := sb.Health(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "ok", health.Status)
+}
+
+// The router strips Authorization, so the sandboxd token must travel in
+// X-Sandboxd-Token on both REST and gRPC.
+func TestRouterPortForward_SandboxdTokenUsesOwnHeader(t *testing.T) {
+	opts := routerPortForwardOpts()
+	opts.SandboxdAuthToken = "tok"
+	svc := &fakeProcessService{response: &processv1.ExecuteResponse{}}
+	router := startFakeGRPCRouter(t, opts.SandboxdGRPCPort, svc)
+	sb, fw, _ := newRouterPortForwardSandboxWith(t, router.port, opts)
+	require.NoError(t, sb.connector.Connect(context.Background()))
+	t.Cleanup(func() {
+		_ = sb.connector.Close()
+		waitForwardReturned(t, fw)
+	})
+
+	_, err := sb.Run(context.Background(), "true")
+	require.NoError(t, err)
+	h := router.lastGRPCHeaders(t)
+	require.Equal(t, "tok", h.Get(headerSandboxdToken))
+	require.Empty(t, h.Get("Authorization"))
 }
 
 // A custom SandboxdGRPCPort must reach the router as X-Sandbox-Port.

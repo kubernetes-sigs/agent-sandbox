@@ -167,6 +167,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
     async def test_get_sandbox_existing_active(self):
         mock_sandbox = MagicMock()
         mock_sandbox.is_active = True
+        mock_sandbox.sandbox_id = "resolved-id"
         mock_sandbox.terminate = AsyncMock()
         self.client._active_connection_sandboxes[("test-namespace", "test-claim")] = mock_sandbox
 
@@ -180,7 +181,9 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
     async def test_get_sandbox_inactive_reattaches(self):
         mock_inactive = MagicMock()
         mock_inactive.is_active = False
+        mock_inactive.sandbox_id = "resolved-id"
         mock_inactive.terminate = AsyncMock()
+        mock_inactive.close_connection = AsyncMock()
         self.client._active_connection_sandboxes[("test-namespace", "test-claim")] = mock_inactive
 
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")
@@ -191,6 +194,58 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
 
         sandbox = await self.client.get_sandbox("test-claim", "test-namespace")
         self.assertEqual(sandbox, mock_new)
+
+    async def test_get_sandbox_replaces_handle_when_claim_rebinds(self):
+        """A claim deleted and re-created under the same name binds to a new
+        sandbox, so get_sandbox must not return the old sandbox's handle."""
+        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="python-aaaaa")
+        self.mock_k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
+        self.mock_k8s_helper.delete_sandbox_claim = AsyncMock()
+        old_handle = MagicMock()
+        old_handle.is_active = True
+        old_handle.sandbox_id = "python-aaaaa"
+        old_handle.close_connection = AsyncMock()
+        old_handle.terminate = AsyncMock()
+        new_handle = MagicMock()
+        self.mock_sandbox_class.side_effect = [old_handle, new_handle]
+
+        self.assertIs(await self.client.get_sandbox("c1", "ns"), old_handle)
+
+        # The claim is deleted and re-created; the warm pool binds it to a new sandbox.
+        self.mock_k8s_helper.resolve_sandbox_name.return_value = "python-bbbbb"
+
+        sandbox = await self.client.get_sandbox("c1", "ns")
+
+        self.assertIs(sandbox, new_handle)
+        self.assertEqual(self.mock_sandbox_class.call_args.kwargs["sandbox_id"], "python-bbbbb")
+        self.assertIs(self.client._active_connection_sandboxes[("ns", "c1")], new_handle)
+        # The stale handle is closed locally; nothing is deleted server-side.
+        old_handle.close_connection.assert_awaited_once_with()
+        old_handle.terminate.assert_not_awaited()
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_awaited()
+
+    async def test_get_sandbox_replaces_stale_handle_when_close_fails(self):
+        """A stale handle that fails to close is still replaced, so the caller
+        gets a handle for the claim's current sandbox."""
+        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="python-bbbbb")
+        self.mock_k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
+        stale_handle = MagicMock()
+        stale_handle.is_active = True
+        stale_handle.sandbox_id = "python-aaaaa"
+        stale_handle.close_connection = AsyncMock(side_effect=RuntimeError("socket already gone"))
+        stale_handle.terminate = AsyncMock()
+        self.client._active_connection_sandboxes[("ns", "c1")] = stale_handle
+        new_handle = MagicMock()
+        self.mock_sandbox_class.return_value = new_handle
+
+        with self.assertLogs("k8s_agent_sandbox.async_sandbox_client", level="ERROR") as logs:
+            sandbox = await self.client.get_sandbox("c1", "ns")
+
+        self.assertIs(sandbox, new_handle)
+        self.assertEqual(self.mock_sandbox_class.call_args.kwargs["sandbox_id"], "python-bbbbb")
+        self.assertIs(self.client._active_connection_sandboxes[("ns", "c1")], new_handle)
+        stale_handle.close_connection.assert_awaited_once_with()
+        self.assertIn("socket already gone", logs.output[0])
 
     async def test_get_sandbox_not_found(self):
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(

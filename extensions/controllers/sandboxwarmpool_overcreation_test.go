@@ -26,6 +26,7 @@ package controllers
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -38,7 +39,10 @@ import (
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 )
@@ -296,6 +300,56 @@ func TestReconcilePool_TerminatingCountsAgainstTarget(t *testing.T) {
 	require.Equal(t, 1, lc.createCount(), "replacement is created once the terminating sandbox is gone")
 }
 
+// TestReconcilePool_OrphanTerminatingCountsAgainstTarget verifies that an
+// orphan that is already terminating still blocks replacement creation. It
+// occupies capacity, but must not enter the owned active set.
+func TestReconcilePool_OrphanTerminatingCountsAgainstTarget(t *testing.T) {
+	const poolName = "test-pool"
+	const poolNamespace = "default"
+	replicas := int32(1)
+	template := createTemplate(poolNamespace)
+	poolNameHash := sandboxcontrollers.NameHash(poolName)
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      poolName,
+			Namespace: poolNamespace,
+			UID:       "warmpool-uid",
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+		},
+	}
+	orphan := createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-terminating")
+	orphan.UID = "uid-terminating"
+	orphan.Finalizers = []string{"test.agents.x-k8s.io/drain"}
+	now := metav1.Now()
+	orphan.DeletionTimestamp = &now
+
+	scheme := newTestScheme()
+	fakeClient := newFakeClient(scheme, template, warmPool, orphan)
+	r := &SandboxWarmPoolReconciler{
+		Client:       fakeClient,
+		Scheme:       scheme,
+		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+	}
+	poolKey := types.NamespacedName{Namespace: poolNamespace, Name: poolName}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: poolKey})
+	require.NoError(t, err)
+	require.True(t, r.exp().SatisfiedExpectations(poolKey))
+
+	var sandboxes sandboxv1beta1.SandboxList
+	require.NoError(t, r.List(context.Background(), &sandboxes, client.InNamespace(poolNamespace)))
+	require.Len(t, sandboxes.Items, 1, "terminating orphan must remain counted against the replica target")
+
+	var updated extensionsv1beta1.SandboxWarmPool
+	require.NoError(t, r.Get(context.Background(), poolKey, &updated))
+	require.Zero(t, updated.Status.Replicas, "terminating orphan must not count as an active owned replica")
+	require.Zero(t, updated.Status.ReadyReplicas)
+}
+
 // nextEvent returns the next event recorded by recorder, or "" if none is pending.
 func nextEvent(recorder *events.FakeRecorder) string {
 	select {
@@ -303,6 +357,163 @@ func nextEvent(recorder *events.FakeRecorder) string {
 		return e
 	default:
 		return ""
+	}
+}
+
+// TestReconcilePool_FailedMemberMutationKeepsPopulation covers the accounting
+// boundary between observing a pool member and successfully mutating it. A
+// failed Update or Delete does not remove the Sandbox from the cluster or free
+// its capacity, so it must remain in the population used by the create gate.
+// Only owned members may enter active status or deletion paths.
+func TestReconcilePool_FailedMemberMutationKeepsPopulation(t *testing.T) {
+	const (
+		poolName  = "test-pool"
+		namespace = "default"
+	)
+	replicas := int32(1)
+	template := createTemplate(namespace)
+	scheme := newTestScheme()
+	poolNameHash := sandboxcontrollers.NameHash(poolName)
+	operationErr := errors.New("injected sandbox mutation failure")
+
+	newWarmPool := func(staleDelete bool) *extensionsv1beta1.SandboxWarmPool {
+		warmPool := &extensionsv1beta1.SandboxWarmPool{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      poolName,
+				Namespace: namespace,
+				UID:       "warmpool-uid",
+			},
+			Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+				Replicas:    &replicas,
+				TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+			},
+		}
+		if staleDelete {
+			warmPool.Spec.UpdateStrategy = &extensionsv1beta1.SandboxWarmPoolUpdateStrategy{
+				Type: extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType,
+			}
+		}
+		return warmPool
+	}
+	newSandbox := func(controlledByPool, staleDelete bool) *sandboxv1beta1.Sandbox {
+		sb := createPoolSandbox(poolName, namespace, poolNameHash, template, "-existing")
+		sb.UID = "sandbox-uid"
+		sb.Status.Conditions = []metav1.Condition{{
+			Type:   string(sandboxv1beta1.SandboxConditionReady),
+			Status: metav1.ConditionTrue,
+		}}
+		if controlledByPool {
+			sb.OwnerReferences = []metav1.OwnerReference{{
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       extensionsv1beta1.SandboxWarmPoolKind,
+				Name:       poolName,
+				UID:        "warmpool-uid",
+				Controller: new(true),
+			}}
+		}
+		if staleDelete {
+			sb.Labels[sandboxTemplateRefHash] = "stale-template-hash"
+		}
+		return sb
+	}
+
+	testCases := []struct {
+		name               string
+		controlledByPool   bool
+		staleDelete        bool
+		wantStatusReplicas int32
+		wantReadyReplicas  int32
+		failureDoc         string
+	}{
+		{
+			name:               "launch type label update fails",
+			controlledByPool:   true,
+			wantStatusReplicas: 1,
+			wantReadyReplicas:  1,
+			failureDoc:         "controlled pool members must survive a failed launch type normalization update",
+		},
+		{
+			name:             "orphan adoption update fails",
+			controlledByPool: false,
+			failureDoc:       "orphaned pool members must remain part of the population when adoption fails",
+		},
+		{
+			name:               "controlled stale member delete fails",
+			controlledByPool:   true,
+			staleDelete:        true,
+			wantStatusReplicas: 1,
+			wantReadyReplicas:  1,
+			failureDoc:         "controlled stale pool members must remain part of the population when cleanup fails",
+		},
+		{
+			name:             "orphan stale member delete fails",
+			controlledByPool: false,
+			staleDelete:      true,
+			failureDoc:       "orphan stale pool members must remain capacity-only when cleanup fails",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			warmPool := newWarmPool(tc.staleDelete)
+			existing := newSandbox(tc.controlledByPool, tc.staleDelete)
+			poolKey := types.NamespacedName{Namespace: namespace, Name: poolName}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&extensionsv1beta1.SandboxWarmPool{}).
+				WithIndex(&sandboxv1beta1.Sandbox{}, sandboxWarmPoolLabelIndex, sandboxWarmPoolLabelIndexer).
+				WithIndex(&extensionsv1beta1.SandboxWarmPool{}, extensionsv1beta1.TemplateRefField, sandboxTemplateRefNameIndexer).
+				WithRuntimeObjects(warmPool, template, existing).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+						if !tc.staleDelete {
+							if _, ok := obj.(*sandboxv1beta1.Sandbox); ok {
+								return operationErr
+							}
+						}
+						return c.Update(ctx, obj, opts...)
+					},
+					Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+						if tc.staleDelete {
+							if _, ok := obj.(*sandboxv1beta1.Sandbox); ok {
+								return operationErr
+							}
+						}
+						return c.Delete(ctx, obj, opts...)
+					},
+				}).
+				Build()
+
+			r := &SandboxWarmPoolReconciler{
+				Client:       fakeClient,
+				Scheme:       scheme,
+				MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+			}
+
+			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: poolKey})
+			require.ErrorIs(t, err, operationErr)
+			require.True(t, r.exp().SatisfiedExpectations(poolKey),
+				"failed mutations must not leave a deletion expectation for an orphan")
+
+			var sandboxes sandboxv1beta1.SandboxList
+			require.NoError(t, r.List(ctx, &sandboxes, client.InNamespace(namespace)))
+			poolMembers := 0
+			for i := range sandboxes.Items {
+				if sandboxes.Items[i].Labels[warmPoolSandboxLabel] == poolNameHash {
+					poolMembers++
+				}
+			}
+			require.Equal(t, int(replicas), poolMembers, tc.failureDoc)
+
+			var updated extensionsv1beta1.SandboxWarmPool
+			require.NoError(t, r.Get(ctx, poolKey, &updated))
+			require.Equal(t, tc.wantStatusReplicas, updated.Status.Replicas,
+				"only owned active members may count in status.replicas")
+			require.Equal(t, tc.wantReadyReplicas, updated.Status.ReadyReplicas,
+				"only owned active members may count in status.readyReplicas")
+		})
 	}
 }
 
@@ -574,11 +785,6 @@ func TestReconcilePool_UnschedulableStuckGC(t *testing.T) {
 	// A terminating sandbox keeps its last mirrored PodScheduled condition until
 	// the sandbox controller observes the Pod's absence, so a stale Unschedulable
 	// must not hold a pool slot on an object that is already going away.
-	//
-	// This checks the Sandbox's DeletionTimestamp where the previous
-	// implementation checked the backing Pod's, which is not a like-for-like
-	// replacement: a deleting Pod under a still-active Sandbox is not covered
-	// here, and is tracked as #1748.
 	t.Run("terminating sandbox with a stale unschedulable condition is not held", func(t *testing.T) {
 		sb := withPodScheduled(agedSandbox("-terminating"), metav1.ConditionFalse, corev1.PodReasonUnschedulable)
 		now := metav1.Now()
@@ -631,6 +837,10 @@ func TestSandboxPodHoldPredicates(t *testing.T) {
 		{
 			name:       "True/PodScheduled (scheduled fine; stuck for another reason)",
 			conditions: cond(metav1.ConditionTrue, sandboxv1beta1.SandboxReasonPodScheduled),
+		},
+		{
+			name:       "False/PodTerminating (backing Pod is terminating)",
+			conditions: cond(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonPodTerminating),
 		},
 		{
 			name:              "False/Unschedulable (waiting on capacity)",

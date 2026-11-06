@@ -50,6 +50,8 @@ const (
 	// child exits. Without it, a grandchild holding the stdout/stderr
 	// write ends keeps Wait blocked indefinitely.
 	waitDelay = 10 * time.Second
+	// executionCleanupTimeout bounds waiting for unary termination and reaping.
+	executionCleanupTimeout = 10 * time.Second
 )
 
 // Options configures a sandboxd Server.
@@ -64,6 +66,8 @@ type Options struct {
 	// StreamChunkSize is the stdout/stderr streaming buffer size in bytes
 	// for ProcessService.Start. Non-positive selects the 4096-byte default.
 	StreamChunkSize int
+	// ExecutionPolicy applies defaults and ceilings to unary command execution.
+	ExecutionPolicy ExecutionPolicy
 	// AuthTokenSHA256, when set, is the SHA-256 digest of a bearer token
 	// required as "Authorization: Bearer <token>" on every gRPC call and
 	// every REST request except GET /v1/health. Nil leaves the API
@@ -88,6 +92,9 @@ func New(opts Options) (*Server, error) {
 	if opts.RootDir == "" {
 		return nil, errors.New("RootDir is required: refusing to default to \"/\", which would disable sandbox confinement")
 	}
+	if err := opts.ExecutionPolicy.validate(); err != nil {
+		return nil, fmt.Errorf("invalid execution policy: %w", err)
+	}
 	registry := processmanager.NewProcessRegistry()
 	s := &Server{
 		registry:      registry,
@@ -95,6 +102,7 @@ func New(opts Options) (*Server, error) {
 		watcherServer: NewFileWatcherServer(opts.RootDir, opts.Log),
 		restServer:    NewRESTServer(opts.RootDir, opts.MetadataEnvPrefix, opts.Log),
 	}
+	s.processServer.executionPolicy = opts.ExecutionPolicy
 	if opts.AuthTokenSHA256 != nil {
 		if len(opts.AuthTokenSHA256) != AuthTokenDigestSize {
 			return nil, fmt.Errorf("AuthTokenSHA256 must be %d bytes, got %d",

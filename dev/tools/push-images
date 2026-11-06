@@ -181,7 +181,7 @@ def main(args):
                  "(podman push to registry is not yet supported; use docker for registry pushes)")
     image_tag = args.image_tag or utils.get_image_tag()
     excluded_dirs = {"bin", "dev", "docs", "k8s", "site",
-                     "temp", "tests", "tmp", ".venv"}
+                     "temp", "tests", "tmp", ".tmp", ".venv"}
 
     if args.controller_only:
         # Avoid walking the largest image-only subtrees. The explicit image
@@ -189,7 +189,47 @@ def main(args):
         # every other directory.
         excluded_dirs.update({"examples", "clients"})
 
-    built = set()
+    images = discover_images(args, excluded_dirs)
+
+    # A requested image with no matching Dockerfile is an error: silently
+    # skipping it leaves stale or missing images in the registry and the
+    # failure only surfaces much later as ImagePullBackOff.
+    if args.images:
+        missing = set(args.images) - {service_name for service_name, _, _ in images}
+        if missing:
+            sys.exit(f"ERROR: no Dockerfile found for requested image(s): {sorted(missing)} "
+                     "(is the directory committed?)")
+
+    # Keep going after a failed image and report all failures at the end: one
+    # flaky example image must not keep the images after it from being pushed.
+    failed = []
+    for service_name, context_dir, dockerfile_path in images:
+        print(f"--- Found Dockerfile at: {dockerfile_path}")
+        print(f"--- Service Name: {service_name}")
+        print(f"--- Context Dir: {context_dir}")
+
+        print(f"create Docker buildx builder for {service_name}")
+        try:
+            create_buildx_builder_if_not_exists(args.container_engine)
+            print(f"building image for {service_name}")
+            build_and_push_image(args, service_name, context_dir, dockerfile_path, image_tag)
+        except subprocess.CalledProcessError as e:
+            print(f"ERROR: building image {service_name} failed: {e}", file=sys.stderr)
+            failed.append(service_name)
+
+    if failed:
+        sys.exit(f"ERROR: failed to build {len(failed)} of {len(images)} image(s): {failed}")
+
+
+def discover_images(args, excluded_dirs):
+    """Returns (service_name, context_dir, dockerfile_path) for each image to build.
+
+    Images released by dev/tools/tag-promote-images come first, so a failure in
+    a slow example image later in the run cannot keep them from being pushed.
+    The rest keep os.walk order.
+    """
+    images = []
+    seen = set()
     for root, dirs, files in os.walk(".", topdown=True):
         dirs[:] = [d for d in dirs if d not in excluded_dirs]
 
@@ -252,29 +292,21 @@ def main(args):
             if args.images and service_name not in args.images:
                 continue
 
-            if service_name in built:
+            if service_name in seen:
                 sys.exit(f"ERROR: duplicate Dockerfiles for image {service_name!r}: "
                          f"second one at {dockerfile_path} (whichever builds last "
                          "would silently win the tag)")
+            seen.add(service_name)
+            images.append((service_name, context_dir, dockerfile_path))
 
-            print(f"--- Found Dockerfile at: {dockerfile_path}")
-            print(f"--- Service Name: {service_name}")
-            print(f"--- Context Dir: {context_dir}")
+    def promoted_first(image):
+        service_name = image[0]
+        if service_name in utils.IMAGES_TO_PROMOTE:
+            return (0, utils.IMAGES_TO_PROMOTE.index(service_name))
+        return (1, 0)
 
-            print(f"create Docker buildx builder for {service_name}")
-            create_buildx_builder_if_not_exists(args.container_engine)
-            print(f"building image for {service_name}")
-            build_and_push_image(args, service_name, context_dir, dockerfile_path, image_tag)
-            built.add(service_name)
-
-    # A requested image with no matching Dockerfile is an error: silently
-    # skipping it leaves stale or missing images in the registry and the
-    # failure only surfaces much later as ImagePullBackOff.
-    if args.images:
-        missing = set(args.images) - built
-        if missing:
-            sys.exit(f"ERROR: no Dockerfile found for requested image(s): {sorted(missing)} "
-                     "(is the directory committed?)")
+    # sorted is stable, so non-promoted images keep their walk order.
+    return sorted(images, key=promoted_first)
 
 
 def make_parser():

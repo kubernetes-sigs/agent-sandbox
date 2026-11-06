@@ -25,7 +25,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -60,17 +59,14 @@ func TestDefaultRouterGRPCEgress(t *testing.T) {
 			if err := yaml.Unmarshal(data, &policy); err != nil {
 				t.Fatal(err)
 			}
-			wantPeers := []networkingv1.NetworkPolicyPeer{{NamespaceSelector: &metav1.LabelSelector{}}}
 			found := false
 			for _, rule := range policy.Spec.Egress {
-				for _, port := range rule.Ports {
-					if port.Port == nil || port.Port.IntValue() != 9090 || (port.Protocol != nil && *port.Protocol != corev1.ProtocolTCP) {
-						continue
-					}
-					found = true
-					if !reflect.DeepEqual(rule.To, wantPeers) {
-						t.Errorf("default gRPC egress must allow tenant namespaces without demo Pod labels; got peers: %+v", rule.To)
-					}
+				if !allowsTCPPort(rule.Ports, 9090) {
+					continue
+				}
+				found = true
+				if !allowsSandboxPodsInAnyNamespace(rule.To) {
+					t.Errorf("default gRPC egress must allow sandbox Pods in tenant namespaces; got peers: %+v", rule.To)
 				}
 			}
 			if !found {
@@ -78,6 +74,48 @@ func TestDefaultRouterGRPCEgress(t *testing.T) {
 			}
 		})
 	}
+}
+
+// allowsTCPPort reports whether the ports permit TCP traffic to port. A rule
+// with no port entries, or an entry without a port number, permits every TCP
+// port.
+func allowsTCPPort(ports []networkingv1.NetworkPolicyPort, port int) bool {
+	if len(ports) == 0 {
+		return true
+	}
+	for _, p := range ports {
+		if p.Protocol != nil && *p.Protocol != corev1.ProtocolTCP {
+			continue
+		}
+		if p.Port == nil || p.Port.IntValue() == port {
+			return true
+		}
+	}
+	return false
+}
+
+// allowsSandboxPodsInAnyNamespace reports whether the peers select sandbox Pods
+// in every tenant namespace. The controller stamps
+// agents.x-k8s.io/sandbox-name-hash on each sandbox Pod, and a peer without a
+// podSelector accepts any Pod in the namespace.
+func allowsSandboxPodsInAnyNamespace(peers []networkingv1.NetworkPolicyPeer) bool {
+	for _, peer := range peers {
+		if peer.NamespaceSelector == nil || len(peer.NamespaceSelector.MatchLabels) > 0 || len(peer.NamespaceSelector.MatchExpressions) > 0 {
+			continue
+		}
+		if peer.PodSelector == nil {
+			return true
+		}
+		if len(peer.PodSelector.MatchLabels) > 0 {
+			continue
+		}
+		for _, expr := range peer.PodSelector.MatchExpressions {
+			if expr.Key == "agents.x-k8s.io/sandbox-name-hash" && expr.Operator == metav1.LabelSelectorOpExists {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func TestExampleThroughRouter(t *testing.T) {

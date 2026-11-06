@@ -46,10 +46,15 @@ import (
 func newProcessClient(t *testing.T, rootDir string) processv1.ProcessServiceClient {
 	t.Helper()
 
-	lis := bufconn.Listen(1024 * 1024)
 	grpcServer := grpc.NewServer()
 	processv1.RegisterProcessServiceServer(grpcServer,
 		NewProcessServer(rootDir, processmanager.NewProcessRegistry(), 0, logr.Discard()))
+	return connectProcessClient(t, grpcServer)
+}
+
+func connectProcessClient(t *testing.T, grpcServer *grpc.Server) processv1.ProcessServiceClient {
+	t.Helper()
+	lis := bufconn.Listen(1024 * 1024)
 	go func() { _ = grpcServer.Serve(lis) }()
 
 	conn, err := grpc.NewClient("passthrough:///bufnet",

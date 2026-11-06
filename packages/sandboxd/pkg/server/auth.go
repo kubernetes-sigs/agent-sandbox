@@ -32,6 +32,12 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// tokenHeader carries the bare token. The sandbox-router consumes
+// Authorization for its own credential and does not forward it, so a client
+// behind the router sends the sandboxd token here instead. gRPC metadata keys
+// are lowercase, and net/http canonicalizes this name on the REST side.
+const tokenHeader = "X-Sandboxd-Token"
+
 // healthPath is served without a token so the kubelet's readiness probe,
 // which carries no per-sandbox credential, keeps working. Every other path,
 // /v1/metadata included, requires the token.
@@ -73,9 +79,10 @@ func LoadAuthTokenFile(path string) ([]byte, error) {
 	return digest[:], nil
 }
 
-// tokenChecker validates "Authorization: Bearer <token>" values against the
-// configured token's SHA-256 digest in constant time. Only the digest is
-// held, so the daemon never needs the token itself.
+// tokenChecker validates "Authorization: Bearer <token>" and
+// "X-Sandboxd-Token: <token>" values against the configured token's SHA-256
+// digest in constant time. Only the digest is held, so the daemon never needs
+// the token itself.
 type tokenChecker struct {
 	want [sha256.Size]byte
 }
@@ -86,18 +93,26 @@ func newTokenChecker(digest []byte) *tokenChecker {
 	return c
 }
 
-func (c *tokenChecker) valid(header string) bool {
-	scheme, credential, ok := strings.Cut(header, " ")
-	if !ok || !strings.EqualFold(scheme, "Bearer") {
-		return false
-	}
-	got := sha256.Sum256([]byte(strings.TrimSpace(credential)))
+func (c *tokenChecker) validToken(token string) bool {
+	got := sha256.Sum256([]byte(strings.TrimSpace(token)))
 	return subtle.ConstantTimeCompare(got[:], c.want[:]) == 1
+}
+
+func (c *tokenChecker) validBearer(header string) bool {
+	scheme, credential, ok := strings.Cut(header, " ")
+	return ok && strings.EqualFold(scheme, "Bearer") && c.validToken(credential)
+}
+
+// authorized reports whether any Authorization value is a valid bearer token
+// or any token header value is the valid bare token.
+func (c *tokenChecker) authorized(authorization, token []string) bool {
+	return slices.ContainsFunc(authorization, c.validBearer) ||
+		slices.ContainsFunc(token, c.validToken)
 }
 
 func (c *tokenChecker) authorizeGRPC(ctx context.Context) error {
 	md, _ := metadata.FromIncomingContext(ctx)
-	if slices.ContainsFunc(md.Get("authorization"), c.valid) {
+	if c.authorized(md.Get("authorization"), md.Get(strings.ToLower(tokenHeader))) {
 		return nil
 	}
 	return status.Error(codes.Unauthenticated, "missing or invalid bearer token")
@@ -123,7 +138,7 @@ func (c *tokenChecker) streamInterceptor(srv any, ss grpc.ServerStream, _ *grpc.
 // probe.
 func (c *tokenChecker) middleware(next http.Handler, s *RESTServer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != healthPath && !c.valid(r.Header.Get("Authorization")) {
+		if r.URL.Path != healthPath && !c.authorized(r.Header.Values("Authorization"), r.Header.Values(tokenHeader)) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="sandboxd"`)
 			s.writeError(w, http.StatusUnauthorized, "UNAUTHENTICATED",
 				"missing or invalid bearer token")

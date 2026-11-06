@@ -41,6 +41,7 @@ import {
   SandboxError,
   SandboxTimeoutError,
 } from "../exceptions.js";
+import type { FileCallOptions, ListOptions } from "../index.js";
 import { noopLogger } from "../logger.js";
 import type { SandboxInit } from "../sandbox.js";
 import { normalizeSandboxdOptions, Sandbox } from "../sandbox.js";
@@ -153,10 +154,12 @@ async function startRestBackend(
   port: number;
   healthHits: number;
   putBodies: Buffer[];
+  fileRequests: string[];
   close(): Promise<void>;
 }> {
   const counter = { healthHits: 0 };
   const putBodies: Buffer[] = [];
+  const fileRequests: string[] = [];
   const server = http.createServer((req, res) => {
     // Like sandboxd's --auth-token-*: everything but /v1/health needs the token.
     if (
@@ -211,6 +214,23 @@ async function startRestBackend(
       setTimeout(() => req.socket.destroy(), 20);
       return;
     }
+    if (req.url?.startsWith("/v1/files/")) {
+      fileRequests.push(`${req.method} ${req.url}`);
+    }
+    if (
+      req.method === "GET" &&
+      new URL(req.url ?? "/", "http://localhost").pathname ===
+        "/v1/files/list-dir"
+    ) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ path: "/list-dir", entries: [] }));
+      return;
+    }
+    if (req.method === "POST" && req.url?.startsWith("/v1/files/")) {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
     if (req.method === "PUT" && req.url?.startsWith("/v1/files/")) {
       const chunks: Buffer[] = [];
       req.on("data", (c: Buffer) => chunks.push(c));
@@ -241,6 +261,7 @@ async function startRestBackend(
       return counter.healthHits;
     },
     putBodies,
+    fileRequests,
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };
 }
@@ -1000,6 +1021,93 @@ describe("Sandbox in-cluster connectivity", () => {
   });
 });
 
+describe("Sandbox files.list()", () => {
+  it("forwards list options and preserves existing runtime options", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    const { tracingManager, events } = makeRecordingTracerManager();
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+      tracingManager,
+    });
+
+    const existingOptions: FileCallOptions = { timeoutMs: 1000 };
+    const recursiveOptions: ListOptions = { recursive: true, maxDepth: 2 };
+    await sandbox.files.list("list-dir");
+    await sandbox.files.list("list-dir", existingOptions);
+    await sandbox.files.list("list-dir", recursiveOptions);
+    await sandbox.files.list("list-dir", { recursive: true });
+    await sandbox.files.list("list-dir", { maxDepth: 3 });
+
+    expect(restBackend.fileRequests).toEqual([
+      "GET /v1/files/list-dir",
+      "GET /v1/files/list-dir",
+      "GET /v1/files/list-dir?recursive=true&max_depth=2",
+      "GET /v1/files/list-dir?recursive=true",
+      "GET /v1/files/list-dir?max_depth=3",
+    ]);
+    expect(restBackend.healthHits).toBe(1);
+    expect(events).toContain("attr:sandbox.file.operation=list");
+    expect(events).toContain("attr:sandbox.file.count=0");
+  });
+
+  it("rejects invalid maxDepth before connecting", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+    });
+
+    for (const maxDepth of [
+      0,
+      -1,
+      1.5,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      Number.MAX_SAFE_INTEGER + 1,
+      "2",
+      null,
+    ]) {
+      await expect(
+        sandbox.files.list("list-dir", {
+          recursive: true,
+          maxDepth: maxDepth as number,
+        }),
+      ).rejects.toMatchObject({ telemetryCode: "invalid_argument" });
+    }
+    await expect(
+      sandbox.files.list("list-dir", { maxDepth: 0 }),
+    ).rejects.toMatchObject({ telemetryCode: "invalid_argument" });
+    expect(restBackend.healthHits).toBe(0);
+    expect(restBackend.fileRequests).toEqual([]);
+  });
+
+  it("rejects non-boolean recursive before connecting", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+    });
+
+    for (const recursive of ["false", 0, 1, null]) {
+      await expect(
+        sandbox.files.list("list-dir", {
+          recursive: recursive as unknown as boolean,
+        }),
+      ).rejects.toMatchObject({ telemetryCode: "invalid_argument" });
+    }
+    expect(restBackend.healthHits).toBe(0);
+    expect(restBackend.fileRequests).toEqual([]);
+  });
+});
+
 describe("Sandbox streaming integration", () => {
   it("readStream errors via the per-call timeout without waiting for another read, and releases in-flight promptly", async () => {
     restBackend = await startRestBackend();
@@ -1144,6 +1252,52 @@ describe("Sandbox streaming integration", () => {
     for (const event of events) {
       expect(event).not.toContain(SENTINEL);
     }
+  });
+
+  it("mkdir, move and copy reach sandboxd and record the operation", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    const { tracingManager, events } = makeRecordingTracerManager();
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+      tracingManager,
+    });
+
+    await sandbox.files.mkdir("a/b", { parents: true, mode: "0700" });
+    await sandbox.files.move("a/b", "c", { overwrite: true });
+    await sandbox.files.copy("c", "d");
+
+    expect(restBackend.fileRequests).toEqual([
+      "PUT /v1/files/a%2Fb?type=directory&parents=true&mode=0700",
+      "POST /v1/files/a%2Fb:move?destination=c&overwrite=true",
+      "POST /v1/files/c:copy?destination=d",
+    ]);
+    for (const op of ["mkdir", "move", "copy"]) {
+      expect(events).toContain(`attr:sandbox.file.operation=${op}`);
+    }
+    // One shared connect served all three calls.
+    expect(restBackend.healthHits).toBe(1);
+  });
+
+  it("mkdir, move and copy reject bad input before connecting", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+    });
+
+    await expect(sandbox.files.mkdir("")).rejects.toThrow(SandboxError);
+    await expect(sandbox.files.mkdir("a", { mode: "755" })).rejects.toThrow(
+      SandboxError,
+    );
+    await expect(sandbox.files.move("a", "../b")).rejects.toThrow(SandboxError);
+    await expect(sandbox.files.copy(".", "b")).rejects.toThrow(SandboxError);
+    expect(restBackend.healthHits).toBe(0);
+    expect(restBackend.fileRequests).toEqual([]);
   });
 
   it("writeStream sends the exact content and reuses the generation for the next call", async () => {

@@ -24,9 +24,10 @@ legacy HTTP Service/GKE resources above are not changed. Router-consumed scoped
 credentials and verified public TLS are required in that example; internal h2c
 does not encrypt the full chain.
 
-`networkpolicy.yaml` allows legacy TCP 8888 and sandboxd gRPC TCP 9090 across
-namespaces. Tighten its namespace and Pod selectors to your permitted tenant range;
-add specific ports for other gRPC services rather than all ports. The
+`networkpolicy.yaml` allows TCP on any port to Pods that carry the
+controller-stamped `agents.x-k8s.io/sandbox-name-hash` label, in any namespace,
+because callers choose the upstream port with `X-Sandbox-Port`. Tighten its
+namespace and Pod selectors to your permitted tenant range. The
 [gRPC example workload](../../examples/sandbox-router-grpc/workload.yaml) has its
 own restricted egress policy for the demo router, separate from these defaults.
 Verify both allowed and forbidden targets with an enforcing CNI. Applying a

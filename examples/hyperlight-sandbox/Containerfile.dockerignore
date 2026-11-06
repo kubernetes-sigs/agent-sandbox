@@ -1,0 +1,3 @@
+# The rootfs image copies initrd.cpio and nothing else from here.
+.hluk/
+snapshot/

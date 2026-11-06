@@ -15,19 +15,21 @@
 """Async HTTP and sandboxd transports used by the Python SDK.
 
 Router-based connections share an ``httpx`` client. The sandboxd runtime uses
-either a direct in-cluster address or one ``kubectl port-forward`` with separate
-REST and gRPC endpoints, both owned by the connector lifecycle.
+either a direct in-cluster address or one ``kubectl port-forward`` to a Pod or
+router. The connector owns both REST and gRPC transports.
 """
 
 import asyncio
 import inspect
 import logging
 import math
+import os
 import socket
 import ssl
 from collections.abc import Callable
 from typing import Any, Awaitable
 
+import certifi
 import httpx
 
 
@@ -46,6 +48,7 @@ from .models import (
     SandboxLocalTunnelConnectionConfig,
     SandboxdPodTunnelConnectionConfig,
     SandboxdInClusterConnectionConfig,
+    SandboxdRouterTunnelConnectionConfig,
 )
 from .utils import async_kubectl_kubeconfig_args, merge_headers, sandboxd_auth_headers
 
@@ -113,13 +116,45 @@ def _build_ssl_context(config: SandboxDirectConnectionConfig) -> ssl.SSLContext:
     return context
 
 
+class _DefaultSSLContext:
+    """Reuse default trust within one SDK client while detecting CA replacement.
+
+    Callers must not modify a shared context after it has been returned.
+    """
+
+    def __init__(self) -> None:
+        self._context: ssl.SSLContext | None = None
+        self._key: tuple[str, int, int, int, int, int] | None = None
+
+    def __call__(self) -> ssl.SSLContext:
+        # Match HTTPX 0.28.1's trust selection.
+        # test_httpx_default_trust_selection_contract fails if that selection
+        # changes. Directory trust stores can change below the directory itself. Leave
+        # those, and contexts with key logging, to HTTPX's normal loading path.
+        cafile = os.environ.get("SSL_CERT_FILE")
+        if (not cafile and os.environ.get("SSL_CERT_DIR")) or os.environ.get("SSLKEYLOGFILE"):
+            return httpx.create_ssl_context()
+        cafile = cafile or certifi.where()
+        try:
+            info = os.stat(cafile)
+        except OSError:
+            # Let HTTPX report inaccessible trust stores through its normal path.
+            return httpx.create_ssl_context()
+        key = (cafile, info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        if self._context is None or key != self._key:
+            context = httpx.create_ssl_context()
+            self._context = context
+            self._key = key
+        return self._context
+
+
 class AsyncSandboxConnector:
     """
     Async connector for communicating with a Sandbox over HTTP using httpx.
 
     Supports DirectConnection, GatewayConnection, InCluster, and sandboxd
-    modes. LocalTunnel mode is not supported because it relies on a
-    router subprocess; use the sync SandboxConnector for local development.
+    modes, including Pod and router tunnels. The legacy LocalTunnel mode
+    requires the synchronous SandboxConnector.
     """
 
     def __init__(
@@ -137,7 +172,8 @@ class AsyncSandboxConnector:
                 "AsyncSandboxConnector does not support SandboxLocalTunnelConnectionConfig. "
                 "Use SandboxDirectConnectionConfig, SandboxGatewayConnectionConfig, "
                 "SandboxInClusterConnectionConfig, "
-                "SandboxdPodTunnelConnectionConfig, or "
+                "SandboxdPodTunnelConnectionConfig, "
+                "SandboxdRouterTunnelConnectionConfig, or "
                 "SandboxdInClusterConnectionConfig instead. "
                 "For local development, use the synchronous SandboxClient."
             )
@@ -150,6 +186,7 @@ class AsyncSandboxConnector:
         self._get_service_fqdn = get_service_fqdn
         self._grpc_channel: Any = None
         self._grpc_channel_target: str | None = None
+        self._grpc_channel_pod_ip: str | None = None
         self._incluster_target: str | None = None
         self._incluster_transport_token = object()
         # Command and filesystem calls may arrive together on first use. The
@@ -164,7 +201,7 @@ class AsyncSandboxConnector:
         self._sandboxd_strategy: (
             AsyncSandboxdPodTunnelStrategy | AsyncSandboxdInClusterStrategy | None
         ) = None
-        if isinstance(connection_config, SandboxdPodTunnelConnectionConfig):
+        if isinstance(connection_config, (SandboxdPodTunnelConnectionConfig, SandboxdRouterTunnelConnectionConfig)):
             self._sandboxd_strategy = AsyncSandboxdPodTunnelStrategy(
                 sandbox_id=sandbox_id,
                 namespace=namespace,
@@ -207,16 +244,38 @@ class AsyncSandboxConnector:
         )
 
         self._extra_headers: dict[str, str] = {}
-        verify: ssl.SSLContext | bool = True
+        self._ssl_context: ssl.SSLContext | None = None
+        self._default_ssl_context: Callable[[], ssl.SSLContext] = httpx.create_ssl_context
+        self._client: httpx.AsyncClient | None = None
         if isinstance(connection_config, SandboxDirectConnectionConfig):
             self._extra_headers = connection_config.extra_headers
             if connection_config.ca_cert or connection_config.client_cert:
-                verify = _build_ssl_context(connection_config)
+                # Load explicit certificates per handle so new handles observe
+                # rotations. Report invalid paths during handle construction.
+                self._ssl_context = _build_ssl_context(connection_config)
 
-        transport = httpx.AsyncHTTPTransport(verify=verify)
-        self.client = httpx.AsyncClient(
-            transport=transport, timeout=httpx.Timeout(60.0)
-        )
+    def _ensure_client(self) -> httpx.AsyncClient:
+        """Create the HTTP client on first use within this connector's event loop."""
+        if self._client is None:
+            self._ensure_open()
+            # Initialization is synchronous, so tasks on one event loop cannot
+            # publish competing clients or contexts.
+            context = self._ssl_context or self._default_ssl_context()
+            transport = httpx.AsyncHTTPTransport(verify=context)
+            self._client = httpx.AsyncClient(
+                transport=transport, timeout=httpx.Timeout(60.0)
+            )
+        return self._client
+
+    @property
+    def client(self) -> httpx.AsyncClient:
+        """Return the HTTP client, creating it on first access."""
+        return self._ensure_client()
+
+    @client.setter
+    def client(self, value: httpx.AsyncClient) -> None:
+        # Preserve support for callers that replace the HTTP client.
+        self._client = value
 
     async def _resolve_base_url(self) -> str:
         """Resolve the HTTP endpoint for the configured connection mode."""
@@ -279,6 +338,32 @@ class AsyncSandboxConnector:
             raise ValueError("AsyncSandboxConnector failed to resolve a base URL.")
         return self._base_url
 
+    async def _routing_pod_ip(
+        self, get_pod_ip: Callable[[], Awaitable[str | None]] | None
+    ) -> str | None:
+        """Return the Pod IP to advertise, or None when the router should resolve it."""
+        if (
+            isinstance(self.connection_config, SandboxdRouterTunnelConnectionConfig)
+            and not self.connection_config.pod_ip_routing
+        ):
+            return None
+        if not get_pod_ip or self._pod_ip_auth_failed:
+            return None
+        if not self._pod_ip_resolved:
+            try:
+                pod_ip = await get_pod_ip()
+                if pod_ip:
+                    self._pod_ip = pod_ip
+                    self._pod_ip_resolved = True
+            except Exception as e:
+                status_code = getattr(getattr(e, "response", None), "status_code", None)
+                if status_code in (401, 403):
+                    self._pod_ip_auth_failed = True
+                    logger.debug(f"K8s API auth failed ({status_code}). Permanently disabling direct pod IP routing for this client instance.")
+                else:
+                    logger.debug(f"Transient failure resolving pod IP for direct routing: {e}")
+        return self._pod_ip
+
     async def send_request(
         self, method: str, endpoint: str, *, stream: bool = False, **kwargs: Any
     ) -> httpx.Response:
@@ -337,33 +422,31 @@ class AsyncSandboxConnector:
         if self._inject_router_headers:
             if not isinstance(
                 self.connection_config,
-                (SandboxDirectConnectionConfig, SandboxGatewayConnectionConfig),
+                (
+                    SandboxDirectConnectionConfig,
+                    SandboxGatewayConnectionConfig,
+                    SandboxdRouterTunnelConnectionConfig,
+                ),
             ):
                 raise RuntimeError(
                     "router headers enabled for a non-router connection config"
                 )
-            headers["X-Sandbox-ID"] = self.id
-            headers["X-Sandbox-Namespace"] = self.namespace
-            headers["X-Sandbox-Port"] = str(self.connection_config.server_port)
+            router_headers = {
+                "X-Sandbox-ID": self.id,
+                "X-Sandbox-Namespace": self.namespace,
+                "X-Sandbox-Port": str(
+                    self.connection_config.rest_port
+                    if isinstance(self.connection_config, SandboxdRouterTunnelConnectionConfig)
+                    else self.connection_config.server_port
+                ),
+            }
             timeout_header = _router_timeout_header_value(kwargs.get("timeout"))
             if timeout_header is not None:
-                headers["X-Sandbox-Timeout"] = timeout_header
-            if self._get_pod_ip and not self._pod_ip_auth_failed:
-                if not self._pod_ip_resolved:
-                    try:
-                        pod_ip = await self._get_pod_ip()
-                        if pod_ip:
-                            self._pod_ip = pod_ip
-                            self._pod_ip_resolved = True
-                    except Exception as e:
-                        status_code = getattr(getattr(e, "response", None), "status_code", None)
-                        if status_code in (401, 403):
-                            self._pod_ip_auth_failed = True
-                            logger.debug(f"K8s API auth failed ({status_code}). Permanently disabling direct pod IP routing for this client instance.")
-                        else:
-                            logger.debug(f"Transient failure resolving pod IP for direct routing: {e}")
-                if self._pod_ip:
-                    headers["X-Sandbox-Pod-IP"] = self._pod_ip
+                router_headers["X-Sandbox-Timeout"] = timeout_header
+            pod_ip = await self._routing_pod_ip(self._get_pod_ip)
+            if pod_ip:
+                router_headers["X-Sandbox-Pod-IP"] = pod_ip
+            headers = merge_headers(headers, router_headers)
 
         stream_auth = (
             kwargs.pop("auth", httpx.USE_CLIENT_DEFAULT)
@@ -374,18 +457,19 @@ class AsyncSandboxConnector:
         max_retries = 0 if disable_retries else MAX_RETRIES
         for attempt in range(max_retries + 1):
             try:
+                client = self._ensure_client()
                 if stream:
-                    request = self.client.build_request(
+                    request = client.build_request(
                         method, url, headers=headers, **kwargs
                     )
-                    response = await self.client.send(
+                    response = await client.send(
                         request,
                         auth=stream_auth,
                         follow_redirects=False,
                         stream=True,
                     )
                 else:
-                    response = await self.client.request(
+                    response = await client.request(
                         method, url, headers=headers, follow_redirects=False, **kwargs
                     )
                 if (
@@ -410,11 +494,11 @@ class AsyncSandboxConnector:
                         response=response,
                     )
                 if allowed_statuses and response.status_code in allowed_statuses:
-                    if stream and isinstance(self._sandboxd_strategy, AsyncSandboxdInClusterStrategy):
+                    if stream and self.is_sandboxd():
                         response.extensions["sandboxd_transport_token"] = transport_token
                     return response
                 response.raise_for_status()
-                if stream and isinstance(self._sandboxd_strategy, AsyncSandboxdInClusterStrategy):
+                if stream and self.is_sandboxd():
                     response.extensions["sandboxd_transport_token"] = transport_token
                 return response
             except httpx.HTTPStatusError as e:
@@ -499,6 +583,7 @@ class AsyncSandboxConnector:
             self.grpc_target = None
             self._grpc_channel = None
             self._grpc_channel_target = None
+            self._grpc_channel_pod_ip = None
             self._base_url = None
             self._pod_ip_resolved = False
             self._cached_pod_ip_url = None
@@ -535,9 +620,15 @@ class AsyncSandboxConnector:
             async with self._grpc_lock:
                 if not self.grpc_target:
                     _, self.grpc_target = await strategy.connect()
+                pod_ip = (
+                    await self._routing_pod_ip(self._get_pod_ip)
+                    if isinstance(self.connection_config, SandboxdRouterTunnelConnectionConfig)
+                    else None
+                )
                 if (
                     self._grpc_channel is not None
                     and self._grpc_channel_target == self.grpc_target
+                    and self._grpc_channel_pod_ip == pod_ip
                 ):
                     return self._grpc_channel
                 if self._grpc_channel is not None:
@@ -546,28 +637,44 @@ class AsyncSandboxConnector:
                         await result
                     self._grpc_channel = None
                     self._grpc_channel_target = None
-                authorization = self._sandboxd_auth_headers.get("authorization")
-                if authorization is None:
+                    self._grpc_channel_pod_ip = None
+                metadata = dict(self._sandboxd_auth_headers)
+                if isinstance(self.connection_config, SandboxdRouterTunnelConnectionConfig):
+                    metadata.update({
+                        "x-sandbox-id": self.id,
+                        "x-sandbox-namespace": self.namespace,
+                        "x-sandbox-port": str(self.connection_config.grpc_port),
+                    })
+                    if pod_ip:
+                        metadata["x-sandbox-pod-ip"] = pod_ip
+                if not metadata:
                     channel = grpc.aio.insecure_channel(self.grpc_target)
                 else:
-                    from ._grpc_auth import async_auth_interceptors
+                    from ._grpc_auth import async_metadata_interceptors
 
                     channel = grpc.aio.insecure_channel(
-                        self.grpc_target, interceptors=async_auth_interceptors(authorization)
+                        self.grpc_target, interceptors=async_metadata_interceptors(metadata)
                     )
                 self._grpc_channel = channel
                 self._grpc_channel_target = self.grpc_target
+                self._grpc_channel_pod_ip = pod_ip
                 return self._grpc_channel
 
     async def invalidate_sandboxd_transport(
         self, channel: Any | None, *, transport_token: object | None = None
     ) -> None:
-        """Discard a failed direct transport without replaying its operation.
+        """Refresh a failed sandboxd endpoint without replaying its operation.
+
+        Router connections drop their cached Pod IP. Direct connections also
+        discard their transport.
 
         A gRPC failure supplies its channel; an HTTP failure supplies the
         request's token. A late failure must not close a replacement.
         """
-        if not isinstance(self._sandboxd_strategy, AsyncSandboxdInClusterStrategy):
+        strategy = self._sandboxd_strategy
+        if not isinstance(strategy, AsyncSandboxdInClusterStrategy) and not isinstance(
+            self.connection_config, SandboxdRouterTunnelConnectionConfig
+        ):
             return
         async with self._lifecycle_lock:
             if channel is not None and channel is not self._grpc_channel:
@@ -576,6 +683,10 @@ class AsyncSandboxConnector:
                 transport_token is not None
                 and transport_token is not self._incluster_transport_token
             ):
+                return
+            if not isinstance(strategy, AsyncSandboxdInClusterStrategy):
+                self._pod_ip_resolved = False
+                self._pod_ip = None
                 return
             async with self._grpc_lock:
                 try:
@@ -590,8 +701,22 @@ class AsyncSandboxConnector:
                     self._incluster_target = None
                     self._grpc_channel = None
                     self._grpc_channel_target = None
+                    self._grpc_channel_pod_ip = None
                     self.grpc_target = None
-                    self._sandboxd_strategy.invalidate_service_fqdn()
+                    strategy.invalidate_service_fqdn()
+
+    def _release_sandbox_callbacks(self) -> None:
+        # The callbacks are bound methods of the handle. Keeping them once the handle
+        # is closed for good makes the handle and its connector a reference cycle, which
+        # holds the connector's sessions until the cyclic garbage collector happens to run.
+        self._get_pod_ip = None
+        self._get_service_fqdn = None
+        strategy = self._sandboxd_strategy
+        if isinstance(strategy, AsyncSandboxdPodTunnelStrategy):
+            strategy._get_pod_name = None
+        elif isinstance(strategy, AsyncSandboxdInClusterStrategy):
+            strategy._get_pod_ip = None
+            strategy._get_service_fqdn = None
 
     async def close(self) -> None:
         """Close HTTP, gRPC, and port-forward resources owned by the connector."""
@@ -601,7 +726,8 @@ class AsyncSandboxConnector:
             self._closed = True
             errors: list[BaseException] = []
             try:
-                await self.client.aclose()
+                if self._client is not None:
+                    await self._client.aclose()
             except BaseException as exc:
                 errors.append(exc)
             finally:
@@ -616,6 +742,7 @@ class AsyncSandboxConnector:
                         else:
                             self._grpc_channel = None
                             self._grpc_channel_target = None
+                            self._grpc_channel_pod_ip = None
                 if self._sandboxd_strategy is not None:
                     try:
                         await self._sandboxd_strategy.close()
@@ -633,6 +760,7 @@ class AsyncSandboxConnector:
                     self._pod_ip = None
                 except BaseException as exc:
                     errors.append(exc)
+                self._release_sandbox_callbacks()
             if errors:
                 # Cancellation must remain observable even when an earlier
                 # cleanup operation raised a regular exception.
@@ -644,17 +772,18 @@ class AsyncSandboxConnector:
 
 
 class AsyncSandboxdPodTunnelStrategy:
-    """Own the direct Pod tunnel used by sandboxd's REST and gRPC clients.
+    """Own a Pod or router tunnel used by sandboxd's REST and gRPC clients.
 
-    A single ``kubectl`` process forwards both ports. Establishment and teardown
-    are serialized because file and command operations can race on first use.
+    A single ``kubectl`` process forwards the required ports. Establishment and
+    teardown are serialized because file and command operations can race on
+    first use.
     """
 
     def __init__(
         self,
         sandbox_id: str,
         namespace: str,
-        config: SandboxdPodTunnelConnectionConfig,
+        config: SandboxdPodTunnelConnectionConfig | SandboxdRouterTunnelConnectionConfig,
         get_pod_name: Callable[[], Awaitable[str | None]] | None = None,
         api_client: Any | None = None,
     ) -> None:
@@ -711,33 +840,46 @@ class AsyncSandboxdPodTunnelStrategy:
         if self.port_forward_process:
             await self._close_locked()
 
-        pod_name = (
-            await self._get_pod_name() if self._get_pod_name is not None else None
-        )
-        if not pod_name:
-            raise SandboxPortForwardError(
-                "sandbox pod name not resolved yet; cannot port-forward to sandboxd"
+        if isinstance(self.config, SandboxdRouterTunnelConnectionConfig):
+            target = "svc/sandbox-router-svc"
+            namespace = self.config.router_namespace
+        else:
+            pod_name = (
+                await self._get_pod_name() if self._get_pod_name is not None else None
             )
+            if not pod_name:
+                raise SandboxPortForwardError(
+                    "sandbox pod name not resolved yet; cannot port-forward to sandboxd"
+                )
+            target = f"pod/{pod_name}"
+            namespace = self.namespace
 
         async with async_kubectl_kubeconfig_args(self._api_client) as kube_args:
-            return await self._start_tunnel_locked(pod_name, kube_args)
+            return await self._start_tunnel_locked(target, namespace, kube_args)
 
     async def _start_tunnel_locked(
-        self, pod_name: str, kube_args: list[str]
+        self, target: str, namespace: str, kube_args: list[str]
     ) -> tuple[str, str]:
         """Start ``kubectl`` while the caller holds ``_lifecycle_lock``."""
         rest_local = self._get_free_port()
-        grpc_local = self._get_free_port()
+        if isinstance(self.config, SandboxdRouterTunnelConnectionConfig):
+            grpc_local = rest_local
+            mappings = [f"{rest_local}:8080"]
+        else:
+            grpc_local = self._get_free_port()
+            mappings = [
+                f"{rest_local}:{self.config.rest_port}",
+                f"{grpc_local}:{self.config.grpc_port}",
+            ]
         try:
             try:
                 self.port_forward_process = await asyncio.create_subprocess_exec(
                     "kubectl",
                     "port-forward",
-                    f"pod/{pod_name}",
-                    f"{rest_local}:{self.config.rest_port}",
-                    f"{grpc_local}:{self.config.grpc_port}",
+                    target,
+                    *mappings,
                     "-n",
-                    self.namespace,
+                    namespace,
                     *kube_args,
                     # kubectl logs each forwarded connection. Discard the
                     # long-lived subprocess output because this SDK has no log
@@ -747,8 +889,8 @@ class AsyncSandboxdPodTunnelStrategy:
                 )
             except OSError as e:
                 raise SandboxPortForwardError(
-                    "failed to start sandboxd port-forward for pod "
-                    f"{self.namespace}/{pod_name}: {e}"
+                    "failed to start sandboxd port-forward for "
+                    f"{namespace}/{target}: {e}"
                 ) from e
 
             deadline = (
@@ -759,8 +901,8 @@ class AsyncSandboxdPodTunnelStrategy:
                 if self.port_forward_process.returncode is not None:
                     await self._close_locked()
                     raise SandboxPortForwardError(
-                        "sandboxd port-forward exited before it was ready for pod "
-                        f"{self.namespace}/{pod_name}"
+                        "sandboxd port-forward exited before it was ready for "
+                        f"{namespace}/{target}"
                     )
                 if await self._is_port_open(rest_local) and await self._is_port_open(
                     grpc_local
@@ -772,8 +914,8 @@ class AsyncSandboxdPodTunnelStrategy:
 
             await self._close_locked()
             raise SandboxPortForwardError(
-                "timed out waiting for sandboxd port-forward for pod "
-                f"{self.namespace}/{pod_name}"
+                "timed out waiting for sandboxd port-forward for "
+                f"{namespace}/{target}"
             )
         except asyncio.CancelledError:
             await self._close_locked()

@@ -146,7 +146,28 @@ func (h *Handler) Close() {
 
 // ServeHTTP implements http.Handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	grpcRequest := isGRPCRequest(r)
+	kind := classifyRequest(r)
+	if kind == protoGRPCWebReject {
+		if labels := observability.LabelsFromContext(r.Context()); labels != nil {
+			labels.GRPC = true
+		}
+		// Stamp CORS before the error so a browser caller from an
+		// allowlisted origin can actually read why the variant was
+		// rejected instead of seeing an opaque CORS failure.
+		h.maybeSetCORSHeaders(w, r, kind)
+		writeGRPCWebError(w, r, codes.InvalidArgument,
+			"unsupported grpc-web content type: the router transcodes binary application/grpc-web only")
+		return
+	}
+	// A CORS preflight carries no routing headers — the browser only
+	// lists their names — so answer it before any routing or authz.
+	if h.maybeHandlePreflight(w, r) {
+		return
+	}
+	// CORS headers for the real gRPC-Web request go on before routing and
+	// authorization so the browser can also read error responses.
+	h.maybeSetCORSHeaders(w, r, kind)
+	grpcRequest := kind.isGRPCish()
 	if grpcRequest {
 		if labels := observability.LabelsFromContext(r.Context()); labels != nil {
 			labels.GRPC = true
@@ -159,7 +180,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		r = r.WithContext(ctx)
 		if err := grpcContextError(ctx); err != nil {
-			writeProxyError(w, r, grpcRequest, &Error{Status: http.StatusBadGateway, Detail: err.Error()})
+			writeProxyError(w, r, kind, &Error{Status: http.StatusBadGateway, Detail: err.Error()})
 			return
 		}
 		if h.cfg.MaxRequestBodyBytes > 0 {
@@ -170,7 +191,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var pathRouted bool
 	target, perr := h.resolveTarget(r, grpcRequest, &upstreamPath, &upstreamRawPath, &pathRouted)
 	if perr != nil {
-		writeProxyError(w, r, grpcRequest, perr)
+		writeProxyError(w, r, kind, perr)
 		return
 	}
 
@@ -213,7 +234,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if h.metrics != nil {
 				h.metrics.AuthzDecisionsTotal.WithLabelValues(target.Namespace, "deny").Inc()
 			}
-			writeProxyError(w, r, grpcRequest, &Error{Status: http.StatusForbidden, Detail: "origin not allowed for cookie-authenticated request"})
+			writeProxyError(w, r, kind, &Error{Status: http.StatusForbidden, Detail: "origin not allowed for cookie-authenticated request"})
 			return
 		}
 	}
@@ -253,7 +274,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Path:        upstreamPathURL.EscapedPath(),
 	})
 	if err != nil {
-		writeProxyError(w, r, grpcRequest, &Error{Status: http.StatusInternalServerError, Detail: err.Error()})
+		writeProxyError(w, r, kind, &Error{Status: http.StatusInternalServerError, Detail: err.Error()})
 		return
 	}
 	if err := h.authz.Authorize(r.Context(), r, authorizationTarget); err != nil {
@@ -267,7 +288,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if h.metrics != nil {
 			h.metrics.AuthzDecisionsTotal.WithLabelValues(target.Namespace, "deny").Inc()
 		}
-		writeProxyError(w, r, grpcRequest, &Error{Status: status, Detail: err.Error()})
+		writeProxyError(w, r, kind, &Error{Status: status, Detail: err.Error()})
 		return
 	}
 	if h.metrics != nil {
@@ -275,7 +296,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if grpcRequest {
 		if err := grpcContextError(r.Context()); err != nil {
-			writeProxyError(w, r, grpcRequest, &Error{Status: http.StatusBadGateway, Detail: err.Error()})
+			writeProxyError(w, r, kind, &Error{Status: http.StatusBadGateway, Detail: err.Error()})
 			return
 		}
 	}
@@ -310,6 +331,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if deadline, ok := pr.Out.Context().Deadline(); ok {
 					pr.Out.Header.Set("Grpc-Timeout", remainingGRPCTimeout(time.Until(deadline)))
 				}
+			}
+			if kind == protoGRPCWeb {
+				rewriteGRPCWebContentType(pr.Out.Header)
 			}
 			// Strip Authorization before forwarding. The router consumes
 			// it (e.g. --authz-mode=tokenreview validates a Bearer token
@@ -383,7 +407,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ErrorHandler: func(w http.ResponseWriter, errReq *http.Request, err error) {
 			var bodyLimit *http.MaxBytesError
 			if grpcRequest && errors.As(err, &bodyLimit) {
-				writeGRPCError(w, codes.ResourceExhausted, "RPC request body limit exceeded")
+				writeProxyError(w, errReq, kind, &Error{
+					Status: http.StatusRequestEntityTooLarge,
+					Detail: "RPC request body limit exceeded",
+				})
 				return
 			}
 			h.recordUpstreamErrorReason(target0.Namespace, classifyError(err))
@@ -416,7 +443,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"namespace", target0.Namespace,
 				"source", string(src),
 			)
-			writeProxyError(w, errReq, grpcRequest, &Error{
+			writeProxyError(w, errReq, kind, &Error{
 				Status: http.StatusBadGateway,
 				Detail: fmt.Sprintf("Could not connect to the backend sandbox: %s", target0.ID),
 			})
@@ -425,6 +452,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if grpcRequest {
 		rp.Transport = h.grpcTransport
 		rp.ModifyResponse = prepareGRPCResponse
+		if kind == protoGRPCWeb {
+			// The inbound request context carries the observability
+			// Labels; recording the terminal status there is what lets
+			// the access log and span report it even though a grpc-web
+			// response never exposes Grpc-Status as a header.
+			rp.ModifyResponse = func(resp *http.Response) error {
+				return prepareGRPCWebResponse(resp, func(status string) {
+					observability.RecordGRPCStatus(r.Context(), status)
+				})
+			}
+		}
 	}
 
 	// Bound the upstream request lifetime by the configured proxy timeout,
@@ -611,10 +649,21 @@ func (t *metricsTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	// so the counter is incremented lazily as bytes flow — SSE /
 	// streaming responses are accounted for correctly because the
 	// counting happens per Read, not per response.
-	if resp.Body != nil {
-		resp.Body = &upstreamCountingReadCloser{
-			rc:      resp.Body,
+	if body := resp.Body; body != nil {
+		counting := &upstreamCountingReadCloser{
+			rc:      body,
 			counter: t.metrics.UpstreamRxBytesTotal.WithLabelValues(namespace),
+		}
+		resp.Body = counting
+		// http.Transport returns a writable body for a 101 response, and
+		// ReverseProxy only hijacks the connection if the body is still an
+		// io.ReadWriteCloser. Keep Write available so upgrades do not 502.
+		if w, ok := body.(io.Writer); ok {
+			resp.Body = &upstreamCountingReadWriteCloser{
+				upstreamCountingReadCloser: counting,
+				w:                          w,
+				writeCounter:               t.metrics.UpstreamTxBytesTotal.WithLabelValues(namespace),
+			}
 		}
 	}
 
@@ -633,12 +682,39 @@ type upstreamCountingReadCloser struct {
 
 func (c *upstreamCountingReadCloser) Read(p []byte) (int, error) {
 	n, err := c.rc.Read(p)
-	if n > 0 {
-		c.counter.Add(float64(n))
-	}
+	addBytes(c.counter, n)
 	return n, err
 }
 
 func (c *upstreamCountingReadCloser) Close() error {
 	return c.rc.Close()
+}
+
+// upstreamCountingReadWriteCloser also counts bytes written to the upstream.
+// It wraps the body of an upgraded (101) response, where Read carries
+// upstream-to-client bytes and Write carries client-to-upstream bytes.
+type upstreamCountingReadWriteCloser struct {
+	*upstreamCountingReadCloser
+	w            io.Writer
+	writeCounter prometheus.Counter
+}
+
+func (c *upstreamCountingReadWriteCloser) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	addBytes(c.writeCounter, n)
+	return n, err
+}
+
+// CloseWrite lets ReverseProxy half-close the upstream, as net/http's own body does.
+func (c *upstreamCountingReadWriteCloser) CloseWrite() error {
+	if cw, ok := c.w.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return http.ErrNotSupported
+}
+
+func addBytes(counter prometheus.Counter, n int) {
+	if n > 0 {
+		counter.Add(float64(n))
+	}
 }

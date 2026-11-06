@@ -292,7 +292,7 @@ type SandboxClaimReconciler struct {
 // move the current state of the cluster closer to the desired state.
 func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, reconcileErr error) {
 	logger := log.FromContext(ctx)
-	logger.V(1).Info("Start of Reconcile loop for SandboxClaim", "request", req.NamespacedName)
+	logger.V(4).Info("Start of Reconcile loop for SandboxClaim", "request", req.NamespacedName)
 	claim := &extensionsv1beta1.SandboxClaim{}
 	if err := r.Get(ctx, req.NamespacedName, claim); err != nil {
 		if k8errors.IsNotFound(err) {
@@ -361,7 +361,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 		return ctrl.Result{RequeueAfter: immediateRequeueDelay}, nil
 	}
-	logger.V(1).Info("Expiration check", "isExpired", claimExpired, "timeLeft", timeLeft, "request", req.NamespacedName)
+	logger.V(4).Info("Expiration check", "isExpired", claimExpired, "timeLeft", timeLeft, "request", req.NamespacedName)
 
 	// Handle "Delete" and "DeleteForeground" policies immediately.
 	// If we delete the claim, we return immediately.
@@ -520,7 +520,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	errs := errors.Join(reconcileErr, metricsErr)
-	logger.V(1).Info("End of Reconcile loop SandboxClaim", "result", result, "error", errs, "request", req.NamespacedName)
+	logger.V(4).Info("End of Reconcile loop SandboxClaim", "result", result, "error", errs, "request", req.NamespacedName)
 	return result, errs
 }
 
@@ -599,7 +599,7 @@ func (r *SandboxClaimReconciler) checkExpiration(claim *extensionsv1beta1.Sandbo
 // reconcileActive handles the creation and updates of running sandboxes.
 func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (*v1beta1.Sandbox, error) {
 	logger := log.FromContext(ctx)
-	logger.V(1).Info("Reconciling active claim", "claim", claim.Name)
+	logger.V(4).Info("Reconciling active claim", "claim", claim.Name)
 
 	// Upfront validation of additional metadata to skip unnecessary processing
 	if err := r.validateAdditionalPodMetadata(&claim.Spec.AdditionalPodMetadata); err != nil {
@@ -608,22 +608,20 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 
 	// Fast path: try to find existing or adopt from warm pool before template lookup.
 	sandbox, err := r.getOrCreateSandbox(ctx, claim, nil)
-	logger.V(1).Info("getOrCreateSandbox result", "sandboxFound", sandbox != nil, "err", err, "claim", claim.Name)
+	logger.V(4).Info("getOrCreateSandbox result", "sandboxFound", sandbox != nil, "err", err, "claim", claim.Name)
 	if err != nil {
 		return nil, err
 	}
 	if sandbox != nil {
-		// Found or adopted. Reconcile network policy (best effort, non blocking).
-		logger.V(1).Info("Fast path: sandbox found or adopted, reconciling network policy", "claim", claim.Name)
+		logger.V(4).Info("Fast path: sandbox found or adopted, propagating metadata", "claim", claim.Name)
 		template, templateErr := r.getTemplate(ctx, claim)
 		if templateErr != nil {
-			logger.Error(templateErr, "failed to get template of the warmpool for network policy reconciliation (non-fatal)", "claim", claim.Name, "warmPool", claim.Spec.WarmPoolRef.Name)
-
-			// If we can't get the template but we have metadata to propagate, we should fail
-			// to ensure consistency and enforce the "No Overrides" rule.
-			if len(claim.Spec.AdditionalPodMetadata.Labels) > 0 || len(claim.Spec.AdditionalPodMetadata.Annotations) > 0 {
-				return nil, fmt.Errorf("failed to get template for metadata propagation: %w", templateErr)
+			// Without the template, the controller can't tell template keys from claim keys,
+			// so it can't check the No-Overrides rule or remove a key the claim dropped.
+			if !podMetadataApplied(&claim.Spec.AdditionalPodMetadata, &sandbox.Spec.PodTemplate.ObjectMeta) {
+				return sandbox, fmt.Errorf("failed to get template for metadata propagation: %w", templateErr)
 			}
+			logger.V(4).Info("Template lookup failed, but the Sandbox already carries the claim's pod metadata", "claim", claim.Name, "warmPool", claim.Spec.WarmPoolRef.Name, "error", templateErr)
 		}
 
 		if template != nil {
@@ -648,7 +646,7 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 			}
 
 			if err := r.mergePodMetadata(&mergedMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
-				return nil, err
+				return sandbox, err
 			}
 
 			needsUpdate := !equality.Semantic.DeepEqual(&mergedMeta, &sandbox.Spec.PodTemplate.ObjectMeta)
@@ -721,16 +719,22 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 // reconcileExpired ensures the Sandbox is deleted for Retained claims.
 func (r *SandboxClaimReconciler) reconcileExpired(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (*v1beta1.Sandbox, error) {
 	logger := log.FromContext(ctx)
-	logger.V(1).Info("Reconciling Expired claim", "claim", claim.Name)
+	logger.V(4).Info("Reconciling Expired claim", "claim", claim.Name)
 
-	// Fall back to claim.Name when status is unset.
-	statusName := claim.Name
-	if claim.Status.SandboxStatus.Name != "" {
-		statusName = claim.Status.SandboxStatus.Name
+	// Adoption persists the assignment before writing claim status.
+	sandboxName := claim.Status.SandboxStatus.Name
+	if sandboxName == "" {
+		sandboxName = claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation]
+	}
+	if sandboxName == "" {
+		sandboxName = claim.Labels[extensionsv1beta1.DeprecatedAssignedSandboxNameLabel]
+	}
+	if sandboxName == "" {
+		sandboxName = claim.Name
 	}
 
 	sandbox := &v1beta1.Sandbox{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: statusName}, sandbox); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: sandboxName}, sandbox); err != nil {
 		if k8errors.IsNotFound(err) {
 			return nil, nil // Sandbox is gone, life is good.
 		}
@@ -804,6 +808,21 @@ func (r *SandboxClaimReconciler) updateStatus(ctx context.Context, oldStatus *ex
 			return true, nil
 		}
 		if k8errors.IsConflict(err) {
+			// A 409 means the patch was computed from an informer cache view
+			// that is stale relative to etcd (often behind our own earlier
+			// metadata or status writes). Attempt an in-pass authoritative
+			// retry on a fresh base to resolve the conflict immediately.
+			authoritative, retryErr := r.retryStatusPatchOnFreshBase(ctx, oldStatus, claim, oldClaim.ResourceVersion)
+			if k8errors.IsNotFound(retryErr) {
+				return true, nil
+			}
+			if retryErr != nil {
+				logger.Error(retryErr, "Failed to retry sandboxclaim status patch on fresh base")
+				return false, retryErr
+			}
+			if authoritative {
+				return true, nil
+			}
 			// Dropping the conflict with a nil error and no requeue relies
 			// entirely on the conflicting write emitting a claim watch event
 			// that re-enqueues this key. That holds because getTimingPredicate
@@ -824,6 +843,136 @@ func (r *SandboxClaimReconciler) updateStatus(ctx context.Context, oldStatus *ex
 		"namespace", claim.Namespace,
 		"observedGeneration", claim.Generation)
 	return true, nil
+}
+
+// conditionsEqualIgnoringTransitionTime reports whether two sorted condition
+// slices have identical elements except for LastTransitionTime.
+func conditionsEqualIgnoringTransitionTime(a, b []metav1.Condition) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		ca, cb := a[i], b[i]
+		cb.LastTransitionTime = ca.LastTransitionTime
+		if !equality.Semantic.DeepEqual(ca, cb) {
+			return false
+		}
+	}
+	return true
+}
+
+// isClaimStatusSatisfied reports whether current server status already satisfies
+// desired status (or is ahead of a stale pre-Ready desired status).
+// It avoids overwriting a committed status (e.g. Ready=True) with a stale pre-Ready view,
+// while still permitting legitimate Ready=True -> Ready=False transitions (e.g. expiry).
+func isClaimStatusSatisfied(oldStatus, current, desired *extensionsv1beta1.SandboxClaimStatus) bool {
+	if desired.SandboxStatus.Name != "" && current.SandboxStatus.Name != "" && current.SandboxStatus.Name != desired.SandboxStatus.Name {
+		return false
+	}
+	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(v1beta1.SandboxConditionReady))
+	currentReady := meta.FindStatusCondition(current.Conditions, string(v1beta1.SandboxConditionReady))
+	desiredReady := meta.FindStatusCondition(desired.Conditions, string(v1beta1.SandboxConditionReady))
+
+	wasReady := oldReady != nil && oldReady.Status == metav1.ConditionTrue
+
+	// If the server already reached Ready=True, do not regress it with a stale
+	// pre-Ready view (where oldStatus had not yet observed Ready=True).
+	// Legitimate Ready=True -> Ready=False transitions (e.g. expiry) have wasReady=true.
+	if !wasReady && currentReady != nil && currentReady.Status == metav1.ConditionTrue {
+		if desiredReady == nil || desiredReady.Status != metav1.ConditionTrue {
+			return true
+		}
+	}
+
+	return equality.Semantic.DeepEqual(current.SandboxStatus, desired.SandboxStatus) &&
+		conditionsEqualIgnoringTransitionTime(current.Conditions, desired.Conditions)
+}
+
+// retryStatusPatchOnFreshBase retries an optimistically locked status patch
+// on a fresh base fetched from the authoritative reader (APIReader).
+func (r *SandboxClaimReconciler) retryStatusPatchOnFreshBase(
+	ctx context.Context,
+	oldStatus *extensionsv1beta1.SandboxClaimStatus,
+	claim *extensionsv1beta1.SandboxClaim,
+	staleResourceVersion string,
+) (bool, error) {
+	reader := r.authoritativeReader()
+	key := client.ObjectKeyFromObject(claim)
+	desiredStatus := claim.Status.DeepCopy()
+
+	fresh := &extensionsv1beta1.SandboxClaim{}
+	if err := reader.Get(ctx, key, fresh); err != nil {
+		return false, err
+	}
+	if fresh.UID != claim.UID || fresh.Generation != claim.Generation {
+		return false, nil
+	}
+
+	slices.SortFunc(fresh.Status.Conditions, func(a, b metav1.Condition) int {
+		if a.Type < b.Type {
+			return -1
+		}
+		return 1
+	})
+
+	// If the server already has a status that satisfies the desired status (e.g.
+	// already Ready=True committed by an earlier pass), adopt the fresh object
+	// and return false so callers do not re-record transition metrics.
+	if isClaimStatusSatisfied(oldStatus, &fresh.Status, desiredStatus) {
+		adoptFreshClaim(claim, fresh)
+		return false, nil
+	}
+
+	// If the authoritative reader does not have a newer ResourceVersion than
+	// the one that just conflicted, attempting another patch is doomed to conflict.
+	if fresh.ResourceVersion == staleResourceVersion {
+		return false, nil
+	}
+
+	oldFresh := fresh.DeepCopy()
+	fresh.Status.SandboxStatus = desiredStatus.SandboxStatus
+	fresh.Status.Conditions = slices.DeleteFunc(fresh.Status.Conditions, func(c metav1.Condition) bool {
+		return meta.FindStatusCondition(desiredStatus.Conditions, c.Type) == nil
+	})
+	for _, cond := range desiredStatus.Conditions {
+		meta.SetStatusCondition(&fresh.Status.Conditions, cond)
+	}
+	slices.SortFunc(fresh.Status.Conditions, func(a, b metav1.Condition) int {
+		if a.Type < b.Type {
+			return -1
+		}
+		return 1
+	})
+	patch := client.MergeFromWithOptions(oldFresh, client.MergeFromWithOptimisticLock{})
+	if err := r.Status().Patch(ctx, fresh, patch); err != nil {
+		if k8errors.IsConflict(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	oldFresh.Status.DeepCopyInto(oldStatus)
+	adoptFreshClaim(claim, fresh)
+	return true, nil
+}
+
+// adoptFreshClaim copies fresh into claim while preserving any in-memory-only
+// observability annotations stamped when DisableObservabilityAnnotations is enabled.
+func adoptFreshClaim(claim, fresh *extensionsv1beta1.SandboxClaim) {
+	obsTime := claim.Annotations[asmetrics.ObservabilityAnnotation]
+	traceCtx := claim.Annotations[asmetrics.TraceContextAnnotation]
+	fresh.DeepCopyInto(claim)
+	if obsTime != "" && claim.Annotations[asmetrics.ObservabilityAnnotation] == "" {
+		if claim.Annotations == nil {
+			claim.Annotations = make(map[string]string)
+		}
+		claim.Annotations[asmetrics.ObservabilityAnnotation] = obsTime
+	}
+	if traceCtx != "" && claim.Annotations[asmetrics.TraceContextAnnotation] == "" {
+		if claim.Annotations == nil {
+			claim.Annotations = make(map[string]string)
+		}
+		claim.Annotations[asmetrics.TraceContextAnnotation] = traceCtx
+	}
 }
 
 func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.SandboxClaim, sandbox *v1beta1.Sandbox, err error, isClaimExpired bool) metav1.Condition {
@@ -1778,6 +1927,22 @@ func (r *SandboxClaimReconciler) mergePodMetadata(templateMeta *v1beta1.PodMetad
 	return nil
 }
 
+// podMetadataApplied reports whether have carries every label and annotation in want
+// with the same value.
+func podMetadataApplied(want, have *v1beta1.PodMetadata) bool {
+	for k, v := range want.Labels {
+		if hv, ok := have.Labels[k]; !ok || hv != v {
+			return false
+		}
+	}
+	for k, v := range want.Annotations {
+		if hv, ok := have.Annotations[k]; !ok || hv != v {
+			return false
+		}
+	}
+	return true
+}
+
 func (r *SandboxClaimReconciler) injectEnvs(logger logr.Logger, container *corev1.Container, envsToInject []extensionsv1beta1.EnvVar, policy extensionsv1beta1.EnvVarsInjectionPolicy, claimName string) error {
 	if policy == extensionsv1beta1.EnvVarsInjectionPolicyAllowed && len(container.EnvFrom) > 0 {
 		return fmt.Errorf("%w: container %q uses EnvFrom sources; Allowed policy cannot safely prevent overriding EnvFrom-provided variables", ErrEnvVarsInjectionRejected, container.Name)
@@ -2104,11 +2269,11 @@ func claimForcesColdStart(claim *extensionsv1beta1.SandboxClaim) bool {
 
 func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, _ *extensionsv1beta1.SandboxTemplate) (*v1beta1.Sandbox, error) {
 	logger := log.FromContext(ctx)
-	logger.V(1).Info("Executing getOrCreateSandbox", "claim", claim.Name)
+	logger.V(4).Info("Executing getOrCreateSandbox", "claim", claim.Name)
 
 	// Check if a previously adopted sandbox is recorded in claim status
 	if statusName := claim.Status.SandboxStatus.Name; statusName != "" {
-		logger.V(1).Info("Checking status for sandbox name", "claim.Status.SandboxStatus.Name", statusName, "claim", claim.Name)
+		logger.V(4).Info("Checking status for sandbox name", "claim.Status.SandboxStatus.Name", statusName, "claim", claim.Name)
 		sandbox := &v1beta1.Sandbox{}
 		if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: statusName}, sandbox); err == nil {
 			if metav1.IsControlledBy(sandbox, claim) {
@@ -2143,7 +2308,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	}
 
 	if sbName != "" {
-		logger.V(1).Info("Checking assigned sandbox name", "sandboxName", sbName, "fromLabel", fromLabel, "claim", claim.Name)
+		logger.V(4).Info("Checking assigned sandbox name", "sandboxName", sbName, "fromLabel", fromLabel, "claim", claim.Name)
 		sandbox := &v1beta1.Sandbox{}
 		if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: sbName}, sandbox); err == nil {
 			if metav1.IsControlledBy(sandbox, claim) {
@@ -2239,7 +2404,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	}
 
 	// Try name-based lookup (sandbox created by createSandbox uses claim.Name)
-	logger.V(1).Info("Trying name-based lookup for sandbox", "claim", claim.Name)
+	logger.V(4).Info("Trying name-based lookup for sandbox", "claim", claim.Name)
 	sandbox := &v1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: claim.Namespace,
@@ -2541,14 +2706,15 @@ func sandboxTemplateCreatePredicate() predicate.Funcs {
 // the entire Ready condition. Narrowing this to a Status-only compare would
 // silently stop expiry from reaching claims.
 //
-// Invariant: this predicate deliberately drops all metadata- and spec-only
-// updates on owned Sandboxes (labels, annotations, generation). Nothing in the
-// bound path consumes those today, so this is safe — but any future logic that
-// reconciles Sandbox *metadata* through this Owns watch (e.g. the
-// adoption-hardening direction in #1229) will not fire until this predicate is
-// widened to admit the relevant metadata change.
+// Invariant: this predicate drops most metadata- and spec-only updates on
+// owned Sandboxes, but admits OwnerReferences changes (e.g. when an adopted
+// sandbox's controller reference is transferred from SandboxWarmPool to
+// SandboxClaim, waking the claim's Owns watch) and DeletionTimestamp.
 func sandboxStatusRelevantChange(oldSb, newSb *v1beta1.Sandbox) bool {
 	if oldSb.DeletionTimestamp.IsZero() != newSb.DeletionTimestamp.IsZero() {
+		return true
+	}
+	if !equality.Semantic.DeepEqual(oldSb.OwnerReferences, newSb.OwnerReferences) {
 		return true
 	}
 	if !equality.Semantic.DeepEqual(oldSb.Status.PodIPs, newSb.Status.PodIPs) {

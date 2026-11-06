@@ -149,6 +149,24 @@ class CheckInstallManifestDriftTest(unittest.TestCase):
             k8s_dir="k8s",
         )
 
+    def test_hardening_files_excluded_from_glob(self):
+        # _glob_release_yamls must filter out hardening/ files so they never
+        # reach the drift check. Build a temp k8s/ tree with a hardening file
+        # and verify the filter drops it.
+        with tempfile.TemporaryDirectory() as k8s_dir:
+            # Create a regular asset and a hardening file.
+            open(os.path.join(k8s_dir, "controller.yaml"), "w").close()
+            hardening_dir = os.path.join(k8s_dir, "hardening")
+            os.makedirs(hardening_dir)
+            open(os.path.join(hardening_dir, "networkpolicy.yaml"), "w").close()
+
+            globbed = release._glob_release_yamls(k8s_dir)
+            basenames = {os.path.relpath(f, k8s_dir) for f in globbed}
+            self.assertIn("controller.yaml", basenames)
+            self.assertNotIn(
+                os.path.join("hardening", "networkpolicy.yaml"), basenames
+            )
+
     def test_missing_file_is_drift(self):
         kpath = self._kustomization("controller.yaml")
         with self.assertRaises(SystemExit):

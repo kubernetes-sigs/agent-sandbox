@@ -32,11 +32,19 @@ from .models import (
     SandboxConnectionConfig,
     SandboxdInClusterConnectionConfig,
     SandboxdPodTunnelConnectionConfig,
+    SandboxdRouterTunnelConnectionConfig,
 )
 
 
 def sandboxd_auth_headers(config: SandboxConnectionConfig) -> dict[str, str]:
-    """Share the runtime credential across REST headers and gRPC metadata."""
+    """Return the transport credential for REST headers and gRPC metadata."""
+    if isinstance(config, SandboxdRouterTunnelConnectionConfig):
+        # The router strips Authorization, so a sandboxd token cannot
+        # authenticate the daemon through this transport.
+        token = config.router_auth_token
+        if token is not None:
+            return {"authorization": f"Bearer {token.get_secret_value()}"}
+        return {}
     if isinstance(config, (SandboxdPodTunnelConnectionConfig, SandboxdInClusterConnectionConfig)):
         if config.auth_token is not None:
             return {"authorization": f"Bearer {config.auth_token.get_secret_value()}"}

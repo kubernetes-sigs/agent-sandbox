@@ -538,10 +538,10 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	template, currentPodTemplateHash, currentSandboxBlueprintHash, tmplErr := r.fetchTemplateAndHash(ctx, warmPool)
 
 	// Delete stale pods, filter pods by ownership and adopt orphans.
-	// terminatingReplicas counts pool-owned sandboxes that are deleting (or
-	// were deleted by us but not yet observed by the cache): they are not
-	// active, but they still occupy capacity until fully gone.
-	activeSandboxes, terminatingReplicas, allErrors := r.filterActiveSandboxes(ctx, poolKey, warmPool, sandboxList.Items, template, currentSandboxBlueprintHash, tmplErr)
+	// inactiveReplicas counts members that cannot enter active status or delete
+	// paths but still occupy capacity: terminating members and unadopted
+	// orphans.
+	activeSandboxes, inactiveReplicas, allErrors := r.filterActiveSandboxes(ctx, poolKey, warmPool, sandboxList.Items, template, currentSandboxBlueprintHash, tmplErr)
 
 	now := r.clockNow()
 	var healthySandboxes []sandboxv1beta1.Sandbox
@@ -604,7 +604,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			// Successfully deleted: it now occupies capacity as terminating
 			// until the deletion is observed; the replacement is created on a
 			// later reconcile once it no longer counts against the target.
-			terminatingReplicas++
+			inactiveReplicas++
 			continue
 		}
 		healthySandboxes = append(healthySandboxes, sb)
@@ -617,14 +617,14 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	}
 	currentReplicas := int32(len(activeSandboxes))
 	// totalReplicas is the pool's whole live population: active plus
-	// terminating-but-still-present. Creates are gated on this so the
-	// population can never balloon past spec.replicas while deletes lag (#1215).
-	totalReplicas := currentReplicas + terminatingReplicas
+	// capacity-only members. Creates are gated on this so the population can
+	// never balloon past spec.replicas while deletes lag (#1215).
+	totalReplicas := currentReplicas + inactiveReplicas
 
 	logger.Info("Pool status",
 		"desired", desiredReplicas,
 		"current", currentReplicas,
-		"terminating", terminatingReplicas,
+		"inactive", inactiveReplicas,
 		"unschedulable", unschedulableReplicas,
 		"gated", gatedReplicas,
 		"poolName", warmPool.Name,
@@ -949,13 +949,9 @@ func readinessGraceStart(sb *sandboxv1beta1.Sandbox) time.Time {
 // fetching the Pod. Anything but False/Unschedulable or False/SchedulingGated
 // (see isSandboxPodSchedulingGated) takes the stuck-sandbox path.
 //
-// Reading the mirror costs two things the Pod read gave us:
-//   - A Pod wedged terminating still reports its last reason, so it holds a
-//     slot until the Pod goes (#1748). LastTransitionTime cannot bound this --
-//     meta.SetStatusCondition only advances it when Status changes.
-//   - A sandbox controller predating the mirror writes no condition, making
-//     every member look stuck. Unreachable in-tree (both controllers ship in one
-//     binary), but possible if extensions ever runs as its own process.
+// A sandbox controller predating the mirror writes no condition, making every
+// member look stuck. Unreachable in-tree (both controllers ship in one binary),
+// but possible if extensions ever runs as its own process.
 func isSandboxPodUnschedulable(sb *sandboxv1beta1.Sandbox) bool {
 	return podNotScheduledReason(sb) == corev1.PodReasonUnschedulable
 }
@@ -1018,16 +1014,16 @@ func setWarmLaunchTypeLabelIfNeeded(sb *sandboxv1beta1.Sandbox) bool {
 }
 
 // filterActiveSandboxes filters the list of sandboxes, deleting stale ones and adopting orphans.
-// It returns the pool's active sandboxes plus the number of pool-owned
-// terminating sandboxes: ones with a deletion timestamp, ones this controller
-// deleted but whose deletion the cache has not observed yet, and ones deleted
-// as stale in this pass. Terminating sandboxes are excluded from active (and
-// so from Ready accounting), but still occupy capacity, so the create path
-// must count them against spec.replicas (#1215).
+// It returns the pool's active sandboxes plus a count of members that are not
+// active but still occupy capacity: terminating sandboxes, ones this controller
+// deleted but whose deletion the cache has not observed yet, stale members that
+// could not be deleted, and orphans that could not be adopted. Non-active
+// members are excluded from status and delete paths, but the create path must
+// count them against spec.replicas (#1215).
 func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, poolKey types.NamespacedName, warmPool *extensionsv1beta1.SandboxWarmPool, sandboxes []sandboxv1beta1.Sandbox, template *extensionsv1beta1.SandboxTemplate, currentSandboxBlueprintHash string, tmplErr error) ([]sandboxv1beta1.Sandbox, int32, error) {
 	logger := log.FromContext(ctx)
 	var activeSandboxes []sandboxv1beta1.Sandbox
-	terminatingReplicas := int32(0)
+	inactiveReplicas := int32(0)
 	var allErrors error
 
 	vettedHashes := make(map[string]bool)
@@ -1047,11 +1043,12 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, p
 		isControlledByPool := controllerRef != nil && controllerRef.UID == warmPool.UID
 
 		if !sb.DeletionTimestamp.IsZero() {
-			// Terminating pool members are no longer active, but they still
-			// occupy capacity until fully gone: count them so create gating
-			// cannot balloon the population while deletes lag (#1215).
-			if isControlledByPool {
-				terminatingReplicas++
+			// Terminating pool members and orphans are no longer active, but
+			// they still occupy capacity until fully gone: count them so
+			// create gating cannot balloon the population while deletes lag
+			// (#1215).
+			if isControlledByPool || isOrphan {
+				inactiveReplicas++
 			}
 			continue
 		}
@@ -1060,7 +1057,7 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, p
 		// (lagging) cache without a deletion timestamp; treat it as
 		// terminating, not active.
 		if isControlledByPool && r.exp().IsPendingDeletion(poolKey, sb.UID) {
-			terminatingReplicas++
+			inactiveReplicas++
 			continue
 		}
 
@@ -1084,8 +1081,19 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, p
 					}
 					logger.Error(err, "Failed to delete stale sandbox", "sandbox", sb.Name)
 					allErrors = errors.Join(allErrors, err)
-				} else if isControlledByPool {
-					terminatingReplicas++
+					if isControlledByPool {
+						// The delete failed, so the owned Sandbox still uses
+						// capacity. Keep it in active accounting so later
+						// delete paths can consume their expectations.
+						activeSandboxes = append(activeSandboxes, sb)
+					} else {
+						// Orphan deletes cannot be mapped back to the pool.
+						// Count the failed orphan as capacity, but keep it out
+						// of active paths that register deletion expectations.
+						inactiveReplicas++
+					}
+				} else {
+					inactiveReplicas++
 				}
 				continue
 			}
@@ -1095,7 +1103,6 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, p
 			if err := r.Update(ctx, &sb); err != nil {
 				logger.Error(err, "Failed to update sandbox launch type label", "sandbox", sb.Name)
 				allErrors = errors.Join(allErrors, err)
-				continue
 			}
 		}
 
@@ -1104,13 +1111,20 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, p
 			if err := r.adoptSandbox(ctx, warmPool, &sb); err != nil {
 				logger.Error(err, "Failed to adopt sandbox", "sandbox", sb.Name)
 				allErrors = errors.Join(allErrors, err)
+				// The adoption failed, so the Sandbox is still unowned. Count
+				// its capacity without exposing it to active delete paths.
+				inactiveReplicas++
 				continue
 			}
 		}
 
+		// A failed metadata update on a pool-owned Sandbox leaves it running
+		// and consuming capacity. Include it in active accounting so the create
+		// gate waits for the next reconcile to retry rather than replacing it
+		// in this pass.
 		activeSandboxes = append(activeSandboxes, sb)
 	}
-	return activeSandboxes, terminatingReplicas, allErrors
+	return activeSandboxes, inactiveReplicas, allErrors
 }
 
 // computePodTemplateHash computes a hash of the sandbox template's Spec.PodTemplate.

@@ -14,7 +14,9 @@
 
 """Unit tests for the async Sandbox connection lifecycle."""
 
+import gc
 import unittest
+import weakref
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -23,10 +25,17 @@ import pytest
 pytest.importorskip("httpx")
 pytest.importorskip("kubernetes_asyncio")
 
+from pydantic import ValidationError
+
 from k8s_agent_sandbox.async_sandbox import AsyncSandbox
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
+    SandboxHealth,
+    SandboxInClusterConnectionConfig,
+    SandboxMetadata,
     SandboxTracerConfig,
+    SandboxdInClusterConnectionConfig,
+    SandboxdPodTunnelConnectionConfig,
 )
 
 
@@ -402,6 +411,127 @@ class TestAsyncSandbox(unittest.IsolatedAsyncioTestCase):
         self.mock_k8s_helper.get_sandbox.assert_not_awaited()
 
 
+def _mock_json_response(payload):
+    """Build a MagicMock shaped like an httpx.Response for /health & /metadata.
+
+    ``.json()`` on httpx is synchronous even on an async response, so a plain
+    MagicMock (not AsyncMock) with ``return_value`` matches the real API.
+    """
+    response = MagicMock()
+    response.json.return_value = payload
+    return response
+
+
+class _AsyncSandboxRuntimeTestBase(unittest.IsolatedAsyncioTestCase):
+    """Shared setUp for ``AsyncSandbox.health()`` / ``metadata()`` cases."""
+
+    @patch("k8s_agent_sandbox.async_sandbox.AsyncFilesystem")
+    @patch("k8s_agent_sandbox.async_sandbox.AsyncCommandExecutor")
+    @patch("k8s_agent_sandbox.async_sandbox.create_tracer_manager")
+    @patch("k8s_agent_sandbox.async_sandbox.AsyncSandboxConnector")
+    @patch("k8s_agent_sandbox.async_sandbox.AsyncK8sHelper")
+    def setUp(self, mock_k8s_helper, mock_connector, mock_create_tracer_manager,
+              mock_command_executor, mock_filesystem):
+        self.mock_connector = mock_connector.return_value
+        self.mock_connector.send_request = AsyncMock()
+        self.mock_connector.close = AsyncMock()
+        self.mock_connector.is_sandboxd = MagicMock(return_value=True)
+        mock_create_tracer_manager.return_value = (MagicMock(), None)
+        self.sandbox = AsyncSandbox(
+            claim_name="c",
+            sandbox_id="s",
+            namespace="n",
+            connection_config=SandboxDirectConnectionConfig(
+                api_url="http://test-router:8080"),
+        )
+
+
+class TestAsyncSandboxHealth(_AsyncSandboxRuntimeTestBase):
+
+    async def test_health_calls_v1_endpoint(self):
+        self.mock_connector.send_request.return_value = _mock_json_response(
+            {"status": "ok", "uptime_seconds": 42})
+        await self.sandbox.health()
+        self.mock_connector.send_request.assert_awaited_once_with(
+            "GET", "v1/health", timeout=60)
+
+    async def test_health_returns_parsed_model(self):
+        self.mock_connector.send_request.return_value = _mock_json_response(
+            {"status": "ok", "uptime_seconds": 42})
+        result = await self.sandbox.health()
+        self.assertEqual(result, SandboxHealth(status="ok", uptime_seconds=42))
+
+    async def test_health_missing_uptime_raises(self):
+        # uptime_seconds is required, matching the Go and TypeScript SDKs:
+        # sandboxd always serves it, so a body without it is malformed.
+        self.mock_connector.send_request.return_value = _mock_json_response(
+            {"status": "ok"})
+        with self.assertRaises(ValidationError):
+            await self.sandbox.health()
+
+    async def test_health_negative_uptime_raises(self):
+        self.mock_connector.send_request.return_value = _mock_json_response(
+            {"status": "ok", "uptime_seconds": -1})
+        with self.assertRaises(ValidationError):
+            await self.sandbox.health()
+
+    async def test_health_legacy_runtime_raises(self):
+        self.mock_connector.is_sandboxd.return_value = False
+        with self.assertRaises(NotImplementedError):
+            await self.sandbox.health()
+        self.mock_connector.send_request.assert_not_awaited()
+
+    async def test_health_honors_custom_timeout(self):
+        self.mock_connector.send_request.return_value = _mock_json_response(
+            {"status": "ok", "uptime_seconds": 42})
+        await self.sandbox.health(timeout=5)
+        _, kwargs = self.mock_connector.send_request.call_args
+        self.assertEqual(kwargs["timeout"], 5)
+
+
+class TestAsyncSandboxMetadata(_AsyncSandboxRuntimeTestBase):
+
+    async def test_metadata_calls_v1_endpoint(self):
+        self.mock_connector.send_request.return_value = _mock_json_response(
+            {"env": {}})
+        await self.sandbox.metadata()
+        self.mock_connector.send_request.assert_awaited_once_with(
+            "GET", "v1/metadata", timeout=60)
+
+    async def test_metadata_returns_parsed_model(self):
+        env = {"SANDBOX_ID": "abc", "WORKSPACE": "/w"}
+        self.mock_connector.send_request.return_value = _mock_json_response(
+            {"env": env})
+        result = await self.sandbox.metadata()
+        self.assertEqual(result, SandboxMetadata(env=env))
+
+    async def test_metadata_missing_env_is_empty(self):
+        self.mock_connector.send_request.return_value = _mock_json_response({})
+        self.assertEqual(
+            await self.sandbox.metadata(), SandboxMetadata(env={}))
+
+    async def test_metadata_null_env_is_empty(self):
+        # Explicit null env — normalize to {} so callers don't have to
+        # branch on None.
+        self.mock_connector.send_request.return_value = _mock_json_response(
+            {"env": None})
+        self.assertEqual(
+            await self.sandbox.metadata(), SandboxMetadata(env={}))
+
+    async def test_metadata_legacy_runtime_raises(self):
+        self.mock_connector.is_sandboxd.return_value = False
+        with self.assertRaises(NotImplementedError):
+            await self.sandbox.metadata()
+        self.mock_connector.send_request.assert_not_awaited()
+
+    async def test_metadata_honors_custom_timeout(self):
+        self.mock_connector.send_request.return_value = _mock_json_response(
+            {"env": {}})
+        await self.sandbox.metadata(timeout=7)
+        _, kwargs = self.mock_connector.send_request.call_args
+        self.assertEqual(kwargs["timeout"], 7)
+
+
 class TestAsyncSandboxTerminateIdempotent(unittest.IsolatedAsyncioTestCase):
     """`AsyncSandbox.terminate()` must be idempotent."""
 
@@ -454,6 +584,30 @@ class TestAsyncSandboxTerminateIdempotent(unittest.IsolatedAsyncioTestCase):
         await sandbox.terminate()
         self.assertEqual(helper.delete_sandbox_claim.await_count, 2)
         self.assertIsNone(sandbox.claim_name)
+
+
+CALLBACK_MODES = {
+    "direct": SandboxDirectConnectionConfig(api_url="http://sandbox.invalid"),
+    "in-cluster": SandboxInClusterConnectionConfig(),
+    "sandboxd-pod-tunnel": SandboxdPodTunnelConnectionConfig(),
+    "sandboxd-in-cluster": SandboxdInClusterConnectionConfig(mode="in-cluster-pod-ip"),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("config", CALLBACK_MODES.values(), ids=CALLBACK_MODES.keys())
+async def test_closed_handle_is_freed_without_the_cycle_collector(config):
+    # With the collector off, only reference counting can free the handle.
+    gc.disable()
+    try:
+        sandbox = AsyncSandbox("claim", "sandbox-id", "ns", connection_config=config, k8s_helper=MagicMock())
+        handle, connector = weakref.ref(sandbox), weakref.ref(sandbox.connector)
+        await sandbox.close_connection()
+        del sandbox
+        assert handle() is None
+        assert connector() is None
+    finally:
+        gc.enable()
 
 
 if __name__ == "__main__":

@@ -14,10 +14,13 @@
 
 import logging
 import os
+import socket
 import tempfile
+import threading
+import time
 import unittest
 import weakref
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from kubernetes import client
 from kubernetes.config import incluster_config
@@ -218,6 +221,23 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
 
         body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
         self.assertNotIn("additionalPodMetadata", body["spec"])
+
+    def test_create_routes_batch_to_unretried_client(self, mock_config, mock_api_cls, mock_core_cls):
+        default_api = MagicMock()
+        batch_api = MagicMock()
+        mock_api_cls.side_effect = [default_api, batch_api]
+
+        helper = K8sHelper()
+        helper.create_sandbox_claim("single-0", "pool-a", "default", _request_timeout=30)
+
+        self.assertEqual(default_api.create_namespaced_custom_object.call_args.kwargs["_request_timeout"], 30)
+        batch_api.create_namespaced_custom_object.assert_not_called()
+
+        default_api.reset_mock()
+        helper.create_sandbox_claim("b1-0", "pool-a", "default", _request_timeout=30, batch=True)
+
+        self.assertEqual(batch_api.create_namespaced_custom_object.call_args.kwargs["_request_timeout"], 30)
+        default_api.create_namespaced_custom_object.assert_not_called()
 
 
 @patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
@@ -465,22 +485,32 @@ class TestK8sHelperDeleteSandboxClaim(unittest.TestCase):
         self.assertEqual(ctx.exception.status, 403)
 
     def test_delete_defaults_to_no_request_timeout(self, mock_config, mock_api_cls, mock_core_cls):
-        mock_api = MagicMock()
-        mock_api_cls.return_value = mock_api
+        default_api = MagicMock()
+        batch_api = MagicMock()
+        mock_api_cls.side_effect = [default_api, batch_api]
 
         helper = K8sHelper()
         helper.delete_sandbox_claim("claim", "default")
 
-        self.assertIsNone(mock_api.delete_namespaced_custom_object.call_args.kwargs["_request_timeout"])
+        self.assertIsNone(default_api.delete_namespaced_custom_object.call_args.kwargs["_request_timeout"])
+        batch_api.delete_namespaced_custom_object.assert_not_called()
 
     def test_delete_forwards_request_timeout(self, mock_config, mock_api_cls, mock_core_cls):
-        mock_api = MagicMock()
-        mock_api_cls.return_value = mock_api
+        default_api = MagicMock()
+        batch_api = MagicMock()
+        mock_api_cls.side_effect = [default_api, batch_api]
 
         helper = K8sHelper()
         helper.delete_sandbox_claim("claim", "default", _request_timeout=30)
 
-        self.assertEqual(mock_api.delete_namespaced_custom_object.call_args.kwargs["_request_timeout"], 30)
+        self.assertEqual(default_api.delete_namespaced_custom_object.call_args.kwargs["_request_timeout"], 30)
+        batch_api.delete_namespaced_custom_object.assert_not_called()
+
+        default_api.reset_mock()
+        helper.delete_sandbox_claim("claim", "default", _request_timeout=30, batch=True)
+
+        self.assertEqual(batch_api.delete_namespaced_custom_object.call_args.kwargs["_request_timeout"], 30)
+        default_api.delete_namespaced_custom_object.assert_not_called()
 
 
 @patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
@@ -1011,23 +1041,36 @@ class TestK8sHelperWatchResourceVersion(unittest.TestCase):
 
 
 @patch("k8s_agent_sandbox.k8s_helper._api_client_without_retries")
+@patch("k8s_agent_sandbox.k8s_helper.client.CoordinationV1Api")
 @patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
 @patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")
 @patch("k8s_agent_sandbox.k8s_helper.config")
 class TestK8sHelperApiClientInjection(unittest.TestCase):
 
     def test_injected_api_client_used_and_no_config_loaded(
-        self, mock_config, mock_custom_cls, mock_core_cls, _
+        self, mock_config, mock_custom_cls, mock_core_cls, mock_coord_cls, mock_without_retries
     ):
         sentinel = MagicMock(name="ApiClient")
-        K8sHelper(api_client=sentinel)
-        mock_custom_cls.assert_called_once_with(sentinel)
+        default_api = MagicMock(name="DefaultCustomObjectsApi")
+        batch_api = MagicMock(name="BatchCustomObjectsApi")
+        mock_custom_cls.side_effect = [default_api, batch_api]
+        unretried_client = MagicMock(name="UnretriedApiClient")
+        mock_without_retries.return_value = unretried_client
+
+        helper = K8sHelper(api_client=sentinel)
+
+        self.assertIs(helper.custom_objects_api, default_api)
+        self.assertIs(helper._batch_custom_objects_api, batch_api)
+        self.assertEqual(mock_custom_cls.call_args_list, [call(sentinel), call(unretried_client)])
+        mock_without_retries.assert_called_once_with(sentinel)
+        mock_coord_cls.assert_called_once_with(unretried_client)
+        self.assertIs(mock_custom_cls.call_args_list[1].args[0], mock_coord_cls.call_args.args[0])
         mock_core_cls.assert_called_once_with(sentinel)
         mock_config.load_incluster_config.assert_not_called()
         mock_config.load_kube_config.assert_not_called()
 
     def test_injected_api_client_is_exposed_only_when_injected(
-        self, mock_config, mock_custom_cls, mock_core_cls, _
+        self, mock_config, mock_custom_cls, mock_core_cls, mock_coord_cls, _
     ):
         sentinel = MagicMock(name="ApiClient")
         self.assertIs(K8sHelper(api_client=sentinel).injected_api_client, sentinel)
@@ -1109,32 +1152,203 @@ class TestK8sHelperWatchTimeout(unittest.TestCase):
 @patch("k8s_agent_sandbox.k8s_helper.config")
 class TestLeaseApiClient(unittest.TestCase):
 
-    def test_lease_requests_are_not_retried_and_keep_the_injected_client_settings(self, _):
-        configuration = client.Configuration(host="https://cluster-b:6443")
-        injected = client.ApiClient(configuration=configuration, cookie="session=1")
-        injected.set_default_header("X-Test", "yes")
-        lease_api_client = K8sHelper(api_client=injected).coordination_v1_api.api_client
-        self.assertIs(lease_api_client.configuration.retries, False)
-        self.assertEqual(lease_api_client.configuration.host, "https://cluster-b:6443")
-        self.assertEqual(lease_api_client.cookie, "session=1")
-        self.assertEqual(lease_api_client.default_headers["X-Test"], "yes")
+    def _assert_delegates_to_injected(self, derived_client, injected, configuration, host):
+        self.assertIsNot(derived_client, injected)
+        self.assertEqual(derived_client.configuration.host, host)
+        self.assertEqual(derived_client.cookie, "session=1")
+        self.assertEqual(derived_client.default_headers["X-Test"], "yes")
         self.assertIsNone(configuration.retries)
         configuration.api_key["authorization"] = "rotated"
         configuration.api_key_prefix["authorization"] = "Bearer"
-        self.assertEqual(lease_api_client.configuration.get_api_key_with_prefix("authorization"), "Bearer rotated")
+        self.assertEqual(
+            derived_client.configuration.get_api_key_with_prefix("authorization"), "Bearer rotated"
+        )
         injected.set_default_header("X-Rotated", "token-2")
         injected.cookie = "session=2"
-        self.assertEqual(lease_api_client.default_headers["X-Rotated"], "token-2")
-        self.assertEqual(lease_api_client.cookie, "session=2")
+        self.assertEqual(derived_client.default_headers["X-Rotated"], "token-2")
+        self.assertEqual(derived_client.cookie, "session=2")
+
+    def test_lease_requests_are_not_retried_and_keep_the_injected_client_settings(self, _):
+        configuration = client.Configuration(host="https://cluster-b:6443")
+        injected = client.ApiClient(configuration=configuration, cookie="session=1")
+        self.addCleanup(injected.close)
+        injected.set_default_header("X-Test", "yes")
+        helper = K8sHelper(api_client=injected)
+        lease_api_client = helper.coordination_v1_api.api_client
+        self.addCleanup(lease_api_client.close)
+        self.assertIs(lease_api_client.configuration.retries, False)
+        self.assertIs(helper._batch_custom_objects_api.api_client, lease_api_client)
+        self._assert_delegates_to_injected(lease_api_client, injected, configuration, "https://cluster-b:6443")
         _, _, headers, _, _ = lease_api_client.param_serialize("GET", "/apis")
         self.assertEqual(headers["X-Rotated"], "token-2")
         self.assertEqual(headers["Cookie"], "session=2")
         injected.default_headers = {"X-Replaced": "1"}
         self.assertEqual(lease_api_client.default_headers, {"X-Replaced": "1"})
 
-    def test_lease_requests_are_not_retried_with_the_default_client(self, _):
-        lease_api_client = K8sHelper().coordination_v1_api.api_client
-        self.assertIs(lease_api_client.configuration.retries, False)
+    def test_lease_and_batch_requests_are_not_retried_with_the_default_client(self, _):
+        helper = K8sHelper()
+        self.addCleanup(helper.custom_objects_api.api_client.close)
+        self.addCleanup(helper.core_v1_api.api_client.close)
+        self.addCleanup(helper.coordination_v1_api.api_client.close)
+        self.assertIs(helper.coordination_v1_api.api_client.configuration.retries, False)
+        self.assertIs(helper._batch_custom_objects_api.api_client, helper.coordination_v1_api.api_client)
+
+    def test_batch_custom_object_requests_do_not_retry_and_keep_injected_settings(self, _):
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            host = f"http://127.0.0.1:{sock.getsockname()[1]}"
+            configuration = client.Configuration(host=host)
+            injected = client.ApiClient(configuration=configuration, cookie="session=1")
+            self.addCleanup(injected.close)
+            injected.set_default_header("X-Test", "yes")
+            helper = K8sHelper(api_client=injected)
+            batch_api_client = helper._batch_custom_objects_api.api_client
+            self.addCleanup(batch_api_client.close)
+
+            self.assertIs(batch_api_client.configuration.retries, False)
+            self.assertIs(
+                batch_api_client.rest_client.pool_manager.connection_pool_kw["retries"].total, False
+            )
+            self.assertIs(batch_api_client, helper.coordination_v1_api.api_client)
+            self._assert_delegates_to_injected(batch_api_client, injected, configuration, host)
+
+            selector = "agents.x-k8s.io/batch-id=b1"
+            batch_calls = (
+                lambda: helper.delete_sandbox_claims_by_label(
+                    "default", selector, _request_timeout=(0.05, 0.05)
+                ),
+                lambda: helper.list_sandbox_claim_objects(
+                    "default", selector, _request_timeout=(0.05, 0.05)
+                ),
+                lambda: helper.count_live_sandbox_claims(
+                    "default", selector, _request_timeout=(0.05, 0.05)
+                ),
+                lambda: list(
+                    helper.watch_sandbox_claims(
+                        "default", selector, "5", 1, _request_timeout=(0.05, 0.05)
+                    )
+                ),
+                lambda: helper.get_sandbox_warmpool("pool-a", "default", _request_timeout=(0.05, 0.05)),
+                lambda: helper.get_sandbox_template("tmpl", "default", _request_timeout=(0.05, 0.05)),
+                lambda: helper.create_sandbox_claim(
+                    "b1-0", "pool-a", "default", _request_timeout=(0.05, 0.05), batch=True
+                ),
+                lambda: helper.delete_sandbox_claim(
+                    "b1-0", "default", _request_timeout=(0.05, 0.05), batch=True
+                ),
+            )
+            # Before listen(), connect is refused: all 8 batch calls fail after one attempt with
+            # NewConnectionError, while non-batch calls retry and wrap in MaxRetryError.
+            for batch_call in batch_calls:
+                with self.assertRaises(urllib3.exceptions.NewConnectionError) as conn_err:
+                    batch_call()
+                self.assertNotIsInstance(conn_err.exception, urllib3.exceptions.MaxRetryError)
+            for non_batch_call in (
+                lambda: helper.create_sandbox_claim(
+                    "single-0", "pool-a", "default", _request_timeout=(0.05, 0.05)
+                ),
+                lambda: helper.delete_sandbox_claim(
+                    "single-0", "default", _request_timeout=(0.05, 0.05)
+                ),
+            ):
+                with self.assertRaises(urllib3.exceptions.MaxRetryError):
+                    non_batch_call()
+
+            # Once listening without replying, a read timeout surfaces after one attempt without retrying.
+            sock.listen(16)
+            sock.setblocking(False)
+            for batch_call in batch_calls:
+                with self.assertRaises(urllib3.exceptions.ReadTimeoutError):
+                    batch_call()
+                attempts = 0
+                while True:
+                    try:
+                        conn, _ = sock.accept()
+                    except BlockingIOError:
+                        break
+                    conn.close()
+                    attempts += 1
+                self.assertEqual(attempts, 1)
+
+            # A 503 with Retry-After surfaces as ApiException after one attempt without sleeping on
+            # batch calls, while non-batch delete_sandbox_claim honors urllib3 retries.
+            sock.settimeout(1.0)
+            throttled_attempts = 0
+            queued_replies: list[bytes] = []
+
+            def reply_throttled():
+                nonlocal throttled_attempts
+                while True:
+                    try:
+                        conn, _ = sock.accept()
+                    except OSError:
+                        return
+                    with conn:
+                        conn.recv(4096)
+                        throttled_attempts += 1
+                        if queued_replies:
+                            conn.sendall(queued_replies.pop(0))
+                        else:
+                            conn.sendall(
+                                b"HTTP/1.1 503 Service Unavailable\r\n"
+                                b"Retry-After: 3600\r\n"
+                                b"Content-Length: 2\r\n"
+                                b"Connection: close\r\n\r\n{}"
+                            )
+
+            server = threading.Thread(target=reply_throttled, daemon=True)
+            server.start()
+            try:
+                for expected, call_fn in enumerate(
+                    (
+                        lambda: helper.delete_sandbox_claims_by_label(
+                            "default", selector, _request_timeout=(5.0, 1.0)
+                        ),
+                        lambda: helper.list_sandbox_claim_objects(
+                            "default", selector, _request_timeout=(5.0, 1.0)
+                        ),
+                        lambda: helper.count_live_sandbox_claims(
+                            "default", selector, _request_timeout=(5.0, 1.0)
+                        ),
+                        lambda: helper.get_sandbox_warmpool(
+                            "pool-a", "default", _request_timeout=(5.0, 1.0)
+                        ),
+                        lambda: helper.get_sandbox_template(
+                            "tmpl", "default", _request_timeout=(5.0, 1.0)
+                        ),
+                        lambda: helper.create_sandbox_claim(
+                            "b1-0", "pool-a", "default", _request_timeout=(5.0, 1.0), batch=True
+                        ),
+                        lambda: helper.delete_sandbox_claim(
+                            "b1-0", "default", _request_timeout=(5.0, 1.0), batch=True
+                        ),
+                    ),
+                    start=1,
+                ):
+                    start = time.monotonic()
+                    with self.assertRaises(client.ApiException) as raised:
+                        call_fn()
+                    elapsed = time.monotonic() - start
+                    self.assertEqual(raised.exception.status, 503)
+                    self.assertEqual(raised.exception.headers["Retry-After"], "3600")
+                    self.assertLess(elapsed, 1.0)
+                    self.assertEqual(throttled_attempts, expected)
+
+                before_non_batch = throttled_attempts
+                queued_replies.extend([
+                    (
+                        b"HTTP/1.1 503 Service Unavailable\r\n"
+                        b"Retry-After: 0\r\n"
+                        b"Content-Length: 2\r\n"
+                        b"Connection: close\r\n\r\n{}"
+                    ),
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                ])
+                helper.delete_sandbox_claim("single-0", "default", _request_timeout=(5.0, 1.0))
+                self.assertEqual(throttled_attempts - before_non_batch, 2)
+            finally:
+                sock.close()
+                server.join(timeout=1.0)
 
 
 @patch("k8s_agent_sandbox.k8s_helper.config")
@@ -1142,8 +1356,14 @@ class TestK8sHelperPoolSize(unittest.TestCase):
 
     def test_pool_size_sizes_the_loaded_clients_pool(self, _):
         helper = K8sHelper(pool_size=7)
+        self.addCleanup(helper.custom_objects_api.api_client.close)
+        self.addCleanup(helper._batch_custom_objects_api.api_client.close)
         pool_manager = helper.custom_objects_api.api_client.rest_client.pool_manager
+        batch_api_client = helper._batch_custom_objects_api.api_client
+        batch_pool_manager = batch_api_client.rest_client.pool_manager
         self.assertEqual(pool_manager.connection_pool_kw["maxsize"], 7)
+        self.assertEqual(batch_api_client.configuration.connection_pool_maxsize, 7)
+        self.assertEqual(batch_pool_manager.connection_pool_kw["maxsize"], 7)
         self.assertEqual(helper.api_pool_size(), 7)
         self.assertIsNone(helper.injected_api_client)
 
@@ -1236,6 +1456,63 @@ class TestK8sHelperBatchMethods(unittest.TestCase):
                 with self.assertRaises(client.ApiException) as raised:
                     helper.list_sandbox_claim_objects("default", "agents.x-k8s.io/batch-id=b1")
                 self.assertEqual(raised.exception.status, expected_status)
+
+    def test_list_sandbox_claim_objects_deadline_caps_page_timeouts_and_stops_once_expired(
+        self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
+    ):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+        expired = client.ApiException(status=410)
+
+        def page(name, rv, token=None):
+            return {"items": [{"metadata": {"name": name}}], "metadata": {"resourceVersion": rv, "continue": token}}
+
+        helper = K8sHelper()
+        for label, req_timeout, expected_timeouts in (
+            ("scalar timeout", 10.0, [10.0, 8.0, 4.0, 1.5]),
+            ("tuple timeout", (5.0, 10.0), [(5.0, 10.0), (5.0, 8.0), (4.0, 4.0), (1.5, 1.5)]),
+            ("unset timeout", None, [15.0, 8.0, 4.0, 1.5]),
+        ):
+            with self.subTest(label), patch(
+                "k8s_agent_sandbox.k8s_helper.time.monotonic", side_effect=[95.0, 102.0, 106.0, 108.5]
+            ):
+                mock_api.list_namespaced_custom_object.reset_mock()
+                mock_api.list_namespaced_custom_object.side_effect = [
+                    page("old-0", "42", "t1"),
+                    expired,
+                    page("b1-0", "50", "t2"),
+                    page("b1-1", "51"),
+                ]
+                items, rv = helper.list_sandbox_claim_objects(
+                    "default",
+                    "agents.x-k8s.io/batch-id=b1",
+                    _request_timeout=req_timeout,
+                    deadline=110.0,
+                )
+                self.assertEqual([item["metadata"]["name"] for item in items], ["b1-0", "b1-1"])
+                self.assertEqual(rv, "50")
+                self.assertEqual(
+                    [c.kwargs["_request_timeout"] for c in mock_api.list_namespaced_custom_object.call_args_list],
+                    expected_timeouts,
+                )
+
+        for label, ticks, pages, expected_calls in (
+            ("expired before first page", [110.0], [page("b1-0", "50")], 0),
+            ("expired before next page", [105.0, 110.0], [page("b1-0", "50", "t1"), page("b1-1", "51")], 1),
+        ):
+            with self.subTest(label), patch(
+                "k8s_agent_sandbox.k8s_helper.time.monotonic", side_effect=ticks
+            ):
+                mock_api.list_namespaced_custom_object.reset_mock()
+                mock_api.list_namespaced_custom_object.side_effect = pages
+                with self.assertRaises(TimeoutError):
+                    helper.list_sandbox_claim_objects(
+                        "default",
+                        "agents.x-k8s.io/batch-id=b1",
+                        _request_timeout=10.0,
+                        deadline=110.0,
+                    )
+                self.assertEqual(mock_api.list_namespaced_custom_object.call_count, expected_calls)
 
     def test_count_live_sandbox_claims_counts_claims_not_being_deleted_across_pages(
         self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
@@ -1537,6 +1814,10 @@ class TestK8sHelperBatchMethods(unittest.TestCase):
         mock_coord = MagicMock()
         mock_coord_cls.return_value = mock_coord
         helper = K8sHelper()
+
+        with self.assertRaises(ValueError):
+            helper.delete_batch_lease("batch-b1", "default", resource_version="")
+        mock_coord.delete_namespaced_lease.assert_not_called()
 
         helper.delete_batch_lease("batch-b1", "default", resource_version="11")
         body = mock_coord.delete_namespaced_lease.call_args.kwargs["body"]

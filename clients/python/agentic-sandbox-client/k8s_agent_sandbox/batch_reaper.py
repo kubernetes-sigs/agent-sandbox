@@ -16,14 +16,15 @@
 
 A driver that dies without running any code (SIGKILL, OOM kill, node loss) never calls
 ``release()``, so its batch Lease goes stale. Each run, the reaper finds the batch Leases that have
-been stale for longer than a clock skew margin, deletes each one only if it hasn't changed for one
-renew interval. The batch's claims carry owner references to the Lease, so the garbage collector
-deletes them, and their Sandboxes and Pods, once the Lease is gone. It never writes a Lease and
-keeps no state between runs, and everything it does is a delete, so a run that stops partway is
-harmless.
+been stale for longer than a clock skew margin, waits each candidate Lease's duration, and deletes
+it only if its resourceVersion is still unchanged. The batch's claims carry owner references to the
+Lease, so the garbage collector deletes them, and their Sandboxes and Pods, once the Lease is gone.
+It never writes a Lease and keeps no state between runs, and everything it does is a delete, so a
+run that stops partway is harmless.
 
 Run it as ``python -m k8s_agent_sandbox.batch_reaper``, for example from a CronJob every one to two
-minutes with ``concurrencyPolicy: Forbid``.
+minutes with ``concurrencyPolicy: Forbid`` and ``activeDeadlineSeconds`` set above the longest batch
+Lease duration plus list and delete slack (for example ``600`` when running ``300``-second Leases).
 """
 
 import argparse
@@ -50,10 +51,10 @@ _SERVICE_ACCOUNT_NAMESPACE_PATH = "/var/run/secrets/kubernetes.io/serviceaccount
 
 
 class StaleLease(NamedTuple):
-    """A batch Lease the reaper found stale, with the resourceVersion it read."""
+    """A batch Lease the reaper found stale, with the resourceVersion and duration it read."""
     batch_id: str
     resource_version: str
-    renew_interval: int
+    lease_duration: int
 
 
 def is_lease_reapable(
@@ -119,7 +120,7 @@ def find_stale_leases(
                 stale.append(StaleLease(
                     batch_id=batch_id,
                     resource_version=metadata.resource_version,
-                    renew_interval=max(1, spec.lease_duration_seconds // 3),
+                    lease_duration=spec.lease_duration_seconds,
                 ))
         continue_token = page.metadata._continue if page.metadata else None
         if not continue_token:
@@ -158,13 +159,17 @@ def reap(
 ) -> tuple[list[tuple[str, str]], int]:
     """Reaps the stale batches in each namespace.
 
-    Lists each namespace's batch Leases, then deletes each stale Lease once one of its own renew
-    intervals has passed since the lists, so a live driver whose clock runs behind has renewed by
-    then. Leases are deleted shortest interval first, so a Lease with a long duration never holds
-    back one with a short duration, and the run lasts the longest interval whatever the number of
-    namespaces. Each delete has a resourceVersion precondition, and a batch whose Lease changed is
-    skipped. It deletes no claims itself. The garbage collector deletes them through their owner
-    references, matching the owner by UID, so it never touches a newer batch that reuses the id.
+    Lists each namespace's batch Leases, then deletes each stale Lease once its own
+    ``leaseDurationSeconds`` has passed since the lists, aligning with the driver's
+    ``sent_at + leaseDurationSeconds`` local self-fencing deadline so a connected driver whose wall
+    clock runs behind either renews (failing the delete precondition with ``409``) or stops locally
+    before the delete runs, and a stalled driver has already stopped locally before the delete while
+    clock skew stays within ``skew_margin + leaseDurationSeconds`` (minus any in-flight request
+    latency). Leases are deleted shortest duration first so a long Lease never delays shorter ones,
+    and runs with no stale Leases return without sleeping. Each delete has a resourceVersion
+    precondition, and a batch whose Lease changed is skipped. It deletes no claims itself. The
+    garbage collector deletes them through their owner references, matching the owner by UID, so it
+    never touches a newer batch that reuses the id.
 
     A namespace whose Leases can't be listed, for example because the reaper has no RoleBinding
     there, is logged and skipped, and so is a Lease that fails to delete.
@@ -190,14 +195,15 @@ def reap(
     if not stale:
         return [], errors
 
-    # Staleness compares the driver's clock with the reaper's, so a live driver whose clock runs
-    # behind looks stale. A live driver renews within one renew interval, which changes the Lease's
-    # resourceVersion and makes the delete below fail its precondition. Only a dead driver's Lease is
-    # still unchanged. The wait is counted from after the lists returned, so it covers each read.
+    # _renew_loop sleeps leaseDurationSeconds // 3 after a renewal returns, so reply latency,
+    # transient retry backoff, or 409 recovery can consume the remaining budget before
+    # sent_at + leaseDurationSeconds self-fences. Waiting the full lease_duration from listed_at
+    # guarantees a connected driver whose wall clock lags behind the reaper either updates
+    # resourceVersion (failing the delete precondition below) or self-fences before the delete runs.
     listed_at = time.monotonic()
     reaped: list[tuple[str, str]] = []
-    for namespace, lease in sorted(stale, key=lambda item: item[1].renew_interval):
-        time.sleep(max(0.0, listed_at + lease.renew_interval - time.monotonic()))
+    for namespace, lease in sorted(stale, key=lambda item: item[1].lease_duration):
+        time.sleep(max(0.0, listed_at + lease.lease_duration - time.monotonic()))
         try:
             if not _delete_lease_if_unchanged(helper, namespace, lease):
                 continue
@@ -247,7 +253,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--skew-margin",
         type=_skew_margin,
         default=REAPER_DEFAULT_SKEW_MARGIN_SECONDS,
-        help="Seconds a Lease must be stale beyond its duration before it is reaped.",
+        help=(
+            "Seconds a Lease must be stale beyond its duration before it is picked "
+            "(stalled drivers stop locally before the delete while clock skew stays within "
+            "skew-margin plus leaseDurationSeconds minus any in-flight request latency)."
+        ),
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="Log the batches that would be reaped, and delete nothing."

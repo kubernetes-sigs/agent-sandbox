@@ -38,6 +38,7 @@ from .constants import (
     BATCH_GROUP_SIZE_ANNOTATION,
     BATCH_ID_LABEL,
     BATCH_LEASE_NAME_PREFIX,
+    BATCH_LEASE_UID_LABEL,
     BATCH_NEXT_ORDINAL_ANNOTATION,
 )
 from .exceptions import (
@@ -82,8 +83,8 @@ _TRANSPORT_ERRORS = (
     urllib3.exceptions.ProtocolError,
     urllib3.exceptions.ReadTimeoutError,
     urllib3.exceptions.MaxRetryError,
-    # urllib3 doesn't retry Lease requests, so a refused or timed-out connect raises this error instead
-    # of a MaxRetryError. NewConnectionError subclasses it.
+    # urllib3 doesn't retry batch requests (retries=False on the batch ApiClient), so a refused or
+    # timed-out connect raises this error instead of a MaxRetryError. NewConnectionError subclasses it.
     urllib3.exceptions.ConnectTimeoutError,
     ConnectionError,
     # A peer that closes the TLS connection early (e.g. a load balancer during a control-plane upgrade)
@@ -182,6 +183,7 @@ class SandboxBatch:
         # The claims this handle creates are owned by its Lease, so the garbage collector deletes
         # them once the Lease is gone, even if no reaper or release() deletes them.
         self._owner_references = [batch_utils.lease_owner_reference(lease)]
+        self._lease_uid: str = self._owner_references[0]["uid"]
         # When this handle considers its Lease expired. It's a little earlier than the expiry other
         # clients see, so the handle never thinks it holds the batch after someone else could take it.
         self._lease_expires_at = lease_renewed_at + lease_duration
@@ -215,8 +217,11 @@ class SandboxBatch:
         self._active_deletes: Counter[int] = Counter()
         # One per pool, so concurrent acquires wait for one read of the pool's Ready count.
         self._credit_refresh_locks: dict[str, threading.Lock] = {}
-        # The caller's labels and the batch id label, which every claim carries.
-        self._labels: dict[str, str] = {BATCH_ID_LABEL: batch_id}
+        # The caller's labels, batch id label, and Lease UID label, which every claim carries.
+        self._labels: dict[str, str] = {
+            BATCH_ID_LABEL: batch_id,
+            BATCH_LEASE_UID_LABEL: self._lease_uid,
+        }
         # Pools acquire() doesn't check again, since claim_batch checked them or they already have claims.
         self._checked_pools: set[str] = {g.warmpool for g in state.groups}
         # The check of each pool that is running, so concurrent first acquires of a pool share it.
@@ -262,7 +267,7 @@ class SandboxBatch:
         )
 
         lease_name = f"{BATCH_LEASE_NAME_PREFIX}{args.batch_id}"
-        label_selector = f"{BATCH_ID_LABEL}={args.batch_id}"
+        label_selector = batch_utils.batch_claim_label_selector(args.batch_id)
         holder_identity = batch_utils.generate_holder_identity()
         lease_labels, lease_annotations = batch_utils.batch_lease_metadata(args)
         # Read before renewTime is stamped, so this handle's expiry is never later than the one
@@ -289,21 +294,44 @@ class SandboxBatch:
                     f"batch '{args.batch_id}' already exists in namespace '{namespace}'"
                 ) from e
             raise
+        created_meta, _ = batch_utils.lease_parts(created)
+        created_rv = created_meta.resource_version
+        if not created_rv:
+            raise BatchError(
+                f"batch '{args.batch_id}' Lease in namespace '{namespace}' has no resourceVersion"
+            )
+        lease_expires_at = renewed_at + args.lease_duration
         try:
+            batch_utils.lease_owner_reference(created)
             # The list's resourceVersion is where the watch starts, so no create is missed.
             claim_items, list_rv = helper.list_sandbox_claim_objects(
-                namespace, label_selector, _request_timeout=timeout
+                namespace, label_selector, _request_timeout=timeout, deadline=lease_expires_at
             )
             if claim_items:
                 raise BatchExistsError(
                     f"claims with batch id '{args.batch_id}' already exist in namespace '{namespace}'"
                 )
-        except BaseException:
+            if time.monotonic() >= lease_expires_at:
+                raise BatchLeaseExpiredError(
+                    f"batch '{args.batch_id}' Lease expired before setup finished in namespace '{namespace}'"
+                )
+        except BaseException as exc:
             # BaseException too, so a cancel or Ctrl-C during the list doesn't leave the Lease behind.
+            # Fence the rollback delete by created_rv so a slow list never deletes a replacement Lease.
             try:
-                helper.delete_batch_lease(lease_name, namespace, _request_timeout=timeout)
+                helper.delete_batch_lease(
+                    lease_name, namespace, _request_timeout=timeout, resource_version=created_rv
+                )
             except Exception as e:
                 logger.warning(f"Batch '{args.batch_id}' failed to delete its Lease: {e}")
+            if (
+                not isinstance(exc, BatchError)
+                and (isinstance(exc, TimeoutError) or _is_transport_error(exc))
+                and time.monotonic() >= lease_expires_at
+            ):
+                raise BatchLeaseExpiredError(
+                    f"batch '{args.batch_id}' Lease expired before setup finished in namespace '{namespace}'"
+                ) from exc
             raise
 
         handle = cls(
@@ -325,7 +353,11 @@ class SandboxBatch:
         handle._create_interval = 1 / args.create_rps
         for warmpool, count in ready.items():
             handle._warm_credit.record(warmpool, count)
-        handle._labels = {**args.labels, BATCH_ID_LABEL: args.batch_id}
+        handle._labels = {
+            **args.labels,
+            BATCH_ID_LABEL: args.batch_id,
+            BATCH_LEASE_UID_LABEL: handle._lease_uid,
+        }
         handle._claim_labels = {
             g.warmpool: {
                 **handle._labels,
@@ -355,11 +387,12 @@ class SandboxBatch:
         batch_utils.validate_batch_id(batch_id)
 
         lease_name = f"{BATCH_LEASE_NAME_PREFIX}{batch_id}"
-        label_selector = f"{BATCH_ID_LABEL}={batch_id}"
 
         lease = client.k8s_helper.read_batch_lease(
             lease_name, namespace, _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
         )
+        lease_uid = None if lease is None else batch_utils.lease_owner_reference(lease)["uid"]
+        label_selector = batch_utils.batch_claim_label_selector(batch_id, lease_uid)
         claim_items, list_rv = client.k8s_helper.list_sandbox_claim_objects(
             namespace, label_selector, _request_timeout=batch_utils.BATCH_COLLECTION_REQUEST_TIMEOUT_SECONDS
         )
@@ -431,7 +464,11 @@ class SandboxBatch:
         )
         handle._fill_deadline = time.monotonic() + settings.quorum_timeout
         handle._create_interval = 1 / settings.create_rps
-        handle._labels = {**settings.labels, BATCH_ID_LABEL: batch_id}
+        handle._labels = {
+            **settings.labels,
+            BATCH_ID_LABEL: batch_id,
+            BATCH_LEASE_UID_LABEL: handle._lease_uid,
+        }
         handle._attached = True
         handle._start()
         return handle
@@ -446,11 +483,25 @@ class SandboxBatch:
         if self._detached:
             raise BatchError(f"batch '{self.batch_id}' has been detached or released")
 
-    def _check_healthy(self) -> None:
+    def _expire_lease_if_due(self, now: float | None = None) -> None:
+        """Marks the handle stopped once the monotonic Lease deadline passes. Requires ``_lock``."""
+        if now is None:
+            now = time.monotonic()
+        if not self._detached and self._state.error() is None and now >= self._lease_expires_at:
+            expired = self._lease_expired_error()
+            self._mark_renewal_degraded(expired)
+            self._state.note_error(expired)
+            self._renew_stop.set()
+            self._notify_all()
+
+    def _check_healthy(self, now: float | None = None) -> None:
         # Once detach() or release() starts or err() is set, this handle may no longer hold the
         # batch's Lease, and a batch recreated under the same id reuses the claim names and labels,
         # so the handle connects to no more sandboxes and deletes no more claims.
         self._check_active()
+        # Check _lease_expires_at here so caller operations fence immediately after a process pause
+        # before _renew_loop wakes up.
+        self._expire_lease_if_due(now)
         if (error := self._state.error()) is not None:
             raise BatchError(f"batch '{self.batch_id}' has stopped") from error
 
@@ -657,17 +708,20 @@ class SandboxBatch:
         with self._changed:
             while True:
                 self._check_active()
-                self._expire_fill_if_due()
+                self._expire_lease_if_due()
+                if self._state.error() is None:
+                    self._expire_fill_if_due()
                 item = pop()
                 if item is not None:
                     return item
                 if done() or self._state.error() is not None:
                     return None
                 # Nothing to hand out yet, but returning None would end the iterator, so wait for
-                # a change. The wait also wakes at the fill deadline so pending members can expire.
-                timeout = None
+                # a change. Wake at the fill or Lease deadline so pending waits end on time.
+                now = time.monotonic()
+                timeout = max(0.0, self._lease_expires_at - now)
                 if self._fill_deadline is not None:
-                    timeout = max(0.0, self._fill_deadline - time.monotonic())
+                    timeout = min(timeout, max(0.0, self._fill_deadline - now))
                 self._changed.wait(timeout)
 
     def _expire_fill_if_due(self) -> None:
@@ -858,16 +912,18 @@ class SandboxBatch:
             with self._lock:
                 waiter.clear()
                 self._check_active()
+                self._expire_lease_if_due()
+                if (error := self._state.error()) is not None:
+                    raise BatchError(f"batch '{self.batch_id}' stopped while acquiring '{claim_name}'") from error
                 member = self._state.acquired_member(claim_name)
                 if member is not None:
                     self._acquire_waiters.pop(claim_name, None)
                     return member
-                if (error := self._state.error()) is not None:
-                    raise BatchError(f"batch '{self.batch_id}' stopped while acquiring '{claim_name}'") from error
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
+                now = time.monotonic()
+                if deadline <= now:
                     raise BatchTimeoutError(f"acquired member '{claim_name}' wasn't Ready within {wait:g}s")
-            waiter.wait(remaining)
+                wait_timeout = max(0.0, min(deadline, self._lease_expires_at) - now)
+            waiter.wait(wait_timeout)
 
     def _check_pool(self, warmpool: str, deadline: float, wait: float, acquire_seq: int) -> None:
         """Checks a pool that isn't one of the batch's groups the first time ``acquire()`` uses it,
@@ -909,11 +965,17 @@ class SandboxBatch:
                 acquired = self._in_flight.acquire(timeout=remaining)
             try:
                 with self._lock:
-                    self._check_healthy()
+                    now = time.monotonic()
+                    self._check_healthy(now)
                     self._check_acquire_pool_active(warmpool, acquire_seq)
+                    request_timeout = min(
+                        batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS, self._lease_expires_at - now
+                    )
                 if not acquired:
                     raise BatchTimeoutError(f"warm pool '{warmpool}' wasn't checked within {wait:g}s")
-                ready = _precheck_pools(self._client.k8s_helper, [warmpool], self.namespace)
+                ready = _precheck_pools(
+                    self._client.k8s_helper, [warmpool], self.namespace, timeout=request_timeout
+                )
                 with self._lock:
                     self._warm_credit.record(warmpool, ready[warmpool])
                     self._checked_pools.add(warmpool)
@@ -939,9 +1001,10 @@ class SandboxBatch:
         a burst of acquires on a warm pool skips pacing without exceeding the connection budget.
         """
         def remaining_if_due() -> float:
-            self._check_healthy()
+            now = time.monotonic()
+            self._check_healthy(now)
             self._check_acquire_pool_active(warmpool, acquire_seq)
-            remaining = deadline - time.monotonic()
+            remaining = min(deadline, self._lease_expires_at) - now
             return remaining if remaining > 0 and self._warm_credit.refresh_due(warmpool) else 0.0
 
         with self._lock:
@@ -970,9 +1033,10 @@ class SandboxBatch:
                     )
                     ready = 0 if obj is None else batch_utils.warmpool_ready_replicas(obj)
                 except Exception as e:
-                    if time.monotonic() >= deadline:
-                        # This acquire's deadline cut the read short, so another acquire with more time
-                        # left can still refresh the pool instead of waiting out the refresh interval.
+                    now = time.monotonic()
+                    if now >= deadline or now >= self._lease_expires_at:
+                        # This acquire's deadline or Lease expiry cut the read short, so another acquire
+                        # with time left can still refresh instead of waiting out the refresh interval.
                         return
                     # Fall back to normal pacing so the claim create surfaces any real pool failure.
                     logger.debug(f"Batch '{self.batch_id}' failed to read warm pool '{warmpool}': {e}")
@@ -1097,7 +1161,7 @@ class SandboxBatch:
         _delete_claims_in_rounds(
             self._client.k8s_helper,
             self.namespace,
-            batch_utils.group_label_selector(self.batch_id, warmpool),
+            batch_utils.group_label_selector(self.batch_id, warmpool, self._lease_uid),
             f"batch '{self.batch_id}' group '{warmpool}'",
             guard=self._member_delete,
         )
@@ -1129,15 +1193,21 @@ class SandboxBatch:
                 # Scope the pool slot and active-delete guard to each HTTP attempt so a sleeping
                 # retry neither holds a max_in_flight slot nor blocks detach() or release().
                 with self._in_flight, self._member_delete():
-                    # Snapshot the delete sequence before sending DELETE so finishing late
-                    # cannot clear a newer cleanup delete queued after a create retry.
+                    # Snapshot the delete sequence and remaining Lease budget before sending DELETE
+                    # so finishing late cannot clear a newer cleanup delete or outlive the Lease.
                     with self._lock:
+                        now = time.monotonic()
+                        self._check_healthy(now)
+                        request_timeout = min(
+                            batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS, self._lease_expires_at - now
+                        )
                         seq = self._state.delete_seq(claim_name)
                     self._client.k8s_helper.delete_sandbox_claim(
                         claim_name,
                         self.namespace,
-                        _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
+                        _request_timeout=request_timeout,
                         log_level=logging.DEBUG,
+                        batch=True,
                     )
                 break
             except Exception as e:
@@ -1441,7 +1511,7 @@ class SandboxBatch:
         then kept up to date with watch events using the list's resourceVersion so no events are missed.
         """
         rv = self._list_resource_version
-        label_selector = f"{BATCH_ID_LABEL}={self.batch_id}"
+        label_selector = batch_utils.batch_claim_label_selector(self.batch_id, self._lease_uid)
         relist = False
         # Consecutive failed attempts, which set the retry backoff.
         failures = 0
@@ -1550,17 +1620,17 @@ class SandboxBatch:
             if self._renew_stop.wait(max(0.0, min(wait, deadline - time.monotonic()))):
                 return
             if time.monotonic() >= deadline:
-                self._stop_renewal(
-                    BatchLeaseExpiredError(
-                        f"batch '{self.batch_id}' lease has not renewed successfully "
-                        f"for {self._lease_duration}s"
-                    )
-                )
+                self._stop_renewal(self._lease_expired_error())
                 return
             if not self._renew_once():
                 return
             with self._lock:
                 failures = failures + 1 if self._renewal_degraded else 0
+
+    def _lease_expired_error(self) -> BatchLeaseExpiredError:
+        return BatchLeaseExpiredError(
+            f"batch '{self.batch_id}' lease has not renewed successfully for {self._lease_duration}s"
+        )
 
     def _mark_renewal_degraded(self, reason: object) -> None:
         """Sets ``_renewal_degraded``, logging the first failure of each episode. Requires ``_lock``."""
@@ -1614,6 +1684,8 @@ class SandboxBatch:
                 self._mark_renewal_degraded(e)
             return True
         with self._lock:
+            if self._detached or self._state.error() is not None:
+                return False
             self._lease = written
             self._lease_expires_at = sent_at + self._lease_duration
             self._renewal_degraded = False
@@ -1654,6 +1726,7 @@ class SandboxBatch:
         """
         while True:
             with self._lock:
+                self._expire_lease_if_due()
                 if (
                     not self._create_plan
                     or self._stop_creating.is_set()
@@ -1722,8 +1795,11 @@ class SandboxBatch:
                 # flight during that delete can land afterwards and recreate the claim.
                 self._delete_released_create(claim_name, group.warmpool, retried=sent > 1)
 
-    def _can_still_send(self, can_send: Callable[[], bool] | None) -> bool:
+    def _can_still_send(
+        self, can_send: Callable[[], bool] | None, now: float | None = None
+    ) -> bool:
         """Whether a create or its retry may still send a request. The caller holds ``self._lock``."""
+        self._expire_lease_if_due(now)
         # Once err() is set the handle can no longer watch or hold the batch, so further
         # claims would be ones nobody can observe or keep alive.
         return (
@@ -1753,6 +1829,7 @@ class SandboxBatch:
         group, or ended the fill. A later release call retries a failed delete.
         """
         with self._lock:
+            self._expire_lease_if_due()
             if (
                 self._stop_creating.is_set()
                 or self._state.error() is not None
@@ -1803,12 +1880,18 @@ class SandboxBatch:
             raise BatchTimeoutError(f"no create in flight slot for claim '{claim_name}' before the deadline")
         try:
             with self._lock:
-                if not self._can_still_send(can_send):
+                now = time.monotonic()
+                if not self._can_still_send(can_send, now):
                     return
                 # Waiting on _lock after _in_flight.acquire can cross deadline, so check again
                 # before recording or sending the create.
-                if deadline is not None and time.monotonic() >= deadline:
+                if deadline is not None and now >= deadline:
                     raise BatchTimeoutError(f"no create in flight slot for claim '{claim_name}' before the deadline")
+                # Bound the HTTP timeout by the remaining Lease budget so an attempt started near
+                # expiry cannot outlive the reaper's confirmation window.
+                request_timeout = min(
+                    batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS, self._lease_expires_at - now
+                )
                 if on_send is not None:
                     on_send()
             self._client.k8s_helper.create_sandbox_claim(
@@ -1819,8 +1902,9 @@ class SandboxBatch:
                 labels=labels,
                 lifecycle=lifecycle,
                 owner_references=self._owner_references,
+                batch=True,
                 log_level=logging.DEBUG,
-                _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
+                _request_timeout=request_timeout,
             )
         finally:
             self._in_flight.release()
@@ -1898,7 +1982,12 @@ class SandboxBatch:
                 raise
 
 
-def _precheck_pools(helper: "K8sHelper", warmpools: Iterable[str], namespace: str) -> dict[str, int]:
+def _precheck_pools(
+    helper: "K8sHelper",
+    warmpools: Iterable[str],
+    namespace: str,
+    timeout: int | float = batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
+) -> dict[str, int]:
     """Checks that each warm pool and the SandboxTemplate it references exist, and returns each
     pool's Ready replica count.
 
@@ -1906,7 +1995,6 @@ def _precheck_pools(helper: "K8sHelper", warmpools: Iterable[str], namespace: st
         SandboxWarmPoolNotFoundError: If a warm pool doesn't exist.
         SandboxTemplateNotFoundError: If a warm pool's template doesn't exist, or it names none.
     """
-    timeout = batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
     checked_templates: set[str] = set()
     ready: dict[str, int] = {}
     for name in warmpools:
@@ -1988,6 +2076,10 @@ def _take_batch_lease(
             retried = True
             continue
         written_meta, _ = batch_utils.lease_parts(written)
+        if not written_meta.resource_version:
+            raise BatchError(
+                f"batch '{batch_id}' Lease in namespace '{namespace}' has no resourceVersion"
+            )
         return str(written_meta.resource_version)
 
 
@@ -2033,10 +2125,11 @@ def _delete_batch_objects(
                 resource_version=resource_version,
             )
 
+    lease_uid = batch_utils.lease_owner_reference(last_lease)["uid"]
     _delete_claims_in_rounds(
         helper,
         namespace,
-        f"{BATCH_ID_LABEL}={batch_id}",
+        batch_utils.batch_claim_label_selector(batch_id, lease_uid),
         f"batch '{batch_id}'",
         hold=take,
         finish=finish,

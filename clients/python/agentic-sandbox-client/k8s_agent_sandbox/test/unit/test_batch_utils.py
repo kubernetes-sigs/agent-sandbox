@@ -28,6 +28,7 @@ from k8s_agent_sandbox.constants import (
     BATCH_CREATE_RPS_ANNOTATION,
     BATCH_GROUP_LABEL,
     BATCH_ID_LABEL,
+    BATCH_LEASE_UID_LABEL,
     BATCH_NEXT_ORDINAL_ANNOTATION,
     BATCH_QUORUM_TIMEOUT_ANNOTATION,
     BATCH_WORK_BUDGET_ANNOTATION,
@@ -209,6 +210,7 @@ class TestValidateClaimBatchArgs(unittest.TestCase):
             "quorum_timeout 1.5": {"quorum_timeout": 1.5},
             "lease_duration 5": {"lease_duration": CLOCK_SKEW_MARGIN},
             "labels set batch id": {"labels": {BATCH_ID_LABEL: "b1"}},
+            "labels set batch lease uid": {"labels": {BATCH_LEASE_UID_LABEL: "u1"}},
             "labels set batch group": {"labels": {BATCH_GROUP_LABEL: "x"}},
             "invalid label": {"labels": {"bad key!": "v"}},
             "invalid batch_id": {"batch_id": "1abc"},
@@ -344,10 +346,12 @@ class TestParseLeaseMetadata(unittest.TestCase):
             [BatchGroup(warmpool="pool-a", size=1)], {"team": "rl"}, "b1", 2.5, None, 120, 90, 45
         )
         labels, annotations = batch_utils.batch_lease_metadata(args)
+        self.assertNotIn(BATCH_LEASE_UID_LABEL, labels)
         annotations[BATCH_NEXT_ORDINAL_ANNOTATION] = "0"
         # Every setting claim_batch writes comes back, with the caller's labels apart from the SDK's.
         self.assertEqual(
-            batch_utils.parse_lease_metadata(labels, annotations), (45, 90, 120, 0, 2.5, {"team": "rl"})
+            batch_utils.parse_lease_metadata({**labels, BATCH_LEASE_UID_LABEL: "u1"}, annotations),
+            (45, 90, 120, 0, 2.5, {"team": "rl"}),
         )
         invalid = {
             BATCH_QUORUM_TIMEOUT_ANNOTATION: ("abc", "0", "-1"),
@@ -434,6 +438,25 @@ class TestWarmCredit(unittest.TestCase):
             self.assertFalse(credit.refresh_due("pool-a"))
             now[0] += 0.2
             self.assertTrue(credit.refresh_due("pool-a"))
+
+
+class TestLabelSelectors(unittest.TestCase):
+
+    def test_batch_and_group_selectors_optionally_scope_to_lease_uid(self):
+        self.assertEqual(batch_utils.batch_claim_label_selector("b1"), f"{BATCH_ID_LABEL}=b1")
+        self.assertEqual(
+            batch_utils.batch_claim_label_selector("b1", "uid-1"),
+            f"{BATCH_ID_LABEL}=b1,{BATCH_LEASE_UID_LABEL}=uid-1",
+        )
+        group_hash = batch_utils.group_label_value("pool-a")
+        self.assertEqual(
+            batch_utils.group_label_selector("b1", "pool-a"),
+            f"{BATCH_ID_LABEL}=b1,{BATCH_GROUP_LABEL}={group_hash}",
+        )
+        self.assertEqual(
+            batch_utils.group_label_selector("b1", "pool-a", "uid-1"),
+            f"{BATCH_ID_LABEL}=b1,{BATCH_GROUP_LABEL}={group_hash},{BATCH_LEASE_UID_LABEL}=uid-1",
+        )
 
 
 if __name__ == "__main__":

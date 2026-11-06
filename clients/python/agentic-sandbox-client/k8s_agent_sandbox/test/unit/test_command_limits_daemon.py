@@ -25,6 +25,7 @@ import subprocess
 import sys
 import time
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import grpc
 import pytest
@@ -39,11 +40,12 @@ from k8s_agent_sandbox.models import SandboxdInClusterConnectionConfig
 
 
 @pytest.fixture(scope="module")
-def daemon(tmp_path_factory):
+def daemon(tmp_path_factory, request):
     binary = os.environ.get("SANDBOXD_BINARY")
     if not binary:
         pytest.skip("set SANDBOXD_BINARY to run loopback daemon tests")
     root = tmp_path_factory.mktemp("bounded-daemon")
+    policy = getattr(request, "param", {"default": 4096, "maximum": 8192})
     reservations = [socket.socket(), socket.socket()]
     try:
         for sock in reservations:
@@ -57,10 +59,10 @@ def daemon(tmp_path_factory):
         f"--root-dir={root}", f"--grpc-port={grpc_port}", f"--rest-port={rest_port}",
         "--shutdown-timeout=3s", "--execute-default-time-limit=1s",
         "--execute-max-time-limit=5s",
-        "--execute-default-stdout-limit-bytes=4096",
-        "--execute-default-stderr-limit-bytes=4096",
-        "--execute-max-stdout-limit-bytes=8192",
-        "--execute-max-stderr-limit-bytes=8192",
+        f"--execute-default-stdout-limit-bytes={policy['default']}",
+        f"--execute-default-stderr-limit-bytes={policy['default']}",
+        f"--execute-max-stdout-limit-bytes={policy['maximum']}",
+        f"--execute-max-stderr-limit-bytes={policy['maximum']}",
     ]
     with (root / "daemon.log").open("w") as log:
         process = subprocess.Popen(args, cwd=root, stdout=log, stderr=subprocess.STDOUT)
@@ -78,9 +80,9 @@ def daemon(tmp_path_factory):
             assert process.returncode == 0, (root / "daemon.log").read_text()
 
 
-def _connector(mode, grpc_port, rest_port):
+def _connector(mode, grpc_port, rest_port, **kwargs):
     config = SandboxdInClusterConnectionConfig(
-        mode="in-cluster-pod-ip", grpc_port=grpc_port, rest_port=rest_port,
+        mode="in-cluster-pod-ip", grpc_port=grpc_port, rest_port=rest_port, **kwargs,
     )
     if mode == "async":
         async def pod_ip():
@@ -331,3 +333,99 @@ async def test_old_server_has_zero_legacy_dispatch(mode, tmp_path):
             else:
                 connector.close()
             server.stop(0).wait(timeout=5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timeout", [1e10, 1e18])
+async def test_daemon_unrepresentable_deadline_rejected(client, timeout):
+    run, case = client
+    with pytest.raises(ValueError, match="deadline"):
+        await run("printf x >> count", timeout=timeout, time_limit=2)
+    assert not (case / "count").exists()
+    await _health(run)
+
+
+@pytest.mark.asyncio
+async def test_daemon_large_representable_absolute_deadline(client):
+    run, _ = client
+    timeout = (2**63 - 1) // 1_000_000_000 - time.time() - 120
+    result = await run("printf ok", timeout=timeout, time_limit=2)
+    assert result.stdout == "ok" and result.exit_code == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("daemon", [{"default": 2**21, "maximum": 2**22}], indirect=True)
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize("capacity", [None, 8 * 1024 * 1024])
+@pytest.mark.parametrize("explicit_caps", [False, True])
+async def test_daemon_large_response_capacity(daemon, mode, capacity, explicit_caps):
+    connector = _connector(
+        mode, daemon.grpc_port, daemon.rest_port, grpc_max_receive_message_bytes=capacity,
+    )
+    executor = (
+        AsyncCommandExecutor(connector, None, "test") if mode == "async"
+        else CommandExecutor(connector, None, "test")
+    )
+    case = daemon.root / f"capacity-{time.monotonic_ns()}"
+    case.mkdir()
+    size = 2**21
+    caps = {"stdout_limit_bytes": size, "stderr_limit_bytes": size} if explicit_caps else {}
+
+    async def invoke(method, command, **kwargs):
+        if mode == "async":
+            return await method(command, cwd=case.name, **kwargs)
+        return await asyncio.to_thread(method, command, cwd=case.name, **kwargs)
+
+    try:
+        if capacity is None and explicit_caps:
+            with patch.object(connector, "connect", wraps=connector.connect) as connect:
+                with pytest.raises(ValueError, match="receive"):
+                    await invoke(executor.run_with_limits, _output(size, size), **caps)
+                connect.assert_not_called()
+            assert not (case / "count").exists()
+        elif capacity is None:
+            # Unknown deployment defaults retain the transport's finite cap.
+            with pytest.raises(RuntimeError) as raised:
+                await invoke(executor.run_with_limits, _output(size, size), **caps)
+            assert raised.value.__cause__.code() == grpc.StatusCode.RESOURCE_EXHAUSTED
+            assert (case / "count").read_text() == "x"
+        else:
+            handle = await invoke(executor.start, "printf started; sleep 0.3; printf finished")
+            channel_before = await connector.grpc_channel() if mode == "async" else connector.grpc_channel()
+            try:
+                result, ordinary = await asyncio.gather(
+                    invoke(executor.run_with_limits, _output(size, size), **caps),
+                    invoke(executor.run, "printf concurrent"),
+                )
+                assert ordinary.stdout == "concurrent"
+                if mode == "async":
+                    events = [event async for event in handle.events()]
+                else:
+                    events = await asyncio.to_thread(lambda: list(handle.events()))
+                assert b"".join(event.data for event in events if event.type == "stdout") == b"startedfinished"
+                assert events[-1].type == "exit" and events[-1].exit_code == 0
+                channel_after = await connector.grpc_channel() if mode == "async" else connector.grpc_channel()
+                assert channel_before is channel_after
+            finally:
+                if mode == "async":
+                    await handle.close()
+                else:
+                    handle.close()
+            assert result.stdout == "O" * size
+            assert result.stderr == "E" * size
+            assert result.exit_code == 0 and result.termination_reason == "exited"
+            assert not result.stdout_truncated and not result.stderr_truncated
+            assert (case / "count").read_text() == "x"
+        healthy = await invoke(executor.run_with_limits, "printf healthy")
+        assert healthy.stdout == "healthy"
+        channel = await connector.grpc_channel() if mode == "async" else connector.grpc_channel()
+        # All operations retain the same channel, including ordinary run.
+        ordinary = await invoke(executor.run, "printf ordinary")
+        assert ordinary.stdout == "ordinary"
+        after = await connector.grpc_channel() if mode == "async" else connector.grpc_channel()
+        assert channel is after
+    finally:
+        if mode == "async":
+            await connector.close()
+        else:
+            connector.close()

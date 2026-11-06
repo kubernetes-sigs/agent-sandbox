@@ -377,10 +377,14 @@ class BuildOrderAndFailureTest(unittest.TestCase):
             kind_cluster_name=None,
         )
 
-    def _run(self, build_side_effect=None):
+    def _run(self, build_side_effect=None, builder_side_effect=None):
         with (
             mock.patch.object(push_images.os, "walk", return_value=self._DISCOVERED),
-            mock.patch.object(push_images, "create_buildx_builder_if_not_exists"),
+            mock.patch.object(
+                push_images,
+                "create_buildx_builder_if_not_exists",
+                side_effect=builder_side_effect,
+            ),
             mock.patch.object(
                 push_images, "build_and_push_image", side_effect=build_side_effect
             ) as build_image,
@@ -421,6 +425,25 @@ class BuildOrderAndFailureTest(unittest.TestCase):
         self.assertIsNotNone(exit_message)
         self.assertIn("1 of 5", exit_message)
         self.assertIn("aider-sandbox", exit_message)
+
+    def test_failed_builder_setup_does_not_stop_later_images(self):
+        calls = {"n": 0}
+
+        def fail_second_setup(container_engine):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise subprocess.CalledProcessError(1, ["docker", "buildx", "use"])
+
+        built, exit_message = self._run(builder_side_effect=fail_second_setup)
+        # The image whose builder setup failed (chrome-sandbox) is not built,
+        # but every image after it is.
+        self.assertEqual(
+            built,
+            ["agent-sandbox-controller", "sandbox-router-go", "aider-sandbox", "langchain"],
+        )
+        self.assertIsNotNone(exit_message)
+        self.assertIn("1 of 5", exit_message)
+        self.assertIn("chrome-sandbox", exit_message)
 
 
 class KindLoadImagesExtraTagsTest(unittest.TestCase):

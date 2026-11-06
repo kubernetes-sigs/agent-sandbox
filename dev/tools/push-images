@@ -209,9 +209,9 @@ def main(args):
         print(f"--- Context Dir: {context_dir}")
 
         print(f"create Docker buildx builder for {service_name}")
-        create_buildx_builder_if_not_exists(args.container_engine)
-        print(f"building image for {service_name}")
         try:
+            create_buildx_builder_if_not_exists(args.container_engine)
+            print(f"building image for {service_name}")
             build_and_push_image(args, service_name, context_dir, dockerfile_path, image_tag)
         except subprocess.CalledProcessError as e:
             print(f"ERROR: building image {service_name} failed: {e}", file=sys.stderr)

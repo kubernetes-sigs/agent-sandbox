@@ -696,6 +696,36 @@ class FalsePositiveFilterTest(unittest.TestCase):
         self.assertEqual(finding["self_regression_cols"], 0)
         self.assertEqual(finding["distinct_changelists"], 2)
 
+    def test_pytest_failure_in_an_integration_suite_is_pr_local(self):
+        # A pytest test lives in an integration, example or dev tooling
+        # suite as often as in the SDK; a PR adding a failing test there is
+        # its own regression, not main-wide breakage (2026-10-31: two stacked
+        # PRs adding clients/integrations/harbor were reported as
+        # consistently failing).
+        table = {
+            "query": self.QUERY,
+            "changelists": ["b0", "b1", "b2"],
+            "column_ids": ["b0", "b1", "b2"],
+            "timestamps": [300, 200, 100],
+            "tests": [
+                {"name": "job.Overall", "statuses": rle([12, 12, 1])},
+                {"name": "pytest.test_start_exec_files_stop_lifecycle",
+                 "statuses": rle([12, 12, 1])},
+            ],
+        }
+        artifacts = {b: {"finished.json": {"result": "FAILURE", "revision": "x"}}
+                     for b in ("b0", "b1")}
+        dirs = {"b0": "https://x/pr-logs/pull/o_r/2125/job/b0",
+                "b1": "https://x/pr-logs/pull/o_r/2126/job/b1"}
+        files = {"2125": ["clients/integrations/harbor/tests/unit/test_environment.py"],
+                 "2126": ["examples/harbor/README.md"]}
+        (flaky, consistent, _, pr_local, _), _ = self.analyze(
+            table, artifacts, dirs=dirs, pr_files=lambda pr: files[pr])
+        self.assertEqual(flaky, [])
+        self.assertEqual(consistent, [])
+        self.assertEqual([p["reason"] for p in pr_local], ["pr-touches-test-sources"])
+        self.assertEqual(pr_local[0]["runs"], 2)
+
     def test_distinct_changelists_counts_prs_not_builds(self):
         # Three pushes of the same PR each failed TestA; a fourth column
         # from another PR passed. Build IDs differ, the PR does not.

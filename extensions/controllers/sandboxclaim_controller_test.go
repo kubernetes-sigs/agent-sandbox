@@ -6525,6 +6525,26 @@ func TestCreateSandboxClaimVolumeClaimTemplatesSuccess(t *testing.T) {
 			expectColdStart: true,
 		},
 		{
+			name: "policy=Overrides appends a new volume",
+			claimVCTs: []sandboxv1beta1.PersistentVolumeClaimTemplate{
+				{
+					EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "custom"},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: resource.MustParse("2Gi"),
+							},
+						},
+					},
+				},
+			},
+			policy:          extensionsv1beta1.VolumeClaimTemplatesPolicyOverrides,
+			expectedVCTs:    []string{"data", "custom"},
+			expectedStorage: "2Gi", // for custom volume
+			expectColdStart: true,
+		},
+		{
 			name: "policy=Allowed allows adding new custom volumes",
 			claimVCTs: []sandboxv1beta1.PersistentVolumeClaimTemplate{
 				{
@@ -6657,11 +6677,8 @@ func TestCreateSandboxClaimVolumeClaimTemplatesSuccess(t *testing.T) {
 			require.Len(t, sandbox.Spec.VolumeClaimTemplates, len(tc.expectedVCTs))
 			for i, name := range tc.expectedVCTs {
 				require.Equal(t, name, sandbox.Spec.VolumeClaimTemplates[i].Name)
-				if name == "data" && tc.policy == extensionsv1beta1.VolumeClaimTemplatesPolicyOverrides {
-					actualStorage := sandbox.Spec.VolumeClaimTemplates[i].Spec.Resources.Requests[corev1.ResourceStorage]
-					require.True(t, actualStorage.Equal(resource.MustParse(tc.expectedStorage)))
-				}
-				if name == "custom" {
+				overriddenData := name == "data" && tc.policy == extensionsv1beta1.VolumeClaimTemplatesPolicyOverrides && len(tc.expectedVCTs) == 1
+				if overriddenData || name == "custom" {
 					actualStorage := sandbox.Spec.VolumeClaimTemplates[i].Spec.Resources.Requests[corev1.ResourceStorage]
 					require.True(t, actualStorage.Equal(resource.MustParse(tc.expectedStorage)))
 				}

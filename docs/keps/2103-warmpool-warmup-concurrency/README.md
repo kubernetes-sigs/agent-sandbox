@@ -489,9 +489,15 @@ That issue is marked `priority/awaiting-more-evidence`; a pool with a 20-minute
 build-and-seed warmup is concrete evidence for it.
 
 The two features compose cleanly and can land independently. This KEP proposes
-documenting the dependency prominently in the field's godoc and in
-`docs/configuration.md`, and adopting whatever precedence rule #1293 settles on
-if a per-pool grace period lands.
+documenting the dependency prominently in
+[docs/configuration.md](../../configuration.md), and adopting whatever
+precedence rule #1293 settles on if a per-pool grace period lands.
+
+The dependency stays out of the field godoc on purpose. That godoc becomes the
+CRD field description, so it carries the field's contract, while
+`--sandbox-warm-pool-readiness-grace-period` is a controller flag rather than
+part of this API. Operators meet the two together in `docs/configuration.md`,
+which is where the guidance for choosing a `maxConcurrent` value also lives.
 
 One consequence to accept explicitly: a genuinely stuck member occupies a
 warmup slot until the grace period expires. With `maxConcurrent: 1` the pool

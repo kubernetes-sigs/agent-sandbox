@@ -6,6 +6,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**agent-sandbox-rl**](./agent-sandbox-rl): Generic, multi-cluster batch orchestration for running SWE-bench-style RL/eval workloads on Agent Sandbox warm pools.
 - [**agent-sandbox-rl-network-policy**](./agent-sandbox-rl-network-policy): One namespace-wide `NetworkPolicy` for every sandbox an agent-sandbox-rl fleet creates, instead of one per `SandboxTemplate`, for fleets with hundreds of templates per namespace on GKE, including the Dataplane V2 identity cost of per-pod labels.
 - [**agentclientprotocol**](./agentclientprotocol): A simple Agent Client Protocol (ACP) client that drives an agent running inside a sandbox.
+- [**agtsbx-agents**](./agtsbx-agents): A sandboxd runtime image with the opencode, Claude Code and Codex CLIs, for running a coding agent in a throwaway sandbox with `agtsbx run`.
 - [**aider-sandbox**](./aider-sandbox): An example of running the Aider coding agent in a sandbox using the template/claim pattern.
 - [**aio-sandbox**](./aio-sandbox): An example of running All-in-One (AIO) Sandbox using agent-sandbox.
 - [**analytics-tool**](./analytics-tool): An example of running an analytics workload in a sandbox with a companion service.

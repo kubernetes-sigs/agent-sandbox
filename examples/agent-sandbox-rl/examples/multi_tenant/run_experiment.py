@@ -130,28 +130,92 @@ def name_prefix_for(user: str, experiment: str) -> str:
   return prefix
 
 
+def warm_replicas(counts: dict[str, int], max_concurrent: int, max_pool: int,
+                  strategy: str = "sliding") -> dict[str, int]:
+  """Warm replicas per image, in task order, as the strategy would size them:
+  `sizing.compute_replicas` for all but ``none``, which warms one per image."""
+  total = sum(counts.values()) or 1
+  if strategy == "none":
+    return {img: 1 for img in counts}
+  return {img: sizing.compute_replicas(n, total, max_concurrent, max_pool)
+          for img, n in counts.items()}
+
+
+def warm_window(counts: dict[str, int], max_concurrent: int, max_pool: int,
+                strategy: str = "sliding") -> int:
+  """How many image pools the strategy keeps warm at once: ``sliding`` the SDK's
+  `sizing.recommend_window`, ``pipelined`` up to two of its
+  `sizing.recommend_window_pipelined` windows, ``none`` one image at a time,
+  ``naive`` every image."""
+  n_images = len(counts)
+  if strategy == "naive":
+    return n_images
+  if strategy == "none":
+    return min(1, n_images)
+  if strategy == "pipelined":
+    return min(n_images, 2 * sizing.recommend_window_pipelined(counts, max_concurrent, max_pool))
+  return sizing.recommend_window(counts, max_concurrent, max_pool)
+
+
 def footprint(counts: dict[str, int], max_concurrent: int, max_pool: int,
               strategy: str = "sliding") -> tuple[int, int]:
-  """What a strategy holds in the namespace at its peak.
+  """What a strategy holds in one namespace at its peak, on one cluster.
 
   Returns ``(window, pods)``: how many image pools are warm at once and the pods
   that costs: those pools' warm replicas, one claimed pod per concurrency slot,
-  and one replacement per slot while a pool refills behind a claim. ``sliding``
-  keeps the SDK's own `sizing.recommend_window` pools warm, ``pipelined`` up to
-  two such windows, ``naive`` and ``none`` every pool. ``counts`` maps each image
-  to its task count, in task order, as `SandboxFleet.image_counts`.
+  and one replacement per slot while a pool refills behind a claim. ``counts``
+  maps each image to its task count, in task order, as
+  `SandboxFleet.image_counts`.
   """
-  total = sum(counts.values()) or 1
-  n_images = len(counts)
-  if strategy in ("naive", "none"):
-    window = n_images
-  else:
-    window = sizing.recommend_window(counts, max_concurrent, max_pool)
-    if strategy == "pipelined":
-      window = min(n_images, 2 * window)
-  warm = sum(sizing.compute_replicas(n, total, max_concurrent, max_pool)
-             for n in list(counts.values())[:window])
-  return window, warm + 2 * max_concurrent
+  return footprint_by_cluster(counts, {img: "cluster" for img in counts}, max_concurrent,
+                              max_pool, strategy).get("cluster", (0, 0))
+
+
+def footprint_by_cluster(counts: dict[str, int], placement: dict[str, str],
+                         max_concurrent: int, max_pool: int,
+                         strategy: str = "sliding") -> dict[str, tuple[int, int]]:
+  """`footprint` per cluster, given where placement puts each image.
+
+  ``placement`` maps an image to its cluster name (`FleetPlan.entries`). A
+  cluster holds at most the strategy's warm window, and no more than the warm
+  replicas of its own images; it holds at most one claimed pod and one refill
+  per slot, and no more slots than it has tasks (``none`` runs one image at a
+  time, so no more than that image's tasks). A cluster with no images costs
+  nothing, which is what lets a quota on one cluster leave a quota-free cluster
+  free to run the whole set.
+  """
+  reps = warm_replicas(counts, max_concurrent, max_pool, strategy)
+  window = warm_window(counts, max_concurrent, max_pool, strategy)
+  window_warm = sum(list(reps.values())[:window])
+  out: dict[str, tuple[int, int]] = {}
+  for cluster in sorted(set(placement.values())):
+    imgs = [img for img in counts if placement.get(img) == cluster]
+    if not imgs:
+      out[cluster] = (0, 0)
+      continue
+    warm = min(window_warm, sum(reps[i] for i in imgs))
+    if strategy == "none":
+      slots = min(max_concurrent, max(counts[i] for i in imgs))
+    else:
+      slots = min(max_concurrent, sum(counts[i] for i in imgs))
+    out[cluster] = (min(window, len(imgs)), warm + 2 * slots)
+  return out
+
+
+def fit_to_budgets(counts: dict[str, int], placement: dict[str, str],
+                   budgets: dict[str, int | None], *, wanted: int, max_pool: int,
+                   strategy: str = "sliding") -> int:
+  """The largest concurrency up to ``wanted`` whose per-cluster footprint fits
+  every cluster's budget (None means no quota there). 0 when not even one slot
+  fits; ``wanted`` when no cluster has a quota."""
+  caps = {c: b for c, b in budgets.items() if b is not None}
+  if not caps:
+    return wanted
+  for mc in range(wanted, 0, -1):
+    pods = footprint_by_cluster(counts, placement, mc, max_pool, strategy)
+    if all(pods.get(c, (0, 0))[1] <= b for c, b in caps.items()):
+      return mc
+  return 0
 
 
 def fleet_ceilings(budgets: dict[str, int | None]) -> tuple[int | None, dict[str, int]]:
@@ -192,23 +256,21 @@ def pod_budget(hard: dict, used: dict, *, cpu: str, memory: str) -> int | None:
 def fit_to_quota(hard: dict, used: dict, *, cpu: str, memory: str, counts: dict[str, int],
                  wanted: int, max_pool: int, share: int = 1,
                  strategy: str = "sliding") -> tuple[int, int | None]:
-  """The largest concurrency up to ``wanted`` whose footprint fits the quota.
+  """`fit_to_budgets` for one cluster, straight from its `ResourceQuota` status.
 
   Returns ``(max_concurrent, budget)``. ``budget`` is this experiment's share of
   the pods the quota still admits (``share`` experiments start at once in the
-  namespace), or None without a quota; ``max_concurrent`` is 0 when not even one
-  slot fits. The quota rejects pods at admission, where the fleet's fail-fast
-  cannot see them, so fitting first is what keeps a run from waiting out
-  ``ready_timeout``.
+  namespace), or None without a quota. The quota rejects pods at admission,
+  where the fleet's fail-fast cannot see them, so fitting first is what keeps a
+  run from waiting out ``ready_timeout``.
   """
   budget = pod_budget(hard, used, cpu=cpu, memory=memory)
   if budget is None:
     return wanted, None
   budget //= max(1, share)
-  for mc in range(wanted, 0, -1):
-    if footprint(counts, mc, max_pool, strategy)[1] <= budget:
-      return mc, budget
-  return 0, budget
+  placement = {img: "cluster" for img in counts}
+  return fit_to_budgets(counts, placement, {"cluster": budget}, wanted=wanted,
+                        max_pool=max_pool, strategy=strategy), budget
 
 
 def read_quota(core_api, namespace: str) -> tuple[dict, dict]:
@@ -259,6 +321,13 @@ def build_config(user: str, experiment: str, *, contexts: list[str] | None = Non
   )
 
 
+def tasks_for(images: list[str], tasks_per_image: int) -> list[Task]:
+  """``tasks_per_image`` tasks per image, ids unique even for images that share
+  a last path segment."""
+  return [Task(id=f"img{n}-{slug(img.rsplit('/', 1)[-1], 30)}-{i}", image=img)
+          for n, img in enumerate(images) for i in range(tasks_per_image)]
+
+
 def probe(task, handle) -> dict:
   """The per-task work: one short command, enough to prove the sandbox runs."""
   out = handle.exec(["sh", "-c", "head -1 /etc/os-release; hostname"]).strip()
@@ -274,9 +343,7 @@ def drive(fleet, images: list[str], *, tasks_per_image: int, strategy: str = "sl
   run id, the task results, the `RunReport` and the per-cluster
   ``verify_teardown`` counts (empty for fakes, which have no reaper).
   """
-  tasks = [Task(id=f"img{n}-{slug(img.rsplit('/', 1)[-1], 30)}-{i}", image=img)
-           for n, img in enumerate(images) for i in range(tasks_per_image)]
-  fleet.load_tasks(tasks)
+  fleet.load_tasks(tasks_for(images, tasks_per_image))
   results = fleet.run(process_fn, strategy=strategy)
   verify = fleet.verify_teardown() if hasattr(fleet, "verify_teardown") else {}
   report = fleet.report.to_dict() if fleet.report is not None else {}
@@ -392,27 +459,25 @@ def main(argv=None) -> int:
   max_concurrent = args.max_concurrent
   if not args.no_quota_fit:
     counts = {img: args.tasks_per_image for img in images}
-    # Per cluster: what its quota admits for this experiment. The tightest
-    # cluster bounds the concurrency, because placement may put a whole window
-    # there; see fleet_ceilings for what becomes max_replicas and the fleet's
-    # pod ceiling.
+    # Per cluster: what its quota admits for this experiment (None without a
+    # quota). The fit then looks at what the plan puts on each cluster, so a
+    # quota on one cluster bounds that cluster's share, not the whole fleet;
+    # see fleet_ceilings for what becomes max_replicas and the pod ceiling.
     budgets: dict[str, int | None] = {}
-    fits = max_concurrent
     for cluster in fleet.registry:
       hard, used = read_quota(cluster.core_api, namespace)
-      fit, budget = fit_to_quota(hard, used, cpu=args.cpu, memory=args.memory, counts=counts,
-                                 wanted=max_concurrent, max_pool=args.max_warmpool_size,
-                                 share=args.share, strategy=args.strategy)
-      budgets[cluster.name] = budget
-      if budget is None:
-        continue
-      if fit < 1:
-        logger.error("quota in %s on cluster %s leaves no room for one slot (budget %d "
-                     "pods for this experiment): hard=%s used=%s", namespace, cluster.name,
-                     budget, hard, used)
-        return 2
-      fits = min(fits, fit)
+      budget = pod_budget(hard, used, cpu=args.cpu, memory=args.memory)
+      budgets[cluster.name] = None if budget is None else budget // max(1, args.share)
+    fleet.load_tasks(tasks_for(images, args.tasks_per_image))
+    placement = {e.image: e.cluster for e in fleet.plan().entries}
+    fits = fit_to_budgets(counts, placement, budgets, wanted=max_concurrent,
+                          max_pool=args.max_warmpool_size, strategy=args.strategy)
     ceiling, caps = fleet_ceilings(budgets)
+    if caps and fits < 1:
+      pods = footprint_by_cluster(counts, placement, 1, args.max_warmpool_size, args.strategy)
+      logger.error("quota in %s leaves no room for one slot: budgets %s, one slot needs %s",
+                   namespace, caps, {c: p for c, (_, p) in pods.items()})
+      return 2
     if caps:
       if fits < max_concurrent:
         logger.warning("quota in %s admits %s pods for this experiment; lowering "
@@ -427,9 +492,12 @@ def main(argv=None) -> int:
       fleet = SandboxFleet(build_config(
           args.user, args.experiment, **{**kwargs, "max_concurrent": fits},
           pod_budget=ceiling, cluster_budgets=caps))
-    window, peak = footprint(counts, max_concurrent, args.max_warmpool_size, args.strategy)
-    logger.info("footprint (%s): %d pools warm at once, up to %d pods at the peak%s",
-                args.strategy, window, peak, f" (quota budgets {caps})" if caps else "")
+    per_cluster = footprint_by_cluster(counts, placement, max_concurrent,
+                                       args.max_warmpool_size, args.strategy)
+    logger.info("footprint (%s): %s%s", args.strategy,
+                "  ".join(f"{c}: {w} pool(s) warm at once, up to {p} pods"
+                          for c, (w, p) in per_cluster.items()),
+                f" (quota budgets {caps})" if caps else "")
   logger.info("user=%s experiment=%s namespace=%s run_id=%s names=%s*", args.user,
               args.experiment, namespace, fleet.run_id, fleet.config.template_name_prefix)
 

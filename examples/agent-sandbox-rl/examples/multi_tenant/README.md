@@ -197,9 +197,12 @@ before it starts:
    the pools that are warm at once (`sliding`: the SDK's own
    `sizing.recommend_window`; `pipelined`: up to two windows; `naive`: every
    pool), plus one claimed pod and one refilling pod per concurrency slot.
-3. `fit_to_quota` lowers `--max-concurrent` until the footprint fits, and the
-   budget becomes the fleet's `max_live_sandboxes`, so the fleet's own circuit
-   breaker and the quota agree.
+3. `fit_to_budgets` lowers `--max-concurrent` until the footprint fits every
+   cluster's budget, and the budget becomes the fleet's `max_live_sandboxes`,
+   so the fleet's own circuit breaker and the quota agree. With several
+   clusters the footprint is counted per cluster from where the plan puts each
+   image, so a quota on one cluster bounds that cluster's share and leaves a
+   quota-free cluster free to run the rest.
 
 The sandboxes run `sleep infinity`, which ignores SIGTERM, so the template
 sets `terminationGracePeriodSeconds: 1`; otherwise every released sandbox

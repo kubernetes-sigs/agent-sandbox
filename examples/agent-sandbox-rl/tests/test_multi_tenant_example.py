@@ -138,6 +138,7 @@ COUNTS = {f"img{i}": 2 for i in range(10)}          # ten images, two tasks each
 
 
 def test_footprint_follows_the_sdk_window():
+  from agent_sandbox_rl import sizing
   # One replica per image here, so the window is max_concurrent pools and the
   # peak adds a claimed pod and a refilling pod per slot.
   assert run_experiment.footprint(COUNTS, 3, 4) == (3, 9)
@@ -147,25 +148,55 @@ def test_footprint_follows_the_sdk_window():
   fleet.load_tasks([img for img in COUNTS for _ in range(2)])
   plan = fleet.plan()
   assert fleet.recommended_window() == run_experiment.footprint(COUNTS, 3, 4)[0]
-  # naive warms every pool at once; pipelined up to two windows.
+  # naive warms every pool at once.
   assert run_experiment.footprint(COUNTS, 3, 4, "naive") == (10, plan.total_replicas + 6)
-  assert run_experiment.footprint(COUNTS, 3, 4, "pipelined") == (6, 12)
-  assert run_experiment.fit_to_quota({"pods": "16"}, {}, cpu="100m", memory="128Mi",
-                                     counts=COUNTS, wanted=8, max_pool=4,
-                                     strategy="naive") == (3, 16)        # 10 + 6
+  # pipelined holds up to two of the SDK's pipelined windows (halved windows).
+  w = sizing.recommend_window_pipelined(COUNTS, 3, 4)
+  assert w == fleet.recommended_window(pipelined=True)
+  assert run_experiment.footprint(COUNTS, 3, 4, "pipelined") == (2 * w, 2 * w + 6)
+  # none runs one image at a time with one warm replica; its slots are bounded
+  # by that image's tasks (two here), not by max_concurrent.
+  assert run_experiment.footprint(COUNTS, 4, 4, "none") == (1, 1 + 2 * 2)
+  assert run_experiment.footprint({"a": 8, "b": 8}, 4, 4, "none") == (1, 1 + 2 * 4)
 
 
-def test_fleet_ceilings_only_sum_when_every_cluster_has_a_quota():
-  assert run_experiment.fleet_ceilings({"a": 8, "b": 6}) == (14, {"a": 8, "b": 6})
-  # A quota on one cluster only: that cluster keeps its cap, the fleet-wide
-  # ceiling is left to the SDK, so the quota-free cluster is not capped by a's budget.
-  assert run_experiment.fleet_ceilings({"a": 8, "b": None}) == (None, {"a": 8})
-  assert run_experiment.fleet_ceilings({"a": None}) == (None, {})
-  assert run_experiment.fleet_ceilings({}) == (None, {})
-  cfg = run_experiment.build_config("alice", "exp1", contexts=["a", "b"],
-                                    pod_budget=None, cluster_budgets={"a": 8})
-  assert [(c.name, c.max_replicas) for c in cfg.clusters] == [("a", 8), ("b", None)]
-  assert cfg.max_live_sandboxes is None
+def test_fit_follows_the_strategy():
+  from agent_sandbox_rl import sizing
+  fit = lambda hard, wanted, strategy: run_experiment.fit_to_quota(      # noqa: E731
+      hard, {}, cpu="100m", memory="128Mi", counts=COUNTS, wanted=wanted, max_pool=4,
+      strategy=strategy)
+  assert fit({"pods": "16"}, 8, "naive") == (3, 16)                   # 10 + 6
+  # none: ten images, four slots, a nine-pod budget admits all four slots
+  # when the image has four tasks, since only one pool is warm at a time.
+  counts4 = {f"img{i}": 4 for i in range(10)}
+  assert run_experiment.fit_to_quota({"pods": "9"}, {}, cpu="100m", memory="128Mi",
+                                     counts=counts4, wanted=4, max_pool=4,
+                                     strategy="none") == (4, 9)
+  # pipelined: with a one-image pipelined window, two warm pools plus six slot
+  # pods fit an eight-pod budget at three slots.
+  if sizing.recommend_window_pipelined(COUNTS, 3, 4) == 1:
+    assert fit({"pods": "8"}, 3, "pipelined") == (3, 8)
+
+
+def test_fit_to_budgets_counts_each_cluster_from_the_placement():
+  all_on_b = {img: "b" for img in COUNTS}
+  # A quota on a only, every image on b: a costs nothing, so nothing is lowered.
+  assert run_experiment.fit_to_budgets(COUNTS, all_on_b, {"a": 8, "b": None}, wanted=4,
+                                       max_pool=4, strategy="naive") == 4
+  assert run_experiment.footprint_by_cluster(COUNTS, all_on_b, 4, 4, "naive") == {"b": (10, 18)}
+  # Five images on each: naive warms a's five pools, plus two pods per slot on a.
+  half = {img: ("a" if i % 2 == 0 else "b") for i, img in enumerate(COUNTS)}
+  by = run_experiment.footprint_by_cluster(COUNTS, half, 2, 4, "naive")
+  assert by == {"a": (5, 5 + 4), "b": (5, 5 + 4)}
+  assert run_experiment.fit_to_budgets(COUNTS, half, {"a": 9, "b": None}, wanted=4,
+                                       max_pool=4, strategy="naive") == 2
+  assert run_experiment.fit_to_budgets(COUNTS, half, {"a": 6, "b": None}, wanted=4,
+                                       max_pool=4, strategy="naive") == 0
+  # No quota anywhere: as asked.
+  assert run_experiment.fit_to_budgets(COUNTS, half, {"a": None, "b": None}, wanted=4,
+                                       max_pool=4) == 4
+  # A cluster the plan did not use has no cost even with a budget.
+  assert run_experiment.footprint_by_cluster(COUNTS, half, 2, 4).get("c") is None
 
 
 @pytest.mark.parametrize("hard,used,expect", [

@@ -64,6 +64,11 @@ replacements:
     replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/examples/deer-flow-sandbox/$1)'
     description: "DeerFlow example file links to GitHub"
 
+  # deepagents README - integration package to GitHub
+  - pattern: '\]\(\.\./\.\./clients/integrations/deepagents\)'
+    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/clients/integrations/deepagents/)'
+    description: "DeepAgents example integration link to GitHub"
+
   # JupyterLab installation guide - specific to experiment.md
   - pattern: '\]\(\./README\.md\)'
     replacement: '](/docs/use-cases/examples/jupyterlab/)'

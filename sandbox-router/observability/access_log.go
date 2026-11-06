@@ -19,6 +19,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -144,22 +145,68 @@ func AccessLogMiddleware(base logr.Logger, skip func(*http.Request) bool) func(h
 			start := time.Now()
 			ctx, labels := LabelsForRequest(r.Context())
 			rec := &accessLogRecorder{ResponseWriter: w, status: http.StatusOK}
+			// ReverseProxy aborts incomplete streams with ErrAbortHandler.
+			// Deferred logging must still run while that panic propagates.
+			defer func() {
+				log := LoggerFromContext(r.Context(), base)
+				fields := []any{
+					"method", r.Method,
+					"path", r.URL.Path,
+					"status", rec.status,
+					"duration_ms", time.Since(start).Milliseconds(),
+					"client_ip", clientIP(r),
+					"sandbox_id", labels.SandboxID,
+					"sandbox_namespace", labels.SandboxNamespace,
+					"bytes_out", rec.bytes,
+					"user_agent", r.UserAgent(),
+				}
+				if labels.GRPC {
+					fields = append(fields, "grpc_status", resolveGRPCStatus(labels, w.Header()))
+				}
+				log.Info("request", fields...)
+			}()
 			next.ServeHTTP(rec, r.WithContext(ctx))
-
-			log := LoggerFromContext(r.Context(), base)
-			log.Info("request",
-				"method", r.Method,
-				"path", r.URL.Path,
-				"status", rec.status,
-				"duration_ms", time.Since(start).Milliseconds(),
-				"client_ip", clientIP(r),
-				"sandbox_id", labels.SandboxID,
-				"sandbox_namespace", labels.SandboxNamespace,
-				"bytes_out", rec.bytes,
-				"user_agent", r.UserAgent(),
-			)
 		})
 	}
+}
+
+// resolveGRPCStatus reports the terminal gRPC status for one request. The
+// Labels value wins when it holds a valid code: a gRPC-Web response delivers
+// its status inside a body trailer frame, so the response headers the
+// fallback sniffs never carry one. An invalid Labels value falls back rather
+// than poisoning the report.
+func resolveGRPCStatus(labels *Labels, headers http.Header) string {
+	if isValidGRPCStatusCode(labels.GRPCStatusCode) {
+		return labels.GRPCStatusCode
+	}
+	return grpcStatus(headers)
+}
+
+func isValidGRPCStatusCode(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, digit := range value {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	code, err := strconv.Atoi(value)
+	return err == nil && code >= 0 && code <= 16
+}
+
+func grpcStatus(headers http.Header) string {
+	values := headers.Values("Grpc-Status")
+	if len(values) == 0 {
+		values = headers.Values(http.TrailerPrefix + "Grpc-Status")
+	}
+	if len(values) != 1 {
+		return "unknown"
+	}
+	if !isValidGRPCStatusCode(values[0]) {
+		return "unknown"
+	}
+	return values[0]
 }
 
 // SkipHealthAndMetrics is a convenience skip function for the access log

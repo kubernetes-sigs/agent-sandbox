@@ -48,9 +48,12 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 - [type FileEventType](<#FileEventType>)
 - [type FileType](<#FileType>)
 - [type Files](<#Files>)
+  - [func \(f \*Files\) Copy\(ctx context.Context, source, destination string, overwrite bool, opts ...CallOption\) error](<#Files.Copy>)
   - [func \(f \*Files\) Delete\(ctx context.Context, path string, recursive bool, opts ...CallOption\) error](<#Files.Delete>)
   - [func \(f \*Files\) Exists\(ctx context.Context, path string, opts ...CallOption\) \(bool, error\)](<#Files.Exists>)
   - [func \(f \*Files\) List\(ctx context.Context, path string, opts ...CallOption\) \(\[\]FileEntry, error\)](<#Files.List>)
+  - [func \(f \*Files\) Mkdir\(ctx context.Context, path string, parents bool, opts ...CallOption\) error](<#Files.Mkdir>)
+  - [func \(f \*Files\) Move\(ctx context.Context, source, destination string, overwrite bool, opts ...CallOption\) error](<#Files.Move>)
   - [func \(f \*Files\) Read\(ctx context.Context, path string, opts ...CallOption\) \(\[\]byte, error\)](<#Files.Read>)
   - [func \(f \*Files\) ReadTo\(ctx context.Context, path string, destination io.Writer, opts ...CallOption\) \(int64, error\)](<#Files.ReadTo>)
   - [func \(f \*Files\) Write\(ctx context.Context, path string, content \[\]byte, opts ...CallOption\) error](<#Files.Write>)
@@ -83,6 +86,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(s \*Sandbox\) ClaimName\(\) string](<#Sandbox.ClaimName>)
   - [func \(s \*Sandbox\) Close\(ctx context.Context\) error](<#Sandbox.Close>)
   - [func \(s \*Sandbox\) Commands\(\) \*Commands](<#Sandbox.Commands>)
+  - [func \(s \*Sandbox\) Copy\(ctx context.Context, source, destination string, overwrite bool, opts ...CallOption\) error](<#Sandbox.Copy>)
   - [func \(s \*Sandbox\) Delete\(ctx context.Context, path string, recursive bool, opts ...CallOption\) error](<#Sandbox.Delete>)
   - [func \(s \*Sandbox\) Disconnect\(ctx context.Context\) error](<#Sandbox.Disconnect>)
   - [func \(s \*Sandbox\) Exists\(ctx context.Context, path string, opts ...CallOption\) \(bool, error\)](<#Sandbox.Exists>)
@@ -91,6 +95,8 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(s \*Sandbox\) IsReady\(\) bool](<#Sandbox.IsReady>)
   - [func \(s \*Sandbox\) List\(ctx context.Context, path string, opts ...CallOption\) \(\[\]FileEntry, error\)](<#Sandbox.List>)
   - [func \(s \*Sandbox\) Metadata\(ctx context.Context, opts ...CallOption\) \(\*Metadata, error\)](<#Sandbox.Metadata>)
+  - [func \(s \*Sandbox\) Mkdir\(ctx context.Context, path string, parents bool, opts ...CallOption\) error](<#Sandbox.Mkdir>)
+  - [func \(s \*Sandbox\) Move\(ctx context.Context, source, destination string, overwrite bool, opts ...CallOption\) error](<#Sandbox.Move>)
   - [func \(s \*Sandbox\) Open\(ctx context.Context\) \(retErr error\)](<#Sandbox.Open>)
   - [func \(s \*Sandbox\) PodIP\(\) string](<#Sandbox.PodIP>)
   - [func \(s \*Sandbox\) PodName\(\) string](<#Sandbox.PodName>)
@@ -382,10 +388,25 @@ const (
     //
     // With RuntimeSandboxd the forward targets the sandbox pod itself, which
     // does not work for Kata or gVisor pods: their workload does not listen in
-    // the pod's host-side network namespace. Use an in-cluster mode for those.
+    // the pod's host-side network namespace. Use an in-cluster mode, or
+    // ConnectivityRouterPortForward.
     // RuntimeLegacyPython forwards to the sandbox-router instead and is
     // unaffected.
     ConnectivityPortForward Connectivity = "port-forward"
+
+    // ConnectivityRouterPortForward port-forwards the sandbox-router, which
+    // proxies sandboxd's REST API to SandboxdRESTPort and its gRPC API (Run,
+    // Start, and Watchers) to SandboxdGRPCPort. gRPC needs sandbox-router
+    // v1.0.9 or later. Requires RuntimeSandboxd. The legacy runtime already
+    // uses ConnectivityPortForward for the same tunnel. This is the laptop or
+    // CI path for Kata and gVisor sandboxes, which pod port-forward cannot
+    // reach.
+    //
+    // The router strips the Authorization header, so sandboxd rejects every
+    // routed call except GET /v1/health when it runs with --auth-token-*
+    // (#2102). The router also caps each REST request at its ProxyTimeout
+    // (default 180s), so raise ProxyTimeout for longer file transfers.
+    ConnectivityRouterPortForward Connectivity = "router-port-forward"
     // ConnectivityInClusterService dials the Sandbox's headless Service by
     // its in-cluster DNS name (Status.ServiceFQDN), taking the apiserver —
     // and, for RuntimeLegacyPython, the sandbox-router, off the data path.
@@ -645,6 +666,15 @@ type Files struct {
 }
 ```
 
+<a name="Files.Copy"></a>
+#### func \(\*Files\) [Copy](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go>)
+
+```go
+func (f *Files) Copy(ctx context.Context, source, destination string, overwrite bool, opts ...CallOption) error
+```
+
+Copy copies the file or directory at source to destination, with the same destination rules, retry behavior, and runtime support as Move.
+
 <a name="Files.Delete"></a>
 #### func \(\*Files\) [Delete](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go>)
 
@@ -673,6 +703,28 @@ func (f *Files) List(ctx context.Context, path string, opts ...CallOption) ([]Fi
 ```
 
 List returns the contents of a directory in the sandbox.
+
+<a name="Files.Mkdir"></a>
+#### func \(\*Files\) [Mkdir](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go>)
+
+```go
+func (f *Files) Mkdir(ctx context.Context, path string, parents bool, opts ...CallOption) error
+```
+
+Mkdir creates a directory in the sandbox. It succeeds when the directory already exists, so it retries like Delete. When parents is false, a missing parent directory fails with a 404 HTTPError.
+
+Only supported by the sandboxd runtime.
+
+<a name="Files.Move"></a>
+#### func \(\*Files\) [Move](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go>)
+
+```go
+func (f *Files) Move(ctx context.Context, source, destination string, overwrite bool, opts ...CallOption) error
+```
+
+Move renames the file or directory at source to destination, creating missing parent directories of destination. An existing destination fails with a 409 HTTPError unless overwrite is true, which replaces a file but never a directory.
+
+Move does not retry unless WithMaxAttempts is set, because a repeat after a lost response fails with 404. Only supported by the sandboxd runtime.
 
 <a name="Files.Read"></a>
 #### func \(\*Files\) [Read](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go>)
@@ -901,17 +953,18 @@ type Options struct {
     AdoptExisting bool
 
     // Runtime selects the in-sandbox runtime API. Default: RuntimeLegacyPython.
-    // RuntimeSandboxd talks to the sandbox pod rather than the sandbox-router,
-    // so GatewayName is not supported with it. APIURL remains available as an
-    // advanced/testing escape hatch for the REST endpoint only: Run needs the
-    // gRPC endpoint and returns ErrUnsupportedByRuntime with it.
+    // RuntimeSandboxd talks to sandboxd on the sandbox pod, so GatewayName is
+    // not supported with it. APIURL remains available as an advanced/testing
+    // escape hatch for the REST endpoint only: Run needs the gRPC endpoint and
+    // returns ErrUnsupportedByRuntime with it.
     Runtime Runtime
 
     // Connectivity selects the transport. Default: ConnectivityPortForward.
     //
     // The in-cluster values conflict with both GatewayName and APIURL, and
     // require that this process runs inside the same cluster as the sandbox
-    // pods.
+    // pods. ConnectivityRouterPortForward also conflicts with GatewayName and
+    // APIURL.
     Connectivity Connectivity
 
     // SandboxdRESTPort is the pod port of sandboxd's Filesystem & Runtime
@@ -925,6 +978,10 @@ type Options struct {
     // Namespace where the SandboxClaim will be created. Default: "default".
     // Must be a valid Kubernetes DNS label (lowercase, [a-z0-9-]).
     Namespace string
+
+    // RouterNamespace is where port-forward modes find sandbox-router-svc
+    // (shipped manifests use "agent-sandbox-system"). Default: Namespace.
+    RouterNamespace string
 
     // GatewayName enables Gateway mode. The client watches this Gateway resource
     // for an external IP, then routes through the sandbox-router.
@@ -1049,6 +1106,14 @@ type Options struct {
     // pod IP is available. Use in environments with strict network policies,
     // service meshes, or secure overlays where direct pod-to-pod IP routing is
     // restricted but service-based DNS routing works correctly.
+    //
+    // ConnectivityRouterPortForward sends X-Sandbox-Pod-IP by default, which
+    // makes the router dial the stored pod IP directly and skip its cache and
+    // DNS lookup. If the sandbox pod was rescheduled, that stale IP may now
+    // belong to another pod. Set DisablePodIPRouting: true when the router runs
+    // with --cache-enabled or the Sandbox has a headless Service
+    // (spec.service: true), so the router resolves the live pod by cache or
+    // DNS instead.
     // Note: this only affects router-based transports that send X-Sandbox-* headers.
     // Default: false (header is sent when router headers are enabled and a pod IP is present).
     DisablePodIPRouting bool
@@ -1237,6 +1302,15 @@ func (s *Sandbox) Commands() *Commands
 
 Commands returns the command execution sub\-object.
 
+<a name="Sandbox.Copy"></a>
+#### func \(\*Sandbox\) [Copy](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
+
+```go
+func (s *Sandbox) Copy(ctx context.Context, source, destination string, overwrite bool, opts ...CallOption) error
+```
+
+Copy copies a file or directory \(sandboxd runtime only\). See Files.Copy.
+
 <a name="Sandbox.Delete"></a>
 #### func \(\*Sandbox\) [Delete](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
 
@@ -1308,6 +1382,24 @@ func (s *Sandbox) Metadata(ctx context.Context, opts ...CallOption) (*Metadata, 
 ```
 
 Metadata returns the workload\-scoped configuration sandboxd serves from GET /v1/metadata \(sandboxd runtime only; the legacy python\-runtime returns ErrUnsupportedByRuntime\). It does not retry unless WithMaxAttempts is set. Not part of the Handle interface to avoid breaking existing implementers.
+
+<a name="Sandbox.Mkdir"></a>
+#### func \(\*Sandbox\) [Mkdir](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
+
+```go
+func (s *Sandbox) Mkdir(ctx context.Context, path string, parents bool, opts ...CallOption) error
+```
+
+Mkdir creates a directory, and its missing parents when parents is true \(sandboxd runtime only\). See Files.Mkdir.
+
+<a name="Sandbox.Move"></a>
+#### func \(\*Sandbox\) [Move](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
+
+```go
+func (s *Sandbox) Move(ctx context.Context, source, destination string, overwrite bool, opts ...CallOption) error
+```
+
+Move renames a file or directory \(sandboxd runtime only\). See Files.Move.
 
 <a name="Sandbox.Open"></a>
 #### func \(\*Sandbox\) [Open](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)

@@ -32,7 +32,10 @@ from k8s_agent_sandbox.files.filesystem import (
     _multipart_framing,
     _read_binary_chunk,
     _STREAM_CHUNK_SIZE,
+    _mkdir_endpoint,
     _sandboxd_files_endpoint,
+    _sandboxd_op_endpoint,
+    _transfer_endpoint,
     _validate_binary_stream,
 )
 from k8s_agent_sandbox.models import FileEntry, SandboxFileConfig
@@ -407,15 +410,50 @@ class AsyncFilesystem:
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
-        if not self.connector.is_sandboxd():
-            raise NotImplementedError(
-                "delete() is only supported by the sandboxd runtime; the legacy "
-                "python-runtime has no delete endpoint"
-            )
-        if path == "":
-            raise ValueError("delete: path must not be empty")
-        endpoint = _sandboxd_files_endpoint(path)
-        if recursive:
-            endpoint += "?recursive=true"
+        endpoint = _sandboxd_op_endpoint(
+            self.connector, "delete", path,
+            query={"recursive": "true"} if recursive else None)
         await self.connector.send_request("DELETE", endpoint, timeout=timeout)
         logger.info(f"Path '{path}' deleted successfully.")
+
+    @async_trace_span("mkdir")
+    async def mkdir(
+        self, path: str, parents: bool = False, timeout: int = 60
+    ) -> None:
+        """Create a sandboxd directory, and its missing parents if ``parents``.
+
+        Succeeds if the directory already exists. The legacy runtime raises
+        ``NotImplementedError``.
+        """
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", path)
+        endpoint = _mkdir_endpoint(self.connector, path, parents)
+        await self.connector.send_request("PUT", endpoint, timeout=timeout)
+        logger.info(f"Directory '{path}' created successfully.")
+
+    @async_trace_span("move")
+    async def move(
+        self, source: str, destination: str, overwrite: bool = False, timeout: int = 60
+    ) -> None:
+        """Rename a sandboxd file or directory. See ``Filesystem.move``."""
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", source)
+        endpoint = _transfer_endpoint(
+            self.connector, "move", source, destination, overwrite)
+        await self.connector.send_request("POST", endpoint, timeout=timeout)
+        logger.info(f"Path '{source}' moved to '{destination}'.")
+
+    @async_trace_span("copy")
+    async def copy(
+        self, source: str, destination: str, overwrite: bool = False, timeout: int = 60
+    ) -> None:
+        """Copy a sandboxd file or directory. See ``Filesystem.move``."""
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", source)
+        endpoint = _transfer_endpoint(
+            self.connector, "copy", source, destination, overwrite)
+        await self.connector.send_request("POST", endpoint, timeout=timeout)
+        logger.info(f"Path '{source}' copied to '{destination}'.")

@@ -14,6 +14,46 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
   cluster's `ApiClient`, so no build loads a kubeconfig. Requires
   `k8s-agent-sandbox>=1.0.6`.
 
+### Added (external step loops and multi-container pods —
+[#1960](https://github.com/kubernetes-sigs/agent-sandbox/pull/1960), [#1962](https://github.com/kubernetes-sigs/agent-sandbox/pull/1962), [#1963](https://github.com/kubernetes-sigs/agent-sandbox/pull/1963), [#1964](https://github.com/kubernetes-sigs/agent-sandbox/pull/1964),
+[#1966](https://github.com/kubernetes-sigs/agent-sandbox/pull/1966), [#1967](https://github.com/kubernetes-sigs/agent-sandbox/pull/1967))
+- **Exec in a chosen container** ([#1960](https://github.com/kubernetes-sigs/agent-sandbox/pull/1960)): `SandboxHandle.target_container`,
+  `exec(container=)` / `open_session(container=)` and `SandboxHandle.runtime_container`
+  pick the container of a multi-container pod; a container is always named (the exec
+  API has no default on such a pod) and recycling stays in the runtime container. The
+  R2E-Gym adapter takes `container=` in `make_fleet_repo_env` / `FleetDockerRuntime`.
+- **OpenHands agent-server preset** ([#1962](https://github.com/kubernetes-sigs/agent-sandbox/pull/1962)):
+  `adapters.openhands.agent_server_template(...)` returns the `TemplateSpec` of an
+  OpenHands pool (server command and probes, a required session key, bounded
+  resources, `server_image=` to copy the server into a plain repo image).
+- **`LookaheadWarmer`** ([#1963](https://github.com/kubernetes-sigs/agent-sandbox/pull/1963)): `agent_sandbox_rl.lookahead` sizes pools for
+  the batches an external step loop has in flight (`add` / `finish` / `add_async` /
+  `close`, errors per image in a `WarmReport`). `SandboxFleet.add_tasks` extends the
+  plan in place and `wait_pools_ready` is a best-effort readiness barrier.
+- **Dataset rows and image manifests as task sources** ([#1964](https://github.com/kubernetes-sigs/agent-sandbox/pull/1964)): `to_tasks` /
+  `JsonlSource` find a row's image and id under the SDK, R2E-Gym and SWE-bench
+  conventions (`image_field=` / `id_field=`); `load_image_list` / `ImageListSource` read
+  one-image-per-line manifests from a local path or `gs://`.
+- **Verified teardown** ([#1966](https://github.com/kubernetes-sigs/agent-sandbox/pull/1966)): `teardown(verify=True)` / `verify_teardown()`
+  run the run-scoped reaper after the sweep and return `{cluster: counts}`: what the
+  reaper found per kind (all zero = the teardown was clean) plus `remaining`, the same
+  kinds re-listed after the reaper ran.
+- **Test double** ([#1967](https://github.com/kubernetes-sigs/agent-sandbox/pull/1967)): `agent_sandbox_rl.testing.FakeFleet` / `FakeHandle`
+  are the `SandboxFleet` surface in memory (`add_tasks` and `wait_pools_ready`
+  included, so a `LookaheadWarmer` runs against it), with the real strategies,
+  sizing and `RunReport`, `exec(container=)` recorded per call, injectable failures
+  and exec outputs.
+
+### Changed (pre-pull at hundreds of images — [#1965](https://github.com/kubernetes-sigs/agent-sandbox/pull/1965))
+- **`prepull` batches**: images are split into DaemonSets of `prepull_images_per_pod`
+  images (default 25); with `wait=True` at most `prepull_max_parallel` (default 4) are
+  live at once, `prepull_delete_when_done` removes finished batches,
+  `prepull_drop_caches` drops the page cache afterwards, and `fleet.prepull` returns
+  whether every cluster finished within the budget. With `wait=False` every batch is
+  created at once and the call returns immediately, without those steps. Tolerations
+  and runtime class come from the template, and the selector no longer carries the
+  run id (it is immutable).
+
 ### Added (template knobs for multi-container, hardened sandbox pods)
 - **`ResourceSpec.cpu_limit` / `memory_limit`**: optional limits on the runtime
   container (requests unchanged; an unset limit stays unlimited).
@@ -154,9 +194,6 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
   empty.
 - **`reap("")`** and `--run-id ""` are rejected; an empty id used to select every
   managed run.
-- The core SDK's `SandboxClient.delete_sandbox` (sync and async) forgets an
-  explicitly named claim once it is deleted. `acquire()` names its claims, and
-  the set used to grow by one per claim for the life of the process.
 - `OwnedByAnotherRunError` is now exported from the package root.
 
 ### Fixed

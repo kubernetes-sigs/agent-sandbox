@@ -115,12 +115,19 @@ def fetch_prs_data(pr_numbers):
 
 
 def get_contributors(prs_data):
-    """Extracts verified GitHub handles of all PR authors."""
+    """Extracts verified GitHub handles of all human PR authors.
+
+    Bot authors are skipped: gh marks them with is_bot and reports logins such
+    as "app/dependabot", which are not GitHub handles.
+    """
     contributors = set()
     for data in prs_data.values():
-        author = data.get("author", {}).get("login")
-        if author:
-            contributors.add(f"@{author}")
+        author = data.get("author") or {}
+        if author.get("is_bot"):
+            continue
+        login = author.get("login")
+        if login:
+            contributors.add(f"@{login}")
     return sorted(list(contributors))
 
 

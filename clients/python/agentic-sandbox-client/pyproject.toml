@@ -53,9 +53,10 @@ root = "../../.."
 [project.optional-dependencies]
 async = [
     "httpx",
-    "kubernetes_asyncio<34.0.0",
+    "certifi",
+    "kubernetes_asyncio<37.0.0",
 ]
-# Required for the sandboxd runtime (pod tunnel or direct in-cluster):
+# Required for the sandboxd runtime (Pod/router tunnel or direct in-cluster):
 # command execution runs over gRPC ProcessService. The generated process stubs
 # validate a protobuf runtime of at least 7.36.1. The legacy python-runtime
 # needs none of this.
@@ -68,15 +69,19 @@ test = [
     "pytest-xdist",
     "pytest-asyncio",
     "httpx",
-    "kubernetes_asyncio<34.0.0",
+    "certifi",
+    "kubernetes_asyncio<37.0.0",
     "mypy~=1.14",
     # Exercise real gRPC channels and authentication interceptors in unit tests.
     "grpcio>=1.83.0",
+    # The vendored ProcessService stubs need a protobuf runtime; without it the
+    # sandboxd gRPC tests skip themselves instead of running.
+    "protobuf>=7.36.1",
 ]
 tracing = [
-    "opentelemetry-api>=1.39,<1.42",
-    "opentelemetry-sdk>=1.39,<1.42",
-    "opentelemetry-exporter-otlp>=1.39,<1.42",
+    "opentelemetry-api>=1.39,<1.46",
+    "opentelemetry-sdk>=1.39,<1.46",
+    "opentelemetry-exporter-otlp>=1.39,<1.46",
     "opentelemetry-instrumentation-requests~=0.60b0",
 ]
 

@@ -42,7 +42,7 @@ metrics = ["prometheus-client"]
 # R2E-Gym (for adapters.r2egym) is not on PyPI — install it from its checkout
 # (`pip install -e path/to/R2E-Gym`); the adapter raises a clear error if it's
 # missing. So there's intentionally no `r2egym` extra here.
-async = ["k8s-agent-sandbox[async]", "kubernetes_asyncio<34.0.0"]
+async = ["k8s-agent-sandbox[async]", "kubernetes_asyncio<37.0.0"]
 tracing = [
     "opentelemetry-api~=1.39",
     "opentelemetry-sdk~=1.39",

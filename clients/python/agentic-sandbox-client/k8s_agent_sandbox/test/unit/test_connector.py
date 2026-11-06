@@ -17,8 +17,11 @@
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
+import textwrap
 import threading
 import time
 import unittest
@@ -37,6 +40,7 @@ from k8s_agent_sandbox.connector import (
     LocalTunnelConnectionStrategy,
     InClusterConnectionStrategy,
     SandboxdPodTunnelStrategy,
+    SandboxdRouterTunnelStrategy,
     SandboxdInClusterStrategy,
     SandboxConnector,
 )
@@ -53,8 +57,53 @@ from k8s_agent_sandbox.models import (
     SandboxLocalTunnelConnectionConfig,
     SandboxdPodTunnelConnectionConfig,
     SandboxdInClusterConnectionConfig,
+    SandboxdRouterTunnelConnectionConfig,
     SandboxInClusterConnectionConfig,
 )
+
+
+class TestSandboxdRouterTunnel(unittest.TestCase):
+    @patch("k8s_agent_sandbox.connector.subprocess.Popen")
+    @patch.object(LocalTunnelConnectionStrategy, "_preflight_check_router_service")
+    @patch.object(LocalTunnelConnectionStrategy, "_is_port_open", return_value=True)
+    @patch.object(LocalTunnelConnectionStrategy, "_get_free_port", side_effect=[18080, 18081])
+    def test_shared_tunnel_reconnect_and_cleanup(self, free_port, is_open, preflight, popen):
+        processes = [MagicMock(), MagicMock()]
+        for process in processes:
+            process.poll.return_value = None
+        popen.side_effect = processes
+        get_pod_name = MagicMock(side_effect=AssertionError("must target the router"))
+        connector = SandboxConnector(
+            "sandbox", "agents",
+            SandboxdRouterTunnelConnectionConfig(router_namespace="routers", rest_port=8181, grpc_port=9191),
+            SimpleNamespace(injected_api_client=None), get_pod_name=get_pod_name,
+        )
+        try:
+            self.assertIsInstance(connector.strategy, SandboxdRouterTunnelStrategy)
+            self.assertTrue(connector.is_sandboxd())
+            self.assertEqual(connector.connect(), "http://127.0.0.1:18080")
+            first_channel = connector.grpc_channel()
+            self.assertIs(first_channel, connector.grpc_channel())
+            self.assertEqual(connector.connect(), "http://127.0.0.1:18080")
+            popen.assert_called_once_with(
+                ["kubectl", "port-forward", "svc/sandbox-router-svc", "18080:8080", "-n", "routers"],
+                stdout=subprocess.DEVNULL, stderr=connector.strategy._stderr_log,
+            )
+            self.assertIsNotNone(connector.strategy._stderr_log)
+            self.assertEqual(connector.strategy.grpc_target, "127.0.0.1:18080")
+            processes[0].poll.return_value = 1
+            with patch.object(first_channel, "close", wraps=first_channel.close) as close_channel:
+                self.assertEqual(connector.connect(), "http://127.0.0.1:18081")
+                self.assertIsNot(connector.grpc_channel(), first_channel)
+                close_channel.assert_called_once()
+            self.assertEqual(connector.strategy.grpc_target, "127.0.0.1:18081")
+            get_pod_name.assert_not_called()
+        finally:
+            connector.close()
+        for process in processes:
+            process.terminate.assert_called_once()
+        self.assertIsNone(connector.strategy.grpc_target)
+        self.assertIsNone(connector.strategy.port_forward_process)
 
 
 class TestInClusterConnectionStrategy(unittest.TestCase):
@@ -1083,6 +1132,15 @@ class TestLocalTunnelPreflightCheck(unittest.TestCase):
             sandbox_id="my-sandbox", namespace="default", config=config
         )
 
+    def _crashed_popen(self, stderr):
+        def popen(cmd, **kwargs):
+            kwargs["stderr"].write(stderr)
+            process = MagicMock()
+            # poll() returns non-None → process already exited
+            process.poll.return_value = 1
+            return process
+        return popen
+
     @patch("subprocess.run")
     def test_preflight_raises_with_namespace_when_service_not_found(self, mock_run):
         """SandboxPortForwardError must include the searched namespace when service is absent."""
@@ -1185,16 +1243,9 @@ class TestLocalTunnelPreflightCheck(unittest.TestCase):
         # Pre-flight passes, then the Popen process crashes immediately.
         mock_run.return_value = MagicMock(returncode=0, stderr=b"")
         strategy = self._make_strategy(router_namespace="custom-ns")
+        popen = self._crashed_popen(b'error: services "sandbox-router-svc" not found')
 
-        mock_proc = MagicMock()
-        # poll() returns non-None → process already exited
-        mock_proc.poll.return_value = 1
-        mock_proc.communicate.return_value = (
-            b"",
-            b'error: services "sandbox-router-svc" not found',
-        )
-
-        with patch("subprocess.Popen", return_value=mock_proc):
+        with patch("subprocess.Popen", side_effect=popen):
             with patch.object(strategy, "_get_free_port", return_value=19876):
                 with self.assertRaises(SandboxPortForwardError) as ctx:
                     strategy.connect()
@@ -1207,15 +1258,11 @@ class TestLocalTunnelPreflightCheck(unittest.TestCase):
         """A crash unrelated to a missing service must not blame router_namespace."""
         mock_run.return_value = MagicMock(returncode=0, stderr=b"")
         strategy = self._make_strategy(router_namespace="custom-ns")
-
-        mock_proc = MagicMock()
-        mock_proc.poll.return_value = 1
-        mock_proc.communicate.return_value = (
-            b"",
-            b"error: unable to listen on port 19876: address already in use",
+        popen = self._crashed_popen(
+            b"error: unable to listen on port 19876: address already in use"
         )
 
-        with patch("subprocess.Popen", return_value=mock_proc):
+        with patch("subprocess.Popen", side_effect=popen):
             with patch.object(strategy, "_get_free_port", return_value=19876):
                 with self.assertRaises(SandboxPortForwardError) as ctx:
                     strategy.connect()
@@ -1292,7 +1339,7 @@ class TestTunnelKubectlOutput(unittest.TestCase):
 
         kwargs = mock_popen.call_args.kwargs
         self.assertEqual(kwargs["stdout"], subprocess.DEVNULL)
-        self.assertEqual(kwargs["stderr"], subprocess.PIPE)
+        self.assertNotEqual(kwargs["stderr"], subprocess.PIPE)
 
     @patch.object(SandboxdPodTunnelStrategy, "_is_port_open", return_value=True)
     @patch("subprocess.Popen")
@@ -1307,7 +1354,153 @@ class TestTunnelKubectlOutput(unittest.TestCase):
 
         kwargs = mock_popen.call_args.kwargs
         self.assertEqual(kwargs["stdout"], subprocess.DEVNULL)
-        self.assertEqual(kwargs["stderr"], subprocess.PIPE)
+        self.assertNotEqual(kwargs["stderr"], subprocess.PIPE)
+
+    def _closed_when_kubectl_fails_to_start(self, strategy):
+        opened = []
+        real_temporary_file = tempfile.TemporaryFile
+
+        def track_open(*args, **kwargs):
+            log = real_temporary_file(*args, **kwargs)
+            opened.append(log)
+            return log
+
+        with patch(
+            "k8s_agent_sandbox.connector.tempfile.TemporaryFile",
+            side_effect=track_open,
+        ):
+            with self.assertRaises(OSError):
+                strategy.connect()
+
+        self.assertEqual(len(opened), 1)
+        self.assertTrue(opened[0].closed)
+        self.assertIsNone(strategy._stderr_log)
+        self.assertIsNone(strategy.port_forward_process)
+
+    @patch.object(LocalTunnelConnectionStrategy, "_preflight_check_router_service")
+    @patch("subprocess.Popen", side_effect=OSError("kubectl not found"))
+    def test_local_tunnel_closes_stderr_log_when_kubectl_fails_to_start(self, *_):
+        self._closed_when_kubectl_fails_to_start(
+            LocalTunnelConnectionStrategy(
+                "sb", "ns", SandboxLocalTunnelConnectionConfig()
+            )
+        )
+
+    @patch("subprocess.Popen", side_effect=OSError("kubectl not found"))
+    def test_sandboxd_tunnel_closes_stderr_log_when_kubectl_fails_to_start(self, _):
+        self._closed_when_kubectl_fails_to_start(
+            SandboxdPodTunnelStrategy(
+                "sb", "ns", SandboxdPodTunnelConnectionConfig(),
+                get_pod_name=lambda: "sb-pod",
+            )
+        )
+
+
+@unittest.skipIf(sys.platform == "win32", "fake kubectl is a shebang script")
+class TestTunnelKubectlStderr(unittest.TestCase):
+    """kubectl logs a stderr line for every reset forwarded connection without
+    exiting. Once more than a pipe buffer of these is unread, kubectl blocks
+    on the write and stops forwarding."""
+
+    # About 290 bytes per line, like kubectl's "error copying ..." messages.
+    NOISE_LINE = (
+        "E1029 01:02:03.456789 12345 portforward.go:398] error copying from local "
+        "connection to remote stream: writeto tcp6 [::1]:41234->[::1]:8080: "
+        "read tcp6 [::1]:41234->[::1]:8080: read: connection reset by peer"
+        + " " * 80 + "\n"
+    )
+
+    def setUp(self):
+        bin_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, bin_dir, True)
+        script = os.path.join(bin_dir, "kubectl")
+        with open(script, "w") as f:
+            f.write(f"#!{sys.executable}\n" + textwrap.dedent("""
+                import os, re, socket, sys, time
+                sys.stderr.write(os.environ["FAKE_KUBECTL_NOISE"] * 1000)
+                sys.stderr.flush()
+                if os.environ.get("FAKE_KUBECTL_EXIT_ERROR"):
+                    sys.stderr.write(os.environ["FAKE_KUBECTL_EXIT_ERROR"] + "\\n")
+                    sys.exit(1)
+                listeners = []
+                for arg in sys.argv[1:]:
+                    if re.fullmatch(r"\\d+:\\d+", arg):
+                        s = socket.socket()
+                        s.bind(("127.0.0.1", int(arg.split(":")[0])))
+                        s.listen()
+                        listeners.append(s)
+                time.sleep(60)
+            """))
+        os.chmod(script, 0o755)
+        env = {
+            "PATH": bin_dir + os.pathsep + os.environ.get("PATH", ""),
+            "FAKE_KUBECTL_NOISE": self.NOISE_LINE,
+        }
+        patcher = patch.dict(os.environ, env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _local_tunnel(self):
+        strategy = LocalTunnelConnectionStrategy(
+            "sb", "ns", SandboxLocalTunnelConnectionConfig(port_forward_ready_timeout=5)
+        )
+        self.addCleanup(strategy.close)
+        return strategy
+
+    def _sandboxd_tunnel(self):
+        strategy = SandboxdPodTunnelStrategy(
+            "sb", "ns", SandboxdPodTunnelConnectionConfig(port_forward_ready_timeout=5),
+            get_pod_name=lambda: "sb-pod",
+        )
+        self.addCleanup(strategy.close)
+        return strategy
+
+    @patch.object(LocalTunnelConnectionStrategy, "_preflight_check_router_service")
+    def test_local_tunnel_survives_kubectl_stderr_beyond_pipe_buffer(self, _):
+        strategy = self._local_tunnel()
+
+        url = strategy.connect()
+
+        self.assertTrue(url.startswith("http://127.0.0.1:"))
+        strategy.verify_connection()
+        strategy.close()
+        self.assertIsNone(strategy._stderr_log)
+
+    def test_sandboxd_tunnel_survives_kubectl_stderr_beyond_pipe_buffer(self):
+        strategy = self._sandboxd_tunnel()
+
+        url = strategy.connect()
+
+        self.assertTrue(url.startswith("http://127.0.0.1:"))
+        strategy.verify_connection()
+        strategy.close()
+        self.assertIsNone(strategy._stderr_log)
+
+    @patch.object(LocalTunnelConnectionStrategy, "_preflight_check_router_service")
+    def test_local_tunnel_crash_reports_kubectl_final_error(self, _):
+        os.environ["FAKE_KUBECTL_EXIT_ERROR"] = (
+            'error: services "sandbox-router-svc" not found'
+        )
+        strategy = self._local_tunnel()
+
+        with self.assertRaises(SandboxPortForwardError) as ctx:
+            strategy.connect()
+
+        message = str(ctx.exception)
+        self.assertIn('services "sandbox-router-svc" not found', message)
+        self.assertIn("router_namespace", message)
+        self.assertLess(len(message), 64 * 1024)
+
+    def test_sandboxd_tunnel_crash_reports_kubectl_final_error(self):
+        os.environ["FAKE_KUBECTL_EXIT_ERROR"] = "error: lost connection to pod"
+        strategy = self._sandboxd_tunnel()
+
+        with self.assertRaises(SandboxPortForwardError) as ctx:
+            strategy.connect()
+
+        message = str(ctx.exception)
+        self.assertIn("error: lost connection to pod", message)
+        self.assertLess(len(message), 64 * 1024)
 
 
 class TestTunnelTargetsInjectedApiClient(unittest.TestCase):
@@ -1391,7 +1584,6 @@ class TestTunnelTargetsInjectedApiClient(unittest.TestCase):
     def test_local_tunnel_removes_kubeconfig_when_port_forward_crashes(self, mock_popen, _):
         process = MagicMock()
         process.poll.return_value = 1
-        process.communicate.return_value = (b"", b"boom")
         calls = []
 
         def popen(cmd, **kwargs):
@@ -1445,6 +1637,7 @@ class TestTunnelTargetsInjectedApiClient(unittest.TestCase):
         for config, expected in (
             (SandboxLocalTunnelConnectionConfig(), LocalTunnelConnectionStrategy),
             (SandboxdPodTunnelConnectionConfig(), SandboxdPodTunnelStrategy),
+            (SandboxdRouterTunnelConnectionConfig(), SandboxdRouterTunnelStrategy),
         ):
             connector = SandboxConnector(
                 sandbox_id="sb", namespace="ns", connection_config=config, k8s_helper=helper,

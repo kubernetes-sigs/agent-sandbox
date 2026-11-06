@@ -635,6 +635,27 @@ func TestValidate(t *testing.T) {
 			wantErr: "authz-trust-forwarded-proto has no effect without --authz-cookie-name",
 		},
 		{
+			name: "malformed grpc-web allowed origin",
+			mut: func(c *Config) {
+				c.GRPCWebAllowedOrigins = []string{"not-a-valid-origin"}
+			},
+			wantErr: "grpc-web-allowed-origins",
+		},
+		{
+			name: "grpc-web allowed origin with a path is rejected",
+			mut: func(c *Config) {
+				c.GRPCWebAllowedOrigins = []string{"https://example.com/some/path"}
+			},
+			wantErr: "grpc-web-allowed-origins",
+		},
+		{
+			name: "valid grpc-web allowed origins",
+			mut: func(c *Config) {
+				c.GRPCWebAllowedOrigins = []string{"https://app.example.com", "https://app.example.com:8443"}
+			},
+			wantErr: "",
+		},
+		{
 			name: "valid browser-session configuration behind a TLS-terminating proxy",
 			mut: func(c *Config) {
 				c.PathRoutingPrefix = "/router"

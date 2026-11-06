@@ -30,15 +30,20 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// Timeouts applied to every listener unless Options overrides them.
+const (
+	defaultReadHeaderTimeout = 10 * time.Second
+	defaultIdleTimeout       = 120 * time.Second
+)
+
 // Server bundles the four HTTP listeners and their shared lifecycle.
 type Server struct {
 	log    logr.Logger
 	probes *Probes
 
-	proxy     *http.Server // plain HTTP proxy listener (optional)
-	proxyTLS  *http.Server // HTTPS proxy listener (optional)
-	metrics   *http.Server // /metrics endpoint
-	healthSrv *http.Server // /healthz, /readyz
+	proxy    *http.Server // plain HTTP proxy listener (optional)
+	proxyTLS *http.Server // HTTPS proxy listener (optional)
+	metrics  *http.Server // /metrics endpoint
 
 	shutdownTimeout time.Duration
 }
@@ -52,7 +57,6 @@ type Options struct {
 	HTTPAddr         string
 	HTTPSAddr        string
 	MetricsAddr      string
-	ProbeAddr        string
 	TLSConfig        *tls.Config
 	MetricsTLSConfig *tls.Config
 	ShutdownTimeout  time.Duration
@@ -80,10 +84,10 @@ func New(o Options) (*Server, error) {
 
 	// Default tuning that mirrors net/http best practice for public listeners.
 	if o.ReadHeaderTimeout == 0 {
-		o.ReadHeaderTimeout = 10 * time.Second
+		o.ReadHeaderTimeout = defaultReadHeaderTimeout
 	}
 	if o.IdleTimeout == 0 {
-		o.IdleTimeout = 120 * time.Second
+		o.IdleTimeout = defaultIdleTimeout
 	}
 
 	s := &Server{
@@ -91,9 +95,14 @@ func New(o Options) (*Server, error) {
 		probes:          o.Probes,
 		shutdownTimeout: o.ShutdownTimeout,
 	}
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetHTTP2(true)
+	protocols.SetUnencryptedHTTP2(true)
 
 	if o.HTTPAddr != "" {
 		s.proxy = &http.Server{
+			Protocols:         protocols,
 			Addr:              o.HTTPAddr,
 			Handler:           o.ProxyHandler,
 			ReadHeaderTimeout: o.ReadHeaderTimeout,
@@ -102,6 +111,7 @@ func New(o Options) (*Server, error) {
 	}
 	if o.HTTPSAddr != "" {
 		s.proxyTLS = &http.Server{
+			Protocols:         protocols,
 			Addr:              o.HTTPSAddr,
 			Handler:           o.ProxyHandler,
 			TLSConfig:         o.TLSConfig,
@@ -120,15 +130,42 @@ func New(o Options) (*Server, error) {
 			IdleTimeout:       o.IdleTimeout,
 		}
 	}
-	if o.ProbeAddr != "" {
-		s.healthSrv = &http.Server{
-			Addr:              o.ProbeAddr,
-			Handler:           o.Probes.Mux(),
-			ReadHeaderTimeout: o.ReadHeaderTimeout,
-			IdleTimeout:       o.IdleTimeout,
-		}
-	}
 	return s, nil
+}
+
+// StartProbes serves /healthz and /readyz on addr in the background. It binds
+// synchronously so a bind failure is returned to the caller. Call it before
+// slow startup work (such as the initial cache sync) so liveness answers
+// while readiness is still false. If the listener fails after startup, onErr
+// receives the error so the caller can exit. The returned stop func shuts the
+// listener down; it is safe to defer.
+func StartProbes(addr string, p *Probes, log logr.Logger, onErr func(error)) (stop func(), err error) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen probes on %s: %w", addr, err)
+	}
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           p.Mux(),
+		ReadHeaderTimeout: defaultReadHeaderTimeout,
+		IdleTimeout:       defaultIdleTimeout,
+	}
+	log.Info("listening", "name", "probes", "addr", ln.Addr().String(), "tls", false)
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error(err, "probes server failed")
+			if onErr != nil {
+				onErr(err)
+			}
+		}
+	}()
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Error(err, "probes shutdown")
+		}
+	}, nil
 }
 
 // Run starts every configured listener and blocks until ctx is canceled or a
@@ -143,6 +180,10 @@ func New(o Options) (*Server, error) {
 // On exit Shutdown is called concurrently on every server with a shared
 // shutdownTimeout so one slow listener cannot consume the whole budget.
 func (s *Server) Run(ctx context.Context) error {
+	// Request lifetime is independent of the signal context: cancellation
+	// happens only after the drain window, not when SIGTERM is received.
+	requestCtx, stopRequests := context.WithCancel(context.Background())
+	defer stopRequests()
 	type listener struct {
 		name string
 		srv  *http.Server
@@ -153,7 +194,6 @@ func (s *Server) Run(ctx context.Context) error {
 		{"proxy-http", s.proxy, nil, false},
 		{"proxy-https", s.proxyTLS, nil, true},
 		{"metrics", s.metrics, nil, s.metrics != nil && s.metrics.TLSConfig != nil},
-		{"health", s.healthSrv, nil, false},
 	}
 
 	// Pre-bind every listener synchronously. If any bind fails, close the
@@ -164,6 +204,7 @@ func (s *Server) Run(ctx context.Context) error {
 		if l.srv == nil {
 			continue
 		}
+		l.srv.BaseContext = func(net.Listener) context.Context { return requestCtx }
 		ln, err := net.Listen("tcp", l.srv.Addr)
 		if err != nil {
 			for _, b := range bound {
@@ -224,6 +265,12 @@ func (s *Server) Run(ctx context.Context) error {
 		})
 	}
 	shutWg.Wait()
+	if shutErr != nil {
+		stopRequests()
+		for _, l := range bound {
+			_ = l.srv.Close()
+		}
+	}
 
 	if err := g.Wait(); err != nil {
 		// If a listener failed for any reason other than ErrServerClosed,

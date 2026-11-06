@@ -152,6 +152,8 @@ class FileWatcher:
                 # independent.
                 code = getattr(e, "code", lambda: "UNKNOWN")()
                 details = getattr(e, "details", lambda: str(e))()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    self.connector.invalidate_sandboxd_transport(channel)
                 raise RuntimeError(
                     f"sandboxd file watcher service failed ({code}): {details}"
                 ) from e

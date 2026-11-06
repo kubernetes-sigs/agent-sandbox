@@ -63,6 +63,7 @@ type connector struct {
 	sandboxID           string // sandbox name, used as X-Sandbox-ID header
 	namespace           string
 	serverPort          int
+	sandboxdGRPCPort    int // X-Sandbox-Port for gRPC calls through the sandbox-router
 	baseURL             string
 	podIP               string
 	disablePodIPRouting bool
@@ -73,9 +74,9 @@ type connector struct {
 	// for sandboxd and for any in-cluster dial, which address the pod and so
 	// have nothing to consume them.
 	routerHeaders bool
-	// grpcTarget is the dial address for sandboxd's ProcessService, published
-	// by whichever strategy resolved it (the pod tunnel once the port-forward
-	// is ready, or the in-cluster strategy once the address is known).
+	// grpcTarget is the dial address for sandboxd's gRPC services. The pod
+	// tunnel and in-cluster strategies publish it, and Connect publishes it
+	// for the router port-forward.
 	grpcTarget string
 	grpcConn   *grpc.ClientConn
 
@@ -96,6 +97,7 @@ type connectorConfig struct {
 	Strategy            ConnectionStrategy
 	Namespace           string
 	ServerPort          int
+	SandboxdGRPCPort    int
 	RouterHeaders       bool
 	RequestTimeout      time.Duration
 	PerAttemptTimeout   time.Duration
@@ -124,6 +126,7 @@ func newConnector(cfg connectorConfig) *connector {
 		strategy:            cfg.Strategy,
 		namespace:           cfg.Namespace,
 		serverPort:          cfg.ServerPort,
+		sandboxdGRPCPort:    cfg.SandboxdGRPCPort,
 		routerHeaders:       cfg.RouterHeaders,
 		requestTimeout:      cfg.RequestTimeout,
 		perAttemptTimeout:   cfg.PerAttemptTimeout,
@@ -179,6 +182,11 @@ func (c *connector) Connect(ctx context.Context) error {
 		mode = "gateway"
 	case *tunnelStrategy:
 		mode = "port-forward"
+		if s.routerREST {
+			mode = string(ConnectivityRouterPortForward)
+			// The router serves gRPC on the same port as REST.
+			c.SetGRPCTarget(strings.TrimPrefix(url, "http://"))
+		}
 	case *podTunnelStrategy:
 		mode = "sandboxd-pod-tunnel"
 	case *inClusterStrategy:
@@ -205,11 +213,10 @@ func (c *connector) SetGRPCTarget(target string) {
 	}
 }
 
-// GRPCConn returns a (lazily dialed) client connection to sandboxd's
-// ProcessService. The connection is plaintext, and what protects it depends on
-// the strategy that published the target: podTunnelStrategy traverses an
-// apiserver-authorized port-forward to the pod, while inClusterStrategy sends it
-// across the pod network, where NetworkPolicy (or a mesh) must confine it.
+// GRPCConn returns a lazily dialed, plaintext connection to sandboxd's gRPC
+// services. The pod tunnel and the router port-forward enter the cluster
+// through an apiserver-authorized port-forward. NetworkPolicy or a mesh must
+// confine every hop across the pod network, including the router's.
 func (c *connector) GRPCConn() (*grpc.ClientConn, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -228,13 +235,40 @@ func (c *connector) GRPCConn() (*grpc.ClientConn, error) {
 		}
 		return nil, fmt.Errorf("%s: %w: sandboxd gRPC endpoint not connected", prefix, ErrNotReady)
 	}
-	conn, err := grpc.NewClient(c.grpcTarget, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	if ts, ok := c.strategy.(*tunnelStrategy); ok && ts.routerREST {
+		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(routerRouting{c: c}))
+	}
+	conn, err := grpc.NewClient(c.grpcTarget, dialOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("%s: failed to create gRPC client: %w", prefix, err)
 	}
 	c.grpcConn = conn
 	return conn, nil
 }
+
+// routerRouting sends the X-Sandbox-* headers that the sandbox-router routes
+// by as metadata on every gRPC call.
+type routerRouting struct {
+	c *connector
+}
+
+func (r routerRouting) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
+	r.c.mu.Lock()
+	defer r.c.mu.Unlock()
+	md := map[string]string{
+		strings.ToLower(headerSandboxID):        r.c.sandboxID,
+		strings.ToLower(headerSandboxNamespace): r.c.namespace,
+		strings.ToLower(headerSandboxPort):      strconv.Itoa(r.c.sandboxdGRPCPort),
+	}
+	if r.c.podIP != "" && !r.c.disablePodIPRouting {
+		md[strings.ToLower(headerSandboxPodIP)] = r.c.podIP
+	}
+	return md, nil
+}
+
+// RequireTransportSecurity returns false because GRPCConn dials without TLS.
+func (routerRouting) RequireTransportSecurity() bool { return false }
 
 // Close clears state (so concurrent SendRequests see ErrNotReady
 // immediately) then tears down the strategy.

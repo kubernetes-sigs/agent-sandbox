@@ -201,9 +201,14 @@ router answers `OPTIONS` itself, before any routing or authorization:
   only carry CORS headers when the request itself was gRPC-Web.
 - Responses echo the exact origin with `Access-Control-Allow-Credentials:
   true` (never `*`), so cookie-authenticated deployments
-  (`--authz-cookie-name`) work from the browser too. The cookie credential
-  rides on the `fetch` automatically; the existing cookie origin guard is
-  unchanged and applies on top.
+  (`--authz-cookie-name`) can work from the browser too. The cookie is not
+  attached to a cross-origin call automatically: the browser only sends
+  credentials when the caller opts in — `fetch(url, { credentials:
+  'include' })`, or the credentials option of the gRPC-Web client library in
+  use (the official `grpc-web` client's `withCredentials`) — and only for an
+  origin listed in `--grpc-web-allowed-origins`. Same-origin calls attach the
+  cookie with the default credentials mode. The existing cookie origin guard
+  is unchanged and applies on top.
 
 Remember that every sandbox behind the router shares one origin (see the
 shared-origin caveat under [Browser-session credentials](#browser-session-credentials)):

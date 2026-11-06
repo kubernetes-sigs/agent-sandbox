@@ -345,31 +345,41 @@ func (b *serverBody) Close() error {
 
 // http.Transport closes the request body when it cannot get a connection,
 // so a retry after a dial failure must not hand it a body that is already
-// closed. The upstream starts listening only after the first dial is
-// refused, and must still receive the full body on the retry.
+// closed. The first dial of a real http.Transport is refused, and the
+// upstream must still receive the full body on the retry.
 func TestRetryTransport_RetriesRequestBodyAfterRealDialFailure(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	addr := ln.Addr().String()
-	ln.Close()
 
 	received := make(chan string, 1)
 	srv := &http.Server{Handler: http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		received <- string(b)
 	})}
-	t.Cleanup(func() { srv.Close() })
-
-	onRetry := func(*http.Request, error, int) {
-		if ln, err := net.Listen("tcp", addr); err == nil {
-			go func() { _ = srv.Serve(ln) }()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(ln) }()
+	t.Cleanup(func() {
+		srv.Close()
+		if err := <-serveErr; !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("serve: %v", err)
 		}
+	})
+
+	var dials atomic.Int32
+	var dialer net.Dialer
+	base := &http.Transport{
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			if dials.Add(1) == 1 {
+				return nil, &net.OpError{Op: "dial", Net: network, Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}}
+			}
+			return dialer.DialContext(ctx, network, address)
+		},
 	}
-	base := &http.Transport{}
 	t.Cleanup(base.CloseIdleConnections)
-	tr := newRetryTransport(base, 3, time.Millisecond, 10*time.Millisecond, onRetry)
+	tr := newRetryTransport(base, 3, time.Millisecond, 10*time.Millisecond, nil)
 
 	const payload = `{"command":"echo hi"}`
 	body := &serverBody{r: strings.NewReader(payload)}
@@ -386,6 +396,9 @@ func TestRetryTransport_RetriesRequestBodyAfterRealDialFailure(t *testing.T) {
 	resp.Body.Close()
 	if got := <-received; got != payload {
 		t.Errorf("upstream received body %q, want %q", got, payload)
+	}
+	if got := dials.Load(); got != 2 {
+		t.Errorf("expected 2 dials, got %d", got)
 	}
 	if !body.closed.Load() {
 		t.Error("request body was not closed after a successful round trip")

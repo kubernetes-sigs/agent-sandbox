@@ -22,6 +22,16 @@ import subprocess
 # Where published agent-sandbox images live (see dev/tools/release).
 PUBLISHED_IMAGE_PREFIX = "registry.k8s.io/agent-sandbox/"
 
+# Images that dev/tools/tag-promote-images promotes to registry.k8s.io on
+# release. dev/tools/push-images builds these first.
+IMAGES_TO_PROMOTE = [
+    "agent-sandbox-controller",
+    "chrome-sandbox",
+    "python-runtime-sandbox",
+    "sandbox-router-go",
+    "sandboxd"
+]
+
 
 # Version strings derived from git refs are interpolated unquoted into the
 # Dockerfile's `RUN go build -ldflags="...${GIT_VERSION}..."` instruction. A

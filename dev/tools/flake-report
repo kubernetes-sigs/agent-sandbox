@@ -885,9 +885,16 @@ def find_manual_job_issue(existing_issues, tab):
     """
     pattern = re.compile(r"(?<![\w-])" + re.escape(tab) + r"(?![\w-])")
     for issue in existing_issues:
+        title = issue.get("title", "")
         if "<!-- flake-report:" in issue.get("body", ""):
             continue
-        if pattern.search(issue.get("title", "")):
+        # `[FLAKE] <test> (<tabs>)` is the per-test title form, so an issue
+        # in that form names the tab as the place a test flakes, not as the
+        # thing that flakes.
+        per_test = re.match(r"\[FLAKE\]\s+(\S+)", title)
+        if per_test and per_test.group(1).rstrip(":") != tab:
+            continue
+        if pattern.search(title):
             return issue
     return None
 

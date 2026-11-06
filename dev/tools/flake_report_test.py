@@ -1164,6 +1164,13 @@ class UpdateIssuesJobBreakageTest(unittest.TestCase):
             existing, "periodic-x-large")["number"], 1)
         self.assertEqual(flake_report.find_manual_job_issue(
             [{"number": 3, "body": "", "title": "post-x is flaky (post-x)"}], "post-x")["number"], 3)
+        # A hand-filed per-test flake issue that names the tab as the place
+        # the test flakes is not the job's issue.
+        self.assertIsNone(flake_report.find_manual_job_issue(
+            [{"number": 4, "body": "", "title": "[FLAKE] TestFoo (post-x)"}], "post-x"))
+        self.assertEqual(flake_report.find_manual_job_issue(
+            [{"number": 5, "body": "", "title": "[FLAKE] post-x: job fails intermittently"}],
+            "post-x")["number"], 5)
 
     def test_no_breakages_means_no_failing_test_lookup(self):
         fake_gh, calls = self.gh_stub({})

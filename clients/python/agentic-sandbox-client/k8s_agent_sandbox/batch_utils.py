@@ -37,6 +37,7 @@ from .constants import (
     BATCH_GROUP_LABEL,
     BATCH_ID_LABEL,
     BATCH_LEASE_DURATION_ANNOTATION,
+    BATCH_LEASE_UID_LABEL,
     BATCH_NEXT_ORDINAL_ANNOTATION,
     BATCH_QUORUM_TIMEOUT_ANNOTATION,
     BATCH_WORK_BUDGET_ANNOTATION,
@@ -72,13 +73,11 @@ _GENERATED_BATCH_ID_RANDOM_LENGTH = 11
 
 BATCH_DEFAULT_CREATE_RPS = 50.0
 BATCH_DEFAULT_MAX_IN_FLIGHT = 20
-# A batch runs up to max_in_flight creates at once and needs two more API connections on top.
-# One is for the watch, which keeps its connection open while it streams. The other is for Lease
-# renewals. If the pool is too small, the async client (aiohttp) makes a renewal wait for a free
-# connection, and a long enough wait lets the Lease expire. The sync client renews over its own
-# pool, so it only needs the one for the watch and the second is spare. A full sync pool (urllib3)
-# doesn't make requests wait. It opens one-off connections that close after a single request, so
-# each pays a fresh handshake.
+# A batch runs up to max_in_flight requests at once and needs two more API connections in the shared
+# batch pool: one for the watch stream and one for Lease renewals. If the pool is too small, the
+# async client (aiohttp) makes a renewal wait for a free connection, and a long enough wait lets the
+# Lease expire. A full sync pool (urllib3) doesn't make requests wait; it opens one-off connections
+# that close after a single request, so each pays a fresh handshake.
 BATCH_POOL_HEADROOM = 2
 # How long acquire() waits before re-reading a warm pool's Ready count once callers spend its credit,
 # so a burst of acquires on one pool sends about one GET a second rather than one per acquire.
@@ -365,7 +364,7 @@ def validate_claim_batch_args(
         pools.add(group.warmpool)
 
     labels = dict(labels or {})
-    for reserved in (BATCH_ID_LABEL, BATCH_GROUP_LABEL):
+    for reserved in (BATCH_ID_LABEL, BATCH_LEASE_UID_LABEL, BATCH_GROUP_LABEL):
         if reserved in labels:
             raise ValueError(f"labels must not set {reserved}; claim_batch sets it")
     if labels:
@@ -403,9 +402,19 @@ def group_label_value(warmpool: str) -> str:
     return hashlib.sha256(warmpool.encode()).hexdigest()[:16]
 
 
-def group_label_selector(batch_id: str, warmpool: str) -> str:
-    """Returns the label selector for one group's fill claims."""
-    return f"{BATCH_ID_LABEL}={batch_id},{BATCH_GROUP_LABEL}={group_label_value(warmpool)}"
+def batch_claim_label_selector(batch_id: str, lease_uid: str | None = None) -> str:
+    """Returns the label selector for a batch's claims, scoped to ``lease_uid`` when given."""
+    if lease_uid is None:
+        return f"{BATCH_ID_LABEL}={batch_id}"
+    return f"{BATCH_ID_LABEL}={batch_id},{BATCH_LEASE_UID_LABEL}={lease_uid}"
+
+
+def group_label_selector(batch_id: str, warmpool: str, lease_uid: str | None = None) -> str:
+    """Returns the label selector for one group's claims, scoped to ``lease_uid`` when given."""
+    base = f"{BATCH_ID_LABEL}={batch_id},{BATCH_GROUP_LABEL}={group_label_value(warmpool)}"
+    if lease_uid is None:
+        return base
+    return f"{base},{BATCH_LEASE_UID_LABEL}={lease_uid}"
 
 
 def fill_create_plan(batch_id: str, groups: Sequence[BatchGroup]) -> list[tuple[str, BatchGroup]]:
@@ -524,7 +533,11 @@ def parse_lease_metadata(labels: dict[str, str] | None, annotations: dict[str, s
         ),
         next_ordinal=_parse_int_annotation(annotations, BATCH_NEXT_ORDINAL_ANNOTATION, 0, 0),
         create_rps=create_rps,
-        labels={k: v for k, v in (labels or {}).items() if k not in (BATCH_ID_LABEL, CREATED_BY_LABEL)},
+        labels={
+            k: v
+            for k, v in (labels or {}).items()
+            if k not in (BATCH_ID_LABEL, BATCH_LEASE_UID_LABEL, CREATED_BY_LABEL)
+        },
     )
 
 

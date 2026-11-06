@@ -681,8 +681,8 @@ returning a `SandboxBatch` handle right away. Each `BatchGroup` names a warm poo
 create from it (`size`), and how many of them must become Ready for the group to count (`min_ready`,
 which defaults to `size`). A group with `size=0` creates no claims and gets its members from `acquire()`,
 and `wait_for_quorum()` and `group_outcomes()` skip it. The claims are named `<batch-id>-0` to `<batch-id>-<N-1>`, where `N` is the
-sum of the group sizes. They carry the `agents.x-k8s.io/batch-id` label and the `agents.x-k8s.io/batch-group`
-label, whose value is a hash of the warm pool's name, and are created in the background, paced at `create_rps` creates per second with at most `max_in_flight` in flight.
+sum of the group sizes. They carry the `agents.x-k8s.io/batch-id`, `agents.x-k8s.io/batch-lease-uid`, and `agents.x-k8s.io/batch-group`
+labels (`batch-group` hashes the warm pool's name), and are created in the background, paced at `create_rps` creates per second with at most `max_in_flight` in flight.
 Claims that a pool's Ready sandboxes cover, counted when `claim_batch()` checks the pool, skip `create_rps` pacing because adopting a Ready sandbox starts
 no pod (the count is a snapshot, not a reservation), so only `max_in_flight` bounds them. When the watch observes a claim from a pool start cold before becoming Ready, the batch
 zeroes that pool's credit and defers its next refresh. When the apiserver answers a create with 429, the batch pauses warm-pool
@@ -780,8 +780,8 @@ count as unable to become Ready, so releasing members before a group or the quor
 it unreachable. Read a failed member's `reason` before releasing it. The three methods delete nothing once
 `err()` is set and raise `BatchError`, since the handle may no longer hold the batch's Lease.
 
-`acquire(warmpool, timeout=None)` adds a member from any warm pool in the batch's namespace and blocks until
-it is Ready, for example to replace a member released with `release_member()`. Its claim takes the next unused
+`acquire(warmpool, timeout=None, *, pod_annotations=None)` adds a member from any warm pool in the batch's namespace and blocks until
+it is Ready, for example to replace a member released with `release_member()`. `acquire()` writes non-empty `pod_annotations` to `spec.additionalPodMetadata.annotations` so the controller propagates them onto the sandbox pod. Its claim takes the next unused
 ordinal, so ordinals are never reused, even across `detach()` and `get_batch()`. It isn't one of the initial
 claims, so `events()`, the quorum consumers and `release_not_ready()` leave it alone, but `release_group()` on
 its pool releases it, and its `shutdownTime` counts from its own create. Its create follows the initial
@@ -790,9 +790,11 @@ count from the pool's check and `create_rps` pacing would delay the next create,
 once a second per pool (unless an expired `timeout` cuts a read short before recording it). When the watch observes a claim from a pool start cold before becoming Ready, the batch zeroes that
 pool's credit and defers its next refresh. Its create and pool reads also share `max_in_flight` with
 the initial claims and member deletes. `acquire()` raises `TerminalMemberError` if the create fails or the
-member fails or is deleted before it is Ready, and `BatchTimeoutError` if it isn't Ready within `timeout`,
-which defaults to `quorum_timeout`. Both are `BatchError`, so `except BatchError` catches every runtime
-failure. If it raises, including on a cancellation, `acquire()` drops the member from `members()` and deletes
+member fails or is deleted before it is Ready, and `BatchTimeoutError` if checking an unchecked warm pool
+or getting the member Ready doesn't finish within `timeout`, which defaults to `quorum_timeout`. Both
+subclass `BatchError`, which `acquire()` also raises directly when the handle stops; checking a pool not yet in the batch
+can also raise `SandboxWarmPoolNotFoundError` or `SandboxTemplateNotFoundError` (both `SandboxError`) or a
+Kubernetes API or network error. If it raises, including on a cancellation, `acquire()` drops the member from `members()` and deletes
 its claim unless the claim is already gone, its create was rejected, or `err()` is set. `release_not_ready()`
 and `release()` retry a failed delete, and calling `acquire()` again tries a new claim.
 
@@ -828,11 +830,23 @@ supports all of the above.
 - `err()`: the error that stopped the background watch/renewal, or `None`. Once it is set, no more claims
   are created.
 - `lease_degraded()`: whether Lease renewal is failing, from the first failed renewal until one succeeds.
-- `acquire(warmpool, timeout=None)`, described above.
+- `acquire(warmpool, timeout=None, *, pod_annotations=None)`, described above.
 - `release_member(member)`, `release_group(warmpool)`, and `release_not_ready()`, described above.
 - `release()` deletes the batch's claims, then its Lease. Idempotent. It raises `BatchInUseError` and deletes
   nothing more if another handle holds the batch's Lease.
 - `detach(grace=None)`: stops the background tasks and releases the Lease so another `get_batch` can take over; idempotent.
+
+#### Error handling
+
+Every batch-specific exception (`BatchTimeoutError`, `QuorumUnreachableError`, `TerminalMemberError`,
+`BatchExistsError`, `BatchNotFoundError`, `BatchInUseError`, and `BatchLeaseExpiredError`) subclasses
+`BatchError`, which subclasses `SandboxError`. Most callers catch `except BatchError` for batch
+lifecycle, quorum, timeout, and member failures, catching a specific subclass only when branching on
+that recovery path (such as `BatchTimeoutError` or `QuorumUnreachableError`). Catch `except SandboxError`
+to also cover `SandboxWarmPoolNotFoundError` and `SandboxTemplateNotFoundError` when `claim_batch()` or
+`acquire()` checks a pool, and `SandboxNotReadyError` on `connect()`. Bad arguments raise `ValueError`,
+and direct Kubernetes API or network failures during setup, teardown, or checking an unchecked pool
+propagate `ApiException` or transport errors unchanged, matching single-sandbox `SandboxClient` methods.
 
 #### RBAC
 
@@ -863,12 +877,14 @@ access its mode needs, such as running `kubectl port-forward` in tunnel mode.
 A driver that dies without running any code (`SIGKILL`, an OOM kill, a lost node) never calls `release()`,
 so its claims would hold their sandboxes until their `shutdownTime`. The batch reaper cleans up such
 batches. Each run lists the batch Leases in its namespaces and picks the ones whose `renewTime` is more
-than the Lease's duration plus `--skew-margin` in the past. Once one renew interval (a third of that Lease's
-duration) has passed since the list, it deletes each picked Lease only if it hasn't changed since it was
-read, so a live driver whose clock runs behind is never reaped. Each Lease waits only for its own interval,
-so a batch with a long duration doesn't hold back the others. It deletes no claims itself. Each claim has an
-`ownerReference` to its Lease, so the garbage collector deletes the claims, and their sandboxes, once the
-Lease is gone.
+than the Lease's duration plus `--skew-margin` in the past. Once that Lease's duration has passed since
+the list, it deletes each picked Lease only if it hasn't changed since it was read, so a connected driver
+whose clock runs behind either renews (failing the delete precondition with `409`) or stops locally before
+the delete runs, and a stalled driver has already stopped locally before the delete while clock skew stays
+within `--skew-margin` plus the Lease's duration (minus any in-flight request latency). Runs that find no
+stale Leases exit without waiting, and each picked Lease waits only for its own duration so a long Lease
+never holds back shorter ones. It deletes no claims itself. Each claim has an `ownerReference` to its
+Lease, so the garbage collector deletes the claims, and their sandboxes, once the Lease is gone.
 
 ```bash
 python -m k8s_agent_sandbox.batch_reaper --namespaces team-a,team-b
@@ -879,7 +895,8 @@ It takes `--namespaces` (comma-separated, defaulting to the reaper's own namespa
 (seconds, 60 by default and never below 5) and `--dry-run`, which logs the batches it would reap and
 deletes nothing. It runs once and exits, logging one line per reaped batch, with a non-zero exit code if
 any namespace or Lease failed, so it suits a CronJob that runs every one to two minutes with
-`concurrencyPolicy: Forbid` and an `activeDeadlineSeconds` that covers the wait. A run cut short is
+`concurrencyPolicy: Forbid` and an `activeDeadlineSeconds` that covers the longest Lease duration wait
+plus list and delete slack (for example `600` when running `300`-second Leases). A run cut short is
 harmless, since every step is a delete and the next run starts over.
 
 Bind the reaper's ServiceAccount to this ClusterRole with a RoleBinding in each namespace it reaps, never

@@ -17,8 +17,11 @@
 import asyncio
 import contextlib
 import inspect
+import json
 import logging
+import socket
 import ssl
+import threading
 import time
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -33,6 +36,7 @@ import aiohttp
 from kubernetes_asyncio import client as k8s_client
 
 from k8s_agent_sandbox import async_sandbox_batch, batch_state, batch_utils
+from k8s_agent_sandbox.async_k8s_helper import AsyncK8sHelper
 from k8s_agent_sandbox.async_sandbox_batch import AsyncSandboxBatch
 from k8s_agent_sandbox.async_sandbox_client import AsyncSandboxClient
 from k8s_agent_sandbox.batch_utils import (
@@ -46,6 +50,7 @@ from k8s_agent_sandbox.constants import (
     BATCH_GROUP_SIZE_ANNOTATION,
     BATCH_ID_LABEL,
     BATCH_LEASE_DURATION_ANNOTATION,
+    BATCH_LEASE_UID_LABEL,
     BATCH_NEXT_ORDINAL_ANNOTATION,
     BATCH_QUORUM_TIMEOUT_ANNOTATION,
     BATCH_WORK_BUDGET_ANNOTATION,
@@ -118,6 +123,7 @@ def _make_handle(
     groups=None,
     lease_duration=BATCH_DEFAULT_LEASE_DURATION_SECONDS,
     lease_renewed_at=None,
+    lease_uid="lease-uid",
 ):
     groups = groups if groups is not None else [BatchGroup(warmpool="pool-a", size=1)]
     state = batch_state.BatchState(batch_id, groups)
@@ -130,7 +136,7 @@ def _make_handle(
         holder_identity="host_1234_abcd1234",
         lease_duration=lease_duration,
         list_resource_version="5",
-        lease=_lease(holder_identity="host_1234_abcd1234"),
+        lease=_lease(holder_identity="host_1234_abcd1234", uid=lease_uid),
         lease_renewed_at=time.monotonic() if lease_renewed_at is None else lease_renewed_at,
     )
 
@@ -196,6 +202,10 @@ class TestGetBatchLeaseCases(BaseAsyncBatchClientTest):
         self.mock_k8s_helper.replace_batch_lease = AsyncMock()
         with self.assertRaises(BatchLeaseExpiredError):
             await self.client.get_batch("b1")
+        self.assertEqual(
+            self.mock_k8s_helper.list_sandbox_claim_objects.call_args.args[1],
+            f"{BATCH_ID_LABEL}=b1",
+        )
         self.mock_k8s_helper.replace_batch_lease.assert_not_called()
 
     async def test_live_different_holder_raises_in_use(self):
@@ -217,8 +227,13 @@ class TestGetBatchLeaseCases(BaseAsyncBatchClientTest):
         self.mock_k8s_helper.list_sandbox_claim_objects = AsyncMock(
             return_value=([_claim("b1-0")], "5")
         )
-        self.mock_k8s_helper.replace_batch_lease = AsyncMock()
-        await self.client.get_batch("b1")
+        self.mock_k8s_helper.replace_batch_lease = AsyncMock(return_value=_lease(holder_identity="h1"))
+        handle = await self.client.get_batch("b1")
+        self.assertEqual(
+            self.mock_k8s_helper.list_sandbox_claim_objects.call_args.args[1],
+            f"{BATCH_ID_LABEL}=b1,{BATCH_LEASE_UID_LABEL}=lease-uid",
+        )
+        self.assertEqual(handle._lease_uid, "lease-uid")
         self.mock_k8s_helper.replace_batch_lease.assert_called_once()
 
     async def test_takeover_write_conflict_raises_in_use(self):
@@ -717,7 +732,7 @@ class TestWatcher(BaseAsyncBatchClientTest):
         )
         await handle._watch_loop()
         call_args = self.mock_k8s_helper.watch_sandbox_claims.call_args_list[0]
-        self.assertEqual(call_args.args[1], f"{BATCH_ID_LABEL}=b1234")
+        self.assertEqual(call_args.args[1], f"{BATCH_ID_LABEL}=b1234,{BATCH_LEASE_UID_LABEL}=lease-uid")
 
     async def test_ssl_error_surfaces_through_err_and_stops(self):
         handle = _make_handle(self.client)
@@ -950,6 +965,173 @@ class TestRenewal(BaseAsyncBatchClientTest):
                 self.assertIsInstance(handle.err(), BatchLeaseExpiredError)
                 # A new Lease would get a new UID, so the garbage collector would delete the claims.
                 self.mock_k8s_helper.create_batch_lease.assert_not_called()
+
+    async def test_local_lease_expiry_fences_operations_before_renew_loop_wakes(self):
+        operations = {
+            "connect": lambda h: h.connect("b1-0"),
+            "acquire known pool": lambda h: h.acquire("pool-a"),
+            "acquire unseen pool": lambda h: h.acquire("pool-unseen"),
+            "release_member": lambda h: h.release_member("b1-0"),
+            "release_not_ready": lambda h: h.release_not_ready(),
+            "release_group": lambda h: h.release_group("pool-a"),
+        }
+        for name, call in operations.items():
+            with self.subTest(operation=name):
+                self.mock_k8s_helper.reset_mock()
+                self.mock_k8s_helper.count_live_sandbox_claims.reset_mock()
+                self.mock_sandbox_class.reset_mock()
+                handle = _make_handle(self.client, groups=[BatchGroup(warmpool="pool-a", size=2)])
+                handle._state.upsert_claim(
+                    _claim(
+                        "b1-0",
+                        warmpool="pool-a",
+                        conditions=[{"type": "Ready", "status": "True"}],
+                        sandbox={"name": "sbx-0", "podIPs": ["10.0.0.1"]},
+                    )
+                )
+                handle._state.upsert_claim(_claim("b1-1", warmpool="pool-a"))
+                renew_task = asyncio.create_task(asyncio.sleep(60))
+                handle._renew_task = renew_task
+                handle._lease_expires_at = time.monotonic() - 0.01
+                with self.assertRaises(BatchError) as ctx:
+                    await call(handle)
+                self.assertIsInstance(ctx.exception.__cause__, BatchLeaseExpiredError)
+                self.assertIs(handle.err(), ctx.exception.__cause__)
+                self.assertTrue(handle.lease_degraded())
+                with self.assertRaises(asyncio.CancelledError):
+                    await renew_task
+                self.assertEqual(self.mock_k8s_helper.mock_calls, [])
+                self.assertEqual(self.mock_k8s_helper.count_live_sandbox_claims.await_count, 0)
+                self.mock_sandbox_class.assert_not_called()
+
+    async def test_local_lease_expiry_mid_acquire_and_quorum_wait_fences_handle(self):
+        with self.subTest("pacing_wait"):
+            self.mock_k8s_helper.create_sandbox_claim = AsyncMock()
+            self.mock_k8s_helper.delete_sandbox_claim = AsyncMock()
+            handle = _make_handle(self.client, groups=[BatchGroup(warmpool="pool-a", size=0)])
+            handle._warm_credit.record("pool-a", 0)
+            handle._next_create_at = time.monotonic() + 10.0
+
+            async def expire_during_pacing(_timeout):
+                handle._lease_expires_at = time.monotonic() - 0.01
+                return False
+
+            with patch.object(handle, "_wait_for_stop", side_effect=expire_during_pacing):
+                with self.assertRaises(BatchError) as ctx:
+                    await handle.acquire("pool-a", timeout=60)
+            self.assertIsInstance(ctx.exception.__cause__, BatchLeaseExpiredError)
+            self.mock_k8s_helper.create_sandbox_claim.assert_not_awaited()
+            self.mock_k8s_helper.delete_sandbox_claim.assert_not_awaited()
+
+        with self.subTest("ready_arrived_before_wait_acquired"):
+            handle = _make_handle(self.client, groups=[BatchGroup(warmpool="pool-a", size=0)])
+            handle._warm_credit.record("pool-a", 1)
+
+            async def create_then_expire(claim_name, warmpool, *_args, **_kwargs):
+                handle._state.upsert_claim(
+                    _claim(
+                        claim_name,
+                        warmpool=warmpool,
+                        conditions=[{"type": "Ready", "status": "True"}],
+                        sandbox={"name": "sbx-0", "podIPs": ["10.0.0.1"]},
+                    )
+                )
+                handle._lease_expires_at = time.monotonic() - 0.01
+
+            self.mock_k8s_helper.create_sandbox_claim = AsyncMock(side_effect=create_then_expire)
+            self.mock_k8s_helper.delete_sandbox_claim = AsyncMock()
+            with self.assertRaises(BatchError) as ctx:
+                await handle.acquire("pool-a", timeout=60)
+            self.assertIsInstance(ctx.exception.__cause__, BatchLeaseExpiredError)
+            self.mock_k8s_helper.create_sandbox_claim.assert_awaited_once()
+            self.mock_k8s_helper.delete_sandbox_claim.assert_not_awaited()
+
+        with self.subTest("sleeping_wait_acquired_and_quorum"):
+            self.mock_k8s_helper.create_sandbox_claim = AsyncMock()
+            self.mock_k8s_helper.delete_sandbox_claim = AsyncMock()
+            handle = _make_handle(self.client, groups=[BatchGroup(warmpool="pool-a", size=1)])
+            handle._warm_credit.record("pool-a", 1)
+            handle._lease_expires_at = time.monotonic() + 0.03
+            started = time.monotonic()
+            with self.assertRaises(BatchError) as ctx:
+                await handle.acquire("pool-a", timeout=60)
+            self.assertLess(time.monotonic() - started, 2.0)
+            self.assertIsInstance(ctx.exception.__cause__, BatchLeaseExpiredError)
+            self.mock_k8s_helper.delete_sandbox_claim.assert_not_awaited()
+
+            quorum_handle = _make_handle(self.client, groups=[BatchGroup(warmpool="pool-a", size=1)])
+            quorum_handle._lease_expires_at = time.monotonic() + 0.03
+            started = time.monotonic()
+            with self.assertRaises(BatchError) as ctx:
+                await quorum_handle.wait_for_quorum()
+            self.assertLess(time.monotonic() - started, 2.0)
+            self.assertIsInstance(ctx.exception.__cause__, BatchLeaseExpiredError)
+
+    async def test_late_renewal_after_local_expiry_keeps_lease_degraded_and_error(self):
+        handle = _make_handle(self.client)
+        expired_deadline: list[float] = []
+
+        async def replace_after_local_fence(*_args, **_kwargs):
+            handle._lease_expires_at = time.monotonic() - 0.01
+            expired_deadline.append(handle._lease_expires_at)
+            with self.assertRaises(BatchError):
+                await handle._check_lease_held()
+            return _lease(holder_identity=handle._holder_identity, resource_version="99")
+
+        self.mock_k8s_helper.replace_batch_lease = AsyncMock(side_effect=replace_after_local_fence)
+        self.assertFalse(await handle._renew_once())
+        self.assertTrue(handle.lease_degraded())
+        self.assertIsInstance(handle.err(), BatchLeaseExpiredError)
+        self.assertEqual(handle._lease_expires_at, expired_deadline[0])
+
+    async def test_remaining_lease_budget_caps_claim_and_pool_request_timeouts(self):
+        handle = _make_handle(
+            self.client,
+            groups=[BatchGroup(warmpool="pool-a", size=0)],
+            lease_duration=6,
+        )
+        handle._lease_expires_at = time.monotonic() + 4.0
+        self.mock_k8s_helper.get_sandbox_warmpool = AsyncMock(
+            return_value={
+                "spec": {"sandboxTemplateRef": {"name": "tmpl"}},
+                "status": {"readyReplicas": 1},
+            }
+        )
+        self.mock_k8s_helper.get_sandbox_template = AsyncMock(
+            return_value={"metadata": {"name": "tmpl"}}
+        )
+
+        async def create_ready(claim_name, warmpool, *_args, **_kwargs):
+            async with handle._lock:
+                handle._state.upsert_claim(
+                    _claim(
+                        claim_name,
+                        warmpool=warmpool,
+                        conditions=[{"type": "Ready", "status": "True"}],
+                        sandbox={"name": f"sbx-{claim_name}", "podIPs": ["10.0.0.1"]},
+                    )
+                )
+                handle._wake_acquire(claim_name)
+
+        self.mock_k8s_helper.create_sandbox_claim = AsyncMock(side_effect=create_ready)
+        self.mock_k8s_helper.delete_sandbox_claim = AsyncMock()
+        member = await handle.acquire("pool-unseen", timeout=60)
+        pool_timeout = self.mock_k8s_helper.get_sandbox_warmpool.call_args.kwargs["_request_timeout"]
+        template_timeout = self.mock_k8s_helper.get_sandbox_template.call_args.kwargs[
+            "_request_timeout"
+        ]
+        create_timeout = self.mock_k8s_helper.create_sandbox_claim.call_args.kwargs["_request_timeout"]
+        self.assertGreater(pool_timeout, 0)
+        self.assertLessEqual(pool_timeout, 4.0)
+        self.assertGreater(template_timeout, 0)
+        self.assertLessEqual(template_timeout, 4.0)
+        self.assertGreater(create_timeout, 0)
+        self.assertLessEqual(create_timeout, 4.0)
+
+        await handle.release_member(member)
+        delete_timeout = self.mock_k8s_helper.delete_sandbox_claim.call_args.kwargs["_request_timeout"]
+        self.assertGreater(delete_timeout, 0)
+        self.assertLessEqual(delete_timeout, 4.0)
 
 
 class TestMembers(unittest.TestCase):
@@ -1489,7 +1671,7 @@ class _Cluster:
         h.delete_sandbox_claim = AsyncMock()
         # A Lease no handle holds, so release() takes it for its handle.
         h.read_batch_lease = AsyncMock(return_value=_lease())
-        h.replace_batch_lease = AsyncMock()
+        h.replace_batch_lease = AsyncMock(return_value=_lease())
 
     async def _watch(self, *args, **kwargs):
         try:
@@ -1665,8 +1847,23 @@ class TestClaimBatchSetup(BaseClaimBatchTest):
         # The group label is a hash of the pool name, which other SDKs must compute the same way.
         self.assertEqual(
             [c.kwargs["labels"] for c in calls],
-            [{"team": "rl", BATCH_ID_LABEL: "b1", BATCH_GROUP_LABEL: "8934303dc131d111"}] * 2
-            + [{"team": "rl", BATCH_ID_LABEL: "b1", BATCH_GROUP_LABEL: "574c3c5032ce922a"}],
+            [
+                {
+                    "team": "rl",
+                    BATCH_ID_LABEL: "b1",
+                    BATCH_LEASE_UID_LABEL: "lease-uid",
+                    BATCH_GROUP_LABEL: "8934303dc131d111",
+                }
+            ]
+            * 2
+            + [
+                {
+                    "team": "rl",
+                    BATCH_ID_LABEL: "b1",
+                    BATCH_LEASE_UID_LABEL: "lease-uid",
+                    BATCH_GROUP_LABEL: "574c3c5032ce922a",
+                }
+            ],
         )
         self.assertEqual(
             kwargs["annotations"],
@@ -1729,6 +1926,7 @@ class TestClaimBatchSetup(BaseClaimBatchTest):
         ):
             with self.subTest(name):
                 helper.delete_batch_lease.reset_mock()
+                helper.create_batch_lease.return_value = _lease(resource_version="77")
                 if isinstance(list_result, BaseException):
                     helper.list_sandbox_claim_objects.side_effect = list_result
                 else:
@@ -1737,7 +1935,93 @@ class TestClaimBatchSetup(BaseClaimBatchTest):
                 with self.assertRaises(error):
                     await self.claim()
                 self.assertEqual(helper.delete_batch_lease.call_args.args[:2], ("batch-b1", "default"))
+                self.assertEqual(helper.delete_batch_lease.call_args.kwargs["resource_version"], "77")
         self.assertEqual(self.cluster.created, [])
+
+    async def test_setup_list_deadline_and_fenced_rollback_against_replacement_lease(self):
+        from k8s_agent_sandbox.async_k8s_helper import AsyncK8sHelper
+
+        helper = self.cluster.helper
+        helper.create_batch_lease.return_value = _lease(resource_version="77")
+
+        real_helper = AsyncK8sHelper()
+        real_helper._initialized = True
+        real_helper.coordination_v1_api = MagicMock()
+        real_helper.coordination_v1_api.delete_namespaced_lease = AsyncMock(
+            side_effect=k8s_client.ApiException(status=409)
+        )
+        helper.delete_batch_lease.side_effect = real_helper.delete_batch_lease
+
+        conn_error = aiohttp.ClientConnectionError("connection dropped")
+        for label, exc, ticks, expected_error in (
+            ("timeout before lease expiry", TimeoutError("page timed out"), [100.0, 120.0], TimeoutError),
+            ("transport error before lease expiry", conn_error, [100.0, 120.0], aiohttp.ClientConnectionError),
+            (
+                "deadline timeout at lease expiry",
+                TimeoutError("SandboxClaim list exceeded its deadline"),
+                [100.0, 145.0],
+                BatchLeaseExpiredError,
+            ),
+            ("transport error at lease expiry", conn_error, [100.0, 145.0], BatchLeaseExpiredError),
+        ):
+            with self.subTest(label):
+                real_helper.coordination_v1_api.delete_namespaced_lease.reset_mock()
+                helper.list_sandbox_claim_objects.side_effect = exc
+                with patch("k8s_agent_sandbox.async_sandbox_batch.time.monotonic", side_effect=ticks):
+                    with self.assertRaises(expected_error) as raised:
+                        await self.claim(lease_duration=45)
+                if expected_error is BatchLeaseExpiredError:
+                    self.assertIs(raised.exception.__cause__, exc)
+                self.assertEqual(helper.list_sandbox_claim_objects.call_args.kwargs["deadline"], 145.0)
+                delete_call = real_helper.coordination_v1_api.delete_namespaced_lease.call_args
+                self.assertEqual(delete_call.args[:2], ("batch-b1", "default"))
+                self.assertEqual(delete_call.kwargs["body"].preconditions.resource_version, "77")
+                self.assertEqual(self.client._active_batches, {})
+                helper.watch_sandbox_claims.assert_not_called()
+                helper.replace_batch_lease.assert_not_called()
+                helper.create_sandbox_claim.assert_not_called()
+
+    async def test_setup_lease_expiry_after_list_rolls_back_and_aborts(self):
+        helper = self.cluster.helper
+        helper.create_batch_lease.return_value = _lease(resource_version="77")
+        helper.list_sandbox_claim_objects.side_effect = None
+        helper.list_sandbox_claim_objects.return_value = ([], "7")
+
+        with patch("k8s_agent_sandbox.async_sandbox_batch.time.monotonic", side_effect=[100.0, 145.0]):
+            with self.assertRaises(BatchLeaseExpiredError):
+                await self.claim(lease_duration=45)
+
+        self.assertEqual(helper.list_sandbox_claim_objects.call_args.kwargs["deadline"], 145.0)
+        helper.delete_batch_lease.assert_awaited_once()
+        self.assertEqual(helper.delete_batch_lease.call_args.args[:2], ("batch-b1", "default"))
+        self.assertEqual(helper.delete_batch_lease.call_args.kwargs["resource_version"], "77")
+        self.assertEqual(self.client._active_batches, {})
+        helper.watch_sandbox_claims.assert_not_called()
+        helper.replace_batch_lease.assert_not_called()
+        helper.create_sandbox_claim.assert_not_called()
+
+    async def test_setup_validates_created_lease_resource_version_and_uid(self):
+        helper = self.cluster.helper
+        for rv in (None, ""):
+            with self.subTest(missing_rv=rv):
+                helper.delete_batch_lease.reset_mock()
+                helper.list_sandbox_claim_objects.reset_mock()
+                helper.create_batch_lease.return_value = _lease(resource_version=rv)
+                with self.assertRaisesRegex(BatchError, "no resourceVersion"):
+                    await self.claim()
+                helper.delete_batch_lease.assert_not_awaited()
+                helper.list_sandbox_claim_objects.assert_not_awaited()
+
+        for uid in (None, ""):
+            with self.subTest(missing_uid=uid):
+                helper.delete_batch_lease.reset_mock()
+                helper.list_sandbox_claim_objects.reset_mock()
+                helper.create_batch_lease.return_value = _lease(resource_version="77", uid=uid)
+                with self.assertRaisesRegex(BatchError, "no name or UID"):
+                    await self.claim()
+                helper.list_sandbox_claim_objects.assert_not_awaited()
+                helper.delete_batch_lease.assert_awaited_once()
+                self.assertEqual(helper.delete_batch_lease.call_args.kwargs["resource_version"], "77")
 
 
 class TestClaimBatchCreation(BaseClaimBatchTest):
@@ -2107,6 +2391,7 @@ class TestConsumers(BaseClaimBatchTest):
             batch = await self.claim(
                 [BatchGroup(warmpool="pool-a", size=1), BatchGroup(warmpool="pool-b", size=1)],
                 quorum_timeout=60,
+                lease_duration=120,
             )
             await _wait_until(lambda: len(self.cluster.created) == 2)
             self.assertAlmostEqual(batch._fill_deadline - self.cluster.created[-1][1], 60, delta=0.5)
@@ -2176,7 +2461,12 @@ class TestWaitForQuorum(BaseClaimBatchTest):
         fake_time = SimpleNamespace(monotonic=lambda: time.monotonic() + offset[0])
         with patch.object(async_sandbox_batch, "time", fake_time):
             # At one create per second, b1-1 still waits for its pacing slot when the deadline passes.
-            batch = await self.claim([BatchGroup(warmpool="pool-a", size=2)], create_rps=1, quorum_timeout=60)
+            batch = await self.claim(
+                [BatchGroup(warmpool="pool-a", size=2)],
+                create_rps=1,
+                quorum_timeout=60,
+                lease_duration=120,
+            )
             await _wait_until(lambda: batch._fill_deadline is not None)
             task = await self.wait_in_background(batch)
             offset[0] = 62
@@ -2335,7 +2625,8 @@ class TestRelease(BaseClaimBatchTest):
         await _wait_until(lambda: len(self.cluster.created) == 1)
         await batch.release()
         helper = self.cluster.helper
-        self.assertEqual(helper.create_sandbox_claim.call_args.kwargs["_request_timeout"], 30)
+        create_kwargs = helper.create_sandbox_claim.call_args.kwargs
+        self.assertEqual((create_kwargs["_request_timeout"], create_kwargs["batch"]), (30, True))
         self.assertEqual(helper.delete_sandbox_claims_by_label.call_args.kwargs["_request_timeout"], 90)
         self.assertEqual(helper.count_live_sandbox_claims.call_args.kwargs["_request_timeout"], 90)
         self.assertEqual(helper.delete_batch_lease.call_args.kwargs["_request_timeout"], 30)
@@ -2511,6 +2802,108 @@ class TestRelease(BaseClaimBatchTest):
                 self.assertIs(type(outcomes["second"]), second_error or type(None))
                 self.assertEqual(self.cluster.calls, calls)
 
+    async def test_stalled_release_and_release_group_scope_deletes_to_lease_uid(self):
+        helper = self.cluster.helper
+        pool_a = batch_utils.group_label_value("pool-a")
+        pool_b = batch_utils.group_label_value("pool-b")
+
+        def matches(labels, selector):
+            return all(
+                labels.get(key) == value
+                for term in selector.split(",")
+                for key, value in [term.split("=", 1)]
+            )
+
+        store: dict[str, dict[str, str]] = {}
+
+        async def delete_by_label(namespace, selector, **kwargs):
+            for name in [n for n, lbl in store.items() if matches(lbl, selector)]:
+                del store[name]
+
+        async def count_live(namespace, selector, **kwargs):
+            return sum(1 for lbl in store.values() if matches(lbl, selector))
+
+        def claim_labels(uid, group_hash):
+            return {BATCH_ID_LABEL: "b1", BATCH_LEASE_UID_LABEL: uid, BATCH_GROUP_LABEL: group_hash}
+
+        with self.subTest("release after old Lease was reaped"):
+            store = {
+                "b1-0": claim_labels("uid-1", pool_a),
+                "b1-new-0": claim_labels("uid-2", pool_a),
+            }
+            helper.delete_sandbox_claims_by_label = AsyncMock(side_effect=delete_by_label)
+            helper.count_live_sandbox_claims = AsyncMock(side_effect=count_live)
+            helper.read_batch_lease = AsyncMock(return_value=None)
+            helper.delete_batch_lease = AsyncMock()
+            handle = _make_handle(self.client, lease_uid="uid-1")
+            await handle.release()
+            self.assertEqual(set(store), {"b1-new-0"})
+            helper.delete_batch_lease.assert_not_called()
+
+        with self.subTest("round 1 deletecollection lands after uid-2 claims exist"):
+            store = {"b1-0": claim_labels("uid-1", pool_a)}
+            current_lease = _lease(holder_identity="host_1234_abcd1234", uid="uid-1")
+            helper.read_batch_lease = AsyncMock(side_effect=lambda *a, **k: current_lease)
+            helper.replace_batch_lease = AsyncMock(
+                side_effect=lambda *a, **k: _lease(
+                    holder_identity=a[2].spec.holder_identity, uid="uid-1", resource_version="11"
+                )
+            )
+            helper.count_live_sandbox_claims = AsyncMock(side_effect=count_live)
+            helper.delete_batch_lease = AsyncMock()
+
+            async def delayed_round1_delete(namespace, selector, **kwargs):
+                nonlocal current_lease
+                # While Round 1's deletecollection is in flight, uid-1 is reaped and batch uid-2 starts.
+                current_lease = _lease(
+                    holder_identity="holder-2", uid="uid-2", renew_time=datetime.now(UTC)
+                )
+                store["b1-new-0"] = claim_labels("uid-2", pool_a)
+                await delete_by_label(namespace, selector, **kwargs)
+                # Simulate one uid-1 claim not yet stamped with deletionTimestamp when 504 cuts Round 1 short.
+                store["b1-1"] = claim_labels("uid-1", pool_a)
+                raise k8s_client.ApiException(status=504)
+
+            helper.delete_sandbox_claims_by_label = AsyncMock(side_effect=delayed_round1_delete)
+            handle = _make_handle(self.client, lease_uid="uid-1")
+            with patch.object(batch_utils, "retry_delay", return_value=0):
+                with self.assertRaises(BatchInUseError):
+                    await handle.release()
+            self.assertEqual(set(store), {"b1-1", "b1-new-0"})
+            helper.delete_batch_lease.assert_not_called()
+
+        with self.subTest("release_group scopes deletecollection to lease uid"):
+            store = {
+                "b1-0": claim_labels("uid-1", pool_a),
+                "b1-1": claim_labels("uid-1", pool_b),
+                "b1-new-0": claim_labels("uid-2", pool_a),
+            }
+            helper.delete_sandbox_claims_by_label = AsyncMock(side_effect=delete_by_label)
+            helper.count_live_sandbox_claims = AsyncMock(side_effect=count_live)
+            handle = _make_handle(
+                self.client,
+                groups=[BatchGroup(warmpool="pool-a", size=1), BatchGroup(warmpool="pool-b", size=1)],
+                lease_uid="uid-1",
+            )
+            await handle.release_group("pool-a")
+            self.assertEqual(set(store), {"b1-1", "b1-new-0"})
+
+        for rv in (None, ""):
+            with self.subTest(missing_written_rv=rv):
+                helper.read_batch_lease = AsyncMock(
+                    return_value=_lease(holder_identity="host_1234_abcd1234", uid="uid-1")
+                )
+                helper.replace_batch_lease = AsyncMock(
+                    return_value=_lease(holder_identity="host_1234_abcd1234", uid="uid-1", resource_version=rv)
+                )
+                helper.delete_sandbox_claims_by_label = AsyncMock()
+                helper.delete_batch_lease = AsyncMock()
+                handle = _make_handle(self.client, lease_uid="uid-1")
+                with self.assertRaisesRegex(BatchError, "no resourceVersion"):
+                    await handle.release()
+                helper.delete_sandbox_claims_by_label.assert_not_awaited()
+                helper.delete_batch_lease.assert_not_awaited()
+
 
 class TestReleaseMembers(BaseClaimBatchTest):
 
@@ -2541,7 +2934,10 @@ class TestReleaseMembers(BaseClaimBatchTest):
                 sandbox.close_connection.assert_called_once()
                 self.assertEqual(helper.delete_sandbox_claim.call_count, attempts)
                 kwargs = helper.delete_sandbox_claim.call_args.kwargs
-                self.assertEqual((kwargs["_request_timeout"], kwargs["log_level"]), (30, logging.DEBUG))
+                self.assertEqual(
+                    (kwargs["_request_timeout"], kwargs["log_level"], kwargs["batch"]),
+                    (30, logging.DEBUG, True),
+                )
         with self.assertRaises(ValueError):
             await handle.release_member(MagicMock(claim_name="b1-9"))
 
@@ -2768,7 +3164,7 @@ class TestReleaseMembers(BaseClaimBatchTest):
         helper = self.cluster.helper
         self.assertEqual(
             helper.delete_sandbox_claims_by_label.call_args.args,
-            ("default", f"{BATCH_ID_LABEL}=b1,{BATCH_GROUP_LABEL}=8934303dc131d111"),
+            ("default", f"{BATCH_ID_LABEL}=b1,{BATCH_GROUP_LABEL}=8934303dc131d111,{BATCH_LEASE_UID_LABEL}=lease-uid"),
         )
         await _wait_until(lambda: helper.delete_sandbox_claim.call_count == 1)
         self.assertEqual(helper.delete_sandbox_claim.call_args.args[0], "b1-0")
@@ -3348,7 +3744,12 @@ class TestAcquire(BaseClaimBatchTest):
         # The group label but no group annotations.
         self.assertEqual(
             create.kwargs["labels"],
-            {"team": "rl", BATCH_ID_LABEL: "b1", BATCH_GROUP_LABEL: batch_utils.group_label_value("pool-c")},
+            {
+                "team": "rl",
+                BATCH_ID_LABEL: "b1",
+                BATCH_LEASE_UID_LABEL: "lease-uid",
+                BATCH_GROUP_LABEL: batch_utils.group_label_value("pool-c"),
+            },
         )
         self.assertEqual(create.kwargs["annotations"], {})
         # Its own shutdownTime, counted from its create.
@@ -3490,12 +3891,18 @@ class TestAcquire(BaseClaimBatchTest):
         async def get_warmpool(name, *args, **kwargs):
             checked.append(name)
             if name == "pool-d":
-                await asyncio.sleep(0.08)
-            elif name != "pool-a":
+                return {"spec": {"sandboxTemplateRef": {"name": "tmpl-d"}}}
+            if name != "pool-a":
                 await release_check.wait()
             return {"spec": {"sandboxTemplateRef": {"name": "tmpl"}}}
 
+        async def get_template(name, *args, **kwargs):
+            if name == "tmpl-d":
+                await asyncio.sleep(0.08)
+            return {}
+
         helper.get_sandbox_warmpool.side_effect = get_warmpool
+        helper.get_sandbox_template.side_effect = get_template
         batch = await self.claim()
         await _wait_until(lambda: len(batch.members()) == 2)
         first = asyncio.create_task(batch.acquire("pool-b"))
@@ -3549,7 +3956,14 @@ class TestAcquire(BaseClaimBatchTest):
             await asyncio.wait_for(task, 5)
         self.assertEqual(
             helper.delete_sandbox_claims_by_label.call_args.args,
-            ("default", f"{BATCH_ID_LABEL}=b1,{BATCH_GROUP_LABEL}={batch_utils.group_label_value('pool-b')}"),
+            (
+                "default",
+                (
+                    f"{BATCH_ID_LABEL}=b1,"
+                    f"{BATCH_GROUP_LABEL}={batch_utils.group_label_value('pool-b')},"
+                    f"{BATCH_LEASE_UID_LABEL}=lease-uid"
+                ),
+            ),
         )
         # Its create may have landed after the label delete, so it is also deleted by name.
         self.assertEqual([c.args[0] for c in helper.delete_sandbox_claim.call_args_list], ["b1-2"])
@@ -3892,15 +4306,13 @@ class TestAcquire(BaseClaimBatchTest):
                         if leader_calls == 1:
                             leader_waiting.set()
                             await asyncio.wait_for(follower_waiting.wait(), 5)
-                            async with asyncio.timeout(0.01):
-                                return await orig_in_flight_acquire()
                         return await orig_in_flight_acquire()
 
                     with (
                         patch.object(asyncio, "shield", side_effect=shield_and_signal),
                         patch.object(batch._in_flight, "acquire", side_effect=leader_times_out_after_follower_waits),
                     ):
-                        short_check = asyncio.create_task(batch.acquire("pool-b", timeout=5))
+                        short_check = asyncio.create_task(batch.acquire("pool-b", timeout=0.25))
                         await asyncio.wait_for(leader_waiting.wait(), 5)
                         follower = asyncio.create_task(batch.acquire("pool-b", timeout=5))
                         await asyncio.wait_for(follower_waiting.wait(), 5)
@@ -4196,6 +4608,7 @@ class TestAcquire(BaseClaimBatchTest):
         })
         lease.metadata.labels = {"team": "rl", BATCH_ID_LABEL: "b1", "agents.x-k8s.io/created-by": "python-client"}
         helper.read_batch_lease.return_value = lease
+        helper.replace_batch_lease.return_value = lease
         batch = await self.client.get_batch("b1")
         self.addAsyncCleanup(batch._stop_background_tasks)
         _SteppingDatetime.calls = 0
@@ -4206,7 +4619,12 @@ class TestAcquire(BaseClaimBatchTest):
         self.assertEqual(create.kwargs["lifecycle"]["shutdownTime"], "2026-01-01T01:13:30Z")
         self.assertEqual(
             create.kwargs["labels"],
-            {"team": "rl", BATCH_ID_LABEL: "b1", BATCH_GROUP_LABEL: batch_utils.group_label_value("pool-a")},
+            {
+                "team": "rl",
+                BATCH_ID_LABEL: "b1",
+                BATCH_LEASE_UID_LABEL: "lease-uid",
+                BATCH_GROUP_LABEL: batch_utils.group_label_value("pool-a"),
+            },
         )
         # Paced at the batch's create_rps of 5, so concurrent creates start 0.2s apart.
         await asyncio.gather(batch.acquire("pool-a"), batch.acquire("pool-a"))
@@ -4260,6 +4678,284 @@ class TestAcquire(BaseClaimBatchTest):
         self.assertEqual(member.claim_name, "b1-1")
         self.assertEqual(wakes, ["set"])
         self.assertEqual(batch._acquire_waiters, {})
+
+    async def test_pod_annotations_are_sent_on_create_and_retries_and_omitted_when_empty(self):
+        real_helper = AsyncK8sHelper()
+        bodies: list[dict] = []
+        unavailable = k8s_client.ApiException(status=503)
+        unavailable.headers = {"Retry-After": "0"}
+        retried = False
+
+        async def create_custom_object(**kwargs):
+            nonlocal retried
+            body = kwargs["body"]
+            bodies.append(body)
+            name = body["metadata"]["name"]
+            if name == "b1-1" and not retried:
+                retried = True
+                raise unavailable
+            await self.cluster._create(
+                name,
+                body["spec"]["warmPoolRef"]["name"],
+                kwargs["namespace"],
+                annotations=body["metadata"]["annotations"],
+            )
+            return body
+
+        real_helper.custom_objects_api = MagicMock(
+            create_namespaced_custom_object=AsyncMock(side_effect=create_custom_object)
+        )
+        real_helper._initialized = True
+        self.cluster.helper.create_sandbox_claim.side_effect = real_helper.create_sandbox_claim
+
+        batch = await self.claim([BatchGroup(warmpool="pool-a", size=1)])
+        await _wait_until(lambda: len(batch.members()) == 1)
+        with self.assertRaises(ValueError):
+            await batch.acquire("pool-unseen", pod_annotations={"bad": None})  # type: ignore[dict-item]
+        self.assertEqual([c.args[0] for c in self.cluster.helper.get_sandbox_warmpool.call_args_list], ["pool-a"])
+
+        pin = {"podsnapshot.gke.io/ps-name": "snap-1"}
+        member = await batch.acquire("pool-a", pod_annotations=pin)
+        await batch.acquire("pool-a")
+        await batch.acquire("pool-a", pod_annotations={})
+
+        self.assertEqual(member.claim_name, "b1-1")
+        self.assertEqual([b["metadata"]["name"] for b in bodies], ["b1-0", "b1-1", "b1-1", "b1-2", "b1-3"])
+        for body in bodies[1:3]:
+            self.assertEqual(body["spec"]["additionalPodMetadata"], {"annotations": pin})
+            self.assertNotIn("podsnapshot.gke.io/ps-name", body["metadata"]["annotations"])
+        for body in (bodies[0], bodies[3], bodies[4]):
+            self.assertNotIn("additionalPodMetadata", body["spec"])
+
+    async def test_pool_check_bounds_reads_by_deadline_and_hands_off_on_timeout(self):
+        stop_server = threading.Event()
+        pool_f_release = threading.Event()
+        pool_e_release = threading.Event()
+        self.addCleanup(stop_server.set)
+        self.addCleanup(pool_f_release.set)
+        self.addCleanup(pool_e_release.set)
+        pool_d_started = threading.Event()
+        pool_f_started = threading.Event()
+        pool_e_started = threading.Event()
+        follower_waiting = threading.Event()
+
+        def http_json(payload: dict) -> bytes:
+            raw = json.dumps(payload).encode()
+            return (
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                + f"Content-Length: {len(raw)}\r\nConnection: close\r\n\r\n".encode()
+                + raw
+            )
+
+        def send_pool(conn: socket.socket, template: str) -> None:
+            try:
+                conn.sendall(
+                    http_json(
+                        {
+                            "spec": {"sandboxTemplateRef": {"name": template}},
+                            "status": {"readyReplicas": 1},
+                        }
+                    )
+                )
+            except OSError:
+                pass
+
+        def handle_conn(conn: socket.socket) -> None:
+            with conn:
+                try:
+                    req = conn.recv(4096).decode("latin1")
+                except OSError:
+                    return
+                first_line = req.splitlines()[0] if req else ""
+                path = first_line.split(" ")[1] if " " in first_line else ""
+                name = path.rsplit("/", 1)[-1]
+                if "/sandboxwarmpools/" in path:
+                    if name == "pool-a":
+                        send_pool(conn, "tmpl-a")
+                        return
+                    if name == "pool-c":
+                        stop_server.wait(0.08)
+                        send_pool(conn, "tmpl-c")
+                        return
+                    if name == "pool-d":
+                        pool_d_started.set()
+                        follower_waiting.wait(2.0)
+                        stop_server.wait(0.18)
+                        send_pool(conn, "tmpl-d")
+                        return
+                    if name == "pool-f":
+                        pool_f_started.set()
+                        pool_f_release.wait(1.2)
+                        send_pool(conn, "tmpl-a")
+                        return
+                    if name == "pool-e":
+                        pool_e_started.set()
+                        pool_e_release.wait(1.2)
+                        send_pool(conn, "tmpl-a")
+                        return
+                    if name == "pool-g":
+                        stop_server.wait(0.25)
+                        send_pool(conn, "tmpl-g")
+                        return
+                    stop_server.wait(1.2)
+                    return
+                if name in ("tmpl-a", "tmpl-d"):
+                    conn.sendall(http_json({"metadata": {"name": name}}))
+                    return
+                stop_server.wait(1.2)
+
+        sock = socket.socket()
+        self.addCleanup(sock.close)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(16)
+        host = f"http://127.0.0.1:{sock.getsockname()[1]}"
+
+        def serve() -> None:
+            while not stop_server.is_set():
+                try:
+                    conn, _ = sock.accept()
+                except OSError:
+                    return
+                threading.Thread(target=handle_conn, args=(conn,), daemon=True).start()
+
+        threading.Thread(target=serve, daemon=True).start()
+
+        configuration = k8s_client.Configuration(host=host)
+        injected = k8s_client.ApiClient(configuration=configuration)
+        self.addAsyncCleanup(injected.close)
+        real_helper = AsyncK8sHelper(api_client=injected)
+        helper = self.cluster.helper
+        helper.get_sandbox_warmpool.side_effect = real_helper.get_sandbox_warmpool
+        helper.get_sandbox_template.side_effect = real_helper.get_sandbox_template
+
+        batch = await self.claim(
+            [BatchGroup(warmpool="pool-a", size=1)], max_in_flight=1, lease_duration=60
+        )
+        await _wait_until(lambda: len(batch.members()) == 1)
+
+        # Stalled warm-pool GET respects timeout and releases the sole max_in_flight slot.
+        start = time.monotonic()
+        with self.assertRaisesRegex(
+            BatchTimeoutError, "warm pool 'pool-b' wasn't checked within 0.12s"
+        ):
+            await batch.acquire("pool-b", timeout=0.12)
+        self.assertLess(time.monotonic() - start, 0.45)
+        self.assertEqual([m.claim_name for m in batch.members()], ["b1-0"])
+        self.assertNotIn("pool-b", batch._checked_pools)
+        self.assertEqual(batch._prechecks, {})
+        self.assertFalse(batch._in_flight.locked())
+
+        # Template GET shares the remaining deadline after the warm-pool GET consumes part of it.
+        start = time.monotonic()
+        with self.assertRaisesRegex(
+            BatchTimeoutError, "warm pool 'pool-c' wasn't checked within 0.16s"
+        ):
+            await batch.acquire("pool-c", timeout=0.16)
+        self.assertLess(time.monotonic() - start, 0.45)
+        self.assertNotIn("pool-c", batch._checked_pools)
+
+        # A short-deadline leader cancels check on BatchTimeoutError so a follower takes over.
+        leader = asyncio.create_task(batch.acquire("pool-d", timeout=0.12))
+        await _wait_until(pool_d_started.is_set)
+        follower = asyncio.create_task(batch.acquire("pool-d", timeout=5.0))
+        await asyncio.sleep(0)
+        follower_waiting.set()
+        with self.assertRaisesRegex(
+            BatchTimeoutError, "warm pool 'pool-d' wasn't checked within 0.12s"
+        ):
+            await asyncio.wait_for(leader, timeout=2.0)
+        member = await asyncio.wait_for(follower, timeout=2.0)
+        self.assertEqual((member.claim_name, member.warmpool), ("b1-1", "pool-d"))
+
+        # A follower whose short timeout expires after release_group() raises BatchError, not
+        # BatchTimeoutError, even while the leader's HTTP read is still stalled.
+        leader = asyncio.create_task(batch.acquire("pool-f", timeout=5.0))
+        await _wait_until(pool_f_started.is_set)
+        follower = asyncio.create_task(batch.acquire("pool-f", timeout=0.16))
+        await asyncio.sleep(0)
+        await batch.release_group("pool-f")
+        with self.assertRaisesRegex(
+            BatchError, "warm pool 'pool-f' was released while acquiring"
+        ) as released_ctx:
+            await asyncio.wait_for(follower, timeout=2.0)
+        self.assertNotIsInstance(released_ctx.exception, BatchTimeoutError)
+        pool_f_release.set()
+        with self.assertRaisesRegex(
+            BatchError, "warm pool 'pool-f' was released while acquiring"
+        ):
+            await asyncio.wait_for(leader, timeout=2.0)
+
+        # A follower with a long timeout wakes at _lease_expires_at with BatchError while the
+        # leader's earlier socket read is still stalled.
+        leader = asyncio.create_task(batch.acquire("pool-e", timeout=5.0))
+        await _wait_until(pool_e_started.is_set)
+        batch._lease_expires_at = time.monotonic() + 0.10
+        start = time.monotonic()
+        follower = asyncio.create_task(batch.acquire("pool-e", timeout=5.0))
+        await asyncio.sleep(0)
+        with self.assertRaises(BatchError) as follower_expired:
+            await asyncio.wait_for(follower, timeout=2.0)
+        self.assertLess(time.monotonic() - start, 0.45)
+        self.assertNotIsInstance(follower_expired.exception, BatchTimeoutError)
+        self.assertIsInstance(follower_expired.exception.__cause__, BatchLeaseExpiredError)
+        pool_e_release.set()
+        with self.assertRaises(BatchError) as leader_expired:
+            await asyncio.wait_for(leader, timeout=2.0)
+        self.assertNotIsInstance(leader_expired.exception, BatchTimeoutError)
+        self.assertIsInstance(leader_expired.exception.__cause__, BatchLeaseExpiredError)
+        await batch._stop_background_tasks()
+
+        # The template GET recomputes remaining Lease time after the pool GET spends most of it.
+        b2 = await self.claim(
+            [BatchGroup(warmpool="pool-a", size=0)],
+            batch_id="b2",
+            max_in_flight=1,
+            lease_duration=60,
+        )
+        b2._lease_expires_at = time.monotonic() + 0.32
+        start = time.monotonic()
+        with self.assertRaises(BatchError) as tmpl_expired:
+            await b2.acquire("pool-g", timeout=5.0)
+        self.assertLess(time.monotonic() - start, 0.50)
+        self.assertNotIsInstance(tmpl_expired.exception, BatchTimeoutError)
+        self.assertIsInstance(tmpl_expired.exception.__cause__, BatchLeaseExpiredError)
+        await b2._stop_background_tasks()
+
+        # A leader blocked on a busy max_in_flight slot re-sleeps across an early wakeup and
+        # wakes at _lease_expires_at with BatchError, not BatchTimeoutError.
+        b3 = await self.claim(
+            [BatchGroup(warmpool="pool-a", size=0)],
+            batch_id="b3",
+            max_in_flight=1,
+            lease_duration=60,
+        )
+        orig_b3_acquire = b3._in_flight.acquire
+        slot_calls = 0
+
+        async def wake_early_once():
+            nonlocal slot_calls
+            slot_calls += 1
+            if slot_calls == 1:
+                async with asyncio.timeout(0.01):
+                    return await orig_b3_acquire()
+            return await orig_b3_acquire()
+
+        await orig_b3_acquire()
+        try:
+            b3._lease_expires_at = time.monotonic() + 0.12
+            start = time.monotonic()
+            with (
+                patch.object(b3._in_flight, "acquire", side_effect=wake_early_once),
+                self.assertRaises(BatchError) as slot_expired,
+            ):
+                await b3.acquire("pool-b", timeout=5.0)
+            self.assertGreaterEqual(slot_calls, 2)
+            self.assertLess(time.monotonic() - start, 0.45)
+            self.assertNotIsInstance(slot_expired.exception, BatchTimeoutError)
+            self.assertIsInstance(slot_expired.exception.__cause__, BatchLeaseExpiredError)
+        finally:
+            b3._in_flight.release()
+            await b3._stop_background_tasks()
 
 
 @patch.object(AsyncSandboxBatch, "_start", lambda self: None)

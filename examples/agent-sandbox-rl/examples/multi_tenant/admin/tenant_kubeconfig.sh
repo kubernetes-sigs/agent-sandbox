@@ -14,22 +14,25 @@
 # limitations under the License.
 
 # Write a kubeconfig that acts as one tenant: a short-lived token for the
-# ServiceAccount rl-tenant in namespace rl-<user>, the current cluster's
-# endpoint and CA, and rl-<user> as the default namespace. Run as an admin;
-# hand the file to the user (or the pipeline) that runs run_experiment.py.
+# ServiceAccount rl-tenant in namespace rl-<user>, each cluster's endpoint and
+# CA, and rl-<user> as the default namespace. One context per cluster, named
+# rl-<user>@<ctx> after the admin's context name, so that run_experiment.py
+# derives the same cluster name for every user; the first is the current
+# context. Run as an admin; hand the file to the user (or the pipeline) that
+# runs run_experiment.py.
 #
-#   tenant_kubeconfig.sh <user> [--context ctx] [--duration 8h] [-o ~/.kube/rl-<user>.kubeconfig]
+#   tenant_kubeconfig.sh <user> [--contexts a,b] [--duration 8h] [-o ~/.kube/rl-<user>.kubeconfig]
 set -euo pipefail
 
 user="${1:-}"
 if [[ -z "$user" || "$user" == -* ]]; then
-  sed -n '16,22p' "$0" | sed 's/^# \{0,1\}//'; exit 2
+  sed -n '/^# Write a kubeconfig/,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 2
 fi
 shift
-context=""; duration="8h"; out=""
+contexts=""; duration="8h"; out=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --context) context="$2"; shift 2;;
+    --contexts|--context) contexts="$2"; shift 2;;
     --duration) duration="$2"; shift 2;;
     -o|--out) out="$2"; shift 2;;
     *) echo "unknown flag: $1" >&2; exit 2;;
@@ -38,18 +41,38 @@ done
 out="${out:-$HOME/.kube/rl-$user.kubeconfig}"
 ns="rl-$user"
 
-K=(kubectl)
-if [[ -n "$context" ]]; then K+=(--context "$context"); fi
-ctx="$("${K[@]}" config current-context)"
-if [[ -n "$context" ]]; then ctx="$context"; fi
-cluster="$("${K[@]}" config view -o jsonpath="{.contexts[?(@.name==\"$ctx\")].context.cluster}")"
-server="$("${K[@]}" config view -o jsonpath="{.clusters[?(@.name==\"$cluster\")].cluster.server}")"
-ca="$("${K[@]}" config view --raw -o jsonpath="{.clusters[?(@.name==\"$cluster\")].cluster.certificate-authority-data}")"
-if [[ -z "$ca" ]]; then
-  ca_file="$("${K[@]}" config view --raw -o jsonpath="{.clusters[?(@.name==\"$cluster\")].cluster.certificate-authority}")"
-  ca="$(base64 < "$ca_file" | tr -d '\n')"
-fi
-token="$("${K[@]}" create token rl-tenant -n "$ns" --duration "$duration")"
+IFS=',' read -r -a ctx_list <<< "$contexts"
+if [[ ${#ctx_list[@]} -eq 0 ]]; then ctx_list=("$(kubectl config current-context)"); fi
+
+clusters_yaml=""; users_yaml=""; contexts_yaml=""; first=""
+for ctx in "${ctx_list[@]}"; do
+  K=(kubectl --context "$ctx")
+  cluster="$("${K[@]}" config view -o jsonpath="{.contexts[?(@.name==\"$ctx\")].context.cluster}")"
+  server="$("${K[@]}" config view -o jsonpath="{.clusters[?(@.name==\"$cluster\")].cluster.server}")"
+  ca="$("${K[@]}" config view --raw -o jsonpath="{.clusters[?(@.name==\"$cluster\")].cluster.certificate-authority-data}")"
+  if [[ -z "$ca" ]]; then
+    ca_file="$("${K[@]}" config view --raw -o jsonpath="{.clusters[?(@.name==\"$cluster\")].cluster.certificate-authority}")"
+    ca="$(base64 < "$ca_file" | tr -d '\n')"
+  fi
+  token="$("${K[@]}" create token rl-tenant -n "$ns" --duration "$duration")"
+  name="rl-$user@$ctx"
+  if [[ -z "$first" ]]; then first="$name"; fi
+  clusters_yaml+="  - name: $cluster
+    cluster:
+      server: $server
+      certificate-authority-data: $ca
+"
+  users_yaml+="  - name: $name
+    user:
+      token: $token
+"
+  contexts_yaml+="  - name: $name
+    context:
+      cluster: $cluster
+      user: $name
+      namespace: $ns
+"
+done
 
 # umask covers a new file only; an existing one keeps its mode, so tighten it
 # before the token lands in it.
@@ -59,22 +82,11 @@ cat > "$out" <<YAML
 apiVersion: v1
 kind: Config
 clusters:
-  - name: $cluster
-    cluster:
-      server: $server
-      certificate-authority-data: $ca
-users:
-  - name: rl-tenant-$user
-    user:
-      token: $token
-contexts:
-  - name: rl-$user
-    context:
-      cluster: $cluster
-      user: rl-tenant-$user
-      namespace: $ns
-current-context: rl-$user
+${clusters_yaml}users:
+${users_yaml}contexts:
+${contexts_yaml}current-context: $first
 YAML
-echo "wrote $out (context rl-$user, token valid $duration)"
+names=""; for ctx in "${ctx_list[@]}"; do names+="rl-$user@$ctx "; done
+echo "wrote $out (contexts: ${names}current: $first; tokens valid $duration)"
 echo "  try:  KUBECONFIG=$out kubectl get sandboxclaims        # own namespace: ok"
 echo "        KUBECONFIG=$out kubectl get sandboxclaims -n rl-<other>   # forbidden"

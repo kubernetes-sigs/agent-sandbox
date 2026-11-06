@@ -44,7 +44,7 @@ spec:
             properties:
               readinessGracePeriodSeconds:
                 format: int32
-                minimum: 1
+                minimum: 30
                 type: integer
               replicas:
                 default: 1

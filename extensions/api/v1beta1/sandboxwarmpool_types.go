@@ -74,7 +74,9 @@ type SandboxWarmPoolSpec struct {
 	// Changing this field does not mark existing sandboxes stale. Shortening it
 	// can still replace a non-Ready sandbox that is already older than the new
 	// value.
-	// +kubebuilder:validation:Minimum=1
+	// The minimum is 30 seconds: a shorter period would delete members before
+	// they could start, and the pool would keep recreating them.
+	// +kubebuilder:validation:Minimum=30
 	// +optional
 	ReadinessGracePeriodSeconds *int32 `json:"readinessGracePeriodSeconds,omitempty"`
 }

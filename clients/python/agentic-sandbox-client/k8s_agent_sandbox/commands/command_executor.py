@@ -12,16 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Command execution for legacy and sandboxd runtimes."""
+
 import threading
-from typing import Any, cast
+from typing import Annotated, Any, cast
+from pydantic import Field, TypeAdapter
 from k8s_agent_sandbox.commands._process_handle import ProcessHandle
 from k8s_agent_sandbox.connector import SandboxConnector
-from k8s_agent_sandbox.models import ExecutionResult, LegacyExecuteRequest, PtySize
+from k8s_agent_sandbox.models import (
+    BoundedExecutionResult, ExecutionLimits, ExecutionResult, LegacyExecuteRequest, PtySize,
+)
 from k8s_agent_sandbox.trace_manager import trace, trace_span
 
 # Extra time the HTTP read waits beyond command_timeout, so the response the
 # runtime sends after killing a timed-out command still arrives.
 _COMMAND_TIMEOUT_MARGIN_SECONDS = 10
+
+_RPC_TIMEOUT = TypeAdapter(
+    Annotated[float, Field(strict=True, gt=0, allow_inf_nan=False)]
+)
 
 def _extract_executable(command: str) -> str:
     if not command:
@@ -73,6 +82,40 @@ def _execute_request(
     if command_timeout is None:
         return payload, timeout
     return payload, max(timeout, command_timeout + _COMMAND_TIMEOUT_MARGIN_SECONDS)
+
+
+def _bounded_execute_request(
+    process_pb2: Any, command: str, limits: ExecutionLimits,
+    env: dict[str, str] | None, cwd: str | None,
+) -> Any:
+    """Preserve absent limits so sandboxd can apply deployment policy."""
+    request = process_pb2.ExecuteWithLimitsRequest(
+        config=_process_config(process_pb2, command, env, cwd),
+        stdout_limit_bytes=limits.stdout_limit_bytes,
+        stderr_limit_bytes=limits.stderr_limit_bytes,
+    )
+    if limits.time_limit is not None:
+        request.time_limit.FromNanoseconds(round(limits.time_limit * 1e9))
+    return request
+
+
+def _bounded_execution_result(process_pb2: Any, response: Any) -> BoundedExecutionResult:
+    try:
+        reason = process_pb2.ExecuteTerminationReason.Name(
+            response.termination_reason
+        ).removeprefix("EXECUTE_TERMINATION_REASON_").lower()
+    except ValueError:
+        reason = str(response.termination_reason)
+    return BoundedExecutionResult(
+        stdout=response.stdout.decode("utf-8", errors="replace"),
+        stderr=response.stderr.decode("utf-8", errors="replace"),
+        exit_code=response.exit_code,
+        timed_out=response.termination_reason == process_pb2.EXECUTE_TERMINATION_REASON_TIME_LIMIT_EXCEEDED,
+        termination_reason=reason,
+        elapsed_duration=response.elapsed_duration.ToNanoseconds() / 1e9,
+        stdout_truncated=response.stdout_truncated,
+        stderr_truncated=response.stderr_truncated,
+    )
 
 
 class CommandExecutor:
@@ -150,6 +193,91 @@ class CommandExecutor:
         except Exception as e:
             raise RuntimeError(f"Server returned invalid execution result format: {response_data}") from e
 
+        if span.is_recording():
+            span.set_attribute("sandbox.exit_code", result.exit_code)
+        return result
+
+    @trace_span("run_with_limits")
+    def run_with_limits(
+        self,
+        command: str,
+        timeout: float = 60,
+        *,
+        time_limit: float | None = None,
+        stdout_limit_bytes: int | None = None,
+        stderr_limit_bytes: int | None = None,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+    ) -> BoundedExecutionResult:
+        """Run a shell command with sandboxd's execution and output budgets.
+
+        Args:
+            command: The shell command to run in the sandbox.
+            timeout: Positive, finite gRPC deadline in seconds. This wait is
+                independent of time_limit; allow time for execution and result
+                delivery. Router and deployment timeouts also apply.
+            time_limit: Execution seconds, including launch and output
+                collection. Must be at least one nanosecond and fit in a Go
+                duration. sandboxd kills the process group on expiry and
+                returns retained output, the actual exit code, and
+                termination_reason="time_limit_exceeded".
+            stdout_limit_bytes: Positive maximum retained stdout prefix in bytes.
+            stderr_limit_bytes: Positive maximum retained stderr prefix in bytes.
+            env: Extra environment variables, overriding the sandbox's own.
+            cwd: Working directory, confined to the sandbox root.
+
+        Unset limits inherit deployment policy, which can leave resources
+        unlimited. Output beyond each stream's limit is drained and discarded.
+        The result decodes retained bytes as UTF-8 with replacement.
+        Transport errors raise RuntimeError with the gRPC error as the cause.
+        Legacy runtimes and servers without ExecuteWithLimits raise
+        NotImplementedError. The SDK never retries or falls back to Execute.
+        """
+        sandboxd = self.connector.is_sandboxd()
+        if not sandboxd:
+            raise NotImplementedError("commands.run_with_limits() requires the sandboxd runtime")
+        _check_process_options(env, cwd, sandboxd)
+        limits = ExecutionLimits(
+            time_limit=time_limit,
+            stdout_limit_bytes=stdout_limit_bytes,
+            stderr_limit_bytes=stderr_limit_bytes,
+        )
+        timeout = _RPC_TIMEOUT.validate_python(timeout)
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.command.executable", _extract_executable(command))
+
+        try:
+            import grpc
+            from k8s_agent_sandbox.commands._process_stubs import (
+                process_pb2,
+                process_pb2_grpc,
+            )
+        except ImportError as e:
+            raise ImportError(
+                "the sandboxd runtime requires gRPC support; install the "
+                "'grpc' extra: pip install k8s-agent-sandbox[grpc]"
+            ) from e
+
+        request = _bounded_execute_request(process_pb2, command, limits, env, cwd)
+        self.connector.connect()
+        channel = self.connector.grpc_channel()
+        stub = process_pb2_grpc.ProcessServiceStub(channel)
+        try:
+            response = stub.ExecuteWithLimits(request, timeout=timeout)
+        except grpc.RpcError as e:
+            rpc_error = cast("grpc.Call", e)
+            if rpc_error.code() == grpc.StatusCode.UNIMPLEMENTED:
+                raise NotImplementedError(
+                    "commands.run_with_limits() requires sandboxd with "
+                    f"ExecuteWithLimits support: {rpc_error.details()}"
+                ) from e
+            if rpc_error.code() == grpc.StatusCode.UNAVAILABLE:
+                self.connector.invalidate_sandboxd_transport(channel)
+            raise RuntimeError(
+                f"sandboxd ExecuteWithLimits failed ({rpc_error.code()}): {rpc_error.details()}"
+            ) from e
+        result = _bounded_execution_result(process_pb2, response)
         if span.is_recording():
             span.set_attribute("sandbox.exit_code", result.exit_code)
         return result

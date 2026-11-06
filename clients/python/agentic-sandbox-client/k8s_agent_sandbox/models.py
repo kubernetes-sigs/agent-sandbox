@@ -62,6 +62,50 @@ class ExecutionResult(BaseModel):
     exit_code: int = -1  # Exit code of the command.
     timed_out: bool = False  # True if the runtime killed the command for exceeding its time limit.
 
+class ExecutionLimits(BaseModel):
+    """Execution budgets for commands.run_with_limits().
+
+    Unset limits inherit sandboxd's deployment defaults or maxima. When a
+    deployment leaves a limit unconfigured, that resource remains unlimited.
+    Explicit limits must be positive and within the deployment maximum.
+    """
+
+    model_config = ConfigDict(validate_assignment=True)
+
+    time_limit: float | None = Field(
+        default=None, strict=True, ge=1e-9, le=(2**63 - 1) / 1e9, allow_inf_nan=False,
+    )  # Execution seconds, including launch and output collection, rounded to nanoseconds.
+    stdout_limit_bytes: int | None = Field(
+        default=None, strict=True, gt=0, le=2**64 - 1,
+    )  # Maximum retained stdout prefix in bytes.
+    stderr_limit_bytes: int | None = Field(
+        default=None, strict=True, gt=0, le=2**64 - 1,
+    )  # Maximum retained stderr prefix in bytes.
+
+    @field_validator("time_limit")
+    @classmethod
+    def validate_time_limit(cls, value: float | None) -> float | None:
+        # Float rounding at the upper boundary can exceed Go's signed duration.
+        if value is not None and round(value * 1e9) > 2**63 - 1:
+            raise ValueError("time_limit must fit in a Go duration")
+        return value
+
+class BoundedExecutionResult(ExecutionResult):
+    """Outcome returned by commands.run_with_limits().
+
+    stdout and stderr contain the retained prefixes, decoded as UTF-8 with
+    replacement for invalid or incomplete characters. Byte limits apply before
+    decoding, so re-encoding the text can exceed those limits.
+    exit_code is sandboxd's actual result, including 128+signal for termination
+    by signal. timed_out is true only for a server-reported execution time limit.
+    Transport failures raise an exception instead of producing a result.
+    """
+
+    termination_reason: str  # "exited", "time_limit_exceeded", "unspecified", or a future enum value as a decimal string.
+    elapsed_duration: float  # Wall-clock seconds from launch preparation through termination and I/O cleanup.
+    stdout_truncated: bool  # True when sandboxd discarded stdout beyond its byte limit.
+    stderr_truncated: bool  # True when sandboxd discarded stderr beyond its byte limit.
+
 class LegacyExecuteRequest(BaseModel):
     """Request body for the legacy python-runtime /execute endpoint."""
     command: str  # Shell command to run.

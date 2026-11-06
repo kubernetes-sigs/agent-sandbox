@@ -97,7 +97,7 @@ class TestReap(unittest.TestCase):
         self.assertEqual(self.reap(), ([], 0))
         self.helper.coordination_v1_api.delete_namespaced_lease.assert_not_called()
 
-    def test_waits_each_leases_renew_interval_then_deletes_only_the_leases(self):
+    def test_waits_each_leases_duration_then_deletes_only_the_leases(self):
         self.leases["default"] = [_lease("b2", age=1000, duration=90)]
         self.leases["other"] = [_lease("b1", age=1000, duration=60)]
         calls = []
@@ -114,16 +114,22 @@ class TestReap(unittest.TestCase):
 
         reaped, _ = self.reap(["default", "other"])
         self.assertEqual(reaped, [("other", "b1"), ("default", "b2")])
-        # Each Lease waits out its own renew interval from the end of the lists, 60 // 3 then
-        # 90 // 3, so the longer one doesn't delay the shorter one.
+        # Each Lease waits out its full duration from the end of the lists, 60s then 90s, so a
+        # connected driver has renewed or self-fenced and the longer Lease doesn't delay the shorter.
         self.assertEqual(
-            calls, [("sleep", 20), ("lease", "batch-b1"), ("sleep", 10), ("lease", "batch-b2")]
+            calls, [("sleep", 60), ("lease", "batch-b1"), ("sleep", 30), ("lease", "batch-b2")]
         )
         # The garbage collector deletes the claims, so the reaper makes no other request.
         self.assertEqual(
             {name for name, _, _ in self.helper.mock_calls},
             {"coordination_v1_api.list_namespaced_lease", "coordination_v1_api.delete_namespaced_lease"},
         )
+
+    def test_returns_without_sleeping_when_no_leases_are_stale(self):
+        self.leases["default"] = [_lease("fresh", age=0)]
+        self.assertEqual(self.reap(), ([], 0))
+        self.time.sleep.assert_not_called()
+        self.helper.coordination_v1_api.delete_namespaced_lease.assert_not_called()
 
     def test_lease_delete_outcomes(self):
         for status, reaped, errors in (

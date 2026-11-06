@@ -235,11 +235,34 @@ export interface ProcessCallOptions {
 export interface WriteOptions extends RuntimeCallOptions {
   /** POSIX file mode, e.g. "0644". Must match `^0[0-7]{3}$`. */
   mode?: string;
+  /**
+   * Add to the end of the file instead of replacing it. Not atomic. Default:
+   * false. A sandboxd that predates this option ignores it and replaces the file.
+   */
+  append?: boolean;
+  /**
+   * Fail with `FAILED_PRECONDITION` if `path` already exists. Default: false. A
+   * sandboxd that predates this option ignores it and replaces the file.
+   */
+  createOnly?: boolean;
 }
 
 export interface DeleteOptions extends RuntimeCallOptions {
   /** Delete non-empty directories recursively. Default: false. */
   recursive?: boolean;
+}
+
+export interface MkdirOptions extends RuntimeCallOptions {
+  /** Also create missing parent directories. Default: false. */
+  parents?: boolean;
+  /** POSIX mode for a new directory, e.g. "0755". Must match `^0[0-7]{3}$`. */
+  mode?: string;
+}
+
+/** Options for sandbox.files.move() and sandbox.files.copy(). */
+export interface MoveCopyOptions extends RuntimeCallOptions {
+  /** Replace an existing destination file. Never replaces a directory. Default: false. */
+  overwrite?: boolean;
 }
 
 /** Result of sandbox.commands.run(). A non-zero exitCode is not an error. */
@@ -394,4 +417,20 @@ export interface GetSandboxOptions {
    * use; call getSandbox() again once the Sandbox is Ready.
    */
   waitForReady?: boolean;
+}
+
+export interface GetSandboxByNameOptions {
+  /**
+   * Wait for the Sandbox to become Ready before returning (default `true`).
+   * With `false`, getSandboxByName() only checks that the Sandbox exists. The
+   * handle's `podIP` and `serviceFQDN` are then taken from the Sandbox as it is
+   * at that moment and may still be empty, in which case in-cluster
+   * connectivity fails on first use.
+   */
+  waitForReady?: boolean;
+  /**
+   * Seconds to wait for the Sandbox to become Ready. Must be a positive
+   * number. Defaults to the client's `sandboxReadyTimeout`.
+   */
+  sandboxReadyTimeout?: number;
 }

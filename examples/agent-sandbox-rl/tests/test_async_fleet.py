@@ -240,3 +240,12 @@ async def test_async_per_task_error_captured(make_cluster):
   assert res[0] == "a" and res[2] == "c"
   assert isinstance(res[1], RuntimeError)
   assert f.handles() == []
+
+
+async def test_async_teardown_verify_reaches_the_sync_fleet(make_cluster, monkeypatch):
+  from agent_sandbox_rl import ClusterRegistry
+  f = _fleet(ClusterRegistry([make_cluster("solo")]))
+  monkeypatch.setattr(f._fleet, "verify_teardown", lambda: {"solo": {"claims": 0}})
+  assert await f.teardown() is None
+  assert await f.teardown(verify=True) == {"solo": {"claims": 0}}
+  assert await f.verify_teardown() == {"solo": {"claims": 0}}

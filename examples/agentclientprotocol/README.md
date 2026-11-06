@@ -13,7 +13,7 @@ In Kubernetes **Agent Sandbox**, ACP enables:
 
 ## How This Example Works
 
-The example is a minimal but complete ACP client using only Go standard library packages, split into two parts:
+The example is a minimal but complete ACP client, split into two parts (the protocol implementation uses only Go standard library packages; the front end additionally uses `client-go` for `kubeservice://` targets, see below):
 
 - **`pkg/acp`** — the protocol implementation: a `Client` with a bidirectional JSON-RPC 2.0 transport, plus Go types for the ACP messages. A single reader goroutine routes responses to pending calls by `id`, dispatches `session/update` notifications, and answers agent → client requests — all concurrently, since the agent calls back into the client while a prompt is running.
 - **`main.go`** — the terminal front end: flag parsing, spawning the agent, rendering streamed updates, and answering permission and file system requests.
@@ -70,7 +70,7 @@ go run . -yolo -prompt "Summarize the README in this directory"
 | Flag | Description |
 |---|---|
 | `-cmd` | Agent command to spawn (default `gemini --acp`). Use shell quoting to pass the whole command as one flag value; the program then splits that value on whitespace, so individual arguments cannot themselves contain spaces (quotes inside the value are not interpreted). |
-| `-addr` | TCP address of an ACP agent to connect to instead of spawning one (e.g. `localhost:8090` behind `kubectl port-forward`) |
+| `-addr` | Address of an ACP agent to connect to instead of spawning one: a TCP address (e.g. `localhost:8090` behind `kubectl port-forward`) or a `kubeservice://<context>/<namespace>/<service>[:<port>]` URL, which port-forwards to a Service in the cluster in-process (see [Connecting to a Service in a cluster](#connecting-to-a-service-in-a-cluster-kubeservice)) |
 | `-cwd` | Working directory for the session (default: current directory) |
 | `-prompt` | Send one prompt and exit instead of running interactively |
 | `-session-id` | Resume an existing session instead of creating a new one |
@@ -102,3 +102,33 @@ go run . -addr localhost:8090
 
 Tool calls the server-side agent wants to run arrive as `session/request_permission`
 requests and are approved or rejected from this client.
+
+### Connecting to a Service in a cluster (`kubeservice://`)
+
+Instead of manually running `kubectl port-forward`, `-addr` accepts a pseudo-URL of
+the form
+
+```text
+kubeservice://<context>/<namespace>/<service>[:<port>]
+```
+
+The client then does the port-forward in-process: it loads your
+kubeconfig, and opens a port-forward stream to that pod through the API
+server — automating what `kubectl port-forward` does. No local port
+is opened and no `kubectl` subprocess is started.
+
+`<context>` is a kubeconfig context name, taken verbatim (so names with `:`, `/` or `@`,
+such as EKS's `arn:aws:eks:us-west-2:123456789012:cluster/prod`, work); leave it empty,
+`kubeservice:///<namespace>/<service>`, for the current context. `<port>` is a Service port
+number or name and can be omitted when the Service has a single port.
+
+Only the Service's selector and port mapping are used, so a headless Service (`clusterIP:
+None`) is enough: it gives the server a stable name to connect to without a routable
+in-cluster address. The sandboxed-tools manifest deliberately ships no Service (see its
+README's security notes); create a headless one next to the Deployment and connect:
+
+```bash
+kubectl -n default expose deployment sandboxed-tools-acp-server --cluster-ip=None --port=8090
+cd examples/agentclientprotocol
+go run . -addr kubeservice:///default/sandboxed-tools-acp-server
+```

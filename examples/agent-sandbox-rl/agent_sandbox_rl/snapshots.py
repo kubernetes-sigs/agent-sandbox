@@ -96,10 +96,15 @@ def _snapshot_client_class():
   return FleetPodSnapshotClient
 
 
-def build_snapshot_client(k8s_helper, *, tracer_config=None):
-  """Build the snapshot-capable SDK client bound to ``k8s_helper``'s cluster."""
+def build_snapshot_client(k8s_helper, *, tracer_config=None, api_client=None):
+  """Build the snapshot-capable SDK client bound to ``k8s_helper``'s cluster.
+
+  ``api_client`` keeps the base init from loading a kubeconfig for the helper
+  that ``k8s_helper`` then replaces."""
   cls = _snapshot_client_class()
   kwargs = {"tracer_config": tracer_config} if tracer_config is not None else {}
+  if api_client is not None:
+    kwargs["api_client"] = api_client
   return cls(k8s_helper, **kwargs)
 
 

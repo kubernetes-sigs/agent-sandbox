@@ -58,7 +58,7 @@ func main() {
 	}
 
 	// The session name identifies this chat (and its sandbox and snapshots);
-	// it is a CLI concern, passed explicitly to Harness.BuildSession.
+	// it is a CLI concern, passed explicitly to Harness.LoadSession / NewSession.
 	sessionName := os.Getenv("SESSION_NAME")
 	if sessionName == "" {
 		sessionName = "default"
@@ -153,7 +153,10 @@ func run(ctx context.Context, opts agent.RunOptions, sessionName string, toolset
 
 	harness := agent.NewHarness(llmClient, sandboxClient, toolsRegistry, opts)
 
-	session, err := harness.BuildSession(ctx, sessionStore, sessionName)
+	session, err := harness.LoadSession(ctx, sessionStore, sessionName)
+	if errors.Is(err, sessions.ErrNotFound) {
+		session, err = harness.NewSession(ctx, sessionStore, sessionName, sessions.Metadata{Toolset: toolset.Name()})
+	}
 	if err != nil {
 		return fmt.Errorf("building session: %w", err)
 	}

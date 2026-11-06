@@ -58,6 +58,8 @@ async def _claim_list_pages(
     namespace: str,
     label_selector: str,
     _request_timeout: float | None,
+    *,
+    deadline: float | None = None,
 ) -> AsyncIterator[tuple[dict[str, Any], bool]]:
     """Yields ``(page, first)`` pairs for one paginated ``SandboxClaim`` list.
 
@@ -74,6 +76,12 @@ async def _claim_list_pages(
     continue_token: str | None = None
     restarted = False
     while True:
+        page_timeout = _request_timeout
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("SandboxClaim list exceeded its deadline")
+            page_timeout = remaining if page_timeout is None else min(float(page_timeout), remaining)
         try:
             page = cast(dict[str, Any], await list_page(
                 group=CLAIM_API_GROUP,
@@ -83,7 +91,7 @@ async def _claim_list_pages(
                 label_selector=label_selector,
                 limit=CLAIM_LIST_PAGE_SIZE,
                 _continue=continue_token,
-                _request_timeout=_request_timeout,
+                _request_timeout=page_timeout,
             ))
         except client.ApiException as e:
             # A continue token expires after a few minutes, and a 410 isn't transient. Restarting the
@@ -172,6 +180,7 @@ class AsyncK8sHelper:
         *,
         log_level: int = logging.INFO,
         _request_timeout: float | None = None,
+        batch: bool = False,
     ) -> dict[str, Any]:
         """Creates a SandboxClaim custom resource.
 
@@ -185,6 +194,8 @@ class AsyncK8sHelper:
                 garbage collector deletes it once its owner is gone.
             log_level: Log level for the logger during this function call.
             _request_timeout: Optional total timeout in seconds, forwarded to kubernetes_asyncio.
+            batch: Accepted for parity with ``K8sHelper.create_sandbox_claim``;
+                ``aiohttp`` does not retry requests.
         """
         await self._ensure_initialized()
 
@@ -261,6 +272,7 @@ class AsyncK8sHelper:
     async def wait_for_claim_ready(
         self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None,
         *, expected_uid: str | None = None, initial_claim: dict[str, Any] | None = None,
+        require_current_generation: bool = False,
     ) -> str:
         """Watches the SandboxClaim until it is bound to a sandbox AND its
         Ready condition is True, then returns the sandbox name.
@@ -279,14 +291,19 @@ class AsyncK8sHelper:
             expected_uid: If provided, reject events for a same-name replacement.
             initial_claim: Optional create/GET response to evaluate before
                 waiting for future watch events.
+            require_current_generation: If True, also require the Ready condition's
+                observedGeneration to equal metadata.generation in each snapshot.
+                Missing generation fields remain pending. Defaults to False.
         """
         return await self._watch_claim(claim_name, namespace, timeout, require_ready=True,
                                        resource_version=resource_version,
-                                       expected_uid=expected_uid, initial_claim=initial_claim)
+                                       expected_uid=expected_uid, initial_claim=initial_claim,
+                                       require_current_generation=require_current_generation)
 
     async def _watch_claim(self, claim_name: str, namespace: str, timeout: int, require_ready: bool,
                            resource_version: str | None = None,
-                           *, expected_uid: str | None = None, initial_claim: dict[str, Any] | None = None) -> str:
+                           *, expected_uid: str | None = None, initial_claim: dict[str, Any] | None = None,
+                           require_current_generation: bool = False) -> str:
         """Shared SandboxClaim watch loop.
 
         Returns the sandbox name once ``status.sandbox.name`` is populated;
@@ -386,7 +403,10 @@ class AsyncK8sHelper:
                                     f"SandboxClaim '{claim_name}' failed with terminal reason "
                                     f"{cond.get('reason')}: {cond.get('message', '')}"
                                 )
-                            if cond.get("type") == "Ready" and cond.get("status") == "True":
+                            if (cond.get("type") == "Ready" and cond.get("status") == "True"
+                                    and (not require_current_generation
+                                         or (metadata.get("generation") is not None
+                                             and cond.get("observedGeneration") == metadata["generation"]))):
                                 ready = True
 
                         sandbox_status = status.get("sandbox", {})
@@ -494,13 +514,15 @@ class AsyncK8sHelper:
 
     async def delete_sandbox_claim(
         self, name: str, namespace: str, *, expected_uid: str | None = None,
-        log_level: int = logging.INFO, _request_timeout: float | None = None,
+        log_level: int = logging.INFO, _request_timeout: float | None = None, batch: bool = False,
     ) -> None:
         """Deletes a SandboxClaim, optionally requiring a matching UID.
 
         Args:
             log_level: Log level for the logger during this function call.
             _request_timeout: Optional total timeout in seconds, forwarded to kubernetes_asyncio.
+            batch: Accepted for parity with ``K8sHelper.delete_sandbox_claim``;
+                ``aiohttp`` does not retry requests.
         """
         await self._ensure_initialized()
 
@@ -646,20 +668,32 @@ class AsyncK8sHelper:
                 await w.close()
 
     async def list_sandbox_claim_objects(
-        self, namespace: str, label_selector: str, _request_timeout: float | None = None
+        self,
+        namespace: str,
+        label_selector: str,
+        _request_timeout: float | None = None,
+        *,
+        deadline: float | None = None,
     ) -> tuple[list[dict[str, Any]], str]:
         """Lists full SandboxClaim objects matching a label selector. Also returns the list's
         resourceVersion, so a subsequent watch does not miss any events.
 
         Args:
             _request_timeout: Optional total timeout in seconds for each page, forwarded to kubernetes_asyncio.
+            deadline: Optional ``time.monotonic()`` deadline across the whole paginated list;
+                caps each page's ``_request_timeout`` to the remaining budget and raises
+                ``TimeoutError`` once the deadline passes.
         """
         await self._ensure_initialized()
 
         items: list[dict[str, Any]] = []
         resource_version = "0"
         async for page, first in _claim_list_pages(
-            self.custom_objects_api.list_namespaced_custom_object, namespace, label_selector, _request_timeout
+            self.custom_objects_api.list_namespaced_custom_object,
+            namespace,
+            label_selector,
+            _request_timeout,
+            deadline=deadline,
         ):
             if first:
                 items = []
@@ -794,7 +828,12 @@ class AsyncK8sHelper:
             _request_timeout: Optional total timeout in seconds, forwarded to kubernetes_asyncio.
             resource_version: If provided, delete the Lease only at this resourceVersion. A Lease
                 someone has written since is left in place and also treated as deleted.
+
+        Raises:
+            ValueError: If ``resource_version`` is an empty string.
         """
+        if resource_version is not None and not resource_version:
+            raise ValueError("resource_version must not be empty")
         await self._ensure_initialized()
 
         delete_kwargs: dict[str, Any] = {}

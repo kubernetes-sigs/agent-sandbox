@@ -20,6 +20,10 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+	"sigs.k8s.io/agent-sandbox/internal/utils"
 	"sigs.k8s.io/agent-sandbox/internal/version"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -29,6 +33,24 @@ const (
 	LaunchTypeWarm    = "warm"    // Pod from a SandboxWarmPool
 	LaunchTypeCold    = "cold"    // Pod not from a SandboxWarmPool
 	LaunchTypeUnknown = "unknown" // Used when Sandbox is nil during failure
+
+	// SuspendResult values for agent_sandbox_suspend_total.
+	SuspendResultRequested     = "requested"
+	SuspendResultPodTerminated = "pod_terminated"
+	SuspendResultError         = "error"
+
+	// ResumeResult values for agent_sandbox_resume_total.
+	ResumeResultRequested = "requested"
+	ResumeResultReady     = "ready"
+	ResumeResultError     = "error"
+
+	// OwnedByNone is the fallback owned_by label value when a Sandbox is not
+	// controlled by an extensions resource (SandboxClaim or SandboxWarmPool).
+	OwnedByNone = "None"
+
+	// UnknownTemplateSentinel is the fallback sandbox_template label value on
+	// Sandbox-scoped metrics when no template annotation is present.
+	UnknownTemplateSentinel = "unknown"
 
 	// ClientAnnotation is the annotation key for the client request time.
 	ClientAnnotation = "agents.x-k8s.io/client-first-requested-at"
@@ -128,6 +150,103 @@ var (
 		[]string{"namespace", "launch_type", "sandbox_template"},
 	)
 
+	// SandboxSuspendTotal counts Sandbox suspend lifecycle transitions by result.
+	// Labels:
+	// - namespace: the namespace of the sandbox
+	// - sandbox_template: the SandboxTemplateRef annotation for claim/warm-pool Sandboxes, or "unknown" when absent or unowned.
+	// - owned_by: "SandboxClaim" | "SandboxWarmPool" | "None".
+	// - result: "requested" | "pod_terminated" | "error".
+	SandboxSuspendTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "agent_sandbox_suspend_total",
+			Help: "Total number of Sandbox suspend lifecycle events by result (requested: suspend initiated; " +
+				"pod_terminated: backing Pod terminated and Suspended=True reached; error: suspend hit an error reason, " +
+				"counted at most once per suspend). Note: pod_terminated and error are not recorded across controller restarts or leader changes.",
+		},
+		[]string{"namespace", "sandbox_template", "owned_by", "result"},
+	)
+
+	// SandboxSuspendLatency measures the time from the controller first observing operatingMode=Suspended
+	// to the Sandbox reaching Suspended=True (PodTerminated).
+	// Labels:
+	// - namespace: the namespace of the sandbox
+	// - sandbox_template: the SandboxTemplateRef annotation for claim/warm-pool Sandboxes, or "unknown" when absent or unowned.
+	// - owned_by: "SandboxClaim" | "SandboxWarmPool" | "None".
+	SandboxSuspendLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "agent_sandbox_suspend_latency_ms",
+			Help: "Latency from the controller first observing operatingMode=Suspended to the Sandbox reaching " +
+				"Suspended=True (PodTerminated), in milliseconds. Note: Not recorded across controller restarts or " +
+				"leader changes, or for transitions that complete in the pass that starts them.",
+			// Buckets for latency from 50ms to 10 minutes
+			Buckets: []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000, 300000, 600000},
+		},
+		[]string{"namespace", "sandbox_template", "owned_by"},
+	)
+
+	// SandboxResumeTotal counts Sandbox resume lifecycle transitions by result.
+	// Labels:
+	// - namespace: the namespace of the sandbox
+	// - sandbox_template: the SandboxTemplateRef annotation for claim/warm-pool Sandboxes, or "unknown" when absent or unowned.
+	// - owned_by: "SandboxClaim" | "SandboxWarmPool" | "None".
+	// - result: "requested" | "ready" | "error".
+	SandboxResumeTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "agent_sandbox_resume_total",
+			Help: "Total number of Sandbox resume lifecycle events by result (requested: resume initiated from Suspended=True; " +
+				"ready: Sandbox reached Ready=True; error: resume hit an error reason, counted at most once per resume). " +
+				"Note: ready and error are not recorded across controller restarts or leader changes.",
+		},
+		[]string{"namespace", "sandbox_template", "owned_by", "result"},
+	)
+
+	// SandboxResumeLatency measures the time from the controller first observing a Sandbox leaving
+	// a fully-suspended state (operatingMode set back to Running) to the Sandbox Ready condition becoming True.
+	// Labels:
+	// - namespace: the namespace of the sandbox
+	// - sandbox_template: the SandboxTemplateRef annotation for claim/warm-pool Sandboxes, or "unknown" when absent or unowned.
+	// - owned_by: "SandboxClaim" | "SandboxWarmPool" | "None".
+	SandboxResumeLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "agent_sandbox_resume_latency_ms",
+			Help: "Latency from the controller first observing operatingMode=Running (after a fully-suspended state) " +
+				"to Sandbox Ready, in milliseconds. Note: Not recorded across controller restarts or leader changes, " +
+				"or for transitions that complete in the pass that starts them.",
+			// Buckets for latency from 50ms to 10 minutes; resume recreates the Pod.
+			Buckets: []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000, 300000, 600000},
+		},
+		[]string{"namespace", "sandbox_template", "owned_by"},
+	)
+
+	// SandboxFinishedTotal counts Sandboxes whose backing Pod reached a terminal phase (Finished=True).
+	// Labels:
+	// - namespace: the namespace of the sandbox
+	// - sandbox_template: the SandboxTemplateRef annotation for claim/warm-pool Sandboxes, or "unknown" when absent or unowned.
+	// - owned_by: "SandboxClaim" | "SandboxWarmPool" | "None".
+	// - reason: "PodSucceeded" | "PodFailed".
+	SandboxFinishedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "agent_sandbox_finished_total",
+			Help: "Total number of Sandboxes whose backing Pod reached a terminal phase (Finished=True).",
+		},
+		[]string{"namespace", "sandbox_template", "owned_by", "reason"},
+	)
+
+	// SandboxExpiredTotal counts Sandboxes that reached their shutdownTime and expired.
+	// Labels:
+	// - namespace: the namespace of the sandbox
+	// - sandbox_template: the SandboxTemplateRef annotation for claim/warm-pool Sandboxes, or "unknown" when absent or unowned.
+	// - owned_by: "SandboxClaim" | "SandboxWarmPool" | "None".
+	// - shutdown_policy: "Delete" | "Retain".
+	SandboxExpiredTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "agent_sandbox_expired_total",
+			Help: "Total number of Sandboxes that reached their spec.shutdownTime and expired. " +
+				"Note: SandboxClaim lifecycle expiry is not counted.",
+		},
+		[]string{"namespace", "sandbox_template", "owned_by", "shutdown_policy"},
+	)
+
 	// SandboxClaimCreationTotal counts the Sandboxes created or adopted for a SandboxClaim.
 	// Labels:
 	// - namespace: the namespace of the claim
@@ -205,6 +324,12 @@ func init() {
 	metrics.Registry.MustRegister(ClaimControllerStartupLatency)
 	metrics.Registry.MustRegister(ClientClaimStartupLatency)
 	metrics.Registry.MustRegister(SandboxCreationLatency)
+	metrics.Registry.MustRegister(SandboxSuspendTotal)
+	metrics.Registry.MustRegister(SandboxSuspendLatency)
+	metrics.Registry.MustRegister(SandboxResumeTotal)
+	metrics.Registry.MustRegister(SandboxResumeLatency)
+	metrics.Registry.MustRegister(SandboxFinishedTotal)
+	metrics.Registry.MustRegister(SandboxExpiredTotal)
 	metrics.Registry.MustRegister(SandboxClaimCreationTotal)
 	metrics.Registry.MustRegister(BuildInfo)
 }
@@ -251,6 +376,68 @@ func NormalizeCreatedBy(createdBy string) string {
 	default:
 		return "unknown"
 	}
+}
+
+// SandboxTemplateLabel extracts the sandbox_template label value from a Sandbox's annotations,
+// defaulting to "unknown" when absent.
+func SandboxTemplateLabel(sandbox *sandboxv1beta1.Sandbox) string {
+	if template, ok := sandbox.Annotations[sandboxv1beta1.SandboxTemplateRefAnnotation]; ok && template != "" {
+		return template
+	}
+	return UnknownTemplateSentinel
+}
+
+// SandboxOwnedByLabel extracts the normalized owned_by label value ("SandboxClaim",
+// "SandboxWarmPool", or "None") from a Sandbox's controller owner reference.
+func SandboxOwnedByLabel(sandbox *sandboxv1beta1.Sandbox) string {
+	controllerRef := metav1.GetControllerOf(sandbox)
+	// Owner references keep the apiVersion that was current when they
+	// were written; sandboxes created before the v1beta1 upgrade still
+	// carry the v1alpha1 group version. Match on group, not version.
+	if g, k := utils.GetGroupKind(controllerRef); g == extensionsv1beta1.GroupVersion.Group &&
+		(k == extensionsv1beta1.SandboxClaimKind || k == extensionsv1beta1.SandboxWarmPoolKind) {
+		return k
+	}
+	return OwnedByNone
+}
+
+// SandboxShutdownPolicyLabel extracts the shutdown_policy label value ("Delete" or "Retain")
+// from a Sandbox's spec, defaulting to "Retain" when unset.
+func SandboxShutdownPolicyLabel(sandbox *sandboxv1beta1.Sandbox) string {
+	if sandbox.Spec.ShutdownPolicy != nil {
+		return string(*sandbox.Spec.ShutdownPolicy)
+	}
+	return string(sandboxv1beta1.ShutdownPolicyRetain)
+}
+
+// RecordSandboxSuspend increments the total count of Sandbox suspend lifecycle events.
+func RecordSandboxSuspend(namespace, templateName, ownedBy, result string) {
+	SandboxSuspendTotal.WithLabelValues(namespace, templateName, ownedBy, result).Inc()
+}
+
+// RecordSandboxSuspendLatency records the measured latency duration for a Sandbox suspend.
+func RecordSandboxSuspendLatency(duration time.Duration, namespace, templateName, ownedBy string) {
+	recordLatencyDuration(SandboxSuspendLatency, duration, namespace, templateName, ownedBy)
+}
+
+// RecordSandboxResume increments the total count of Sandbox resume lifecycle events.
+func RecordSandboxResume(namespace, templateName, ownedBy, result string) {
+	SandboxResumeTotal.WithLabelValues(namespace, templateName, ownedBy, result).Inc()
+}
+
+// RecordSandboxResumeLatency records the measured latency duration for a Sandbox resume.
+func RecordSandboxResumeLatency(duration time.Duration, namespace, templateName, ownedBy string) {
+	recordLatencyDuration(SandboxResumeLatency, duration, namespace, templateName, ownedBy)
+}
+
+// RecordSandboxFinished increments the total count of Sandboxes reaching Finished=True.
+func RecordSandboxFinished(namespace, templateName, ownedBy, reason string) {
+	SandboxFinishedTotal.WithLabelValues(namespace, templateName, ownedBy, reason).Inc()
+}
+
+// RecordSandboxExpired increments the total count of Sandboxes that expired.
+func RecordSandboxExpired(namespace, templateName, ownedBy, shutdownPolicy string) {
+	SandboxExpiredTotal.WithLabelValues(namespace, templateName, ownedBy, shutdownPolicy).Inc()
 }
 
 // RecordSandboxClaimCreation increments the total count of Sandboxes created or adopted for a SandboxClaim.

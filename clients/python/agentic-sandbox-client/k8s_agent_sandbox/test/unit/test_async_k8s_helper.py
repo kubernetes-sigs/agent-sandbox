@@ -12,7 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+import json
 import logging
+import os
+import tempfile
 import unittest
 import weakref
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -22,11 +26,13 @@ import pytest
 pytest.importorskip("kubernetes_asyncio")
 
 import aiohttp
+import certifi
 from kubernetes_asyncio import client
+from kubernetes_asyncio.config import incluster_config
 
 from k8s_agent_sandbox.models import AdditionalPodMetadata
 from k8s_agent_sandbox.async_k8s_helper import AsyncK8sHelper
-from k8s_agent_sandbox.exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxTemplateNotFoundError
+from k8s_agent_sandbox.exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError
 from k8s_agent_sandbox.constants import CLIENT_REQUEST_TIME_ANNOTATION
 
 
@@ -1004,6 +1010,77 @@ class TestAsyncK8sHelperApiClientInjection(unittest.IsolatedAsyncioTestCase):
         created.close.assert_awaited_once()
 
 
+class TestAsyncK8sHelperClientCompatibility(unittest.IsolatedAsyncioTestCase):
+    async def test_incluster_token_and_uid_reach_the_request(self):
+        """Exercise real in-cluster auth and delete serialization without network I/O."""
+        original = client.Configuration.get_default_copy()
+        self.addCleanup(client.Configuration.set_default, original)
+        helper = AsyncK8sHelper()
+        self.addAsyncCleanup(helper.close)
+        with tempfile.TemporaryDirectory() as tmp:
+            token_path = os.path.join(tmp, "token")
+            with open(token_path, "w") as f:
+                f.write("test-token")
+            with patch.dict(os.environ, {
+                "KUBERNETES_SERVICE_HOST": "10.0.0.1",
+                "KUBERNETES_SERVICE_PORT": "443",
+            }), patch.object(
+                incluster_config, "SERVICE_TOKEN_FILENAME", token_path
+            ), patch.object(incluster_config, "SERVICE_CERT_FILENAME", certifi.where()):
+                await helper._ensure_initialized()
+
+            api_client = helper.custom_objects_api.api_client
+            response = MagicMock(status=200, data=b"{}")
+            response.getheader.return_value = "application/json"
+            # Keep the generated API, serialization and auth code; replace only I/O.
+            with patch.object(api_client, "request", AsyncMock(return_value=response)) as request:
+                await helper.delete_sandbox_claim("claim", "default", expected_uid="claim-uid")
+            self.assertEqual(request.call_args.args[0], "DELETE")
+            self.assertEqual(request.call_args.kwargs["headers"]["authorization"], "Bearer test-token")
+            self.assertEqual(request.call_args.kwargs["body"]["preconditions"], {"uid": "claim-uid"})
+
+    async def test_real_watch_preserves_readiness_uid_and_cancellation(self):
+        """Exercise the installed Watch across adoption, replacement and cancellation."""
+        async with client.ApiClient() as api_client:
+            helper = AsyncK8sHelper(api_client=api_client)
+            for outcome in ("ready", "replaced", "cancelled"):
+                with self.subTest(outcome=outcome):
+                    response = MagicMock()
+                    events = [
+                        {"type": "ADDED", "object": {
+                            "metadata": {"uid": "claim-uid", "resourceVersion": "10"},
+                            "status": {"sandbox": {"name": "adopted-sandbox"}},
+                        }},
+                        {"type": "MODIFIED", "object": {
+                            "metadata": {"uid": "replacement" if outcome == "replaced" else "claim-uid",
+                                         "resourceVersion": "11", "generation": 2},
+                            "status": {"sandbox": {"name": "adopted-sandbox"},
+                                       "conditions": [{"type": "Ready", "status": "True", "observedGeneration": 2}]},
+                        }},
+                    ]
+                    response.content.readline = AsyncMock(side_effect=(
+                        asyncio.CancelledError() if outcome == "cancelled" else
+                        [(json.dumps(event) + "\n").encode() for event in events]
+                    ))
+                    with patch.object(api_client, "request", AsyncMock(return_value=response)) as request:
+                        wait = helper.wait_for_claim_ready(
+                            "claim", "default", timeout=5, resource_version="9",
+                            expected_uid="claim-uid", require_current_generation=True,
+                        )
+                        if outcome == "ready":
+                            self.assertEqual(await wait, "adopted-sandbox")
+                        else:
+                            with self.assertRaises(SandboxNotFoundError if outcome == "replaced" else asyncio.CancelledError):
+                                await wait
+                    query = dict(request.call_args.kwargs["query_params"])
+                    self.assertEqual(query["resourceVersion"], "9")
+                    self.assertEqual(query["fieldSelector"], "metadata.name=claim")
+                    self.assertTrue(query["watch"])
+                    response.release.assert_called_once()
+                    await helper.close()
+                    self.assertFalse(api_client.rest_client.pool_manager.closed)
+
+
 class TestAsyncK8sHelperWatchTimeout(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.helper = AsyncK8sHelper()
@@ -1141,6 +1218,58 @@ class TestAsyncK8sHelperBatchMethods(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(client.ApiException) as raised:
                     await self.helper.list_sandbox_claim_objects("default", "agents.x-k8s.io/batch-id=b1")
                 self.assertEqual(raised.exception.status, expected_status)
+
+    async def test_list_sandbox_claim_objects_deadline_caps_page_timeouts_and_stops_once_expired(self):
+        expired = client.ApiException(status=410)
+
+        def page(name, rv, token=None):
+            return {"items": [{"metadata": {"name": name}}], "metadata": {"resourceVersion": rv, "continue": token}}
+
+        list_page = self.helper.custom_objects_api.list_namespaced_custom_object = AsyncMock()
+        for label, req_timeout, expected_timeouts in (
+            ("scalar timeout", 10.0, [10.0, 8.0, 4.0, 1.5]),
+            ("unset timeout", None, [15.0, 8.0, 4.0, 1.5]),
+        ):
+            with self.subTest(label), patch(
+                "k8s_agent_sandbox.async_k8s_helper.time.monotonic", side_effect=[95.0, 102.0, 106.0, 108.5]
+            ):
+                list_page.reset_mock()
+                list_page.side_effect = [
+                    page("old-0", "42", "t1"),
+                    expired,
+                    page("b1-0", "50", "t2"),
+                    page("b1-1", "51"),
+                ]
+                items, rv = await self.helper.list_sandbox_claim_objects(
+                    "default",
+                    "agents.x-k8s.io/batch-id=b1",
+                    _request_timeout=req_timeout,
+                    deadline=110.0,
+                )
+                self.assertEqual([item["metadata"]["name"] for item in items], ["b1-0", "b1-1"])
+                self.assertEqual(rv, "50")
+                self.assertEqual(
+                    [c.kwargs["_request_timeout"] for c in list_page.call_args_list],
+                    expected_timeouts,
+                )
+
+        for label, ticks, pages, expected_calls in (
+            ("expired before first page", [110.0], [page("b1-0", "50")], 0),
+            ("expired before next page", [105.0, 110.0], [page("b1-0", "50", "t1"), page("b1-1", "51")], 1),
+        ):
+            with self.subTest(label), patch(
+                "k8s_agent_sandbox.async_k8s_helper.time.monotonic", side_effect=ticks
+            ):
+                list_page.reset_mock()
+                list_page.side_effect = pages
+                with self.assertRaises(TimeoutError):
+                    await self.helper.list_sandbox_claim_objects(
+                        "default",
+                        "agents.x-k8s.io/batch-id=b1",
+                        _request_timeout=10.0,
+                        deadline=110.0,
+                    )
+                self.assertEqual(list_page.call_count, expected_calls)
 
     async def test_count_live_sandbox_claims_counts_claims_not_being_deleted_across_pages(self):
         class _Page(dict):
@@ -1401,8 +1530,11 @@ class TestAsyncK8sHelperBatchMethods(unittest.IsolatedAsyncioTestCase):
                 "batch-b1", "default", _request_timeout=30),
              coord.delete_namespaced_lease, {}),
             ("delete_sandbox_claim", lambda: helper.delete_sandbox_claim(
-                "b1-0", "default", _request_timeout=30),
+                "b1-0", "default", _request_timeout=30, batch=True),
              api.delete_namespaced_custom_object, {"plural": "sandboxclaims", "name": "b1-0"}),
+            ("create_sandbox_claim", lambda: helper.create_sandbox_claim(
+                "b1-0", "pool-a", "default", _request_timeout=30, batch=True),
+             api.create_namespaced_custom_object, {"plural": "sandboxclaims"}),
         ]
         for name, call, api_method, expected in cases:
             with self.subTest(name):
@@ -1447,6 +1579,10 @@ class TestAsyncK8sHelperBatchMethods(unittest.IsolatedAsyncioTestCase):
     async def test_lease_delete_at_a_resource_version_sends_a_precondition_and_counts_a_conflict_as_deleted(self):
         coord = self.helper.coordination_v1_api
         coord.delete_namespaced_lease = AsyncMock()
+
+        with self.assertRaises(ValueError):
+            await self.helper.delete_batch_lease("batch-b1", "default", resource_version="")
+        coord.delete_namespaced_lease.assert_not_awaited()
 
         await self.helper.delete_batch_lease("batch-b1", "default", resource_version="11")
         body = coord.delete_namespaced_lease.await_args.kwargs["body"]

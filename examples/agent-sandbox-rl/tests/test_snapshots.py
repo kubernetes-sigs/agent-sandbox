@@ -564,6 +564,8 @@ def test_build_snapshot_client_injects_helper_before_crd_check(fake_sdk):
   assert helper.checked == 1                        # checked against THIS cluster
   assert c.init_kwargs == {"tracer_config": "tc"}
   assert snap.build_snapshot_client(_helper(True)).init_kwargs == {}
+  assert snap.build_snapshot_client(
+      _helper(True), api_client="api").init_kwargs == {"api_client": "api"}
 
 
 def test_build_snapshot_client_fails_clearly_without_crd(fake_sdk):
@@ -583,13 +585,14 @@ def test_cluster_builds_snapshot_client_when_configured(monkeypatch):
   monkeypatch.setattr(Cluster, "k8s_helper", property(lambda self: helper))
   built = {}
 
-  def fake_build(k8s_helper, *, tracer_config=None):
+  def fake_build(k8s_helper, *, tracer_config=None, api_client=None):
     built["helper"], built["tracer"] = k8s_helper, tracer_config
+    built["api_client"] = api_client
     return "snapshot-client"
   monkeypatch.setattr(snap, "build_snapshot_client", fake_build)
   c = Cluster(ClusterConfig(name="gke", snapshots=True), api_client=MagicMock())
   assert c.sandbox_client == "snapshot-client"
-  assert built == {"helper": helper, "tracer": None}
+  assert built == {"helper": helper, "tracer": None, "api_client": c.api_client}
   assert c.sandbox_client == "snapshot-client"      # cached
 
 

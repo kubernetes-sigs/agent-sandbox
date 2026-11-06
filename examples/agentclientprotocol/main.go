@@ -39,15 +39,17 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/agent-sandbox/examples/agentclientprotocol/pkg/acp"
+	"sigs.k8s.io/agent-sandbox/examples/agentclientprotocol/pkg/kubeservice"
 )
 
 type options struct {
 	// AgentCommand is the command line used to spawn the ACP agent subprocess.
 	AgentCommand string
 	// AgentAddress, if set, connects to an ACP agent listening on a TCP
-	// address (e.g. behind kubectl port-forward) instead of spawning a
-	// subprocess.
+	// address (e.g. behind kubectl port-forward), or on a Kubernetes Service
+	// given as a kubeservice:// URL, instead of spawning a subprocess.
 	AgentAddress string
 	// WorkingDirectory is the session working directory; file system requests
 	// from the agent are confined to it. Empty means the current directory.
@@ -79,7 +81,7 @@ func main() {
 func run(ctx context.Context) error {
 	var opt options
 	flag.StringVar(&opt.AgentCommand, "cmd", "gemini --acp", "Command to start the ACP agent (e.g. 'gemini --acp')")
-	flag.StringVar(&opt.AgentAddress, "addr", "", "TCP address of an ACP agent to connect to (e.g. 'localhost:8090' behind kubectl port-forward); overrides -cmd")
+	flag.StringVar(&opt.AgentAddress, "addr", "", "Address of an ACP agent to connect to: a TCP address (e.g. 'localhost:8090' behind kubectl port-forward) or a kubeservice://<context>/<namespace>/<service>[:<port>] URL, which port-forwards to the Service in-process; overrides -cmd")
 	flag.StringVar(&opt.WorkingDirectory, "cwd", "", "Working directory for the session (defaults to current directory)")
 	flag.StringVar(&opt.SessionID, "session-id", "", "Resume an existing session ID instead of creating a new one")
 	flag.StringVar(&opt.Prompt, "prompt", "", "Send a single prompt and exit instead of running interactively")
@@ -156,17 +158,32 @@ func run(ctx context.Context) error {
 	}
 }
 
-// connectAgent connects to the ACP agent: over TCP if -addr is set,
-// otherwise by spawning the configured agent command and using its stdout
-// and stdin.
+// connectAgent connects to the ACP agent: over TCP or an in-process
+// port-forward if -addr is set, otherwise by spawning the configured agent
+// command and using its stdout and stdin.
 func connectAgent(ctx context.Context, opt options, cwd string) (io.Reader, io.Writer, func(), error) {
+	log := klog.FromContext(ctx)
+
+	if kubeservice.IsURL(opt.AgentAddress) {
+		target, err := kubeservice.ParseURL(opt.AgentAddress)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		conn, err := kubeservice.Dial(ctx, target)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("connecting to agent at %s: %w", target, err)
+		}
+		log.Info("connected to agent", "target", target, "pod", conn.Pod, "port", conn.Port)
+		return conn, conn, func() { conn.Close() }, nil
+	}
+
 	if opt.AgentAddress != "" {
 		var dialer net.Dialer
 		conn, err := dialer.DialContext(ctx, "tcp", opt.AgentAddress)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("connecting to agent at %s: %w", opt.AgentAddress, err)
 		}
-		fmt.Printf("Connected to ACP agent at %s\n", opt.AgentAddress)
+		log.Info("connected to agent", "address", opt.AgentAddress)
 		return conn, conn, func() { conn.Close() }, nil
 	}
 

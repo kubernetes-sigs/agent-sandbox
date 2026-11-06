@@ -1,3 +1,6 @@
+import datetime
+
+from google.protobuf import duration_pb2 as _duration_pb2
 from google.protobuf import empty_pb2 as _empty_pb2
 from google.protobuf.internal import containers as _containers
 from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
@@ -14,10 +17,19 @@ class Signal(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     SIGNAL_SIGINT: _ClassVar[Signal]
     SIGNAL_SIGKILL: _ClassVar[Signal]
     SIGNAL_SIGTERM: _ClassVar[Signal]
+
+class ExecuteTerminationReason(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    EXECUTE_TERMINATION_REASON_UNSPECIFIED: _ClassVar[ExecuteTerminationReason]
+    EXECUTE_TERMINATION_REASON_EXITED: _ClassVar[ExecuteTerminationReason]
+    EXECUTE_TERMINATION_REASON_TIME_LIMIT_EXCEEDED: _ClassVar[ExecuteTerminationReason]
 SIGNAL_UNSPECIFIED: Signal
 SIGNAL_SIGINT: Signal
 SIGNAL_SIGKILL: Signal
 SIGNAL_SIGTERM: Signal
+EXECUTE_TERMINATION_REASON_UNSPECIFIED: ExecuteTerminationReason
+EXECUTE_TERMINATION_REASON_EXITED: ExecuteTerminationReason
+EXECUTE_TERMINATION_REASON_TIME_LIMIT_EXCEEDED: ExecuteTerminationReason
 
 class PTY(_message.Message):
     __slots__ = ("cols", "rows")
@@ -91,6 +103,36 @@ class ExecuteResponse(_message.Message):
     stdout: bytes
     stderr: bytes
     def __init__(self, exit_code: _Optional[int] = ..., stdout: _Optional[bytes] = ..., stderr: _Optional[bytes] = ...) -> None: ...
+
+class ExecuteWithLimitsRequest(_message.Message):
+    __slots__ = ("config", "stdout_limit_bytes", "stderr_limit_bytes", "time_limit")
+    CONFIG_FIELD_NUMBER: _ClassVar[int]
+    STDOUT_LIMIT_BYTES_FIELD_NUMBER: _ClassVar[int]
+    STDERR_LIMIT_BYTES_FIELD_NUMBER: _ClassVar[int]
+    TIME_LIMIT_FIELD_NUMBER: _ClassVar[int]
+    config: ProcessConfig
+    stdout_limit_bytes: int
+    stderr_limit_bytes: int
+    time_limit: _duration_pb2.Duration
+    def __init__(self, config: _Optional[_Union[ProcessConfig, _Mapping]] = ..., stdout_limit_bytes: _Optional[int] = ..., stderr_limit_bytes: _Optional[int] = ..., time_limit: _Optional[_Union[datetime.timedelta, _duration_pb2.Duration, _Mapping]] = ...) -> None: ...
+
+class ExecuteWithLimitsResponse(_message.Message):
+    __slots__ = ("exit_code", "stdout", "stderr", "termination_reason", "elapsed_duration", "stdout_truncated", "stderr_truncated")
+    EXIT_CODE_FIELD_NUMBER: _ClassVar[int]
+    STDOUT_FIELD_NUMBER: _ClassVar[int]
+    STDERR_FIELD_NUMBER: _ClassVar[int]
+    TERMINATION_REASON_FIELD_NUMBER: _ClassVar[int]
+    ELAPSED_DURATION_FIELD_NUMBER: _ClassVar[int]
+    STDOUT_TRUNCATED_FIELD_NUMBER: _ClassVar[int]
+    STDERR_TRUNCATED_FIELD_NUMBER: _ClassVar[int]
+    exit_code: int
+    stdout: bytes
+    stderr: bytes
+    termination_reason: ExecuteTerminationReason
+    elapsed_duration: _duration_pb2.Duration
+    stdout_truncated: bool
+    stderr_truncated: bool
+    def __init__(self, exit_code: _Optional[int] = ..., stdout: _Optional[bytes] = ..., stderr: _Optional[bytes] = ..., termination_reason: _Optional[_Union[ExecuteTerminationReason, str]] = ..., elapsed_duration: _Optional[_Union[datetime.timedelta, _duration_pb2.Duration, _Mapping]] = ..., stdout_truncated: _Optional[bool] = ..., stderr_truncated: _Optional[bool] = ...) -> None: ...
 
 class WriteStdinRequest(_message.Message):
     __slots__ = ("process_id", "input", "eof")

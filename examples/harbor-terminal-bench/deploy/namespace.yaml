@@ -1,0 +1,10 @@
+# Namespace for Harbor trials. Harbor needs root inside the sandbox (agent
+# installs, su), so Pod Security Admission is set to baseline here; use a gVisor
+# or Kata runtime class for isolation (configs/gvisor.yaml).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: harbor
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: baseline

@@ -1,0 +1,22 @@
+# hluk.toml: builds the guest rootfs (`hluk build`) and runs the sandbox
+# runtime locally (`hluk run`), with no cluster, to try it before packaging.
+# See docs/manifest.md in hyperlight-unikraft for every key.
+manifest_version = 1
+
+[app]
+name = "hyperlight-sandbox"
+
+[rootfs]
+dockerfile = "rootfs.Dockerfile"
+
+[run]
+guest_exec = "/app/main.py"
+warm = true
+env = { SANDBOX_BASE_DIR = "/tmp/workspace" }
+
+[run.net]
+# The runtime listens on 8888, reachable from the host at 127.0.0.1:8888,
+# and may reach anything, as the images' `--net` lets it. In the cluster,
+# the NetworkPolicy narrows that down.
+all = true
+ports = [8888]

@@ -140,6 +140,7 @@ export type SandboxdApiCode =
   | "NOT_FOUND"
   | "PERMISSION_DENIED"
   | "CONFLICT"
+  | "FAILED_PRECONDITION"
   | "INTERNAL"
   | "UNKNOWN";
 

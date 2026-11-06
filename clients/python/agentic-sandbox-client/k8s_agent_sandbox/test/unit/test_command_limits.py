@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import grpc
@@ -28,7 +29,10 @@ from pydantic import ValidationError
 from k8s_agent_sandbox.commands.async_command_executor import AsyncCommandExecutor
 from k8s_agent_sandbox.commands.command_executor import CommandExecutor
 from k8s_agent_sandbox.commands._process_stubs import process_pb2 as pb
-from k8s_agent_sandbox.models import BoundedExecutionResult, ExecutionLimits
+from k8s_agent_sandbox.models import (
+    BoundedExecutionResult, ExecutionLimits, SandboxdInClusterConnectionConfig,
+    SandboxdPodTunnelConnectionConfig, SandboxdRouterTunnelConnectionConfig,
+)
 
 
 class RpcFailure(grpc.RpcError):
@@ -46,6 +50,7 @@ class RpcFailure(grpc.RpcError):
 def bounded(request):
     connector = MagicMock()
     connector.is_sandboxd.return_value = True
+    connector.connection_config = SandboxdInClusterConnectionConfig(mode="in-cluster-pod-ip")
     stub = MagicMock()
     if request.param == "async":
         for name in ("connect", "grpc_channel", "invalidate_sandboxd_transport"):
@@ -110,13 +115,13 @@ async def test_omitted_limits_inherit_deployment_policy(bounded):
 
 
 @pytest.mark.asyncio
-async def test_minimum_time_and_uint64_byte_limits(bounded):
+async def test_minimum_time_and_byte_limits(bounded):
     run, _, stub = bounded
-    await run(time_limit=1e-9, stdout_limit_bytes=1, stderr_limit_bytes=2**64 - 1)
+    await run(time_limit=1e-9, stdout_limit_bytes=1, stderr_limit_bytes=2)
     request = stub.ExecuteWithLimits.call_args.args[0]
     assert request.time_limit.ToNanoseconds() == 1
     assert request.stdout_limit_bytes == 1
-    assert request.stderr_limit_bytes == 2**64 - 1
+    assert request.stderr_limit_bytes == 2
 
 
 @pytest.mark.asyncio
@@ -259,7 +264,9 @@ def test_invalid_limit_models(kwargs):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kwargs", [
     *INVALID_LIMITS,
-    *[{"timeout": v} for v in (0, -1, math.inf, math.nan, True, "1")],
+    *[{"timeout": v} for v in (
+        0, -1, math.inf, math.nan, True, "1", 1e10, 1e18, 1e100, sys.float_info.max,
+    )],
     {"env": {"A=B": "value"}},
     {"env": {"": "value"}},
 ])
@@ -310,3 +317,78 @@ assert hasattr(AsyncCommandExecutor, "run_with_limits")
         env={**os.environ, "PYTHONPATH": package_root}, timeout=20,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caps", [
+    {"stdout_limit_bytes": 2**21, "stderr_limit_bytes": 2**21},
+    {"stdout_limit_bytes": 2**22},
+    {"stderr_limit_bytes": 2**64 - 1},
+])
+async def test_response_capacity_rejected_before_connect(bounded, caps):
+    run, connector, stub = bounded
+    with pytest.raises(ValueError, match="receive"):
+        await run(**caps)
+    connector.connect.assert_not_called()
+    stub.ExecuteWithLimits.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_configured_response_capacity_accepts_both_streams(bounded):
+    run, connector, stub = bounded
+    connector.connection_config = SandboxdInClusterConnectionConfig(
+        mode="in-cluster-pod-ip", grpc_max_receive_message_bytes=8 * 1024 * 1024,
+    )
+    await run(stdout_limit_bytes=2**21, stderr_limit_bytes=2**21)
+    stub.ExecuteWithLimits.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_response_capacity_includes_metadata_headroom(bounded):
+    run, connector, stub = bounded
+    await run(stdout_limit_bytes=2**22 - 1025, stderr_limit_bytes=1)
+    connector.connect.assert_called_once()
+    stub.ExecuteWithLimits.assert_called_once()
+    connector.connect.reset_mock()
+    stub.ExecuteWithLimits.reset_mock()
+    with pytest.raises(ValueError, match="receive"):
+        await run(stdout_limit_bytes=2**22 - 1024, stderr_limit_bytes=1)
+    connector.connect.assert_not_called()
+    stub.ExecuteWithLimits.assert_not_called()
+
+
+def test_wire_limits_keep_uint64_range():
+    assert ExecutionLimits(stdout_limit_bytes=2**64 - 1).stdout_limit_bytes == 2**64 - 1
+
+
+@pytest.mark.parametrize("config_type,kwargs", [
+    (SandboxdPodTunnelConnectionConfig, {}),
+    (SandboxdRouterTunnelConnectionConfig, {}),
+    (SandboxdInClusterConnectionConfig, {"mode": "in-cluster-pod-ip"}),
+])
+@pytest.mark.parametrize("capacity", [0, -1, True, 1.5, "8192", 2**31])
+def test_invalid_receive_capacity(config_type, kwargs, capacity):
+    with pytest.raises(ValidationError):
+        config_type(**kwargs, grpc_max_receive_message_bytes=capacity)
+
+
+@pytest.mark.parametrize("config_type,kwargs", [
+    (SandboxdPodTunnelConnectionConfig, {}),
+    (SandboxdRouterTunnelConnectionConfig, {}),
+    (SandboxdInClusterConnectionConfig, {"mode": "in-cluster-pod-ip"}),
+])
+def test_receive_capacity_is_stable(config_type, kwargs):
+    config = config_type(**kwargs, grpc_max_receive_message_bytes=8 * 1024 * 1024)
+    assert config.grpc_max_receive_message_bytes == 8 * 1024 * 1024
+    with pytest.raises(ValidationError):
+        config.grpc_max_receive_message_bytes = 16 * 1024 * 1024
+
+
+@pytest.mark.asyncio
+async def test_absolute_deadline_accounts_for_current_epoch(bounded):
+    run, connector, stub = bounded
+    timeout = (2**63 - 1) // 1_000_000_000 - time.time() + 60
+    with pytest.raises(ValueError, match="deadline"):
+        await run(timeout=timeout)
+    connector.connect.assert_not_called()
+    stub.ExecuteWithLimits.assert_not_called()

@@ -744,6 +744,12 @@ sandboxd REST filesystem port on the pod.
 
 sandboxd gRPC ProcessService port on the pod.
 
+<a id="k8s_agent_sandbox.models.SandboxdPodTunnelConnectionConfig.grpc_max_receive_message_bytes"></a>
+
+#### grpc\_max\_receive\_message\_bytes
+
+Fixed per-channel receive capacity; None preserves gRPC's 4 MiB default.
+
 <a id="k8s_agent_sandbox.models.SandboxdPodTunnelConnectionConfig.port_forward_ready_timeout"></a>
 
 #### port\_forward\_ready\_timeout
@@ -794,6 +800,12 @@ sandboxd REST port, not the router port.
 
 sandboxd gRPC port, not the router port.
 
+<a id="k8s_agent_sandbox.models.SandboxdRouterTunnelConnectionConfig.grpc_max_receive_message_bytes"></a>
+
+#### grpc\_max\_receive\_message\_bytes
+
+Fixed per-channel receive capacity; None preserves gRPC's 4 MiB default.
+
 <a id="k8s_agent_sandbox.models.SandboxdRouterTunnelConnectionConfig.router_namespace"></a>
 
 #### router\_namespace
@@ -833,6 +845,12 @@ listener to port 9090.
 #### auth\_token
 
 Optional bearer token for sandboxd REST and gRPC.
+
+<a id="k8s_agent_sandbox.models.SandboxdInClusterConnectionConfig.grpc_max_receive_message_bytes"></a>
+
+#### grpc\_max\_receive\_message\_bytes
+
+Fixed per-channel receive capacity; None preserves gRPC's 4 MiB default.
 
 <a id="k8s_agent_sandbox.models.SandboxInClusterConnectionConfig"></a>
 

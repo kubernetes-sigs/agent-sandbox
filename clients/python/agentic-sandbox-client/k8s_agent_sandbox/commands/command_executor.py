@@ -15,8 +15,9 @@
 """Command execution for legacy and sandboxd runtimes."""
 
 import threading
-from typing import Annotated, Any, cast
-from pydantic import Field, TypeAdapter
+import time
+from typing import Any, cast
+from pydantic import ConfigDict, TypeAdapter
 from k8s_agent_sandbox.commands._process_handle import ProcessHandle
 from k8s_agent_sandbox.connector import SandboxConnector
 from k8s_agent_sandbox.models import (
@@ -28,9 +29,38 @@ from k8s_agent_sandbox.trace_manager import trace, trace_span
 # runtime sends after killing a timed-out command still arrives.
 _COMMAND_TIMEOUT_MARGIN_SECONDS = 10
 
-_RPC_TIMEOUT = TypeAdapter(
-    Annotated[float, Field(strict=True, gt=0, allow_inf_nan=False)]
+_RPC_TIMEOUT: TypeAdapter[float] = TypeAdapter(
+    float, config=ConfigDict(strict=True, allow_inf_nan=False)
 )
+_MAX_RPC_DEADLINE_SECONDS = (2**63 - 1) // 1_000_000_000
+_RPC_DEADLINE_MARGIN_SECONDS = 60
+_DEFAULT_GRPC_RECEIVE_BYTES = 4 * 1024 * 1024
+_EXECUTE_RESPONSE_OVERHEAD_BYTES = 1024
+
+
+def _validate_rpc_timeout(timeout: float) -> float:
+    value = _RPC_TIMEOUT.validate_python(timeout)
+    if value <= 0:
+        raise ValueError("timeout must be positive")
+    # Python gRPC adds the current Unix epoch before converting the deadline.
+    # Keep that absolute timestamp within signed nanoseconds, with headroom.
+    if value > _MAX_RPC_DEADLINE_SECONDS - time.time() - _RPC_DEADLINE_MARGIN_SECONDS:
+        raise ValueError("timeout exceeds the representable absolute gRPC deadline")
+    return value
+
+
+def _check_response_capacity(limits: ExecutionLimits, connection_config: Any) -> None:
+    capacity = (
+        getattr(connection_config, "grpc_max_receive_message_bytes", None)
+        or _DEFAULT_GRPC_RECEIVE_BYTES
+    )
+    requested = (limits.stdout_limit_bytes or 0) + (limits.stderr_limit_bytes or 0)
+    if requested and requested + _EXECUTE_RESPONSE_OVERHEAD_BYTES > capacity:
+        raise ValueError(
+            "explicit output limits plus 1024 bytes of protobuf overhead exceed "
+            f"the gRPC receive capacity ({capacity} bytes); reduce the limits or "
+            "set grpc_max_receive_message_bytes in the connection configuration"
+        )
 
 def _extract_executable(command: str) -> str:
     if not command:
@@ -215,7 +245,9 @@ class CommandExecutor:
             command: The shell command to run in the sandbox.
             timeout: Positive, finite gRPC deadline in seconds. This wait is
                 independent of time_limit; allow time for execution and result
-                delivery. Router and deployment timeouts also apply.
+                delivery. The absolute Unix deadline must fit in signed 64-bit
+                nanoseconds with 60 seconds of headroom. Router and deployment
+                timeouts also apply.
             time_limit: Execution seconds, including launch and output
                 collection. Must be at least one nanosecond and fit in a Go
                 duration. sandboxd kills the process group on expiry and
@@ -229,6 +261,11 @@ class CommandExecutor:
         Unset limits inherit deployment policy, which can leave resources
         unlimited. Output beyond each stream's limit is drained and discarded.
         The result decodes retained bytes as UTF-8 with replacement.
+        Explicit output budgets plus 1 KiB of protobuf overhead must fit in
+        the connection's grpc_max_receive_message_bytes (4 MiB by default).
+        Omitted budgets inherit server policy and can exceed this capacity;
+        set both budgets to ensure the result fits. Oversized responses raise
+        a transport error after execution.
         Transport errors raise RuntimeError with the gRPC error as the cause.
         Legacy runtimes and servers without ExecuteWithLimits raise
         NotImplementedError. The SDK never retries or falls back to Execute.
@@ -242,7 +279,8 @@ class CommandExecutor:
             stdout_limit_bytes=stdout_limit_bytes,
             stderr_limit_bytes=stderr_limit_bytes,
         )
-        timeout = _RPC_TIMEOUT.validate_python(timeout)
+        _check_response_capacity(limits, self.connector.connection_config)
+        timeout = _validate_rpc_timeout(timeout)
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.command.executable", _extract_executable(command))
@@ -264,7 +302,7 @@ class CommandExecutor:
         channel = self.connector.grpc_channel()
         stub = process_pb2_grpc.ProcessServiceStub(channel)
         try:
-            response = stub.ExecuteWithLimits(request, timeout=timeout)
+            response = stub.ExecuteWithLimits(request, timeout=_validate_rpc_timeout(timeout))
         except grpc.RpcError as e:
             rpc_error = cast("grpc.Call", e)
             if rpc_error.code() == grpc.StatusCode.UNIMPLEMENTED:

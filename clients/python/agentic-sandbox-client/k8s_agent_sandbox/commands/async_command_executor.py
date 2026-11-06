@@ -19,13 +19,14 @@ from typing import Any, cast
 from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
 from k8s_agent_sandbox.commands._process_handle import AsyncProcessHandle
 from k8s_agent_sandbox.commands.command_executor import (
-    _RPC_TIMEOUT,
     _bounded_execute_request,
     _bounded_execution_result,
     _check_process_options,
+    _check_response_capacity,
     _execute_request,
     _extract_executable,
     _process_config,
+    _validate_rpc_timeout,
 )
 from k8s_agent_sandbox.models import BoundedExecutionResult, ExecutionLimits, ExecutionResult, PtySize
 from k8s_agent_sandbox.trace_manager import async_trace_span, trace
@@ -134,7 +135,9 @@ class AsyncCommandExecutor:
         including launch and output collection. Each stream retains its own
         byte-limited prefix and decodes it as UTF-8 with replacement. Unset
         limits inherit deployment policy. Transport errors raise RuntimeError;
-        servers without ExecuteWithLimits raise NotImplementedError.
+        servers without ExecuteWithLimits raise NotImplementedError. Explicit
+        output budgets plus 1 KiB of protobuf overhead must fit in the
+        connection's grpc_max_receive_message_bytes (4 MiB by default).
         """
         sandboxd = self.connector.is_sandboxd()
         if not sandboxd:
@@ -145,7 +148,8 @@ class AsyncCommandExecutor:
             stdout_limit_bytes=stdout_limit_bytes,
             stderr_limit_bytes=stderr_limit_bytes,
         )
-        timeout = _RPC_TIMEOUT.validate_python(timeout)
+        _check_response_capacity(limits, self.connector.connection_config)
+        timeout = _validate_rpc_timeout(timeout)
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.command.executable", _extract_executable(command))
@@ -167,7 +171,7 @@ class AsyncCommandExecutor:
         channel = await self.connector.grpc_channel()
         stub = process_pb2_grpc.ProcessServiceStub(channel)
         try:
-            response = await stub.ExecuteWithLimits(request, timeout=timeout)
+            response = await stub.ExecuteWithLimits(request, timeout=_validate_rpc_timeout(timeout))
         except grpc.RpcError as e:
             rpc_error = cast("grpc.aio.AioRpcError", e)
             if rpc_error.code() == grpc.StatusCode.UNIMPLEMENTED:

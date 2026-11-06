@@ -325,6 +325,9 @@ class SandboxdPodTunnelConnectionConfig(BaseModel):
     auth_token: _SandboxdAuthToken | None = Field(default=None, repr=False)  # Optional bearer token for sandboxd REST and gRPC.
     rest_port: int = 8080  # sandboxd REST filesystem port on the pod.
     grpc_port: int = 9090  # sandboxd gRPC ProcessService port on the pod.
+    grpc_max_receive_message_bytes: int | None = Field(
+        default=None, strict=True, gt=0, le=2**31 - 1, frozen=True,
+    )  # Fixed per-channel receive capacity; None preserves gRPC's 4 MiB default.
     port_forward_ready_timeout: int = 30  # Seconds to wait for port-forward readiness.
 
     @field_validator("rest_port", "grpc_port")
@@ -355,6 +358,9 @@ class SandboxdRouterTunnelConnectionConfig(BaseModel):
     router_auth_token: _SandboxdAuthToken | None = Field(default=None, repr=False)  # Bearer token for the router. Sent as Authorization on REST and gRPC. The router strips it.
     rest_port: int = Field(default=8080, ge=1, le=65535)  # sandboxd REST port, not the router port.
     grpc_port: int = Field(default=9090, ge=1, le=65535)  # sandboxd gRPC port, not the router port.
+    grpc_max_receive_message_bytes: int | None = Field(
+        default=None, strict=True, gt=0, le=2**31 - 1, frozen=True,
+    )  # Fixed per-channel receive capacity; None preserves gRPC's 4 MiB default.
     router_namespace: str = Field(
         default="agent-sandbox-system", min_length=1, max_length=63,
         pattern=r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
@@ -385,6 +391,9 @@ class SandboxdInClusterConnectionConfig(BaseModel):
     mode: Literal["in-cluster-service", "in-cluster-pod-ip"]
     rest_port: int = 8080
     grpc_port: int = 9090
+    grpc_max_receive_message_bytes: int | None = Field(
+        default=None, strict=True, gt=0, le=2**31 - 1, frozen=True,
+    )  # Fixed per-channel receive capacity; None preserves gRPC's 4 MiB default.
 
     @field_validator("mode", mode="before")
     @classmethod

@@ -885,6 +885,12 @@ timeouts also apply. A transport deadline or cancellation raises `RuntimeError`
 with the gRPC status and diagnostic in its message and the original error in
 `__cause__`.
 
+The SDK validates that the absolute Unix deadline fits in signed 64-bit
+nanoseconds, with 60 seconds of headroom. Its maximum timeout is therefore
+`floor((2**63 - 1) / 1e9) - time.time() - 60` seconds. This check runs before
+connecting and again before dispatch, so an unrepresentable deadline raises
+`ValueError` before the command starts.
+
 Each positive byte limit applies to its stream independently. sandboxd retains
 the prefix, drains further output, and sets the corresponding truncation flag.
 The `BoundedExecutionResult` model decodes the retained bytes as UTF-8, replacing
@@ -895,6 +901,30 @@ Unset limits inherit sandboxd's deployment defaults or maxima. A resource stays
 unlimited when both are unconfigured. Explicit limits above the deployment
 maximum fail before the command starts. The SDK validates positive uint64 byte
 limits and execution durations before connecting.
+
+gRPC's default receive capacity is 4 MiB for the entire serialized response.
+The sum of explicitly requested output caps, plus 1 KiB reserved for protobuf
+metadata, must fit in this capacity. The SDK raises `ValueError` before connecting
+when that budget is too large. For larger output, set a finite capacity when
+creating any sandboxd connection configuration:
+
+```python
+from k8s_agent_sandbox.models import SandboxdPodTunnelConnectionConfig
+
+connection_config = SandboxdPodTunnelConnectionConfig(
+    grpc_max_receive_message_bytes=8 * 1024 * 1024,
+)
+```
+
+`grpc_max_receive_message_bytes` accepts positive integers up to `2**31 - 1`.
+It stays fixed for the connection configuration and applies to all RPCs on its
+shared channel. Omitting it preserves existing channel behavior. Concurrent
+commands reuse that channel regardless of their output budgets.
+
+When an output cap is omitted, the SDK inherits the server's policy. An inherited
+result can exceed the client's receive capacity and raise `RuntimeError` with
+gRPC status `RESOURCE_EXHAUSTED` after execution. For a predictable result size,
+set both output caps and choose sufficient receive capacity.
 
 `run_with_limits()` requires a server implementing `ExecuteWithLimits`. Legacy
 HTTP runtimes and older sandboxd servers raise `NotImplementedError`. The SDK

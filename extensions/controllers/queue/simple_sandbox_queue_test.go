@@ -59,22 +59,22 @@ func TestSimpleSandboxQueue_RemoveItem_GhostPodFix(t *testing.T) {
 	q.Add(hash, key2)
 	q.Add(hash, key3)
 
-	// Simulate the Kubelet deleting the middle pod (Ghost Pod scenario)
-	q.RemoveItem(hash, key2)
-
-	// Ensure RemoveItem does not retain stale references in backing array tail.
 	rawQueue, ok := q.queues.Load(hash)
 	if !ok {
 		t.Fatalf("Expected queue for %q to exist", hash)
 	}
 	sq := rawQueue.(*synchronizedQueue)
-	if cap(sq.items) > len(sq.items) {
-		backing := sq.items[:cap(sq.items)]
-		for i := len(sq.items); i < len(backing); i++ {
-			if backing[i] != (SandboxKey{}) {
-				t.Errorf("Expected backing array slot %d to be cleared, found %+v", i, backing[i])
-			}
-		}
+	removed := sq.set[sandboxID{key2.Namespace, key2.Name}]
+	element := removed.element
+
+	// Simulate the Kubelet deleting the middle pod (Ghost Pod scenario).
+	q.RemoveItem(hash, key2)
+
+	if removed.key != (SandboxKey{}) || removed.element != nil || element.Value != nil {
+		t.Error("Expected removed entry to release its key and list references")
+	}
+	if _, exists := sq.set[sandboxID{key2.Namespace, key2.Name}]; exists {
+		t.Error("Expected removed key to be absent from the identity index")
 	}
 
 	// First pop should still be key1
@@ -106,8 +106,8 @@ func TestSynchronizedQueue_Deduplication(t *testing.T) {
 	q.Push(key)
 
 	// Verify it only stored it once
-	if len(q.items) != 1 {
-		t.Errorf("Expected length 1 due to O(1) deduplication, got %d", len(q.items))
+	if q.items.Len() != 1 {
+		t.Errorf("Expected length 1 due to O(1) deduplication, got %d", q.items.Len())
 	}
 
 	// Verify the set also only has 1 item

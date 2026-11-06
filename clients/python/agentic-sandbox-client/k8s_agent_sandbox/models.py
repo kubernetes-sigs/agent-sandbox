@@ -298,16 +298,15 @@ class SandboxdRouterTunnelConnectionConfig(BaseModel):
     REST and gRPC share the router's port 8080. Routing headers and metadata
     select the Sandbox and its REST or gRPC port. gRPC requires sandbox-router
     v1.0.9 or later. Set ``router_auth_token`` when the router requires
-    authentication. The SDK sends only that token as ``Authorization``.
-    The router strips that header before forwarding, so token-protected
-    sandboxd is unsupported until credential pass-through is defined (issue
-    2102). The SDK never sends ``auth_token`` in this mode.
+    authentication. The SDK sends that token as ``Authorization``, which the
+    router strips. It sends ``auth_token`` as ``X-Sandboxd-Token``, which the
+    router forwards to sandboxd.
     ``pod_ip_routing`` stays false so the router selects the Pod from its cache
     or DNS. Scoped tokens reject ``X-Sandbox-Pod-IP``.
     """
     model_config = ConfigDict(hide_input_in_errors=True)
 
-    auth_token: _SandboxdAuthToken | None = Field(default=None, repr=False)  # sandboxd bearer token. Not sent in this mode because the router strips Authorization (issue 2102).
+    auth_token: _SandboxdAuthToken | None = Field(default=None, repr=False)  # sandboxd token. Sent as X-Sandboxd-Token because the router strips Authorization.
     router_auth_token: _SandboxdAuthToken | None = Field(default=None, repr=False)  # Bearer token for the router. Sent as Authorization on REST and gRPC. The router strips it.
     rest_port: int = Field(default=8080, ge=1, le=65535)  # sandboxd REST port, not the router port.
     grpc_port: int = Field(default=9090, ge=1, le=65535)  # sandboxd gRPC port, not the router port.

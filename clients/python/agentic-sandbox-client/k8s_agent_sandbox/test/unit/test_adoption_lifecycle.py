@@ -32,7 +32,12 @@ from k8s_agent_sandbox import constants as C
 from k8s_agent_sandbox.async_sandbox_client import AsyncSandboxClient
 from k8s_agent_sandbox.sandbox_client import SandboxClient
 from k8s_agent_sandbox.models import SandboxDirectConnectionConfig
-from k8s_agent_sandbox.exceptions import SandboxNotFoundError
+from k8s_agent_sandbox.exceptions import (
+    SandboxClaimFailedError,
+    SandboxNotFoundError,
+    SandboxTemplateNotFoundError,
+    SandboxWarmPoolNotFoundError,
+)
 from k8s_agent_sandbox.gke_extensions.snapshots.podsnapshot_client import PodSnapshotSandboxClient
 
 
@@ -426,6 +431,54 @@ async def test_claim_ready_wait_current_generation_still_requires_ready_and_bind
             await invoke(
                 client.k8s_helper.wait_for_claim_ready, 'workflow-a', 'default', 5,
                 initial_claim=initial, require_current_generation=True,
+            )
+
+
+TERMINAL_CLAIM_FAILURES = [
+    ('InvalidMetadata', SandboxClaimFailedError),
+    ('TemplateNotFound', SandboxTemplateNotFoundError),
+    ('WarmPoolNotFound', SandboxWarmPoolNotFoundError),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reason', [reason for reason, _ in TERMINAL_CLAIM_FAILURES])
+@pytest.mark.parametrize('options', [{}, {'require_current_generation': True}])
+async def test_claim_ready_wait_ignores_failure_from_older_generation(sdk_client, reason, options):
+    api, client, _ = sdk_client
+    initial = seed_claim(api)
+    initial['metadata']['generation'] = 2
+    initial['status']['conditions'][0].update(status='False', reason=reason, observedGeneration=1)
+    current = deepcopy(initial)
+    current['metadata']['resourceVersion'] = '11'
+    current['status']['conditions'][0].update(status='True', reason='Ready', observedGeneration=2)
+    with patch.object(api, 'list_namespaced_custom_object', side_effect=[{'items': [current]}]):
+        name = await invoke(
+            client.k8s_helper.wait_for_claim_ready, 'workflow-a', 'default', 5,
+            resource_version='10', expected_uid=initial['metadata']['uid'],
+            initial_claim=initial, **options,
+        )
+    assert name == 'sandbox-a'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reason,error', TERMINAL_CLAIM_FAILURES)
+@pytest.mark.parametrize('observed_generation', [2, None])
+async def test_claim_ready_wait_fails_fast_on_current_generation_failure(
+        sdk_client, reason, error, observed_generation):
+    api, client, _ = sdk_client
+    initial = seed_claim(api)
+    initial['metadata']['generation'] = 2
+    ready = initial['status']['conditions'][0]
+    ready.update(status='False', reason=reason, observedGeneration=observed_generation)
+    if observed_generation is None:
+        ready.pop('observedGeneration')
+    with patch.object(api, 'list_namespaced_custom_object', side_effect=AssertionError('no future events')):
+        with pytest.raises(error):
+            await invoke(
+                client.k8s_helper.wait_for_claim_ready, 'workflow-a', 'default', 5,
+                expected_uid=initial['metadata']['uid'], initial_claim=initial,
+                require_current_generation=True,
             )
 
 

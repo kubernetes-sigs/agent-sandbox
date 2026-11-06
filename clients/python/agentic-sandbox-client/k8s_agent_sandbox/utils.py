@@ -236,6 +236,26 @@ def extract_sandbox_name_hash(sandbox_object: dict[str, Any]) -> str | None:
     return None
 
 
+def current_not_ready(obj: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """Return the object's Ready=False condition, or None if Ready is absent,
+    not False, or describes an older generation than the object's current spec.
+
+    A failure reported for an older generation may already be fixed by the
+    current spec, so it must not end a wait.
+    """
+    generation = (obj.get("metadata") or {}).get("generation")
+    for cond in (obj.get("status") or {}).get("conditions") or []:
+        if cond.get("type") != "Ready":
+            continue
+        if cond.get("status") != "False":
+            return None
+        observed = cond.get("observedGeneration")
+        if observed and generation is not None and observed < generation:
+            return None
+        return cast(Mapping[str, Any], cond)
+    return None
+
+
 def construct_sandbox_claim_env_spec(env: Mapping[str, str] | None) -> list[SandboxClaimEnvVar]:
     """Construct SandboxClaim env spec entries from a mapping of names to values."""
     if not env:

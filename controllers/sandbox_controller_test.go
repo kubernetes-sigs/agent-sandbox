@@ -256,8 +256,9 @@ func TestComputeConditions(t *testing.T) {
 			svc:     &corev1.Service{},
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-sandbox-pod",
-					Namespace: "default",
+					Name:              "test-sandbox-pod",
+					Namespace:         "default",
+					DeletionTimestamp: new(metav1.Now()),
 					OwnerReferences: []metav1.OwnerReference{
 						{
 							APIVersion: sandboxv1beta1.GroupVersion.String(),
@@ -658,7 +659,7 @@ func TestComputeConditions(t *testing.T) {
 			expectedConditions: []metav1.Condition{
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Pod is terminating"},
-				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod exists with phase: Pending; Service Exists"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Pod is terminating"},
 			},
 		},
 		{
@@ -679,7 +680,51 @@ func TestComputeConditions(t *testing.T) {
 			expectedConditions: []metav1.Condition{
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "True", ObservedGeneration: gen, Reason: "PodScheduled"},
-				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod is Running but not Ready; Service Exists"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Pod is terminating"},
+			},
+		},
+		{
+			name:    "26. Running Ready Pod with deletionTimestamp is not ready",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
+			pod: ownedPod(&corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					DeletionTimestamp: new(metav1.Now()),
+				},
+				Status: corev1.PodStatus{
+					Phase:  corev1.PodRunning,
+					PodIPs: []corev1.PodIP{{IP: "10.244.0.1"}},
+					Conditions: []corev1.PodCondition{
+						{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
+						{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+					},
+				},
+			}),
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
+				{Type: "PodScheduled", Status: "True", ObservedGeneration: gen, Reason: "PodScheduled"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Pod is terminating"},
+			},
+		},
+		{
+			name:    "27. Terminating Failed Pod stays PodTerminating",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
+			svc:     &corev1.Service{},
+			pod: ownedPod(&corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					DeletionTimestamp: new(metav1.Now()),
+				},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodFailed,
+					Conditions: []corev1.PodCondition{
+						{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
+					},
+				},
+			}),
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
+				{Type: "Finished", Status: "True", ObservedGeneration: gen, Reason: "PodFailed", Message: "Pod failed"},
+				{Type: "PodScheduled", Status: "True", ObservedGeneration: gen, Reason: "PodScheduled"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Pod is terminating"},
 			},
 		},
 	}

@@ -94,8 +94,10 @@ export const TUNNEL_BACKPRESSURE_THRESHOLD_BYTES = 1024 * 1024;
 // extensions/controllers/sandboxclaim_controller.go). Watch-based ready-waits
 // fail fast on these instead of burning the full timeout. Transient reasons
 // (AdoptionPending, SandboxMissing, SandboxNotReady, ReconcilerError) are
-// intentionally absent: the controller retries those. Kept in sync with the
-// Python SDK's TERMINAL_CLAIM_READY_REASONS.
+// intentionally absent: the controller retries those. PodTerminating is also
+// absent: it is transient while the Pod is being deleted, and the outcome is
+// on the Finished condition. Kept in sync with the Python SDK's
+// TERMINAL_CLAIM_READY_REASONS.
 export const TERMINAL_CLAIM_READY_REASONS: ReadonlySet<string> = new Set([
   "InvalidMetadata",
   "EnvVarsInjectionRejected",

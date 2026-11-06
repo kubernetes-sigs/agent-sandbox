@@ -36,6 +36,7 @@ Summarizes whether the Sandbox can serve traffic. It is `True` only when the bac
 | `False` | `SandboxSuspended` | The Sandbox is suspending or suspended (`spec.operatingMode: Suspended`). |
 | `False` | `PodSucceeded` | The Pod completed successfully. |
 | `False` | `PodFailed` | The Pod failed. |
+| `False` | `PodTerminating` | The Pod has a deletion timestamp, even if it already reached Failed or Succeeded, which `Finished` reports. With `spec.failedPodPolicy: Recreate`, the controller replaces a Failed Pod instead, so Ready is `DependenciesNotReady` and `Finished` is absent. |
 | `False` | `SandboxExpired` | `spec.shutdownTime` was reached. Resource cleanup may still be pending or in progress. See [shutdown time]({{< ref "/docs/sandbox/lifecycle" >}}). |
 
 ### Suspended
@@ -52,7 +53,7 @@ Reports progress of a suspension. It is never removed: a running Sandbox reports
 
 ### Finished
 
-Present only while an owned Pod is in a terminal phase. It is always `True`. Expiry does not create it, but `shutdownPolicy: Retain` keeps an existing one. `Delete` removes the Sandbox.
+Present only while the controller reports an owned Pod in a terminal phase. It is always `True`. With `spec.failedPodPolicy: Recreate`, a Failed Pod is left out of status while a replacement is pending, so this condition is absent then. Expiry does not create it, but `shutdownPolicy: Retain` keeps an existing one. `Delete` removes the Sandbox.
 
 | Status | Reason | Meaning |
 | --- | --- | --- |

@@ -45,7 +45,9 @@ PODSNAPSHOT_API_KIND = "PodSnapshot"
 # extensions/controllers/sandboxclaim_controller.go). Watch-based ready-waits
 # fail fast on these instead of burning the full timeout. Transient reasons
 # (AdoptionPending, SandboxMissing, SandboxNotReady, ReconcilerError) are
-# intentionally absent: the controller retries those.
+# intentionally absent: the controller retries those. PodTerminating is also
+# absent: it is transient while the Pod is being deleted, and the outcome is
+# on the Finished condition.
 TERMINAL_CLAIM_READY_REASONS = frozenset({
     "InvalidMetadata",
     "EnvVarsInjectionRejected",

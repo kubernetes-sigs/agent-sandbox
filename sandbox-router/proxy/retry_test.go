@@ -323,3 +323,89 @@ func TestRetryTransport_TimerDrainToleratesAlreadyConsumedChannel(t *testing.T) 
 		t.Errorf("expected 4 attempts, got %d", got)
 	}
 }
+
+// serverBody mimics the body of an incoming server request: reading it
+// after Close fails, as it does for the bodies ReverseProxy forwards.
+type serverBody struct {
+	r      io.Reader
+	closed atomic.Bool
+}
+
+func (b *serverBody) Read(p []byte) (int, error) {
+	if b.closed.Load() {
+		return 0, errors.New("http: invalid Read on closed Body")
+	}
+	return b.r.Read(p)
+}
+
+func (b *serverBody) Close() error {
+	b.closed.Store(true)
+	return nil
+}
+
+// http.Transport closes the request body when it cannot get a connection,
+// so a retry after a dial failure must not hand it a body that is already
+// closed. The upstream starts listening only after the first dial is
+// refused, and must still receive the full body on the retry.
+func TestRetryTransport_RetriesRequestBodyAfterRealDialFailure(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	received := make(chan string, 1)
+	srv := &http.Server{Handler: http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		received <- string(b)
+	})}
+	t.Cleanup(func() { srv.Close() })
+
+	onRetry := func(*http.Request, error, int) {
+		if ln, err := net.Listen("tcp", addr); err == nil {
+			go func() { _ = srv.Serve(ln) }()
+		}
+	}
+	base := &http.Transport{}
+	t.Cleanup(base.CloseIdleConnections)
+	tr := newRetryTransport(base, 3, time.Millisecond, 10*time.Millisecond, onRetry)
+
+	const payload = `{"command":"echo hi"}`
+	body := &serverBody{r: strings.NewReader(payload)}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://"+addr+"/exec", body)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.ContentLength = int64(len(payload))
+
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	resp.Body.Close()
+	if got := <-received; got != payload {
+		t.Errorf("upstream received body %q, want %q", got, payload)
+	}
+	if !body.closed.Load() {
+		t.Error("request body was not closed after a successful round trip")
+	}
+}
+
+// The RoundTripper contract requires the request body to be closed even
+// when every attempt fails.
+func TestRetryTransport_ClosesRequestBodyWhenAttemptsAreExhausted(t *testing.T) {
+	base := rtFunc(func(*http.Request) (*http.Response, error) { return nil, dialErr() })
+	tr := newRetryTransport(base, 3, time.Millisecond, 10*time.Millisecond, nil)
+	body := &serverBody{r: strings.NewReader("payload")}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://upstream.invalid/", body)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	if _, err := tr.RoundTrip(req); err == nil {
+		t.Fatal("expected an error")
+	}
+	if !body.closed.Load() {
+		t.Error("request body was not closed after the last failed attempt")
+	}
+}

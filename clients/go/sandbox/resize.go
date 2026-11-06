@@ -32,36 +32,33 @@ type resizeOptions struct {
 	syncTemplate bool
 }
 
-// WithoutTemplateSync disables the default Sandbox spec synchronization.
-// By default ResizePodResources also updates Sandbox.Spec.PodTemplate so the
-// Sandbox spec matches the resized Pod; without that sync the two drift
-// apart, which can surprise later template-driven operations.
-func WithoutTemplateSync() ResizeOption {
+// WithTemplateSync also updates Sandbox.Spec.PodTemplate after a successful
+// resize so the declared template matches the resized Pod. It is opt-in
+// because it needs get and patch on sandboxes, which SandboxClaim-scoped
+// callers often do not have; without it the Sandbox spec no longer reflects
+// the running Pod's sizing.
+func WithTemplateSync() ResizeOption {
 	return func(o *resizeOptions) {
-		o.syncTemplate = false
+		o.syncTemplate = true
 	}
 }
 
 // ResizePodResources requests an in-place resize of one container's CPU and
 // memory resources on the Sandbox's backing Pod via the Pod /resize
-// subresource (KEP-1287). The Pod is not restarted and keeps its identity.
+// subresource (KEP-1287). The Pod keeps its identity; whether the resized
+// container restarts is controlled by its per-container resizePolicy
+// (NotRequired avoids a restart, RestartContainer allows one).
 //
 // This operates on the Pod directly instead of going through the Sandbox
 // API, per the project guidance (issue #612): the Sandbox spec stays a
 // user-owned declaration, and the resize does not freeze a KEP-1287 subset
 // into the Sandbox API surface.
 //
-// By default the Sandbox spec is synchronized afterwards so
-// Sandbox.Spec.PodTemplate reflects the new sizing; pass WithoutTemplateSync
-// to skip that write.
+// The cluster must serve the Pod resize subresource. The call returns the
+// API server's error unchanged (wrapped) when a resize is rejected.
 //
-// Resizing is opt-in on the cluster side: every container on the Pod must
-// have a RestartPolicy of RestartNotRequired for CPU and memory, and the
-// cluster must serve the Pod resize subresource. The call returns the API
-// server's error unchanged (wrapped) when a resize is rejected.
-//
-// Required RBAC for the caller's credentials: patch on pods/resize, and
-// (unless WithoutTemplateSync is used) patch on sandboxes.
+// Required RBAC for the caller's credentials: patch on pods/resize. When
+// WithTemplateSync is used, get and patch on sandboxes are required as well.
 //
 // Example:
 //
@@ -70,7 +67,7 @@ func WithoutTemplateSync() ResizeOption {
 //	    Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")},
 //	})
 func (s *Sandbox) ResizePodResources(ctx context.Context, containerName string, resources corev1.ResourceRequirements, opts ...ResizeOption) error {
-	cfg := resizeOptions{syncTemplate: true}
+	cfg := resizeOptions{}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
@@ -114,6 +111,12 @@ func (s *Sandbox) ResizePodResources(ctx context.Context, containerName string, 
 // syncTemplateResources updates Sandbox.Spec.PodTemplate so the declared
 // template matches the resized Pod. The write is skipped when the template
 // already carries the requested resources.
+//
+// CRDs have no strategic merge, so the merge patch carries the full container
+// list from the fetched Sandbox with only the resized container's resources
+// changed; anything less would drop the other containers and their fields.
+// The fetched resourceVersion rides along so a concurrent template change
+// makes the write fail with a conflict instead of being overwritten.
 func (s *Sandbox) syncTemplateResources(ctx context.Context, containerName string, resources corev1.ResourceRequirements) error {
 	if s.k8s.AgentsClient == nil {
 		return fmt.Errorf("sandbox: template sync requires a K8sHelper with an AgentsClient")
@@ -129,7 +132,9 @@ func (s *Sandbox) syncTemplateResources(ctx context.Context, containerName strin
 		if equality.Semantic.DeepEqual(sb.Spec.PodTemplate.Spec.Containers[i].Resources, resources) {
 			return nil
 		}
-		patch, err := sandboxTemplateResourcesPatch(sb.Name, containerName, resources)
+		containers := append([]corev1.Container(nil), sb.Spec.PodTemplate.Spec.Containers...)
+		containers[i].Resources = resources
+		patch, err := sandboxTemplateResourcesPatch(sb.Name, sb.ResourceVersion, containers)
 		if err != nil {
 			return err
 		}
@@ -154,7 +159,10 @@ func containerResourcesPatch(podName, containerName string, resources corev1.Res
 	patch := map[string]any{
 		"spec": map[string]any{
 			"containers": []any{
-				containerResourcesPatchEntry(containerName, resources),
+				map[string]any{
+					"name":      containerName,
+					"resources": resources,
+				},
 			},
 		},
 	}
@@ -166,15 +174,16 @@ func containerResourcesPatch(podName, containerName string, resources corev1.Res
 }
 
 // sandboxTemplateResourcesPatch builds the merge patch that mirrors resized
-// resources into the Sandbox's pod template.
-func sandboxTemplateResourcesPatch(sandboxName, containerName string, resources corev1.ResourceRequirements) ([]byte, error) {
+// resources into the Sandbox's pod template, preserving every container.
+func sandboxTemplateResourcesPatch(sandboxName, resourceVersion string, containers []corev1.Container) ([]byte, error) {
 	patch := map[string]any{
+		"metadata": map[string]any{
+			"resourceVersion": resourceVersion,
+		},
 		"spec": map[string]any{
 			"podTemplate": map[string]any{
 				"spec": map[string]any{
-					"containers": []any{
-						containerResourcesPatchEntry(containerName, resources),
-					},
+					"containers": containers,
 				},
 			},
 		},
@@ -184,11 +193,4 @@ func sandboxTemplateResourcesPatch(sandboxName, containerName string, resources 
 		return nil, fmt.Errorf("sandbox: build template patch for sandbox %q: %w", sandboxName, err)
 	}
 	return body, nil
-}
-
-func containerResourcesPatchEntry(containerName string, resources corev1.ResourceRequirements) map[string]any {
-	return map[string]any{
-		"name":      containerName,
-		"resources": resources,
-	}
 }

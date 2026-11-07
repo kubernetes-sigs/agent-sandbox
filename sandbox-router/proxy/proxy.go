@@ -187,7 +187,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			r.Body = http.MaxBytesReader(w, r.Body, h.cfg.MaxRequestBodyBytes)
 		}
 	}
-	upstreamPath, upstreamRawPath := r.URL.Path, ""
+	// Keep RawPath so an encoded "/" (e.g. "%2F") survives to the upstream.
+	upstreamPath, upstreamRawPath := r.URL.Path, r.URL.RawPath
 	var pathRouted bool
 	target, perr := h.resolveTarget(r, grpcRequest, &upstreamPath, &upstreamRawPath, &pathRouted)
 	if perr != nil {
@@ -494,9 +495,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // originally-escaped form — both are needed together to preserve an
 // encoded separator (e.g. "%2F") through to the outbound request, see
 // ParsePathRoute. Both are left untouched for header-routed requests,
-// which carry no routing prefix to strip; *upstreamRawPath in particular
-// stays "" there, exactly matching pre-path-routing behavior of never
-// setting Resolve's outbound URL.RawPath at all.
+// which carry no routing prefix to strip; the caller seeds both from
+// r.URL so header-routed requests keep their original escaping.
 //
 // *pathRouted reports which branch actually resolved the target — the
 // browser-session bootstrap (maybeBootstrapCookie) must only fire for a

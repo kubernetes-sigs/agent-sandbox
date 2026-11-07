@@ -31,11 +31,11 @@ type LifecycleApplyConfiguration struct {
 	// underlying Sandbox. Instead, the SandboxClaim controller enforces this
 	// expiration by deleting the Sandbox resources when the time is reached.
 	// If this field is omitted or set to nil, the SandboxClaim does not expire at a
-	// scheduled time and lives until it is deleted, unless ttlSecondsAfterFinished
-	// expires it after its Sandbox finishes.
+	// scheduled time. It can still expire through ttlSecondsAfterFinished.
 	// This implies unsetting a Sandbox's ShutdownTime via SandboxClaim isn't supported.
 	ShutdownTime *v1.Time `json:"shutdownTime,omitempty"`
-	// ttlSecondsAfterFinished limits how long a finished claim is retained.
+	// ttlSecondsAfterFinished is how long after its Sandbox finishes the claim
+	// expires. The shutdownPolicy decides whether expiry deletes the claim.
 	// The timer starts from the mirrored Finished condition's LastTransitionTime.
 	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
 	// shutdownPolicy determines what happens to the SandboxClaim object when it

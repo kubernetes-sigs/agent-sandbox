@@ -1,3 +1,17 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Verify a JupyterLab sandbox serves correctly under the router's browser prefix.
 
 Run it against the sandbox-router (see README.md for the port-forward step):
@@ -9,6 +23,7 @@ Run it against the sandbox-router (see README.md for the port-forward step):
 PREFIX must match the sandbox's base_url in sandbox.yaml. Prints PASS/FAIL per
 check and exits non-zero on any FAIL.
 """
+import http.client
 import http.cookiejar
 import json
 import os
@@ -24,6 +39,7 @@ results = []
 
 
 def check(name, ok, detail=""):
+    ok = bool(ok)
     results.append(ok)
     print(("PASS " if ok else "FAIL ") + name + (("  -- " + detail) if detail else ""))
 
@@ -38,28 +54,37 @@ jar = http.cookiejar.CookieJar()
 opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
 
 
-def get(url, op=opener):
-    try:
-        r = op.open(BASE + url, timeout=20)
-        return r.status, dict(r.headers), r.read()
-    except urllib.error.HTTPError as e:
-        return e.code, dict(e.headers), e.read()
-    except urllib.error.URLError as e:
-        # Unreachable router or sandbox: report it as a failed check rather
-        # than a traceback, so the output still says which step broke.
-        check("reach " + BASE + url, False, repr(e.reason))
-        print_summary_and_exit()
-
-
 def print_summary_and_exit():
     print()
     print(f"{sum(results)}/{len(results)} checks passed")
     sys.exit(1)
 
 
+def report_unreachable(url, err):
+    # Connection refused, reset, timeout, or a truncated response: report it
+    # as a failed check that names the step, instead of a traceback.
+    check("reach " + BASE + url, False, repr(getattr(err, "reason", err)))
+    print_summary_and_exit()
+
+
+def get(url, op=opener):
+    try:
+        r = op.open(BASE + url, timeout=20)
+        return r.status, dict(r.headers), r.read()
+    except urllib.error.HTTPError as e:
+        # HTTPError is a URLError and an OSError, so it must be caught first.
+        try:
+            body = e.read()
+        except (OSError, http.client.HTTPException) as read_err:
+            report_unreachable(url, read_err)
+        return e.code, dict(e.headers), body
+    except (OSError, http.client.HTTPException) as e:
+        report_unreachable(url, e)
+
+
 # 1. Root without prefix must not serve the app (prefix is load-bearing).
 st, _, _ = get("/lab")
-check("unprefixed /lab is not served by the app", st != 200, f"status={st}")
+check("unprefixed /lab is not served by the app", st != 200 and st < 500, f"status={st}")
 
 # 2. A real redirect: prefix without trailing slash must redirect to a prefixed Location.
 st, h, _ = get(PREFIX, op=opener_noredir)

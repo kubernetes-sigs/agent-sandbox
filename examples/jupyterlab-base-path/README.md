@@ -78,6 +78,5 @@ PREFIX=/sandboxes/default/jupyterlab-base-path/8888 \
   match its `base_url` and requests fail.
 - The XSRF check stays on. With `base_url` set, the `_xsrf` cookie is scoped to
   the sandbox prefix instead of `Path=/`, so sandboxes do not collide.
-- `base_url` hardcodes the namespace and sandbox name. If the sandbox is adopted
-  from a warm pool, its pod name can differ from its sandbox name, so derive the
-  `base_url` from the name the router routes to.
+- `base_url` is built from the Pod's namespace and name through the Downward
+  API, so it matches the route the router uses without hardcoding either value.

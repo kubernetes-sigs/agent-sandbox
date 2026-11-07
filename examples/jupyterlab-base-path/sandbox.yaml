@@ -7,10 +7,10 @@
 # prefix, so its redirects, cookies, asset URLs, kernelspec URLs and kernel
 # WebSockets all stay under it without any response rewriting in the router.
 #
-# The base_url below must match the sandbox's namespace and name. This example
-# hardcodes them because the Sandbox is created directly; if the sandbox is
-# adopted from a warm pool, the pod name can differ from the sandbox name, so
-# derive the base_url from the name the router will actually route to.
+# The base_url is built from the Pod's namespace and name, which the Downward
+# API provides. The Pod takes the Sandbox's name, and the router resolves
+# <sandbox-id> by that name, so the prefix matches the route without
+# hardcoding either value.
 apiVersion: agents.x-k8s.io/v1beta1
 kind: Sandbox
 metadata:
@@ -38,12 +38,20 @@ spec:
                 --port=8888 \
                 --no-browser \
                 --ServerApp.root_dir=/home/jovyan \
-                --ServerApp.base_url=/sandboxes/default/jupyterlab-base-path/8888/ \
+                --ServerApp.base_url=/sandboxes/${POD_NAMESPACE}/${POD_NAME}/8888/ \
                 --ServerApp.token='' \
                 --ServerApp.password=''
           env:
             - name: JUPYTER_ENABLE_LAB
               value: "yes"
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
           ports:
             - containerPort: 8888
               name: notebook

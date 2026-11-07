@@ -131,10 +131,10 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 			"prefixed URLs themselves. Requires --path-routing-prefix. When off (default), "+
 			"upstream Location and Set-Cookie paths are rewritten under the prefix instead.")
 	fs.BoolVar(&c.PathRoutingRewriteResponses, "path-routing-rewrite-responses", c.PathRoutingRewriteResponses,
-		"Rewrite upstream Location and Set-Cookie Path so path-routed responses stay under "+
-			"the routing prefix. Applies only without --path-routing-preserve-prefix. On by "+
-			"default; disable only for an upstream that must see its redirects and cookies "+
-			"unmodified.")
+		"Keep path-routed responses under the routing prefix: rewrite upstream Set-Cookie "+
+			"Path in both modes, and Location too unless --path-routing-preserve-prefix is set. "+
+			"On by default; disable only for an upstream that must see its redirects and "+
+			"cookies unmodified.")
 	fs.IntVar(&c.UpstreamMaxRetries, "upstream-max-retries", c.UpstreamMaxRetries,
 		"Number of additional dial attempts before returning 502. Only dial-class "+
 			"failures (DNS, connection refused) are retried. Smooths the case "+

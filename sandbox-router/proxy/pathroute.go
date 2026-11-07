@@ -192,64 +192,81 @@ func rewriteLocation(loc, base string, isSelf func(host string) bool) string {
 }
 
 // selfHostMatcher reports whether a Location host names the sandbox at
-// upstreamHost or the router at routerHost. Hosts are compared without their
-// ports: a redirect to "http://10.0.0.1/a" is still the sandbox even though
-// the upstream dial address carries :8888, and a router reached on a
-// different port is still the router.
+// upstreamHost or the router at routerHost. A port-less host is still the
+// sandbox ("http://10.0.0.1/a" for an upstream dialed on :8888), and so is one
+// on the upstream's own port. A host with a different explicit port is some
+// other service on the pod, so it passes through unchanged. The router is
+// matched by name alone, so a router reached on another port still counts.
 func selfHostMatcher(routerHost, upstreamHost string) func(host string) bool {
+	upName, upPort := splitHostLoose(upstreamHost)
+	routerName, _ := splitHostLoose(routerHost)
 	return func(host string) bool {
-		h := stripPort(host)
-		if h == "" {
+		name, port := splitHostLoose(host)
+		if name == "" {
 			return false
 		}
-		if strings.EqualFold(h, stripPort(upstreamHost)) {
+		if strings.EqualFold(name, upName) && (port == "" || port == upPort) {
 			return true
 		}
-		return routerHost != "" && strings.EqualFold(h, stripPort(routerHost))
+		return routerName != "" && strings.EqualFold(name, routerName)
 	}
 }
 
-// stripPort returns host without a trailing port, unwrapping an IPv6
-// literal's brackets when no port is present.
-func stripPort(host string) string {
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		return h
+// splitHostLoose splits host into its name and port. Unlike net.SplitHostPort
+// it accepts a bare name with no port, and it unwraps an IPv6 literal's
+// brackets in either case.
+func splitHostLoose(host string) (name, port string) {
+	if h, p, err := net.SplitHostPort(host); err == nil {
+		return h, p
 	}
-	return strings.Trim(host, "[]")
+	return strings.Trim(host, "[]"), ""
 }
 
 // rewriteSetCookiePath rescopes every Path attribute of one upstream
 // Set-Cookie value under base, so the browser attaches the cookie only to
 // requests addressed to this sandbox. Every attribute is rewritten, not just
 // the first: browsers use the last Path they see, so a leftover "Path=/"
-// would still win. A cookie with no Path attribute is left as-is: the
-// browser's default-path comes from the request URL it actually sent, which
-// already carries the prefix.
+// would still win. A cookie with no Path attribute gets one: the browser's
+// default-path is the directory of the request URL, and for a request to the
+// bare base path (no trailing slash) that directory is the namespace, which
+// every sandbox in it shares.
 //
 // This is collision avoidance, not isolation. Sandboxes still share one
 // origin, so the prefix does not keep one sandbox's script from reading
 // another's cookie.
 func rewriteSetCookiePath(v, base string) string {
+	// A __Host- cookie must be sent with Path=/ (RFC 6265bis §4.1.3.2.2), or
+	// the browser rejects it. Rescoping it would break a working cookie, so it
+	// is passed through; such a cookie already covers the prefixed URL.
+	if name, _, _ := strings.Cut(v, "="); strings.HasPrefix(strings.ToLower(strings.TrimSpace(name)), "__host-") {
+		return v
+	}
 	parts := strings.Split(v, ";")
+	hasPath := false
 	for i := 1; i < len(parts); i++ {
 		name, val, ok := strings.Cut(strings.TrimSpace(parts[i]), "=")
 		if !ok || !strings.EqualFold(strings.TrimSpace(name), "path") {
 			continue
 		}
+		hasPath = true
 		p := strings.TrimSpace(val)
 		if !strings.HasPrefix(p, "/") || p == base || strings.HasPrefix(p, base+"/") {
 			continue
 		}
 		parts[i] = " Path=" + base + p
 	}
+	if !hasPath {
+		parts = append(parts, " Path="+base+"/")
+	}
 	return strings.Join(parts, ";")
 }
 
-// rewriteResponseHeaders applies rewriteLocation and rewriteSetCookiePath to
-// an upstream response's headers. It only touches Location and Set-Cookie;
-// response bodies are passed through, so this never buffers a body.
-func rewriteResponseHeaders(h http.Header, base string, isSelf func(host string) bool) {
-	if loc := h.Get("Location"); loc != "" {
+// rewriteResponseHeaders applies rewriteSetCookiePath to an upstream response's
+// Set-Cookie headers and, when rewriteLocations is set, rewriteLocation to its
+// Location. It only touches those two headers; response bodies are passed
+// through, so this never buffers a body.
+func rewriteResponseHeaders(h http.Header, base string, isSelf func(host string) bool, rewriteLocations bool) {
+	if loc := h.Get("Location"); rewriteLocations && loc != "" {
 		h.Set("Location", rewriteLocation(loc, base, isSelf))
 	}
 	if vs := h.Values("Set-Cookie"); len(vs) > 0 {

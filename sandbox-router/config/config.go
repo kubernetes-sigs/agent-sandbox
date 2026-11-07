@@ -197,7 +197,8 @@ type Config struct {
 	// with --ServerApp.base_url=<prefix>/<namespace>/<id>/<port>/): such an
 	// app emits prefixed Location, Set-Cookie, asset and WebSocket URLs
 	// itself, so the router must not strip the prefix from what it
-	// forwards and must not rewrite the response either.
+	// forwards. Its Location headers are left alone too, though Set-Cookie
+	// Path is still rescoped under the prefix (see PathRoutingRewriteResponses).
 	//
 	// Off by default, which keeps the stripped form for apps that have no
 	// base-path setting. In that default mode the router rewrites
@@ -208,9 +209,10 @@ type Config struct {
 
 	// PathRoutingRewriteResponses, when true (the default), rewrites the
 	// Location and Set-Cookie Path of path-routed responses so they stay under
-	// the routing prefix. It applies only in the default strip mode: under
-	// PathRoutingPreservePrefix the sandbox already emits prefixed URLs and the
-	// router leaves its responses alone. Turn it off only for an upstream that
+	// the routing prefix. Set-Cookie Path is rewritten in both modes. Location
+	// is rewritten only in the default strip mode: under
+	// PathRoutingPreservePrefix the sandbox already emits prefixed redirects,
+	// and the router leaves them alone. Turn this off only for an upstream that
 	// must see its redirects and cookies unmodified, accepting that apps with
 	// no base-path setting will redirect the browser outside the prefix.
 	PathRoutingRewriteResponses bool

@@ -480,16 +480,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// In strip mode the sandbox does not know its prefix, so its redirects
-	// and cookie paths must be mapped back under it here. Preserve mode
-	// skips this: the sandbox already emits prefixed URLs, and rewriting
-	// them again would double the prefix. gRPC responses carry no
-	// Location or cookie paths worth rewriting, so they keep their own hook.
-	if pathRouted && !grpcRequest && !h.cfg.PathRoutingPreservePrefix && h.cfg.PathRoutingRewriteResponses {
+	// Cookie paths are rescoped under the prefix in both modes: an app that
+	// writes Path=/ would otherwise hand its cookie to every sandbox sharing
+	// the origin. Location is rewritten only in strip mode. There the sandbox
+	// does not know its prefix; in preserve mode it already emits prefixed
+	// redirects, and rewriting them again would double the prefix. gRPC
+	// responses keep their own hook.
+	if pathRouted && !grpcRequest && h.cfg.PathRoutingRewriteResponses {
 		base := strings.TrimSuffix(bootstrapCookiePath(h.cfg.PathRoutingPrefix, target0), "/")
 		isSelf := selfHostMatcher(r.Host, upstreamURL.Host)
+		rewriteLocations := !h.cfg.PathRoutingPreservePrefix
 		rp.ModifyResponse = func(resp *http.Response) error {
-			rewriteResponseHeaders(resp.Header, base, isSelf)
+			rewriteResponseHeaders(resp.Header, base, isSelf, rewriteLocations)
 			return nil
 		}
 	}

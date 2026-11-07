@@ -261,14 +261,14 @@ curl -i --http1.1 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
 
 An app that has no base-path setting does not know it was addressed as `<prefix>/<namespace>/<id>/<port>/`. Its redirects and cookies would then send the browser out of that prefix, to a path that is not this sandbox. For path-routed requests, the router therefore rewrites:
 
-- an upstream `Location` that points at the sandbox or at the router's own host, to a path under the prefix (`/login` becomes `<prefix>/<namespace>/<id>/<port>/login`);
-- every `Path` attribute of an upstream `Set-Cookie`, so the browser attaches the cookie only to requests for this sandbox.
+- an upstream `Location` that points at the sandbox or at the router's own host, to a path under the prefix (`/login` becomes `<prefix>/<namespace>/<id>/<port>/login`). This happens only in the default strip mode;
+- every `Path` attribute of an upstream `Set-Cookie`, so the browser attaches the cookie only to requests for this sandbox. This happens in both modes. A `__Host-` cookie is left alone, because it must keep `Path=/` to be accepted.
 
 Only `Location` and `Set-Cookie` are touched, and only for path-routed requests. Header-routed requests and gRPC responses pass through unchanged, and response bodies are never buffered. This is collision avoidance, not isolation: sandboxes still share one origin, so the prefix does not stop one sandbox's script from reading another's cookie.
 
 This is on by default, which changes the responses of existing path-routed deployments. Set `--path-routing-rewrite-responses=false` to forward them unmodified.
 
-If the sandbox serves under its own base path (for example JupyterLab started with `--ServerApp.base_url`), set `--path-routing-preserve-prefix` instead. The router then forwards the full `<prefix>/<namespace>/<id>/<port>/` path, and it does not rewrite the response, because the app already emits prefixed URLs and a second rewrite would double the prefix. Authorization still sees the stripped path in both modes, so existing policies do not change. The examples in `examples/jupyterlab-base-path` show this mode.
+If the sandbox serves under its own base path (for example JupyterLab started with `--ServerApp.base_url`), set `--path-routing-preserve-prefix` instead. The router then forwards the full `<prefix>/<namespace>/<id>/<port>/` path, and it does not rewrite `Location`, because the app already emits prefixed redirects and a second rewrite would double the prefix. `Set-Cookie` paths are still rescoped under the prefix. Authorization still sees the stripped path in both modes, so existing policies do not change. The examples in `examples/jupyterlab-base-path` show this mode.
 
 ## Flags
 
@@ -294,7 +294,7 @@ Run `sandbox-router --help` for the full list. The most relevant:
 | `--allow-loopback-pod-ip` | `false` | Permit loopback addresses in `X-Sandbox-Pod-IP`. Default-off rejects the router's own loopback as an SSRF target. Enable only when the sandbox runs as a sidecar in the router's Pod, or for integration tests against a localhost backend. Link-local / multicast / unspecified stay rejected regardless. |
 | `--path-routing-prefix` | `""` (disabled) | Optional path prefix (`<prefix>/<namespace>/<id>/<port>/...`) for callers that cannot set `X-Sandbox-*` headers — see [Browser-facing traffic](#browser-facing-traffic-path-based-routing). Falls through to header-based routing for any path that doesn't match. |
 | `--path-routing-preserve-prefix` | `false` | Forward path-routed requests with the full `<prefix>/<namespace>/<id>/<port>/` path, for a sandbox that serves under its own base path. Requires `--path-routing-prefix`. See [Keeping redirects and cookies under the prefix](#keeping-redirects-and-cookies-under-the-prefix). |
-| `--path-routing-rewrite-responses` | `true` | Rewrite upstream `Location` and `Set-Cookie` Path for path-routed responses so they stay under the prefix. Applies only without `--path-routing-preserve-prefix`. Set `false` to forward responses unmodified. |
+| `--path-routing-rewrite-responses` | `true` | Rewrite upstream `Location` and `Set-Cookie` Path for path-routed responses so they stay under the prefix. Set-Cookie Path is rewritten in both modes; Location only without `--path-routing-preserve-prefix`. Set `false` to forward responses unmodified. |
 | `--grpc-web-allowed-origins` | `""` (same-origin only) | Comma-separated `scheme://host[:port]` allowlist of browser origins permitted to call the router with gRPC-Web. Gates only gRPC-Web CORS — see [gRPC-Web](#grpc-web-browser-clients). Transcoding itself is always on. |
 | `--cache-enabled` | `false` | Enable the Pod-IP cache (KEP-NNNN fast path). Requires the RBAC in `deploy/rbac.yaml`. |
 | `--cache-namespace` | `""` (cluster-wide) | Restrict the Pod informer to a single namespace. |

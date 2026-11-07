@@ -17,7 +17,7 @@ Core platform capabilities, controllers, scheduling engines, and backend interfa
 *   **Auto Suspend/Resume** `📅 Planned`
     *   Automatically suspend inactive sandboxes and resume them upon traffic or API invocation.
 *   **Smart Warmpool Selection** `✅ Done`
-    *   Support intelligent warmpool matching and routing based on claim requirements. [[#491](https://github.com/kubernetes-sigs/agent-sandbox/issues/491), [#878](https://github.com/kubernetes-sigs/agent-sandbox/pull/878)]
+    *   Select the best sandbox within the warm pool named by a claim (readiness, node spread, oldest first). [[#491](https://github.com/kubernetes-sigs/agent-sandbox/issues/491), [#878](https://github.com/kubernetes-sigs/agent-sandbox/pull/878)]
 *   **API Support for Multi-Sandbox per Pod** `📅 Planned`
     *   Extend API models to support running and managing multiple isolated sandboxes inside a single Pod.
 
@@ -64,7 +64,7 @@ Advanced ingress/egress isolation, lifecycle state retention, and security contr
 *   **Network Policy "Attach" at Claim Time** `📅 Planned`
     *   Dynamic attachment of L4 and L7 egress/ingress NetworkPolicies at claim time to restrict internet access or whitelist specific FQDNs.
 *   **Storage Customization at Claim Time** `✅ Done`
-    *   Allow full custom storage volume and PVC sizing definitions directly in the SandboxClaim. [[#225](https://github.com/kubernetes-sigs/agent-sandbox/issues/225), [#554](https://github.com/kubernetes-sigs/agent-sandbox/issues/554), [#960](https://github.com/kubernetes-sigs/agent-sandbox/pull/960)]
+    *   Allow PVC templates (including sizing) in the SandboxClaim, when the template's `volumeClaimTemplatesPolicy` permits it (default `Disallowed`). These claims cold-start instead of using a warm sandbox. [[#225](https://github.com/kubernetes-sigs/agent-sandbox/issues/225), [#554](https://github.com/kubernetes-sigs/agent-sandbox/issues/554), [#960](https://github.com/kubernetes-sigs/agent-sandbox/pull/960)]
 *   **Strict Sandbox-to-Pod Mapping** `✅ Done`
     *   Provide bulletproof, deterministic 1-to-1 mappings between a Sandbox claim and its backing Pod. [[#127](https://github.com/kubernetes-sigs/agent-sandbox/issues/127)]
 *   **Startup Actions** `📅 Planned`

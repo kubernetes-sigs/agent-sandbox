@@ -176,6 +176,10 @@ class AsyncSandboxBatch:
         # cleanup makes, writes the same one.
         self._detach_grace: int | None = None
         self._renewal_degraded = False
+        # Why this handle lost the Lease (expiry, takeover, or deletion). It stays separate from
+        # watch errors, which also set err(), because a watch error leaves the Lease held, so
+        # renewal and claim cleanup keep running.
+        self._lease_error: BatchError | None = None
         # The Lease from this handle's last successful write. Renewal sends it back without reading
         # the Lease first, and only reads it if the write conflicts.
         self._lease = lease
@@ -497,6 +501,10 @@ class AsyncSandboxBatch:
         self._watch_task = None
         self._renew_task = None
 
+    def _batch_error_locked(self) -> Exception | None:
+        """Returns the error ``err()`` reports, either a lost Lease or a fatal watch error."""
+        return self._lease_error or self._state.error()
+
     def _check_active(self) -> None:
         if self._detached:
             raise BatchError(f"batch '{self.batch_id}' has been detached or released")
@@ -505,28 +513,40 @@ class AsyncSandboxBatch:
         """Marks the handle stopped once the monotonic Lease deadline passes. Requires ``_lock``."""
         if now is None:
             now = time.monotonic()
-        if not self._detached and self._state.error() is None and now >= self._lease_expires_at:
+        if not self._detached and self._lease_error is None and now >= self._lease_expires_at:
             expired = self._lease_expired_error()
             self._mark_renewal_degraded(expired)
-            self._state.note_error(expired)
-            if self._renew_task is not None:
+            self._lease_error = expired
+            self._stop_creating.set()
+            if self._renew_task is not None and self._renew_task is not asyncio.current_task():
                 self._renew_task.cancel()
+            if self._watch_task is not None and self._watch_task is not asyncio.current_task():
+                self._watch_task.cancel()
             self._notify_all()
 
     def _check_healthy(self, now: float | None = None) -> None:
-        # Once detach() or release() starts or err() is set, this handle may no longer hold the
-        # batch's Lease, and a batch recreated under the same id reuses the claim names and labels,
-        # so the handle connects to no more sandboxes and deletes no more claims.
+        # Once detach() or release() starts or err() is set, the cache can no longer vouch for
+        # members or observe new claims, so the handle connects to no more sandboxes and starts no
+        # more acquires.
         self._check_active()
         # Check _lease_expires_at here so caller operations fence immediately after a process pause
         # before _renew_loop wakes up.
         self._expire_lease_if_due(now)
-        if (error := self._state.error()) is not None:
+        if (error := self._batch_error_locked()) is not None:
             raise BatchError(f"batch '{self.batch_id}' has stopped") from error
+
+    def _check_lease_held_locked(self, now: float | None = None) -> None:
+        # Once detach() or release() starts or this handle loses the Lease, a batch recreated under
+        # the same id reuses the claim names and labels, so this handle deletes no more claims. A
+        # watch error leaves the Lease held, so cleanup methods still delete claims.
+        self._check_active()
+        self._expire_lease_if_due(now)
+        if self._lease_error is not None:
+            raise BatchError(f"batch '{self.batch_id}' has stopped") from self._lease_error
 
     async def _check_lease_held(self) -> None:
         async with self._lock:
-            self._check_healthy()
+            self._check_lease_held_locked()
 
     @contextlib.asynccontextmanager
     async def _member_delete(self) -> AsyncIterator[None]:
@@ -540,7 +560,7 @@ class AsyncSandboxBatch:
         drain active ones.
         """
         async with self._lock:
-            self._check_healthy()
+            self._check_lease_held_locked()
             self._active_deletes += 1
             self._no_active_deletes.clear()
         try:
@@ -611,7 +631,7 @@ class AsyncSandboxBatch:
         A failed claim create doesn't set it. That claim shows in ``members()`` as a ``FAILED``
         member with reason ``CreateFailed``.
         """
-        return self._state.error()
+        return self._batch_error_locked()
 
     def lease_degraded(self) -> bool:
         """Returns whether background Lease renewal is failing.
@@ -694,7 +714,9 @@ class AsyncSandboxBatch:
         try:
             result = await self._next(self._state.quorum_result, lambda: False)
             if result is None:
-                raise BatchError(f"batch '{self.batch_id}' stopped while waiting for quorum") from self._state.error()
+                raise BatchError(
+                    f"batch '{self.batch_id}' stopped while waiting for quorum"
+                ) from self._batch_error_locked()
         except BaseException:
             # This was the only wait, so a quorum left undecided would hold its members forever.
             async with self._changed:
@@ -717,12 +739,12 @@ class AsyncSandboxBatch:
             while True:
                 self._check_active()
                 self._expire_lease_if_due()
-                if self._state.error() is None:
+                if self._batch_error_locked() is None:
                     self._expire_fill_if_due()
                 item = pop()
                 if item is not None:
                     return item
-                if done() or self._state.error() is not None:
+                if done() or self._batch_error_locked() is not None:
                     return None
                 # Nothing to hand out yet, but returning None would end the iterator, so wait for
                 # a change. Wake at the fill or Lease deadline so pending waits end on time.
@@ -784,10 +806,11 @@ class AsyncSandboxBatch:
 
         If it raises, including on a cancellation, the member is dropped from ``members()`` and its
         claim is deleted, unless the claim is already gone or its create was rejected. A failed delete is
-        retried by ``release_not_ready()`` and ``release()``. Once ``err()`` is set the claim is kept,
-        since the handle may no longer hold the batch's Lease, and ``release()`` deletes it. It never
-        creates a second claim, so call it again to try again. A member it returned that fails later
-        shows in ``members()`` like any other, and ``release_member`` frees it.
+        retried by ``release_not_ready()`` and ``release()``. Once this handle loses the batch's
+        Lease it keeps the claim, which ``release()`` deletes only if no other handle has taken the
+        Lease since. It never creates a second claim, so call it again to try again. A member it
+        returned that fails later shows in ``members()`` like any other, and ``release_member``
+        frees it.
 
         ``TerminalMemberError`` and ``BatchTimeoutError`` both subclass ``BatchError``, and
         ``except SandboxError`` also covers a missing pool or template. Bad arguments raise
@@ -939,7 +962,7 @@ class AsyncSandboxBatch:
                 waiter.clear()
                 self._check_active()
                 self._expire_lease_if_due()
-                if (error := self._state.error()) is not None:
+                if (error := self._batch_error_locked()) is not None:
                     raise BatchError(f"batch '{self.batch_id}' stopped while acquiring '{claim_name}'") from error
                 member = self._state.acquired_member(claim_name)
                 if member is not None:
@@ -1143,7 +1166,7 @@ class AsyncSandboxBatch:
             except asyncio.CancelledError:
                 raise
             except BatchError:
-                # detach(), release(), or err() stopped this handle from deleting claims.
+                # detach(), release(), or losing the Lease stopped this handle from deleting claims.
                 pass
             except Exception as e:
                 logger.warning(f"Batch '{self.batch_id}' failed to delete acquired claim '{claim_name}': {e}")
@@ -1159,13 +1182,13 @@ class AsyncSandboxBatch:
 
         Raises:
             ValueError: If the member isn't in this batch.
-            BatchError: If this handle has been detached or released, or once ``err()`` is set,
-                since the handle may no longer hold the batch's Lease.
+            BatchError: If this handle has been detached or released, or once this handle loses the
+                batch's Lease.
             ApiException: For a non-transient error such as a 403, or the last transient error
                 after ``BATCH_DELETE_ATTEMPTS`` attempts (an ``ApiException`` or a transport error).
         """
         async with self._changed:
-            self._check_healthy()
+            self._check_lease_held_locked()
             needs_delete = self._state.release_member(member.claim_name)
             self._wake_acquire(member.claim_name)
             self._changed.notify_all()
@@ -1190,13 +1213,13 @@ class AsyncSandboxBatch:
         calling ``release_not_ready`` again retries it.
 
         Raises:
-            BatchError: If this handle has been detached or released, or once ``err()`` is set,
-                since the handle may no longer hold the batch's Lease.
+            BatchError: If this handle has been detached or released, or once this handle loses the
+                batch's Lease.
             ApiException: The first error a delete ended with, once every delete has been tried
                 (an ``ApiException`` or a transport error).
         """
         async with self._changed:
-            self._check_healthy()
+            self._check_lease_held_locked()
             self._drop_planned_creates(None)
             names = self._state.release_not_ready()
             self._changed.notify_all()
@@ -1225,15 +1248,14 @@ class AsyncSandboxBatch:
 
         Raises:
             ValueError: If the batch has no group, member or ``acquire()`` in flight for ``warmpool``.
-            BatchError: If this handle has been detached or released, once ``err()`` is set,
-                since the handle may no longer hold the batch's Lease, or if claims are still not
-                being deleted after the last round.
+            BatchError: If this handle has been detached or released, once this handle loses the
+                batch's Lease, or if claims are still not being deleted after the last round.
             ApiException: For a non-transient error such as a 403, which is raised at once.
                 After the last round, the last transient error is raised (an ``ApiException``
                 or a transport error).
         """
         async with self._changed:
-            self._check_healthy()
+            self._check_lease_held_locked()
             if not self._state.has_pool(warmpool):
                 raise ValueError(f"batch '{self.batch_id}' has no group or members for warm pool '{warmpool}'")
             self._drop_planned_creates(warmpool)
@@ -1279,7 +1301,7 @@ class AsyncSandboxBatch:
                     # so finishing late cannot clear a newer cleanup delete or outlive the Lease.
                     async with self._lock:
                         now = time.monotonic()
-                        self._check_healthy(now)
+                        self._check_lease_held_locked(now)
                         request_timeout = min(
                             batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS, self._lease_expires_at - now
                         )
@@ -1572,31 +1594,38 @@ class AsyncSandboxBatch:
                     relist = False
                 watch_started = time.monotonic()
                 got_event = False
-                async for event in self._client.k8s_helper.watch_sandbox_claims(
-                    self.namespace, label_selector, rv, _WATCH_TIMEOUT_SECONDS, _request_timeout=_WATCH_REQUEST_TIMEOUT
-                ):
-                    failures = 0
-                    got_event = True
-                    event_type = event.get("type")
-                    obj = event.get("object") or {}
-                    seen_rv = (obj.get("metadata") or {}).get("resourceVersion")
-                    if seen_rv:
-                        rv = seen_rv
-                    if event_type == "BOOKMARK":
-                        continue
-                    claim_name = (obj.get("metadata") or {}).get("name", "")
-                    async with self._lock:
-                        if event_type == "DELETED":
-                            if self._state.mark_lost(claim_name) is not None:
-                                self._wake_acquire(claim_name)
-                        elif event_type in ("ADDED", "MODIFIED"):
-                            member = self._state.upsert_claim(obj)
-                            self._exhaust_warm_credit()
-                            if member is not None and member.state is not MemberState.PENDING:
-                                self._wake_acquire(claim_name)
-                        self._changed.notify_all()
-                        stale = self._pop_stale_connections([claim_name])
-                    await self._close_connections(stale, "a watch event")
+                async with contextlib.aclosing(
+                    self._client.k8s_helper.watch_sandbox_claims(
+                        self.namespace,
+                        label_selector,
+                        rv,
+                        _WATCH_TIMEOUT_SECONDS,
+                        _request_timeout=_WATCH_REQUEST_TIMEOUT,
+                    )
+                ) as stream:
+                    async for event in stream:
+                        failures = 0
+                        got_event = True
+                        event_type = event.get("type")
+                        obj = event.get("object") or {}
+                        seen_rv = (obj.get("metadata") or {}).get("resourceVersion")
+                        if seen_rv:
+                            rv = seen_rv
+                        if event_type == "BOOKMARK":
+                            continue
+                        claim_name = (obj.get("metadata") or {}).get("name", "")
+                        async with self._lock:
+                            if event_type == "DELETED":
+                                if self._state.mark_lost(claim_name) is not None:
+                                    self._wake_acquire(claim_name)
+                            elif event_type in ("ADDED", "MODIFIED"):
+                                member = self._state.upsert_claim(obj)
+                                self._exhaust_warm_credit()
+                                if member is not None and member.state is not MemberState.PENDING:
+                                    self._wake_acquire(claim_name)
+                            self._changed.notify_all()
+                            stale = self._pop_stale_connections([claim_name])
+                        await self._close_connections(stale, "a watch event")
                 if not got_event and time.monotonic() - watch_started < _SHORT_WATCH_SECONDS:
                     failures += 1
                     await asyncio.sleep(batch_utils.retry_delay(failures, None))
@@ -1684,9 +1713,15 @@ class AsyncSandboxBatch:
         Returns ``False`` if another holder has taken the Lease or the Lease no longer exists,
         meaning this handle must stop renewing rather than overwrite it.
         """
+        # Snapshot the Lease under the lock and skip renewing once this handle detached or lost the
+        # Lease, so a late renewal can't revive a Lease it gave up.
+        async with self._lock:
+            if self._detached or self._lease_error is not None:
+                return False
+            lease = self._lease
         try:
             try:
-                sent_at, written = await self._write_renewal(self._lease)
+                sent_at, written = await self._write_renewal(lease)
             except ApiException as e:
                 if e.status == 404:
                     return await self._stop_renewal(self._lease_gone_error())
@@ -1694,12 +1729,12 @@ class AsyncSandboxBatch:
                     raise
                 # A conflict means another holder took the Lease, or an earlier renewal whose
                 # response was lost did land, so read it to tell the two apart.
-                lease = await self._client.k8s_helper.read_batch_lease(
+                current_lease = await self._client.k8s_helper.read_batch_lease(
                     self._lease_name, self.namespace, _request_timeout=self._renew_request_timeout()
                 )
-                if lease is None:
+                if current_lease is None:
                     return await self._stop_renewal(self._lease_gone_error())
-                spec = batch_utils.lease_parts(lease)[1]
+                spec = batch_utils.lease_parts(current_lease)[1]
                 if spec.holder_identity != self._holder_identity:
                     return await self._stop_renewal(
                         BatchInUseError(
@@ -1707,15 +1742,17 @@ class AsyncSandboxBatch:
                             f"(current holder: {spec.holder_identity!r})"
                         )
                     )
-                sent_at, written = await self._write_renewal(lease)
+                sent_at, written = await self._write_renewal(current_lease)
         except asyncio.CancelledError:
             raise
         except Exception as e:
             async with self._lock:
+                if self._detached or self._lease_error is not None:
+                    return False
                 self._mark_renewal_degraded(e)
             return True
         async with self._lock:
-            if self._detached or self._state.error() is not None:
+            if self._detached or self._lease_error is not None:
                 return False
             self._lease = written
             self._lease_expires_at = sent_at + self._lease_duration
@@ -1725,8 +1762,18 @@ class AsyncSandboxBatch:
     async def _stop_renewal(self, error: BatchError) -> bool:
         """Records why this handle stops renewing the Lease. Returns ``False`` for ``_renew_once``."""
         async with self._lock:
+            if self._detached:
+                return False
             self._mark_renewal_degraded(error)
-            self._state.note_error(error)
+            if self._lease_error is None:
+                self._lease_error = error
+            # Losing the Lease stops creates, renewal, and the watch, since a recreated batch can
+            # reuse this batch's claim names.
+            self._stop_creating.set()
+            if self._renew_task is not None and self._renew_task is not asyncio.current_task():
+                self._renew_task.cancel()
+            if self._watch_task is not None and self._watch_task is not asyncio.current_task():
+                self._watch_task.cancel()
             self._notify_all()
         return False
 
@@ -1761,7 +1808,7 @@ class AsyncSandboxBatch:
                 if (
                     not self._create_plan
                     or self._stop_creating.is_set()
-                    or self._state.error() is not None
+                    or self._batch_error_locked() is not None
                 ):
                     return
                 claim_name, group = self._create_plan.popleft()
@@ -1835,7 +1882,7 @@ class AsyncSandboxBatch:
         # claims would be ones nobody can observe or keep alive.
         return (
             not self._stop_creating.is_set()
-            and self._state.error() is None
+            and self._batch_error_locked() is None
             and (can_send is None or can_send())
         )
 
@@ -1846,8 +1893,8 @@ class AsyncSandboxBatch:
         async with self._lock:
             self._expire_lease_if_due()
             if (
-                self._stop_creating.is_set()
-                or self._state.error() is not None
+                self._detached
+                or self._lease_error is not None
                 or not self._state.fill_creates_released(warmpool, claim_name if retried else None)
             ):
                 return
@@ -1862,7 +1909,7 @@ class AsyncSandboxBatch:
         except asyncio.CancelledError:
             raise
         except BatchError:
-            # detach(), release(), or err() stopped this handle from deleting claims.
+            # detach(), release(), or losing the Lease stopped this handle from deleting claims.
             pass
         except Exception as e:
             logger.warning(f"Batch '{self.batch_id}' failed to delete released claim '{claim_name}': {e}")

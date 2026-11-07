@@ -12,16 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import copy
+import functools
 import logging
 import math
+import socket
+import threading
 import time
+import weakref
 from itertools import chain
 from datetime import UTC, datetime
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from typing import Any, List, cast
 from kubernetes import client, config, watch
 import urllib3.exceptions
+from urllib3.response import HTTPResponse
 from .exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
 from .models import AdditionalPodMetadata
 from .utils import (
@@ -50,6 +56,33 @@ from .constants import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _shutdown_response_socket(resp: HTTPResponse | None) -> None:
+    """Shuts down the socket under a streaming response so a read blocked on it in another thread
+    returns at once. Closing the socket instead can hang on the SSL lock that the blocked read holds.
+    """
+    conn = resp.connection if resp is not None else None
+    if conn is not None and conn.sock is not None:
+        # kubernetes 37 and later also shut the socket down in Watch.stop(), so it may already be.
+        with contextlib.suppress(OSError):
+            conn.sock.shutdown(socket.SHUT_RDWR)
+
+
+class _EmptyWatchResponse:
+    """Empty HTTP response placeholder returned when a watch stops before streaming."""
+
+    status = 200
+    closed = True
+
+    def stream(self, *_args: Any, **_kwargs: Any) -> Iterator[bytes]:
+        return iter(())
+
+    def close(self) -> None:
+        pass
+
+    def release_conn(self) -> None:
+        pass
 
 
 class _UnretriedApiClient(client.ApiClient):
@@ -752,20 +785,77 @@ class K8sHelper:
         return live
 
     def watch_sandbox_claims(
-        self, namespace: str, label_selector: str, resource_version: str, timeout_seconds: int,
-        _request_timeout: float | tuple[float, float] | None = None
-    ) -> Iterator[dict[str, Any]]:
+        self,
+        namespace: str,
+        label_selector: str,
+        resource_version: str,
+        timeout_seconds: int,
+        _request_timeout: float | tuple[float, float] | None = None,
+        *,
+        on_watch: Callable[[watch.Watch | None], None] | None = None,
+    ) -> Generator[dict[str, Any], None, None]:
         """Uses a single watch starting at ``resource_version`` to yield raw watch events for multiple
         SandboxClaims matching a label selector.
 
         Args:
             _request_timeout: Optional timeout (seconds, or a ``(connect, read)``
                 pair) forwarded to the underlying urllib3 request.
+            on_watch: Optional callback that receives the active ``watch.Watch`` before streaming
+                events and ``None`` when the stream closes.
         """
         w = watch.Watch()
+        orig_list_fn = self._batch_custom_objects_api.list_namespaced_custom_object
+        stream_fn: Any = orig_list_fn
+        # Wrap only the stock Watch, whose stream() calls func and reads _stop the way this code
+        # expects.
+        if type(w) is watch.Watch:
+            stopped = threading.Event()
+            w_ref = weakref.ref(w)
+            # kubernetes releases before 37 make Watch.stop() only set a flag, so a quiet stream
+            # stays blocked in its read until the watch times out. Keeping the response lets stop
+            # unblock that read on every client version.
+            active_resp: HTTPResponse | None = None
+
+            def _stop() -> None:
+                stopped.set()
+                if (target := w_ref()) is not None:
+                    watch.Watch.stop(target)
+                _shutdown_response_socket(active_resp)
+
+            w.stop = _stop  # type: ignore[method-assign]
+
+            # stop() can run before Watch.stream() makes its list call, and stream() resets _stop on
+            # entry, so this checks again and skips the request once the watch is stopped.
+            @functools.wraps(orig_list_fn)
+            def _checked_list(*args: Any, **kwargs: Any) -> Any:
+                nonlocal active_resp
+                target = w_ref()
+                if stopped.is_set() or (
+                    target is not None and getattr(target, "_stop", False) is True
+                ):
+                    if target is not None:
+                        target._stop = True
+                    return _EmptyWatchResponse()
+                resp: Any = orig_list_fn(*args, **kwargs)
+                active_resp = resp
+                # Watch.stream resets _stop at entry and invokes the list call before assigning
+                # _resp, so re-check stopped here to close the response immediately on race.
+                if stopped.is_set():
+                    if target is not None:
+                        target._resp = resp
+                        watch.Watch.stop(target)
+                    if not getattr(resp, "closed", True):
+                        resp.close()
+                    resp.release_conn()
+                    if target is not None:
+                        target._resp = None
+                    return _EmptyWatchResponse()
+                return resp
+
+            stream_fn = _checked_list
         try:
-            for event in w.stream(
-                func=self._batch_custom_objects_api.list_namespaced_custom_object,
+            raw_stream = w.stream(
+                func=stream_fn,
                 namespace=namespace,
                 group=CLAIM_API_GROUP,
                 version=CLAIM_API_VERSION,
@@ -775,11 +865,32 @@ class K8sHelper:
                 timeout_seconds=timeout_seconds,
                 allow_watch_bookmarks=True,
                 _request_timeout=_request_timeout,
-            ):
-                if event is not None:
-                    yield event
+            )
+            stream_cm: contextlib.AbstractContextManager[Any] = (
+                contextlib.closing(raw_stream)
+                if hasattr(raw_stream, "close")
+                else contextlib.nullcontext(raw_stream)
+            )
+            with stream_cm as stream:
+                # Hand the watch to the caller so it can stop it from another thread. A stop that came
+                # before this registration already set _stop, so return without streaming.
+                if on_watch is not None:
+                    on_watch(w)
+                if getattr(w, "_stop", False) is True:
+                    return
+                for event in stream:
+                    if event is not None:
+                        yield event
         finally:
+            if on_watch is not None:
+                on_watch(None)
             w.stop()
+            # Each Watch builds its own ApiClient, so close it rather than leak a thread pool on
+            # every watch restart.
+            if type(w) is watch.Watch and isinstance(
+                getattr(w, "_api_client", None), client.ApiClient
+            ):
+                w._api_client.close()
 
     def read_batch_lease(
         self, name: str, namespace: str, _request_timeout: float | tuple[float, float] | None = None

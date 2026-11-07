@@ -833,6 +833,28 @@ class TestWatcher(BaseAsyncBatchClientTest):
         self.assertTrue(0.25 <= delays[4] <= 0.5, delays)
         self.assertIsNone(handle.err())
 
+    async def test_watch_loop_closes_async_stream_on_cancel(self):
+        handle = _make_handle(self.client)
+        entered = asyncio.Event()
+        closed = False
+
+        async def blocking_stream(*args, **kwargs):
+            nonlocal closed
+            entered.set()
+            try:
+                await asyncio.Future()
+                yield
+            finally:
+                closed = True
+
+        self.mock_k8s_helper.watch_sandbox_claims = MagicMock(side_effect=blocking_stream)
+        handle._watch_task = asyncio.create_task(handle._watch_loop())
+        await entered.wait()
+
+        await handle._stop_background_tasks()
+        self.assertTrue(closed)
+        self.assertIsNone(handle._watch_task)
+
 
 class TestRenewal(BaseAsyncBatchClientTest):
 
@@ -1132,6 +1154,49 @@ class TestRenewal(BaseAsyncBatchClientTest):
         delete_timeout = self.mock_k8s_helper.delete_sandbox_claim.call_args.kwargs["_request_timeout"]
         self.assertGreater(delete_timeout, 0)
         self.assertLessEqual(delete_timeout, 4.0)
+
+    async def test_watch_error_keeps_lease_renewal_and_cleanup_while_lease_loss_stops_watch(self):
+        handle = _make_handle(self.client)
+        ready = [{"type": "Ready", "status": "True"}]
+        handle._state.upsert_claim(
+            _claim("b1-0", conditions=ready, sandbox={"name": "sbx-0", "podIPs": ["10.0.0.1"]}, annotations=_FILL)
+        )
+        handle._state.upsert_claim(
+            _claim("b1-1", conditions=ready, sandbox={"name": "sbx-1", "podIPs": ["10.0.0.2"]}, annotations=_FILL)
+        )
+        first, second = handle.members()
+
+        watch_error = k8s_client.ApiException(status=403)
+        self.mock_k8s_helper.watch_sandbox_claims = MagicMock(side_effect=watch_error)
+        await handle._watch_loop()
+        self.assertIs(handle.err(), watch_error)
+        self.assertFalse(handle.lease_degraded())
+        self.assertFalse(handle._stop_creating.is_set())
+        with self.assertRaises(BatchError) as cm:
+            await handle.connect(first)
+        self.assertIs(cm.exception.__cause__, watch_error)
+
+        self.mock_k8s_helper.replace_batch_lease = AsyncMock(return_value=_lease(resource_version="25"))
+        self.assertTrue(await handle._renew_once())
+        self.assertEqual(handle._lease.metadata.resource_version, "25")
+
+        self.mock_k8s_helper.delete_sandbox_claim = AsyncMock()
+        await handle.release_member(first)
+        self.mock_k8s_helper.delete_sandbox_claim.assert_awaited_once()
+        self.assertEqual(self.mock_k8s_helper.delete_sandbox_claim.call_args.args[0], "b1-0")
+
+        watch_task = asyncio.create_task(asyncio.Event().wait())
+        handle._watch_task = watch_task
+        self.mock_k8s_helper.delete_sandbox_claim.reset_mock()
+        self.mock_k8s_helper.replace_batch_lease = AsyncMock(side_effect=k8s_client.ApiException(status=404))
+        self.assertFalse(await handle._renew_once())
+        self.assertIsInstance(handle.err(), BatchLeaseExpiredError)
+        self.assertTrue(handle._stop_creating.is_set())
+        with self.assertRaises(asyncio.CancelledError):
+            await watch_task
+        with self.assertRaises(BatchError):
+            await handle.release_member(second)
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_awaited()
 
 
 class TestMembers(unittest.TestCase):
@@ -3620,7 +3685,8 @@ class TestReleaseMembers(BaseClaimBatchTest):
     @patch("k8s_agent_sandbox.batch_utils.retry_delay", return_value=5)
     async def test_release_methods_delete_nothing_once_err_is_set(self, _):
         helper = self.cluster.helper
-        cause = RuntimeError("renewal stopped")
+        cause = BatchLeaseExpiredError("renewal stopped")
+        watch_cause = RuntimeError("watch failed")
 
         def handle_with_a_pending_member():
             handle = _make_handle(self.client)
@@ -3636,7 +3702,7 @@ class TestReleaseMembers(BaseClaimBatchTest):
                 helper.reset_mock()
                 handle = handle_with_a_pending_member()
                 before = handle.members()
-                handle._state.note_error(cause)
+                handle._lease_error = cause
                 with self.assertRaises(BatchError) as cm:
                     await release(handle)
                 self.assertIs(cm.exception.__cause__, cause)
@@ -3644,12 +3710,28 @@ class TestReleaseMembers(BaseClaimBatchTest):
                 helper.delete_sandbox_claim.assert_not_awaited()
                 helper.delete_sandbox_claims_by_label.assert_not_awaited()
 
+            with self.subTest(watch_error_method=name):
+                helper.reset_mock()
+                helper.delete_sandbox_claim.side_effect = None
+                helper.delete_sandbox_claims_by_label.side_effect = None
+                helper.count_live_sandbox_claims.side_effect = None
+                helper.count_live_sandbox_claims.return_value = 0
+                handle = handle_with_a_pending_member()
+                handle._state.note_error(watch_cause)
+                self.assertIs(handle.err(), watch_cause)
+                await release(handle)
+                self.assertEqual(handle.members(), [])
+                if name == "release_group":
+                    helper.delete_sandbox_claims_by_label.assert_awaited_once()
+                else:
+                    helper.delete_sandbox_claim.assert_awaited_once()
+
         with self.subTest("err set between delete attempts"):
             helper.reset_mock()
             handle = handle_with_a_pending_member()
 
             def fail_and_stop(*args, **kwargs):
-                handle._state.note_error(cause)
+                handle._lease_error = cause
                 raise k8s_client.ApiException(status=503)
 
             helper.delete_sandbox_claim.side_effect = fail_and_stop
@@ -3667,7 +3749,7 @@ class TestReleaseMembers(BaseClaimBatchTest):
             helper.delete_sandbox_claim.side_effect = k8s_client.ApiException(status=503)
             with patch(
                 "k8s_agent_sandbox.async_sandbox_batch.asyncio.sleep",
-                AsyncMock(side_effect=lambda _s: handle._state.note_error(cause)),
+                AsyncMock(side_effect=lambda _s: setattr(handle, "_lease_error", cause)),
             ):
                 with self.assertRaises(BatchError) as cm:
                     await handle.release_member(handle.members()[0])
@@ -3682,7 +3764,7 @@ class TestReleaseMembers(BaseClaimBatchTest):
                 handle = handle_with_a_pending_member()
 
                 async def stop_during_deletecollection(*args, **kwargs):
-                    handle._state.note_error(cause)
+                    handle._lease_error = cause
                     if fail:
                         raise k8s_client.ApiException(status=503)
 
@@ -3702,7 +3784,7 @@ class TestReleaseMembers(BaseClaimBatchTest):
             handle = handle_with_a_pending_member()
 
             async def stop_during_count(*args, **kwargs):
-                handle._state.note_error(cause)
+                handle._lease_error = cause
                 return 1
 
             helper.count_live_sandbox_claims.side_effect = stop_during_count
@@ -4433,6 +4515,7 @@ class TestAcquire(BaseClaimBatchTest):
     async def test_failures_drop_the_member_and_delete_a_claim_that_may_exist(self):
         terminal = [{"type": "Ready", "status": "False", "reason": "InvalidConfiguration"}]
         failure = RuntimeError("watch failed")
+        lease_failure = BatchLeaseExpiredError("renewal stopped")
 
         async def push_terminal(batch, task):
             claim = _claim("b1-1", conditions=terminal)
@@ -4448,9 +4531,14 @@ class TestAcquire(BaseClaimBatchTest):
             await _wait_until(lambda: batch.members()[-1].claim_name == "b1-1")
             await batch.release_member(batch.members()[-1])
 
-        async def fail_batch(batch, task):
+        async def fail_watch(batch, task):
             async with batch._changed:
                 batch._state.note_error(failure)
+                batch._notify_all()
+
+        async def lose_lease(batch, task):
+            async with batch._changed:
+                batch._lease_error = lease_failure
                 batch._notify_all()
 
         async def cancel(batch, task):
@@ -4478,8 +4566,10 @@ class TestAcquire(BaseClaimBatchTest):
             "terminal": (None, push_terminal, TerminalMemberError, MemberState.FAILED, True),
             "deleted by someone else": (None, delete, TerminalMemberError, MemberState.LOST, False),
             "timeout": (None, wait, BatchTimeoutError, None, True),
-            # Once err() is set, the handle may no longer hold the Lease, so the claim is left for release().
-            "err set": (None, fail_batch, BatchError, None, False),
+            # A watch error leaves the Lease held so acquire() still deletes the pending claim.
+            "watch err set": (None, fail_watch, BatchError, None, True),
+            # Losing the Lease fences claim deletes so release() cleans up the claim later.
+            "lease err set": (None, lose_lease, BatchError, None, False),
             "released while pending": (None, release, BatchError, None, True),
             "cancelled": (None, cancel, asyncio.CancelledError, None, True),
         }
@@ -4518,15 +4608,16 @@ class TestAcquire(BaseClaimBatchTest):
                     self.assertEqual(raised.exception.member.state, state)
                 if create_error is not None and state is not None:
                     self.assertEqual(raised.exception.member.reason, "CreateFailed")
-                if name == "err set":
+                if name in ("watch err set", "lease err set"):
+                    expected_cause = failure if name == "watch err set" else lease_failure
                     # err() keeps the original error, and a later acquire fails before checking a
                     # new pool.
-                    self.assertIs(batch.err(), failure)
-                    self.assertIs(raised.exception.__cause__, failure)
+                    self.assertIs(batch.err(), expected_cause)
+                    self.assertIs(raised.exception.__cause__, expected_cause)
                     helper.get_sandbox_warmpool.reset_mock()
                     with self.assertRaises(BatchError) as later:
                         await batch.acquire("pool-unseen")
-                    self.assertIs(later.exception.__cause__, failure)
+                    self.assertIs(later.exception.__cause__, expected_cause)
                     helper.get_sandbox_warmpool.assert_not_awaited()
                 if name == "released while pending":
                     # It fails at once rather than waiting out its timeout.

@@ -17,7 +17,7 @@ import logging
 import math
 import time
 from datetime import UTC, datetime
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from typing import Any, cast
 
 import aiohttp
@@ -730,7 +730,7 @@ class AsyncK8sHelper:
     async def watch_sandbox_claims(
         self, namespace: str, label_selector: str, resource_version: str, timeout_seconds: int,
         _request_timeout: float | None = None
-    ) -> AsyncIterator[dict[str, Any]]:
+    ) -> AsyncGenerator[dict[str, Any], None]:
         """Uses a single watch starting at ``resource_version`` to yield raw watch events for multiple
         SandboxClaims matching a label selector.
 

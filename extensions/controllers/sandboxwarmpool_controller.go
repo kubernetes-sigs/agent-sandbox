@@ -386,9 +386,15 @@ func (r *SandboxWarmPoolReconciler) clockNow() time.Time {
 	return time.Now()
 }
 
-// readinessGracePeriod returns the configured readiness grace period, falling
-// back to the default for zero-value construction (tests, bare literals).
-func (r *SandboxWarmPoolReconciler) readinessGracePeriod() time.Duration {
+// readinessGracePeriod returns the readiness grace period for warmPool: its
+// spec.readinessGracePeriodSeconds when set, otherwise the controller-level
+// value (flag or ConfigMap, already merged into r.ReadinessGracePeriod),
+// otherwise the default for zero-value construction (tests, bare literals).
+// The CRD enforces a minimum on the field, so a set value is used as is.
+func (r *SandboxWarmPoolReconciler) readinessGracePeriod(warmPool *extensionsv1beta1.SandboxWarmPool) time.Duration {
+	if warmPool != nil && warmPool.Spec.ReadinessGracePeriodSeconds != nil {
+		return time.Duration(*warmPool.Spec.ReadinessGracePeriodSeconds) * time.Second
+	}
 	if r.ReadinessGracePeriod > 0 {
 		return r.ReadinessGracePeriod
 	}
@@ -530,10 +536,11 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	// nextGraceDeadline is the time remaining until the earliest readiness
 	// grace deadline among not-yet-Ready sandboxes (0 = none pending).
 	var nextGraceDeadline time.Duration
+	graceWindow := r.readinessGracePeriod(warmPool)
 	for _, sb := range activeSandboxes {
 		if !isSandboxReady(&sb) && !sb.CreationTimestamp.IsZero() {
 			age := now.Sub(readinessGraceStart(&sb))
-			if age <= r.readinessGracePeriod() {
+			if age <= graceWindow {
 				// Not Ready but still within the grace period. In a quiet
 				// cluster nothing else touches the Sandbox objects of a pool
 				// that settles at Ready=False (pod FailedScheduling events do
@@ -543,7 +550,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 				// unschedulable-hold/NotProgressing signal unreachable.
 				// Requeue for the earliest grace deadline so the evaluation
 				// is deterministic.
-				if remaining := r.readinessGracePeriod() - age + graceRequeueSlack; nextGraceDeadline == 0 || remaining < nextGraceDeadline {
+				if remaining := graceWindow - age + graceRequeueSlack; nextGraceDeadline == 0 || remaining < nextGraceDeadline {
 					nextGraceDeadline = remaining
 				}
 				healthySandboxes = append(healthySandboxes, sb)
@@ -802,7 +809,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	} else {
 		r.setNotProgressing(warmPool, poolKey, reasonSandboxTemplateError, "", "")
 	}
-	cause, message := notProgressingSignal(unschedulableReplicas, gatedReplicas, desiredReplicas, r.readinessGracePeriod())
+	cause, message := notProgressingSignal(unschedulableReplicas, gatedReplicas, desiredReplicas, graceWindow)
 	r.setNotProgressing(warmPool, poolKey, reasonWarmPoolNotProgressing, cause, message)
 	if cause != "" {
 		requeueAfter = minNonZeroDuration(requeueAfter, r.unschedulableRecheckInterval())

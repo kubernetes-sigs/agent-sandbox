@@ -105,18 +105,21 @@ describe("resolveSandboxPath", () => {
     expect(() => resolveSandboxPath("./", "write")).toThrow(SandboxError);
   });
 
-  it("rejects the sandbox root for mkdir/move/copy but allows a trailing slash", () => {
+  it("rejects the sandbox root for mkdir/move/copy and drops a trailing slash before encoding", () => {
     for (const op of ["mkdir", "move", "copy"] as const) {
       expect(() => resolveSandboxPath("", op)).toThrow(SandboxError);
       expect(() => resolveSandboxPath("./", op)).toThrow(SandboxError);
-      expect(resolveSandboxPath("dir/", op)).toBe("dir%2F");
+      // mkdir allows a trailing slash; it is dropped before encode.
+      expect(resolveSandboxPath("dir/", op)).toBe("dir");
     }
   });
 
-  it("rejects a trailing slash for write/delete but not read/list/exists", () => {
+  it("rejects a trailing slash for write/delete and drops it for read/list/exists", () => {
     expect(() => resolveSandboxPath("dir/", "write")).toThrow(SandboxError);
     expect(() => resolveSandboxPath("dir/", "delete")).toThrow(SandboxError);
-    expect(() => resolveSandboxPath("dir/", "list")).not.toThrow();
+    expect(resolveSandboxPath("dir/", "read")).toBe("dir");
+    expect(resolveSandboxPath("dir/", "list")).toBe("dir");
+    expect(resolveSandboxPath("dir/", "exists")).toBe("dir");
   });
 
   it("rejects absolute paths for every operation", () => {
@@ -152,13 +155,22 @@ describe("resolveSandboxPath", () => {
     expect(() => resolveSandboxPath("a\ud800b", "read")).toThrow(SandboxError);
   });
 
-  it("encodes '/', '%', space, '?', and '#' via a single encodeURIComponent pass", () => {
+  it("encodes each segment with encodeURIComponent but keeps separators literal", () => {
     expect(resolveSandboxPath("dir/sub file.txt", "read")).toBe(
-      encodeURIComponent("dir/sub file.txt"),
+      "dir/sub%20file.txt",
     );
     expect(resolveSandboxPath("a?b#c%d", "read")).toBe(
       encodeURIComponent("a?b#c%d"),
     );
+  });
+
+  it("drops interior '.' segments", () => {
+    expect(resolveSandboxPath("./a.txt", "read")).toBe("a.txt");
+    expect(resolveSandboxPath("dir/./a.txt", "read")).toBe("dir/a.txt");
+    expect(resolveSandboxPath("dir/sub/./file.txt", "write")).toBe(
+      "dir/sub/file.txt",
+    );
+    expect(resolveSandboxPath("dir//a.txt", "read")).toBe("dir/a.txt");
   });
 });
 
@@ -343,9 +355,7 @@ describe("SandboxdRestClient.read", () => {
     );
     expect(new TextDecoder().decode(result)).toBe("hello");
     expect(activeServer.requests[0].method).toBe("GET");
-    expect(activeServer.requests[0].url).toBe(
-      `/v1/files/${encodeURIComponent("dir/sub file.txt")}`,
-    );
+    expect(activeServer.requests[0].url).toBe(`/v1/files/dir/sub%20file.txt`);
   });
 
   it("requests '/v1/files/' for the sandbox root", async () => {
@@ -1318,7 +1328,7 @@ describe("SandboxdRestClient.list", () => {
       new AbortController().signal,
     );
     expect(activeServer.requests[0].url).toBe(
-      "/v1/files/dir%2Fsub?recursive=true&max_depth=2",
+      "/v1/files/dir/sub?recursive=true&max_depth=2",
     );
     expect(listing.path).toBe("/dir/sub");
     expect(listing.entries.map((entry) => entry.name)).toEqual([
@@ -1448,7 +1458,7 @@ describe("SandboxdRestClient.mkdir", () => {
     await client.mkdir("a/b", {}, new AbortController().signal);
     const req = activeServer.requests[0];
     expect(req.method).toBe("PUT");
-    expect(req.url).toBe("/v1/files/a%2Fb?type=directory");
+    expect(req.url).toBe("/v1/files/a/b?type=directory");
     expect(req.body).toHaveLength(0);
   });
 
@@ -1523,7 +1533,7 @@ describe.each(["move", "copy"] as const)("SandboxdRestClient.%s", (action) => {
     const req = activeServer.requests[0];
     expect(req.method).toBe("POST");
     expect(req.url).toBe(
-      `/v1/files/src%2Fa.txt:${action}?destination=dst%2Fa.txt`,
+      `/v1/files/src/a.txt:${action}?destination=dst%2Fa.txt`,
     );
   });
 

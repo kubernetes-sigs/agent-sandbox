@@ -1270,8 +1270,8 @@ describe("Sandbox streaming integration", () => {
     await sandbox.files.copy("c", "d");
 
     expect(restBackend.fileRequests).toEqual([
-      "PUT /v1/files/a%2Fb?type=directory&parents=true&mode=0700",
-      "POST /v1/files/a%2Fb:move?destination=c&overwrite=true",
+      "PUT /v1/files/a/b?type=directory&parents=true&mode=0700",
+      "POST /v1/files/a/b:move?destination=c&overwrite=true",
       "POST /v1/files/c:copy?destination=d",
     ]);
     for (const op of ["mkdir", "move", "copy"]) {

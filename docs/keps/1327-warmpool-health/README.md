@@ -71,7 +71,9 @@ Descriptive state names in this table are concepts under discussion:
 
 #### API Changes
 
-Candidate shared facts are `updatedReplicas`, `updatedReadyReplicas`, and observed template identity. Counts cover active, pool-owned members, with ownership and termination filtering consistent with current accounting. Observation failures must be distinguishable from a legitimate zero count. A successful controller list, rather than a successful create request, establishes observed inventory.
+Candidate shared facts are `updatedReplicas`, `updatedReadyReplicas`, and observed template identity. Counts cover active, pool-owned members, with ownership and termination filtering consistent with current accounting. A successful controller list establishes observed inventory.
+
+The proposed `updatedReplicas` and `updatedReadyReplicas` fields are optional `*int32` values with `omitempty` and `Minimum=0`. A non-nil value records an observed count, including an explicit zero. An unavailable member list or unresolved effective revision sets both fields to nil, which serializes as omitted and means unknown. Publish both counts with the source identity used to evaluate them. Existing `replicas` and `readyReplicas` retain their `int32,omitempty` representation. The new counters carry the known-versus-unknown distinction independently of conditions, which describe the observation failure separately.
 
 The observed source needs enough identity to reject a stale result after a template edit or delete/recreate. Candidate information is reference name, UID, generation, and an opaque effective revision. UID/generation establish the observed source; the effective revision groups content with equivalent replacement semantics. Their exact representation requires API review.
 
@@ -100,15 +102,16 @@ The proposed condition table makes the naming review concrete. Reason names are 
 | `ReplenishmentBlocked` | Required creation or replacement was rejected by the API server | True / `ReplenishmentError`; clear after a successful reevaluation |
 | `ReplenishmentBlocked` | Pool-owned members remain unschedulable or scheduling-gated past grace | True / `HoldingUnschedulable`, `HoldingSchedulingGated`, or `HoldingUnschedulableAndSchedulingGated` |
 | `ReplenishmentBlocked` | Refill is proceeding or waiting for its configured pacing budget | False / `ReplenishmentPending` |
-| `TemplateReadyObserved` | No evaluation demand, zero replicas, or source lookup failure | Unknown / `EvaluationDeferred` or `TemplateObservationFailed` |
+| `TemplateReadyObserved` | Source lookup failure | Unknown / `TemplateObservationFailed`; retain previous evidence and its identity |
+| `TemplateReadyObserved` | Source is available and Ready evidence for the current evaluation was committed, including with no demand or zero replicas | True / `ReadyObserved` |
+| `TemplateReadyObserved` | No committed Ready observation and no evaluation demand, including zero replicas | Unknown / `EvaluationDeferred` |
 | `TemplateReadyObserved` | Active evaluation has no committed Ready observation | False / `AwaitingReadyObservation` |
-| `TemplateReadyObserved` | Ready evidence for the current evaluation was committed | True / `ReadyObserved` |
 | `TemplateReadyObserved` | An enabled evaluation deadline expired with an intact evidence protocol and no Ready observation | False / `ReadinessObservationDeadlineExceeded` |
-| `TemplateReadyObserved` | Evidence could have been lost during transfer, deletion, or controller unavailability | Unknown / `ObservationIncomplete` |
+| `TemplateReadyObserved` | No committed Ready observation and evidence could have been lost during transfer, deletion, or controller unavailability | Unknown / `ObservationIncomplete` |
 
 For replenishment, evaluate observation availability first, then zero demand, required template, API errors, and post-grace holds. Report both hold types using the combined reason when present. A missing template on a full idle OnReplenish pool affects template observation; it does not create a refill obstruction without a create deficit. These rules reuse the existing event diagnostics. A scheduling gate is an intentional admission wait, and its condition message must identify that wait explicitly.
 
-The template condition is evaluated separately. Once committed, a positive observation survives Claim consumption, controller restart, and stock depletion within the same evaluation. A source lookup failure retains the previous evidence and its identity while reporting the current evaluation as Unknown. Later observations can restore the associated result. This prevents a stock-health update from overwriting template evidence.
+The template condition is evaluated separately. Evaluate source availability first, then committed success, then demand. With an available source, committed success takes precedence over deferred evaluation at zero replicas or absent demand. Once committed, a positive observation survives Claim consumption, controller restart, and stock depletion within the same evaluation. A source lookup failure retains the previous evidence and its identity while reporting the current evaluation as Unknown. A successful lookup of the same source and evaluation restores `ReadyObserved`. For demanded work without committed success, an incomplete evidence protocol takes precedence over waiting or expired results. This prevents a stock-health update from overwriting template evidence.
 
 Automation first verifies the pool generation and observed template identity. It can then distinguish `ReadyObserved`, `ReadinessObservationDeadlineExceeded`, and pending/unknown reasons. `TemplateReadyObserved=False` alone includes both waiting and expired evaluations. Ready-count checks remain available for clients that require a particular stock level.
 
@@ -126,6 +129,10 @@ Choose and validate a durable observation protocol before enabling an expiry res
 
 This draft favors preserving Claim behavior while designing a bounded source receipt, with passive observation as a smaller alternative. Receipt lifetime, acknowledgment, and deletion handling require a concrete recovery protocol before implementation. A local watch callback or a best-effort write after transfer is insufficient: either can lose the only evidence. A source receipt is an additive API design, not a reason to retain labels that current membership indexes interpret as pool ownership.
 
+The source-receipt option proposes optional typed provenance and receipt fields in core `Sandbox.status`, written by an extension controller. This extends the core `agents.x-k8s.io/v1beta1` API and requires root-approver review. The core and extension status writers must preserve each other's fields and retry conflicts. The pool controller commits accepted evidence to `SandboxWarmPool.status` before acknowledging the Sandbox receipt. Persistence ordering, discovery after Claim transfer, and retention through deletion require a defined recovery protocol.
+
+An alternative keeps evaluation provenance and receipts entirely in `SandboxWarmPool.status`, owned by the pool controller. This confines the API additions to the extension group. It still needs bounded tracking of an evaluated Sandbox after adoption and durable observation before deletion can erase evidence. The pool-only option reports `ObservationIncomplete` wherever its observation protocol permits evidence loss. The storage location and writer ownership are part of the protocol decision below.
+
 An evaluation identifier must fence delayed evidence separately from the effective revision. In an A-to-B-to-A template sequence, the second A evaluation gets a new identifier; the first A's delayed receipt cannot satisfy it. Replay of the same valid receipt is idempotent. Reject evidence for a previous pool UID, evaluation, or incompatible Sandbox generation. Retain bounded evidence for the active evaluation instead of an unbounded list of consumed members.
 
 | Budget | What expiry establishes | Main design cost |
@@ -136,7 +143,7 @@ An evaluation identifier must fence delayed evidence separately from the effecti
 
 The recommended direction for discussion is the third model, driven by actual refill or replacement demand. An idle OnReplenish pool awaits an evaluation opportunity. Creation errors and readiness waits need coverage in the same attempt definition. A total convergence budget remains an operational-policy option with its stock-based meaning stated explicitly.
 
-Once selected, a deadline should be an optional positive integer in the pool spec, with omission disabling expiry. Persist the attempt identity and start time before deadline-dependent actions. A no-progress model additionally needs persisted progress time and evidence rules. Schedule quiet-pool expiry explicitly and preserve the clock across retry/restart. `lastTransitionTime` alone cannot identify successive template attempts that share a condition status.
+Once selected, a deadline uses an optional `*int32` field in the pool spec with a `Seconds` suffix, such as `readinessObservationDeadlineSeconds`, and `+kubebuilder:validation:Minimum=1`. Omission disables expiry; explicit zero and negative values fail validation. Persist the attempt identity and start time before deadline-dependent actions. A no-progress model additionally needs persisted progress time and evidence rules. Schedule quiet-pool expiry explicitly and preserve the clock across retry/restart. `lastTransitionTime` alone cannot identify successive template attempts that share a condition status.
 
 The proposed lifecycle rules for an explicit readiness-evaluation budget are:
 
@@ -176,7 +183,8 @@ Implementation acceptance requirements are:
 
 | Layer | Requirement |
 | --- | --- |
-| Semantic table tests | Every scenario above has a result for stock, current health, template evidence, and timer eligibility. |
+| Semantic table tests | Every scenario above has a result for stock, current health, template evidence, and timer eligibility. Include committed success at zero replicas, source lookup failure, and restoration of the same source. |
+| API representation | Round-trip omitted and explicit-zero updated counters. Unavailable observations stay unknown. Reject negative counts and nonpositive deadline seconds; omission disables the deadline. |
 | Real apiserver | Template-only edits preserve pool generation; status identifies the external source; metadata-equivalent changes retain the effective revision. |
 | Conflict and crash boundaries | Reject/conflict status writes at attempt start and success; restart around those boundaries; verify durable identity, clock, and outcome. |
 | Claim traffic | Exercise Ready-to-claim transfer between observations, pre-Ready adoption, receipt deletion, restart, and delayed signals through A-to-B-to-A revisions. Stock deficit alone must not produce a template-failure diagnosis. |
@@ -187,7 +195,7 @@ Implementation acceptance requirements are:
 
 ### Design Review Decisions
 
-The requested review decisions are the two proposed condition responsibilities and names; revision equivalence under policy/defaulting changes; and the cost/guarantee tradeoff of durable source receipts versus passive observation. Selecting the observation protocol determines which negative deadline result can be implemented reliably. The lifecycle table provides concrete rules to review once that choice is made.
+The requested review decisions are the two proposed condition responsibilities and names; revision equivalence under policy/defaulting changes; and the cost/guarantee tradeoff of Sandbox receipts, pool-only receipts, and passive observation. Selecting the observation protocol includes its API location and writer ownership, and determines which negative deadline result can be implemented reliably. The lifecycle table provides concrete rules to review once that choice is made.
 
 ## Scalability
 

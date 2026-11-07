@@ -4,6 +4,11 @@ authors:
   - "@lilong555"
 status: provisional
 creation-date: "2026-11-07"
+reviewers:
+  - "@aditya-shantanu"
+  - "@igooch"
+approvers:
+  - "@janetkuo"
 see-also:
   - "https://github.com/kubernetes-sigs/agent-sandbox/issues/1326"
   - "https://github.com/kubernetes-sigs/agent-sandbox/issues/1327"

@@ -44,8 +44,7 @@ type LifecycleApplyConfiguration struct {
 	// - Retain (default): the controller keeps the SandboxClaim and sets its Ready
 	// condition to False with reason ClaimExpired.
 	// - Delete: the controller deletes the SandboxClaim.
-	// - DeleteForeground: like Delete, but the SandboxClaim remains, with a
-	// deletionTimestamp, until its dependents are deleted.
+	// - DeleteForeground: like Delete, but uses foreground cascading deletion.
 	// This field has no effect while the SandboxClaim cannot expire.
 	ShutdownPolicy *apiv1beta1.ShutdownPolicy `json:"shutdownPolicy,omitempty"`
 }

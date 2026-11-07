@@ -1355,6 +1355,7 @@ func TestWriteReader_PreservesPathValidation(t *testing.T) {
 		{name: "sandboxd trailing slash", runtime: RuntimeSandboxd, path: "dir/", want: "not a valid file path"},
 		{name: "sandboxd root", runtime: RuntimeSandboxd, path: ".", want: "sandbox root"},
 		{name: "sandboxd escape", runtime: RuntimeSandboxd, path: "../file.txt", want: "escapes the sandbox root"},
+		{name: "sandboxd dotdot segment", runtime: RuntimeSandboxd, path: "dir/../file.txt", want: "escapes the sandbox root"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

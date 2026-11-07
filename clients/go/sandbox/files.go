@@ -116,17 +116,21 @@ type Files struct {
 }
 
 // filesEndpoint returns the sandboxd REST path for path. It percent-encodes
-// each segment and returns an error when the path leaves the sandbox root.
+// each segment. A ".." segment is rejected before cleaning, so "dir/../a.txt"
+// is an error instead of a silent rewrite to "a.txt". Cleaning still drops
+// "." and empty segments, including a trailing slash.
 func filesEndpoint(path string) (string, error) {
+	for _, part := range strings.Split(path, "/") {
+		if part == ".." {
+			return "", fmt.Errorf("path %q escapes the sandbox root", path)
+		}
+	}
 	rel := strings.TrimPrefix(pathpkg.Clean(path), "/")
 	if rel == "." {
 		rel = ""
 	}
 	if rel == "" {
 		return "v1/files/", nil
-	}
-	if rel == ".." || strings.HasPrefix(rel, "../") {
-		return "", fmt.Errorf("path %q escapes the sandbox root", path)
 	}
 
 	var b strings.Builder
@@ -335,9 +339,9 @@ func (r *uploadLimitReader) Read(p []byte) (int, error) {
 
 // sandboxdWriteReq builds the sandboxd PUT request: an idempotent write of the
 // raw bytes to /v1/files/{path}. Parent directories are created server-side.
-// Relative paths are allowed, but ".." components that escape the sandbox root
-// are rejected client-side as defense in depth (sandboxd also enforces this
-// server-side via SanitizePath).
+// Relative paths are allowed. A ".." segment is rejected before the path is
+// cleaned, so the client does not rewrite it. sandboxd enforces the same
+// rule server-side via SanitizePath.
 func (f *Files) sandboxdWriteReq(path string, content []byte) (method, endpoint, contentType string, body *bytes.Reader, err error) {
 	if err := f.validateSandboxdWritePath(path); err != nil {
 		return "", "", "", nil, err

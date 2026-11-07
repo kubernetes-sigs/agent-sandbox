@@ -105,18 +105,21 @@ describe("resolveSandboxPath", () => {
     expect(() => resolveSandboxPath("./", "write")).toThrow(SandboxError);
   });
 
-  it("rejects the sandbox root for mkdir/move/copy but allows a trailing slash", () => {
+  it("rejects the sandbox root for mkdir/move/copy and drops a trailing slash before encoding", () => {
     for (const op of ["mkdir", "move", "copy"] as const) {
       expect(() => resolveSandboxPath("", op)).toThrow(SandboxError);
       expect(() => resolveSandboxPath("./", op)).toThrow(SandboxError);
-      expect(resolveSandboxPath("dir/", op)).toBe("dir/");
+      // mkdir allows a trailing slash; it is dropped before encode.
+      expect(resolveSandboxPath("dir/", op)).toBe("dir");
     }
   });
 
-  it("rejects a trailing slash for write/delete but not read/list/exists", () => {
+  it("rejects a trailing slash for write/delete and drops it for read/list/exists", () => {
     expect(() => resolveSandboxPath("dir/", "write")).toThrow(SandboxError);
     expect(() => resolveSandboxPath("dir/", "delete")).toThrow(SandboxError);
-    expect(() => resolveSandboxPath("dir/", "list")).not.toThrow();
+    expect(resolveSandboxPath("dir/", "read")).toBe("dir");
+    expect(resolveSandboxPath("dir/", "list")).toBe("dir");
+    expect(resolveSandboxPath("dir/", "exists")).toBe("dir");
   });
 
   it("rejects absolute paths for every operation", () => {

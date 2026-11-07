@@ -136,13 +136,6 @@ func TestSandboxdWrite_PutsRawBody(t *testing.T) {
 	if string(gotBody) != "print(1)" {
 		t.Errorf("unexpected body: %q", gotBody)
 	}
-
-	if err := c.Write(context.Background(), "dir/../a.txt", []byte("x")); err != nil {
-		t.Fatalf("Write() error: %v", err)
-	}
-	if gotPath != "/v1/files/a.txt" {
-		t.Errorf("collapsed path: got %s, want /v1/files/a.txt", gotPath)
-	}
 }
 
 func TestSandboxdWrite_RejectsTraversal(t *testing.T) {
@@ -154,7 +147,7 @@ func TestSandboxdWrite_RejectsTraversal(t *testing.T) {
 	defer server.Close()
 
 	c := newReadySandboxdTestSandbox(server.URL)
-	for _, p := range []string{"../etc/passwd", "dir/../../etc/passwd", "..", ".", "foo/.."} {
+	for _, p := range []string{"../etc/passwd", "dir/../../etc/passwd", "dir/../a.txt", "..", ".", "foo/.."} {
 		err := c.Write(context.Background(), p, []byte("x"))
 		if err == nil {
 			t.Errorf("Write(%q) should be rejected client-side", p)
@@ -344,10 +337,11 @@ func TestSandboxdFilesEndpointCollapsesDotSegments(t *testing.T) {
 	}{
 		{path: "dir/script.py", want: "v1/files/dir/script.py"},
 		{path: "./a.txt", want: "v1/files/a.txt"},
-		{path: "dir/../a.txt", want: "v1/files/a.txt"},
 		{path: "dir//a.txt", want: "v1/files/dir/a.txt"},
+		{path: "dir/", want: "v1/files/dir"},
 		{path: "/", want: "v1/files/"},
 		{path: ".", want: "v1/files/"},
+		{path: "dir/../a.txt", wantErr: true},
 		{path: "../escape", wantErr: true},
 		{path: "dir/../../escape", wantErr: true},
 	}

@@ -172,6 +172,12 @@ class TestFilesystemSafeUploadPath(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "escapes the sandbox root"):
             Filesystem._safe_upload_path("dir/../../etc/passwd")
 
+    def test_non_escaping_parent_segment_is_rejected(self):
+        # "dir/../a.txt" stays inside the root after normpath, but a ".."
+        # segment is rejected before that rewrite.
+        with self.assertRaisesRegex(ValueError, "escapes the sandbox root"):
+            Filesystem._safe_upload_path("dir/../a.txt")
+
     def test_absolute_etc_is_not_allowed_to_escape(self):
         # /etc/passwd normalizes to "etc/passwd" relative to the runtime root.
         self.assertEqual(Filesystem._safe_upload_path("/etc/passwd"), "etc/passwd")
@@ -216,24 +222,25 @@ class TestFilesystemSafeUploadPath(unittest.TestCase):
                 )
 
     def test_sandboxd_parent_escape_is_rejected(self):
-        for path in ("..", "../etc/passwd", "dir/../../etc/passwd"):
+        for path in ("..", "../etc/passwd", "dir/../../etc/passwd", "dir/../a.txt"):
             with self.subTest(path=path), self.assertRaisesRegex(
                 ValueError, "escapes the sandbox root"
             ):
                 _sandboxd_files_endpoint(path)
 
     def test_sandboxd_separators_stay_literal(self):
-        # Leading/repeated slashes and "."/".." collapse to the same relative
-        # path; separators stay literal "/".
+        # Leading/repeated slashes, "." and a trailing slash collapse to the
+        # same relative path; separators stay literal "/". A ".." segment is
+        # rejected instead of collapsed.
         cases = {
             "dir/script.py": "/v1/files/dir/script.py",
             "/dir/script.py": "/v1/files/dir/script.py",
             "dir//script.py": "/v1/files/dir/script.py",
+            "dir/": "/v1/files/dir",
             "/": "/v1/files/",
             "/dir": "/v1/files/dir",
             "a b/c.txt": "/v1/files/a%20b/c.txt",
             "./a.txt": "/v1/files/a.txt",
-            "dir/../a.txt": "/v1/files/a.txt",
         }
         for path, path_url in cases.items():
             with self.subTest(path=path):

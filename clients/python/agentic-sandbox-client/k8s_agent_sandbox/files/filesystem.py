@@ -134,17 +134,17 @@ def _iter_multipart_body(
 def _sandboxd_files_endpoint(path: str) -> str:
     """Return the sandboxd REST path for a sandbox-relative file path.
 
-    Separators stay literal "/"; the path is normalized first so "." and
-    ".." never reach the wire. A surviving ".." escapes the sandbox root.
+    Separators stay literal "/". A ".." segment is rejected before
+    normalization, so "dir/../a.txt" is an error instead of a rewrite to
+    "a.txt". "." and empty segments, including a trailing slash, are dropped.
     """
+    if any(part == ".." for part in path.split("/")):
+        raise ValueError(f"path {path!r} escapes the sandbox root")
     normalized = posixpath.normpath(path).lstrip("/")
     if normalized in ("", "."):
         return "v1/files/"
-    parts = normalized.split("/")
-    if any(part == ".." for part in parts):
-        raise ValueError(f"path {path!r} escapes the sandbox root")
     return "v1/files/" + "/".join(
-        urllib.parse.quote(part, safe="") for part in parts
+        urllib.parse.quote(part, safe="") for part in normalized.split("/")
     )
 
 
@@ -315,15 +315,16 @@ class Filesystem:
             )
         if not path.strip():
             raise ValueError("Upload path cannot be empty.")
+        # Reject ".." before normpath. Otherwise "dir/../a.txt" is rewritten
+        # to "a.txt" and the caller never sees that the path moved.
+        if any(part == ".." for part in path.split("/")):
+            raise ValueError(
+                f"Upload path '{path}' escapes the sandbox root."
+            )
 
         normalized = posixpath.normpath(path).lstrip("/")
         if not normalized or normalized == ".":
             raise ValueError(f"Upload path '{path}' does not name a file.")
-        parts = normalized.split("/")
-        if any(part == ".." for part in parts):
-            raise ValueError(
-                f"Upload path '{path}' escapes the sandbox root."
-            )
         return normalized
 
     @trace_span("read")

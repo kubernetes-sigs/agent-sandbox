@@ -132,20 +132,20 @@ def _iter_multipart_body(
 
 
 def _sandboxd_files_endpoint(path: str) -> str:
-    """Return the sandboxd REST path for a sandbox-relative file path."""
-    # HTTP clients and proxies may decode %2E before the server routes it.
-    # Use the root endpoint directly to avoid a dot-segment redirect.
-    if path == ".":
+    """Return the sandboxd REST path for a sandbox-relative file path.
+
+    Separators stay literal "/"; the path is normalized first so "." and
+    ".." never reach the wire. A surviving ".." escapes the sandbox root.
+    """
+    normalized = posixpath.normpath(path).lstrip("/")
+    if normalized in ("", "."):
         return "v1/files/"
-    encoded = []
-    for segment in path.split("/"):
-        if segment == ".":
-            encoded.append("%2E")
-        elif segment == "..":
-            encoded.append("%2E%2E")
-        else:
-            encoded.append(urllib.parse.quote(segment, safe=""))
-    return f"v1/files/{'%2F'.join(encoded)}"
+    parts = normalized.split("/")
+    if any(part == ".." for part in parts):
+        raise ValueError(f"path {path!r} escapes the sandbox root")
+    return "v1/files/" + "/".join(
+        urllib.parse.quote(part, safe="") for part in parts
+    )
 
 
 class _RuntimeProbe(Protocol):
@@ -173,7 +173,10 @@ def _sandboxd_op_endpoint(
         )
     if path == "":
         raise ValueError(f"{op}: path must not be empty")
-    endpoint = _sandboxd_files_endpoint(path) + action
+    endpoint = _sandboxd_files_endpoint(path)
+    if endpoint == "v1/files/":
+        raise ValueError(f"{op}: path {path!r} names the sandbox root")
+    endpoint += action
     if query:
         endpoint += "?" + urllib.parse.urlencode(query)
     return endpoint

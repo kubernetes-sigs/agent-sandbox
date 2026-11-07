@@ -144,11 +144,10 @@ const ROOT_REJECTED_AS: Partial<Record<SandboxPathOperation, string>> = {
 };
 
 /**
- * Validates a caller-supplied sandbox-root-relative path WITHOUT decoding or
- * normalizing it first, then returns the single encodeURIComponent-encoded
- * path segment to append after "/v1/files/" — empty string for the sandbox
- * root. Throws SandboxError before any network request for every case that
- * must be rejected client-side.
+ * Validates a caller-supplied sandbox-root-relative path without decoding or
+ * normalizing it, then returns the percent-encoded path to append after
+ * "/v1/files/" — "" for the sandbox root. Separators stay literal "/".
+ * "." and empty segments are dropped. Invalid paths throw before any request.
  * @internal
  */
 export function resolveSandboxPath(
@@ -187,7 +186,11 @@ export function resolveSandboxPath(
       `invalid path '${input}': a trailing '/' is not allowed for ${operation}`,
     );
   }
-  return encodeURIComponent(input);
+  return input
+    .split("/")
+    .filter((segment) => segment !== "" && segment !== ".")
+    .map(encodeURIComponent)
+    .join("/");
 }
 
 function mediaType(contentType: string | null): string {

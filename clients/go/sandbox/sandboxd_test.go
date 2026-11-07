@@ -127,7 +127,7 @@ func TestSandboxdWrite_PutsRawBody(t *testing.T) {
 	if gotMethod != http.MethodPut {
 		t.Errorf("expected PUT, got %s", gotMethod)
 	}
-	if gotPath != "/v1/files/dir%2Fscript.py" {
+	if gotPath != "/v1/files/dir/script.py" {
 		t.Errorf("unexpected path: %s", gotPath)
 	}
 	if gotContentType != "application/octet-stream" {
@@ -135,6 +135,13 @@ func TestSandboxdWrite_PutsRawBody(t *testing.T) {
 	}
 	if string(gotBody) != "print(1)" {
 		t.Errorf("unexpected body: %q", gotBody)
+	}
+
+	if err := c.Write(context.Background(), "dir/../a.txt", []byte("x")); err != nil {
+		t.Fatalf("Write() error: %v", err)
+	}
+	if gotPath != "/v1/files/a.txt" {
+		t.Errorf("collapsed path: got %s, want /v1/files/a.txt", gotPath)
 	}
 }
 
@@ -147,7 +154,7 @@ func TestSandboxdWrite_RejectsTraversal(t *testing.T) {
 	defer server.Close()
 
 	c := newReadySandboxdTestSandbox(server.URL)
-	for _, p := range []string{"../etc/passwd", "dir/../../etc/passwd", ".."} {
+	for _, p := range []string{"../etc/passwd", "dir/../../etc/passwd", "..", ".", "foo/.."} {
 		err := c.Write(context.Background(), p, []byte("x"))
 		if err == nil {
 			t.Errorf("Write(%q) should be rejected client-side", p)
@@ -155,6 +162,22 @@ func TestSandboxdWrite_RejectsTraversal(t *testing.T) {
 	}
 	if called {
 		t.Error("traversal write must not reach the server")
+	}
+}
+
+func TestSandboxdReadAndDelete_RejectRoot(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("root path must not reach the server")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	c := newReadySandboxdTestSandbox(server.URL)
+	if _, err := c.Read(context.Background(), "."); err == nil || !strings.Contains(err.Error(), "sandbox root") {
+		t.Fatalf("Read(.): %v", err)
+	}
+	if err := c.Delete(context.Background(), "foo/..", true); err == nil || !strings.Contains(err.Error(), "sandbox root") {
+		t.Fatalf("Delete(foo/..): %v", err)
 	}
 }
 
@@ -179,7 +202,7 @@ func TestSandboxdWrite_NoRouterHeaders(t *testing.T) {
 
 func TestSandboxdRead_GetsFileBytes(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.EscapedPath() != "/v1/files/notes%2Fhello.txt" {
+		if r.URL.EscapedPath() != "/v1/files/notes/hello.txt" {
 			t.Errorf("unexpected path: %s", r.URL.EscapedPath())
 		}
 		_, _ = w.Write([]byte("hello"))
@@ -198,7 +221,7 @@ func TestSandboxdRead_GetsFileBytes(t *testing.T) {
 
 func TestSandboxdReadTo_GetsFileBytes(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.EscapedPath() != "/v1/files/notes%2Fhello.txt" {
+		if r.URL.EscapedPath() != "/v1/files/notes/hello.txt" {
 			t.Errorf("unexpected path: %s", r.URL.EscapedPath())
 		}
 		_, _ = w.Write([]byte("hello"))
@@ -313,6 +336,40 @@ func TestDelete_LegacyRuntimeUnsupported(t *testing.T) {
 	}
 }
 
+func TestSandboxdFilesEndpointCollapsesDotSegments(t *testing.T) {
+	cases := []struct {
+		path    string
+		want    string
+		wantErr bool
+	}{
+		{path: "dir/script.py", want: "v1/files/dir/script.py"},
+		{path: "./a.txt", want: "v1/files/a.txt"},
+		{path: "dir/../a.txt", want: "v1/files/a.txt"},
+		{path: "dir//a.txt", want: "v1/files/dir/a.txt"},
+		{path: "/", want: "v1/files/"},
+		{path: ".", want: "v1/files/"},
+		{path: "../escape", wantErr: true},
+		{path: "dir/../../escape", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			got, err := filesEndpoint(tc.path)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("filesEndpoint(%q) = %q, want error", tc.path, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("filesEndpoint(%q) error: %v", tc.path, err)
+			}
+			if got != tc.want {
+				t.Fatalf("filesEndpoint(%q) = %q, want %q", tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSandboxdFileOps_Requests(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -322,9 +379,9 @@ func TestSandboxdFileOps_Requests(t *testing.T) {
 		wantQuery  string
 	}{
 		{"mkdir", func(c *Sandbox) error { return c.Mkdir(context.Background(), "a/b", false) },
-			http.MethodPut, "/v1/files/a%2Fb", "type=directory"},
+			http.MethodPut, "/v1/files/a/b", "type=directory"},
 		{"mkdir parents", func(c *Sandbox) error { return c.Mkdir(context.Background(), "a/b", true) },
-			http.MethodPut, "/v1/files/a%2Fb", "parents=true&type=directory"},
+			http.MethodPut, "/v1/files/a/b", "parents=true&type=directory"},
 		{"move", func(c *Sandbox) error { return c.Move(context.Background(), "a", "dir/b c", false) },
 			http.MethodPost, "/v1/files/a:move", "destination=dir%2Fb+c"},
 		{"copy overwrite", func(c *Sandbox) error { return c.Copy(context.Background(), "a", "b", true) },
@@ -434,7 +491,7 @@ func TestSandboxdError_DecodesAPIError(t *testing.T) {
 	defer server.Close()
 
 	c := newReadySandboxdTestSandbox(server.URL)
-	_, err := c.Read(context.Background(), "../etc/passwd")
+	_, err := c.Read(context.Background(), "secret/file.txt")
 	if err == nil {
 		t.Fatal("expected error")
 	}

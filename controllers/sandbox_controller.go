@@ -1241,6 +1241,8 @@ func NameHash(objectName string) string {
 	return string(buf[:])
 }
 
+// removeSandboxOwnerReferences drops every owner reference to sandbox from
+// obj and reports whether any was removed; obj is changed in place only then.
 func removeSandboxOwnerReferences(obj client.Object, sandbox *sandboxv1beta1.Sandbox) bool {
 	ownerRefs := obj.GetOwnerReferences()
 	filtered := make([]metav1.OwnerReference, 0, len(ownerRefs))
@@ -2225,6 +2227,10 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 	return updated
 }
 
+// reconcilePVCs ensures a PVC exists for each of the sandbox's
+// volumeClaimTemplates. Under the default Delete retention policy the sandbox
+// owns each PVC, so the PVCs are garbage collected with it; under Retain the
+// sandbox never takes ownership and drops any it holds, so the PVCs outlive it.
 func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, nameHash string) error {
 	logger := log.FromContext(ctx)
 

@@ -24,17 +24,17 @@ from shared import utils
 DEFAULT_PLATFORMS = "linux/amd64,linux/arm64"
 
 # Example images whose arm64 pip install under QEMU takes up to 25 minutes.
-# They are not promoted, so they ship for amd64 only.
+# They are not promoted, so they default to amd64 only.
 AMD64_ONLY_IMAGES = {"aider-sandbox", "analytics-tool", "langchain"}
 
 
 def _platforms_for(args, service_name):
     """Returns the registry push platforms for an image."""
-    if service_name not in AMD64_ONLY_IMAGES:
+    if args.platform:
         return args.platform
-    platforms = [p for p in args.platform.split(",") if p != "linux/arm64"]
-    # An explicit arm64-only request is kept as is.
-    return ",".join(platforms) or args.platform
+    if service_name in AMD64_ONLY_IMAGES:
+        return "linux/amd64"
+    return DEFAULT_PLATFORMS
 
 
 def _get_version_build_args():
@@ -363,11 +363,12 @@ def make_parser():
     parser.add_argument("--platform",
                         dest="platform",
                         help="Comma-separated platforms for registry pushes. "
+                             "Default: linux/amd64,linux/arm64. "
                              "Use the cluster's architecture to avoid QEMU "
                              "emulation of the others. Ignored with "
                              "--kind-cluster-name (host platform only).",
                         type=str,
-                        default=DEFAULT_PLATFORMS)
+                        default=None)
     parser.add_argument("--container-engine",
                         dest="container_engine",
                         help="Container engine to use (docker or podman). "

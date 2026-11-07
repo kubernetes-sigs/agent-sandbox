@@ -78,8 +78,13 @@ spec:
       router-scoped-mcp/sandbox: box-b
   policyTypes: ["Ingress"]
   ingress:
+  # Router pods in agent-sandbox-system. Both selectors sit in one `from`
+  # entry, so the rule is their AND.
   - from:
-    - podSelector:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: agent-sandbox-system
+      podSelector:
         matchLabels:
           app.kubernetes.io/name: sandbox-router
           app.kubernetes.io/component: sandbox-router

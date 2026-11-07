@@ -102,12 +102,15 @@ spec:
       router-scoped-mcp/sandbox: box-a
   policyTypes: ["Ingress"]
   ingress:
-  # Matches the pod labels sandbox-router/deploy/deployment.yaml stamps
-  # on the router pods. Both boxes and the router live in `default`
-  # here, so a podSelector alone is the whole rule; across namespaces
-  # this needs a namespaceSelector for the router's namespace too.
+  # Matches the router pods sandbox-router/deploy/deployment.yaml stamps
+  # with these labels, in the router's own namespace. Both selectors sit in
+  # one `from` entry, so the rule is their AND: a pod with the right labels in
+  # another namespace does not match.
   - from:
-    - podSelector:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: agent-sandbox-system
+      podSelector:
         matchLabels:
           app.kubernetes.io/name: sandbox-router
           app.kubernetes.io/component: sandbox-router

@@ -34,6 +34,9 @@ EXAMPLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROUTER_IMAGE="${ROUTER_IMAGE:-kind.local/sandbox-router-go:scoped-token-example}"
 MCP_IMAGE="${MCP_IMAGE:-kind.local/router-scoped-mcp-sandbox:example}"
 KIND_CLUSTER="${KIND_CLUSTER:-agent-sandbox}"
+# The router manifests under sandbox-router/deploy set this namespace; every
+# router-side command must target it. The Sandboxes themselves stay in default.
+ROUTER_NS="${ROUTER_NS:-agent-sandbox-system}"
 
 # Wait on the Sandbox's own Ready condition (set by the controller when
 # the pod is ready) rather than on a pod label selector — the label
@@ -63,7 +66,7 @@ kind load docker-image "${MCP_IMAGE}" --name "${KIND_CLUSTER}"
 echo "Generating the shared scoped-token secret..."
 SECRET_FILE="$(mktemp)"
 openssl rand -hex 32 > "${SECRET_FILE}"
-kubectl create secret generic scoped-token-secret \
+kubectl create secret generic scoped-token-secret -n "${ROUTER_NS}" \
   --from-file=secret="${SECRET_FILE}" \
   --dry-run=client -o yaml | kubectl apply -f -
 
@@ -72,11 +75,11 @@ cleanup() {
   [ -n "${PF_PID:-}" ] && kill "${PF_PID}" 2>/dev/null || true
   kubectl delete --ignore-not-found -f "${EXAMPLE_DIR}/sandbox.yaml"
   kubectl delete --ignore-not-found -f "${EXAMPLE_DIR}/sandbox-box-b.yaml"
-  kubectl delete --ignore-not-found secret scoped-token-secret
-  kubectl delete --ignore-not-found deploy sandbox-router
-  kubectl delete --ignore-not-found svc sandbox-router-svc
+  kubectl delete --ignore-not-found -n "${ROUTER_NS}" secret scoped-token-secret
+  kubectl delete --ignore-not-found -n "${ROUTER_NS}" deploy sandbox-router
+  kubectl delete --ignore-not-found -n "${ROUTER_NS}" svc sandbox-router-svc
   kubectl delete --ignore-not-found -f "${REPO_ROOT}/sandbox-router/deploy/rbac.yaml"
-  kubectl delete --ignore-not-found serviceaccount sandbox-router
+  kubectl delete --ignore-not-found -n "${ROUTER_NS}" serviceaccount sandbox-router
   rm -f "${SECRET_FILE}"
   if [ -n "${VENV_DIR:-}" ]; then rm -rf "${VENV_DIR}"; fi
 }
@@ -98,11 +101,11 @@ sed -e "s|registry.k8s.io/agent-sandbox/sandbox-router-go:latest|${ROUTER_IMAGE}
 # (volumes/volumeMounts don't exist yet in the base manifest, so this half
 # uses a strategic-merge patch, which knows how to add a new named volume
 # without needing the key to pre-exist).
-kubectl patch deploy sandbox-router --type=json -p='[
+kubectl patch -n "${ROUTER_NS}" deploy sandbox-router --type=json -p='[
   {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--authz-mode=scoped-token"},
   {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--authz-scoped-token-secret-file=/etc/scoped-token/secret"}
 ]'
-kubectl patch deploy sandbox-router --type=strategic -p='{
+kubectl patch -n "${ROUTER_NS}" deploy sandbox-router --type=strategic -p='{
   "spec": {"template": {"spec": {
     "volumes": [{"name": "scoped-token-secret", "secret": {"secretName": "scoped-token-secret"}}],
     "containers": [{"name": "sandbox-router", "volumeMounts": [
@@ -110,13 +113,13 @@ kubectl patch deploy sandbox-router --type=strategic -p='{
     ]}]
   }}}
 }'
-kubectl rollout status deploy/sandbox-router --timeout=120s
+kubectl rollout status -n "${ROUTER_NS}" deploy/sandbox-router --timeout=120s
 
 # The client runs on the host, where the in-cluster Service DNS name is
 # not resolvable (kind, most local clusters) — port-forward the router
 # Service to localhost instead. client.py's default --router-url matches.
 echo "Port-forwarding the router Service to localhost:18080..."
-kubectl port-forward svc/sandbox-router-svc 18080:8080 &
+kubectl port-forward -n "${ROUTER_NS}" svc/sandbox-router-svc 18080:8080 &
 PF_PID=$!
 sleep 3
 

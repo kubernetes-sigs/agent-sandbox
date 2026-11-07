@@ -81,7 +81,7 @@ type Lifecycle struct {
 	//     condition to False with reason ClaimExpired.
 	//   - Delete: the controller deletes the SandboxClaim.
 	//   - DeleteForeground: like Delete, but the SandboxClaim remains, with a
-	//     deletionTimestamp, until the Sandbox and its Pod are fully terminated.
+	//     deletionTimestamp, until its dependents are deleted.
 	// This field has no effect while the SandboxClaim cannot expire.
 	// +kubebuilder:default=Retain
 	// +optional

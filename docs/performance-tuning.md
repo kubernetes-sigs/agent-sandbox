@@ -372,6 +372,13 @@ During a claim burst, every avoidable write competes for API server capacity
 with latency-critical adoption writes. Flag reference:
 [API Write and Cache Optimization](configuration.md#api-write-and-cache-optimization).
 
+Independently of these flags, the SandboxWarmPool controller always coalesces
+counter-only status writes (`status.replicas` / `status.readyReplicas`) to at
+most one per second per pool, so a stream of adoptions no longer costs three
+back-to-back status patches per claim; `observedGeneration` and other
+non-counter changes still write through immediately, as do all changes on a
+reconcile that hit an error, and the counters converge within about a second.
+
 ### `--disable-sandbox-events` and `--disable-claim-events` (default: false)
 
 Disable Kubernetes Event emission from the `Sandbox` and `SandboxClaim`

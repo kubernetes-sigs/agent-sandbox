@@ -5997,6 +5997,127 @@ func TestReconcilePVCs(t *testing.T) {
 	}
 }
 
+// TestReconcileSkipsAdoptionWhenSandboxIsDeleting covers an orphan delete of a
+// Sandbox: the garbage collector releases the Sandbox's PVC, Pod, and Service
+// before the informer cache shows the Sandbox's deletionTimestamp. The
+// controller must not adopt them back, or the garbage collector deletes them
+// together with the Sandbox.
+func TestReconcileSkipsAdoptionWhenSandboxIsDeleting(t *testing.T) {
+	sandboxName := "test-sandbox"
+	sandboxNs := "test-ns"
+	nameHash := NameHash(sandboxName)
+	pvcName := "data-" + sandboxName
+
+	cachedSandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: sandboxNs,
+			UID:       sandboxUID,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "busybox"}}},
+				},
+				VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{{
+					EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+				}},
+				Service: new(true),
+			},
+			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+		},
+	}
+	releasedChildren := func() []runtime.Object {
+		labels := map[string]string{sandboxv1beta1.SandboxNameHashLabel: nameHash}
+		return []runtime.Object{
+			&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: pvcName, Namespace: sandboxNs, Labels: labels}},
+			&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs, Labels: labels}},
+			&corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs, Labels: labels},
+				Spec:       corev1.ServiceSpec{ClusterIP: corev1.ClusterIPNone},
+			},
+		}
+	}
+
+	deletingSandbox := cachedSandbox.DeepCopy()
+	deletingSandbox.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	deletingSandbox.Finalizers = []string{metav1.FinalizerOrphanDependents}
+	recreatedSandbox := cachedSandbox.DeepCopy()
+	recreatedSandbox.UID = "recreated-sandbox-uid"
+
+	testCases := []struct {
+		name       string
+		apiSandbox *sandboxv1beta1.Sandbox
+	}{
+		{name: "sandbox is being deleted", apiSandbox: deletingSandbox},
+		{name: "sandbox is gone"},
+		{name: "sandbox was recreated with a new UID", apiSandbox: recreatedSandbox},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var apiObjs []runtime.Object
+			if tc.apiSandbox != nil {
+				apiObjs = append(apiObjs, tc.apiSandbox.DeepCopy())
+			}
+			r := SandboxReconciler{
+				Client:    newFakeClient(append(releasedChildren(), cachedSandbox.DeepCopy())...),
+				APIReader: newFakeClient(apiObjs...),
+				Scheme:    Scheme,
+				Tracer:    asmetrics.NewNoOp(),
+			}
+
+			_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}})
+			require.NoError(t, err)
+
+			for _, child := range []client.Object{&corev1.PersistentVolumeClaim{}, &corev1.Pod{}, &corev1.Service{}} {
+				name := sandboxName
+				if _, isPVC := child.(*corev1.PersistentVolumeClaim); isPVC {
+					name = pvcName
+				}
+				require.NoError(t, r.Get(t.Context(), types.NamespacedName{Name: name, Namespace: sandboxNs}, child))
+				assert.Empty(t, child.GetOwnerReferences(), "expected %T %q to stay unowned", child, name)
+			}
+		})
+	}
+}
+
+func TestReconcilePVCsReturnsErrorWhenSandboxReadFails(t *testing.T) {
+	sandboxName := "test-sandbox"
+	sandboxNs := "test-ns"
+	nameHash := NameHash(sandboxName)
+	pvcName := "data-" + sandboxName
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs, UID: sandboxUID},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+			VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{{
+				EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+			}},
+		}},
+	}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: pvcName, Namespace: sandboxNs,
+		Labels: map[string]string{sandboxv1beta1.SandboxNameHashLabel: nameHash},
+	}}
+	r := SandboxReconciler{
+		Client: newFakeClient(pvc, sandbox),
+		APIReader: newFakeClientWithInterceptor(interceptor.Funcs{
+			Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+				return errors.New("apiserver unavailable")
+			},
+		}),
+		Scheme: Scheme,
+		Tracer: asmetrics.NewNoOp(),
+	}
+
+	err := r.reconcilePVCs(t.Context(), sandbox, nameHash)
+	require.ErrorContains(t, err, "apiserver unavailable")
+
+	livePVC := &corev1.PersistentVolumeClaim{}
+	require.NoError(t, r.Get(t.Context(), types.NamespacedName{Name: pvcName, Namespace: sandboxNs}, livePVC))
+	assert.Empty(t, livePVC.OwnerReferences)
+}
+
 func TestSandboxExpiry(t *testing.T) {
 	now := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 

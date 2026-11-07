@@ -23,6 +23,19 @@ from shared import utils
 
 DEFAULT_PLATFORMS = "linux/amd64,linux/arm64"
 
+# Example images whose arm64 pip install under QEMU takes up to 25 minutes.
+# They are not promoted, so they ship for amd64 only.
+AMD64_ONLY_IMAGES = {"aider-sandbox", "analytics-tool", "langchain"}
+
+
+def _platforms_for(args, service_name):
+    """Returns the registry push platforms for an image."""
+    if service_name not in AMD64_ONLY_IMAGES:
+        return args.platform
+    platforms = [p for p in args.platform.split(",") if p != "linux/arm64"]
+    # An explicit arm64-only request is kept as is.
+    return ",".join(platforms) or args.platform
+
 
 def _get_version_build_args():
     """Returns build args for version info injection into Go binaries."""
@@ -98,7 +111,7 @@ def build_and_push_image_with_docker_buildx(args, service_name, srcdir, dockerfi
             f"--cache-from=type=registry,ref={cache_ref}",
             f"--cache-to=type=registry,ref={cache_ref},mode=max",
         ])
-        build_cmd.append("--platform=" + args.platform)
+        build_cmd.append("--platform=" + _platforms_for(args, service_name))
     image_name = utils.get_full_image_name(args, service_name, tag=image_tag)
     build_cmd.extend(["-t", image_name])
     for tag in args.extra_image_tags:  # additional image tags

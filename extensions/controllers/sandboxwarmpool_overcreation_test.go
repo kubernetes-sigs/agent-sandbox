@@ -681,7 +681,7 @@ func TestReconcilePool_UnschedulableStuckGC(t *testing.T) {
 
 	t.Run("stuck sandbox with missing pod is still replaced", func(t *testing.T) {
 		warmPool := newPool()
-		sb := agedSandbox("-nopod")
+		sb := withPodScheduled(agedSandbox("-nopod"), metav1.ConditionFalse, sandboxv1beta1.SandboxReasonPodAbsent)
 
 		lc := newLaggingClient(newFakeClient(newTestScheme(), template, warmPool, sb))
 		r := SandboxWarmPoolReconciler{
@@ -799,10 +799,10 @@ func TestReconcilePool_UnschedulableStuckGC(t *testing.T) {
 // TestSandboxPodHoldPredicates pins the decision table of the mirrored-condition
 // reads directly, independent of reconcilePool. PodScheduled=False with reason
 // Unschedulable or SchedulingGated is a hold signal, and each reason belongs to
-// exactly one predicate so a held member is counted once. A missing condition and
-// an Unknown status are the two shapes the mirror uses for "Pod absent" and "Pod
-// state unknown", so both fall through to the stuck-sandbox path, as does any
-// other False reason.
+// exactly one predicate so a held member is counted once. False with reason
+// PodAbsent and an Unknown status are the shapes the mirror uses for "Pod absent"
+// and "Pod state unknown", so both fall through to the stuck-sandbox path, as do
+// any other False reason and a missing condition.
 func TestSandboxPodHoldPredicates(t *testing.T) {
 	deleting := metav1.Now()
 
@@ -823,8 +823,12 @@ func TestSandboxPodHoldPredicates(t *testing.T) {
 		wantGated         bool
 	}{
 		{
-			name:       "no PodScheduled condition (mirror removed: Pod confirmed absent)",
+			name:       "no PodScheduled condition (sandbox controller predates the mirror)",
 			conditions: nil,
+		},
+		{
+			name:       "False/PodAbsent (Pod confirmed absent)",
+			conditions: cond(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonPodAbsent),
 		},
 		{
 			name:       "other conditions but no PodScheduled",

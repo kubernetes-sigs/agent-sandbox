@@ -112,7 +112,7 @@ func TestSandboxClaimFinishedConditionUsesClaimGeneration(t *testing.T) {
 			want := sandbox.Status.Conditions[0]
 			want.ObservedGeneration = claim.Generation
 			want.LastTransitionTime = tc.wantFinishedAt
-			(&SandboxClaimReconciler{}).syncFinishedCondition(claim, sandbox, false)
+			(&SandboxClaimReconciler{}).syncFinishedCondition(claim, sandbox)
 
 			got := meta.FindStatusCondition(claim.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished))
 			if got == nil || *got != want {
@@ -120,6 +120,60 @@ func TestSandboxClaimFinishedConditionUsesClaimGeneration(t *testing.T) {
 			}
 			if gotGeneration := sandbox.Status.Conditions[0].ObservedGeneration; gotGeneration != tc.sandboxGeneration {
 				t.Errorf("sandbox Finished ObservedGeneration = %d, want %d unchanged", gotGeneration, tc.sandboxGeneration)
+			}
+		})
+	}
+}
+
+func TestSandboxClaimFinishedConditionWithoutSandboxFinished(t *testing.T) {
+	recordedFinish := metav1.Condition{
+		Type:               string(sandboxv1beta1.SandboxConditionFinished),
+		Status:             metav1.ConditionTrue,
+		Reason:             sandboxv1beta1.SandboxReasonPodSucceeded,
+		Message:            "Pod completed successfully",
+		ObservedGeneration: 3,
+	}
+
+	testCases := []struct {
+		name       string
+		recorded   *metav1.Condition
+		sandbox    *sandboxv1beta1.Sandbox
+		wantStatus metav1.ConditionStatus
+		wantReason string
+	}{
+		{
+			name:       "sandbox has not reported Finished",
+			sandbox:    &sandboxv1beta1.Sandbox{},
+			wantStatus: metav1.ConditionUnknown,
+			wantReason: extensionsv1beta1.SandboxStateUnknownReason,
+		},
+		{
+			name:       "no sandbox keeps a recorded finish",
+			recorded:   &recordedFinish,
+			wantStatus: metav1.ConditionTrue,
+			wantReason: sandboxv1beta1.SandboxReasonPodSucceeded,
+		},
+		{
+			name:       "no sandbox with nothing recorded",
+			wantStatus: metav1.ConditionUnknown,
+			wantReason: extensionsv1beta1.SandboxStateUnknownReason,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			claim := &extensionsv1beta1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Generation: 4},
+			}
+			if tc.recorded != nil {
+				claim.Status.Conditions = []metav1.Condition{*tc.recorded}
+			}
+
+			(&SandboxClaimReconciler{}).syncFinishedCondition(claim, tc.sandbox)
+
+			got := meta.FindStatusCondition(claim.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished))
+			if got == nil || got.Status != tc.wantStatus || got.Reason != tc.wantReason || got.ObservedGeneration != claim.Generation {
+				t.Errorf("claim Finished condition = %+v, want status %s reason %s generation %d", got, tc.wantStatus, tc.wantReason, claim.Generation)
 			}
 		})
 	}

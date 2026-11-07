@@ -64,6 +64,13 @@ func TestSandboxSuspendResumeCycleWithOperatingMode(t *testing.T) {
 					Message:            "Sandbox is not suspended",
 				},
 				{
+					Type:               string(sandboxv1beta1.SandboxConditionFinished),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: gen,
+					Reason:             sandboxv1beta1.SandboxReasonNotFinished,
+					Message:            "Pod has not reached a terminal phase",
+				},
+				{
 					Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: gen,
@@ -89,6 +96,20 @@ func TestSandboxSuspendResumeCycleWithOperatingMode(t *testing.T) {
 					ObservedGeneration: gen,
 					Reason:             sandboxv1beta1.SandboxReasonSuspendedPodTerminated,
 					Message:            "Pod has been terminated. Sandbox is suspended",
+				},
+				{
+					Type:               string(sandboxv1beta1.SandboxConditionFinished),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: gen,
+					Reason:             sandboxv1beta1.SandboxReasonNotFinished,
+					Message:            "Pod has not reached a terminal phase",
+				},
+				{
+					Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: gen,
+					Reason:             sandboxv1beta1.SandboxReasonPodAbsent,
+					Message:            "Sandbox has no backing Pod",
 				},
 				{
 					Type:               "Ready",
@@ -186,6 +207,13 @@ func TestSandboxSuspensionWithTerminatingPod(t *testing.T) {
 					Message:            "Sandbox is not suspended",
 				},
 				{
+					Type:               string(sandboxv1beta1.SandboxConditionFinished),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: 1,
+					Reason:             sandboxv1beta1.SandboxReasonNotFinished,
+					Message:            "Pod has not reached a terminal phase",
+				},
+				{
 					Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: 1,
@@ -265,6 +293,15 @@ func TestSandboxSuspensionWithTerminatingPod(t *testing.T) {
 					Message:            "Pod is terminating. Sandbox is suspending",
 				},
 				{
+					// Finished keeps the value recorded before the suspend while
+					// the Pod terminates.
+					Type:               string(sandboxv1beta1.SandboxConditionFinished),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: 2,
+					Reason:             sandboxv1beta1.SandboxReasonNotFinished,
+					Message:            "Pod has not reached a terminal phase",
+				},
+				{
 					// The Pod is terminating but still present and owned, so its
 					// scheduling state is still mirrored.
 					Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
@@ -320,6 +357,20 @@ func TestSandboxSuspensionWithTerminatingPod(t *testing.T) {
 					Message:            "Pod has been terminated. Sandbox is suspended",
 				},
 				{
+					Type:               string(sandboxv1beta1.SandboxConditionFinished),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: 2,
+					Reason:             sandboxv1beta1.SandboxReasonNotFinished,
+					Message:            "Pod has not reached a terminal phase",
+				},
+				{
+					Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: 2,
+					Reason:             sandboxv1beta1.SandboxReasonPodAbsent,
+					Message:            "Sandbox has no backing Pod",
+				},
+				{
 					Type:               "Ready",
 					Status:             metav1.ConditionFalse,
 					ObservedGeneration: 2,
@@ -364,6 +415,13 @@ func TestSandboxPodDeletionKeepsSuspendedFalse(t *testing.T) {
 				ObservedGeneration: 1,
 				Reason:             sandboxv1beta1.SandboxReasonNotSuspended,
 				Message:            "Sandbox is not suspended",
+			},
+			{
+				Type:               string(sandboxv1beta1.SandboxConditionFinished),
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: 1,
+				Reason:             sandboxv1beta1.SandboxReasonNotFinished,
+				Message:            "Pod has not reached a terminal phase",
 			},
 			{
 				Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
@@ -489,6 +547,20 @@ func TestSandboxSuspensionBlockedByUnownedPodConflict(t *testing.T) {
 				ObservedGeneration: 1,
 				Reason:             sandboxv1beta1.SandboxReasonSuspendedPodNotOwned,
 				Message:            "Refused to delete pod because it is not owned by this sandbox",
+			},
+			{
+				Type:               string(sandboxv1beta1.SandboxConditionFinished),
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: 1,
+				Reason:             sandboxv1beta1.SandboxReasonNotFinished,
+				Message:            "Sandbox has no backing Pod",
+			},
+			{
+				Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: 1,
+				Reason:             sandboxv1beta1.SandboxReasonPodAbsent,
+				Message:            "Sandbox has no backing Pod",
 			},
 			{
 				Type:               "Ready",

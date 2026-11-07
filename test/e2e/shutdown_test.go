@@ -55,6 +55,13 @@ func TestSandboxShutdownTime(t *testing.T) {
 					Message:            "Sandbox is not suspended",
 				},
 				{
+					Type:               string(sandboxv1beta1.SandboxConditionFinished),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: 1,
+					Reason:             sandboxv1beta1.SandboxReasonNotFinished,
+					Message:            "Pod has not reached a terminal phase",
+				},
+				{
 					Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: 1,
@@ -101,6 +108,20 @@ func TestSandboxShutdownTime(t *testing.T) {
 					ObservedGeneration: 2,
 					Reason:             sandboxv1beta1.SandboxReasonNotSuspended,
 					Message:            "Sandbox is not suspended",
+				},
+				{
+					Type:               string(sandboxv1beta1.SandboxConditionFinished),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: 2,
+					Reason:             sandboxv1beta1.SandboxReasonNotFinished,
+					Message:            "Pod has not reached a terminal phase",
+				},
+				{
+					Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: 2,
+					Reason:             sandboxv1beta1.SandboxReasonExpired,
+					Message:            "Sandbox has expired",
 				},
 				{
 					Type:               string(sandboxv1beta1.SandboxConditionReady),

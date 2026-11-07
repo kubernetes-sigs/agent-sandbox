@@ -148,6 +148,90 @@ def rpc_server():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("asynchronous", (False, True))
+@pytest.mark.parametrize("capacity", (None, 8 * 1024 * 1024))
+@pytest.mark.parametrize("config_type, options", [
+    (SandboxdPodTunnelConnectionConfig, {"auth_token": "test-token"}),
+    (SandboxdInClusterConnectionConfig, {"mode": "in-cluster-pod-ip", "auth_token": "test-token"}),
+    (SandboxdRouterTunnelConnectionConfig, {
+        "router_auth_token": "test-token", "auth_token": "sandboxd-token",
+        "pod_ip_routing": True,
+    }),
+])
+async def test_receive_capacity_preserves_channel_metadata(
+    rpc_server, monkeypatch, asynchronous, capacity, config_type, options,
+):
+    config = config_type(**options, grpc_max_receive_message_bytes=capacity)
+    get_pod_ip = AsyncMock(return_value="10.0.0.8") if asynchronous else MagicMock(return_value="10.0.0.8")
+    client_type = AsyncSandboxConnector if asynchronous else SandboxConnector
+    connector = client_type("sb", "ns", config, MagicMock(), get_pod_ip=get_pod_ip)
+    grpc_module = grpc.aio if asynchronous else grpc
+    dial = MagicMock(wraps=grpc_module.insecure_channel)
+    monkeypatch.setattr(grpc_module, "insecure_channel", dial)
+    if asynchronous:
+        connector.grpc_target = rpc_server.target
+    else:
+        connector.strategy.grpc_target = rpc_server.target
+    try:
+        channel = await connector.grpc_channel() if asynchronous else connector.grpc_channel()
+        again = await connector.grpc_channel() if asynchronous else connector.grpc_channel()
+        assert again is channel
+        dial.assert_called_once()
+        assert dial.call_args.args == (rpc_server.target,)
+        if capacity is None:
+            assert "options" not in dial.call_args.kwargs
+        else:
+            assert dial.call_args.kwargs["options"] == [
+                ("grpc.max_receive_message_length", capacity),
+            ]
+        call = channel.unary_unary("/test.Auth/unary_unary")(b"request", timeout=5)
+        assert (await call if asynchronous else call) == b"ok"
+        metadata = dict(rpc_server.received[-1])
+        assert metadata["authorization"] == "Bearer test-token"
+        if isinstance(config, SandboxdRouterTunnelConnectionConfig):
+            assert metadata["x-sandbox-id"] == "sb"
+            assert metadata["x-sandbox-namespace"] == "ns"
+            assert metadata["x-sandbox-port"] == str(config.grpc_port)
+            assert metadata["x-sandbox-pod-ip"] == "10.0.0.8"
+        else:
+            assert "x-sandbox-id" not in metadata
+        if isinstance(config, SandboxdInClusterConnectionConfig):
+            rpc_server.settings.expected_pod_ip = "unavailable"
+            with pytest.raises(grpc.RpcError) as raised:
+                failed = channel.unary_unary("/test.Auth/unary_unary")(b"request", timeout=5)
+                if asynchronous:
+                    await failed
+            assert raised.value.code() == grpc.StatusCode.UNAVAILABLE
+            if asynchronous:
+                await connector.invalidate_sandboxd_transport(channel)
+                connector.grpc_target = rpc_server.target
+            else:
+                connector.invalidate_sandboxd_transport(channel)
+                connector.strategy.grpc_target = rpc_server.target
+            rpc_server.settings.expected_pod_ip = None
+            replacement = await connector.grpc_channel() if asynchronous else connector.grpc_channel()
+            assert replacement is not channel
+            assert dial.call_count == 2
+            if capacity is not None:
+                assert dial.call_args.kwargs["options"] == [
+                    ("grpc.max_receive_message_length", capacity),
+                ]
+            if asynchronous:
+                await connector.invalidate_sandboxd_transport(channel)
+            else:
+                connector.invalidate_sandboxd_transport(channel)
+            retained = await connector.grpc_channel() if asynchronous else connector.grpc_channel()
+            assert retained is replacement
+            healthy = replacement.unary_unary("/test.Auth/unary_unary")(b"request", timeout=5)
+            assert (await healthy if asynchronous else healthy) == b"ok"
+    finally:
+        if asynchronous:
+            await connector.close()
+        else:
+            connector.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", (False, True))
 @pytest.mark.parametrize("token", ("test-token", "wrong-token", None))
 @pytest.mark.parametrize("router", (False, True))
 async def test_channel_authentication(rpc_server, asynchronous, token, router):
@@ -315,11 +399,14 @@ async def test_router_pod_ip_routing(rpc_server, asynchronous, pod_ip_routing):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("asynchronous", (False, True))
 @pytest.mark.parametrize("failure", ("grpc", "http"))
-async def test_router_grpc_refreshes_pod_ip_after_failure(rpc_server, asynchronous, failure):
+@pytest.mark.parametrize("capacity", (None, 8 * 1024 * 1024))
+async def test_router_grpc_refreshes_pod_ip_after_failure(rpc_server, asynchronous, failure, capacity):
     rpc_server.settings.expected_authorization = None
     rpc_server.settings.expected_pod_ip = "10.0.0.8"
     get_pod_ip = AsyncMock(return_value="10.0.0.8") if asynchronous else MagicMock(return_value="10.0.0.8")
-    config = SandboxdRouterTunnelConnectionConfig(pod_ip_routing=True)
+    config = SandboxdRouterTunnelConnectionConfig(
+        pod_ip_routing=True, grpc_max_receive_message_bytes=capacity,
+    )
     client_type = AsyncSandboxConnector if asynchronous else SandboxConnector
     connector = client_type("sb", "ns", config, MagicMock(), get_pod_ip=get_pod_ip)
     if asynchronous:

@@ -847,6 +847,10 @@ class SandboxConnector:
                 "'grpc' extra: pip install k8s-agent-sandbox[grpc]"
             ) from e
         metadata = dict(self._sandboxd_auth_headers)
+        channel_options: dict[str, Any] = {}
+        receive_capacity = getattr(self.connection_config, "grpc_max_receive_message_bytes", None)
+        if receive_capacity is not None:
+            channel_options["options"] = [("grpc.max_receive_message_length", receive_capacity)]
         if isinstance(self.connection_config, SandboxdRouterTunnelConnectionConfig):
             metadata.update({
                 "x-sandbox-id": self.id,
@@ -856,12 +860,12 @@ class SandboxConnector:
             if pod_ip:
                 metadata["x-sandbox-pod-ip"] = pod_ip
         if not metadata:
-            channel = grpc.insecure_channel(target)
+            channel = grpc.insecure_channel(target, **channel_options)
         else:
             from ._grpc_auth import MetadataInterceptor
 
             interceptor = MetadataInterceptor(metadata)
-            channel = grpc.insecure_channel(target)
+            channel = grpc.insecure_channel(target, **channel_options)
             try:
                 channel = grpc.intercept_channel(channel, interceptor)
             except Exception:

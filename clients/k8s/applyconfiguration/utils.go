@@ -34,6 +34,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &apiv1beta1.EmbeddedObjectMetadataApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("Lifecycle"):
 		return &apiv1beta1.LifecycleApplyConfiguration{}
+	case v1beta1.SchemeGroupVersion.WithKind("PersistentVolumeClaimRetentionPolicy"):
+		return &apiv1beta1.PersistentVolumeClaimRetentionPolicyApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("PersistentVolumeClaimTemplate"):
 		return &apiv1beta1.PersistentVolumeClaimTemplateApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("PodMetadata"):

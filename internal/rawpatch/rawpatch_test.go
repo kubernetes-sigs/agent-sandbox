@@ -100,6 +100,53 @@ func TestEmptySetRejected(t *testing.T) {
 	}
 }
 
+// TestWithOptimisticLock pins the resourceVersion precondition on the wire
+// and its byte-equivalence with client.MergeFromWithOptimisticLock, and that
+// an empty resourceVersion is rejected instead of degrading to an
+// unconditional write.
+func TestWithOptimisticLock(t *testing.T) {
+	base := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "pod-1",
+			Namespace:       "ns",
+			ResourceVersion: "4711",
+			Annotations:     map[string]string{"existing/anno": "value"},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "debian:latest"}}},
+	}
+	add := map[string]string{"agents.x-k8s.io/sandbox-name": "warm-sb-042"}
+
+	raw, err := Annotations(add, WithOptimisticLock(base.ResourceVersion))
+	if err != nil {
+		t.Fatalf("Annotations() error: %v", err)
+	}
+	rawData, err := raw.Data(base)
+	if err != nil {
+		t.Fatalf("raw Data() error: %v", err)
+	}
+	want := `{"metadata":{"annotations":{"agents.x-k8s.io/sandbox-name":"warm-sb-042"},"resourceVersion":"4711"}}`
+	if string(rawData) != want {
+		t.Errorf("payload mismatch:\n got: %s\nwant: %s", rawData, want)
+	}
+
+	modified := base.DeepCopy()
+	maps.Copy(modified.Annotations, add)
+	legacyData, err := client.MergeFromWithOptions(base.DeepCopy(), client.MergeFromWithOptimisticLock{}).Data(modified)
+	if err != nil {
+		t.Fatalf("MergeFromWithOptimisticLock Data() error: %v", err)
+	}
+	if string(rawData) != string(legacyData) {
+		t.Errorf("wire payloads differ:\n raw:   %s\n merge: %s", rawData, legacyData)
+	}
+
+	if _, err := Annotations(add, WithOptimisticLock("")); err == nil {
+		t.Error("WithOptimisticLock(\"\") should error")
+	}
+	if _, err := Labels(map[string]string{"k": "v"}, WithOptimisticLock("")); err == nil {
+		t.Error("Labels with WithOptimisticLock(\"\") should error")
+	}
+}
+
 // TestEquivalenceWithMergeFrom proves the raw payload is byte-identical to
 // what the DeepCopy+client.MergeFrom pattern produced for the same
 // metadata-only mutation — i.e. the optimization changes nothing on the wire.

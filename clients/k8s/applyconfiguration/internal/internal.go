@@ -2443,6 +2443,12 @@ var schemaYAML = typed.YAMLObject(`types:
     - name: name
       type:
         scalar: string
+- name: io.k8s.sigs.agent-sandbox.api.v1beta1.PersistentVolumeClaimRetentionPolicy
+  map:
+    fields:
+    - name: whenDeleted
+      type:
+        scalar: string
 - name: io.k8s.sigs.agent-sandbox.api.v1beta1.PersistentVolumeClaimTemplate
   map:
     fields:
@@ -2508,6 +2514,9 @@ var schemaYAML = typed.YAMLObject(`types:
     - name: operatingMode
       type:
         scalar: string
+    - name: persistentVolumeClaimRetentionPolicy
+      type:
+        namedType: io.k8s.sigs.agent-sandbox.api.v1beta1.PersistentVolumeClaimRetentionPolicy
     - name: podTemplate
       type:
         namedType: io.k8s.sigs.agent-sandbox.api.v1beta1.PodTemplate

@@ -502,6 +502,7 @@ func main() {
 
 	if err = (&controllers.SandboxReconciler{
 		Client:            mgr.GetClient(),
+		APIReader:         mgr.GetAPIReader(),
 		Scheme:            mgr.GetScheme(),
 		Recorder:          sandboxRecorder,
 		Tracer:            instrumenter,

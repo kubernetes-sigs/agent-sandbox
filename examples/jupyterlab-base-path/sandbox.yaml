@@ -1,0 +1,57 @@
+# JupyterLab served under the sandbox-router's browser path prefix.
+#
+# The router addresses this sandbox at:
+#   /sandboxes/<namespace>/<sandbox-id>/<port>/...
+# and, with --path-routing-preserve-prefix, forwards that full path intact.
+# JupyterLab is therefore started with --ServerApp.base_url set to the same
+# prefix, so its redirects, cookies, asset URLs, kernelspec URLs and kernel
+# WebSockets all stay under it without any response rewriting in the router.
+#
+# The base_url below must match the sandbox's namespace and name. This example
+# hardcodes them because the Sandbox is created directly; if the sandbox is
+# adopted from a warm pool, the pod name can differ from the sandbox name, so
+# derive the base_url from the name the router will actually route to.
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: jupyterlab-base-path
+  namespace: default
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        app: jupyterlab-base-path
+    spec:
+      containers:
+        - name: jupyterlab
+          image: jupyterhub/k8s-singleuser-sample:4.2.0
+          command:
+            - /bin/bash
+            - -c
+          args:
+            - |
+              # Auth is disabled for this in-cluster demo only. Keep the XSRF
+              # check ON: with base_url set, the _xsrf cookie is scoped to the
+              # sandbox prefix instead of Path=/ shared across sandboxes.
+              exec jupyter lab \
+                --ip=0.0.0.0 \
+                --port=8888 \
+                --no-browser \
+                --ServerApp.root_dir=/home/jovyan \
+                --ServerApp.base_url=/sandboxes/default/jupyterlab-base-path/8888/ \
+                --ServerApp.token='' \
+                --ServerApp.password=''
+          env:
+            - name: JUPYTER_ENABLE_LAB
+              value: "yes"
+          ports:
+            - containerPort: 8888
+              name: notebook
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi

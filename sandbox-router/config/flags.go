@@ -124,6 +124,17 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 			"path even if it's otherwise malformed (bad namespace/id/port), "+
 			"and is never retried against headers. Pick a prefix no real "+
 			"in-sandbox route needs to answer under.")
+	fs.BoolVar(&c.PathRoutingPreservePrefix, "path-routing-preserve-prefix", c.PathRoutingPreservePrefix,
+		"Forward path-routed requests with the full <prefix>/<namespace>/<id>/<port>/ "+
+			"path intact, instead of stripping it. Use for sandbox UIs configured to serve "+
+			"under their own base path (e.g. JupyterLab --ServerApp.base_url), which emit "+
+			"prefixed URLs themselves. Requires --path-routing-prefix. When off (default), "+
+			"upstream Location and Set-Cookie paths are rewritten under the prefix instead.")
+	fs.BoolVar(&c.PathRoutingRewriteResponses, "path-routing-rewrite-responses", c.PathRoutingRewriteResponses,
+		"Rewrite upstream Location and Set-Cookie Path so path-routed responses stay under "+
+			"the routing prefix. Applies only without --path-routing-preserve-prefix. On by "+
+			"default; disable only for an upstream that must see its redirects and cookies "+
+			"unmodified.")
 	fs.IntVar(&c.UpstreamMaxRetries, "upstream-max-retries", c.UpstreamMaxRetries,
 		"Number of additional dial attempts before returning 502. Only dial-class "+
 			"failures (DNS, connection refused) are retried. Smooths the case "+

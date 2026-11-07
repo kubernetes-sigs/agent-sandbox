@@ -675,3 +675,225 @@ func TestIntegration_AuthorizationStrippedFromUpstream(t *testing.T) {
 		t.Fatalf("upstream saw Authorization=%q, want empty (router must strip)", got)
 	}
 }
+
+// startRedirectingBackend serves one request: it records the path it was
+// given and answers with a redirect and a cookie whose Path is written the
+// way an app with no knowledge of any routing prefix writes it.
+func startRedirectingBackend(t *testing.T, seen chan<- string, location, cookiePath string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.URL.Path
+		w.Header().Set("Location", location)
+		w.Header().Add("Set-Cookie", "sid=abc; Path="+cookiePath+"; HttpOnly")
+		w.WriteHeader(http.StatusFound)
+	}))
+}
+
+// getNoFollow fetches u without following redirects, so the test sees the
+// Location the router actually handed the browser.
+func getNoFollow(t *testing.T, u string) *http.Response {
+	t.Helper()
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := client.Get(u)
+	if err != nil {
+		t.Fatalf("get %s: %v", u, err)
+	}
+	resp.Body.Close()
+	return resp
+}
+
+// TestIntegration_PathRoutedStripModeRewritesRedirectAndCookie covers the
+// default mode: the sandbox has no base-path setting, so it sees the
+// stripped path, and the router must keep its redirect and cookie under the
+// prefix the browser addressed it with.
+func TestIntegration_PathRoutedStripModeRewritesRedirectAndCookie(t *testing.T) {
+	seen := make(chan string, 1)
+	backend := startRedirectingBackend(t, seen, "/login?next=/a", "/")
+	defer backend.Close()
+	bu, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("parse backend: %v", err)
+	}
+
+	cfg := config.Defaults()
+	cfg.PathRoutingPrefix = "/router"
+	cfg.AllowLoopbackPodIP = true
+	lookup := &stubLookup{entries: map[types.UID]cache.Entry{
+		"strip-uid": {PodIP: bu.Hostname(), SandboxName: "ws-sandbox", Namespace: "test"},
+	}}
+	router := httptest.NewServer(NewHandler(Options{Config: &cfg, Cache: lookup, Logger: logr.Discard()}))
+	defer router.Close()
+
+	base := "/router/test/ws-sandbox/" + bu.Port()
+	resp := getNoFollow(t, router.URL+base+"/lab")
+
+	if got := <-seen; got != "/lab" {
+		t.Fatalf("sandbox saw path %q, want stripped %q", got, "/lab")
+	}
+	if got, want := resp.Header.Get("Location"), base+"/login?next=/a"; got != want {
+		t.Fatalf("Location = %q, want %q", got, want)
+	}
+	if len(resp.Cookies()) != 1 {
+		t.Fatalf("got %d cookies, want 1", len(resp.Cookies()))
+	}
+	if got, want := resp.Cookies()[0].Path, base+"/"; got != want {
+		t.Fatalf("cookie Path = %q, want %q", got, want)
+	}
+}
+
+// TestIntegration_PathRoutedPreserveModeForwardsFullPath covers the opt-in
+// mode for an app configured with its own base path: it must receive the
+// full prefixed path, and the router must leave its already-prefixed
+// redirect and cookie path alone instead of doubling the prefix.
+func TestIntegration_PathRoutedPreserveModeForwardsFullPath(t *testing.T) {
+	seen := make(chan string, 1)
+	// Ports are not known until the backend is up, so the app's prefixed
+	// output is built from the request path it received, the way a
+	// base_url-configured app builds its own.
+	var backend *httptest.Server
+	backend = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.URL.Path
+		port := backend.URL[strings.LastIndex(backend.URL, ":")+1:]
+		prefix := "/router/test/ws-sandbox/" + port
+		w.Header().Set("Location", prefix+"/login")
+		w.Header().Add("Set-Cookie", "sid=abc; Path="+prefix+"/; HttpOnly")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer backend.Close()
+	bu, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("parse backend: %v", err)
+	}
+
+	cfg := config.Defaults()
+	cfg.PathRoutingPrefix = "/router"
+	cfg.PathRoutingPreservePrefix = true
+	cfg.AllowLoopbackPodIP = true
+	lookup := &stubLookup{entries: map[types.UID]cache.Entry{
+		"preserve-uid": {PodIP: bu.Hostname(), SandboxName: "ws-sandbox", Namespace: "test"},
+	}}
+	authorizer := &recordingAuthz{}
+	router := httptest.NewServer(NewHandler(Options{Config: &cfg, Cache: lookup, Authorizer: authorizer, Logger: logr.Discard()}))
+	defer router.Close()
+
+	base := "/router/test/ws-sandbox/" + bu.Port()
+	resp := getNoFollow(t, router.URL+base+"/lab")
+
+	if got, want := <-seen, base+"/lab"; got != want {
+		t.Fatalf("sandbox saw path %q, want full path %q", got, want)
+	}
+	// Policies are written against the stripped path; preserving the prefix
+	// for the sandbox must not change what authorization is asked to decide.
+	reqs := authorizer.snapshot()
+	if len(reqs) != 1 {
+		t.Fatalf("authorizer called %d times, want 1", len(reqs))
+	}
+	if got, want := reqs[0].target.Path, "/lab"; got != want {
+		t.Fatalf("authorized path = %q, want stripped %q", got, want)
+	}
+	if got, want := resp.Header.Get("Location"), base+"/login"; got != want {
+		t.Fatalf("Location = %q, want unchanged %q", got, want)
+	}
+	if got, want := resp.Cookies()[0].Path, base+"/"; got != want {
+		t.Fatalf("cookie Path = %q, want unchanged %q", got, want)
+	}
+}
+
+// TestIntegration_PathRoutedRedirectToRouterHostIsRewritten covers apps behind
+// forwarded headers (Django, Rails, Flask, Grafana): they build absolute
+// redirects from X-Forwarded-Host, which is the router's own host, not the
+// pod's. Those must come back under the prefix, not leak the router root.
+func TestIntegration_PathRoutedRedirectToRouterHostIsRewritten(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "https://"+r.Header.Get("X-Forwarded-Host")+"/login")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer backend.Close()
+	bu, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("parse backend: %v", err)
+	}
+
+	cfg := config.Defaults()
+	cfg.PathRoutingPrefix = "/router"
+	cfg.AllowLoopbackPodIP = true
+	lookup := &stubLookup{entries: map[types.UID]cache.Entry{
+		"forwarded-uid": {PodIP: bu.Hostname(), SandboxName: "ws-sandbox", Namespace: "test"},
+	}}
+	router := httptest.NewServer(NewHandler(Options{Config: &cfg, Cache: lookup, Logger: logr.Discard()}))
+	defer router.Close()
+
+	base := "/router/test/ws-sandbox/" + bu.Port()
+	resp := getNoFollow(t, router.URL+base+"/lab")
+	if got, want := resp.Header.Get("Location"), base+"/login"; got != want {
+		t.Fatalf("Location = %q, want %q", got, want)
+	}
+}
+
+// TestIntegration_HeaderRoutedResponsesUntouched pins backward compatibility:
+// a request routed by X-Sandbox-* headers has no routing prefix to restore, so
+// its redirects and cookies must pass through exactly as the sandbox sent them.
+func TestIntegration_HeaderRoutedResponsesUntouched(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "/login")
+		w.Header().Set("Set-Cookie", "sid=abc; Path=/")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer backend.Close()
+
+	router := httptest.NewServer(newRouter(t))
+	defer router.Close()
+
+	req, err := http.NewRequest(http.MethodGet, router.URL+"/lab", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	for k, vs := range podIPHeaders(t, backend.URL) {
+		req.Header[k] = vs
+	}
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	resp.Body.Close()
+	if got := resp.Header.Get("Location"); got != "/login" {
+		t.Fatalf("Location = %q, want unchanged %q", got, "/login")
+	}
+	if got := resp.Header.Get("Set-Cookie"); got != "sid=abc; Path=/" {
+		t.Fatalf("Set-Cookie = %q, want unchanged", got)
+	}
+}
+
+// TestIntegration_PathRoutedRewriteDisabledLeavesResponseAlone checks the
+// opt-out: with --path-routing-rewrite-responses=false the router forwards a
+// path-routed response untouched.
+func TestIntegration_PathRoutedRewriteDisabledLeavesResponseAlone(t *testing.T) {
+	seen := make(chan string, 1)
+	backend := startRedirectingBackend(t, seen, "/login", "/")
+	defer backend.Close()
+	bu, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("parse backend: %v", err)
+	}
+
+	cfg := config.Defaults()
+	cfg.PathRoutingPrefix = "/router"
+	cfg.PathRoutingRewriteResponses = false
+	cfg.AllowLoopbackPodIP = true
+	lookup := &stubLookup{entries: map[types.UID]cache.Entry{
+		"optout-uid": {PodIP: bu.Hostname(), SandboxName: "ws-sandbox", Namespace: "test"},
+	}}
+	router := httptest.NewServer(NewHandler(Options{Config: &cfg, Cache: lookup, Logger: logr.Discard()}))
+	defer router.Close()
+
+	resp := getNoFollow(t, router.URL+"/router/test/ws-sandbox/"+bu.Port()+"/lab")
+	<-seen
+	if got := resp.Header.Get("Location"); got != "/login" {
+		t.Fatalf("Location = %q, want unchanged %q", got, "/login")
+	}
+}

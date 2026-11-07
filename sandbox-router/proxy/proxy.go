@@ -320,6 +320,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// normal flow already returned above.
 		outboundRawQuery = stripQueryParam(outboundRawQuery, h.cfg.AuthzCookieQueryParam)
 	}
+	if pathRouted && h.cfg.PathRoutingPreservePrefix {
+		// Authorization above saw the stripped path, which is what policies
+		// are written against. Only the forwarded request keeps the prefix:
+		// the sandbox serves under its own base path, so it must receive
+		// the full path it was addressed with. Same escaping pair as the
+		// stripped branch, so an encoded separator survives unchanged.
+		//
+		// The prefix segments reach the sandbox exactly as the client
+		// encoded them. An app that compares its configured base URL as a
+		// string must match that encoded form: percent-decoding a segment
+		// yields a different path than the one the request was addressed
+		// with, so the base URL would no longer match.
+		upstreamURL.Path = r.URL.Path
+		upstreamURL.RawPath = r.URL.EscapedPath()
+	}
 	upstreamURL.RawQuery = outboundRawQuery
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -462,6 +477,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					observability.RecordGRPCStatus(r.Context(), status)
 				})
 			}
+		}
+	}
+
+	// In strip mode the sandbox does not know its prefix, so its redirects
+	// and cookie paths must be mapped back under it here. Preserve mode
+	// skips this: the sandbox already emits prefixed URLs, and rewriting
+	// them again would double the prefix. gRPC responses carry no
+	// Location or cookie paths worth rewriting, so they keep their own hook.
+	if pathRouted && !grpcRequest && !h.cfg.PathRoutingPreservePrefix && h.cfg.PathRoutingRewriteResponses {
+		base := strings.TrimSuffix(bootstrapCookiePath(h.cfg.PathRoutingPrefix, target0), "/")
+		isSelf := selfHostMatcher(r.Host, upstreamURL.Host)
+		rp.ModifyResponse = func(resp *http.Response) error {
+			rewriteResponseHeaders(resp.Header, base, isSelf)
+			return nil
 		}
 	}
 

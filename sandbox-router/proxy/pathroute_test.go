@@ -243,3 +243,63 @@ func TestParsePathRoute(t *testing.T) {
 		})
 	}
 }
+
+func TestRewriteLocation(t *testing.T) {
+	const base = "/r/ns/id/8888"
+	const upstream = "10.0.0.1:8888"
+	cases := []struct {
+		name string
+		loc  string
+		want string
+	}{
+		{"absolute path gets prefix", "/login", base + "/login"},
+		{"root path maps to base slash", "/", base + "/"},
+		{"query and fragment survive", "/login?next=/a#top", base + "/login?next=/a#top"},
+		{"already prefixed is unchanged", base + "/x", base + "/x"},
+		{"exact base is unchanged", base, base},
+		{"sibling sharing a string prefix is prefixed", "/r/ns/id/8888x", base + "/r/ns/id/8888x"},
+		{"relative reference is unchanged", "login", "login"},
+		{"protocol-relative is unchanged", "//evil.example/x", "//evil.example/x"},
+		{"external absolute is unchanged", "https://ext.example/x", "https://ext.example/x"},
+		{"absolute to the upstream host is rewritten", "http://10.0.0.1:8888/a", base + "/a"},
+		{"absolute to another host is unchanged", "http://10.0.0.2:8888/a", "http://10.0.0.2:8888/a"},
+		{"empty path maps to base slash", "http://10.0.0.1:8888", base + "/"},
+		{"empty path keeps query", "http://10.0.0.1:8888?x=1", base + "/?x=1"},
+		{"upstream host without port is still self", "http://10.0.0.1/a", base + "/a"},
+		{"router host is self (forwarded-host redirect)", "https://router.example:8080/login", base + "/login"},
+		{"router host without port is self", "https://router.example/login", base + "/login"},
+		{"external host with router-like name is unchanged", "https://router.example.evil/x", "https://router.example.evil/x"},
+	}
+	isSelf := selfHostMatcher("router.example:8080", upstream)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := rewriteLocation(tc.loc, base, isSelf); got != tc.want {
+				t.Fatalf("rewriteLocation(%q) = %q, want %q", tc.loc, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRewriteSetCookiePath(t *testing.T) {
+	const base = "/r/ns/id/8888"
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"root path rescoped", "sid=1; Path=/; HttpOnly", "sid=1; Path=/r/ns/id/8888/; HttpOnly"},
+		{"lowercase attribute rescoped", "sid=1; path=/lab", "sid=1; Path=/r/ns/id/8888/lab"},
+		{"other attributes preserved", "sid=1; Domain=x; Path=/; Secure", "sid=1; Domain=x; Path=/r/ns/id/8888/; Secure"},
+		{"already prefixed is unchanged", "sid=1; Path=/r/ns/id/8888/x", "sid=1; Path=/r/ns/id/8888/x"},
+		{"no path attribute is unchanged", "sid=1; HttpOnly", "sid=1; HttpOnly"},
+		{"relative path is unchanged", "sid=1; Path=lab", "sid=1; Path=lab"},
+		{"every Path attribute is rewritten", "sid=1; Path=/; Path=/lab", "sid=1; Path=/r/ns/id/8888/; Path=/r/ns/id/8888/lab"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := rewriteSetCookiePath(tc.in, base); got != tc.want {
+				t.Fatalf("rewriteSetCookiePath(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}

@@ -1237,10 +1237,16 @@ class TestLeaseApiClient(unittest.TestCase):
                     "b1-0", "default", _request_timeout=(0.05, 0.05), batch=True
                 ),
             )
-            # Before listen(), connect is refused: all 8 batch calls fail after one attempt with
-            # NewConnectionError, while non-batch calls retry and wrap in MaxRetryError.
+            # Before listen(), Linux refuses the connection with NewConnectionError while BSD and
+            # macOS drop SYN packets until ConnectTimeoutError; all 8 batch calls fail after one
+            # attempt without wrapping in MaxRetryError, while non-batch calls retry.
             for batch_call in batch_calls:
-                with self.assertRaises(urllib3.exceptions.NewConnectionError) as conn_err:
+                with self.assertRaises(
+                    (
+                        urllib3.exceptions.NewConnectionError,
+                        urllib3.exceptions.ConnectTimeoutError,
+                    )
+                ) as conn_err:
                     batch_call()
                 self.assertNotIsInstance(conn_err.exception, urllib3.exceptions.MaxRetryError)
             for non_batch_call in (

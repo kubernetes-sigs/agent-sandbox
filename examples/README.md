@@ -57,6 +57,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**podsnapshot-golden-warmpool**](./podsnapshot-golden-warmpool): Golden-snapshot warm pools on GKE — snapshot one primed sandbox (memory + filesystem) and every pool member pre-warmed afterward boots already restored from it, so claims adopt pre-initialized sandboxes.
 - [**policy**](./policy): Examples of using different policies with sandboxes.
 - [**python-runtime-sandbox**](./python-runtime-sandbox): An example of a Python runtime sandbox.
+- [**router-scoped-mcp-sandbox**](./router-scoped-mcp-sandbox): An MCP server reached through sandbox-router's scoped-token authorizer — the agent holds a token bound to one sandbox, never a K8s credential or a third-party gateway.
 - [**python-sdk-quickstart**](./python-sdk-quickstart): A quickstart for the Python SDK: create a sandbox, run commands, and manage files without Kubernetes primitives.
 - [**quickstart**](./quickstart): An end-to-end getting-started walkthrough — controller install, warm pool, router, and SDK test client — plus gVisor and Kata isolation variants.
 - [**ray-integration**](./ray-integration): An example of integrating Ray with agent-sandbox for secure Proxy Execution during Agentic Reinforcement Learning (RL) training.

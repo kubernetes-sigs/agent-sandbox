@@ -46,6 +46,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**n8n-mcp**](./n8n-mcp): An example of connecting n8n workflows to sandboxes through the MCP server integration.
 - [**nemoclaw-sandbox**](./nemoclaw-sandbox): A tutorial on setting up a testing environment for AI agents using NemoClaw, OpenClaw, and OpenShell within a Kubernetes Agent Sandbox.
 - [**network-policy-api-sandbox**](./network-policy-api-sandbox): Cluster-wide default deny and FQDN egress allowlists for sandboxes with the official Kubernetes `ClusterNetworkPolicy` API, on top of the template-managed `NetworkPolicy`, enforced by kube-network-policies (the SIG Network reference implementation).
+- [**nitro-eks-sandbox**](./nitro-eks-sandbox): An example of running VS Code in a sandbox isolated by an AWS Nitro Sandbox on Amazon EKS Auto Mode, with its own VM and kernel, reached with `kubectl port-forward`.
 - [**nono-sandbox**](./nono-sandbox): An example of running nono inside an Agent Sandbox, with fine-grained filesystem isolation, network filtering, credential brokering, and ephemeral per-tool micro-sandboxes.
 - [**nullclaw-sandbox**](./nullclaw-sandbox): An example of running Nullclaw, a minimal AI assistant runtime, inside the Agent Sandbox.
 - [**openclaw-fleet-gke**](./openclaw-fleet-gke): A measured enterprise-fleet blueprint on GKE: sub-second warm claims with late-bound per-employee Filestore workspaces, stable per-employee URLs, two-tier sleep/wake, and rolling updates.

@@ -165,7 +165,7 @@ class AsyncSandboxBatch:
         # The watch moves a cached connection here when its member is gone or runs on another sandbox
         # or pod IP. connect() reads only _connected, so it never hands out these connections. Each
         # connection stays here until it closes, so the next cleanup retries a close that failed.
-        self._stale_connections: list["AsyncSandbox"] = []
+        self._stale_connections: dict["AsyncSandbox", None] = {}
         # get_batch sets this, so client exit cleanup detaches the handle instead of deleting a batch that
         # another client may own.
         self._attached = False
@@ -664,6 +664,10 @@ class AsyncSandboxBatch:
     def members(self, warmpool: str | None = None) -> list[Member]:
         """Returns a snapshot of the batch's members, optionally filtered to one warm pool."""
         return self._state.members(warmpool)
+
+    def get_member(self, claim_name: str) -> Member | None:
+        """Returns the current ``Member`` for ``claim_name``, or ``None`` if it is not in the batch."""
+        return self._state.get_member(claim_name)
 
     async def connect(self, member: Member) -> "AsyncSandbox":
         """Returns a connected ``AsyncSandbox`` for a ready member. If this handle is already connected
@@ -1341,8 +1345,11 @@ class AsyncSandboxBatch:
             if not self._state.has_pool(warmpool):
                 raise ValueError(f"batch '{self.batch_id}' has no group or members for warm pool '{warmpool}'")
             self._drop_planned_creates(warmpool)
+            acquiring = self._state.acquiring_in_pool(warmpool)
             names = self._state.release_group(warmpool)
-            self._notify_all()
+            for name in acquiring:
+                self._wake_acquire(name)
+            self._changed.notify_all()
         await self._close_cached_connections("release_group", names)
         await _delete_claims_in_rounds(
             self._client.k8s_helper,
@@ -1513,8 +1520,9 @@ class AsyncSandboxBatch:
             if cached is not None and not batch_state.still_reaches(
                 self._state.get_member(claim_name), cached[0].sandbox_id, cached[1]
             ):
-                stale.append(self._connected.pop(claim_name)[0])
-        self._stale_connections += stale
+                sandbox = self._connected.pop(claim_name)[0]
+                stale.append(sandbox)
+                self._stale_connections[sandbox] = None
         return stale
 
     async def _close_connections(self, connected: list["AsyncSandbox"], action: str) -> None:
@@ -1523,8 +1531,8 @@ class AsyncSandboxBatch:
             async with self._lock:
                 if sandbox not in self._stale_connections:
                     continue
-                self._stale_connections.remove(sandbox)
-            await self._close_one(sandbox, action, partial(self._stale_connections.append, sandbox))
+                del self._stale_connections[sandbox]
+            await self._close_one(sandbox, action, partial(self._stale_connections.setdefault, sandbox, None))
 
     async def _close_one(self, sandbox: "AsyncSandbox", action: str, keep: Callable[[], object]) -> None:
         """Closes one cached connection, or calls ``keep`` to put it back if the close fails."""

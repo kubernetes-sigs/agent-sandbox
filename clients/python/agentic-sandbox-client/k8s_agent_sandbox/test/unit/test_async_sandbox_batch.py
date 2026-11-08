@@ -640,7 +640,7 @@ class TestWatcher(BaseAsyncBatchClientTest):
                 await handle._watch_loop()
                 self.assertEqual(sandbox.close_connection.called, closed)
                 self.assertEqual("b1-0" in handle._connected, not closed)
-                self.assertEqual(handle._stale_connections, [])
+                self.assertEqual(handle._stale_connections, {})
                 # The 403 that ends the loop sets err(), which connect() would raise first.
                 handle._state._error = None
                 if handle._state.get_member("b1-0").state is not MemberState.READY:
@@ -674,7 +674,7 @@ class TestWatcher(BaseAsyncBatchClientTest):
 
         await self.client.close()
         self.assertEqual(stale.close_connection.await_count, 2)
-        self.assertEqual(handle._stale_connections, [])
+        self.assertEqual(handle._stale_connections, {})
 
     async def test_a_watch_cancelled_while_closing_stale_connections_keeps_them_for_cleanup(self):
         self.mock_k8s_helper.close = AsyncMock()
@@ -712,7 +712,7 @@ class TestWatcher(BaseAsyncBatchClientTest):
         await self.client.close()
         self.assertEqual(sandboxes[0].close_connection.await_count, 2)
         sandboxes[1].close_connection.assert_awaited_once()
-        self.assertEqual(handle._stale_connections, [])
+        self.assertEqual(handle._stale_connections, {})
 
     async def test_410_relist_retries_503_then_succeeds_reconciling_lost_claim(self):
         handle = _make_handle(self.client)
@@ -1748,13 +1748,13 @@ class TestClientClose(BaseAsyncBatchClientTest):
         cached = MagicMock()
         handle._connected["b1-0"] = (cached, None)
         stale = MagicMock()
-        handle._stale_connections.append(stale)
+        handle._stale_connections[stale] = None
         self.client._active_batches[("default", "b1")] = handle
         closing = _make_handle(self.client)
         closing_cached = MagicMock()
         closing._connected["b1-0"] = (closing_cached, None)
         closing_stale = MagicMock()
-        closing._stale_connections.append(closing_stale)
+        closing._stale_connections[closing_stale] = None
         self.client._closing_batches.add(closing)
         half_detached = _make_handle(self.client, batch_id="b2")
         half_detached._detach_grace = 30
@@ -5553,6 +5553,42 @@ class TestCreateDrainPacingAndAcquireWakeup(BaseAsyncBatchClientTest):
         await handle.release_group("pool-a")
         with self.assertRaises(BatchError):
             await asyncio.wait_for(acq_task, timeout=3.0)
+
+
+class TestHandleLookupAndPoolScopedWakeups(BaseAsyncBatchClientTest):
+
+    async def test_get_member_returns_live_member_or_none(self):
+        handle = _make_handle(self.client, groups=[BatchGroup(warmpool="pool-a", size=1)])
+        handle._state.upsert_claim(
+            _claim(
+                "b1-0",
+                conditions=[{"type": "Ready", "status": "True"}],
+                sandbox={"name": "sbx-0", "podIPs": ["10.0.0.1"]},
+                annotations=_FILL,
+            )
+        )
+        member = handle.get_member("b1-0")
+        self.assertIsNotNone(member)
+        self.assertEqual(member.claim_name, "b1-0")
+        self.assertEqual(member.sandbox_name, "sbx-0")
+        self.assertIsNone(handle.get_member("missing"))
+
+    async def test_release_group_wakes_only_waiters_in_target_pool(self):
+        handle = _make_handle(
+            self.client,
+            groups=[BatchGroup(warmpool="pool-a", size=1), BatchGroup(warmpool="pool-b", size=0)],
+        )
+        self.mock_k8s_helper.delete_sandbox_claims_by_label = AsyncMock()
+        self.mock_k8s_helper.count_live_sandbox_claims = AsyncMock(return_value=0)
+        acq_a = handle._state.start_acquire("pool-a")
+        acq_b = handle._state.start_acquire("pool-b")
+        waiter_a = handle._acquire_waiters[acq_a] = asyncio.Event()
+        waiter_b = handle._acquire_waiters[acq_b] = asyncio.Event()
+
+        await handle.release_group("pool-a")
+
+        self.assertTrue(waiter_a.is_set())
+        self.assertFalse(waiter_b.is_set())
 
 
 if __name__ == "__main__":

@@ -203,6 +203,10 @@ class BatchState:
         self.size = sum(g.size for g in self.groups)
 
         self._members: dict[str, Member] = {}
+        # Per-pool indexes so per-pool lookups and release_group() cost O(pool size) instead of a
+        # scan over every member.
+        self._members_by_pool: dict[str, dict[str, Member]] = {}
+        self._declared_pools: set[str] = {g.warmpool for g in self.groups}
         # Ordinals are never reused, since a released claim may still be terminating when its
         # successor is created. The fill takes 0 to size - 1, and ``next_ordinal`` is the one a
         # detached handle recorded.
@@ -269,6 +273,7 @@ class BatchState:
         # The pool of each acquire() claim that isn't Ready yet, so release_group() can release it
         # before the watch has seen it.
         self._acquiring: dict[str, str] = {}
+        self._acquiring_by_pool: dict[str, dict[str, None]] = {}
         # Count of acquire() calls per pool that have not reserved a claim ordinal yet, so
         # release_group() recognizes the pool during its first check or warm-credit refresh
         # without burning an ordinal.
@@ -348,9 +353,39 @@ class BatchState:
                     self._exhausted_pools.add(member.warmpool)
             else:
                 self._pending_launch.add(claim_name)
-        self._members[claim_name] = member
+        self._put_member(claim_name, member)
         self._on_fill_change(claim_name, member)
         return member
+
+    def _put_member(self, claim_name: str, member: Member) -> None:
+        previous = self._members.get(claim_name)
+        if previous is not None and previous.warmpool != member.warmpool:
+            if (old_pool := self._members_by_pool.get(previous.warmpool)) is not None:
+                old_pool.pop(claim_name, None)
+                if not old_pool:
+                    del self._members_by_pool[previous.warmpool]
+        self._members[claim_name] = member
+        self._members_by_pool.setdefault(member.warmpool, {})[claim_name] = member
+
+    def _pop_member(self, claim_name: str) -> Member | None:
+        member = self._members.pop(claim_name, None)
+        if member is not None and (pool_members := self._members_by_pool.get(member.warmpool)) is not None:
+            pool_members.pop(claim_name, None)
+            if not pool_members:
+                del self._members_by_pool[member.warmpool]
+        return member
+
+    def _put_acquiring(self, claim_name: str, warmpool: str) -> None:
+        self._acquiring[claim_name] = warmpool
+        self._acquiring_by_pool.setdefault(warmpool, {})[claim_name] = None
+
+    def _pop_acquiring(self, claim_name: str) -> str | None:
+        pool = self._acquiring.pop(claim_name, None)
+        if pool is not None and (pool_acquiring := self._acquiring_by_pool.get(pool)) is not None:
+            pool_acquiring.pop(claim_name, None)
+            if not pool_acquiring:
+                del self._acquiring_by_pool[pool]
+        return pool
 
     def mark_lost(self, claim_name: str) -> Member | None:
         """Handles a lost claim (watch DELETED or missing on re-list).
@@ -368,7 +403,7 @@ class BatchState:
         if existing.state is not MemberState.FAILED:
             update.update(state=MemberState.LOST, reason=None, message=None)
         lost_member = existing.model_copy(update=update)
-        self._members[claim_name] = lost_member
+        self._put_member(claim_name, lost_member)
         self._on_fill_change(claim_name, lost_member)
         return lost_member
 
@@ -396,7 +431,7 @@ class BatchState:
         if claim_name in self._released:
             return
         self._released.add(claim_name)
-        member = self._members.pop(claim_name, None)
+        member = self._pop_member(claim_name)
         if member is None and not needs_delete:
             self._released_unseen.add(claim_name)
         # Apart from acquire() claims, only a group's fill creates release a claim before the
@@ -431,7 +466,7 @@ class BatchState:
                 return claim_name in self._pending_deletes
             raise ValueError(f"'{claim_name}' is not a member of batch '{self.batch_id}'")
         self.release_claim(claim_name, member.warmpool)
-        self._acquiring.pop(claim_name, None)
+        self._pop_acquiring(claim_name)
         return bool(self._take_deletes([member]))
 
     def release_not_ready(self) -> list[str]:
@@ -457,20 +492,24 @@ class BatchState:
         """
         self._fill_stopped_pools.add(warmpool)
         self._pool_release_seq[warmpool] = self._pool_release_seq.get(warmpool, 0) + 1
-        names = [name for name, member in self._members.items() if member.warmpool == warmpool]
-        acquiring = [name for name, pool in self._acquiring.items() if pool == warmpool]
-        for name in [*names, *acquiring]:
+        names = list(self._members_by_pool.get(warmpool, ()))
+        acquiring = list(self._acquiring_by_pool.get(warmpool, ()))
+        for name in (*names, *acquiring):
             self.release_claim(name, warmpool)
         return names
+
+    def acquiring_in_pool(self, warmpool: str) -> list[str]:
+        """Returns in-flight ``acquire()`` claim names for ``warmpool``."""
+        return list(self._acquiring_by_pool.get(warmpool, ()))
 
     def has_pool(self, warmpool: str) -> bool:
         """Whether the batch has a group, a member, an ``acquire()`` in flight, or an earlier
         ``release_group()`` for ``warmpool``."""
         return (
-            any(g.warmpool == warmpool for g in self.groups)
+            warmpool in self._declared_pools
             or warmpool in self._fill_stopped_pools
-            or any(m.warmpool == warmpool for m in self._members.values())
-            or warmpool in self._acquiring.values()
+            or warmpool in self._members_by_pool
+            or warmpool in self._acquiring_by_pool
             or warmpool in self._checking_acquires
         )
 
@@ -528,7 +567,7 @@ class BatchState:
         """
         claim_name = f"{self.batch_id}-{self._next_ordinal}"
         self._next_ordinal += 1
-        self._acquiring[claim_name] = warmpool
+        self._put_acquiring(claim_name, warmpool)
         return claim_name
 
     def acquired_member(self, claim_name: str) -> Member | None:
@@ -544,7 +583,7 @@ class BatchState:
         if member is None or member.state is MemberState.PENDING:
             return None
         if member.state is MemberState.READY:
-            self._acquiring.pop(claim_name, None)
+            self._pop_acquiring(claim_name)
             return member
         raise TerminalMemberError(member)
 
@@ -557,7 +596,7 @@ class BatchState:
         ``release_member()``.
         """
         self._pending_launch.discard(claim_name)
-        was_acquiring = self._acquiring.pop(claim_name, None) is not None
+        was_acquiring = self._pop_acquiring(claim_name) is not None
         if claim_name in self._released:
             # A create in flight during release_group() (was_acquiring) can land after the
             # label delete, and a create retry (retried) can land after release_member()'s
@@ -568,7 +607,7 @@ class BatchState:
                 return True
             return False
         self._released.add(claim_name)
-        member = self._members.pop(claim_name, None)
+        member = self._pop_member(claim_name)
         if not created:
             if member is None:
                 self._released_unseen.add(claim_name)
@@ -603,10 +642,10 @@ class BatchState:
 
     def members(self, warmpool: str | None = None) -> list[Member]:
         """Returns a snapshot of the batch's members, optionally filtered to one pool."""
+        source = self._members if warmpool is None else self._members_by_pool.get(warmpool, {})
         items = [
             (ordinal_sort_key(parse_ordinal(self.batch_id, name)), member)
-            for name, member in self._members.items()
-            if warmpool is None or member.warmpool == warmpool
+            for name, member in source.items()
         ]
         items.sort(key=itemgetter(0))
         return [m for _, m in items]
@@ -849,7 +888,7 @@ class BatchState:
             reason=CREATE_FAILED_REASON,
             message=message,
         )
-        self._members[claim_name] = member
+        self._put_member(claim_name, member)
         self._on_fill_change(claim_name, member)
 
     def record_skipped_create(self) -> None:

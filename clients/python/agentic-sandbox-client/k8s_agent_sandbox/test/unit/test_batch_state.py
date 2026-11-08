@@ -1150,6 +1150,35 @@ class TestAcquired(unittest.TestCase):
         self.assertFalse(state.drop_acquired("b1-1", created=True))
         self.assertEqual(state.release_not_ready(), [])
 
+    def test_per_pool_indexes_stay_in_sync_across_lifecycle(self):
+        state = _state(BatchGroup(warmpool="pool-a", size=1), BatchGroup(warmpool="pool-b", size=0))
+        state.upsert_claim(_ready("b1-0", "pool-a"))
+        acq_a = state.start_acquire("pool-a")
+        acq_b = state.start_acquire("pool-b")
+        self.assertEqual(state.acquiring_in_pool("pool-a"), [acq_a])
+        self.assertEqual(state.acquiring_in_pool("pool-b"), [acq_b])
+        self.assertEqual([m.claim_name for m in state.members("pool-a")], ["b1-0"])
+        self.assertEqual(state.members("pool-b"), [])
+
+        # Releasing pool-a removes its members without touching pool-b, while keeping _acquiring
+        # and _acquiring_by_pool in sync until drop_acquired schedules a cleanup delete.
+        self.assertEqual(state.release_group("pool-a"), ["b1-0"])
+        self.assertNotIn("pool-a", state._members_by_pool)
+        self.assertEqual(state.acquiring_in_pool("pool-a"), [acq_a])
+        self.assertEqual(state.acquiring_in_pool("pool-b"), [acq_b])
+        self.assertTrue(state.drop_acquired(acq_a, created=True))
+        self.assertEqual(state.acquiring_in_pool("pool-a"), [])
+        self.assertNotIn("pool-a", state._acquiring_by_pool)
+
+        # Ready acquire in pool-b leaves _acquiring_by_pool cleanly and deletes empty inner dicts on release.
+        state.upsert_claim(_ready(acq_b, "pool-b", fill=False))
+        self.assertIsNotNone(state.acquired_member(acq_b))
+        self.assertNotIn("pool-b", state._acquiring_by_pool)
+        self.assertEqual([m.claim_name for m in state.members("pool-b")], [acq_b])
+        state.release_member(acq_b)
+        self.assertEqual(state._members_by_pool, {})
+        self.assertEqual(state._acquiring_by_pool, {})
+
 
 if __name__ == "__main__":
     unittest.main()

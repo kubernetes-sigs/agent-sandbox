@@ -882,6 +882,16 @@ def members(warmpool: str | None = None) -> list[Member]
 
 Returns a snapshot of the batch's members, optionally filtered to one warm pool.
 
+<a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.get_member"></a>
+
+##### get\_member
+
+```python
+def get_member(claim_name: str) -> Member | None
+```
+
+Returns the current ``Member`` for ``claim_name``, or ``None`` if it is not in the batch.
+
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.connect"></a>
 
 ##### connect

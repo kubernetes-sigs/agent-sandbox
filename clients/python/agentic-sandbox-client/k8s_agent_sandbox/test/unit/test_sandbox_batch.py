@@ -556,7 +556,7 @@ class TestWatcher(BaseBatchClientTest):
                 handle._watch_loop()
                 self.assertEqual(sandbox.close_connection.called, closed)
                 self.assertEqual("b1-0" in handle._connected, not closed)
-                self.assertEqual(handle._stale_connections, [])
+                self.assertEqual(handle._stale_connections, {})
                 # The 403 that ends the loop sets err(), which connect() would raise first.
                 handle._state._error = None
                 if handle._state.get_member("b1-0").state is not MemberState.READY:
@@ -587,7 +587,7 @@ class TestWatcher(BaseBatchClientTest):
 
         self.client.delete_all()
         self.assertEqual(stale.close_connection.call_count, 2)
-        self.assertEqual(handle._stale_connections, [])
+        self.assertEqual(handle._stale_connections, {})
 
     def test_a_stale_connection_another_caller_took_is_not_closed_again(self):
         self.mock_sandbox_class.side_effect = lambda **kwargs: MagicMock(sandbox_id=kwargs["sandbox_id"])
@@ -623,7 +623,7 @@ class TestWatcher(BaseBatchClientTest):
 
         sandboxes[0].close_connection.assert_called_once()
         sandboxes[1].close_connection.assert_called_once()
-        self.assertEqual(handle._stale_connections, [])
+        self.assertEqual(handle._stale_connections, {})
 
     def test_410_relist_retries_503_then_succeeds_reconciling_lost_claim(self):
         handle = _make_handle(self.client)
@@ -5737,6 +5737,41 @@ class TestCreateDrainPacingAndAcquireWakeup(BaseBatchClientTest):
         acq_thread.join(timeout=3.0)
         self.assertFalse(acq_thread.is_alive())
         self.assertIsInstance(acq_errors[0], BatchError)
+
+
+class TestHandleLookupAndPoolScopedWakeups(BaseBatchClientTest):
+
+    def test_get_member_returns_live_member_or_none(self):
+        handle = _make_handle(self.client, groups=[BatchGroup(warmpool="pool-a", size=1)])
+        handle._state.upsert_claim(
+            _claim(
+                "b1-0",
+                conditions=[{"type": "Ready", "status": "True"}],
+                sandbox={"name": "sbx-0", "podIPs": ["10.0.0.1"]},
+                annotations=_FILL,
+            )
+        )
+        member = handle.get_member("b1-0")
+        self.assertIsNotNone(member)
+        self.assertEqual(member.claim_name, "b1-0")
+        self.assertEqual(member.sandbox_name, "sbx-0")
+        self.assertIsNone(handle.get_member("missing"))
+
+    def test_release_group_wakes_only_waiters_in_target_pool(self):
+        handle = _make_handle(
+            self.client,
+            groups=[BatchGroup(warmpool="pool-a", size=1), BatchGroup(warmpool="pool-b", size=0)],
+        )
+        self.mock_k8s_helper.count_live_sandbox_claims.return_value = 0
+        acq_a = handle._state.start_acquire("pool-a")
+        acq_b = handle._state.start_acquire("pool-b")
+        waiter_a = handle._acquire_waiters[acq_a] = threading.Event()
+        waiter_b = handle._acquire_waiters[acq_b] = threading.Event()
+
+        handle.release_group("pool-a")
+
+        self.assertTrue(waiter_a.is_set())
+        self.assertFalse(waiter_b.is_set())
 
 
 if __name__ == "__main__":

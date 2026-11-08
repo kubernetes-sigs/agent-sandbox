@@ -771,6 +771,25 @@ func TestDirectoryListingOmitsEscapingSymlinks(t *testing.T) {
 	require.Equal(t, "normal.txt", listing.Entries[0].Name)
 }
 
+func TestPathUnderRegularFileNotFound(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o644))
+
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/v1/files/f.txt/child"},
+		{http.MethodHead, "/v1/files/f.txt/child"},
+		{http.MethodDelete, "/v1/files/f.txt/child"},
+		{http.MethodPut, "/v1/files/f.txt/child"},
+		{http.MethodGet, "/v1/files/f.txt/a/b"},
+	} {
+		rec := doRequest(handler, tc.method, tc.path, []byte("y"), nil)
+		require.Equal(t, http.StatusNotFound, rec.Code, "%s %s: %s", tc.method, tc.path, rec.Body.String())
+		if tc.method != http.MethodHead {
+			require.Equal(t, "NOT_FOUND", decodeError(t, rec).Code)
+		}
+	}
+}
+
 func TestDeleteInvalidRecursiveRejected(t *testing.T) {
 	_, handler, root := newRESTFixture(t)
 	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o644))

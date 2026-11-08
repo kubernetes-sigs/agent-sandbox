@@ -574,7 +574,14 @@ func (h *K8sHelper) verifyClaimExists(ctx context.Context, name, namespace strin
 
 	_, err := h.ExtensionsClient.SandboxClaims(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
-		retErr := fmt.Errorf("%w: claim %s: %w", ErrSandboxDeleted, name, err)
+		// Only NotFound means the claim is gone. Any other error, such as a
+		// refused connection or a 503, says nothing about the claim.
+		var retErr error
+		if k8serrors.IsNotFound(err) {
+			retErr = fmt.Errorf("%w: claim %s: %w", ErrSandboxDeleted, name, err)
+		} else {
+			retErr = fmt.Errorf("get claim %s: %w", name, err)
+		}
 		recordError(span, retErr)
 		return retErr
 	}

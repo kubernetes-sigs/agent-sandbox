@@ -3238,6 +3238,9 @@ func TestOpen_ReconnectTransientClaimError(t *testing.T) {
 	if !errors.Is(err, ErrOrphanedClaim) {
 		t.Errorf("expected ErrOrphanedClaim, got: %v", err)
 	}
+	if errors.Is(err, ErrSandboxDeleted) {
+		t.Errorf("a transient claim error must not report ErrSandboxDeleted, got: %v", err)
+	}
 	if c.ClaimName() == "" {
 		t.Error("expected claimName preserved for Close retry")
 	}

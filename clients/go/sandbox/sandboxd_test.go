@@ -31,6 +31,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	fakekube "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
@@ -42,6 +43,12 @@ import (
 // newReadySandboxdTestSandbox creates a RuntimeSandboxd Sandbox already
 // "connected" to the given REST server URL.
 func newReadySandboxdTestSandbox(serverURL string) *Sandbox {
+	return newReadySandboxdTestSandboxWith(serverURL, nil)
+}
+
+// newReadySandboxdTestSandboxWith is newReadySandboxdTestSandbox with
+// tweak applied to the Options first.
+func newReadySandboxdTestSandboxWith(serverURL string, tweak func(*Options)) *Sandbox {
 	opts := Options{
 		WarmPoolName:      "test-warmpool",
 		Namespace:         "default",
@@ -50,6 +57,9 @@ func newReadySandboxdTestSandbox(serverURL string) *Sandbox {
 		RequestTimeout:    5 * time.Second,
 		PerAttemptTimeout: 2 * time.Second,
 		Quiet:             true,
+	}
+	if tweak != nil {
+		tweak(&opts)
 	}
 	opts.setDefaults()
 
@@ -900,6 +910,101 @@ func TestOptions_SandboxdRejectsGateway(t *testing.T) {
 	err := opts.validateCommon()
 	if err == nil || !strings.Contains(err.Error(), "Gateway mode does not support sandboxd yet") {
 		t.Fatalf("expected Gateway mode to say it does not support sandboxd yet, got %v", err)
+	}
+}
+
+func TestOptions_SandboxdAuthTokenValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		runtime Runtime
+		token   string
+		wantErr string
+	}{
+		{name: "valid", runtime: RuntimeSandboxd, token: "s3cret-Tok_en.1~"},
+		{name: "legacy runtime", runtime: RuntimeLegacyPython, token: "tok", wantErr: "requires sandboxd"},
+		{name: "space", runtime: RuntimeSandboxd, token: "a b", wantErr: "printable ASCII"},
+		{name: "newline", runtime: RuntimeSandboxd, token: "tok\n", wantErr: "printable ASCII"},
+		{name: "non-ASCII", runtime: RuntimeSandboxd, token: "tök", wantErr: "printable ASCII"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := Options{WarmPoolName: "wp", Runtime: tt.runtime, SandboxdAuthToken: tt.token}
+			opts.setDefaults()
+			err := opts.validateCommon()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateCommon() error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+			}
+			if strings.Contains(err.Error(), tt.token) {
+				t.Errorf("error leaks the token: %v", err)
+			}
+		})
+	}
+}
+
+func TestSandboxdAuthToken_SentAsBearerOnREST(t *testing.T) {
+	var gotAuth, gotToken string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotToken = r.Header.Get(headerSandboxdToken)
+		_, _ = io.WriteString(w, `{"status":"ok"}`)
+	}))
+	defer server.Close()
+
+	sb := newReadySandboxdTestSandboxWith(server.URL, func(o *Options) { o.SandboxdAuthToken = "tok" })
+	if _, err := sb.Health(context.Background()); err != nil {
+		t.Fatalf("Health() error: %v", err)
+	}
+	if gotAuth != "Bearer tok" || gotToken != "" {
+		t.Errorf("got Authorization=%q X-Sandboxd-Token=%q, want Bearer tok and none", gotAuth, gotToken)
+	}
+}
+
+func TestSandboxdAuthToken_OmittedWhenUnset(t *testing.T) {
+	var gotAuth, gotToken string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotToken = r.Header.Get(headerSandboxdToken)
+		_, _ = io.WriteString(w, `{"status":"ok"}`)
+	}))
+	defer server.Close()
+
+	sb := newReadySandboxdTestSandbox(server.URL)
+	if _, err := sb.Health(context.Background()); err != nil {
+		t.Fatalf("Health() error: %v", err)
+	}
+	if gotAuth != "" || gotToken != "" {
+		t.Errorf("got Authorization=%q X-Sandboxd-Token=%q, want none", gotAuth, gotToken)
+	}
+}
+
+func TestSandboxdAuthToken_SentAsBearerOnGRPC(t *testing.T) {
+	sb := newReadySandboxdTestSandboxWith("http://unused", func(o *Options) { o.SandboxdAuthToken = "tok" })
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	var gotAuth []string
+	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, h grpc.UnaryHandler) (any, error) {
+		md, _ := metadata.FromIncomingContext(ctx)
+		gotAuth = md.Get("authorization")
+		return h(ctx, req)
+	}))
+	processv1.RegisterProcessServiceServer(grpcServer, &fakeProcessService{response: &processv1.ExecuteResponse{}})
+	go func() { _ = grpcServer.Serve(lis) }()
+	t.Cleanup(grpcServer.Stop)
+	sb.connector.SetGRPCTarget(lis.Addr().String())
+
+	if _, err := sb.Run(context.Background(), "true"); err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	if len(gotAuth) != 1 || gotAuth[0] != "Bearer tok" {
+		t.Errorf("got authorization metadata %q, want [Bearer tok]", gotAuth)
 	}
 }
 

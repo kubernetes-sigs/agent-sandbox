@@ -2305,6 +2305,11 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 
 				if retentionWhenDeleted == sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain {
 					logger.V(4).Info("Using unowned PVC without adopting because retention policy is Retain", "PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)
+					// A non-controller owner reference to this sandbox would still
+					// make the PVC a garbage-collection dependent; drop it too.
+					if err := r.releaseRetainedPVC(ctx, sandbox, pvc); err != nil {
+						return err
+					}
 					continue
 				}
 

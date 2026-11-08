@@ -8427,3 +8427,33 @@ func TestExpiredSandboxAppliesPVCRetention(t *testing.T) {
 		})
 	}
 }
+
+func TestReconcilePVCsRetainDropsNonControllerOwnerReference(t *testing.T) {
+	const sandboxName = "retain-non-controller-ref"
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: "default", UID: sandboxUID},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+			VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{{
+				EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+			}},
+			PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+				WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain,
+			},
+		}},
+	}
+	nonControllerRef := sandboxControllerRef(sandboxName)
+	nonControllerRef.Controller = nil
+	otherRef := metav1.OwnerReference{APIVersion: "v1", Kind: "ConfigMap", Name: "unrelated", UID: types.UID("unrelated-uid")}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: "data-" + sandboxName, Namespace: "default",
+		Labels:          map[string]string{sandboxv1beta1.SandboxNameHashLabel: NameHash(sandboxName)},
+		OwnerReferences: []metav1.OwnerReference{nonControllerRef, otherRef},
+	}}
+	r := SandboxReconciler{Client: newFakeClient(sandbox, pvc), Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+
+	require.NoError(t, r.reconcilePVCs(t.Context(), sandbox, NameHash(sandboxName)))
+
+	livePVC := &corev1.PersistentVolumeClaim{}
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pvc), livePVC))
+	require.Equal(t, []metav1.OwnerReference{otherRef}, livePVC.OwnerReferences)
+}

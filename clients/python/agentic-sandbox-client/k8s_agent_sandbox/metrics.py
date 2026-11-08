@@ -12,6 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 from prometheus_client import Histogram
 
 _LATENCY_BUCKETS_MS = (100, 250, 500, 750, 1000, 1250, 1500, 2000, 2500, 5000, 10000, 30000, 60000, 120000, 240000)
@@ -45,3 +49,20 @@ sandbox_client_restore_latency_ms = Histogram(
 )
 
 
+@contextmanager
+def record_discovery_latency(mode: str) -> Iterator[None]:
+    """Record the time spent in the block as a discovery latency for ``mode``.
+
+    Cancellation counts as a failure, so an abandoned connection attempt is not
+    reported as a success.
+    """
+    start_time = time.monotonic()
+    status = "success"
+    try:
+        yield
+    except BaseException:
+        status = "failure"
+        raise
+    finally:
+        latency = (time.monotonic() - start_time) * 1000
+        sandbox_client_discovery_latency_ms.labels(mode=mode, status=status).observe(latency)

@@ -50,6 +50,7 @@ from .models import (
     SandboxdInClusterConnectionConfig,
     SandboxdRouterTunnelConnectionConfig,
 )
+from .metrics import record_discovery_latency
 from .utils import async_kubectl_kubeconfig_args, merge_headers, sandboxd_auth_headers
 
 logger = logging.getLogger(__name__)
@@ -322,11 +323,12 @@ class AsyncSandboxConnector:
         if isinstance(self.connection_config, SandboxDirectConnectionConfig):
             self._base_url = self.connection_config.api_url
         elif isinstance(self.connection_config, SandboxGatewayConnectionConfig):
-            ip_address = await self.k8s_helper.wait_for_gateway_ip(
-                self.connection_config.gateway_name,
-                self.connection_config.gateway_namespace,
-                self.connection_config.gateway_ready_timeout,
-            )
+            with record_discovery_latency("gateway"):
+                ip_address = await self.k8s_helper.wait_for_gateway_ip(
+                    self.connection_config.gateway_name,
+                    self.connection_config.gateway_namespace,
+                    self.connection_config.gateway_ready_timeout,
+                )
             host = f"[{ip_address}]" if ":" in ip_address else ip_address
             self._base_url = f"http://{host}"
         else:
@@ -854,8 +856,16 @@ class AsyncSandboxdPodTunnelStrategy:
             target = f"pod/{pod_name}"
             namespace = self.namespace
 
-        async with async_kubectl_kubeconfig_args(self._api_client) as kube_args:
-            return await self._start_tunnel_locked(target, namespace, kube_args)
+        # The sync client reports a router tunnel as "port_forward" and a Pod
+        # tunnel as "sandboxd_pod_tunnel".
+        mode = (
+            "port_forward"
+            if isinstance(self.config, SandboxdRouterTunnelConnectionConfig)
+            else "sandboxd_pod_tunnel"
+        )
+        with record_discovery_latency(mode):
+            async with async_kubectl_kubeconfig_args(self._api_client) as kube_args:
+                return await self._start_tunnel_locked(target, namespace, kube_args)
 
     async def _start_tunnel_locked(
         self, target: str, namespace: str, kube_args: list[str]

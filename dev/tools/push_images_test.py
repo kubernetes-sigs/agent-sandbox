@@ -66,7 +66,9 @@ class BuildxDockerfileArgTest(unittest.TestCase):
     instead (issue #1123).
     """
 
-    def _captured_build_cmd(self, srcdir, dockerfile_path, **arg_overrides):
+    def _captured_build_cmd(
+        self, srcdir, dockerfile_path, service_name="svc", **arg_overrides
+    ):
         captured = {}
 
         def fake_run(cmd, **kwargs):
@@ -85,12 +87,12 @@ class BuildxDockerfileArgTest(unittest.TestCase):
             args = argparse.Namespace(
                 docker_build_output_type="docker",
                 extra_image_tags=[],
-                platform=push_images.DEFAULT_PLATFORMS,
+                platform=None,
             )
             for k, v in arg_overrides.items():
                 setattr(args, k, v)
             push_images.build_and_push_image_with_docker_buildx(
-                args, "svc", srcdir, dockerfile_path, "testtag"
+                args, service_name, srcdir, dockerfile_path, "testtag"
             )
         finally:
             push_images.subprocess.run = orig_run
@@ -123,10 +125,11 @@ class BuildxDockerfileArgTest(unittest.TestCase):
         )
         self.assertEqual(captured["cwd"], ".")
 
-    def _platform_args(self, **arg_overrides):
+    def _platform_args(self, service_name="svc", **arg_overrides):
         cmd = self._captured_build_cmd(
             srcdir=".",
             dockerfile_path=os.path.join(".", "Dockerfile"),
+            service_name=service_name,
             **arg_overrides,
         )["cmd"]
         return [a for a in cmd if a.startswith("--platform")]
@@ -143,6 +146,34 @@ class BuildxDockerfileArgTest(unittest.TestCase):
                 docker_build_output_type="registry", platform="linux/amd64"
             ),
             ["--platform=linux/amd64"],
+        )
+
+    def test_slow_example_images_push_amd64_only(self):
+        self.assertEqual(
+            self._platform_args(
+                service_name="langchain", docker_build_output_type="registry"
+            ),
+            ["--platform=linux/amd64"],
+        )
+
+    def test_slow_example_images_keep_explicit_arm64(self):
+        self.assertEqual(
+            self._platform_args(
+                service_name="langchain",
+                docker_build_output_type="registry",
+                platform="linux/arm64",
+            ),
+            ["--platform=linux/arm64"],
+        )
+
+    def test_slow_example_images_keep_explicit_multi_arch(self):
+        self.assertEqual(
+            self._platform_args(
+                service_name="langchain",
+                docker_build_output_type="registry",
+                platform="linux/amd64,linux/arm64",
+            ),
+            ["--platform=linux/amd64,linux/arm64"],
         )
 
     def test_kind_load_builds_host_platform_only(self):
@@ -659,9 +690,9 @@ class CLITest(unittest.TestCase):
         args = self._make_parser().parse_args([])
         self.assertEqual(args.container_engine, "podman")
 
-    def test_platform_defaults_to_multi_arch(self):
+    def test_platform_unset_by_default(self):
         args = self._make_parser().parse_args([])
-        self.assertEqual(args.platform, push_images.DEFAULT_PLATFORMS)
+        self.assertIsNone(args.platform)
 
     def test_platform_flag(self):
         args = self._make_parser().parse_args(["--platform", "linux/amd64"])

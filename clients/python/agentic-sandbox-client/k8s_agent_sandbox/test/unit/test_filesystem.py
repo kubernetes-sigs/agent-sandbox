@@ -416,7 +416,23 @@ class TestAsyncSandboxdFilesystem(unittest.IsolatedAsyncioTestCase):
             with self.subTest(path=path, **kwargs):
                 with self.assertRaisesRegex(ValueError, "sandbox root|does not name a file|empty"):
                     await self.fs.read(path, **kwargs)
+        self.connector.send_request.assert_not_awaited()
 
+    async def test_write_append_and_create_only_are_not_retried(self):
+        await self.fs.write("log.txt", b"x", append=True)
+        args, kwargs = self.connector.send_request.call_args
+        self.assertEqual(args[:2], ("PUT", "v1/files/log.txt?append=true"))
+        self.assertTrue(kwargs["_disable_retries"])
+
+        await self.fs.write("new.txt", b"x", create_only=True)
+        args, kwargs = self.connector.send_request.call_args
+        self.assertEqual(kwargs["headers"]["If-None-Match"], "*")
+        self.assertTrue(kwargs["_disable_retries"])
+
+    async def test_write_options_rejected_on_legacy_runtime(self):
+        self.connector.is_sandboxd.return_value = False
+        with self.assertRaises(NotImplementedError):
+            await self.fs.write("a", b"x", append=True)
         self.connector.send_request.assert_not_awaited()
 
     async def test_stream_write_disables_retries(self):

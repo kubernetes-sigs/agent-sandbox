@@ -159,6 +159,23 @@ class TestSandboxdFilesystem(unittest.TestCase):
         self.assertTrue(kwargs["_disable_retries"])
         self.assertFalse(source.closed)
 
+    def test_write_append_and_create_only_are_not_retried(self):
+        self._fs.write("log.txt", b"x", append=True)
+        args, kwargs = self._last_call()
+        self.assertEqual(args[:2], ("PUT", "v1/files/log.txt?append=true"))
+        self.assertTrue(kwargs["_disable_retries"])
+        self.assertNotIn("If-None-Match", kwargs["headers"])
+
+        self._fs.write("new.txt", b"x", create_only=True)
+        args, kwargs = self._last_call()
+        self.assertEqual(args[:2], ("PUT", "v1/files/new.txt"))
+        self.assertEqual(kwargs["headers"]["If-None-Match"], "*")
+        self.assertTrue(kwargs["_disable_retries"])
+
+    def test_plain_write_stays_retryable(self):
+        self._fs.write("a.txt", b"x")
+        self.assertFalse(self._last_call().kwargs["_disable_retries"])
+
     def test_read_gets_files_endpoint(self):
         resp = MagicMock()
         resp.content = b"hello"
@@ -276,6 +293,8 @@ class TestLegacyFileOpsUnsupported(unittest.TestCase):
             lambda: fs.mkdir("d"),
             lambda: fs.move("a", "b"),
             lambda: fs.copy("a", "b"),
+            lambda: fs.write("a", b"x", append=True),
+            lambda: fs.write("a", b"x", create_only=True),
         ):
             with self.subTest(), self.assertRaises(NotImplementedError):
                 call()

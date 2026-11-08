@@ -180,6 +180,9 @@ func (s *RESTServer) resolveUserPath(w http.ResponseWriter, userPath string,
 		if errors.Is(err, pathutil.ErrPathEscapes) {
 			s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED",
 				"path traversal outside sandbox root is forbidden")
+		} else if errors.Is(err, syscall.ENOTDIR) {
+			// A parent component is a regular file, so the path cannot exist.
+			s.writeError(w, http.StatusNotFound, "NOT_FOUND", "path does not exist within the sandbox")
 		} else {
 			s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 		}
@@ -949,7 +952,7 @@ func (s *RESTServer) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if _, err := os.Lstat(target); err != nil {
-		if os.IsNotExist(err) {
+		if os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR) {
 			s.writeError(w, http.StatusNotFound, "NOT_FOUND", "path does not exist within the sandbox")
 		} else {
 			s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())

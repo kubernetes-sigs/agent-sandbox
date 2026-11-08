@@ -34,6 +34,8 @@ from k8s_agent_sandbox.models import (
 # int forms let callers pass Python's own signal.SIGINT and friends.
 _SIGNAL_NAMES = {"SIGINT": 2, "SIGTERM": 15, "SIGKILL": 9}
 
+_SIGNAL_TIMEOUT_SECONDS = 5.0
+
 
 def _to_proto_signal(proto_module: Any, sig: int | str) -> int:
     """Map a signal name or number to the proto Signal enum.
@@ -210,14 +212,19 @@ class ProcessHandle:
                 "Exit event")
 
     def signal(self, sig: int | str) -> None:
-        """Deliver ``sig`` (SIGINT/SIGTERM/SIGKILL) to the running process."""
+        """Deliver ``sig`` (SIGINT/SIGTERM/SIGKILL) to the running process.
+
+        The five-second RPC deadline raises ``RuntimeError`` with the gRPC
+        error as its cause. Timeout leaves Start open; the signal may
+        already have been delivered.
+        """
         import grpc
 
         request = self._proto.SendSignalRequest(
             process_id=self.process_id, signal=_to_proto_signal(self._proto, sig)
         )
         try:
-            self._stub.SendSignal(request)
+            self._stub.SendSignal(request, timeout=_SIGNAL_TIMEOUT_SECONDS)
         except grpc.RpcError as e:
             rpc_error = cast("grpc.Call", e)
             raise _signal_error(
@@ -296,14 +303,19 @@ class AsyncProcessHandle:
                 "Exit event")
 
     async def signal(self, sig: int | str) -> None:
-        """Deliver ``sig`` (SIGINT/SIGTERM/SIGKILL) to the running process."""
+        """Deliver ``sig`` (SIGINT/SIGTERM/SIGKILL) to the running process.
+
+        The five-second RPC deadline raises ``RuntimeError`` with the gRPC
+        error as its cause. Timeout leaves Start open; the signal may
+        already have been delivered.
+        """
         import grpc
 
         request = self._proto.SendSignalRequest(
             process_id=self.process_id, signal=_to_proto_signal(self._proto, sig)
         )
         try:
-            await self._stub.SendSignal(request)
+            await self._stub.SendSignal(request, timeout=_SIGNAL_TIMEOUT_SECONDS)
         except grpc.aio.AioRpcError as e:
             raise _signal_error(e, e.code(), self.process_id) from e
 

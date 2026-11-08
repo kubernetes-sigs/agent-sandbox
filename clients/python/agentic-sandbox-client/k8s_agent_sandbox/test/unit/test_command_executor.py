@@ -628,6 +628,7 @@ class TestProcessHandleSync(unittest.TestCase):
                 request = stub.SendSignal.call_args.args[0]
                 self.assertEqual(request.process_id, 7)
                 self.assertEqual(request.signal, getattr(self.pb2, expected))
+                self.assertEqual(stub.SendSignal.call_args.kwargs, {"timeout": 5})
 
     def test_signal_maps_grpc_errors_to_exception_taxonomy(self):
         import grpc
@@ -647,6 +648,29 @@ class TestProcessHandleSync(unittest.TestCase):
                 with executor.start("noop") as handle:
                     with self.assertRaises(expected):
                         handle.signal(sig.SIGTERM)
+
+    def test_signal_deadline_preserves_stream(self):
+        import grpc
+
+        rpc_error = grpc.RpcError()
+        rpc_error.code = lambda: grpc.StatusCode.DEADLINE_EXCEEDED
+        rpc_error.details = lambda: "Deadline Exceeded"
+        stream = _FakeStream([
+            _make_start_response(self.pb2, init=7),
+            _make_start_response(self.pb2, stdout=b"still running"),
+            _make_start_response(self.pb2, exit_code=0),
+        ])
+        executor, _, stub = self._executor_with_stream(stream)
+        stub.SendSignal.side_effect = rpc_error
+
+        with executor.start("noop") as handle:
+            with self.assertRaisesRegex(RuntimeError, "DEADLINE_EXCEEDED"):
+                handle.signal(sig.SIGTERM)
+            self.assertFalse(stream.cancelled)
+            self.assertEqual(list(handle.events()), [
+                ProcessOutputEvent(type="stdout", data=b"still running"),
+                ProcessExitEvent(exit_code=0),
+            ])
 
     def test_protocol_violations_are_rejected(self):
         # Mirrors the Go SDK's TestProcessHandle_ProtocolAndStableTerminal and
@@ -789,9 +813,7 @@ class TestAsyncProcessHandle(unittest.IsolatedAsyncioTestCase):
         stub = MagicMock()
         stub.Start = MagicMock(return_value=stream)
         if send_signal is None:
-            async def _default_send_signal(_req):
-                return None
-            send_signal = _default_send_signal
+            send_signal = AsyncMock(return_value=None)
         stub.SendSignal = send_signal
 
         async def _grpc_channel():
@@ -875,8 +897,8 @@ class TestAsyncProcessHandle(unittest.IsolatedAsyncioTestCase):
     async def test_signal_sends_mapped_proto_signal(self):
         captured = []
 
-        async def _send_signal(request):
-            captured.append(request)
+        async def _send_signal(request, *, timeout):
+            captured.append((request, timeout))
             return None
 
         stream = _FakeAsyncStream([
@@ -890,8 +912,34 @@ class TestAsyncProcessHandle(unittest.IsolatedAsyncioTestCase):
             await handle.signal(sig.SIGINT)
             [e async for e in handle.events()]
 
-        self.assertEqual(captured[0].process_id, 7)
-        self.assertEqual(captured[0].signal, self.pb2.SIGNAL_SIGINT)
+        request, timeout = captured[0]
+        self.assertEqual(request.process_id, 7)
+        self.assertEqual(request.signal, self.pb2.SIGNAL_SIGINT)
+        self.assertEqual(timeout, 5)
+
+    async def test_signal_deadline_preserves_stream(self):
+        import grpc
+
+        rpc_error = grpc.aio.AioRpcError(
+            grpc.StatusCode.DEADLINE_EXCEEDED,
+            grpc.aio.Metadata(), grpc.aio.Metadata(), "Deadline Exceeded")
+        send_signal = AsyncMock(side_effect=rpc_error)
+        stream = _FakeAsyncStream([
+            _make_start_response(self.pb2, init=7),
+            _make_start_response(self.pb2, stdout=b"still running"),
+            _make_start_response(self.pb2, exit_code=0),
+        ])
+        executor, _, _ = self._executor_with_stream(
+            stream, send_signal=send_signal)
+
+        async with await executor.start("noop") as handle:
+            with self.assertRaisesRegex(RuntimeError, "DEADLINE_EXCEEDED"):
+                await handle.signal(sig.SIGTERM)
+            self.assertFalse(stream.cancelled)
+            self.assertEqual([event async for event in handle.events()], [
+                ProcessOutputEvent(type="stdout", data=b"still running"),
+                ProcessExitEvent(exit_code=0),
+            ])
 
     async def test_protocol_violations_are_rejected(self):
         # _to_event is shared with the sync path, which covers the full table;

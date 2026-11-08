@@ -52,6 +52,7 @@ from k8s_agent_sandbox.constants import (
 )
 from k8s_agent_sandbox.exceptions import (
     BatchError,
+    SandboxResponseTooLargeError,
     BatchExistsError,
     BatchInUseError,
     BatchLeaseExpiredError,
@@ -69,6 +70,7 @@ from k8s_agent_sandbox.models import (
     BatchGroup,
     MemberState,
     SandboxDirectConnectionConfig,
+    SandboxFileConfig,
 )
 from k8s_agent_sandbox.sandbox import Sandbox
 from k8s_agent_sandbox.sandbox_batch import SandboxBatch
@@ -1246,6 +1248,7 @@ class TestConnect(unittest.TestCase):
 
     def setUp(self):
         self.mock_client = MagicMock()
+        self.mock_client.file_config = None
         self.mock_sandbox_instance = MagicMock()
         self.mock_client.sandbox_class.return_value = self.mock_sandbox_instance
         self.handle = _make_handle(self.mock_client)
@@ -1273,6 +1276,29 @@ class TestConnect(unittest.TestCase):
         self.mock_client.k8s_helper.get_sandbox.assert_not_called()
         self.assertIs(sandbox, self.mock_sandbox_instance)
         self.assertEqual(sandbox._seeded_pod_ip, "10.0.0.1")
+
+    def test_forwards_client_file_config_when_set(self):
+        patcher = patch("k8s_agent_sandbox.sandbox_client.K8sHelper")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        real_client = SandboxClient(
+            connection_config=SandboxDirectConnectionConfig(api_url="http://test-router:8080"),
+            file_config=SandboxFileConfig(max_download_size=4),
+            cleanup=False,
+        )
+        handle = _make_handle(real_client)
+        handle._state.upsert_claim(
+            _claim("b1-0", conditions=[{"type": "Ready", "status": "True"}], sandbox={"name": "sbx-1"})
+        )
+        sandbox = handle.connect(handle.members()[0])
+        self.addCleanup(sandbox.close_connection)
+
+        response = MagicMock(status_code=200, headers={})
+        response.iter_content.return_value = iter([b"oversized"])
+        with patch.object(sandbox.connector, "send_request", return_value=response):
+            with self.assertRaises(SandboxResponseTooLargeError):
+                sandbox.files.read("file.bin")
+        response.close.assert_called_once_with()
 
     def test_repeat_call_returns_same_handle(self):
         self.handle._state.upsert_claim(
@@ -1412,6 +1438,8 @@ class TestConnect(unittest.TestCase):
     def test_terminate_on_a_connected_sandbox_deletes_through_release_member(self):
         client = self._real_client()
         handle, sbx = self._connect_member(client)
+        observed_claim_names: list[str | None] = []
+        sbx._on_terminated = lambda s: observed_claim_names.append(s.claim_name)
         sbx.terminate()
         client.k8s_helper.delete_sandbox_claim.assert_called_once_with(
             "b1-0",
@@ -1420,6 +1448,8 @@ class TestConnect(unittest.TestCase):
             log_level=logging.DEBUG,
             batch=True,
         )
+        self.assertEqual(observed_claim_names, ["b1-0"])
+        self.assertIsNone(sbx._on_terminated)
         self.assertEqual(handle.members(), [])
         self.assertIsNone(sbx.claim_name)
         self.assertFalse(sbx.is_active)
@@ -1514,7 +1544,14 @@ class TestConnect(unittest.TestCase):
                     on_close()
 
         mock_client = MagicMock()
+        mock_client.file_config = None
         mock_client.sandbox_class = _StubSandbox
+
+        with patch("k8s_agent_sandbox.sandbox_client.K8sHelper"):
+            real_client = SandboxClient(
+                connection_config=SandboxDirectConnectionConfig(api_url="http://test-router:8080"),
+                cleanup=False,
+            )
 
         was_enabled = gc.isenabled()
         gc.disable()
@@ -1543,6 +1580,20 @@ class TestConnect(unittest.TestCase):
             self.assertIsNone(batch_ref2())
             del sbx2
             self.assertIsNone(sbx_ref2())
+
+            real_handle = _make_handle(real_client)
+            real_handle._state.upsert_claim(
+                _claim("b1-0", conditions=[{"type": "Ready", "status": "True"}], sandbox={"name": "sbx-1"})
+            )
+            real_sbx = real_handle.connect(real_handle.members()[0])
+            real_batch_ref = weakref.ref(real_handle)
+            real_sbx_ref = weakref.ref(real_sbx)
+            real_client_ref = weakref.ref(real_client)
+            real_sbx.close_connection()
+            del real_sbx, real_handle, real_client
+            self.assertIsNone(real_sbx_ref())
+            self.assertIsNone(real_batch_ref())
+            self.assertIsNone(real_client_ref())
         finally:
             if was_enabled:
                 gc.enable()

@@ -623,12 +623,14 @@ class TestProcessHandleSync(unittest.TestCase):
 
                 with executor.start("sleep 5") as handle:
                     handle.signal(sent)
+                    self.assertEqual(stub.SendSignal.call_args.kwargs, {"timeout": 5})
+                    handle.signal(sent, timeout=10)
                     list(handle.events())
 
                 request = stub.SendSignal.call_args.args[0]
                 self.assertEqual(request.process_id, 7)
                 self.assertEqual(request.signal, getattr(self.pb2, expected))
-                self.assertEqual(stub.SendSignal.call_args.kwargs, {"timeout": 5})
+                self.assertEqual(stub.SendSignal.call_args.kwargs, {"timeout": 10})
 
     def test_signal_maps_grpc_errors_to_exception_taxonomy(self):
         import grpc
@@ -910,12 +912,14 @@ class TestAsyncProcessHandle(unittest.IsolatedAsyncioTestCase):
 
         async with await executor.start("sleep 5") as handle:
             await handle.signal(sig.SIGINT)
+            await handle.signal(sig.SIGINT, timeout=10)
             [e async for e in handle.events()]
 
         request, timeout = captured[0]
         self.assertEqual(request.process_id, 7)
         self.assertEqual(request.signal, self.pb2.SIGNAL_SIGINT)
         self.assertEqual(timeout, 5)
+        self.assertEqual(captured[1][1], 10)
 
     async def test_signal_deadline_preserves_stream(self):
         import grpc

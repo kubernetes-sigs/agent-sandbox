@@ -8337,3 +8337,93 @@ func TestSandboxStaleStatusPatchConflictDroppedWithoutMetrics(t *testing.T) {
 	require.InDelta(t, 1.0, testutil.ToFloat64(asmetrics.SandboxSuspendTotal.WithLabelValues("default", "unknown", "None", "requested")), 0.001)
 	require.InDelta(t, 1.0, testutil.ToFloat64(asmetrics.SandboxSuspendTotal.WithLabelValues("default", "unknown", "None", "pod_terminated")), 0.001)
 }
+
+func TestExpiredSandboxAppliesPVCRetention(t *testing.T) {
+	testCases := []struct {
+		name           string
+		shutdownPolicy sandboxv1beta1.ShutdownPolicy
+		whenDeleted    sandboxv1beta1.PersistentVolumeClaimRetentionPolicyType
+		wantOwned      bool
+		wantSandbox    bool
+	}{
+		{
+			name:           "retained sandbox releases its PVC under Retain",
+			shutdownPolicy: sandboxv1beta1.ShutdownPolicyRetain,
+			whenDeleted:    sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain,
+			wantOwned:      false,
+			wantSandbox:    true,
+		},
+		{
+			name:           "deleted sandbox releases its PVC before it goes under Retain",
+			shutdownPolicy: sandboxv1beta1.ShutdownPolicyDelete,
+			whenDeleted:    sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain,
+			wantOwned:      false,
+			wantSandbox:    false,
+		},
+		{
+			name:           "retained sandbox keeps owning its PVC under Delete",
+			shutdownPolicy: sandboxv1beta1.ShutdownPolicyRetain,
+			whenDeleted:    sandboxv1beta1.PersistentVolumeClaimRetentionPolicyDelete,
+			wantOwned:      true,
+			wantSandbox:    true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			const sandboxName = "expired-retention"
+			shutdownTime := metav1.NewTime(time.Now().Add(-time.Hour))
+			sandbox := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: "default", UID: sandboxUID, Generation: 1},
+				Spec: sandboxv1beta1.SandboxSpec{
+					SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+						PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}}},
+						VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{{
+							EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+							Spec: corev1.PersistentVolumeClaimSpec{
+								AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+								Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
+									corev1.ResourceStorage: resource.MustParse("1Gi"),
+								}},
+							},
+						}},
+						PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{WhenDeleted: tc.whenDeleted},
+					},
+					Lifecycle: sandboxv1beta1.Lifecycle{ShutdownTime: &shutdownTime, ShutdownPolicy: new(tc.shutdownPolicy)},
+				},
+			}
+			pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+				Name: "data-" + sandboxName, Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+			}}
+			r := &SandboxReconciler{Client: newFakeClient(sandbox, pvc), Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+			req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sandboxName, Namespace: "default"}}
+
+			for range 3 {
+				_, err := r.Reconcile(t.Context(), req)
+				require.NoError(t, err)
+			}
+
+			livePVC := &corev1.PersistentVolumeClaim{}
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pvc), livePVC))
+			owned := false
+			for _, ref := range livePVC.OwnerReferences {
+				if ref.UID == sandboxUID {
+					owned = true
+				}
+			}
+			require.Equal(t, tc.wantOwned, owned, "PVC owner references: %+v", livePVC.OwnerReferences)
+
+			pvcs := &corev1.PersistentVolumeClaimList{}
+			require.NoError(t, r.List(t.Context(), pvcs, client.InNamespace("default")))
+			require.Len(t, pvcs.Items, 1, "expiry must not create PVCs")
+
+			err := r.Get(t.Context(), req.NamespacedName, &sandboxv1beta1.Sandbox{})
+			if tc.wantSandbox {
+				require.NoError(t, err)
+			} else {
+				require.True(t, k8serrors.IsNotFound(err), "expected the sandbox to be deleted, got %v", err)
+			}
+		})
+	}
+}

@@ -3895,6 +3895,45 @@ class TestReleaseMembers(BaseClaimBatchTest):
         self.assertIsInstance(errors[0], BatchError)
         self.assertIs(errors[0].__cause__, lease_error)
 
+    def test_release_group_clamps_rounds_and_sleep_to_lease_deadline(self):
+        helper = self.cluster.helper
+        clock = [100.0]
+        sleeps: list[float] = []
+
+        def fake_sleep(delay: float) -> None:
+            sleeps.append(delay)
+            clock[0] += delay
+
+        with patch.object(
+            sandbox_batch, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=fake_sleep)
+        ):
+            handle = _make_handle(self.client, lease_duration=60, lease_renewed_at=42.5)
+            handle._state.upsert_claim(_claim("b1-0", conditions=_NOT_READY, annotations=_FILL))
+
+            def first_delete(*_args, **_kwargs):
+                clock[0] = 101.0
+
+            def first_count(*_args, **_kwargs):
+                clock[0] = 102.45
+                return 1
+
+            helper.delete_sandbox_claims_by_label.side_effect = first_delete
+            helper.count_live_sandbox_claims.side_effect = first_count
+
+            with self.assertRaises(BatchError) as cm:
+                handle.release_group("pool-a")
+
+        self.assertIsInstance(cm.exception.__cause__, BatchLeaseExpiredError)
+        self.assertAlmostEqual(
+            helper.delete_sandbox_claims_by_label.call_args.kwargs["_request_timeout"], 2.5
+        )
+        self.assertAlmostEqual(
+            helper.count_live_sandbox_claims.call_args.kwargs["_request_timeout"], 1.5
+        )
+        self.assertEqual(helper.count_live_sandbox_claims.call_args.kwargs["deadline"], 102.5)
+        self.assertEqual(len(sleeps), 1)
+        self.assertAlmostEqual(sleeps[0], 0.05)
+
 
 class TestAcquire(BaseClaimBatchTest):
 

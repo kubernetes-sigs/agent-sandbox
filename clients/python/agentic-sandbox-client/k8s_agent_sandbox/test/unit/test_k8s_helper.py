@@ -1557,6 +1557,45 @@ class TestK8sHelperBatchMethods(unittest.TestCase):
 
         self.assertEqual(helper.count_live_sandbox_claims("default", "agents.x-k8s.io/batch-id=b1"), 3)
 
+    def test_count_live_sandbox_claims_clamps_page_timeouts_to_deadline(
+        self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
+    ):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+        helper = K8sHelper()
+        live = {"metadata": {"name": "live"}}
+        mock_api.list_namespaced_custom_object.side_effect = [
+            {"items": [live], "metadata": {"continue": "t1"}},
+            {"items": [live], "metadata": {}},
+        ]
+        with patch("k8s_agent_sandbox.k8s_helper.time.monotonic", side_effect=[100.0, 108.5]):
+            count = helper.count_live_sandbox_claims(
+                "default",
+                "agents.x-k8s.io/batch-id=b1",
+                _request_timeout=90.0,
+                deadline=110.0,
+            )
+        self.assertEqual(count, 2)
+        self.assertEqual(
+            [c.kwargs["_request_timeout"] for c in mock_api.list_namespaced_custom_object.call_args_list],
+            [10.0, 1.5],
+        )
+
+        mock_api.list_namespaced_custom_object.reset_mock()
+        mock_api.list_namespaced_custom_object.side_effect = [
+            {"items": [live], "metadata": {"continue": "t1"}},
+            {"items": [live], "metadata": {}},
+        ]
+        with patch("k8s_agent_sandbox.k8s_helper.time.monotonic", side_effect=[105.0, 110.0]):
+            with self.assertRaises(TimeoutError):
+                helper.count_live_sandbox_claims(
+                    "default",
+                    "agents.x-k8s.io/batch-id=b1",
+                    _request_timeout=90.0,
+                    deadline=110.0,
+                )
+        self.assertEqual(mock_api.list_namespaced_custom_object.call_count, 1)
+
     def test_delete_sandbox_claims_by_label_drains_the_response_unparsed_and_releases_it(
         self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
     ):

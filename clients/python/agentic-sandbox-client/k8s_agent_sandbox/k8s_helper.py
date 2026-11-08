@@ -757,6 +757,8 @@ class K8sHelper:
         namespace: str,
         label_selector: str,
         _request_timeout: float | tuple[float, float] | None = None,
+        *,
+        deadline: float | None = None,
     ) -> int:
         """Counts matching ``SandboxClaim`` objects without ``metadata.deletionTimestamp``,
         holding one page of the list at a time.
@@ -772,10 +774,17 @@ class K8sHelper:
         Args:
             _request_timeout: Optional timeout (seconds, or a ``(connect, read)``
                 pair) forwarded to the underlying urllib3 request of each page.
+            deadline: Optional ``time.monotonic()`` deadline across the whole paginated list;
+                caps each page's ``_request_timeout`` to the remaining budget and raises
+                ``TimeoutError`` once the deadline passes.
         """
         live = 0
         for page, first in _claim_list_pages(
-            self._batch_custom_objects_api.list_namespaced_custom_object, namespace, label_selector, _request_timeout
+            self._batch_custom_objects_api.list_namespaced_custom_object,
+            namespace,
+            label_selector,
+            _request_timeout,
+            deadline=deadline,
         ):
             if first:
                 live = 0

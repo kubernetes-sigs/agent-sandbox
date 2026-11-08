@@ -818,7 +818,9 @@ finally:
 ```
 
 `signal()` accepts either the cross-SDK name (`"SIGINT"`) or Python's own
-`signal.SIGINT`. `env` and `cwd` work as they do on `run()`. Passing
+`signal.SIGINT`. The `timeout` argument defaults to five seconds and controls
+how long `signal()` waits for a response. If the deadline expires, it raises
+`TimeoutError`. `env` and `cwd` work as they do on `run()`. Passing
 `pty=PtySize(cols=120, rows=40)` (from `k8s_agent_sandbox.models`) allocates a
 pseudo-terminal, which merges stderr into stdout.
 

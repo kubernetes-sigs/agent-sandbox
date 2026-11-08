@@ -576,6 +576,36 @@ func TestSandboxdRun_GRPCErrorSurfacesCode(t *testing.T) {
 	}
 }
 
+// hangingProcessService never answers Execute until the call is cancelled.
+type hangingProcessService struct {
+	processv1.UnimplementedProcessServiceServer
+}
+
+func (hangingProcessService) Execute(ctx context.Context, _ *processv1.ExecuteRequest) (*processv1.ExecuteResponse, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestSandboxdRun_AppliesRequestTimeout(t *testing.T) {
+	c := newReadySandboxdTestSandbox("http://unused.invalid")
+	c.connector.requestTimeout = 200 * time.Millisecond
+	startFakeProcessServer(t, c, hangingProcessService{})
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Run(context.Background(), "sleep 999")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "DeadlineExceeded") {
+			t.Fatalf("expected DeadlineExceeded, got: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not apply RequestTimeout to the sandboxd Execute call")
+	}
+}
+
 func TestSandboxdRun_NotConnected(t *testing.T) {
 	// The in-cluster strategy publishes a gRPC target on Open; before that,
 	// Run is merely not ready.

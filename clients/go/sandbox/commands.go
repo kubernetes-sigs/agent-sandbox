@@ -71,6 +71,13 @@ func (c *Commands) Run(ctx context.Context, command string, opts ...CallOption) 
 	defer func() { span.End() }()
 
 	if c.runtime == RuntimeSandboxd {
+		// The legacy path gets RequestTimeout from SendRequest. Apply it
+		// here too, or an Execute that never answers blocks forever.
+		if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+			var reqCancel context.CancelFunc
+			ctx, reqCancel = context.WithTimeout(ctx, c.connector.requestTimeout)
+			defer reqCancel()
+		}
 		return c.runSandboxd(ctx, span, command, co)
 	}
 	if len(co.env) > 0 || co.cwd != "" {

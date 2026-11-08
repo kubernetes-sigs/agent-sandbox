@@ -30,6 +30,8 @@ import (
 func ForKind(kind schema.GroupVersionKind) interface{} {
 	switch kind {
 	// Group=extensions.agents.x-k8s.io, Version=v1beta1
+	case v1beta1.SchemeGroupVersion.WithKind("ContainerResourceOverride"):
+		return &apiv1beta1.ContainerResourceOverrideApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("EnvVar"):
 		return &apiv1beta1.EnvVarApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("Lifecycle"):
@@ -60,8 +62,6 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &apiv1beta1.SandboxWarmPoolStatusApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("SandboxWarmPoolUpdateStrategy"):
 		return &apiv1beta1.SandboxWarmPoolUpdateStrategyApplyConfiguration{}
-	case v1beta1.SchemeGroupVersion.WithKind("WorkspaceResourceOverride"):
-		return &apiv1beta1.WorkspaceResourceOverrideApplyConfiguration{}
 
 	}
 	return nil

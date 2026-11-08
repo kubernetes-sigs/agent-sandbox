@@ -45,11 +45,13 @@ type SandboxClaimSpecApplyConfiguration struct {
 	// Each entry must have a unique, non-empty metadata.name.
 	// At most 128 entries: the cap only bounds the CEL cost of the uniqueness rule.
 	VolumeClaimTemplates []apiv1beta1.PersistentVolumeClaimTemplateApplyConfiguration `json:"volumeClaimTemplates,omitempty"`
-	// workspaceResources overrides resource requirements for named PodSpec containers or init containers at claim time.
+	// containerResources overrides resource requirements for named PodSpec containers or init containers at claim time.
+	// Overrides are only honored when the referenced SandboxTemplate opts in via
+	// spec.containerResourcesPolicy: with the default Disallowed the claim is rejected.
 	// Unset request and limit entries keep the values from the SandboxTemplate.
 	// Any non-empty override forces a cold start because warm-pool adoption is skipped for per-claim sizing.
-	// Claim writers may override resources independently of the SandboxTemplate; namespace ResourceQuota and LimitRange policies still apply.
-	WorkspaceResources []WorkspaceResourceOverrideApplyConfiguration `json:"workspaceResources,omitempty"`
+	// Namespace ResourceQuota and LimitRange policies still apply.
+	ContainerResources []ContainerResourceOverrideApplyConfiguration `json:"containerResources,omitempty"`
 }
 
 // SandboxClaimSpecApplyConfiguration constructs a declarative configuration of the SandboxClaimSpec type for use with
@@ -108,15 +110,15 @@ func (b *SandboxClaimSpecApplyConfiguration) WithVolumeClaimTemplates(values ...
 	return b
 }
 
-// WithWorkspaceResources adds the given value to the WorkspaceResources field in the declarative configuration
+// WithContainerResources adds the given value to the ContainerResources field in the declarative configuration
 // and returns the receiver, so that objects can be build by chaining "With" function invocations.
-// If called multiple times, values provided by each call will be appended to the WorkspaceResources field.
-func (b *SandboxClaimSpecApplyConfiguration) WithWorkspaceResources(values ...*WorkspaceResourceOverrideApplyConfiguration) *SandboxClaimSpecApplyConfiguration {
+// If called multiple times, values provided by each call will be appended to the ContainerResources field.
+func (b *SandboxClaimSpecApplyConfiguration) WithContainerResources(values ...*ContainerResourceOverrideApplyConfiguration) *SandboxClaimSpecApplyConfiguration {
 	for i := range values {
 		if values[i] == nil {
-			panic("nil value passed to WithWorkspaceResources")
+			panic("nil value passed to WithContainerResources")
 		}
-		b.WorkspaceResources = append(b.WorkspaceResources, *values[i])
+		b.ContainerResources = append(b.ContainerResources, *values[i])
 	}
 	return b
 }

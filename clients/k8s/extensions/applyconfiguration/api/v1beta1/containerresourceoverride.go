@@ -20,14 +20,14 @@ import (
 	v1 "k8s.io/api/core/v1"
 )
 
-// WorkspaceResourceOverrideApplyConfiguration represents a declarative configuration of the WorkspaceResourceOverride type for use
+// ContainerResourceOverrideApplyConfiguration represents a declarative configuration of the ContainerResourceOverride type for use
 // with apply.
 //
-// WorkspaceResourceOverride defines per-claim resource requirement overrides
+// ContainerResourceOverride defines per-claim resource requirement overrides
 // for a named PodSpec container or init container. Requests and limits are
 // merged by resource name; non-empty claims replace the target container's
 // resource claims.
-type WorkspaceResourceOverrideApplyConfiguration struct {
+type ContainerResourceOverrideApplyConfiguration struct {
 	// containerName specifies the target regular container or init container for
 	// the resource override.
 	ContainerName *string `json:"containerName,omitempty"`
@@ -37,16 +37,16 @@ type WorkspaceResourceOverrideApplyConfiguration struct {
 	Resources *v1.ResourceRequirements `json:"resources,omitempty"`
 }
 
-// WorkspaceResourceOverrideApplyConfiguration constructs a declarative configuration of the WorkspaceResourceOverride type for use with
+// ContainerResourceOverrideApplyConfiguration constructs a declarative configuration of the ContainerResourceOverride type for use with
 // apply.
-func WorkspaceResourceOverride() *WorkspaceResourceOverrideApplyConfiguration {
-	return &WorkspaceResourceOverrideApplyConfiguration{}
+func ContainerResourceOverride() *ContainerResourceOverrideApplyConfiguration {
+	return &ContainerResourceOverrideApplyConfiguration{}
 }
 
 // WithContainerName sets the ContainerName field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the ContainerName field is set to the value of the last call.
-func (b *WorkspaceResourceOverrideApplyConfiguration) WithContainerName(value string) *WorkspaceResourceOverrideApplyConfiguration {
+func (b *ContainerResourceOverrideApplyConfiguration) WithContainerName(value string) *ContainerResourceOverrideApplyConfiguration {
 	b.ContainerName = &value
 	return b
 }
@@ -54,7 +54,7 @@ func (b *WorkspaceResourceOverrideApplyConfiguration) WithContainerName(value st
 // WithResources sets the Resources field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the Resources field is set to the value of the last call.
-func (b *WorkspaceResourceOverrideApplyConfiguration) WithResources(value v1.ResourceRequirements) *WorkspaceResourceOverrideApplyConfiguration {
+func (b *ContainerResourceOverrideApplyConfiguration) WithResources(value v1.ResourceRequirements) *ContainerResourceOverrideApplyConfiguration {
 	b.Resources = &value
 	return b
 }

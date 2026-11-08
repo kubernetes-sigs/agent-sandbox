@@ -197,6 +197,9 @@ class SandboxBatch:
         self._lease_expires_at = lease_renewed_at + lease_duration
         self._watch_thread: threading.Thread | None = None
         self._renew_thread: threading.Thread | None = None
+        # Deletes the watch starts for claims that land after their pool was released, tracked so
+        # detach() and release() wait for them.
+        self._watch_delete_threads: set[threading.Thread] = set()
 
         # Notified on every change consumers wait for: watch events, create failures, errors,
         # the fill deadline being set, and detach/release.
@@ -565,7 +568,7 @@ class SandboxBatch:
                 self._active_deletes[tid] -= 1
                 if not self._active_deletes[tid]:
                     del self._active_deletes[tid]
-                if self._detached:
+                if self._detached or not self._active_deletes:
                     self._changed.notify_all()
 
     def _wait_active_deletes(self, for_detach: bool = False) -> None:
@@ -1261,7 +1264,8 @@ class SandboxBatch:
         kept: deque[tuple[str, BatchGroup]] = deque()
         for claim_name, group in self._create_plan:
             if warmpool is None or group.warmpool == warmpool:
-                self._state.release_claim(claim_name, group.warmpool)
+                if warmpool is not None or self._state.get_member(claim_name) is None:
+                    self._state.release_claim(claim_name, group.warmpool)
             else:
                 kept.append((claim_name, group))
         self._create_plan = kept
@@ -1275,6 +1279,7 @@ class SandboxBatch:
         """Deletes one released claim, retrying transient errors. A claim already gone counts as deleted."""
         attempt = 1
         while True:
+            self._check_lease_held()
             try:
                 # Scope the pool slot and active-delete guard to each HTTP attempt so a sleeping
                 # retry neither holds a max_in_flight slot nor blocks detach() or release().
@@ -1300,7 +1305,9 @@ class SandboxBatch:
                 if attempt >= batch_utils.BATCH_DELETE_ATTEMPTS or not _is_transient_error(e):
                     raise
                 self._check_lease_held()
-                time.sleep(batch_utils.retry_delay(attempt, e))
+                # Wake as soon as the handle stops instead of sleeping out the backoff, then report why.
+                if self._stop_creating.wait(batch_utils.retry_delay(attempt, e)):
+                    self._check_lease_held()
                 attempt += 1
         with self._lock:
             self._state.note_deleted(claim_name, seq)
@@ -1401,6 +1408,12 @@ class SandboxBatch:
         # Stopping the watch above interrupts its blocked read, so the join returns promptly.
         if self._watch_thread is not None and self._watch_thread is not threading.current_thread():
             self._watch_thread.join(max(0.0, deadline - time.monotonic()))
+        # Wait for deletes the watch started for late claims, for the same reason.
+        with self._lock:
+            watch_delete_threads = list(self._watch_delete_threads)
+        for delete_thread in watch_delete_threads:
+            if delete_thread is not threading.current_thread():
+                delete_thread.join(max(0.0, deadline - time.monotonic()))
         if self._renew_thread is not None and self._renew_thread is not threading.current_thread():
             self._renew_thread.join()
 
@@ -1597,6 +1610,61 @@ class SandboxBatch:
                 self._changed.notify_all()
         self._client._unregister_batch(self)
 
+    def _start_watch_deletes_locked(self) -> None:
+        """Starts a thread that deletes claims that landed after their pool was released, unless
+        there are none or this handle can no longer delete claims. A separate thread keeps the watch
+        from blocking on HTTP deletes.
+
+        The thread starts here, under ``_lock``, so ``_watch_delete_threads`` never holds an unstarted
+        thread for ``_stop_background_threads`` to join. Its deletes take ``_lock`` themselves, so they
+        wait until the caller releases it.
+        """
+        names = self._state.take_watch_deletes()
+        if not names:
+            return
+        self._expire_lease_if_due()
+        if self._detached or self._lease_error is not None:
+            return
+        thread = threading.Thread(
+            target=self._run_watch_deletes,
+            args=(names,),
+            name=f"batch-{self.batch_id}-watch-delete",
+            daemon=True,
+        )
+        thread.start()
+        self._watch_delete_threads.add(thread)
+
+    def _run_watch_deletes(self, names: list[str]) -> None:
+        """Deletes each late claim. ``BatchError`` means this handle detached or lost the Lease,
+        which ends cleanup, so it is not logged.
+        """
+        try:
+            for name in names:
+                try:
+                    self._delete_claim(name)
+                except BatchError:
+                    pass
+                except Exception as e:
+                    logger.warning(f"Batch '{self.batch_id}' failed to delete late watch claim '{name}': {e}")
+        finally:
+            with self._lock:
+                self._watch_delete_threads.discard(threading.current_thread())
+
+    def _drain_watch_deletes(self) -> None:
+        """Waits, within one request timeout, for the late-claim deletes this watch started."""
+        if not self._watch_delete_threads:
+            return
+        with self._lock:
+            watch_delete_threads = list(self._watch_delete_threads)
+        deadline = (
+            time.monotonic()
+            + batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
+            + batch_utils.BATCH_CREATOR_STOP_GRACE_SECONDS
+        )
+        for delete_thread in watch_delete_threads:
+            if delete_thread is not threading.current_thread():
+                delete_thread.join(max(0.0, deadline - time.monotonic()))
+
     def _watch_loop(self) -> None:
         """Background watch loop which keeps ``self._state`` in sync with the batch's claims.
 
@@ -1609,106 +1677,112 @@ class SandboxBatch:
         relist = False
         # Consecutive failed attempts, which set the retry backoff.
         failures = 0
-        while not self._watch_stop.is_set():
-            try:
-                if relist:
-                    items, rv = self._client.k8s_helper.list_sandbox_claim_objects(
-                        self.namespace, label_selector, _request_timeout=batch_utils.BATCH_COLLECTION_REQUEST_TIMEOUT_SECONDS
-                    )
-                    if self._watch_stop.is_set():
-                        return
-                    with self._lock:
-                        self._state.resync_from_list(items)
-                        self._exhaust_warm_credit()
-                        self._notify_all()
-                        stale = self._pop_stale_connections(list(self._connected))
-                    self._close_connections(stale, "a re-list")
-                    relist = False
-                watch_started = time.monotonic()
-                got_event = False
-                raw_stream = self._client.k8s_helper.watch_sandbox_claims(
-                    self.namespace,
-                    label_selector,
-                    rv,
-                    _WATCH_TIMEOUT_SECONDS,
-                    _request_timeout=_WATCH_REQUEST_TIMEOUT,
-                    on_watch=self._set_active_watch,
-                )
-                stream_cm: contextlib.AbstractContextManager[Iterator[dict[str, Any]]] = (
-                    contextlib.closing(raw_stream)
-                    if hasattr(raw_stream, "close")
-                    else contextlib.nullcontext(raw_stream)
-                )
-                with stream_cm as stream:
-                    for event in stream:
+        try:
+            while not self._watch_stop.is_set():
+                try:
+                    if relist:
+                        items, rv = self._client.k8s_helper.list_sandbox_claim_objects(
+                            self.namespace, label_selector, _request_timeout=batch_utils.BATCH_COLLECTION_REQUEST_TIMEOUT_SECONDS
+                        )
                         if self._watch_stop.is_set():
                             return
-                        failures = 0
-                        got_event = True
-                        event_type = event.get("type")
-                        obj = event.get("object") or {}
-                        seen_rv = (obj.get("metadata") or {}).get("resourceVersion")
-                        if seen_rv:
-                            rv = seen_rv
-                        if event_type == "BOOKMARK":
-                            continue
-                        claim_name = (obj.get("metadata") or {}).get("name", "")
                         with self._lock:
-                            if event_type == "DELETED":
-                                if self._state.mark_lost(claim_name) is not None:
-                                    self._wake_acquire(claim_name)
-                            elif event_type in ("ADDED", "MODIFIED"):
-                                member = self._state.upsert_claim(obj)
-                                self._exhaust_warm_credit()
-                                if member is not None and member.state is not MemberState.PENDING:
-                                    self._wake_acquire(claim_name)
-                            self._changed.notify_all()
-                            stale = self._pop_stale_connections([claim_name])
-                        self._close_connections(stale, "a watch event")
-                if (
-                    not got_event
-                    and time.monotonic() - watch_started < _SHORT_WATCH_SECONDS
-                    and not self._watch_stop.is_set()
-                ):
-                    failures += 1
-                    self._watch_stop.wait(batch_utils.retry_delay(failures, None))
-                    continue
-                # The watch ended at its timeout, which is not a failure.
-                failures = 0
-            except client.ApiException as e:
-                if self._watch_stop.is_set():
+                            self._state.resync_from_list(items)
+                            self._exhaust_warm_credit()
+                            self._start_watch_deletes_locked()
+                            self._notify_all()
+                            stale = self._pop_stale_connections(list(self._connected))
+                        self._close_connections(stale, "a re-list")
+                        relist = False
+                    watch_started = time.monotonic()
+                    got_event = False
+                    raw_stream = self._client.k8s_helper.watch_sandbox_claims(
+                        self.namespace,
+                        label_selector,
+                        rv,
+                        _WATCH_TIMEOUT_SECONDS,
+                        _request_timeout=_WATCH_REQUEST_TIMEOUT,
+                        on_watch=self._set_active_watch,
+                    )
+                    stream_cm: contextlib.AbstractContextManager[Iterator[dict[str, Any]]] = (
+                        contextlib.closing(raw_stream)
+                        if hasattr(raw_stream, "close")
+                        else contextlib.nullcontext(raw_stream)
+                    )
+                    with stream_cm as stream:
+                        for event in stream:
+                            if self._watch_stop.is_set():
+                                return
+                            failures = 0
+                            got_event = True
+                            event_type = event.get("type")
+                            obj = event.get("object") or {}
+                            seen_rv = (obj.get("metadata") or {}).get("resourceVersion")
+                            if seen_rv:
+                                rv = seen_rv
+                            if event_type == "BOOKMARK":
+                                continue
+                            claim_name = (obj.get("metadata") or {}).get("name", "")
+                            with self._lock:
+                                if event_type == "DELETED":
+                                    if self._state.mark_lost(claim_name) is not None:
+                                        self._wake_acquire(claim_name)
+                                elif event_type in ("ADDED", "MODIFIED"):
+                                    member = self._state.upsert_claim(obj)
+                                    self._exhaust_warm_credit()
+                                    self._start_watch_deletes_locked()
+                                    if member is not None and member.state is not MemberState.PENDING:
+                                        self._wake_acquire(claim_name)
+                                self._changed.notify_all()
+                                stale = self._pop_stale_connections([claim_name])
+                            self._close_connections(stale, "a watch event")
+                    if (
+                        not got_event
+                        and time.monotonic() - watch_started < _SHORT_WATCH_SECONDS
+                        and not self._watch_stop.is_set()
+                    ):
+                        failures += 1
+                        self._watch_stop.wait(batch_utils.retry_delay(failures, None))
+                        continue
+                    # The watch ended at its timeout, which is not a failure.
+                    failures = 0
+                except client.ApiException as e:
+                    if self._watch_stop.is_set():
+                        return
+                    if e.status == 410:
+                        # Indicates etcd RV compaction aged our resourceVersion out of the apiserver's watch cache,
+                        # so the watch can't continue. Re-list, reconcile the cache (catches events that occurred while there
+                        # was no watch), and continue watching from the new list's resourceVersion.
+                        relist = True
+                        continue
+                    if batch_utils.is_retryable_status(e.status):
+                        # Likely transient: retry the re-list, or the watch from the last-seen resourceVersion.
+                        failures += 1
+                        self._watch_stop.wait(batch_utils.retry_delay(failures, e))
+                        continue
+                    # Response codes outside of this (e.g. 403, 404) are not recoverable
+                    # by retrying, so we error then exit
+                    with self._lock:
+                        self._state.note_error(e)
+                        self._notify_all()
                     return
-                if e.status == 410:
-                    # Indicates etcd RV compaction aged our resourceVersion out of the apiserver's watch cache,
-                    # so the watch can't continue. Re-list, reconcile the cache (catches events that occurred while there
-                    # was no watch), and continue watching from the new list's resourceVersion.
-                    relist = True
-                    continue
-                if batch_utils.is_retryable_status(e.status):
-                    # Likely transient: retry the re-list, or the watch from the last-seen resourceVersion.
-                    failures += 1
-                    self._watch_stop.wait(batch_utils.retry_delay(failures, e))
-                    continue
-                # Response codes outside of this (e.g. 403, 404) are not recoverable
-                # by retrying, so we error then exit
-                with self._lock:
-                    self._state.note_error(e)
-                    self._notify_all()
-                return
-            except Exception as e:
-                if self._watch_stop.is_set():
+                except Exception as e:
+                    if self._watch_stop.is_set():
+                        return
+                    if _is_transport_error(e):
+                        # Likely transient network-level failure so retry
+                        failures += 1
+                        self._watch_stop.wait(batch_utils.retry_delay(failures, e))
+                        continue
+                    # Anything else (e.g. a certificate error) is not known to be transient, so surface it
+                    # via err() instead of leaving the thread dead with err() still None.
+                    with self._lock:
+                        self._state.note_error(e)
+                        self._notify_all()
                     return
-                if _is_transport_error(e):
-                    # Likely transient network-level failure so retry
-                    failures += 1
-                    self._watch_stop.wait(batch_utils.retry_delay(failures, e))
-                    continue
-                # Anything else (e.g. a certificate error) is not known to be transient, so surface it
-                # via err() instead of leaving the thread dead with err() still None.
-                with self._lock:
-                    self._state.note_error(e)
-                    self._notify_all()
-                return
+        finally:
+            # Leave no late-claim delete running once the watch loop ends.
+            self._drain_watch_deletes()
 
     def _renew_loop(self) -> None:
         """Background lease renewal loop: renews at roughly 1/3 of lease duration

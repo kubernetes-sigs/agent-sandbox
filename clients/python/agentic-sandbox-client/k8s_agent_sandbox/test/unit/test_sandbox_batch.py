@@ -3180,51 +3180,54 @@ class TestReleaseMembers(BaseClaimBatchTest):
                     in_flight_rpcs -= 1
                     in_flight_deletes -= 1
 
-        def sleep_on_retry(_seconds):
-            delete_sleeping.set()
-            finish_sleep.wait(10)
-
         helper.create_sandbox_claim.side_effect = create_claim
         helper.delete_sandbox_claim.side_effect = delete_claim
-        with (
-            patch(
-                "k8s_agent_sandbox.batch_utils.retry_delay",
-                side_effect=lambda _a, err=None: 10 if err is None else 1,
-            ),
-            patch.object(sandbox_batch, "time", SimpleNamespace(monotonic=time.monotonic, sleep=sleep_on_retry)),
+        with patch(
+            "k8s_agent_sandbox.batch_utils.retry_delay",
+            side_effect=lambda _a, err=None: 10 if err is None else 1,
         ):
             batch = self.claim([BatchGroup(warmpool="pool-a", size=4)], max_in_flight=2)
-            _wait_until(lambda: len(batch.members()) == 3 and create_entered.is_set())
-            m0, m1, m2 = batch.members()
+            real_wait = batch._stop_creating.wait
 
-            # b1-3's create holds one of the two slots, so only one release_member enters delete_sandbox_claim.
-            t0 = threading.Thread(target=batch.release_member, args=(m0,))
-            t1 = threading.Thread(target=batch.release_member, args=(m1,))
-            t0.start()
-            t1.start()
-            _wait_until(lambda: in_flight_deletes == 1 and len(batch.members()) == 1)
-            self.assertEqual(in_flight_rpcs, 2)
+            def wait_on_retry(seconds=None):
+                if threading.current_thread() not in batch._creators:
+                    delete_sleeping.set()
+                    finish_sleep.wait(10)
+                    return batch._stop_creating.is_set()
+                return real_wait(seconds)
 
-            # b1-3's create fails with 503 and frees its slot before backoff, so m1's delete runs in parallel.
-            release_create.set()
-            _wait_until(lambda: in_flight_deletes == 2)
-            self.assertEqual(in_flight_rpcs, 2)
+            with patch.object(batch._stop_creating, "wait", side_effect=wait_on_retry):
+                _wait_until(lambda: len(batch.members()) == 3 and create_entered.is_set())
+                m0, m1, m2 = batch.members()
 
-            # m2 waits until m0 fails with 503 and releases its slot before sleeping, then finishes while m0 sleeps.
-            t2 = threading.Thread(target=batch.release_member, args=(m2,))
-            t2.start()
-            _wait_until(lambda: batch.members() == [])
-            self.assertEqual(in_flight_deletes, 2)
-            fail_m0.set()
-            self.assertTrue(delete_sleeping.wait(5))
-            t2.join(timeout=2)
-            self.assertFalse(t2.is_alive())
-            finish_m1.set()
-            finish_sleep.set()
-            batch._stop_creating.set()
-            for thread in (t0, t1):
-                thread.join(timeout=5)
-            _wait_until(lambda: not any(c.is_alive() for c in batch._creators))
+                # b1-3's create holds one of the two slots, so only one release_member enters delete_sandbox_claim.
+                t0 = threading.Thread(target=batch.release_member, args=(m0,))
+                t1 = threading.Thread(target=batch.release_member, args=(m1,))
+                t0.start()
+                t1.start()
+                _wait_until(lambda: in_flight_deletes == 1 and len(batch.members()) == 1)
+                self.assertEqual(in_flight_rpcs, 2)
+
+                # b1-3's create fails with 503 and frees its slot before backoff, so m1's delete runs in parallel.
+                release_create.set()
+                _wait_until(lambda: in_flight_deletes == 2)
+                self.assertEqual(in_flight_rpcs, 2)
+
+                # m2 waits until m0 fails with 503 and releases its slot before sleeping, then finishes while m0 sleeps.
+                t2 = threading.Thread(target=batch.release_member, args=(m2,))
+                t2.start()
+                _wait_until(lambda: batch.members() == [])
+                self.assertEqual(in_flight_deletes, 2)
+                fail_m0.set()
+                self.assertTrue(delete_sleeping.wait(5))
+                t2.join(timeout=2)
+                self.assertFalse(t2.is_alive())
+                finish_m1.set()
+                finish_sleep.set()
+                batch._stop_creating.set()
+                for thread in (t0, t1):
+                    thread.join(timeout=5)
+                _wait_until(lambda: not any(c.is_alive() for c in batch._creators))
         self.assertEqual((peak_rpcs, peak_deletes), (2, 2))
 
         with self.subTest("release_not_ready respects max_in_flight"):
@@ -3405,7 +3408,7 @@ class TestReleaseMembers(BaseClaimBatchTest):
                 raise k8s_client.ApiException(status=503)
 
             helper.delete_sandbox_claim.side_effect = fail_after_detach
-            sleep_mock = MagicMock()
+            wait_mock = MagicMock()
             release_error: BaseException | None = None
 
             def run_release():
@@ -3415,7 +3418,7 @@ class TestReleaseMembers(BaseClaimBatchTest):
                 except BaseException as e:
                     release_error = e
 
-            with patch.object(sandbox_batch, "time", SimpleNamespace(monotonic=time.monotonic, sleep=sleep_mock)):
+            with patch.object(handle._stop_creating, "wait", wait_mock):
                 release_thread = threading.Thread(target=run_release)
                 release_thread.start()
                 self.assertTrue(in_delete.wait(5))
@@ -3426,7 +3429,7 @@ class TestReleaseMembers(BaseClaimBatchTest):
                 release_thread.join(timeout=5)
                 detach_thread.join(timeout=5)
             self.assertIsInstance(release_error, BatchError)
-            sleep_mock.assert_not_called()
+            wait_mock.assert_not_called()
             helper.delete_sandbox_claim.assert_called_once()
             self.assertTrue(handle._lease_released)
 
@@ -3749,12 +3752,12 @@ class TestReleaseMembers(BaseClaimBatchTest):
                 raise k8s_client.ApiException(status=503)
 
             helper.delete_sandbox_claim.side_effect = fail_and_stop
-            sleep_mock = MagicMock()
-            with patch.object(sandbox_batch, "time", SimpleNamespace(monotonic=time.monotonic, sleep=sleep_mock)):
+            wait_mock = MagicMock()
+            with patch.object(handle._stop_creating, "wait", wait_mock):
                 with self.assertRaises(BatchError) as cm:
                     handle.release_member(handle.members()[0])
             self.assertIs(cm.exception.__cause__, cause)
-            sleep_mock.assert_not_called()
+            wait_mock.assert_not_called()
             helper.delete_sandbox_claim.assert_called_once()
 
         with self.subTest("err set during retry sleep"):
@@ -3762,9 +3765,9 @@ class TestReleaseMembers(BaseClaimBatchTest):
             handle = handle_with_a_pending_member()
             helper.delete_sandbox_claim.side_effect = k8s_client.ApiException(status=503)
             with patch.object(
-                sandbox_batch,
-                "time",
-                SimpleNamespace(monotonic=time.monotonic, sleep=lambda _s: setattr(handle, "_lease_error", cause)),
+                handle._stop_creating,
+                "wait",
+                side_effect=lambda _s=None: setattr(handle, "_lease_error", cause) or False,
             ):
                 with self.assertRaises(BatchError) as cm:
                     handle.release_member(handle.members()[0])
@@ -3811,6 +3814,86 @@ class TestReleaseMembers(BaseClaimBatchTest):
             helper.delete_sandbox_claims_by_label.assert_called_once()
             helper.count_live_sandbox_claims.assert_called_once()
             sleep_mock.assert_not_called()
+
+    def test_watch_loop_deletes_late_fill_claims_in_released_pools_once(self):
+        helper = self.cluster.helper
+        handle = _make_handle(self.client, groups=[BatchGroup(warmpool="pool-a", size=3, min_ready=1)])
+        handle._state.upsert_claim(
+            _claim("b1-0", conditions=_READY, sandbox={"name": "sbx-0"}, annotations=_FILL)
+        )
+        self.assertEqual([m.claim_name for m in handle.wait_for_quorum()], ["b1-0"])
+        handle.release_not_ready()
+        helper.delete_sandbox_claim.assert_not_called()
+
+        terminating = _claim("b1-2", conditions=_NOT_READY, annotations=_FILL)
+        terminating["metadata"]["deletionTimestamp"] = "2026-03-01T00:00:00Z"
+
+        def stream(*_args, **_kwargs):
+            yield {
+                "type": "ADDED",
+                "object": _claim("b1-1", conditions=_NOT_READY, annotations=_FILL),
+            }
+            yield {"type": "ADDED", "object": terminating}
+            yield {
+                "type": "MODIFIED",
+                "object": _claim("b1-1", conditions=_READY, sandbox={"name": "sbx-1"}, annotations=_FILL),
+            }
+            handle._watch_stop.set()
+
+        helper.watch_sandbox_claims.side_effect = stream
+        handle._watch_loop()
+        self.assertEqual([c.args[0] for c in helper.delete_sandbox_claim.call_args_list], ["b1-1"])
+        self.assertEqual([m.claim_name for m in handle.members()], ["b1-0"])
+
+    def test_watch_deletes_start_before_they_are_tracked(self):
+        # _stop_background_threads joins every tracked delete thread, and joining a thread that
+        # hasn't started raises, so a thread must start before it enters _watch_delete_threads.
+        handle = _make_handle(self.client, groups=[BatchGroup(warmpool="pool-a", size=1)])
+        handle._state._watch_deletes.append("b1-0")
+        with handle._lock:
+            handle._start_watch_deletes_locked()
+            tracked = list(handle._watch_delete_threads)
+            self.assertEqual(len(tracked), 1)
+            # join() raises RuntimeError on a thread that hasn't started.
+            tracked[0].join(timeout=0)
+        tracked[0].join(timeout=3.0)
+        self.assertFalse(tracked[0].is_alive())
+
+    def test_lease_loss_wakes_delete_claim_retry_sleep(self):
+        helper = self.cluster.helper
+        handle = _make_handle(self.client)
+        handle._state.upsert_claim(_claim("b1-0", conditions=_READY, sandbox={"name": "sbx-0"}))
+        member = handle.members()[0]
+        helper.delete_sandbox_claim.side_effect = k8s_client.ApiException(status=503)
+        entered_retry = threading.Event()
+        lease_error = BatchLeaseExpiredError("lease gone")
+        errors: list[BaseException] = []
+
+        def retry_delay(_attempt, _err=None):
+            entered_retry.set()
+            return 10.0
+
+        def run_release():
+            try:
+                handle.release_member(member)
+            except BaseException as exc:
+                errors.append(exc)
+
+        with patch("k8s_agent_sandbox.batch_utils.retry_delay", side_effect=retry_delay):
+            started = time.monotonic()
+            worker = threading.Thread(target=run_release)
+            worker.start()
+            self.assertTrue(entered_retry.wait(5))
+            handle._stop_renewal(lease_error)
+            worker.join(timeout=3.0)
+            elapsed = time.monotonic() - started
+
+        self.assertFalse(worker.is_alive())
+        self.assertLess(elapsed, 2.5)
+        self.assertEqual(helper.delete_sandbox_claim.call_count, 1)
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], BatchError)
+        self.assertIs(errors[0].__cause__, lease_error)
 
 
 class TestAcquire(BaseClaimBatchTest):

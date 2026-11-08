@@ -254,6 +254,9 @@ class BatchState:
         # Claims the caller released, including fill creates it stopped. They are gone from members(),
         # are never handed out, and later watch events for them are ignored.
         self._released: set[str] = set()
+        # Released claims the watch hasn't seen yet, such as a fill create still in flight when the
+        # caller released its pool. If one lands later, the watch queues its delete.
+        self._released_unseen: set[str] = set()
         self._released_count: dict[str, int] = dict.fromkeys(self._group_by_pool, 0)
         # Pools whose fill creates the caller stopped with release_group() or release_not_ready().
         self._fill_stopped_pools: set[str] = set()
@@ -261,6 +264,8 @@ class BatchState:
         # older delete finishing after a retry recreated the claim leaves the new delete pending.
         self._pending_deletes: dict[str, int] = {}
         self._next_delete_seq = 0
+        # Late claims the watch found for released pools, which the handle deletes in the background.
+        self._watch_deletes: list[str] = []
         # The pool of each acquire() claim that isn't Ready yet, so release_group() can release it
         # before the watch has seen it.
         self._acquiring: dict[str, str] = {}
@@ -286,12 +291,28 @@ class BatchState:
             self.upsert_claim(claim_obj)
         self._pending_launch.clear()
         self._exhausted_pools.clear()
+        self._watch_deletes.clear()
+
+    def take_watch_deletes(self) -> list[str]:
+        """Returns and clears claims that arrived on the watch or re-list after their group's fill stopped."""
+        names = self._watch_deletes
+        self._watch_deletes = []
+        return names
 
     def upsert_claim(self, claim_obj: dict[str, Any]) -> Member | None:
         """Derives a ``Member`` from a claim and inserts or updates it."""
         metadata = claim_obj.get("metadata") or {}
         claim_name = metadata.get("name", "")
         if claim_name in self._released:
+            if claim_name in self._released_unseen:
+                # Count the late claim's ordinal so a later acquire() never reuses its name.
+                self._released_unseen.discard(claim_name)
+                ordinal = parse_ordinal(self.batch_id, claim_name)
+                if ordinal is not None:
+                    self._next_ordinal = max(self._next_ordinal, ordinal + 1)
+                if not metadata.get("deletionTimestamp"):
+                    self._need_delete(claim_name)
+                    self._watch_deletes.append(claim_name)
             return None
         ordinal = parse_ordinal(self.batch_id, claim_name)
         if ordinal is not None:
@@ -308,9 +329,12 @@ class BatchState:
                 self._lost[member.warmpool] -= 1
                 self._never_created -= 1
             if previous is None and self.fill_creates_released(member.warmpool):
-                # The create was sent before the caller stopped it and landed afterwards. Its
-                # creator deletes the claim.
-                self.release_claim(claim_name, member.warmpool)
+                # A creator sent the claim before the caller stopped the fill, and it landed afterwards.
+                # Queue a background delete unless the claim is already terminating.
+                needs_delete = not metadata.get("deletionTimestamp")
+                self.release_claim(claim_name, member.warmpool, needs_delete=needs_delete)
+                if needs_delete:
+                    self._watch_deletes.append(claim_name)
                 return None
         # Settle each claim's initial warm-vs-cold launch once: leave _pending_launch as soon as
         # the controller writes a warm, terminal, or cold status so booting cold pods do not linger
@@ -367,11 +391,14 @@ class BatchState:
         """
         self._pending_launch.discard(claim_name)
         if needs_delete:
+            self._released_unseen.discard(claim_name)
             self._need_delete(claim_name)
         if claim_name in self._released:
             return
         self._released.add(claim_name)
         member = self._members.pop(claim_name, None)
+        if member is None and not needs_delete:
+            self._released_unseen.add(claim_name)
         # Apart from acquire() claims, only a group's fill creates release a claim before the
         # watch sees it.
         fill = (
@@ -536,12 +563,15 @@ class BatchState:
             # label delete, and a create retry (retried) can land after release_member()'s
             # name delete and recreate the claim, so both still need a follow-up delete.
             if created and (was_acquiring or retried):
+                self._released_unseen.discard(claim_name)
                 self._need_delete(claim_name)
                 return True
             return False
         self._released.add(claim_name)
         member = self._members.pop(claim_name, None)
         if not created:
+            if member is None:
+                self._released_unseen.add(claim_name)
             return False
         if member is None:
             # The create succeeded, but the watch hasn't seen the claim yet.
@@ -709,6 +739,7 @@ class BatchState:
         """Gives every group without an outcome a ``BatchTimeoutError``."""
         for pool in self._group_by_pool:
             if pool not in self._group_outcomes:
+                self._resolved.update(self._waiting[pool])
                 self._waiting[pool].clear()
                 self._set_group_outcome(GroupOutcome(warmpool=pool, error=BatchTimeoutError("Group quorum timed out")))
 

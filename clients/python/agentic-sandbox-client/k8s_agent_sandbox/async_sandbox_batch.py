@@ -192,6 +192,9 @@ class AsyncSandboxBatch:
         self._lease_expires_at = lease_renewed_at + lease_duration
         self._watch_task: asyncio.Task[None] | None = None
         self._renew_task: asyncio.Task[None] | None = None
+        # Deletes the watch starts for claims that land after their pool was released, tracked so
+        # detach() and release() wait for them.
+        self._watch_delete_tasks: set[asyncio.Task[None]] = set()
 
         # Notified on every change consumers wait for: watch events, create failures, errors,
         # the fill deadline being set, and detach/release.
@@ -498,6 +501,13 @@ class AsyncSandboxBatch:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        # Cancel deletes the watch started for late claims, so none runs after this handle gives
+        # up the Lease.
+        for delete_task in list(self._watch_delete_tasks):
+            delete_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await delete_task
+        self._watch_delete_tasks.clear()
         self._watch_task = None
         self._renew_task = None
 
@@ -1279,7 +1289,8 @@ class AsyncSandboxBatch:
         kept: deque[tuple[str, BatchGroup]] = deque()
         for claim_name, group in self._create_plan:
             if warmpool is None or group.warmpool == warmpool:
-                self._state.release_claim(claim_name, group.warmpool)
+                if warmpool is not None or self._state.get_member(claim_name) is None:
+                    self._state.release_claim(claim_name, group.warmpool)
             else:
                 kept.append((claim_name, group))
         self._create_plan = kept
@@ -1293,6 +1304,7 @@ class AsyncSandboxBatch:
         """Deletes one released claim, retrying transient errors. A claim already gone counts as deleted."""
         attempt = 1
         while True:
+            await self._check_lease_held()
             try:
                 # Scope the pool slot and active-delete guard to each HTTP attempt so a sleeping
                 # retry neither holds a max_in_flight slot nor blocks detach() or release().
@@ -1320,7 +1332,9 @@ class AsyncSandboxBatch:
                 if attempt >= batch_utils.BATCH_DELETE_ATTEMPTS or not _is_transient_error(e):
                     raise
                 await self._check_lease_held()
-                await asyncio.sleep(batch_utils.retry_delay(attempt, e))
+                # Wake as soon as the handle stops instead of sleeping out the backoff, then report why.
+                if await self._wait_for_stop(batch_utils.retry_delay(attempt, e)):
+                    await self._check_lease_held()
                 attempt += 1
         async with self._lock:
             self._state.note_deleted(claim_name, seq)
@@ -1567,6 +1581,53 @@ class AsyncSandboxBatch:
                 self._lease_released = True
         self._client._unregister_batch(self)
 
+    def _take_watch_deletes_locked(self) -> list[str]:
+        """Returns claims that landed after their pool was released, or none once this handle can
+        no longer delete claims.
+        """
+        names = self._state.take_watch_deletes()
+        if not names:
+            return []
+        self._expire_lease_if_due()
+        if self._detached or self._lease_error is not None:
+            return []
+        return names
+
+    def _start_watch_deletes(self, names: list[str]) -> None:
+        """Deletes late claims in a separate task so the watch doesn't block on HTTP deletes."""
+        task = asyncio.create_task(
+            self._run_watch_deletes(names),
+            name=f"batch-{self.batch_id}-watch-delete",
+        )
+        self._watch_delete_tasks.add(task)
+        task.add_done_callback(self._watch_delete_tasks.discard)
+
+    async def _run_watch_deletes(self, names: list[str]) -> None:
+        """Deletes each late claim. ``BatchError`` means this handle detached or lost the Lease,
+        which ends cleanup, so it is not logged.
+        """
+        for name in names:
+            try:
+                await self._delete_claim(name)
+            except asyncio.CancelledError:
+                raise
+            except BatchError:
+                pass
+            except Exception as e:
+                logger.warning(f"Batch '{self.batch_id}' failed to delete late watch claim '{name}': {e}")
+
+    async def _drain_watch_deletes(self) -> None:
+        """Waits for the late-claim deletes this watch started, cancelling them first once this
+        handle can no longer delete claims.
+        """
+        if not self._watch_delete_tasks:
+            return
+        pending_tasks = list(self._watch_delete_tasks)
+        if self._detached or self._lease_error is not None:
+            for task in pending_tasks:
+                task.cancel()
+        await asyncio.gather(*pending_tasks, return_exceptions=True)
+
     async def _watch_loop(self) -> None:
         """Background watch loop which keeps ``self._state`` in sync with the batch's claims.
 
@@ -1579,90 +1640,101 @@ class AsyncSandboxBatch:
         relist = False
         # Consecutive failed attempts, which set the retry backoff.
         failures = 0
-        while True:
-            try:
-                if relist:
-                    items, rv = await self._client.k8s_helper.list_sandbox_claim_objects(
-                        self.namespace, label_selector, _request_timeout=batch_utils.BATCH_COLLECTION_REQUEST_TIMEOUT_SECONDS
-                    )
-                    async with self._lock:
-                        self._state.resync_from_list(items)
-                        self._exhaust_warm_credit()
-                        self._notify_all()
-                        stale = self._pop_stale_connections(list(self._connected))
-                    await self._close_connections(stale, "a re-list")
-                    relist = False
-                watch_started = time.monotonic()
-                got_event = False
-                async with contextlib.aclosing(
-                    self._client.k8s_helper.watch_sandbox_claims(
-                        self.namespace,
-                        label_selector,
-                        rv,
-                        _WATCH_TIMEOUT_SECONDS,
-                        _request_timeout=_WATCH_REQUEST_TIMEOUT,
-                    )
-                ) as stream:
-                    async for event in stream:
-                        failures = 0
-                        got_event = True
-                        event_type = event.get("type")
-                        obj = event.get("object") or {}
-                        seen_rv = (obj.get("metadata") or {}).get("resourceVersion")
-                        if seen_rv:
-                            rv = seen_rv
-                        if event_type == "BOOKMARK":
-                            continue
-                        claim_name = (obj.get("metadata") or {}).get("name", "")
+        try:
+            while True:
+                try:
+                    if relist:
+                        items, rv = await self._client.k8s_helper.list_sandbox_claim_objects(
+                            self.namespace, label_selector, _request_timeout=batch_utils.BATCH_COLLECTION_REQUEST_TIMEOUT_SECONDS
+                        )
                         async with self._lock:
-                            if event_type == "DELETED":
-                                if self._state.mark_lost(claim_name) is not None:
-                                    self._wake_acquire(claim_name)
-                            elif event_type in ("ADDED", "MODIFIED"):
-                                member = self._state.upsert_claim(obj)
-                                self._exhaust_warm_credit()
-                                if member is not None and member.state is not MemberState.PENDING:
-                                    self._wake_acquire(claim_name)
-                            self._changed.notify_all()
-                            stale = self._pop_stale_connections([claim_name])
-                        await self._close_connections(stale, "a watch event")
-                if not got_event and time.monotonic() - watch_started < _SHORT_WATCH_SECONDS:
-                    failures += 1
-                    await asyncio.sleep(batch_utils.retry_delay(failures, None))
-                    continue
-                # The watch ended at its timeout, which is not a failure.
-                failures = 0
-            except asyncio.CancelledError:
-                raise
-            except client.ApiException as e:
-                # Indicates etcd RV compaction aged our resourceVersion out of the apiserver's watch cache,
-                # so the watch can't continue. Re-list, reconcile the cache (catches events that occurred while there
-                # was no watch), and continue watching from the new list's resourceVersion.
-                if e.status == 410:
-                    relist = True
-                    continue
-                if batch_utils.is_retryable_status(e.status):
-                    # Likely transient: retry the re-list, or the watch from the last-seen resourceVersion.
-                    failures += 1
-                    await asyncio.sleep(batch_utils.retry_delay(failures, e))
-                    continue
-                # Response codes outside of this (e.g. 403, 404) are not recoverable
-                # by retrying, so we error then exit
-                async with self._lock:
-                    self._state.note_error(e)
-                    self._notify_all()
-                return
-            except Exception as e:
-                if _is_transport_error(e):
-                    # Likely transient network-level failure so retry
-                    failures += 1
-                    await asyncio.sleep(batch_utils.retry_delay(failures, e))
-                    continue
-                # Anything else is not known to be transient, so surface it via err().
-                async with self._lock:
-                    self._state.note_error(e)
-                    self._notify_all()
-                return
+                            self._state.resync_from_list(items)
+                            self._exhaust_warm_credit()
+                            watch_deletes = self._take_watch_deletes_locked()
+                            self._notify_all()
+                            stale = self._pop_stale_connections(list(self._connected))
+                        if watch_deletes:
+                            self._start_watch_deletes(watch_deletes)
+                        await self._close_connections(stale, "a re-list")
+                        relist = False
+                    watch_started = time.monotonic()
+                    got_event = False
+                    async with contextlib.aclosing(
+                        self._client.k8s_helper.watch_sandbox_claims(
+                            self.namespace,
+                            label_selector,
+                            rv,
+                            _WATCH_TIMEOUT_SECONDS,
+                            _request_timeout=_WATCH_REQUEST_TIMEOUT,
+                        )
+                    ) as stream:
+                        async for event in stream:
+                            failures = 0
+                            got_event = True
+                            event_type = event.get("type")
+                            obj = event.get("object") or {}
+                            seen_rv = (obj.get("metadata") or {}).get("resourceVersion")
+                            if seen_rv:
+                                rv = seen_rv
+                            if event_type == "BOOKMARK":
+                                continue
+                            claim_name = (obj.get("metadata") or {}).get("name", "")
+                            watch_deletes = []
+                            async with self._lock:
+                                if event_type == "DELETED":
+                                    if self._state.mark_lost(claim_name) is not None:
+                                        self._wake_acquire(claim_name)
+                                elif event_type in ("ADDED", "MODIFIED"):
+                                    member = self._state.upsert_claim(obj)
+                                    self._exhaust_warm_credit()
+                                    watch_deletes = self._take_watch_deletes_locked()
+                                    if member is not None and member.state is not MemberState.PENDING:
+                                        self._wake_acquire(claim_name)
+                                self._changed.notify_all()
+                                stale = self._pop_stale_connections([claim_name])
+                            if watch_deletes:
+                                self._start_watch_deletes(watch_deletes)
+                            await self._close_connections(stale, "a watch event")
+                    if not got_event and time.monotonic() - watch_started < _SHORT_WATCH_SECONDS:
+                        failures += 1
+                        await asyncio.sleep(batch_utils.retry_delay(failures, None))
+                        continue
+                    # The watch ended at its timeout, which is not a failure.
+                    failures = 0
+                except asyncio.CancelledError:
+                    raise
+                except client.ApiException as e:
+                    # Indicates etcd RV compaction aged our resourceVersion out of the apiserver's watch cache,
+                    # so the watch can't continue. Re-list, reconcile the cache (catches events that occurred while there
+                    # was no watch), and continue watching from the new list's resourceVersion.
+                    if e.status == 410:
+                        relist = True
+                        continue
+                    if batch_utils.is_retryable_status(e.status):
+                        # Likely transient: retry the re-list, or the watch from the last-seen resourceVersion.
+                        failures += 1
+                        await asyncio.sleep(batch_utils.retry_delay(failures, e))
+                        continue
+                    # Response codes outside of this (e.g. 403, 404) are not recoverable
+                    # by retrying, so we error then exit
+                    async with self._lock:
+                        self._state.note_error(e)
+                        self._notify_all()
+                    return
+                except Exception as e:
+                    if _is_transport_error(e):
+                        # Likely transient network-level failure so retry
+                        failures += 1
+                        await asyncio.sleep(batch_utils.retry_delay(failures, e))
+                        continue
+                    # Anything else is not known to be transient, so surface it via err().
+                    async with self._lock:
+                        self._state.note_error(e)
+                        self._notify_all()
+                    return
+        finally:
+            # Leave no late-claim delete running once the watch loop ends.
+            await self._drain_watch_deletes()
 
     async def _renew_loop(self) -> None:
         """Background lease renewal loop: renews at roughly 1/3 of lease duration

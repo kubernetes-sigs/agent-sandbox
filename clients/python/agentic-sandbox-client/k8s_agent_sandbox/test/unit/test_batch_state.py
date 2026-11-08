@@ -680,6 +680,19 @@ class TestSettle(unittest.TestCase):
         state.upsert_claim(_pending("b1-3"))
         self.assertTrue(state.fill_settled())
 
+    def test_members_dropped_when_their_group_times_out_count_when_they_stop_being_ready(self):
+        state = _state(BatchGroup(warmpool="pool-a", size=2, min_ready=2), mode=batch_state.ConsumerMode.GROUP)
+        state.upsert_claim(_ready("b1-0"))
+        state.upsert_claim(_pending("b1-1"))
+        state.expire_fill()
+        [outcome] = _drain_groups(state)
+        self.assertIsInstance(outcome.error, BatchTimeoutError)
+        self.assertIn("b1-0", state._resolved)
+
+        state.upsert_claim(_pending("b1-0"))
+        state.upsert_claim(_claim("b1-1", conditions=_TERMINAL, annotations=_FILL))
+        self.assertTrue(state.fill_settled())
+
 
 class TestReattachedFill(unittest.TestCase):
 
@@ -843,6 +856,27 @@ class TestRelease(unittest.TestCase):
         self.assertEqual(outcomes["pool-a"].error.released, 1)  # Decided at the first release.
         self.assertEqual([m.claim_name for m in outcomes["pool-b"].members], ["b1-3"])
         self.assertTrue(state.fill_settled())
+
+    def test_late_fill_claims_in_released_pools_queue_watch_deletes_once_unless_terminating(self):
+        state = _state(BatchGroup(warmpool="pool-a", size=4, min_ready=1))
+        state.upsert_claim(_ready("b1-0"))
+        # Simulate a creator thread pre-tombstoning an unseen claim before stopping.
+        state.release_claim("b1-3", "pool-a")
+        state.release_not_ready()
+        self.assertEqual(state.take_watch_deletes(), [])
+
+        terminating = _pending("b1-2")
+        terminating["metadata"]["deletionTimestamp"] = "2026-03-01T00:00:00Z"
+        state.upsert_claim(_pending("b1-1"))
+        state.upsert_claim(terminating)
+        state.upsert_claim(_pending("b1-3"))
+        self.assertEqual(state.take_watch_deletes(), ["b1-1", "b1-3"])
+        self.assertEqual(state.take_watch_deletes(), [])
+
+        # Subsequent MODIFIED events for already-tombstoned claims never re-queue deletes.
+        state.upsert_claim(_ready("b1-1"))
+        state.upsert_claim(_ready("b1-3"))
+        self.assertEqual(state.take_watch_deletes(), [])
 
 
 class TestSizeZeroGroups(unittest.TestCase):

@@ -130,3 +130,38 @@ func TestAccessLogMiddleware_UsesResolvedIdentityNotHeaders(t *testing.T) {
 		t.Errorf("sandbox_namespace field: got %v (present=%v), want %q", v, ok, "poc-agent-sandbox")
 	}
 }
+
+func TestAccessLogMiddleware_GRPCStatusLabelPrefersContext(t *testing.T) {
+	// gRPC-Web responses carry the final status in a body trailer frame,
+	// never in a response header, so the proxy records it on Labels and
+	// the access log must prefer that over header sniffing.
+	for _, tc := range []struct {
+		name   string
+		label  string
+		header string
+		want   string
+	}{
+		{"label only", "5", "", "5"},
+		{"label wins over header", "0", "13", "0"},
+		{"header fallback", "", "7", "7"},
+		{"neither", "", "", "unknown"},
+		{"invalid label falls back to header", "bogus", "7", "7"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var line capturedLine
+			inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				labels := LabelsFromContext(r.Context())
+				labels.GRPC = true
+				labels.GRPCStatusCode = tc.label
+				if tc.header != "" {
+					w.Header().Set("Grpc-Status", tc.header)
+				}
+			})
+			h := AccessLogMiddleware(newCapturingLogger(&line), nil)(inner)
+			h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/service/Method", nil))
+			if got, ok := line.value("grpc_status"); !ok || got != tc.want {
+				t.Fatalf("logged grpc_status = %v, want %s", got, tc.want)
+			}
+		})
+	}
+}

@@ -124,6 +124,17 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 			"path even if it's otherwise malformed (bad namespace/id/port), "+
 			"and is never retried against headers. Pick a prefix no real "+
 			"in-sandbox route needs to answer under.")
+	fs.BoolVar(&c.PathRoutingPreservePrefix, "path-routing-preserve-prefix", c.PathRoutingPreservePrefix,
+		"Forward path-routed requests with the full <prefix>/<namespace>/<id>/<port>/ "+
+			"path intact, instead of stripping it. Use for sandbox UIs configured to serve "+
+			"under their own base path (e.g. JupyterLab --ServerApp.base_url), which emit "+
+			"prefixed URLs themselves. Requires --path-routing-prefix. When off (default), "+
+			"upstream Location and Set-Cookie paths are rewritten under the prefix instead.")
+	fs.BoolVar(&c.PathRoutingRewriteResponses, "path-routing-rewrite-responses", c.PathRoutingRewriteResponses,
+		"Keep path-routed responses under the routing prefix: rewrite upstream Set-Cookie "+
+			"Path in both modes, and Location too unless --path-routing-preserve-prefix is set. "+
+			"On by default; disable only for an upstream that must see its redirects and "+
+			"cookies unmodified.")
 	fs.IntVar(&c.UpstreamMaxRetries, "upstream-max-retries", c.UpstreamMaxRetries,
 		"Number of additional dial attempts before returning 502. Only dial-class "+
 			"failures (DNS, connection refused) are retried. Smooths the case "+
@@ -223,6 +234,17 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 			"client-supplied one first; otherwise a client with direct "+
 			"network access to the router could forge its own scheme. Has "+
 			"no effect without --authz-cookie-name.")
+	stringSliceVar(fs, &c.GRPCWebAllowedOrigins, "grpc-web-allowed-origins",
+		"Comma-separated allowlist of scheme://host[:port] browser origins "+
+			"permitted to call the router with gRPC-Web (Content-Type "+
+			"application/grpc-web). Listed origins get CORS response headers "+
+			"(same-origin requests are always allowed those too) and their "+
+			"CORS preflights are answered by the router; every other OPTIONS "+
+			"request is proxied unchanged. When empty (the default), "+
+			"cross-origin browser callers get no CORS headers and the browser "+
+			"blocks the response; non-browser clients are unaffected either "+
+			"way. This list gates only gRPC-Web traffic — plain HTTP CORS "+
+			"behavior is unchanged.")
 
 	fs.BoolVar(&c.CacheEnabled, "cache-enabled", c.CacheEnabled,
 		"Enable the in-process Pod-IP cache (KEP-NNNN fast path). When on, "+

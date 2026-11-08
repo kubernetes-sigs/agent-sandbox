@@ -26,6 +26,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from unittest.mock import MagicMock, patch, ANY
 
+import pytest
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -118,6 +119,7 @@ class TestSandboxClient(unittest.TestCase):
     def test_get_sandbox_existing_active(self):
         mock_sandbox = MagicMock()
         mock_sandbox.is_active = True
+        mock_sandbox.sandbox_id = "resolved-id"
         self.client._active_connection_sandboxes[("test-namespace", "test-claim")] = mock_sandbox
         
         self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
@@ -130,6 +132,7 @@ class TestSandboxClient(unittest.TestCase):
 
         mock_inactive_sandbox = MagicMock()
         mock_inactive_sandbox.is_active = False
+        mock_inactive_sandbox.sandbox_id = "resolved-id"
         self.client._active_connection_sandboxes[("test-namespace", "test-claim")] = mock_inactive_sandbox
         
         self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
@@ -144,6 +147,54 @@ class TestSandboxClient(unittest.TestCase):
         self.assertEqual(self.client._active_connection_sandboxes[("test-namespace", "test-claim")], mock_new_sandbox)
         self.mock_k8s_helper.get_sandbox.assert_called_with("resolved-id", "test-namespace")
         self.mock_sandbox_class.assert_called_once()
+
+    def test_get_sandbox_replaces_handle_when_claim_rebinds(self):
+        """A claim deleted and re-created under the same name binds to a new
+        sandbox, so get_sandbox must not return the old sandbox's handle."""
+        self.mock_k8s_helper.resolve_sandbox_name.return_value = "python-aaaaa"
+        self.mock_k8s_helper.get_sandbox.return_value = {"metadata": {}}
+        old_handle = MagicMock()
+        old_handle.is_active = True
+        old_handle.sandbox_id = "python-aaaaa"
+        new_handle = MagicMock()
+        self.mock_sandbox_class.side_effect = [old_handle, new_handle]
+
+        self.assertIs(self.client.get_sandbox("c1", "ns"), old_handle)
+
+        # The claim is deleted and re-created; the warm pool binds it to a new sandbox.
+        self.mock_k8s_helper.resolve_sandbox_name.return_value = "python-bbbbb"
+
+        sandbox = self.client.get_sandbox("c1", "ns")
+
+        self.assertIs(sandbox, new_handle)
+        self.assertEqual(self.mock_sandbox_class.call_args.kwargs["sandbox_id"], "python-bbbbb")
+        self.assertIs(self.client._active_connection_sandboxes[("ns", "c1")], new_handle)
+        # The stale handle is closed locally; nothing is deleted server-side.
+        old_handle.close_connection.assert_called_once_with()
+        old_handle.terminate.assert_not_called()
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_called()
+
+    def test_get_sandbox_replaces_stale_handle_when_close_fails(self):
+        """A stale handle that fails to close is still replaced, so the caller
+        gets a handle for the claim's current sandbox."""
+        self.mock_k8s_helper.resolve_sandbox_name.return_value = "python-bbbbb"
+        self.mock_k8s_helper.get_sandbox.return_value = {"metadata": {}}
+        stale_handle = MagicMock()
+        stale_handle.is_active = True
+        stale_handle.sandbox_id = "python-aaaaa"
+        stale_handle.close_connection.side_effect = RuntimeError("socket already gone")
+        self.client._active_connection_sandboxes[("ns", "c1")] = stale_handle
+        new_handle = MagicMock()
+        self.mock_sandbox_class.return_value = new_handle
+
+        with self.assertLogs("k8s_agent_sandbox.sandbox_client", level="ERROR") as logs:
+            sandbox = self.client.get_sandbox("c1", "ns")
+
+        self.assertIs(sandbox, new_handle)
+        self.assertEqual(self.mock_sandbox_class.call_args.kwargs["sandbox_id"], "python-bbbbb")
+        self.assertIs(self.client._active_connection_sandboxes[("ns", "c1")], new_handle)
+        stale_handle.close_connection.assert_called_once_with()
+        self.assertIn("socket already gone", logs.output[0])
 
     def test_get_sandbox_not_found_k8s_error(self):
         self.mock_k8s_helper.resolve_sandbox_name.side_effect = Exception("Not found")
@@ -1005,6 +1056,43 @@ def test_tracked_handle_does_not_keep_its_client_alive():
     finally:
         gc.enable()
         sandbox.close_connection()
+
+
+@pytest.mark.parametrize("tracked", [False, True], ids=["registry-empty", "registry-tracking"])
+def test_dropped_client_is_freed_and_its_exit_hook_still_cleans_up(tracked):
+    with patch('k8s_agent_sandbox.sandbox_client.K8sHelper'), \
+            patch('k8s_agent_sandbox.sandbox_client.atexit') as mock_atexit:
+        client = SandboxClient(
+            connection_config=SandboxDirectConnectionConfig(api_url="http://sandbox.invalid"), cleanup=True
+        )
+    exit_hook = mock_atexit.register.call_args.args[0]
+    client.sandbox_class = Sandbox
+    helper = client.k8s_helper
+    helper.wait_for_claim_ready.return_value = "sandbox-id"
+    claim = {"metadata": {"uid": "uid-kept", "resourceVersion": "1"}, "spec": {"warmPoolRef": {"name": "pool"}}}
+    with patch.object(client, '_create_claim', return_value=claim):
+        generated = client.create_sandbox("pool", "ns")
+        explicit = client.create_sandbox("pool", "ns", claim_name="kept")
+    generated_name = generated.claim_name
+    if not tracked:
+        generated.terminate()
+        explicit.terminate()
+    helper.delete_sandbox_claim.reset_mock()
+    # With the collector off, only reference counting can free the client.
+    gc.disable()
+    try:
+        client_ref = weakref.ref(client)
+        del client
+        assert client_ref() is None
+    finally:
+        gc.enable()
+    exit_hook()
+    if tracked:
+        helper.delete_sandbox_claim.assert_called_once_with(generated_name, "ns")
+    else:
+        helper.delete_sandbox_claim.assert_not_called()
+    assert not generated.is_active
+    assert not explicit.is_active
 
 
 if __name__ == '__main__':

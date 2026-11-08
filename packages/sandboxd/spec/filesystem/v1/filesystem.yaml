@@ -49,6 +49,7 @@ paths:
       description: >
         If the path points to a file, returns raw file bytes (application/octet-stream).
         If the path points to a directory, returns a structured directory listing (application/json).
+        Named pipes, devices, and other special files fail with 400.
         Pass type to fail with 409 instead when the path is not of the expected kind.
         Pass recursive=true to also list nested directories.
       parameters:
@@ -90,7 +91,7 @@ paths:
         "400":
           description: >
             The type, recursive, or max_depth query is invalid, or a recursive listing
-            exceeds 10000 entries
+            exceeds 10000 entries, or the path is a special file such as a named pipe
         "403":
           description: Path escapes sandbox root, or permission is denied during path lookup or file open
         "404":
@@ -170,6 +171,7 @@ paths:
           description: >
             If true, appends the body to the file, creating it if it does not exist.
             Readers can see a partial append, and concurrent appends can interleave.
+            An existing target must be a regular file; special files fail with 400.
         - name: If-None-Match
           in: header
           required: false

@@ -32,7 +32,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-recall-memory}"
-AGENT_SANDBOX_VERSION="${AGENT_SANDBOX_VERSION:-v1.0.6}"
+AGENT_SANDBOX_VERSION="${AGENT_SANDBOX_VERSION:-v1.0.9}"
 KUBECTL="kubectl --context kind-${KIND_CLUSTER_NAME}"
 
 now() { perl -MTime::HiRes=time -e 'printf "%.3f\n", time'; }

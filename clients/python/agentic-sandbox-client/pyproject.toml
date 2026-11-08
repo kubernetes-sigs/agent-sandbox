@@ -56,7 +56,7 @@ async = [
     "certifi",
     "kubernetes_asyncio<37.0.0",
 ]
-# Required for the sandboxd runtime (pod tunnel or direct in-cluster):
+# Required for the sandboxd runtime (Pod/router tunnel or direct in-cluster):
 # command execution runs over gRPC ProcessService. The generated process stubs
 # validate a protobuf runtime of at least 7.36.1. The legacy python-runtime
 # needs none of this.

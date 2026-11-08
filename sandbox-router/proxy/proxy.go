@@ -146,7 +146,28 @@ func (h *Handler) Close() {
 
 // ServeHTTP implements http.Handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	grpcRequest := isGRPCRequest(r)
+	kind := classifyRequest(r)
+	if kind == protoGRPCWebReject {
+		if labels := observability.LabelsFromContext(r.Context()); labels != nil {
+			labels.GRPC = true
+		}
+		// Stamp CORS before the error so a browser caller from an
+		// allowlisted origin can actually read why the variant was
+		// rejected instead of seeing an opaque CORS failure.
+		h.maybeSetCORSHeaders(w, r, kind)
+		writeGRPCWebError(w, r, codes.InvalidArgument,
+			"unsupported grpc-web content type: the router transcodes binary application/grpc-web only")
+		return
+	}
+	// A CORS preflight carries no routing headers — the browser only
+	// lists their names — so answer it before any routing or authz.
+	if h.maybeHandlePreflight(w, r) {
+		return
+	}
+	// CORS headers for the real gRPC-Web request go on before routing and
+	// authorization so the browser can also read error responses.
+	h.maybeSetCORSHeaders(w, r, kind)
+	grpcRequest := kind.isGRPCish()
 	if grpcRequest {
 		if labels := observability.LabelsFromContext(r.Context()); labels != nil {
 			labels.GRPC = true
@@ -159,7 +180,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		r = r.WithContext(ctx)
 		if err := grpcContextError(ctx); err != nil {
-			writeProxyError(w, r, grpcRequest, &Error{Status: http.StatusBadGateway, Detail: err.Error()})
+			writeProxyError(w, r, kind, &Error{Status: http.StatusBadGateway, Detail: err.Error()})
 			return
 		}
 		if h.cfg.MaxRequestBodyBytes > 0 {
@@ -170,7 +191,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var pathRouted bool
 	target, perr := h.resolveTarget(r, grpcRequest, &upstreamPath, &upstreamRawPath, &pathRouted)
 	if perr != nil {
-		writeProxyError(w, r, grpcRequest, perr)
+		writeProxyError(w, r, kind, perr)
 		return
 	}
 
@@ -213,7 +234,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if h.metrics != nil {
 				h.metrics.AuthzDecisionsTotal.WithLabelValues(target.Namespace, "deny").Inc()
 			}
-			writeProxyError(w, r, grpcRequest, &Error{Status: http.StatusForbidden, Detail: "origin not allowed for cookie-authenticated request"})
+			writeProxyError(w, r, kind, &Error{Status: http.StatusForbidden, Detail: "origin not allowed for cookie-authenticated request"})
 			return
 		}
 	}
@@ -253,7 +274,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Path:        upstreamPathURL.EscapedPath(),
 	})
 	if err != nil {
-		writeProxyError(w, r, grpcRequest, &Error{Status: http.StatusInternalServerError, Detail: err.Error()})
+		writeProxyError(w, r, kind, &Error{Status: http.StatusInternalServerError, Detail: err.Error()})
 		return
 	}
 	if err := h.authz.Authorize(r.Context(), r, authorizationTarget); err != nil {
@@ -267,7 +288,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if h.metrics != nil {
 			h.metrics.AuthzDecisionsTotal.WithLabelValues(target.Namespace, "deny").Inc()
 		}
-		writeProxyError(w, r, grpcRequest, &Error{Status: status, Detail: err.Error()})
+		writeProxyError(w, r, kind, &Error{Status: status, Detail: err.Error()})
 		return
 	}
 	if h.metrics != nil {
@@ -275,7 +296,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if grpcRequest {
 		if err := grpcContextError(r.Context()); err != nil {
-			writeProxyError(w, r, grpcRequest, &Error{Status: http.StatusBadGateway, Detail: err.Error()})
+			writeProxyError(w, r, kind, &Error{Status: http.StatusBadGateway, Detail: err.Error()})
 			return
 		}
 	}
@@ -299,6 +320,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// normal flow already returned above.
 		outboundRawQuery = stripQueryParam(outboundRawQuery, h.cfg.AuthzCookieQueryParam)
 	}
+	if pathRouted && h.cfg.PathRoutingPreservePrefix {
+		// Authorization above saw the stripped path, which is what policies
+		// are written against. Only the forwarded request keeps the prefix:
+		// the sandbox serves under its own base path, so it must receive
+		// the full path it was addressed with. Same escaping pair as the
+		// stripped branch, so an encoded separator survives unchanged.
+		//
+		// The prefix segments reach the sandbox exactly as the client
+		// encoded them. An app that compares its configured base URL as a
+		// string must match that encoded form: percent-decoding a segment
+		// yields a different path than the one the request was addressed
+		// with, so the base URL would no longer match.
+		upstreamURL.Path = r.URL.Path
+		upstreamURL.RawPath = r.URL.EscapedPath()
+	}
 	upstreamURL.RawQuery = outboundRawQuery
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -310,6 +346,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if deadline, ok := pr.Out.Context().Deadline(); ok {
 					pr.Out.Header.Set("Grpc-Timeout", remainingGRPCTimeout(time.Until(deadline)))
 				}
+			}
+			if kind == protoGRPCWeb {
+				rewriteGRPCWebContentType(pr.Out.Header)
 			}
 			// Strip Authorization before forwarding. The router consumes
 			// it (e.g. --authz-mode=tokenreview validates a Bearer token
@@ -383,7 +422,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ErrorHandler: func(w http.ResponseWriter, errReq *http.Request, err error) {
 			var bodyLimit *http.MaxBytesError
 			if grpcRequest && errors.As(err, &bodyLimit) {
-				writeGRPCError(w, codes.ResourceExhausted, "RPC request body limit exceeded")
+				writeProxyError(w, errReq, kind, &Error{
+					Status: http.StatusRequestEntityTooLarge,
+					Detail: "RPC request body limit exceeded",
+				})
 				return
 			}
 			h.recordUpstreamErrorReason(target0.Namespace, classifyError(err))
@@ -416,7 +458,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"namespace", target0.Namespace,
 				"source", string(src),
 			)
-			writeProxyError(w, errReq, grpcRequest, &Error{
+			writeProxyError(w, errReq, kind, &Error{
 				Status: http.StatusBadGateway,
 				Detail: fmt.Sprintf("Could not connect to the backend sandbox: %s", target0.ID),
 			})
@@ -425,6 +467,33 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if grpcRequest {
 		rp.Transport = h.grpcTransport
 		rp.ModifyResponse = prepareGRPCResponse
+		if kind == protoGRPCWeb {
+			// The inbound request context carries the observability
+			// Labels; recording the terminal status there is what lets
+			// the access log and span report it even though a grpc-web
+			// response never exposes Grpc-Status as a header.
+			rp.ModifyResponse = func(resp *http.Response) error {
+				return prepareGRPCWebResponse(resp, func(status string) {
+					observability.RecordGRPCStatus(r.Context(), status)
+				})
+			}
+		}
+	}
+
+	// Cookie paths are rescoped under the prefix in both modes: an app that
+	// writes Path=/ would otherwise hand its cookie to every sandbox sharing
+	// the origin. Location is rewritten only in strip mode. There the sandbox
+	// does not know its prefix; in preserve mode it already emits prefixed
+	// redirects, and rewriting them again would double the prefix. gRPC
+	// responses keep their own hook.
+	if pathRouted && !grpcRequest && h.cfg.PathRoutingRewriteResponses {
+		base := strings.TrimSuffix(bootstrapCookiePath(h.cfg.PathRoutingPrefix, target0), "/")
+		isSelf := selfHostMatcher(r.Host, upstreamURL.Host)
+		rewriteLocations := !h.cfg.PathRoutingPreservePrefix
+		rp.ModifyResponse = func(resp *http.Response) error {
+			rewriteResponseHeaders(resp.Header, base, isSelf, rewriteLocations)
+			return nil
+		}
 	}
 
 	// Bound the upstream request lifetime by the configured proxy timeout,

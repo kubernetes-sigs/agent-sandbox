@@ -32,11 +32,20 @@ from .models import (
     SandboxConnectionConfig,
     SandboxdInClusterConnectionConfig,
     SandboxdPodTunnelConnectionConfig,
+    SandboxdRouterTunnelConnectionConfig,
 )
 
 
 def sandboxd_auth_headers(config: SandboxConnectionConfig) -> dict[str, str]:
-    """Share the runtime credential across REST headers and gRPC metadata."""
+    """Return the transport credential for REST headers and gRPC metadata."""
+    if isinstance(config, SandboxdRouterTunnelConnectionConfig):
+        headers = {}
+        if config.router_auth_token is not None:
+            headers["authorization"] = f"Bearer {config.router_auth_token.get_secret_value()}"
+        # The router strips Authorization, so sandboxd gets its token here.
+        if config.auth_token is not None:
+            headers["x-sandboxd-token"] = config.auth_token.get_secret_value()
+        return headers
     if isinstance(config, (SandboxdPodTunnelConnectionConfig, SandboxdInClusterConnectionConfig)):
         if config.auth_token is not None:
             return {"authorization": f"Bearer {config.auth_token.get_secret_value()}"}
@@ -224,6 +233,26 @@ def extract_sandbox_name_hash(sandbox_object: dict[str, Any]) -> str | None:
         if sep and key.strip() == SANDBOX_NAME_HASH_LABEL:
             return value.strip() or None
 
+    return None
+
+
+def current_not_ready(obj: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """Return the object's Ready=False condition, or None if Ready is absent,
+    not False, or describes an older generation than the object's current spec.
+
+    A failure reported for an older generation may already be fixed by the
+    current spec, so it must not end a wait.
+    """
+    generation = (obj.get("metadata") or {}).get("generation")
+    for cond in (obj.get("status") or {}).get("conditions") or []:
+        if cond.get("type") != "Ready":
+            continue
+        if cond.get("status") != "False":
+            return None
+        observed = cond.get("observedGeneration")
+        if observed and generation is not None and observed < generation:
+            return None
+        return cast(Mapping[str, Any], cond)
     return None
 
 

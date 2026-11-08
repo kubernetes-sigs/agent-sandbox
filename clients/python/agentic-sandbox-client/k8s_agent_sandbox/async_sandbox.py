@@ -71,7 +71,7 @@ class AsyncSandbox:
                 "connection_config is required for AsyncSandbox. "
                 "Use SandboxDirectConnectionConfig, SandboxGatewayConnectionConfig, "
                 "SandboxInClusterConnectionConfig, SandboxdPodTunnelConnectionConfig, "
-                "or SandboxdInClusterConnectionConfig."
+                "SandboxdRouterTunnelConnectionConfig, or SandboxdInClusterConnectionConfig."
             )
 
         self.claim_name: str | None = claim_name

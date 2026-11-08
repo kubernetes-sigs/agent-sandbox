@@ -25,6 +25,8 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**firecracker-sandbox**](./firecracker-sandbox): An example of running a sandbox on Kata Containers with the Firecracker VMM (`kata-fc`) plus an envd-compatible runtime that matches the E2B data-plane contract.
 - [**gemini-cu-sandbox**](./gemini-cu-sandbox): An example of a Python runtime sandbox for Gemini Computer Use Agent.
 - [**gke-swap**](./gke-swap): Demonstrates how to configure GKE node memory swap with dedicated Local SSDs to drastically increase Chrome pod density from 120 to 200 pods per node.
+- [**gpu-l4-snapshot-sandbox**](./gpu-l4-snapshot-sandbox): Snapshot an L4 GPU sandbox on GKE, suspend it to release the GPU, and resume it with its process and GPU memory restored.
+- [**harbor-terminal-bench**](./harbor-terminal-bench): Terminal-Bench 2.0 through the Harbor evaluation framework with every trial in a `SandboxClaim` (the `clients/integrations/harbor` environment): kind smoke run with the oracle agent, the full benchmark on GKE, and a results report.
 - [**hello-world-sandbox**](./hello-world-sandbox): A simple "Hello World" sandbox example.
 - [**hermes-agent**](./hermes-agent): An example of running Hermes Agent with persistence and custom skills.
 - [**hermes-agents-as-a-service**](./hermes-agents-as-a-service): The multi-user platform pattern distilled from a real agents-as-a-service product: per-user claims over a warm pool, suspend/resume as the cost dial, PVC state survival, and injection-policy enforcement.
@@ -55,6 +57,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**podsnapshot-golden-warmpool**](./podsnapshot-golden-warmpool): Golden-snapshot warm pools on GKE — snapshot one primed sandbox (memory + filesystem) and every pool member pre-warmed afterward boots already restored from it, so claims adopt pre-initialized sandboxes.
 - [**policy**](./policy): Examples of using different policies with sandboxes.
 - [**python-runtime-sandbox**](./python-runtime-sandbox): An example of a Python runtime sandbox.
+- [**router-scoped-mcp-sandbox**](./router-scoped-mcp-sandbox): An MCP server reached through sandbox-router's scoped-token authorizer — the agent holds a token bound to one sandbox, never a K8s credential or a third-party gateway.
 - [**python-sdk-quickstart**](./python-sdk-quickstart): A quickstart for the Python SDK: create a sandbox, run commands, and manage files without Kubernetes primitives.
 - [**quickstart**](./quickstart): An end-to-end getting-started walkthrough — controller install, warm pool, router, and SDK test client — plus gVisor and Kata isolation variants.
 - [**ray-integration**](./ray-integration): An example of integrating Ray with agent-sandbox for secure Proxy Execution during Agentic Reinforcement Learning (RL) training.

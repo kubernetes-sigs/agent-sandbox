@@ -1,0 +1,21 @@
+# Cluster-wide read access every tenant needs, applied once by provision.sh.
+# The SDK's preflight reads the CRD definitions to confirm the served versions,
+# and RuntimeClass when a template asks for one (gvisor on GKE). Both are
+# cluster-scoped objects, so a namespaced Role cannot grant them. Nothing here
+# lets a tenant see another tenant's namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rl-tenant-cluster-read
+rules:
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get"]
+    resourceNames:
+      - sandboxes.agents.x-k8s.io
+      - sandboxclaims.extensions.agents.x-k8s.io
+      - sandboxtemplates.extensions.agents.x-k8s.io
+      - sandboxwarmpools.extensions.agents.x-k8s.io
+  - apiGroups: ["node.k8s.io"]
+    resources: ["runtimeclasses"]
+    verbs: ["get"]

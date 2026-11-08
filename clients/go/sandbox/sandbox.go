@@ -158,6 +158,7 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 		ServerPort:          serverPort,
 		SandboxdGRPCPort:    opts.SandboxdGRPCPort,
 		RouterHeaders:       routerHeaders,
+		SandboxdAuthToken:   opts.SandboxdAuthToken,
 		RequestTimeout:      opts.RequestTimeout,
 		PerAttemptTimeout:   opts.PerAttemptTimeout,
 		HTTPTransport:       opts.HTTPTransport,
@@ -676,6 +677,22 @@ func (s *Sandbox) Exists(ctx context.Context, path string, opts ...CallOption) (
 // interface to avoid breaking existing implementers.
 func (s *Sandbox) Delete(ctx context.Context, path string, recursive bool, opts ...CallOption) error {
 	return s.files.Delete(ctx, path, recursive, opts...)
+}
+
+// Mkdir creates a directory, and its missing parents when parents is true
+// (sandboxd runtime only). See Files.Mkdir.
+func (s *Sandbox) Mkdir(ctx context.Context, path string, parents bool, opts ...CallOption) error {
+	return s.files.Mkdir(ctx, path, parents, opts...)
+}
+
+// Move renames a file or directory (sandboxd runtime only). See Files.Move.
+func (s *Sandbox) Move(ctx context.Context, source, destination string, overwrite bool, opts ...CallOption) error {
+	return s.files.Move(ctx, source, destination, overwrite, opts...)
+}
+
+// Copy copies a file or directory (sandboxd runtime only). See Files.Copy.
+func (s *Sandbox) Copy(ctx context.Context, source, destination string, overwrite bool, opts ...CallOption) error {
+	return s.files.Copy(ctx, source, destination, overwrite, opts...)
 }
 
 // Health returns sandboxd's report from GET /v1/health. It returns an

@@ -75,8 +75,8 @@ const (
 	// Service already exists even though one was not explicitly requested.
 	// In all other states Status is False with a reason describing why: the Sandbox is
 	// still provisioning (DependenciesNotReady), suspended (SandboxSuspended), its Pod
-	// has reached a terminal phase (PodSucceeded/PodFailed), it has expired
-	// (SandboxExpired), or the controller hit an error (ReconcilerError).
+	// is terminating (PodTerminating) or terminal (PodSucceeded/PodFailed), it has
+	// expired (SandboxExpired), or the controller hit an error (ReconcilerError).
 	SandboxConditionReady ConditionType = "Ready"
 	// SandboxReasonDependenciesReady is the Ready=True reason: the Pod (and Service, if
 	// requested) are provisioned and the Pod reports Ready with an assigned IP.
@@ -109,8 +109,10 @@ const (
 	// SandboxConditionPodScheduled mirrors the backing Pod's PodScheduled
 	// condition so consumers can see why a Sandbox is not scheduled (e.g.
 	// Unschedulable, SchedulingGated) without reading the Pod. The Pod
-	// condition's status, reason and message are copied through verbatim;
-	// the condition is absent while the Sandbox has no backing Pod.
+	// condition's status, reason and message are copied through verbatim,
+	// except when an unscheduled Pod is terminating (Status is False with
+	// reason PodTerminating); the condition is absent while the Sandbox has
+	// no backing Pod.
 	SandboxConditionPodScheduled ConditionType = "PodScheduled"
 	// SandboxReasonPodScheduled indicates the backing Pod has been scheduled
 	// to a node. Used when the Pod's PodScheduled condition carries no reason
@@ -120,6 +122,12 @@ const (
 	// determined: the Pod has not reported PodScheduled yet, reports it without a
 	// reason (and not True), or could not be read.
 	SandboxReasonPodSchedulingUnknown = "PodSchedulingUnknown"
+	// SandboxReasonPodTerminating indicates the backing Pod has a deletion
+	// timestamp. Ready keeps it even after the Pod reaches Failed or Succeeded,
+	// which Finished reports. With failedPodPolicy Recreate, the controller
+	// replaces a Failed Pod instead, so Ready is DependenciesNotReady and
+	// Finished is absent.
+	SandboxReasonPodTerminating = "PodTerminating"
 
 	// SandboxConditionFinished reports that the backing Pod reached a terminal phase.
 	// It is set (Status True) only after the Pod has Succeeded or Failed, with the reason

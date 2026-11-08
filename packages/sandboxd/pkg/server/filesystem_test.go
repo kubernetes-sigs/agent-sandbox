@@ -88,6 +88,84 @@ func TestPutThenGetFileRoundTrip(t *testing.T) {
 	require.Equal(t, "payload", rec.Body.String())
 }
 
+// TestFileTransfersRejectNamedPipes verifies that transfers finish without a FIFO
+// peer and leave the pipe empty when a reader is already present.
+func TestFileTransfersRejectNamedPipes(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		method string
+		query  string
+		reader bool
+	}{
+		{name: "get", method: http.MethodGet},
+		{name: "head", method: http.MethodHead},
+		{name: "append without reader", method: http.MethodPut, query: "?append=true"},
+		{name: "append with reader", method: http.MethodPut, query: "?append=true", reader: true},
+	} {
+		for _, symlink := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/symlink=%t", tc.name, symlink), func(t *testing.T) {
+				_, handler, root := newRESTFixture(t)
+				pipePath := filepath.Join(root, "pipe")
+				require.NoError(t, syscall.Mkfifo(pipePath, 0o600))
+				path := "pipe"
+				if symlink {
+					require.NoError(t, os.Symlink("pipe", filepath.Join(root, "link")))
+					path = "link"
+				}
+				var reader *os.File
+				if tc.reader {
+					var err error
+					reader, err = os.OpenFile(pipePath, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+					require.NoError(t, err)
+					t.Cleanup(func() { _ = reader.Close() })
+				}
+
+				finished := make(chan struct{})
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					defer close(finished)
+					handler.ServeHTTP(w, r)
+				}))
+				t.Cleanup(func() {
+					// Release a blocking open on a regression so server cleanup
+					// can finish even when the request's deadline did not help.
+					peer, err := os.OpenFile(pipePath, os.O_RDWR|syscall.O_NONBLOCK, 0)
+					if err == nil {
+						defer func() { _ = peer.Close() }()
+					}
+					srv.Close()
+				})
+				ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+				defer cancel()
+				req, err := http.NewRequestWithContext(ctx, tc.method, srv.URL+"/v1/files/"+path+tc.query, strings.NewReader("payload"))
+				require.NoError(t, err)
+				response, err := srv.Client().Do(req)
+				require.NoError(t, err, "file requests must complete without waiting for a FIFO peer")
+				defer func() { _ = response.Body.Close() }()
+				require.Equal(t, http.StatusBadRequest, response.StatusCode)
+				if tc.method != http.MethodHead {
+					var apiErr APIError
+					require.NoError(t, json.NewDecoder(response.Body).Decode(&apiErr))
+					require.Equal(t, "INVALID_ARGUMENT", apiErr.Code)
+				}
+				select {
+				case <-finished:
+				case <-ctx.Done():
+					t.Fatal("file handler did not finish")
+				}
+				info, err := os.Lstat(pipePath)
+				require.NoError(t, err)
+				require.NotZero(t, info.Mode()&os.ModeNamedPipe)
+				if reader != nil {
+					var data [16]byte
+					n, err := syscall.Read(int(reader.Fd()), data[:])
+					require.NoError(t, err)
+					require.Zero(t, n, "append must leave the FIFO empty")
+				}
+			})
+		}
+	}
+}
+
 func TestPutCreatesParentDirectories(t *testing.T) {
 	_, handler, root := newRESTFixture(t)
 
@@ -1045,6 +1123,29 @@ func TestDirectoryListingOmitsEscapingSymlinks(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &listing))
 	require.Len(t, listing.Entries, 1)
 	require.Equal(t, "normal.txt", listing.Entries[0].Name)
+}
+
+func TestDeleteSymlinkRemovesLinkNotTarget(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "real.txt"), []byte("x"), 0o644))
+	require.NoError(t, os.Symlink("real.txt", filepath.Join(root, "file-link")))
+	require.NoError(t, os.Symlink(".", filepath.Join(root, "root-link")))
+	outside := t.TempDir()
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "outside-link")))
+
+	for _, path := range []string{"file-link", "root-link?recursive=true", "outside-link"} {
+		rec := doRequest(handler, http.MethodDelete, "/v1/files/"+path, nil, nil)
+		require.Equal(t, http.StatusNoContent, rec.Code, "%s: %s", path, rec.Body.String())
+	}
+
+	for _, link := range []string{"file-link", "root-link", "outside-link"} {
+		_, err := os.Lstat(filepath.Join(root, link))
+		require.True(t, os.IsNotExist(err), "%s should be removed", link)
+	}
+	_, err := os.Stat(filepath.Join(root, "real.txt"))
+	require.NoError(t, err, "the link target must survive")
+	_, err = os.Stat(outside)
+	require.NoError(t, err)
 }
 
 func TestDeleteInvalidRecursiveRejected(t *testing.T) {

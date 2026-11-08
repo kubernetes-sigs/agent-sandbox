@@ -21,11 +21,14 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	sandboxd "sigs.k8s.io/agent-sandbox/packages/sandboxd/pkg/server"
 	processv1 "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1"
@@ -53,6 +56,14 @@ func TestGRPCSandboxdProcessInteraction(t *testing.T) {
 	res, err := client.Execute(ctx, &processv1.ExecuteRequest{Config: &processv1.ProcessConfig{Command: []string{"/bin/sh", "-c", "printf hello; printf warning >&2; exit 7"}}})
 	if err != nil || string(res.GetStdout()) != "hello" || string(res.GetStderr()) != "warning" || res.GetExitCode() != 7 {
 		t.Fatalf("Execute: %v, %v", res, err)
+	}
+	limited, err := client.ExecuteWithLimits(ctx, &processv1.ExecuteWithLimitsRequest{
+		Config:           &processv1.ProcessConfig{Command: []string{"/bin/sh", "-c", "printf 'hello world'; exec sleep 30"}},
+		StdoutLimitBytes: proto.Uint64(5), TimeLimit: durationpb.New(100 * time.Millisecond),
+	})
+	if err != nil || string(limited.GetStdout()) != "hello" || !limited.GetStdoutTruncated() ||
+		limited.GetTerminationReason() != processv1.ExecuteTerminationReason_EXECUTE_TERMINATION_REASON_TIME_LIMIT_EXCEEDED {
+		t.Fatalf("ExecuteWithLimits: %v, %v", limited, err)
 	}
 	stream, err := client.Start(ctx, &processv1.StartRequest{Config: &processv1.ProcessConfig{Command: []string{"/bin/sh", "-c", "printf ready; read line; printf 'input:%s' \"$line\""}}})
 	if err != nil {

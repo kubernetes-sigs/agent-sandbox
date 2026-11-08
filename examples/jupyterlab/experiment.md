@@ -105,10 +105,12 @@ To add another team member:
 
 ```bash
 # Create sandbox for Bob
-export BOB_TOKEN=<HF-TOKEN>
-
-kubectl create secret generic jupyter-hf-token-bob \
-  --from-literal=token=${BOB_TOKEN}
+# Only if Bob needs gated or private models: create a token Secret and
+# reference it from the setup-environment init container
+# (see "Optional: Gated or Private Models" in README.md)
+# export BOB_TOKEN=<HF-TOKEN>
+# kubectl create secret generic jupyter-hf-token-bob \
+#   --from-literal=token=${BOB_TOKEN}
 
 kubectl apply -f - <<EOF
 apiVersion: agents.x-k8s.io/v1beta1

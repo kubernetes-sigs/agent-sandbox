@@ -34,7 +34,7 @@ from kubernetes import client as sync_client
 from kubernetes_asyncio import client as async_client
 from kubernetes_asyncio.client import ApiException
 
-from .claim_adoption import validate_claim_name, validate_claim_for_adoption
+from .claim_adoption import validate_claim_name, validate_claim_for_adoption, is_already_exists
 from .async_k8s_helper import AsyncK8sHelper
 from .async_connector import _DefaultSSLContext
 from .async_sandbox import AsyncSandbox
@@ -180,9 +180,8 @@ class AsyncSandboxClient(Generic[T]):
                 "connection_config is required for AsyncSandboxClient. "
                 "Use SandboxDirectConnectionConfig, SandboxGatewayConnectionConfig, "
                 "SandboxInClusterConnectionConfig, SandboxdPodTunnelConnectionConfig, "
-                "or SandboxdInClusterConnectionConfig. "
-                "For local development with the router's port-forward, use the synchronous SandboxClient; "
-                "SandboxdPodTunnelConnectionConfig supports async pod port-forwarding."
+                "SandboxdRouterTunnelConnectionConfig, or SandboxdInClusterConnectionConfig. "
+                "Sandboxd Pod and router tunnels support async port-forwarding."
             )
 
         self.connection_config = connection_config
@@ -194,16 +193,20 @@ class AsyncSandboxClient(Generic[T]):
         self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
 
         self.k8s_helper = AsyncK8sHelper(api_client=api_client)
-        # Held so atexit cleanup can read configuration/default_headers/cookie live at cleanup time
-        self._injected_api_client = api_client
 
+        # The exit hook holds these two containers, so the client changes them in place and never rebinds them.
         self._active_connection_sandboxes: dict[tuple[str, str], T] = {}
         self._explicit_claims: set[tuple[str, str]] = set()
         self._lock = asyncio.Lock()
         self._default_ssl_context = _DefaultSSLContext()
 
         if cleanup:
-            atexit.register(self._atexit_cleanup)
+            # Register a static method bound to the cleanup data with functools.partial, so the hook
+            # never keeps the client alive. A bound method of the client would keep it alive until exit.
+            # Pass the api_client itself, not a copy, so exit cleanup reads its settings as they are at exit.
+            atexit.register(functools.partial(
+                AsyncSandboxClient._atexit_cleanup, self._active_connection_sandboxes, self._explicit_claims, api_client
+            ))
 
     async def __aenter__(self) -> Self:
         return self
@@ -267,7 +270,7 @@ class AsyncSandboxClient(Generic[T]):
                 (``SandboxClaim.metadata.labels``).
             claim_name: Optional DNS-1123 Claim name. Explicit names remain
                 caller-owned and are excluded from automatic cleanup.
-            adopt_existing: On 409, attach to the existing named Claim after
+            adopt_existing: On AlreadyExists, attach to the existing named Claim after
                 checking its warm pool and that it is not terminating. Requires
                 claim_name. Creation options are not reapplied on adoption;
                 an existing shutdownTime is preserved.
@@ -332,7 +335,7 @@ class AsyncSandboxClient(Generic[T]):
             except ApiException as error:
                 if error.status == 409:
                     cleanup_generated = False
-                if not (adopt_existing and error.status == 409):
+                if not (adopt_existing and is_already_exists(error)):
                     raise
                 created_claim = await self.k8s_helper.get_sandbox_claim(claim_name, namespace)
             if not generated_name:
@@ -463,10 +466,25 @@ class AsyncSandboxClient(Generic[T]):
                 f"in namespace '{namespace}': {e}"
             ) from e
 
-        if existing and existing.is_active:
+        # Reuse the tracked handle only while it is active and still bound to
+        # the claim's current sandbox. A claim deleted and re-created under the
+        # same name keeps that name, so the handle's sandbox_id is what tells
+        # us the claim now points at a different sandbox.
+        if existing and existing.is_active and existing.sandbox_id == sandbox_id:
             return existing
 
+        # Drop the inactive or stale handle. close_connection() only releases
+        # local resources, so the claim's current sandbox is untouched. A
+        # failed close must not block the replacement: the caller needs a
+        # handle for the current sandbox either way.
         if existing:
+            try:
+                await existing.close_connection()
+            except Exception as e:
+                logger.error(
+                    f"Failed to close stale sandbox connection for '{claim_name}' "
+                    f"in namespace '{namespace}': {e}"
+                )
             async with self._lock:
                 self._active_connection_sandboxes.pop(key, None)
 
@@ -552,7 +570,12 @@ class AsyncSandboxClient(Generic[T]):
             if (namespace, claim_name) not in self._explicit_claims:
                 await self.delete_sandbox(claim_name, namespace)
 
-    def _atexit_cleanup(self) -> None:
+    @staticmethod
+    def _atexit_cleanup(
+        registry: dict[tuple[str, str], T],
+        explicit_claims: set[tuple[str, str]],
+        injected_api_client: async_client.ApiClient | None,
+    ) -> None:
         """Best-effort atexit cleanup for claims and local sandbox resources.
 
         Tracked sandbox handles use their synchronous, loop-independent
@@ -565,9 +588,9 @@ class AsyncSandboxClient(Generic[T]):
         failures and top-level errors are reported to ``sys.stderr`` rather than raised.
         """
         try:
-            claims = list(self._active_connection_sandboxes.keys())
+            claims = list(registry.keys())
             tracked = [
-                (key, self._active_connection_sandboxes[key]) for key in claims
+                (key, registry[key]) for key in claims
             ]
             if not tracked:
                 return
@@ -584,12 +607,12 @@ class AsyncSandboxClient(Generic[T]):
                         )
 
             atexit_api_client = None
-            if self._injected_api_client is not None:
+            if injected_api_client is not None:
                 atexit_api_client = sync_client.ApiClient(
-                    configuration=_sync_configuration_from_async(self._injected_api_client.configuration),
-                    cookie=self._injected_api_client.cookie,
+                    configuration=_sync_configuration_from_async(injected_api_client.configuration),
+                    cookie=injected_api_client.cookie,
                 )
-                for name, value in dict(self._injected_api_client.default_headers).items():
+                for name, value in dict(injected_api_client.default_headers).items():
                     atexit_api_client.set_default_header(name, value)
 
             # kubernetes registers its own atexit removal of extracted inline cert files, but Python drops
@@ -601,7 +624,7 @@ class AsyncSandboxClient(Generic[T]):
             with kube_config_dir_cm as kube_config_dir:
                 helper = K8sHelper(api_client=atexit_api_client, kube_config_temp_dir=kube_config_dir)
                 for ns, claim_name in (key for key, _ in tracked):
-                    if (ns, claim_name) in self._explicit_claims:
+                    if (ns, claim_name) in explicit_claims:
                         continue
                     try:
                         helper.delete_sandbox_claim(

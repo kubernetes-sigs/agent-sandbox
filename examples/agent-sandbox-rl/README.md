@@ -580,6 +580,35 @@ process; `max_live_sandboxes` still caps each process's claims. Clean up the job
 once, at the end, with `reap(run_id=…)` — not from each process's exit hook,
 where it would sweep the other processes' resources too.
 
+### Many users, one cluster
+
+When several people share a cluster, give each a namespace of their own and keep
+the task images shared. The image layers live in the node's image cache, below
+the namespace, so the second user on a node starts without a pull; the running
+pods live in the namespace, so the quota, the RBAC and the network policy are
+per user. [`examples/multi_tenant`](examples/multi_tenant/README.md) is the
+worked example: an admin provisions `rl-<user>` (Role, ResourceQuota,
+LimitRange, one NetworkPolicy) and pre-pulls the image list once; each user
+runs experiments in their namespace with `run_isolation="names"`, and the
+runner lowers its concurrency to what the namespace quota admits before it
+starts, because a quota rejection happens at pod admission, where fail-fast
+sees no pod.
+
+| Layer | Shared across user namespaces |
+| --- | --- |
+| Image layers on the node (`IfNotPresent`, `fleet.prepull()`, GKE Image Streaming, secondary boot disks) | yes, whoever pulled them |
+| `SandboxTemplate`, `SandboxWarmPool`, warm pods | no, a claim binds only to a pool in its own namespace |
+| `SandboxClaim`, `Sandbox`, pods, quota, RBAC, NetworkPolicy | no, that is the isolation |
+
+Compared with the layouts above: one namespace with hash names (the default) or
+with `run_isolation="names"` shares the quota and lets anyone delete anyone's
+objects; a shared `run_id` or `adopt_existing` is the only layout that shares
+warm pods; `run_isolation="namespace"` gives each run a namespace but needs
+cluster rights to create it. A namespace per user costs the sharing of warm
+pods and nothing else: two users warming the same image hold two pools, on
+image layers they share. Several clusters are a follow-up example: the
+namespace, quota and pre-pull are then needed on each cluster.
+
 ## Configuration reference
 
 **FleetConfig:** `clusters`, `placement`, `max_concurrent` (1), `max_warmpool_size`

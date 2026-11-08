@@ -313,9 +313,11 @@ func (s *RESTServer) handleGetFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f, err := os.Open(target)
+	f, err := openRegularFile(target, os.O_RDONLY, 0)
 	if err != nil {
-		if os.IsPermission(err) {
+		if errors.Is(err, errUnsupportedFileType) {
+			s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		} else if os.IsPermission(err) {
 			s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED", "permission denied")
 		} else {
 			s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
@@ -572,6 +574,8 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 			s.writePathExists(w)
 		case errors.Is(err, errChanged):
 			s.writeChanged(w)
+		case errors.Is(err, errUnsupportedFileType):
+			s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 		case errors.Is(err, os.ErrPermission):
 			s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED", "permission denied")
 		default:
@@ -834,10 +838,10 @@ func appendWrite(target string, src io.Reader, mode os.FileMode) (err error) {
 	}
 
 	// O_EXCL tells us whether this request created the file.
-	f, err := os.OpenFile(target, os.O_WRONLY|os.O_APPEND|os.O_CREATE|os.O_EXCL, mode)
+	f, err := openRegularFile(target, os.O_WRONLY|os.O_APPEND|os.O_CREATE|os.O_EXCL, mode)
 	created := err == nil
 	if errors.Is(err, os.ErrExist) {
-		f, err = os.OpenFile(target, os.O_WRONLY|os.O_APPEND, 0)
+		f, err = openRegularFile(target, os.O_WRONLY|os.O_APPEND, 0)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to open file: %w", err)
@@ -859,6 +863,28 @@ func appendWrite(target string, src io.Reader, mode os.FileMode) (err error) {
 		return fmt.Errorf("failed to append file contents: %w", err)
 	}
 	return nil
+}
+
+// openRegularFile rejects special files without waiting for a FIFO peer. Check
+// the opened descriptor because a path can change after a prior Stat call.
+func openRegularFile(path string, flags int, mode os.FileMode) (*os.File, error) {
+	f, err := os.OpenFile(path, flags|syscall.O_NONBLOCK, mode)
+	if errors.Is(err, syscall.ENXIO) {
+		// A FIFO opened for writing without a reader fails before Stat.
+		return nil, fmt.Errorf("%w: %s", errUnsupportedFileType, filepath.Base(path))
+	}
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err == nil && !info.Mode().IsRegular() {
+		err = fmt.Errorf("%w: %s", errUnsupportedFileType, filepath.Base(path))
+	}
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
 }
 
 var (
@@ -1022,7 +1048,10 @@ func (s *RESTServer) writeExtractError(w http.ResponseWriter, err error) {
 }
 
 func (s *RESTServer) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
-	target, ok := s.resolvePath(w, r)
+	// Delete a symlink in the last path component, not its target, as rm
+	// does. Following it would let "DELETE link?recursive=true" clear the
+	// directory the link points to, including the sandbox root itself.
+	target, ok := s.resolveUserPath(w, r.PathValue("path"), pathutil.SanitizeEntryPath)
 	if !ok {
 		return
 	}
@@ -1103,8 +1132,7 @@ const (
 // tmpPattern names the temporary entries sandboxd creates beside a target.
 const tmpPattern = ".sandboxd-tmp-*"
 
-// errUnsupportedFileType marks a copy source that is neither a regular file,
-// a directory, nor a symlink, such as a socket or a named pipe.
+// errUnsupportedFileType marks a special file that a transfer cannot handle.
 var errUnsupportedFileType = errors.New("unsupported file type")
 
 // handleFileAction serves POST /v1/files/{path}:move and :copy. A net/http

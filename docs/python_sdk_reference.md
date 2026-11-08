@@ -42,7 +42,7 @@ Initializes the SandboxClient.
 
 - `connection_config` - Configuration for connecting to the sandboxes.
   Defaults to SandboxLocalTunnelConnectionConfig() which uses
-  kubectl port-forwarding. Sandboxd supports a pod tunnel or the
+  kubectl port-forwarding. Sandboxd supports a Pod or router tunnel, or the
   explicit Service DNS / Pod IP in-cluster connection config.
 - `tracer_config` - Configuration for OpenTelemetry tracing.
   Defaults to an empty SandboxTracerConfig (tracing disabled).
@@ -85,7 +85,7 @@ the underlying infrastructure.
   (``SandboxClaim.metadata.labels``).
 - `claim_name` - Optional DNS-1123 Claim name. Explicit names remain
   caller-owned and are excluded from automatic cleanup.
-- `adopt_existing` - On 409, attach to the existing named Claim after
+- `adopt_existing` - On AlreadyExists, attach to the existing named Claim after
   checking its warm pool and that it is not terminating. Requires
   claim_name. Creation options are not reapplied on adoption;
   an existing shutdownTime is preserved.
@@ -237,6 +237,8 @@ Get warmpool name of a sandbox claim.
 <a id="k8s_agent_sandbox.models"></a>
 
 ## k8s\_agent\_sandbox.models
+
+Configuration and wire-format models for the Python SDK.
 
 <a id="k8s_agent_sandbox.models.ExecutionResult"></a>
 
@@ -648,7 +650,8 @@ sandboxd (KEP-539.2) exposes two listeners: the Filesystem & Runtime REST
 API and the gRPC ProcessService. This config port-forwards directly to the
 sandbox pod, reaching both.
 
-Doesn't work on Kata or gVisor; use SandboxdInClusterConnectionConfig for those.
+For Kata or gVisor, use SandboxdRouterTunnelConnectionConfig or
+SandboxdInClusterConnectionConfig.
 
 <a id="k8s_agent_sandbox.models.SandboxdPodTunnelConnectionConfig.auth_token"></a>
 
@@ -673,6 +676,67 @@ sandboxd gRPC ProcessService port on the pod.
 #### port\_forward\_ready\_timeout
 
 Seconds to wait for port-forward readiness.
+
+<a id="k8s_agent_sandbox.models.SandboxdRouterTunnelConnectionConfig"></a>
+
+### SandboxdRouterTunnelConnectionConfig Objects
+
+```python
+class SandboxdRouterTunnelConnectionConfig(BaseModel)
+```
+
+Connect to sandboxd through a port-forward to sandbox-router-svc.
+
+REST and gRPC share the router's port 8080. Routing headers and metadata
+select the Sandbox and its REST or gRPC port. gRPC requires sandbox-router
+v1.0.9 or later. Set ``router_auth_token`` when the router requires
+authentication. The SDK sends that token as ``Authorization``, which the
+router strips. It sends ``auth_token`` as ``X-Sandboxd-Token``, which the
+router forwards to sandboxd.
+``pod_ip_routing`` stays false so the router selects the Pod from its cache
+or DNS. Scoped tokens reject ``X-Sandbox-Pod-IP``.
+
+<a id="k8s_agent_sandbox.models.SandboxdRouterTunnelConnectionConfig.auth_token"></a>
+
+#### auth\_token
+
+sandboxd token. Sent as X-Sandboxd-Token because the router strips Authorization.
+
+<a id="k8s_agent_sandbox.models.SandboxdRouterTunnelConnectionConfig.router_auth_token"></a>
+
+#### router\_auth\_token
+
+Bearer token for the router. Sent as Authorization on REST and gRPC. The router strips it.
+
+<a id="k8s_agent_sandbox.models.SandboxdRouterTunnelConnectionConfig.rest_port"></a>
+
+#### rest\_port
+
+sandboxd REST port, not the router port.
+
+<a id="k8s_agent_sandbox.models.SandboxdRouterTunnelConnectionConfig.grpc_port"></a>
+
+#### grpc\_port
+
+sandboxd gRPC port, not the router port.
+
+<a id="k8s_agent_sandbox.models.SandboxdRouterTunnelConnectionConfig.router_namespace"></a>
+
+#### router\_namespace
+
+Namespace of sandbox-router-svc. Defaults to agent-sandbox-system.
+
+<a id="k8s_agent_sandbox.models.SandboxdRouterTunnelConnectionConfig.port_forward_ready_timeout"></a>
+
+#### port\_forward\_ready\_timeout
+
+Seconds to wait for the router tunnel. Must be positive.
+
+<a id="k8s_agent_sandbox.models.SandboxdRouterTunnelConnectionConfig.pod_ip_routing"></a>
+
+#### pod\_ip\_routing
+
+Send X-Sandbox-Pod-IP on REST and gRPC. Set true only when the router cache is disabled and the Sandbox has no Service.
 
 <a id="k8s_agent_sandbox.models.SandboxdInClusterConnectionConfig"></a>
 

@@ -1,6 +1,6 @@
 # Sandbox Router (Go)
 
-A Go reimplementation of the Python [`sandbox-router`](../clients/python/agentic-sandbox-client/sandbox-router/README.md) — a small reverse proxy that fans HTTP and native gRPC traffic out to ephemeral agent sandbox pods in a Kubernetes cluster.
+A Go reimplementation of the Python [`sandbox-router`](../clients/python/agentic-sandbox-client/sandbox-router/README.md) — a small reverse proxy that fans HTTP, native gRPC, and browser gRPC-Web traffic out to ephemeral agent sandbox pods in a Kubernetes cluster.
 
 It preserves the original `X-Sandbox-*` header contract (so existing clients and `Gateway` / `HTTPRoute` resources keep working) and adds the controls needed for enterprise deployments: TLS, mTLS, Prometheus metrics, OpenTelemetry tracing, hot-reloading certs, dial retries, structured logs, and graceful shutdown.
 
@@ -26,8 +26,9 @@ The router **never** creates or looks up Sandbox resources. If the target sandbo
 
 ## Request contract
 
-The table below describes HTTP requests. Native gRPC requires an explicit
-`X-Sandbox-Port`; see [Native gRPC](#native-grpc).
+The table below describes HTTP requests. Native gRPC and gRPC-Web require an
+explicit `X-Sandbox-Port`; see [Native gRPC](#native-grpc) and
+[gRPC-Web](#grpc-web-browser-clients).
 
 | Header | Required | Default | Notes |
 |---|---|---|---|
@@ -86,14 +87,15 @@ When the target sandbox can't be dialed (DNS doesn't resolve, or the pod isn't l
 Defaults: 3 retries (4 attempts total), 200 ms → 400 ms → 800 ms backoff. Tunable via `--upstream-max-retries`, `--upstream-retry-initial-delay`, `--upstream-retry-max-delay`. Set retries to `0` to disable.
 
 The HTTP retry budget never exceeds `--proxy-timeout`; the per-request context cuts
-it short. Native gRPC does not use this retry wrapper.
+it short. Native gRPC and gRPC-Web do not use this retry wrapper.
 
 ## Native gRPC
 
 The same proxy listener accepts HTTP/1 and HTTP/2 prior-knowledge (h2c) on 8080;
 the optional TLS listener accepts HTTP/1 and TLS HTTP/2. Native gRPC is identified
-by HTTP/2 POST with `application/grpc` or `application/grpc+<codec>`. gRPC-Web is
-not supported. The router uses h2c to the backend and does not register or decode
+by HTTP/2 POST with `application/grpc` or `application/grpc+<codec>`. Binary
+gRPC-Web requests are transcoded to native gRPC — see
+[gRPC-Web](#grpc-web-browser-clients). The router uses h2c to the backend and does not register or decode
 any business service. Unary and all three streaming forms are forwarded with
 immediate flush, preserving metadata, compression, headers, and terminal trailers.
 
@@ -135,6 +137,92 @@ NetworkPolicy boundaries, and explicit test/cleanup commands. No public SDK's
 connection modes are changed by this feature. Internal h2c is a trusted-network
 hop, not end-to-end encryption.
 
+## gRPC-Web (browser clients)
+
+Browser JavaScript cannot speak native gRPC — `fetch` cannot read HTTP trailers
+and browsers do not offer h2c prior knowledge. The router therefore transcodes
+binary gRPC-Web (`Content-Type: application/grpc-web[+proto]`) to native gRPC on
+the upstream hop, so a browser can call sandboxd's :9090 services directly
+through the router with a standard gRPC-Web client library (grpc-web,
+Connect-Web). Transcoding is always on; there is no master switch. Plain HTTP
+and native gRPC traffic is unaffected.
+
+The capability boundary follows the gRPC-Web protocol itself:
+
+- **Unary and server-streaming RPCs only.** gRPC-Web cannot express
+  client-streaming or bidi calls. This covers the entire sandboxd surface:
+  `Execute`, `WriteStdin`, `SendSignal`, and `ResizeTTY` are unary, and `Start`
+  and `WatchDir` are server-streaming (stdin and signals travel as separate
+  unary RPCs by design).
+- **Binary variant only.** `application/grpc-web-text` (base64) and
+  `application/grpc-web+json` are rejected with an `InvalidArgument` status
+  frame. Modern browsers send binary bodies through `fetch` without issue.
+
+How it works: message frames are byte-identical between the two protocols and
+pass through untouched (including gzip-compressed frames under
+`grpc-encoding`). The router rewrites the outbound `Content-Type` and converts
+the response's terminal HTTP trailers — which a browser could never read — into
+the gRPC-Web trailer frame (`0x80`) appended to the body. Inbound requests may
+arrive over HTTP/1.1 or HTTP/2; the upstream hop is h2c either way.
+
+Routing, deadlines, and errors behave exactly as for native gRPC: send
+`x-sandbox-id` and an explicit `x-sandbox-port` (9090 for sandboxd) on every
+call — `fetch` sets headers freely, so path-based routing is not needed — and
+`grpc-timeout` plus `--grpc-proxy-timeout` bound the RPC the same way. Router
+errors arrive as HTTP 200 with a trailers-only status frame, using the same
+code table as native gRPC. If the upstream stream breaks after messages have
+flowed, the router appends a synthesized `Unavailable` frame so the browser
+client gets an outcome instead of hanging; once a stream has started, a
+router-side failure aborts the body without a frame, same as the native path.
+Access logs and spans report `grpc_status` for gRPC-Web calls even though the
+status never appears in a response header.
+
+### CORS
+
+A cross-origin `fetch` triggers a CORS preflight, and a preflight carries no
+`X-Sandbox-*` values — the browser only lists the header *names* — so the
+router answers `OPTIONS` itself, before any routing or authorization:
+
+- Same-origin requests are always allowed. Cross-origin requests need the
+  origin in `--grpc-web-allowed-origins` (comma-separated
+  `scheme://host[:port]`). The default is empty: cross-origin browser callers
+  get no CORS headers and the browser blocks the response, while non-browser
+  clients are never affected.
+- Only preflights from an explicitly allowlisted origin are intercepted;
+  every other `OPTIONS` request — including same-origin ones, which browsers
+  never actually preflight — is proxied exactly as before this feature
+  existed, so sandboxes that answer their own CORS keep working with the
+  default empty allowlist.
+- The `Access-Control-Allow-Headers` answer is the intersection of the
+  requested headers with a closed set (content-type, grpc-timeout, the
+  X-Sandbox-* routing headers, authorization, x-user-agent, traceparent). This
+  is what keeps CORS scoped to gRPC-Web: a plain-REST preflight asking for
+  anything else cannot get a usable answer, and real (non-preflight) responses
+  only carry CORS headers when the request itself was gRPC-Web.
+- Responses echo the exact origin with `Access-Control-Allow-Credentials:
+  true` (never `*`), so cookie-authenticated deployments
+  (`--authz-cookie-name`) can work from the browser too. Sending and reading
+  are separate conditions: the browser attaches the cookie only when the
+  caller opts into credentials mode — `fetch(url, { credentials: 'include'
+  })`, or the gRPC-Web client library's equivalent (the official `grpc-web`
+  client's `withCredentials`) — and it lets a cross-origin caller read the
+  response only when the origin is listed in `--grpc-web-allowed-origins`.
+  Same-origin calls attach a path-matching cookie with the default
+  credentials mode. When the credential came from a cookie, the separate
+  cookie origin guard still checks `Origin` against
+  `--authz-cookie-allowed-origins` (see [Browser-session
+  credentials](#browser-session-credentials)). One caveat: the bootstrapped
+  cookie is `Path`-scoped to `<path-routing-prefix>/<namespace>/<id>/<port>/`
+  while a gRPC-Web call posts to `/package.Service/Method`, so the browser
+  does not attach it there — cookie auth for gRPC-Web needs a cookie whose
+  `Path` matches the gRPC-Web endpoint, or the caller can send the
+  `Authorization` header instead, which `fetch` sets freely.
+
+Remember that every sandbox behind the router shares one origin (see the
+shared-origin caveat under [Browser-session credentials](#browser-session-credentials)):
+gRPC-Web CORS makes browser calls possible, it does not isolate sandboxes from
+each other in the same browser profile.
+
 ## WebSockets and other protocol upgrades
 
 `Connection: Upgrade` / `Upgrade: websocket` requests are forwarded transparently via `httputil.ReverseProxy`'s built-in upgrade handling. This is what makes things like `code-server` (VS Code in the browser, holds a single long-lived WebSocket per editing session) work through the router unchanged.
@@ -169,6 +257,19 @@ curl -i --http1.1 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
 # -> 101 Switching Protocols, no X-Sandbox-* header sent anywhere in this request
 ```
 
+#### Keeping redirects and cookies under the prefix
+
+An app that has no base-path setting does not know it was addressed as `<prefix>/<namespace>/<id>/<port>/`. Its redirects and cookies would then send the browser out of that prefix, to a path that is not this sandbox. For path-routed requests, the router therefore rewrites:
+
+- an upstream `Location` that points at the sandbox or at the router's own host, to a path under the prefix (`/login` becomes `<prefix>/<namespace>/<id>/<port>/login`). This happens only in the default strip mode;
+- every `Path` attribute of an upstream `Set-Cookie`, so the browser attaches the cookie only to requests for this sandbox. This happens in both modes. A `__Host-` cookie is left alone, because it must keep `Path=/` to be accepted.
+
+Only `Location` and `Set-Cookie` are touched, and only for path-routed requests. Header-routed requests and gRPC responses pass through unchanged, and response bodies are never buffered. This is collision avoidance, not isolation: sandboxes still share one origin, so the prefix does not stop one sandbox's script from reading another's cookie.
+
+This is on by default, which changes the responses of existing path-routed deployments. Set `--path-routing-rewrite-responses=false` to forward them unmodified.
+
+If the sandbox serves under its own base path (for example JupyterLab started with `--ServerApp.base_url`), set `--path-routing-preserve-prefix` instead. The router then forwards the full `<prefix>/<namespace>/<id>/<port>/` path, and it does not rewrite `Location`, because the app already emits prefixed redirects and a second rewrite would double the prefix. `Set-Cookie` paths are still rescoped under the prefix. Authorization still sees the stripped path in both modes, so existing policies do not change. The examples in `examples/jupyterlab-base-path` show this mode.
+
 ## Flags
 
 Run `sandbox-router --help` for the full list. The most relevant:
@@ -192,6 +293,9 @@ Run `sandbox-router --help` for the full list. The most relevant:
 | `--max-request-body-bytes` | `0` (unlimited) | Optional cap on inbound body size. |
 | `--allow-loopback-pod-ip` | `false` | Permit loopback addresses in `X-Sandbox-Pod-IP`. Default-off rejects the router's own loopback as an SSRF target. Enable only when the sandbox runs as a sidecar in the router's Pod, or for integration tests against a localhost backend. Link-local / multicast / unspecified stay rejected regardless. |
 | `--path-routing-prefix` | `""` (disabled) | Optional path prefix (`<prefix>/<namespace>/<id>/<port>/...`) for callers that cannot set `X-Sandbox-*` headers — see [Browser-facing traffic](#browser-facing-traffic-path-based-routing). Falls through to header-based routing for any path that doesn't match. |
+| `--path-routing-preserve-prefix` | `false` | Forward path-routed requests with the full `<prefix>/<namespace>/<id>/<port>/` path, for a sandbox that serves under its own base path. Requires `--path-routing-prefix`. See [Keeping redirects and cookies under the prefix](#keeping-redirects-and-cookies-under-the-prefix). |
+| `--path-routing-rewrite-responses` | `true` | Rewrite upstream `Location` and `Set-Cookie` Path for path-routed responses so they stay under the prefix. Set-Cookie Path is rewritten in both modes; Location only without `--path-routing-preserve-prefix`. Set `false` to forward responses unmodified. |
+| `--grpc-web-allowed-origins` | `""` (same-origin only) | Comma-separated `scheme://host[:port]` allowlist of browser origins permitted to call the router with gRPC-Web. Gates only gRPC-Web CORS — see [gRPC-Web](#grpc-web-browser-clients). Transcoding itself is always on. |
 | `--cache-enabled` | `false` | Enable the Pod-IP cache (KEP-NNNN fast path). Requires the RBAC in `deploy/rbac.yaml`. |
 | `--cache-namespace` | `""` (cluster-wide) | Restrict the Pod informer to a single namespace. |
 | `--kubeconfig` | `""` (in-cluster) | Kubeconfig for the cache's informer client. Honors `KUBECONFIG`. |
@@ -366,8 +470,8 @@ All metrics live under a private Prometheus registry (no controller-runtime metr
 | `sandbox_router_cert_reloads_total` | counter | `outcome` (`success` / `failure`) |
 | `sandbox_router_build_info` | gauge (const labels) | `git_version`, `git_commit`, `build_date`, `go_version`, `compiler`, `platform` |
 
-These request, duration and inflight metrics also cover native gRPC traffic;
-HTTP 200 does not imply a successful RPC. Upstream byte-volume counters are not
+These request, duration and inflight metrics also cover native gRPC and
+gRPC-Web traffic; HTTP 200 does not imply a successful RPC. Upstream byte-volume counters are not
 currently exported for either HTTP or native gRPC.
 
 ## Tracing
@@ -408,6 +512,7 @@ tls-min-version: "VersionTLS12"
 tls-cipher-suites: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
 metrics-secure-serving: true
 mtls-mode: "required"
+grpc-web-allowed-origins: "https://app.example.com,https://admin.example.com:8443"
 cluster-domain: "cluster.local"
 proxy-timeout: "180s"
 upstream-max-retries: 3
@@ -492,4 +597,5 @@ What's new beyond the Python router:
 - Configurable dial-retry with backoff
 - Graceful shutdown (readiness flip, parallel drain, bounded timeout)
 - Strict request-body size limit (`--max-request-body-bytes`)
+- Native gRPC proxying and gRPC-Web transcoding for browser clients
 - Built as a multi-arch distroless static image

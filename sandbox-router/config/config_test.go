@@ -509,6 +509,16 @@ func TestValidate(t *testing.T) {
 			wantErr: "path-routing-prefix must not contain whitespace or control characters",
 		},
 		{
+			name:    "preserve prefix without a path routing prefix rejected",
+			mut:     func(c *Config) { c.PathRoutingPrefix = ""; c.PathRoutingPreservePrefix = true },
+			wantErr: "path-routing-preserve-prefix requires --path-routing-prefix",
+		},
+		{
+			name:    "preserve prefix with a path routing prefix accepted",
+			mut:     func(c *Config) { c.PathRoutingPrefix = "/router"; c.PathRoutingPreservePrefix = true },
+			wantErr: "",
+		},
+		{
 			name:    "path routing prefix with a trailing newline rejected",
 			mut:     func(c *Config) { c.PathRoutingPrefix = "/router\n" },
 			wantErr: "path-routing-prefix must not contain whitespace or control characters",
@@ -633,6 +643,27 @@ func TestValidate(t *testing.T) {
 				c.AuthzTrustForwardedProto = true
 			},
 			wantErr: "authz-trust-forwarded-proto has no effect without --authz-cookie-name",
+		},
+		{
+			name: "malformed grpc-web allowed origin",
+			mut: func(c *Config) {
+				c.GRPCWebAllowedOrigins = []string{"not-a-valid-origin"}
+			},
+			wantErr: "grpc-web-allowed-origins",
+		},
+		{
+			name: "grpc-web allowed origin with a path is rejected",
+			mut: func(c *Config) {
+				c.GRPCWebAllowedOrigins = []string{"https://example.com/some/path"}
+			},
+			wantErr: "grpc-web-allowed-origins",
+		},
+		{
+			name: "valid grpc-web allowed origins",
+			mut: func(c *Config) {
+				c.GRPCWebAllowedOrigins = []string{"https://app.example.com", "https://app.example.com:8443"}
+			},
+			wantErr: "",
 		},
 		{
 			name: "valid browser-session configuration behind a TLS-terminating proxy",

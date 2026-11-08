@@ -771,6 +771,27 @@ func TestDirectoryListingOmitsEscapingSymlinks(t *testing.T) {
 	require.Equal(t, "normal.txt", listing.Entries[0].Name)
 }
 
+func TestDeleteRemovesSymlinkItself(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	outside := filepath.Join(t.TempDir(), "secret")
+	require.NoError(t, os.WriteFile(outside, []byte("s"), 0o644))
+	writeFiles(t, root, map[string]string{"real.txt": "data", "dir/f": "f"})
+	require.NoError(t, os.Symlink("real.txt", filepath.Join(root, "link")))
+	require.NoError(t, os.Symlink("dir", filepath.Join(root, "dirlink")))
+	require.NoError(t, os.Symlink(".", filepath.Join(root, "rootlink")))
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "escape")))
+
+	for _, name := range []string{"link", "dirlink", "rootlink", "escape"} {
+		rec := doRequest(handler, http.MethodDelete, "/v1/files/"+name+"?recursive=true", nil, nil)
+		require.Equal(t, http.StatusNoContent, rec.Code, name+": "+rec.Body.String())
+		_, err := os.Lstat(filepath.Join(root, name))
+		require.ErrorIs(t, err, os.ErrNotExist, name)
+	}
+	require.Equal(t, "data", readFile(t, filepath.Join(root, "real.txt")))
+	require.Equal(t, "f", readFile(t, filepath.Join(root, "dir", "f")))
+	require.Equal(t, "s", readFile(t, outside))
+}
+
 func TestDeleteInvalidRecursiveRejected(t *testing.T) {
 	_, handler, root := newRESTFixture(t)
 	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o644))

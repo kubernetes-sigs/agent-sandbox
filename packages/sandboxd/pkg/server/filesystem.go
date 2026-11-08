@@ -897,7 +897,7 @@ func (s *RESTServer) writeExtractError(w http.ResponseWriter, err error) {
 }
 
 func (s *RESTServer) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
-	target, ok := s.resolvePath(w, r)
+	target, ok := s.resolveUserPath(w, r.PathValue("path"), pathutil.SanitizeEntryPath)
 	if !ok {
 		return
 	}

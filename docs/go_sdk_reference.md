@@ -79,8 +79,6 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(h \*ProcessHandle\) Recv\(\) \(\*ProcessEvent, error\)](<#ProcessHandle.Recv>)
   - [func \(h \*ProcessHandle\) SendSignal\(ctx context.Context, signal ProcessSignal\) error](<#ProcessHandle.SendSignal>)
 - [type ProcessSignal](<#ProcessSignal>)
-- [type ResizeOption](<#ResizeOption>)
-  - [func WithTemplateSync\(\) ResizeOption](<#WithTemplateSync>)
 - [type Runtime](<#Runtime>)
 - [type Sandbox](<#Sandbox>)
   - [func New\(\_ context.Context, opts Options\) \(\*Sandbox, error\)](<#New>)
@@ -104,7 +102,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(s \*Sandbox\) PodName\(\) string](<#Sandbox.PodName>)
   - [func \(s \*Sandbox\) Read\(ctx context.Context, path string, opts ...CallOption\) \(\[\]byte, error\)](<#Sandbox.Read>)
   - [func \(s \*Sandbox\) ReadTo\(ctx context.Context, path string, destination io.Writer, opts ...CallOption\) \(int64, error\)](<#Sandbox.ReadTo>)
-  - [func \(s \*Sandbox\) ResizePodResources\(ctx context.Context, containerName string, resources corev1.ResourceRequirements, opts ...ResizeOption\) error](<#Sandbox.ResizePodResources>)
+  - [func \(s \*Sandbox\) ResizePodResources\(ctx context.Context, containerName string, resources corev1.ResourceRequirements\) error](<#Sandbox.ResizePodResources>)
   - [func \(s \*Sandbox\) Run\(ctx context.Context, command string, opts ...CallOption\) \(\*ExecutionResult, error\)](<#Sandbox.Run>)
   - [func \(s \*Sandbox\) SandboxName\(\) string](<#Sandbox.SandboxName>)
   - [func \(s \*Sandbox\) ServiceFQDN\(\) string](<#Sandbox.ServiceFQDN>)
@@ -1223,24 +1221,6 @@ const (
 )
 ```
 
-<a name="ResizeOption"></a>
-### type [ResizeOption](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/resize.go>)
-
-ResizeOption configures per\-call behavior of ResizePodResources.
-
-```go
-type ResizeOption func(*resizeOptions)
-```
-
-<a name="WithTemplateSync"></a>
-#### func [WithTemplateSync](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/resize.go>)
-
-```go
-func WithTemplateSync() ResizeOption
-```
-
-WithTemplateSync also updates Sandbox.Spec.PodTemplate after a successful resize so the declared template matches the resized Pod. It is opt\-in because it needs get and patch on sandboxes, which SandboxClaim\-scoped callers often do not have; without it the Sandbox spec no longer reflects the running Pod's sizing.
-
 <a name="Runtime"></a>
 ### type [Runtime](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/options.go>)
 
@@ -1471,16 +1451,16 @@ ReadTo streams a file into a caller\-owned io.Writer without buffering the compl
 #### func \(\*Sandbox\) [ResizePodResources](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/resize.go>)
 
 ```go
-func (s *Sandbox) ResizePodResources(ctx context.Context, containerName string, resources corev1.ResourceRequirements, opts ...ResizeOption) error
+func (s *Sandbox) ResizePodResources(ctx context.Context, containerName string, resources corev1.ResourceRequirements) error
 ```
 
 ResizePodResources requests an in\-place resize of one container's CPU and memory resources on the Sandbox's backing Pod via the Pod /resize subresource \(KEP\-1287\). The Pod keeps its identity; whether the resized container restarts is controlled by its per\-container resizePolicy \(NotRequired avoids a restart, RestartContainer allows one\).
 
-This operates on the Pod directly instead of going through the Sandbox API, per the project guidance \(issue \#612\): the Sandbox spec stays a user\-owned declaration, and the resize does not freeze a KEP\-1287 subset into the Sandbox API surface.
+This operates on the Pod directly instead of going through the Sandbox API, per the project guidance \(issue \#612\): the Sandbox spec stays a user\-owned declaration, and the resize does not freeze a KEP\-1287 subset into the Sandbox API surface. The Sandbox spec is deliberately left untouched: it cannot track live changes from other /resize callers such as VPA, and callers who want the new size reflected in Sandbox.Spec.PodTemplate can patch the Sandbox themselves.
 
 The cluster must serve the Pod resize subresource. The call returns the API server's error unchanged \(wrapped\) when a resize is rejected.
 
-Required RBAC for the caller's credentials: patch on pods/resize. When WithTemplateSync is used, get and patch on sandboxes are required as well.
+Required RBAC for the caller's credentials: patch on pods/resize.
 
 Example:
 

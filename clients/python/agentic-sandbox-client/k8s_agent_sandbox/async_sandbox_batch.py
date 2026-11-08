@@ -390,15 +390,23 @@ class AsyncSandboxBatch:
     async def _attach(cls, client: "AsyncSandboxClient[Any]", batch_id: str, namespace: str) -> "AsyncSandboxBatch":
         """Attach to an existing batch and take over its Lease."""
         batch_utils.validate_batch_id(batch_id)
+        helper = client.k8s_helper
+        # Check the connection pool before taking the Lease, so a pool too small for the watch,
+        # renewal, and deletes fails here instead of after this handle holds the batch.
+        max_in_flight = batch_utils.check_pool_size(
+            await helper.api_pool_size(),
+            batch_utils.BATCH_DEFAULT_MAX_IN_FLIGHT,
+            explicit=False,
+        )
 
         lease_name = f"{BATCH_LEASE_NAME_PREFIX}{batch_id}"
 
-        lease = await client.k8s_helper.read_batch_lease(
+        lease = await helper.read_batch_lease(
             lease_name, namespace, _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
         )
         lease_uid = None if lease is None else batch_utils.lease_owner_reference(lease)["uid"]
         label_selector = batch_utils.batch_claim_label_selector(batch_id, lease_uid)
-        claim_items, list_rv = await client.k8s_helper.list_sandbox_claim_objects(
+        claim_items, list_rv = await helper.list_sandbox_claim_objects(
             namespace, label_selector, _request_timeout=batch_utils.BATCH_COLLECTION_REQUEST_TIMEOUT_SECONDS
         )
 
@@ -442,16 +450,52 @@ class AsyncSandboxBatch:
         spec.lease_duration_seconds = duration
         spec.acquire_time = now
         spec.lease_transitions = (spec.lease_transitions or 0) + 1
+        lease_expires_at = renewed_at + duration
+        # Bound the takeover write by the new Lease duration, so a slow write can't land after the
+        # Lease it grants has already expired.
+        attach_timeout = min(float(batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS), float(duration))
         try:
-            written = await client.k8s_helper.replace_batch_lease(
-                lease_name, namespace, lease, _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
+            written = await helper.replace_batch_lease(
+                lease_name, namespace, lease, _request_timeout=attach_timeout
             )
         except ApiException as e:
             if e.status == 409:
                 raise BatchInUseError(
                     f"batch '{batch_id}' Lease was taken over by another client while attaching"
                 ) from e
+            # The Lease was deleted between the read and the write, so report the batch the same way
+            # as when the read finds no Lease.
+            if e.status == 404:
+                remaining_claims, _ = await helper.list_sandbox_claim_objects(
+                    namespace,
+                    batch_utils.batch_claim_label_selector(batch_id),
+                    _request_timeout=batch_utils.BATCH_COLLECTION_REQUEST_TIMEOUT_SECONDS,
+                )
+                if not remaining_claims:
+                    raise BatchNotFoundError(
+                        f"batch '{batch_id}' not found in namespace '{namespace}'"
+                    ) from e
+                raise BatchLeaseExpiredError(
+                    f"batch '{batch_id}' Lease is missing or stale in namespace '{namespace}'"
+                ) from e
             raise
+        # A timeout or transport error after the new Lease expired leaves no usable takeover, so
+        # report the expiry instead.
+        except Exception as exc:
+            if (
+                not isinstance(exc, BatchError)
+                and (isinstance(exc, TimeoutError) or _is_transport_error(exc))
+                and time.monotonic() >= lease_expires_at
+            ):
+                raise BatchLeaseExpiredError(
+                    f"batch '{batch_id}' Lease expired before attach finished in namespace '{namespace}'"
+                ) from exc
+            raise
+        # The write itself can take long enough to use up the new Lease.
+        if time.monotonic() >= lease_expires_at:
+            raise BatchLeaseExpiredError(
+                f"batch '{batch_id}' Lease expired before attach finished in namespace '{namespace}'"
+            )
 
         handle = cls(
             client=client,
@@ -466,6 +510,7 @@ class AsyncSandboxBatch:
             lease_renewed_at=renewed_at,
             quorum_timeout=settings.quorum_timeout,
             work_budget=settings.work_budget,
+            max_in_flight=max_in_flight,
         )
         handle._fill_deadline = time.monotonic() + settings.quorum_timeout
         handle._create_interval = 1 / settings.create_rps
@@ -1561,6 +1606,9 @@ class AsyncSandboxBatch:
                             )
                             break
                         except ApiException as e:
+                            # The Lease is already gone, so there is nothing left to release.
+                            if e.status == 404:
+                                break
                             if e.status != 409 or attempt:
                                 raise
                             # A 409 means the Lease changed after it was read. A write from an earlier detach() call
@@ -2253,6 +2301,9 @@ async def _take_batch_lease(
         try:
             written = await helper.replace_batch_lease(lease_name, namespace, lease, _request_timeout=timeout)
         except ApiException as e:
+            # The Lease was deleted after the read, so report it missing the way the read does.
+            if e.status == 404:
+                return None
             if e.status != 409:
                 raise
             if retried:

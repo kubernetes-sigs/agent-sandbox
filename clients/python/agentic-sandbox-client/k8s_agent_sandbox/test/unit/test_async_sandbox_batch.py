@@ -169,6 +169,7 @@ class BaseAsyncBatchClientTest(unittest.IsolatedAsyncioTestCase):
         config = SandboxDirectConnectionConfig(api_url="http://test-router:8080")
         self.client = AsyncSandboxClient(connection_config=config, cleanup=False)
         self.mock_k8s_helper = self.client.k8s_helper
+        self.mock_k8s_helper.api_pool_size = AsyncMock(return_value=None)
         self.mock_k8s_helper.count_live_sandbox_claims = AsyncMock(return_value=0)
         self.mock_sandbox_class = MagicMock()
         self.client.sandbox_class = self.mock_sandbox_class
@@ -263,6 +264,82 @@ class TestGetBatchLeaseCases(BaseAsyncBatchClientTest):
         )
         with self.assertRaises(k8s_client.ApiException):
             await self.client.get_batch("b1")
+
+    async def test_get_batch_checks_pool_size_and_fences_slow_lease_write(self):
+        self.mock_k8s_helper.api_pool_size = AsyncMock(return_value=2)
+        with self.assertRaises(ValueError):
+            await self.client.get_batch("b1")
+        self.mock_k8s_helper.read_batch_lease.assert_not_called()
+
+        self.mock_k8s_helper.api_pool_size = AsyncMock(return_value=8)
+        now = datetime.now(UTC)
+        self.mock_k8s_helper.read_batch_lease = AsyncMock(
+            side_effect=lambda *_a, **_kw: _lease(
+                holder_identity=None,
+                renew_time=now,
+                lease_duration_seconds=6,
+                annotations={BATCH_LEASE_DURATION_ANNOTATION: "6"},
+            )
+        )
+        self.mock_k8s_helper.list_sandbox_claim_objects = AsyncMock(
+            return_value=([_claim("b1-0")], "5")
+        )
+        clock = [100.0]
+
+        async def slow_replace(*_args, **_kwargs):
+            clock[0] += 6.0
+            return _lease(holder_identity="h1", lease_duration_seconds=6)
+
+        self.mock_k8s_helper.replace_batch_lease = AsyncMock(side_effect=slow_replace)
+        with patch(
+            "k8s_agent_sandbox.async_sandbox_batch.time.monotonic", side_effect=lambda: clock[0]
+        ):
+            with self.assertRaises(BatchLeaseExpiredError):
+                await self.client.get_batch("b1")
+        self.assertEqual(
+            self.mock_k8s_helper.replace_batch_lease.call_args_list[0].kwargs["_request_timeout"],
+            6.0,
+        )
+
+        self.mock_k8s_helper.replace_batch_lease = AsyncMock(
+            return_value=_lease(holder_identity="h1", lease_duration_seconds=6)
+        )
+        attached = await self.client.get_batch("b1")
+        self.assertEqual(attached._in_flight._value, 8 - batch_utils.BATCH_POOL_HEADROOM)
+
+    async def test_replace_batch_lease_404_is_handled_across_attach_release_and_detach(self):
+        now = datetime.now(UTC)
+        not_found = k8s_client.ApiException(status=404, reason="Not Found")
+        self.mock_k8s_helper.read_batch_lease = AsyncMock(
+            side_effect=lambda *_a, **_kw: _lease(holder_identity=None, renew_time=now)
+        )
+        self.mock_k8s_helper.replace_batch_lease = AsyncMock(side_effect=not_found)
+        self.mock_k8s_helper.delete_sandbox_claims_by_label = AsyncMock()
+        self.mock_k8s_helper.delete_batch_lease = AsyncMock()
+
+        self.mock_k8s_helper.list_sandbox_claim_objects = AsyncMock(
+            side_effect=[([], "5"), ([], "6")]
+        )
+        with self.assertRaises(BatchNotFoundError):
+            await self.client.get_batch("b1")
+
+        self.mock_k8s_helper.list_sandbox_claim_objects = AsyncMock(
+            side_effect=[([], "5"), ([_claim("b1-0")], "6")]
+        )
+        with self.assertRaises(BatchLeaseExpiredError):
+            await self.client.get_batch("b1")
+
+        handle_rel = _make_handle(self.client)
+        self.mock_k8s_helper.read_batch_lease = AsyncMock(return_value=handle_rel._lease)
+        await handle_rel.release()
+        self.assertTrue(handle_rel._released)
+        self.mock_k8s_helper.delete_sandbox_claims_by_label.assert_awaited_once()
+        self.mock_k8s_helper.delete_batch_lease.assert_not_awaited()
+
+        handle_det = _make_handle(self.client)
+        self.mock_k8s_helper.read_batch_lease = AsyncMock(return_value=handle_det._lease)
+        await handle_det.detach(grace=30)
+        self.assertTrue(handle_det._lease_released)
 
 
 @patch.object(AsyncSandboxBatch, "_start", lambda self: None)

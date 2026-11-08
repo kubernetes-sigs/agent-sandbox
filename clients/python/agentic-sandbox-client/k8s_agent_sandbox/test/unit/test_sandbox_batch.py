@@ -4959,9 +4959,9 @@ class TestAcquire(BaseClaimBatchTest):
         self.assertEqual(batch._acquire_waiters, {})
 
     def test_pod_annotations_are_sent_on_create_and_retries_and_omitted_when_empty(self):
-        with patch("k8s_agent_sandbox.k8s_helper.config"), \
-             patch("k8s_agent_sandbox.k8s_helper.client.ApiClient"):
+        with patch("k8s_agent_sandbox.k8s_helper.config"):
             real_helper = K8sHelper()
+        self.addCleanup(real_helper.close)
         bodies: list[dict] = []
         unavailable = k8s_client.ApiException(status=503)
         unavailable.headers = {"Retry-After": "0"}

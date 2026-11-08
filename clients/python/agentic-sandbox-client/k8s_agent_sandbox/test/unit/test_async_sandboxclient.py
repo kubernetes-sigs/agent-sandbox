@@ -372,15 +372,23 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         client._active_connection_sandboxes = {("tenant-ns", "claim-abc"): MagicMock()}
         mock_helper_instance = MagicMock()
         mock_helper_instance.delete_sandbox_claim = MagicMock()
+        closed: list[str] = []
+        mock_helper_instance.close.side_effect = lambda: closed.append("helper")
 
         with patch(
             "k8s_agent_sandbox.async_sandbox_client.K8sHelper",
             return_value=mock_helper_instance,
-        ) as MockHelper:
+        ) as MockHelper, patch(
+            "k8s_agent_sandbox.async_sandbox_client._close_api_client",
+            side_effect=lambda api_client: closed.append("api_client"),
+        ) as mock_close_api_client:
             client._atexit_cleanup()
 
         MockHelper.assert_called_once()
         atexit_api_client = MockHelper.call_args.kwargs["api_client"]
+        # The mirrored client's HTTP pool is cleared too, after the helper using it closes.
+        mock_close_api_client.assert_called_once_with(atexit_api_client)
+        self.assertEqual(closed, ["helper", "api_client"])
         self.assertIsInstance(atexit_api_client, sync_client.ApiClient)
         self.assertEqual(atexit_api_client.configuration.host, "https://tenant-a.example.com")
         self.assertFalse(atexit_api_client.configuration.verify_ssl)

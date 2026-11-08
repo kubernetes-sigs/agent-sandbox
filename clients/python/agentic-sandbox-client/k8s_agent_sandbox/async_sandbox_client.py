@@ -40,7 +40,7 @@ from .async_k8s_helper import AsyncK8sHelper
 from .async_sandbox import AsyncSandbox
 from .async_sandbox_batch import AsyncSandboxBatch
 from .exceptions import BatchInUseError, SandboxNotFoundError
-from .k8s_helper import K8sHelper
+from .k8s_helper import K8sHelper, _close_api_client
 from .pod_metadata import build_pod_metadata, validate_labels
 from .sandbox_batch import _delete_batch_objects as _delete_batch_objects_sync
 from .utils import construct_sandbox_claim_lifecycle_spec
@@ -828,23 +828,26 @@ class AsyncSandboxClient(Generic[T]):
                             file=sys.stderr,
                         )
 
-            atexit_api_client = None
-            if self._injected_api_client is not None:
-                atexit_api_client = sync_client.ApiClient(
-                    configuration=_sync_configuration_from_async(self._injected_api_client.configuration),
-                    cookie=self._injected_api_client.cookie,
-                )
-                for name, value in dict(self._injected_api_client.default_headers).items():
-                    atexit_api_client.set_default_header(name, value)
-
-            # kubernetes registers its own atexit removal of extracted inline cert files, but Python drops
-            # registrations made from inside a running atexit hook, so they go in a directory removed here.
-            # An injected api_client loads no kubeconfig, so it needs no directory.
-            kube_config_dir_cm = (
-                contextlib.nullcontext() if atexit_api_client is not None else tempfile.TemporaryDirectory()
-            )
-            with kube_config_dir_cm as kube_config_dir:
+            # Cleanup runs in reverse: the helper closes first, then the kube-config directory or the
+            # mirrored api_client.
+            with contextlib.ExitStack() as cleanup:
+                atexit_api_client = None
+                kube_config_dir = None
+                if self._injected_api_client is not None:
+                    atexit_api_client = sync_client.ApiClient(
+                        configuration=_sync_configuration_from_async(self._injected_api_client.configuration),
+                        cookie=self._injected_api_client.cookie,
+                    )
+                    cleanup.callback(_close_api_client, atexit_api_client)
+                    for name, value in dict(self._injected_api_client.default_headers).items():
+                        atexit_api_client.set_default_header(name, value)
+                else:
+                    # kubernetes registers its own atexit removal of extracted inline cert files, but Python
+                    # drops registrations made from inside a running atexit hook, so they go in a directory
+                    # removed here. An injected api_client loads no kubeconfig, so it needs no directory.
+                    kube_config_dir = cleanup.enter_context(tempfile.TemporaryDirectory())
                 helper = K8sHelper(api_client=atexit_api_client, kube_config_temp_dir=kube_config_dir)
+                cleanup.callback(helper.close)
                 for ns, claim_name in (key for key, _ in tracked):
                     if (ns, claim_name) in self._explicit_claims:
                         continue

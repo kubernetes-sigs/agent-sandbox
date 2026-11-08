@@ -604,16 +604,19 @@ class SandboxClient(Generic[T]):
         self._release_batches(exiting=False)
 
     def _delete_automatic_sandboxes(self) -> None:
-        for key, sandbox in list(self._active_connection_sandboxes.items()):
-            namespace, claim_name = key
-            try:
-                if key in self._explicit_claims:
-                    sandbox.close_connection()
-                else:
-                    self.delete_sandbox(claim_name, namespace)
-            except Exception as e:
-                logger.error(f"Cleanup failed for {claim_name} in namespace {namespace}: {e}")
-        self._release_batches(exiting=True)
+        try:
+            for key, sandbox in list(self._active_connection_sandboxes.items()):
+                namespace, claim_name = key
+                try:
+                    if key in self._explicit_claims:
+                        sandbox.close_connection()
+                    else:
+                        self.delete_sandbox(claim_name, namespace)
+                except Exception as e:
+                    logger.error(f"Cleanup failed for {claim_name} in namespace {namespace}: {e}")
+            self._release_batches(exiting=True)
+        finally:
+            self.k8s_helper.close()
 
     def _release_batches(self, exiting: bool) -> None:
         """Releases every tracked batch, except that exit cleanup detaches attached ones.

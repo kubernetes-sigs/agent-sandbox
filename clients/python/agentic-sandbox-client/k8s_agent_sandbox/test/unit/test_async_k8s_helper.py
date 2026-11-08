@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import logging
 import unittest
 import weakref
@@ -1003,6 +1004,41 @@ class TestAsyncK8sHelperApiClientInjection(unittest.IsolatedAsyncioTestCase):
         await helper.close()
         created.close.assert_awaited_once()
 
+    async def test_in_flight_or_cancelled_close_clears_initialized_state_immediately(
+        self, mock_config, mock_api_client_cls, mock_custom_cls, mock_core_cls
+    ):
+        entered_close = asyncio.Event()
+        release_close = asyncio.Event()
+        self.addCleanup(release_close.set)
+
+        async def slow_close() -> None:
+            entered_close.set()
+            await release_close.wait()
+
+        created = AsyncMock(name="ApiClient")
+        created.close.side_effect = slow_close
+        replacement = AsyncMock(name="ReplacementApiClient")
+        mock_api_client_cls.side_effect = [created, replacement]
+
+        helper = AsyncK8sHelper()
+        await helper._ensure_initialized()
+        self.assertTrue(helper._initialized)
+
+        close_task = asyncio.create_task(helper.close())
+        await asyncio.wait_for(entered_close.wait(), timeout=2.5)
+        self.assertIsNone(helper._api_client)
+        self.assertFalse(helper._initialized)
+
+        close_task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await close_task
+        self.assertIsNone(helper._api_client)
+        self.assertFalse(helper._initialized)
+
+        await helper._ensure_initialized()
+        self.assertIs(helper._api_client, replacement)
+        self.assertTrue(helper._initialized)
+
 
 class TestAsyncK8sHelperWatchTimeout(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -1313,6 +1349,14 @@ class TestAsyncK8sHelperBatchMethods(unittest.IsolatedAsyncioTestCase):
         self.assertIn("\ufffdproxy error", raised.exception.body)
         binary_error.release.assert_called_once()
 
+        broken = MagicMock(status=503, reason="Service Unavailable", headers={})
+        broken.read = AsyncMock(side_effect=ConnectionResetError("read failed"))
+        self.helper.custom_objects_api.delete_collection_namespaced_custom_object = AsyncMock(return_value=broken)
+        with self.assertRaises(ConnectionResetError):
+            await self.helper.delete_sandbox_claims_by_label("default", "agents.x-k8s.io/batch-id=b1")
+        broken.close.assert_called_once()
+        broken.release.assert_called_once()
+
     @patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch")
     async def test_watch_sandbox_claims_yields_events(self, mock_watch_class):
         mock_watch = MagicMock()
@@ -1382,6 +1426,69 @@ class TestAsyncK8sHelperBatchMethods(unittest.IsolatedAsyncioTestCase):
                 pass
 
         mock_watch.close.assert_awaited_once()
+
+    async def test_watch_sandbox_claims_raises_api_exception_with_headers_on_http_error(self):
+        class _FakeResponse:
+            def __init__(self, status: int, reason: str, headers: dict[str, str], body: bytes) -> None:
+                self.status = status
+                self.reason = reason
+                self.headers = headers
+                self._body = body
+                self.closed = False
+                self.released = False
+
+            async def read(self) -> bytes:
+                return self._body
+
+            def close(self) -> None:
+                self.closed = True
+
+            def release(self) -> None:
+                self.released = True
+
+        resp_403 = _FakeResponse(403, "Forbidden", {}, b"Forbidden\n")
+        self.helper.custom_objects_api.list_namespaced_custom_object = AsyncMock(return_value=resp_403)
+        with self.assertRaises(client.ApiException) as ctx_403:
+            _ = [
+                e async for e in self.helper.watch_sandbox_claims(
+                    "default", "agents.x-k8s.io/batch-id=b1", "5", 30
+                )
+            ]
+        self.assertEqual(ctx_403.exception.status, 403)
+        self.assertEqual(ctx_403.exception.body, "Forbidden\n")
+        self.assertTrue(resp_403.released)
+
+        resp_429 = _FakeResponse(
+            429,
+            "Too Many Requests",
+            {"Retry-After": "17"},
+            b'{"kind":"Status","apiVersion":"v1","status":"Failure","code":429}\n',
+        )
+        self.helper.custom_objects_api.list_namespaced_custom_object = AsyncMock(return_value=resp_429)
+        with self.assertRaises(client.ApiException) as ctx_429:
+            _ = [
+                e async for e in self.helper.watch_sandbox_claims(
+                    "default", "agents.x-k8s.io/batch-id=b1", "5", 30
+                )
+            ]
+        self.assertEqual(ctx_429.exception.status, 429)
+        self.assertEqual(ctx_429.exception.headers["Retry-After"], "17")
+        self.assertTrue(resp_429.released)
+
+        class _BrokenReadResponse(_FakeResponse):
+            async def read(self) -> bytes:
+                raise ConnectionResetError("read failed")
+
+        resp_broken = _BrokenReadResponse(503, "Service Unavailable", {}, b"")
+        self.helper.custom_objects_api.list_namespaced_custom_object = AsyncMock(return_value=resp_broken)
+        with self.assertRaises(ConnectionResetError):
+            _ = [
+                e async for e in self.helper.watch_sandbox_claims(
+                    "default", "agents.x-k8s.io/batch-id=b1", "5", 30
+                )
+            ]
+        self.assertTrue(resp_broken.closed)
+        self.assertTrue(resp_broken.released)
 
     async def test_read_batch_lease_returns_lease_on_success(self):
         lease = client.V1Lease(metadata=client.V1ObjectMeta(name="batch-b1"))

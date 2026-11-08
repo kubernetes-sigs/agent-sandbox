@@ -1076,7 +1076,65 @@ class TestK8sHelperApiClientInjection(unittest.TestCase):
     ):
         sentinel = MagicMock(name="ApiClient")
         self.assertIs(K8sHelper(api_client=sentinel).injected_api_client, sentinel)
-        self.assertIsNone(K8sHelper().injected_api_client)
+        ambient = K8sHelper()
+        self.addCleanup(ambient.close)
+        self.assertIsNone(ambient.injected_api_client)
+
+    @patch("k8s_agent_sandbox.k8s_helper.client.ApiClient")
+    def test_close_closes_owned_and_batch_api_clients_idempotently(
+        self, mock_api_client_cls, mock_config, mock_custom_cls, mock_core_cls, mock_coord_cls, mock_without_retries
+    ):
+        owned = MagicMock(name="OwnedApiClient")
+        unretried = MagicMock(name="UnretriedApiClient")
+        mock_api_client_cls.return_value = owned
+        mock_without_retries.return_value = unretried
+
+        helper = K8sHelper()
+
+        mock_api_client_cls.assert_called_once_with()
+        mock_without_retries.assert_called_once_with(owned)
+        self.assertEqual(mock_custom_cls.call_args_list, [call(owned), call(unretried)])
+        mock_core_cls.assert_called_once_with(owned)
+
+        helper.close()
+        helper.close()
+        unretried.close.assert_called_once()
+        owned.close.assert_called_once()
+        # kubernetes 35's ApiClient.close() leaves the HTTP connection pool open.
+        unretried.rest_client.pool_manager.clear.assert_called_once()
+        owned.rest_client.pool_manager.clear.assert_called_once()
+
+    def test_close_leaves_injected_api_client_open_and_closes_batch_client(
+        self, mock_config, mock_custom_cls, mock_core_cls, mock_coord_cls, mock_without_retries
+    ):
+        injected = MagicMock(name="InjectedApiClient")
+        unretried = MagicMock(name="UnretriedApiClient")
+        mock_without_retries.return_value = unretried
+
+        helper = K8sHelper(api_client=injected)
+        helper.close()
+        helper.close()
+
+        injected.close.assert_not_called()
+        injected.rest_client.pool_manager.clear.assert_not_called()
+        unretried.close.assert_called_once()
+        unretried.rest_client.pool_manager.clear.assert_called_once()
+
+    @patch("k8s_agent_sandbox.k8s_helper.client.ApiClient")
+    def test_init_failure_closes_already_created_clients(
+        self, mock_api_client_cls, mock_config, mock_custom_cls, mock_core_cls, mock_coord_cls, mock_without_retries
+    ):
+        owned = MagicMock(name="OwnedApiClient")
+        unretried = MagicMock(name="UnretriedApiClient")
+        mock_api_client_cls.return_value = owned
+        mock_without_retries.return_value = unretried
+        mock_coord_cls.side_effect = RuntimeError("init boom")
+
+        with self.assertRaisesRegex(RuntimeError, "init boom"):
+            K8sHelper()
+
+        unretried.close.assert_called_once()
+        owned.close.assert_called_once()
 
 
 class TestK8sHelperInClusterAuth(unittest.TestCase):

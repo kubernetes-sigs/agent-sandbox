@@ -189,6 +189,34 @@ type Config struct {
 	// browser tab.
 	PathRoutingPrefix string
 
+	// PathRoutingPreservePrefix, when true, forwards a path-routed request
+	// to the sandbox with its full original path intact —
+	// <PathRoutingPrefix>/<namespace>/<id>/<port>/<rest...> — instead of
+	// the stripped <rest...>. Use it for a sandbox UI that is configured
+	// to serve under its own base path (for example JupyterLab started
+	// with --ServerApp.base_url=<prefix>/<namespace>/<id>/<port>/): such an
+	// app emits prefixed Location, Set-Cookie, asset and WebSocket URLs
+	// itself, so the router must not strip the prefix from what it
+	// forwards. Its Location headers are left alone too, though Set-Cookie
+	// Path is still rescoped under the prefix (see PathRoutingRewriteResponses).
+	//
+	// Off by default, which keeps the stripped form for apps that have no
+	// base-path setting. In that default mode the router rewrites
+	// upstream Location and Set-Cookie Path attributes for path-routed
+	// requests so they stay under the prefix. Requires
+	// PathRoutingPrefix.
+	PathRoutingPreservePrefix bool
+
+	// PathRoutingRewriteResponses, when true (the default), rewrites the
+	// Location and Set-Cookie Path of path-routed responses so they stay under
+	// the routing prefix. Set-Cookie Path is rewritten in both modes. Location
+	// is rewritten only in the default strip mode: under
+	// PathRoutingPreservePrefix the sandbox already emits prefixed redirects,
+	// and the router leaves them alone. Turn this off only for an upstream that
+	// must see its redirects and cookies unmodified, accepting that apps with
+	// no base-path setting will redirect the browser outside the prefix.
+	PathRoutingRewriteResponses bool
+
 	// EnableTracing enables OTel tracing via the OTLP gRPC exporter. The
 	// exporter endpoint is read from OTEL_EXPORTER_OTLP_ENDPOINT.
 	EnableTracing bool
@@ -339,23 +367,24 @@ type Config struct {
 // flag overrides are present.
 func Defaults() Config {
 	return Config{
-		HTTPAddr:                  ":8080",
-		HTTPSAddr:                 "",
-		MetricsAddr:               ":9090",
-		ProbeAddr:                 ":8081",
-		MTLSMode:                  MTLSOff,
-		ClusterDomain:             "cluster.local",
-		ProxyTimeout:              180 * time.Second,
-		ResponseHeaderTimeout:     30 * time.Second,
-		ShutdownTimeout:           30 * time.Second,
-		UpstreamMaxRetries:        3,
-		UpstreamRetryInitialDelay: 200 * time.Millisecond,
-		UpstreamRetryMaxDelay:     800 * time.Millisecond,
-		AccessLog:                 true,
-		AuthzMode:                 AuthzAllowAll,
-		AuthzTokenReviewTTL:       30 * time.Second,
-		AuthzTokenReviewCacheSize: 2048,
-		AuthzCookieSameSite:       CookieSameSiteLax,
+		PathRoutingRewriteResponses: true,
+		HTTPAddr:                    ":8080",
+		HTTPSAddr:                   "",
+		MetricsAddr:                 ":9090",
+		ProbeAddr:                   ":8081",
+		MTLSMode:                    MTLSOff,
+		ClusterDomain:               "cluster.local",
+		ProxyTimeout:                180 * time.Second,
+		ResponseHeaderTimeout:       30 * time.Second,
+		ShutdownTimeout:             30 * time.Second,
+		UpstreamMaxRetries:          3,
+		UpstreamRetryInitialDelay:   200 * time.Millisecond,
+		UpstreamRetryMaxDelay:       800 * time.Millisecond,
+		AccessLog:                   true,
+		AuthzMode:                   AuthzAllowAll,
+		AuthzTokenReviewTTL:         30 * time.Second,
+		AuthzTokenReviewCacheSize:   2048,
+		AuthzCookieSameSite:         CookieSameSiteLax,
 	}
 }
 
@@ -439,6 +468,9 @@ func (c *Config) Validate() error {
 		}) {
 			return fmt.Errorf("--path-routing-prefix must not contain whitespace or control characters, got %q", c.PathRoutingPrefix)
 		}
+	}
+	if c.PathRoutingPreservePrefix && c.PathRoutingPrefix == "" {
+		return errors.New("--path-routing-preserve-prefix requires --path-routing-prefix")
 	}
 	if c.UpstreamMaxRetries < 0 {
 		return fmt.Errorf("--upstream-max-retries must be non-negative, got %d", c.UpstreamMaxRetries)

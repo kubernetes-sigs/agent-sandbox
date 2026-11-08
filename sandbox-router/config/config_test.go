@@ -509,6 +509,16 @@ func TestValidate(t *testing.T) {
 			wantErr: "path-routing-prefix must not contain whitespace or control characters",
 		},
 		{
+			name:    "preserve prefix without a path routing prefix rejected",
+			mut:     func(c *Config) { c.PathRoutingPrefix = ""; c.PathRoutingPreservePrefix = true },
+			wantErr: "path-routing-preserve-prefix requires --path-routing-prefix",
+		},
+		{
+			name:    "preserve prefix with a path routing prefix accepted",
+			mut:     func(c *Config) { c.PathRoutingPrefix = "/router"; c.PathRoutingPreservePrefix = true },
+			wantErr: "",
+		},
+		{
 			name:    "path routing prefix with a trailing newline rejected",
 			mut:     func(c *Config) { c.PathRoutingPrefix = "/router\n" },
 			wantErr: "path-routing-prefix must not contain whitespace or control characters",

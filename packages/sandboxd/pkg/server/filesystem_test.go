@@ -87,6 +87,8 @@ func TestPutThenGetFileRoundTrip(t *testing.T) {
 	require.Equal(t, "payload", rec.Body.String())
 }
 
+// TestFileTransfersRejectNamedPipes verifies that transfers finish without a FIFO
+// peer and leave the pipe empty when a reader is already present.
 func TestFileTransfersRejectNamedPipes(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

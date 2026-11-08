@@ -12,12 +12,8 @@ Core platform capabilities, controllers, scheduling engines, and backend interfa
     *   Enable full customization of the runtime environment without breaking the API (via a common proto backend). [[KEP #597](https://github.com/kubernetes-sigs/agent-sandbox/pull/597), [KEP #747](https://github.com/kubernetes-sigs/agent-sandbox/pull/747)]
 *   **SandboxTemplate & SandboxWarmPool Rolling Updates** `⏳ In Progress`
     *   Support rolling updates on WarmPools and Templates to update sandbox pods without causing downtime or service disruption. [[#323](https://github.com/kubernetes-sigs/agent-sandbox/issues/323)]
-*   **1st Class Router** `✅ Done`
-    *   Support the sandbox-router as a first-class citizen within the project (written in Go, built with the rest of the project, and shipping with out-of-the-box images). [[#838](https://github.com/kubernetes-sigs/agent-sandbox/pull/838)]
 *   **Auto Suspend/Resume** `📅 Planned`
     *   Automatically suspend inactive sandboxes and resume them upon traffic or API invocation.
-*   **Smart Warmpool Selection** `✅ Done`
-    *   Select the best sandbox within the warm pool named by a claim (readiness, node spread, oldest first). [[#491](https://github.com/kubernetes-sigs/agent-sandbox/issues/491), [#878](https://github.com/kubernetes-sigs/agent-sandbox/pull/878)]
 *   **API Support for Multi-Sandbox per Pod** `📅 Planned`
     *   Extend API models to support running and managing multiple isolated sandboxes inside a single Pod.
 
@@ -33,8 +29,6 @@ Developer interfaces, programming language SDKs, and application-level tooling.
     *   Implement high-level TypeScript SDK support for modern web application frontends.
 *   **Client Interface for SDK Language Alignment** `📅 Planned`
     *   Establish robust mechanism/interfaces to minimize language diversion across Python, Go, and TypeScript SDKs.
-*   **Agent Sandbox MCP (Model Context Protocol) Server** `✅ Done`
-    *   Integrate an MCP server endpoint via the router or SDK, making Agent Sandbox a native tool for MCP-enabled LLM runtimes. [[#1141](https://github.com/kubernetes-sigs/agent-sandbox/pull/1141)]
 
 ---
 
@@ -63,10 +57,6 @@ Advanced ingress/egress isolation, lifecycle state retention, and security contr
     *   Enable dynamic sandbox/pod identity allocation at claim time (especially when provisioning from pre-warmed pools), associating the pod's security principal/identity based on the user/system making the SandboxClaim.
 *   **Network Policy "Attach" at Claim Time** `📅 Planned`
     *   Dynamic attachment of L4 and L7 egress/ingress NetworkPolicies at claim time to restrict internet access or whitelist specific FQDNs.
-*   **Storage Customization at Claim Time** `✅ Done`
-    *   Allow PVC templates (including sizing) in the SandboxClaim, when the template's `volumeClaimTemplatesPolicy` permits it (default `Disallowed`). These claims cold-start instead of using a warm sandbox. [[#225](https://github.com/kubernetes-sigs/agent-sandbox/issues/225), [#554](https://github.com/kubernetes-sigs/agent-sandbox/issues/554), [#960](https://github.com/kubernetes-sigs/agent-sandbox/pull/960)]
-*   **Strict Sandbox-to-Pod Mapping** `✅ Done`
-    *   Provide bulletproof, deterministic 1-to-1 mappings between a Sandbox claim and its backing Pod. [[#127](https://github.com/kubernetes-sigs/agent-sandbox/issues/127)]
 *   **Startup Actions** `📅 Planned`
     *   Provide options for declarative startup routines, such as immediately pausing or scheduling suspension post-creation. [[#58](https://github.com/kubernetes-sigs/agent-sandbox/issues/58)]
 *   **Auto-Deletion of Bursty Sandboxes** `📅 Planned`
@@ -141,3 +131,13 @@ Lowering the barrier to entry, beautiful guides, interactive tools, and UI dashb
     *   Restructure and write comprehensive, high-fidelity guides replicating clear, professional developer-oriented styles.
 *   **Website Refresh** `✅ Completed`
     *   Ensure that the public site reflects current API changes, usage examples, and best-practice architectures. [[#166](https://github.com/kubernetes-sigs/agent-sandbox/issues/166)]
+*   **1st Class Router** `✅ Completed`
+    *   Support the sandbox-router as a first-class citizen within the project (written in Go, built with the rest of the project, and shipping with out-of-the-box images). [[#838](https://github.com/kubernetes-sigs/agent-sandbox/pull/838)]
+*   **Smart Warmpool Selection** `✅ Completed`
+    *   Select the best sandbox within the warm pool named by a claim (readiness, node spread, oldest first). [[#491](https://github.com/kubernetes-sigs/agent-sandbox/issues/491), [#878](https://github.com/kubernetes-sigs/agent-sandbox/pull/878)]
+*   **Agent Sandbox MCP (Model Context Protocol) Server** `✅ Completed`
+    *   Integrate an MCP server endpoint via the router or SDK, making Agent Sandbox a native tool for MCP-enabled LLM runtimes. [[#1141](https://github.com/kubernetes-sigs/agent-sandbox/pull/1141)]
+*   **Storage Customization at Claim Time** `✅ Completed`
+    *   Allow PVC templates (including sizing) in the SandboxClaim, when the template's `volumeClaimTemplatesPolicy` permits it (default `Disallowed`). These claims cold-start instead of using a warm sandbox. [[#225](https://github.com/kubernetes-sigs/agent-sandbox/issues/225), [#960](https://github.com/kubernetes-sigs/agent-sandbox/pull/960)]
+*   **Strict Sandbox-to-Pod Mapping** `✅ Completed`
+    *   Provide bulletproof, deterministic 1-to-1 mappings between a Sandbox claim and its backing Pod. [[#127](https://github.com/kubernetes-sigs/agent-sandbox/issues/127)]

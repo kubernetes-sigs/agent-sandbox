@@ -897,7 +897,10 @@ func (s *RESTServer) writeExtractError(w http.ResponseWriter, err error) {
 }
 
 func (s *RESTServer) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
-	target, ok := s.resolvePath(w, r)
+	// Delete a symlink in the last path component, not its target, as rm
+	// does. Following it would let "DELETE link?recursive=true" clear the
+	// directory the link points to, including the sandbox root itself.
+	target, ok := s.resolveUserPath(w, r.PathValue("path"), pathutil.SanitizeEntryPath)
 	if !ok {
 		return
 	}

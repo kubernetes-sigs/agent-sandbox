@@ -180,6 +180,9 @@ func (s *RESTServer) resolveUserPath(w http.ResponseWriter, userPath string,
 		if errors.Is(err, pathutil.ErrPathEscapes) {
 			s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED",
 				"path traversal outside sandbox root is forbidden")
+		} else if errors.Is(err, syscall.ENOTDIR) {
+			// A parent component is a regular file, so the path cannot exist.
+			s.writeError(w, http.StatusNotFound, "NOT_FOUND", "path does not exist within the sandbox")
 		} else {
 			s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 		}

@@ -25,6 +25,7 @@ import logging
 import math
 import ssl
 import time
+import weakref
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from functools import partial
@@ -120,6 +121,35 @@ def _create_failure_message(error: Exception) -> str:
     return str(error)
 
 
+def _make_sandbox_callbacks(
+    batch_ref: weakref.ReferenceType["AsyncSandboxBatch"],
+    sandbox_ref: weakref.ReferenceType["AsyncSandbox"],
+    member: Member,
+    batch_id: str,
+    released_cell: list[bool],
+) -> tuple[Callable[[], None], Callable[[], Awaitable[None]]]:
+    """Builds weakref-only close and claim-delete callbacks so connected sandboxes form no cycles."""
+
+    def on_close() -> None:
+        batch = batch_ref()
+        sandbox = sandbox_ref()
+        if batch is None or sandbox is None:
+            return
+        batch._evict_closed_connection(member.claim_name, sandbox)
+
+    async def claim_deleter() -> None:
+        if released_cell[0]:
+            return
+        batch = batch_ref()
+        if batch is None:
+            # The handle was garbage collected after its client stopped tracking it (detach(),
+            # client cleanup, or another handle taking the batch), so nothing can fence the delete.
+            raise BatchError(f"batch '{batch_id}' handle is gone, so its claims can't be deleted through it")
+        await batch.release_member(member)
+
+    return on_close, claim_deleter
+
+
 class AsyncSandboxBatch:
     """An async handle to a batch's claims, obtained via ``AsyncSandboxClient.claim_batch`` or
     ``AsyncSandboxClient.get_batch``.
@@ -210,7 +240,7 @@ class AsyncSandboxBatch:
         # _release_started() can't tell, since a client close() cancelled while stopping the handle
         # also leaves it detached with no _detach_grace.
         self._release_attempted = False
-        self._released = False
+        self._released_cell: list[bool] = [False]
         self._lifecycle_owner: asyncio.Task[Any] | None = None
         self._creators: set[asyncio.Task[None]] = set()
         self._stop_creating = asyncio.Event()
@@ -697,7 +727,9 @@ class AsyncSandboxBatch:
                     f"batch member '{member.claim_name}' is not ready"
                 )
             cached = self._connected.get(member.claim_name)
-            if cached is not None:
+            # An inactive handle has already closed its connector, unlike a stale one, so it is replaced
+            # here rather than moved to _stale_connections to be closed later.
+            if cached is not None and cached[0].is_active:
                 return cached[0]
             sandbox: AsyncSandbox = self._client.sandbox_class(
                 claim_name=member.claim_name,
@@ -710,8 +742,30 @@ class AsyncSandboxBatch:
             # The watch already has the pod IP, so the first request needs no Sandbox GET.
             pod_ip = select_pod_ip(current.pod_ips)
             sandbox._seeded_pod_ip = pod_ip
+            sandbox._on_close, sandbox._claim_deleter = _make_sandbox_callbacks(
+                weakref.ref(self),
+                weakref.ref(sandbox),
+                current,
+                self.batch_id,
+                self._released_cell,
+            )
             self._connected[member.claim_name] = (sandbox, pod_ip)
             return sandbox
+
+    @property
+    def _released(self) -> bool:
+        return self._released_cell[0]
+
+    @_released.setter
+    def _released(self, value: bool) -> None:
+        self._released_cell[0] = value
+
+    def _evict_closed_connection(self, claim_name: str, sandbox: "AsyncSandbox") -> None:
+        """Drops ``sandbox`` from ``_connected`` and ``_stale_connections`` once it closes."""
+        cached = self._connected.get(claim_name)
+        if cached is not None and cached[0] is sandbox:
+            del self._connected[claim_name]
+        self._stale_connections.pop(sandbox, None)
 
     def err(self) -> Exception | None:
         """Returns the error that stopped the batch's watch or background

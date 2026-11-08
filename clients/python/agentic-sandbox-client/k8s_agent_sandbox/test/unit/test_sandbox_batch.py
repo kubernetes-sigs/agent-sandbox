@@ -15,6 +15,7 @@
 
 import collections
 import contextlib
+import gc
 import json
 import logging
 import queue
@@ -24,6 +25,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 import threading
 import time
 import unittest
+import weakref
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -62,7 +64,13 @@ from k8s_agent_sandbox.exceptions import (
     TerminalMemberError,
 )
 from k8s_agent_sandbox.k8s_helper import K8sHelper
-from k8s_agent_sandbox.models import BatchEventType, BatchGroup, MemberState
+from k8s_agent_sandbox.models import (
+    BatchEventType,
+    BatchGroup,
+    MemberState,
+    SandboxDirectConnectionConfig,
+)
+from k8s_agent_sandbox.sandbox import Sandbox
 from k8s_agent_sandbox.sandbox_batch import SandboxBatch
 from k8s_agent_sandbox.sandbox_client import SandboxClient
 
@@ -1323,6 +1331,205 @@ class TestConnect(unittest.TestCase):
         member = handle.members()[0]
         handle.connect(member)
         self.assertEqual(real_client._active_connection_sandboxes, {})
+
+    def _real_client(self) -> SandboxClient:
+        """Returns a client that builds real ``Sandbox`` handles over a mocked ``K8sHelper``."""
+        patcher = patch("k8s_agent_sandbox.sandbox_client.K8sHelper")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        config = SandboxDirectConnectionConfig(api_url="http://test-router:8080")
+        client = SandboxClient(connection_config=config, cleanup=False)
+        client.k8s_helper.delete_sandbox_claim = MagicMock()
+        return client
+
+    def _connect_member(self, client: SandboxClient) -> tuple[SandboxBatch, Sandbox]:
+        """Connects to the Ready member of a new handle on ``client``."""
+        handle = _make_handle(client)
+        handle._state.upsert_claim(
+            _claim(
+                "b1-0",
+                conditions=[{"type": "Ready", "status": "True"}],
+                sandbox={"name": "sbx-1", "podIPs": ["10.0.0.1"]},
+            )
+        )
+        return handle, handle.connect(handle.members()[0])
+
+    def test_close_connection_evicts_cached_sandbox_and_connect_recreates_it(self):
+        handle, first = self._connect_member(self._real_client())
+        self.assertIsInstance(first, Sandbox)
+        self.assertTrue(first.is_active)
+        self.assertIn("b1-0", handle._connected)
+
+        first.close_connection()
+        self.assertFalse(first.is_active)
+        self.assertEqual(handle._connected, {})
+
+        second = handle.connect(handle.members()[0])
+        self.addCleanup(second.close_connection)
+        self.assertIsNot(second, first)
+        self.assertTrue(second.is_active)
+
+
+    def test_terminate_after_the_batch_handle_is_collected_raises_and_keeps_the_claim(self):
+        client = self._real_client()
+        handle, sbx = self._connect_member(client)
+        self.addCleanup(sbx.close_connection)
+        handle_ref = weakref.ref(handle)
+        del handle
+        gc.collect()
+        self.assertIsNone(handle_ref())
+
+        # A close that fails too is logged, and the deleter's error is the one raised.
+        real_close = sbx.connector.close
+        sbx.connector.close = MagicMock(side_effect=RuntimeError("close failed"))  # type: ignore[method-assign]
+        with self.assertLogs(level="WARNING"), self.assertRaisesRegex(BatchError, "handle is gone"):
+            sbx.terminate()
+        self.assertTrue(sbx.is_active)
+        sbx.connector.close = real_close  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(BatchError, "handle is gone"):
+            sbx.terminate()
+        client.k8s_helper.delete_sandbox_claim.assert_not_called()
+        self.assertEqual(sbx.claim_name, "b1-0")
+        self.assertFalse(sbx.is_active)
+
+    def test_terminate_on_a_connected_sandbox_deletes_through_release_member(self):
+        client = self._real_client()
+        handle, sbx = self._connect_member(client)
+        sbx.terminate()
+        client.k8s_helper.delete_sandbox_claim.assert_called_once_with(
+            "b1-0",
+            "default",
+            _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
+            log_level=logging.DEBUG,
+            batch=True,
+        )
+        self.assertEqual(handle.members(), [])
+        self.assertIsNone(sbx.claim_name)
+        self.assertFalse(sbx.is_active)
+        sbx.terminate()
+        self.assertEqual(client.k8s_helper.delete_sandbox_claim.call_count, 1)
+
+    def test_terminate_after_the_lease_is_lost_raises_keeps_the_claim_and_closes(self):
+        client = self._real_client()
+        handle, sbx = self._connect_member(client)
+        self.addCleanup(sbx.close_connection)
+        handle._stop_renewal(BatchLeaseExpiredError("Lease lost"))
+        with self.assertRaises(BatchError):
+            sbx.terminate()
+        self.assertFalse(sbx.is_active)
+        self.assertEqual(sbx.claim_name, "b1-0")
+        client.k8s_helper.delete_sandbox_claim.assert_not_called()
+
+    def test_terminate_on_a_detached_handle_raises_keeps_the_claim_and_closes(self):
+        client = self._real_client()
+        handle, sbx = self._connect_member(client)
+        self.addCleanup(sbx.close_connection)
+        client.k8s_helper.read_batch_lease = MagicMock(return_value=_lease(holder_identity=handle._holder_identity))
+        client.k8s_helper.replace_batch_lease = MagicMock()
+        for detach in ("started", "finished"):
+            with self.subTest(detach=detach):
+                if detach == "started":
+                    handle._detached = True
+                else:
+                    handle._detached = False
+                    handle.detach(grace=10)
+                with self.assertRaises(BatchError):
+                    sbx.terminate()
+                self.assertFalse(sbx.is_active)
+                self.assertEqual(sbx.claim_name, "b1-0")
+                client.k8s_helper.delete_sandbox_claim.assert_not_called()
+
+    def test_terminate_after_release_is_a_no_op(self):
+        client = self._real_client()
+        helper = client.k8s_helper
+        handle, sbx = self._connect_member(client)
+        helper.read_batch_lease = MagicMock(return_value=_lease(holder_identity=handle._holder_identity))
+        helper.replace_batch_lease = MagicMock(return_value=_lease(holder_identity=handle._holder_identity))
+        helper.delete_sandbox_claims_by_label = MagicMock()
+        helper.count_live_sandbox_claims = MagicMock(return_value=0)
+        helper.delete_batch_lease = MagicMock()
+        handle.release()
+        sbx.terminate()
+        helper.delete_sandbox_claim.assert_not_called()
+        self.assertIsNone(sbx.claim_name)
+        self.assertFalse(sbx.is_active)
+
+    def test_terminate_that_fails_to_close_after_deleting_clears_the_claim(self):
+        # A retry then only closes the connection, without an unfenced delete.
+        client = self._real_client()
+        _, sbx = self._connect_member(client)
+        orig_connector_close = sbx.connector.close
+        close_attempts = 0
+
+        def flaky_close():
+            nonlocal close_attempts
+            close_attempts += 1
+            if close_attempts <= 2:
+                raise RuntimeError("close failed")
+            orig_connector_close()
+
+        sbx.connector.close = flaky_close  # type: ignore[method-assign]
+        with self.assertLogs(level="WARNING"), self.assertRaisesRegex(RuntimeError, "close failed"):
+            sbx.terminate()
+        self.assertIsNone(sbx.claim_name)
+        self.assertIsNone(sbx._claim_deleter)
+        self.assertTrue(sbx.is_active)
+        self.assertEqual(client.k8s_helper.delete_sandbox_claim.call_count, 1)
+
+        sbx.terminate()
+        self.assertFalse(sbx.is_active)
+        self.assertEqual(client.k8s_helper.delete_sandbox_claim.call_count, 1)
+
+    def test_connected_sandbox_callbacks_form_no_reference_cycle_when_gc_disabled(self):
+        class _StubSandbox:
+            def __init__(self, claim_name, sandbox_id, **_kwargs):
+                self.claim_name = claim_name
+                self.sandbox_id = sandbox_id
+                self.is_active = True
+                self._seeded_pod_ip = None
+                self._on_close = None
+                self._claim_deleter = None
+
+            def close_connection(self):
+                self.is_active = False
+                on_close, self._on_close = self._on_close, None
+                if on_close is not None:
+                    on_close()
+
+        mock_client = MagicMock()
+        mock_client.sandbox_class = _StubSandbox
+
+        was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            handle = _make_handle(mock_client)
+            handle._state.upsert_claim(
+                _claim("b1-0", conditions=[{"type": "Ready", "status": "True"}], sandbox={"name": "sbx-1"})
+            )
+            sbx = handle.connect(handle.members()[0])
+            batch_ref = weakref.ref(handle)
+            sbx_ref = weakref.ref(sbx)
+            del sbx
+            del handle
+            self.assertIsNone(batch_ref())
+            self.assertIsNone(sbx_ref())
+
+            handle2 = _make_handle(mock_client)
+            handle2._state.upsert_claim(
+                _claim("b1-0", conditions=[{"type": "Ready", "status": "True"}], sandbox={"name": "sbx-1"})
+            )
+            sbx2 = handle2.connect(handle2.members()[0])
+            batch_ref2 = weakref.ref(handle2)
+            sbx_ref2 = weakref.ref(sbx2)
+            sbx2.close_connection()
+            del handle2
+            self.assertIsNone(batch_ref2())
+            del sbx2
+            self.assertIsNone(sbx_ref2())
+        finally:
+            if was_enabled:
+                gc.enable()
 
 
 class TestDetach(unittest.TestCase):

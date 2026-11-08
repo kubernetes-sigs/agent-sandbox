@@ -115,7 +115,7 @@ explicitly as shown in [Agent Sandbox SDK access](#agent-sandbox-sdk-access).
 | `Start` | Server stream | Run a command, stream `stdout`/`stderr` in real time until `ExitEvent`. Optional PTY. |
 | `Execute` | Unary | Run a command synchronously, return `stdout`/`stderr`/`exit_code` atomically. |
 | `ExecuteWithLimits` | Unary | Run a command with time and output limits, returning explicit execution outcomes. |
-| `WriteStdin` | Unary | Send `stdin` bytes or `EOF` to a running process. |
+| `WriteStdin` | Unary | Send `stdin` bytes or `EOF` to a running process. `EOF` on a PTY process fails with `FAILED_PRECONDITION`; send `0x04` (Ctrl-D) as input instead. |
 | `SendSignal` | Unary | Deliver `SIGINT`/`SIGTERM`/`SIGKILL` to the process group. |
 | `ResizeTTY` | Unary | Resize the pseudo-terminal window (`cols`, `rows`). |
 

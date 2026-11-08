@@ -299,6 +299,33 @@ func TestWriteStdinAndEOF(t *testing.T) {
 	require.Equal(t, int32(0), res.exitCode)
 }
 
+func TestWriteStdinEOFWithPTYRejected(t *testing.T) {
+	client := newProcessClient(t, t.TempDir())
+	ctx := testCtx(t)
+
+	stream, err := client.Start(ctx, &processv1.StartRequest{
+		Config: &processv1.ProcessConfig{Command: []string{"cat"}},
+		Pty:    &processv1.PTY{Cols: 80, Rows: 24},
+	})
+	require.NoError(t, err)
+	pid := recvInit(t, stream)
+
+	_, err = client.WriteStdin(ctx, &processv1.WriteStdinRequest{
+		ProcessId: pid,
+		Payload:   &processv1.WriteStdinRequest_Eof{Eof: &emptypb.Empty{}},
+	})
+	require.Equal(t, codes.FailedPrecondition, status.Code(err), "err: %v", err)
+
+	// The terminal is still usable: Ctrl-D through the PTY ends cat normally.
+	_, err = client.WriteStdin(ctx, &processv1.WriteStdinRequest{
+		ProcessId: pid,
+		Payload:   &processv1.WriteStdinRequest_Input{Input: []byte("\x04")},
+	})
+	require.NoError(t, err)
+	res := drainStart(t, stream)
+	require.Equal(t, int32(0), res.exitCode)
+}
+
 func TestWriteStdinNotFound(t *testing.T) {
 	client := newProcessClient(t, t.TempDir())
 

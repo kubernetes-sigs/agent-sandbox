@@ -82,12 +82,20 @@ func (p *ManagedProcess) Signal(sig syscall.Signal) error {
 	return nil
 }
 
+// ErrStdinIsTerminal is returned by CloseStdin for a PTY process, whose
+// stdin is the terminal master. Closing it would hang up the terminal
+// rather than signal end of input.
+var ErrStdinIsTerminal = errors.New("stdin is a PTY")
+
 // CloseStdin closes the process stdin writer if present.
 func (p *ManagedProcess) CloseStdin() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.Stdin == nil {
 		return nil
+	}
+	if p.PTY != nil && p.Stdin == io.WriteCloser(p.PTY) {
+		return ErrStdinIsTerminal
 	}
 	return p.Stdin.Close()
 }

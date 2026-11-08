@@ -206,7 +206,12 @@ class AsyncSandboxBatch:
         # create's pacing slot is taken, or at attach for a re-attached batch.
         self._fill_deadline: float | None = None
         self._last_fill_slot: float = 0.0
+        # Set once release() starts, so client cleanup keeps a handle whose release failed for a retry.
+        # _release_started() can't tell, since a client close() cancelled while stopping the handle
+        # also leaves it detached with no _detach_grace.
+        self._release_attempted = False
         self._released = False
+        self._lifecycle_owner: asyncio.Task[Any] | None = None
         self._creators: set[asyncio.Task[None]] = set()
         self._stop_creating = asyncio.Event()
         # Planned fill creates in send order. An OrderedDict pops the next create in O(1) and lets
@@ -1456,44 +1461,49 @@ class AsyncSandboxBatch:
                 or a transport error).
         """
         async with self._lifecycle_lock:
-            async with self._lock:
-                if self._released:
-                    return
-                if self._lease_released:
-                    raise BatchError(f"batch '{self.batch_id}' has been detached or is held by another handle")
-                self._detached = True
-                self._stop_creating.set()
-                # Clearing _detach_grace marks release as started so detach() rejects new calls and
-                # client cleanup retries a failed release as a release rather than a detach.
-                self._detach_grace = None
-                self._notify_all()
-
-            await self._wait_active_requests()
-            await self._stop_background_tasks()
-            await self._close_cached_connections("release")
-            async with self._lock:
-                lease = self._lease
+            self._lifecycle_owner = asyncio.current_task()
             try:
-                await _delete_batch_objects(
-                    self._client.k8s_helper,
-                    self.namespace,
-                    self.batch_id,
-                    self._lease_name,
-                    self._holder_identity,
-                    self._lease_duration,
-                    lease,
-                )
-            except BatchInUseError:
-                # The batch is another handle's now, so neither a retry nor client cleanup may delete anything.
+                async with self._lock:
+                    if self._released:
+                        return
+                    if self._lease_released:
+                        raise BatchError(f"batch '{self.batch_id}' has been detached or is held by another handle")
+                    self._detached = True
+                    self._stop_creating.set()
+                    # Clearing _detach_grace marks release as started so detach() rejects new calls and
+                    # client cleanup retries a failed release as a release rather than a detach.
+                    self._detach_grace = None
+                    self._release_attempted = True
+                    self._notify_all()
+
+                await self._wait_active_requests()
+                await self._stop_background_tasks()
+                await self._close_cached_connections("release")
+                async with self._lock:
+                    lease = self._lease
+                try:
+                    await _delete_batch_objects(
+                        self._client.k8s_helper,
+                        self.namespace,
+                        self.batch_id,
+                        self._lease_name,
+                        self._holder_identity,
+                        self._lease_duration,
+                        lease,
+                    )
+                except BatchInUseError:
+                    # The batch is another handle's now, so neither a retry nor client cleanup may delete anything.
+                    async with self._lock:
+                        self._lease_released = True
+                    self._client._unregister_batch(self)
+                    raise
+
                 async with self._lock:
                     self._lease_released = True
+                    self._released = True
                 self._client._unregister_batch(self)
-                raise
-
-            async with self._lock:
-                self._lease_released = True
-                self._released = True
-            self._client._unregister_batch(self)
+            finally:
+                self._lifecycle_owner = None
 
     async def _close_cached_connections(self, action: str, claim_names: Iterable[str] | None = None) -> None:
         """Closes the cached connections to the given claims' sandboxes, or to every sandbox along
@@ -1593,89 +1603,97 @@ class AsyncSandboxBatch:
         if grace is not None:
             batch_utils.validate_lease_duration_value(grace)
 
-        # _detached prevents the caller from connecting to Sandboxes, while _lease_released signals that
-        # detach fully completed (i.e. the previous steps and the Lease release write succeeded), so callers
-        # can retry detach() if the release fails.
         async with self._lock:
             if self._detach_done():
                 return
-            self._detached = True
-            self._stop_creating.set()
-            self._notify_all()
-            if grace is not None:
-                self._detach_grace = grace
-            elif self._detach_grace is None:
-                self._detach_grace = self._lease_duration
-            # Another detach() call can change _detach_grace while this call writes the Lease, so every write
-            # uses this copy.
-            grace = self._detach_grace
-            # acquire() takes no ordinal once the handle is detached, so this is final.
-            next_ordinal = self._state.next_ordinal
-
-        await self._wait_active_requests()
-        async with self._lock:
-            if self._detach_done():
-                return
-        await self._stop_background_tasks()
-        await self._close_cached_connections("detach")
 
         async with self._lifecycle_lock:
-            async with self._lock:
-                if self._detach_done():
-                    return
-            lease = await self._client.k8s_helper.read_batch_lease(
-                self._lease_name, self.namespace, _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
-            )
-            if lease is not None:
-                meta, spec = batch_utils.lease_parts(lease)
-                if spec.holder_identity != self._holder_identity:
-                    logger.info(
-                        f"Batch '{self.batch_id}' Lease is held by "
-                        f"'{spec.holder_identity}', not this handle; treating as released"
-                    )
-                else:
-                    for attempt in range(2):
-                        # kubernetes_asyncio 36's stub types holder_identity as str, though None clears it.
-                        spec.holder_identity = cast(Any, None)
-                        spec.renew_time = batch_utils.lease_now()
-                        meta.annotations = {
-                            **(meta.annotations or {}),
-                            BATCH_NEXT_ORDINAL_ANNOTATION: str(next_ordinal),
-                        }
-                        # Refresh the Lease so it doesn't expire immediately after we release it,
-                        # giving other clients a chance to acquire it.
-                        spec.lease_duration_seconds = grace
-                        try:
-                            await self._client.k8s_helper.replace_batch_lease(
-                                self._lease_name,
-                                self.namespace,
-                                lease,
-                                _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
-                            )
-                            break
-                        except ApiException as e:
-                            # The Lease is already gone, so there is nothing left to release.
-                            if e.status == 404:
-                                break
-                            if e.status != 409 or attempt:
-                                raise
-                            # A 409 means the Lease changed after it was read. A write from an earlier detach() call
-                            # that timed out but landed leaves it released, and a takeover leaves another holder, so
-                            # both count as done. It can still be held here only if one of this handle's own renewals
-                            # landed late, so the release is written once more.
-                            lease = await self._client.k8s_helper.read_batch_lease(
-                                self._lease_name,
-                                self.namespace,
-                                _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
-                            )
-                            if lease is None:
-                                break
-                            meta, spec = batch_utils.lease_parts(lease)
-                            if spec.holder_identity != self._holder_identity:
-                                break
+            self._lifecycle_owner = asyncio.current_task()
+            try:
+                # _detached prevents the caller from connecting to Sandboxes, while _lease_released signals that
+                # detach fully completed (i.e. the previous steps and the Lease release write succeeded), so callers
+                # can retry detach() if the release fails.
+                async with self._lock:
+                    if self._detach_done():
+                        return
+                    self._detached = True
+                    self._stop_creating.set()
+                    self._notify_all()
+                    if grace is not None:
+                        self._detach_grace = grace
+                    elif self._detach_grace is None:
+                        self._detach_grace = self._lease_duration
+                    # Another detach() call can change _detach_grace while this call writes the Lease, so every write
+                    # uses this copy.
+                    grace = self._detach_grace
+                    # acquire() takes no ordinal once the handle is detached, so this is final.
+                    next_ordinal = self._state.next_ordinal
 
-            async with self._lock:
-                self._lease_released = True
+                await self._wait_active_requests()
+                async with self._lock:
+                    if self._detach_done():
+                        return
+                await self._stop_background_tasks()
+                await self._close_cached_connections("detach")
+
+                async with self._lock:
+                    if self._detach_done():
+                        return
+                lease = await self._client.k8s_helper.read_batch_lease(
+                    self._lease_name, self.namespace, _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
+                )
+                if lease is not None:
+                    meta, spec = batch_utils.lease_parts(lease)
+                    if spec.holder_identity != self._holder_identity:
+                        logger.info(
+                            f"Batch '{self.batch_id}' Lease is held by "
+                            f"'{spec.holder_identity}', not this handle; treating as released"
+                        )
+                    else:
+                        for attempt in range(2):
+                            # kubernetes_asyncio 36's stub types holder_identity as str, though None clears it.
+                            spec.holder_identity = cast(Any, None)
+                            spec.renew_time = batch_utils.lease_now()
+                            meta.annotations = {
+                                **(meta.annotations or {}),
+                                BATCH_NEXT_ORDINAL_ANNOTATION: str(next_ordinal),
+                            }
+                            # Refresh the Lease so it doesn't expire immediately after we release it,
+                            # giving other clients a chance to acquire it.
+                            spec.lease_duration_seconds = grace
+                            try:
+                                await self._client.k8s_helper.replace_batch_lease(
+                                    self._lease_name,
+                                    self.namespace,
+                                    lease,
+                                    _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
+                                )
+                                break
+                            except ApiException as e:
+                                # The Lease is already gone, so there is nothing left to release.
+                                if e.status == 404:
+                                    break
+                                if e.status != 409 or attempt:
+                                    raise
+                                # A 409 means the Lease changed after it was read. A write from an earlier detach() call
+                                # that timed out but landed leaves it released, and a takeover leaves another holder, so
+                                # both count as done. It can still be held here only if one of this handle's own renewals
+                                # landed late, so the release is written once more.
+                                lease = await self._client.k8s_helper.read_batch_lease(
+                                    self._lease_name,
+                                    self.namespace,
+                                    _request_timeout=batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
+                                )
+                                if lease is None:
+                                    break
+                                meta, spec = batch_utils.lease_parts(lease)
+                                if spec.holder_identity != self._holder_identity:
+                                    break
+
+                async with self._lock:
+                    self._lease_released = True
+            finally:
+                self._lifecycle_owner = None
         self._client._unregister_batch(self)
 
     def _take_watch_deletes_locked(self) -> list[str]:

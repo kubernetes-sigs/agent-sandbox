@@ -539,7 +539,9 @@ class SandboxClient(Generic[T]):
         # connections.
         key = (batch.namespace, batch.batch_id)
         with self._batches_lock:
-            if (batch._connected or batch._stale_connections) and self._active_batches.get(key) is not batch:
+            with batch._lock:
+                has_connections = bool(batch._connected or batch._stale_connections)
+            if has_connections and self._active_batches.get(key) is not batch:
                 self._closing_batches.add(batch)
             else:
                 self._closing_batches.discard(batch)
@@ -548,7 +550,9 @@ class SandboxClient(Generic[T]):
         # A caller whose detach() didn't finish has handed the batch off, so cleanup finishes the detach
         # instead of stopping or releasing the batch. If that fails too, nothing is deleted and the
         # handle stays registered for the next cleanup.
-        if not batch._detach_unfinished():
+        with batch._lock:
+            unfinished = batch._detach_unfinished()
+        if not unfinished:
             return False
         try:
             batch.detach()

@@ -5532,6 +5532,51 @@ class TestClientBatchCleanup(BaseClaimBatchTest):
         self.assertEqual(self.client._closing_batches, set())
         helper.delete_sandbox_claims_by_label.assert_not_called()
 
+    def test_cleanup_waits_for_batch_lock_mid_detach_transition(self):
+        handle = _make_handle(self.client, lease_duration=90)
+        self.client._active_batches[("default", "b1")] = handle
+        helper = self.client.k8s_helper
+        helper.read_batch_lease.side_effect = (
+            lambda *a, **k: _lease(holder_identity=handle._holder_identity)
+        )
+        helper.replace_batch_lease.side_effect = lambda _n, _ns, body, **k: body
+
+        in_transition = threading.Event()
+        entered_finish_detach = threading.Event()
+        orig_notify = handle._notify_all
+        orig_finish_detach = self.client._finish_detach
+
+        def notify_while_holding_lock() -> None:
+            # Pause inside handle._lock after _detached turns True and before _detach_grace is set.
+            in_transition.set()
+            self.assertTrue(entered_finish_detach.wait(timeout=2.5))
+            orig_notify()
+
+        def finish_detach_with_signal(b):
+            entered_finish_detach.set()
+            return orig_finish_detach(b)
+
+        handle._notify_all = notify_while_holding_lock
+        self.client._finish_detach = finish_detach_with_signal
+
+        worker = threading.Thread(target=handle.detach, kwargs={"grace": 42})
+        worker.start()
+        self.assertTrue(in_transition.wait(timeout=2.5))
+
+        cleanup = threading.Thread(target=self.client.delete_all)
+        cleanup.start()
+
+        worker.join(timeout=2.5)
+        cleanup.join(timeout=2.5)
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(cleanup.is_alive())
+        self.assertTrue(handle._lease_released)
+        helper.delete_sandbox_claims_by_label.assert_not_called()
+        helper.delete_batch_lease.assert_not_called()
+        written = helper.replace_batch_lease.call_args.args[2]
+        self.assertIsNone(written.spec.holder_identity)
+        self.assertEqual(written.spec.lease_duration_seconds, 42)
+
 
 class TestCreateDrainPacingAndAcquireWakeup(BaseBatchClientTest):
 

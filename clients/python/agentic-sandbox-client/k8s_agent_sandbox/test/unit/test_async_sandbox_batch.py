@@ -1677,6 +1677,82 @@ class TestClientClose(BaseAsyncBatchClientTest):
                 new._stop_background_tasks.assert_awaited_once()
                 self.assertEqual(self.client._closing_batches, set())
 
+    async def test_close_from_a_lifecycle_call_does_not_deadlock_with_another_tasks_close(self):
+        # Task A's close() holds _close_lock and waits on the batch's _lifecycle_lock, which this
+        # task holds inside release() or detach() when its close_connection() calls close().
+        self.mock_k8s_helper.close = AsyncMock()
+        for action in ("release", "detach"):
+            with self.subTest(action=action):
+                handle = _make_handle(self.client)
+                self.client._active_batches[("default", "b1")] = handle
+                self.mock_k8s_helper.read_batch_lease = AsyncMock(
+                    return_value=_lease(holder_identity=handle._holder_identity)
+                )
+                self.mock_k8s_helper.replace_batch_lease = AsyncMock()
+                other_close: asyncio.Task[None] | None = None
+
+                async def close_connection():
+                    nonlocal other_close
+                    other_close = asyncio.create_task(self.client.close())
+                    for _ in range(5):
+                        await asyncio.sleep(0)
+                    self.assertIs(self.client._close_owner, other_close)
+                    await self.client.close()
+
+                cached = MagicMock(close_connection=AsyncMock(side_effect=close_connection))
+                handle._connected["b1-0"] = (cached, None)
+
+                with patch("k8s_agent_sandbox.async_sandbox_batch._delete_batch_objects", AsyncMock()):
+                    await asyncio.wait_for(getattr(handle, action)(), timeout=2)
+                    assert other_close is not None
+                    await asyncio.wait_for(other_close, timeout=2)
+                self.assertEqual(self.client._active_batches, {})
+
+    async def test_close_from_a_lifecycle_call_leaves_the_api_client_open_for_it(self):
+        # With no other close() running, a close() from inside release() or detach() would otherwise
+        # close k8s_helper before the lifecycle call's own Lease and claim requests.
+        order: list[str] = []
+        self.mock_k8s_helper.close = AsyncMock(side_effect=lambda: order.append("helper.close"))
+        for action in ("release", "detach"):
+            with self.subTest(action=action):
+                order.clear()
+                handle = _make_handle(self.client)
+                self.client._active_batches[("default", "b1")] = handle
+                self.mock_k8s_helper.read_batch_lease = AsyncMock(
+                    side_effect=lambda *a, **k: order.append("read_lease") or _lease(holder_identity=handle._holder_identity)
+                )
+                self.mock_k8s_helper.replace_batch_lease = AsyncMock(side_effect=lambda *a, **k: order.append("replace_lease"))
+                cached = MagicMock(close_connection=AsyncMock(side_effect=self.client.close))
+                handle._connected["b1-0"] = (cached, None)
+
+                async def delete(*args, **kwargs):
+                    order.append("delete_batch_objects")
+
+                with patch("k8s_agent_sandbox.async_sandbox_batch._delete_batch_objects", delete):
+                    await asyncio.wait_for(getattr(handle, action)(), timeout=2)
+                self.assertNotIn("helper.close", order)
+                await self.client.close()
+                self.assertEqual(order[-1], "helper.close")
+
+    async def test_delete_all_from_a_lifecycle_call_skips_that_batch(self):
+        # delete_all() from inside the batch's own release() or detach() would otherwise wait on the
+        # _lifecycle_lock this task holds.
+        self.mock_k8s_helper.close = AsyncMock()
+        for action in ("release", "detach"):
+            with self.subTest(action=action):
+                handle = _make_handle(self.client)
+                self.client._active_batches[("default", "b1")] = handle
+                self.mock_k8s_helper.read_batch_lease = AsyncMock(
+                    return_value=_lease(holder_identity=handle._holder_identity)
+                )
+                self.mock_k8s_helper.replace_batch_lease = AsyncMock()
+                cached = MagicMock(close_connection=AsyncMock(side_effect=self.client.delete_all))
+                handle._connected["b1-0"] = (cached, None)
+
+                with patch("k8s_agent_sandbox.async_sandbox_batch._delete_batch_objects", AsyncMock()):
+                    await asyncio.wait_for(getattr(handle, action)(), timeout=2)
+                self.assertEqual(self.client._active_batches, {})
+
     async def test_a_close_that_fails_after_an_overlapping_cleanup_and_reattach_is_retried(self):
         self.mock_k8s_helper.close = AsyncMock()
         handle = _make_handle(self.client)
@@ -1782,6 +1858,216 @@ class TestClientClose(BaseAsyncBatchClientTest):
         self.client._unregister_batch(old_handle)
 
         self.assertEqual(self.client._active_batches, {("default", "b1"): new_handle})
+
+    async def test_aexit_retains_failed_batch_for_delete_all_retry(self):
+        self.mock_k8s_helper.close = AsyncMock()
+        handle = _make_handle(self.client)
+        handle._state.upsert_claim(_claim("b1-0", conditions=_READY, sandbox={"name": "sbx-0"}))
+        self.client._active_batches[("default", "b1")] = handle
+        self.mock_k8s_helper.read_batch_lease = AsyncMock(
+            side_effect=lambda *a, **k: _lease(holder_identity=handle._holder_identity)
+        )
+        self.mock_k8s_helper.replace_batch_lease = AsyncMock(
+            side_effect=lambda _n, _ns, body, **k: body
+        )
+        self.mock_k8s_helper.delete_sandbox_claims_by_label = AsyncMock(
+            side_effect=[k8s_client.ApiException(status=403, reason="Forbidden"), None]
+        )
+        self.mock_k8s_helper.delete_batch_lease = AsyncMock()
+
+        with self.assertLogs(level="ERROR"):
+            await self.client.__aexit__(None, None, None)
+
+        self.assertIn(("default", "b1"), self.client._active_batches)
+        await self.client.delete_all()
+        self.assertEqual(self.mock_k8s_helper.delete_sandbox_claims_by_label.await_count, 2)
+        self.mock_k8s_helper.delete_batch_lease.assert_awaited_once()
+        self.assertEqual(self.client._active_batches, {})
+
+    async def test_close_releases_client_lock_during_sandbox_close_and_waits_for_batch_release(self):
+        self.mock_k8s_helper.close = AsyncMock()
+        replacement = MagicMock(close_connection=AsyncMock())
+
+        entered_close = asyncio.Event()
+
+        async def close_and_replace():
+            # Acquiring client._lock inside close_connection proves close() dropped self._lock first.
+            async with self.client._lock:
+                self.client._active_connection_sandboxes[("default", "c1")] = replacement
+            entered_close.set()
+
+        old_sbx = MagicMock(close_connection=AsyncMock(side_effect=close_and_replace))
+        self.client._active_connection_sandboxes[("default", "c1")] = old_sbx
+
+        handle = _make_handle(self.client)
+        self.client._active_batches[("default", "b1")] = handle
+        entered_delete = asyncio.Event()
+        allow_finish = asyncio.Event()
+        helper_closed = False
+
+        async def slow_delete(*_a, **_kw):
+            entered_delete.set()
+            await allow_finish.wait()
+            self.assertFalse(helper_closed)
+
+        async def mark_closed():
+            nonlocal helper_closed
+            helper_closed = True
+
+        self.mock_k8s_helper.read_batch_lease = AsyncMock(
+            return_value=_lease(holder_identity=handle._holder_identity)
+        )
+        self.mock_k8s_helper.replace_batch_lease = AsyncMock(
+            side_effect=lambda _n, _ns, body, **k: body
+        )
+        self.mock_k8s_helper.delete_sandbox_claims_by_label = AsyncMock(side_effect=slow_delete)
+        self.mock_k8s_helper.delete_batch_lease = AsyncMock(
+            side_effect=lambda *_a, **_kw: self.assertFalse(helper_closed)
+        )
+        self.mock_k8s_helper.close = AsyncMock(side_effect=mark_closed)
+
+        rel_task = asyncio.create_task(handle.release())
+        await asyncio.wait_for(entered_delete.wait(), timeout=2.5)
+        close_task = asyncio.create_task(self.client.close())
+        await asyncio.wait_for(entered_close.wait(), timeout=2.5)
+        await asyncio.sleep(0)
+        self.assertFalse(helper_closed)
+        allow_finish.set()
+        await asyncio.gather(rel_task, close_task)
+
+        self.assertIs(self.client._active_connection_sandboxes.get(("default", "c1")), replacement)
+        self.mock_k8s_helper.delete_batch_lease.assert_awaited_once()
+
+    async def test_close_coordinates_with_in_flight_and_subsequent_claim_batch(self):
+        cluster = _Cluster()
+        self.client.k8s_helper = cluster.helper
+        entered_claim = asyncio.Event()
+        allow_claim = asyncio.Event()
+        self.addCleanup(allow_claim.set)
+
+        async def slow_create_lease(*_a, **_kw):
+            entered_claim.set()
+            await allow_claim.wait()
+            return _lease()
+
+        cluster.helper.create_batch_lease = AsyncMock(side_effect=slow_create_lease)
+        helper_closed = False
+
+        async def mark_closed():
+            nonlocal helper_closed
+            helper_closed = True
+
+        cluster.helper.close = AsyncMock(side_effect=mark_closed)
+
+        with patch.object(async_sandbox_batch, "_SHORT_WATCH_SECONDS", 0):
+            claim_task = asyncio.create_task(
+                self.client.claim_batch([BatchGroup(warmpool="pool-a", size=0)], batch_id="b1")
+            )
+            await asyncio.wait_for(entered_claim.wait(), timeout=2.5)
+
+            close_task = asyncio.create_task(self.client.close())
+            await _wait_until(lambda: not self.client._not_closing.is_set())
+            self.assertFalse(helper_closed)
+
+            allow_claim.set()
+            batch1, _ = await asyncio.gather(claim_task, close_task)
+
+            self.assertTrue(helper_closed)
+            self.assertTrue(batch1._detached)
+            self.assertIsNone(batch1._renew_task)
+            self.assertIsNone(batch1._watch_task)
+            self.assertEqual(self.client._active_batches, {})
+
+            # Now race in the opposite order so claim_batch arrives while close is closing helper.
+            entered_helper_close = asyncio.Event()
+            allow_helper_close = asyncio.Event()
+            waiting_for_close = asyncio.Event()
+            self.addCleanup(allow_helper_close.set)
+            pool_size_called = False
+            orig_wait = self.client._not_closing.wait
+
+            async def tracked_wait():
+                waiting_for_close.set()
+                return await orig_wait()
+
+            self.client._not_closing.wait = tracked_wait  # type: ignore[method-assign]
+
+            async def slow_helper_close():
+                entered_helper_close.set()
+                await allow_helper_close.wait()
+
+            async def record_pool_size():
+                nonlocal pool_size_called
+                pool_size_called = True
+                return None
+
+            cluster.helper.close = AsyncMock(side_effect=slow_helper_close)
+            cluster.helper.api_pool_size = AsyncMock(side_effect=record_pool_size)
+            cluster.helper.create_batch_lease = AsyncMock(return_value=_lease())
+
+            close_task2 = asyncio.create_task(self.client.close())
+            await asyncio.wait_for(entered_helper_close.wait(), timeout=2.5)
+
+            claim_task2 = asyncio.create_task(
+                self.client.claim_batch([BatchGroup(warmpool="pool-a", size=0)], batch_id="b2")
+            )
+            await asyncio.wait_for(waiting_for_close.wait(), timeout=2.5)
+            self.assertFalse(pool_size_called)
+
+            allow_helper_close.set()
+            _, batch2 = await asyncio.gather(close_task2, claim_task2)
+            self.addAsyncCleanup(batch2._stop_background_tasks)
+            self.assertTrue(pool_size_called)
+            self.assertIs(self.client._active_batches.get(("default", "b2")), batch2)
+            self.assertFalse(batch2._detached)
+
+    async def test_close_waits_for_in_flight_detach_before_closing_helper(self):
+        handle = _make_handle(self.client)
+        self.client._active_batches[("default", "b1")] = handle
+        entered_replace = asyncio.Event()
+        allow_replace = asyncio.Event()
+        entered_stop_batches = asyncio.Event()
+        self.addCleanup(allow_replace.set)
+        helper_closed = False
+        orig_stop_batches = self.client._stop_batches
+
+        async def tracked_stop_batches():
+            entered_stop_batches.set()
+            await orig_stop_batches()
+
+        self.client._stop_batches = tracked_stop_batches  # type: ignore[method-assign]
+
+        async def slow_replace(_n, _ns, body, **_kw):
+            entered_replace.set()
+            await allow_replace.wait()
+            self.assertFalse(helper_closed)
+            return body
+
+        async def mark_closed():
+            nonlocal helper_closed
+            helper_closed = True
+
+        self.mock_k8s_helper.read_batch_lease = AsyncMock(
+            return_value=_lease(holder_identity=handle._holder_identity)
+        )
+        self.mock_k8s_helper.replace_batch_lease = AsyncMock(side_effect=slow_replace)
+        self.mock_k8s_helper.close = AsyncMock(side_effect=mark_closed)
+
+        detach_task = asyncio.create_task(handle.detach(grace=30))
+        await asyncio.wait_for(entered_replace.wait(), timeout=2.5)
+
+        close_task = asyncio.create_task(self.client.close())
+        await asyncio.wait_for(entered_stop_batches.wait(), timeout=2.5)
+        await asyncio.sleep(0)
+        self.assertFalse(helper_closed)
+
+        allow_replace.set()
+        await asyncio.gather(detach_task, close_task)
+
+        self.assertTrue(handle._lease_released)
+        self.mock_k8s_helper.replace_batch_lease.assert_awaited_once()
+        self.mock_k8s_helper.close.assert_awaited_once()
+        self.assertEqual(self.client._active_batches, {})
 
 
 _READY = [{"type": "Ready", "status": "True"}]

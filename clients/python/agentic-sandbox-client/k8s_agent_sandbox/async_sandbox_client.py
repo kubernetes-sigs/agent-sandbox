@@ -26,7 +26,7 @@ import logging
 import sys
 import tempfile
 import uuid
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from types import TracebackType
 from typing import Any, Generic, Self, TypeVar
 
@@ -208,9 +208,35 @@ class AsyncSandboxClient(Generic[T]):
         # Handles that left _active_batches with cached connections still to close
         self._closing_batches: set[AsyncSandboxBatch] = set()
         self._lock = asyncio.Lock()
+        # A writer-preferring gate: close() clears _not_closing so claim_batch() and get_batch() wait
+        # to start, then waits on _no_batch_ops for in-flight ones to finish. Events let _batch_op()
+        # update its count in finally without awaiting, since a cancelled await there would leak the
+        # count and hang close().
+        self._close_lock = asyncio.Lock()
+        self._not_closing = asyncio.Event()
+        self._not_closing.set()
+        self._no_batch_ops = asyncio.Event()
+        self._no_batch_ops.set()
+        self._in_flight_batch_ops = 0
+        self._close_owner: asyncio.Task[Any] | None = None
 
         if cleanup:
             atexit.register(self._atexit_cleanup)
+
+    @contextlib.asynccontextmanager
+    async def _batch_op(self) -> AsyncIterator[None]:
+        current_task = asyncio.current_task()
+        if current_task is not self._close_owner:
+            while not self._not_closing.is_set():
+                await self._not_closing.wait()
+        self._in_flight_batch_ops += 1
+        self._no_batch_ops.clear()
+        try:
+            yield
+        finally:
+            self._in_flight_batch_ops -= 1
+            if self._in_flight_batch_ops == 0:
+                self._no_batch_ops.set()
 
     async def __aenter__(self) -> Self:
         return self
@@ -234,17 +260,44 @@ class AsyncSandboxClient(Generic[T]):
 
         It stops each tracked batch's Lease renewal without releasing the Lease, so ``get_batch``
         can't re-attach a batch that wasn't detached with ``detach()``.
+
+        Called from inside a batch's ``release()`` or ``detach()``, such as by a sandbox's
+        ``close_connection()``, it returns without closing anything, and a later ``close()`` does.
         """
-        async with self._lock:
-            for key, sandbox in list(self._active_connection_sandboxes.items()):
-                try:
-                    await sandbox.close_connection()
-                except Exception as e:
-                    logger.error(f"Failed to close sandbox connection: {e}")
-                else:
-                    self._active_connection_sandboxes.pop(key, None)
-        await self._stop_batches()
-        await self.k8s_helper.close()
+        current_task = asyncio.current_task()
+        if current_task is not None and (
+            self._close_owner is current_task
+            # A sandbox's close_connection() can call close() from inside its batch's release() or
+            # detach(). Closing then would close k8s_helper under the lifecycle call still using it,
+            # and waiting for another task's close() would deadlock, since that close() holds
+            # _close_lock and waits on the batch's _lifecycle_lock.
+            or any(
+                batch._lifecycle_owner is current_task
+                for batch in (*self._active_batches.values(), *self._closing_batches)
+            )
+        ):
+            return
+        async with self._close_lock:
+            self._not_closing.clear()
+            self._close_owner = current_task
+            try:
+                await self._no_batch_ops.wait()
+                async with self._lock:
+                    sandboxes = list(self._active_connection_sandboxes.items())
+                for key, sandbox in sandboxes:
+                    try:
+                        await sandbox.close_connection()
+                    except Exception as e:
+                        logger.error(f"Failed to close sandbox connection: {e}")
+                    else:
+                        async with self._lock:
+                            if self._active_connection_sandboxes.get(key) is sandbox:
+                                del self._active_connection_sandboxes[key]
+                await self._stop_batches()
+                await self.k8s_helper.close()
+            finally:
+                self._close_owner = None
+                self._not_closing.set()
 
     async def _stop_batches(self) -> None:
         # Without this, a dropped handle's tasks would keep renewing its Lease for the life of the
@@ -255,22 +308,31 @@ class AsyncSandboxClient(Generic[T]):
         for batch in batches:
             if await self._finish_detach(batch):
                 continue
-            try:
-                # Stop new connects, creates, and deletes and drain in-flight creates and deletes before
-                # cancelling Lease renewal or closing the caller's API session.
+            keep_for_release_retry = False
+            # close() returns early inside a batch's lifecycle call, so this task never holds the lock.
+            async with batch._lifecycle_lock:
                 async with batch._lock:
+                    keep_for_release_retry = (
+                        batch._release_attempted
+                        and not batch._released
+                        and not batch._lease_released
+                    )
                     batch._detached = True
                     batch._stop_creating.set()
                     batch._notify_all()
                 try:
-                    await batch._wait_active_requests()
-                    await batch._stop_background_tasks()
-                finally:
-                    # A failed stop must not leave port-forwards open.
-                    await batch._close_cached_connections("client cleanup")
-            except Exception as e:
-                logger.error(f"Failed to stop batch '{batch.batch_id}' tasks: {e}")
-            self._unregister_batch(batch)
+                    # Stop new connects, creates, and deletes and drain in-flight work before
+                    # cancelling Lease renewal or closing the caller's API session.
+                    try:
+                        await batch._wait_active_requests()
+                        await batch._stop_background_tasks()
+                    finally:
+                        # A failed stop must not leave port-forwards open.
+                        await batch._close_cached_connections("client cleanup")
+                except Exception as e:
+                    logger.error(f"Failed to stop batch '{batch.batch_id}' tasks: {e}")
+            if not keep_for_release_retry:
+                self._unregister_batch(batch)
 
     async def create_sandbox(
         self,
@@ -628,17 +690,18 @@ class AsyncSandboxClient(Generic[T]):
             groups, labels, batch_id, create_rps, max_in_flight, work_budget, quorum_timeout,
             lease_duration,
         )
-        args = args._replace(
-            max_in_flight=batch_utils.check_pool_size(
-                await self.k8s_helper.api_pool_size(),
-                args.max_in_flight,
-                explicit=max_in_flight is not None,
+        async with self._batch_op():
+            args = args._replace(
+                max_in_flight=batch_utils.check_pool_size(
+                    await self.k8s_helper.api_pool_size(),
+                    args.max_in_flight,
+                    explicit=max_in_flight is not None,
+                )
             )
-        )
-        batch = await AsyncSandboxBatch._claim(self, args, namespace, self._trace_context_annotations())
-        # Registered with no await in between, so a cancel here can't leave the batch's tasks
-        # running where close() won't stop them.
-        self._register_batch(batch)
+            batch = await AsyncSandboxBatch._claim(self, args, namespace, self._trace_context_annotations())
+            # Registered with no await in between, so a cancel here can't leave the batch's tasks
+            # running where close() won't stop them.
+            self._register_batch(batch)
         return batch
 
     async def get_batch(self, batch_id: str, namespace: str = "default") -> AsyncSandboxBatch:
@@ -678,8 +741,9 @@ class AsyncSandboxClient(Generic[T]):
             batch = await client.get_batch("b1234abcd12")
             ready = [m for m in batch.members() if m.state is MemberState.READY]
         """
-        batch = await AsyncSandboxBatch._attach(self, batch_id, namespace)
-        self._register_batch(batch)
+        async with self._batch_op():
+            batch = await AsyncSandboxBatch._attach(self, batch_id, namespace)
+            self._register_batch(batch)
         return batch
 
     def _register_batch(self, batch: AsyncSandboxBatch) -> None:
@@ -772,7 +836,12 @@ class AsyncSandboxClient(Generic[T]):
         await self._retry_closing_batches()
         async with self._lock:
             batches = list(self._active_batches.items())
+        current_task = asyncio.current_task()
         for (namespace, batch_id), batch in batches:
+            # A sandbox's close_connection() can call this from inside the batch's own release() or
+            # detach(), whose _lifecycle_lock this task holds, so that call finishes the batch instead.
+            if current_task is not None and batch._lifecycle_owner is current_task:
+                continue
             if await self._finish_detach(batch):
                 continue
             if exiting and batch._exit_detaches():

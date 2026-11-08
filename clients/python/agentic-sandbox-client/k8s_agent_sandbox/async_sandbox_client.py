@@ -256,14 +256,14 @@ class AsyncSandboxClient(Generic[T]):
             if await self._finish_detach(batch):
                 continue
             try:
-                # Stop new connects, creates, and deletes and drain in-flight deletes before
+                # Stop new connects, creates, and deletes and drain in-flight creates and deletes before
                 # cancelling Lease renewal or closing the caller's API session.
                 async with batch._lock:
                     batch._detached = True
                     batch._stop_creating.set()
                     batch._notify_all()
                 try:
-                    await batch._wait_active_deletes()
+                    await batch._wait_active_requests()
                     await batch._stop_background_tasks()
                 finally:
                     # A failed stop must not leave port-forwards open.

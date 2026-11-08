@@ -15,6 +15,7 @@
 """Unit tests for the async AsyncSandboxBatch handle and AsyncSandboxClient.get_batch."""
 
 import asyncio
+import collections
 import contextlib
 import inspect
 import json
@@ -1111,11 +1112,11 @@ class TestRenewal(BaseAsyncBatchClientTest):
             handle._warm_credit.record("pool-a", 0)
             handle._next_create_at = time.monotonic() + 10.0
 
-            async def expire_during_pacing(_timeout):
+            async def expire_during_pacing(_timeout, _cancel=None):
                 handle._lease_expires_at = time.monotonic() - 0.01
                 return False
 
-            with patch.object(handle, "_wait_for_stop", side_effect=expire_during_pacing):
+            with patch.object(handle, "_wait_stop_or", side_effect=expire_during_pacing):
                 with self.assertRaises(BatchError) as ctx:
                     await handle.acquire("pool-a", timeout=60)
             self.assertIsInstance(ctx.exception.__cause__, BatchLeaseExpiredError)
@@ -2439,7 +2440,7 @@ class TestClaimBatchCreation(BaseClaimBatchTest):
                 self.cluster.helper.create_sandbox_claim.side_effect = [error, None]
                 next_free_slot = []
 
-                async def wait(timeout):
+                async def wait(timeout, _cancel=None):
                     # Another create reserves a slot during this create's first wait.
                     if not next_free_slot:
                         now = time.monotonic()
@@ -2447,7 +2448,7 @@ class TestClaimBatchCreation(BaseClaimBatchTest):
                             next_free_slot.append(handle._reserve_create_slot(now) - now)
                     return False
 
-                handle._wait_for_stop = wait
+                handle._wait_stop_or = wait
                 await handle._create_one("b1-0", "pool-a", {}, {}, {})
                 self.assertEqual(self.cluster.helper.create_sandbox_claim.call_count, 2)
                 self.assertTrue(earliest <= next_free_slot[0] < latest, next_free_slot)
@@ -2468,13 +2469,13 @@ class TestClaimBatchCreation(BaseClaimBatchTest):
                 deadline = time.monotonic() + deadline_in
                 waits = []
 
-                async def wait(timeout):
+                async def wait(timeout, _cancel=None):
                     waits.append(timeout)
                     if slots_taken_during_backoff:
                         handle._next_create_at = deadline
                     return False
 
-                handle._wait_for_stop = wait
+                handle._wait_stop_or = wait
                 with self.assertRaises(BatchTimeoutError):
                     await handle._create_one("b1-0", "pool-a", {}, {}, {}, deadline=deadline)
                 self.assertEqual(len(waits), waits_before_raising)
@@ -3202,16 +3203,17 @@ class TestReleaseMembers(BaseClaimBatchTest):
 
                     if timing == "during_backoff":
                         await _wait_until(lambda: len(first_attempt) == 1)
-                        orig_wait = batch._wait_for_stop
+                        orig_wait = batch._wait_stop_or
 
-                        async def wait_gate(timeout: float) -> bool:
-                            if timeout == 1.0:
+                        async def wait_gate(timeout: float, cancel: asyncio.Event | None = None) -> bool:
+                            # The retry backoff is 1.0 seconds, computed from a deadline.
+                            if 0.5 < timeout <= 1.0:
                                 entered_backoff.set()
                                 await asyncio.wait_for(finish_backoff.wait(), 5)
                                 return batch._stop_creating.is_set()
-                            return await orig_wait(timeout)
+                            return await orig_wait(timeout, cancel)
 
-                        batch._wait_for_stop = wait_gate  # type: ignore[method-assign]
+                        batch._wait_stop_or = wait_gate  # type: ignore[method-assign]
                         fail_first.set()
                         await asyncio.wait_for(entered_backoff.wait(), 5)
                         claim_name, claim_annotations = first_attempt[0]
@@ -4583,13 +4585,13 @@ class TestAcquire(BaseClaimBatchTest):
                     offset = [0.0]
                     fake_time = SimpleNamespace(monotonic=lambda: time.monotonic() + offset[0])
 
-                    async def expire_during_pacing(_t):
+                    async def expire_during_pacing(_t, _cancel=None):
                         offset[0] += 10.0
                         return False
 
                     with (
                         patch.object(async_sandbox_batch, "time", fake_time),
-                        patch.object(batch, "_wait_for_stop", side_effect=expire_during_pacing),
+                        patch.object(batch, "_wait_stop_or", side_effect=expire_during_pacing),
                     ):
                         with self.assertRaisesRegex(BatchTimeoutError, "no create in flight slot"):
                             await batch.acquire("pool-a", timeout=5)
@@ -5381,6 +5383,176 @@ class TestClientBatchCleanup(BaseClaimBatchTest):
         created = len(self.cluster.created)
         await asyncio.sleep(0.3)
         self.assertEqual(len(self.cluster.created), created)
+
+
+class TestCreateDrainPacingAndAcquireWakeup(BaseAsyncBatchClientTest):
+
+    async def test_release_drains_in_flight_acquire_create(self):
+        handle = _make_handle(self.client, groups=[BatchGroup(warmpool="pool-a", size=0)])
+        entered_post = asyncio.Event()
+        allow_post_return = asyncio.Event()
+        live_claims: set[str] = set()
+
+        async def slow_create(claim_name, warmpool, *_args, **_kwargs):
+            entered_post.set()
+            await allow_post_return.wait()
+            live_claims.add(claim_name)
+            return _claim(claim_name, warmpool=warmpool)
+
+        async def delete_by_label(*_args, **_kwargs):
+            live_claims.clear()
+
+        self.mock_k8s_helper.create_sandbox_claim = AsyncMock(side_effect=slow_create)
+        self.mock_k8s_helper.delete_sandbox_claims_by_label = AsyncMock(side_effect=delete_by_label)
+        self.mock_k8s_helper.delete_batch_lease = AsyncMock()
+        self.mock_k8s_helper.read_batch_lease = AsyncMock(return_value=handle._lease)
+        self.mock_k8s_helper.replace_batch_lease = AsyncMock(return_value=handle._lease)
+
+        acq_task = asyncio.create_task(handle.acquire("pool-a", timeout=5.0))
+        await asyncio.wait_for(entered_post.wait(), timeout=3.0)
+        rel_task = asyncio.create_task(handle.release())
+        await _wait_until(lambda: handle._detached)
+        self.mock_k8s_helper.delete_sandbox_claims_by_label.assert_not_awaited()
+        allow_post_return.set()
+        acq_res, rel_res = await asyncio.gather(acq_task, rel_task, return_exceptions=True)
+        await handle._wait_active_requests()
+        self.assertIsNone(rel_res)
+        self.assertIsInstance(acq_res, BaseException)
+        self.assertEqual(live_claims, set())
+
+    async def test_release_group_cancels_popped_pacing_slot_creates(self):
+        groups = [
+            BatchGroup(warmpool="pool-fast", size=1),
+            BatchGroup(warmpool="pool-slow", size=2),
+        ]
+        handle = _make_handle(self.client, groups=groups)
+        plan = batch_utils.fill_create_plan("b1", groups)
+        handle._create_plan = collections.OrderedDict.fromkeys(plan)
+        for entry in plan:
+            handle._plan_by_pool.setdefault(entry[1].warmpool, {})[entry] = None
+        handle._claim_labels = {g.warmpool: {} for g in groups}
+        handle._claim_annotations = {g.warmpool: {} for g in groups}
+        handle._warm_credit.record("pool-fast", 1)
+        handle._warm_credit.record("pool-slow", 0)
+        handle._create_interval = 5.0
+        handle._next_create_at = time.monotonic() + 5.0
+
+        async def create_and_upsert(claim_name, warmpool, *_args, **_kwargs):
+            obj = _claim(
+                claim_name,
+                warmpool=warmpool,
+                conditions=[{"type": "Ready", "status": "True"}],
+                sandbox={"name": f"sbx-{claim_name}"},
+                annotations=_FILL,
+            )
+            async with handle._changed:
+                handle._state.upsert_claim(obj)
+                handle._changed.notify_all()
+            return obj
+
+        self.mock_k8s_helper.create_sandbox_claim = AsyncMock(side_effect=create_and_upsert)
+        self.mock_k8s_helper.delete_sandbox_claims_by_label = AsyncMock()
+        workers = [asyncio.create_task(handle._create_worker()) for _ in range(3)]
+        handle._creators = set(workers)
+        try:
+            ev_iter = handle.events()
+            first = await asyncio.wait_for(anext(ev_iter), timeout=3.0)
+            self.assertEqual(first.member.warmpool, "pool-fast")
+            await _wait_until(lambda: not handle._create_plan)
+            self.assertEqual(len(handle._create_plan), 0)
+            await handle.release_group("pool-slow")
+            rest = await asyncio.wait_for(
+                self._drain_async(ev_iter), timeout=2.5
+            )
+            self.assertEqual(rest, [])
+        finally:
+            handle._stop_creating.set()
+            for w in workers:
+                w.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+
+    @staticmethod
+    async def _drain_async(ev_iter):
+        return [ev async for ev in ev_iter]
+
+    async def test_acquire_wakes_on_release_group_during_retry_and_clamps_in_flight_to_lease(self):
+        handle = _make_handle(self.client, groups=[BatchGroup(warmpool="pool-a", size=0)])
+        entered_retry = asyncio.Event()
+        api_429 = k8s_client.ApiException(status=429, reason="Too Many Requests")
+        api_429.headers = {"Retry-After": "15"}
+        orig_wait_stop_or = handle._wait_stop_or
+
+        async def wait_stop_or(timeout, cancel=None):
+            if timeout > 0:
+                entered_retry.set()
+            return await orig_wait_stop_or(timeout, cancel)
+
+        handle._wait_stop_or = wait_stop_or  # type: ignore[method-assign]
+        self.mock_k8s_helper.create_sandbox_claim = AsyncMock(side_effect=api_429)
+        self.mock_k8s_helper.delete_sandbox_claims_by_label = AsyncMock()
+        acq_task = asyncio.create_task(handle.acquire("pool-a", timeout=30.0))
+        await asyncio.wait_for(entered_retry.wait(), timeout=3.0)
+        await asyncio.sleep(0)
+        t0 = time.monotonic()
+        await handle.release_group("pool-a")
+        with self.assertRaises(BatchError):
+            await asyncio.wait_for(acq_task, timeout=2.5)
+        self.assertLess(time.monotonic() - t0, 2.5)
+        self.mock_k8s_helper.create_sandbox_claim.assert_awaited_once()
+
+        handle2 = _make_handle(self.client, groups=[BatchGroup(warmpool="pool-a", size=0)])
+        handle2._in_flight = asyncio.BoundedSemaphore(1)
+        await handle2._in_flight.acquire()
+        try:
+            handle2._lease_expires_at = time.monotonic() + 0.10
+            t1 = time.monotonic()
+            with self.assertRaises(BatchError) as ctx:
+                await handle2.acquire("pool-a", timeout=10.0)
+            self.assertLess(time.monotonic() - t1, 2.5)
+            self.assertIsInstance(ctx.exception.__cause__, BatchLeaseExpiredError)
+        finally:
+            handle2._in_flight.release()
+
+    async def test_acquire_keeps_pacing_and_retrying_when_notify_all_wakes_its_waiter(self):
+        # _notify_all() also sets acquire waiters (for example after a healthy 410 re-list), so a
+        # wake during pacing or a retry wait must not skip the create.
+        handle = _make_handle(self.client, groups=[BatchGroup(warmpool="pool-a", size=0)])
+        # One event per create count, so the test can tell the pacing sleep from the retry sleep.
+        sleeping = {0: asyncio.Event(), 1: asyncio.Event()}
+        calls: list[str] = []
+        orig_wait_stop_or = handle._wait_stop_or
+
+        async def wait_stop_or(timeout, cancel=None):
+            if timeout > 0.2 and cancel is not None and len(calls) in sleeping:
+                sleeping[len(calls)].set()
+            return await orig_wait_stop_or(timeout, cancel)
+
+        handle._wait_stop_or = wait_stop_or  # type: ignore[method-assign]
+        api_429 = k8s_client.ApiException(status=429, reason="Too Many Requests")
+        api_429.headers = {"Retry-After": "1"}
+        sent = asyncio.Event()
+
+        async def create(name, *args, **kwargs):
+            calls.append(name)
+            if len(calls) == 1:
+                raise api_429
+            sent.set()
+
+        self.mock_k8s_helper.create_sandbox_claim = AsyncMock(side_effect=create)
+        self.mock_k8s_helper.delete_sandbox_claims_by_label = AsyncMock()
+        self.mock_k8s_helper.count_live_sandbox_claims = AsyncMock(return_value=0)
+        handle._next_create_at = time.monotonic() + 1.0
+        acq_task = asyncio.create_task(handle.acquire("pool-a", timeout=10.0))
+        for creates_so_far in (0, 1):
+            await asyncio.wait_for(sleeping[creates_so_far].wait(), timeout=3.0)
+            self.assertEqual(len(calls), creates_so_far)
+            async with handle._lock:
+                handle._notify_all()
+        await asyncio.wait_for(sent.wait(), timeout=3.0)
+        self.assertEqual(len(calls), 2)
+        await handle.release_group("pool-a")
+        with self.assertRaises(BatchError):
+            await asyncio.wait_for(acq_task, timeout=3.0)
 
 
 if __name__ == "__main__":

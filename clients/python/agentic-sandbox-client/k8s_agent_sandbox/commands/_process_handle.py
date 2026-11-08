@@ -134,6 +134,8 @@ def _signal_error(exc: Any, code: Any, process_id: int) -> Exception:
     """Translate a SendSignal gRPC error into the SDK's exception taxonomy."""
     import grpc
 
+    if code == grpc.StatusCode.DEADLINE_EXCEEDED:
+        return TimeoutError("sandboxd SendSignal timed out: {}".format(exc.details()))
     if code == grpc.StatusCode.NOT_FOUND:
         return LookupError(f"process {process_id} not found: {exc.details()}")
     if code == grpc.StatusCode.PERMISSION_DENIED:
@@ -216,7 +218,7 @@ class ProcessHandle:
         """Deliver ``sig`` (SIGINT/SIGTERM/SIGKILL) to the running process.
 
         ``timeout`` sets how many seconds to wait for the RPC response.
-        It defaults to five. Deadline expiry raises ``RuntimeError`` with the
+        It defaults to five. A timeout raises ``TimeoutError`` with the
         gRPC error as its cause. Timeout leaves Start open; the signal may
         already have been delivered.
         """
@@ -309,7 +311,7 @@ class AsyncProcessHandle:
         """Deliver ``sig`` (SIGINT/SIGTERM/SIGKILL) to the running process.
 
         ``timeout`` sets how many seconds to wait for the RPC response.
-        It defaults to five. Deadline expiry raises ``RuntimeError`` with the
+        It defaults to five. A timeout raises ``TimeoutError`` with the
         gRPC error as its cause. Timeout leaves Start open; the signal may
         already have been delivered.
         """

@@ -666,7 +666,7 @@ class TestProcessHandleSync(unittest.TestCase):
         stub.SendSignal.side_effect = rpc_error
 
         with executor.start("noop") as handle:
-            with self.assertRaisesRegex(RuntimeError, "DEADLINE_EXCEEDED"):
+            with self.assertRaisesRegex(TimeoutError, "Deadline Exceeded"):
                 handle.signal(sig.SIGTERM)
             self.assertFalse(stream.cancelled)
             self.assertEqual(list(handle.events()), [
@@ -937,7 +937,7 @@ class TestAsyncProcessHandle(unittest.IsolatedAsyncioTestCase):
             stream, send_signal=send_signal)
 
         async with await executor.start("noop") as handle:
-            with self.assertRaisesRegex(RuntimeError, "DEADLINE_EXCEEDED"):
+            with self.assertRaisesRegex(TimeoutError, "Deadline Exceeded"):
                 await handle.signal(sig.SIGTERM)
             self.assertFalse(stream.cancelled)
             self.assertEqual([event async for event in handle.events()], [

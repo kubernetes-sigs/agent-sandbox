@@ -111,7 +111,7 @@ if err != nil { log.Fatal(err) }
 fmt.Println(entries)
 ```
 
-On sandboxd, `sb.List(ctx, ".", sandbox.WithRecursive(), sandbox.WithMaxDepth(2))` also lists nested entries.
+With `Runtime: sandbox.RuntimeSandboxd` in `sandbox.Options`, `sb.List(ctx, ".", sandbox.WithRecursive(), sandbox.WithMaxDepth(2))` also lists nested entries. The default legacy runtime returns `ErrUnsupportedByRuntime`.
 
 ### 4. Custom Ports
 

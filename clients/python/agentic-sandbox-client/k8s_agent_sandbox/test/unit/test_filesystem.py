@@ -158,8 +158,12 @@ class TestFilesystemSafeUploadPath(unittest.TestCase):
                 self.assertEqual(Filesystem._safe_upload_path(path), path)
 
     def test_leading_slash_is_stripped(self):
-        # An absolute-looking path gets normalized to a relative path under the runtime root.
+        # The legacy multipart filename is relative. sandboxd keeps the slash.
         self.assertEqual(Filesystem._safe_upload_path("/dir/foo.txt"), "dir/foo.txt")
+        self.assertEqual(
+            Filesystem._safe_upload_path("/workspace/a.txt", preserve_absolute=True),
+            "/workspace/a.txt",
+        )
 
     def test_double_slash_collapses(self):
         self.assertEqual(Filesystem._safe_upload_path("dir//foo.txt"), "dir/foo.txt")
@@ -229,17 +233,17 @@ class TestFilesystemSafeUploadPath(unittest.TestCase):
                 _sandboxd_files_endpoint(path)
 
     def test_sandboxd_separators_stay_literal(self):
-        # Leading/repeated slashes, "." and a trailing slash collapse to the
-        # same relative path; separators stay literal "/". A ".." segment is
-        # rejected instead of collapsed.
+        # A leading slash stays encoded as %2F. Repeated slashes, "." and a
+        # trailing slash collapse. Separators stay literal "/".
         cases = {
             "dir/script.py": "/v1/files/dir/script.py",
-            "/dir/script.py": "/v1/files/dir/script.py",
+            "/dir/script.py": "/v1/files/%2Fdir/script.py",
             "dir//script.py": "/v1/files/dir/script.py",
             "dir/": "/v1/files/dir",
             "/": "/v1/files/",
-            "/dir": "/v1/files/dir",
+            "/dir": "/v1/files/%2Fdir",
             "a b/c.txt": "/v1/files/a%20b/c.txt",
+            "/workspace/a b.txt": "/v1/files/%2Fworkspace/a%20b.txt",
             "./a.txt": "/v1/files/a.txt",
         }
         for path, path_url in cases.items():
@@ -335,6 +339,23 @@ class TestAsyncFilesystemSafePaths(TestFilesystemSafePaths):
         asyncio.run(self._fs.read("/dir/foo.txt", **kwargs))
 
 
+class TestSandboxdAbsolutePath(unittest.TestCase):
+    def test_write_and_exists_keep_the_leading_slash(self):
+        connector = MagicMock()
+        connector.is_sandboxd.return_value = True
+        connector.send_request.return_value = MagicMock(status_code=200)
+        fs = Filesystem(connector, MagicMock(), trace_service_name="test")
+
+        fs.write("/workspace/a.txt", b"x")
+        self.assertTrue(fs.exists("/workspace/a.txt"))
+
+        calls = [c.args[:2] for c in connector.send_request.call_args_list]
+        self.assertEqual(calls, [
+            ("PUT", "v1/files/%2Fworkspace/a.txt"),
+            ("HEAD", "v1/files/%2Fworkspace/a.txt"),
+        ])
+
+
 class TestAsyncSandboxdFilesystem(unittest.IsolatedAsyncioTestCase):
     """Verify sandboxd endpoints, response validation, and tracing."""
 
@@ -350,6 +371,19 @@ class TestAsyncSandboxdFilesystem(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(args[:2], ("PUT", "v1/files/dir/script.py"))
         self.assertEqual(kwargs["content"], b"print(1)")
         self.assertNotIn("data", kwargs)
+
+    async def test_absolute_write_and_exists_share_one_path(self):
+        response = MagicMock(status_code=200)
+        self.connector.send_request.return_value = response
+
+        await self.fs.write("/workspace/a.txt", b"x")
+        self.assertTrue(await self.fs.exists("/workspace/a.txt"))
+
+        calls = [c.args[:2] for c in self.connector.send_request.call_args_list]
+        self.assertEqual(calls, [
+            ("PUT", "v1/files/%2Fworkspace/a.txt"),
+            ("HEAD", "v1/files/%2Fworkspace/a.txt"),
+        ])
 
     async def test_stream_write_disables_retries(self):
         await self.fs.write("dir/data.bin", BoundedReader(b"payload"))

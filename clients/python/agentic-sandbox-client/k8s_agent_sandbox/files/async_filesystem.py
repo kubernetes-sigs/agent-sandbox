@@ -137,7 +137,9 @@ class AsyncFilesystem:
         # returns the string unchanged, and the NUL truncates at the
         # runtime's C layer.
         if not allow_unsafe_paths:
-            path = Filesystem._safe_upload_path(path)
+            path = Filesystem._safe_upload_path(
+                path, preserve_absolute=self.connector.is_sandboxd()
+            )
         if self.connector.is_sandboxd():
             if isinstance(content, bytes):
                 await self.connector.send_request(
@@ -200,7 +202,9 @@ class AsyncFilesystem:
             span.set_attribute("sandbox.file.path", path)
 
         if not allow_unsafe_paths:
-            path = Filesystem._safe_upload_path(path)
+            path = Filesystem._safe_upload_path(
+                path, preserve_absolute=self.connector.is_sandboxd()
+            )
         endpoint = (
             _sandboxd_files_endpoint(path)
             if self.connector.is_sandboxd()
@@ -247,7 +251,9 @@ class AsyncFilesystem:
             span.set_attribute("sandbox.file.path", path)
 
         if not allow_unsafe_paths:
-            path = Filesystem._safe_upload_path(path)
+            path = Filesystem._safe_upload_path(
+                path, preserve_absolute=self.connector.is_sandboxd()
+            )
         endpoint = (
             _sandboxd_files_endpoint(path)
             if self.connector.is_sandboxd()

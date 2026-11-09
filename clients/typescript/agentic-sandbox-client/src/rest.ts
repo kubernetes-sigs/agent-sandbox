@@ -145,7 +145,7 @@ const ROOT_REJECTED_AS: Partial<Record<SandboxPathOperation, string>> = {
 
 /**
  * Validates a caller-supplied sandbox-root-relative path without decoding or
- * normalizing it, then returns the percent-encoded path to append after
+ * normalizing it first, then returns the percent-encoded path to append after
  * "/v1/files/" — "" for the sandbox root. Separators stay literal "/".
  * "." and empty segments are dropped. Invalid paths throw before any request.
  * @internal

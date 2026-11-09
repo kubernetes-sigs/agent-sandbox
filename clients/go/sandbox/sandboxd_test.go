@@ -138,6 +138,45 @@ func TestSandboxdWrite_PutsRawBody(t *testing.T) {
 	}
 }
 
+func TestSandboxdWrite_KeepsAbsolutePath(t *testing.T) {
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	c := newReadySandboxdTestSandbox(server.URL)
+	if err := c.Write(context.Background(), "/workspace/a.txt", []byte("x")); err != nil {
+		t.Fatalf("Write() error: %v", err)
+	}
+	if gotPath != "/v1/files/%2Fworkspace/a.txt" {
+		t.Fatalf("path = %s, want /v1/files/%%2Fworkspace/a.txt", gotPath)
+	}
+}
+
+func TestSandboxdPathErrorsIncludeOperation(t *testing.T) {
+	c := newReadySandboxdTestSandbox("http://unused")
+	prefix := "sandbox[default/test-claim-abc123]"
+	checks := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"write", c.Write(context.Background(), "..", []byte("x")), prefix + `: write(".."):`},
+		{"read", func() error { _, err := c.Read(context.Background(), "."); return err }(), prefix + `: read("."):`},
+		{"list", func() error { _, err := c.List(context.Background(), "../x"); return err }(), prefix + `: list("../x"):`},
+		{"delete", c.Delete(context.Background(), ".", false), prefix + `: delete("."):`},
+	}
+	for _, tc := range checks {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.err == nil || !strings.Contains(tc.err.Error(), tc.want) {
+				t.Fatalf("error = %v, want substring %q", tc.err, tc.want)
+			}
+		})
+	}
+}
+
 func TestSandboxdWrite_RejectsTraversal(t *testing.T) {
 	called := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -341,6 +380,9 @@ func TestSandboxdFilesEndpointCollapsesDotSegments(t *testing.T) {
 		{path: "dir/", want: "v1/files/dir"},
 		{path: "/", want: "v1/files/"},
 		{path: ".", want: "v1/files/"},
+		{path: "/workspace/a.txt", want: "v1/files/%2Fworkspace/a.txt"},
+		{path: "/dir", want: "v1/files/%2Fdir"},
+		{path: "//dir//a.txt", want: "v1/files/%2Fdir/a.txt"},
 		{path: "dir/../a.txt", wantErr: true},
 		{path: "../escape", wantErr: true},
 		{path: "dir/../../escape", wantErr: true},

@@ -109,7 +109,6 @@ describe("resolveSandboxPath", () => {
     for (const op of ["mkdir", "move", "copy"] as const) {
       expect(() => resolveSandboxPath("", op)).toThrow(SandboxError);
       expect(() => resolveSandboxPath("./", op)).toThrow(SandboxError);
-      // mkdir allows a trailing slash; it is dropped before encode.
       expect(resolveSandboxPath("dir/", op)).toBe("dir");
     }
   });

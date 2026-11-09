@@ -132,20 +132,28 @@ def _iter_multipart_body(
 
 
 def _sandboxd_files_endpoint(path: str) -> str:
-    """Return the sandboxd REST path for a sandbox-relative file path.
+    """Return the sandboxd REST path for a sandbox file path.
 
-    Separators stay literal "/". A ".." segment is rejected before
-    normalization, so "dir/../a.txt" is an error instead of a rewrite to
-    "a.txt". "." and empty segments, including a trailing slash, are dropped.
+    Separators stay literal "/". A leading "/" is encoded as "%2F", so
+    "/workspace/a.txt" stays absolute and sandboxd can strip its own root.
+    Stripping the slash here would join that path under the root a second
+    time. A ".." segment is rejected before normalization, so
+    "dir/../a.txt" is an error instead of a rewrite to "a.txt". "." and
+    empty segments, including a trailing slash, are dropped.
     """
     if any(part == ".." for part in path.split("/")):
         raise ValueError(f"path {path!r} escapes the sandbox root")
-    normalized = posixpath.normpath(path).lstrip("/")
-    if normalized in ("", "."):
+    normalized = posixpath.normpath(path)
+    if normalized in ("", ".", "/"):
         return "v1/files/"
-    return "v1/files/" + "/".join(
-        urllib.parse.quote(part, safe="") for part in normalized.split("/")
+    absolute = normalized.startswith("/")
+    body = normalized[1:] if absolute else normalized
+    encoded = "/".join(
+        urllib.parse.quote(part, safe="") for part in body.split("/")
     )
+    if absolute:
+        return "v1/files/%2F" + encoded
+    return "v1/files/" + encoded
 
 
 class _RuntimeProbe(Protocol):
@@ -260,7 +268,9 @@ class Filesystem:
         # Sanitize here to guarantee the filename is a normalized
         # relative path with no upward traversal.
         if not allow_unsafe_paths:
-            path = self._safe_upload_path(path)
+            path = self._safe_upload_path(
+                path, preserve_absolute=self.connector.is_sandboxd()
+            )
 
         if self.connector.is_sandboxd():
             # sandboxd write is an idempotent PUT of the raw bytes; parent
@@ -298,8 +308,8 @@ class Filesystem:
         logger.info(f"File '{path}' uploaded successfully.")
 
     @staticmethod
-    def _safe_upload_path(path: str) -> str:
-        """Return a relative, ``..``-free filename safe to send as multipart filename.
+    def _safe_upload_path(path: str, *, preserve_absolute: bool = False) -> str:
+        """Return a ``..``-free path safe to send to the runtime.
 
         Rejects NUL bytes and ASCII control characters before normalisation:
         ``os.path.normpath`` preserves embedded NULs, and a NUL in the
@@ -307,7 +317,13 @@ class Filesystem:
         check ``foo\\x00../etc/passwd`` would survive the ``..`` split (no
         part equals ``".."`` because the NUL-prefixed segment doesn't
         match) yet resolve to ``foo`` on the filesystem — or worse,
-        something server-dependent.``.
+        something server-dependent.
+
+        A leading "/" is kept when ``preserve_absolute`` is set. sandboxd
+        needs that slash so "/workspace/a.txt" is not joined under the
+        workspace root a second time. The legacy multipart filename leaves
+        it unset and strips the slash, because that field is a relative
+        path and an absolute filename would escape the runtime directory.
         """
         if any(ord(c) < 0x20 or ord(c) == 0x7F for c in path):
             raise ValueError(
@@ -322,8 +338,10 @@ class Filesystem:
                 f"Upload path '{path}' escapes the sandbox root."
             )
 
-        normalized = posixpath.normpath(path).lstrip("/")
-        if not normalized or normalized == ".":
+        normalized = posixpath.normpath(path)
+        if not preserve_absolute:
+            normalized = normalized.lstrip("/")
+        if normalized in ("", ".", "/"):
             raise ValueError(f"Upload path '{path}' does not name a file.")
         return normalized
 
@@ -351,7 +369,9 @@ class Filesystem:
             span.set_attribute("sandbox.file.path", path)
 
         if not allow_unsafe_paths:
-            path = self._safe_upload_path(path)
+            path = self._safe_upload_path(
+                path, preserve_absolute=self.connector.is_sandboxd()
+            )
 
         if self.connector.is_sandboxd():
             endpoint = _sandboxd_files_endpoint(path)
@@ -398,7 +418,9 @@ class Filesystem:
             span.set_attribute("sandbox.file.path", path)
 
         if not allow_unsafe_paths:
-            path = self._safe_upload_path(path)
+            path = self._safe_upload_path(
+                path, preserve_absolute=self.connector.is_sandboxd()
+            )
 
         if self.connector.is_sandboxd():
             endpoint = _sandboxd_files_endpoint(path)

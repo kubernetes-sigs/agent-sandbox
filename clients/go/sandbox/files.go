@@ -116,25 +116,31 @@ type Files struct {
 }
 
 // filesEndpoint returns the sandboxd REST path for path. It percent-encodes
-// each segment. A ".." segment is rejected before cleaning, so "dir/../a.txt"
+// each segment and leaves "/" separators in place. A leading "/" is encoded
+// as "%2F", so "/workspace/a.txt" stays absolute and sandboxd can strip its
+// own root. Stripping the slash here would join that path under the root a
+// second time. A ".." segment is rejected before cleaning, so "dir/../a.txt"
 // is an error instead of a silent rewrite to "a.txt". Cleaning still drops
-// "." and empty segments, including a trailing slash.
+// "." and empty segments, including a trailing slash. The sandbox root
+// ("/", ".", and "") is "v1/files/".
 func filesEndpoint(path string) (string, error) {
 	for _, part := range strings.Split(path, "/") {
 		if part == ".." {
 			return "", fmt.Errorf("path %q escapes the sandbox root", path)
 		}
 	}
-	rel := strings.TrimPrefix(pathpkg.Clean(path), "/")
-	if rel == "." {
-		rel = ""
-	}
-	if rel == "" {
+	cleaned := pathpkg.Clean(path)
+	if cleaned == "." || cleaned == "/" {
 		return "v1/files/", nil
 	}
+	absolute := strings.HasPrefix(cleaned, "/")
+	rel := strings.TrimPrefix(cleaned, "/")
 
 	var b strings.Builder
 	b.WriteString("v1/files/")
+	if absolute {
+		b.WriteString("%2F")
+	}
 	for i, part := range strings.Split(rel, "/") {
 		if i > 0 {
 			b.WriteByte('/')
@@ -144,6 +150,8 @@ func filesEndpoint(path string) (string, error) {
 	return b.String(), nil
 }
 
+// nonRootFilesEndpoint is filesEndpoint for an operation that cannot name
+// the sandbox root.
 func nonRootFilesEndpoint(path string) (string, error) {
 	ep, err := filesEndpoint(path)
 	if err != nil || ep != "v1/files/" {
@@ -263,7 +271,7 @@ func (f *Files) WriteReader(ctx context.Context, path string, content io.Reader,
 		ep, err := nonRootFilesEndpoint(path)
 		if err != nil {
 			recordError(span, err)
-			return err
+			return fmt.Errorf("%s: write(%q): %w", f.errPrefix(), path, err)
 		}
 		method, endpoint, contentType = http.MethodPut, ep, "application/octet-stream"
 		body = &uploadLimitReader{reader: content, remaining: f.maxUpload, maxUpload: f.maxUpload}
@@ -340,15 +348,14 @@ func (r *uploadLimitReader) Read(p []byte) (int, error) {
 // sandboxdWriteReq builds the sandboxd PUT request: an idempotent write of the
 // raw bytes to /v1/files/{path}. Parent directories are created server-side.
 // Relative paths are allowed. A ".." segment is rejected before the path is
-// cleaned, so the client does not rewrite it. sandboxd enforces the same
-// rule server-side via SanitizePath.
+// cleaned, so the client does not rewrite it.
 func (f *Files) sandboxdWriteReq(path string, content []byte) (method, endpoint, contentType string, body *bytes.Reader, err error) {
 	if err := f.validateSandboxdWritePath(path); err != nil {
 		return "", "", "", nil, err
 	}
 	endpoint, err = nonRootFilesEndpoint(path)
 	if err != nil {
-		return "", "", "", nil, err
+		return "", "", "", nil, fmt.Errorf("%s: write(%q): %w", f.errPrefix(), path, err)
 	}
 	return http.MethodPut, endpoint, "application/octet-stream", bytes.NewReader(content), nil
 }
@@ -453,7 +460,7 @@ func (f *Files) readTo(ctx context.Context, path string, destination io.Writer, 
 		ep, err := nonRootFilesEndpoint(path)
 		if err != nil {
 			recordError(span, err)
-			return 0, err
+			return 0, fmt.Errorf("%s: read(%q): %w", f.errPrefix(), path, err)
 		}
 		endpoint = ep
 	}
@@ -529,7 +536,7 @@ func (f *Files) List(ctx context.Context, path string, opts ...CallOption) ([]Fi
 		ep, err := filesEndpoint(path)
 		if err != nil {
 			recordError(span, err)
-			return nil, err
+			return nil, fmt.Errorf("%s: list(%q): %w", f.errPrefix(), path, err)
 		}
 		endpoint = ep
 	}
@@ -750,7 +757,7 @@ func (f *Files) sandboxdFileOp(ctx context.Context, op, method, path, actionSuff
 	endpoint, err := nonRootFilesEndpoint(path)
 	if err != nil {
 		recordError(span, err)
-		return err
+		return fmt.Errorf("%s: %s(%q): %w", f.errPrefix(), op, path, err)
 	}
 	endpoint += actionSuffix
 	if len(query) > 0 {

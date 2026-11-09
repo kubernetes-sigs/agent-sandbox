@@ -845,7 +845,10 @@ class AsyncSandboxdPodTunnelStrategy:
         if isinstance(self.config, SandboxdRouterTunnelConnectionConfig):
             target = "svc/sandbox-router-svc"
             namespace = self.config.router_namespace
+            # Same mode labels as the sync client.
+            mode = "port_forward"
         else:
+            mode = "sandboxd_pod_tunnel"
             pod_name = (
                 await self._get_pod_name() if self._get_pod_name is not None else None
             )
@@ -856,15 +859,8 @@ class AsyncSandboxdPodTunnelStrategy:
             target = f"pod/{pod_name}"
             namespace = self.namespace
 
-        # The sync client reports a router tunnel as "port_forward" and a Pod
-        # tunnel as "sandboxd_pod_tunnel".
-        mode = (
-            "port_forward"
-            if isinstance(self.config, SandboxdRouterTunnelConnectionConfig)
-            else "sandboxd_pod_tunnel"
-        )
-        with record_discovery_latency(mode):
-            async with async_kubectl_kubeconfig_args(self._api_client) as kube_args:
+        async with async_kubectl_kubeconfig_args(self._api_client) as kube_args:
+            with record_discovery_latency(mode):
                 return await self._start_tunnel_locked(target, namespace, kube_args)
 
     async def _start_tunnel_locked(

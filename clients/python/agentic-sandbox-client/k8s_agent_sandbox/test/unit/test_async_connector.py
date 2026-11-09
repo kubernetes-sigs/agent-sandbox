@@ -23,6 +23,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import prometheus_client
 from kubernetes_asyncio import client as async_client
 
 from k8s_agent_sandbox.async_connector import (
@@ -38,6 +39,7 @@ from k8s_agent_sandbox.exceptions import (
     SandboxRequestError,
 )
 from k8s_agent_sandbox.models import (
+    SandboxGatewayConnectionConfig,
     SandboxdInClusterConnectionConfig,
     SandboxdPodTunnelConnectionConfig,
     SandboxdRouterTunnelConnectionConfig,
@@ -834,6 +836,92 @@ class TestAsyncSandboxdInClusterConnector(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(connector._closed)
         self.assertIsNone(connector.grpc_target)
         self.assertIsNone(strategy._service_fqdn)
+
+
+class TestAsyncDiscoveryLatencyMetric(unittest.IsolatedAsyncioTestCase):
+    """The async connector reports the same discovery latency metric as the sync one."""
+
+    def _count(self, mode, status):
+        return prometheus_client.REGISTRY.get_sample_value(
+            "sandbox_client_discovery_latency_ms_count",
+            labels={"mode": mode, "status": status},
+        ) or 0.0
+
+    def _gateway_connector(self, wait_for_gateway_ip):
+        helper = MagicMock()
+        helper.wait_for_gateway_ip = wait_for_gateway_ip
+        return AsyncSandboxConnector(
+            sandbox_id="sandbox-1",
+            namespace="agents",
+            connection_config=SandboxGatewayConnectionConfig(
+                gateway_name="gw", gateway_namespace="default"
+            ),
+            k8s_helper=helper,
+        )
+
+    async def test_gateway_success_is_recorded_once(self):
+        connector = self._gateway_connector(AsyncMock(return_value="1.2.3.4"))
+        before = self._count("gateway", "success")
+        await connector._resolve_base_url()
+        # The second call reuses the cached URL, so it does not discover again.
+        await connector._resolve_base_url()
+        self.assertEqual(self._count("gateway", "success"), before + 1)
+
+    async def test_gateway_failure_is_recorded(self):
+        connector = self._gateway_connector(AsyncMock(side_effect=TimeoutError("no ip")))
+        before = self._count("gateway", "failure")
+        with self.assertRaises(TimeoutError):
+            await connector._resolve_base_url()
+        self.assertEqual(self._count("gateway", "failure"), before + 1)
+
+    async def test_gateway_cancellation_is_recorded_as_failure(self):
+        connector = self._gateway_connector(AsyncMock(side_effect=asyncio.CancelledError()))
+        before = self._count("gateway", "failure")
+        with self.assertRaises(asyncio.CancelledError):
+            await connector._resolve_base_url()
+        self.assertEqual(self._count("gateway", "failure"), before + 1)
+
+    @patch("k8s_agent_sandbox.async_connector.asyncio.create_subprocess_exec")
+    @patch.object(AsyncSandboxdPodTunnelStrategy, "_is_port_open", new_callable=AsyncMock)
+    @patch.object(AsyncSandboxdPodTunnelStrategy, "_get_free_port")
+    async def test_pod_tunnel_success_is_recorded(
+        self, get_free_port, is_port_open, create_subprocess
+    ):
+        process = MagicMock(returncode=None)
+        process.terminate = MagicMock()
+        process.wait = AsyncMock()
+        create_subprocess.return_value = process
+        get_free_port.side_effect = [18080, 19090]
+        is_port_open.return_value = True
+        strategy = AsyncSandboxdPodTunnelStrategy(
+            sandbox_id="sandbox-1",
+            namespace="agents",
+            config=SandboxdPodTunnelConnectionConfig(rest_port=8080, grpc_port=9090),
+            get_pod_name=AsyncMock(return_value="sandbox-1"),
+        )
+        before = self._count("sandboxd_pod_tunnel", "success")
+        await strategy.connect()
+        # Reusing the live tunnel is not a new discovery.
+        await strategy.connect()
+        self.assertEqual(self._count("sandboxd_pod_tunnel", "success"), before + 1)
+        await strategy.close()
+
+    @patch("k8s_agent_sandbox.async_connector.asyncio.create_subprocess_exec")
+    @patch.object(AsyncSandboxdPodTunnelStrategy, "_get_free_port", return_value=18080)
+    async def test_router_tunnel_failure_is_recorded_as_port_forward(
+        self, get_free_port, create_subprocess
+    ):
+        create_subprocess.side_effect = OSError("kubectl missing")
+        strategy = AsyncSandboxdPodTunnelStrategy(
+            sandbox_id="sandbox-1",
+            namespace="agents",
+            config=SandboxdRouterTunnelConnectionConfig(),
+            get_pod_name=None,
+        )
+        before = self._count("port_forward", "failure")
+        with self.assertRaises(SandboxPortForwardError):
+            await strategy.connect()
+        self.assertEqual(self._count("port_forward", "failure"), before + 1)
 
 
 if __name__ == "__main__":

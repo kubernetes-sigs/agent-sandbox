@@ -94,6 +94,8 @@ type callOptions struct {
 	cwd         string
 	appendWrite bool
 	createOnly  bool
+	recursive   bool
+	maxDepth    int // 0 = unlimited
 }
 
 // WithTimeout sets the total timeout for a single operation. HTTP operations
@@ -163,6 +165,26 @@ func WithAppend() CallOption {
 func WithCreateOnly() CallOption {
 	return func(o *callOptions) {
 		o.createOnly = true
+	}
+}
+
+// WithRecursive makes Files.List include nested entries. Entry names are then
+// paths relative to the listed directory. List returns ErrUnsupportedByRuntime
+// on the legacy python-runtime. Other operations ignore it.
+func WithRecursive() CallOption {
+	return func(o *callOptions) {
+		o.recursive = true
+	}
+}
+
+// WithMaxDepth limits how many directory levels a recursive Files.List
+// descends, where 1 lists only the directory's own entries. Values <= 0 are
+// ignored. It has no effect without WithRecursive.
+func WithMaxDepth(n int) CallOption {
+	return func(o *callOptions) {
+		if n > 0 {
+			o.maxDepth = n
+		}
 	}
 }
 
@@ -412,6 +434,8 @@ const (
 // float POSIX timestamp) and the sandboxd wire format (modified_at as an
 // RFC 3339 string, plus mode) into this one shape.
 type FileEntry struct {
+	// Name is the entry's base name, or its path relative to the listed
+	// directory after a WithRecursive listing.
 	Name    string
 	Size    int64
 	Type    FileType

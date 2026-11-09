@@ -489,6 +489,18 @@ func TestList_DotPathDoesNotRedirect(t *testing.T) {
 	}
 }
 
+func TestList_RecursiveUnsupportedOnLegacy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("legacy runtime must not receive a request")
+	}))
+	defer server.Close()
+
+	_, err := newReadyTestSandbox(server.URL).List(context.Background(), ".", WithRecursive())
+	if !errors.Is(err, ErrUnsupportedByRuntime) {
+		t.Fatalf("List() error = %v, want ErrUnsupportedByRuntime", err)
+	}
+}
+
 func TestList_ParsesEntries(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode([]legacyFileEntry{

@@ -111,6 +111,8 @@ if err != nil { log.Fatal(err) }
 fmt.Println(entries)
 ```
 
+On sandboxd, `sb.List(ctx, ".", sandbox.WithRecursive(), sandbox.WithMaxDepth(2))` also lists nested entries.
+
 ### 4. Custom Ports
 
 If your sandbox runtime listens on a port other than 8888, specify `ServerPort`.

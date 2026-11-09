@@ -400,6 +400,43 @@ func TestSandboxdList_ParsesDirectoryListing(t *testing.T) {
 	}
 }
 
+func TestSandboxdList_RecursiveQuery(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []CallOption
+		want string
+	}{
+		{"flat", nil, ""},
+		{"recursive", []CallOption{WithRecursive()}, "recursive=true"},
+		{"max depth", []CallOption{WithRecursive(), WithMaxDepth(2)}, "max_depth=2&recursive=true"},
+		{"max depth alone", []CallOption{WithMaxDepth(2)}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.URL.RawQuery
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"entries": []map[string]any{
+						{"name": "sub/a.txt", "size": 5, "type": "file", "modified_at": "2026-08-06T10:00:00Z", "mode": "0644"},
+					},
+				})
+			}))
+			defer server.Close()
+
+			entries, err := newReadySandboxdTestSandbox(server.URL).List(context.Background(), "notes", tc.opts...)
+			if err != nil {
+				t.Fatalf("List() error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("query = %q, want %q", got, tc.want)
+			}
+			if len(entries) != 1 || entries[0].Name != "sub/a.txt" {
+				t.Errorf("unexpected entries: %+v", entries)
+			}
+		})
+	}
+}
+
 func TestSandboxdExists_HeadStatusCodes(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodHead {

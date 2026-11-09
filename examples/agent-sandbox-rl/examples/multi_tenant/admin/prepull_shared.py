@@ -20,12 +20,16 @@ node's image cache, which is below the namespace: every tenant's sandboxes on
 that node then start from the cache. With ``--keep`` the DaemonSet stays, so a
 node the autoscaler adds later pulls the list on arrival.
 
-  python admin/prepull_shared.py --images images.txt [--context ctx] [--keep]
+Each cluster has its own node caches, so ``--contexts a,b`` pre-pulls on every
+listed cluster, at the same time.
+
+  python admin/prepull_shared.py --images images.txt [--contexts a,b] [--keep]
 """
 
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import logging
 import pathlib
 import sys
@@ -38,7 +42,8 @@ def main(argv=None) -> int:
   p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
   p.add_argument("--images",
                  default=str(pathlib.Path(__file__).resolve().parent.parent / "images.txt"))
-  p.add_argument("--context", default=None)
+  p.add_argument("--contexts", "--context", default=None, dest="contexts",
+                 help="comma-separated kube contexts (default: the current context)")
   p.add_argument("--namespace", default="rl-shared",
                  help="where the DaemonSet runs (provision.sh creates it)")
   p.add_argument("--node-selector", default=None, metavar="KEY=VALUE",
@@ -61,14 +66,29 @@ def main(argv=None) -> int:
   if args.node_selector:
     k, _, v = args.node_selector.partition("=")
     node_selector = {k: v}
-  cluster = Cluster(ClusterConfig(name=args.context or "default", context=args.context,
-                                  namespace=args.namespace))
-  ok = prepull(cluster, images, node_selector=node_selector, runtime_class=args.runtime_class,
-               image_pull_secret=args.image_pull_secret, wait=True, timeout=args.timeout,
-               delete_when_done=not args.keep)
-  print(f"pre-pull of {len(images)} image(s) in {args.namespace}: "
-        f"{'done' if ok else 'INCOMPLETE'}" + (" (DaemonSet kept)" if args.keep else ""))
-  return 0 if ok else 1
+  contexts = [c for c in (args.contexts or "").split(",") if c] or [None]
+
+  def one(ctx):
+    # An API error on one cluster must not hide the other clusters' results.
+    try:
+      cluster = Cluster(ClusterConfig(name=ctx or "default", context=ctx,
+                                      namespace=args.namespace))
+      return prepull(cluster, images, node_selector=node_selector,
+                     runtime_class=args.runtime_class,
+                     image_pull_secret=args.image_pull_secret, wait=True,
+                     timeout=args.timeout, delete_when_done=not args.keep)
+    except Exception as e:  # noqa: BLE001 - reported per cluster below
+      logging.getLogger("multi_tenant.prepull").error(
+          "pre-pull on %s failed: %s", ctx or "current context", e)
+      return False
+
+  with concurrent.futures.ThreadPoolExecutor(max_workers=len(contexts)) as pool:
+    results = dict(zip(contexts, pool.map(one, contexts)))
+  for ctx, ok in results.items():
+    print(f"pre-pull of {len(images)} image(s) in {args.namespace}"
+          f"{f' on {ctx}' if ctx else ''}: {'done' if ok else 'INCOMPLETE'}"
+          + (" (DaemonSet kept)" if args.keep else ""))
+  return 0 if all(results.values()) else 1
 
 
 if __name__ == "__main__":

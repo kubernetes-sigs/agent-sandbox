@@ -26,6 +26,11 @@ node's image cache, below the namespace, so the second user on a node starts
 without a pull. Nothing here pre-pulls: the admin does that once with
 ``admin/prepull_shared.py``.
 
+Several clusters: ``--contexts a,b`` gives the fleet one `ClusterConfig` per
+context, all in the user's namespace, which the admin provisioned on each
+cluster. The quota is fitted per cluster, the tightest one sets the
+concurrency, and each cluster's budget becomes its `max_replicas`.
+
 Example:
 
   python run_experiment.py --user alice --experiment exp1 \\
@@ -89,6 +94,22 @@ def tenant_namespace(user: str) -> str:
   return f"{NAMESPACE_PREFIX}{user}"
 
 
+def cluster_name_for(context: str | None) -> str:
+  """The fleet's name for a cluster, the same for every user.
+
+  `admin/tenant_kubeconfig.sh` names a tenant's contexts ``rl-<user>@<ctx>``,
+  where ``<ctx>`` is the admin's context name. The part after ``@`` is the
+  cluster name, so alice's ``rl-alice@prod-a`` and bob's ``rl-bob@prod-a`` are
+  one cluster ``prod-a`` to both fleets. That matters for the default
+  ``image-affinity`` placement, which maps an image to a cluster by the sorted
+  cluster names: with the same names, every user puts an image on the same
+  cluster and finds it in that cluster's node cache.
+  """
+  if not context:
+    return "default"
+  return context.rsplit("@", 1)[-1] or context
+
+
 def report_path(report_dir: pathlib.Path | str, user: str, experiment: str) -> pathlib.Path:
   """Where one experiment's ``report.json`` goes; `run_many.py` reads the same."""
   return pathlib.Path(report_dir) / user / slug(experiment, 63) / "report.json"
@@ -109,20 +130,108 @@ def name_prefix_for(user: str, experiment: str) -> str:
   return prefix
 
 
-def footprint(counts: dict[str, int], max_concurrent: int, max_pool: int) -> tuple[int, int]:
-  """What the sliding strategy holds in the namespace at its peak.
-
-  Returns ``(window, pods)``: the number of image pools the strategy keeps warm
-  at once (the SDK's own `sizing.recommend_window`) and the pods that costs:
-  those pools' warm replicas, one claimed pod per concurrency slot, and one
-  replacement per slot while a pool refills behind a claim. ``counts`` maps
-  each image to its task count, in task order, as `SandboxFleet.image_counts`.
-  """
+def warm_replicas(counts: dict[str, int], max_concurrent: int, max_pool: int,
+                  strategy: str = "sliding") -> dict[str, int]:
+  """Warm replicas per image, in task order, as the strategy would size them:
+  `sizing.compute_replicas` for all but ``none``, which warms one per image."""
   total = sum(counts.values()) or 1
-  window = sizing.recommend_window(counts, max_concurrent, max_pool)
-  warm = sum(sizing.compute_replicas(n, total, max_concurrent, max_pool)
-             for n in list(counts.values())[:window])
-  return window, warm + 2 * max_concurrent
+  if strategy == "none":
+    return {img: 1 for img in counts}
+  return {img: sizing.compute_replicas(n, total, max_concurrent, max_pool)
+          for img, n in counts.items()}
+
+
+def warm_window(counts: dict[str, int], max_concurrent: int, max_pool: int,
+                strategy: str = "sliding") -> int:
+  """How many image pools the strategy keeps warm at once: ``sliding`` the SDK's
+  `sizing.recommend_window`, ``pipelined`` up to two of its
+  `sizing.recommend_window_pipelined` windows, ``none`` one image at a time,
+  ``naive`` every image."""
+  n_images = len(counts)
+  if strategy == "naive":
+    return n_images
+  if strategy == "none":
+    return min(1, n_images)
+  if strategy == "pipelined":
+    return min(n_images, 2 * sizing.recommend_window_pipelined(counts, max_concurrent, max_pool))
+  return sizing.recommend_window(counts, max_concurrent, max_pool)
+
+
+def footprint(counts: dict[str, int], max_concurrent: int, max_pool: int,
+              strategy: str = "sliding") -> tuple[int, int]:
+  """What a strategy holds in one namespace at its peak, on one cluster.
+
+  Returns ``(window, pods)``: how many image pools are warm at once and the pods
+  that costs: those pools' warm replicas, one claimed pod per concurrency slot,
+  and one replacement per slot while a pool refills behind a claim. ``counts``
+  maps each image to its task count, in task order, as
+  `SandboxFleet.image_counts`.
+  """
+  return footprint_by_cluster(counts, {img: "cluster" for img in counts}, max_concurrent,
+                              max_pool, strategy).get("cluster", (0, 0))
+
+
+def footprint_by_cluster(counts: dict[str, int], placement: dict[str, str],
+                         max_concurrent: int, max_pool: int,
+                         strategy: str = "sliding") -> dict[str, tuple[int, int]]:
+  """`footprint` per cluster, given where placement puts each image.
+
+  ``placement`` maps an image to its cluster name (`FleetPlan.entries`). A
+  cluster holds at most the strategy's warm window, and no more than the warm
+  replicas of its own images; it holds at most one claimed pod and one refill
+  per slot, and no more slots than it has tasks (``none`` runs one image at a
+  time, so no more than that image's tasks). A cluster with no images costs
+  nothing, which is what lets a quota on one cluster leave a quota-free cluster
+  free to run the whole set.
+  """
+  reps = warm_replicas(counts, max_concurrent, max_pool, strategy)
+  window = warm_window(counts, max_concurrent, max_pool, strategy)
+  window_warm = sum(list(reps.values())[:window])
+  out: dict[str, tuple[int, int]] = {}
+  for cluster in sorted(set(placement.values())):
+    imgs = [img for img in counts if placement.get(img) == cluster]
+    if not imgs:
+      out[cluster] = (0, 0)
+      continue
+    warm = min(window_warm, sum(reps[i] for i in imgs))
+    if strategy == "none":
+      slots = min(max_concurrent, max(counts[i] for i in imgs))
+    else:
+      slots = min(max_concurrent, sum(counts[i] for i in imgs))
+    out[cluster] = (min(window, len(imgs)), warm + 2 * slots)
+  return out
+
+
+def fit_to_budgets(counts: dict[str, int], placement: dict[str, str],
+                   budgets: dict[str, int | None], *, wanted: int, max_pool: int,
+                   strategy: str = "sliding") -> int:
+  """The largest concurrency up to ``wanted`` whose per-cluster footprint fits
+  every cluster's budget (None means no quota there). 0 when not even one slot
+  fits; ``wanted`` when no cluster has a quota."""
+  caps = {c: b for c, b in budgets.items() if b is not None}
+  if not caps:
+    return wanted
+  for mc in range(wanted, 0, -1):
+    pods = footprint_by_cluster(counts, placement, mc, max_pool, strategy)
+    if all(pods.get(c, (0, 0))[1] <= b for c, b in caps.items()):
+      return mc
+  return 0
+
+
+def fleet_ceilings(budgets: dict[str, int | None]) -> tuple[int | None, dict[str, int]]:
+  """The fleet's pod ceiling and the per-cluster caps from per-cluster budgets.
+
+  ``budgets`` maps each cluster to the pods its quota admits, or None for a
+  cluster without a quota. Every cluster with a budget keeps it as its
+  ``max_replicas``. The fleet-wide ``max_live_sandboxes`` is the sum only when
+  every cluster has a budget: with a quota on some clusters only, a sum of the
+  known budgets would cap pods on the quota-free clusters too, and the SDK's own
+  ceiling (expected replicas times its overcommit factor) applies instead.
+  """
+  caps = {c: b for c, b in budgets.items() if b is not None}
+  if budgets and len(caps) == len(budgets):
+    return sum(caps.values()), caps
+  return None, caps
 
 
 def pod_budget(hard: dict, used: dict, *, cpu: str, memory: str) -> int | None:
@@ -145,24 +254,23 @@ def pod_budget(hard: dict, used: dict, *, cpu: str, memory: str) -> int | None:
 
 
 def fit_to_quota(hard: dict, used: dict, *, cpu: str, memory: str, counts: dict[str, int],
-                 wanted: int, max_pool: int, share: int = 1) -> tuple[int, int | None]:
-  """The largest concurrency up to ``wanted`` whose footprint fits the quota.
+                 wanted: int, max_pool: int, share: int = 1,
+                 strategy: str = "sliding") -> tuple[int, int | None]:
+  """`fit_to_budgets` for one cluster, straight from its `ResourceQuota` status.
 
   Returns ``(max_concurrent, budget)``. ``budget`` is this experiment's share of
   the pods the quota still admits (``share`` experiments start at once in the
-  namespace), or None without a quota; ``max_concurrent`` is 0 when not even one
-  slot fits. The quota rejects pods at admission, where the fleet's fail-fast
-  cannot see them, so fitting first is what keeps a run from waiting out
-  ``ready_timeout``.
+  namespace), or None without a quota. The quota rejects pods at admission,
+  where the fleet's fail-fast cannot see them, so fitting first is what keeps a
+  run from waiting out ``ready_timeout``.
   """
   budget = pod_budget(hard, used, cpu=cpu, memory=memory)
   if budget is None:
     return wanted, None
   budget //= max(1, share)
-  for mc in range(wanted, 0, -1):
-    if footprint(counts, mc, max_pool)[1] <= budget:
-      return mc, budget
-  return 0, budget
+  placement = {img: "cluster" for img in counts}
+  return fit_to_budgets(counts, placement, {"cluster": budget}, wanted=wanted,
+                        max_pool=max_pool, strategy=strategy), budget
 
 
 def read_quota(core_api, namespace: str) -> tuple[dict, dict]:
@@ -175,18 +283,27 @@ def read_quota(core_api, namespace: str) -> tuple[dict, dict]:
   return hard, used
 
 
-def build_config(user: str, experiment: str, *, context: str | None = None,
+def build_config(user: str, experiment: str, *, contexts: list[str] | None = None,
                  kubeconfig: str | None = None, max_concurrent: int = 4,
                  max_warmpool_size: int = 4, cpu: str = "100m", memory: str = "128Mi",
-                 ready_timeout: int = 600, pod_budget: int | None = None) -> FleetConfig:
-  """The fleet of one experiment: the user's namespace, names per user and
-  experiment and run, labels that say whose run it is, and the quota's pod
-  budget as the fleet's own hard ceiling (`max_live_sandboxes`)."""
+                 ready_timeout: int = 600, pod_budget: int | None = None,
+                 cluster_budgets: dict[str, int] | None = None) -> FleetConfig:
+  """The fleet of one experiment: the user's namespace on every cluster, names
+  per user and experiment and run, labels that say whose run it is, the
+  quota's pod budget as the fleet's own hard ceiling (`max_live_sandboxes`),
+  and, with several clusters, each cluster's budget as its `max_replicas`."""
   namespace = tenant_namespace(user)              # refuses a name no admin provisioned
-  cluster = ClusterConfig(name=context or "default", context=context,
-                          kubeconfig=kubeconfig, namespace=namespace)
+  contexts = list(contexts or [None])
+  clusters = []
+  for ctx in contexts:
+    name = cluster_name_for(ctx)
+    clusters.append(ClusterConfig(
+        name=name, context=ctx, kubeconfig=kubeconfig, namespace=namespace,
+        max_replicas=(cluster_budgets or {}).get(name)))
+  if len({c.name for c in clusters}) != len(clusters):
+    raise ValueError(f"contexts {contexts!r} name the same cluster twice")
   return FleetConfig(
-      clusters=[cluster],
+      clusters=clusters,
       run_isolation="names",
       template_name_prefix=name_prefix_for(user, experiment),
       labels={**constants.DEFAULT_LABELS,
@@ -204,10 +321,18 @@ def build_config(user: str, experiment: str, *, context: str | None = None,
   )
 
 
+def tasks_for(images: list[str], tasks_per_image: int) -> list[Task]:
+  """``tasks_per_image`` tasks per image, ids unique even for images that share
+  a last path segment."""
+  return [Task(id=f"img{n}-{slug(img.rsplit('/', 1)[-1], 30)}-{i}", image=img)
+          for n, img in enumerate(images) for i in range(tasks_per_image)]
+
+
 def probe(task, handle) -> dict:
   """The per-task work: one short command, enough to prove the sandbox runs."""
   out = handle.exec(["sh", "-c", "head -1 /etc/os-release; hostname"]).strip()
-  return {"task": task.id, "image": task.image, "output": out}
+  return {"task": task.id, "image": task.image,
+          "cluster": getattr(handle, "cluster_name", None), "output": out}
 
 
 def drive(fleet, images: list[str], *, tasks_per_image: int, strategy: str = "sliding",
@@ -218,9 +343,7 @@ def drive(fleet, images: list[str], *, tasks_per_image: int, strategy: str = "sl
   run id, the task results, the `RunReport` and the per-cluster
   ``verify_teardown`` counts (empty for fakes, which have no reaper).
   """
-  tasks = [Task(id=f"img{n}-{slug(img.rsplit('/', 1)[-1], 30)}-{i}", image=img)
-           for n, img in enumerate(images) for i in range(tasks_per_image)]
-  fleet.load_tasks(tasks)
+  fleet.load_tasks(tasks_for(images, tasks_per_image))
   results = fleet.run(process_fn, strategy=strategy)
   verify = fleet.verify_teardown() if hasattr(fleet, "verify_teardown") else {}
   report = fleet.report.to_dict() if fleet.report is not None else {}
@@ -256,6 +379,15 @@ def reaper_found(verify: dict) -> dict[str, int]:
   return out
 
 
+def claims_by_cluster(results: list) -> dict[str, int]:
+  """How many tasks ran on each cluster, from the probe's ``cluster`` field."""
+  out: dict[str, int] = {}
+  for r in results:
+    if isinstance(r, dict) and r.get("cluster"):
+      out[r["cluster"]] = out.get(r["cluster"], 0) + 1
+  return dict(sorted(out.items()))
+
+
 def write_report(path: pathlib.Path, *, user: str, experiment: str,
                  outcome: dict, max_concurrent: int) -> pathlib.Path:
   path.parent.mkdir(parents=True, exist_ok=True)
@@ -265,6 +397,7 @@ def write_report(path: pathlib.Path, *, user: str, experiment: str,
       "user": user, "experiment": experiment, "run_id": outcome.get("run_id"),
       "namespace": tenant_namespace(user), "max_concurrent": max_concurrent,
       "tasks": len(results), "task_errors": len(errors),
+      "claims_by_cluster": claims_by_cluster(results),
       "report": outcome["report"], "verify_teardown": outcome["verify_teardown"],
       "teardown_clean": teardown_clean(outcome["verify_teardown"]),
       "reaper_found": reaper_found(outcome["verify_teardown"]),
@@ -289,7 +422,9 @@ def main(argv=None) -> int:
   p.add_argument("--memory", default="128Mi", help="per-sandbox memory request")
   p.add_argument("--strategy", default="sliding")
   p.add_argument("--ready-timeout", type=int, default=600)
-  p.add_argument("--context", default=None, help="kube context (default: current)")
+  p.add_argument("--contexts", default=None,
+                 help="comma-separated kube contexts, one cluster each (default: the "
+                      "current context); the cluster name is the part after '@'")
   p.add_argument("--kubeconfig", default=None,
                  help="kubeconfig file, e.g. the one admin/tenant_kubeconfig.sh wrote")
   p.add_argument("--report-dir", default="reports",
@@ -311,35 +446,58 @@ def main(argv=None) -> int:
     tenant_namespace(args.user)
   except ValueError as e:
     p.error(str(e))
-  kwargs = dict(context=args.context, kubeconfig=args.kubeconfig,
+  contexts = [c for c in (args.contexts or "").split(",") if c] or None
+  kwargs = dict(contexts=contexts, kubeconfig=args.kubeconfig,
                 max_concurrent=args.max_concurrent, max_warmpool_size=args.max_warmpool_size,
                 cpu=args.cpu, memory=args.memory, ready_timeout=args.ready_timeout)
-  fleet = SandboxFleet(build_config(args.user, args.experiment, **kwargs))
+  try:
+    fleet = SandboxFleet(build_config(args.user, args.experiment, **kwargs))
+  except ValueError as e:
+    p.error(str(e))
   namespace = fleet.config.clusters[0].namespace
 
   max_concurrent = args.max_concurrent
   if not args.no_quota_fit:
-    cluster = next(iter(fleet.registry))
-    hard, used = read_quota(cluster.core_api, namespace)
     counts = {img: args.tasks_per_image for img in images}
-    fits, budget = fit_to_quota(hard, used, cpu=args.cpu, memory=args.memory, counts=counts,
-                                wanted=max_concurrent, max_pool=args.max_warmpool_size,
-                                share=args.share)
-    if budget is not None and fits < 1:
-      logger.error("quota in %s leaves no room for one slot (budget %d pods for this "
-                   "experiment): hard=%s used=%s", namespace, budget, hard, used)
+    # Per cluster: what its quota admits for this experiment (None without a
+    # quota). The fit then looks at what the plan puts on each cluster, so a
+    # quota on one cluster bounds that cluster's share, not the whole fleet;
+    # see fleet_ceilings for what becomes max_replicas and the pod ceiling.
+    budgets: dict[str, int | None] = {}
+    for cluster in fleet.registry:
+      hard, used = read_quota(cluster.core_api, namespace)
+      budget = pod_budget(hard, used, cpu=args.cpu, memory=args.memory)
+      budgets[cluster.name] = None if budget is None else budget // max(1, args.share)
+    fleet.load_tasks(tasks_for(images, args.tasks_per_image))
+    placement = {e.image: e.cluster for e in fleet.plan().entries}
+    fits = fit_to_budgets(counts, placement, budgets, wanted=max_concurrent,
+                          max_pool=args.max_warmpool_size, strategy=args.strategy)
+    ceiling, caps = fleet_ceilings(budgets)
+    if caps and fits < 1:
+      pods = footprint_by_cluster(counts, placement, 1, args.max_warmpool_size, args.strategy)
+      logger.error("quota in %s leaves no room for one slot: budgets %s, one slot needs %s",
+                   namespace, caps, {c: p for c, (_, p) in pods.items()})
       return 2
-    if fits < max_concurrent or budget is not None:
+    if caps:
       if fits < max_concurrent:
-        logger.warning("quota in %s admits %d pods for this experiment; lowering "
-                       "--max-concurrent from %d to %d", namespace, budget, max_concurrent, fits)
+        logger.warning("quota in %s admits %s pods for this experiment; lowering "
+                       "--max-concurrent from %d to %d", namespace,
+                       ", ".join(f"{b} on {c}" for c, b in caps.items()),
+                       max_concurrent, fits)
+      if ceiling is None:
+        logger.info("no quota on %s; the fleet keeps the SDK's own pod ceiling and "
+                    "max_replicas caps %s", ", ".join(c for c, b in budgets.items() if b is None),
+                    caps)
       max_concurrent = fits
-      fleet = SandboxFleet(build_config(args.user, args.experiment,
-                                        **{**kwargs, "max_concurrent": fits},
-                                        pod_budget=budget))
-    window, peak = footprint(counts, max_concurrent, args.max_warmpool_size)
-    logger.info("footprint: %d pools warm at once, up to %d pods at the peak%s",
-                window, peak, f" (quota budget {budget})" if budget is not None else "")
+      fleet = SandboxFleet(build_config(
+          args.user, args.experiment, **{**kwargs, "max_concurrent": fits},
+          pod_budget=ceiling, cluster_budgets=caps))
+    per_cluster = footprint_by_cluster(counts, placement, max_concurrent,
+                                       args.max_warmpool_size, args.strategy)
+    logger.info("footprint (%s): %s%s", args.strategy,
+                "  ".join(f"{c}: {w} pool(s) warm at once, up to {p} pods"
+                          for c, (w, p) in per_cluster.items()),
+                f" (quota budgets {caps})" if caps else "")
   logger.info("user=%s experiment=%s namespace=%s run_id=%s names=%s*", args.user,
               args.experiment, namespace, fleet.run_id, fleet.config.template_name_prefix)
 
@@ -353,9 +511,13 @@ def main(argv=None) -> int:
   clean = teardown_clean(outcome["verify_teardown"])
   print(f"{args.user}/{args.experiment}: run_id={run_id} tasks={len(outcome['results'])} "
         f"errors={errors} teardown_clean={clean} report={path}")
+  by_cluster = claims_by_cluster(outcome["results"])
+  if len(by_cluster) > 1:
+    print("  tasks per cluster: " + "  ".join(f"{c}={n}" for c, n in by_cluster.items()))
   if not clean:
-    print(f"  leftovers: python -m agent_sandbox_rl.reaper --run-id {run_id} "
-          f"--namespace {namespace}" + (f" --context {args.context}" if args.context else ""))
+    for ctx in (contexts or [None]):
+      print(f"  leftovers: python -m agent_sandbox_rl.reaper --run-id {run_id} "
+            f"--namespace {namespace}" + (f" --context {ctx}" if ctx else ""))
   return 0 if errors == 0 and clean else 1
 
 

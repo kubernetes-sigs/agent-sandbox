@@ -18,27 +18,29 @@
 # after it (everything back to zero). Impersonates each tenant's
 # ServiceAccount for the cross-namespace check.
 #
-#   verify.sh alice bob [--context ctx]
+#   verify.sh alice bob [--contexts a,b]
 #
-# Per namespace: templates, pools, claims, sandboxes and pods of
+# Per cluster and namespace: templates, pools, claims, sandboxes and pods of
 # agent-sandbox-rl fleets, grouped by run id; ResourceQuota used/hard; the
 # NetworkPolicy; and kubelet "Pulled" events, split into pulls from the registry
 # and "already present on machine", which is the shared node cache at work.
+# With several contexts the same checks run on each: a cluster has its own
+# node caches, so its pull counts are its own.
 set -uo pipefail
 
-users=(); context=""
+users=(); contexts=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --context) context="$2"; shift 2;;
+    --contexts|--context) contexts="$2"; shift 2;;
     -*) echo "unknown flag: $1" >&2; exit 2;;
     *) users+=("$1"); shift;;
   esac
 done
-if [[ ${#users[@]} -lt 1 ]]; then sed -n '16,27p' "$0" | sed 's/^# \{0,1\}//'; exit 2; fi
-K=(kubectl)
-if [[ -n "$context" ]]; then K+=(--context "$context"); fi
+if [[ ${#users[@]} -lt 1 ]]; then sed -n '/^# Show what each/,/^set -uo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 2; fi
 SEL="app=agent-sandbox-rl"
 fail=0
+IFS=',' read -r -a ctx_list <<< "$contexts"
+if [[ ${#ctx_list[@]} -eq 0 ]]; then ctx_list=(""); fi
 
 count() { "${K[@]}" get "$1" -n "$2" -l "$SEL" --no-headers 2>/dev/null | wc -l | tr -d ' '; }
 
@@ -67,9 +69,12 @@ for rid,(n,ok) in sorted(runs.items()):
     print(f"     run {rid}: {n} pool(s), {ok} ready")'
 }
 
+for ctx in "${ctx_list[@]}"; do
+K=(kubectl)
+if [[ -n "$ctx" ]]; then K+=(--context "$ctx"); fi
 for u in "${users[@]}"; do
   ns="rl-$u"
-  echo "== $ns"
+  echo "== ${ctx:+$ctx / }$ns"
   if ! "${K[@]}" get namespace "$ns" >/dev/null 2>&1; then
     echo "   FAIL namespace missing (admin/provision.sh $u)"; fail=1; continue
   fi
@@ -102,7 +107,7 @@ done
 # Cross-namespace: each tenant, impersonated, reads its own claims and is
 # refused on the next tenant's namespace.
 if [[ ${#users[@]} -ge 2 ]]; then
-  echo "== isolation"
+  echo "== ${ctx:+$ctx / }isolation"
   for i in "${!users[@]}"; do
     me="${users[$i]}"; other="${users[$(( (i + 1) % ${#users[@]} ))]}"
     sa="system:serviceaccount:rl-$me:rl-tenant"
@@ -118,4 +123,5 @@ if [[ ${#users[@]} -ge 2 ]]; then
     fi
   done
 fi
+done
 exit $fail

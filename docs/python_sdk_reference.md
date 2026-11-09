@@ -1067,8 +1067,8 @@ shows in ``members()`` like any other, and ``release_member`` frees it.
 
 **Raises**:
 
-- `ValueError` - If ``timeout`` isn't a positive finite number, or ``pod_annotations`` is
-  invalid.
+- `ValueError` - If ``timeout`` isn't a positive finite number, or ``pod_annotations`` isn't
+  a mapping of strings.
 - `SandboxWarmPoolNotFoundError` - If the warm pool doesn't exist.
 - `SandboxTemplateNotFoundError` - If the warm pool's template doesn't exist, or it names none.
 - `TerminalMemberError` - If the create fails (the member is ``FAILED`` with reason

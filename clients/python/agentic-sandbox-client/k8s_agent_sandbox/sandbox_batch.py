@@ -795,8 +795,8 @@ class SandboxBatch:
                 ``pod_annotations`` is ``None`` or empty.
 
         Raises:
-            ValueError: If ``timeout`` isn't a positive finite number, or ``pod_annotations`` is
-                invalid.
+            ValueError: If ``timeout`` isn't a positive finite number, or ``pod_annotations`` isn't
+                a mapping of strings.
             SandboxWarmPoolNotFoundError: If the warm pool doesn't exist.
             SandboxTemplateNotFoundError: If the warm pool's template doesn't exist, or it names none.
             TerminalMemberError: If the create fails (the member is ``FAILED`` with reason
@@ -1007,7 +1007,7 @@ class SandboxBatch:
                         self._client.k8s_helper,
                         [warmpool],
                         self.namespace,
-                        request_timeout=next_timeout,
+                        timeout=next_timeout,
                     )
                 except Exception as e:
                     with self._lock:
@@ -2047,9 +2047,7 @@ def _precheck_pools(
     helper: "K8sHelper",
     warmpools: Iterable[str],
     namespace: str,
-    timeout: int | float = batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
-    *,
-    request_timeout: Callable[[], float] | None = None,
+    timeout: int | float | Callable[[], float] = batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
 ) -> dict[str, int]:
     """Checks that each warm pool and the SandboxTemplate it references exist, and returns each
     pool's Ready replica count.
@@ -2061,7 +2059,7 @@ def _precheck_pools(
     checked_templates: set[str] = set()
     ready: dict[str, int] = {}
     for name in warmpools:
-        step_timeout = timeout if request_timeout is None else request_timeout()
+        step_timeout = timeout() if callable(timeout) else timeout
         warmpool = helper.get_sandbox_warmpool(
             name, namespace, _request_timeout=step_timeout
         )
@@ -2077,7 +2075,7 @@ def _precheck_pools(
             )
         if template in checked_templates:
             continue
-        step_timeout = timeout if request_timeout is None else request_timeout()
+        step_timeout = timeout() if callable(timeout) else timeout
         if helper.get_sandbox_template(
             template, namespace, _request_timeout=step_timeout
         ) is None:

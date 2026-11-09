@@ -781,7 +781,7 @@ it unreachable. Read a failed member's `reason` before releasing it. The three m
 `err()` is set and raise `BatchError`, since the handle may no longer hold the batch's Lease.
 
 `acquire(warmpool, timeout=None, *, pod_annotations=None)` adds a member from any warm pool in the batch's namespace and blocks until
-it is Ready, for example to replace a member released with `release_member()`. `acquire()` writes non-empty `pod_annotations` to `spec.additionalPodMetadata.annotations` so the controller propagates them onto the sandbox pod. Its claim takes the next unused
+it is Ready, for example to replace a member released with `release_member()`. `acquire()` writes non-empty `pod_annotations` to `spec.additionalPodMetadata.annotations` so the controller propagates them onto the sandbox pod. `BatchGroup` has no pod annotation field, so callers that need per-pod annotations on every member pass `size=0` groups to `claim_batch()` and call `acquire()`. Its claim takes the next unused
 ordinal, so ordinals are never reused, even across `detach()` and `get_batch()`. It isn't one of the initial
 claims, so `events()`, the quorum consumers and `release_not_ready()` leave it alone, but `release_group()` on
 its pool releases it, and its `shutdownTime` counts from its own create. Its create follows the initial

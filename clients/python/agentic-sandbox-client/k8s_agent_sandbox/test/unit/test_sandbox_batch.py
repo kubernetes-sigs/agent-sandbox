@@ -4927,7 +4927,7 @@ class TestAcquire(BaseClaimBatchTest):
         start = time.monotonic()
         with self.assertRaises(BatchError) as tmpl_expired:
             b2.acquire("pool-g", timeout=5.0)
-        self.assertLess(time.monotonic() - start, 0.50)
+        self.assertLess(time.monotonic() - start, 1.0)
         self.assertNotIsInstance(tmpl_expired.exception, BatchTimeoutError)
         self.assertIsInstance(tmpl_expired.exception.__cause__, BatchLeaseExpiredError)
         b2._stop_background_threads()

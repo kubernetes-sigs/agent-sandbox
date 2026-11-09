@@ -257,6 +257,30 @@ func TestExecuteCwdEscapeDenied(t *testing.T) {
 	require.Equal(t, codes.PermissionDenied, status.Code(err))
 }
 
+func TestExecuteCwdUnderRegularFile(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o644))
+	client := newProcessClient(t, root)
+
+	cwd := "f.txt/child"
+	_, err := client.Execute(testCtx(t), &processv1.ExecuteRequest{
+		Config: &processv1.ProcessConfig{Command: []string{"true"}, Cwd: &cwd},
+	})
+	require.Equal(t, codes.NotFound, status.Code(err), err)
+}
+
+func TestExecuteCwdIsRegularFile(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o644))
+	client := newProcessClient(t, root)
+
+	cwd := "f.txt"
+	_, err := client.Execute(testCtx(t), &processv1.ExecuteRequest{
+		Config: &processv1.ProcessConfig{Command: []string{"true"}, Cwd: &cwd},
+	})
+	require.Equal(t, codes.NotFound, status.Code(err), err)
+}
+
 func TestStartStreamsStdoutStderrAndExit(t *testing.T) {
 	client := newProcessClient(t, t.TempDir())
 

@@ -325,6 +325,20 @@ func TestWatchDirNonDirectory(t *testing.T) {
 	require.Equal(t, codes.InvalidArgument, st.Code())
 }
 
+func TestWatchDirPathUnderRegularFile(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "afile.txt"), []byte("data"), 0o644))
+
+	client := newWatcherClient(t, root)
+	stream, err := client.WatchDir(context.Background(), &watcherv1.WatchDirRequest{Path: "afile.txt/child"})
+	require.NoError(t, err)
+	_, err = stream.Recv()
+	require.Error(t, err)
+	st, ok := status.FromError(err)
+	require.True(t, ok)
+	require.Equal(t, codes.NotFound, st.Code(), err)
+}
+
 func TestWatchDirRecursive(t *testing.T) {
 	root := t.TempDir()
 	subdir := filepath.Join(root, "subdir")

@@ -92,6 +92,8 @@ type callOptions struct {
 	maxAttempts int // 0 = use default (maxAttempts const); 1 = no retry
 	env         map[string]string
 	cwd         string
+	appendWrite bool
+	createOnly  bool
 }
 
 // WithTimeout sets the total timeout for a single operation. HTTP operations
@@ -139,6 +141,28 @@ func WithEnv(env map[string]string) CallOption {
 func WithWorkingDir(dir string) CallOption {
 	return func(o *callOptions) {
 		o.cwd = dir
+	}
+}
+
+// WithAppend makes Files.Write or Files.WriteReader add to the end of the file
+// instead of replacing it. An append is not atomic, and the call does not retry
+// unless WithMaxAttempts is set, because a retry can add the content twice.
+// Other operations ignore it. Returns ErrUnsupportedByRuntime on the legacy
+// python-runtime.
+func WithAppend() CallOption {
+	return func(o *callOptions) {
+		o.appendWrite = true
+	}
+}
+
+// WithCreateOnly makes Files.Write or Files.WriteReader fail with a 412
+// HTTPError if the path already exists. The call does not retry unless
+// WithMaxAttempts is set, because a retry after a lost response would fail
+// with 412. Other operations ignore it. Returns ErrUnsupportedByRuntime on the
+// legacy python-runtime.
+func WithCreateOnly() CallOption {
+	return func(o *callOptions) {
+		o.createOnly = true
 	}
 }
 

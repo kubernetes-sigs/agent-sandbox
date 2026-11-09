@@ -11,6 +11,8 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 - [Variables](<#variables>)
 - [func NewTracerProvider\(ctx context.Context, serviceName string\) \(\*sdktrace.TracerProvider, error\)](<#NewTracerProvider>)
 - [type CallOption](<#CallOption>)
+  - [func WithAppend\(\) CallOption](<#WithAppend>)
+  - [func WithCreateOnly\(\) CallOption](<#WithCreateOnly>)
   - [func WithEnv\(env map\[string\]string\) CallOption](<#WithEnv>)
   - [func WithMaxAttempts\(n int\) CallOption](<#WithMaxAttempts>)
   - [func WithTimeout\(d time.Duration\) CallOption](<#WithTimeout>)
@@ -190,6 +192,24 @@ CallOption configures per\-call behavior for SDK operations.
 ```go
 type CallOption func(*callOptions)
 ```
+
+<a name="WithAppend"></a>
+#### func [WithAppend](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithAppend() CallOption
+```
+
+WithAppend makes Files.Write or Files.WriteReader add to the end of the file instead of replacing it. An append is not atomic, and the call does not retry unless WithMaxAttempts is set, because a retry can add the content twice. Other operations ignore it. Returns ErrUnsupportedByRuntime on the legacy python\-runtime.
+
+<a name="WithCreateOnly"></a>
+#### func [WithCreateOnly](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithCreateOnly() CallOption
+```
+
+WithCreateOnly makes Files.Write or Files.WriteReader fail with a 412 HTTPError if the path already exists. The call does not retry unless WithMaxAttempts is set, because a retry after a lost response would fail with 412. Other operations ignore it. Returns ErrUnsupportedByRuntime on the legacy python\-runtime.
 
 <a name="WithEnv"></a>
 #### func [WithEnv](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
@@ -754,7 +774,7 @@ func (f *Files) Write(ctx context.Context, path string, content []byte, opts ...
 
 Write uploads content to the sandbox.
 
-With the legacy runtime the path must be a plain filename without directory separators \(e.g., "script.py", not "dir/script.py"\). The sandboxd runtime supports relative paths and creates parent directories automatically.
+With the legacy runtime the path must be a plain filename without directory separators \(e.g., "script.py", not "dir/script.py"\). The sandboxd runtime supports relative paths and creates parent directories automatically. On sandboxd, WithAppend and WithCreateOnly add to the file or fail if it exists.
 
 The entire content is buffered in memory to support retries on transient failures. Content exceeding MaxUploadSize \(default 256 MB\) is rejected before any network I/O.
 

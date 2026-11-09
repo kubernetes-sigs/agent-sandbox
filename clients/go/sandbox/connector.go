@@ -24,6 +24,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -376,6 +377,12 @@ func (cc *cancelOnClose) Close() error {
 // (e.g., 301, 302, 303, 307, 308), the response is returned directly to the caller
 // with its body unclosed and a nil error (instead of being followed automatically).
 func (c *connector) SendRequest(ctx context.Context, method, endpoint string, body io.Reader, contentType string, maxRetries int) (*http.Response, error) {
+	return c.SendRequestWithHeaders(ctx, method, endpoint, body, contentType, nil, maxRetries)
+}
+
+// SendRequestWithHeaders is SendRequest with extra request headers. The SDK's
+// own headers override extra on a name clash.
+func (c *connector) SendRequestWithHeaders(ctx context.Context, method, endpoint string, body io.Reader, contentType string, extra http.Header, maxRetries int) (*http.Response, error) {
 	limit := maxRetries
 	if limit <= 0 {
 		limit = maxAttempts
@@ -438,6 +445,10 @@ func (c *connector) SendRequest(ctx context.Context, method, endpoint string, bo
 			attemptTimer.Stop()
 			attemptCancel()
 			return nil, fmt.Errorf("sandbox: failed to create request: %w", err)
+		}
+
+		for name, values := range extra {
+			req.Header[name] = slices.Clone(values)
 		}
 
 		// Router headers only apply to router-based transports; the

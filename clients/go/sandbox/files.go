@@ -184,14 +184,20 @@ func newHTTPError(resp *http.Response, op string, runtime Runtime) *HTTPError {
 // With the legacy runtime the path must be a plain filename without
 // directory separators (e.g., "script.py", not "dir/script.py"). The
 // sandboxd runtime supports relative paths and creates parent directories
-// automatically.
+// automatically. On sandboxd, WithAppend and WithCreateOnly add to the file or
+// fail if it exists.
 //
 // The entire content is buffered in memory to support retries on transient
 // failures. Content exceeding MaxUploadSize (default 256 MB) is rejected
 // before any network I/O.
 func (f *Files) Write(ctx context.Context, path string, content []byte, opts ...CallOption) error {
 	defer f.trackOp()()
-	ctx, callCancel, maxAttempts := applyCallOpts(ctx, opts)
+	co := resolveCallOpts(opts)
+	apply := applyCallOpts
+	if co.conditionalWrite() {
+		apply = applyCallOptsNoRetry
+	}
+	ctx, callCancel, maxAttempts := apply(ctx, opts)
 	defer callCancel()
 	ctx, span := startSpan(withLifecycleSpan(ctx, f.lifecycleCtx()), f.tracer, f.svcName, "write", AttrFilePath.String(path), AttrFileSize.Int(len(content)))
 	defer span.End()
@@ -202,11 +208,16 @@ func (f *Files) Write(ctx context.Context, path string, content []byte, opts ...
 		return err
 	}
 
+	if err := f.checkWriteOptions(path, co); err != nil {
+		recordError(span, err)
+		return err
+	}
+
 	var method, endpoint, contentType string
 	var body *bytes.Reader
 	var err error
 	if f.runtime == RuntimeSandboxd {
-		method, endpoint, contentType, body, err = f.sandboxdWriteReq(path, content)
+		method, endpoint, contentType, body, err = f.sandboxdWriteReq(path, content, co)
 	} else {
 		method, endpoint, contentType, body, err = f.legacyWriteReq(path, content)
 	}
@@ -215,7 +226,7 @@ func (f *Files) Write(ctx context.Context, path string, content []byte, opts ...
 		return err
 	}
 
-	if err := f.sendWriteRequest(ctx, path, method, endpoint, body, contentType, maxAttempts, span); err != nil {
+	if err := f.sendWriteRequest(ctx, path, method, endpoint, body, contentType, co.writeHeaders(), maxAttempts, span); err != nil {
 		return err
 	}
 	f.log.V(1).Info("write completed", "path", path, "size", len(content))
@@ -237,6 +248,7 @@ func (f *Files) Write(ctx context.Context, path string, content []byte, opts ...
 // bodies without a Content-Length header.
 func (f *Files) WriteReader(ctx context.Context, path string, content io.Reader, opts ...CallOption) error {
 	defer f.trackOp()()
+	co := resolveCallOpts(opts)
 	ctx, callCancel, maxAttempts := applyCallOpts(ctx, opts)
 	defer callCancel()
 	ctx, span := startSpan(withLifecycleSpan(ctx, f.lifecycleCtx()), f.tracer, f.svcName, "write", AttrFilePath.String(path))
@@ -249,6 +261,10 @@ func (f *Files) WriteReader(ctx context.Context, path string, content io.Reader,
 	}
 	if maxAttempts > 1 {
 		err := fmt.Errorf("%s: write(%q): streaming uploads do not support retries", f.errPrefix(), path)
+		recordError(span, err)
+		return err
+	}
+	if err := f.checkWriteOptions(path, co); err != nil {
 		recordError(span, err)
 		return err
 	}
@@ -267,7 +283,7 @@ func (f *Files) WriteReader(ctx context.Context, path string, content io.Reader,
 			recordError(span, err)
 			return err
 		}
-		ep, err := nonRootFilesEndpoint(path)
+		ep, err := sandboxdWriteEndpoint(path, co)
 		if err != nil {
 			recordError(span, err)
 			return fmt.Errorf("%s: write(%q): %w", f.errPrefix(), path, err)
@@ -287,7 +303,7 @@ func (f *Files) WriteReader(ctx context.Context, path string, content io.Reader,
 		}
 	}
 
-	if err := f.sendWriteRequest(ctx, path, method, endpoint, body, contentType, maxAttempts, span); err != nil {
+	if err := f.sendWriteRequest(ctx, path, method, endpoint, body, contentType, co.writeHeaders(), maxAttempts, span); err != nil {
 		return err
 	}
 	f.log.V(1).Info("streaming write completed", "path", path)
@@ -299,10 +315,11 @@ func (f *Files) sendWriteRequest(
 	path, method, endpoint string,
 	body io.Reader,
 	contentType string,
+	headers http.Header,
 	maxAttempts int,
 	span trace.Span,
 ) error {
-	resp, err := f.connector.SendRequest(ctx, method, endpoint, body, contentType, maxAttempts)
+	resp, err := f.connector.SendRequestWithHeaders(ctx, method, endpoint, body, contentType, headers, maxAttempts)
 	if err != nil {
 		recordError(span, err)
 		return fmt.Errorf("%s: write(%q) failed: %w", f.errPrefix(), path, err)
@@ -348,15 +365,45 @@ func (r *uploadLimitReader) Read(p []byte) (int, error) {
 // raw bytes to /v1/files/{path}. Parent directories are created server-side.
 // Relative paths are allowed. A ".." segment is rejected before the path is
 // cleaned, so the client does not rewrite it.
-func (f *Files) sandboxdWriteReq(path string, content []byte) (method, endpoint, contentType string, body *bytes.Reader, err error) {
+func (f *Files) sandboxdWriteReq(path string, content []byte, co callOptions) (method, endpoint, contentType string, body *bytes.Reader, err error) {
 	if err := f.validateSandboxdWritePath(path); err != nil {
 		return "", "", "", nil, err
 	}
-	endpoint, err = nonRootFilesEndpoint(path)
+	endpoint, err = sandboxdWriteEndpoint(path, co)
 	if err != nil {
 		return "", "", "", nil, fmt.Errorf("%s: write(%q): %w", f.errPrefix(), path, err)
 	}
 	return http.MethodPut, endpoint, "application/octet-stream", bytes.NewReader(content), nil
+}
+
+func sandboxdWriteEndpoint(path string, co callOptions) (string, error) {
+	ep, err := nonRootFilesEndpoint(path)
+	if err != nil || !co.appendWrite {
+		return ep, err
+	}
+	return ep + "?append=true", nil
+}
+
+// conditionalWrite reports whether the call appends or creates only. Neither
+// is safe to repeat after a lost response.
+func (co callOptions) conditionalWrite() bool {
+	return co.appendWrite || co.createOnly
+}
+
+func (co callOptions) writeHeaders() http.Header {
+	if !co.createOnly {
+		return nil
+	}
+	return http.Header{"If-None-Match": {"*"}}
+}
+
+// checkWriteOptions rejects write options the legacy python-runtime cannot
+// honor, rather than silently overwriting the file.
+func (f *Files) checkWriteOptions(path string, co callOptions) error {
+	if f.runtime != RuntimeSandboxd && co.conditionalWrite() {
+		return fmt.Errorf("%s: write(%q): %w: the legacy python-runtime ignores WithAppend and WithCreateOnly", f.errPrefix(), path, ErrUnsupportedByRuntime)
+	}
+	return nil
 }
 
 func (f *Files) validateSandboxdWritePath(path string) error {

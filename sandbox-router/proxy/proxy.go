@@ -33,6 +33,7 @@ import (
 	"google.golang.org/grpc/codes"
 
 	"sigs.k8s.io/agent-sandbox/sandbox-router/authz"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/bodyrewrite"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/observability"
 )
@@ -50,6 +51,7 @@ type Handler struct {
 	grpcConnections *grpcConnections
 	cache           Lookup
 	authz           authz.Authorizer
+	bodyRewriter    *bodyrewrite.Rewriter
 	log             logr.Logger
 }
 
@@ -70,6 +72,10 @@ type Options struct {
 	// a TokenReview authorizer to enforce per-sandbox auth (KEP-NNNN).
 	Authorizer authz.Authorizer
 	Logger     logr.Logger
+	// BodyRewriteProfiles, when non-nil, replaces the built-in profiles
+	// named by Config.PathRoutingBodyRewriteProfiles. Tests use it to run
+	// the body-rewrite framework with a fake profile.
+	BodyRewriteProfiles []bodyrewrite.Profile
 }
 
 // NewHandler builds a Handler from o.
@@ -112,6 +118,19 @@ func NewHandler(o Options) *Handler {
 	if authorizer == nil {
 		authorizer = authz.AllowAll{}
 	}
+	// Config.Validate has already checked the profile names and limit, so
+	// a failure here is a programming error, like a nil Config.
+	profiles := o.BodyRewriteProfiles
+	if profiles == nil {
+		var err error
+		if profiles, err = bodyrewrite.Resolve(o.Config.PathRoutingBodyRewriteProfiles); err != nil {
+			panic("proxy.NewHandler: " + err.Error())
+		}
+	}
+	bodyRewriter, err := bodyrewrite.NewRewriter(profiles, o.Config.PathRoutingBodyRewriteMaxBytes)
+	if err != nil {
+		panic("proxy.NewHandler: " + err.Error())
+	}
 	grpcTr := grpcTransport(o.Config)
 	grpcConns := newGRPCConnections(grpcTr.DialContext)
 	grpcTr.DialContext = grpcConns.dialContext
@@ -125,6 +144,7 @@ func NewHandler(o Options) *Handler {
 		grpcConnections: grpcConns,
 		cache:           o.Cache,
 		authz:           authorizer,
+		bodyRewriter:    bodyRewriter,
 		log:             o.Logger,
 	}
 }
@@ -486,13 +506,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// does not know its prefix; in preserve mode it already emits prefixed
 	// redirects, and rewriting them again would double the prefix. gRPC
 	// responses keep their own hook.
+	//
+	// Bodies are rewritten only when body rewrite profiles are configured
+	// (h.bodyRewriter is nil otherwise), and only within the bounds the
+	// bodyrewrite package enforces; everything else streams through.
 	if pathRouted && !grpcRequest && h.cfg.PathRoutingRewriteResponses {
 		base := strings.TrimSuffix(bootstrapCookiePath(h.cfg.PathRoutingPrefix, target0), "/")
 		isSelf := selfHostMatcher(r.Host, upstreamURL.Host)
 		rewriteLocations := !h.cfg.PathRoutingPreservePrefix
+		bodyCtx := bodyrewrite.Context{
+			Path:           upstreamPath,
+			Prefix:         base,
+			PreservePrefix: h.cfg.PathRoutingPreservePrefix,
+			Upgrade:        upgrade,
+		}
 		rp.ModifyResponse = func(resp *http.Response) error {
 			rewriteResponseHeaders(resp.Header, base, isSelf, rewriteLocations)
-			return nil
+			return h.rewriteBody(resp, bodyCtx)
 		}
 	}
 
@@ -511,6 +541,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 	}
 	rp.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// rewriteBody applies the configured body rewrite profiles to resp. A rule
+// failure is logged and the original response served; only a failure to read
+// the upstream body, which leaves nothing whole to serve, fails the request.
+func (h *Handler) rewriteBody(resp *http.Response, c bodyrewrite.Context) error {
+	err := h.bodyRewriter.Apply(resp, c)
+	if _, ok := errors.AsType[*bodyrewrite.RuleError](err); ok {
+		observability.LoggerFromContext(resp.Request.Context(), h.log).Error(err,
+			"body rewrite failed, serving the upstream body unchanged", "path", c.Path)
+		return nil
+	}
+	return err
 }
 
 // resolveTarget parses the routing Target for r, preferring the path-based

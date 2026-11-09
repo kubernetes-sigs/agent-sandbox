@@ -135,6 +135,16 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 			"Path in both modes, and Location too unless --path-routing-preserve-prefix is set. "+
 			"On by default; disable only for an upstream that must see its redirects and "+
 			"cookies unmodified.")
+	stringSliceVar(fs, &c.PathRoutingBodyRewriteProfiles, "path-routing-body-rewrite-profiles",
+		"Comma-separated built-in body rewrite profiles applied to path-routed "+
+			"responses, in order. Empty (default) disables body rewriting. Only "+
+			"identity-encoded responses with a known Content-Length up to "+
+			"--path-routing-body-rewrite-max-bytes are buffered; everything else "+
+			"streams through unchanged. Requires --path-routing-prefix and "+
+			"--path-routing-rewrite-responses.")
+	fs.Int64Var(&c.PathRoutingBodyRewriteMaxBytes, "path-routing-body-rewrite-max-bytes", c.PathRoutingBodyRewriteMaxBytes,
+		"Largest response body buffered for body rewriting. Larger responses "+
+			"stream through unchanged. A profile may set a lower limit. At most 32MiB.")
 	fs.IntVar(&c.UpstreamMaxRetries, "upstream-max-retries", c.UpstreamMaxRetries,
 		"Number of additional dial attempts before returning 502. Only dial-class "+
 			"failures (DNS, connection refused) are retried. Smooths the case "+

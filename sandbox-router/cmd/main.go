@@ -388,6 +388,7 @@ func run(ctx context.Context, cfg *config.Config, log logr.Logger) (err error) {
 		"pathRoutingPrefix", cfg.PathRoutingPrefix,
 		"pathRoutingPreservePrefix", cfg.PathRoutingPreservePrefix,
 		"pathRoutingRewriteResponses", cfg.PathRoutingRewriteResponses,
+		"pathRoutingBodyRewriteProfiles", cfg.PathRoutingBodyRewriteProfiles,
 	)
 	return srv.Run(ctx)
 }

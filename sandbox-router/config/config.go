@@ -22,6 +22,18 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"sigs.k8s.io/agent-sandbox/sandbox-router/bodyrewrite"
+)
+
+// Body rewrite size limits (see Config.PathRoutingBodyRewriteMaxBytes).
+const (
+	// DefaultBodyRewriteMaxBytes is the default cap on a buffered body.
+	DefaultBodyRewriteMaxBytes int64 = 2 << 20
+	// MaxBodyRewriteBytesLimit is the largest cap an operator may set, so a
+	// misconfiguration cannot make the router buffer arbitrarily large
+	// responses.
+	MaxBodyRewriteBytesLimit int64 = 32 << 20
 )
 
 // MTLSMode controls how the router validates client certificates on incoming
@@ -217,6 +229,21 @@ type Config struct {
 	// no base-path setting will redirect the browser outside the prefix.
 	PathRoutingRewriteResponses bool
 
+	// PathRoutingBodyRewriteProfiles names the built-in body rewrite
+	// profiles (package bodyrewrite) applied to path-routed responses, in
+	// order; the first profile whose paths and content types match a
+	// response rewrites it. Empty, the default, disables body rewriting.
+	// Requires PathRoutingPrefix and PathRoutingRewriteResponses. Only
+	// identity-encoded responses with a known Content-Length within
+	// PathRoutingBodyRewriteMaxBytes are buffered; everything else streams
+	// through unchanged.
+	PathRoutingBodyRewriteProfiles []string
+
+	// PathRoutingBodyRewriteMaxBytes caps the size of any response body
+	// buffered for rewriting. A profile may set a lower limit, never a
+	// higher one. Must be in [1, MaxBodyRewriteBytesLimit].
+	PathRoutingBodyRewriteMaxBytes int64
+
 	// EnableTracing enables OTel tracing via the OTLP gRPC exporter. The
 	// exporter endpoint is read from OTEL_EXPORTER_OTLP_ENDPOINT.
 	EnableTracing bool
@@ -385,6 +412,8 @@ func Defaults() Config {
 		AuthzTokenReviewTTL:         30 * time.Second,
 		AuthzTokenReviewCacheSize:   2048,
 		AuthzCookieSameSite:         CookieSameSiteLax,
+
+		PathRoutingBodyRewriteMaxBytes: DefaultBodyRewriteMaxBytes,
 	}
 }
 
@@ -471,6 +500,20 @@ func (c *Config) Validate() error {
 	}
 	if c.PathRoutingPreservePrefix && c.PathRoutingPrefix == "" {
 		return errors.New("--path-routing-preserve-prefix requires --path-routing-prefix")
+	}
+	if c.PathRoutingBodyRewriteMaxBytes < 1 || c.PathRoutingBodyRewriteMaxBytes > MaxBodyRewriteBytesLimit {
+		return fmt.Errorf("--path-routing-body-rewrite-max-bytes must be between 1 and %d, got %d", MaxBodyRewriteBytesLimit, c.PathRoutingBodyRewriteMaxBytes)
+	}
+	if len(c.PathRoutingBodyRewriteProfiles) > 0 {
+		if c.PathRoutingPrefix == "" {
+			return errors.New("--path-routing-body-rewrite-profiles requires --path-routing-prefix: only path-routed responses are rewritten")
+		}
+		if !c.PathRoutingRewriteResponses {
+			return errors.New("--path-routing-body-rewrite-profiles requires --path-routing-rewrite-responses, which turns all response rewriting off")
+		}
+		if _, err := bodyrewrite.Resolve(c.PathRoutingBodyRewriteProfiles); err != nil {
+			return fmt.Errorf("--path-routing-body-rewrite-profiles: %w", err)
+		}
 	}
 	if c.UpstreamMaxRetries < 0 {
 		return fmt.Errorf("--upstream-max-retries must be non-negative, got %d", c.UpstreamMaxRetries)

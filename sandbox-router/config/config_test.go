@@ -132,6 +132,35 @@ func TestRegisterFlagsOverridesEnv(t *testing.T) {
 	}
 }
 
+func TestBodyRewriteDisabledByDefault(t *testing.T) {
+	c := Defaults()
+	if len(c.PathRoutingBodyRewriteProfiles) != 0 {
+		t.Fatalf("body rewrite profiles default = %v, want none", c.PathRoutingBodyRewriteProfiles)
+	}
+	if c.PathRoutingBodyRewriteMaxBytes != 2<<20 {
+		t.Fatalf("body rewrite max bytes default = %d, want 2MiB", c.PathRoutingBodyRewriteMaxBytes)
+	}
+}
+
+func TestBodyRewriteFlags(t *testing.T) {
+	c := Defaults()
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.SetOutput(&strings.Builder{})
+	RegisterFlags(fs, &c, func(string) (string, bool) { return "", false })
+	if err := fs.Parse([]string{
+		"--path-routing-body-rewrite-profiles=a, b",
+		"--path-routing-body-rewrite-max-bytes=4096",
+	}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := strings.Join(c.PathRoutingBodyRewriteProfiles, ","); got != "a,b" {
+		t.Fatalf("profiles = %q, want a,b", got)
+	}
+	if c.PathRoutingBodyRewriteMaxBytes != 4096 {
+		t.Fatalf("max bytes = %d, want 4096", c.PathRoutingBodyRewriteMaxBytes)
+	}
+}
+
 func TestAudiencesCSVFlag(t *testing.T) {
 	cases := []struct {
 		name string
@@ -516,6 +545,43 @@ func TestValidate(t *testing.T) {
 		{
 			name:    "preserve prefix with a path routing prefix accepted",
 			mut:     func(c *Config) { c.PathRoutingPrefix = "/router"; c.PathRoutingPreservePrefix = true },
+			wantErr: "",
+		},
+		{
+			name:    "body rewrite profile without a path routing prefix rejected",
+			mut:     func(c *Config) { c.PathRoutingPrefix = ""; c.PathRoutingBodyRewriteProfiles = []string{"x"} },
+			wantErr: "path-routing-body-rewrite-profiles requires --path-routing-prefix",
+		},
+		{
+			name: "body rewrite profile with response rewriting off rejected",
+			mut: func(c *Config) {
+				c.PathRoutingPrefix = "/router"
+				c.PathRoutingRewriteResponses = false
+				c.PathRoutingBodyRewriteProfiles = []string{"x"}
+			},
+			wantErr: "path-routing-body-rewrite-profiles requires --path-routing-rewrite-responses",
+		},
+		{
+			name: "unknown body rewrite profile rejected",
+			mut: func(c *Config) {
+				c.PathRoutingPrefix = "/router"
+				c.PathRoutingBodyRewriteProfiles = []string{"no-such-profile"}
+			},
+			wantErr: `unknown body rewrite profile "no-such-profile"`,
+		},
+		{
+			name:    "zero body rewrite max bytes rejected",
+			mut:     func(c *Config) { c.PathRoutingBodyRewriteMaxBytes = 0 },
+			wantErr: "path-routing-body-rewrite-max-bytes must be between 1 and",
+		},
+		{
+			name:    "body rewrite max bytes over the hard cap rejected",
+			mut:     func(c *Config) { c.PathRoutingBodyRewriteMaxBytes = MaxBodyRewriteBytesLimit + 1 },
+			wantErr: "path-routing-body-rewrite-max-bytes must be between 1 and",
+		},
+		{
+			name:    "body rewrite max bytes at the hard cap accepted",
+			mut:     func(c *Config) { c.PathRoutingBodyRewriteMaxBytes = MaxBodyRewriteBytesLimit },
 			wantErr: "",
 		},
 		{

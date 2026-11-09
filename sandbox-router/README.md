@@ -270,6 +270,16 @@ This is on by default, which changes the responses of existing path-routed deplo
 
 If the sandbox serves under its own base path (for example JupyterLab started with `--ServerApp.base_url`), set `--path-routing-preserve-prefix` instead. The router then forwards the full `<prefix>/<namespace>/<id>/<port>/` path, and it does not rewrite `Location`, because the app already emits prefixed redirects and a second rewrite would double the prefix. `Set-Cookie` paths are still rescoped under the prefix. Authorization still sees the stripped path in both modes, so existing policies do not change. The examples in `examples/jupyterlab-base-path` show this mode.
 
+#### Rewriting response bodies (framework only)
+
+Some UI apps also emit root-relative URLs in their HTML, JavaScript, CSS or JSON, which the header rewriting above cannot reach. The router has a bounded body-rewrite pipeline for these, driven by named profiles. A profile matches on the request path (glob patterns such as `/lab/**` or `**/*.html`, matched against the stripped path, in both modes) and on the response media type, and runs an ordered list of rules on the body.
+
+Body rewriting is off by default and is enabled only by naming profiles in `--path-routing-body-rewrite-profiles`. No profiles are built in yet, so the flag currently rejects every name; app profiles such as JupyterLab will be added separately. Custom user-defined rules are not supported.
+
+A response body is buffered only when the request is path-routed, not a protocol upgrade, gRPC or `HEAD`; the status is not 1xx, 204, 206 or 304; the response has no `Content-Encoding` (bodies are never decompressed), no `Content-Range` and no `Cache-Control: no-transform`; its media type and path match a profile; and its `Content-Length` is known and at most `--path-routing-body-rewrite-max-bytes` (and the profile's own limit, if lower). Anything else streams through unchanged. When a rule changes the body, the router sets the new `Content-Length`, removes `Transfer-Encoding`, and drops `ETag`, `Accept-Ranges` and body digests, which no longer describe the bytes sent. When no rule changes it, the response is forwarded exactly as received. If a rule fails, the original body is served and the failure is logged.
+
+Because most UI servers compress their responses, a profile only sees bodies the upstream sent uncompressed.
+
 ## Flags
 
 Run `sandbox-router --help` for the full list. The most relevant:
@@ -295,6 +305,8 @@ Run `sandbox-router --help` for the full list. The most relevant:
 | `--path-routing-prefix` | `""` (disabled) | Optional path prefix (`<prefix>/<namespace>/<id>/<port>/...`) for callers that cannot set `X-Sandbox-*` headers — see [Browser-facing traffic](#browser-facing-traffic-path-based-routing). Falls through to header-based routing for any path that doesn't match. |
 | `--path-routing-preserve-prefix` | `false` | Forward path-routed requests with the full `<prefix>/<namespace>/<id>/<port>/` path, for a sandbox that serves under its own base path. Requires `--path-routing-prefix`. See [Keeping redirects and cookies under the prefix](#keeping-redirects-and-cookies-under-the-prefix). |
 | `--path-routing-rewrite-responses` | `true` | Rewrite upstream `Location` and `Set-Cookie` Path for path-routed responses so they stay under the prefix. Set-Cookie Path is rewritten in both modes; Location only without `--path-routing-preserve-prefix`. Set `false` to forward responses unmodified. |
+| `--path-routing-body-rewrite-profiles` | `""` (disabled) | Comma-separated built-in body rewrite profiles for path-routed responses. No profiles are built in yet. Requires `--path-routing-prefix` and `--path-routing-rewrite-responses`. See [Rewriting response bodies](#rewriting-response-bodies-framework-only). |
+| `--path-routing-body-rewrite-max-bytes` | `2097152` (2 MiB) | Largest response body buffered for body rewriting; larger responses stream through unchanged. At most 32 MiB. |
 | `--grpc-web-allowed-origins` | `""` (same-origin only) | Comma-separated `scheme://host[:port]` allowlist of browser origins permitted to call the router with gRPC-Web. Gates only gRPC-Web CORS — see [gRPC-Web](#grpc-web-browser-clients). Transcoding itself is always on. |
 | `--cache-enabled` | `false` | Enable the Pod-IP cache (KEP-NNNN fast path). Requires the RBAC in `deploy/rbac.yaml`. |
 | `--cache-namespace` | `""` (cluster-wide) | Restrict the Pod informer to a single namespace. |

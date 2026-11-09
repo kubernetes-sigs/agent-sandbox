@@ -24,7 +24,6 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -448,7 +447,9 @@ func (c *connector) SendRequestWithHeaders(ctx context.Context, method, endpoint
 		}
 
 		for name, values := range extra {
-			req.Header[name] = slices.Clone(values)
+			for _, v := range values {
+				req.Header.Add(name, v)
+			}
 		}
 
 		// Router headers only apply to router-based transports; the

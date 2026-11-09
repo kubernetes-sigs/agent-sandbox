@@ -163,9 +163,11 @@ if err != nil { log.Fatal(err) }
 err = sb.Copy(ctx, "out/script.py", "backup.py", false)
 if err != nil { log.Fatal(err) }
 
-// Add to a file, or fail with a 412 HTTPError if it exists (sandboxd runtime only)
+// Add to the end of a file (sandboxd runtime only)
 err = sb.Write(ctx, "app.log", []byte("more\n"), sandbox.WithAppend())
 if err != nil { log.Fatal(err) }
+
+// Create a file, or fail with a 412 HTTPError if it exists (sandboxd runtime only)
 err = sb.Write(ctx, "new.txt", []byte("hi"), sandbox.WithCreateOnly())
 ```
 

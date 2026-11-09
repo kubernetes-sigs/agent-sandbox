@@ -200,7 +200,7 @@ type CallOption func(*callOptions)
 func WithAppend() CallOption
 ```
 
-WithAppend makes Files.Write or Files.WriteReader add to the end of the file instead of replacing it. An append is not atomic, and the call does not retry unless WithMaxAttempts is set, because a retry can add the content twice. Other operations ignore it. Returns ErrUnsupportedByRuntime on the legacy python\-runtime.
+WithAppend makes Files.Write or Files.WriteReader add to the end of the file instead of replacing it. An append is not atomic, and the call does not retry unless WithMaxAttempts is set, because a retry can add the content twice. Other operations ignore it. It cannot be combined with WithCreateOnly. Returns ErrUnsupportedByRuntime on the legacy python\-runtime.
 
 <a name="WithCreateOnly"></a>
 #### func [WithCreateOnly](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
@@ -209,7 +209,7 @@ WithAppend makes Files.Write or Files.WriteReader add to the end of the file ins
 func WithCreateOnly() CallOption
 ```
 
-WithCreateOnly makes Files.Write or Files.WriteReader fail with a 412 HTTPError if the path already exists. The call does not retry unless WithMaxAttempts is set, because a retry after a lost response would fail with 412. Other operations ignore it. Returns ErrUnsupportedByRuntime on the legacy python\-runtime.
+WithCreateOnly makes Files.Write or Files.WriteReader fail with a 412 HTTPError if the path already exists. The call does not retry unless WithMaxAttempts is set, because a retry after a lost response would fail with 412. Other operations ignore it. It cannot be combined with WithAppend. Returns ErrUnsupportedByRuntime on the legacy python\-runtime.
 
 <a name="WithEnv"></a>
 #### func [WithEnv](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)

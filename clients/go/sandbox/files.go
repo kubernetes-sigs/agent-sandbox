@@ -398,10 +398,14 @@ func (co callOptions) writeHeaders() http.Header {
 }
 
 // checkWriteOptions rejects write options the legacy python-runtime cannot
-// honor, rather than silently overwriting the file.
+// honor, rather than silently overwriting the file. It also rejects
+// WithAppend together with WithCreateOnly, which sandboxd resolves silently.
 func (f *Files) checkWriteOptions(path string, co callOptions) error {
 	if f.runtime != RuntimeSandboxd && co.conditionalWrite() {
 		return fmt.Errorf("%s: write(%q): %w: the legacy python-runtime ignores WithAppend and WithCreateOnly", f.errPrefix(), path, ErrUnsupportedByRuntime)
+	}
+	if co.appendWrite && co.createOnly {
+		return fmt.Errorf("%s: write(%q): WithAppend and WithCreateOnly cannot be combined", f.errPrefix(), path)
 	}
 	return nil
 }

@@ -147,8 +147,8 @@ func WithWorkingDir(dir string) CallOption {
 // WithAppend makes Files.Write or Files.WriteReader add to the end of the file
 // instead of replacing it. An append is not atomic, and the call does not retry
 // unless WithMaxAttempts is set, because a retry can add the content twice.
-// Other operations ignore it. Returns ErrUnsupportedByRuntime on the legacy
-// python-runtime.
+// Other operations ignore it. It cannot be combined with WithCreateOnly.
+// Returns ErrUnsupportedByRuntime on the legacy python-runtime.
 func WithAppend() CallOption {
 	return func(o *callOptions) {
 		o.appendWrite = true
@@ -158,8 +158,8 @@ func WithAppend() CallOption {
 // WithCreateOnly makes Files.Write or Files.WriteReader fail with a 412
 // HTTPError if the path already exists. The call does not retry unless
 // WithMaxAttempts is set, because a retry after a lost response would fail
-// with 412. Other operations ignore it. Returns ErrUnsupportedByRuntime on the
-// legacy python-runtime.
+// with 412. Other operations ignore it. It cannot be combined with WithAppend.
+// Returns ErrUnsupportedByRuntime on the legacy python-runtime.
 func WithCreateOnly() CallOption {
 	return func(o *callOptions) {
 		o.createOnly = true

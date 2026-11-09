@@ -283,6 +283,21 @@ func TestSandboxdWrite_AppendAndCreateOnly(t *testing.T) {
 	}
 }
 
+func TestSandboxdWrite_AppendWithCreateOnlyRejected(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Error("rejected calls must not reach the server")
+	}))
+	defer server.Close()
+
+	c := newReadySandboxdTestSandbox(server.URL)
+	if err := c.Write(context.Background(), "f.txt", []byte("x"), WithAppend(), WithCreateOnly()); err == nil {
+		t.Error("Write: expected an error")
+	}
+	if err := c.WriteReader(context.Background(), "f.txt", strings.NewReader("x"), WithAppend(), WithCreateOnly()); err == nil {
+		t.Error("WriteReader: expected an error")
+	}
+}
+
 func TestSandboxdWrite_CreateOnlyConflict(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusPreconditionFailed)

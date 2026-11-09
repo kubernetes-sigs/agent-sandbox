@@ -27,6 +27,7 @@ import (
 	"net/url"
 	pathpkg "path"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -124,10 +125,8 @@ type Files struct {
 // "." and empty segments, including a trailing slash. The sandbox root
 // ("/", ".", and "") is "v1/files/".
 func filesEndpoint(path string) (string, error) {
-	for _, part := range strings.Split(path, "/") {
-		if part == ".." {
-			return "", fmt.Errorf("path %q escapes the sandbox root", path)
-		}
+	if slices.Contains(strings.Split(path, "/"), "..") {
+		return "", fmt.Errorf("path %q escapes the sandbox root", path)
 	}
 	cleaned := pathpkg.Clean(path)
 	if cleaned == "." || cleaned == "/" {

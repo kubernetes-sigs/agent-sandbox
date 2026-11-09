@@ -286,11 +286,10 @@ To ensure a truly clean slate and prevent state leakage between tasks, the `Clea
 
 sandboxd currently ties process exit information to the lifetime of the `Start` stream. The `ExitEvent` is sent on the same server-streaming connection that carries the process's output. When the process exits, `Start` records the exit code on the `ManagedProcess` — including on the disconnect path, where a SIGKILLed process is recorded as `137` (`128 + signal number`, as a shell reports it) — but the handler's deferred `ProcessRegistry.Remove` runs immediately afterwards, so no later RPC can read it: any RPC referencing that process ID fails with `NOT_FOUND`. If the stream breaks while the process is still running, sandboxd additionally kills the process tree (existing `killProcessGroupOnContextDone` behavior, unchanged by this extension), so the recorded outcome is sandboxd's own kill rather than the process's natural exit.
 
-This extension retains each process's exit metadata (exit code, completion time) for a bounded TTL after exit and adds a blocking `Wait` RPC so clients can retrieve it. Without detached execution, it serves three client scenarios today:
+This extension retains each process's exit metadata (exit code, completion time) for a bounded TTL after exit and adds a blocking `Wait` RPC so clients can retrieve it. Without detached execution, it serves two client scenarios today:
 
 - **Waiting from a separate call path.** A client — or a second concurrent consumer — can block on a process's outcome without holding or draining the output stream. A `Wait` timeout or cancellation ends only the RPC and never affects the process.
 - **The natural-exit race.** When a process is reaped on its own around the moment the stream is lost, the kill watcher skips the already-reaped process and the *real* exit code is recorded — but is unreachable today. Retention makes it replayable, so an SDK can distinguish "exited with code N" from "killed by sandboxd" without re-running a non-idempotent command.
-- **A definitive outcome after a disconnect.** A client that reconnects after a mid-run disconnect gets `NOT_FOUND` today and can only guess or re-run. With retention it gets a definitive `137` with a completion time.
 
 What retention alone cannot solve is recovering the natural outcome of a *still-running* process across a mid-run disconnect: under kill-on-disconnect, that outcome is always `137`. Recovering real results in that case requires processes to survive disconnection — detached execution, proposed in #2061 and specified in [Detached Processes](#detached-processes). This extension is the retrieval half of that story: `Wait` is fully useful on its own, and `ExitEventStore` is designed now so that once processes survive disconnection, replaying their natural exit codes needs no further API change.
 
@@ -302,7 +301,7 @@ Changes to `packages/sandboxd/spec/process/v1/process.proto` (all additive; no e
 
 ```protobuf
 service ProcessService {
-  // Existing: Start, Execute, WriteStdin, SendSignal, ResizeTTY
+  // Existing: Start, Execute, ExecuteWithLimits, WriteStdin, SendSignal, ResizeTTY
   rpc Wait(WaitRequest) returns (WaitResponse);   // new
 }
 
@@ -310,18 +309,16 @@ message WaitRequest {
   int32 process_id = 1;
   // Optional per-request timeout for the wait, supplied by the client and
   // enforced by the server: when it elapses, Wait returns DEADLINE_EXCEEDED.
-  // When unset or 0, the server imposes no timeout of its own and relies on
-  // the gRPC context deadline or cancellation. Servers reject negative
-  // values, and values too large to convert to a duration, with
-  // INVALID_ARGUMENT.
-  optional int64 timeout_ms = 2;
+  // When unset or zero, the server imposes no timeout of its own and relies
+  // on the gRPC context deadline or cancellation. Servers reject negative
+  // values with INVALID_ARGUMENT. Uses google.protobuf.Duration, matching
+  // time_limit and elapsed_duration on this service.
+  google.protobuf.Duration timeout = 2;
 }
 
 message WaitResponse {
   int32 exit_code = 1;
-  // Exit time as an RFC 3339 string, matching the modified_at convention
-  // in the filesystem spec.
-  string completed_at = 2;
+  google.protobuf.Timestamp completed_at = 2; // Exit time.
 }
 ```
 
@@ -337,9 +334,9 @@ New sandboxd daemon flags:
 | Process state | `Wait` result |
 |---|---|
 | Running, exits before timeout | `OK {exit_code, completed_at}` |
-| Running, `timeout_ms` elapses | `DEADLINE_EXCEEDED`; the process is unaffected |
+| Running, `timeout` elapses | `DEADLINE_EXCEEDED`; the process is unaffected |
 | Running, caller context cancelled | `CANCELLED`; the process is unaffected |
-| `timeout_ms` negative, or too large to convert to a duration | `INVALID_ARGUMENT`; the process is unaffected |
+| `timeout` negative | `INVALID_ARGUMENT`; the process is unaffected |
 | Exited, within TTL | `OK {exit_code, completed_at}` immediately |
 | Unknown process ID, record expired, or record evicted at the entry cap | `NOT_FOUND` |
 | Retention disabled (`--exit-event-ttl=0`) | Blocking waits on running processes still work; a `Wait` arriving after exit returns `NOT_FOUND` |
@@ -348,7 +345,7 @@ Key guarantees:
 
 - **`Wait` never kills a process.** It is orthogonal to the stream-disconnect kill path; a timeout or cancellation ends only the RPC.
 - **Concurrent waiters are supported.** Multiple `Wait` calls for the same process ID block on the process's existing `Done` channel. Waiters that remain attached until the process exits all receive the same exit outcome; an individual waiter can instead return `DEADLINE_EXCEEDED` or `CANCELLED` per its own timeout or cancellation, as the semantics table specifies.
-- **Record before remove.** When retention is enabled, `Start`'s teardown records the exit event before removing the process from the registry, so no `Wait` call can observe a window where the process appears in neither store. This ordering holds on every teardown path, including the `InitEvent` send-failure path, where the client never learns the process ID: recording there too keeps the invariant unconditional and the implementation free of special cases. With `--exit-event-ttl=0` nothing is recorded, and a `Wait` arriving after removal returns `NOT_FOUND` as the semantics table specifies.
+- **Record before remove.** When retention is enabled, `Start`'s teardown records the exit event before removing the process from the registry, so no `Wait` call can observe a window where the process appears in neither store. This ordering holds on every teardown path, including the `InitEvent` send-failure path, where the client never learns the process ID: recording there too keeps the invariant unconditional and the implementation free of special cases. That path needs new work. Today its goroutine only waits for the process and closes `Done` without recording an exit code, so the implementation must compute the exit status there as well. With `--exit-event-ttl=0` nothing is recorded, and a `Wait` arriving after removal returns `NOT_FOUND` as the semantics table specifies.
 
 #### Implementation Considerations for Exit Retention
 
@@ -358,7 +355,7 @@ Key guarantees:
 - **Authoritative `completed_at`.** `ManagedProcess` today records only the exit code. The exit path extends that shared completion state to record the completion timestamp in the same critical section as the exit code, and both the live `Wait` path and the store's record read this single value. Implementations must not synthesize a timestamp after `Done` closes.
 - **Virtual PID wrap-around:** `ProcessRegistry.NextPID` documents that IDs are unique among concurrently live processes. Retention grows the uniqueness domain to "live plus retained records". With a monotonically increasing counter and a 30s TTL a collision is practically impossible; defensively, `NextPID` must not hand out an ID that is still present in the retention store (it skips to the next value). Reserving retained IDs removes the whole class of stale-waiter confusion, including at the registry level, where a reused ID would otherwise surface a new process to callers holding the old one. `Record` correspondingly never overwrites a retained record. These guarantees are scoped to a single daemon instance; see the next bullet.
 - **Daemon restarts invalidate process IDs.** The registry counter and the retention store are in-memory, so a sandboxd restart clears both and reissues IDs from the beginning. A client that carries a pre-restart ID into the new instance could match an unrelated new process. This exposure predates the extension — `SendSignal`, `WriteStdin`, and `ResizeTTY` share it today — and clients can detect restarts through the existing `/v1/health` `uptime_seconds` field, which drops back after a restart. Scoping process identity to a daemon generation across `ProcessService` is left to future work.
-- `Execute` does not participate: it is a synchronous unary call that returns the exit code atomically and never registers a process.
+- `Execute` and `ExecuteWithLimits` do not participate: both are synchronous unary calls that return the exit code atomically and never register a process.
 - Testing: `ExitEventStore` unit tests (TTL expiry, cap eviction, disabled mode); one test per row of the semantics table, asserting that timeout/cancellation leave the process running; a record-before-remove race test; concurrent waiters; an integration test that drops the stream mid-run and asserts `Wait` replays exit code `137`, documenting the kill-path outcome rather than a survival guarantee; and a natural-exit race test where the process exits on its own before the stream is dropped and `Wait` must replay its real exit code.
 
 #### Non-Goals of This Extension
@@ -424,10 +421,10 @@ message ProcessInfo {
   repeated string command = 2; // ProcessConfig.command; env_vars are omitted.
   ProcessState state = 3;
   bool detached = 4;
-  optional int32 exit_code = 5;     // Set when state is EXITED.
-  optional string completed_at = 6; // RFC 3339; set when state is EXITED.
-  OutputRange stdout = 7;           // Detached processes only.
-  OutputRange stderr = 8;           // Detached processes only.
+  optional int32 exit_code = 5;                        // Set when state is EXITED.
+  optional google.protobuf.Timestamp completed_at = 6; // Set when state is EXITED.
+  OutputRange stdout = 7;                              // Detached processes only.
+  OutputRange stderr = 8;                              // Detached processes only.
 }
 
 message ListRequest {}
@@ -497,7 +494,7 @@ These two flags also bound retained output for the whole daemon. The bound is `-
 | `List` | `RUNNING`, with output ranges | `EXITED`, with `exit_code`, `completed_at`, and output ranges | `RUNNING`, without output ranges |
 | `Release` | `FAILED_PRECONDITION`; the process keeps running | Frees the buffers and the exit record | `FAILED_PRECONDITION` |
 
-Every call returns `NOT_FOUND` for an unknown or released process ID, as today. A non-detached process leaves `List` when it exits. After that, only `Wait` can find it, through `ExitEventStore`. `Execute` never registers a process, so `List` never shows the processes it runs.
+Every call returns `NOT_FOUND` for an unknown or released process ID, as today. A non-detached process leaves `List` when it exits. After that, only `Wait` can find it, through `ExitEventStore`. Neither `Execute` nor `ExecuteWithLimits` registers a process, so `List` never shows the processes they run.
 
 | `Attach` offset | Result |
 |---|---|
@@ -522,11 +519,11 @@ Key guarantees:
 - **Exit.** When the process exits, the owning goroutine applies the same `waitDelay` and `pipeDrainGrace` bounds as `Start`. It then records the exit code and `completed_at` on the `ManagedProcess` and closes `Done`. This is the same completion state the previous section defines. It closes the pipes or PTY. The registry entry then holds only the ID, command, buffers, and exit state. sandboxd does not capture output that a surviving grandchild writes after the drain bound.
 - **Composition with `ExitEventStore`.** Exit records follow one of two retention rules. A non-detached process moves to `ExitEventStore` at teardown and expires after `--exit-event-ttl`. A detached process keeps its record on its `ProcessRegistry` entry until `Release` or eviction, and never enters `ExitEventStore`. `--exit-event-ttl` governs only non-detached processes, even when it is `0`. With retention disabled, `Wait` still returns a detached process's exit result until `Release` or eviction. `Wait` needs no new code path for detached processes. It finds them in the registry, and the closed `Done` channel makes it return at once. `Release` and eviction do not copy the record into `ExitEventStore`. The store's lazy expiry compares `completed_at` against `--exit-event-ttl`, so a record that sandboxd kept longer than the TTL would expire as soon as it arrived.
 - **Process IDs.** `NextPID` must also skip IDs held by the registry, which extends the previous section's rule for `ExitEventStore`. Detached entries can stay in the registry for hours, much longer than a 30-second exit record. Without this rule, a counter that wraps around could hand out the ID of an entry that still exists.
-- **Process groups and reaping.** A detached process stays a direct child of sandboxd. sandboxd keeps the process group setup it uses today: `Setpgid` for pipe processes and `Setsid` (set by `creack/pty`) for PTY processes. It does not double-fork. The owning goroutine's `cmd.Wait` reaps the process sandboxd started, so sandboxd records its exit code and the process never stays a zombie. The kernel reparents grandchildren that outlive their parent to PID 1. When sandboxd is PID 1, those grandchildren stay zombies after they exit (#1980). Detached execution makes #1980 more pressing, because it targets long-lived trees such as dev servers and shells that background work. This extension depends on #1980 for orphan reaping. That reaper must not call a broad `waitpid(-1)`, because that call can collect a child that sandboxd still waits on through `cmd.Wait`. It must skip the OS PIDs of those children, which include every registry entry's `ManagedProcess.Cmd.Process.Pid` and the children of in-flight `Execute` calls. If the reaper collected a tracked child first, `cmd.Wait` would fail with `ECHILD`. sandboxd would then record `-1`, which is what `Start` records today for any `Wait` error that is not an `exec.ExitError`. One option is for the reaper to find an exited child with `waitid(P_ALL, 0, &info, WEXITED|WNOHANG|WNOWAIT)`, which leaves the child waitable for `cmd.Wait`, and to reap that PID only if sandboxd does not track it. The reaper would check and reap under a lock that sandboxd also holds from before `cmd.Start` until it records the new PID as tracked, so the reaper cannot collect a child that exits before then. `WNOHANG` makes the call return at once when no child has exited, so the reaper never blocks while it holds the lock and waits for SIGCHLD outside it. Because `WNOWAIT` does not consume the selected child, a reaper that skips a tracked PID could select the same child again and spin, so the reaper would reap only PIDs outside the tracked set and, when `waitid(P_ALL)` returns a tracked PID, back off until that child's `cmd.Wait` consumes it instead of retrying at once. The reaper would hold the lock only while it checks and reaps one PID, never during the backoff, so the lock does not block `Start` or `Execute` for longer than that.
+- **Process groups and reaping.** A detached process stays a direct child of sandboxd. sandboxd keeps the process group setup it uses today: `Setpgid` for pipe processes and `Setsid` (set by `creack/pty`) for PTY processes. It does not double-fork. The owning goroutine's `cmd.Wait` reaps the process sandboxd started, so sandboxd records its exit code and the process never stays a zombie. The kernel reparents grandchildren that outlive their parent to PID 1. When sandboxd is PID 1, those grandchildren stay zombies after they exit (#1980). Detached execution makes #1980 more pressing, because it targets long-lived trees such as dev servers and shells that background work, and this extension depends on #1980 for orphan reaping. This extension imposes one constraint on that reaper. The reaper must never reap an OS PID that sandboxd tracks through `cmd.Wait`, which covers every registry entry's `ManagedProcess.Cmd.Process.Pid` and the children of in-flight `Execute` and `ExecuteWithLimits` calls. If the reaper collected a tracked child first, that child's `cmd.Wait` would fail with `ECHILD`, and sandboxd would record `-1` instead of the real exit code. The reaper's own mechanics (child selection, locking, backoff) belong to #1980.
 - **Daemon restarts.** Detached processes and their records do not survive a sandboxd restart. `ShutdownProcesses` sends SIGTERM and then SIGKILL to every registered process, detached ones included. The previous section's "Daemon restarts invalidate process IDs" bullet applies unchanged. After a restart, a pre-restart process ID can match an unrelated new process, so `Attach` can return that process's output and `List` and `Wait` can report it. Clients detect the restart through the `/v1/health` `uptime_seconds` field, as the previous section describes, and should drop their saved process IDs and offsets.
 - **Compatibility.** A sandboxd without this extension ignores the unknown `detached` field, keeps the process tied to the stream, and keeps streaming output. It never sets `InitEvent.detached`. If an SDK requested detached execution and `InitEvent.detached` is `false`, the SDK must treat detached execution as unsupported and report an error. Older daemons return `UNIMPLEMENTED` for `List`, `Attach`, and `Release`.
 - **Security and limits.** The bearer-token interceptors from `Server.GRPCServerOptions` apply to every RPC on the gRPC server, so the new RPCs need no new authorization code. sandboxd trusts every client that holds its bearer token equally. Any such client can see every process through `List` and can call `Attach`, `SendSignal`, or `Release` on any process, including one that another client started. Per-client process ownership is out of scope for this extension. `List` omits `env_vars`, which can carry credentials. Retained output can also contain secrets the process printed. It stays in sandboxd memory until `Release` or eviction frees it. `--detached-max-processes` limits detached processes per sandboxd instance.
-- Testing: `OutputBuffer` unit tests (wrap-around, offsets after overwrite, growth up to the cap); one test per row of both semantics tables; an integration test that starts a detached process, cancels the `Start` stream, reattaches with saved offsets, and receives the remaining output and the process's own exit code from `Attach` and `Wait`; concurrent attachers receiving identical bytes; a slow attacher that sees an offset gap while the process keeps running; `Release` on a running process returning `FAILED_PRECONDITION` with the process still alive; eviction order and `RESOURCE_EXHAUSTED` at `--detached-max-processes`; flag validation at startup; `ShutdownProcesses` terminating detached processes; and, once #1980 lands, a test that a tracked detached process keeps its own exit code while the #1980 reaper runs, plus a test with one exited tracked child and one exited orphan that confirms the reaper reaps the orphan while the tracked child stays waitable and its `cmd.Wait` reports its own exit code, and a test with no exited child that confirms the reaper returns at once without blocking `Start`.
+- Testing: `OutputBuffer` unit tests (wrap-around, offsets after overwrite, growth up to the cap); one test per row of both semantics tables; an integration test that starts a detached process, cancels the `Start` stream, reattaches with saved offsets, and receives the remaining output and the process's own exit code from `Attach` and `Wait`; concurrent attachers receiving identical bytes; a slow attacher that sees an offset gap while the process keeps running; `Release` on a running process returning `FAILED_PRECONDITION` with the process still alive; eviction order and `RESOURCE_EXHAUSTED` at `--detached-max-processes`; flag validation at startup; `ShutdownProcesses` terminating detached processes; and, once #1980 lands, a test that a tracked detached process keeps its own exit code while the #1980 reaper runs, plus a test that the reaper reaps an exited orphan without consuming a tracked child.
 
 #### Non-Goals for Detached Processes
 

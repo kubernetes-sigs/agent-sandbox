@@ -320,9 +320,10 @@ class Filesystem:
             )
 
         if self.connector.is_sandboxd():
-            # A plain write is an atomic, idempotent PUT. Append and
-            # create_only are neither, so they disable retries. Parent
-            # directories are created server-side.
+            # A plain write is an atomic, idempotent PUT. Append is not
+            # atomic, and neither append nor create_only is idempotent, so
+            # they disable retries. Parent directories are created
+            # server-side.
             endpoint, headers, retry_safe = _sandboxd_write_request(
                 path, append, create_only)
             data: bytes | Iterator[bytes]

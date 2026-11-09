@@ -34,6 +34,7 @@ from k8s_agent_sandbox.files.filesystem import (
     _STREAM_CHUNK_SIZE,
     _mkdir_endpoint,
     _sandboxd_files_endpoint,
+    _sandboxd_read_endpoint,
     _sandboxd_op_endpoint,
     _transfer_endpoint,
     _validate_binary_stream,
@@ -206,7 +207,7 @@ class AsyncFilesystem:
                 path, preserve_absolute=self.connector.is_sandboxd()
             )
         endpoint = (
-            _sandboxd_files_endpoint(path)
+            _sandboxd_read_endpoint(path)
             if self.connector.is_sandboxd()
             else f"download/{urllib.parse.quote(path, safe='')}"
         )
@@ -255,7 +256,7 @@ class AsyncFilesystem:
                 path, preserve_absolute=self.connector.is_sandboxd()
             )
         endpoint = (
-            _sandboxd_files_endpoint(path)
+            _sandboxd_read_endpoint(path)
             if self.connector.is_sandboxd()
             else f"download/{urllib.parse.quote(path, safe='')}"
         )

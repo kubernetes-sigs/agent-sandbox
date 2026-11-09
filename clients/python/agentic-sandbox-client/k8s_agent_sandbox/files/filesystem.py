@@ -156,6 +156,18 @@ def _sandboxd_files_endpoint(path: str) -> str:
     return "v1/files/" + encoded
 
 
+def _sandboxd_read_endpoint(path: str) -> str:
+    """Return the sandboxd GET path for a file read.
+
+    The sandbox root is a directory. Reject it before the request, as the Go
+    and TypeScript clients do, instead of downloading the directory listing.
+    """
+    endpoint = _sandboxd_files_endpoint(path)
+    if endpoint == "v1/files/":
+        raise ValueError(f"read: path {path!r} names the sandbox root")
+    return endpoint
+
+
 class _RuntimeProbe(Protocol):
     """The part of a sync or async connector that the endpoint helpers use."""
 
@@ -374,7 +386,7 @@ class Filesystem:
             )
 
         if self.connector.is_sandboxd():
-            endpoint = _sandboxd_files_endpoint(path)
+            endpoint = _sandboxd_read_endpoint(path)
         else:
             endpoint = f"download/{urllib.parse.quote(path, safe='')}"
         response = self.connector.send_request("GET", endpoint, timeout=timeout)
@@ -423,7 +435,7 @@ class Filesystem:
             )
 
         if self.connector.is_sandboxd():
-            endpoint = _sandboxd_files_endpoint(path)
+            endpoint = _sandboxd_read_endpoint(path)
         else:
             endpoint = f"download/{urllib.parse.quote(path, safe='')}"
 

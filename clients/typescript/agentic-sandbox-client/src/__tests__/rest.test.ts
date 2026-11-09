@@ -93,13 +93,16 @@ afterEach(async () => {
 // ---------- resolveSandboxPath (client-side validation) ----------
 
 describe("resolveSandboxPath", () => {
-  it("maps '' and '.' to the sandbox root for read/list/exists", () => {
-    expect(resolveSandboxPath("", "read")).toBe("");
-    expect(resolveSandboxPath(".", "list")).toBe("");
-    expect(resolveSandboxPath("./.", "exists")).toBe("");
+  it("maps '' and '.' to the sandbox root for list/exists", () => {
+    expect(resolveSandboxPath("", "list")).toBe("");
+    expect(resolveSandboxPath(".", "exists")).toBe("");
+    expect(resolveSandboxPath("./.", "list")).toBe("");
   });
 
-  it("rejects the sandbox root for write/delete", () => {
+  it("rejects the sandbox root for read/write/delete", () => {
+    expect(() => resolveSandboxPath("", "read")).toThrow(SandboxError);
+    expect(() => resolveSandboxPath(".", "read")).toThrow(SandboxError);
+    expect(() => resolveSandboxPath("./", "read")).toThrow(SandboxError);
     expect(() => resolveSandboxPath("", "write")).toThrow(SandboxError);
     expect(() => resolveSandboxPath(".", "delete")).toThrow(SandboxError);
     expect(() => resolveSandboxPath("./", "write")).toThrow(SandboxError);
@@ -357,16 +360,16 @@ describe("SandboxdRestClient.read", () => {
     expect(activeServer.requests[0].url).toBe(`/v1/files/dir/sub%20file.txt`);
   });
 
-  it("requests '/v1/files/' for the sandbox root", async () => {
+  it("rejects the sandbox root before any request", async () => {
     activeServer = await startServer((_req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ path: "/", entries: [] }));
     });
     const client = makeClient(activeServer.baseUrl);
-    await expect(client.read("", new AbortController().signal)).rejects.toThrow(
-      SandboxError,
-    );
-    expect(activeServer.requests[0].url).toBe("/v1/files/");
+    const signal = new AbortController().signal;
+    await expect(client.read("", signal)).rejects.toThrow(SandboxError);
+    await expect(client.read(".", signal)).rejects.toThrow(SandboxError);
+    expect(activeServer.requests).toHaveLength(0);
   });
 
   it("errors when the response is a directory listing (JSON content-type)", async () => {

@@ -355,6 +355,27 @@ class TestSandboxdAbsolutePath(unittest.TestCase):
             ("HEAD", "v1/files/%2Fworkspace/a.txt"),
         ])
 
+    def test_read_rejects_sandbox_root_before_request(self):
+        connector = MagicMock()
+        connector.is_sandboxd.return_value = True
+        fs = Filesystem(connector, MagicMock(), trace_service_name="test")
+        destination = io.BytesIO()
+
+        for path, kwargs in (
+            (".", {}),
+            (".", {"allow_unsafe_paths": True}),
+            ("", {"allow_unsafe_paths": True}),
+            ("/", {"allow_unsafe_paths": True}),
+            ("./", {"allow_unsafe_paths": True}),
+        ):
+            with self.subTest(path=path, **kwargs):
+                with self.assertRaisesRegex(ValueError, "sandbox root|does not name a file|empty"):
+                    fs.read(path, **kwargs)
+                with self.assertRaisesRegex(ValueError, "sandbox root|does not name a file|empty"):
+                    fs.read_to(path, destination, **kwargs)
+
+        connector.send_request.assert_not_called()
+
 
 class TestAsyncSandboxdFilesystem(unittest.IsolatedAsyncioTestCase):
     """Verify sandboxd endpoints, response validation, and tracing."""
@@ -384,6 +405,19 @@ class TestAsyncSandboxdFilesystem(unittest.IsolatedAsyncioTestCase):
             ("PUT", "v1/files/%2Fworkspace/a.txt"),
             ("HEAD", "v1/files/%2Fworkspace/a.txt"),
         ])
+
+    async def test_read_rejects_sandbox_root_before_request(self):
+        for path, kwargs in (
+            (".", {}),
+            (".", {"allow_unsafe_paths": True}),
+            ("", {"allow_unsafe_paths": True}),
+            ("/", {"allow_unsafe_paths": True}),
+        ):
+            with self.subTest(path=path, **kwargs):
+                with self.assertRaisesRegex(ValueError, "sandbox root|does not name a file|empty"):
+                    await self.fs.read(path, **kwargs)
+
+        self.connector.send_request.assert_not_awaited()
 
     async def test_stream_write_disables_retries(self):
         await self.fs.write("dir/data.bin", BoundedReader(b"payload"))

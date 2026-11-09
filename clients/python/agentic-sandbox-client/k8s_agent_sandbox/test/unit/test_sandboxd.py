@@ -143,7 +143,7 @@ class TestSandboxdFilesystem(unittest.TestCase):
         self._fs.write("dir/script.py", b"print(1)")
         args, kwargs = self._last_call()
         self.assertEqual(args[0], "PUT")
-        self.assertEqual(args[1], "v1/files/dir%2Fscript.py")
+        self.assertEqual(args[1], "v1/files/dir/script.py")
         self.assertEqual(kwargs["data"], b"print(1)")
         self.assertEqual(kwargs["headers"]["Content-Type"], "application/octet-stream")
 
@@ -167,7 +167,7 @@ class TestSandboxdFilesystem(unittest.TestCase):
         self.assertEqual(data, b"hello")
         args, _ = self._last_call()
         self.assertEqual(args[0], "GET")
-        self.assertEqual(args[1], "v1/files/notes%2Fhello.txt")
+        self.assertEqual(args[1], "v1/files/notes/hello.txt")
 
     def test_list_unwraps_directory_listing(self):
         resp = MagicMock()
@@ -231,13 +231,13 @@ class TestSandboxdFilesystem(unittest.TestCase):
     def test_mkdir_sends_directory_type(self):
         self._fs.mkdir("a/b")
         args, _ = self._last_call()
-        self.assertEqual(args[:2], ("PUT", "v1/files/a%2Fb?type=directory"))
+        self.assertEqual(args[:2], ("PUT", "v1/files/a/b?type=directory"))
 
     def test_mkdir_parents(self):
         self._fs.mkdir("a/b", parents=True)
         args, _ = self._last_call()
         self.assertEqual(
-            args[:2], ("PUT", "v1/files/a%2Fb?type=directory&parents=true"))
+            args[:2], ("PUT", "v1/files/a/b?type=directory&parents=true"))
 
     def test_move_and_copy_send_destination(self):
         for op in ("move", "copy"):
@@ -247,7 +247,7 @@ class TestSandboxdFilesystem(unittest.TestCase):
                 self.assertEqual(args[0], "POST")
                 self.assertEqual(
                     args[1],
-                    f"v1/files/src%20dir%2Fa.txt:{op}?destination=dst%2Fb.txt")
+                    f"v1/files/src%20dir/a.txt:{op}?destination=dst%2Fb.txt")
 
     def test_move_overwrite(self):
         self._fs.move("a", "b", overwrite=True)

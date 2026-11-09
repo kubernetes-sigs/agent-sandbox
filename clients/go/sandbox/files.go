@@ -116,9 +116,47 @@ type Files struct {
 	lifecycleCtx func() context.Context
 }
 
-// filesEndpoint returns the sandboxd REST path for a file path.
-func filesEndpoint(path string) string {
-	return "v1/files/" + encodeFilePath(path)
+// filesEndpoint returns the sandboxd REST path for path. It percent-encodes
+// each segment and leaves "/" separators in place. A leading "/" is encoded
+// as "%2F", so "/workspace/a.txt" stays absolute and sandboxd can strip its
+// own root. Stripping the slash here would join that path under the root a
+// second time. A ".." segment is rejected before cleaning, so "dir/../a.txt"
+// is an error instead of a silent rewrite to "a.txt". Cleaning still drops
+// "." and empty segments, including a trailing slash. The sandbox root
+// ("/", ".", and "") is "v1/files/".
+func filesEndpoint(path string) (string, error) {
+	if slices.Contains(strings.Split(path, "/"), "..") {
+		return "", fmt.Errorf("path %q escapes the sandbox root", path)
+	}
+	cleaned := pathpkg.Clean(path)
+	if cleaned == "." || cleaned == "/" {
+		return "v1/files/", nil
+	}
+	absolute := strings.HasPrefix(cleaned, "/")
+	rel := strings.TrimPrefix(cleaned, "/")
+
+	var b strings.Builder
+	b.WriteString("v1/files/")
+	if absolute {
+		b.WriteString("%2F")
+	}
+	for i, part := range strings.Split(rel, "/") {
+		if i > 0 {
+			b.WriteByte('/')
+		}
+		b.WriteString(percentEncode(part))
+	}
+	return b.String(), nil
+}
+
+// nonRootFilesEndpoint is filesEndpoint for an operation that cannot name
+// the sandbox root.
+func nonRootFilesEndpoint(path string) (string, error) {
+	ep, err := filesEndpoint(path)
+	if err != nil || ep != "v1/files/" {
+		return ep, err
+	}
+	return "", fmt.Errorf("path %q names the sandbox root", path)
 }
 
 // httpErrorFromResponse builds an HTTPError from a non-2xx response. For the
@@ -229,7 +267,12 @@ func (f *Files) WriteReader(ctx context.Context, path string, content io.Reader,
 			recordError(span, err)
 			return err
 		}
-		method, endpoint, contentType = http.MethodPut, filesEndpoint(path), "application/octet-stream"
+		ep, err := nonRootFilesEndpoint(path)
+		if err != nil {
+			recordError(span, err)
+			return fmt.Errorf("%s: write(%q): %w", f.errPrefix(), path, err)
+		}
+		method, endpoint, contentType = http.MethodPut, ep, "application/octet-stream"
 		body = &uploadLimitReader{reader: content, remaining: f.maxUpload, maxUpload: f.maxUpload}
 	} else {
 		if err := f.validateLegacyWritePath(path); err != nil {
@@ -303,22 +346,22 @@ func (r *uploadLimitReader) Read(p []byte) (int, error) {
 
 // sandboxdWriteReq builds the sandboxd PUT request: an idempotent write of the
 // raw bytes to /v1/files/{path}. Parent directories are created server-side.
-// Relative paths are allowed, but ".." components that escape the sandbox root
-// are rejected client-side as defense in depth (sandboxd also enforces this
-// server-side via SanitizePath).
+// Relative paths are allowed. A ".." segment is rejected before the path is
+// cleaned, so the client does not rewrite it.
 func (f *Files) sandboxdWriteReq(path string, content []byte) (method, endpoint, contentType string, body *bytes.Reader, err error) {
 	if err := f.validateSandboxdWritePath(path); err != nil {
 		return "", "", "", nil, err
 	}
-	return http.MethodPut, filesEndpoint(path), "application/octet-stream", bytes.NewReader(content), nil
+	endpoint, err = nonRootFilesEndpoint(path)
+	if err != nil {
+		return "", "", "", nil, fmt.Errorf("%s: write(%q): %w", f.errPrefix(), path, err)
+	}
+	return http.MethodPut, endpoint, "application/octet-stream", bytes.NewReader(content), nil
 }
 
 func (f *Files) validateSandboxdWritePath(path string) error {
-	if path == "" || path == "." || path == ".." || strings.HasSuffix(path, "/") {
+	if strings.HasSuffix(path, "/") {
 		return fmt.Errorf("%s: write: %q is not a valid file path", f.errPrefix(), path)
-	}
-	if slices.Contains(strings.Split(path, "/"), "..") {
-		return fmt.Errorf("%s: write: %q must not contain %q path segments (escapes the sandbox root)", f.errPrefix(), path, "..")
 	}
 	return nil
 }
@@ -413,7 +456,12 @@ func (f *Files) readTo(ctx context.Context, path string, destination io.Writer, 
 
 	endpoint := "download/" + encodeFilePath(path)
 	if f.runtime == RuntimeSandboxd {
-		endpoint = filesEndpoint(path)
+		ep, err := nonRootFilesEndpoint(path)
+		if err != nil {
+			recordError(span, err)
+			return 0, fmt.Errorf("%s: read(%q): %w", f.errPrefix(), path, err)
+		}
+		endpoint = ep
 	}
 	resp, err := f.connector.SendRequest(ctx, http.MethodGet, endpoint, nil, "", maxAttempts)
 	if err != nil {
@@ -484,7 +532,12 @@ func (f *Files) List(ctx context.Context, path string, opts ...CallOption) ([]Fi
 
 	endpoint := "list/" + encodeFilePath(path)
 	if f.runtime == RuntimeSandboxd {
-		endpoint = filesEndpoint(path)
+		ep, err := filesEndpoint(path)
+		if err != nil {
+			recordError(span, err)
+			return nil, fmt.Errorf("%s: list(%q): %w", f.errPrefix(), path, err)
+		}
+		endpoint = ep
 	}
 	resp, err := f.connector.SendRequest(ctx, http.MethodGet, endpoint, nil, "", maxAttempts)
 	if err != nil {
@@ -560,7 +613,12 @@ func (f *Files) Exists(ctx context.Context, path string, opts ...CallOption) (bo
 	if f.runtime == RuntimeSandboxd {
 		// sandboxd has no dedicated exists endpoint: HEAD on the file path
 		// answers existence without transferring the body (200 vs 404).
-		resp, err := f.connector.SendRequest(ctx, http.MethodHead, filesEndpoint(path), nil, "", maxAttempts)
+		endpoint, err := filesEndpoint(path)
+		if err != nil {
+			recordError(span, err)
+			return false, fmt.Errorf("%s: exists(%q): %w", f.errPrefix(), path, err)
+		}
+		resp, err := f.connector.SendRequest(ctx, http.MethodHead, endpoint, nil, "", maxAttempts)
 		if err != nil {
 			recordError(span, err)
 			return false, fmt.Errorf("%s: exists(%q) failed: %w", f.errPrefix(), path, err)
@@ -695,7 +753,12 @@ func (f *Files) sandboxdFileOp(ctx context.Context, op, method, path, actionSuff
 		return err
 	}
 
-	endpoint := filesEndpoint(path) + actionSuffix
+	endpoint, err := nonRootFilesEndpoint(path)
+	if err != nil {
+		recordError(span, err)
+		return fmt.Errorf("%s: %s(%q): %w", f.errPrefix(), op, path, err)
+	}
+	endpoint += actionSuffix
 	if len(query) > 0 {
 		endpoint += "?" + query.Encode()
 	}

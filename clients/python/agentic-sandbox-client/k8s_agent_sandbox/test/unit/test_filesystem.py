@@ -158,8 +158,12 @@ class TestFilesystemSafeUploadPath(unittest.TestCase):
                 self.assertEqual(Filesystem._safe_upload_path(path), path)
 
     def test_leading_slash_is_stripped(self):
-        # An absolute-looking path gets normalized to a relative path under the runtime root.
+        # The legacy multipart filename is relative. sandboxd keeps the slash.
         self.assertEqual(Filesystem._safe_upload_path("/dir/foo.txt"), "dir/foo.txt")
+        self.assertEqual(
+            Filesystem._safe_upload_path("/workspace/a.txt", preserve_absolute=True),
+            "/workspace/a.txt",
+        )
 
     def test_double_slash_collapses(self):
         self.assertEqual(Filesystem._safe_upload_path("dir//foo.txt"), "dir/foo.txt")
@@ -171,6 +175,12 @@ class TestFilesystemSafeUploadPath(unittest.TestCase):
     def test_embedded_parent_traversal_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "escapes the sandbox root"):
             Filesystem._safe_upload_path("dir/../../etc/passwd")
+
+    def test_non_escaping_parent_segment_is_rejected(self):
+        # "dir/../a.txt" stays inside the root after normpath, but a ".."
+        # segment is rejected before that rewrite.
+        with self.assertRaisesRegex(ValueError, "escapes the sandbox root"):
+            Filesystem._safe_upload_path("dir/../a.txt")
 
     def test_absolute_etc_is_not_allowed_to_escape(self):
         # /etc/passwd normalizes to "etc/passwd" relative to the runtime root.
@@ -215,8 +225,36 @@ class TestFilesystemSafeUploadPath(unittest.TestCase):
                     b"/v1/files/",
                 )
 
-    def test_sandboxd_parent_segments_are_encoded(self):
-        self.assertEqual(_sandboxd_files_endpoint(".."), "v1/files/%2E%2E")
+    def test_sandboxd_parent_escape_is_rejected(self):
+        for path in ("..", "../etc/passwd", "dir/../../etc/passwd", "dir/../a.txt"):
+            with self.subTest(path=path), self.assertRaisesRegex(
+                ValueError, "escapes the sandbox root"
+            ):
+                _sandboxd_files_endpoint(path)
+
+    def test_sandboxd_separators_stay_literal(self):
+        # A leading slash stays encoded as %2F. Repeated slashes, "." and a
+        # trailing slash collapse. Separators stay literal "/".
+        cases = {
+            "dir/script.py": "/v1/files/dir/script.py",
+            "/dir/script.py": "/v1/files/%2Fdir/script.py",
+            "dir//script.py": "/v1/files/dir/script.py",
+            "dir/": "/v1/files/dir",
+            "/": "/v1/files/",
+            "/dir": "/v1/files/%2Fdir",
+            "a b/c.txt": "/v1/files/a%20b/c.txt",
+            "/workspace/a b.txt": "/v1/files/%2Fworkspace/a%20b.txt",
+            "./a.txt": "/v1/files/a.txt",
+        }
+        for path, path_url in cases.items():
+            with self.subTest(path=path):
+                url = "http://sandbox/" + _sandboxd_files_endpoint(path)
+                self.assertEqual(
+                    requests.Request("GET", url).prepare().path_url, path_url
+                )
+                self.assertEqual(
+                    httpx.Request("GET", url).url.raw_path, path_url.encode()
+                )
 
 
 class TestAsyncFilesystemSafeUploadPath(unittest.TestCase):
@@ -301,6 +339,44 @@ class TestAsyncFilesystemSafePaths(TestFilesystemSafePaths):
         asyncio.run(self._fs.read("/dir/foo.txt", **kwargs))
 
 
+class TestSandboxdAbsolutePath(unittest.TestCase):
+    def test_write_and_exists_keep_the_leading_slash(self):
+        connector = MagicMock()
+        connector.is_sandboxd.return_value = True
+        connector.send_request.return_value = MagicMock(status_code=200)
+        fs = Filesystem(connector, MagicMock(), trace_service_name="test")
+
+        fs.write("/workspace/a.txt", b"x")
+        self.assertTrue(fs.exists("/workspace/a.txt"))
+
+        calls = [c.args[:2] for c in connector.send_request.call_args_list]
+        self.assertEqual(calls, [
+            ("PUT", "v1/files/%2Fworkspace/a.txt"),
+            ("HEAD", "v1/files/%2Fworkspace/a.txt"),
+        ])
+
+    def test_read_rejects_sandbox_root_before_request(self):
+        connector = MagicMock()
+        connector.is_sandboxd.return_value = True
+        fs = Filesystem(connector, MagicMock(), trace_service_name="test")
+        destination = io.BytesIO()
+
+        for path, kwargs in (
+            (".", {}),
+            (".", {"allow_unsafe_paths": True}),
+            ("", {"allow_unsafe_paths": True}),
+            ("/", {"allow_unsafe_paths": True}),
+            ("./", {"allow_unsafe_paths": True}),
+        ):
+            with self.subTest(path=path, **kwargs):
+                with self.assertRaisesRegex(ValueError, "sandbox root|does not name a file|empty"):
+                    fs.read(path, **kwargs)
+                with self.assertRaisesRegex(ValueError, "sandbox root|does not name a file|empty"):
+                    fs.read_to(path, destination, **kwargs)
+
+        connector.send_request.assert_not_called()
+
+
 class TestAsyncSandboxdFilesystem(unittest.IsolatedAsyncioTestCase):
     """Verify sandboxd endpoints, response validation, and tracing."""
 
@@ -313,15 +389,41 @@ class TestAsyncSandboxdFilesystem(unittest.IsolatedAsyncioTestCase):
     async def test_write_uses_sandboxd_put(self):
         await self.fs.write("dir/script.py", b"print(1)")
         args, kwargs = self.connector.send_request.call_args
-        self.assertEqual(args[:2], ("PUT", "v1/files/dir%2Fscript.py"))
+        self.assertEqual(args[:2], ("PUT", "v1/files/dir/script.py"))
         self.assertEqual(kwargs["content"], b"print(1)")
         self.assertNotIn("data", kwargs)
+
+    async def test_absolute_write_and_exists_share_one_path(self):
+        response = MagicMock(status_code=200)
+        self.connector.send_request.return_value = response
+
+        await self.fs.write("/workspace/a.txt", b"x")
+        self.assertTrue(await self.fs.exists("/workspace/a.txt"))
+
+        calls = [c.args[:2] for c in self.connector.send_request.call_args_list]
+        self.assertEqual(calls, [
+            ("PUT", "v1/files/%2Fworkspace/a.txt"),
+            ("HEAD", "v1/files/%2Fworkspace/a.txt"),
+        ])
+
+    async def test_read_rejects_sandbox_root_before_request(self):
+        for path, kwargs in (
+            (".", {}),
+            (".", {"allow_unsafe_paths": True}),
+            ("", {"allow_unsafe_paths": True}),
+            ("/", {"allow_unsafe_paths": True}),
+        ):
+            with self.subTest(path=path, **kwargs):
+                with self.assertRaisesRegex(ValueError, "sandbox root|does not name a file|empty"):
+                    await self.fs.read(path, **kwargs)
+
+        self.connector.send_request.assert_not_awaited()
 
     async def test_stream_write_disables_retries(self):
         await self.fs.write("dir/data.bin", BoundedReader(b"payload"))
         args, kwargs = self.connector.send_request.call_args
 
-        self.assertEqual(args[:2], ("PUT", "v1/files/dir%2Fdata.bin"))
+        self.assertEqual(args[:2], ("PUT", "v1/files/dir/data.bin"))
         self.assertTrue(kwargs["_disable_retries"])
         self.assertEqual(
             b"".join([chunk async for chunk in kwargs["content"]]), b"payload"
@@ -333,7 +435,7 @@ class TestAsyncSandboxdFilesystem(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(await self.fs.read("notes/hello.txt"), b"hello")
         args, _ = self.connector.send_request.call_args
-        self.assertEqual(args[:2], ("GET", "v1/files/notes%2Fhello.txt"))
+        self.assertEqual(args[:2], ("GET", "v1/files/notes/hello.txt"))
 
     async def test_list_unwraps_sandboxd_directory_listing(self):
         response = MagicMock()
@@ -406,6 +508,13 @@ class TestAsyncSandboxdFilesystem(unittest.IsolatedAsyncioTestCase):
 
         self.connector.send_request.assert_not_awaited()
 
+    async def test_delete_rejects_sandbox_root(self):
+        for path in (".", "foo/.."):
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "sandbox root"):
+                await self.fs.delete(path)
+
+        self.connector.send_request.assert_not_awaited()
+
     async def test_mkdir_move_copy_use_sandboxd_endpoints(self):
         await self.fs.mkdir("a/b", parents=True)
         await self.fs.move("a", "b", overwrite=True)
@@ -413,7 +522,7 @@ class TestAsyncSandboxdFilesystem(unittest.IsolatedAsyncioTestCase):
 
         calls = [c.args[:2] for c in self.connector.send_request.call_args_list]
         self.assertEqual(calls, [
-            ("PUT", "v1/files/a%2Fb?type=directory&parents=true"),
+            ("PUT", "v1/files/a/b?type=directory&parents=true"),
             ("POST", "v1/files/a:move?destination=b&overwrite=true"),
             ("POST", "v1/files/a:copy?destination=b"),
         ])
@@ -703,7 +812,7 @@ class TestFilesystemStreamingRead(unittest.TestCase):
         self.assertEqual(written, 8)
         self.assertEqual(destination.getvalue(), b"sandboxd")
         self.connector.send_request.assert_called_once_with(
-            "GET", "v1/files/dir%2Ffile.bin", timeout=60, stream=True
+            "GET", "v1/files/dir/file.bin", timeout=60, stream=True
         )
 
     def test_read_to_invalidates_sandboxd_after_stream_transport_failure(self):
@@ -940,7 +1049,7 @@ class TestAsyncFilesystemStreamingRead(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(written, 8)
         self.assertEqual(destination.content, b"sandboxd")
         self.connector.send_request.assert_awaited_once_with(
-            "GET", "v1/files/dir%2Ffile.bin", timeout=60, stream=True
+            "GET", "v1/files/dir/file.bin", timeout=60, stream=True
         )
 
     async def test_read_to_rejects_non_success_status(self):

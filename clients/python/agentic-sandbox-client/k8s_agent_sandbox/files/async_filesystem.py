@@ -34,6 +34,7 @@ from k8s_agent_sandbox.files.filesystem import (
     _STREAM_CHUNK_SIZE,
     _mkdir_endpoint,
     _sandboxd_files_endpoint,
+    _sandboxd_read_endpoint,
     _sandboxd_op_endpoint,
     _transfer_endpoint,
     _validate_binary_stream,
@@ -137,7 +138,9 @@ class AsyncFilesystem:
         # returns the string unchanged, and the NUL truncates at the
         # runtime's C layer.
         if not allow_unsafe_paths:
-            path = Filesystem._safe_upload_path(path)
+            path = Filesystem._safe_upload_path(
+                path, preserve_absolute=self.connector.is_sandboxd()
+            )
         if self.connector.is_sandboxd():
             if isinstance(content, bytes):
                 await self.connector.send_request(
@@ -200,9 +203,11 @@ class AsyncFilesystem:
             span.set_attribute("sandbox.file.path", path)
 
         if not allow_unsafe_paths:
-            path = Filesystem._safe_upload_path(path)
+            path = Filesystem._safe_upload_path(
+                path, preserve_absolute=self.connector.is_sandboxd()
+            )
         endpoint = (
-            _sandboxd_files_endpoint(path)
+            _sandboxd_read_endpoint(path)
             if self.connector.is_sandboxd()
             else f"download/{urllib.parse.quote(path, safe='')}"
         )
@@ -247,9 +252,11 @@ class AsyncFilesystem:
             span.set_attribute("sandbox.file.path", path)
 
         if not allow_unsafe_paths:
-            path = Filesystem._safe_upload_path(path)
+            path = Filesystem._safe_upload_path(
+                path, preserve_absolute=self.connector.is_sandboxd()
+            )
         endpoint = (
-            _sandboxd_files_endpoint(path)
+            _sandboxd_read_endpoint(path)
             if self.connector.is_sandboxd()
             else f"download/{urllib.parse.quote(path, safe='')}"
         )

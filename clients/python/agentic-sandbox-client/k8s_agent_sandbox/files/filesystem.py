@@ -222,7 +222,9 @@ def _sandboxd_write_request(
 def _check_write_options(
     connector: _RuntimeProbe, append: bool, create_only: bool,
 ) -> None:
-    """Reject write options the legacy runtime has no way to honor."""
+    """Reject write options that are contradictory or unsupported."""
+    if append and create_only:
+        raise ValueError("append and create_only cannot be combined")
     if (append or create_only) and not connector.is_sandboxd():
         raise NotImplementedError(
             "append and create_only are only supported by the sandboxd runtime"
@@ -290,7 +292,8 @@ class Filesystem:
 
         On the sandboxd runtime, ``append=True`` adds to the end of the file
         and ``create_only=True`` fails with a 412 ``SandboxRequestError`` if
-        the path exists. Neither is retried. The legacy runtime raises
+        the path exists. Neither is retried, and they cannot be combined
+        (``ValueError``). The legacy runtime raises
         ``NotImplementedError``.
         """
         _check_write_options(self.connector, append, create_only)

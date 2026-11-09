@@ -125,7 +125,8 @@ class AsyncFilesystem:
 
         On the sandboxd runtime, ``append=True`` adds to the end of the file
         and ``create_only=True`` fails with a 412 ``SandboxRequestError`` if
-        the path exists. Neither is retried. The legacy runtime raises
+        the path exists. Neither is retried, and they cannot be combined
+        (``ValueError``). The legacy runtime raises
         ``NotImplementedError``.
         """
         _check_write_options(self.connector, append, create_only)

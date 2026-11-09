@@ -429,6 +429,11 @@ class TestAsyncSandboxdFilesystem(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["headers"]["If-None-Match"], "*")
         self.assertTrue(kwargs["_disable_retries"])
 
+    async def test_write_rejects_append_with_create_only(self):
+        with self.assertRaises(ValueError):
+            await self.fs.write("a", b"x", append=True, create_only=True)
+        self.connector.send_request.assert_not_awaited()
+
     async def test_write_options_rejected_on_legacy_runtime(self):
         self.connector.is_sandboxd.return_value = False
         with self.assertRaises(NotImplementedError):

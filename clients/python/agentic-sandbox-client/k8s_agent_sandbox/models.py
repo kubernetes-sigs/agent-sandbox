@@ -20,6 +20,8 @@ from enum import StrEnum
 from typing import Any, Literal, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .exceptions import BatchError
+
 _ENV_VAR_NAME_RE = re.compile(r"^[-._a-zA-Z][-._a-zA-Z0-9]*$")
 _RESERVED_HEADER_PREFIX = "x-sandbox-"
 _DEPRECATED_IN_CLUSTER_MODES = {
@@ -314,9 +316,9 @@ class GroupOutcome:
     On success, ``members`` holds exactly ``min_ready`` Ready members and ``error`` is ``None``.
     On failure, ``error`` is a ``QuorumUnreachableError`` or ``BatchTimeoutError`` and ``members`` is empty.
 
-    This is a dataclass rather than a Pydantic model because ``error`` holds a raw Python
-    ``Exception`` object (preserving traceback and causes) rather than serializable data.
+    This is a dataclass rather than a Pydantic model because ``error`` holds a ``BatchError``
+    instance (preserving traceback and causes) rather than serializable data.
     """
     warmpool: str
     members: list[Member] = field(default_factory=list)
-    error: Exception | None = None
+    error: BatchError | None = None

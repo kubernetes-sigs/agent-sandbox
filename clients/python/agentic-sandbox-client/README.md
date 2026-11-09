@@ -780,8 +780,8 @@ count as unable to become Ready, so releasing members before a group or the quor
 it unreachable. Read a failed member's `reason` before releasing it. The three methods delete nothing once
 `err()` is set and raise `BatchError`, since the handle may no longer hold the batch's Lease.
 
-`acquire(warmpool, timeout=None)` adds a member from any warm pool in the batch's namespace and blocks until
-it is Ready, for example to replace a member released with `release_member()`. Its claim takes the next unused
+`acquire(warmpool, timeout=None, *, pod_annotations=None)` adds a member from any warm pool in the batch's namespace and blocks until
+it is Ready, for example to replace a member released with `release_member()`. `acquire()` writes non-empty `pod_annotations` to `spec.additionalPodMetadata.annotations` so the controller propagates them onto the sandbox pod. Its claim takes the next unused
 ordinal, so ordinals are never reused, even across `detach()` and `get_batch()`. It isn't one of the initial
 claims, so `events()`, the quorum consumers and `release_not_ready()` leave it alone, but `release_group()` on
 its pool releases it, and its `shutdownTime` counts from its own create. Its create follows the initial
@@ -790,9 +790,11 @@ count from the pool's check and `create_rps` pacing would delay the next create,
 once a second per pool (unless an expired `timeout` cuts a read short before recording it). When the watch observes a claim from a pool start cold before becoming Ready, the batch zeroes that
 pool's credit and defers its next refresh. Its create and pool reads also share `max_in_flight` with
 the initial claims and member deletes. `acquire()` raises `TerminalMemberError` if the create fails or the
-member fails or is deleted before it is Ready, and `BatchTimeoutError` if it isn't Ready within `timeout`,
-which defaults to `quorum_timeout`. Both are `BatchError`, so `except BatchError` catches every runtime
-failure. If it raises, including on a cancellation, `acquire()` drops the member from `members()` and deletes
+member fails or is deleted before it is Ready, and `BatchTimeoutError` if checking an unchecked warm pool
+or getting the member Ready doesn't finish within `timeout`, which defaults to `quorum_timeout`. Both
+subclass `BatchError`, which `acquire()` also raises directly when the handle stops; checking a pool not yet in the batch
+can also raise `SandboxWarmPoolNotFoundError` or `SandboxTemplateNotFoundError` (both `SandboxError`) or a
+Kubernetes API or network error. If it raises, including on a cancellation, `acquire()` drops the member from `members()` and deletes
 its claim unless the claim is already gone, its create was rejected, or `err()` is set. `release_not_ready()`
 and `release()` retry a failed delete, and calling `acquire()` again tries a new claim.
 
@@ -828,11 +830,23 @@ supports all of the above.
 - `err()`: the error that stopped the background watch/renewal, or `None`. Once it is set, no more claims
   are created.
 - `lease_degraded()`: whether Lease renewal is failing, from the first failed renewal until one succeeds.
-- `acquire(warmpool, timeout=None)`, described above.
+- `acquire(warmpool, timeout=None, *, pod_annotations=None)`, described above.
 - `release_member(member)`, `release_group(warmpool)`, and `release_not_ready()`, described above.
 - `release()` deletes the batch's claims, then its Lease. Idempotent. It raises `BatchInUseError` and deletes
   nothing more if another handle holds the batch's Lease.
 - `detach(grace=None)`: stops the background tasks and releases the Lease so another `get_batch` can take over; idempotent.
+
+#### Error handling
+
+Every batch-specific exception (`BatchTimeoutError`, `QuorumUnreachableError`, `TerminalMemberError`,
+`BatchExistsError`, `BatchNotFoundError`, `BatchInUseError`, and `BatchLeaseExpiredError`) subclasses
+`BatchError`, which subclasses `SandboxError`. Most callers catch `except BatchError` for batch
+lifecycle, quorum, timeout, and member failures, catching a specific subclass only when branching on
+that recovery path (such as `BatchTimeoutError` or `QuorumUnreachableError`). Catch `except SandboxError`
+to also cover `SandboxWarmPoolNotFoundError` and `SandboxTemplateNotFoundError` when `claim_batch()` or
+`acquire()` checks a pool, and `SandboxNotReadyError` on `connect()`. Bad arguments raise `ValueError`,
+and direct Kubernetes API or network failures during setup, teardown, or checking an unchecked pool
+propagate `ApiException` or transport errors unchanged, matching single-sandbox `SandboxClient` methods.
 
 #### RBAC
 

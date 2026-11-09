@@ -57,7 +57,8 @@ from .exceptions import (
     SandboxWarmPoolNotFoundError,
     TerminalMemberError,
 )
-from .models import BatchEvent, BatchGroup, GroupOutcome, Member, MemberState
+from .models import AdditionalPodMetadata, BatchEvent, BatchGroup, GroupOutcome, Member, MemberState
+from .pod_metadata import build_pod_metadata
 from .utils import construct_sandbox_claim_lifecycle_spec, select_pod_ip
 
 if TYPE_CHECKING:
@@ -756,7 +757,13 @@ class AsyncSandboxBatch:
         for warmpool in self._state.take_exhausted_pools():
             self._warm_credit.exhaust(warmpool)
 
-    async def acquire(self, warmpool: str, timeout: float | None = None) -> Member:
+    async def acquire(
+        self,
+        warmpool: str,
+        timeout: float | None = None,
+        *,
+        pod_annotations: dict[str, str] | None = None,
+    ) -> Member:
         """Adds a member from ``warmpool`` to the batch, waits until it is Ready, and returns it.
 
         The pool can be any warm pool in the batch's namespace. A pool that isn't one of the batch's
@@ -782,30 +789,41 @@ class AsyncSandboxBatch:
         creates a second claim, so call it again to try again. A member it returned that fails later
         shows in ``members()`` like any other, and ``release_member`` frees it.
 
-        ``TerminalMemberError`` and ``BatchTimeoutError`` are both ``BatchError``, so
-        ``except BatchError`` handles every runtime failure. The other errors mean a bad argument
-        or a missing pool or template.
+        ``TerminalMemberError`` and ``BatchTimeoutError`` both subclass ``BatchError``, and
+        ``except SandboxError`` also covers a missing pool or template. Bad arguments raise
+        ``ValueError``, and checking an unchecked pool propagates Kubernetes API or network errors.
 
         Args:
             warmpool: The warm pool to claim the member from.
             timeout: Seconds to wait for the member to be Ready. Defaults to the batch's
                 ``quorum_timeout``.
+            pod_annotations: Optional annotations that ``acquire()`` writes to
+                ``spec.additionalPodMetadata.annotations`` so the controller propagates them onto
+                the sandbox pod. ``acquire()`` omits ``spec.additionalPodMetadata`` when
+                ``pod_annotations`` is ``None`` or empty.
 
         Raises:
-            ValueError: If ``timeout`` isn't a positive finite number.
+            ValueError: If ``timeout`` isn't a positive finite number, or ``pod_annotations`` is
+                invalid.
             SandboxWarmPoolNotFoundError: If the warm pool doesn't exist.
             SandboxTemplateNotFoundError: If the warm pool's template doesn't exist, or it names none.
             TerminalMemberError: If the create fails (the member is ``FAILED`` with reason
                 ``CreateFailed``), the member fails terminally, or someone else deletes its claim
                 (the member is ``LOST``) before it is Ready.
-            BatchTimeoutError: If the member isn't Ready within ``timeout``. ``acquire()`` skips
+            BatchTimeoutError: If checking an unchecked warm pool, creating the claim, or waiting
+                for the member to be Ready doesn't finish within ``timeout``. ``acquire()`` skips
                 sending any create or create retry that ``create_rps`` pacing or ``max_in_flight``
                 cannot start before the deadline.
             BatchError: If this handle has been detached or released, or ``err()`` is set, when
                 called or while waiting, or if ``release_member`` or ``release_group`` releases the
                 member before it is Ready.
+            ApiException: If checking an unchecked warm pool fails with an API error such as a
+                403.
+            aiohttp.ClientError, TimeoutError: If checking an unchecked warm pool fails before
+                ``timeout``, such as on a connection error or request timeout.
         """
         wait = batch_utils.positive_number("timeout", timeout, self._quorum_timeout)
+        pod_metadata = build_pod_metadata(None, pod_annotations)
         deadline = time.monotonic() + wait
         async with self._lock:
             self._check_healthy()
@@ -883,6 +901,7 @@ class AsyncSandboxBatch:
                         deadline,
                         can_send=can_send,
                         on_send=on_send,
+                        pod_metadata=pod_metadata,
                     )
                 except BatchError:
                     raise
@@ -936,21 +955,24 @@ class AsyncSandboxBatch:
     async def _check_pool(self, warmpool: str, deadline: float, wait: float, acquire_seq: int) -> None:
         """Checks a pool that isn't one of the batch's groups the first time ``acquire()`` uses it,
         and records its Ready count as credit. Concurrent first acquires of a pool share one check
-        and its outcome. A failed check leaves no cached entry, so a later acquire checks the pool
-        again.
+        and its outcome, except when a caller-local ``BatchError`` stops the leader and cancels the
+        shared check so a waiting acquire can take over or surface its own batch state. A failed
+        check leaves no cached entry, so a later acquire checks the pool again.
 
         Raises:
-            BatchTimeoutError: If another acquire's check of the pool doesn't finish by ``deadline``,
-                or no ``max_in_flight`` slot frees up before it.
+            BatchTimeoutError: If checking the pool or waiting for a ``max_in_flight`` slot doesn't
+                finish by ``deadline``.
         """
         while True:
             async with self._lock:
-                self._check_healthy()
+                now = time.monotonic()
+                self._check_healthy(now)
                 self._check_acquire_pool_active(warmpool, acquire_seq)
                 if warmpool in self._checked_pools:
                     return
-                if time.monotonic() >= deadline:
+                if now >= deadline:
                     raise BatchTimeoutError(f"warm pool '{warmpool}' wasn't checked within {wait:g}s")
+                wait_timeout = min(deadline, self._lease_expires_at) - now
                 check = self._prechecks.get(warmpool)
                 if check is None:
                     check = self._prechecks[warmpool] = asyncio.get_running_loop().create_future()
@@ -958,40 +980,64 @@ class AsyncSandboxBatch:
                     check.add_done_callback(lambda done: done.cancelled() or done.exception())
                     break
             try:
-                await asyncio.wait_for(asyncio.shield(check), max(0.0, deadline - time.monotonic()))
+                await asyncio.wait_for(asyncio.shield(check), wait_timeout)
             except TimeoutError:
-                if not check.done() or check.cancelled():
-                    raise BatchTimeoutError(f"warm pool '{warmpool}' wasn't checked within {wait:g}s") from None
-                # The check itself timed out, so this acquire raises the check's error.
-                check.result()
+                if check.done() and not check.cancelled() and check.exception() is not None:
+                    check.result()
+                continue
             except asyncio.CancelledError:
                 task = asyncio.current_task()
                 if check.cancelled() and task is not None and not task.cancelling():
-                    # The acquire that ran the check was interrupted, so this one checks the pool itself.
+                    # The leader stopped before publishing an outcome, so this acquire checks next.
                     continue
                 raise
             return
+
+        async def next_timeout() -> float:
+            async with self._lock:
+                now = time.monotonic()
+                self._check_healthy(now)
+                self._check_acquire_pool_active(warmpool, acquire_seq)
+                if now >= deadline:
+                    raise BatchTimeoutError(
+                        f"warm pool '{warmpool}' wasn't checked within {wait:g}s"
+                    )
+                return min(
+                    float(batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS),
+                    deadline - now,
+                    self._lease_expires_at - now,
+                )
+
         acquired = False
         try:
-            remaining = deadline - time.monotonic()
-            if remaining > 0:
-                with contextlib.suppress(TimeoutError):
-                    async with asyncio.timeout(remaining):
-                        await self._in_flight.acquire()
-                        acquired = True
+            # Both the slot wait and each pool-check GET honor deadline and Lease expiry;
+            # a caller-local BatchError cancels check so a waiting acquire can take over.
             try:
-                async with self._lock:
-                    now = time.monotonic()
-                    self._check_healthy(now)
-                    self._check_acquire_pool_active(warmpool, acquire_seq)
-                    request_timeout = min(
-                        batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS, self._lease_expires_at - now
+                while not acquired:
+                    step_timeout = await next_timeout()
+                    with contextlib.suppress(TimeoutError):
+                        async with asyncio.timeout(step_timeout):
+                            await self._in_flight.acquire()
+                            acquired = True
+                try:
+                    ready = await _precheck_pools(
+                        self._client.k8s_helper,
+                        [warmpool],
+                        self.namespace,
+                        request_timeout=next_timeout,
                     )
-                if not acquired:
-                    raise BatchTimeoutError(f"warm pool '{warmpool}' wasn't checked within {wait:g}s")
-                ready = await _precheck_pools(
-                    self._client.k8s_helper, [warmpool], self.namespace, timeout=request_timeout
-                )
+                except Exception as e:
+                    async with self._lock:
+                        now = time.monotonic()
+                        self._check_healthy(now)
+                        self._check_acquire_pool_active(warmpool, acquire_seq)
+                    if not isinstance(e, BatchError) and now >= deadline and (
+                        isinstance(e, TimeoutError) or _is_transport_error(e)
+                    ):
+                        raise BatchTimeoutError(
+                            f"warm pool '{warmpool}' wasn't checked within {wait:g}s"
+                        ) from e
+                    raise
                 async with self._lock:
                     self._warm_credit.record(warmpool, ready[warmpool])
                     self._checked_pools.add(warmpool)
@@ -1002,7 +1048,12 @@ class AsyncSandboxBatch:
         except BaseException as e:
             self._prechecks.pop(warmpool, None)
             same_release = self._state.pool_release_seq(warmpool) == acquire_seq
-            if acquired and isinstance(e, Exception) and same_release:
+            if (
+                acquired
+                and isinstance(e, Exception)
+                and not isinstance(e, BatchError)
+                and same_release
+            ):
                 check.set_exception(e)
             else:
                 # Let a waiting acquire with a later deadline or after release_group() take over.
@@ -1850,6 +1901,7 @@ class AsyncSandboxBatch:
         deadline: float | None,
         can_send: Callable[[], bool] | None = None,
         on_send: Callable[[], None] | None = None,
+        pod_metadata: AdditionalPodMetadata | None = None,
     ) -> None:
         """Sends one claim create while holding one of the ``max_in_flight`` slots, releasing the
         slot before any retry backoff sleep, unless creation stopped or ``can_send`` skipped the
@@ -1897,6 +1949,7 @@ class AsyncSandboxBatch:
                 annotations=annotations,
                 labels=labels,
                 lifecycle=lifecycle,
+                pod_metadata=pod_metadata,
                 owner_references=self._owner_references,
                 batch=True,
                 log_level=logging.DEBUG,
@@ -1915,6 +1968,7 @@ class AsyncSandboxBatch:
         deadline: float | None = None,
         can_send: Callable[[], bool] | None = None,
         on_send: Callable[[], None] | None = None,
+        pod_metadata: AdditionalPodMetadata | None = None,
     ) -> None:
         """Creates one claim, retrying transient errors, with each retry taking a pacing slot.
 
@@ -1931,7 +1985,15 @@ class AsyncSandboxBatch:
         while True:
             try:
                 await self._send_create(
-                    claim_name, warmpool, annotations, labels, lifecycle, deadline, can_send, on_send
+                    claim_name,
+                    warmpool,
+                    annotations,
+                    labels,
+                    lifecycle,
+                    deadline,
+                    can_send=can_send,
+                    on_send=on_send,
+                    pod_metadata=pod_metadata,
                 )
                 return
             except asyncio.CancelledError:
@@ -1985,6 +2047,8 @@ async def _precheck_pools(
     warmpools: Iterable[str],
     namespace: str,
     timeout: int | float = batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
+    *,
+    request_timeout: Callable[[], Awaitable[float]] | None = None,
 ) -> dict[str, int]:
     """Checks that each warm pool and the SandboxTemplate it references exist, and returns each
     pool's Ready replica count.
@@ -1996,7 +2060,10 @@ async def _precheck_pools(
     checked_templates: set[str] = set()
     ready: dict[str, int] = {}
     for name in warmpools:
-        warmpool = await helper.get_sandbox_warmpool(name, namespace, _request_timeout=timeout)
+        step_timeout = timeout if request_timeout is None else await request_timeout()
+        warmpool = await helper.get_sandbox_warmpool(
+            name, namespace, _request_timeout=step_timeout
+        )
         if warmpool is None:
             raise SandboxWarmPoolNotFoundError(
                 f"SandboxWarmPool '{name}' not found in namespace '{namespace}'"
@@ -2009,7 +2076,10 @@ async def _precheck_pools(
             )
         if template in checked_templates:
             continue
-        if await helper.get_sandbox_template(template, namespace, _request_timeout=timeout) is None:
+        step_timeout = timeout if request_timeout is None else await request_timeout()
+        if await helper.get_sandbox_template(
+            template, namespace, _request_timeout=step_timeout
+        ) is None:
             raise SandboxTemplateNotFoundError(
                 f"SandboxTemplate '{template}' not found in namespace '{namespace}'"
             )

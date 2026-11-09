@@ -382,7 +382,7 @@ The v2 key file contains unpadded base64url public keys:
 {"keys":[{"kid":"2026-08","publicKey":"<base64url-ed25519-public-key>"}]}
 ```
 
-A v2 token authorizes the bound Sandbox UID, method, port, and path until expiry. Query parameters and request bodies are not signed, and tokens are reusable during that interval. For an endpoint that accepts commands in its query or body, a token holder may change those commands while keeping the signed target unchanged. Enforce command-level policy or one-time execution in the upstream service when required.
+A v2 token authorizes the bound Sandbox UID, method, port, and path until expiry. Header-routed requests forward that path byte-for-byte, escaping included, the same way a path-routed request forwards everything after `<port>`. An encoded separator inside one segment (a filename containing `/`, sent as `%2F`) stays escaped on the hop, and the token binds that escaped form. Mint the token for the path the client sends: a token for `/x/y` does not authorize a request sent as `/x%2Fy`. Query parameters and request bodies are not signed, and tokens are reusable during that interval. For an endpoint that accepts commands in its query or body, a token holder may change those commands while keeping the signed target unchanged. Enforce command-level policy or one-time execution in the upstream service when required.
 
 The router reloads keys on restart. `authz.MintScopedTokenV2` is available to controller-side issuers, but the router never mints tokens itself.
 

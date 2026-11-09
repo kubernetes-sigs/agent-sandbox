@@ -318,18 +318,20 @@ def test_termination_and_deletion(
     sandbox_warmpool,
 ):
     print("\n--- Testing Termination and Get ---")
-    print(f"Terminating sandbox {sandbox.claim_name}...")
+    # terminate() clears claim_name.
+    claim_name = sandbox.claim_name
+    print(f"Terminating sandbox {claim_name}...")
     sandbox.terminate()
 
-    print(f"Attempting to get terminated sandbox {sandbox.claim_name}...")
+    print(f"Attempting to get terminated sandbox {claim_name}...")
     # Wait for K8s to fully delete the resource
     start_time = time.monotonic()
     while True:
         try:
-            sandbox_client.get_sandbox(sandbox.claim_name, namespace=temp_namespace)
+            sandbox_client.get_sandbox(claim_name, namespace=temp_namespace)
             if time.monotonic() - start_time > 60:
                 raise AssertionError(
-                    f"Sandbox {sandbox.claim_name} was not deleted within timeout"
+                    f"Sandbox {claim_name} was not deleted within timeout"
                 )
             print("Sandbox still exists, waiting...")
             time.sleep(2)
@@ -339,7 +341,12 @@ def test_termination_and_deletion(
             break
 
     print("\n--- Verifying Sandbox Status after termination ---")
+    # Garbage collection deletes the Sandbox after its claim, so it can briefly outlive the claim.
+    start_time = time.monotonic()
     status, message = sandbox.status()
+    while status != "SandboxNotFound" and time.monotonic() - start_time < 60:
+        time.sleep(2)
+        status, message = sandbox.status()
     print(f"Status: {status}, Message: '{message}'")
     assert status == "SandboxNotFound", f"Expected 'SandboxNotFound', got '{status}'"
     print("--- Termination and Get Test Passed ---")
@@ -351,6 +358,7 @@ def test_termination_and_deletion(
         sandbox2.claim_name,
     ) in sandbox_client.list_active_sandboxes()
 
+    claim_name2 = sandbox2.claim_name
     print("Calling client.delete_all()...")
     sandbox_client.delete_all()
 
@@ -378,10 +386,10 @@ def test_termination_and_deletion(
     start_time = time.monotonic()
     while True:
         try:
-            sandbox_client.get_sandbox(sandbox2.claim_name, namespace=temp_namespace)
+            sandbox_client.get_sandbox(claim_name2, namespace=temp_namespace)
             if time.monotonic() - start_time > 60:
                 raise AssertionError(
-                    f"Sandbox {sandbox2.claim_name} was not deleted within timeout"
+                    f"Sandbox {claim_name2} was not deleted within timeout"
                 )
             print("Sandbox still exists, waiting...")
             time.sleep(2)

@@ -16,7 +16,7 @@
 
 from copy import deepcopy
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 import asyncio
 import contextlib
 import inspect
@@ -615,7 +615,7 @@ async def test_failed_readiness_preserves_explicit_claim(sdk_client):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('claim_name', [None, 'workflow-a'])
-@pytest.mark.parametrize('failure', ['WarmPoolNotFound', 'watch-429'])
+@pytest.mark.parametrize('failure', ['WarmPoolNotFound', 'apiserver-429'])
 async def test_failed_lookup_never_deletes_claim(sdk_client, claim_name, failure):
     api, client, register = sdk_client
     sandbox = await invoke(client.create_sandbox, 'pool-a', claim_name=claim_name)
@@ -626,13 +626,41 @@ async def test_failed_lookup_never_deletes_claim(sdk_client, claim_name, failure
         ]
         lookup_failure = contextlib.nullcontext()
     else:
-        lookup_failure = patch.object(api, 'list_namespaced_custom_object', side_effect=ApiException(status=429))
+        throttled = MagicMock(side_effect=ApiException(status=429))
+        lookup_failure = patch.multiple(api, list_namespaced_custom_object=throttled, get_namespaced_custom_object=throttled)
     with lookup_failure, pytest.raises(SandboxNotFoundError):
         await invoke(client.get_sandbox, sandbox.claim_name)
     assert api.deletes == []
-    assert not sandbox.is_active
+    assert sandbox.is_active
     register.call_args.args[0]()
     assert api.remaining(C.CLAIM_PLURAL_NAME) == ([] if claim_name is None else [key])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('gone', ['claim', 'sandbox'])
+async def test_failed_lookup_closes_handle_once_claim_or_sandbox_is_gone(sdk_client, gone):
+    api, client, _ = sdk_client
+    sandbox = await invoke(client.create_sandbox, 'pool-a')
+    claim_key = (C.CLAIM_PLURAL_NAME, 'default', sandbox.claim_name)
+    if gone == 'claim':
+        api.objects.pop(claim_key)
+    else:
+        # A Retain-policy expiry deletes the Sandbox but keeps the claim.
+        api.objects.pop((C.SANDBOX_PLURAL_NAME, 'default', sandbox.sandbox_id))
+        api.objects[claim_key]['status'] = {'sandbox': {}, 'conditions': [
+            {'type': 'Ready', 'status': 'False', 'reason': 'ClaimExpired'}]}
+    with pytest.raises(SandboxNotFoundError):
+        await invoke(client.get_sandbox, sandbox.claim_name)
+    assert not sandbox.is_active
+    assert api.deletes == []
+
+
+@pytest.mark.asyncio
+async def test_lookup_of_a_missing_claim_fails_without_watching(sdk_client):
+    api, client, _ = sdk_client
+    with patch.object(api, 'list_namespaced_custom_object') as watch, pytest.raises(SandboxNotFoundError):
+        await invoke(client.get_sandbox, 'does-not-exist', resolve_timeout=1)
+    watch.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -298,34 +298,31 @@ class SandboxClient(Generic[T]):
 
         # Check if the sandbox actually exists in Kubernetes
         try:
-            sandbox_id = self.k8s_helper.resolve_sandbox_name(claim_name, namespace, timeout=resolve_timeout)
+            claim_object = self.k8s_helper.get_sandbox_claim(claim_name, namespace)
+            if not claim_object:
+                raise SandboxNotFoundError(f"SandboxClaim '{claim_name}' not found in namespace '{namespace}'.")
+            sandbox_id = self.k8s_helper.resolve_sandbox_name(claim_name, namespace, timeout=resolve_timeout, initial_claim=claim_object)
             sandbox_object = self.k8s_helper.get_sandbox(sandbox_id, namespace)
             if not sandbox_object:
                 raise SandboxNotFoundError(f"Underlying Sandbox '{sandbox_id}' not found.")
         except Exception as e:
-            if existing:
-                # A failed lookup doesn't mean the claim is gone, and cleanup
-                # only reaches tracked handles, so close locally and stay tracked.
+            # Other callers may hold this handle, so close it only once its claim
+            # or Sandbox is gone. It stays tracked because cleanup only reaches
+            # tracked handles.
+            if existing and self._claim_or_sandbox_gone(claim_name, existing.sandbox_id, namespace):
                 existing.close_connection()
             raise SandboxNotFoundError(f"Sandbox claim '{claim_name}' not found or resolution failed in namespace '{namespace}': {e}") from e
 
-        # Reuse the tracked handle only while it is active and still bound to
-        # the claim's current sandbox. A claim deleted and re-created under the
-        # same name keeps that name, so the handle's sandbox_id is what tells
-        # us the claim now points at a different sandbox.
+        # Reuse the tracked handle only while it is active and still bound to the claim's current Sandbox
         if existing and existing.is_active and existing.sandbox_id == sandbox_id:
             return existing
 
-        # Drop the inactive or stale handle. close_connection() only releases
-        # local resources, so the claim's current sandbox is untouched. A
-        # failed close must not block the replacement: the caller needs a
-        # handle for the current sandbox either way.
+        # Close the inactive or stale handle. A failed close must not block its replacement.
         if existing:
             try:
                 existing.close_connection()
             except Exception as e:
                 logger.error(f"Failed to close stale sandbox connection for '{claim_name}' in namespace '{namespace}': {e}")
-            self._active_connection_sandboxes.pop(key, None)
 
         # Re-attach: Create a fresh handle for the existing ID
         new_handle = self.sandbox_class(
@@ -342,6 +339,16 @@ class SandboxClient(Generic[T]):
         self._active_connection_sandboxes[key] = new_handle
         return new_handle
     
+    def _claim_or_sandbox_gone(self, claim_name: str, sandbox_id: str, namespace: str) -> bool:
+        """Returns True if the claim or the Sandbox is gone, False if both exist or a GET fails."""
+        try:
+            claim = self.k8s_helper.get_sandbox_claim(claim_name, namespace)
+            if not claim:
+                return True
+            return self.k8s_helper.get_sandbox(sandbox_id, namespace) is None
+        except Exception:
+            return False
+
     def list_active_sandboxes(self) -> List[Tuple[str, str]]:
         """Returns a list of tuples containing (namespace, claim_name) currently managed by this client.
         

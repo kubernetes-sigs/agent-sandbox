@@ -187,7 +187,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			r.Body = http.MaxBytesReader(w, r.Body, h.cfg.MaxRequestBodyBytes)
 		}
 	}
-	// Keep RawPath so an encoded "/" (e.g. "%2F") survives to the upstream.
 	upstreamPath, upstreamRawPath := r.URL.Path, r.URL.RawPath
 	var pathRouted bool
 	target, perr := h.resolveTarget(r, grpcRequest, &upstreamPath, &upstreamRawPath, &pathRouted)
@@ -248,14 +247,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	target0 := target // capture for closures
 	upstreamURL, src, resolved := target0.Resolve("http", h.cfg.ClusterDomain, upstreamPath, r.URL.RawQuery, h.cache)
 	if upstreamRawPath != "" {
-		// Only ever set for a path-routed request (see resolveTarget).
-		// Target.Resolve only assigns URL.Path, so without this a path-
-		// routed request carrying an encoded separator in its upstream
-		// portion (e.g. a filename containing "/", sent as "%2F") would
-		// reach the sandbox already decoded, silently renaming the
-		// resource it addresses. net/url only honors RawPath when it is
-		// a valid encoding of Path (see url.URL.EscapedPath's doc) —
-		// resolveTarget/ParsePathRoute guarantee that pairing holds.
+		// Header routing seeds RawPath from r.URL; path routing rewrites
+		// it in resolveTarget. Target.Resolve only assigns URL.Path, so
+		// without this a request carrying an encoded separator (e.g. a
+		// filename containing "/", sent as "%2F") would reach the sandbox
+		// already decoded, silently renaming the resource it addresses.
+		// net/url only honors RawPath when it is a valid encoding of Path
+		// (see url.URL.EscapedPath's doc). That pairing comes from r.URL
+		// for a header-routed request, and resolveTarget/ParsePathRoute
+		// guarantee it for a path-routed one.
 		upstreamURL.RawPath = upstreamRawPath
 	}
 

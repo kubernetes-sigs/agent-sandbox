@@ -961,6 +961,22 @@ class JobBreakageTest(unittest.TestCase):
         self.assertIn("`post-agent-sandbox-push-images` (job): 2 of 7 completed "
                       "runs failed", report)
 
+    def test_fixed_job_breakage_is_recovered_not_flaky(self):
+        # Four failures in a row that have since cleared are the history of
+        # a breakage, not a flake, so no kind/flake issue follows the
+        # kind/failing-test one.
+        statuses = [1, 1, 12, 12, 12, 12, 1, 1]
+        artifacts = {f"b{i}": {"finished.json": {"result": "FAILURE", "timestamp": 1000 + i}}
+                     for i in range(2, 6)}
+        (flaky, consistent, _, _, recovered), _ = self.analyze(
+            self.table(self.POST_QUERY, statuses), artifacts)
+        self.assertEqual((flaky, consistent), ([], []))
+        (finding,) = recovered
+        self.assertEqual((finding["job"], finding["fails"]), ("recovered", 4))
+        report = flake_report.render_report("dash", [], [], [], 8, recovered=recovered)
+        self.assertIn("## Recovered breakage", report)
+        self.assertIn("post-agent-sandbox-push-images", report)
+
     def test_one_intermittent_failure_or_an_aborted_run_is_not_flaky(self):
         (flaky, _, _, _, _), _ = self.analyze(
             self.table(self.POST_QUERY, [1, 12, 1, 1]),
@@ -1165,9 +1181,13 @@ class UpdateIssuesJobBreakageTest(unittest.TestCase):
         self.assertEqual(flake_report.find_manual_job_issue(
             [{"number": 3, "body": "", "title": "post-x is flaky (post-x)"}], "post-x")["number"], 3)
         # A hand-filed per-test flake issue that names the tab as the place
-        # the test flakes is not the job's issue.
+        # the test flakes is not the job's issue, but a hand-written job
+        # title in the [FLAKE] form still is.
         self.assertIsNone(flake_report.find_manual_job_issue(
             [{"number": 4, "body": "", "title": "[FLAKE] TestFoo (post-x)"}], "post-x"))
+        self.assertEqual(flake_report.find_manual_job_issue(
+            [{"number": 6, "body": "", "title": "[FLAKE] Push images job (post-x)"}],
+            "post-x")["number"], 6)
         self.assertEqual(flake_report.find_manual_job_issue(
             [{"number": 5, "body": "", "title": "[FLAKE] post-x: job fails intermittently"}],
             "post-x")["number"], 5)

@@ -17,10 +17,15 @@ whose failure output you have not read.
 - Skip any issue that already has an open fix PR: search
   `gh pr list --repo kubernetes-sigs/agent-sandbox --state open --search "<issue number> in:body"`
   and check the results actually reference `Fixes #<n>` / `Closes #<n>`.
-- Skip infra-failure issues (title contains "infrastructure failures") unless
-  explicitly asked — those are CI tooling work (`dev/ci/`, prow job config in
-  `kubernetes/test-infra`), not test edits. If you do take one, the fix lives in
-  `dev/ci/shared/runner.py` retries, image prepulls, or job resources.
+- Skip infra-failure issues (title contains "infrastructure failures") and
+  job-level issues (title contains "job fails intermittently", or the body
+  carries a `<!-- flake-report:job-flake=` or `<!-- flake-report:job=` marker)
+  unless explicitly asked — those name a Prow job, not a test, so there is
+  nothing to reproduce or edit here. Infra failures are CI tooling work
+  (`dev/ci/`, prow job config in `kubernetes/test-infra`); job-level issues
+  need the job's build log and usually a build or publish fix. If you do take
+  an infra one, the fix lives in `dev/ci/shared/runner.py` retries, image
+  prepulls, or job resources.
 
 ## Reproduce first
 

@@ -412,7 +412,9 @@ def job_health(tab, overall, timestamps, fetcher, job_history):
     failed run of a brand-new job does not file an issue. The finding names
     the first run of the failing streak because its commit is where the
     breakage landed. Returns ("flaky", finding) when the window holds at
-    least two non-aborted failures mixed with passes. Returns None otherwise.
+    least two non-aborted failures mixed with passes, and ("recovered",
+    finding) when those failures form one breakage window that has since
+    cleared, the same rule per-test rows use. Returns None otherwise.
     Failure times come from finished.json, so a run that ends after its
     tracking issue was closed counts as a new failure.
     """
@@ -465,8 +467,12 @@ def job_health(tab, overall, timestamps, fetcher, job_history):
         }
 
     if len(failed) >= 2 and passed:
-        return "flaky", {
-            "job": "flaky",
+        # A fixed breakage leaves a dense run of failures followed by
+        # passes; that is the breakage issue's history, not a flake.
+        kind = "recovered" if is_recovered_breakage(
+            failed, passed, [cell(i) for i in recent]) else "flaky"
+        return kind, {
+            "job": kind,
             "tab": tab,
             "test": f"{tab}.Overall",
             "short": tab,
@@ -750,6 +756,8 @@ def analyze_tab(dashboard, tab, window, pr_files=None):
         health = job_health(tab, overall, timestamps, fetcher, job_history)
         if health and health[0] == "breakage":
             consistent.append(health[1])
+        elif health and health[0] == "recovered":
+            recovered.append(health[1])
         elif health:
             flaky.append(health[1])
     return flaky, consistent, infra, pr_local, recovered
@@ -888,11 +896,13 @@ def find_manual_job_issue(existing_issues, tab):
         title = issue.get("title", "")
         if "<!-- flake-report:" in issue.get("body", ""):
             continue
-        # `[FLAKE] <test> (<tabs>)` is the per-test title form, so an issue
-        # in that form names the tab as the place a test flakes, not as the
-        # thing that flakes.
-        per_test = re.match(r"\[FLAKE\]\s+(\S+)", title)
-        if per_test and per_test.group(1).rstrip(":") != tab:
+        # `[FLAKE] <test> (<tabs>)` is the per-test title form: one
+        # unspaced test name, then the tabs it flakes in. Such an issue names
+        # the tab as a place, not as the thing that flakes. A hand-written
+        # job title like `[FLAKE] Push images job (post-x)` has spaces
+        # before the parenthesis and does not match.
+        per_test = re.match(r"\[FLAKE\]\s+(\S+)\s+\(([^)]*)\)\s*$", title)
+        if per_test and per_test.group(1) != tab and pattern.search(per_test.group(2)):
             continue
         if pattern.search(title):
             return issue

@@ -44,6 +44,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 import urllib.parse
 from datetime import datetime, timezone
 
@@ -73,17 +74,40 @@ ISSUE_MARKER_PREFIX = "<!-- flake-report:test="
 INFRA_MARKER_PREFIX = "<!-- flake-report:infra-tab="
 
 
+class FetchUnavailable(RuntimeError):
+    """The server could not be reached, so nothing is known about the URL.
+
+    Distinct from a plain RuntimeError, which means the server answered and
+    the resource is absent (HTTP 4xx). Callers that classify CI runs must
+    treat an unreachable artifact as unknown, never as missing.
+    """
+
+
+# curl exit codes for failures that happen before any HTTP answer: DNS,
+# connect, timeout, TLS, and dropped connections. Anything else, above all
+# 22 (HTTP error under -f), is an answer and is not retried.
+TRANSIENT_CURL_EXITS = {6, 7, 28, 35, 52, 55, 56}
+FETCH_ATTEMPTS = 3
+FETCH_RETRY_SECONDS = (2, 5)
+
+
 def fetch_text(url):
     # curl rather than urllib: python installs without CA bundles (common on
     # macOS) fail TLS verification, and curl is already a repo-tooling
     # prerequisite alongside gh and jq.
-    result = subprocess.run(
-        ["curl", "-fsSL", "--max-time", "60", url],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"fetch {url} failed: {result.stderr.strip()}")
-    return result.stdout
+    for attempt in range(1, FETCH_ATTEMPTS + 1):
+        result = subprocess.run(
+            ["curl", "-fsSL", "--max-time", "60", url],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            return result.stdout
+        if result.returncode not in TRANSIENT_CURL_EXITS:
+            raise RuntimeError(f"fetch {url} failed: {result.stderr.strip()}")
+        if attempt < FETCH_ATTEMPTS:
+            time.sleep(FETCH_RETRY_SECONDS[min(attempt, len(FETCH_RETRY_SECONDS)) - 1])
+    raise FetchUnavailable(
+        f"fetch {url} unreachable after {FETCH_ATTEMPTS} attempts: {result.stderr.strip()}")
 
 
 def fetch_json(url):
@@ -154,6 +178,8 @@ def make_artifact_fetcher(gcs_query, build_id):
                 try:
                     pointer = fetch_text(
                         f"{GCS_HTTP}/{gcs_query}/{build_id}.txt").strip()
+                except FetchUnavailable:
+                    raise
                 except RuntimeError:
                     return None
                 if pointer.startswith("gs://"):
@@ -163,11 +189,18 @@ def make_artifact_fetcher(gcs_query, build_id):
         return cache["dir"]
 
     def fetch(name):
+        """Returns the parsed artifact, None when the run has no such file.
+
+        Raises FetchUnavailable when the server could not be reached, so a
+        network blip is never mistaken for a missing artifact.
+        """
         base = resolve()
         if not base:
             return None
         try:
             return fetch_json(f"{base}/{name}")
+        except FetchUnavailable:
+            raise
         except (RuntimeError, ValueError):
             return None
 
@@ -207,12 +240,18 @@ def classify_red_run(has_failing_test, has_test_results, fetch_artifact):
                            (rebase needed)
       "infra"           -- pod started, produced no junit, and none of the
                            above explains the red run
+      "unknown"         -- the run's artifacts could not be fetched, so no
+                           verdict is possible; counted nowhere
 
     fetch_artifact(name) returns the parsed JSON artifact from the run's GCS
-    dir, or None when unavailable; only artifacts needed for the verdict are
-    fetched.
+    dir, None when the run has no such file, and raises FetchUnavailable
+    when the server could not be reached; only artifacts needed for the
+    verdict are fetched.
     """
-    finished = fetch_artifact("finished.json") or {}
+    try:
+        finished = fetch_artifact("finished.json") or {}
+    except FetchUnavailable:
+        return "unknown"
     # podutils writes "ABORTED" but crier writes "aborted" when the pod died
     # before podutils could upload — exactly the junit-less runs classified
     # here, so the comparison must be case-insensitive.
@@ -222,7 +261,10 @@ def classify_red_run(has_failing_test, has_test_results, fetch_artifact):
         return "test_failure"
     if has_test_results:
         return "pretest_failure"
-    clone_records = fetch_artifact("clone-records.json")
+    try:
+        clone_records = fetch_artifact("clone-records.json")
+    except FetchUnavailable:
+        return "unknown"
     if clone_records is not None:
         failed = [r for r in clone_records if r.get("failed")]
         if failed:
@@ -416,8 +458,11 @@ def analyze_tab(dashboard, tab, window, pr_files=None):
     # failure, and those errors must not count as flakes. Only meaningful
     # on tabs that report per-test rows; on junit-less tabs (lint, autogen)
     # a red run is indistinguishable from a legitimately failing PR.
+    # A column whose artifacts could not be fetched is unknown: it might be
+    # an aborted run, so it is kept out of every count rather than guessed.
     col_class = {}
     aborted_cols = set()
+    unknown_cols = set()
     if test_rows:
         for i in range(ncols):
             red = overall is not None and cell(overall, i) in FAIL_STATUSES
@@ -426,8 +471,14 @@ def analyze_tab(dashboard, tab, window, pr_files=None):
                 col_class[i] = classify_red_run(has_fail, ran_in(i), fetcher(i))
                 if col_class[i] == "aborted":
                     aborted_cols.add(i)
+                elif col_class[i] == "unknown":
+                    unknown_cols.add(i)
             elif has_fail:
-                finished = fetcher(i)("finished.json") or {}
+                try:
+                    finished = fetcher(i)("finished.json") or {}
+                except FetchUnavailable:
+                    unknown_cols.add(i)
+                    continue
                 if (finished.get("result") or "").upper() == "ABORTED":
                     aborted_cols.add(i)
 
@@ -438,7 +489,10 @@ def analyze_tab(dashboard, tab, window, pr_files=None):
         artifact fetcher already located; None on periodic tabs."""
         if i not in col_pr:
             resolve = getattr(fetcher(i), "resolved_dir", None)
-            col_pr[i] = pr_number_from_dir(resolve()) if resolve else None
+            try:
+                col_pr[i] = pr_number_from_dir(resolve()) if resolve else None
+            except FetchUnavailable:
+                col_pr[i] = None
         return col_pr[i]
 
     # Columns where a large fraction of tests failed at once are a broken PR
@@ -481,7 +535,8 @@ def analyze_tab(dashboard, tab, window, pr_files=None):
         suite = suite_of(name)
 
         def excluded(i):
-            return i in aborted_cols or i in mass_cols or (suite, i) in suite_mass
+            return (i in aborted_cols or i in unknown_cols or i in mass_cols
+                    or (suite, i) in suite_mass)
 
         fail_cols = [i for i in range(ncols)
                      if cell(statuses, i) in FAIL_STATUSES and not excluded(i)]
@@ -615,6 +670,7 @@ def analyze_tab(dashboard, tab, window, pr_files=None):
                 1 for c in col_class.values() if c == "clone_failure"),
             "pretest_failures": sum(
                 1 for c in col_class.values() if c == "pretest_failure"),
+            "unknown_runs": sum(1 for c in col_class.values() if c == "unknown"),
             "total_runs": sum(1 for i in range(ncols) if cell(overall, i) != 0),
             "last_failure_ts": max(
                 (timestamps[i] for i in infra_cols if i < len(timestamps)),
@@ -706,8 +762,14 @@ def render_report(dashboard, flaky, consistent, infra, window, pr_local=(),
                 f"- {i['tab']}: {i['pretest_failures']} red run(s) were "
                 f"pre-test PR breakage (compile/vet/mypy gates — "
                 f"author-actionable)")
+        if i.get("unknown_runs"):
+            lines.append(
+                f"- {i['tab']}: {i['unknown_runs']} red run(s) could not be "
+                f"classified because their artifacts were unreachable; rerun "
+                f"the report before acting on this tab")
         excluded_any = excluded_any or any(
-            i.get(k) for k in ("aborted_runs", "clone_failures", "pretest_failures"))
+            i.get(k) for k in ("aborted_runs", "clone_failures",
+                               "pretest_failures", "unknown_runs"))
     if not excluded_any:
         lines.append("- none")
     return "\n".join(lines) + "\n"
@@ -878,6 +940,13 @@ def update_issues(repo, flaky, infra, dry_run):
 
     for i in infra:
         if not i or not i["infra_runs"]:
+            continue
+        if i.get("unknown_runs"):
+            # Some red runs could not be classified, so the infra count is
+            # a lower bound at best and the issue text would be wrong.
+            actions.append(
+                f"skip ({i['unknown_runs']} red run(s) unclassified, artifacts "
+                f"unreachable): infra {i['tab']}")
             continue
         marker = f"{INFRA_MARKER_PREFIX}{i['tab']} -->"
         issue = find_existing_issue(existing, marker)

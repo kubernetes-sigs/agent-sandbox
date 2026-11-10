@@ -131,7 +131,7 @@ kubectl exec vscode-nitro -- cat /home/coder/.config/code-server/config.yaml
 
 Open http://localhost:8080 in your browser, sign in with the password, and you have VS Code with a terminal, running in the sandbox. If port 8080 is already in use on your machine, pick another local port, for example `kubectl port-forward pod/vscode-nitro 18080:8080`.
 
-The editor is not published outside the cluster: there is no Service of type LoadBalancer, no NodePort and no Ingress, and only your `kubectl` session reaches it.
+The editor is not published outside the cluster: there is no Service of type LoadBalancer, no NodePort and no Ingress. Inside the cluster, code-server listens on `0.0.0.0:8080`, so any other pod in the cluster can reach the editor by the pod's IP address; the password sign-in still applies.
 
 ## Cleanup
 

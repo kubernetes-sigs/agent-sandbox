@@ -14,6 +14,8 @@ spec:
         # The image runs as a non-root user and serves VS Code on port 8080,
         # with a generated password in ~/.config/code-server/config.yaml.
         image: codercom/code-server:4.145.2
+        securityContext:
+          runAsNonRoot: true
         ports:
         - containerPort: 8080
         resources:

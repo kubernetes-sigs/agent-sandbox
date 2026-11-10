@@ -18,8 +18,10 @@ EKS Auto Mode provides everything else. A new Auto Mode cluster comes with the `
 
 > **Note:** this command creates billable AWS resources: an EKS cluster, its VPC, and the EC2 instances Auto Mode launches for your pods. See [Cleanup](#cleanup) to remove them.
 
+AWS Nitro Sandbox is supported on Amazon EKS 1.36 or higher. Check the [Amazon EKS documentation](https://docs.aws.amazon.com/eks/latest/userguide/sandboxing.html) for the supported Regions, then replace `<REGION>` and `<EKS VERSION>` below:
+
 ```shell
-eksctl create cluster --name nitro-sandbox-demo --region us-east-1 --version 1.37 --enable-auto-mode
+eksctl create cluster --name nitro-sandbox-demo --region <REGION> --version <EKS VERSION> --enable-auto-mode
 ```
 
 Check that the cluster has the Nitro Sandbox runtime classes:
@@ -60,6 +62,8 @@ spec:
       containers:
       - name: code-server
         image: codercom/code-server:4.145.2
+        securityContext:
+          runAsNonRoot: true
         ports:
         - containerPort: 8080
         resources:
@@ -140,7 +144,7 @@ kubectl delete -f sandbox-nitro-eks.yaml
 To remove the demo cluster entirely:
 
 ```shell
-eksctl delete cluster --name nitro-sandbox-demo --region us-east-1
+eksctl delete cluster --name nitro-sandbox-demo --region <REGION>
 ```
 
 ## Learn more

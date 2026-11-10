@@ -327,6 +327,11 @@ On the sandboxd runtime, `files.mkdir(path, parents=False)`,
 `files.copy(source, destination, overwrite=False)` create, rename and copy
 paths. The legacy runtime raises `NotImplementedError`.
 
+`files.write(path, content, append=True)` adds to the end of a file, and
+`create_only=True` fails with a 412 `SandboxRequestError` if the path exists.
+Neither is retried, and an append is not atomic. The legacy runtime raises
+`NotImplementedError`.
+
 ### 6. Async Client
 
 For async applications (FastAPI, aiohttp, async agent orchestrators), use the `AsyncSandboxClient`.

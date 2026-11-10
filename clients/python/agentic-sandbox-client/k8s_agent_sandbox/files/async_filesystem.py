@@ -33,9 +33,11 @@ from k8s_agent_sandbox.files.filesystem import (
     _read_binary_chunk,
     _STREAM_CHUNK_SIZE,
     _mkdir_endpoint,
+    _check_write_options,
     _sandboxd_files_endpoint,
     _sandboxd_read_endpoint,
     _sandboxd_op_endpoint,
+    _sandboxd_write_request,
     _transfer_endpoint,
     _validate_binary_stream,
 )
@@ -112,13 +114,22 @@ class AsyncFilesystem:
         content: bytes | str | BinaryIO,
         timeout: int = 60,
         allow_unsafe_paths: bool = False,
+        append: bool = False,
+        create_only: bool = False,
     ) -> None:
         """Upload content to a sandbox-relative path.
 
         Binary file objects are read in chunks from their current position and
         sent once without retries. The caller must close the file object; its
         position may advance if the upload fails.
+
+        On the sandboxd runtime, ``append=True`` adds to the end of the file
+        and ``create_only=True`` fails with a 412 ``SandboxRequestError`` if
+        the path exists. Neither is retried, and they cannot be combined
+        (``ValueError``). The legacy runtime raises
+        ``NotImplementedError``.
         """
+        _check_write_options(self.connector, append, create_only)
         if isinstance(content, str):
             content = content.encode("utf-8")
         elif isinstance(content, (bytearray, memoryview)):
@@ -142,23 +153,21 @@ class AsyncFilesystem:
                 path, preserve_absolute=self.connector.is_sandboxd()
             )
         if self.connector.is_sandboxd():
+            endpoint, headers, retry_safe = _sandboxd_write_request(
+                path, append, create_only)
             if isinstance(content, bytes):
-                await self.connector.send_request(
-                    "PUT",
-                    _sandboxd_files_endpoint(path),
-                    content=content,
-                    headers={"Content-Type": "application/octet-stream"},
-                    timeout=timeout,
-                )
+                body: bytes | AsyncIterator[bytes] = content
             else:
-                await self.connector.send_request(
-                    "PUT",
-                    _sandboxd_files_endpoint(path),
-                    content=_iter_binary_chunks(content),
-                    headers={"Content-Type": "application/octet-stream"},
-                    timeout=timeout,
-                    _disable_retries=True,
-                )
+                body = _iter_binary_chunks(content)
+                retry_safe = False
+            await self.connector.send_request(
+                "PUT",
+                endpoint,
+                content=body,
+                headers=headers,
+                timeout=timeout,
+                _disable_retries=not retry_safe,
+            )
         elif isinstance(content, bytes):
             files_payload = {"file": (path, content)}
             await self.connector.send_request(

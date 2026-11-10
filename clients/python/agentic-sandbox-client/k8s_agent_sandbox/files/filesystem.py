@@ -202,6 +202,35 @@ def _sandboxd_op_endpoint(
     return endpoint
 
 
+def _sandboxd_write_request(
+    path: str, append: bool, create_only: bool,
+) -> tuple[str, dict[str, str], bool]:
+    """Return the endpoint, headers and retry-safety of a sandboxd PUT.
+
+    Append and create-only writes are not idempotent, so a retry could
+    duplicate content or fail with 412 after the first attempt succeeded.
+    """
+    endpoint = _sandboxd_files_endpoint(path)
+    if append:
+        endpoint += "?append=true"
+    headers = {"Content-Type": "application/octet-stream"}
+    if create_only:
+        headers["If-None-Match"] = "*"
+    return endpoint, headers, not (append or create_only)
+
+
+def _check_write_options(
+    connector: _RuntimeProbe, append: bool, create_only: bool,
+) -> None:
+    """Reject write options that are contradictory or unsupported."""
+    if append and create_only:
+        raise ValueError("append and create_only cannot be combined")
+    if (append or create_only) and not connector.is_sandboxd():
+        raise NotImplementedError(
+            "append and create_only are only supported by the sandboxd runtime"
+        )
+
+
 def _mkdir_endpoint(connector: _RuntimeProbe, path: str, parents: bool) -> str:
     """Return the endpoint for a sandboxd directory creation."""
     query = {"type": "directory"}
@@ -252,13 +281,22 @@ class Filesystem:
         content: bytes | str | BinaryIO,
         timeout: int = 60,
         allow_unsafe_paths: bool = False,
+        append: bool = False,
+        create_only: bool = False,
     ) -> None:
         """Upload content to a sandbox-relative path.
 
         Binary file objects are read in chunks from their current position and
         sent once without retries. The caller must close the file object; its
         position may advance if the upload fails.
+
+        On the sandboxd runtime, ``append=True`` adds to the end of the file
+        and ``create_only=True`` fails with a 412 ``SandboxRequestError`` if
+        the path exists. Neither is retried, and they cannot be combined
+        (``ValueError``). The legacy runtime raises
+        ``NotImplementedError``.
         """
+        _check_write_options(self.connector, append, create_only)
         if isinstance(content, str):
             content = content.encode("utf-8")
         elif isinstance(content, (bytearray, memoryview)):
@@ -285,21 +323,24 @@ class Filesystem:
             )
 
         if self.connector.is_sandboxd():
-            # sandboxd write is an idempotent PUT of the raw bytes; parent
-            # directories are created server-side (temp-file + rename).
+            # A plain write is an atomic, idempotent PUT. Append is not
+            # atomic, and neither append nor create_only is idempotent, so
+            # they disable retries. Parent directories are created
+            # server-side.
+            endpoint, headers, retry_safe = _sandboxd_write_request(
+                path, append, create_only)
             data: bytes | Iterator[bytes]
             if isinstance(content, bytes):
                 data = content
-                disable_retries = False
             else:
                 data = _iter_binary_chunks(content)
-                disable_retries = True
+                retry_safe = False
             self.connector.send_request(
-                "PUT", _sandboxd_files_endpoint(path),
+                "PUT", endpoint,
                 data=data,
-                headers={"Content-Type": "application/octet-stream"},
+                headers=headers,
                 timeout=timeout,
-                _disable_retries=disable_retries,
+                _disable_retries=not retry_safe,
             )
         elif not isinstance(content, bytes):
             prefix, suffix, content_type = _multipart_framing(path)

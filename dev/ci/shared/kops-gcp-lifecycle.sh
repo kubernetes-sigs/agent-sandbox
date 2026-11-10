@@ -175,8 +175,39 @@ kops_validate_cluster() {
   echo "Waiting for cluster to be ready (timeout: ${wait_time})..."
   if ! kops validate cluster --wait "${wait_time}"; then
     kops_capture_cp_serial_port
+    kops_capture_igm_diagnostics
     exit 1
   fi
+}
+
+# Records why the control-plane VM was late or missing. In the 11-09 and
+# 11-10 validate timeouts the control plane booted more than 20 minutes after
+# `kops update`, and by the time the serial console was captured the managed
+# instance group had already replaced the instance. The IGM's own error list
+# and the project's failed GCE operations are the only record of the attempts
+# that never booted.
+kops_capture_igm_diagnostics() {
+  local out_dir="${ARTIFACTS:-.}"
+  mkdir -p "${out_dir}"
+  local igm="a-control-plane-${ZONE}-${CLUSTER_NAME}"
+  local out_file="${out_dir}/control-plane-igm-diagnostics.log"
+  echo "Saving managed instance group diagnostics to ${out_file}..."
+  {
+    echo "== managed instances of ${igm} =="
+    gcloud compute instance-groups managed list-instances "${igm}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" \
+      --format="table(instance.basename(),instanceStatus,currentAction,lastAttempt.errors.errors[].code,version.instanceTemplate.basename())"
+    echo
+    echo "== errors reported by ${igm} =="
+    gcloud compute instance-groups managed list-errors "${igm}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" \
+      --format="table(timestamp,error.code,error.message,instanceActionDetails.instance.basename())"
+    echo
+    echo "== failed GCE operations in ${PROJECT_ID} (newest first) =="
+    gcloud compute operations list --project="${PROJECT_ID}" \
+      --filter="error:*" --sort-by="~insertTime" --limit=50 \
+      --format="table(insertTime,operationType,targetLink.basename(),error.errors[].code,error.errors[].message)"
+  } > "${out_file}" 2>&1 || true
 }
 
 kops_capture_cp_serial_port() {

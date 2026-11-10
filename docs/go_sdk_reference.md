@@ -15,6 +15,8 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func WithCreateOnly\(\) CallOption](<#WithCreateOnly>)
   - [func WithEnv\(env map\[string\]string\) CallOption](<#WithEnv>)
   - [func WithMaxAttempts\(n int\) CallOption](<#WithMaxAttempts>)
+  - [func WithMaxDepth\(n int\) CallOption](<#WithMaxDepth>)
+  - [func WithRecursive\(\) CallOption](<#WithRecursive>)
   - [func WithTimeout\(d time.Duration\) CallOption](<#WithTimeout>)
   - [func WithWorkingDir\(dir string\) CallOption](<#WithWorkingDir>)
 - [type Client](<#Client>)
@@ -236,6 +238,24 @@ WithMaxAttempts sets the maximum number of attempts for an operation. Values ≤
 ```
 result, err := client.Run(ctx, "cat /etc/hostname", sandbox.WithMaxAttempts(6))
 ```
+
+<a name="WithMaxDepth"></a>
+#### func [WithMaxDepth](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithMaxDepth(n int) CallOption
+```
+
+WithMaxDepth limits how many directory levels a recursive Files.List descends, where 1 lists only the directory's own entries. Values \<= 0 are ignored. It has no effect without WithRecursive.
+
+<a name="WithRecursive"></a>
+#### func [WithRecursive](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithRecursive() CallOption
+```
+
+WithRecursive makes Files.List include nested entries. Entry names are then paths relative to the listed directory. List returns ErrUnsupportedByRuntime on the legacy python\-runtime. Other operations ignore it.
 
 <a name="WithTimeout"></a>
 #### func [WithTimeout](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
@@ -595,6 +615,8 @@ FileEntry represents a file or directory entry in the sandbox. It is runtime\-ne
 
 ```go
 type FileEntry struct {
+    // Name is the entry's base name, or its path relative to the listed
+    // directory after a WithRecursive listing.
     Name    string
     Size    int64
     Type    FileType
@@ -723,7 +745,7 @@ Exists checks if a file or directory exists at the given path in the sandbox.
 func (f *Files) List(ctx context.Context, path string, opts ...CallOption) ([]FileEntry, error)
 ```
 
-List returns the contents of a directory in the sandbox.
+List returns the contents of a directory in the sandbox. WithRecursive includes nested entries, and WithMaxDepth limits how deep it goes. Both need the sandboxd runtime.
 
 <a name="Files.Mkdir"></a>
 #### func \(\*Files\) [Mkdir](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go>)

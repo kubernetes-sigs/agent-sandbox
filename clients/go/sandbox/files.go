@@ -28,6 +28,7 @@ import (
 	pathpkg "path"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -567,9 +568,12 @@ func isNilWriter(writer io.Writer) bool {
 	}
 }
 
-// List returns the contents of a directory in the sandbox.
+// List returns the contents of a directory in the sandbox. WithRecursive
+// includes nested entries, and WithMaxDepth limits how deep it goes. Both
+// need the sandboxd runtime.
 func (f *Files) List(ctx context.Context, path string, opts ...CallOption) ([]FileEntry, error) {
 	defer f.trackOp()()
+	co := resolveCallOpts(opts)
 	ctx, callCancel, maxAttempts := applyCallOpts(ctx, opts)
 	defer callCancel()
 	ctx, span := startSpan(withLifecycleSpan(ctx, f.lifecycleCtx()), f.tracer, f.svcName, "list", AttrFilePath.String(path))
@@ -589,6 +593,17 @@ func (f *Files) List(ctx context.Context, path string, opts ...CallOption) ([]Fi
 			return nil, fmt.Errorf("%s: list(%q): %w", f.errPrefix(), path, err)
 		}
 		endpoint = ep
+		if co.recursive {
+			query := url.Values{"recursive": {"true"}}
+			if co.maxDepth > 0 {
+				query.Set("max_depth", strconv.Itoa(co.maxDepth))
+			}
+			endpoint += "?" + query.Encode()
+		}
+	} else if co.recursive {
+		err := fmt.Errorf("%s: list(%q): %w: the legacy python-runtime cannot list recursively", f.errPrefix(), path, ErrUnsupportedByRuntime)
+		recordError(span, err)
+		return nil, err
 	}
 	resp, err := f.connector.SendRequest(ctx, http.MethodGet, endpoint, nil, "", maxAttempts)
 	if err != nil {

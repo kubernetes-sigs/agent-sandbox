@@ -58,3 +58,22 @@ TERMINAL_CLAIM_READY_REASONS = frozenset({
     "PodFailed",             # core SandboxReasonPodFailed, forwarded to the claim
     "PodSucceeded",          # core SandboxReasonPodSucceeded, forwarded to the claim
 })
+
+# Upper bound on the diagnostic text carried by SandboxConnectionError.detail
+# and SandboxdRpcError.detail. Server messages and transport errors are
+# untrusted and unbounded, so they are truncated before being attached to an
+# exception. Kept in sync with the TypeScript SDK's ERROR_DETAIL_MAX_BYTES.
+ERROR_DETAIL_MAX_BYTES = 512
+
+# Fixed classification of a sandboxd connection failure, carried by
+# SandboxConnectionError.kind. Never a free-form string: transport code maps
+# the underlying cause into one of these. Kept in sync with the TypeScript
+# SDK's SandboxConnectionErrorKind.
+SANDBOX_CONNECTION_ERROR_KINDS = frozenset({
+    "handshake",     # the port-forward WebSocket upgrade was rejected
+    "port_forward",  # the apiserver reported an error on the forwarding channel
+    "protocol",      # sandboxd's stream violated the ProcessService contract
+    "socket",        # the local socket or gRPC session dropped mid-call
+    "listener",      # the local port-forward listener could not be bound
+    "unavailable",   # sandboxd did not answer on a connection believed live
+})

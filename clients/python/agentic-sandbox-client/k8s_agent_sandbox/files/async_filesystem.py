@@ -32,6 +32,7 @@ from k8s_agent_sandbox.files.filesystem import (
     _multipart_framing,
     _read_binary_chunk,
     _STREAM_CHUNK_SIZE,
+    _list_endpoint,
     _mkdir_endpoint,
     _check_write_options,
     _sandboxd_files_endpoint,
@@ -309,16 +310,30 @@ class AsyncFilesystem:
         return total
 
     @async_trace_span("list")
-    async def list(self, path: str, timeout: int = 60) -> list[FileEntry]:
-        """List files and directories at a sandbox-relative path."""
+    async def list(
+        self,
+        path: str,
+        timeout: int = 60,
+        recursive: bool = False,
+        max_depth: int | None = None,
+    ) -> list[FileEntry]:
+        """List files and directories at a sandbox-relative path.
+
+        With ``recursive=True`` the listing includes nested entries, and entry
+        names are paths relative to ``path``. ``max_depth`` limits how many
+        levels it descends, where 1 lists only the directory's own entries.
+        ``recursive=True`` needs the sandboxd runtime; the legacy python-runtime
+        raises NotImplementedError.
+        """
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
+        endpoint = _list_endpoint(self.connector, path, recursive, max_depth)
         # sandboxd wraps directory entries in a DirectoryListing envelope;
         # the legacy runtime returns the entry list directly.
         if self.connector.is_sandboxd():
             response = await self.connector.send_request(
-                "GET", _sandboxd_files_endpoint(path), timeout=timeout
+                "GET", endpoint, timeout=timeout
             )
         else:
             encoded_path = urllib.parse.quote(path, safe="")

@@ -204,6 +204,30 @@ class TestSandboxdFilesystem(unittest.TestCase):
         self.assertEqual(entries[0].mode, "0644")
         self.assertEqual(entries[1].type, "directory")
 
+    def test_list_recursive_sends_query(self):
+        resp = MagicMock()
+        resp.json.return_value = {"path": "/notes", "entries": []}
+        self._connector.send_request.return_value = resp
+        for kwargs, endpoint in (
+            ({}, "v1/files/notes"),
+            ({"recursive": True}, "v1/files/notes?recursive=true"),
+            ({"recursive": True, "max_depth": 2},
+             "v1/files/notes?recursive=true&max_depth=2"),
+            # max_depth has no effect without recursive.
+            ({"max_depth": 2}, "v1/files/notes"),
+        ):
+            with self.subTest(kwargs=kwargs):
+                self._fs.list("notes", **kwargs)
+                args, _ = self._last_call()
+                self.assertEqual(args[:2], ("GET", endpoint))
+
+    def test_list_rejects_invalid_max_depth(self):
+        for depth in (0, -1, True, "2"):
+            with self.subTest(depth=depth), self.assertRaisesRegex(
+                    ValueError, "max_depth"):
+                self._fs.list("notes", recursive=True, max_depth=depth)
+        self._connector.send_request.assert_not_called()
+
     def test_exists_true_on_head_ok(self):
         resp = MagicMock()
         resp.status_code = 200
@@ -298,6 +322,14 @@ class TestLegacyFileOpsUnsupported(unittest.TestCase):
         ):
             with self.subTest(), self.assertRaises(NotImplementedError):
                 call()
+        connector.send_request.assert_not_called()
+
+    def test_recursive_list_raises_on_legacy(self):
+        connector = MagicMock()
+        connector.is_sandboxd.return_value = False
+        fs = Filesystem(connector, MagicMock(), trace_service_name="test")
+        with self.assertRaises(NotImplementedError):
+            fs.list("d", recursive=True)
         connector.send_request.assert_not_called()
 
 

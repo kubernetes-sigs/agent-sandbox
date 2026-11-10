@@ -480,6 +480,30 @@ class TestAsyncSandboxdFilesystem(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entries[0].name, "a.txt")
         self.assertEqual(entries[0].mode, "0644")
 
+    async def test_list_recursive_sends_query(self):
+        response = MagicMock()
+        response.json.return_value = {"path": "/notes", "entries": []}
+        self.connector.send_request.return_value = response
+
+        await self.fs.list("notes", recursive=True, max_depth=2)
+
+        args, _ = self.connector.send_request.call_args
+        self.assertEqual(
+            args[:2], ("GET", "v1/files/notes?recursive=true&max_depth=2")
+        )
+
+    async def test_list_rejects_invalid_max_depth(self):
+        with self.assertRaisesRegex(ValueError, "max_depth"):
+            await self.fs.list("notes", recursive=True, max_depth=0)
+        self.connector.send_request.assert_not_called()
+
+    async def test_list_recursive_raises_on_legacy(self):
+        self.connector.is_sandboxd.return_value = False
+
+        with self.assertRaises(NotImplementedError):
+            await self.fs.list("notes", recursive=True)
+        self.connector.send_request.assert_not_called()
+
     async def test_list_rejects_non_list_entries(self):
         response = MagicMock()
         response.json.return_value = {"path": "/notes", "entries": {}}

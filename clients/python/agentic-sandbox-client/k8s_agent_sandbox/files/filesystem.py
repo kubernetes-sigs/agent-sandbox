@@ -231,6 +231,34 @@ def _check_write_options(
         )
 
 
+def _list_endpoint(
+    connector: _RuntimeProbe, path: str, recursive: bool, max_depth: int | None
+) -> str:
+    """Return the sandboxd endpoint for a directory listing.
+
+    Raises NotImplementedError when ``recursive`` is set on the legacy
+    runtime, and ValueError when ``max_depth`` is not a positive integer.
+    """
+    if max_depth is not None and (
+        isinstance(max_depth, bool) or not isinstance(max_depth, int) or max_depth < 1
+    ):
+        raise ValueError(f"list: max_depth must be a positive integer, got {max_depth!r}")
+    if recursive and not connector.is_sandboxd():
+        raise NotImplementedError(
+            "recursive listing is only supported by the sandboxd runtime; the "
+            "legacy python-runtime lists a single directory level"
+        )
+    endpoint = _sandboxd_files_endpoint(path)
+    query = {}
+    if recursive:
+        query["recursive"] = "true"
+        if max_depth is not None:
+            query["max_depth"] = str(max_depth)
+    if query:
+        endpoint += "?" + urllib.parse.urlencode(query)
+    return endpoint
+
+
 def _mkdir_endpoint(connector: _RuntimeProbe, path: str, parents: bool) -> str:
     """Return the endpoint for a sandboxd directory creation."""
     query = {"type": "directory"}
@@ -520,16 +548,30 @@ class Filesystem:
         return total
 
     @trace_span("list")
-    def list(self, path: str, timeout: int = 60) -> List[FileEntry]:
-        """List files and directories at a sandbox-relative path."""
+    def list(
+        self,
+        path: str,
+        timeout: int = 60,
+        recursive: bool = False,
+        max_depth: int | None = None,
+    ) -> List[FileEntry]:
+        """List files and directories at a sandbox-relative path.
+
+        With ``recursive=True`` the listing includes nested entries, and entry
+        names are paths relative to ``path``. ``max_depth`` limits how many
+        levels it descends, where 1 lists only the directory's own entries.
+        ``recursive=True`` needs the sandboxd runtime; the legacy python-runtime
+        raises NotImplementedError.
+        """
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
         encoded_path = urllib.parse.quote(path, safe='')
+        endpoint = _list_endpoint(self.connector, path, recursive, max_depth)
 
         if self.connector.is_sandboxd():
             response = self.connector.send_request(
-                "GET", _sandboxd_files_endpoint(path), timeout=timeout)
+                "GET", endpoint, timeout=timeout)
             try:
                 listing = response.json()
             except ValueError as e:

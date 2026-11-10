@@ -765,6 +765,36 @@ func TestClient_EnableAutoCleanup_Idempotent(t *testing.T) {
 	stop2()
 }
 
+// Stopping the handler must let a later EnableAutoCleanup install a new one,
+// instead of turning every later call into a no-op.
+func TestClient_EnableAutoCleanup_AfterStop(t *testing.T) {
+	c, _ := newTestClient(t)
+	active := func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.stopSignal != nil
+	}
+
+	stop1 := c.EnableAutoCleanup()
+	stop1()
+	if active() {
+		t.Fatal("handler still registered after stop")
+	}
+
+	stop2 := c.EnableAutoCleanup()
+	defer stop2()
+	if !active() {
+		t.Fatal("EnableAutoCleanup after stop did not install a handler")
+	}
+
+	// A second call to the first stop function must not remove the
+	// handler installed after it.
+	stop1()
+	if !active() {
+		t.Fatal("stale stop function removed the current handler")
+	}
+}
+
 // Signal cleanup must delete generated-name claims but only disconnect named
 // claims, including when the tracked handle came from GetSandbox and so has
 // no Options.ClaimName.

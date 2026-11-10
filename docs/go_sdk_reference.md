@@ -309,7 +309,7 @@ DeleteSandbox closes the handle \(if tracked\) and deletes the claim.
 func (c *Client) EnableAutoCleanup() (stop func())
 ```
 
-EnableAutoCleanup deletes tracked sandboxes on SIGINT/SIGTERM. Claims created with WithClaimName are caller\-owned: their handles are disconnected but the claims are kept. Call the returned function to stop the signal handler.
+EnableAutoCleanup deletes tracked sandboxes on SIGINT/SIGTERM. Claims created with WithClaimName are caller\-owned: their handles are disconnected but the claims are kept. Call the returned function to stop the signal handler; EnableAutoCleanup can be called again afterwards.
 
 <a name="Client.GetSandbox"></a>
 #### func \(\*Client\) [GetSandbox](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go>)

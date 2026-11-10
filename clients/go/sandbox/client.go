@@ -306,7 +306,8 @@ func (c *Client) closeTracked(ctx context.Context, keepNamed bool) {
 // EnableAutoCleanup deletes tracked sandboxes on SIGINT/SIGTERM. Claims
 // created with WithClaimName are caller-owned: their handles are
 // disconnected but the claims are kept.
-// Call the returned function to stop the signal handler.
+// Call the returned function to stop the signal handler; EnableAutoCleanup
+// can be called again afterwards.
 func (c *Client) EnableAutoCleanup() (stop func()) {
 	c.mu.Lock()
 	if c.stopSignal != nil {
@@ -334,7 +335,13 @@ func (c *Client) EnableAutoCleanup() (stop func()) {
 		}
 	}()
 
+	var once sync.Once
 	return func() {
-		cancel()
+		once.Do(func() {
+			cancel()
+			c.mu.Lock()
+			c.stopSignal = nil
+			c.mu.Unlock()
+		})
 	}
 }

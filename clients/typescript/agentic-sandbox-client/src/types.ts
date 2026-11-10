@@ -237,12 +237,14 @@ export interface WriteOptions extends RuntimeCallOptions {
   mode?: string;
   /**
    * Add to the end of the file instead of replacing it. Not atomic. Default:
-   * false. A sandboxd that predates this option ignores it and replaces the file.
+   * false. Cannot be combined with `createOnly`. A sandboxd that predates this
+   * option ignores it and replaces the file.
    */
   append?: boolean;
   /**
-   * Fail with `FAILED_PRECONDITION` if `path` already exists. Default: false. A
-   * sandboxd that predates this option ignores it and replaces the file.
+   * Fail with `FAILED_PRECONDITION` if `path` already exists. Default: false.
+   * Cannot be combined with `append`. A sandboxd that predates this option
+   * ignores it and replaces the file.
    */
   createOnly?: boolean;
 }

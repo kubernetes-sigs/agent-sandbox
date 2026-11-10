@@ -69,6 +69,9 @@ function writeRequestParts(opts: WriteRequestOptions): {
   headers: Record<string, string>;
 } {
   validateMode(opts.mode);
+  if (opts.append && opts.createOnly) {
+    throw invalidArgument("append and createOnly cannot be combined");
+  }
   const query: Record<string, string> = {};
   if (opts.mode) query.mode = opts.mode;
   if (opts.append) query.append = "true";

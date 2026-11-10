@@ -97,7 +97,8 @@ export class SandboxFiles {
    *
    * With `opts.append`, sandboxd adds `content` to the end of the file instead
    * of replacing it. This is not atomic. With `opts.createOnly`, the call
-   * fails with `FAILED_PRECONDITION` if `path` already exists.
+   * fails with `FAILED_PRECONDITION` if `path` already exists. The two
+   * options cannot be combined; the call is rejected before any request.
    */
   write(
     path: string,

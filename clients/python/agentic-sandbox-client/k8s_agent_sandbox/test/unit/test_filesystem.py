@@ -377,6 +377,52 @@ class TestSandboxdAbsolutePath(unittest.TestCase):
         connector.send_request.assert_not_called()
 
 
+class TestSandboxdFilesystemResponses(unittest.TestCase):
+    """Sync counterpart of the async list/exists response validation."""
+
+    def setUp(self):
+        self.connector = MagicMock()
+        self.connector.is_sandboxd.return_value = True
+        self.fs = Filesystem(self.connector, MagicMock(), trace_service_name="test")
+
+    def _listing(self, entries):
+        response = MagicMock()
+        response.json.return_value = {"path": "/notes", "entries": entries}
+        self.connector.send_request.return_value = response
+
+    def test_list_rejects_non_list_entries(self):
+        for entries in ({}, "a.txt"):
+            with self.subTest(entries=entries):
+                self._listing(entries)
+                with self.assertRaisesRegex(RuntimeError, "invalid directory listing"):
+                    self.fs.list("notes")
+
+    def test_list_rejects_non_object_entry(self):
+        self._listing(["a.txt"])
+
+        with self.assertRaisesRegex(RuntimeError, "invalid directory listing"):
+            self.fs.list("notes")
+
+    def test_list_treats_null_entries_as_empty(self):
+        self._listing(None)
+
+        self.assertEqual(self.fs.list("notes"), [])
+
+    def test_exists_allows_sandboxd_404(self):
+        self.connector.send_request.return_value = MagicMock(status_code=404)
+
+        self.assertFalse(self.fs.exists("missing.txt"))
+        _, kwargs = self.connector.send_request.call_args
+        self.assertEqual(kwargs["allowed_statuses"], {404})
+
+    def test_exists_rejects_non_success_status(self):
+        for status_code in (302, 304):
+            with self.subTest(status_code=status_code):
+                self.connector.send_request.return_value = MagicMock(status_code=status_code)
+                with self.assertRaises(SandboxRequestError):
+                    self.fs.exists("maybe.txt")
+
+
 class TestAsyncSandboxdFilesystem(unittest.IsolatedAsyncioTestCase):
     """Verify sandboxd endpoints, response validation, and tracing."""
 

@@ -497,8 +497,15 @@ class Filesystem:
             # anything else rather than silently returning an empty list.
             if not isinstance(listing, dict) or "entries" not in listing:
                 raise RuntimeError(f"Server returned invalid directory listing: {listing}")
+            raw_entries = listing["entries"]
+            if raw_entries is None:
+                raw_entries = []
+            elif not isinstance(raw_entries, list):
+                raise RuntimeError(f"Server returned invalid directory listing: {listing}")
             file_entries = []
-            for entry in listing.get("entries") or []:
+            for entry in raw_entries:
+                if not isinstance(entry, dict):
+                    raise RuntimeError(f"Server returned invalid directory listing: {listing}")
                 # Skip entry types the SDK model does not represent (e.g. a
                 # stray "symlink") so one unknown entry does not fail the
                 # whole listing.
@@ -542,7 +549,19 @@ class Filesystem:
             response = self.connector.send_request(
                 "HEAD", _sandboxd_files_endpoint(path),
                 timeout=timeout, allowed_statuses={404})
-            exists = response.status_code != 404
+            # send_request does not follow redirects and only raises for
+            # 4xx/5xx, so a 3xx must not be read as "the path exists".
+            if response.status_code == 404:
+                exists = False
+            elif 200 <= response.status_code < 300:
+                exists = True
+            else:
+                raise SandboxRequestError(
+                    f"Unexpected status checking sandbox path existence: "
+                    f"{response.status_code}",
+                    status_code=response.status_code,
+                    response=response,
+                )
             if span.is_recording():
                 span.set_attribute("sandbox.file.exists", exists)
             return exists

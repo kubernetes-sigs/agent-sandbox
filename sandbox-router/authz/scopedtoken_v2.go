@@ -153,9 +153,10 @@ func mintScopedTokenV2(privateKey ed25519.PrivateKey, keyID string, target Autho
 }
 
 // matches reports whether the request path is the one the token names. A
-// prefix token also covers every path below the prefix. A path segment that
-// decodes to "." or ".." never matches a prefix, because the router forwards
-// the raw path and the sandbox could resolve it outside the prefix.
+// prefix token also covers every path below the prefix. A path that decodes to
+// a "." or ".." segment, including inside an encoded separator, never matches a
+// prefix, because the router forwards the raw path and the sandbox could
+// resolve it outside the prefix.
 func (c *scopedTokenV2Claims) matches(requestPath string) bool {
 	if c.PathPrefix == "" {
 		return c.Path != "" && c.Path == requestPath
@@ -167,9 +168,12 @@ func (c *scopedTokenV2Claims) matches(requestPath string) bool {
 	if requestPath != base && !strings.HasPrefix(requestPath, base+"/") {
 		return false
 	}
-	for _, segment := range strings.Split(requestPath, "/") {
-		decoded, err := url.PathUnescape(segment)
-		if err != nil || decoded == "." || decoded == ".." {
+	decoded, err := url.PathUnescape(requestPath)
+	if err != nil {
+		return false
+	}
+	for _, segment := range strings.Split(decoded, "/") {
+		if segment == "." || segment == ".." {
 			return false
 		}
 	}

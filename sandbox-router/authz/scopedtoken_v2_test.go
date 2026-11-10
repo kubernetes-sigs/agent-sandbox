@@ -345,6 +345,8 @@ func TestScopedTokenV2_PathPrefix(t *testing.T) {
 		{"dot-dot segment", func(t *AuthorizationTarget) { t.Path = "/v1/files/../metadata" }, ErrForbidden},
 		{"encoded dot-dot segment", func(t *AuthorizationTarget) { t.Path = "/v1/files/%2e%2E/metadata" }, ErrForbidden},
 		{"dot segment", func(t *AuthorizationTarget) { t.Path = "/v1/files/./a" }, ErrForbidden},
+		{"dot-dot inside encoded separator", func(t *AuthorizationTarget) { t.Path = "/v1/files/%2E%2E%2Fmetadata" }, ErrForbidden},
+		{"dot inside encoded separator", func(t *AuthorizationTarget) { t.Path = "/v1/files/a%2F.%2Fb" }, ErrForbidden},
 		{"other method", func(t *AuthorizationTarget) { t.Path = "/v1/files/a"; t.Method = "PUT" }, ErrForbidden},
 		{"other port", func(t *AuthorizationTarget) { t.Path = "/v1/files/a"; t.Port++ }, ErrForbidden},
 		{"other Sandbox UID", func(t *AuthorizationTarget) { t.Path = "/v1/files/a"; t.SandboxUID = "replacement-uid" }, ErrForbidden},

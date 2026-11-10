@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"os/exec"
 	"strconv"
@@ -140,6 +141,9 @@ func (s *ProcessServer) buildCommand(_ context.Context, config *processv1.Proces
 
 // Start runs a command and streams stdout/stderr events until it exits.
 func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.ProcessService_StartServer) error {
+	if err := validateTTYSize(req.GetPty().GetCols(), req.GetPty().GetRows()); err != nil {
+		return err
+	}
 	cmd, err := s.buildCommand(stream.Context(), req.GetConfig())
 	if err != nil {
 		return err
@@ -708,11 +712,24 @@ func (s *ProcessServer) ResizeTTY(_ context.Context, req *processv1.ResizeTTYReq
 		return nil, status.Errorf(codes.NotFound, "process %d not found", req.GetProcessId())
 	}
 
+	if err := validateTTYSize(req.GetCols(), req.GetRows()); err != nil {
+		return nil, err
+	}
 	if err := proc.ResizeTTY(uint16(req.GetCols()), uint16(req.GetRows())); err != nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "failed to resize TTY: %v", err)
 	}
 
 	return &processv1.ResizeTTYResponse{}, nil
+}
+
+// validateTTYSize rejects a window size that does not fit the kernel's
+// 16-bit winsize fields, which a plain conversion would silently wrap
+// (65616 columns would become 80).
+func validateTTYSize(cols, rows uint32) error {
+	if cols > math.MaxUint16 || rows > math.MaxUint16 {
+		return status.Errorf(codes.InvalidArgument, "pty size %dx%d out of range: cols and rows must be at most %d", cols, rows, math.MaxUint16)
+	}
+	return nil
 }
 
 func closeAll(files ...*os.File) {

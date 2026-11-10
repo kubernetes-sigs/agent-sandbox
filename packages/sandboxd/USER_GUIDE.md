@@ -117,7 +117,7 @@ explicitly as shown in [Agent Sandbox SDK access](#agent-sandbox-sdk-access).
 | `ExecuteWithLimits` | Unary | Run a command with time and output limits, returning explicit execution outcomes. |
 | `WriteStdin` | Unary | Send `stdin` bytes or `EOF` to a running process. `EOF` on a PTY process fails with `FAILED_PRECONDITION`: the terminal decides what ends input. In canonical mode, write `0x04` (Ctrl-D) at the start of a line (send `\n` first if a partial line is pending). A program in raw mode does not treat `0x04` as EOF; use its own quit input or `SendSignal`. |
 | `SendSignal` | Unary | Deliver `SIGINT`/`SIGTERM`/`SIGKILL` to the process group. |
-| `ResizeTTY` | Unary | Resize the pseudo-terminal window (`cols`, `rows`). |
+| `ResizeTTY` | Unary | Resize the pseudo-terminal window (`cols`, `rows`, each at most 65535; larger values fail with `INVALID_ARGUMENT`, as they do in `Start`'s `pty`). |
 
 Errors surface as standard gRPC status codes (`NOT_FOUND` for unknown
 process IDs, `PERMISSION_DENIED` for a `cwd` escaping the sandbox root,

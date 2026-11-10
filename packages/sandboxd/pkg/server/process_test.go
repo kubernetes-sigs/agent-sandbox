@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -500,6 +501,53 @@ func TestResizeTTYWithPTY(t *testing.T) {
 	pid := recvInit(t, stream)
 
 	_, err = client.ResizeTTY(ctx, &processv1.ResizeTTYRequest{ProcessId: pid, Cols: 120, Rows: 40})
+	require.NoError(t, err)
+
+	_, err = client.SendSignal(ctx, &processv1.SendSignalRequest{
+		ProcessId: pid,
+		Signal:    processv1.Signal_SIGNAL_SIGKILL,
+	})
+	require.NoError(t, err)
+	drainStart(t, stream)
+}
+
+// TestStartWithPTY_RejectsOversizedWindow guards against a size that does not
+// fit the 16-bit winsize being wrapped: 65616 columns used to start the
+// process with an 80-column terminal.
+func TestStartWithPTY_RejectsOversizedWindow(t *testing.T) {
+	client := newProcessClient(t, t.TempDir())
+	ctx := testCtx(t)
+
+	for name, size := range map[string]*processv1.PTY{
+		"cols": {Cols: math.MaxUint16 + 81, Rows: 24},
+		"rows": {Cols: 80, Rows: math.MaxUint16 + 25},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stream, err := client.Start(ctx, &processv1.StartRequest{
+				Config: &processv1.ProcessConfig{Command: []string{"stty", "size"}},
+				Pty:    size,
+			})
+			require.NoError(t, err)
+			_, err = stream.Recv()
+			require.Equal(t, codes.InvalidArgument, status.Code(err), "err: %v", err)
+		})
+	}
+}
+
+func TestResizeTTYRejectsOversizedWindow(t *testing.T) {
+	client := newProcessClient(t, t.TempDir())
+	ctx := testCtx(t)
+
+	stream, err := client.Start(ctx, &processv1.StartRequest{
+		Config: &processv1.ProcessConfig{Command: []string{"cat"}},
+		Pty:    &processv1.PTY{Cols: 80, Rows: 24},
+	})
+	require.NoError(t, err)
+	pid := recvInit(t, stream)
+
+	_, err = client.ResizeTTY(ctx, &processv1.ResizeTTYRequest{ProcessId: pid, Cols: math.MaxUint16 + 121, Rows: 40})
+	require.Equal(t, codes.InvalidArgument, status.Code(err), "err: %v", err)
+	_, err = client.ResizeTTY(ctx, &processv1.ResizeTTYRequest{ProcessId: pid, Cols: math.MaxUint16, Rows: math.MaxUint16})
 	require.NoError(t, err)
 
 	_, err = client.SendSignal(ctx, &processv1.SendSignalRequest{

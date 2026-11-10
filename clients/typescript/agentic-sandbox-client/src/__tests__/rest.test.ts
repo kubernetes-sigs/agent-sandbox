@@ -717,6 +717,23 @@ describe("SandboxdRestClient.write", () => {
     expect(plainReq.headers["if-none-match"]).toBeUndefined();
   });
 
+  it("rejects append combined with createOnly before any request", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await expect(
+      client.write(
+        "a.txt",
+        new Uint8Array(),
+        { append: true, createOnly: true },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(SandboxError);
+    expect(activeServer.requests).toHaveLength(0);
+  });
+
   it("maps 412 to FAILED_PRECONDITION", async () => {
     activeServer = await startServer((_req, res) => {
       res.writeHead(412, { "Content-Type": "application/json" });
@@ -877,16 +894,44 @@ describe("SandboxdRestClient.writeStream", () => {
       res.end();
     });
     const client = makeClient(activeServer.baseUrl);
+    const signal = new AbortController().signal;
     await client.writeStream(
       "a.txt",
       toReadableStream([]),
-      { mode: "0644", append: true, createOnly: true },
-      new AbortController().signal,
+      { mode: "0644", append: true },
+      signal,
+    );
+    await client.writeStream(
+      "b.txt",
+      toReadableStream([]),
+      { mode: "0644", createOnly: true },
+      signal,
     );
     expect(activeServer.requests[0].url).toBe(
       "/v1/files/a.txt?mode=0644&append=true",
     );
-    expect(activeServer.requests[0].headers["if-none-match"]).toBe("*");
+    expect(activeServer.requests[0].headers["if-none-match"]).toBeUndefined();
+    expect(activeServer.requests[1].url).toBe("/v1/files/b.txt?mode=0644");
+    expect(activeServer.requests[1].headers["if-none-match"]).toBe("*");
+  });
+
+  it("rejects append combined with createOnly before touching the source stream", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    const stream = toReadableStream(textChunks("x"));
+    await expect(
+      client.writeStream(
+        "a.txt",
+        stream,
+        { append: true, createOnly: true },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(SandboxError);
+    expect(activeServer.requests).toHaveLength(0);
+    expect(stream.locked).toBe(false);
   });
 
   it("rejects an invalid mode before ever touching the source stream", async () => {

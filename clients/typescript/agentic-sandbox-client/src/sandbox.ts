@@ -62,6 +62,7 @@ import {
   SandboxdRestClient,
   SourceFailure,
   validateMode,
+  validateWriteOptions,
 } from "./rest.js";
 import type { Span, TracerManager } from "./trace-manager.js";
 import { spanErrorStatusCode, withSpan } from "./trace-manager.js";
@@ -1292,7 +1293,7 @@ export class Sandbox {
     opts?: WriteOptions,
   ): Promise<void> {
     resolveSandboxPath(path, "write");
-    validateMode(opts?.mode);
+    validateWriteOptions(opts ?? {});
     const timeoutMs = validateTimeoutMs("timeoutMs", opts?.timeoutMs);
     const bytes =
       typeof content === "string" ? new TextEncoder().encode(content) : content;
@@ -1541,7 +1542,7 @@ export class Sandbox {
     opts?: WriteOptions,
   ): Promise<void> {
     resolveSandboxPath(path, "write");
-    validateMode(opts?.mode);
+    validateWriteOptions(opts ?? {});
     if (content.locked) {
       throw new SandboxError(
         "writeStream content is already locked by another reader",

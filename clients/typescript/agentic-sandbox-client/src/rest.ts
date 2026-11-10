@@ -63,12 +63,26 @@ export interface WriteRequestOptions {
   createOnly?: boolean;
 }
 
+/**
+ * Throws before any request when the write options are invalid: a `mode`
+ * that is not four octal digits, or `append` combined with `createOnly`.
+ * Sandbox calls this before connecting, and the REST layer calls it again
+ * so direct SandboxdRestClient users get the same guarantee.
+ * @internal
+ */
+export function validateWriteOptions(opts: WriteRequestOptions): void {
+  validateMode(opts.mode);
+  if (opts.append && opts.createOnly) {
+    throw invalidArgument("append and createOnly cannot be combined");
+  }
+}
+
 /** Query and headers of a PUT file request for the given write options. */
 function writeRequestParts(opts: WriteRequestOptions): {
   query?: Record<string, string>;
   headers: Record<string, string>;
 } {
-  validateMode(opts.mode);
+  validateWriteOptions(opts);
   const query: Record<string, string> = {};
   if (opts.mode) query.mode = opts.mode;
   if (opts.append) query.append = "true";

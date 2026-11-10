@@ -97,7 +97,8 @@ export class SandboxFiles {
    *
    * With `opts.append`, sandboxd adds `content` to the end of the file instead
    * of replacing it. This is not atomic. With `opts.createOnly`, the call
-   * fails with `FAILED_PRECONDITION` if `path` already exists.
+   * fails with `FAILED_PRECONDITION` if `path` already exists. The two
+   * options cannot be combined; the call is rejected before any request.
    */
   write(
     path: string,
@@ -138,7 +139,8 @@ export class SandboxFiles {
    * have committed the write if the acknowledgement was lost, and retrying
    * may overwrite concurrent updates. With `append`, the write is not atomic:
    * an oversized or interrupted stream can leave a prefix in the target, and a
-   * retry appends it again. `sandboxd.maxUploadSize` is enforced
+   * retry appends it again. `append` and `createOnly` cannot be combined; the
+   * call is rejected before any request. `sandboxd.maxUploadSize` is enforced
    * before forwarding each chunk; the server may receive a prefix within the
    * limit before an oversized upload is aborted. `opts.timeoutMs` covers
    * connection setup until the server acknowledges the write, including time

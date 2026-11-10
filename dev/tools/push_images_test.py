@@ -190,6 +190,7 @@ class ControllerOnlySelectionTest(unittest.TestCase):
             images=["sandbox-router-go"],
             container_engine="docker",
             kind_cluster_name=None,
+            docker_build_output_type="registry",
         )
 
         with (
@@ -208,6 +209,7 @@ class ControllerOnlySelectionTest(unittest.TestCase):
             images=[],
             container_engine="docker",
             kind_cluster_name=None,
+            docker_build_output_type="registry",
         )
         discovered_dockerfiles = [
             (".", ["sandbox-router"], ["Dockerfile"]),
@@ -248,6 +250,7 @@ class ControllerOnlySelectionTest(unittest.TestCase):
             images=["agent-sandbox-controller"],
             container_engine="docker",
             kind_cluster_name=None,
+            docker_build_output_type="registry",
         )
         discovered_dockerfiles = [
             (".", ["sandbox-router"], ["Dockerfile"]),
@@ -292,6 +295,7 @@ class DockerfileOverridesTest(unittest.TestCase):
             images=[],
             container_engine="docker",
             kind_cluster_name=None,
+            docker_build_output_type="registry",
         )
         with (
             mock.patch.object(
@@ -361,6 +365,7 @@ class RepoImageNamesUniqueTest(unittest.TestCase):
             images=[],
             container_engine="docker",
             kind_cluster_name=None,
+            docker_build_output_type="registry",
         )
         old_cwd = os.getcwd()
         os.chdir(repo_root)
@@ -399,16 +404,17 @@ class BuildOrderAndFailureTest(unittest.TestCase):
         (os.path.join(".", "sandbox-router"), [], ["Dockerfile"]),
     ]
 
-    def _args(self):
+    def _args(self, output_type="registry"):
         return argparse.Namespace(
             controller_only=False,
             image_tag="testtag",
             images=[],
             container_engine="docker",
             kind_cluster_name=None,
+            docker_build_output_type=output_type,
         )
 
-    def _run(self, build_side_effect=None, builder_side_effect=None):
+    def _run(self, build_side_effect=None, builder_side_effect=None, output_type="registry"):
         with (
             mock.patch.object(push_images.os, "walk", return_value=self._DISCOVERED),
             mock.patch.object(
@@ -422,7 +428,7 @@ class BuildOrderAndFailureTest(unittest.TestCase):
             mock.patch("builtins.print"),
         ):
             try:
-                push_images.main(self._args())
+                push_images.main(self._args(output_type))
                 exit_message = None
             except SystemExit as e:
                 exit_message = str(e)
@@ -450,12 +456,51 @@ class BuildOrderAndFailureTest(unittest.TestCase):
             if service_name == "aider-sandbox":
                 raise subprocess.CalledProcessError(1, ["docker", "buildx", "build"])
 
-        built, exit_message = self._run(build_side_effect=fail_aider)
+        with mock.patch.object(push_images.sys, "stderr"):
+            built, exit_message = self._run(build_side_effect=fail_aider)
         self.assertIn("langchain", built)
-        self.assertEqual(len(built), 5)
+        # aider-sandbox appears twice: the failed attempt and its retry.
+        self.assertEqual(len(set(built)), 5)
         self.assertIsNotNone(exit_message)
         self.assertIn("1 of 5", exit_message)
         self.assertIn("aider-sandbox", exit_message)
+
+    def test_failed_registry_push_is_retried_once(self):
+        # The first aider-sandbox attempt fails the way an expired Cloud Build
+        # credential does; the retry succeeds and the run is clean.
+        calls = {"aider-sandbox": 0}
+
+        def fail_aider_once(args, service_name, *rest):
+            if service_name == "aider-sandbox":
+                calls[service_name] += 1
+                if calls[service_name] == 1:
+                    raise subprocess.CalledProcessError(1, ["docker", "buildx", "build"])
+
+        with mock.patch.object(push_images.sys, "stderr"):
+            built, exit_message = self._run(build_side_effect=fail_aider_once)
+        self.assertIsNone(exit_message)
+        self.assertEqual(built.count("aider-sandbox"), 2)
+        self.assertEqual(built.count("langchain"), 1)
+
+    def test_image_failing_twice_is_reported(self):
+        def fail_aider(args, service_name, *rest):
+            if service_name == "aider-sandbox":
+                raise subprocess.CalledProcessError(1, ["docker", "buildx", "build"])
+
+        with mock.patch.object(push_images.sys, "stderr"):
+            built, exit_message = self._run(build_side_effect=fail_aider)
+        self.assertEqual(built.count("aider-sandbox"), 2)
+        self.assertIsNotNone(exit_message)
+        self.assertIn("aider-sandbox", exit_message)
+
+    def test_kind_builds_are_not_retried(self):
+        def fail_aider(args, service_name, *rest):
+            if service_name == "aider-sandbox":
+                raise subprocess.CalledProcessError(1, ["docker", "buildx", "build"])
+
+        built, exit_message = self._run(build_side_effect=fail_aider, output_type="docker")
+        self.assertEqual(built.count("aider-sandbox"), 1)
+        self.assertIsNotNone(exit_message)
 
     def test_failed_builder_setup_does_not_stop_later_images(self):
         calls = {"n": 0}

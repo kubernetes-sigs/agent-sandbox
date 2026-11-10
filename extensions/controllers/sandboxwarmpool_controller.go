@@ -533,7 +533,8 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	for _, sb := range activeSandboxes {
 		if !isSandboxReady(&sb) && !sb.CreationTimestamp.IsZero() {
 			age := now.Sub(readinessGraceStart(&sb))
-			if age <= r.readinessGracePeriod() {
+			terminal := isSandboxTerminal(&sb)
+			if !terminal && age <= r.readinessGracePeriod() {
 				// Not Ready but still within the grace period. In a quiet
 				// cluster nothing else touches the Sandbox objects of a pool
 				// that settles at Ready=False (pod FailedScheduling events do
@@ -555,7 +556,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			// loop (#1215). Hold the sandbox and retry on a rate-limited
 			// requeue instead; the scheduler will place it when capacity
 			// frees up.
-			if isSandboxPodUnschedulable(&sb) {
+			if !terminal && isSandboxPodUnschedulable(&sb) {
 				unschedulableReplicas++
 				healthySandboxes = append(healthySandboxes, sb)
 				continue
@@ -563,7 +564,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			// Likewise a gated Pod waits for the controller that owns its
 			// scheduling gates (e.g. Kueue admission) to remove them; a
 			// replacement would be gated again at the back of its queue.
-			if isSandboxPodSchedulingGated(&sb) {
+			if !terminal && isSandboxPodSchedulingGated(&sb) {
 				gatedReplicas++
 				healthySandboxes = append(healthySandboxes, sb)
 				continue
@@ -957,6 +958,28 @@ func podNotScheduledReason(sb *sandboxv1beta1.Sandbox) string {
 		return ""
 	}
 	return cond.Reason
+}
+
+// isSandboxTerminal reports whether a pool member has reached a terminal state
+// and cannot become Ready. Terminal members bypass the readiness grace period
+// and are replaced immediately.
+//
+// SandboxReasonInvalidConfiguration is deliberately excluded: every replacement
+// stamped from the same pool name and SandboxTemplate would hit the same
+// apiserver validation error and hot-loop on delete/create.
+func isSandboxTerminal(sb *sandboxv1beta1.Sandbox) bool {
+	if meta.IsStatusConditionTrue(sb.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished)) {
+		return true
+	}
+	if ready := meta.FindStatusCondition(sb.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady)); ready != nil && ready.Status == metav1.ConditionFalse {
+		switch ready.Reason {
+		case sandboxv1beta1.SandboxReasonPodFailed,
+			sandboxv1beta1.SandboxReasonPodSucceeded,
+			sandboxv1beta1.SandboxReasonExpired:
+			return true
+		}
+	}
+	return false
 }
 
 // resolveUpdateStrategy returns the effective update strategy for the warm pool,

@@ -3529,3 +3529,148 @@ func TestReconcileFlushesStatusOnReconcilePoolError(t *testing.T) {
 		require.Zero(t, statusPatches.Load(), "updateStatus must be a no-op when reconcilePool fails before mutating status")
 	})
 }
+
+func TestReconcilePool_DeletesTerminalSandboxWithinGracePeriod(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	templateName := "test-template"
+	replicas := int32(2)
+
+	template := createTemplate(poolNamespace)
+	scheme := newTestScheme()
+	poolNameHash := sandboxcontrollers.NameHash(poolName)
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      poolName,
+			Namespace: poolNamespace,
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas: &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{
+				Name: templateName,
+			},
+		},
+	}
+
+	terminalCases := []struct {
+		name       string
+		age        time.Duration
+		conditions []metav1.Condition
+	}{
+		{
+			name: "Finished=True and Ready=False with Reason=PodFailed",
+			age:  30 * time.Second,
+			conditions: []metav1.Condition{
+				{
+					Type:   string(sandboxv1beta1.SandboxConditionReady),
+					Status: metav1.ConditionFalse,
+					Reason: sandboxv1beta1.SandboxReasonPodFailed,
+				},
+				{
+					Type:   string(sandboxv1beta1.SandboxConditionFinished),
+					Status: metav1.ConditionTrue,
+					Reason: sandboxv1beta1.SandboxReasonPodFailed,
+				},
+			},
+		},
+		{
+			name: "Finished=True and Ready=False with Reason=PodSucceeded",
+			age:  30 * time.Second,
+			conditions: []metav1.Condition{
+				{
+					Type:   string(sandboxv1beta1.SandboxConditionReady),
+					Status: metav1.ConditionFalse,
+					Reason: sandboxv1beta1.SandboxReasonPodSucceeded,
+				},
+				{
+					Type:   string(sandboxv1beta1.SandboxConditionFinished),
+					Status: metav1.ConditionTrue,
+					Reason: sandboxv1beta1.SandboxReasonPodSucceeded,
+				},
+			},
+		},
+		{
+			name: "Ready=False with Reason=SandboxExpired",
+			age:  30 * time.Second,
+			conditions: []metav1.Condition{
+				{
+					Type:   string(sandboxv1beta1.SandboxConditionReady),
+					Status: metav1.ConditionFalse,
+					Reason: sandboxv1beta1.SandboxReasonExpired,
+				},
+			},
+		},
+		{
+			name: "Ready=False with Reason=SandboxExpired bypasses Unschedulable hold past grace period",
+			age:  10 * time.Minute,
+			conditions: []metav1.Condition{
+				{
+					Type:   string(sandboxv1beta1.SandboxConditionReady),
+					Status: metav1.ConditionFalse,
+					Reason: sandboxv1beta1.SandboxReasonExpired,
+				},
+				{
+					Type:   string(sandboxv1beta1.SandboxConditionPodScheduled),
+					Status: metav1.ConditionFalse,
+					Reason: corev1.PodReasonUnschedulable,
+				},
+			},
+		},
+		{
+			name: "Ready=False with Reason=SandboxExpired bypasses SchedulingGated hold past grace period",
+			age:  10 * time.Minute,
+			conditions: []metav1.Condition{
+				{
+					Type:   string(sandboxv1beta1.SandboxConditionReady),
+					Status: metav1.ConditionFalse,
+					Reason: sandboxv1beta1.SandboxReasonExpired,
+				},
+				{
+					Type:   string(sandboxv1beta1.SandboxConditionPodScheduled),
+					Status: metav1.ConditionFalse,
+					Reason: corev1.PodReasonSchedulingGated,
+				},
+			},
+		},
+	}
+
+	for _, tc := range terminalCases {
+		t.Run(tc.name, func(t *testing.T) {
+			failedSb := createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-terminal")
+			failedSb.CreationTimestamp = metav1.Time{Time: time.Now().Add(-tc.age)}
+			failedSb.Status.Conditions = tc.conditions
+
+			healthySb := createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-healthy")
+			healthySb.CreationTimestamp = metav1.Time{Time: time.Now().Add(-10 * time.Minute)}
+			healthySb.Status.Conditions = []metav1.Condition{
+				{
+					Type:   string(sandboxv1beta1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+				},
+			}
+
+			r := SandboxWarmPoolReconciler{
+				Client:       newFakeClient(scheme, template, failedSb, healthySb),
+				Scheme:       scheme,
+				MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+			}
+
+			ctx := context.Background()
+			requeue, err := r.reconcilePool(ctx, warmPool)
+			require.NoError(t, err)
+			require.Zero(t, requeue, "terminal sandbox should be deleted immediately without scheduling a post-grace requeue")
+
+			err = r.Get(ctx, types.NamespacedName{Namespace: poolNamespace, Name: failedSb.Name}, &sandboxv1beta1.Sandbox{})
+			require.True(t, k8serrors.IsNotFound(err), "terminal sandbox must be deleted immediately even within readinessGracePeriod")
+
+			// Second pass creates the replacement once deletion is observed.
+			_, err = r.reconcilePool(ctx, warmPool)
+			require.NoError(t, err)
+
+			list := &sandboxv1beta1.SandboxList{}
+			require.NoError(t, r.List(ctx, list, &client.ListOptions{Namespace: poolNamespace}))
+			require.Len(t, list.Items, int(replicas))
+		})
+	}
+}

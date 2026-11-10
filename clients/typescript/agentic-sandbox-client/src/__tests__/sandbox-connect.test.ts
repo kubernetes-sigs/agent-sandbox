@@ -909,6 +909,32 @@ describe("Sandbox commands.run() arguments", () => {
     expect(restBackend?.healthHits).toBe(0);
   });
 
+  it.each([
+    [
+      "files.write",
+      () =>
+        (sandbox as Sandbox).files.write("a.txt", "x", {
+          append: true,
+          createOnly: true,
+        }),
+    ],
+    [
+      "files.writeStream",
+      () =>
+        (sandbox as Sandbox).files.writeStream("a.txt", new ReadableStream(), {
+          append: true,
+          createOnly: true,
+        }),
+    ],
+  ])("rejects %s with append and createOnly combined before connecting", async (_, call) => {
+    await startRecordingSandbox();
+    await expect(call()).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof SandboxError && err.telemetryCode === "invalid_argument",
+    );
+    expect(restBackend?.healthHits).toBe(0);
+  });
+
   it("records only the executable's base name on the span", async () => {
     const { tracingManager, events } = makeRecordingTracerManager();
     await startRecordingSandbox(tracingManager);

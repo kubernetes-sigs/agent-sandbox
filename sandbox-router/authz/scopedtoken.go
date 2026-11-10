@@ -278,7 +278,7 @@ func (a *ScopedTokenAuthorizer) Authorize(_ context.Context, r *http.Request, ta
 			claims.SandboxUID != normalized.SandboxUID ||
 			claims.Port != normalized.Port ||
 			claims.Method != normalized.Method ||
-			claims.Path != normalized.Path {
+			!claims.matches(normalized.Path) {
 			return ErrForbidden
 		}
 		return nil

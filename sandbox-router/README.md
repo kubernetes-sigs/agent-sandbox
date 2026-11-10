@@ -384,6 +384,8 @@ The v2 key file contains unpadded base64url public keys:
 
 A v2 token authorizes the bound Sandbox UID, method, port, and path until expiry. Header-routed requests forward that path byte-for-byte, escaping included, the same way a path-routed request forwards everything after `<port>`. An encoded separator inside one segment (a filename containing `/`, sent as `%2F`) stays escaped on the hop, and the token binds that escaped form. Mint the token for the path the client sends: a token for `/x/y` does not authorize a request sent as `/x%2Fy`. Query parameters and request bodies are not signed, and tokens are reusable during that interval. For an endpoint that accepts commands in its query or body, a token holder may change those commands while keeping the signed target unchanged. Enforce command-level policy or one-time execution in the upstream service when required.
 
+A token can instead name a path prefix, minted with `authz.MintScopedTokenV2PathPrefix`. It covers every path below the prefix and still binds the Sandbox UID, method, and port. Matching is on whole segments: `/v1/files/` covers `/v1/files/a` but not `/v1/filesystem`. The router rejects a prefix match if any later segment is `.` or `..`, including the percent-encoded forms. Use this for sandboxd's file API, where each file has its own path. A router without prefix support rejects these tokens.
+
 The router reloads keys on restart. `authz.MintScopedTokenV2` is available to controller-side issuers, but the router never mints tokens itself.
 
 ### Browser-session credentials

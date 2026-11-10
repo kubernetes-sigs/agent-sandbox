@@ -315,3 +315,78 @@ func decodeScopedTokenV2Claims(t *testing.T, token string) scopedTokenV2Claims {
 	}
 	return claims
 }
+
+func TestScopedTokenV2_PathPrefix(t *testing.T) {
+	publicKey, privateKey := newScopedTokenV2Key(t)
+	prefixTarget := scopedTokenV2Target()
+	prefixTarget.Path = "/v1/files/"
+	token, err := MintScopedTokenV2PathPrefix(privateKey, "current", prefixTarget, time.Minute)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	authorizer, err := NewScopedTokenAuthorizer(ScopedTokenOptions{
+		VerificationKeys: map[string]ed25519.PublicKey{"current": publicKey},
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*AuthorizationTarget)
+		want   error
+	}{
+		{"file below prefix", func(t *AuthorizationTarget) { t.Path = "/v1/files/report.csv" }, nil},
+		{"nested file", func(t *AuthorizationTarget) { t.Path = "/v1/files/a/b" }, nil},
+		{"encoded separator", func(t *AuthorizationTarget) { t.Path = "/v1/files/%2Ftmp%2Fa" }, nil},
+		{"prefix itself", func(t *AuthorizationTarget) { t.Path = "/v1/files" }, nil},
+		{"sibling sharing the prefix string", func(t *AuthorizationTarget) { t.Path = "/v1/filesystem" }, ErrForbidden},
+		{"other endpoint", func(t *AuthorizationTarget) { t.Path = "/v1/metadata" }, ErrForbidden},
+		{"dot-dot segment", func(t *AuthorizationTarget) { t.Path = "/v1/files/../metadata" }, ErrForbidden},
+		{"encoded dot-dot segment", func(t *AuthorizationTarget) { t.Path = "/v1/files/%2e%2E/metadata" }, ErrForbidden},
+		{"dot segment", func(t *AuthorizationTarget) { t.Path = "/v1/files/./a" }, ErrForbidden},
+		{"other method", func(t *AuthorizationTarget) { t.Path = "/v1/files/a"; t.Method = "PUT" }, ErrForbidden},
+		{"other port", func(t *AuthorizationTarget) { t.Path = "/v1/files/a"; t.Port++ }, ErrForbidden},
+		{"other Sandbox UID", func(t *AuthorizationTarget) { t.Path = "/v1/files/a"; t.SandboxUID = "replacement-uid" }, ErrForbidden},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := prefixTarget
+			test.mutate(&got)
+			request := reqWithBearer(token)
+			request.Method = got.Method
+			if err := authorizer.Authorize(context.Background(), request, got); !errors.Is(err, test.want) {
+				t.Fatalf("got %v, want %v", err, test.want)
+			}
+		})
+	}
+}
+
+func TestScopedTokenV2_ExactTokenDoesNotCoverChildren(t *testing.T) {
+	publicKey, privateKey := newScopedTokenV2Key(t)
+	target := scopedTokenV2Target()
+	token, err := MintScopedTokenV2(privateKey, "current", target, time.Minute)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	authorizer, err := NewScopedTokenAuthorizer(ScopedTokenOptions{
+		VerificationKeys: map[string]ed25519.PublicKey{"current": publicKey},
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	target.Path += "/child"
+	if err := authorizer.Authorize(context.Background(), reqWithBearer(token), target); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("expected exact-path token to reject a child path, got %v", err)
+	}
+}
+
+func TestScopedTokenV2_RejectsClaimsWithBothPathAndPrefix(t *testing.T) {
+	claims := scopedTokenV2Claims{Path: "/v1/files/a", PathPrefix: "/v1/files/"}
+	if claims.matches("/v1/files/a") {
+		t.Fatal("expected claims naming both path and prefix to match nothing")
+	}
+	if (&scopedTokenV2Claims{}).matches("/") {
+		t.Fatal("expected claims naming neither path nor prefix to match nothing")
+	}
+}

@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -38,7 +39,8 @@ type scopedTokenV2Claims struct {
 	SandboxUID  string `json:"uid"`
 	Port        int    `json:"port"`
 	Method      string `json:"method"`
-	Path        string `json:"path"`
+	Path        string `json:"path,omitempty"`
+	PathPrefix  string `json:"pathPrefix,omitempty"`
 	Exp         int64  `json:"exp"`
 }
 
@@ -95,6 +97,18 @@ func ParseScopedTokenVerificationKeys(data []byte) (map[string]ed25519.PublicKey
 // authorization target. The key ID is protected by the signature so it
 // cannot be swapped to select a different verification key.
 func MintScopedTokenV2(privateKey ed25519.PrivateKey, keyID string, target AuthorizationTarget, ttl time.Duration) (string, error) {
+	return mintScopedTokenV2(privateKey, keyID, target, ttl, false)
+}
+
+// MintScopedTokenV2PathPrefix is like MintScopedTokenV2, but target.Path is a
+// prefix that covers every path below it, matched on whole segments. The
+// prefix "/v1/files/" covers "/v1/files/a" but not "/v1/filesystem". A router
+// that predates prefix tokens rejects them.
+func MintScopedTokenV2PathPrefix(privateKey ed25519.PrivateKey, keyID string, target AuthorizationTarget, ttl time.Duration) (string, error) {
+	return mintScopedTokenV2(privateKey, keyID, target, ttl, true)
+}
+
+func mintScopedTokenV2(privateKey ed25519.PrivateKey, keyID string, target AuthorizationTarget, ttl time.Duration, prefix bool) (string, error) {
 	if len(privateKey) != ed25519.PrivateKeySize {
 		return "", fmt.Errorf("scopedtoken: private key must be %d bytes, got %d", ed25519.PrivateKeySize, len(privateKey))
 	}
@@ -117,8 +131,12 @@ func MintScopedTokenV2(privateKey ed25519.PrivateKey, keyID string, target Autho
 		SandboxUID:  normalized.SandboxUID,
 		Port:        normalized.Port,
 		Method:      normalized.Method,
-		Path:        normalized.Path,
 		Exp:         time.Now().Add(ttl).Unix(),
+	}
+	if prefix {
+		claims.PathPrefix = normalized.Path
+	} else {
+		claims.Path = normalized.Path
 	}
 	payload, err := json.Marshal(claims)
 	if err != nil {
@@ -132,6 +150,30 @@ func MintScopedTokenV2(privateKey ed25519.PrivateKey, keyID string, target Autho
 		encPayload,
 		base64.RawURLEncoding.EncodeToString(signature),
 	}, "."), nil
+}
+
+// matches reports whether the request path is the one the token names. A
+// prefix token also covers every path below the prefix. A path segment that
+// decodes to "." or ".." never matches a prefix, because the router forwards
+// the raw path and the sandbox could resolve it outside the prefix.
+func (c *scopedTokenV2Claims) matches(requestPath string) bool {
+	if c.PathPrefix == "" {
+		return c.Path != "" && c.Path == requestPath
+	}
+	if c.Path != "" {
+		return false
+	}
+	base := strings.TrimSuffix(c.PathPrefix, "/")
+	if requestPath != base && !strings.HasPrefix(requestPath, base+"/") {
+		return false
+	}
+	for _, segment := range strings.Split(requestPath, "/") {
+		decoded, err := url.PathUnescape(segment)
+		if err != nil || decoded == "." || decoded == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 func scopedTokenV2SigningInput(keyID, encPayload string) []byte {

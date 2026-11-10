@@ -162,10 +162,19 @@ err = sb.Move(ctx, "script.py", "out/script.py", false) // overwrite
 if err != nil { log.Fatal(err) }
 err = sb.Copy(ctx, "out/script.py", "backup.py", false)
 if err != nil { log.Fatal(err) }
+
+// Add to the end of a file (sandboxd runtime only)
+err = sb.Write(ctx, "app.log", []byte("more\n"), sandbox.WithAppend())
+if err != nil { log.Fatal(err) }
+
+// Create a file, or fail with a 412 HTTPError if it exists (sandboxd runtime only)
+err = sb.Write(ctx, "new.txt", []byte("hi"), sandbox.WithCreateOnly())
 ```
 
 `Move()` and `Copy()` do not retry unless you pass `WithMaxAttempts`, because a
-repeat after a lost response fails.
+repeat after a lost response fails. `Write()` and `WriteReader()` with
+`WithAppend()` or `WithCreateOnly()` behave the same way, and an append is not
+atomic.
 
 `Read()` and `ReadTo()` responses are capped by `MaxDownloadSize` (256 MB by
 default). `Run()` responses are capped at 16 MB; `List()`/`Exists()` at 8 MB.

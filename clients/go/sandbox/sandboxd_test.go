@@ -242,6 +242,93 @@ func TestSandboxdWrite_NoRouterHeaders(t *testing.T) {
 	}
 }
 
+func TestSandboxdWrite_AppendAndCreateOnly(t *testing.T) {
+	var gotURI, gotIfNoneMatch string
+	var attempts int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		gotURI = r.URL.RequestURI()
+		gotIfNoneMatch = r.Header.Get("If-None-Match")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	c := newReadySandboxdTestSandbox(server.URL)
+	writes := map[string]func(...CallOption) error{
+		"Write": func(opts ...CallOption) error {
+			return c.Write(context.Background(), "log.txt", []byte("x"), opts...)
+		},
+		"WriteReader": func(opts ...CallOption) error {
+			return c.WriteReader(context.Background(), "log.txt", strings.NewReader("x"), opts...)
+		},
+	}
+	for name, write := range writes {
+		attempts = 0
+		_ = write(WithAppend())
+		if gotURI != "/v1/files/log.txt?append=true" || gotIfNoneMatch != "" {
+			t.Errorf("%s append: got %q If-None-Match=%q", name, gotURI, gotIfNoneMatch)
+		}
+		if attempts != 1 {
+			t.Errorf("%s append: got %d attempts, want 1", name, attempts)
+		}
+
+		attempts = 0
+		_ = write(WithCreateOnly())
+		if gotURI != "/v1/files/log.txt" || gotIfNoneMatch != "*" {
+			t.Errorf("%s create-only: got %q If-None-Match=%q", name, gotURI, gotIfNoneMatch)
+		}
+		if attempts != 1 {
+			t.Errorf("%s create-only: got %d attempts, want 1", name, attempts)
+		}
+	}
+}
+
+func TestSandboxdWrite_AppendWithCreateOnlyRejected(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Error("rejected calls must not reach the server")
+	}))
+	defer server.Close()
+
+	c := newReadySandboxdTestSandbox(server.URL)
+	if err := c.Write(context.Background(), "f.txt", []byte("x"), WithAppend(), WithCreateOnly()); err == nil {
+		t.Error("Write: expected an error")
+	}
+	if err := c.WriteReader(context.Background(), "f.txt", strings.NewReader("x"), WithAppend(), WithCreateOnly()); err == nil {
+		t.Error("WriteReader: expected an error")
+	}
+}
+
+func TestSandboxdWrite_CreateOnlyConflict(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusPreconditionFailed)
+	}))
+	defer server.Close()
+
+	c := newReadySandboxdTestSandbox(server.URL)
+	err := c.Write(context.Background(), "f.txt", []byte("x"), WithCreateOnly())
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusPreconditionFailed {
+		t.Fatalf("expected a 412 HTTPError, got: %v", err)
+	}
+}
+
+func TestWrite_AppendAndCreateOnlyLegacyRuntimeUnsupported(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Error("legacy calls must not reach the server")
+	}))
+	defer server.Close()
+
+	c := newReadyTestSandbox(server.URL)
+	for _, opt := range []CallOption{WithAppend(), WithCreateOnly()} {
+		if err := c.Write(context.Background(), "f.txt", []byte("x"), opt); !errors.Is(err, ErrUnsupportedByRuntime) {
+			t.Errorf("Write: expected ErrUnsupportedByRuntime, got: %v", err)
+		}
+		if err := c.WriteReader(context.Background(), "f.txt", strings.NewReader("x"), opt); !errors.Is(err, ErrUnsupportedByRuntime) {
+			t.Errorf("WriteReader: expected ErrUnsupportedByRuntime, got: %v", err)
+		}
+	}
+}
+
 func TestSandboxdRead_GetsFileBytes(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.EscapedPath() != "/v1/files/notes/hello.txt" {

@@ -576,6 +576,70 @@ func TestSandboxdFileOps_Requests(t *testing.T) {
 	}
 }
 
+func TestSandboxExtract(t *testing.T) {
+	var gotMethod, gotPath, gotQuery, gotBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotMethod, gotPath, gotQuery, gotBody = r.Method, r.URL.EscapedPath(), r.URL.RawQuery, string(body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	for _, tc := range []struct{ path, wantPath string }{
+		{"a/b", "/v1/files/a/b"},
+		{"/", "/v1/files/"},
+	} {
+		c := newReadySandboxdTestSandbox(server.URL)
+		if err := c.Extract(context.Background(), tc.path, strings.NewReader("tar-bytes")); err != nil {
+			t.Fatalf("Extract(%q): %v", tc.path, err)
+		}
+		if gotMethod != http.MethodPut || gotPath != tc.wantPath || gotQuery != "extract=tar" || gotBody != "tar-bytes" {
+			t.Errorf("Extract(%q): got %s %s?%s %q", tc.path, gotMethod, gotPath, gotQuery, gotBody)
+		}
+	}
+}
+
+func TestSandboxExtract_DoesNotRetry(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	c := newReadySandboxdTestSandbox(server.URL)
+	if err := c.Extract(context.Background(), "d", strings.NewReader("x")); err == nil {
+		t.Fatal("expected the 503 to be returned")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("server saw %d calls, want 1", got)
+	}
+}
+
+func TestSandboxExtract_Validation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("an invalid call must not reach the server")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	c := newReadySandboxdTestSandbox(server.URL)
+	ctx := context.Background()
+	if err := c.Extract(ctx, "", strings.NewReader("x")); err == nil {
+		t.Error("empty path: expected error")
+	}
+	if err := c.Extract(ctx, "d", nil); err == nil {
+		t.Error("nil archive: expected error")
+	}
+	if err := c.Extract(ctx, "d", strings.NewReader("x"), WithMaxAttempts(2)); err == nil {
+		t.Error("WithMaxAttempts(2): expected error")
+	}
+	legacy := newReadyTestSandbox(server.URL)
+	if err := legacy.Extract(ctx, "d", strings.NewReader("x")); !errors.Is(err, ErrUnsupportedByRuntime) {
+		t.Errorf("legacy runtime: expected ErrUnsupportedByRuntime, got: %v", err)
+	}
+}
+
 func TestSandboxdFileOps_RetryDefaults(t *testing.T) {
 	tests := []struct {
 		name      string

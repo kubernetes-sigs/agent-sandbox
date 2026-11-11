@@ -695,6 +695,12 @@ func (s *Sandbox) Copy(ctx context.Context, source, destination string, overwrit
 	return s.files.Copy(ctx, source, destination, overwrite, opts...)
 }
 
+// Extract unpacks a tar archive into a directory (sandboxd runtime only). See
+// Files.Extract.
+func (s *Sandbox) Extract(ctx context.Context, path string, archive io.Reader, opts ...CallOption) error {
+	return s.files.Extract(ctx, path, archive, opts...)
+}
+
 // Health returns sandboxd's report from GET /v1/health. It returns an
 // HTTPError while sandboxd is shutting down, and ErrUnsupportedByRuntime on
 // the legacy python-runtime. It does not retry unless WithMaxAttempts is set.

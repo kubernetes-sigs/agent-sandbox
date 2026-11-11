@@ -165,6 +165,13 @@ if err != nil { log.Fatal(err) }
 err = sb.Copy(ctx, "out/script.py", "backup.py", false)
 if err != nil { log.Fatal(err) }
 
+// Unpack a tar archive, optionally gzipped, into a directory (sandboxd runtime only)
+archive, err := os.Open("repo.tar.gz")
+if err != nil { log.Fatal(err) }
+defer archive.Close()
+err = sb.Extract(ctx, "repo", archive)
+if err != nil { log.Fatal(err) }
+
 // Add to the end of a file (sandboxd runtime only)
 err = sb.Write(ctx, "app.log", []byte("more\n"), sandbox.WithAppend())
 if err != nil { log.Fatal(err) }
@@ -174,7 +181,8 @@ err = sb.Write(ctx, "new.txt", []byte("hi"), sandbox.WithCreateOnly())
 ```
 
 `Move()` and `Copy()` do not retry unless you pass `WithMaxAttempts`, because a
-repeat after a lost response fails. `Write()` and `WriteReader()` with
+repeat after a lost response fails. `Extract()` never retries, because it
+streams the archive once, and the unpack is not atomic. `Write()` and `WriteReader()` with
 `WithAppend()` or `WithCreateOnly()` behave the same way, and an append is not
 atomic.
 

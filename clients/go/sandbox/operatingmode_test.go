@@ -731,26 +731,51 @@ func TestSandbox_Suspend_TimeoutBoundsSemaphoreWait(t *testing.T) {
 	}
 }
 
+// waitForLifecycleCancel blocks until a lifecycle operation has registered
+// its cancel hook, so a test can time an interrupt against an operation
+// parked on the semaphore instead of racing a sleep.
+func waitForLifecycleCancel(t *testing.T, sb *Sandbox) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		sb.mu.Lock()
+		registered := len(sb.lifecycleCancels) > 0
+		sb.mu.Unlock()
+		if registered {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("lifecycle operation did not register its cancel hook")
+}
+
 func TestSandbox_Disconnect_InterruptsSuspendInAcquisitionGap(t *testing.T) {
-	// Disconnect checks the cancel hook before blocking on the semaphore.
-	// An interrupt that lands between Suspend's acquisition and its hook
-	// registration must not be lost: Suspend has to abort promptly instead
-	// of running to its full timeout.
+	// An interrupt that lands while Suspend is parked on the lifecycle
+	// semaphore must not be lost. Registration is confirmed before the
+	// interrupt runs, and the semaphore stays held until Suspend aborts,
+	// so the test cannot pass by cancelling an already-active operation.
 	cr := newOperatingModeCR("sbx-1", sandboxv1beta1.SandboxOperatingModeRunning)
 	sb, _ := newSuspendTestSandbox(t, cr, true)
 
 	sb.lifecycleSem <- struct{}{} // hold the lock so Suspend parks in acquisition
+	defer func() {
+		// Release on assertion failures too, so the parked goroutine can
+		// finish instead of outliving the test.
+		select {
+		case <-sb.lifecycleSem:
+		default:
+		}
+	}()
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- sb.Suspend(context.Background(), WithTimeout(30*time.Second)) }()
-	time.Sleep(50 * time.Millisecond) // let Suspend reach the semaphore wait
+	go func() { errCh <- sb.Suspend(context.Background(), WithTimeout(5*time.Second)) }()
+	waitForLifecycleCancel(t, sb)
 
 	discCh := make(chan error, 1)
 	go func() { discCh <- sb.Disconnect(context.Background()) }()
-	time.Sleep(50 * time.Millisecond) // Disconnect sees no hook and records the interrupt
 
-	<-sb.lifecycleSem // release: Suspend acquires and must notice the missed interrupt
-
+	// The semaphore is still held here, so the only way Suspend can return
+	// is by observing the interrupt.
 	select {
 	case err := <-errCh:
 		if err == nil {
@@ -759,6 +784,8 @@ func TestSandbox_Disconnect_InterruptsSuspendInAcquisitionGap(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Suspend ignored an interrupt that arrived during semaphore acquisition")
 	}
+
+	<-sb.lifecycleSem // let Disconnect finish
 	if err := <-discCh; err != nil {
 		t.Errorf("Disconnect: %v", err)
 	}
@@ -872,5 +899,128 @@ func TestSandbox_IsSuspended(t *testing.T) {
 	}
 	if got {
 		t.Error("IsSuspended = true, want false")
+	}
+}
+
+func TestSandbox_SuspendResume_TerminatingSandbox_ReturnsErrSandboxDeleted(t *testing.T) {
+	// Kubernetes retains objects during finalization with their conditions
+	// still looking alive. A UID-matching sandbox that started terminating
+	// must not be patched, waited on, or reported: the pod is going away
+	// regardless of what operatingMode says.
+	cr := newOperatingModeCR("sbx-1", sandboxv1beta1.SandboxOperatingModeRunning, readyCond(seedGeneration))
+	now := metav1.Now()
+	cr.DeletionTimestamp = &now
+	sb, cs := newSuspendTestSandbox(t, cr, true)
+
+	if err := sb.Suspend(context.Background()); !errors.Is(err, ErrSandboxDeleted) {
+		t.Errorf("Suspend error = %v, want ErrSandboxDeleted", err)
+	}
+	if err := sb.Resume(context.Background()); !errors.Is(err, ErrSandboxDeleted) {
+		t.Errorf("Resume error = %v, want ErrSandboxDeleted", err)
+	}
+	if _, err := sb.IsSuspended(context.Background()); !errors.Is(err, ErrSandboxDeleted) {
+		t.Errorf("IsSuspended error = %v, want ErrSandboxDeleted", err)
+	}
+	if hasPatchAction(cs) {
+		t.Error("mode change issued against a terminating sandbox")
+	}
+}
+
+func TestSandbox_Resume_TerminatingDuringWait_ReturnsErrSandboxDeleted(t *testing.T) {
+	// The sandbox starts terminating while the resume wait runs, and the
+	// replacement state still satisfies the Ready predicate: the wait must
+	// reject it instead of reporting success on a doomed sandbox.
+	cr := newOperatingModeCR("sbx-1", sandboxv1beta1.SandboxOperatingModeSuspended)
+	sb, cs := newSuspendTestSandbox(t, cr, false)
+
+	terminating := cr.DeepCopy()
+	now := metav1.Now()
+	terminating.DeletionTimestamp = &now
+	terminating.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeRunning
+	terminating.Status.Conditions = []metav1.Condition{readyCond(seedGeneration)}
+
+	cs.PrependReactor("list", "sandboxes", func(ktesting.Action) (bool, runtime.Object, error) {
+		return true, &sandboxv1beta1.SandboxList{Items: []sandboxv1beta1.Sandbox{*terminating}}, nil
+	})
+	fw := watch.NewRaceFreeFake()
+	defer fw.Stop()
+	cs.PrependWatchReactor("sandboxes", func(ktesting.Action) (bool, watch.Interface, error) {
+		return true, fw, nil
+	})
+
+	err := sb.Resume(context.Background(), WithTimeout(5*time.Second))
+	if !errors.Is(err, ErrSandboxDeleted) {
+		t.Fatalf("Resume error = %v, want ErrSandboxDeleted", err)
+	}
+}
+
+func TestSandbox_Suspend_TrackedDuringWaitAndAfterTimeout(t *testing.T) {
+	// Suspend tears the transport down before the condition wait, so the
+	// handle reports IsReady() false while the wait runs. The managed
+	// Client evicts handles in that state unless the suspension flag is
+	// already set, and eviction makes DeleteAll miss the claim — including
+	// when the wait ends in a timeout.
+	cr := newOperatingModeCR("sbx-1", sandboxv1beta1.SandboxOperatingModeRunning)
+	sb, cs := newSuspendTestSandbox(t, cr, true)
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- sb.Suspend(context.Background(), WithTimeout(2*time.Second)) }()
+
+	waitForPatchAction(t, cs)
+	deadline := time.Now().Add(2 * time.Second)
+	for !sb.suspendedLocally() && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if !sb.suspendedLocally() {
+		t.Error("handle is not tracked as suspended while the suspend wait runs")
+	}
+
+	// No controller will ever set the Suspended condition: the wait times
+	// out, and the handle must stay tracked afterwards.
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, ErrTimeout) {
+			t.Fatalf("Suspend error = %v, want ErrTimeout", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Suspend did not time out")
+	}
+	if !sb.suspendedLocally() {
+		t.Error("handle lost its suspension tracking after a timed-out Suspend")
+	}
+}
+
+func TestOpen_Reconnect_ReplacedSandbox_ReturnsErrSandboxDeleted(t *testing.T) {
+	// A same-name replacement appears while the handle is disconnected.
+	// reconnect must not adopt it: setState would overwrite the recorded
+	// UID and let a later Suspend/Resume operate on the replacement.
+	opts := defaultTestOpts()
+	c, agentsCS, extensionsCS := newTestSandbox(opts)
+	sb := readySandbox("sb")
+	sb.UID = "uid-original"
+	setupWatchWithReactor(agentsCS, extensionsCS, sb)
+
+	current := sb
+	agentsCS.PrependReactor("get", "sandboxes", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		return true, current, nil
+	})
+
+	ctx := context.Background()
+	if err := c.Open(ctx); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := c.Disconnect(ctx); err != nil {
+		t.Fatalf("Disconnect: %v", err)
+	}
+
+	replacement := readySandbox("sb")
+	replacement.UID = "uid-replacement"
+	current = replacement
+
+	if err := c.Open(ctx); !errors.Is(err, ErrSandboxDeleted) {
+		t.Fatalf("reconnect Open error = %v, want ErrSandboxDeleted", err)
+	}
+	if err := c.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 }

@@ -325,12 +325,19 @@ func claimIdentityFailure(claim *extv1beta1.SandboxClaim, expectedUID types.UID)
 
 // sandboxIdentityFailure is claimIdentityFailure for the Sandbox CR: it
 // returns ErrSandboxDeleted when sb is a same-name replacement of the
-// sandbox the caller opened. An empty expectedUID disables the check.
+// sandbox the caller opened, or the original being deleted. An empty
+// expectedUID disables the check.
 func sandboxIdentityFailure(sb *sandboxv1beta1.Sandbox, expectedUID types.UID) error {
-	if expectedUID == "" || sb.UID == expectedUID {
+	if expectedUID == "" {
 		return nil
 	}
-	return fmt.Errorf("%w: sandbox %s was replaced (uid %s, want %s)", ErrSandboxDeleted, sb.Name, sb.UID, expectedUID)
+	if sb.UID != expectedUID {
+		return fmt.Errorf("%w: sandbox %s was replaced (uid %s, want %s)", ErrSandboxDeleted, sb.Name, sb.UID, expectedUID)
+	}
+	if sb.DeletionTimestamp != nil {
+		return fmt.Errorf("%w: sandbox %s is terminating", ErrSandboxDeleted, sb.Name)
+	}
+	return nil
 }
 
 // resolveSandboxName watches SandboxClaim status until the sandbox name is

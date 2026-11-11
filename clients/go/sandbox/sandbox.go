@@ -438,6 +438,17 @@ func (s *Sandbox) reconnect(ctx context.Context) error {
 		recordError(span, retErr)
 		return retErr
 	}
+	// A same-name replacement must not be adopted: the recorded UID belongs
+	// to the sandbox this handle opened, and setState would overwrite it,
+	// letting a later Suspend/Resume operate on the replacement.
+	s.mu.Lock()
+	wantUID := s.sandboxUID
+	s.mu.Unlock()
+	if wantUID != "" && state.UID != wantUID {
+		retErr := fmt.Errorf("%s: %w: sandbox %s was replaced (uid %s, want %s)", s.errPrefix(), ErrSandboxDeleted, sandboxName, state.UID, wantUID)
+		recordError(span, retErr)
+		return retErr
+	}
 	s.setState(state)
 
 	s.connector.SetIdentity(sandboxName)

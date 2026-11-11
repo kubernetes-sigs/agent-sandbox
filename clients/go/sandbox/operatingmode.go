@@ -87,14 +87,17 @@ func (s *Sandbox) Suspend(ctx context.Context, opts ...CallOption) error {
 
 	// The pod is going away either way, so tear the transport down before
 	// waiting: a timed-out wait must not leave the caller holding a
-	// connection to a dying pod.
+	// connection to a dying pod. Track the suspension first — the teardown
+	// drops IsReady, and without the flag the managed Client would evict
+	// the handle while the wait runs or after a timeout, making DeleteAll
+	// miss the claim.
+	s.setSuspendedLocally(true)
 	s.teardownAfterSuspend()
 
 	if err := s.k8s.waitForSandboxSuspended(ctx, name, s.opts.Namespace, timeout, minGeneration, cr.UID, s.tracer, s.traceServiceName); err != nil {
 		recordError(span, err)
 		return fmt.Errorf("%s: %w", s.errPrefix(), err)
 	}
-	s.setSuspendedLocally(true)
 	s.log.Info("sandbox suspended", "sandbox", name)
 	return nil
 }
@@ -265,18 +268,26 @@ func (s *Sandbox) readSandboxCR(ctx context.Context, name string) (*sandboxv1bet
 }
 
 // verifySandboxIdentity fails when the CR read back is not the sandbox this
-// handle opened: a same-name replacement must not be suspended or resumed.
-// It mirrors claimIdentityFailure, which guards the claim the same way. An
-// empty recorded UID (a handle that never went through Open) disables the
-// check.
+// handle opened: a same-name replacement must not be suspended or resumed,
+// and neither must the original once it is terminating — Kubernetes keeps
+// deleted objects around during finalization with their conditions still
+// looking alive. It mirrors claimIdentityFailure, which guards the claim the
+// same way. An empty recorded UID (a handle that never went through Open)
+// disables the check.
 func (s *Sandbox) verifySandboxIdentity(cr *sandboxv1beta1.Sandbox) error {
 	s.mu.Lock()
 	want := s.sandboxUID
 	s.mu.Unlock()
-	if want == "" || cr.UID == want {
+	if want == "" {
 		return nil
 	}
-	return fmt.Errorf("%s: %w: sandbox %s was replaced (uid %s, want %s)", s.errPrefix(), ErrSandboxDeleted, cr.Name, cr.UID, want)
+	if cr.UID != want {
+		return fmt.Errorf("%s: %w: sandbox %s was replaced (uid %s, want %s)", s.errPrefix(), ErrSandboxDeleted, cr.Name, cr.UID, want)
+	}
+	if cr.DeletionTimestamp != nil {
+		return fmt.Errorf("%s: %w: sandbox %s is terminating", s.errPrefix(), ErrSandboxDeleted, cr.Name)
+	}
+	return nil
 }
 
 // operatingModeErr classifies a patch failure: a sandbox deleted between the

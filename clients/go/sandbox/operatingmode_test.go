@@ -21,9 +21,13 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"go.opentelemetry.io/otel/trace/noop"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
+	ktesting "k8s.io/client-go/testing"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	fakeagents "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/fake"
@@ -104,7 +108,11 @@ func newSuspendTestSandbox(t *testing.T, cr *sandboxv1beta1.Sandbox, connected b
 	}
 	sb.sandboxName = cr.Name
 	sb.sandboxUID = cr.UID
-	sb.podName = cr.Name + "-pod"
+	// The controller names the pod after the sandbox, and extractState
+	// falls back to the sandbox name when the pod-name annotation is
+	// absent, so the cached name must match for Resume's pod-change check
+	// to stay quiet on an unchanged pod.
+	sb.podName = cr.Name
 	if connected {
 		sb.connector.SetIdentity(cr.Name)
 		sb.connector.baseURL = "http://fake"
@@ -203,7 +211,7 @@ func TestSandbox_Suspend_WaitsForControllerObservation(t *testing.T) {
 	waitForPatchAction(t, cs)
 	assertNotCompleted(t, errCh, "Suspend")
 
-	simulateController(cs, "sbx-1", func(cr *sandboxv1beta1.Sandbox) {
+	simulateController(cs, cr.Name, func(cr *sandboxv1beta1.Sandbox) {
 		cr.Status.Conditions = []metav1.Condition{suspendedCond(cr.Generation)}
 	}, controllerStop(t))
 
@@ -264,7 +272,7 @@ func TestSandbox_Suspend_ExternallySuspended_WaitsForCondition(t *testing.T) {
 
 	assertNotCompleted(t, errCh, "Suspend")
 
-	simulateController(cs, "sbx-1", func(cr *sandboxv1beta1.Sandbox) {
+	simulateController(cs, cr.Name, func(cr *sandboxv1beta1.Sandbox) {
 		cr.Status.Conditions = []metav1.Condition{suspendedCond(cr.Generation)}
 	}, controllerStop(t))
 
@@ -364,7 +372,7 @@ func TestSandbox_Resume_WaitsForControllerObservation(t *testing.T) {
 	waitForPatchAction(t, cs)
 	assertNotCompleted(t, errCh, "Resume")
 
-	simulateController(cs, "sbx-1", func(cr *sandboxv1beta1.Sandbox) {
+	simulateController(cs, cr.Name, func(cr *sandboxv1beta1.Sandbox) {
 		cr.Status.Conditions = []metav1.Condition{readyCond(cr.Generation)}
 		cr.Status.PodIPs = []string{"10.0.0.5"}
 		cr.Status.ServiceFQDN = "sbx-1.default.svc.cluster.local"
@@ -473,8 +481,183 @@ func TestSandbox_SuspendResume_ReplacedSandbox_ReturnsErrSandboxDeleted(t *testi
 	if err := sb.Resume(context.Background()); !errors.Is(err, ErrSandboxDeleted) {
 		t.Errorf("Resume error = %v, want ErrSandboxDeleted", err)
 	}
+	if _, err := sb.IsSuspended(context.Background()); !errors.Is(err, ErrSandboxDeleted) {
+		t.Errorf("IsSuspended error = %v, want ErrSandboxDeleted", err)
+	}
 	if hasPatchAction(cs) {
 		t.Error("mode change issued against a same-name replacement sandbox")
+	}
+}
+
+func TestSandbox_Suspend_ReplacedDuringWait_ReturnsErrSandboxDeleted(t *testing.T) {
+	// The original sandbox is deleted and a same-name replacement takes
+	// over while the suspend wait runs. The replacement already reports
+	// Suspended, but the wait must reject it on the UID instead of
+	// reporting success for a sandbox this handle never opened.
+	cr := newOperatingModeCR("sbx-1", sandboxv1beta1.SandboxOperatingModeRunning)
+	sb, cs := newSuspendTestSandbox(t, cr, true)
+
+	replacement := newOperatingModeCR("sbx-1", sandboxv1beta1.SandboxOperatingModeSuspended, suspendedCond(seedGeneration))
+	replacement.UID = "uid-replacement"
+	cs.PrependReactor("list", "sandboxes", func(ktesting.Action) (bool, runtime.Object, error) {
+		return true, &sandboxv1beta1.SandboxList{Items: []sandboxv1beta1.Sandbox{*replacement}}, nil
+	})
+	fw := watch.NewRaceFreeFake()
+	defer fw.Stop()
+	cs.PrependWatchReactor("sandboxes", func(ktesting.Action) (bool, watch.Interface, error) {
+		return true, fw, nil
+	})
+
+	err := sb.Suspend(context.Background(), WithTimeout(5*time.Second))
+	if !errors.Is(err, ErrSandboxDeleted) {
+		t.Fatalf("Suspend error = %v, want ErrSandboxDeleted", err)
+	}
+}
+
+func TestSandbox_Resume_ReplacedDuringWatch_ReturnsErrSandboxDeleted(t *testing.T) {
+	// A same-name replacement shows up on the watch during the resume
+	// wait, already Ready: the wait must fail instead of letting the
+	// handle adopt the wrong sandbox.
+	cr := newOperatingModeCR("sbx-1", sandboxv1beta1.SandboxOperatingModeSuspended)
+	sb, cs := newSuspendTestSandbox(t, cr, false)
+
+	replacement := newOperatingModeCR("sbx-1", sandboxv1beta1.SandboxOperatingModeRunning, readyCond(seedGeneration))
+	replacement.UID = "uid-replacement"
+	replacement.Status.PodIPs = []string{"10.0.0.9"}
+
+	fw := watch.NewRaceFreeFake()
+	defer fw.Stop()
+	cs.PrependWatchReactor("sandboxes", func(ktesting.Action) (bool, watch.Interface, error) {
+		fw.Modify(replacement)
+		return true, fw, nil
+	})
+
+	err := sb.Resume(context.Background(), WithTimeout(5*time.Second))
+	if !errors.Is(err, ErrSandboxDeleted) {
+		t.Fatalf("Resume error = %v, want ErrSandboxDeleted", err)
+	}
+}
+
+func TestSandbox_Resume_Running_PodChanged_Reconnects(t *testing.T) {
+	// Another client suspended and resumed the sandbox: the CR is running
+	// and Ready at its current generation again, but a new pod backs it.
+	// The still-connected transport points at the dead pod and must be
+	// rebuilt instead of trusted.
+	cr := newOperatingModeCR("sbx-1", sandboxv1beta1.SandboxOperatingModeRunning, readyCond(seedGeneration))
+	cr.Status.PodIPs = []string{"10.0.0.9"}
+	sb, cs := newSuspendTestSandbox(t, cr, true)
+	sb.podIP = "10.0.0.5" // the IP the live transport was built for
+
+	if err := sb.Resume(context.Background()); err != nil {
+		t.Fatalf("Resume on a running sandbox whose pod changed: %v", err)
+	}
+	if hasPatchAction(cs) {
+		t.Error("Resume patched an already running sandbox; want no patch")
+	}
+	if sb.PodIP() != "10.0.0.9" {
+		t.Errorf("PodIP = %q, want the replacement pod's 10.0.0.9", sb.PodIP())
+	}
+	if !sb.IsReady() {
+		t.Error("transport is not connected after Resume rebuilt it")
+	}
+}
+
+func TestSandbox_Resume_CanceledContextIsNotErrTimeout(t *testing.T) {
+	// A caller cancellation (or a Disconnect interrupt) during the
+	// readiness wait must surface context.Canceled, not ErrTimeout: the
+	// wait did not run out of time.
+	cr := newOperatingModeCR("sbx-1", sandboxv1beta1.SandboxOperatingModeSuspended)
+	sb, cs := newSuspendTestSandbox(t, cr, false)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- sb.Resume(ctx, WithTimeout(30*time.Second)) }()
+
+	waitForPatchAction(t, cs)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Resume error = %v, want it to wrap context.Canceled", err)
+		}
+		if errors.Is(err, ErrTimeout) {
+			t.Errorf("Resume reported ErrTimeout for a cancelled context: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Resume did not return after cancellation")
+	}
+}
+
+func TestSandbox_Resume_PatchClosesStaleTransport(t *testing.T) {
+	// The handle was still connected when another client suspended the
+	// sandbox. Once Resume patches the CR back to Running, the old
+	// transport points at a dead pod and must go before the wait: a
+	// readiness wait that then times out must not leave a handle
+	// reporting itself ready.
+	cr := newOperatingModeCR("sbx-1", sandboxv1beta1.SandboxOperatingModeSuspended)
+	sb, _ := newSuspendTestSandbox(t, cr, true)
+
+	err := sb.Resume(context.Background(), WithTimeout(300*time.Millisecond))
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("Resume error = %v, want ErrTimeout", err)
+	}
+	if sb.IsReady() {
+		t.Error("stale transport survived the resume patch; the handle reports itself ready against a dead pod")
+	}
+}
+
+func TestSandbox_Close_ClearsSuspendedFlag(t *testing.T) {
+	// A closed handle must not keep advertising itself as suspended: the
+	// managed Client keeps suspended handles registered, so GetSandbox
+	// would hand out a dead handle with no claim behind it.
+	opts := defaultTestOpts()
+	c, agentsCS, extensionsCS := newTestSandbox(opts)
+	setupWatchWithReactor(agentsCS, extensionsCS, readySandbox("sb"))
+
+	ctx := context.Background()
+	if err := c.Open(ctx); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	c.setSuspendedLocally(true)
+	if err := c.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if c.suspendedLocally() {
+		t.Error("handle is still tracked as suspended after Close")
+	}
+}
+
+func TestOpen_Reconnect_ClearsSuspendedFlag(t *testing.T) {
+	// The handle suspended the sandbox, the CR was resumed outside the
+	// SDK, and Open re-attached the transport. A stale suspension flag
+	// would make Client.GetSandbox hand out this handle after a later
+	// Disconnect instead of re-attaching it.
+	opts := defaultTestOpts()
+	c, agentsCS, extensionsCS := newTestSandbox(opts)
+	sb := readySandbox("sb")
+	setupWatchWithReactor(agentsCS, extensionsCS, sb)
+	agentsCS.PrependReactor("get", "sandboxes", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		return true, sb, nil
+	})
+
+	ctx := context.Background()
+	if err := c.Open(ctx); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := c.Disconnect(ctx); err != nil {
+		t.Fatalf("Disconnect: %v", err)
+	}
+	c.setSuspendedLocally(true)
+
+	if err := c.Open(ctx); err != nil {
+		t.Fatalf("reconnect Open: %v", err)
+	}
+	if c.suspendedLocally() {
+		t.Error("handle is still tracked as suspended after a successful reconnect")
+	}
+	if err := c.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 }
 
@@ -522,6 +705,151 @@ func TestClient_KeepsSuspendedHandles(t *testing.T) {
 	keys := c.ListActiveSandboxes()
 	if len(keys) != 1 || keys[0] != key {
 		t.Errorf("ListActiveSandboxes = %v, want [%v] (suspended handle pruned)", keys, key)
+	}
+}
+
+func TestSandbox_Suspend_TimeoutBoundsSemaphoreWait(t *testing.T) {
+	// WithTimeout documents a total operation timeout, so it must also
+	// bound the wait for the lifecycle semaphore, not just the condition
+	// wait that starts after acquisition.
+	cr := newOperatingModeCR("sbx-1", sandboxv1beta1.SandboxOperatingModeRunning)
+	sb, _ := newSuspendTestSandbox(t, cr, true)
+
+	sb.lifecycleSem <- struct{}{} // another lifecycle operation holds the lock
+	defer func() { <-sb.lifecycleSem }()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- sb.Suspend(context.Background(), WithTimeout(200*time.Millisecond)) }()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("Suspend succeeded while the lifecycle lock was held")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WithTimeout did not bound the lifecycle semaphore wait")
+	}
+}
+
+func TestSandbox_Disconnect_InterruptsSuspendInAcquisitionGap(t *testing.T) {
+	// Disconnect checks the cancel hook before blocking on the semaphore.
+	// An interrupt that lands between Suspend's acquisition and its hook
+	// registration must not be lost: Suspend has to abort promptly instead
+	// of running to its full timeout.
+	cr := newOperatingModeCR("sbx-1", sandboxv1beta1.SandboxOperatingModeRunning)
+	sb, _ := newSuspendTestSandbox(t, cr, true)
+
+	sb.lifecycleSem <- struct{}{} // hold the lock so Suspend parks in acquisition
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- sb.Suspend(context.Background(), WithTimeout(30*time.Second)) }()
+	time.Sleep(50 * time.Millisecond) // let Suspend reach the semaphore wait
+
+	discCh := make(chan error, 1)
+	go func() { discCh <- sb.Disconnect(context.Background()) }()
+	time.Sleep(50 * time.Millisecond) // Disconnect sees no hook and records the interrupt
+
+	<-sb.lifecycleSem // release: Suspend acquires and must notice the missed interrupt
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("Suspend succeeded despite the interrupt")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Suspend ignored an interrupt that arrived during semaphore acquisition")
+	}
+	if err := <-discCh; err != nil {
+		t.Errorf("Disconnect: %v", err)
+	}
+}
+
+func TestSandbox_Suspend_ExternalModeFlipIsNotSuccess(t *testing.T) {
+	// If another client flips operatingMode back to Running while the wait
+	// is in flight, a Suspended=True condition stamped at the current
+	// generation describes a suspension that is no longer wanted. The wait
+	// must not report success.
+	cr := newOperatingModeCR("sbx-1", sandboxv1beta1.SandboxOperatingModeRunning)
+	sb, cs := newSuspendTestSandbox(t, cr, true)
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- sb.Suspend(context.Background(), WithTimeout(time.Second)) }()
+
+	waitForPatchAction(t, cs)
+	simulateController(cs, cr.Name, func(cr *sandboxv1beta1.Sandbox) {
+		cr.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeRunning
+		cr.Status.Conditions = []metav1.Condition{suspendedCond(cr.Generation)}
+	}, controllerStop(t))
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, ErrTimeout) {
+			t.Fatalf("Suspend error = %v, want ErrTimeout after an external mode flip", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Suspend did not return")
+	}
+}
+
+func TestSandbox_Resume_ExternalModeFlipIsNotSuccess(t *testing.T) {
+	// Symmetric case: another client re-suspends while Resume waits, and a
+	// stale-but-current-generation Ready=True must not satisfy the wait.
+	cr := newOperatingModeCR("sbx-1", sandboxv1beta1.SandboxOperatingModeSuspended)
+	sb, cs := newSuspendTestSandbox(t, cr, false)
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- sb.Resume(context.Background(), WithTimeout(time.Second)) }()
+
+	waitForPatchAction(t, cs)
+	simulateController(cs, cr.Name, func(cr *sandboxv1beta1.Sandbox) {
+		cr.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeSuspended
+		cr.Status.Conditions = []metav1.Condition{readyCond(cr.Generation)}
+		cr.Status.PodIPs = []string{"10.0.0.5"}
+	}, controllerStop(t))
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, ErrTimeout) {
+			t.Fatalf("Resume error = %v, want ErrTimeout after an external mode flip", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Resume did not return")
+	}
+}
+
+func TestPatchSandboxOperatingMode_UIDTestOp(t *testing.T) {
+	// The patch itself must carry the identity check (JSON Patch test op on
+	// metadata.uid) so a same-name replacement cannot be modified in the
+	// window between the SDK's read and write.
+	cr := newOperatingModeCR("sbx-1", sandboxv1beta1.SandboxOperatingModeRunning)
+	agentsCS := fakeagents.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	if err := agentsCS.Tracker().Create(sandboxGVR, cr, cr.Namespace); err != nil {
+		t.Fatalf("seed sandbox CR: %v", err)
+	}
+	h := &K8sHelper{AgentsClient: agentsCS.AgentsV1beta1(), Log: logr.Discard()}
+	tracer := noop.NewTracerProvider().Tracer("test")
+	ctx := context.Background()
+
+	if _, err := h.patchSandboxOperatingMode(ctx, "sbx-1", "default",
+		sandboxv1beta1.SandboxOperatingModeSuspended, types.UID("someone-else"), tracer, "test"); err == nil {
+		t.Fatal("patch carrying a foreign UID test op succeeded")
+	}
+	if got := getCR(t, agentsCS, "sbx-1").Spec.OperatingMode; got != sandboxv1beta1.SandboxOperatingModeRunning {
+		t.Errorf("operatingMode = %q after the rejected patch, want Running (replacement must stay untouched)", got)
+	}
+
+	patched, err := h.patchSandboxOperatingMode(ctx, "sbx-1", "default",
+		sandboxv1beta1.SandboxOperatingModeSuspended, cr.UID, tracer, "test")
+	if err != nil {
+		t.Fatalf("patch with the opened UID: %v", err)
+	}
+	if patched.Spec.OperatingMode != sandboxv1beta1.SandboxOperatingModeSuspended {
+		t.Errorf("operatingMode = %q, want Suspended", patched.Spec.OperatingMode)
+	}
+
+	if _, err := h.patchSandboxOperatingMode(ctx, "sbx-1", "default",
+		sandboxv1beta1.SandboxOperatingModeRunning, "", tracer, "test"); err != nil {
+		t.Fatalf("patch without a recorded UID (unguarded): %v", err)
 	}
 }
 

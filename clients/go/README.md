@@ -417,8 +417,9 @@ become Ready, and re-establishes connectivity, so the same handle keeps
 working. Both are idempotent: `Suspend` on an already suspended sandbox
 skips the patch and just completes the suspension (closing the transport and
 waiting for the pod to terminate), and `Resume` on a running sandbox skips
-the patch — it returns immediately when connected, or reconnects when the
-handle lost its transport.
+the patch — it confirms the sandbox is Ready, keeps a connected transport
+when the same pod still backs it, and reconnects when the handle lost its
+transport or the pod was replaced underneath it.
 
 ```go
 if err := sb.Suspend(ctx); err != nil { log.Fatal(err) }

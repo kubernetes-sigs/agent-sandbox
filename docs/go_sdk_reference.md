@@ -1467,7 +1467,7 @@ func (s *Sandbox) Resume(ctx context.Context, opts ...CallOption) error
 
 Resume makes a suspended sandbox runnable again: it sets the Sandbox's spec.operatingMode back to Running, waits for the sandbox to become Ready, and re\-establishes connectivity so the caller can keep using the same handle.
 
-Resume is idempotent. On a sandbox that is already running it does not patch: if this handle is connected, Resume returns nil immediately; if the handle lost its transport, Resume waits for readiness and reconnects. Pass WithTimeout to override Options.SandboxReadyTimeout as the wait budget.
+Resume is idempotent. On a sandbox that is already running it does not patch: Resume waits for the sandbox to report Ready at its current generation and leaves a connected transport alone, unless the pod behind the sandbox changed — another client may have suspended and resumed it — in which case Resume rebuilds the transport. A handle that lost its transport always reconnects. Pass WithTimeout to override Options.SandboxReadyTimeout as the wait budget.
 
 <a name="Sandbox.Run"></a>
 #### func \(\*Sandbox\) [Run](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)

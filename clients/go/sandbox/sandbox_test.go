@@ -1177,7 +1177,7 @@ func TestDrainSandboxWatch_ErrorTriggersRelist(t *testing.T) {
 			go func() { fw.Error(&tc.status) }()
 
 			var lastCond string
-			_, done, err := h.drainSandboxWatch(context.Background(), fw, "test-claim", &lastCond, "readiness", isSandboxReady)
+			_, done, err := h.drainSandboxWatch(context.Background(), fw, "test-claim", &lastCond, "readiness", "", isSandboxReady)
 			if done {
 				t.Error("expected done=false")
 			}
@@ -1197,7 +1197,7 @@ func TestDrainSandboxWatch_Deleted(t *testing.T) {
 	}()
 
 	var lastCond string
-	_, done, err := h.drainSandboxWatch(context.Background(), fw, "test-claim", &lastCond, "readiness", isSandboxReady)
+	_, done, err := h.drainSandboxWatch(context.Background(), fw, "test-claim", &lastCond, "readiness", "", isSandboxReady)
 	if done {
 		t.Error("expected done=false for Deleted event")
 	}
@@ -2242,7 +2242,7 @@ func TestDrainSandboxWatch_NonSandboxObject(t *testing.T) {
 	}()
 
 	var lastCond string
-	_, done, err := h.drainSandboxWatch(context.Background(), fw, "test-claim", &lastCond, "readiness", isSandboxReady)
+	_, done, err := h.drainSandboxWatch(context.Background(), fw, "test-claim", &lastCond, "readiness", "", isSandboxReady)
 	if done {
 		t.Error("expected done=false for non-sandbox object")
 	}

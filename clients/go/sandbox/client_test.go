@@ -1130,7 +1130,7 @@ func TestWaitForSandboxReady_FailsFastOnTerminalSandbox(t *testing.T) {
 				return true, fw, nil
 			})
 
-			_, err := k8s.waitForSandboxReady(context.Background(), "target", "default", 5*time.Second, 0, noop.NewTracerProvider().Tracer("test"), "test")
+			_, err := k8s.waitForSandboxReady(context.Background(), "target", "default", 5*time.Second, 0, "", "", noop.NewTracerProvider().Tracer("test"), "test")
 			if !errors.Is(err, ErrClaimFailed) {
 				t.Fatalf("expected ErrClaimFailed, got: %v", err)
 			}
@@ -1168,7 +1168,7 @@ func TestWaitForSandboxReady_UsesSandboxName(t *testing.T) {
 		}, nil
 	})
 
-	state, err := k8s.waitForSandboxReady(context.Background(), "warm-pool-sandbox-xyz", "default", 5*time.Second, 0, noop.NewTracerProvider().Tracer("test"), "test")
+	state, err := k8s.waitForSandboxReady(context.Background(), "warm-pool-sandbox-xyz", "default", 5*time.Second, 0, "", "", noop.NewTracerProvider().Tracer("test"), "test")
 	if err != nil {
 		t.Fatal(err)
 	}

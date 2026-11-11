@@ -282,6 +282,28 @@ class TestSandboxdFilesystem(unittest.TestCase):
                 call()
         self._connector.send_request.assert_not_called()
 
+    def test_extract_sends_tar_body(self):
+        self._fs.extract("src dir", b"tar-bytes")
+        args, kwargs = self._last_call()
+        self.assertEqual(args[:2], ("PUT", "v1/files/src%20dir?extract=tar"))
+        self.assertEqual(kwargs["data"], b"tar-bytes")
+        self.assertFalse(kwargs["_disable_retries"])
+
+    def test_extract_streams_file_object_without_retries(self):
+        self._fs.extract("src", io.BytesIO(b"tar-bytes"))
+        _, kwargs = self._last_call()
+        self.assertEqual(b"".join(kwargs["data"]), b"tar-bytes")
+        self.assertTrue(kwargs["_disable_retries"])
+
+    def test_extract_rejects_bad_arguments(self):
+        for call, error in (
+            (lambda: self._fs.extract("", b"x"), ValueError),
+            (lambda: self._fs.extract("src", io.StringIO("x")), TypeError),
+        ):
+            with self.subTest(), self.assertRaises(error):
+                call()
+        self._connector.send_request.assert_not_called()
+
 
 class TestLegacyFileOpsUnsupported(unittest.TestCase):
     def test_sandboxd_only_ops_raise_on_legacy(self):
@@ -293,6 +315,7 @@ class TestLegacyFileOpsUnsupported(unittest.TestCase):
             lambda: fs.mkdir("d"),
             lambda: fs.move("a", "b"),
             lambda: fs.copy("a", "b"),
+            lambda: fs.extract("d", b"x"),
             lambda: fs.write("a", b"x", append=True),
             lambda: fs.write("a", b"x", create_only=True),
         ):

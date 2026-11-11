@@ -29,7 +29,9 @@ from k8s_agent_sandbox.files.filesystem import (
     Filesystem,
     _check_download_headers,
     _download_limit,
+    _extract_endpoint,
     _multipart_framing,
+    _prepare_archive,
     _read_binary_chunk,
     _STREAM_CHUNK_SIZE,
     _mkdir_endpoint,
@@ -473,3 +475,30 @@ class AsyncFilesystem:
             self.connector, "copy", source, destination, overwrite)
         await self.connector.send_request("POST", endpoint, timeout=timeout)
         logger.info(f"Path '{source}' copied to '{destination}'.")
+
+    @async_trace_span("extract")
+    async def extract(
+        self, path: str, archive: bytes | BinaryIO, timeout: int = 60
+    ) -> None:
+        """Unpack a tar archive into a sandboxd directory.
+
+        See ``Filesystem.extract``.
+        """
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", path)
+        endpoint = _extract_endpoint(self.connector, path)
+        archive = _prepare_archive(archive)
+        body: bytes | AsyncIterator[bytes]
+        if isinstance(archive, bytes):
+            body = archive
+        else:
+            body = _iter_binary_chunks(archive)
+        await self.connector.send_request(
+            "PUT", endpoint,
+            content=body,
+            headers={"Content-Type": "application/octet-stream"},
+            timeout=timeout,
+            _disable_retries=not isinstance(archive, bytes),
+        )
+        logger.info(f"Archive extracted into '{path}'.")

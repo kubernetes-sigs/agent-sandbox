@@ -332,6 +332,10 @@ paths. The legacy runtime raises `NotImplementedError`.
 Neither is retried, and an append is not atomic. The legacy runtime raises
 `NotImplementedError`.
 
+`files.extract(path, archive)` unpacks a tar archive, optionally gzipped, into
+a directory. `archive` is `bytes` or a binary file object. The legacy runtime
+raises `NotImplementedError`.
+
 ### 6. Async Client
 
 For async applications (FastAPI, aiohttp, async agent orchestrators), use the `AsyncSandboxClient`.

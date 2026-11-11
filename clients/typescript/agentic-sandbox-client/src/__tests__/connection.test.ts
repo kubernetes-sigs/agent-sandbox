@@ -12,16 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { describe, expect, it } from "vitest";
+import type * as k8s from "@kubernetes/client-node";
+import { describe, expect, it, vi } from "vitest";
 import {
   createConnectionStrategy,
   formatHost,
   InClusterStrategy,
   PortForwardStrategy,
+  RouterPortForwardStrategy,
   resolveInClusterHost,
+  resolveRouterPod,
   selectPodIP,
 } from "../connection.js";
-import { SandboxMetadataError, SandboxNoServiceError } from "../exceptions.js";
+import {
+  SandboxConnectionError,
+  SandboxMetadataError,
+  SandboxNoServiceError,
+} from "../exceptions.js";
 import { noopLogger } from "../logger.js";
 
 describe("selectPodIP", () => {
@@ -101,6 +108,7 @@ describe("createConnectionStrategy", () => {
     serviceFQDN: "sb.default.svc.cluster.local",
     restPort: 8080,
     grpcPort: 9090,
+    routerNamespace: "default",
     handshakeTimeoutMs: 1000,
     logger: noopLogger,
   };
@@ -131,5 +139,120 @@ describe("createConnectionStrategy", () => {
     expect(transport.grpcBaseUrl).toBe(
       "http://sb.default.svc.cluster.local:9090",
     );
+  });
+
+  it("selects router-port-forward", () => {
+    const strategy = createConnectionStrategy("router-port-forward", target);
+    expect(strategy).toBeInstanceOf(RouterPortForwardStrategy);
+    expect(strategy.connectivity).toBe("router-port-forward");
+  });
+});
+
+describe("resolveRouterPod", () => {
+  const SELECTOR = "kubernetes.io/service-name=sandbox-router-svc";
+
+  function withDiscovery(slices: k8s.V1EndpointSliceList): {
+    kubeConfig: k8s.KubeConfig;
+    discovery: { listNamespacedEndpointSlice: ReturnType<typeof vi.fn> };
+  } {
+    const discovery = {
+      listNamespacedEndpointSlice: vi.fn().mockResolvedValue(slices),
+    };
+    const kubeConfig = {
+      makeApiClient: () => discovery,
+    } as unknown as k8s.KubeConfig;
+    return { kubeConfig, discovery };
+  }
+
+  function sliceWith(
+    endpoints: Array<{
+      name?: string;
+      ready?: boolean;
+    }>,
+  ): k8s.V1EndpointSliceList {
+    return {
+      items: [
+        {
+          endpoints: endpoints.map((e) => ({
+            targetRef: e.name ? { name: e.name } : undefined,
+            conditions: e.ready === undefined ? undefined : { ready: e.ready },
+          })),
+        },
+      ],
+    } as unknown as k8s.V1EndpointSliceList;
+  }
+
+  it("returns the first ready endpoint's target pod name", async () => {
+    const { kubeConfig, discovery } = withDiscovery(
+      sliceWith([
+        { name: "router-pod-abc", ready: true },
+        { name: "router-pod-def", ready: true },
+      ]),
+    );
+
+    await expect(
+      resolveRouterPod(kubeConfig, "agent-sandbox-system"),
+    ).resolves.toBe("router-pod-abc");
+    expect(discovery.listNamespacedEndpointSlice).toHaveBeenCalledWith({
+      namespace: "agent-sandbox-system",
+      labelSelector: SELECTOR,
+    });
+  });
+
+  it("skips not-ready endpoints and treats a missing ready condition as ready", async () => {
+    const { kubeConfig } = withDiscovery(
+      sliceWith([
+        { name: "router-pod-notready", ready: false },
+        { name: "router-pod-ready", ready: true },
+        { name: "router-pod-implicit" },
+      ]),
+    );
+
+    // The first ready endpoint (explicit) wins before the implicit one is
+    // ever considered.
+    await expect(resolveRouterPod(kubeConfig, "ns")).resolves.toBe(
+      "router-pod-ready",
+    );
+  });
+
+  it("throws a connection error when the router has no ready endpoints", async () => {
+    const { kubeConfig } = withDiscovery(sliceWith([]));
+    await expect(resolveRouterPod(kubeConfig, "ns")).rejects.toBeInstanceOf(
+      SandboxConnectionError,
+    );
+  });
+
+  it("wraps a list failure while the signal is still active", async () => {
+    const discovery = {
+      listNamespacedEndpointSlice: vi.fn().mockRejectedValue(new Error("boom")),
+    };
+    const kubeConfig = {
+      makeApiClient: () => discovery,
+    } as unknown as k8s.KubeConfig;
+    const controller = new AbortController();
+    await expect(
+      resolveRouterPod(kubeConfig, "ns", controller.signal),
+    ).rejects.toBeInstanceOf(SandboxConnectionError);
+  });
+
+  it("rejects when discovery is aborted and ignores a list that completes later", async () => {
+    let resolveList: (value: k8s.V1EndpointSliceList) => void = () => {};
+    const listed = new Promise<k8s.V1EndpointSliceList>((resolve) => {
+      resolveList = resolve;
+    });
+    const discovery = {
+      listNamespacedEndpointSlice: vi.fn().mockReturnValue(listed),
+    };
+    const kubeConfig = {
+      makeApiClient: () => discovery,
+    } as unknown as k8s.KubeConfig;
+    const controller = new AbortController();
+    const pending = resolveRouterPod(kubeConfig, "ns", controller.signal);
+    controller.abort(new Error("deadline"));
+    await expect(pending).rejects.toThrow("deadline");
+
+    resolveList(sliceWith([{ name: "late-pod", ready: true }]));
+    await Promise.resolve();
+    await expect(pending).rejects.toThrow("deadline");
   });
 });

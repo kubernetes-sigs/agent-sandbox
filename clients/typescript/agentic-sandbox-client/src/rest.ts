@@ -40,6 +40,8 @@ export interface SandboxdRestClientOptions {
   maxMetadataResponseSize: number;
   /** `Authorization` header value sent on every request, when set. */
   authorization?: string;
+  /** Lowercase x-sandbox-* routing headers, sent only in router mode. */
+  routingHeaders?: Readonly<Record<string, string>>;
 }
 
 export type SandboxPathOperation =
@@ -552,9 +554,13 @@ export class SandboxdRestClient {
     const fetchInit: RequestInit & { duplex?: "half" } = {
       method,
       body: init.body,
-      headers: this.opts.authorization
-        ? { ...init.headers, Authorization: this.opts.authorization }
-        : init.headers,
+      headers: {
+        ...this.opts.routingHeaders,
+        ...init.headers,
+        ...(this.opts.authorization
+          ? { Authorization: this.opts.authorization }
+          : {}),
+      },
       // Never follow a redirect: it could carry the token to another host.
       redirect: "error",
       signal: combined,

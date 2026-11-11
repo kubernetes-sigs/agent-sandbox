@@ -151,24 +151,39 @@ export interface ResolvedSandboxdOptions {
   maxUploadSize: number;
   maxMetadataResponseSize: number;
   maxCommandOutputSize: number;
-  /** Full `Authorization` header value ("Bearer <token>"), if configured. */
-  authorization?: string;
+  /**
+   * Bare sandboxd token: `Authorization: Bearer <token>`, or `X-Sandboxd-Token`
+   * (bare) in router mode because the router strips Authorization.
+   */
+  authToken?: string;
+  /**
+   * Bare sandbox-router token, sent as `Authorization: Bearer <token>` in
+   * router mode only; the router strips it before forwarding.
+   */
+  routerAuthToken?: string;
+  /** Namespace where sandbox-router-svc lives; undefined means the claim namespace. */
+  routerNamespace?: string;
+  /** Suppress the X-Sandbox-Pod-IP routing header/metadata. */
+  disablePodIPRouting: boolean;
 }
 
 // Printable ASCII without spaces, so the value is always a legal header value.
 // An illegal one would make fetch() throw an error that quotes the token.
 const AUTH_TOKEN_RE = /^[\x21-\x7e]+$/;
 
-function bearerAuthorization(token: string | undefined): string | undefined {
+function validateToken(
+  name: string,
+  token: string | undefined,
+): string | undefined {
   if (token === undefined) return undefined;
   // The message must not echo the token.
   if (typeof token !== "string" || !AUTH_TOKEN_RE.test(token)) {
     throw new SandboxError(
-      "sandboxd.authToken must be a non-empty string of printable ASCII characters with no spaces",
+      `${name} must be a non-empty string of printable ASCII characters with no spaces`,
       { telemetryCode: "invalid_argument" },
     );
   }
-  return `Bearer ${token}`;
+  return token;
 }
 
 function validateBoundedInt(
@@ -195,6 +210,11 @@ function validateBoundedInt(
 export function normalizeSandboxdOptions(
   opts?: SandboxdOptions,
 ): ResolvedSandboxdOptions {
+  const authToken = validateToken("sandboxd.authToken", opts?.authToken);
+  const routerAuthToken = validateToken(
+    "sandboxd.routerAuthToken",
+    opts?.routerAuthToken,
+  );
   const resolved: ResolvedSandboxdOptions = {
     connectivity: validateConnectivity(opts?.connectivity),
     restPort:
@@ -234,7 +254,10 @@ export function normalizeSandboxdOptions(
         opts?.maxCommandOutputSize,
         0xffffffff,
       ) ?? DEFAULT_MAX_COMMAND_OUTPUT_SIZE,
-    authorization: bearerAuthorization(opts?.authToken),
+    authToken,
+    routerAuthToken,
+    routerNamespace: validateRouterNamespace(opts?.routerNamespace),
+    disablePodIPRouting: validateDisablePodIPRouting(opts?.disablePodIPRouting),
   };
   // With in-cluster connectivity both would dial the same pod address, so
   // REST and gRPC must be on distinct ports; the Go client rejects this too.
@@ -249,6 +272,7 @@ export function normalizeSandboxdOptions(
 
 const CONNECTIVITY_VALUES: readonly SandboxdConnectivity[] = [
   "port-forward",
+  "router-port-forward",
   "in-cluster-service",
   "in-cluster-pod-ip",
 ];
@@ -260,6 +284,36 @@ function validateConnectivity(
   if (!CONNECTIVITY_VALUES.includes(value)) {
     throw new SandboxError(
       `sandboxd.connectivity must be one of ${CONNECTIVITY_VALUES.map((v) => `"${v}"`).join(", ")}, got: ${String(value)}`,
+      { telemetryCode: "invalid_argument" },
+    );
+  }
+  return value;
+}
+
+function validateRouterNamespace(
+  value: string | undefined,
+): string | undefined {
+  if (value === undefined) return undefined;
+  // A Kubernetes namespace is a DNS-1123 label.
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > 63 ||
+    !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(value)
+  ) {
+    throw new SandboxError(
+      `sandboxd.routerNamespace must be a valid Kubernetes namespace (DNS label), got: ${String(value)}`,
+      { telemetryCode: "invalid_argument" },
+    );
+  }
+  return value;
+}
+
+function validateDisablePodIPRouting(value: boolean | undefined): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") {
+    throw new SandboxError(
+      `sandboxd.disablePodIPRouting must be a boolean, got: ${String(value)}`,
       { telemetryCode: "invalid_argument" },
     );
   }
@@ -450,6 +504,7 @@ export class Sandbox {
         serviceFQDN: this.serviceFQDN,
         restPort: init.sandboxdOptions.restPort,
         grpcPort: init.sandboxdOptions.grpcPort,
+        routerNamespace: init.sandboxdOptions.routerNamespace ?? this.namespace,
         handshakeTimeoutMs: init.sandboxdOptions.portForwardReadyTimeoutMs,
         logger: this.logger,
       },
@@ -838,24 +893,36 @@ export class Sandbox {
 
     let transport: SandboxdTransport | undefined;
     try {
-      transport = await this.connectionStrategy.open();
+      transport = await this.connectionStrategy.open(signal);
       this.logger.debug(
         `sandboxd transport opened (connectivity: ${this.connectionStrategy.connectivity})`,
       );
+
+      // In router mode Authorization is the router's own credential; the
+      // sandboxd token rides X-Sandboxd-Token instead (see routerRouting()).
+      const isRouter =
+        this.sandboxdOptions.connectivity === "router-port-forward";
+      const token = isRouter
+        ? this.sandboxdOptions.routerAuthToken
+        : this.sandboxdOptions.authToken;
+      const authorization = token === undefined ? undefined : `Bearer ${token}`;
+      const routing = this.routerRouting();
 
       const rest = new SandboxdRestClient({
         baseUrl: transport.restBaseUrl,
         maxDownloadSize: this.sandboxdOptions.maxDownloadSize,
         maxUploadSize: this.sandboxdOptions.maxUploadSize,
         maxMetadataResponseSize: this.sandboxdOptions.maxMetadataResponseSize,
-        authorization: this.sandboxdOptions.authorization,
+        authorization,
+        routingHeaders: routing?.restHeaders,
       });
       await this.waitForHealthy(rest, transport, signal);
 
       const process = new ProcessClient({
         grpcBaseUrl: transport.grpcBaseUrl,
         maxCommandOutputSize: this.sandboxdOptions.maxCommandOutputSize,
-        authorization: this.sandboxdOptions.authorization,
+        authorization,
+        routingMetadata: routing?.grpcMetadata,
       });
 
       return {
@@ -871,6 +938,48 @@ export class Sandbox {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /**
+   * Lowercase routing headers/metadata the router consumes; REST and gRPC
+   * share one map and differ only in x-sandbox-port.
+   */
+  private routerRouting():
+    | {
+        restHeaders: Record<string, string>;
+        grpcMetadata: Record<string, string>;
+      }
+    | undefined {
+    if (this.sandboxdOptions.connectivity !== "router-port-forward") {
+      return undefined;
+    }
+    const common: Record<string, string> = {
+      "x-sandbox-id": this.sandboxName,
+      "x-sandbox-namespace": this.namespace,
+    };
+    // A captured pod IP overrides the router's cache and DNS.
+    if (
+      this.podIP !== "" &&
+      this.serviceFQDN === "" &&
+      !this.sandboxdOptions.disablePodIPRouting
+    ) {
+      common["x-sandbox-pod-ip"] = this.podIP;
+    }
+    // The router strips Authorization but forwards X-Sandboxd-Token, which
+    // sandboxd reads as its bearer token (#2164). Send the bare token there.
+    if (this.sandboxdOptions.authToken !== undefined) {
+      common["x-sandboxd-token"] = this.sandboxdOptions.authToken;
+    }
+    return {
+      restHeaders: {
+        ...common,
+        "x-sandbox-port": String(this.sandboxdOptions.restPort),
+      },
+      grpcMetadata: {
+        ...common,
+        "x-sandbox-port": String(this.sandboxdOptions.grpcPort),
+      },
+    };
   }
 
   private async waitForHealthy(

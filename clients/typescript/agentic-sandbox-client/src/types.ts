@@ -61,16 +61,25 @@ export interface SandboxdOptions {
    * {@link SandboxdConnectivity}.
    */
   connectivity?: SandboxdConnectivity;
+  /**
+   * Namespace of the sandbox-router ("agent-sandbox-system" in shipped
+   * manifests); defaults to the claim namespace. Router mode only.
+   */
+  routerNamespace?: string;
+  /**
+   * Omit X-Sandbox-Pod-IP. Also omitted when the Sandbox has a headless
+   * Service. Set for a router cache, or for scoped-token authz (it rejects
+   * a raw pod IP). Router mode only. Default: false.
+   */
+  disablePodIPRouting?: boolean;
   /** sandboxd's REST files/health port inside the Pod. Default: 8080. */
   restPort?: number;
   /** sandboxd's gRPC process port inside the Pod. Default: 9090. */
   grpcPort?: number;
   /**
-   * Budget (ms) for establishing the shared connection, through a
-   * successful /v1/health check: for "port-forward" it starts when both
-   * local listeners are opened; for the in-cluster modes it bounds the
-   * health polling against the pod address. Re-applied in full on every
-   * reconnect. Default: 30000.
+   * Budget (ms) for one connect attempt through /v1/health, including
+   * router EndpointSlice discovery. Reapplied on every reconnect.
+   * Default: 30000.
    */
   portForwardReadyTimeoutMs?: number;
   /**
@@ -95,13 +104,15 @@ export interface SandboxdOptions {
    */
   maxCommandOutputSize?: number;
   /**
-   * Bearer token for a sandboxd started with --auth-token-sha256 or
-   * --auth-token-file. Sent as `Authorization: Bearer <token>` on every REST
-   * request and gRPC call, and never logged or put in an error. It is not
-   * encrypted on the wire: with the in-cluster modes it travels in plaintext.
-   * Must be non-empty printable ASCII with no spaces. Default: none.
+   * sandboxd token: `Authorization: Bearer <token>`, or bare `X-Sandboxd-Token`
+   * in router mode (the router strips Authorization). Never logged.
    */
   authToken?: string;
+  /**
+   * The sandbox-router's own credential, sent as `Authorization: Bearer
+   * <token>` in router mode only; the router strips it before forwarding.
+   */
+  routerAuthToken?: string;
 }
 
 /**
@@ -123,6 +134,8 @@ export interface SandboxdOptions {
  *   Service, but nothing detects that the pod was rescheduled: requests can
  *   continue to a stale address Kubernetes may have reassigned to an
  *   unrelated pod.
+ * - `"router-port-forward"`: port-forwards the sandbox-router, the laptop/CI
+ *   path for Kata/gVisor sandboxes (gRPC needs sandbox-router v1.0.9+).
  *
  * Both in-cluster modes require this process to run inside the same cluster
  * as the sandbox pods, and send REST and gRPC in plaintext across the pod
@@ -130,6 +143,7 @@ export interface SandboxdOptions {
  */
 export type SandboxdConnectivity =
   | "port-forward"
+  | "router-port-forward"
   | "in-cluster-service"
   | "in-cluster-pod-ip";
 

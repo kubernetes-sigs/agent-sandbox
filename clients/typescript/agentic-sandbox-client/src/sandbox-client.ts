@@ -708,10 +708,10 @@ export class SandboxClient {
   /**
    * Retrieves an existing sandbox handle by claim name.
    * Returns the cached handle if still active, otherwise re-attaches.
-   * `opts` applies only to a re-attach; a cached handle is returned without
-   * waiting, unless it was attached with `waitForReady: false` before the
-   * Sandbox had an in-cluster address, in which case it is closed and replaced. A concurrent call for the same claim joins the attach already in
-   * flight, including its options.
+   * `opts` applies only to a re-attach. A cached handle is returned as-is,
+   * unless an in-cluster mode attached it before the Sandbox had an address.
+   * Port-forward and router-port-forward keep a handle with no pod IP.
+   * A concurrent call for the same claim joins the attach already in flight.
    */
   async getSandbox(
     claimName: string,
@@ -1359,12 +1359,12 @@ export class SandboxClient {
       namespace,
       timeoutMs,
     );
-    if (this.sandboxdOptions.connectivity !== "port-forward") {
-      resolveInClusterHost(
-        this.sandboxdOptions.connectivity,
-        ready.podIP,
-        ready.serviceFQDN,
-      );
+    const connectivity = this.sandboxdOptions.connectivity;
+    if (
+      connectivity === "in-cluster-service" ||
+      connectivity === "in-cluster-pod-ip"
+    ) {
+      resolveInClusterHost(connectivity, ready.podIP, ready.serviceFQDN);
     }
     return ready;
   }
@@ -1763,7 +1763,12 @@ export class SandboxClient {
   /** False when an in-cluster mode has no address to dial for this handle. */
   private hasConnectionAddress(sandbox: Sandbox): boolean {
     const { connectivity } = this.sandboxdOptions;
-    if (connectivity === "port-forward") return true;
+    if (
+      connectivity === "port-forward" ||
+      connectivity === "router-port-forward"
+    ) {
+      return true;
+    }
     try {
       resolveInClusterHost(connectivity, sandbox.podIP, sandbox.serviceFQDN);
       return true;

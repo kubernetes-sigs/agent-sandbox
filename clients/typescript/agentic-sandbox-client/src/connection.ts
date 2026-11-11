@@ -13,7 +13,12 @@
 // limitations under the License.
 
 import * as net from "node:net";
-import type * as k8s from "@kubernetes/client-node";
+import * as k8s from "@kubernetes/client-node";
+import {
+  ROUTER_PROXY_PORT,
+  ROUTER_SERVICE_LABEL_SELECTOR,
+  ROUTER_SERVICE_NAME,
+} from "./constants.js";
 import {
   SandboxConnectionError,
   type SandboxError,
@@ -48,7 +53,7 @@ export interface SandboxdTransport {
  */
 export interface SandboxdConnectionStrategy {
   readonly connectivity: SandboxdConnectivity;
-  open(): Promise<SandboxdTransport>;
+  open(signal?: AbortSignal): Promise<SandboxdTransport>;
 }
 
 /** @internal */
@@ -60,6 +65,8 @@ export interface ConnectionTarget {
   serviceFQDN: string;
   restPort: number;
   grpcPort: number;
+  /** Namespace where sandbox-router-svc lives (router-port-forward only). */
+  routerNamespace: string;
   /** Budget for each port-forward WS handshake. */
   handshakeTimeoutMs: number;
   logger: Logger;
@@ -113,6 +120,140 @@ export class PortForwardStrategy implements SandboxdConnectionStrategy {
         if (!isTerminalPortForwardFailure(err)) return undefined;
         return new SandboxConnectionError(
           "sandboxd port-forward was rejected by the apiserver",
+          "port_forward",
+          { cause: err },
+        );
+      },
+      close: () => tunnel.close(),
+    };
+  }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw signal.reason;
+}
+
+/** Resolves with `promise`, or rejects when `signal` aborts first. */
+function abandonOnAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  if (!signal) return promise;
+  throwIfAborted(signal);
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        if (signal.aborted) reject(signal.reason);
+        else resolve(value);
+      },
+      (err: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        if (signal.aborted) reject(signal.reason);
+        else reject(err);
+      },
+    );
+  });
+}
+
+/**
+ * Finds a ready sandbox-router pod through its EndpointSlices.
+ * @internal
+ */
+export async function resolveRouterPod(
+  kubeConfig: k8s.KubeConfig,
+  namespace: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  throwIfAborted(signal);
+  const discovery = kubeConfig.makeApiClient(k8s.DiscoveryV1Api);
+  // The list API cannot be cancelled, so stop waiting when signal aborts.
+  let settled: Promise<
+    { ok: true; value: k8s.V1EndpointSliceList } | { ok: false; err: unknown }
+  >;
+  try {
+    settled = Promise.resolve(
+      discovery.listNamespacedEndpointSlice({
+        namespace,
+        labelSelector: ROUTER_SERVICE_LABEL_SELECTOR,
+      }),
+    ).then(
+      (value) => ({ ok: true as const, value }),
+      (err: unknown) => ({ ok: false as const, err }),
+    );
+  } catch (err) {
+    throw new SandboxConnectionError(
+      `failed to list EndpointSlices for ${ROUTER_SERVICE_NAME}`,
+      "unavailable",
+      { cause: err },
+    );
+  }
+  const result = await abandonOnAbort(settled, signal);
+  throwIfAborted(signal);
+  if (!result.ok) {
+    throw new SandboxConnectionError(
+      `failed to list EndpointSlices for ${ROUTER_SERVICE_NAME}`,
+      "unavailable",
+      { cause: result.err },
+    );
+  }
+  for (const slice of result.value.items ?? []) {
+    for (const endpoint of slice.endpoints ?? []) {
+      // A missing ready condition means ready (nil is true in Kubernetes).
+      if (endpoint.conditions?.ready === false) continue;
+      const podName = endpoint.targetRef?.name;
+      if (podName) {
+        throwIfAborted(signal);
+        return podName;
+      }
+    }
+  }
+  throwIfAborted(signal);
+  throw new SandboxConnectionError(
+    `no ready endpoints for ${ROUTER_SERVICE_NAME} in namespace ${namespace}`,
+    "unavailable",
+  );
+}
+
+/**
+ * Port-forwards the sandbox-router; the laptop/CI path for Kata/gVisor.
+ * @internal
+ */
+export class RouterPortForwardStrategy implements SandboxdConnectionStrategy {
+  readonly connectivity: SandboxdConnectivity = "router-port-forward";
+
+  constructor(private readonly target: ConnectionTarget) {}
+
+  async open(signal?: AbortSignal): Promise<SandboxdTransport> {
+    const podName = await resolveRouterPod(
+      this.target.kubeConfig,
+      this.target.routerNamespace,
+      signal,
+    );
+    throwIfAborted(signal);
+    const tunnel = new PodTunnel({
+      kubeConfig: this.target.kubeConfig,
+      namespace: this.target.routerNamespace,
+      podName,
+      restTargetPort: ROUTER_PROXY_PORT,
+      grpcTargetPort: ROUTER_PROXY_PORT,
+      handshakeTimeoutMs: this.target.handshakeTimeoutMs,
+      logger: this.target.logger,
+      sharedPort: true,
+    });
+    const endpoints = await tunnel.start();
+    return {
+      restBaseUrl: endpoints.restBaseUrl,
+      grpcBaseUrl: endpoints.grpcBaseUrl,
+      terminalError: () => {
+        // The apiserver rejecting the upgrade outright (auth denied, router
+        // pod gone) cannot be fixed by retrying the connect budget.
+        const err = tunnel.lastHandshakeError;
+        if (!isTerminalPortForwardFailure(err)) return undefined;
+        return new SandboxConnectionError(
+          "sandbox-router port-forward was rejected by the apiserver",
           "port_forward",
           { cause: err },
         );
@@ -198,6 +339,8 @@ export function createConnectionStrategy(
       return new InClusterStrategy(target, false);
     case "in-cluster-service":
       return new InClusterStrategy(target, true);
+    case "router-port-forward":
+      return new RouterPortForwardStrategy(target);
     default:
       return new PortForwardStrategy(target);
   }

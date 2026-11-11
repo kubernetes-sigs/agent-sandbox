@@ -198,7 +198,7 @@ default.
 ### Timeouts
 
 - `sandboxReadyTimeout` (constructor / `createSandbox()` options) is in **seconds** and bounds waiting for the `SandboxClaim`/`Sandbox` to become `Ready`. Default: 180.
-- `sandboxd.portForwardReadyTimeoutMs` (constructor option, under `sandboxd`) is in **milliseconds** and bounds the shared connection to sandboxd, through a successful health check: for `port-forward` connectivity it starts when both local port-forward listeners are opened, and for the in-cluster modes it bounds health polling against the pod address (see [Connectivity](#connectivity)). It applies in full to every (re)connect attempt, including reconnects after a transport failure. Default: 30000.
+- `sandboxd.portForwardReadyTimeoutMs` (constructor option, under `sandboxd`) is in **milliseconds** and bounds each shared connect attempt, from the start of that attempt through a successful health check. For `router-port-forward` that includes EndpointSlice discovery. It applies in full to every (re)connect, including reconnects after a transport failure. Default: 30000.
 - Every `sandbox.files.*` / `sandbox.commands.run()` / `sandbox.health()` / `sandbox.metadata()` call takes a per-call `timeoutMs` (default 60000). This is a total budget for the call, including any time spent waiting on the shared connection above — a cold first call can spend most of its budget just connecting. For `sandbox.commands.start()` it covers only the time until the process has started (see [Interactive processes](#interactive-processes)); the calls on the returned handle each take their own `timeoutMs`.
 - `sandboxd.maxCommandOutputSize` bounds the fully-decoded `ExecuteResponse` (stdout + stderr + protobuf framing combined, not stdout alone) that `sandbox.commands.run()` will accept.
 
@@ -209,18 +209,43 @@ default.
 | Value | Path | Requirements |
 | --- | --- | --- |
 | `"port-forward"` (default) | WebSocket port-forward brokered by the apiserver | A kubeconfig that allows `pods/portforward`. Works from anywhere, including a laptop or CI runner. |
+| `"router-port-forward"` | Port-forwards the sandbox-router, which proxies sandboxd's REST API to `restPort` and its gRPC API to `grpcPort` over one shared local port | A kubeconfig that allows `pods/portforward` and `list` on `endpointslices` in `routerNamespace`, plus a deployed sandbox-router (v1.0.9+ for gRPC). The laptop/CI path for Kata and gVisor sandboxes. |
 | `"in-cluster-service"` | Dials the Sandbox's headless Service by DNS name (`status.serviceFQDN`) | The process runs inside the cluster, and the template sets `spec.service: true`. |
 | `"in-cluster-pod-ip"` | Dials the pod IP (`status.podIPs`, IPv4 preferred) | The process runs inside the cluster. |
 
 `"port-forward"` doesn't work on Kata or gVisor: their workload runs in a separate
 kernel, so the pod's host-side network namespace has nothing for the port-forward to
-reach — use an in-cluster mode (the Sandbox NetworkPolicy must admit the client).
+reach — use `"router-port-forward"` or an in-cluster mode (the Sandbox NetworkPolicy
+must admit the client).
 
 ```ts
 const client = new SandboxClient({
   sandboxd: { connectivity: "in-cluster-service" },
 });
 ```
+
+`"router-port-forward"` resolves a ready `sandbox-router` pod through its
+EndpointSlices and port-forwards the router's own port instead of sandboxd's ports
+on the sandbox pod, so it works for Kata and gVisor sandboxes that pod
+port-forward cannot reach. REST and gRPC share a single local port-forward; the
+router selects the sandbox and its REST or gRPC port from the routing headers and
+metadata the SDK sends (`X-Sandbox-ID`, `X-Sandbox-Namespace`, `X-Sandbox-Port`,
+and `X-Sandbox-Pod-IP` when the Sandbox has no headless Service and
+`disablePodIPRouting` is not set). gRPC needs sandbox-router v1.0.9 or later.
+
+- `sandboxd.routerNamespace` names the namespace where the router runs (shipped
+  manifests use `"agent-sandbox-system"`). It defaults to the claim's namespace.
+- When the Sandbox has a headless Service (`status.serviceFQDN`), the SDK omits
+  `X-Sandbox-Pod-IP`. The router then resolves the live pod by DNS. The IP
+  captured when the handle was created would override that lookup, and after a
+  reschedule it can belong to a different pod.
+- When the Sandbox has no Service, the SDK sends that captured IP so a router
+  without a cache can still reach the sandbox. `sandboxd.disablePodIPRouting: true`
+  omits the header in that case too, and the router resolves the live pod from
+  its cache or DNS. Set it when the router runs with `--cache-enabled`.
+  Scoped-token authorization rejects `X-Sandbox-Pod-IP` (v2 rejects a raw pod
+  IP as well, and resolves through the cache), so set
+  `disablePodIPRouting: true` when the router uses `--authz-mode=scoped-token`.
 
 The in-cluster modes take the apiserver off the data path. Each uses exactly one address, and neither falls back to the other or to port-forwarding:
 
@@ -240,9 +265,28 @@ const client = new SandboxClient({
 });
 ```
 
-The SDK sends it as `Authorization: Bearer <token>` on every REST request and gRPC call, and never logs it or puts it in a trace or error. It must be non-empty printable ASCII with no spaces. A missing or wrong token fails the call with `SandboxdApiError` (`code: "UNAUTHENTICATED"`) for files and metadata, and `SandboxdRpcError` (`code: "unauthenticated"`) for commands. `GET /v1/health` needs no token, so the connect health check passes even with a wrong one and the first real call reports it.
+With `port-forward` and the in-cluster modes, the SDK sends `authToken` as `Authorization: Bearer <token>` on every REST request and gRPC call. With `router-port-forward`, `Authorization` is the router's own credential (`sandboxd.routerAuthToken`). The SDK sends `authToken` as the bare `X-Sandboxd-Token` header on REST and as `x-sandboxd-token` metadata on gRPC. The router strips `Authorization` and forwards `X-Sandboxd-Token`, which sandboxd reads as its bearer token. The SDK never logs either token or puts one in a trace or error. `authToken` must be non-empty printable ASCII with no spaces. A missing or wrong token fails the call with `SandboxdApiError` (`code: "UNAUTHENTICATED"`) for files and metadata, and `SandboxdRpcError` (`code: "unauthenticated"`) for commands. `GET /v1/health` needs no token, so the connect health check passes even with a wrong one and the first real call reports it.
 
 With `port-forward` the token rides the TLS connection to the apiserver. sandboxd has no TLS, so with the in-cluster modes it is sent in plaintext, and `in-cluster-pod-ip` can send it to an unrelated pod if the IP was reassigned. Prefer `in-cluster-service` or `port-forward`. See [Trust boundary](#trust-boundary).
+
+With `"router-port-forward"`, `X-Sandboxd-Token` still travels in plaintext from the router to the sandbox pod. A NetworkPolicy that admits only the router keeps it off the shared pod network.
+
+If the router itself requires authentication (e.g. `--authz-mode=tokenreview` or
+`scoped-token`), pass its credential as `sandboxd.routerAuthToken`. The SDK sends
+it as `Authorization: Bearer <token>` on every REST request and gRPC call in
+router mode only; the router consumes and strips it before forwarding, so it
+never reaches sandboxd. `authToken` and `routerAuthToken` are two independent
+credentials and can be set together.
+
+```ts
+const client = new SandboxClient({
+  sandboxd: {
+    connectivity: "router-port-forward",
+    authToken: process.env.SANDBOXD_TOKEN,
+    routerAuthToken: process.env.ROUTER_TOKEN,
+  },
+});
+```
 
 ### Streaming
 
@@ -386,7 +430,7 @@ With the in-cluster modes, REST and gRPC travel in plaintext across the pod netw
 ### Not supported
 
 - The legacy python-runtime. The SDK only talks to sandboxd.
-- The Gateway and Direct connection modes, and access to sandboxd through sandbox-router ([#1889](https://github.com/kubernetes-sigs/agent-sandbox/issues/1889)). Use one of the `sandboxd.connectivity` values above.
+- The Gateway and Direct connection modes. Use one of the `sandboxd.connectivity` values above.
 
 ## Publishing status
 

@@ -32,6 +32,14 @@ export const CLEANUP_TIMEOUT_MS = 5_000;
 export const DEFAULT_SANDBOXD_REST_PORT = 8080;
 export const DEFAULT_SANDBOXD_GRPC_PORT = 9090;
 
+// sandbox-router's HTTP listener; "router-port-forward" port-forwards it.
+export const ROUTER_PROXY_PORT = 8080;
+
+// Service name and label selector used to find a ready router pod through
+// its EndpointSlices. Mirrors the Go client's resolveRouterPod.
+export const ROUTER_SERVICE_NAME = "sandbox-router-svc";
+export const ROUTER_SERVICE_LABEL_SELECTOR = `kubernetes.io/service-name=${ROUTER_SERVICE_NAME}`;
+
 // Budget for the shared connect (both port-forward listeners + REST health
 // check) and for each individual WS handshake within it. Re-applied in full
 // to every reconnect attempt.

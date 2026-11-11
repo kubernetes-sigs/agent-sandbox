@@ -285,6 +285,21 @@ def _transfer_endpoint(
     return _sandboxd_op_endpoint(connector, op, source, f":{op}", query)
 
 
+def _extract_endpoint(connector: _RuntimeProbe, path: str) -> str:
+    """Return the endpoint for a sandboxd tar extraction."""
+    return _sandboxd_op_endpoint(
+        connector, "extract", path, query={"extract": "tar"})
+
+
+def _prepare_archive(archive: bytes | BinaryIO) -> bytes | BinaryIO:
+    """Return the archive as bytes or a validated binary stream."""
+    if isinstance(archive, (bytearray, memoryview)):
+        return bytes(archive)
+    if not isinstance(archive, bytes):
+        _validate_binary_stream(archive)
+    return archive
+
+
 class Filesystem:
     """
     Handles file operations within the sandbox.
@@ -704,3 +719,33 @@ class Filesystem:
             self.connector, "copy", source, destination, overwrite)
         self.connector.send_request("POST", endpoint, timeout=timeout)
         logger.info(f"Path '{source}' copied to '{destination}'.")
+
+    @trace_span("extract")
+    def extract(
+        self, path: str, archive: bytes | BinaryIO, timeout: int = 60
+    ) -> None:
+        """Unpack a tar archive, optionally gzipped, into a directory.
+
+        sandboxd runtime only. Missing directories are created. The unpack is
+        not atomic, so a failure leaves the entries written so far. Binary
+        file objects are streamed once without retries. The legacy
+        python-runtime raises NotImplementedError.
+        """
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", path)
+        endpoint = _extract_endpoint(self.connector, path)
+        archive = _prepare_archive(archive)
+        data: bytes | Iterator[bytes]
+        if isinstance(archive, bytes):
+            data = archive
+        else:
+            data = _iter_binary_chunks(archive)
+        self.connector.send_request(
+            "PUT", endpoint,
+            data=data,
+            headers={"Content-Type": "application/octet-stream"},
+            timeout=timeout,
+            _disable_retries=not isinstance(archive, bytes),
+        )
+        logger.info(f"Archive extracted into '{path}'.")

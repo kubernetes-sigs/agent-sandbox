@@ -583,6 +583,19 @@ class TestAsyncSandboxdFilesystem(unittest.IsolatedAsyncioTestCase):
 
         self.connector.send_request.assert_not_awaited()
 
+    async def test_extract_sends_bytes_and_streams_file_objects(self):
+        await self.fs.extract("src", b"tar-bytes")
+        args, kwargs = self.connector.send_request.call_args
+        self.assertEqual(args[:2], ("PUT", "v1/files/src?extract=tar"))
+        self.assertEqual(kwargs["content"], b"tar-bytes")
+        self.assertFalse(kwargs["_disable_retries"])
+
+        await self.fs.extract("src", io.BytesIO(b"tar-bytes"))
+        _, kwargs = self.connector.send_request.call_args
+        self.assertEqual(
+            b"".join([chunk async for chunk in kwargs["content"]]), b"tar-bytes")
+        self.assertTrue(kwargs["_disable_retries"])
+
     @patch("k8s_agent_sandbox.files.async_filesystem.trace")
     async def test_delete_records_path_in_trace(self, mock_trace):
         span = MagicMock()

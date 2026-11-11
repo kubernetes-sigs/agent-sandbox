@@ -176,8 +176,9 @@ type ScopedTokenOptions struct {
 
 // ScopedTokenAuthorizer authenticates and authorizes a request in one
 // step. V1 verifies an HMAC and binds namespace plus name. V2 verifies
-// Ed25519 and binds the complete AuthorizationTarget. A verified token
-// for one target is rejected with ErrForbidden against any other.
+// Ed25519 and binds the complete AuthorizationTarget, or only the Sandbox
+// for a sandbox-scoped token. A verified token is rejected with
+// ErrForbidden against any target it does not bind.
 //
 // This gives an agent a single-purpose credential scoped to its own
 // sandbox instead of a cluster-verifiable K8s Bearer token, without a
@@ -275,8 +276,13 @@ func (a *ScopedTokenAuthorizer) Authorize(_ context.Context, r *http.Request, ta
 		}
 		if claims.Namespace != normalized.Namespace ||
 			claims.SandboxName != normalized.SandboxName ||
-			claims.SandboxUID != normalized.SandboxUID ||
-			claims.Port != normalized.Port ||
+			claims.SandboxUID != normalized.SandboxUID {
+			return ErrForbidden
+		}
+		if claims.Scope == scopedTokenV2ScopeSandbox {
+			return nil
+		}
+		if claims.Port != normalized.Port ||
 			claims.Method != normalized.Method ||
 			claims.Path != normalized.Path {
 			return ErrForbidden
@@ -354,6 +360,15 @@ func (a *ScopedTokenAuthorizer) verifyV2(token string) (*scopedTokenV2Claims, er
 	var claims scopedTokenV2Claims
 	if err := json.Unmarshal(payload, &claims); err != nil {
 		return nil, fmt.Errorf("scopedtoken: unmarshal v2 claims: %w", err)
+	}
+	switch claims.Scope {
+	case "":
+	case scopedTokenV2ScopeSandbox:
+		if claims.Port != 0 || claims.Method != "" || claims.Path != "" {
+			return nil, errors.New("scopedtoken: v2 sandbox scope must not bind a port, method, or path")
+		}
+	default:
+		return nil, fmt.Errorf("scopedtoken: unknown v2 scope %q", claims.Scope)
 	}
 	if claims.SandboxUID == "" {
 		return nil, errors.New("scopedtoken: v2 Sandbox UID is required")

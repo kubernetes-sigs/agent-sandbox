@@ -319,6 +319,23 @@ class TestSandboxdFilesystem(unittest.TestCase):
         self.assertEqual(b"".join(kwargs["data"]), b"tar-bytes")
         self.assertTrue(kwargs["_disable_retries"])
 
+    def test_extract_accepts_the_sandbox_root(self):
+        for path in (".", "/"):
+            with self.subTest(path=path):
+                self._fs.extract(path, b"tar-bytes")
+                args, _ = self._last_call()
+                self.assertEqual(args[:2], ("PUT", "v1/files/?extract=tar"))
+
+    def test_other_ops_reject_the_sandbox_root(self):
+        for call in (
+            lambda: self._fs.mkdir("/"),
+            lambda: self._fs.move(".", "b"),
+            lambda: self._fs.copy("/", "b"),
+        ):
+            with self.subTest(), self.assertRaisesRegex(ValueError, "sandbox root"):
+                call()
+        self._connector.send_request.assert_not_called()
+
     def test_extract_rejects_bad_arguments(self):
         for call, error in (
             (lambda: self._fs.extract("", b"x"), ValueError),

@@ -28,10 +28,10 @@ from k8s_agent_sandbox.exceptions import SandboxRequestError, SandboxResponseToo
 from k8s_agent_sandbox.files.filesystem import (
     Filesystem,
     _check_download_headers,
+    _coerce_binary,
     _download_limit,
     _extract_endpoint,
     _multipart_framing,
-    _prepare_archive,
     _read_binary_chunk,
     _STREAM_CHUNK_SIZE,
     _list_endpoint,
@@ -42,7 +42,6 @@ from k8s_agent_sandbox.files.filesystem import (
     _sandboxd_op_endpoint,
     _sandboxd_write_request,
     _transfer_endpoint,
-    _validate_binary_stream,
 )
 from k8s_agent_sandbox.models import FileEntry, SandboxFileConfig
 from k8s_agent_sandbox.trace_manager import async_trace_span, trace
@@ -135,10 +134,8 @@ class AsyncFilesystem:
         _check_write_options(self.connector, append, create_only)
         if isinstance(content, str):
             content = content.encode("utf-8")
-        elif isinstance(content, (bytearray, memoryview)):
-            content = bytes(content)
-        elif not isinstance(content, bytes):
-            _validate_binary_stream(content)
+        else:
+            content = _coerce_binary(content)
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
@@ -503,7 +500,7 @@ class AsyncFilesystem:
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
         endpoint = _extract_endpoint(self.connector, path)
-        archive = _prepare_archive(archive)
+        archive = _coerce_binary(archive)
         body: bytes | AsyncIterator[bytes]
         if isinstance(archive, bytes):
             body = archive

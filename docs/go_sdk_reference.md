@@ -106,6 +106,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(s \*Sandbox\) PodName\(\) string](<#Sandbox.PodName>)
   - [func \(s \*Sandbox\) Read\(ctx context.Context, path string, opts ...CallOption\) \(\[\]byte, error\)](<#Sandbox.Read>)
   - [func \(s \*Sandbox\) ReadTo\(ctx context.Context, path string, destination io.Writer, opts ...CallOption\) \(int64, error\)](<#Sandbox.ReadTo>)
+  - [func \(s \*Sandbox\) ResizePodResources\(ctx context.Context, containerName string, resources corev1.ResourceRequirements\) error](<#Sandbox.ResizePodResources>)
   - [func \(s \*Sandbox\) Run\(ctx context.Context, command string, opts ...CallOption\) \(\*ExecutionResult, error\)](<#Sandbox.Run>)
   - [func \(s \*Sandbox\) SandboxName\(\) string](<#Sandbox.SandboxName>)
   - [func \(s \*Sandbox\) ServiceFQDN\(\) string](<#Sandbox.ServiceFQDN>)
@@ -1497,6 +1498,30 @@ func (s *Sandbox) ReadTo(ctx context.Context, path string, destination io.Writer
 ```
 
 ReadTo streams a file into a caller\-owned io.Writer without buffering the complete response. The destination is never closed.
+
+<a name="Sandbox.ResizePodResources"></a>
+#### func \(\*Sandbox\) [ResizePodResources](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/resize.go>)
+
+```go
+func (s *Sandbox) ResizePodResources(ctx context.Context, containerName string, resources corev1.ResourceRequirements) error
+```
+
+ResizePodResources requests an in\-place resize of one container's CPU and memory resources on the Sandbox's backing Pod via the Pod /resize subresource \(KEP\-1287\). The Pod keeps its identity; whether the resized container restarts is controlled by its per\-container resizePolicy \(NotRequired avoids a restart, RestartContainer allows one\).
+
+This operates on the Pod directly instead of going through the Sandbox API, per the project guidance \(issue \#612\): the Sandbox spec stays a user\-owned declaration, and the resize does not freeze a KEP\-1287 subset into the Sandbox API surface. The Sandbox spec is deliberately left untouched: it cannot track live changes from other /resize callers such as VPA, and callers who want the new size reflected in Sandbox.Spec.PodTemplate can patch the Sandbox themselves.
+
+The cluster must serve the Pod resize subresource. The call returns the API server's error unchanged \(wrapped\) when a resize is rejected.
+
+Required RBAC for the caller's credentials: patch on pods/resize.
+
+Example:
+
+```
+err := sb.ResizePodResources(ctx, "workspace", corev1.ResourceRequirements{
+    Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+    Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")},
+})
+```
 
 <a name="Sandbox.Run"></a>
 #### func \(\*Sandbox\) [Run](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)

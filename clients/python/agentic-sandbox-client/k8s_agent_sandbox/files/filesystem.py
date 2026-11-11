@@ -180,11 +180,13 @@ def _sandboxd_op_endpoint(
     path: str,
     action: str = "",
     query: Mapping[str, str] | None = None,
+    allow_root: bool = False,
 ) -> str:
     """Return the endpoint for a sandboxd-only file operation.
 
     Raises NotImplementedError on the legacy runtime, which has none of these
-    endpoints, and ValueError for an empty path.
+    endpoints, and ValueError for an empty path or, unless ``allow_root`` is
+    set, one that names the sandbox root.
     """
     if not connector.is_sandboxd():
         raise NotImplementedError(
@@ -194,7 +196,7 @@ def _sandboxd_op_endpoint(
     if path == "":
         raise ValueError(f"{op}: path must not be empty")
     endpoint = _sandboxd_files_endpoint(path)
-    if endpoint == "v1/files/":
+    if endpoint == "v1/files/" and not allow_root:
         raise ValueError(f"{op}: path {path!r} names the sandbox root")
     endpoint += action
     if query:
@@ -258,18 +260,23 @@ def _transfer_endpoint(
 
 
 def _extract_endpoint(connector: _RuntimeProbe, path: str) -> str:
-    """Return the endpoint for a sandboxd tar extraction."""
+    """Return the endpoint for a sandboxd tar extraction.
+
+    The path may name the sandbox root.
+    """
     return _sandboxd_op_endpoint(
-        connector, "extract", path, query={"extract": "tar"})
+        connector, "extract", path, query={"extract": "tar"}, allow_root=True)
 
 
-def _prepare_archive(archive: bytes | BinaryIO) -> bytes | BinaryIO:
-    """Return the archive as bytes or a validated binary stream."""
-    if isinstance(archive, (bytearray, memoryview)):
-        return bytes(archive)
-    if not isinstance(archive, bytes):
-        _validate_binary_stream(archive)
-    return archive
+def _coerce_binary(
+    content: bytes | bytearray | memoryview | BinaryIO,
+) -> bytes | BinaryIO:
+    """Return binary content as bytes or a validated binary stream."""
+    if isinstance(content, (bytearray, memoryview)):
+        return bytes(content)
+    if not isinstance(content, bytes):
+        _validate_binary_stream(content)
+    return content
 
 
 class Filesystem:
@@ -314,10 +321,8 @@ class Filesystem:
         _check_write_options(self.connector, append, create_only)
         if isinstance(content, str):
             content = content.encode("utf-8")
-        elif isinstance(content, (bytearray, memoryview)):
-            content = bytes(content)
-        elif not isinstance(content, bytes):
-            _validate_binary_stream(content)
+        else:
+            content = _coerce_binary(content)
 
         span = trace.get_current_span()
         if span.is_recording():
@@ -684,16 +689,17 @@ class Filesystem:
     ) -> None:
         """Unpack a tar archive, optionally gzipped, into a directory.
 
-        sandboxd runtime only. Missing directories are created. The unpack is
-        not atomic, so a failure leaves the entries written so far. Binary
-        file objects are streamed once without retries. The legacy
-        python-runtime raises NotImplementedError.
+        sandboxd runtime only. ``path`` may be ``/`` for the sandbox root.
+        Missing directories are created. The unpack is not atomic, so a
+        failure leaves the entries written so far. Binary file objects are
+        streamed once without retries. The legacy python-runtime raises
+        NotImplementedError.
         """
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
         endpoint = _extract_endpoint(self.connector, path)
-        archive = _prepare_archive(archive)
+        archive = _coerce_binary(archive)
         data: bytes | Iterator[bytes]
         if isinstance(archive, bytes):
             data = archive

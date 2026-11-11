@@ -165,6 +165,7 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 		Log:                 opts.Logger,
 		Tracer:              tracer,
 		TraceServiceName:    svcName,
+		DiscoveryLatency:    newDiscoveryLatencyHistogram(newMeter(opts), opts.Logger),
 	})
 
 	// Wire strategy connector references for death notifications (and, for

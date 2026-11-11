@@ -25,6 +25,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 	metav1validation "k8s.io/apimachinery/pkg/apis/meta/v1/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -305,6 +306,12 @@ type Options struct {
 	// TracerProvider sets the OpenTelemetry TracerProvider for span creation.
 	// If nil, falls back to otel.GetTracerProvider (noop by default).
 	TracerProvider trace.TracerProvider
+
+	// MeterProvider sets the OpenTelemetry MeterProvider for client metrics
+	// (e.g. the sandbox.client.discovery.latency.ms histogram). If nil, falls
+	// back to otel.GetMeterProvider (noop by default, so recording costs
+	// nothing unless a real provider is configured).
+	MeterProvider metric.MeterProvider
 
 	// DisablePodIPRouting suppresses the X-Sandbox-Pod-IP header even when a
 	// pod IP is available. Use in environments with strict network policies,

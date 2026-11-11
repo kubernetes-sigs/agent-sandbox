@@ -882,6 +882,16 @@ def members(warmpool: str | None = None) -> list[Member]
 
 Returns a snapshot of the batch's members, optionally filtered to one warm pool.
 
+<a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.get_member"></a>
+
+##### get\_member
+
+```python
+def get_member(claim_name: str) -> Member | None
+```
+
+Returns the current ``Member`` for ``claim_name``, or ``None`` if it is not in the batch.
+
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.connect"></a>
 
 ##### connect
@@ -1045,10 +1055,11 @@ next refresh. Fill creates, ``acquire()`` creates and pool reads, and member del
 
 If it raises, including on a cancellation, the member is dropped from ``members()`` and its
 claim is deleted, unless the claim is already gone or its create was rejected. A failed delete is
-retried by ``release_not_ready()`` and ``release()``. Once ``err()`` is set the claim is kept,
-since the handle may no longer hold the batch's Lease, and ``release()`` deletes it. It never
-creates a second claim, so call it again to try again. A member it returned that fails later
-shows in ``members()`` like any other, and ``release_member`` frees it.
+retried by ``release_not_ready()`` and ``release()``. Once this handle loses the batch's
+Lease it keeps the claim, which ``release()`` deletes only if no other handle has taken the
+Lease since. It never creates a second claim, so call it again to try again. A member it
+returned that fails later shows in ``members()`` like any other, and ``release_member``
+frees it.
 
 ``TerminalMemberError`` and ``BatchTimeoutError`` both subclass ``BatchError``, and
 ``except SandboxError`` also covers a missing pool or template. Bad arguments raise
@@ -1067,8 +1078,8 @@ shows in ``members()`` like any other, and ``release_member`` frees it.
 
 **Raises**:
 
-- `ValueError` - If ``timeout`` isn't a positive finite number, or ``pod_annotations`` is
-  invalid.
+- `ValueError` - If ``timeout`` isn't a positive finite number, or ``pod_annotations`` isn't
+  a mapping of strings.
 - `SandboxWarmPoolNotFoundError` - If the warm pool doesn't exist.
 - `SandboxTemplateNotFoundError` - If the warm pool's template doesn't exist, or it names none.
 - `TerminalMemberError` - If the create fails (the member is ``FAILED`` with reason
@@ -1105,8 +1116,8 @@ counts as deleted, and transient errors are retried. If the delete fails, callin
 **Raises**:
 
 - `ValueError` - If the member isn't in this batch.
-- `BatchError` - If this handle has been detached or released, or once ``err()`` is set,
-  since the handle may no longer hold the batch's Lease.
+- `BatchError` - If this handle has been detached or released, or once this handle loses the
+  batch's Lease.
 - `ApiException` - For a non-transient error such as a 403, or the last transient error
   after ``BATCH_DELETE_ATTEMPTS`` attempts (an ``ApiException`` or a transport error).
 
@@ -1135,8 +1146,8 @@ calling ``release_not_ready`` again retries it.
 
 **Raises**:
 
-- `BatchError` - If this handle has been detached or released, or once ``err()`` is set,
-  since the handle may no longer hold the batch's Lease.
+- `BatchError` - If this handle has been detached or released, or once this handle loses the
+  batch's Lease.
 - `ApiException` - The first error a delete ended with, once every delete has been tried
   (an ``ApiException`` or a transport error).
 
@@ -1165,9 +1176,8 @@ scoped to the group's label. If they fail, calling ``release_group`` again retri
 **Raises**:
 
 - `ValueError` - If the batch has no group, member or ``acquire()`` in flight for ``warmpool``.
-- `BatchError` - If this handle has been detached or released, once ``err()`` is set,
-  since the handle may no longer hold the batch's Lease, or if claims are still not
-  being deleted after the last round.
+- `BatchError` - If this handle has been detached or released, once this handle loses the
+  batch's Lease, or if claims are still not being deleted after the last round.
 - `ApiException` - For a non-transient error such as a 403, which is raised at once.
   After the last round, the last transient error is raised (an ``ApiException``
   or a transport error).

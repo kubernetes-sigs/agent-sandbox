@@ -1223,6 +1223,42 @@ class TestAsyncK8sHelperBatchMethods(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(await self.helper.count_live_sandbox_claims("default", "agents.x-k8s.io/batch-id=b1"), 3)
 
+    async def test_count_live_sandbox_claims_clamps_page_timeouts_to_deadline(self):
+        live = {"metadata": {"name": "live"}}
+        list_page = self.helper.custom_objects_api.list_namespaced_custom_object = AsyncMock(
+            side_effect=[
+                {"items": [live], "metadata": {"continue": "t1"}},
+                {"items": [live], "metadata": {}},
+            ]
+        )
+        with patch("k8s_agent_sandbox.async_k8s_helper.time.monotonic", side_effect=[100.0, 108.5]):
+            count = await self.helper.count_live_sandbox_claims(
+                "default",
+                "agents.x-k8s.io/batch-id=b1",
+                _request_timeout=90.0,
+                deadline=110.0,
+            )
+        self.assertEqual(count, 2)
+        self.assertEqual(
+            [c.kwargs["_request_timeout"] for c in list_page.call_args_list],
+            [10.0, 1.5],
+        )
+
+        list_page.reset_mock()
+        list_page.side_effect = [
+            {"items": [live], "metadata": {"continue": "t1"}},
+            {"items": [live], "metadata": {}},
+        ]
+        with patch("k8s_agent_sandbox.async_k8s_helper.time.monotonic", side_effect=[105.0, 110.0]):
+            with self.assertRaises(TimeoutError):
+                await self.helper.count_live_sandbox_claims(
+                    "default",
+                    "agents.x-k8s.io/batch-id=b1",
+                    _request_timeout=90.0,
+                    deadline=110.0,
+                )
+        self.assertEqual(list_page.call_count, 1)
+
     async def test_delete_sandbox_claims_by_label_drains_the_response_unparsed_and_releases_it(self):
         drained = []
 

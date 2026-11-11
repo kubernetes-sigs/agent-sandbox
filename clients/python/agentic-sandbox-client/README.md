@@ -778,10 +778,11 @@ handed out, once you have what you need. Member deletes and the initial claims s
 defaults to 20 on a handle from `get_batch()`. Released members are never handed out, are dropped from `members()`, and
 count as unable to become Ready, so releasing members before a group or the quorum has been decided can make
 it unreachable. Read a failed member's `reason` before releasing it. The three methods delete nothing once
-`err()` is set and raise `BatchError`, since the handle may no longer hold the batch's Lease.
+this handle loses the batch's Lease or is detached, and raise `BatchError`. A watch error sets `err()` but
+leaves the Lease held, so they still delete claims after one.
 
 `acquire(warmpool, timeout=None, *, pod_annotations=None)` adds a member from any warm pool in the batch's namespace and blocks until
-it is Ready, for example to replace a member released with `release_member()`. `acquire()` writes non-empty `pod_annotations` to `spec.additionalPodMetadata.annotations` so the controller propagates them onto the sandbox pod. Its claim takes the next unused
+it is Ready, for example to replace a member released with `release_member()`. `acquire()` writes non-empty `pod_annotations` to `spec.additionalPodMetadata.annotations` so the controller propagates them onto the sandbox pod. `BatchGroup` has no pod annotation field, so callers that need per-pod annotations on every member pass `size=0` groups to `claim_batch()` and call `acquire()`. Its claim takes the next unused
 ordinal, so ordinals are never reused, even across `detach()` and `get_batch()`. It isn't one of the initial
 claims, so `events()`, the quorum consumers and `release_not_ready()` leave it alone, but `release_group()` on
 its pool releases it, and its `shutdownTime` counts from its own create. Its create follows the initial
@@ -795,7 +796,7 @@ or getting the member Ready doesn't finish within `timeout`, which defaults to `
 subclass `BatchError`, which `acquire()` also raises directly when the handle stops; checking a pool not yet in the batch
 can also raise `SandboxWarmPoolNotFoundError` or `SandboxTemplateNotFoundError` (both `SandboxError`) or a
 Kubernetes API or network error. If it raises, including on a cancellation, `acquire()` drops the member from `members()` and deletes
-its claim unless the claim is already gone, its create was rejected, or `err()` is set. `release_not_ready()`
+its claim unless the claim is already gone, its create was rejected, or this handle lost the batch's Lease. `release_not_ready()`
 and `release()` retry a failed delete, and calling `acquire()` again tries a new claim.
 
 The `claim_batch()` defaults are `create_rps=50`, `max_in_flight=20`, `quorum_timeout=600` seconds,

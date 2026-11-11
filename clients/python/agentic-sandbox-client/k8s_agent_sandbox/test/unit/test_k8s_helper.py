@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gc
 import logging
 import os
 import socket
@@ -22,8 +23,9 @@ import unittest
 import weakref
 from unittest.mock import MagicMock, call, patch
 
-from kubernetes import client
+from kubernetes import client, watch
 from kubernetes.config import incluster_config
+import urllib3
 import urllib3.exceptions
 from pydantic import ValidationError
 from k8s_agent_sandbox.models import AdditionalPodMetadata
@@ -1237,10 +1239,16 @@ class TestLeaseApiClient(unittest.TestCase):
                     "b1-0", "default", _request_timeout=(0.05, 0.05), batch=True
                 ),
             )
-            # Before listen(), connect is refused: all 8 batch calls fail after one attempt with
-            # NewConnectionError, while non-batch calls retry and wrap in MaxRetryError.
+            # Before listen(), Linux refuses the connection with NewConnectionError while BSD and
+            # macOS drop SYN packets until ConnectTimeoutError; all 8 batch calls fail after one
+            # attempt without wrapping in MaxRetryError, while non-batch calls retry.
             for batch_call in batch_calls:
-                with self.assertRaises(urllib3.exceptions.NewConnectionError) as conn_err:
+                with self.assertRaises(
+                    (
+                        urllib3.exceptions.NewConnectionError,
+                        urllib3.exceptions.ConnectTimeoutError,
+                    )
+                ) as conn_err:
                     batch_call()
                 self.assertNotIsInstance(conn_err.exception, urllib3.exceptions.MaxRetryError)
             for non_batch_call in (
@@ -1549,6 +1557,45 @@ class TestK8sHelperBatchMethods(unittest.TestCase):
 
         self.assertEqual(helper.count_live_sandbox_claims("default", "agents.x-k8s.io/batch-id=b1"), 3)
 
+    def test_count_live_sandbox_claims_clamps_page_timeouts_to_deadline(
+        self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
+    ):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+        helper = K8sHelper()
+        live = {"metadata": {"name": "live"}}
+        mock_api.list_namespaced_custom_object.side_effect = [
+            {"items": [live], "metadata": {"continue": "t1"}},
+            {"items": [live], "metadata": {}},
+        ]
+        with patch("k8s_agent_sandbox.k8s_helper.time.monotonic", side_effect=[100.0, 108.5]):
+            count = helper.count_live_sandbox_claims(
+                "default",
+                "agents.x-k8s.io/batch-id=b1",
+                _request_timeout=90.0,
+                deadline=110.0,
+            )
+        self.assertEqual(count, 2)
+        self.assertEqual(
+            [c.kwargs["_request_timeout"] for c in mock_api.list_namespaced_custom_object.call_args_list],
+            [10.0, 1.5],
+        )
+
+        mock_api.list_namespaced_custom_object.reset_mock()
+        mock_api.list_namespaced_custom_object.side_effect = [
+            {"items": [live], "metadata": {"continue": "t1"}},
+            {"items": [live], "metadata": {}},
+        ]
+        with patch("k8s_agent_sandbox.k8s_helper.time.monotonic", side_effect=[105.0, 110.0]):
+            with self.assertRaises(TimeoutError):
+                helper.count_live_sandbox_claims(
+                    "default",
+                    "agents.x-k8s.io/batch-id=b1",
+                    _request_timeout=90.0,
+                    deadline=110.0,
+                )
+        self.assertEqual(mock_api.list_namespaced_custom_object.call_count, 1)
+
     def test_delete_sandbox_claims_by_label_drains_the_response_unparsed_and_releases_it(
         self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
     ):
@@ -1589,13 +1636,20 @@ class TestK8sHelperBatchMethods(unittest.TestCase):
         mock_watch_class.return_value = mock_watch
 
         helper = K8sHelper()
+        seen_watches = []
         events = list(
             helper.watch_sandbox_claims(
-                "default", "agents.x-k8s.io/batch-id=b1", "5", 30, _request_timeout=35
+                "default",
+                "agents.x-k8s.io/batch-id=b1",
+                "5",
+                30,
+                _request_timeout=35,
+                on_watch=seen_watches.append,
             )
         )
 
         self.assertEqual(events, [event])
+        self.assertEqual(seen_watches, [mock_watch, None])
         self.assertEqual(mock_watch.stream.call_args.kwargs["resource_version"], "5")
         self.assertEqual(mock_watch.stream.call_args.kwargs["_request_timeout"], 35)
         self.assertEqual(mock_watch.stream.call_args.kwargs["label_selector"], "agents.x-k8s.io/batch-id=b1")
@@ -1632,10 +1686,186 @@ class TestK8sHelperBatchMethods(unittest.TestCase):
         mock_watch_class.return_value = mock_watch
 
         helper = K8sHelper()
+        seen_watches = []
         with self.assertRaises(client.ApiException):
-            list(helper.watch_sandbox_claims("default", "agents.x-k8s.io/batch-id=b1", "5", 30))
+            list(
+                helper.watch_sandbox_claims(
+                    "default",
+                    "agents.x-k8s.io/batch-id=b1",
+                    "5",
+                    30,
+                    on_watch=seen_watches.append,
+                )
+            )
 
+        self.assertEqual(seen_watches, [mock_watch, None])
         mock_watch.stop.assert_called_once()
+
+        # Stopping inside on_watch skips advancing stream so Watch.stream does not clear _stop.
+        stopped_watch = MagicMock()
+        stopped_watch._stop = False
+        stopped_watch.stop.side_effect = lambda: setattr(stopped_watch, "_stop", True)
+        stream_started = False
+
+        def _never_advance(*args, **kwargs):
+            nonlocal stream_started
+            stream_started = True
+            yield {"type": "MODIFIED", "object": {"metadata": {"name": "b1-0"}}}
+
+        stopped_watch.stream = _never_advance
+        mock_watch_class.return_value = stopped_watch
+        seen_watches.clear()
+        events = list(
+            helper.watch_sandbox_claims(
+                "default",
+                "agents.x-k8s.io/batch-id=b1",
+                "5",
+                30,
+                on_watch=lambda w: (seen_watches.append(w), w.stop() if w is not None else None),
+            )
+        )
+        self.assertEqual(events, [])
+        self.assertFalse(stream_started)
+        self.assertEqual(seen_watches, [stopped_watch, None])
+
+    def test_watch_sandbox_claims_stops_in_flight_list_and_closes_watch_api_client(
+        self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
+    ):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+        in_list = threading.Event()
+        release_list = threading.Event()
+        mock_resp = MagicMock(status=200, closed=False)
+        mock_resp.stream.side_effect = AssertionError("stream should not run after stop")
+
+        def blocking_list(*args, **kwargs):
+            in_list.set()
+            self.assertTrue(release_list.wait(5))
+            return mock_resp
+
+        mock_api.list_namespaced_custom_object = blocking_list
+
+        api_client = client.ApiClient()
+        self.addCleanup(api_client.close)
+        helper = K8sHelper(api_client=api_client)
+        for cls_call in mock_api_cls.call_args_list:
+            if cls_call.args and isinstance(cls_call.args[0], client.ApiClient):
+                self.addCleanup(cls_call.args[0].close)
+
+        active_watch = [None]
+        watch_ref = [None]
+        callback_count = [0]
+        watch_ready = threading.Event()
+        close_calls = []
+
+        def on_watch(w):
+            callback_count[0] += 1
+            active_watch[0] = w
+            if w is not None:
+                watch_ref[0] = weakref.ref(w)
+                api_ref = weakref.ref(w._api_client)
+                w._api_client.close = lambda: (
+                    close_calls.append(True),
+                    client.ApiClient.close(api_ref()),
+                )[1]
+                watch_ready.set()
+
+        events_out = []
+
+        def run_watch():
+            events_out.extend(
+                helper.watch_sandbox_claims(
+                    "default",
+                    "agents.x-k8s.io/batch-id=b1",
+                    "5",
+                    30,
+                    on_watch=on_watch,
+                )
+            )
+
+        was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            worker = threading.Thread(target=run_watch)
+            worker.start()
+            self.assertTrue(watch_ready.wait(5))
+            self.assertTrue(in_list.wait(5))
+            active_watch[0].stop()
+            release_list.set()
+            worker.join(timeout=5)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(events_out, [])
+            self.assertEqual(callback_count[0], 2)
+            self.assertIsNone(active_watch[0])
+            self.assertIsNotNone(watch_ref[0])
+            self.assertIsNone(watch_ref[0]())
+        finally:
+            if was_enabled:
+                gc.enable()
+        mock_resp.close.assert_called_once()
+        mock_resp.release_conn.assert_called_once()
+        mock_resp.stream.assert_not_called()
+        self.assertEqual(len(close_calls), 1)
+
+    def test_watch_sandbox_claims_stop_interrupts_blocked_stream_read(
+        self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
+    ):
+        # A quiet watch blocks reading a real socket. kubernetes releases before 37 make
+        # Watch.stop() only set a flag, so stop must still unblock the read itself.
+        server = socket.create_server(("127.0.0.1", 0))
+        self.addCleanup(server.close)
+        port = server.getsockname()[1]
+        headers_sent = threading.Event()
+        release_server = threading.Event()
+        self.addCleanup(release_server.set)
+
+        def serve():
+            conn, _ = server.accept()
+            with conn:
+                conn.recv(65536)
+                conn.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                    b"Transfer-Encoding: chunked\r\n\r\n"
+                )
+                headers_sent.set()
+                release_server.wait(10)
+
+        threading.Thread(target=serve, daemon=True).start()
+        pool = urllib3.PoolManager()
+        self.addCleanup(pool.clear)
+
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+        mock_api.list_namespaced_custom_object = lambda *a, **kw: pool.request(
+            "GET", f"http://127.0.0.1:{port}/watch", preload_content=False
+        )
+        helper = K8sHelper()
+
+        active_watch = [None]
+        watch_ready = threading.Event()
+
+        def on_watch(w):
+            if w is not None:
+                active_watch[0] = w
+                watch_ready.set()
+
+        def run_watch():
+            list(
+                helper.watch_sandbox_claims(
+                    "default", "agents.x-k8s.io/batch-id=b1", "5", 30, on_watch=on_watch
+                )
+            )
+
+        with patch.object(watch.Watch, "stop", lambda w: setattr(w, "_stop", True)):
+            worker = threading.Thread(target=run_watch, daemon=True)
+            worker.start()
+            self.assertTrue(watch_ready.wait(5))
+            self.assertTrue(headers_sent.wait(5))
+            worker.join(0.2)
+            self.assertTrue(worker.is_alive())
+            active_watch[0].stop()
+            worker.join(2)
+        self.assertFalse(worker.is_alive())
 
     def test_read_batch_lease_returns_lease_on_success(
         self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls

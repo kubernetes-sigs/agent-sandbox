@@ -680,6 +680,19 @@ class TestSettle(unittest.TestCase):
         state.upsert_claim(_pending("b1-3"))
         self.assertTrue(state.fill_settled())
 
+    def test_members_dropped_when_their_group_times_out_count_when_they_stop_being_ready(self):
+        state = _state(BatchGroup(warmpool="pool-a", size=2, min_ready=2), mode=batch_state.ConsumerMode.GROUP)
+        state.upsert_claim(_ready("b1-0"))
+        state.upsert_claim(_pending("b1-1"))
+        state.expire_fill()
+        [outcome] = _drain_groups(state)
+        self.assertIsInstance(outcome.error, BatchTimeoutError)
+        self.assertIn("b1-0", state._resolved)
+
+        state.upsert_claim(_pending("b1-0"))
+        state.upsert_claim(_claim("b1-1", conditions=_TERMINAL, annotations=_FILL))
+        self.assertTrue(state.fill_settled())
+
 
 class TestReattachedFill(unittest.TestCase):
 
@@ -843,6 +856,27 @@ class TestRelease(unittest.TestCase):
         self.assertEqual(outcomes["pool-a"].error.released, 1)  # Decided at the first release.
         self.assertEqual([m.claim_name for m in outcomes["pool-b"].members], ["b1-3"])
         self.assertTrue(state.fill_settled())
+
+    def test_late_fill_claims_in_released_pools_queue_watch_deletes_once_unless_terminating(self):
+        state = _state(BatchGroup(warmpool="pool-a", size=4, min_ready=1))
+        state.upsert_claim(_ready("b1-0"))
+        # Simulate a creator thread pre-tombstoning an unseen claim before stopping.
+        state.release_claim("b1-3", "pool-a")
+        state.release_not_ready()
+        self.assertEqual(state.take_watch_deletes(), [])
+
+        terminating = _pending("b1-2")
+        terminating["metadata"]["deletionTimestamp"] = "2026-03-01T00:00:00Z"
+        state.upsert_claim(_pending("b1-1"))
+        state.upsert_claim(terminating)
+        state.upsert_claim(_pending("b1-3"))
+        self.assertEqual(state.take_watch_deletes(), ["b1-1", "b1-3"])
+        self.assertEqual(state.take_watch_deletes(), [])
+
+        # Subsequent MODIFIED events for already-tombstoned claims never re-queue deletes.
+        state.upsert_claim(_ready("b1-1"))
+        state.upsert_claim(_ready("b1-3"))
+        self.assertEqual(state.take_watch_deletes(), [])
 
 
 class TestSizeZeroGroups(unittest.TestCase):
@@ -1115,6 +1149,35 @@ class TestAcquired(unittest.TestCase):
         state.note_deleted("b1-1", state.delete_seq("b1-1"))
         self.assertFalse(state.drop_acquired("b1-1", created=True))
         self.assertEqual(state.release_not_ready(), [])
+
+    def test_per_pool_indexes_stay_in_sync_across_lifecycle(self):
+        state = _state(BatchGroup(warmpool="pool-a", size=1), BatchGroup(warmpool="pool-b", size=0))
+        state.upsert_claim(_ready("b1-0", "pool-a"))
+        acq_a = state.start_acquire("pool-a")
+        acq_b = state.start_acquire("pool-b")
+        self.assertEqual(state.acquiring_in_pool("pool-a"), [acq_a])
+        self.assertEqual(state.acquiring_in_pool("pool-b"), [acq_b])
+        self.assertEqual([m.claim_name for m in state.members("pool-a")], ["b1-0"])
+        self.assertEqual(state.members("pool-b"), [])
+
+        # Releasing pool-a removes its members without touching pool-b, while keeping _acquiring
+        # and _acquiring_by_pool in sync until drop_acquired schedules a cleanup delete.
+        self.assertEqual(state.release_group("pool-a"), ["b1-0"])
+        self.assertNotIn("pool-a", state._members_by_pool)
+        self.assertEqual(state.acquiring_in_pool("pool-a"), [acq_a])
+        self.assertEqual(state.acquiring_in_pool("pool-b"), [acq_b])
+        self.assertTrue(state.drop_acquired(acq_a, created=True))
+        self.assertEqual(state.acquiring_in_pool("pool-a"), [])
+        self.assertNotIn("pool-a", state._acquiring_by_pool)
+
+        # Ready acquire in pool-b leaves _acquiring_by_pool cleanly and deletes empty inner dicts on release.
+        state.upsert_claim(_ready(acq_b, "pool-b", fill=False))
+        self.assertIsNotNone(state.acquired_member(acq_b))
+        self.assertNotIn("pool-b", state._acquiring_by_pool)
+        self.assertEqual([m.claim_name for m in state.members("pool-b")], [acq_b])
+        state.release_member(acq_b)
+        self.assertEqual(state._members_by_pool, {})
+        self.assertEqual(state._acquiring_by_pool, {})
 
 
 if __name__ == "__main__":

@@ -175,6 +175,44 @@ class TestReap(unittest.TestCase):
         self.time.sleep.assert_not_called()
         self.helper.coordination_v1_api.delete_namespaced_lease.assert_not_called()
 
+    def test_restarts_pagination_on_410_and_caps_restarts(self):
+        lister = self.helper.coordination_v1_api.list_namespaced_lease
+        lister.side_effect = [
+            _page([_lease("b1", age=1000)], "expired-token"),
+            k8s_client.ApiException(status=410, reason="Gone"),
+            _page([_lease("b2", age=1000)]),
+        ]
+        reaped, errors = self.reap(dry_run=True)
+        self.assertEqual(reaped, [("default", "b2")])
+        self.assertEqual(errors, 0)
+
+        lister.side_effect = [
+            _page([_lease("b1", age=1000)], "tok-1"),
+            k8s_client.ApiException(status=410),
+            _page([_lease("b1", age=1000)], "tok-2"),
+            k8s_client.ApiException(status=410),
+            _page([_lease("b1", age=1000)], "tok-3"),
+            k8s_client.ApiException(status=410),
+            _page([_lease("b1", age=1000)], "tok-4"),
+            k8s_client.ApiException(status=410),
+        ]
+        reaped, errors = self.reap(dry_run=True)
+        self.assertEqual(reaped, [])
+        self.assertEqual(errors, 1)
+
+    def test_skips_lease_with_naive_or_overflowing_renew_time(self):
+        bad_naive = _lease("badnaive", age=1000)
+        bad_naive.spec.renew_time = datetime(2026, 1, 1, 0, 0, 0)
+        bad_overflow = _lease("badoverflow", age=1000)
+        bad_overflow.spec.lease_duration_seconds = 10**12
+        good = _lease("good", age=1000)
+        self.leases["default"] = [bad_naive, bad_overflow, good]
+        with self.assertLogs("k8s_agent_sandbox.batch_reaper", level="WARNING") as logs:
+            reaped, errors = self.reap(dry_run=True)
+        self.assertEqual(reaped, [("default", "good")])
+        self.assertEqual(errors, 0)
+        self.assertEqual(len(logs.records), 2)
+
 
 class TestMain(unittest.TestCase):
 

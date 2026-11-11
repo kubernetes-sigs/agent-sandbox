@@ -28,6 +28,7 @@ import (
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/trace"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
@@ -45,6 +46,8 @@ type Sandbox struct {
 
 	claimName   string
 	sandboxName string
+	sandboxUID  k8stypes.UID
+	suspended   bool // set by Suspend, cleared by Resume and Open
 	podName     string
 	podIP       string
 	serviceFQDN string
@@ -344,7 +347,7 @@ func (s *Sandbox) Open(ctx context.Context) (retErr error) {
 	}
 
 	// Wait for sandbox to be ready.
-	state, err := s.k8s.waitForSandboxReady(openCtx, sandboxName, s.opts.Namespace, remainingTimeout, s.tracer, s.traceServiceName)
+	state, err := s.k8s.waitForSandboxReady(openCtx, sandboxName, s.opts.Namespace, remainingTimeout, 0, s.tracer, s.traceServiceName)
 	if err != nil {
 		return s.rollbackOpen(err)
 	}
@@ -355,6 +358,7 @@ func (s *Sandbox) Open(ctx context.Context) (retErr error) {
 	if err := s.connector.Connect(openCtx); err != nil {
 		return s.rollbackOpen(err)
 	}
+	s.setSuspendedLocally(false)
 
 	return nil
 }
@@ -842,6 +846,7 @@ func (s *Sandbox) setState(state *sandboxState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sandboxName = state.SandboxName
+	s.sandboxUID = state.UID
 	s.podName = state.PodName
 	s.podIP = state.PodIP
 	s.serviceFQDN = state.ServiceFQDN

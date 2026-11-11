@@ -407,6 +407,43 @@ This is useful for suspending a session (e.g., between user requests in a
 web service) while keeping the sandbox warm. `Close()` deletes the claim;
 `Disconnect(ctx)` preserves it.
 
+## Suspend and Resume
+
+`Suspend()` asks the controller to stop the sandbox: it sets the Sandbox's
+`spec.operatingMode` to `Suspended`, closes the transport, and waits for the
+`Suspended` condition, which turns True once the backing pod has terminated.
+`Resume()` sets `operatingMode` back to `Running`, waits for the sandbox to
+become Ready, and re-establishes connectivity, so the same handle keeps
+working. Both are idempotent: `Suspend` on an already suspended sandbox
+skips the patch and just completes the suspension (closing the transport and
+waiting for the pod to terminate), and `Resume` on a running sandbox skips
+the patch — it returns immediately when connected, or reconnects when the
+handle lost its transport.
+
+```go
+if err := sb.Suspend(ctx); err != nil { log.Fatal(err) }
+// The pod is gone; the claim and sandbox identity are preserved.
+
+if suspended, err := sb.IsSuspended(ctx); err != nil {
+    log.Fatal(err)
+} else if suspended {
+    fmt.Println("sandbox is suspended")
+}
+
+if err := sb.Resume(ctx); err != nil { log.Fatal(err) }
+
+result, err := sb.Run(ctx, "echo back online")
+if err != nil { log.Fatal(err) }
+fmt.Println(result.Stdout)
+```
+
+Each wait defaults to `SandboxReadyTimeout` (180s); pass `WithTimeout` to
+override it per call. A sandbox pod does not keep in-memory state across a
+suspend unless the cluster restores it (for example, through GKE pod
+snapshots). Data survives only on persistent storage such as a
+PersistentVolumeClaim whose volume is retained; ephemeral storage, including
+`emptyDir` volumes, is deleted together with the pod.
+
 ## Timeouts and Context
 
 `Open()` executes several sequential phases (claim creation, sandbox

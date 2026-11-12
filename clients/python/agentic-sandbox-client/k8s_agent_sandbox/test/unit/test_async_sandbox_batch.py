@@ -2069,7 +2069,13 @@ class TestClientClose(BaseAsyncBatchClientTest):
 
         with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper"), \
              patch("k8s_agent_sandbox.async_sandbox_client._delete_batch_objects_sync") as delete:
-            self.client._atexit_cleanup()
+            AsyncSandboxClient._atexit_cleanup(
+                self.client._active_connection_sandboxes,
+                self.client._explicit_claims,
+                self.client._active_batches,
+                self.client._closing_batches,
+                None,
+            )
 
         for sandbox in (cached, stale, closing_cached, closing_stale, attached_cached):
             sandbox._close_for_atexit.assert_called_once()
@@ -5877,7 +5883,13 @@ class TestClientBatchCleanup(BaseClaimBatchTest):
         with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper") as sync_helper, \
              patch("k8s_agent_sandbox.async_sandbox_client._delete_batch_objects_sync") as delete:
             delete.side_effect = [RuntimeError("down"), None]
-            self.client._atexit_cleanup()
+            AsyncSandboxClient._atexit_cleanup(
+                self.client._active_connection_sandboxes,
+                self.client._explicit_claims,
+                self.client._active_batches,
+                self.client._closing_batches,
+                None,
+            )
         holder, duration = "host_1234_abcd1234", BATCH_DEFAULT_LEASE_DURATION_SECONDS
         self.assertEqual(
             [c.args for c in delete.call_args_list],
@@ -5895,6 +5907,75 @@ class TestClientBatchCleanup(BaseClaimBatchTest):
         created = len(self.cluster.created)
         await asyncio.sleep(0.3)
         self.assertEqual(len(self.cluster.created), created)
+
+    @patch.object(AsyncSandboxBatch, "_start", lambda self: None)
+    async def test_dropped_client_is_freed_and_its_exit_hook_releases_active_batch(self):
+        class _HelperProxy:
+            def __init__(self, target):
+                self._target = target
+
+            def __getattr__(self, name):
+                return getattr(self._target, name)
+
+        config = SandboxDirectConnectionConfig(api_url="http://sandbox.invalid")
+        for released in (True, False):
+            with self.subTest(released=released):
+                with patch(
+                    "k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper",
+                    side_effect=lambda **_kw: _HelperProxy(self.cluster.helper),
+                ), patch("k8s_agent_sandbox.async_sandbox_client.atexit") as mock_atexit:
+                    client = AsyncSandboxClient(connection_config=config, cleanup=True)
+                exit_hook = mock_atexit.register.call_args.args[0]
+                batch = await client.claim_batch([BatchGroup(warmpool="pool-a", size=1)], batch_id="b1")
+                await asyncio.gather(*batch._creators)
+                holder = batch._holder_identity
+                self.cluster.helper.read_batch_lease.return_value = _lease(holder_identity=holder)
+                if released:
+                    await batch.release()
+                sync_helper = MagicMock()
+                sync_helper.count_live_sandbox_claims.return_value = 0
+                sync_helper.read_batch_lease.return_value = _lease(holder_identity=holder)
+                sync_helper.replace_batch_lease.return_value = _lease(holder_identity=holder)
+                # With the collector off, only reference counting can free the client and helper.
+                with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper", return_value=sync_helper) as MockHelper:
+                    gc.disable()
+                    try:
+                        client_ref = weakref.ref(client)
+                        helper_ref = weakref.ref(client.k8s_helper)
+                        del batch, client
+                        if released:
+                            self.assertIsNone(client_ref())
+                            self.assertIsNone(helper_ref())
+                        exit_hook()
+                        self.assertIsNone(client_ref())
+                        self.assertIsNone(helper_ref())
+                    finally:
+                        gc.enable()
+                if released:
+                    MockHelper.assert_not_called()
+                else:
+                    sync_helper.delete_sandbox_claims_by_label.assert_called_once()
+                    sync_helper.delete_batch_lease.assert_called_once()
+                    sync_helper.close.assert_called_once()
+
+        self.cluster.helper.close = AsyncMock()
+        with patch(
+            "k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper",
+            side_effect=lambda **_kw: _HelperProxy(self.cluster.helper),
+        ), patch("k8s_agent_sandbox.async_sandbox_client.atexit"):
+            client = AsyncSandboxClient(connection_config=config, cleanup=True)
+        batch = await client.claim_batch([BatchGroup(warmpool="pool-a", size=1)], batch_id="b-closed")
+        await client.close()
+        self.cluster.helper.close.assert_awaited_once()
+        gc.disable()
+        try:
+            client_ref = weakref.ref(client)
+            helper_ref = weakref.ref(client.k8s_helper)
+            del batch, client
+            self.assertIsNone(client_ref())
+            self.assertIsNone(helper_ref())
+        finally:
+            gc.enable()
 
 
 class TestCreateDrainPacingAndAcquireWakeup(BaseAsyncBatchClientTest):

@@ -1,0 +1,5 @@
+# BuildKit reads <Containerfile>.dockerignore for each image instead of this
+# file. A builder that reads only this file sends initrd.cpio and snapshot/
+# along with every build, which is slower but complete: the Containerfiles
+# copy them.
+.hluk/

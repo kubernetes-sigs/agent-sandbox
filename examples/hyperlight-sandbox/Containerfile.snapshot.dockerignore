@@ -1,0 +1,3 @@
+# The snapshot image copies snapshot/ and nothing else from here.
+.hluk/
+initrd.cpio

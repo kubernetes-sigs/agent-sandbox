@@ -20,6 +20,7 @@ Requires the ``async`` optional dependencies::
 """
 
 import atexit
+import functools
 import asyncio
 import contextlib
 import logging
@@ -35,8 +36,9 @@ from kubernetes_asyncio import client as async_client
 from kubernetes_asyncio.client import ApiException
 
 from . import batch_utils
-from .claim_adoption import validate_claim_name, validate_claim_for_adoption
+from .claim_adoption import validate_claim_name, validate_claim_for_adoption, is_already_exists
 from .async_k8s_helper import AsyncK8sHelper
+from .async_connector import _DefaultSSLContext
 from .async_sandbox import AsyncSandbox
 from .async_sandbox_batch import AsyncSandboxBatch
 from .exceptions import BatchInUseError, SandboxNotFoundError
@@ -44,7 +46,7 @@ from .k8s_helper import K8sHelper, _close_api_client
 from .pod_metadata import build_pod_metadata, validate_labels
 from .sandbox_batch import _delete_batch_objects as _delete_batch_objects_sync
 from .utils import construct_sandbox_claim_lifecycle_spec
-from .models import AdditionalPodMetadata, BatchGroup, SandboxConnectionConfig, SandboxTracerConfig
+from .models import AdditionalPodMetadata, BatchGroup, SandboxConnectionConfig, SandboxFileConfig, SandboxTracerConfig
 from .trace_manager import async_trace_span, create_tracer_manager, initialize_tracer, trace
 
 logger = logging.getLogger(__name__)
@@ -155,6 +157,8 @@ class AsyncSandboxClient(Generic[T]):
         cleanup: bool = True,
         api_client: async_client.ApiClient | None = None,
         pool_size: int | None = None,
+        *,
+        file_config: SandboxFileConfig | None = None,
     ) -> None:
         """
         Args:
@@ -180,18 +184,20 @@ class AsyncSandboxClient(Generic[T]):
             pool_size: Optional size of the Kubernetes API connection pool. A batch
                 needs at least its ``max_in_flight`` plus 2. Can't be combined with
                 ``api_client``; set ``connection_pool_maxsize`` on its configuration instead.
+            file_config: File download limits for created and attached sandboxes.
+                Defaults to unlimited downloads.
         """
         if connection_config is None:
             raise ValueError(
                 "connection_config is required for AsyncSandboxClient. "
                 "Use SandboxDirectConnectionConfig, SandboxGatewayConnectionConfig, "
                 "SandboxInClusterConnectionConfig, SandboxdPodTunnelConnectionConfig, "
-                "or SandboxdInClusterConnectionConfig. "
-                "For local development with the router's port-forward, use the synchronous SandboxClient; "
-                "SandboxdPodTunnelConnectionConfig supports async pod port-forwarding."
+                "SandboxdRouterTunnelConnectionConfig, or SandboxdInClusterConnectionConfig. "
+                "Sandboxd Pod and router tunnels support async port-forwarding."
             )
 
         self.connection_config = connection_config
+        self.file_config = file_config
 
         self.tracer_config = tracer_config or SandboxTracerConfig()
         if self.tracer_config.enable_tracing:
@@ -199,9 +205,8 @@ class AsyncSandboxClient(Generic[T]):
         self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
 
         self.k8s_helper = AsyncK8sHelper(api_client=api_client, pool_size=pool_size)
-        # Held so atexit cleanup can read configuration/default_headers/cookie live at cleanup time
-        self._injected_api_client = api_client
 
+        # The exit hook holds these four containers, so the client changes them in place and never rebinds them.
         self._active_connection_sandboxes: dict[tuple[str, str], T] = {}
         self._explicit_claims: set[tuple[str, str]] = set()
         self._active_batches: dict[tuple[str, str], AsyncSandboxBatch] = {}
@@ -219,9 +224,20 @@ class AsyncSandboxClient(Generic[T]):
         self._no_batch_ops.set()
         self._in_flight_batch_ops = 0
         self._close_owner: asyncio.Task[Any] | None = None
+        self._default_ssl_context = _DefaultSSLContext()
 
         if cleanup:
-            atexit.register(self._atexit_cleanup)
+            # Register a static method bound to the cleanup data with functools.partial, so the hook
+            # never keeps the client alive. A bound method of the client would keep it alive until exit.
+            # Pass the api_client itself, not a copy, so exit cleanup reads its settings as they are at exit.
+            atexit.register(functools.partial(
+                AsyncSandboxClient._atexit_cleanup,
+                self._active_connection_sandboxes,
+                self._explicit_claims,
+                self._active_batches,
+                self._closing_batches,
+                api_client,
+            ))
 
     @contextlib.asynccontextmanager
     async def _batch_op(self) -> AsyncIterator[None]:
@@ -295,6 +311,7 @@ class AsyncSandboxClient(Generic[T]):
                                 del self._active_connection_sandboxes[key]
                 await self._stop_batches()
                 await self.k8s_helper.close()
+                self._default_ssl_context = _DefaultSSLContext()
             finally:
                 self._close_owner = None
                 self._not_closing.set()
@@ -334,6 +351,12 @@ class AsyncSandboxClient(Generic[T]):
             if not keep_for_release_retry:
                 self._unregister_batch(batch)
 
+    def _attach_handle(self, sandbox: T) -> None:
+        """Attach client-owned TLS setup and termination tracking to a handle."""
+        # Preserve existing sandbox_class constructor signatures.
+        sandbox.connector._default_ssl_context = self._default_ssl_context
+        sandbox._on_terminated = functools.partial(self._untrack, self._active_connection_sandboxes)
+
     async def create_sandbox(
         self,
         warmpool: str,
@@ -359,7 +382,7 @@ class AsyncSandboxClient(Generic[T]):
                 (``SandboxClaim.metadata.labels``).
             claim_name: Optional DNS-1123 Claim name. Explicit names remain
                 caller-owned and are excluded from automatic cleanup.
-            adopt_existing: On 409, attach to the existing named Claim after
+            adopt_existing: On AlreadyExists, attach to the existing named Claim after
                 checking its warm pool and that it is not terminating. Requires
                 claim_name. Creation options are not reapplied on adoption;
                 an existing shutdownTime is preserved.
@@ -424,7 +447,7 @@ class AsyncSandboxClient(Generic[T]):
             except ApiException as error:
                 if error.status == 409:
                     cleanup_generated = False
-                if not (adopt_existing and error.status == 409):
+                if not (adopt_existing and is_already_exists(error)):
                     raise
                 created_claim = await self.k8s_helper.get_sandbox_claim(claim_name, namespace)
             if not generated_name:
@@ -462,7 +485,9 @@ class AsyncSandboxClient(Generic[T]):
                 connection_config=self.connection_config,
                 tracer_config=self.tracer_config,
                 k8s_helper=self.k8s_helper,
+                **({"file_config": self.file_config} if self.file_config is not None else {}),
             )
+            self._attach_handle(sandbox)
         except (Exception, asyncio.CancelledError):
             if cleanup_generated:
                 # Preserve legacy rollback even if the create response was lost.
@@ -553,10 +578,25 @@ class AsyncSandboxClient(Generic[T]):
                 f"in namespace '{namespace}': {e}"
             ) from e
 
-        if existing and existing.is_active:
+        # Reuse the tracked handle only while it is active and still bound to
+        # the claim's current sandbox. A claim deleted and re-created under the
+        # same name keeps that name, so the handle's sandbox_id is what tells
+        # us the claim now points at a different sandbox.
+        if existing and existing.is_active and existing.sandbox_id == sandbox_id:
             return existing
 
+        # Drop the inactive or stale handle. close_connection() only releases
+        # local resources, so the claim's current sandbox is untouched. A
+        # failed close must not block the replacement: the caller needs a
+        # handle for the current sandbox either way.
         if existing:
+            try:
+                await existing.close_connection()
+            except Exception as e:
+                logger.error(
+                    f"Failed to close stale sandbox connection for '{claim_name}' "
+                    f"in namespace '{namespace}': {e}"
+                )
             async with self._lock:
                 self._active_connection_sandboxes.pop(key, None)
 
@@ -567,7 +607,9 @@ class AsyncSandboxClient(Generic[T]):
             connection_config=self.connection_config,
             tracer_config=self.tracer_config,
             k8s_helper=self.k8s_helper,
+            **({"file_config": self.file_config} if self.file_config is not None else {}),
         )
+        self._attach_handle(new_handle)
 
         async with self._lock:
             self._active_connection_sandboxes[key] = new_handle
@@ -580,6 +622,19 @@ class AsyncSandboxClient(Generic[T]):
                 if not obj.is_active:
                     self._active_connection_sandboxes.pop(key, None)
             return list(self._active_connection_sandboxes.keys())
+
+    @staticmethod
+    def _untrack(registry: dict[tuple[str, str], T], sandbox: AsyncSandbox) -> None:
+        # terminate() calls this after a successful delete, while claim_name is still
+        # set, so the None check only narrows its type. A newer handle may have
+        # replaced this one for the same claim, so remove only this exact handle.
+        # This is static and bound to the registry with functools.partial, so a tracked
+        # handle never keeps the client alive. An instance method would keep it alive.
+        if sandbox.claim_name is None:
+            return
+        key = (sandbox.namespace, sandbox.claim_name)
+        if registry.get(key) is sandbox:
+            del registry[key]
 
     async def list_all_sandboxes(self, namespace: str = "default", label_selector: str | None = None) -> list[str]:
         """Lists all SandboxClaim names in the Kubernetes cluster for a namespace.
@@ -861,7 +916,14 @@ class AsyncSandboxClient(Generic[T]):
             except Exception as e:
                 logger.error(f"Failed to release batch '{batch_id}' in namespace {namespace}: {e}")
 
-    def _atexit_cleanup(self) -> None:
+    @staticmethod
+    def _atexit_cleanup(
+        registry: dict[tuple[str, str], T],
+        explicit_claims: set[tuple[str, str]],
+        active_batches: dict[tuple[str, str], AsyncSandboxBatch],
+        closing_batches: set[AsyncSandboxBatch],
+        injected_api_client: async_client.ApiClient | None,
+    ) -> None:
         """Best-effort atexit cleanup for claims and local sandbox resources.
 
         Tracked sandbox handles use their synchronous, loop-independent
@@ -874,18 +936,26 @@ class AsyncSandboxClient(Generic[T]):
         failures and top-level errors are reported to ``sys.stderr`` rather than raised.
         """
         try:
-            claims = list(self._active_connection_sandboxes.keys())
+            claims = list(registry.keys())
             tracked = [
-                (key, self._active_connection_sandboxes[key]) for key in claims
+                (key, registry[key]) for key in claims
             ]
-            batches = list(self._active_batches.values())
-            closing = list(self._closing_batches)
+            batches = list(active_batches.items())
+            closing = list(closing_batches)
             if not tracked and not batches and not closing:
                 return
 
             # A batch's cached connections hold port-forward processes too.
-            batch_sandboxes = [sandbox for batch in batches + closing for sandbox, _ in batch._connected.values()]
-            batch_sandboxes += [sandbox for batch in batches + closing for sandbox in batch._stale_connections]
+            batch_sandboxes = [
+                sandbox
+                for batch in [b for _, b in batches] + closing
+                for sandbox, _ in batch._connected.values()
+            ]
+            batch_sandboxes += [
+                sandbox
+                for batch in [b for _, b in batches] + closing
+                for sandbox in batch._stale_connections
+            ]
             for sandbox in [sandbox for _, sandbox in tracked] + batch_sandboxes:
                 try:
                     sandbox._close_for_atexit()
@@ -902,13 +972,13 @@ class AsyncSandboxClient(Generic[T]):
             with contextlib.ExitStack() as cleanup:
                 atexit_api_client = None
                 kube_config_dir = None
-                if self._injected_api_client is not None:
+                if injected_api_client is not None:
                     atexit_api_client = sync_client.ApiClient(
-                        configuration=_sync_configuration_from_async(self._injected_api_client.configuration),
-                        cookie=self._injected_api_client.cookie,
+                        configuration=_sync_configuration_from_async(injected_api_client.configuration),
+                        cookie=injected_api_client.cookie,
                     )
                     cleanup.callback(_close_api_client, atexit_api_client)
-                    for name, value in dict(self._injected_api_client.default_headers).items():
+                    for name, value in dict(injected_api_client.default_headers).items():
                         atexit_api_client.set_default_header(name, value)
                 else:
                     # kubernetes registers its own atexit removal of extracted inline cert files, but Python
@@ -918,7 +988,7 @@ class AsyncSandboxClient(Generic[T]):
                 helper = K8sHelper(api_client=atexit_api_client, kube_config_temp_dir=kube_config_dir)
                 cleanup.callback(helper.close)
                 for ns, claim_name in (key for key, _ in tracked):
-                    if (ns, claim_name) in self._explicit_claims:
+                    if (ns, claim_name) in explicit_claims:
                         continue
                     try:
                         helper.delete_sandbox_claim(
@@ -933,7 +1003,7 @@ class AsyncSandboxClient(Generic[T]):
                                 f"'{claim_name}' in namespace '{ns}' during atexit cleanup: {e}",
                                 file=sys.stderr,
                             )
-                for batch in batches:
+                for (namespace, batch_id), batch in batches:
                     # A batch whose detach() didn't finish was handed off, and an atexit hook can't await detach().
                     # The hook leaves an attached batch in place until its Lease goes stale.
                     if batch._detach_unfinished() or batch._exit_detaches():
@@ -955,6 +1025,9 @@ class AsyncSandboxClient(Generic[T]):
                                 f"'{batch.batch_id}' in namespace '{batch.namespace}' during atexit cleanup: {e}",
                                 file=sys.stderr,
                             )
+                    else:
+                        if active_batches.get((namespace, batch_id)) is batch:
+                            del active_batches[(namespace, batch_id)]
         except Exception as e:
             if sys.stderr is not None:
                 print(

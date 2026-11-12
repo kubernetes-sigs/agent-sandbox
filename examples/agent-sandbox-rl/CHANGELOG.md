@@ -5,6 +5,79 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 
 ## [0.1.0.dev0] — unreleased
 
+### Fixed
+- **Concurrent first acquires build one `SandboxClient` per cluster.**
+  `Cluster.sandbox_client` was built lazily with no lock, so a step of threads
+  acquiring at once on a fresh fleet each built a client and loaded the kubeconfig
+  (160 builds for 160 sync per-claim envs on kind, last start 4.22 s against 1.37 s
+  once fixed). It is now built once under a lock, and the SDK clients get the
+  cluster's `ApiClient`, so no build loads a kubeconfig. Requires
+  `k8s-agent-sandbox>=1.0.6`.
+
+### Added (external step loops and multi-container pods —
+[#1960](https://github.com/kubernetes-sigs/agent-sandbox/pull/1960), [#1962](https://github.com/kubernetes-sigs/agent-sandbox/pull/1962), [#1963](https://github.com/kubernetes-sigs/agent-sandbox/pull/1963), [#1964](https://github.com/kubernetes-sigs/agent-sandbox/pull/1964),
+[#1966](https://github.com/kubernetes-sigs/agent-sandbox/pull/1966), [#1967](https://github.com/kubernetes-sigs/agent-sandbox/pull/1967))
+- **Exec in a chosen container** ([#1960](https://github.com/kubernetes-sigs/agent-sandbox/pull/1960)): `SandboxHandle.target_container`,
+  `exec(container=)` / `open_session(container=)` and `SandboxHandle.runtime_container`
+  pick the container of a multi-container pod; a container is always named (the exec
+  API has no default on such a pod) and recycling stays in the runtime container. The
+  R2E-Gym adapter takes `container=` in `make_fleet_repo_env` / `FleetDockerRuntime`.
+- **OpenHands agent-server preset** ([#1962](https://github.com/kubernetes-sigs/agent-sandbox/pull/1962)):
+  `adapters.openhands.agent_server_template(...)` returns the `TemplateSpec` of an
+  OpenHands pool (server command and probes, a required session key, bounded
+  resources, `server_image=` to copy the server into a plain repo image).
+- **`LookaheadWarmer`** ([#1963](https://github.com/kubernetes-sigs/agent-sandbox/pull/1963)): `agent_sandbox_rl.lookahead` sizes pools for
+  the batches an external step loop has in flight (`add` / `finish` / `add_async` /
+  `close`, errors per image in a `WarmReport`). `SandboxFleet.add_tasks` extends the
+  plan in place and `wait_pools_ready` is a best-effort readiness barrier.
+- **Dataset rows and image manifests as task sources** ([#1964](https://github.com/kubernetes-sigs/agent-sandbox/pull/1964)): `to_tasks` /
+  `JsonlSource` find a row's image and id under the SDK, R2E-Gym and SWE-bench
+  conventions (`image_field=` / `id_field=`); `load_image_list` / `ImageListSource` read
+  one-image-per-line manifests from a local path or `gs://`.
+- **Verified teardown** ([#1966](https://github.com/kubernetes-sigs/agent-sandbox/pull/1966)): `teardown(verify=True)` / `verify_teardown()`
+  run the run-scoped reaper after the sweep and return `{cluster: counts}`: what the
+  reaper found per kind (all zero = the teardown was clean) plus `remaining`, the same
+  kinds re-listed after the reaper ran.
+- **Test double** ([#1967](https://github.com/kubernetes-sigs/agent-sandbox/pull/1967)): `agent_sandbox_rl.testing.FakeFleet` / `FakeHandle`
+  are the `SandboxFleet` surface in memory (`add_tasks` and `wait_pools_ready`
+  included, so a `LookaheadWarmer` runs against it), with the real strategies,
+  sizing and `RunReport`, `exec(container=)` recorded per call, injectable failures
+  and exec outputs.
+
+### Changed (pre-pull at hundreds of images — [#1965](https://github.com/kubernetes-sigs/agent-sandbox/pull/1965))
+- **`prepull` batches**: images are split into DaemonSets of `prepull_images_per_pod`
+  images (default 25); with `wait=True` at most `prepull_max_parallel` (default 4) are
+  live at once, `prepull_delete_when_done` removes finished batches,
+  `prepull_drop_caches` drops the page cache afterwards, and `fleet.prepull` returns
+  whether every cluster finished within the budget. With `wait=False` every batch is
+  created at once and the call returns immediately, without those steps. Tolerations
+  and runtime class come from the template, and the selector no longer carries the
+  run id (it is immutable).
+
+### Added (template knobs for multi-container, hardened sandbox pods)
+- **`ResourceSpec.cpu_limit` / `memory_limit`**: optional limits on the runtime
+  container (requests unchanged; an unset limit stays unlimited).
+- **`{task_image}` placeholder** (`constants.TASK_IMAGE_PLACEHOLDER`): a container or
+  init container in `TemplateSpec.extra_pod_spec` whose image is `{task_image}` runs the
+  template's own task image, resolved per template, so a fresh grading sidecar of the
+  task image is one dict in the spec instead of a patched manifest. A `{task_image}`
+  container that names no `imagePullPolicy` gets the template's; any other container
+  keeps the Kubernetes default.
+- **`TemplateSpec.extra_template_spec`**: extra SandboxTemplate `spec` keys merged next
+  to `podTemplate` and `networkPolicyManagement`. Those two keys are rejected: they
+  have knobs the SDK's own logic reads (`extra_pod_spec`, `network_policy_management`).
+  Keys the CRD does not know are pruned by the API server.
+
+### Changed (pod hardening made explicit)
+- **The rendered pod spec now states its hardening**: `automountServiceAccountToken:
+  false` and `shareProcessNamespace: false`. Pod behavior does not change: the
+  controller already defaults automount to false on the pods it creates, and no shared
+  PID namespace is the Kubernetes default. The values are explicit so a reader of the
+  template (or a policy engine) sees them, and so a grading sidecar never shares the
+  agent's PID namespace by accident. `TemplateSpec.automount_service_account_token` /
+  `share_process_namespace` restore either; `extra_pod_spec` keys still win. Existing
+  templates are not rewritten; the defaults apply to templates a fleet creates.
+
 ### Added (one NetworkPolicy per namespace)
 - **`TemplateSpec.network_policy_management`** sets `spec.networkPolicyManagement`
   on the SandboxTemplates a fleet creates, and patches it onto a pre-existing
@@ -65,6 +138,73 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
   another run's template as it finds it (as it already did with the pool), and
   `ensure_templates()` raises a `FleetError` naming the owning run, like the
   warm path.
+
+### Added (fail fast on claims that cannot start)
+- **`acquire()` fails fast on a pod that will not come up.** The SDK's claim wait
+  can only see the claim, so a pod stuck in `ImagePullBackOff`,
+  `CreateContainerConfigError`, `CrashLoopBackOff`, OOM-killed at start, or
+  `Unschedulable` looked like one still starting and ran out `ready_timeout`
+  (15 minutes) before the caller learned anything. `acquire()` now names its claim
+  and runs a `ClaimWatchdog` (`failfast.py`) next to the wait; when the pod is in a
+  state the controller will not recover from, the watchdog deletes the claim and
+  `acquire()` raises **`SandboxStartError`** with the Kubernetes reason, the pod and
+  the image. Reasons that never clear fail at once. The graced classes are opt-in:
+  transient-looking ones fail after `FailFastPolicy.grace_s` and `Unschedulable`
+  after `unschedulable_grace_s` only when those are set (unset by default: a GPU
+  or node-auto-provisioning scale-up outlasts a few minutes of `Unschedulable`,
+  and failing a pull during registry throttling makes the caller retry on a new
+  pod whose pull starts at once, adding load). A pod being deleted is not a
+  verdict: the controller recreates an evicted or preempted pod under the same
+  name. The retryable reasons of a container share one
+  grace clock, which resets only after the condition has been gone for a full
+  grace period, so a pull flipping between `ErrImagePull` and `ImagePullBackOff`
+  or a crash loop seen between restarts is not restarted on every poll. An
+  earlier OOM kill fails a container only while it is not running again. Off with
+  `FleetConfig(fail_fast=FailFastPolicy(enabled=False))`.
+- **Claim tracking does not grow per episode.** `acquire()` names its claim, which
+  the SDK client records (`_explicit_claims`, next to the Sandbox object in
+  `_active_connection_sandboxes`); `sandbox.terminate()` leaves both in place.
+  `handle.release()` and every rollback path of a failed `acquire()` now prune the
+  claim from the client (`forget_claim_in_client`). The SDK itself is unchanged
+  here; pruning on its terminate path is a separate SDK change.
+- **`FleetConfig.claim_timeout`** bounds one claim's readiness wait separately from
+  `ready_timeout`, which also bounds whole-pool fills and is sized for those.
+  `None` (default) keeps the old behaviour.
+- **`SandboxHandle.is_alive()`** and **`SandboxLostError`**: an `exec()` that fails
+  because the pod is gone (deleted, evicted, OOM-killed, finished) now raises
+  `SandboxLostError` instead of the raw transport error, after one pod read, so an
+  RL loop can release and re-acquire at once instead of spending its step timeout.
+  `acquire()` records the pod's UID and the runtime container's restart count, so
+  `is_alive()` also reports a pod recreated under the same name (eviction,
+  deletion) and an in-place restart (OOM kill). Only the runtime container is
+  judged; a sidecar that exits does not mark the sandbox lost. After a resume or restore, `refresh()` re-records the identity for the new pod, so `is_alive()` does not report the restored pod as a replacement.
+- **`reap_orphans(alive_run_ids)`** / `python -m agent_sandbox_rl.reaper --orphans
+  --alive-run-ids a,b`: reap every run in the namespace whose driver the caller
+  does not list as alive, discovered through the run-id label on its claims,
+  pools and templates (pods and Sandboxes are reached through those).
+  This is the sweep an external reaper should call rather than matching names or
+  ages itself; `--min-age-s` (300) protects runs that just started, `--dry-run`
+  reports only. Runs with only pods or Sandboxes left are not discovered (neither
+  carries the run-id label everywhere). Pools, and their templates, that a claim of
+  a run not being reaped still points at are kept, here and in `reap(run_id)`, and
+  so are their pods and the pods those runs claimed from them, which keep the
+  run-id label of the run that created the pool. If the claims, pools or
+  Sandboxes needed to tell those apart cannot be listed, the reap raises
+  `FleetError` before deleting anything instead of treating the unknown set as
+  empty.
+- **`reap("")`** and `--run-id ""` are rejected; an empty id used to select every
+  managed run.
+- `OwnedByAnotherRunError` is now exported from the package root.
+
+### Fixed
+- **`reap()` reaches a run's Sandboxes and pods without relying on the run-id
+  label.** Sandbox CRs never carry it, and pods created before `POD_RUN_ID_LABEL`
+  ([#1807](https://github.com/kubernetes-sigs/agent-sandbox/issues/1807)) carry no
+  run id at all, so the label-based sweeps alone left them to the owner cascade.
+  The sweep now records, before deleting anything, each pool's `status.selector`
+  and each claim's `status.sandbox.name` (and that Sandbox's `status.labelSelector`),
+  deletes those Sandboxes by name and force-deletes pods by every selector, so a
+  stalled owner cascade still ends with the pods gone.
 
 ### Fixed (concurrent runs in one namespace —
 [#1736](https://github.com/kubernetes-sigs/agent-sandbox/issues/1736))

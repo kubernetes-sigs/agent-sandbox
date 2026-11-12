@@ -18,10 +18,12 @@ sandboxd (runtime daemon)
   plain HTTP client works without generated stubs.
 
 Both listeners bind to `--listen-host` (default `0.0.0.0`), so the daemon is
-reachable through the Pod IP, a Kubernetes Service, or an SDK pod
-port-forward. The current `sandbox-router` accepts HTTP/2 client connections,
-but disables HTTP/2 on its upstream connections and therefore cannot carry the
-gRPC `ProcessService`, so it is not a complete `sandboxd` transport.
+reachable through the Pod IP, a Kubernetes Service, an SDK pod port-forward, or
+the `sandbox-router`, which proxies both the REST API and native gRPC (see
+[Native gRPC](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/sandbox-router/README.md#native-grpc)).
+The router strips `Authorization` before forwarding, so a client behind the
+router sends the token in `X-Sandboxd-Token` instead (see
+[Client authentication](#client-authentication)).
 Containment is provided by pod isolation and NetworkPolicy, not loopback
 binding; pass `--listen-host=127.0.0.1` to restrict to loopback (e.g. local
 development).
@@ -37,6 +39,7 @@ The specifications live in [`spec/`](spec/):
 | Surface | Spec |
 |---|---|
 | `ProcessService` (gRPC) | [`spec/process/v1/process.proto`](spec/process/v1/process.proto) |
+| `FileWatcherService` (gRPC) | [`spec/watcher/v1/watcher.proto`](spec/watcher/v1/watcher.proto) |
 | Filesystem & Runtime REST API | [`spec/filesystem/v1/filesystem.yaml`](spec/filesystem/v1/filesystem.yaml) |
 
 ## Implementing a compatible runtime
@@ -51,6 +54,15 @@ same workspace and execution environment:
   `InitEvent` before process output, zero or more `stdout`/`stderr` events,
   and one final `ExitEvent`. The process ID from `InitEvent` is the handle
   used by `WriteStdin`, `SendSignal`, and `ResizeTTY`.
+- Optionally serve `watcher.v1.FileWatcherService`. The SDKs reject the call
+  upfront with `ErrUnsupportedByRuntime` (Go) / `RuntimeError` (Python) only
+  when the configured runtime is the legacy python-runtime. Against a runtime
+  that does not serve the service, the `Unimplemented` gRPC status surfaces
+  from the stream instead: the Go SDK delivers it as a terminal `error`
+  FileEvent, and the Python SDK raises `RuntimeError` during iteration. A
+  compatible runtime that wants watcher support must implement `WatchDir` with
+  the same path-confinement and terminal-ERROR semantics as the reference
+  server.
 - Serve the `/v1/files`, `/v1/health`, and `/v1/metadata` REST resources with
   the status codes and JSON shapes in the OpenAPI document. File payloads are
   raw bytes rather than base64; `PUT` accepts both an octet-stream body and a
@@ -102,6 +114,7 @@ explicitly as shown in [Agent Sandbox SDK access](#agent-sandbox-sdk-access).
 |---|---|---|
 | `Start` | Server stream | Run a command, stream `stdout`/`stderr` in real time until `ExitEvent`. Optional PTY. |
 | `Execute` | Unary | Run a command synchronously, return `stdout`/`stderr`/`exit_code` atomically. |
+| `ExecuteWithLimits` | Unary | Run a command with time and output limits, returning explicit execution outcomes. |
 | `WriteStdin` | Unary | Send `stdin` bytes or `EOF` to a running process. |
 | `SendSignal` | Unary | Deliver `SIGINT`/`SIGTERM`/`SIGKILL` to the process group. |
 | `ResizeTTY` | Unary | Resize the pseudo-terminal window (`cols`, `rows`). |
@@ -113,14 +126,88 @@ process IDs, `PERMISSION_DENIED` for a `cwd` escaping the sandbox root,
 `exit_code` is the process's exit status, or `128+n` when signal `n` killed
 it (e.g. `137` for `SIGKILL`), as a shell reports it.
 
+`ExecuteWithLimits` accepts optional positive `stdout_limit_bytes` and
+`stderr_limit_bytes`. Each stream keeps its prefix within its own byte budget.
+Additional output is drained and discarded without terminating the program.
+The response reports each stream's truncation flag and elapsed duration.
+Unspecified limits preserve unlimited capture until deployment policy is set.
+Older runtimes reject the new RPC with `UNIMPLEMENTED` before running a command;
+clients must not retry it through `Execute` without the requested limits.
+
+The optional positive `time_limit` is a protobuf Duration independent of the RPC
+deadline. It covers launch and output collection. At expiry the daemon attempts
+to kill the process group and descendants, then waits up to 10 seconds for
+termination and cleanup. If cleanup completes while the RPC remains active,
+the response reports `EXECUTE_TERMINATION_REASON_TIME_LIMIT_EXCEEDED`, the actual
+exit code, and retained output. `elapsed_duration` includes cleanup, so it can
+exceed `time_limit`. Incomplete cleanup returns `INTERNAL`. An earlier RPC
+cancellation or deadline still returns its gRPC error without a result.
+Check `termination_reason` alongside `exit_code`: descendant output collection
+can reach the time limit after the direct child has exited successfully.
+
+If output draining times out, the daemon attempts bounded termination of the
+remaining process group before reporting the failure.
+
+Both unary RPCs resolve each limit independently: request value, deployment
+default, deployment maximum, then unlimited if none is configured. A request
+above its deployment maximum returns `INVALID_ARGUMENT` before starting the
+program. Explicit request limits must be positive; omitting a field inherits
+policy. Deployment flags use zero to leave a setting unconfigured. Invalid
+configuration, including a default above its maximum, prevents startup.
+
+`Execute` also enforces deployment policy. It returns `RESOURCE_EXHAUSTED` when
+execution times out or output is truncated, because its response cannot express
+partial results. On output truncation it still waits for the program to finish.
+Use `ExecuteWithLimits` to receive retained output and structured outcomes;
+an error from `Execute` does not mean the command had no side effects.
+Without deployment policy, existing calls retain their behavior.
+
+Capture budgets count raw bytes, so a retained prefix can end within a UTF-8
+character. They do not bound the program's memory or total memory across
+concurrent executions. gRPC message-size limits apply separately to the final
+response. These policies do not apply to `Start` or PTY sessions.
+
+### FileWatcherService (gRPC, `:9090`)
+
+| RPC | Type | Purpose |
+|---|---|---|
+| `WatchDir` | Server stream | Stream filesystem events (create, write, remove, rename, chmod) for a directory. Optional recursive mode. |
+
+Events are batched in ~250ms windows and flushed in order; individual
+events are not merged. For renames, `path` carries the old (source) name;
+when the new name lands inside the watched tree it arrives as a separate
+`create` event — clients reconstruct renames by pairing the two. Each
+event path is re-validated against the sandbox root on delivery to prevent
+symlink-swap escapes. Terminal
+conditions (watched directory removed, unrecoverable watcher error) are
+surfaced as a final `FileEvent` with type `ERROR` before the stream
+closes, rather than as a gRPC status code, so clients can distinguish
+transport failures from intentional termination. Non-fatal problems
+(event overflow, subdirectories that could not be watched in recursive
+mode) also arrive as `ERROR` events, but the stream continues.
+
+Errors that prevent the watch from starting surface as standard gRPC
+status codes (`NOT_FOUND` for a non-existent path, `PERMISSION_DENIED`
+for a path escaping the sandbox root, `INVALID_ARGUMENT` for a
+non-directory path).
+
+`FileWatcherService` is optional for compatible runtimes. The SDKs reject
+the call with `ErrUnsupportedByRuntime` (Go) / `RuntimeError` (Python) when
+the configured runtime is the legacy python-runtime; against a runtime that
+does not serve the service, the `Unimplemented` gRPC status surfaces from the
+stream as a terminal `error` FileEvent (Go) or a `RuntimeError` raised during
+iteration (Python).
+
 ### Filesystem & Runtime REST API (`:8080`)
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| `GET` | `/v1/files/{path}` | File → raw bytes (`application/octet-stream`); directory → JSON `DirectoryListing`. |
+| `GET` | `/v1/files/{path}` | File → raw bytes (`application/octet-stream`); directory → JSON `DirectoryListing`. Optional `type` query (`file` or `directory`, also on `HEAD`): `409` if the path is the other kind. `recursive=true` lists nested directories too, and `max_depth=N` limits how deep (entry names become paths relative to the listed directory). A recursive listing over 10000 entries fails with `400`. |
 | `HEAD` | `/v1/files/{path}` | Existence/metadata probe without transferring the body. |
-| `PUT` | `/v1/files/{path}` | Atomic write (temp file + rename), auto-creates parents. Optional `mode` query (`^0[0-7]{3}$`, default `0644`). Accepts raw bytes or `multipart/form-data` (`file` part). |
+| `PUT` | `/v1/files/{path}` | Atomic write (temp file + rename), auto-creates parents. Optional `mode` query (`^0[0-7]{3}$`, default `0644`). `append=true` adds to the end of the file instead (not atomic). `type=directory` creates a directory instead (body ignored, `parents=true` also creates missing parents, default mode `0755`). `If-None-Match: *` creates the file only if the path does not exist, else `412`. `extract=tar` unpacks a tar body, optionally gzipped, into the directory at the path (not atomic). Accepts raw bytes or `multipart/form-data` (`file` part). |
 | `DELETE` | `/v1/files/{path}` | Remove a file or directory; `recursive=true` for `rm -rf` behavior; `409` on a non-empty directory otherwise. |
+| `POST` | `/v1/files/{path}:move` | Rename or move to the required `destination` query path, auto-creating parents. `409` if the destination exists, except that `overwrite=true` replaces a file with a file. Directories are never replaced. A symlink as the last path component is moved or replaced itself, not followed. |
+| `POST` | `/v1/files/{path}:copy` | Same as `:move`, but copies. Directories are copied recursively, files keep their mode, and symlinks inside a directory are copied as links. |
 | `GET` | `/v1/health` | Readiness probe: `200 {"status":"ok"}` or `503` during shutdown. |
 | `GET` | `/v1/metadata` | Orchestrator-injected, non-sensitive environment variables (allowlisted by prefix, default `SANDBOX_`). |
 
@@ -131,8 +218,8 @@ default) via symlink-aware sanitization; traversal attempts return
 ### Concurrency semantics
 
 Requests are handled in parallel, with no server-side serialization. The
-atomic-write strategy prevents partial file contents, but it does not impose an
-ordering across requests:
+atomic-write strategy prevents partial file contents for replacement writes (not
+appends, see below), but it does not impose an ordering across requests:
 
 - **Write vs. read** — a successful read sees either the complete previous
   file or the complete new one, never partial content. A read racing with a
@@ -144,6 +231,22 @@ ordering across requests:
   complete after the path is deleted; a read that has not opened it may fail.
 - **Concurrent writes to one path** — each successful rename is atomic; the
   last successful rename determines the final contents.
+- **Create-only writes (`If-None-Match: *`)** - when several race to create one
+  path, exactly one succeeds and the rest get `412`. It needs hard link support,
+  so it fails on volumes without it, such as GCS FUSE.
+- **Appends (`append=true`)** are written in place, not atomically: a read can
+  see a partial append, and concurrent appends to one path can interleave. A
+  retried append adds the body again.
+- **Move and copy** use one `rename` per move and publish each copied file or
+  directory atomically. A move across filesystems copies and then removes the
+  source, so both paths are briefly absent. The check for an existing
+  destination is not atomic with them, so a concurrent writer can win the race.
+- **Archive extraction (`extract=tar`)** writes each file atomically but the
+  archive as a whole is not: an error leaves the entries written so far. An
+  archive over 100000 entries or 1 GiB of file data fails with `413`. Symlink
+  targets are written as given, so a link can point outside the extraction
+  directory. Only later requests through the API are confined to the sandbox
+  root.
 
 There is no cross-request transaction or compare-and-swap; agents that need
 ordering or coordination on shared paths must layer it themselves.
@@ -197,9 +300,24 @@ Complete, runnable manifests for both (plus an end-to-end SDK client) live in
 | `--shutdown-timeout` | `10s` | Grace period for in-flight requests and child processes. |
 | `--http-idle-timeout` | `60s` | Close idle HTTP keep-alive connections after this duration. |
 | `--stream-chunk-size` | `4096` | Buffer size in bytes for streaming process stdout/stderr chunks. |
+| `--execute-default-time-limit` | `0` | Default unary execution time limit, as a Go duration such as `2s`. Zero leaves it unset. |
+| `--execute-max-time-limit` | `0` | Maximum unary execution time limit. Also used when no request or default limit is set. |
+| `--execute-default-stdout-limit-bytes` | `0` | Default stdout capture limit per unary execution. |
+| `--execute-max-stdout-limit-bytes` | `0` | Maximum stdout capture limit per unary execution. |
+| `--execute-default-stderr-limit-bytes` | `0` | Default stderr capture limit per unary execution. |
+| `--execute-max-stderr-limit-bytes` | `0` | Maximum stderr capture limit per unary execution. |
 | `--auth-token-sha256` | (none) | Hex SHA-256 digest of the bearer token clients must send. See [Client authentication](#client-authentication). |
 | `--auth-token-file` | (none) | File holding the bearer token (e.g. a mounted Secret). Alternative to `--auth-token-sha256`; set at most one. Neither leaves the API unauthenticated. |
 | `--version` | | Print version info and exit. |
+
+For example, start a local daemon with optional execution policy:
+
+```bash
+sandboxd --listen-host=127.0.0.1 --root-dir=/tmp/sandboxd-demo \
+  --execute-default-time-limit=2s --execute-max-time-limit=10s \
+  --execute-default-stdout-limit-bytes=1024 --execute-max-stdout-limit-bytes=1048576 \
+  --execute-default-stderr-limit-bytes=1024 --execute-max-stderr-limit-bytes=1048576
+```
 
 ## Talking to sandboxd
 
@@ -210,17 +328,36 @@ Complete, runnable manifests for both (plus an end-to-end SDK client) live in
 curl -sf -X PUT -H "Content-Type: application/octet-stream" \
   --data-binary @local.py "localhost:8080/v1/files/src/main.py?mode=0644"
 
+# Create only if missing (412 if it exists)
+curl -sf -X PUT -H "If-None-Match: *" --data-binary "x" localhost:8080/v1/files/src/new.py
+
 # Read it back
 curl -sf localhost:8080/v1/files/src/main.py
 
 # List a directory (JSON)
 curl -sf localhost:8080/v1/files/src
 
+# List it with nested directories, two levels deep
+curl -sf "localhost:8080/v1/files/src?recursive=true&max_depth=2"
+
 # Existence probe
 curl -sf -I localhost:8080/v1/files/src/main.py
 
+# Append
+curl -sf -X PUT --data-binary "more" "localhost:8080/v1/files/src/main.py?append=true"
+
+# Create a directory (with missing parents)
+curl -sf -X PUT "localhost:8080/v1/files/src/pkg?type=directory&parents=true"
+
+# Extract a tarball (plain or gzipped) into a directory
+curl -sf -X PUT --data-binary @repo.tar.gz "localhost:8080/v1/files/src?extract=tar"
+
 # Delete recursively
 curl -sf -X DELETE "localhost:8080/v1/files/src?recursive=true"
+
+# Move or copy (missing parents of the destination are created)
+curl -sf -X POST "localhost:8080/v1/files/src/main.py:move?destination=lib/main.py"
+curl -sf -X POST "localhost:8080/v1/files/src:copy?destination=backup/src"
 
 # Probes
 curl -sf localhost:8080/v1/health
@@ -233,6 +370,12 @@ curl -sf localhost:8080/v1/metadata
 # Synchronous execution
 grpcurl -plaintext -d '{"config":{"command":["echo","hello"]}}' \
   localhost:9090 process.v1.ProcessService/Execute
+
+# Allow the RPC 10 seconds, but stop the program after 0.2 seconds.
+# The response includes retained output and TIME_LIMIT_EXCEEDED.
+grpcurl -plaintext -max-time 10 \
+  -d '{"config":{"command":["sh","-c","printf started; exec sleep 30"]},"timeLimit":"0.2s","stdoutLimitBytes":"1024","stderrLimitBytes":"1024"}' \
+  localhost:9090 process.v1.ProcessService/ExecuteWithLimits
 
 # Streaming execution: watch InitEvent → stdout chunks → ExitEvent
 grpcurl -plaintext -d '{"config":{"command":["sh","-c","for i in 1 2 3; do echo $i; sleep 1; done"]}}' \
@@ -286,9 +429,11 @@ auto-detect it. They select the runtime and transport explicitly. The Go SDK
 and both Python client variants (synchronous and asynchronous) can use a direct
 **pod port-forward** for `:8080` and `:9090`. From inside the cluster, both
 SDKs can instead dial the Pod IP or the Sandbox's headless Service directly.
-Filesystem calls use REST and `Run` uses
-gRPC. The current `sandbox-router` cannot provide this combined transport
-because it does not proxy gRPC.
+Filesystem calls use REST and `Run` uses gRPC. These SDK modes connect to the
+pod without the `sandbox-router`. The router can proxy both protocols, so a
+plain gRPC client can also reach `sandboxd` through it by sending `x-sandbox-id`
+and `x-sandbox-port: 9090` on every RPC (see
+[Native gRPC](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/sandbox-router/README.md#native-grpc)).
 
 > **Where commands run:** `ProcessService` executes commands inside the
 > container that hosts `sandboxd` (see
@@ -401,6 +546,22 @@ digest is `<hex>` on:
 - every REST request except `GET /v1/health`, `/v1/metadata` included, as the
   header `Authorization: Bearer <token>`. Requests without it get `401` with
   `{"code":"UNAUTHENTICATED"}` and `WWW-Authenticate: Bearer`.
+
+Either transport also accepts the bare token in `X-Sandboxd-Token: <token>`
+(`x-sandboxd-token` in gRPC metadata). Use it through the `sandbox-router`,
+which drops `Authorization` before it forwards a request. A router enforcing
+TokenReview or scoped-token auth does not read this header, so also send its
+own credential in `Authorization`:
+
+```bash
+curl -sf -H "Authorization: Bearer $ROUTER_TOKEN" \
+  -H "X-Sandboxd-Token: $TOKEN" \
+  -H "X-Sandbox-ID: my-sandbox" -H "X-Sandbox-Port: 8080" \
+  "$ROUTER_URL/v1/files/src"
+```
+
+The Python SDK sends `auth_token` in `X-Sandboxd-Token` through the router.
+The TypeScript SDK still sends it only in `Authorization` (#2102, #1785).
 
 `/v1/health` stays open so a kubelet `httpGet` readiness probe works without
 the token. Comparison is constant time.

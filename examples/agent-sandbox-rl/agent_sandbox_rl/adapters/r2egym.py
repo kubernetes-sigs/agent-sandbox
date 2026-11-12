@@ -65,6 +65,8 @@ import time
 
 from kubernetes.stream import stream
 
+from ..handles import exec_container_kwargs
+
 logger = logging.getLogger("agent_sandbox_rl.adapters.r2egym")
 
 _HINT = (
@@ -117,8 +119,14 @@ def _build_classes():
       """
 
       def __init__(self, handle, *, command=("/bin/bash", "-l"), logger=None,
-                   **docker_kwargs):
+                   container=None, **docker_kwargs):
         self._handle = handle
+        # Which container of the pod exec / file-copy target: an explicit
+        # argument, else the handle's target_container, else the container
+        # running the task image (never unnamed: the exec API has no default
+        # container on a multi-container pod).
+        self._container = (container or getattr(handle, "target_container", None)
+                           or getattr(handle, "runtime_container", None))
         ds = (getattr(handle.task, "metadata", None) or {}).get("ds")
         if ds is None:
           raise RuntimeError(
@@ -179,7 +187,7 @@ def _build_classes():
                 self.client.connect_get_namespaced_pod_exec,
                 self.container_name, self._ns, command=full_command,
                 stderr=True, stdin=False, stdout=True, tty=False,
-                _preload_content=False)
+                _preload_content=False, **exec_container_kwargs(self._container))
             chunks = []
             while resp.is_open():
               resp.update(timeout=1)
@@ -235,7 +243,7 @@ def _build_classes():
                 self.container_name, self._ns,
                 command=["tar", "xmf", "-", "-C", dest_dir],
                 stderr=True, stdin=True, stdout=True, tty=False,
-                _preload_content=False)
+                _preload_content=False, **exec_container_kwargs(self._container))
             resp.write_stdin(tar_stream.read())
             resp.close()
             return
@@ -259,7 +267,7 @@ def _build_classes():
       """
 
       def __init__(self, handle, args, *, logger=None, verbose=True,
-                   step_timeout=90, reward_timeout=300):
+                   step_timeout=90, reward_timeout=300, container=None):
         if logger is None:
           from r2egym.agenthub.utils.log import get_logger
           self.logger = get_logger("FleetRepoEnv")
@@ -268,7 +276,8 @@ def _build_classes():
         if not verbose:
           self.logger.setLevel(logging.CRITICAL)
 
-        self.runtime = FleetDockerRuntime(handle, logger=self.logger)
+        self.runtime = FleetDockerRuntime(handle, logger=self.logger,
+                                          container=container)
 
         self.args = args
         self.done = False
@@ -303,14 +312,20 @@ def _build_classes():
 
 
 def make_fleet_repo_env(handle, *, command_files=None, verbose=False,
-                        step_timeout: int = 90, reward_timeout: int = 300):
+                        step_timeout: int = 90, reward_timeout: int = 300,
+                        container: str | None = None):
   """Build an R2E-Gym `RepoEnv` bound to a fleet-warmed pod (`handle`).
 
   ``handle`` must come from a fleet whose tasks were loaded with
   ``SweBenchSource(keep_row=True)`` (the env/reward grading need the full dataset
   row in ``task.metadata['ds']``). ``command_files`` are R2E-Gym tool files copied
-  into the pod (see `r2egym_command_files`). Call ``env.close()`` when done — it is
-  a no-op that does NOT delete the pod; the fleet releases it.
+  into the pod (see `r2egym_command_files`). ``container`` names the pod container
+  the env execs and copies into (default: ``handle.target_container``, else
+  ``handle.runtime_container``; the exec API has no default container) — build
+  one env on the runtime container for the episode and another on a fresh
+  grading sidecar for the reward. Call
+  ``env.close()`` when done — it is a no-op that does NOT delete the pod; the
+  fleet releases it.
   """
   _, FleetRepoEnv = _build_classes()
   from r2egym.agenthub.environment.env import EnvArgs
@@ -320,7 +335,8 @@ def make_fleet_repo_env(handle, *, command_files=None, verbose=False,
         "Task.metadata['ds'] is required for the R2E-Gym adapter — load tasks "
         "with SweBenchSource(keep_row=True).")
   env = FleetRepoEnv(handle, EnvArgs(ds=ds), verbose=verbose,
-                     step_timeout=step_timeout, reward_timeout=reward_timeout)
+                     step_timeout=step_timeout, reward_timeout=reward_timeout,
+                     container=container)
   if command_files:
     env.add_commands(list(command_files))
   return env

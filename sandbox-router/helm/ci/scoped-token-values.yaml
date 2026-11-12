@@ -1,0 +1,24 @@
+image:
+  tag: v0.0.0-lint
+authz:
+  mode: scoped-token
+networkPolicy:
+  otlpPort: 4318
+  otlpEgressTo:
+    - ipBlock:
+        cidr: 10.1.0.0/24
+router:
+  cacheNamespace: tenants
+  extraArgs:
+    - --authz-scoped-token-verification-keys-file=/var/run/secrets/sandbox-router/scoped-token/verification-keys.json
+extraVolumeMounts:
+  - name: scoped-token-verification-keys
+    mountPath: /var/run/secrets/sandbox-router/scoped-token
+    readOnly: true
+extraVolumes:
+  - name: scoped-token-verification-keys
+    configMap:
+      name: sandbox-router-scoped-token-keys-v1
+      items:
+        - key: verification-keys.json
+          path: verification-keys.json

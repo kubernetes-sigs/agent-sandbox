@@ -1,0 +1,104 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# DeepAgents sandbox runtime: stock python:3.11 with the sandboxd binary
+# injected by an initContainer (same topology as examples/deer-flow-sandbox).
+# The Deep Agent's shell and file tools execute inside THIS container.
+# sandboxd's --root-dir=/app matches the K8sAgentSandbox backend's default
+# sandbox_api_cwd="/app", so the backend's relative-path resolution and
+# sandboxd's file API agree without extra configuration. The backend creates
+# its working directory (/app/work) on first use.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: deepagents-template
+  namespace: default
+spec:
+  podTemplate:
+    spec:
+      # The sandbox runs untrusted agent code; it needs no API access.
+      automountServiceAccountToken: false
+      restartPolicy: "OnFailure"
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 1000
+      initContainers:
+        - name: install-sandboxd
+          image: us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/sandboxd:latest-main
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c", "cp /usr/local/bin/sandboxd /sandboxd-bin/sandboxd"]
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: sandboxd-bin
+              mountPath: /sandboxd-bin
+      containers:
+        - name: app
+          image: python:3.11
+          imagePullPolicy: IfNotPresent
+          command:
+            - /sandboxd-bin/sandboxd
+            - --root-dir=/app
+            - --rest-port=8080
+            - --grpc-port=9090
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          ports:
+            - containerPort: 8080  # REST filesystem + probes
+            - containerPort: 9090  # gRPC ProcessService
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: 8080
+          volumeMounts:
+            # Read-only: sandboxed commands must not replace the injected binary.
+            - name: sandboxd-bin
+              mountPath: /sandboxd-bin
+              readOnly: true
+            - name: workspace
+              # Mount the writable emptyDir AT sandboxd's --root-dir so
+              # fsGroup 1000 governs it and the uid-1000 sandbox can create
+              # its working directory (/app/work) and agent files.
+              mountPath: /app
+      volumes:
+        - name: sandboxd-bin
+          emptyDir: {}
+        - name: workspace
+          emptyDir: {}

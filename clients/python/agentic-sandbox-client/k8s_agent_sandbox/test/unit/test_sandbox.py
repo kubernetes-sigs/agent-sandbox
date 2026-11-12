@@ -12,16 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gc
+import threading
 import unittest
+import weakref
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from pydantic import ValidationError
 
 from k8s_agent_sandbox.sandbox import Sandbox
 from k8s_agent_sandbox.models import (
+    SandboxDirectConnectionConfig,
+    SandboxHealth,
     SandboxInClusterConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
+    SandboxMetadata,
     SandboxTracerConfig,
+    SandboxdInClusterConnectionConfig,
+    SandboxdPodTunnelConnectionConfig,
 )
 from k8s_agent_sandbox.utils import select_pod_ip
 
@@ -339,6 +350,117 @@ class TestSandbox(unittest.TestCase):
         self.assertIsNone(self.sandbox.get_service_fqdn())
 
 
+def _mock_json_response(payload):
+    """Build a MagicMock shaped like a requests.Response for /health & /metadata."""
+    response = MagicMock()
+    response.json.return_value = payload
+    return response
+
+
+class _SandboxRuntimeTestBase(unittest.TestCase):
+    """Shared setUp for ``Sandbox.health()`` / ``metadata()`` cases."""
+
+    @patch('k8s_agent_sandbox.sandbox.Filesystem')
+    @patch('k8s_agent_sandbox.sandbox.CommandExecutor')
+    @patch('k8s_agent_sandbox.sandbox.create_tracer_manager')
+    @patch('k8s_agent_sandbox.sandbox.SandboxConnector')
+    @patch('k8s_agent_sandbox.sandbox.K8sHelper')
+    def setUp(self, mock_k8s_helper, mock_connector, mock_create_tracer_manager, mock_command_executor, mock_filesystem):
+        self.mock_connector = mock_connector.return_value
+        self.mock_connector.is_sandboxd.return_value = True
+        mock_create_tracer_manager.return_value = (MagicMock(), None)
+        self.sandbox = Sandbox(
+            claim_name="c", sandbox_id="s", namespace="n",
+        )
+
+
+class TestSandboxHealth(_SandboxRuntimeTestBase):
+    """Exercises ``Sandbox.health()`` against a mocked sandboxd connector."""
+
+    def test_health_calls_v1_endpoint(self):
+        self.mock_connector.send_request.return_value = _mock_json_response(
+            {"status": "ok", "uptime_seconds": 42})
+        self.sandbox.health()
+        self.mock_connector.send_request.assert_called_once_with(
+            "GET", "v1/health", timeout=60)
+
+    def test_health_returns_parsed_model(self):
+        self.mock_connector.send_request.return_value = _mock_json_response(
+            {"status": "ok", "uptime_seconds": 42})
+        result = self.sandbox.health()
+        self.assertEqual(result, SandboxHealth(status="ok", uptime_seconds=42))
+
+    def test_health_missing_uptime_raises(self):
+        # uptime_seconds is required, matching the Go and TypeScript SDKs:
+        # sandboxd always serves it, so a body without it is malformed.
+        self.mock_connector.send_request.return_value = _mock_json_response(
+            {"status": "ok"})
+        with self.assertRaises(ValidationError):
+            self.sandbox.health()
+
+    def test_health_negative_uptime_raises(self):
+        self.mock_connector.send_request.return_value = _mock_json_response(
+            {"status": "ok", "uptime_seconds": -1})
+        with self.assertRaises(ValidationError):
+            self.sandbox.health()
+
+    def test_health_legacy_runtime_raises(self):
+        self.mock_connector.is_sandboxd.return_value = False
+        with self.assertRaises(NotImplementedError):
+            self.sandbox.health()
+        self.mock_connector.send_request.assert_not_called()
+
+    def test_health_honors_custom_timeout(self):
+        self.mock_connector.send_request.return_value = _mock_json_response(
+            {"status": "ok", "uptime_seconds": 42})
+        self.sandbox.health(timeout=5)
+        _, kwargs = self.mock_connector.send_request.call_args
+        self.assertEqual(kwargs["timeout"], 5)
+
+
+class TestSandboxMetadata(_SandboxRuntimeTestBase):
+    """Exercises ``Sandbox.metadata()`` against a mocked sandboxd connector."""
+
+    def test_metadata_calls_v1_endpoint(self):
+        self.mock_connector.send_request.return_value = _mock_json_response(
+            {"env": {}})
+        self.sandbox.metadata()
+        self.mock_connector.send_request.assert_called_once_with(
+            "GET", "v1/metadata", timeout=60)
+
+    def test_metadata_returns_parsed_model(self):
+        env = {"SANDBOX_ID": "abc", "WORKSPACE": "/w"}
+        self.mock_connector.send_request.return_value = _mock_json_response(
+            {"env": env})
+        result = self.sandbox.metadata()
+        self.assertEqual(result, SandboxMetadata(env=env))
+
+    def test_metadata_missing_env_is_empty(self):
+        # /v1/metadata's env is optional; a bare {} must decode, not raise.
+        self.mock_connector.send_request.return_value = _mock_json_response({})
+        self.assertEqual(self.sandbox.metadata(), SandboxMetadata(env={}))
+
+    def test_metadata_null_env_is_empty(self):
+        # Explicit null env — normalize to {} so callers don't have to
+        # branch on None.
+        self.mock_connector.send_request.return_value = _mock_json_response(
+            {"env": None})
+        self.assertEqual(self.sandbox.metadata(), SandboxMetadata(env={}))
+
+    def test_metadata_legacy_runtime_raises(self):
+        self.mock_connector.is_sandboxd.return_value = False
+        with self.assertRaises(NotImplementedError):
+            self.sandbox.metadata()
+        self.mock_connector.send_request.assert_not_called()
+
+    def test_metadata_honors_custom_timeout(self):
+        self.mock_connector.send_request.return_value = _mock_json_response(
+            {"env": {}})
+        self.sandbox.metadata(timeout=7)
+        _, kwargs = self.mock_connector.send_request.call_args
+        self.assertEqual(kwargs["timeout"], 7)
+
+
 class TestSandboxTerminateIdempotent(unittest.TestCase):
     """`Sandbox.terminate()` must be idempotent — a second call must not
     issue a redundant DELETE."""
@@ -440,6 +562,58 @@ class TestSelectPodIP(unittest.TestCase):
             ObjWithIP("10.244.0.42"),
         ]
         self.assertEqual(select_pod_ip(mixed_ips), "10.244.0.42")
+
+
+CALLBACK_MODES = {
+    "direct": SandboxDirectConnectionConfig(api_url="http://sandbox.invalid"),
+    "in-cluster": SandboxInClusterConnectionConfig(),
+    "sandboxd-pod-tunnel": SandboxdPodTunnelConnectionConfig(),
+    "sandboxd-in-cluster": SandboxdInClusterConnectionConfig(mode="in-cluster-pod-ip"),
+}
+
+
+@pytest.mark.parametrize("config", CALLBACK_MODES.values(), ids=CALLBACK_MODES.keys())
+def test_closed_handle_is_freed_without_the_cycle_collector(config):
+    # With the collector off, only reference counting can free the handle.
+    gc.disable()
+    try:
+        sandbox = Sandbox("claim", "sandbox-id", "ns", connection_config=config, k8s_helper=MagicMock())
+        handle, connector = weakref.ref(sandbox), weakref.ref(sandbox.connector)
+        sandbox.close_connection()
+        del sandbox
+        assert handle() is None
+        assert connector() is None
+    finally:
+        gc.enable()
+
+
+def test_callbacks_are_released_only_between_transport_operations():
+    config = SandboxdInClusterConnectionConfig(mode="in-cluster-pod-ip")
+    sandbox = Sandbox("claim", "sandbox-id", "ns", connection_config=config, k8s_helper=MagicMock())
+    connector = sandbox.connector
+    # Holding the lock stands in for a connect() on another thread that is between checking a callback and calling it.
+    with connector._transport_lock:
+        release = threading.Thread(target=connector._release_sandbox_callbacks)
+        release.start()
+        release.join(timeout=0.2)
+        assert connector.strategy._get_pod_ip is not None
+    release.join()
+    assert connector.strategy._get_pod_ip is None
+    sandbox.close_connection()
+
+
+def test_request_keeps_the_pod_ip_callback_it_connected_with():
+    config = SandboxDirectConnectionConfig(api_url="http://sandbox.invalid")
+    sandbox = Sandbox("claim", "sandbox-id", "ns", connection_config=config, k8s_helper=MagicMock())
+    sandbox.k8s_helper.get_sandbox.return_value = {"status": {"podIPs": [{"ip": "10.0.0.5"}]}}
+    connector = sandbox.connector
+    connector.session = MagicMock()
+    connector.session.request.return_value = MagicMock(is_redirect=False, status_code=200)
+    # The release stands in for a close_connection() on another thread right after the request connected.
+    with patch.object(connector.strategy, "verify_connection", side_effect=connector._release_sandbox_callbacks):
+        connector.send_request("GET", "health")
+    assert connector.session.request.call_args.kwargs["headers"]["X-Sandbox-Pod-IP"] == "10.0.0.5"
+    sandbox.close_connection()
 
 
 if __name__ == '__main__':

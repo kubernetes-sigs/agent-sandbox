@@ -1,0 +1,10 @@
+image:
+  tag: v0.0.0-lint
+router:
+  cacheEnabled: false
+topologySpread:
+  enabled: false
+pdb:
+  enabled: false
+networkPolicy:
+  enabled: false

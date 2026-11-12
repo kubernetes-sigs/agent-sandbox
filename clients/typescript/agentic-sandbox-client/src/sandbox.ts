@@ -61,6 +61,7 @@ import {
   resolveSandboxPath,
   SandboxdRestClient,
   SourceFailure,
+  validateMode,
 } from "./rest.js";
 import type { Span, TracerManager } from "./trace-manager.js";
 import { spanErrorStatusCode, withSpan } from "./trace-manager.js";
@@ -69,7 +70,10 @@ import type {
   DirectoryListing,
   ExecutionResult,
   FileCallOptions,
+  ListOptions,
   Logger,
+  MkdirOptions,
+  MoveCopyOptions,
   ProcessCallOptions,
   ProcessOptions,
   RunOptions,
@@ -482,6 +486,11 @@ export class Sandbox {
         exists: (path, opts) => this.existsImpl(path, opts),
         list: (path, opts) => this.listImpl(path, opts),
         delete: (path, opts) => this.deleteFileImpl(path, opts),
+        mkdir: (path, opts) => this.mkdirImpl(path, opts),
+        move: (source, destination, opts) =>
+          this.transferImpl("move", source, destination, opts),
+        copy: (source, destination, opts) =>
+          this.transferImpl("copy", source, destination, opts),
       });
     }
     return this._files;
@@ -1283,12 +1292,7 @@ export class Sandbox {
     opts?: WriteOptions,
   ): Promise<void> {
     resolveSandboxPath(path, "write");
-    if (opts?.mode !== undefined && !/^0[0-7]{3}$/.test(opts.mode)) {
-      throw new SandboxError(
-        `invalid mode '${opts.mode}': must match ^0[0-7]{3}$`,
-        { telemetryCode: "invalid_argument" },
-      );
-    }
+    validateMode(opts?.mode);
     const timeoutMs = validateTimeoutMs("timeoutMs", opts?.timeoutMs);
     const bytes =
       typeof content === "string" ? new TextEncoder().encode(content) : content;
@@ -1309,8 +1313,7 @@ export class Sandbox {
         }
       },
       undefined,
-      (gen, signal) =>
-        gen.rest.write(path, bytes, { mode: opts?.mode }, signal),
+      (gen, signal) => gen.rest.write(path, bytes, opts ?? {}, signal),
     );
   }
 
@@ -1538,12 +1541,7 @@ export class Sandbox {
     opts?: WriteOptions,
   ): Promise<void> {
     resolveSandboxPath(path, "write");
-    if (opts?.mode !== undefined && !/^0[0-7]{3}$/.test(opts.mode)) {
-      throw new SandboxError(
-        `invalid mode '${opts.mode}': must match ^0[0-7]{3}$`,
-        { telemetryCode: "invalid_argument" },
-      );
-    }
+    validateMode(opts?.mode);
     if (content.locked) {
       throw new SandboxError(
         "writeStream content is already locked by another reader",
@@ -1567,7 +1565,7 @@ export class Sandbox {
           }
         },
         (gen, signal) =>
-          gen.rest.writeStream(path, content, { mode: opts?.mode }, signal),
+          gen.rest.writeStream(path, content, opts ?? {}, signal),
       );
     } catch (err) {
       if (err instanceof SourceFailure) {
@@ -1601,9 +1599,18 @@ export class Sandbox {
 
   private async listImpl(
     path: string,
-    opts?: FileCallOptions,
+    opts?: ListOptions,
   ): Promise<DirectoryListing> {
     resolveSandboxPath(path, "list");
+    const recursive = opts?.recursive;
+    if (recursive !== undefined && typeof recursive !== "boolean") {
+      throw invalidArgumentError("recursive must be a boolean");
+    }
+    const maxDepth = validateBoundedInt(
+      "maxDepth",
+      opts?.maxDepth,
+      Number.MAX_SAFE_INTEGER,
+    );
     const timeoutMs = validateTimeoutMs("timeoutMs", opts?.timeoutMs);
     return this.operate<DirectoryListing>(
       "files.list",
@@ -1617,7 +1624,7 @@ export class Sandbox {
         if (span.isRecording())
           span.setAttribute("sandbox.file.count", result.entries.length);
       },
-      (gen, signal) => gen.rest.list(path, signal),
+      (gen, signal) => gen.rest.list(path, { recursive, maxDepth }, signal),
     );
   }
 
@@ -1638,6 +1645,56 @@ export class Sandbox {
       undefined,
       (gen, signal) =>
         gen.rest.delete(path, { recursive: opts?.recursive }, signal),
+    );
+  }
+
+  private async mkdirImpl(path: string, opts?: MkdirOptions): Promise<void> {
+    resolveSandboxPath(path, "mkdir");
+    validateMode(opts?.mode);
+    const timeoutMs = validateTimeoutMs("timeoutMs", opts?.timeoutMs);
+    return this.operate<void>(
+      "files.mkdir",
+      timeoutMs,
+      opts?.signal,
+      (span) => {
+        if (span.isRecording())
+          span.setAttribute("sandbox.file.operation", "mkdir");
+      },
+      undefined,
+      (gen, signal) =>
+        gen.rest.mkdir(
+          path,
+          { parents: opts?.parents, mode: opts?.mode },
+          signal,
+        ),
+    );
+  }
+
+  private async transferImpl(
+    action: "move" | "copy",
+    source: string,
+    destination: string,
+    opts?: MoveCopyOptions,
+  ): Promise<void> {
+    resolveSandboxPath(source, action);
+    resolveSandboxPath(destination, action);
+    const timeoutMs = validateTimeoutMs("timeoutMs", opts?.timeoutMs);
+    return this.operate<void>(
+      `files.${action}`,
+      timeoutMs,
+      opts?.signal,
+      (span) => {
+        if (span.isRecording())
+          span.setAttribute("sandbox.file.operation", action);
+      },
+      undefined,
+      (gen, signal) =>
+        gen.rest[action](
+          source,
+          destination,
+          { overwrite: opts?.overwrite },
+          signal,
+        ),
     );
   }
 }

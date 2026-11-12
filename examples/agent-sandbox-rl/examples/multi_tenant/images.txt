@@ -1,0 +1,13 @@
+# The shared image list: every user runs the same images. Ten small public
+# images with a shell, so a kind cluster can run the walk-through; for GKE,
+# point --images at a mirrored dataset slice instead (see the README).
+debian:bookworm-slim
+ubuntu:24.04
+python:3.12-slim
+python:3.11-slim
+node:22-slim
+node:20-slim
+ruby:3.3-slim
+php:8.3-cli
+perl:5.40-slim
+nginx:1.27

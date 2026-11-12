@@ -24,6 +24,7 @@ import (
 	"math"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	pathpkg "path"
 	"reflect"
 	"slices"
@@ -618,40 +619,99 @@ func (f *Files) Exists(ctx context.Context, path string, opts ...CallOption) (bo
 // Only supported by the sandboxd runtime: the legacy python-runtime has no
 // delete endpoint, and calls return ErrUnsupportedByRuntime.
 func (f *Files) Delete(ctx context.Context, path string, recursive bool, opts ...CallOption) error {
+	query := url.Values{}
+	if recursive {
+		query.Set("recursive", "true")
+	}
+	return f.sandboxdFileOp(ctx, "delete", http.MethodDelete, path, "", query, true, opts)
+}
+
+// Mkdir creates a directory in the sandbox. It succeeds when the directory
+// already exists, so it retries like Delete. When parents is false, a missing
+// parent directory fails with a 404 HTTPError.
+//
+// Only supported by the sandboxd runtime.
+func (f *Files) Mkdir(ctx context.Context, path string, parents bool, opts ...CallOption) error {
+	query := url.Values{"type": {"directory"}}
+	if parents {
+		query.Set("parents", "true")
+	}
+	return f.sandboxdFileOp(ctx, "mkdir", http.MethodPut, path, "", query, true, opts)
+}
+
+// Move renames the file or directory at source to destination, creating
+// missing parent directories of destination. An existing destination fails
+// with a 409 HTTPError unless overwrite is true, which replaces a file but
+// never a directory.
+//
+// Move does not retry unless WithMaxAttempts is set, because a repeat after a
+// lost response fails with 404. Only supported by the sandboxd runtime.
+func (f *Files) Move(ctx context.Context, source, destination string, overwrite bool, opts ...CallOption) error {
+	return f.transfer(ctx, "move", source, destination, overwrite, opts)
+}
+
+// Copy copies the file or directory at source to destination, with the same
+// destination rules, retry behavior, and runtime support as Move.
+func (f *Files) Copy(ctx context.Context, source, destination string, overwrite bool, opts ...CallOption) error {
+	return f.transfer(ctx, "copy", source, destination, overwrite, opts)
+}
+
+func (f *Files) transfer(ctx context.Context, action, source, destination string, overwrite bool, opts []CallOption) error {
+	if destination == "" {
+		return fmt.Errorf("%s: %s: destination must not be empty", f.errPrefix(), action)
+	}
+	query := url.Values{"destination": {destination}}
+	if overwrite {
+		query.Set("overwrite", "true")
+	}
+	// The encoded path never contains a literal colon, so sandboxd can split
+	// the action off at the last one.
+	return f.sandboxdFileOp(ctx, action, http.MethodPost, source, ":"+action, query, false, opts)
+}
+
+// sandboxdFileOp sends a request that sandboxd answers with an empty 2xx body.
+// It appends actionSuffix to the path's endpoint and fails with
+// ErrUnsupportedByRuntime on the legacy python-runtime. Unless retry is true,
+// it sends the request once unless the caller sets WithMaxAttempts.
+func (f *Files) sandboxdFileOp(ctx context.Context, op, method, path, actionSuffix string, query url.Values, retry bool, opts []CallOption) error {
 	defer f.trackOp()()
-	ctx, callCancel, maxAttempts := applyCallOpts(ctx, opts)
+	apply := applyCallOptsNoRetry
+	if retry {
+		apply = applyCallOpts
+	}
+	ctx, callCancel, maxAttempts := apply(ctx, opts)
 	defer callCancel()
-	ctx, span := startSpan(withLifecycleSpan(ctx, f.lifecycleCtx()), f.tracer, f.svcName, "delete", AttrFilePath.String(path))
+	ctx, span := startSpan(withLifecycleSpan(ctx, f.lifecycleCtx()), f.tracer, f.svcName, op, AttrFilePath.String(path))
 	defer span.End()
 
 	if f.runtime != RuntimeSandboxd {
-		err := fmt.Errorf("%s: delete(%q): %w: the legacy python-runtime has no delete endpoint", f.errPrefix(), path, ErrUnsupportedByRuntime)
+		err := fmt.Errorf("%s: %s(%q): %w: the legacy python-runtime has no %s endpoint", f.errPrefix(), op, path, ErrUnsupportedByRuntime, op)
 		recordError(span, err)
 		return err
 	}
 	if path == "" {
-		err := fmt.Errorf("%s: delete: path must not be empty", f.errPrefix())
+		err := fmt.Errorf("%s: %s: path must not be empty", f.errPrefix(), op)
 		recordError(span, err)
 		return err
 	}
 
-	endpoint := filesEndpoint(path)
-	if recursive {
-		endpoint += "?recursive=true"
+	endpoint := filesEndpoint(path) + actionSuffix
+	if len(query) > 0 {
+		endpoint += "?" + query.Encode()
 	}
-	resp, err := f.connector.SendRequest(ctx, http.MethodDelete, endpoint, nil, "", maxAttempts)
+	resp, err := f.connector.SendRequest(ctx, method, endpoint, nil, "", maxAttempts)
 	if err != nil {
 		recordError(span, err)
-		return fmt.Errorf("%s: delete(%q) failed: %w", f.errPrefix(), path, err)
+		return fmt.Errorf("%s: %s(%q) failed: %w", f.errPrefix(), op, path, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		retErr := fmt.Errorf("%s: delete(%q): %w", f.errPrefix(), path, f.httpErrorFromResponse(resp, "delete"))
+		retErr := fmt.Errorf("%s: %s(%q): %w", f.errPrefix(), op, path, f.httpErrorFromResponse(resp, op))
 		recordError(span, retErr)
 		return retErr
 	}
 	defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes)) }()
-	f.log.V(1).Info("delete completed", "path", path, "recursive", recursive)
+	f.log.V(1).Info(op+" completed", "path", path)
 	return nil
 }

@@ -16,6 +16,9 @@ import type {
   DeleteOptions,
   DirectoryListing,
   FileCallOptions,
+  ListOptions,
+  MkdirOptions,
+  MoveCopyOptions,
   WriteOptions,
 } from "./types.js";
 
@@ -44,8 +47,19 @@ export interface FilesOperations {
     opts?: WriteOptions,
   ): Promise<void>;
   exists(path: string, opts?: FileCallOptions): Promise<boolean>;
-  list(path: string, opts?: FileCallOptions): Promise<DirectoryListing>;
+  list(path: string, opts?: ListOptions): Promise<DirectoryListing>;
   delete(path: string, opts?: DeleteOptions): Promise<void>;
+  mkdir(path: string, opts?: MkdirOptions): Promise<void>;
+  move(
+    source: string,
+    destination: string,
+    opts?: MoveCopyOptions,
+  ): Promise<void>;
+  copy(
+    source: string,
+    destination: string,
+    opts?: MoveCopyOptions,
+  ): Promise<void>;
 }
 
 /**
@@ -80,6 +94,10 @@ export class SandboxFiles {
    *
    * A trailing `/` or the sandbox root itself is rejected — write() never
    * targets a directory.
+   *
+   * With `opts.append`, sandboxd adds `content` to the end of the file instead
+   * of replacing it. This is not atomic. With `opts.createOnly`, the call
+   * fails with `FAILED_PRECONDITION` if `path` already exists.
    */
   write(
     path: string,
@@ -118,7 +136,9 @@ export class SandboxFiles {
    * stream producing the same content. sandboxd replaces the target
    * atomically using a temporary file and rename. A failed call may already
    * have committed the write if the acknowledgement was lost, and retrying
-   * may overwrite concurrent updates. `sandboxd.maxUploadSize` is enforced
+   * may overwrite concurrent updates. With `append`, the write is not atomic:
+   * an oversized or interrupted stream can leave a prefix in the target, and a
+   * retry appends it again. `sandboxd.maxUploadSize` is enforced
    * before forwarding each chunk; the server may receive a prefix within the
    * limit before an oversized upload is aborted. `opts.timeoutMs` covers
    * connection setup until the server acknowledges the write, including time
@@ -140,8 +160,13 @@ export class SandboxFiles {
     return this.ops.exists(path, opts);
   }
 
-  /** Lists a directory's immediate entries. Errors if `path` names a file. */
-  list(path: string, opts?: FileCallOptions): Promise<DirectoryListing> {
+  /**
+   * Lists a directory's immediate entries, or its descendants when
+   * `opts.recursive` is true. `opts.maxDepth` limits recursive traversal;
+   * entry names are relative to `path`. Errors if `path` names a file.
+   * Older sandboxd versions ignore these options and return a flat listing.
+   */
+  list(path: string, opts?: ListOptions): Promise<DirectoryListing> {
     return this.ops.list(path, opts);
   }
 
@@ -152,5 +177,34 @@ export class SandboxFiles {
    */
   delete(path: string, opts?: DeleteOptions): Promise<void> {
     return this.ops.delete(path, opts);
+  }
+
+  /**
+   * Creates a directory. Succeeds if it already exists. A missing parent
+   * fails with `NOT_FOUND` unless `opts.parents` is true.
+   */
+  mkdir(path: string, opts?: MkdirOptions): Promise<void> {
+    return this.ops.mkdir(path, opts);
+  }
+
+  /**
+   * Moves or renames a file or directory. An existing `destination` fails
+   * with `CONFLICT`, unless `opts.overwrite` replaces a file with a file.
+   */
+  move(
+    source: string,
+    destination: string,
+    opts?: MoveCopyOptions,
+  ): Promise<void> {
+    return this.ops.move(source, destination, opts);
+  }
+
+  /** Copies a file or directory, with the same destination rules as `move()`. */
+  copy(
+    source: string,
+    destination: string,
+    opts?: MoveCopyOptions,
+  ): Promise<void> {
+    return this.ops.copy(source, destination, opts);
   }
 }

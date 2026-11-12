@@ -2502,6 +2502,9 @@ var schemaYAML = typed.YAMLObject(`types:
 - name: io.k8s.sigs.agent-sandbox.api.v1beta1.SandboxSpec
   map:
     fields:
+    - name: failedPodPolicy
+      type:
+        scalar: string
     - name: operatingMode
       type:
         scalar: string

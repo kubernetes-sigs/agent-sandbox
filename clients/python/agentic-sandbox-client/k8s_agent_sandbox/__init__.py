@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Public clients, configuration models, and errors for Agent Sandbox."""
+
 from .sandbox_client import SandboxClient
 from .models import (
     BatchEvent,
@@ -21,6 +23,7 @@ from .models import (
     Member,
     MemberState,
     SandboxdInClusterConnectionConfig,
+    SandboxdRouterTunnelConnectionConfig,
 )
 from .sandbox_batch import SandboxBatch
 from .metrics_utils import get_metrics, print_metrics
@@ -35,6 +38,7 @@ from .exceptions import (
     SandboxClaimFailedError,
     SandboxPortForwardError,
     SandboxRequestError,
+    SandboxResponseTooLargeError,
     BatchError,
     BatchNotFoundError,
     BatchLeaseExpiredError,
@@ -95,10 +99,12 @@ __all__ = [
     "SandboxNotReadyError",
     "SandboxPortForwardError",
     "SandboxRequestError",
+    "SandboxResponseTooLargeError",
     "SandboxServiceUnavailableError",
     "SandboxTemplateNotFoundError",
     "SandboxWarmPoolNotFoundError",
     "SandboxdInClusterConnectionConfig",
+    "SandboxdRouterTunnelConnectionConfig",
     "TerminalMemberError",
     "get_metrics",
     "print_metrics",

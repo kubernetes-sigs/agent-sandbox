@@ -941,6 +941,8 @@ func TestClaimFailure(t *testing.T) {
 		{"SandboxMissing", nil},
 		{"SandboxNotReady", nil},
 		{"ReconcilerError", nil},
+		// Transient while the Pod is being deleted. The outcome is on Finished.
+		{sandboxv1beta1.SandboxReasonPodTerminating, nil},
 	} {
 		t.Run(tc.reason, func(t *testing.T) {
 			err := claimFailure(claimNotReady("c", tc.reason))
@@ -1093,6 +1095,9 @@ func TestSandboxFailure(t *testing.T) {
 	}
 	if err := sandboxFailure(notReady("DependenciesNotReady")); err != nil {
 		t.Fatalf("expected no failure for a transient reason, got: %v", err)
+	}
+	if err := sandboxFailure(notReady(sandboxv1beta1.SandboxReasonPodTerminating)); err != nil {
+		t.Fatalf("expected no failure while the Pod is terminating, got: %v", err)
 	}
 	stale := notReady("PodFailed")
 	stale.Status.Conditions[0].ObservedGeneration = 1

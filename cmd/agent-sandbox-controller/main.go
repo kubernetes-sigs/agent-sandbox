@@ -40,6 +40,7 @@ import (
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	extensionscontrollers "sigs.k8s.io/agent-sandbox/extensions/controllers"
 	"sigs.k8s.io/agent-sandbox/extensions/controllers/queue"
+	internalconfig "sigs.k8s.io/agent-sandbox/internal/config"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 	"sigs.k8s.io/agent-sandbox/internal/version"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -153,7 +154,7 @@ func main() {
 	flag.BoolVar(&enableWarmPoolEviction, "enable-warm-pool-eviction", true, "Mark pods created by a warm pool as ready-to-evict by default.")
 	flag.BoolVar(&cacheLabelSelectors, "cache-label-selectors", false,
 		"Scope the manager's Pod and Service informer caches to objects carrying the sandbox tracking label ("+
-			controllers.SandboxNameHashLabel+"). The controller only ever creates/looks up Pods and Services it "+
+			sandboxv1beta1.SandboxNameHashLabel+"). The controller only ever creates/looks up Pods and Services it "+
 			"labeled itself, so on shared or high-churn clusters this cuts informer list/watch volume, JSON decode "+
 			"CPU, and cache memory from O(cluster) to O(sandboxes). CAVEAT: externally pre-provisioned resources "+
 			"that rely on the "+sandboxv1beta1.SandboxAdoptableLabel+"=true adoption path MUST also carry the "+
@@ -201,6 +202,33 @@ func main() {
 	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	// Apply ConfigMap overrides from the volume mount.
+	configData, err := readConfigDir("/etc/sandbox-config")
+	if err != nil {
+		setupLog.Error(err, "failed to read controller config directory")
+		os.Exit(1)
+	}
+	if len(configData) > 0 {
+		// flag.CommandLine is the flag set used by main(); the allowlist in
+		// internalconfig gates which flags are touched, so imported-package
+		// flags (e.g. klog) are never modified.
+		overrides, skipped, cliOverridden, err := internalconfig.ApplyConfigMapData(configData, flag.CommandLine)
+		if err != nil {
+			setupLog.Error(err, "failed to parse controller config from ConfigMap")
+			os.Exit(1)
+		}
+		for _, o := range overrides {
+			setupLog.Info("ConfigMap override applied", "key", o.Key, "value", o.Value)
+		}
+		for _, key := range skipped {
+			setupLog.Info("ConfigMap key ignored (not a ConfigMap-tunable flag; see docs/configuration.md)", "key", key)
+		}
+		for _, key := range cliOverridden {
+			setupLog.Info("ConfigMap key ignored (CLI flag takes precedence)", "key", key)
+		}
+	}
+
 	if sandboxClaimWarmCandidateGracePeriod <= 0 {
 		setupLog.Error(nil, "--sandbox-claim-warm-candidate-grace-period must be a positive duration", "value", sandboxClaimWarmCandidateGracePeriod)
 		os.Exit(1)
@@ -436,7 +464,7 @@ func main() {
 	mgrOpts.Cache = cacheOpts
 	if cacheLabelSelectors {
 		setupLog.Info("informer caches for Pods and Services scoped to the sandbox tracking label (--cache-label-selectors)",
-			"label", controllers.SandboxNameHashLabel)
+			"label", sandboxv1beta1.SandboxNameHashLabel)
 	}
 	if watchHTTPClient != nil {
 		// The manager cache builds its list/watch REST clients from this
@@ -582,4 +610,29 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// readConfigDir reads all regular files from dir into a map[string]string
+// keyed by filename. Returns (nil, nil) when the directory does not exist
+// (the volume mount is optional).
+func readConfigDir(dir string) (map[string]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading config directory %s: %w", dir, err)
+	}
+	data := make(map[string]string, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || strings.HasPrefix(e.Name(), "..") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("reading config key %s: %w", e.Name(), err)
+		}
+		data[e.Name()] = string(raw)
+	}
+	return data, nil
 }

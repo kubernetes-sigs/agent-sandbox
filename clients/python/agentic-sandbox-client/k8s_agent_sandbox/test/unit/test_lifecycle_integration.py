@@ -58,6 +58,7 @@ class TestLifecycleIntegration(unittest.TestCase):
         sandbox_client.tracing_manager = None
         sandbox_client.tracer = MagicMock()
         sandbox_client.connection_config = MagicMock()
+        sandbox_client.file_config = None
         sandbox_client.tracer_config = MagicMock()
         sandbox_client.tracer_config.enable_tracing = False
         sandbox_client._active_connection_sandboxes = {}
@@ -105,6 +106,7 @@ class TestLifecycleIntegration(unittest.TestCase):
         sandbox_client.tracing_manager = None
         sandbox_client.tracer = MagicMock()
         sandbox_client.connection_config = MagicMock()
+        sandbox_client.file_config = None
         sandbox_client.tracer_config = MagicMock()
         sandbox_client.tracer_config.enable_tracing = False
         sandbox_client._active_connection_sandboxes = {}
@@ -136,6 +138,7 @@ class TestLifecycleIntegration(unittest.TestCase):
         sandbox_client.tracing_manager = None
         sandbox_client.tracer = MagicMock()
         sandbox_client.connection_config = MagicMock()
+        sandbox_client.file_config = None
         sandbox_client.tracer_config = MagicMock()
         sandbox_client.tracer_config.enable_tracing = False
         sandbox_client._active_connection_sandboxes = {}

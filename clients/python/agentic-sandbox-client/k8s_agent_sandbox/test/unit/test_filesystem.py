@@ -23,9 +23,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import requests
 
-from k8s_agent_sandbox.exceptions import SandboxRequestError
+from k8s_agent_sandbox import AsyncSandboxClient, SandboxClient
+from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
+from k8s_agent_sandbox.connector import SandboxConnector
+from k8s_agent_sandbox.exceptions import SandboxRequestError, SandboxResponseTooLargeError
 from k8s_agent_sandbox.files.async_filesystem import AsyncFilesystem
 from k8s_agent_sandbox.files.filesystem import Filesystem, _sandboxd_files_endpoint
+from k8s_agent_sandbox.models import (
+    SandboxDirectConnectionConfig,
+    SandboxFileConfig,
+    SandboxdRouterTunnelConnectionConfig,
+)
 
 
 class PartialWriter:
@@ -82,6 +90,7 @@ def async_streaming_response(
     chunks: list[bytes], content_length: int | None = None
 ):
     response = MagicMock()
+    response.status_code = 200
     response.headers = {}
     if content_length is not None:
         response.headers["Content-Length"] = str(content_length)
@@ -193,8 +202,20 @@ class TestFilesystemSafeUploadPath(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "control characters"):
                 Filesystem._safe_upload_path(bad)
 
-    def test_sandboxd_dot_segments_are_encoded(self):
-        self.assertEqual(_sandboxd_files_endpoint("."), "v1/files/%2E")
+    def test_sandboxd_root_path_avoids_dot_segment_redirects(self):
+        for path in ("", "."):
+            with self.subTest(path=path):
+                url = "http://sandbox/" + _sandboxd_files_endpoint(path)
+                self.assertEqual(
+                    requests.Request("GET", url).prepare().path_url,
+                    "/v1/files/",
+                )
+                self.assertEqual(
+                    httpx.Request("GET", url).url.raw_path,
+                    b"/v1/files/",
+                )
+
+    def test_sandboxd_parent_segments_are_encoded(self):
         self.assertEqual(_sandboxd_files_endpoint(".."), "v1/files/%2E%2E")
 
 
@@ -385,6 +406,29 @@ class TestAsyncSandboxdFilesystem(unittest.IsolatedAsyncioTestCase):
 
         self.connector.send_request.assert_not_awaited()
 
+    async def test_mkdir_move_copy_use_sandboxd_endpoints(self):
+        await self.fs.mkdir("a/b", parents=True)
+        await self.fs.move("a", "b", overwrite=True)
+        await self.fs.copy("a", "b")
+
+        calls = [c.args[:2] for c in self.connector.send_request.call_args_list]
+        self.assertEqual(calls, [
+            ("PUT", "v1/files/a%2Fb?type=directory&parents=true"),
+            ("POST", "v1/files/a:move?destination=b&overwrite=true"),
+            ("POST", "v1/files/a:copy?destination=b"),
+        ])
+
+    async def test_mkdir_move_copy_reject_empty_arguments(self):
+        for call in (
+            lambda: self.fs.mkdir(""),
+            lambda: self.fs.move("", "b"),
+            lambda: self.fs.copy("a", ""),
+        ):
+            with self.subTest(), self.assertRaisesRegex(ValueError, "must not be empty"):
+                await call()
+
+        self.connector.send_request.assert_not_awaited()
+
     @patch("k8s_agent_sandbox.files.async_filesystem.trace")
     async def test_delete_records_path_in_trace(self, mock_trace):
         span = MagicMock()
@@ -564,6 +608,74 @@ class TestFilesystemStreamingRead(unittest.TestCase):
             self.connector, MagicMock(), trace_service_name="test"
         )
 
+    def test_read_enforces_configured_limit(self):
+        filesystem = Filesystem(
+            self.connector, MagicMock(), "test",
+            file_config=SandboxFileConfig(max_download_size=4),
+        )
+        self.connector.is_sandboxd.return_value = True
+        for content, declared_size, encoding in (
+            (b"", None, "identity"), (b"abcd", None, "identity"),
+            (b"abcde", None, "identity"), (b"abcde", 5, "identity"),
+            (b"abcde", 1, "identity"), (b"abcd", 24, "gzip"), (b"abcde", 25, "gzip"),
+        ):
+            with self.subTest(content=content, declared_size=declared_size, encoding=encoding):
+                response = streaming_response([content[:2], content[2:]], declared_size)
+                response.headers["Content-Encoding"] = encoding
+                self.connector.send_request.return_value = response
+                if len(content) > 4:
+                    with self.assertRaises(SandboxResponseTooLargeError):
+                        filesystem.read("file.bin")
+                else:
+                    self.assertEqual(filesystem.read("file.bin"), content)
+                self.assertTrue(self.connector.send_request.call_args.kwargs["stream"])
+                response.close.assert_called_once_with()
+
+    def test_read_to_uses_stricter_limit_and_stops_consuming(self):
+        filesystem = Filesystem(
+            self.connector, MagicMock(), "test",
+            file_config=SandboxFileConfig(max_download_size=4),
+        )
+        for max_bytes, expected in ((None, b"abcd"), (6, b"abcd"), (2, b"ab"), (0, b"")):
+            with self.subTest(max_bytes=max_bytes):
+                response = streaming_response([b"abcdef", b"not consumed"])
+                self.connector.send_request.return_value = response
+                destination = io.BytesIO()
+                with self.assertRaises(SandboxResponseTooLargeError):
+                    filesystem.read_to("file.bin", destination, max_bytes=max_bytes)
+                self.assertEqual(destination.getvalue(), expected)
+                self.assertFalse(destination.closed)
+                self.assertEqual(next(response.iter_content.return_value), b"not consumed")
+                response.close.assert_called_once_with()
+
+    def test_file_config_rejects_invalid_limits(self):
+        self.assertIsNone(SandboxFileConfig().max_download_size)
+        for value in (0, -1, True, 1.5, "10"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                SandboxFileConfig(max_download_size=value)
+
+    @patch("k8s_agent_sandbox.sandbox_client.K8sHelper")
+    def test_client_limit_survives_reattach(self, helper_class):
+        helper = helper_class.return_value
+        helper.resolve_sandbox_name.return_value = "sandbox"
+        helper.get_sandbox.return_value = {"metadata": {}}
+        client = SandboxClient(file_config=SandboxFileConfig(max_download_size=4))
+        with patch.object(client, "_create_claim", return_value={}), \
+             patch.object(client, "_wait_for_claim_ready", return_value="sandbox"):
+            sandbox = client.create_sandbox("pool")
+        claim_name = sandbox.claim_name
+        for attempt in range(2):
+            if attempt:
+                sandbox = client.get_sandbox(claim_name)
+            response = streaming_response([b"oversized"])
+            try:
+                with patch.object(sandbox.connector, "send_request", return_value=response):
+                    with self.assertRaises(SandboxResponseTooLargeError):
+                        sandbox.files.read("file.bin")
+                response.close.assert_called_once_with()
+            finally:
+                sandbox.close_connection()
+
     def test_read_to_streams_chunks_and_handles_partial_writes(self):
         chunks = [b"a" * (64 * 1024), b"b" * (64 * 1024)]
         response = streaming_response(chunks)
@@ -616,6 +728,38 @@ class TestFilesystemStreamingRead(unittest.TestCase):
             None, transport_token=transport_token
         )
         response.close.assert_called_once_with()
+
+    def test_router_refreshes_pod_ip_after_stream_transport_failure(self):
+        get_pod_ip = MagicMock(side_effect=["10.0.0.8", "10.0.0.9"])
+        connector = SandboxConnector(
+            "sandbox", "default", SandboxdRouterTunnelConnectionConfig(pod_ip_routing=True),
+            MagicMock(), get_pod_ip=get_pod_ip,
+        )
+        connector.connect = MagicMock(return_value="http://router:8080")
+        connector.strategy.verify_connection = MagicMock()
+        response = requests.Response()
+        response.status_code = 200
+
+        def broken_stream(*, chunk_size):
+            yield b"partial"
+            raise requests.exceptions.ChunkedEncodingError("connection lost")
+
+        response.iter_content = broken_stream
+        response.close = MagicMock()
+        connector.session.request = MagicMock(return_value=response)
+        filesystem = Filesystem(connector, None, "test")
+        try:
+            with self.assertRaises(requests.exceptions.ChunkedEncodingError):
+                filesystem.read_to("file.bin", io.BytesIO())
+
+            connector.send_request("GET", "v1/health")
+
+            headers = connector.session.request.call_args.kwargs["headers"]
+            self.assertEqual(headers["X-Sandbox-Pod-IP"], "10.0.0.9")
+            self.assertEqual(get_pod_ip.call_count, 2)
+            response.close.assert_called_once_with()
+        finally:
+            connector.close()
 
     def test_read_to_rejects_non_success_status(self):
         response = streaming_response([b"error"])
@@ -685,6 +829,90 @@ class TestAsyncFilesystemStreamingRead(unittest.IsolatedAsyncioTestCase):
             self.connector, MagicMock(), trace_service_name="test"
         )
 
+    async def test_read_enforces_configured_limit(self):
+        filesystem = AsyncFilesystem(
+            self.connector, MagicMock(), "test",
+            file_config=SandboxFileConfig(max_download_size=4),
+        )
+        self.connector.is_sandboxd.return_value = True
+        for content, declared_size, encoding in (
+            (b"", None, "identity"), (b"abcd", None, "identity"),
+            (b"abcde", None, "identity"), (b"abcde", 5, "identity"),
+            (b"abcde", 1, "identity"), (b"abcd", 24, "gzip"), (b"abcde", 25, "gzip"),
+        ):
+            with self.subTest(content=content, declared_size=declared_size, encoding=encoding):
+                response = async_streaming_response([content[:2], content[2:]], declared_size)
+                response.headers["Content-Encoding"] = encoding
+                self.connector.send_request.return_value = response
+                if len(content) > 4:
+                    with self.assertRaises(SandboxResponseTooLargeError):
+                        await filesystem.read("file.bin")
+                else:
+                    self.assertEqual(await filesystem.read("file.bin"), content)
+                self.assertTrue(self.connector.send_request.call_args.kwargs["stream"])
+                response.aclose.assert_awaited_once_with()
+
+    async def test_read_to_uses_stricter_limit_and_stops_consuming(self):
+        filesystem = AsyncFilesystem(
+            self.connector, MagicMock(), "test",
+            file_config=SandboxFileConfig(max_download_size=4),
+        )
+        for max_bytes, expected in ((None, b"abcd"), (6, b"abcd"), (2, b"ab"), (0, b"")):
+            with self.subTest(max_bytes=max_bytes):
+                chunks = iter([b"abcdef", b"not consumed"])
+                response = async_streaming_response(chunks)
+                self.connector.send_request.return_value = response
+                destination = AsyncPartialWriter(max_write=2)
+                with self.assertRaises(SandboxResponseTooLargeError):
+                    await filesystem.read_to("file.bin", destination, max_bytes=max_bytes)
+                self.assertEqual(destination.content, expected)
+                self.assertFalse(destination.closed)
+                self.assertEqual(next(chunks), b"not consumed")
+                response.aclose.assert_awaited_once_with()
+
+    async def test_bounded_read_closes_response_when_cancelled(self):
+        filesystem = AsyncFilesystem(
+            self.connector, MagicMock(), "test",
+            file_config=SandboxFileConfig(max_download_size=4),
+        )
+        response = async_streaming_response([])
+
+        async def cancelled_stream(*, chunk_size):
+            yield b"ab"
+            raise asyncio.CancelledError
+
+        response.aiter_bytes = cancelled_stream
+        self.connector.send_request.return_value = response
+        with self.assertRaises(asyncio.CancelledError):
+            await filesystem.read("file.bin")
+        response.aclose.assert_awaited_once_with()
+
+    @patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper")
+    async def test_client_limit_survives_reattach(self, helper_class):
+        helper = helper_class.return_value = AsyncMock()
+        helper.resolve_sandbox_name.return_value = "sandbox"
+        helper.get_sandbox.return_value = {"metadata": {}}
+        client = AsyncSandboxClient(
+            connection_config=SandboxDirectConnectionConfig(api_url="http://unused"),
+            file_config=SandboxFileConfig(max_download_size=4), cleanup=False,
+        )
+        try:
+            with patch.object(client, "_create_claim", new=AsyncMock(return_value={})), \
+                 patch.object(client, "_wait_for_claim_ready", new=AsyncMock(return_value="sandbox")):
+                sandbox = await client.create_sandbox("pool")
+            claim_name = sandbox.claim_name
+            for attempt in range(2):
+                if attempt:
+                    sandbox = await client.get_sandbox(claim_name)
+                response = async_streaming_response([b"oversized"])
+                with patch.object(sandbox.connector, "send_request", new=AsyncMock(return_value=response)):
+                    with self.assertRaises(SandboxResponseTooLargeError):
+                        await sandbox.files.read("file.bin")
+                response.aclose.assert_awaited_once_with()
+                await sandbox.close_connection()
+        finally:
+            await client.close()
+
     async def test_read_to_streams_chunks_and_handles_partial_writes(self):
         chunks = [b"a" * (64 * 1024), b"b" * (64 * 1024)]
         response = async_streaming_response(chunks)
@@ -715,6 +943,17 @@ class TestAsyncFilesystemStreamingRead(unittest.IsolatedAsyncioTestCase):
             "GET", "v1/files/dir%2Ffile.bin", timeout=60, stream=True
         )
 
+    async def test_read_to_rejects_non_success_status(self):
+        response = async_streaming_response([b"error"])
+        response.status_code = 300
+        self.connector.send_request.return_value = response
+        destination = AsyncPartialWriter(max_write=10)
+        with self.assertRaises(SandboxRequestError) as ctx:
+            await self.filesystem.read_to("file.bin", destination)
+        self.assertEqual(ctx.exception.status_code, 300)
+        self.assertEqual(destination.content, b"")
+        response.aclose.assert_awaited_once_with()
+
     async def test_read_to_invalidates_sandboxd_after_stream_transport_failure(self):
         self.connector.is_sandboxd.return_value = True
         response = async_streaming_response([])
@@ -738,6 +977,38 @@ class TestAsyncFilesystemStreamingRead(unittest.IsolatedAsyncioTestCase):
             None, transport_token=transport_token
         )
         response.aclose.assert_awaited_once_with()
+
+    async def test_router_refreshes_pod_ip_after_stream_transport_failure(self):
+        get_pod_ip = AsyncMock(side_effect=["10.0.0.8", "10.0.0.9"])
+        connector = AsyncSandboxConnector(
+            "sandbox", "default", SandboxdRouterTunnelConnectionConfig(pod_ip_routing=True),
+            MagicMock(), get_pod_ip=get_pod_ip,
+        )
+        connector._resolve_base_url = AsyncMock(return_value="http://router:8080")
+        response = async_streaming_response([])
+        response.is_redirect = False
+        response.extensions = {}
+
+        async def broken_stream(*, chunk_size):
+            yield b"partial"
+            raise httpx.ReadError("connection lost")
+
+        response.aiter_bytes = broken_stream
+        connector.client.send = AsyncMock(return_value=response)
+        connector.client.request = AsyncMock(return_value=response)
+        filesystem = AsyncFilesystem(connector, None, "test")
+        try:
+            with self.assertRaises(httpx.ReadError):
+                await filesystem.read_to("file.bin", AsyncPartialWriter(max_write=10))
+
+            await connector.send_request("GET", "v1/health")
+
+            headers = connector.client.request.call_args.kwargs["headers"]
+            self.assertEqual(headers["X-Sandbox-Pod-IP"], "10.0.0.9")
+            self.assertEqual(get_pod_ip.await_count, 2)
+            response.aclose.assert_awaited_once_with()
+        finally:
+            await connector.close()
 
     async def test_read_to_enforces_unknown_length_limit_while_streaming(self):
         response = async_streaming_response([b"abc", b"def"])

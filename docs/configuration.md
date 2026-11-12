@@ -112,7 +112,7 @@ and are not repeated here.
 
 ## Deployment Example
 
-To deploy the controller with custom concurrency settings, modify the `args` of the `agent-sandbox-controller` container within the project's installation manifests. 
+To deploy the controller with custom concurrency settings, modify the `args` of the `agent-sandbox-controller` container within the project's installation manifests.
 
 If using the core controller, update `sandbox.yaml`:
 
@@ -279,13 +279,57 @@ The controller's metrics server can optionally serve over HTTPS with configurabl
    - Change `port` from `8080` to `8443` in `helm/templates/service.yaml`.
    - Change `scheme` to `https` and configure `tlsConfig` for the serving certificate in `helm/templates/servicemonitor.yaml`.
    - If supplying your own certificate (via `--metrics-cert-dir`), add the corresponding Secret volume and volumeMount to the Helm Deployment template. The chart does not include a metrics certificate mount by default.
-6. **NetworkPolicy** — if deploying the controller NetworkPolicy (`olm/config/network-policy/allow-metrics-traffic.yaml`), replace the `8080` ingress port with `8443`.
+6. **NetworkPolicy** — if deploying the controller NetworkPolicy (`k8s/hardening/networkpolicy.yaml`), replace the `8080` ingress port with `8443`.
 7. **OLM / kustomize** — `make bundle` regenerates `olm/` from `k8s/` and `olm/config/`, so the above changes propagate automatically. If you also enable the ServiceMonitor, update `scheme` from `http` to `https` and configure `tlsConfig` for the serving certificate in `olm/config/prometheus/monitor.yaml`.
 8. **TLS certificate** — if `--metrics-cert-dir` is used, create a Kubernetes Secret named `agent-sandbox-metrics-tls` containing `tls.crt` and `tls.key` in the controller namespace. How you provision this depends on your environment (cert-manager, service-serving-cert-signer on OpenShift, manual, etc.).
 
 A downstream operator can inject the cluster TLS profile by translating it into these flags and patching the controller Deployment.
 
-## SandboxClaim label-domain allowlist
+## SandboxClaim identity on Pods
+
+For a Sandbox owned by a SandboxClaim, the controller maintains these fields on
+its Pod:
+
+| Metadata | Key | Value |
+| --- | --- | --- |
+| Label | `agents.x-k8s.io/claim-uid` | The Claim's UID; identifies that specific Claim object. |
+| Annotation | `agents.x-k8s.io/claim-name` | The Claim's full name, in the same namespace as the Pod. |
+
+The Claim name is an annotation because resource names can be up to 253 characters,
+while label values are limited to 63 characters. Deleting and recreating a Claim
+with the same name produces a different UID; use the UID when distinguishing
+Claim instances matters.
+
+The metadata is set on newly created Pods and reconciled on existing Pods after
+WarmPool adoption. Unclaimed WarmPool Pods and standalone Sandboxes do not receive
+Claim identity metadata. Updates are asynchronous: consumers must handle missing
+metadata while reconciliation is in progress.
+
+```sh
+kubectl get pod <pod-name> -n <namespace> \
+  -o jsonpath='{.metadata.annotations.agents\.x-k8s\.io/claim-name}{"\t"}{.metadata.labels.agents\.x-k8s\.io/claim-uid}{"\n"}'
+```
+
+These keys are controller-owned; do not set them through `additionalPodMetadata`
+or a Pod template. External services can use them to discover Claim identity, but
+metadata alone does not authenticate a caller. Authenticate the caller (for example,
+with TokenReview of a Pod-bound service account token) and enforce authorization
+and any live-Claim UID checks required by the service.
+
+## agent-sandbox-config ConfigMap
+
+The controller reads runtime configuration from an optional ConfigMap named
+`agent-sandbox-config` in the controller's namespace. The ConfigMap is
+volume-mounted at `/etc/sandbox-config/`; each key becomes a file whose
+contents are the value. The ConfigMap is not shipped with the controller —
+create it yourself when you need to override defaults. Restart the
+controller Deployment after creating or changing the ConfigMap:
+
+```sh
+kubectl -n agent-sandbox-system rollout restart deploy/agent-sandbox-controller
+```
+
+### SandboxClaim label-domain allowlist
 
 Since v0.5.0, label keys in `SandboxClaim.spec.additionalPodMetadata.labels`
 must carry a domain prefix from an allowlist; claims with any other label
@@ -293,13 +337,12 @@ domain are rejected with `Ready=False, reason=InvalidMetadata`. The default
 allowlist is `sandbox.users.io` (subdomains of an allowed domain also pass).
 
 The extensions controller reads the allowlist **once at startup** from
-`/etc/sandbox-config/allowed-label-domains`, mounted from an optional
-ConfigMap named `agent-sandbox-config` in the controller's namespace. The
-file's contents **replace** the default rather than extending it, so include
-`sandbox.users.io` if existing consumers rely on it. Domains are separated
-by newlines or commas. An empty (or separator-only) file does not disable
-the allowlist — the controller treats it the same as an absent file and
-falls back to the `sandbox.users.io` default.
+`/etc/sandbox-config/allowed-label-domains`. The value **replaces** the default rather than
+extending it, so include `sandbox.users.io` if existing consumers rely on
+it. Domains are separated by newlines or commas. An empty (or
+separator-only) value does not disable the allowlist — the controller treats
+it the same as an absent key and falls back to the `sandbox.users.io`
+default.
 
 ```yaml
 apiVersion: v1
@@ -313,13 +356,39 @@ data:
     sandbox.users.io
 ```
 
-After creating or changing the ConfigMap, restart the controller so it
-re-reads the file:
-
-```sh
-kubectl -n agent-sandbox-system rollout restart deploy/agent-sandbox-controller
-```
-
 Annotations in `additionalPodMetadata` are governed separately by a
 restricted-domain blocklist (with `cluster-autoscaler.kubernetes.io/safe-to-evict`
 exempted), not by this allowlist.
+
+### Controller flag overrides
+
+This mechanism is mainly useful for OLM-managed installs, where the
+ClusterServiceVersion owns the Deployment args and editing them directly
+is impractical. Non-OLM users can set flags in the Deployment manifest
+or Helm values instead.
+
+Keys that match one of the tunable flag names below override the compiled
+default; explicit CLI flags always take precedence
+(CLI > ConfigMap > compiled default). If a key has an invalid value (e.g. a
+non-numeric string for an integer flag), the controller exits with an error
+on startup. The controller also logs any ConfigMap key that is not in the
+list, so typos surface immediately instead of silently falling back to
+defaults. Keys set via CLI are also logged so the precedence decision is
+visible.
+
+Settable flags: `kube-api-qps`, `kube-api-burst`, `api-connections`,
+`separate-watch-connection`, `sandbox-concurrent-workers`,
+`sandbox-claim-concurrent-workers`, `sandbox-warm-pool-concurrent-workers`,
+`sandbox-template-concurrent-workers`, `sandbox-warm-pool-max-batch-size`,
+`sandbox-warm-pool-replenish-delay`, `sandbox-warm-pool-max-refill-rate`,
+`sandbox-claim-warm-candidate-grace-period`,
+`sandbox-warm-pool-readiness-grace-period`,
+`sandbox-warm-pool-unschedulable-recheck-interval`,
+`enable-warm-pool-eviction`, `disable-sandbox-events`,
+`disable-claim-events`, `disable-claim-observability-annotations`,
+`sandbox-write-behind-window`.
+
+See the flag descriptions earlier in this document for defaults and
+semantics. Keys not in this list are ignored and logged.
+Documentation-only keys (prefixed with `_` or `.`) and the
+`allowed-label-domains` key are silently skipped.

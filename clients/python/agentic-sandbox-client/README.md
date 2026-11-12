@@ -267,16 +267,38 @@ sandbox = client.create_sandbox(warmpool="node-sandbox-warmpool", namespace="def
 
 ### File Operations
 
+Use `SandboxFileConfig` to bound file downloads for every sandbox created or
+attached by a client:
+
+```python
+from k8s_agent_sandbox.models import SandboxFileConfig
+
+client = SandboxClient(
+    file_config=SandboxFileConfig(
+        max_download_size=256 * 1024 * 1024,
+    ),
+)
+sandbox = client.create_sandbox(warmpool="python-sandbox-warmpool")
+```
+
+`AsyncSandboxClient` accepts the same `file_config`; it can also be passed to
+`Sandbox` or `AsyncSandbox` directly. `max_download_size` is a positive byte
+limit shared by `read()` and `read_to()`, for both runtimes. It defaults to
+`None`, preserving unlimited downloads. An oversized download raises
+`SandboxResponseTooLargeError` (a `RuntimeError` subclass) and closes the response.
+Limits are checked while reading, including when the response length is unknown.
+The limit counts file bytes after HTTP content decoding, not compressed wire bytes.
+
 `read()` remains convenient for small files and returns the complete contents as
-`bytes`. Use `read_to()` for large files so the response is copied incrementally
-into a caller-owned binary destination:
+`bytes`; it never returns partial content on overflow. Use `read_to()` for large
+files so the response is copied incrementally into a caller-owned binary destination:
 
 ```python
 with open("artifact-copy.tar", "wb") as destination:
     written = sandbox.files.read_to(
         "artifact.tar",
         destination,
-        max_bytes=512 * 1024 * 1024,
+        max_bytes=128 * 1024 * 1024,
     )
 
 print(f"downloaded {written} bytes")
@@ -284,8 +306,10 @@ print(f"downloaded {written} bytes")
 
 `read_to()` never closes the destination. It always closes the HTTP response,
 including after a size-limit violation or destination error. If an error occurs,
-data already written remains in the destination. Omitting `max_bytes` disables
-the optional per-call download limit.
+data already written remains in the destination. The smaller of the configured
+`max_download_size` and the per-call `max_bytes` applies. Omitting `max_bytes`
+removes only the per-call restriction, not the configured limit; `max_bytes=0`
+allows only empty files. With neither limit set, downloads remain unlimited.
 
 `AsyncFilesystem.read_to()` provides the same behavior for an asynchronous sink
 whose `write(bytes)` method is awaitable and returns the number of bytes accepted:
@@ -294,9 +318,14 @@ whose `write(bytes)` method is awaitable and returns the number of bytes accepte
 written = await sandbox.files.read_to(
     "artifact.tar",
     async_destination,
-    max_bytes=512 * 1024 * 1024,
+    max_bytes=128 * 1024 * 1024,
 )
 ```
+
+On the sandboxd runtime, `files.mkdir(path, parents=False)`,
+`files.move(source, destination, overwrite=False)` and
+`files.copy(source, destination, overwrite=False)` create, rename and copy
+paths. The legacy runtime raises `NotImplementedError`.
 
 ### 6. Async Client
 
@@ -310,7 +339,8 @@ pip install k8s-agent-sandbox[async]
 The async client requires an explicit connection config — `SandboxLocalTunnelConnectionConfig`
 is not supported because it relies on a synchronous `kubectl port-forward` subprocess. Use
 `SandboxGatewayConnectionConfig`, `SandboxDirectConnectionConfig`,
-`SandboxInClusterConnectionConfig`, `SandboxdPodTunnelConnectionConfig`, or
+`SandboxInClusterConnectionConfig`, `SandboxdPodTunnelConnectionConfig`,
+`SandboxdRouterTunnelConnectionConfig`, or
 `SandboxdInClusterConnectionConfig`. For the portable
 `sandboxd` runtime, install
 both optional extras: `pip install 'k8s-agent-sandbox[async,grpc]'`.
@@ -367,8 +397,9 @@ both forwards without blocking the event loop.
 
 This doesn't work on Kata or gVisor: their workload runs in a separate kernel, so the
 pod's host-side network namespace has nothing listening for the port-forward to reach.
-Use `SandboxdInClusterConnectionConfig` for those, with the client running inside the
-cluster (the Sandbox NetworkPolicy must admit the client; see below).
+Use `SandboxdRouterTunnelConnectionConfig` for those from outside the cluster.
+Use `SandboxdInClusterConnectionConfig` when the client runs inside the cluster
+(the Sandbox NetworkPolicy must admit the client; see below).
 
 ```python
 import asyncio
@@ -482,7 +513,77 @@ With sandboxd, `commands.run` also takes `env` and `cwd`, as in the synchronous
 example. `cwd` is confined to the sandbox root. The legacy runtime raises
 `NotImplementedError` for both.
 
-### 9. Labels and Pod Metadata
+#### sandboxd bearer authentication
+
+If sandboxd requires a bearer token (`--auth-token-sha256` or
+`--auth-token-file`), set `auth_token` on either
+`SandboxdPodTunnelConnectionConfig` or `SandboxdInClusterConnectionConfig`:
+
+```python
+import os
+from k8s_agent_sandbox import SandboxdInClusterConnectionConfig
+
+config = SandboxdInClusterConnectionConfig(
+    mode="in-cluster-service",
+    auth_token=os.environ["SANDBOXD_AUTH_TOKEN"],
+)
+```
+
+Pass this config to `SandboxClient` or `AsyncSandboxClient`. The raw token must
+be non-empty printable ASCII without spaces, matching TypeScript's `authToken`.
+The SDK adds `Bearer ` to REST headers and all unary/streaming gRPC calls,
+including after reconnect. Omit `auth_token` to preserve existing behavior.
+
+This client-level credential is stored as `SecretStr` and hidden from config
+repr and validation error messages. Configure the matching token on sandboxd
+separately. It is independent of Kubernetes credentials and does not add TLS;
+in-cluster traffic remains plaintext and requires appropriate network isolation.
+
+### 9. sandboxd Router Tunnel Mode
+
+Use `SandboxdRouterTunnelConnectionConfig` to reach sandboxd through
+`sandbox-router-svc`. This supports Kata and gVisor Pods that cannot receive a
+direct Pod port-forward. Install `k8s-agent-sandbox[grpc]` for the synchronous
+client or `k8s-agent-sandbox[async,grpc]` for the asynchronous client.
+
+The SDK opens one `kubectl port-forward` to the router's port 8080. REST requests
+and gRPC calls share that tunnel. The SDK sets `X-Sandbox-ID`,
+`X-Sandbox-Namespace`, and `X-Sandbox-Port` as HTTP headers or lowercase gRPC
+metadata. `rest_port` and `grpc_port` select the sandboxd listeners, which default
+to 8080 and 9090. gRPC requires sandbox-router v1.0.9 or later. The client omits
+`X-Sandbox-Pod-IP` unless `pod_ip_routing` is true, so the router selects the
+current Pod from its cache or DNS. Leave the default for `scoped-token`, which
+rejects that header. Set `pod_ip_routing=True` only when the router cache is
+disabled and the Sandbox has no Service.
+
+```python
+from k8s_agent_sandbox import SandboxClient, SandboxdRouterTunnelConnectionConfig
+
+config = SandboxdRouterTunnelConnectionConfig(
+    router_namespace="agent-sandbox-system",
+)
+with SandboxClient(connection_config=config) as client:
+    sandbox = client.create_sandbox(warmpool="sandboxd-warmpool", namespace="default")
+    sandbox.files.write("hello.txt", b"hello through the router\n")
+    print(sandbox.commands.run("cat hello.txt").stdout)
+```
+
+`AsyncSandboxClient` accepts the same config and manages the tunnel without
+blocking the event loop. `router_namespace` identifies the router's namespace,
+independently of the Sandbox namespace. The router must be able to reach the
+Sandbox on both sandboxd ports. The Kubernetes credentials must permit
+port-forwarding to the router Pod through its Service.
+
+This mode is opt-in. `SandboxdPodTunnelConnectionConfig` continues to connect
+directly to the sandbox Pod. The router caps REST request timeouts at its proxy
+timeout. When the router is not in `allow-all` mode, set `router_auth_token`.
+The SDK sends that token as `Authorization` on REST requests and gRPC calls.
+Use a Kubernetes bearer token for `tokenreview`, or a scoped token for
+`scoped-token`. The router strips `Authorization`, so the SDK sends `auth_token`
+in `X-Sandboxd-Token` instead. sandboxd accepts that header since
+[#2164](https://github.com/kubernetes-sigs/agent-sandbox/pull/2164).
+
+### 10. Labels and Pod Metadata
 
 `create_sandbox` lets you attach metadata at two different levels:
 
@@ -517,7 +618,7 @@ Behavioral notes:
   domain allow-list and system-label restrictions are enforced server-side and
   are not replicated client-side.
 
-### 10. Deterministic, Retry-Safe Claim Creation
+### 11. Deterministic, Retry-Safe Claim Creation
 
 By default, `create_sandbox` continues to generate a new random
 `SandboxClaim` name for every call. For a workflow that may retry after an
@@ -565,7 +666,7 @@ response provided a UID; without one it retains the existing name-based delete.
 A `409` does not trigger rollback of the conflicting Claim. This feature does
 not add thread-safety guarantees or UID tracking to returned handles.
 
-### 11. Custom Volume Claim Templates
+### 12. Custom Volume Claim Templates
 
 You can dynamically request persistent volumes to be attached to your Sandbox Pod by specifying `volume_claim_templates`. This allows the sandbox to mount custom PersistentVolumeClaims (PVCs).
 
@@ -593,7 +694,7 @@ sandbox = client.create_sandbox(
 
 The volume claim templates are validated against the warmpool template's policy and rules (e.g., whether custom volume claims are allowed or if overrides are permitted).
 
-### 12. Startup Latency: How the SDK Waits for Readiness
+### 13. Startup Latency: How the SDK Waits for Readiness
 
 `create_sandbox()` is fully **watch-based** — it never polls the Kubernetes
 API on an interval, so there is no poll-interval latency added on top of the
@@ -623,11 +724,11 @@ Latency guidance:
   for the `kubectl port-forward` startup; the SDK probes the local port every
   50ms while it comes up. Gateway/in-cluster modes do not have this step.
 
-### 13. Targeting a Specific Cluster or Context
+### 14. Targeting a Specific Cluster or Context
 
 By default, `SandboxClient` and `AsyncSandboxClient` load their Kubernetes credentials via an in-cluster config if running inside a pod, otherwise `KUBECONFIG`, falling back to `~/.kube/config`'s `current-context` if unset. To target a different cluster/context instead, pass a pre-configured `api_client`.
 
-> **Note:** The `kubectl` calls in the local-tunnel and sandboxd pod-tunnel modes target the same cluster as `api_client`. The SDK gives `kubectl` a short-lived kubeconfig built from the client's host, CA, client certificate and bearer token. Basic auth is not carried over.
+> **Note:** The `kubectl` calls in the local-tunnel and sandboxd Pod/router tunnel modes target the same cluster as `api_client`. The SDK gives `kubectl` a short-lived kubeconfig built from the client's host, CA, client certificate and bearer token. Basic auth is not carried over.
 
 **A kubeconfig file outside the default location** (e.g. a `pytest-kind` cluster):
 
@@ -664,7 +765,7 @@ The async client takes the same parameter with a `kubernetes_asyncio.client.ApiC
 
 An injected `api_client` is caller-owned: the SDK never closes it, so closing it is up to you.
 
-### 14. Logging
+### 15. Logging
 
 The SDK logs through the `k8s_agent_sandbox` logger hierarchy and does not configure logging itself. To see its progress messages, configure logging in your application:
 
@@ -674,7 +775,68 @@ import logging
 logging.basicConfig(level=logging.INFO)
 ```
 
-### 15. Batch claims
+### 15. Streaming Exec and Cancellation (sandboxd runtime)
+
+`sandbox.commands.run()` waits for the whole command to finish before returning
+its output — fine for short one-shots, but not for long-running builds, hung
+processes, or anything you might need to cancel from the outside. On the
+**sandboxd runtime**, the SDK also exposes a streaming variant that yields
+stdout/stderr in real time and lets you deliver POSIX signals to the running process through `commands.start()`.
+
+Install the SDK with the `grpc` extra to enable it:
+
+```bash
+pip install "k8s-agent-sandbox[grpc]"
+```
+
+`sandbox.commands.start(command)` returns a `ProcessHandle` context manager.
+Its `process_id` is set before `start()` returns, so you can signal the process
+without first consuming an event. Iterate `handle.events()` for typed events
+(`ProcessOutputEvent`, then a terminal `ProcessExitEvent`) and call
+`handle.signal(sig)` to cancel:
+
+```python
+import sys
+import signal as sig
+from k8s_agent_sandbox import SandboxClient
+from k8s_agent_sandbox.models import SandboxdPodTunnelConnectionConfig
+
+client = SandboxClient(connection_config=SandboxdPodTunnelConnectionConfig())
+sandbox = client.create_sandbox(warmpool="sandboxd-warmpool", namespace="default")
+try:
+    with sandbox.commands.start("python long_task.py") as handle:
+        for event in handle.events():
+            if event.type in ("stdout", "stderr"):
+                sys.stdout.buffer.write(event.data)
+                sys.stdout.buffer.flush()
+            elif event.type == "exit":
+                print(f"exited with {event.exit_code}")
+            if user_hit_ctrl_c():
+                handle.signal(sig.SIGINT)
+finally:
+    sandbox.terminate()
+```
+
+`signal()` accepts either the cross-SDK name (`"SIGINT"`) or Python's own
+`signal.SIGINT`. `env` and `cwd` work as they do on `run()`. Passing
+`pty=PtySize(cols=120, rows=40)` (from `k8s_agent_sandbox.models`) allocates a
+pseudo-terminal, which merges stderr into stdout.
+
+The async client mirrors the interface via `async with` / `async for` /
+`await`:
+
+```python
+async with await sandbox.commands.start("python long_task.py") as handle:
+    async for event in handle.events():
+        ...
+    await handle.signal(sig.SIGINT)
+```
+
+`start()` is only available on the sandboxd runtime and raises
+`NotImplementedError` on the legacy python-runtime connector, which does not
+expose a streaming exec endpoint.
+
+### 16. Batch claims
 
 `SandboxClient.claim_batch()` claims a batch of `SandboxClaims` across one or more warm pools in one call,
 returning a `SandboxBatch` handle right away. Each `BatchGroup` names a warm pool, how many claims to
@@ -922,7 +1084,6 @@ rules:
   resources: ["leases"]
   verbs: ["list", "get", "delete"]
 ```
-
 ## Testing
 
 A test script is included to verify the full lifecycle (Creation -> Execution -> File I/O -> Cleanup).

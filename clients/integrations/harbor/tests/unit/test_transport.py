@@ -180,21 +180,57 @@ async def test_wait_ready_times_out_with_last_error(transport, monkeypatch):
         await transport.wait_ready(timeout_s=60)
 
 
-async def test_upload_tar_appends_a_marker_and_confirms_it(transport, tmp_path):
-    import io
-    import tarfile
-
+async def test_upload_tar_writes_the_marker_after_tar_and_confirms_it(transport, tmp_path):
     (tmp_path / "f.txt").write_text("hi")
     data = archive.pack_dir(tmp_path)
     transport.responses.extend([FakeResp(), FakeResp(returncode=0)])   # upload stream, marker check
     await transport.upload_tar(data, "/tests")
     upload, check = transport.calls
     assert upload["stdin"] is True and upload["binary"] is True
-    assert upload["command"][2] == "mkdir -p /tests && tar xf - -C /tests"
-    with tarfile.open(fileobj=io.BytesIO(upload["resp"].stdin), mode="r:*") as tar:
-        names = tar.getnames()
-    assert "f.txt" in names and any(n.startswith(".k8s-agent-sandbox-harbor-") for n in names)
-    assert "test -e /tests/.k8s-agent-sandbox-harbor-" in check["command"][2]
+    command = upload["command"][2]
+    assert command.startswith("mkdir -p /tests && tar xf - -C /tests && : > /tests/.k8s-agent-sandbox-harbor-")
+    marker = command.rsplit(" ", 1)[1]
+    # The archive goes through unchanged: the marker is not one of its members.
+    assert upload["resp"].stdin == data
+    assert check["command"][2] == f"bash -c 'test -e {marker} && rm -f {marker}'"
+
+
+def test_upload_command_leaves_no_marker_when_a_member_fails(tmp_path):
+    """tar extracts the members after one that fails, so a marker inside the
+    archive would report a partial upload as complete."""
+    import io
+    import subprocess
+    import tarfile
+
+    from k8s_agent_sandbox_harbor.transport.podexec import upload_command
+
+    def run(target: Path) -> subprocess.CompletedProcess:
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            for name in ("conflict/earlier.txt", "later.txt"):
+                info = tarfile.TarInfo(name)
+                info.size = 2
+                tar.addfile(info, io.BytesIO(b"hi"))
+        return subprocess.run(["sh", "-c", upload_command(str(target), str(target / ".marker"))],
+                              input=buf.getvalue(), capture_output=True)
+
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    (bad / "conflict").write_text("a file where the archive has a directory")
+    assert run(bad).returncode != 0
+    assert (bad / "later.txt").exists() and not (bad / ".marker").exists()
+
+    good = tmp_path / "good"
+    assert run(good).returncode == 0
+    assert (good / "conflict" / "earlier.txt").exists() and (good / ".marker").exists()
+
+
+async def test_upload_tar_fails_at_once_when_tar_reports_an_error(transport, tmp_path):
+    (tmp_path / "f").write_text("x")
+    transport.responses.append(FakeResp(stderr=b"tar: conflict/earlier.txt: Cannot open", returncode=2))
+    with pytest.raises(RuntimeError, match=r"failed \(exit 2\): tar: conflict/earlier.txt"):
+        await transport.upload_tar(archive.pack_dir(tmp_path), "/tests")
+    assert len(transport.calls) == 1                       # no marker poll after a known failure
 
 
 async def test_upload_tar_fails_when_marker_never_appears(transport, tmp_path, monkeypatch):
@@ -217,6 +253,28 @@ async def test_download_tar_reads_binary_and_rejects_failures(transport):
     transport.responses.append(FakeResp(stderr=b"tar: write error", returncode=2))
     with pytest.raises(RuntimeError, match="write error"):
         await transport.download_tar("/logs")
+
+
+def test_unpack_skips_a_member_the_data_filter_rejects(tmp_path: Path, caplog):
+    """A symlink with an absolute target must not stop the download: the
+    members after it are still extracted."""
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        link = tarfile.TarInfo("latest")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "/logs/verifier/reward.txt"
+        tar.addfile(link)
+        info = tarfile.TarInfo("reward.txt")
+        info.size = 1
+        tar.addfile(info, io.BytesIO(b"1"))
+    with caplog.at_level("WARNING"):
+        archive.unpack(buf.getvalue(), tmp_path / "out")
+    assert (tmp_path / "out" / "reward.txt").read_text() == "1"
+    assert not (tmp_path / "out" / "latest").is_symlink()
+    assert "not extracting latest" in caplog.text
 
 
 def test_archive_round_trip(tmp_path: Path):
@@ -294,6 +352,38 @@ async def test_timed_out_exec_closes_the_stream_off_the_exec_pool(monkeypatch):
         assert result.return_code == 124 and release.is_set()
     finally:
         release.set()                                      # never leave the worker hung
+        ex.shutdown(wait=True)
+
+
+async def test_cancelled_exec_closes_its_stream_and_frees_the_thread(monkeypatch):
+    """A cancelled call must give its thread back: with one exec thread, the
+    next call runs instead of timing out behind the abandoned stream."""
+    import asyncio
+    import k8s_agent_sandbox_harbor.transport.podexec as mod
+
+    class OpenResp(FakeResp):
+        def update(self, timeout=None):                    # the command never ends
+            import time
+            time.sleep(0.02)
+
+    hung = OpenResp()
+    responses = [hung, FakeResp(stdout="next")]
+    monkeypatch.setattr(mod, "stream", lambda fn, pod, ns, **kw: responses.pop(0))
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    api = types.SimpleNamespace(connect_get_namespaced_pod_exec=object())
+    t = PodExecTransport(api_factory=lambda: api, pod="p", namespace="ns", container="main",
+                         executor=ex, slots=asyncio.Semaphore(1))
+    try:
+        task = asyncio.create_task(t.exec("sleep 300"))
+        await asyncio.sleep(0.2)                           # the call is inside the stream
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        result = await asyncio.wait_for(t.exec("echo next", timeout_sec=1), timeout=5)
+        assert (result.return_code, result.stdout) == (0, "next")
+        assert hung.closed
+    finally:
+        hung._open = False                                 # never leave the worker hung
         ex.shutdown(wait=True)
 
 

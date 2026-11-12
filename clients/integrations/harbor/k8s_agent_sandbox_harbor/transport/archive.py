@@ -21,8 +21,11 @@ symlinks and empty directories, and needs only ``tar`` in the image.
 from __future__ import annotations
 
 import io
+import logging
 import tarfile
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def pack_dir(source: Path | str) -> bytes:
@@ -43,9 +46,27 @@ def pack_file(source: Path | str, arcname: str) -> bytes:
     return buf.getvalue()
 
 
+def _skip_unsafe(member: tarfile.TarInfo, path: str) -> tarfile.TarInfo | None:
+    """The data filter, except that a member it rejects is skipped with a warning.
+
+    A sandbox directory can hold a member the filter refuses, most often a
+    symlink with an absolute target. Raising there would stop the extraction
+    and lose every member after it, and Harbor fails the trial when the
+    verifier directory does not download.
+    """
+    try:
+        return tarfile.data_filter(member, path)
+    except tarfile.FilterError as exc:
+        logger.warning("not extracting %s from the sandbox: %s", member.name, exc)
+        return None
+
+
 def unpack(data: bytes, target: Path | str) -> None:
-    """Extract a tar stream under ``target`` with the data filter (no escapes)."""
+    """Extract a tar stream under ``target`` with the data filter (no escapes).
+
+    Members the filter rejects are left out; the rest are extracted.
+    """
     target = Path(target)
     target.mkdir(parents=True, exist_ok=True)
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tar:
-        tar.extractall(target, filter="data")
+        tar.extractall(target, filter=_skip_unsafe)

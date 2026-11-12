@@ -120,6 +120,13 @@ def build_command(script: str, *, cwd: str | None = None, env: dict[str, str] | 
     return ["sh", "-c", full]
 
 
+def upload_command(target_dir: str, marker_path: str) -> str:
+    """The shell command an upload runs: extract stdin under ``target_dir``,
+    then create ``marker_path`` only when ``tar`` exited 0."""
+    target = shlex.quote(target_dir)
+    return f"mkdir -p {target} && tar xf - -C {target} && : > {shlex.quote(marker_path)}"
+
+
 @dataclass
 class _Streams:
     stdout: str = ""
@@ -220,9 +227,13 @@ class PodExecTransport:
     def _exec_blocking(self, command: list[str], holder: dict[str, Any]) -> tuple[str, str, int]:
         resp = self._open(command, stdin=False, binary=False)
         holder["resp"] = resp
+        abandoned: threading.Event = holder["abandoned"]
         out = _Streams()
         try:
-            while resp.is_open():
+            # The caller sets ``abandoned`` when it stops waiting (timeout or
+            # cancellation), so this thread returns to the pool within one
+            # update interval even when the stream itself stays open.
+            while resp.is_open() and not abandoned.is_set():
                 resp.update(timeout=1)
                 if resp.peek_stdout():
                     out.stdout += resp.read_stdout()
@@ -232,10 +243,28 @@ class PodExecTransport:
             resp.close()
         return out.stdout, out.stderr, self._return_code(resp)
 
+    def _abandon(self, holder: dict[str, Any]) -> asyncio.Future[None]:
+        """Stop the blocking call behind ``holder`` and close its stream.
+
+        The close runs on the default executor, not the exec pool: the
+        abandoned call still holds one of the pool's threads, and when every
+        thread is held by a hung stream the close is the only thing that frees
+        them. A close error is dropped so it cannot replace the caller's result.
+        """
+        holder["abandoned"].set()
+        resp = holder.get("resp")
+
+        def close() -> None:
+            if resp is not None:
+                with contextlib.suppress(Exception):
+                    resp.close()
+
+        return asyncio.get_running_loop().run_in_executor(None, close)
+
     async def exec(self, script: str, *, cwd: str | None = None, env: dict[str, str] | None = None,
                    user: str | int | None = None, timeout_sec: int | None = None) -> ExecResult:
         command = build_command(script, cwd=cwd, env=env, user=user, timeout_sec=timeout_sec)
-        holder: dict[str, Any] = {}
+        holder: dict[str, Any] = {"abandoned": threading.Event()}
         self.exec_count += 1
         deadline = (timeout_sec + _LOCAL_TIMEOUT_GRACE_S) if timeout_sec else None
         async with self._slot():
@@ -243,72 +272,74 @@ class PodExecTransport:
                 stdout, stderr, code = await asyncio.wait_for(
                     self._run(self._exec_blocking, command, holder), timeout=deadline)
             except asyncio.TimeoutError:
-                resp = holder.get("resp")
-                if resp is not None:
-                    # Close on the default executor, not the exec pool: the
-                    # timed-out call still holds one of the pool's threads, and
-                    # when every thread is held by a hung stream the close is
-                    # the only thing that frees them. A close error must not
-                    # replace the timeout result.
-                    loop = asyncio.get_running_loop()
-                    with contextlib.suppress(Exception):
-                        await loop.run_in_executor(None, resp.close)
+                await self._abandon(holder)
                 return ExecResult(stdout=None,
                                   stderr=f"Command timed out after {timeout_sec} seconds",
                                   return_code=124)
+            except asyncio.CancelledError:
+                # Harbor cancels a trial's exec when the trial times out or is
+                # stopped. Without this the thread stays in the stream until
+                # the command ends, while the slot is already free, and the
+                # next call's timeout runs while it waits for a thread. The
+                # close is not awaited: a cancelled task must not wait here.
+                self._abandon(holder)
+                raise
             except ApiException as exc:
                 raise self._translate(exc) from exc
         return ExecResult(stdout=self._cap(stdout), stderr=self._cap(stderr), return_code=code)
 
     # --- files ----------------------------------------------------------------
-    def _upload_blocking(self, data: bytes, target_dir: str) -> str:
-        command = ["sh", "-c", f"mkdir -p {shlex.quote(target_dir)} && tar xf - -C {shlex.quote(target_dir)}"]
-        resp = self._open(command, stdin=True, binary=True)
+    def _upload_blocking(self, data: bytes, target_dir: str,
+                         marker_path: str) -> tuple[str, int | None]:
+        """Stream ``data`` into ``tar``; return its stderr and, when the command
+        ended while the stream was open, its exit status."""
+        resp = self._open(["sh", "-c", upload_command(target_dir, marker_path)],
+                          stdin=True, binary=True)
         err = b""
+        code: int | None = None
         try:
             view = memoryview(data)
             for start in range(0, len(view), 1 << 20):
                 resp.write_stdin(bytes(view[start:start + (1 << 20)]))
-            # The websocket has no stdin EOF; tar gets it when the stream closes.
+            # The websocket has no stdin EOF. A tar that stops at the archive's
+            # end blocks exits here and reports its status; one that waits for
+            # EOF gets it when the stream closes, and the marker tells.
             resp.run_forever(timeout=1)
             if resp.peek_stderr():
                 err = resp.read_stderr()
+            if not resp.is_open():
+                with contextlib.suppress(Exception):
+                    code = resp.returncode
         finally:
             resp.close()
-        return err.decode("utf-8", "replace") if isinstance(err, bytes) else str(err)
+        return (err.decode("utf-8", "replace") if isinstance(err, bytes) else str(err)), code
 
     async def upload_tar(self, data: bytes, target_dir: str) -> None:
         """Extract a tar stream under ``target_dir`` and confirm it landed.
 
-        The exec websocket cannot half-close stdin, so ``tar`` sees EOF only
-        when the stream closes and its exit status is lost. A marker member
-        appended to the archive proves the extraction completed.
+        The exec websocket cannot half-close stdin, so the exit status of
+        ``tar`` can be lost. The remote shell creates a marker file only after
+        ``tar`` exits 0, and this method waits for that file. The marker is not
+        an archive member, because ``tar`` extracts later members after an
+        earlier one fails.
         """
-        marker = f".k8s-agent-sandbox-harbor-{uuid.uuid4().hex}"
-        import io
-        import tarfile
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w") as tar:
-            with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as src:
-                for member in src:
-                    tar.addfile(member, src.extractfile(member) if member.isfile() else None)
-            info = tarfile.TarInfo(marker)
-            info.size = 0
-            tar.addfile(info)
+        marker_path = f"{target_dir.rstrip('/')}/.k8s-agent-sandbox-harbor-{uuid.uuid4().hex}"
         try:
             async with self._slot():
-                stderr = await self._run(self._upload_blocking, buf.getvalue(), target_dir)
+                stderr, code = await self._run(self._upload_blocking, data, target_dir, marker_path)
         except ApiException as exc:
             raise self._translate(exc) from exc
-        marker_path = f"{target_dir.rstrip('/')}/{marker}"
+        detail = f": {stderr.strip()}" if stderr.strip() else ""
+        if code:
+            raise RuntimeError(f"upload to {target_dir} on pod {self.pod} failed "
+                               f"(exit {code}){detail}")
         deadline = _now() + _UPLOAD_SETTLE_S
         while True:
             result = await self.exec(f"test -e {shlex.quote(marker_path)} && rm -f {shlex.quote(marker_path)}")
             if result.return_code == 0:
                 return
             if _now() >= deadline:
-                raise RuntimeError(f"upload to {target_dir} on pod {self.pod} did not complete"
-                                   + (f": {stderr.strip()}" if stderr.strip() else ""))
+                raise RuntimeError(f"upload to {target_dir} on pod {self.pod} did not complete{detail}")
             await asyncio.sleep(0.5)
 
     def _download_blocking(self, source_dir: str, single: str | None) -> tuple[bytes, str]:

@@ -97,6 +97,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(s \*Sandbox\) Files\(\) \*Files](<#Sandbox.Files>)
   - [func \(s \*Sandbox\) Health\(ctx context.Context, opts ...CallOption\) \(\*Health, error\)](<#Sandbox.Health>)
   - [func \(s \*Sandbox\) IsReady\(\) bool](<#Sandbox.IsReady>)
+  - [func \(s \*Sandbox\) IsSuspended\(ctx context.Context\) \(bool, error\)](<#Sandbox.IsSuspended>)
   - [func \(s \*Sandbox\) List\(ctx context.Context, path string, opts ...CallOption\) \(\[\]FileEntry, error\)](<#Sandbox.List>)
   - [func \(s \*Sandbox\) Metadata\(ctx context.Context, opts ...CallOption\) \(\*Metadata, error\)](<#Sandbox.Metadata>)
   - [func \(s \*Sandbox\) Mkdir\(ctx context.Context, path string, parents bool, opts ...CallOption\) error](<#Sandbox.Mkdir>)
@@ -106,9 +107,11 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(s \*Sandbox\) PodName\(\) string](<#Sandbox.PodName>)
   - [func \(s \*Sandbox\) Read\(ctx context.Context, path string, opts ...CallOption\) \(\[\]byte, error\)](<#Sandbox.Read>)
   - [func \(s \*Sandbox\) ReadTo\(ctx context.Context, path string, destination io.Writer, opts ...CallOption\) \(int64, error\)](<#Sandbox.ReadTo>)
+  - [func \(s \*Sandbox\) Resume\(ctx context.Context, opts ...CallOption\) error](<#Sandbox.Resume>)
   - [func \(s \*Sandbox\) Run\(ctx context.Context, command string, opts ...CallOption\) \(\*ExecutionResult, error\)](<#Sandbox.Run>)
   - [func \(s \*Sandbox\) SandboxName\(\) string](<#Sandbox.SandboxName>)
   - [func \(s \*Sandbox\) ServiceFQDN\(\) string](<#Sandbox.ServiceFQDN>)
+  - [func \(s \*Sandbox\) Suspend\(ctx context.Context, opts ...CallOption\) error](<#Sandbox.Suspend>)
   - [func \(s \*Sandbox\) WatchDir\(ctx context.Context, path string, recursive bool, opts ...CallOption\) \(\<\-chan FileEvent, error\)](<#Sandbox.WatchDir>)
   - [func \(s \*Sandbox\) Watchers\(\) \*Watchers](<#Sandbox.Watchers>)
   - [func \(s \*Sandbox\) Write\(ctx context.Context, path string, content \[\]byte, opts ...CallOption\) error](<#Sandbox.Write>)
@@ -1417,6 +1420,15 @@ func (s *Sandbox) IsReady() bool
 
 IsReady returns true if the sandbox is ready for communication.
 
+<a name="Sandbox.IsSuspended"></a>
+#### func \(\*Sandbox\) [IsSuspended](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/operatingmode.go>)
+
+```go
+func (s *Sandbox) IsSuspended(ctx context.Context) (bool, error)
+```
+
+IsSuspended reports whether the Sandbox CR asks the controller to keep the sandbox suspended \(spec.operatingMode is Suspended\). It reflects the desired state, not whether the pod has finished terminating; Suspend waits for that.
+
 <a name="Sandbox.List"></a>
 #### func \(\*Sandbox\) [List](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
 
@@ -1498,6 +1510,17 @@ func (s *Sandbox) ReadTo(ctx context.Context, path string, destination io.Writer
 
 ReadTo streams a file into a caller\-owned io.Writer without buffering the complete response. The destination is never closed.
 
+<a name="Sandbox.Resume"></a>
+#### func \(\*Sandbox\) [Resume](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/operatingmode.go>)
+
+```go
+func (s *Sandbox) Resume(ctx context.Context, opts ...CallOption) error
+```
+
+Resume makes a suspended sandbox runnable again: it sets the Sandbox's spec.operatingMode back to Running, waits for the sandbox to become Ready, and re\-establishes connectivity so the caller can keep using the same handle.
+
+Resume is idempotent. On a sandbox that is already running it does not patch: Resume waits for the sandbox to report Ready at its current generation and leaves a connected transport alone, unless the pod behind the sandbox changed — another client may have suspended and resumed it — in which case Resume rebuilds the transport. A handle that lost its transport always reconnects. Pass WithTimeout to override Options.SandboxReadyTimeout as the wait budget.
+
 <a name="Sandbox.Run"></a>
 #### func \(\*Sandbox\) [Run](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
 
@@ -1524,6 +1547,17 @@ func (s *Sandbox) ServiceFQDN() string
 ```
 
 ServiceFQDN returns the in\-cluster DNS name of the Sandbox's headless Service, or "" when it has none \(spec.service unset or false\). Not part of the Info interface, which is frozen for backward compatibility.
+
+<a name="Sandbox.Suspend"></a>
+#### func \(\*Sandbox\) [Suspend](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/operatingmode.go>)
+
+```go
+func (s *Sandbox) Suspend(ctx context.Context, opts ...CallOption) error
+```
+
+Suspend puts the sandbox into the suspended state: it sets the Sandbox's spec.operatingMode to Suspended \(unless already set\), closes the transport, and waits for the Suspended condition, which the controller sets once the backing pod has terminated. The claim and sandbox identity are preserved, so Resume brings the same sandbox back.
+
+Suspend is idempotent and also completes a suspension requested outside the SDK: it waits for the pod to terminate and closes a live transport instead of returning early. Pass WithTimeout to override Options.SandboxReadyTimeout as the wait budget.
 
 <a name="Sandbox.WatchDir"></a>
 #### func \(\*Sandbox\) [WatchDir](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)

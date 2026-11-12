@@ -16,6 +16,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"strings"
@@ -47,6 +48,7 @@ const clientAnnotation = "agents.x-k8s.io/client-first-requested-at"
 // sandboxState holds the identity metadata returned when a sandbox becomes ready.
 type sandboxState struct {
 	SandboxName string
+	UID         types.UID
 	PodName     string
 	PodIP       string
 	ServiceFQDN string
@@ -323,6 +325,23 @@ func claimIdentityFailure(claim *extv1beta1.SandboxClaim, expectedUID types.UID)
 	return nil
 }
 
+// sandboxIdentityFailure is claimIdentityFailure for the Sandbox CR: it
+// returns ErrSandboxDeleted when sb is a same-name replacement of the
+// sandbox the caller opened, or the original being deleted. An empty
+// expectedUID disables the check.
+func sandboxIdentityFailure(sb *sandboxv1beta1.Sandbox, expectedUID types.UID) error {
+	if expectedUID == "" {
+		return nil
+	}
+	if sb.UID != expectedUID {
+		return fmt.Errorf("%w: sandbox %s was replaced (uid %s, want %s)", ErrSandboxDeleted, sb.Name, sb.UID, expectedUID)
+	}
+	if sb.DeletionTimestamp != nil {
+		return fmt.Errorf("%w: sandbox %s is terminating", ErrSandboxDeleted, sb.Name)
+	}
+	return nil
+}
+
 // resolveSandboxName watches SandboxClaim status until the sandbox name is
 // populated. With warm pool, the sandbox name may differ from the claim name.
 // It returns early with a claimFailure error if the claim can never become ready,
@@ -444,20 +463,38 @@ func (h *K8sHelper) WaitForSandboxReady(ctx context.Context, sandboxName, namesp
 	if sandboxName == "" || namespace == "" {
 		return fmt.Errorf("sandbox: sandbox name and namespace are required")
 	}
-	_, err := h.waitForSandboxState(ctx, sandboxName, namespace)
+	_, err := h.waitForSandboxState(ctx, sandboxName, namespace, "readiness", "", isSandboxReady)
 	return err
 }
 
-// waitForSandboxReady adds SDK tracing and timeout semantics to the shared wait.
-func (h *K8sHelper) waitForSandboxReady(ctx context.Context, sandboxName, namespace string, timeout time.Duration, tracer trace.Tracer, svcName string) (*sandboxState, error) {
+// waitForSandboxReady adds SDK tracing and timeout semantics to the shared
+// wait. When minGeneration is greater than zero, only a Ready condition
+// observed at that generation or later satisfies the wait; pass 0 to accept
+// any Ready=True. When expectedUID is set, a same-name replacement sandbox
+// fails the wait instead of satisfying it. When expectedMode is set, a
+// Ready=True stamped while spec.operatingMode points the other way — another
+// client re-suspended the sandbox mid-wait — does not satisfy the wait.
+func (h *K8sHelper) waitForSandboxReady(ctx context.Context, sandboxName, namespace string, timeout time.Duration, minGeneration int64, expectedUID types.UID, expectedMode sandboxv1beta1.SandboxOperatingMode, tracer trace.Tracer, svcName string) (*sandboxState, error) {
 	ctx, span := startSpan(ctx, tracer, svcName, "wait_for_sandbox_ready")
 	defer span.End()
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	state, err := h.waitForSandboxState(ctx, sandboxName, namespace)
+	done := func(sb *sandboxv1beta1.Sandbox) bool {
+		if expectedMode != "" && sb.Spec.OperatingMode != expectedMode {
+			return false
+		}
+		if minGeneration > 0 {
+			return conditionObserved(sb, sandboxv1beta1.SandboxConditionReady, minGeneration)
+		}
+		return isSandboxReady(sb)
+	}
+	state, err := h.waitForSandboxState(ctx, sandboxName, namespace, "readiness", expectedUID, done)
 	if err != nil {
-		if ctx.Err() != nil {
+		// Only a deadline maps to ErrTimeout. A caller cancellation (or a
+		// Close/Disconnect interrupt) must stay discoverable through
+		// errors.Is(err, context.Canceled), as in waitForSandboxSuspended.
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			err = fmt.Errorf("%w: sandbox %s did not become ready within %s: %v", ErrTimeout, sandboxName, timeout, err)
 		}
 		recordError(span, err)
@@ -465,8 +502,77 @@ func (h *K8sHelper) waitForSandboxReady(ctx context.Context, sandboxName, namesp
 	return state, err
 }
 
-// waitForSandboxState shares the list/watch loop between SDK opens and public waits.
-func (h *K8sHelper) waitForSandboxState(ctx context.Context, sandboxName, namespace string) (*sandboxState, error) {
+// waitForSandboxSuspended waits until the Sandbox reports the Suspended
+// condition, meaning the controller has terminated the backing pod. The
+// condition must have been observed at minGeneration or later, so a
+// Suspended=True left over from an earlier suspend cycle does not satisfy
+// the wait before the controller acts on the new patch. When expectedUID is
+// set, a same-name replacement sandbox fails the wait instead of satisfying
+// it.
+func (h *K8sHelper) waitForSandboxSuspended(ctx context.Context, sandboxName, namespace string, timeout time.Duration, minGeneration int64, expectedUID types.UID, tracer trace.Tracer, svcName string) error {
+	ctx, span := startSpan(ctx, tracer, svcName, "wait_for_sandbox_suspended")
+	defer span.End()
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	done := func(sb *sandboxv1beta1.Sandbox) bool {
+		// A Suspended=True stamped while spec.operatingMode already points
+		// back to Running describes a suspension nobody wants anymore: the
+		// wait must not report success on it.
+		return sb.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended &&
+			conditionObserved(sb, sandboxv1beta1.SandboxConditionSuspended, minGeneration)
+	}
+	_, err := h.waitForSandboxState(ctx, sandboxName, namespace, "suspension", expectedUID, done)
+	if err != nil {
+		// Only a deadline maps to ErrTimeout. A caller cancellation (or a
+		// Close/Disconnect interrupt) must stay discoverable through
+		// errors.Is(err, context.Canceled).
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			err = fmt.Errorf("%w: sandbox %s did not suspend within %s: %v", ErrTimeout, sandboxName, timeout, err)
+		}
+		recordError(span, err)
+	}
+	return err
+}
+
+// getSandbox reads the Sandbox CR.
+func (h *K8sHelper) getSandbox(ctx context.Context, name, namespace string) (*sandboxv1beta1.Sandbox, error) {
+	return h.AgentsClient.Sandboxes(namespace).Get(ctx, name, metav1.GetOptions{})
+}
+
+// patchSandboxOperatingMode sets spec.operatingMode on the Sandbox CR, which
+// is how a client asks the controller to suspend or resume the sandbox. It
+// returns the patched object so the caller can gate status waits on the
+// generation the controller must observe. When expectedUID is set, the patch
+// carries a JSON Patch test op on metadata.uid, so the API server rejects it
+// if a same-name replacement was created between the SDK's read and write;
+// an empty expectedUID leaves the patch unguarded.
+func (h *K8sHelper) patchSandboxOperatingMode(ctx context.Context, name, namespace string, mode sandboxv1beta1.SandboxOperatingMode, expectedUID types.UID, tracer trace.Tracer, svcName string) (*sandboxv1beta1.Sandbox, error) {
+	ctx, span := startSpan(ctx, tracer, svcName, "patch_operating_mode")
+	defer span.End()
+
+	patchType := types.MergePatchType
+	patch := []byte(fmt.Sprintf(`{"spec":{"operatingMode":%q}}`, mode))
+	if expectedUID != "" {
+		patchType = types.JSONPatchType
+		patch = []byte(fmt.Sprintf(`[{"op":"test","path":"/metadata/uid","value":%q},{"op":"add","path":"/spec/operatingMode","value":%q}]`, expectedUID, mode))
+	}
+	patched, err := h.AgentsClient.Sandboxes(namespace).Patch(ctx, name, patchType, patch, metav1.PatchOptions{})
+	if err != nil {
+		recordError(span, err)
+		return nil, fmt.Errorf("sandbox: failed to set operatingMode %s on %s: %w", mode, name, err)
+	}
+	h.Log.Info("operatingMode patched", "sandbox", name, "mode", mode)
+	return patched, nil
+}
+
+// waitForSandboxState shares the list/watch loop between SDK opens and public
+// waits. The done predicate selects the awaited state and desc names it in
+// error messages ("readiness", "suspension"). When expectedUID is set, a
+// sandbox that matches the name but not the UID — a same-name replacement
+// created while the wait ran — fails the wait instead of being evaluated
+// against done.
+func (h *K8sHelper) waitForSandboxState(ctx context.Context, sandboxName, namespace, desc string, expectedUID types.UID, done func(*sandboxv1beta1.Sandbox) bool) (*sandboxState, error) {
 	listOpts := metav1.ListOptions{
 		FieldSelector: fmt.Sprintf("metadata.name=%s", sandboxName),
 	}
@@ -477,7 +583,7 @@ func (h *K8sHelper) waitForSandboxState(ctx context.Context, sandboxName, namesp
 
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, fmt.Errorf("sandbox %s readiness wait ended (last conditions: %s): %w", sandboxName, lastConditions, err)
+			return nil, fmt.Errorf("sandbox %s %s wait ended (last conditions: %s): %w", sandboxName, desc, lastConditions, err)
 		}
 		list, listErr := h.AgentsClient.Sandboxes(namespace).List(ctx, listOpts)
 		if listErr == nil {
@@ -485,7 +591,10 @@ func (h *K8sHelper) waitForSandboxState(ctx context.Context, sandboxName, namesp
 				if list.Items[i].Name != sandboxName {
 					continue
 				}
-				if isSandboxReady(&list.Items[i]) {
+				if failure := sandboxIdentityFailure(&list.Items[i], expectedUID); failure != nil {
+					return nil, failure
+				}
+				if done(&list.Items[i]) {
 					return extractState(&list.Items[i]), nil
 				}
 				if failure := sandboxFailure(&list.Items[i]); failure != nil {
@@ -501,7 +610,7 @@ func (h *K8sHelper) waitForSandboxState(ctx context.Context, sandboxName, namesp
 		watcher, err := h.AgentsClient.Sandboxes(namespace).Watch(ctx, listOpts)
 		if err != nil {
 			if ctx.Err() != nil {
-				retErr := fmt.Errorf("sandbox %s readiness wait ended (last conditions: %s): %w", sandboxName, lastConditions, ctx.Err())
+				retErr := fmt.Errorf("sandbox %s %s wait ended (last conditions: %s): %w", sandboxName, desc, lastConditions, ctx.Err())
 				return nil, retErr
 			}
 			h.Log.V(1).Info("watch creation failed, retrying", "error", err, "sandbox", sandboxName)
@@ -514,9 +623,9 @@ func (h *K8sHelper) waitForSandboxState(ctx context.Context, sandboxName, namesp
 			continue
 		}
 
-		state, done, watchErr := h.drainSandboxWatch(ctx, watcher, sandboxName, &lastConditions)
+		state, reached, watchErr := h.drainSandboxWatch(ctx, watcher, sandboxName, &lastConditions, desc, expectedUID, done)
 		watcher.Stop()
-		if done {
+		if reached {
 			return state, nil
 		}
 		if watchErr != nil {
@@ -533,11 +642,11 @@ func (h *K8sHelper) waitForSandboxState(ctx context.Context, sandboxName, namesp
 	}
 }
 
-func (h *K8sHelper) drainSandboxWatch(ctx context.Context, watcher watch.Interface, sandboxName string, lastConditions *string) (*sandboxState, bool, error) {
+func (h *K8sHelper) drainSandboxWatch(ctx context.Context, watcher watch.Interface, sandboxName string, lastConditions *string, desc string, expectedUID types.UID, done func(*sandboxv1beta1.Sandbox) bool) (*sandboxState, bool, error) {
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, false, fmt.Errorf("sandbox %s readiness wait ended (last conditions: %s): %w", sandboxName, *lastConditions, ctx.Err())
+			return nil, false, fmt.Errorf("sandbox %s %s wait ended (last conditions: %s): %w", sandboxName, desc, *lastConditions, ctx.Err())
 		case event, ok := <-watcher.ResultChan():
 			if !ok {
 				return nil, false, nil
@@ -556,8 +665,11 @@ func (h *K8sHelper) drainSandboxWatch(ctx context.Context, watcher watch.Interfa
 			if sb.Name != sandboxName {
 				continue
 			}
+			if failure := sandboxIdentityFailure(sb, expectedUID); failure != nil {
+				return nil, false, failure
+			}
 			*lastConditions = formatConditions(sb.Status.Conditions)
-			if isSandboxReady(sb) {
+			if done(sb) {
 				return extractState(sb), true, nil
 			}
 			if failure := sandboxFailure(sb); failure != nil {
@@ -617,9 +729,25 @@ func isSandboxReady(sb *sandboxv1beta1.Sandbox) bool {
 	return false
 }
 
+// conditionObserved reports whether the given condition is True and was
+// written by a controller that had observed generation minGeneration or
+// later. Without the generation floor, a condition left over from an
+// earlier spec would report success before the controller acts on the
+// current one — e.g. a Suspended=True from a previous suspend cycle, or a
+// Ready=True from before an interrupted suspend.
+func conditionObserved(sb *sandboxv1beta1.Sandbox, condType sandboxv1beta1.ConditionType, minGeneration int64) bool {
+	for _, cond := range sb.Status.Conditions {
+		if cond.Type == string(condType) && cond.Status == metav1.ConditionTrue {
+			return cond.ObservedGeneration >= minGeneration
+		}
+	}
+	return false
+}
+
 func extractState(sb *sandboxv1beta1.Sandbox) *sandboxState {
 	state := &sandboxState{
 		SandboxName: sb.Name,
+		UID:         sb.UID,
 	}
 	if sb.Annotations != nil {
 		state.Annotations = make(map[string]string, len(sb.Annotations))

@@ -28,6 +28,7 @@ import (
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/trace"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
@@ -45,6 +46,8 @@ type Sandbox struct {
 
 	claimName   string
 	sandboxName string
+	sandboxUID  k8stypes.UID
+	suspended   bool // set by Suspend, cleared by Resume, Open, and Close
 	podName     string
 	podIP       string
 	serviceFQDN string
@@ -54,7 +57,11 @@ type Sandbox struct {
 	mu           sync.Mutex
 	inflightOps  *sync.WaitGroup
 	draining     bool // set by Close before drain; checked by trackOp
-	openCancel   context.CancelFunc
+	// lifecycleCancels holds the cancel functions of lifecycle operations:
+	// the one holding the semaphore and any parked waiting for it, so
+	// Close and Disconnect can interrupt them all.
+	lifecycleCancels   map[int]context.CancelFunc
+	lifecycleCancelSeq int
 
 	tracer           trace.Tracer
 	traceServiceName string
@@ -256,14 +263,10 @@ func (s *Sandbox) Open(ctx context.Context) (retErr error) {
 	}
 
 	openCtx, openCancel := context.WithCancel(ctx)
-	s.mu.Lock()
-	s.openCancel = openCancel
-	s.mu.Unlock()
+	unregister := s.registerLifecycleCancel(openCancel)
 	defer func() {
 		openCancel()
-		s.mu.Lock()
-		s.openCancel = nil
-		s.mu.Unlock()
+		unregister()
 	}()
 
 	// Check connectivity outside s.mu to avoid nested lock ordering
@@ -345,7 +348,7 @@ func (s *Sandbox) Open(ctx context.Context) (retErr error) {
 	}
 
 	// Wait for sandbox to be ready.
-	state, err := s.k8s.waitForSandboxReady(openCtx, sandboxName, s.opts.Namespace, remainingTimeout, s.tracer, s.traceServiceName)
+	state, err := s.k8s.waitForSandboxReady(openCtx, sandboxName, s.opts.Namespace, remainingTimeout, 0, "", "", s.tracer, s.traceServiceName)
 	if err != nil {
 		return s.rollbackOpen(err)
 	}
@@ -356,6 +359,7 @@ func (s *Sandbox) Open(ctx context.Context) (retErr error) {
 	if err := s.connector.Connect(openCtx); err != nil {
 		return s.rollbackOpen(err)
 	}
+	s.setSuspendedLocally(false)
 
 	return nil
 }
@@ -435,6 +439,17 @@ func (s *Sandbox) reconnect(ctx context.Context) error {
 		recordError(span, retErr)
 		return retErr
 	}
+	// A same-name replacement must not be adopted: the recorded UID belongs
+	// to the sandbox this handle opened, and setState would overwrite it,
+	// letting a later Suspend/Resume operate on the replacement.
+	s.mu.Lock()
+	wantUID := s.sandboxUID
+	s.mu.Unlock()
+	if wantUID != "" && state.UID != wantUID {
+		retErr := fmt.Errorf("%s: %w: sandbox %s was replaced (uid %s, want %s)", s.errPrefix(), ErrSandboxDeleted, sandboxName, state.UID, wantUID)
+		recordError(span, retErr)
+		return retErr
+	}
 	s.setState(state)
 
 	s.connector.SetIdentity(sandboxName)
@@ -444,6 +459,11 @@ func (s *Sandbox) reconnect(ctx context.Context) error {
 		recordError(span, retErr)
 		return retErr
 	}
+	// The sandbox is live and the transport works again, so a suspension
+	// this handle recorded earlier is over. Leaving the flag set would make
+	// Client.GetSandbox hand out this handle after a later Disconnect
+	// instead of re-attaching it.
+	s.setSuspendedLocally(false)
 	return nil
 }
 
@@ -484,11 +504,7 @@ func (s *Sandbox) rollbackOpen(originalErr error) error {
 
 // Close deletes the SandboxClaim and cleans up resources.
 func (s *Sandbox) Close(ctx context.Context) error {
-	s.mu.Lock()
-	if s.openCancel != nil {
-		s.openCancel()
-	}
-	s.mu.Unlock()
+	s.interruptLifecycle()
 
 	// Allow up to 2x CleanupTimeout for semaphore acquisition so Close can
 	// wait for an in-progress Open that is itself running rollbackOpen with
@@ -558,6 +574,10 @@ func (s *Sandbox) Close(ctx context.Context) error {
 	s.podIP = ""
 	s.serviceFQDN = ""
 	s.annotations = nil
+	// The handle is torn down, so it must stop advertising itself as
+	// suspended: the managed Client keeps suspended handles registered and
+	// would hand out this closed one from GetSandbox.
+	s.suspended = false
 	if err != nil && s.claimName != "" {
 		s.log.Error(err, "orphaned claim during Close, could not delete; retry Close() to clean up", "claim", s.claimName)
 	} else {
@@ -588,11 +608,7 @@ func (s *Sandbox) Close(ctx context.Context) error {
 // to reconnect. Disconnect is safe to call concurrently with Open;
 // an in-progress Open is cancelled before the transport is torn down.
 func (s *Sandbox) Disconnect(ctx context.Context) error {
-	s.mu.Lock()
-	if s.openCancel != nil {
-		s.openCancel()
-	}
-	s.mu.Unlock()
+	s.interruptLifecycle()
 
 	timer := time.NewTimer(s.opts.CleanupTimeout)
 	defer timer.Stop()
@@ -602,8 +618,9 @@ func (s *Sandbox) Disconnect(ctx context.Context) error {
 	case <-ctx.Done():
 		return fmt.Errorf("sandbox[%s/%s]: disconnect cancelled waiting for lifecycle lock: %w", s.opts.Namespace, s.ClaimName(), ctx.Err())
 	case <-timer.C:
-		// openCancel() above signals a stuck Open to abort and release the
-		// semaphore. We intentionally do NOT call connector.Close() here:
+		// interruptLifecycle() above signals a stuck lifecycle operation to
+		// abort and release the semaphore. We intentionally do NOT call
+		// connector.Close() here:
 		// it would race with a just-succeeding Open() and tear down a live
 		// transport, leaving the caller with a nil error from Open() but a
 		// dead connection.
@@ -843,6 +860,7 @@ func (s *Sandbox) setState(state *sandboxState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sandboxName = state.SandboxName
+	s.sandboxUID = state.UID
 	s.podName = state.PodName
 	s.podIP = state.PodIP
 	s.serviceFQDN = state.ServiceFQDN

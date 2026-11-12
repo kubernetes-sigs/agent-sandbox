@@ -194,6 +194,12 @@ var ErrVolumeClaimTemplatesOverrideForbidden = errors.New("overriding volume cla
 // ErrVolumeClaimTemplatesInvalid is a sentinel error indicating that the volumeClaimTemplates configuration is invalid.
 var ErrVolumeClaimTemplatesInvalid = errors.New("invalid volume claim templates")
 
+// ErrContainerResourcesDisallowed is a sentinel error indicating that containerResources are disallowed by the template.
+var ErrContainerResourcesDisallowed = errors.New("container resource overrides are disallowed by the template")
+
+// ErrContainerResourcesInvalid is a sentinel error indicating that containerResources are invalid for the template.
+var ErrContainerResourcesInvalid = errors.New("invalid container resource overrides")
+
 var suppressErrors = []error{
 	ErrInvalidMetadata,
 	ErrSandboxNotOwned,
@@ -201,6 +207,8 @@ var suppressErrors = []error{
 	ErrVolumeClaimTemplatesDisallowed,
 	ErrVolumeClaimTemplatesOverrideForbidden,
 	ErrVolumeClaimTemplatesInvalid,
+	ErrContainerResourcesDisallowed,
+	ErrContainerResourcesInvalid,
 }
 
 // observedTimeEntry stores the first observed timestamp and the UID of the SandboxClaim.
@@ -1041,6 +1049,24 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.
 				Type:               string(v1beta1.SandboxConditionReady),
 				Status:             metav1.ConditionFalse,
 				Reason:             "VolumeClaimTemplatesError",
+				Message:            err.Error(),
+				ObservedGeneration: claim.Generation,
+			}
+		}
+		if errors.Is(err, ErrContainerResourcesDisallowed) {
+			return metav1.Condition{
+				Type:               string(v1beta1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				Reason:             "ContainerResourcesDisallowed",
+				Message:            err.Error(),
+				ObservedGeneration: claim.Generation,
+			}
+		}
+		if errors.Is(err, ErrContainerResourcesInvalid) {
+			return metav1.Condition{
+				Type:               string(v1beta1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				Reason:             "ContainerResourcesInvalid",
 				Message:            err.Error(),
 				ObservedGeneration: claim.Generation,
 			}
@@ -2090,6 +2116,26 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	// Apply secure defaults to the sandbox pod spec
 	ApplySandboxSecureDefaults(template, &sandbox.Spec.PodTemplate.Spec)
 
+	// Apply claim container resource overrides before creating the Sandbox so
+	// per-claim sizing is persisted into the initial pod template. The template
+	// opts in via containerResourcesPolicy; with the default Disallowed a claim
+	// that sets overrides is rejected.
+	if hasContainerResourceOverrides(claim) && template.Spec.ContainerResourcesPolicy != extensionsv1beta1.ContainerResourcesPolicyAllowed {
+		err := fmt.Errorf("%w: template %q has containerResourcesPolicy %q", ErrContainerResourcesDisallowed, template.Name, template.Spec.ContainerResourcesPolicy)
+		logger.Error(err, "Container resource override rejected", "claimName", claim.Name)
+		if r.Recorder != nil {
+			r.Recorder.Eventf(claim, nil, corev1.EventTypeWarning, "ContainerResourcesDisallowed", "Rejected", "%s", err.Error())
+		}
+		return nil, err
+	}
+	if err := applyClaimContainerResourcesToPodSpec(&sandbox.Spec.PodTemplate.Spec, claim); err != nil {
+		logger.Error(err, "Container resource override rejected", "claimName", claim.Name)
+		if r.Recorder != nil && errors.Is(err, ErrContainerResourcesInvalid) {
+			r.Recorder.Eventf(claim, nil, corev1.EventTypeWarning, "ContainerResourcesInvalid", "Rejected", "%s", err.Error())
+		}
+		return nil, err
+	}
+
 	if err := controllerutil.SetControllerReference(claim, sandbox, r.Scheme); err != nil {
 		err = fmt.Errorf("failed to set controller reference for sandbox: %w", err)
 		logger.Error(err, "Error creating sandbox for claim", "claimName", claim.Name)
@@ -2415,6 +2461,16 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	// If len(claim.Spec.Env) > 0 or len(claim.Spec.VolumeClaimTemplates) > 0, the controller immediately bypasses the warm pool queue.
 	if claimForcesColdStart(claim) {
 		logger.Info("Bypassing warm pool adoption because custom configuration is provided (env or volume claim templates)", "claim", claim.Name)
+		return nil, nil
+	}
+
+	// When the claim overrides container resources, skip warm-pool adoption and
+	// fall through to cold creation. Warm-pool sandboxes have a backing Pod
+	// already running with the pool's default sizing; adopting and mutating only
+	// Sandbox.Spec.PodTemplate would leave the running Pod at the wrong size
+	// until restart. Cold creation is the supported path for per-claim sizing.
+	if hasContainerResourceOverrides(claim) {
+		logger.Info("Skipping warm-pool adoption for claim with ContainerResources override", "claim", claim.Name)
 		return nil, nil
 	}
 
@@ -3036,6 +3092,124 @@ func (h *sandboxEventHandler) Update(ctx context.Context, e event.UpdateEvent, _
 
 func (h *sandboxEventHandler) Generic(_ context.Context, _ event.GenericEvent, _ workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 	// Generic events are not typically used for pod lifecycle changes we care about.
+}
+
+// hasResourceOverride reports whether a resource requirement changes a target
+// container. Empty claims have the same durable API representation as omitted
+// claims and therefore do not request clearing template claims.
+func hasResourceOverride(resources corev1.ResourceRequirements) bool {
+	return len(resources.Requests) > 0 || len(resources.Limits) > 0 || len(resources.Claims) > 0
+}
+
+// hasContainerResourceOverrides reports whether the claim asks to merge any
+// resource requirement into at least one target container.
+func hasContainerResourceOverrides(claim *extensionsv1beta1.SandboxClaim) bool {
+	for i := range claim.Spec.ContainerResources {
+		if hasResourceOverride(claim.Spec.ContainerResources[i].Resources) {
+			return true
+		}
+	}
+	return false
+}
+
+func applyContainerResourceOverrides(container *corev1.Container, override *extensionsv1beta1.ContainerResourceOverride) {
+	if override == nil || !hasResourceOverride(override.Resources) {
+		return
+	}
+	if len(override.Resources.Requests) > 0 && container.Resources.Requests == nil {
+		container.Resources.Requests = corev1.ResourceList{}
+	}
+	if len(override.Resources.Limits) > 0 && container.Resources.Limits == nil {
+		container.Resources.Limits = corev1.ResourceList{}
+	}
+	if len(override.Resources.Requests) > 0 {
+		maps.Copy(container.Resources.Requests, override.Resources.Requests)
+	}
+	if len(override.Resources.Limits) > 0 {
+		maps.Copy(container.Resources.Limits, override.Resources.Limits)
+	}
+	if len(override.Resources.Claims) > 0 {
+		container.Resources.Claims = slices.Clone(override.Resources.Claims)
+	}
+}
+
+func validateResourceRequirements(requirements corev1.ResourceRequirements) error {
+	for resourceName, request := range requirements.Requests {
+		limit, ok := requirements.Limits[resourceName]
+		if !ok {
+			continue
+		}
+		if request.Cmp(limit) > 0 {
+			return fmt.Errorf("%w: request for %s (%s) exceeds limit (%s)", ErrContainerResourcesInvalid, resourceName, request.String(), limit.String())
+		}
+	}
+	return nil
+}
+
+func validateResourceClaimReferences(spec *corev1.PodSpec, containerName string, claims []corev1.ResourceClaim) error {
+	availableClaims := make(map[string]struct{}, len(spec.ResourceClaims))
+	for i := range spec.ResourceClaims {
+		availableClaims[spec.ResourceClaims[i].Name] = struct{}{}
+	}
+	for i := range claims {
+		if _, ok := availableClaims[claims[i].Name]; !ok {
+			return fmt.Errorf("%w: resource claim %q for container %q is not declared in podSpec.resourceClaims", ErrContainerResourcesInvalid, claims[i].Name, containerName)
+		}
+	}
+	return nil
+}
+
+func applyClaimContainerResourcesToPodSpec(spec *corev1.PodSpec, claim *extensionsv1beta1.SandboxClaim) error {
+	if !hasContainerResourceOverrides(claim) {
+		return nil
+	}
+
+	updated := spec.DeepCopy()
+	seenTargets := make(map[string]struct{}, len(claim.Spec.ContainerResources))
+	for i := range claim.Spec.ContainerResources {
+		override := &claim.Spec.ContainerResources[i]
+		if !hasResourceOverride(override.Resources) {
+			continue
+		}
+		if override.ContainerName == "" {
+			return fmt.Errorf("%w: containerName is required", ErrContainerResourcesInvalid)
+		}
+		if _, exists := seenTargets[override.ContainerName]; exists {
+			return fmt.Errorf("%w: containerName %q is specified more than once", ErrContainerResourcesInvalid, override.ContainerName)
+		}
+		seenTargets[override.ContainerName] = struct{}{}
+
+		if err := validateResourceClaimReferences(updated, override.ContainerName, override.Resources.Claims); err != nil {
+			return err
+		}
+
+		var target *corev1.Container
+		for j := range updated.Containers {
+			if updated.Containers[j].Name == override.ContainerName {
+				target = &updated.Containers[j]
+				break
+			}
+		}
+		if target == nil {
+			for j := range updated.InitContainers {
+				if updated.InitContainers[j].Name == override.ContainerName {
+					target = &updated.InitContainers[j]
+					break
+				}
+			}
+		}
+		if target == nil {
+			return fmt.Errorf("%w: target container %q not found in the SandboxTemplate", ErrContainerResourcesInvalid, override.ContainerName)
+		}
+
+		applyContainerResourceOverrides(target, override)
+		if err := validateResourceRequirements(target.Resources); err != nil {
+			return err
+		}
+	}
+
+	*spec = *updated
+	return nil
 }
 
 func verifySandboxCandidate(candidate *v1beta1.Sandbox, claim *extensionsv1beta1.SandboxClaim) error {

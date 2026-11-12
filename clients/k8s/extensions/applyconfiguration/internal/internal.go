@@ -2545,6 +2545,17 @@ var schemaYAML = typed.YAMLObject(`types:
       type:
         namedType: PodSpec.v1.core.api.k8s.io
       default: {}
+- name: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.ContainerResourceOverride
+  map:
+    fields:
+    - name: containerName
+      type:
+        scalar: string
+      default: ""
+    - name: resources
+      type:
+        namedType: ResourceRequirements.v1.core.api.k8s.io
+      default: {}
 - name: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.EnvVar
   map:
     fields:
@@ -2614,6 +2625,14 @@ var schemaYAML = typed.YAMLObject(`types:
       type:
         namedType: io.k8s.sigs.agent-sandbox.api.v1beta1.PodMetadata
       default: {}
+    - name: containerResources
+      type:
+        list:
+          elementType:
+            namedType: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.ContainerResourceOverride
+          elementRelationship: associative
+          keys:
+          - containerName
     - name: env
       type:
         list:
@@ -2688,6 +2707,9 @@ var schemaYAML = typed.YAMLObject(`types:
 - name: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.SandboxTemplateSpec
   map:
     fields:
+    - name: containerResourcesPolicy
+      type:
+        scalar: string
     - name: envVarsInjectionPolicy
       type:
         scalar: string

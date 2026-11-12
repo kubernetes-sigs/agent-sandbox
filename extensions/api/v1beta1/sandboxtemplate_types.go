@@ -80,6 +80,21 @@ const (
 	VolumeClaimTemplatesPolicyOverrides VolumeClaimTemplatesPolicy = "Overrides"
 )
 
+// ContainerResourcesPolicy defines whether a SandboxClaim is allowed to
+// override container resource requirements on sandboxes created from this
+// template.
+// +kubebuilder:validation:Enum=Disallowed;Allowed
+type ContainerResourcesPolicy string
+
+const (
+	// ContainerResourcesPolicyDisallowed prevents a SandboxClaim from specifying any container resource overrides; a claim that
+	// specifies spec.containerResources is rejected.
+	ContainerResourcesPolicyDisallowed ContainerResourcesPolicy = "Disallowed"
+
+	// ContainerResourcesPolicyAllowed allows a SandboxClaim to override resource requirements for containers declared in the template.
+	ContainerResourcesPolicyAllowed ContainerResourcesPolicy = "Allowed"
+)
+
 // NetworkPolicySpec defines the desired state of the NetworkPolicy.
 type NetworkPolicySpec struct {
 	// ingress is a list of ingress rules to be applied to the sandbox.
@@ -156,6 +171,19 @@ type SandboxTemplateSpec struct {
 	// +kubebuilder:default=Disallowed
 	// +optional
 	VolumeClaimTemplatesPolicy VolumeClaimTemplatesPolicy `json:"volumeClaimTemplatesPolicy,omitempty"`
+
+	// containerResourcesPolicy controls whether a SandboxClaim may override container
+	// resource requirements (spec.containerResources) on sandboxes created from this template:
+	//   - Disallowed (default): claims may not specify container resource overrides; a claim that
+	//     specifies spec.containerResources is rejected.
+	//   - Allowed: claims may override resource requirements for containers declared in the template.
+	// Note: resource overrides are baked into the Pod before it is created; they cannot be applied
+	// to an already-running warm pool Pod. Consequently, any claim that actually sets
+	// spec.containerResources is forced to cold-start a fresh Sandbox and cannot adopt a warm pool
+	// Sandbox. Claims that set no overrides still use the warm pool normally.
+	// +kubebuilder:default=Disallowed
+	// +optional
+	ContainerResourcesPolicy ContainerResourcesPolicy `json:"containerResourcesPolicy,omitempty"`
 }
 
 // +genclient

@@ -15,6 +15,7 @@
 package v1beta1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
@@ -105,6 +106,26 @@ type EnvVar struct {
 	ContainerName string `json:"containerName,omitempty"`
 }
 
+// ContainerResourceOverride defines per-claim resource requirement overrides
+// for a named PodSpec container or init container. Requests and limits are
+// merged by resource name; non-empty claims replace the target container's
+// resource claims.
+type ContainerResourceOverride struct {
+	// containerName specifies the target regular container or init container for
+	// the resource override.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	ContainerName string `json:"containerName"`
+
+	// resources specifies resource requirements to merge into the target container.
+	// Request and limit entries left unset keep the values from the SandboxTemplate.
+	// Non-empty claims replace the target container's resource claims.
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+}
+
 // SandboxClaimSpec defines the desired state of Sandbox.
 type SandboxClaimSpec struct {
 	// warmPoolRef targets the specific pre-warmed infrastructure pool to check out from.
@@ -140,6 +161,18 @@ type SandboxClaimSpec struct {
 	// +optional
 	// +listType=atomic
 	VolumeClaimTemplates []sandboxv1beta1.PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
+
+	// containerResources overrides resource requirements for named PodSpec containers or init containers at claim time.
+	// Overrides are only honored when the referenced SandboxTemplate opts in via
+	// spec.containerResourcesPolicy: with the default Disallowed the claim is rejected.
+	// Unset request and limit entries keep the values from the SandboxTemplate.
+	// Any non-empty override forces a cold start because warm-pool adoption is skipped for per-claim sizing.
+	// Namespace ResourceQuota and LimitRange policies still apply.
+	// +optional
+	// +listType=map
+	// +listMapKey=containerName
+	// +kubebuilder:validation:MaxItems=64
+	ContainerResources []ContainerResourceOverride `json:"containerResources,omitempty"`
 }
 
 // SandboxClaimStatus defines the observed state of Sandbox.

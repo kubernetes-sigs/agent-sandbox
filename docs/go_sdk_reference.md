@@ -55,6 +55,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(f \*Files\) Copy\(ctx context.Context, source, destination string, overwrite bool, opts ...CallOption\) error](<#Files.Copy>)
   - [func \(f \*Files\) Delete\(ctx context.Context, path string, recursive bool, opts ...CallOption\) error](<#Files.Delete>)
   - [func \(f \*Files\) Exists\(ctx context.Context, path string, opts ...CallOption\) \(bool, error\)](<#Files.Exists>)
+  - [func \(f \*Files\) Extract\(ctx context.Context, path string, archive io.Reader, opts ...CallOption\) error](<#Files.Extract>)
   - [func \(f \*Files\) List\(ctx context.Context, path string, opts ...CallOption\) \(\[\]FileEntry, error\)](<#Files.List>)
   - [func \(f \*Files\) Mkdir\(ctx context.Context, path string, parents bool, opts ...CallOption\) error](<#Files.Mkdir>)
   - [func \(f \*Files\) Move\(ctx context.Context, source, destination string, overwrite bool, opts ...CallOption\) error](<#Files.Move>)
@@ -94,6 +95,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(s \*Sandbox\) Delete\(ctx context.Context, path string, recursive bool, opts ...CallOption\) error](<#Sandbox.Delete>)
   - [func \(s \*Sandbox\) Disconnect\(ctx context.Context\) error](<#Sandbox.Disconnect>)
   - [func \(s \*Sandbox\) Exists\(ctx context.Context, path string, opts ...CallOption\) \(bool, error\)](<#Sandbox.Exists>)
+  - [func \(s \*Sandbox\) Extract\(ctx context.Context, path string, archive io.Reader, opts ...CallOption\) error](<#Sandbox.Extract>)
   - [func \(s \*Sandbox\) Files\(\) \*Files](<#Sandbox.Files>)
   - [func \(s \*Sandbox\) Health\(ctx context.Context, opts ...CallOption\) \(\*Health, error\)](<#Sandbox.Health>)
   - [func \(s \*Sandbox\) IsReady\(\) bool](<#Sandbox.IsReady>)
@@ -740,6 +742,17 @@ func (f *Files) Exists(ctx context.Context, path string, opts ...CallOption) (bo
 ```
 
 Exists checks if a file or directory exists at the given path in the sandbox.
+
+<a name="Files.Extract"></a>
+#### func \(\*Files\) [Extract](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go>)
+
+```go
+func (f *Files) Extract(ctx context.Context, path string, archive io.Reader, opts ...CallOption) error
+```
+
+Extract unpacks a tar archive, optionally gzipped, into the directory at path, creating it when missing. "/" names the sandbox root. The archive is streamed once. Extract does not retry, and WithMaxAttempts above 1 is an error, because a reader cannot be replayed. The unpack is not atomic, so a failure leaves the entries written so far. The archive size is capped by MaxUploadSize.
+
+Only supported by the sandboxd runtime.
 
 <a name="Files.List"></a>
 #### func \(\*Files\) [List](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go>)
@@ -1392,6 +1405,15 @@ func (s *Sandbox) Exists(ctx context.Context, path string, opts ...CallOption) (
 ```
 
 
+
+<a name="Sandbox.Extract"></a>
+#### func \(\*Sandbox\) [Extract](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
+
+```go
+func (s *Sandbox) Extract(ctx context.Context, path string, archive io.Reader, opts ...CallOption) error
+```
+
+Extract unpacks a tar archive into a directory \(sandboxd runtime only\). See Files.Extract.
 
 <a name="Sandbox.Files"></a>
 #### func \(\*Sandbox\) [Files](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)

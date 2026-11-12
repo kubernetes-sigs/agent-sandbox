@@ -747,7 +747,7 @@ func (f *Files) Delete(ctx context.Context, path string, recursive bool, opts ..
 	if recursive {
 		query.Set("recursive", "true")
 	}
-	return f.sandboxdFileOp(ctx, "delete", http.MethodDelete, path, "", query, true, opts)
+	return f.sandboxdFileOp(ctx, sandboxdOp{name: "delete", method: http.MethodDelete, path: path, query: query, retry: true}, opts)
 }
 
 // Mkdir creates a directory in the sandbox. It succeeds when the directory
@@ -760,7 +760,7 @@ func (f *Files) Mkdir(ctx context.Context, path string, parents bool, opts ...Ca
 	if parents {
 		query.Set("parents", "true")
 	}
-	return f.sandboxdFileOp(ctx, "mkdir", http.MethodPut, path, "", query, true, opts)
+	return f.sandboxdFileOp(ctx, sandboxdOp{name: "mkdir", method: http.MethodPut, path: path, query: query, retry: true}, opts)
 }
 
 // Move renames the file or directory at source to destination, creating
@@ -790,57 +790,100 @@ func (f *Files) transfer(ctx context.Context, action, source, destination string
 	}
 	// The encoded path never contains a literal colon, so sandboxd can split
 	// the action off at the last one.
-	return f.sandboxdFileOp(ctx, action, http.MethodPost, source, ":"+action, query, false, opts)
+	return f.sandboxdFileOp(ctx, sandboxdOp{name: action, method: http.MethodPost, path: source, suffix: ":" + action, query: query}, opts)
 }
 
-// sandboxdFileOp sends a request that sandboxd answers with an empty 2xx body.
-// It appends actionSuffix to the path's endpoint and fails with
-// ErrUnsupportedByRuntime on the legacy python-runtime. Unless retry is true,
-// it sends the request once unless the caller sets WithMaxAttempts.
-func (f *Files) sandboxdFileOp(ctx context.Context, op, method, path, actionSuffix string, query url.Values, retry bool, opts []CallOption) error {
+// Extract unpacks a tar archive, optionally gzipped, into the directory at
+// path, creating it when missing. "/" names the sandbox root. The archive is
+// streamed once. Extract does not retry, and WithMaxAttempts above 1 is an
+// error, because a reader cannot be replayed. The unpack is not atomic, so a
+// failure leaves the entries written so far. The archive size is capped by
+// MaxUploadSize.
+//
+// Only supported by the sandboxd runtime.
+func (f *Files) Extract(ctx context.Context, path string, archive io.Reader, opts ...CallOption) error {
+	if archive == nil {
+		return fmt.Errorf("%s: extract(%q): archive reader must not be nil", f.errPrefix(), path)
+	}
+	if resolveCallOpts(opts).maxAttempts > 1 {
+		return fmt.Errorf("%s: extract(%q): streaming uploads do not support retries", f.errPrefix(), path)
+	}
+	body := &uploadLimitReader{reader: archive, remaining: f.maxUpload, maxUpload: f.maxUpload}
+	return f.sandboxdFileOp(ctx, sandboxdOp{
+		name: "extract", method: http.MethodPut, path: path,
+		query: url.Values{"extract": {"tar"}}, body: body, allowRoot: true,
+	}, opts)
+}
+
+// sandboxdOp describes a request that sandboxd answers with an empty 2xx body.
+type sandboxdOp struct {
+	name, method, path string
+	// suffix is appended to the path's endpoint, before the query.
+	suffix string
+	query  url.Values
+	body   io.Reader
+	// retry lets the call retry by default. Otherwise it sends the request
+	// once unless the caller sets WithMaxAttempts.
+	retry bool
+	// allowRoot permits a path that names the sandbox root.
+	allowRoot bool
+}
+
+// sandboxdFileOp sends op and fails with ErrUnsupportedByRuntime on the
+// legacy python-runtime.
+func (f *Files) sandboxdFileOp(ctx context.Context, op sandboxdOp, opts []CallOption) error {
 	defer f.trackOp()()
+	name, path := op.name, op.path
 	apply := applyCallOptsNoRetry
-	if retry {
+	if op.retry {
 		apply = applyCallOpts
 	}
 	ctx, callCancel, maxAttempts := apply(ctx, opts)
 	defer callCancel()
-	ctx, span := startSpan(withLifecycleSpan(ctx, f.lifecycleCtx()), f.tracer, f.svcName, op, AttrFilePath.String(path))
+	ctx, span := startSpan(withLifecycleSpan(ctx, f.lifecycleCtx()), f.tracer, f.svcName, name, AttrFilePath.String(path))
 	defer span.End()
 
 	if f.runtime != RuntimeSandboxd {
-		err := fmt.Errorf("%s: %s(%q): %w: the legacy python-runtime has no %s endpoint", f.errPrefix(), op, path, ErrUnsupportedByRuntime, op)
+		err := fmt.Errorf("%s: %s(%q): %w: the legacy python-runtime has no %s endpoint", f.errPrefix(), name, path, ErrUnsupportedByRuntime, name)
 		recordError(span, err)
 		return err
 	}
 	if path == "" {
-		err := fmt.Errorf("%s: %s: path must not be empty", f.errPrefix(), op)
+		err := fmt.Errorf("%s: %s: path must not be empty", f.errPrefix(), name)
 		recordError(span, err)
 		return err
 	}
 
-	endpoint, err := nonRootFilesEndpoint(path)
+	endpointFor := nonRootFilesEndpoint
+	if op.allowRoot {
+		endpointFor = filesEndpoint
+	}
+	endpoint, err := endpointFor(path)
 	if err != nil {
 		recordError(span, err)
-		return fmt.Errorf("%s: %s(%q): %w", f.errPrefix(), op, path, err)
+		return fmt.Errorf("%s: %s(%q): %w", f.errPrefix(), name, path, err)
 	}
-	endpoint += actionSuffix
-	if len(query) > 0 {
-		endpoint += "?" + query.Encode()
+	endpoint += op.suffix
+	if len(op.query) > 0 {
+		endpoint += "?" + op.query.Encode()
 	}
-	resp, err := f.connector.SendRequest(ctx, method, endpoint, nil, "", maxAttempts)
+	contentType := ""
+	if op.body != nil {
+		contentType = "application/octet-stream"
+	}
+	resp, err := f.connector.SendRequest(ctx, op.method, endpoint, op.body, contentType, maxAttempts)
 	if err != nil {
 		recordError(span, err)
-		return fmt.Errorf("%s: %s(%q) failed: %w", f.errPrefix(), op, path, err)
+		return fmt.Errorf("%s: %s(%q) failed: %w", f.errPrefix(), name, path, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		retErr := fmt.Errorf("%s: %s(%q): %w", f.errPrefix(), op, path, f.httpErrorFromResponse(resp, op))
+		retErr := fmt.Errorf("%s: %s(%q): %w", f.errPrefix(), name, path, f.httpErrorFromResponse(resp, name))
 		recordError(span, retErr)
 		return retErr
 	}
 	defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes)) }()
-	f.log.V(1).Info(op+" completed", "path", path)
+	f.log.V(1).Info(name+" completed", "path", path)
 	return nil
 }

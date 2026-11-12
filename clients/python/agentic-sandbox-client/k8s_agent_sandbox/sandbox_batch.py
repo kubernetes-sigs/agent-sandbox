@@ -1129,7 +1129,7 @@ class SandboxBatch:
                 with self._lock:
                     self._state.exit_acquire(warmpool)
             if claim_name is not None:
-                self._drop_acquired(claim_name, may_exist, retried=sent > 1)
+                self._drop_acquired(claim_name, warmpool, may_exist, retried=sent > 1)
             raise
 
     def _check_acquire_pool_active(self, warmpool: str, acquire_seq: int) -> None:
@@ -1313,13 +1313,15 @@ class SandboxBatch:
         finally:
             refresh_lock.release()
 
-    def _drop_acquired(self, claim_name: str, may_exist: bool, *, retried: bool = False) -> None:
+    def _drop_acquired(
+        self, claim_name: str, warmpool: str, may_exist: bool, *, retried: bool = False
+    ) -> None:
         """Drops a claim ``acquire()`` didn't get Ready and deletes it. A failed delete is logged,
         since the error ``acquire()`` raises matters more, and left for a later release call.
         """
         with self._changed:
             self._acquire_waiters.pop(claim_name, None)
-            needs_delete = self._state.drop_acquired(claim_name, may_exist, retried=retried)
+            needs_delete = self._state.drop_acquired(claim_name, warmpool, may_exist, retried=retried)
             self._changed.notify_all()
         if needs_delete:
             try:
@@ -1369,7 +1371,8 @@ class SandboxBatch:
 
         Deletes each claim like ``release_member``. Member deletes and claim creates share
         ``max_in_flight``, which defaults to 20 on a handle from ``get_batch``. If a delete fails,
-        calling ``release_not_ready`` again retries it.
+        calling ``release_not_ready`` again retries it. While ``release_group()`` or ``release_members()``
+        is deleting a pool's claims, the pool's pending deletes are left to it.
 
         Raises:
             BatchError: If this handle has been detached or released, or once this handle loses the
@@ -1442,40 +1445,53 @@ class SandboxBatch:
         """Releases every claim from ``warmpool``, or from every pool if it is ``None``, then deletes
         the claims with deletecollection rounds scoped to the pool's or the whole batch's label.
         """
-        with self._changed:
-            self._check_lease_held_locked()
-            # Checked under the same lock hold as the release, so the pool can't change in between.
-            if warmpool is not None and not self._state.has_pool(warmpool):
-                raise ValueError(f"batch '{self.batch_id}' has no group or members for warm pool '{warmpool}'")
-            self._drop_planned_creates(warmpool)
-            if warmpool is None:
-                acquiring, pending_seqs = self._state.release_members()
-                # Every member is released, so this also retries the connections earlier releases
-                # failed to close, which stay cached under claims that are no longer members.
-                names: list[str] | None = None
-                action, scope = "release_members", f"batch '{self.batch_id}' members"
-                selector = batch_utils.batch_claim_label_selector(self.batch_id, self._lease_uid)
-            else:
-                acquiring, pending_seqs = self._state.acquiring_in_pool(warmpool), {}
-                names = self._state.release_group(warmpool)
-                action, scope = "release_group", f"batch '{self.batch_id}' group '{warmpool}'"
-                selector = batch_utils.group_label_selector(self.batch_id, warmpool, self._lease_uid)
-            for name in acquiring:
-                self._wake_acquire(name)
-            self._changed.notify_all()
-        self._close_cached_connections(action, names)
-        _delete_claims_in_rounds(
-            self._client.k8s_helper,
-            self.namespace,
-            selector,
-            scope,
-            guard=self._member_delete,
-            deadline=self._lease_deadline,
-        )
-        if pending_seqs:
-            with self._lock:
-                for name, seq in pending_seqs.items():
-                    self._state.note_deleted(name, seq)
+        # Set right after start_release() so the finally ends a started release. A KeyboardInterrupt
+        # between the two would leave the pool marked as being released until the handle is released.
+        swept = False
+        try:
+            with self._changed:
+                self._check_lease_held_locked()
+                # Checked under the same lock hold as the release, so the pool can't change in between.
+                if warmpool is not None and not self._state.has_pool(warmpool):
+                    raise ValueError(f"batch '{self.batch_id}' has no group or members for warm pool '{warmpool}'")
+                self._drop_planned_creates(warmpool)
+                if warmpool is None:
+                    acquiring, pending_seqs = self._state.release_members()
+                    # Every member is released, so this also retries the connections earlier releases
+                    # failed to close, which stay cached under claims that are no longer members.
+                    names: list[str] | None = None
+                    action, scope = "release_members", f"batch '{self.batch_id}' members"
+                    selector = batch_utils.batch_claim_label_selector(self.batch_id, self._lease_uid)
+                else:
+                    acquiring = self._state.acquiring_in_pool(warmpool)
+                    names = self._state.release_group(warmpool)
+                    # Only the pool's label is deleted, so only its pending deletes, including those an
+                    # earlier release left, clear once it succeeds.
+                    pending_seqs = self._state.pending_deletes_in_pool(warmpool)
+                    action, scope = "release_group", f"batch '{self.batch_id}' group '{warmpool}'"
+                    selector = batch_utils.group_label_selector(self.batch_id, warmpool, self._lease_uid)
+                for name in acquiring:
+                    self._wake_acquire(name)
+                self._state.start_release(warmpool)
+                swept = True
+                self._changed.notify_all()
+            self._close_cached_connections(action, names)
+            _delete_claims_in_rounds(
+                self._client.k8s_helper,
+                self.namespace,
+                selector,
+                scope,
+                guard=self._member_delete,
+                deadline=self._lease_deadline,
+            )
+            if pending_seqs:
+                with self._lock:
+                    for name, seq in pending_seqs.items():
+                        self._state.note_deleted(name, seq)
+        finally:
+            if swept:
+                with self._lock:
+                    self._state.end_release(warmpool)
 
     def _lease_deadline(self) -> float:
         """Returns the current monotonic Lease deadline under ``_lock``."""

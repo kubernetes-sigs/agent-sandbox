@@ -1464,6 +1464,22 @@ class TestConnect(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sbx.claim_name, "b1-0")
         self.assertFalse(sbx.is_active)
 
+    async def test_terminate_after_release_group_deletes_by_name_only_if_the_label_delete_failed(self):
+        client = self._real_client()
+        helper = client.k8s_helper
+        helper.count_live_sandbox_claims = AsyncMock(return_value=0)
+        for label_delete_error in (k8s_client.ApiException(status=403), None):
+            with self.subTest(label_delete_failed=label_delete_error is not None):
+                helper.delete_sandbox_claim.reset_mock()
+                helper.delete_sandbox_claims_by_label = AsyncMock(side_effect=label_delete_error)
+                handle, sbx = await self._connect_member(client)
+                with contextlib.suppress(k8s_client.ApiException):
+                    await handle.release_group("pool-a")
+
+                await sbx.terminate()
+                self.assertEqual(helper.delete_sandbox_claim.await_count, 1 if label_delete_error else 0)
+                self.assertIsNone(sbx.claim_name)
+
     async def test_terminate_on_a_connected_sandbox_deletes_through_release_member(self):
         client = self._real_client()
         handle, sbx = await self._connect_member(client)
@@ -4769,7 +4785,7 @@ class TestAcquire(BaseClaimBatchTest):
             helper.delete_sandbox_claim.assert_not_called()
             self.assertEqual(batch._state.next_ordinal, 0)
             self.assertEqual(batch._state._checking_acquires, {})
-            self.assertEqual(batch._state._released, set())
+            self.assertEqual(set(batch._state._released), set())
 
             # Timing out with no create slot after a warm-credit refresh finds 0 Ready replicas
             # neither advances next_ordinal nor records a released claim.
@@ -4779,7 +4795,7 @@ class TestAcquire(BaseClaimBatchTest):
                 await batch.acquire("pool-a", timeout=0.2)
             self.assertEqual(batch._state.next_ordinal, 0)
             self.assertEqual(batch._state._checking_acquires, {})
-            self.assertEqual(batch._state._released, set())
+            self.assertEqual(set(batch._state._released), set())
 
             batch._next_create_at = 0.0
             first = await batch.acquire("pool-refresh")
@@ -4805,7 +4821,7 @@ class TestAcquire(BaseClaimBatchTest):
             self.assertEqual(batch._state.next_ordinal, 2)
             self.assertEqual(batch._state._checking_acquires, {})
             self.assertEqual(batch._state._acquiring, {})
-            self.assertEqual(batch._state._released, {"b1-0", "b1-1"})
+            self.assertEqual(set(batch._state._released), {"b1-0", "b1-1"})
             self.assertEqual(batch._acquire_waiters, {})
 
     async def test_acquires_the_warm_pool_covers_skip_pacing_and_reread_its_count_once_a_second(self):
@@ -6262,6 +6278,110 @@ class TestAsyncReleaseAllMembers(BaseClaimBatchTest):
         # b1-1 was still planned, so it is never sent.
         self.assertEqual(self.cluster.names(), ["b1-0"])
         self.assertEqual(batch.members(), [])
+
+    async def test_release_not_ready_leaves_claims_to_a_running_release_unless_it_fails(self):
+        helper = self.cluster.helper
+        batch = await self.claim([BatchGroup(warmpool="pool-a", size=0)], max_in_flight=4)
+        for label_delete_error in (None, k8s_client.ApiException(status=403)):
+            with self.subTest(label_delete_failed=label_delete_error is not None):
+                member = await batch.acquire("pool-a", timeout=5)
+                helper.delete_sandbox_claim.reset_mock()
+                sweeping = asyncio.Event()
+                gate = asyncio.Event()
+
+                async def slow_delete(*args, error=label_delete_error, **kwargs):
+                    sweeping.set()
+                    await gate.wait()
+                    if error is not None:
+                        raise error
+
+                helper.delete_sandbox_claims_by_label.side_effect = slow_delete
+                releasing = asyncio.create_task(batch.release_group("pool-a"))
+                await asyncio.wait_for(sweeping.wait(), 5)
+                # The running label delete covers the member, so no name delete is sent for it.
+                await batch.release_not_ready()
+                helper.delete_sandbox_claim.assert_not_called()
+                gate.set()
+                with contextlib.suppress(k8s_client.ApiException):
+                    await asyncio.wait_for(releasing, 5)
+
+                await batch.release_not_ready()
+                expected = [member.claim_name] if label_delete_error is not None else []
+                self.assertEqual([c.args[0] for c in helper.delete_sandbox_claim.call_args_list], expected)
+
+    async def test_a_release_interrupted_right_after_its_sweep_starts_still_ends_it(self):
+        batch = await self.claim([BatchGroup(warmpool="pool-a", size=0)], max_in_flight=4)
+        real_start = batch._state.start_release
+        real_notify = batch._changed.notify_all
+        started = []
+
+        def start(warmpool):
+            real_start(warmpool)
+            started.append(warmpool)
+
+        def notify():
+            if started:
+                started.clear()
+                raise RuntimeError("interrupted")
+            real_notify()
+
+        with patch.object(batch._state, "start_release", start), \
+             patch.object(batch._changed, "notify_all", notify):
+            with self.assertRaisesRegex(RuntimeError, "interrupted"):
+                await batch.release_members()
+        self.assertFalse(batch._state.release_sweeping("pool-a"))
+
+    async def test_a_release_interrupted_entering_start_release_leaves_another_release_running(self):
+        helper = self.cluster.helper
+        batch = await self.claim([BatchGroup(warmpool="pool-a", size=0)], max_in_flight=4)
+        await batch.acquire("pool-a", timeout=5)
+        sweeping = asyncio.Event()
+        gate = asyncio.Event()
+        self.addCleanup(gate.set)
+
+        async def slow_delete(*args, **kwargs):
+            sweeping.set()
+            await gate.wait()
+
+        helper.delete_sandbox_claims_by_label.side_effect = slow_delete
+        running = asyncio.create_task(batch.release_group("pool-a"))
+        await asyncio.wait_for(sweeping.wait(), 5)
+
+        def interrupted(warmpool):
+            raise KeyboardInterrupt
+
+        with patch.object(batch._state, "start_release", interrupted), self.assertRaises(KeyboardInterrupt):
+            await batch.release_group("pool-a")
+        # The interrupted release never started, so it must not end the one still running.
+        self.assertTrue(batch._state.release_sweeping("pool-a"))
+        gate.set()
+        await asyncio.wait_for(running, 5)
+        self.assertFalse(batch._state.release_sweeping("pool-a"))
+
+    async def test_a_retried_release_group_covers_and_clears_the_deletes_a_failed_one_left(self):
+        helper = self.cluster.helper
+        batch = await self.claim([BatchGroup(warmpool="pool-a", size=0)], max_in_flight=4)
+        await batch.acquire("pool-a", timeout=5)
+        helper.delete_sandbox_claim.reset_mock()
+        helper.delete_sandbox_claims_by_label.side_effect = k8s_client.ApiException(status=403)
+        with self.assertRaises(k8s_client.ApiException):
+            await batch.release_group("pool-a")
+        sweeping = asyncio.Event()
+        gate = asyncio.Event()
+
+        async def slow_delete(*args, **kwargs):
+            sweeping.set()
+            await gate.wait()
+
+        helper.delete_sandbox_claims_by_label.side_effect = slow_delete
+        retrying = asyncio.create_task(batch.release_group("pool-a"))
+        await asyncio.wait_for(sweeping.wait(), 5)
+        await batch.release_not_ready()
+        gate.set()
+        await asyncio.wait_for(retrying, 5)
+        await batch.release_not_ready()
+        helper.delete_sandbox_claim.assert_not_called()
+        self.assertEqual(batch._state._pending_deletes, {})
 
 
 if __name__ == "__main__":

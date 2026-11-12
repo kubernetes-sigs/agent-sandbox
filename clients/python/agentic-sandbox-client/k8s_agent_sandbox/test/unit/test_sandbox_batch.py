@@ -1393,6 +1393,22 @@ class TestConnect(unittest.TestCase):
         self.assertEqual(sbx.claim_name, "b1-0")
         self.assertFalse(sbx.is_active)
 
+    def test_terminate_after_release_group_deletes_by_name_only_if_the_label_delete_failed(self):
+        client = self._real_client()
+        helper = client.k8s_helper
+        helper.count_live_sandbox_claims = MagicMock(return_value=0)
+        for label_delete_error in (k8s_client.ApiException(status=403), None):
+            with self.subTest(label_delete_failed=label_delete_error is not None):
+                helper.delete_sandbox_claim.reset_mock()
+                helper.delete_sandbox_claims_by_label = MagicMock(side_effect=label_delete_error)
+                handle, sbx = self._connect_member(client)
+                with contextlib.suppress(k8s_client.ApiException):
+                    handle.release_group("pool-a")
+
+                sbx.terminate()
+                self.assertEqual(helper.delete_sandbox_claim.call_count, 1 if label_delete_error else 0)
+                self.assertIsNone(sbx.claim_name)
+
     def test_terminate_on_a_connected_sandbox_deletes_through_release_member(self):
         client = self._real_client()
         handle, sbx = self._connect_member(client)
@@ -4485,7 +4501,7 @@ class TestAcquire(BaseClaimBatchTest):
             helper.delete_sandbox_claim.assert_not_called()
             self.assertEqual(batch._state.next_ordinal, 0)
             self.assertEqual(batch._state._checking_acquires, {})
-            self.assertEqual(batch._state._released, set())
+            self.assertEqual(set(batch._state._released), set())
 
             # Timing out with no create slot after a warm-credit refresh finds 0 Ready replicas
             # neither advances next_ordinal nor records a released claim.
@@ -4495,7 +4511,7 @@ class TestAcquire(BaseClaimBatchTest):
                 batch.acquire("pool-a", timeout=0.2)
             self.assertEqual(batch._state.next_ordinal, 0)
             self.assertEqual(batch._state._checking_acquires, {})
-            self.assertEqual(batch._state._released, set())
+            self.assertEqual(set(batch._state._released), set())
 
             batch._next_create_at = 0.0
             first = batch.acquire("pool-refresh")
@@ -4522,7 +4538,7 @@ class TestAcquire(BaseClaimBatchTest):
             self.assertEqual(batch._state.next_ordinal, 2)
             self.assertEqual(batch._state._checking_acquires, {})
             self.assertEqual(batch._state._acquiring, {})
-            self.assertEqual(batch._state._released, {"b1-0", "b1-1"})
+            self.assertEqual(set(batch._state._released), {"b1-0", "b1-1"})
             self.assertEqual(batch._acquire_waiters, {})
 
     def test_acquires_the_warm_pool_covers_skip_pacing_and_reread_its_count_once_a_second(self):
@@ -6201,6 +6217,114 @@ class TestReleaseAllMembers(BaseClaimBatchTest):
         # b1-1 was still planned, so it is never sent.
         self.assertEqual(self.cluster.names(), ["b1-0"])
         self.assertEqual(batch.members(), [])
+
+    def test_release_not_ready_leaves_claims_to_a_running_release_unless_it_fails(self):
+        helper = self.cluster.helper
+        batch = self.claim([BatchGroup(warmpool="pool-a", size=0)], max_in_flight=4)
+        for label_delete_error in (None, k8s_client.ApiException(status=403)):
+            with self.subTest(label_delete_failed=label_delete_error is not None), ThreadPoolExecutor(1) as pool:
+                member = batch.acquire("pool-a", timeout=5)
+                helper.delete_sandbox_claim.reset_mock()
+                sweeping = threading.Event()
+                gate = threading.Event()
+                self.addCleanup(gate.set)
+
+                def slow_delete(*args, error=label_delete_error, **kwargs):
+                    sweeping.set()
+                    gate.wait(5)
+                    if error is not None:
+                        raise error
+
+                helper.delete_sandbox_claims_by_label.side_effect = slow_delete
+                releasing = pool.submit(batch.release_group, "pool-a")
+                self.assertTrue(sweeping.wait(5))
+                # The running label delete covers the member, so no name delete is sent for it.
+                batch.release_not_ready()
+                helper.delete_sandbox_claim.assert_not_called()
+                gate.set()
+                with contextlib.suppress(k8s_client.ApiException):
+                    releasing.result(5)
+
+                batch.release_not_ready()
+                expected = [member.claim_name] if label_delete_error is not None else []
+                self.assertEqual([c.args[0] for c in helper.delete_sandbox_claim.call_args_list], expected)
+
+    def test_a_release_interrupted_right_after_its_sweep_starts_still_ends_it(self):
+        batch = self.claim([BatchGroup(warmpool="pool-a", size=0)], max_in_flight=4)
+        real_start = batch._state.start_release
+        real_notify = batch._changed.notify_all
+        started = []
+
+        def start(warmpool):
+            real_start(warmpool)
+            started.append(warmpool)
+
+        def notify():
+            if started:
+                started.clear()
+                raise RuntimeError("interrupted")
+            real_notify()
+
+        with patch.object(batch._state, "start_release", start), \
+             patch.object(batch._changed, "notify_all", notify):
+            with self.assertRaisesRegex(RuntimeError, "interrupted"):
+                batch.release_members()
+        self.assertFalse(batch._state.release_sweeping("pool-a"))
+
+    def test_a_release_interrupted_entering_start_release_leaves_another_release_running(self):
+        helper = self.cluster.helper
+        batch = self.claim([BatchGroup(warmpool="pool-a", size=0)], max_in_flight=4)
+        batch.acquire("pool-a", timeout=5)
+        sweeping = threading.Event()
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+
+        def slow_delete(*args, **kwargs):
+            sweeping.set()
+            gate.wait(5)
+
+        helper.delete_sandbox_claims_by_label.side_effect = slow_delete
+
+        def interrupted(warmpool):
+            raise KeyboardInterrupt
+
+        with ThreadPoolExecutor(1) as pool:
+            running = pool.submit(batch.release_group, "pool-a")
+            self.assertTrue(sweeping.wait(5))
+            with patch.object(batch._state, "start_release", interrupted), self.assertRaises(KeyboardInterrupt):
+                batch.release_group("pool-a")
+            # The interrupted release never started, so it must not end the one still running.
+            self.assertTrue(batch._state.release_sweeping("pool-a"))
+            gate.set()
+            running.result(5)
+        self.assertFalse(batch._state.release_sweeping("pool-a"))
+
+    def test_a_retried_release_group_covers_and_clears_the_deletes_a_failed_one_left(self):
+        helper = self.cluster.helper
+        batch = self.claim([BatchGroup(warmpool="pool-a", size=0)], max_in_flight=4)
+        batch.acquire("pool-a", timeout=5)
+        helper.delete_sandbox_claim.reset_mock()
+        helper.delete_sandbox_claims_by_label.side_effect = k8s_client.ApiException(status=403)
+        with self.assertRaises(k8s_client.ApiException):
+            batch.release_group("pool-a")
+        sweeping = threading.Event()
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+
+        def slow_delete(*args, **kwargs):
+            sweeping.set()
+            gate.wait(5)
+
+        helper.delete_sandbox_claims_by_label.side_effect = slow_delete
+        with ThreadPoolExecutor(1) as pool:
+            retrying = pool.submit(batch.release_group, "pool-a")
+            self.assertTrue(sweeping.wait(5))
+            batch.release_not_ready()
+            gate.set()
+            retrying.result(5)
+        batch.release_not_ready()
+        helper.delete_sandbox_claim.assert_not_called()
+        self.assertEqual(batch._state._pending_deletes, {})
 
 
 if __name__ == "__main__":

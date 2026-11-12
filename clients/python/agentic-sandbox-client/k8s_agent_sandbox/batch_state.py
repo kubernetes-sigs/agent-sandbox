@@ -255,9 +255,9 @@ class BatchState:
         self._quorum_error: Exception | None = None
         # Groups with fewer than min_ready held members, so the quorum is reached when this is empty.
         self._groups_short_of_quorum: set[str] = set(self._group_by_pool)
-        # Claims the caller released, including fill creates it stopped. They are gone from members(),
-        # are never handed out, and later watch events for them are ignored.
-        self._released: set[str] = set()
+        # Claims the caller released, including fill creates it stopped, mapped to their pool. They are
+        # gone from members(), are never handed out, and later watch events for them are ignored.
+        self._released: dict[str, str] = {}
         # Released claims the watch hasn't seen yet, such as a fill create still in flight when the
         # caller released its pool. If one lands later, the watch queues its delete.
         self._released_unseen: set[str] = set()
@@ -279,6 +279,9 @@ class BatchState:
         # without burning an ordinal.
         self._checking_acquires: Counter[str] = Counter()
         self._pool_release_seq: dict[str, int] = {}
+        # Label-scoped release deletes in flight per pool, or under None for every pool. They cover
+        # the pool's pending deletes, so release_not_ready() leaves those to them.
+        self._release_sweeps: Counter[str | None] = Counter()
         # Holds newly seen claims only while unreconciled (status: {} or AdoptionConflict), until
         # the controller writes their first warm or cold status, rather than while cold pods boot,
         # so steady-state size stays 0. BatchState tracks every new claim because it does not see
@@ -430,7 +433,7 @@ class BatchState:
             self._need_delete(claim_name)
         if claim_name in self._released:
             return
-        self._released.add(claim_name)
+        self._released[claim_name] = warmpool
         member = self._pop_member(claim_name)
         if member is None and not needs_delete:
             self._released_unseen.add(claim_name)
@@ -472,7 +475,8 @@ class BatchState:
     def release_not_ready(self) -> list[str]:
         """Ends the fill and releases every fill member that isn't Ready and was never handed out.
 
-        Returns the claims to delete, including those of earlier releases whose delete failed.
+        Returns the claims to delete, including those of earlier releases whose delete failed, but
+        not those of a pool that a running label delete covers.
         """
         self._fill_stopped_pools.update(self._group_by_pool)
         released = [
@@ -483,20 +487,25 @@ class BatchState:
         for member in released:
             self.release_claim(member.claim_name, member.warmpool)
         self._take_deletes(released)
-        return list(self._pending_deletes)
+        return [
+            name for name in self._pending_deletes if not self.release_sweeping(self._released.get(name))
+        ]
 
     def release_group(self, warmpool: str) -> list[str]:
         """Stops a pool's fill creates and releases every member from it, acquired ones included,
         along with its acquire() claims the watch hasn't seen yet. Returns the members' names, so the
-        handle can close their connections. It deletes them by label, not by name.
+        handle can close their connections. It deletes them by label, and their deletes stay pending
+        until the handle notes that the label delete succeeded, so a delete by name, such as one from
+        ``terminate()``, still runs if it fails.
         """
         self._fill_stopped_pools.add(warmpool)
         self._pool_release_seq[warmpool] = self._pool_release_seq.get(warmpool, 0) + 1
-        names = list(self._members_by_pool.get(warmpool, ()))
+        members = list(self._members_by_pool.get(warmpool, {}).values())
         acquiring = list(self._acquiring_by_pool.get(warmpool, ()))
-        for name in (*names, *acquiring):
+        for name in (*(m.claim_name for m in members), *acquiring):
             self.release_claim(name, warmpool)
-        return names
+        self._take_deletes(members)
+        return [m.claim_name for m in members]
 
     def release_members(self) -> tuple[list[str], dict[str, int]]:
         """Stops all fill creates and releases every member across all pools in the batch,
@@ -511,11 +520,9 @@ class BatchState:
             | set(self._acquiring_by_pool)
             | set(self._checking_acquires)
         )
-        live_members = list(self._members.values())
         acquiring = list(self._acquiring)
         for pool in pools:
             self.release_group(pool)
-        self._take_deletes(live_members)
         return acquiring, dict(self._pending_deletes)
 
     def acquiring_in_pool(self, warmpool: str) -> list[str]:
@@ -540,6 +547,24 @@ class BatchState:
         # the claim (201 Created) and that earlier delete records its completion late.
         self._next_delete_seq += 1
         self._pending_deletes[claim_name] = self._next_delete_seq
+
+    def pending_deletes_in_pool(self, warmpool: str) -> dict[str, int]:
+        """Returns the pending deletes of ``warmpool``'s claims, with their delete sequences."""
+        return {
+            name: seq for name, seq in self._pending_deletes.items() if self._released.get(name) == warmpool
+        }
+
+    def start_release(self, warmpool: str | None) -> None:
+        """Marks a label delete of ``warmpool``, or of every pool if ``None``, as running."""
+        self._release_sweeps[warmpool] += 1
+
+    def end_release(self, warmpool: str | None) -> None:
+        """Clears a ``start_release()`` once its label delete ends, whether it succeeded or not."""
+        remaining = self._release_sweeps[warmpool] - 1
+        if remaining > 0:
+            self._release_sweeps[warmpool] = remaining
+        else:
+            self._release_sweeps.pop(warmpool, None)
 
     def delete_seq(self, claim_name: str) -> int:
         """Returns the current delete sequence for ``claim_name``, or ``0`` if none is pending."""
@@ -577,6 +602,12 @@ class BatchState:
         else:
             self._checking_acquires.pop(warmpool, None)
 
+    def release_sweeping(self, warmpool: str | None) -> bool:
+        """Whether a label delete in flight covers ``warmpool``, so ``release_not_ready()`` leaves
+        its pending deletes to that delete.
+        """
+        return bool(self._release_sweeps[None] or self._release_sweeps[warmpool])
+
     def pool_release_seq(self, warmpool: str) -> int:
         """Returns how many times ``release_group()`` has released ``warmpool``."""
         return self._pool_release_seq.get(warmpool, 0)
@@ -607,7 +638,7 @@ class BatchState:
             return member
         raise TerminalMemberError(member)
 
-    def drop_acquired(self, claim_name: str, created: bool, *, retried: bool = False) -> bool:
+    def drop_acquired(self, claim_name: str, warmpool: str, created: bool, *, retried: bool = False) -> bool:
         """Drops a claim that ``acquire()`` didn't get Ready, so the batch never hands it out and
         ignores later watch events for it. Returns whether its claim still needs deleting, which it
         doesn't if it is already gone or its create failed. A claim the caller released needs it only
@@ -626,7 +657,7 @@ class BatchState:
                 self._need_delete(claim_name)
                 return True
             return False
-        self._released.add(claim_name)
+        self._released[claim_name] = warmpool
         member = self._pop_member(claim_name)
         if not created:
             if member is None:

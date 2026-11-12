@@ -1142,7 +1142,8 @@ what you need.
 
 Deletes each claim like ``release_member``. Member deletes and claim creates share
 ``max_in_flight``, which defaults to 20 on a handle from ``get_batch``. If a delete fails,
-calling ``release_not_ready`` again retries it.
+calling ``release_not_ready`` again retries it. While ``release_group()`` or ``release_members()``
+is deleting a pool's claims, the pool's pending deletes are left to it.
 
 **Raises**:
 

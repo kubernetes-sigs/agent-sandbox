@@ -244,11 +244,9 @@ func (m *observedTimeMap) LoadOrStore(key types.NamespacedName, entry observedTi
 // SandboxClaimReconciler reconciles a SandboxClaim object.
 type SandboxClaimReconciler struct {
 	client.Client
-	// APIReader reads directly from the API server, bypassing the informer
-	// cache. Used only to re-read a claim, or its assigned sandbox, after an
-	// optimistic-lock conflict or a suspect 404, where the cache is stale by
-	// definition. Falls back to Client when unset (e.g. in unit tests with a
-	// fake client).
+	// APIReader bypasses the informer cache to resolve write conflicts and
+	// confirm missing Sandboxes before allocation. An unset reader uses the
+	// cached Client, for example in unit tests with a fake client.
 	APIReader               client.Reader
 	Scheme                  *runtime.Scheme
 	WarmSandboxQueue        queue.SandboxQueue
@@ -2247,6 +2245,17 @@ func claimForcesColdStart(claim *extensionsv1beta1.SandboxClaim) bool {
 	return len(claim.Spec.Env) > 0 || len(claim.Spec.VolumeClaimTemplates) > 0
 }
 
+// getSandboxForClaim confirms cache misses before a claim can discard an
+// assignment or allocate another Sandbox. The claim and Sandbox informers
+// can observe a successful allocation at different times.
+func (r *SandboxClaimReconciler) getSandboxForClaim(ctx context.Context, key client.ObjectKey, sandbox *v1beta1.Sandbox) error {
+	err := r.Get(ctx, key, sandbox)
+	if k8errors.IsNotFound(err) && r.APIReader != nil {
+		return r.APIReader.Get(ctx, key, sandbox)
+	}
+	return err
+}
+
 func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, _ *extensionsv1beta1.SandboxTemplate) (*v1beta1.Sandbox, error) {
 	logger := log.FromContext(ctx)
 	logger.V(4).Info("Executing getOrCreateSandbox", "claim", claim.Name)
@@ -2255,7 +2264,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	if statusName := claim.Status.SandboxStatus.Name; statusName != "" {
 		logger.V(4).Info("Checking status for sandbox name", "claim.Status.SandboxStatus.Name", statusName, "claim", claim.Name)
 		sandbox := &v1beta1.Sandbox{}
-		if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: statusName}, sandbox); err == nil {
+		if err := r.getSandboxForClaim(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: statusName}, sandbox); err == nil {
 			if metav1.IsControlledBy(sandbox, claim) {
 				logger.V(4).Info("Found existing adopted sandbox from status", "claim.Status.SandboxStatus.Name", statusName, "claim", claim.Name)
 				launchType := v1beta1.SandboxLaunchTypeCold
@@ -2290,7 +2299,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	if sbName != "" {
 		logger.V(4).Info("Checking assigned sandbox name", "sandboxName", sbName, "fromLabel", fromLabel, "claim", claim.Name)
 		sandbox := &v1beta1.Sandbox{}
-		if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: sbName}, sandbox); err == nil {
+		if err := r.getSandboxForClaim(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: sbName}, sandbox); err == nil {
 			if metav1.IsControlledBy(sandbox, claim) {
 				logger.V(4).Info("Found existing adopted sandbox", "sandbox", sbName, "claim", claim.Name)
 				if fromLabel {
@@ -2391,7 +2400,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 			Name:      claim.Name,
 		},
 	}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(sandbox), sandbox); err != nil {
+	if err := r.getSandboxForClaim(ctx, client.ObjectKeyFromObject(sandbox), sandbox); err != nil {
 		sandbox = nil
 		if !k8errors.IsNotFound(err) {
 			return nil, fmt.Errorf("failed to get sandbox %q: %w", claim.Name, err)

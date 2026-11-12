@@ -9412,6 +9412,12 @@ func TestCreateSandboxAlreadyExistsRecoversViaAuthoritativeRead(t *testing.T) {
 		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
 	}
 
+	// Exercise the AlreadyExists recovery even when reconciliation finds the
+	// Sandbox during its earlier authoritative lookup.
+	recovered, err := reconciler.createSandbox(t.Context(), claim.DeepCopy(), template)
+	require.NoError(t, err)
+	require.True(t, metav1.IsControlledBy(recovered, claim))
+
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claimName, Namespace: "default"}}
 
 	result, err := reconciler.Reconcile(context.Background(), req)
@@ -9426,6 +9432,137 @@ func TestCreateSandboxAlreadyExistsRecoversViaAuthoritativeRead(t *testing.T) {
 	readyCond := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
 	require.NotNil(t, readyCond, "expected Ready condition after in-pass recovery")
 	require.NotEqual(t, "SandboxCreatePending", readyCond.Reason, "in-pass recovery must not report SandboxCreatePending")
+}
+
+// TestSandboxClaimLookupCacheMiss exercises allocation with an available warm
+// candidate while an existing assignment is missing from the informer cache.
+func TestSandboxClaimLookupCacheMiss(t *testing.T) {
+	for _, reference := range []string{"cold-status", "warm-status", "annotation", "legacy-label", "cold-name"} {
+		for _, state := range []string{"cache-miss", "cache-hit", "cache-error", "read-error", "deleted", "foreign-owner"} {
+			t.Run(reference+"/"+state, func(t *testing.T) {
+				ctx := t.Context()
+				scheme := newScheme(t)
+				claim, template, pool, candidate := warmAdoptionFixtures()
+				existing := candidate.DeepCopy()
+				existing.Name = "existing-sandbox"
+				existing.UID = "existing-sandbox-uid"
+				existing.OwnerReferences = []metav1.OwnerReference{{
+					APIVersion: extensionsv1beta1.GroupVersion.String(),
+					Kind:       "SandboxClaim",
+					Name:       claim.Name,
+					UID:        claim.UID,
+					Controller: new(true),
+				}}
+				launchType := sandboxv1beta1.SandboxLaunchTypeWarm
+				switch reference {
+				case "cold-status", "cold-name":
+					existing.Name = claim.Name
+					launchType = sandboxv1beta1.SandboxLaunchTypeCold
+					if reference == "cold-status" {
+						claim.Status.SandboxStatus.Name = existing.Name
+					}
+				case "warm-status":
+					claim.Status.SandboxStatus.Name = existing.Name
+				case "annotation":
+					claim.Annotations = map[string]string{extensionsv1beta1.AssignedSandboxNameAnnotation: existing.Name}
+				case "legacy-label":
+					claim.Labels = map[string]string{extensionsv1beta1.DeprecatedAssignedSandboxNameLabel: existing.Name}
+				}
+				if state == "foreign-owner" {
+					existing.OwnerReferences[0].UID = "other-claim-uid"
+				}
+				objects := []client.Object{claim, template, pool, candidate}
+				if state != "deleted" {
+					objects = append(objects, existing)
+				}
+				live := fake.NewClientBuilder().WithScheme(scheme).
+					WithObjects(objects...).WithStatusSubresource(claim).Build()
+				readFailure := errors.New("sandbox read failed")
+				cached := interceptor.NewClient(live, interceptor.Funcs{
+					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						if _, ok := obj.(*sandboxv1beta1.Sandbox); ok && key.Name == existing.Name && state != "cache-hit" {
+							if state == "cache-error" {
+								return readFailure
+							}
+							return k8errors.NewNotFound(schema.GroupResource{Group: sandboxv1beta1.GroupVersion.Group, Resource: "sandboxes"}, key.Name)
+						}
+						return c.Get(ctx, key, obj, opts...)
+					},
+				})
+				liveReads := 0
+				apiReader := interceptor.NewClient(live, interceptor.Funcs{
+					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						if _, ok := obj.(*sandboxv1beta1.Sandbox); ok {
+							liveReads++
+							if state == "read-error" {
+								return readFailure
+							}
+						}
+						return c.Get(ctx, key, obj, opts...)
+					},
+				})
+				q := queue.NewSimpleSandboxQueue()
+				q.Add(queue.GetNamespacedWarmPoolName(pool.Namespace, pool.Name), queue.SandboxKey{Namespace: candidate.Namespace, Name: candidate.Name})
+				r := &SandboxClaimReconciler{
+					Client: cached, APIReader: apiReader, Scheme: scheme,
+					Tracer: asmetrics.NewNoOp(), WarmSandboxQueue: q,
+				}
+				_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(claim)})
+				readFailed := state == "read-error" || state == "cache-error"
+				nameCollision := state == "foreign-owner" && existing.Name == claim.Name
+				switch {
+				case readFailed:
+					require.ErrorIs(t, err, readFailure)
+				case nameCollision:
+					require.ErrorContains(t, err, "is not controlled by claim")
+				default:
+					require.NoError(t, err)
+				}
+				if state == "cache-hit" || state == "cache-error" {
+					require.Zero(t, liveReads, "cached results must not require an API-server read")
+				}
+				updatedClaim := &extensionsv1beta1.SandboxClaim{}
+				require.NoError(t, live.Get(ctx, client.ObjectKeyFromObject(claim), updatedClaim))
+				require.NoError(t, live.Get(ctx, client.ObjectKeyFromObject(candidate), candidate))
+				inventory := &sandboxv1beta1.SandboxList{}
+				require.NoError(t, live.List(ctx, inventory, client.InNamespace(claim.Namespace)))
+				var owned []string
+				for i := range inventory.Items {
+					if metav1.IsControlledBy(&inventory.Items[i], claim) {
+						owned = append(owned, inventory.Items[i].Name)
+					}
+				}
+				switch {
+				case nameCollision:
+					require.Empty(t, owned)
+					require.True(t, metav1.IsControlledBy(candidate, pool))
+				case state == "deleted" || state == "foreign-owner":
+					require.Equal(t, []string{candidate.Name}, owned)
+					require.Equal(t, candidate.Name, updatedClaim.Status.SandboxStatus.Name)
+				default:
+					require.Equal(t, []string{existing.Name}, owned, "claim must retain its sole Sandbox")
+					require.True(t, metav1.IsControlledBy(candidate, pool), "warm inventory must remain available")
+					if readFailed {
+						require.Equal(t, claim.Status.SandboxStatus.Name, updatedClaim.Status.SandboxStatus.Name)
+						require.Equal(t, claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation], updatedClaim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation])
+						require.Equal(t, claim.Labels[extensionsv1beta1.DeprecatedAssignedSandboxNameLabel], updatedClaim.Labels[extensionsv1beta1.DeprecatedAssignedSandboxNameLabel])
+					} else {
+						require.Equal(t, existing.Name, updatedClaim.Status.SandboxStatus.Name)
+						require.NoError(t, live.Get(ctx, client.ObjectKeyFromObject(existing), existing))
+						require.Equal(t, launchType, existing.Labels[sandboxv1beta1.SandboxLaunchTypeLabel])
+						if reference == "legacy-label" {
+							require.Equal(t, existing.Name, updatedClaim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation])
+							require.Empty(t, updatedClaim.Labels[extensionsv1beta1.DeprecatedAssignedSandboxNameLabel])
+						}
+					}
+				}
+				if state == "foreign-owner" {
+					require.NoError(t, live.Get(ctx, client.ObjectKeyFromObject(existing), existing))
+					require.Equal(t, types.UID("other-claim-uid"), metav1.GetControllerOf(existing).UID)
+				}
+			})
+		}
+	}
 }
 
 // TestCreateSandboxAlreadyExistsNameCollisionIsTerminal verifies that when the
@@ -9512,6 +9649,9 @@ func TestCreateSandboxAlreadyExistsNameCollisionIsTerminal(t *testing.T) {
 	require.Error(t, err, "a name collision must surface as an error, not be adopted")
 	require.ErrorContains(t, err, "is not controlled by claim")
 	require.NotErrorIs(t, err, errSandboxAlreadyExists, "collision must not be classified as benign cache lag")
+	_, createErr := reconciler.createSandbox(t.Context(), claim.DeepCopy(), template)
+	require.ErrorContains(t, createErr, "is not controlled by claim")
+	require.NotErrorIs(t, createErr, errSandboxAlreadyExists)
 
 	// The claim must not bind to the foreign sandbox.
 	updatedClaim := &extensionsv1beta1.SandboxClaim{}
@@ -9585,12 +9725,17 @@ func TestCreateSandboxAlreadyExistsAuthoritativeReadFailure(t *testing.T) {
 		}).
 		Build()
 
-	// The APIReader is configured but unhealthy: every read fails with a
-	// distinguishable sentinel.
+	// A lookup can confirm absence just before Create returns AlreadyExists.
+	// The read after that write failure returns a distinguishable sentinel.
+	allowLookupMiss := false
 	readFailure := errors.New("authoritative reader unavailable")
 	apiReader := fake.NewClientBuilder().WithScheme(scheme).
 		WithInterceptorFuncs(interceptor.Funcs{
-			Get: func(_ context.Context, _ client.WithWatch, _ client.ObjectKey, _ client.Object, _ ...client.GetOption) error {
+			Get: func(_ context.Context, _ client.WithWatch, key client.ObjectKey, _ client.Object, _ ...client.GetOption) error {
+				if allowLookupMiss {
+					allowLookupMiss = false
+					return k8errors.NewNotFound(schema.GroupResource{Group: "agents.x-k8s.io", Resource: "sandboxes"}, key.Name)
+				}
 				return readFailure
 			},
 		}).
@@ -9613,6 +9758,7 @@ func TestCreateSandboxAlreadyExistsAuthoritativeReadFailure(t *testing.T) {
 	require.True(t, k8errors.IsAlreadyExists(err), "original AlreadyExists must stay identifiable")
 
 	// Reconcile-level: the sentinel converts to the bounded requeue with nil error.
+	allowLookupMiss = true
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claimName, Namespace: "default"}}
 	result, reconcileErr := reconciler.Reconcile(context.Background(), req)
 	require.NoError(t, reconcileErr, "sentinel should be converted to nil error")

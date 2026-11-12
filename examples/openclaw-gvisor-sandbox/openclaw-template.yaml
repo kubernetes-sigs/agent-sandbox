@@ -46,8 +46,6 @@ spec:
               drop:
                 - ALL
           env:
-            - name: OPENCLAW_GATEWAY_TOKEN
-              value: "dummy-token-for-sandbox"
             - name: OPENCLAW_CONFIG_PATH
               value: "/etc/openclaw/openclaw.json"
             - name: HOME                            

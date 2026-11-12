@@ -212,9 +212,16 @@ def test_dockerfile_workdir_parsing():
     assert dockerfile_workdir("FROM x\nWORKDIR /app\nworkdir src\n") == "/app/src"
     assert dockerfile_workdir("FROM x\nWORKDIR $HOME/app\n") is None
     assert dockerfile_workdir("FROM x\nRUN true\n") is None
-    # A build stage's WORKDIR does not carry into the final stage.
+    # A build stage's WORKDIR does not carry into a final stage built from an image.
     assert dockerfile_workdir("FROM a AS build\nWORKDIR /src\nFROM b\nCOPY --from=build /src/x /x\n") is None
     assert dockerfile_workdir("FROM a AS build\nWORKDIR /src\nfrom b\nWORKDIR /app\n") == "/app"
+    # A stage built from an earlier stage inherits its WORKDIR, by name or by index.
+    assert dockerfile_workdir("FROM ubuntu AS base\nWORKDIR /app\nFROM base\nWORKDIR src\n") == "/app/src"
+    assert dockerfile_workdir("FROM ubuntu AS Base\nWORKDIR /app\nFROM --platform=linux/amd64 base AS final\n") == "/app"
+    assert dockerfile_workdir("FROM a\nWORKDIR /zero\nFROM b\nWORKDIR /one\nFROM 0\n") == "/zero"
+    # A relative WORKDIR on top of an image's unknown one cannot be resolved.
+    assert dockerfile_workdir("FROM x\nWORKDIR src\n") is None
+    assert dockerfile_workdir("FROM x\nWORKDIR $HOME/app\nWORKDIR src\n") is None
 
 
 class _Groups:

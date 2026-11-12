@@ -262,6 +262,11 @@ class PodExecTransport:
                     await asyncio.wait_for(self._slots.acquire(), timeout=remaining)
                 except asyncio.TimeoutError:
                     raise expired() from None
+                # The slot can come free just before the deadline and this
+                # task resume after it; a probe must not start past the budget.
+                if _now() >= deadline:
+                    self._slots.release()
+                    raise expired()
             try:
                 await self._run(self._probe)
                 return

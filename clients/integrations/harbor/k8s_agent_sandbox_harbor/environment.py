@@ -65,28 +65,41 @@ _PREFLIGHT_TIMEOUT_S = 15
 def dockerfile_workdir(text: str) -> str | None:
     """The final ``WORKDIR`` of a Dockerfile, as the image's default cwd.
 
-    Relative WORKDIRs resolve against the previous one, as Docker does. A
-    WORKDIR that uses a variable is not resolved and yields None, so the
-    image's own default applies. Each ``FROM`` starts a new stage, so only the
-    last stage's WORKDIR counts.
+    Follows Docker's rules for the last stage. Relative WORKDIRs resolve
+    against the previous one. A stage that starts ``FROM`` an earlier stage
+    inherits that stage's WORKDIR; a stage that starts from an image starts
+    with that image's WORKDIR, which is not known here.
+
+    Returns None when the directory cannot be worked out, so the image's own
+    default applies: no WORKDIR in the last stage's chain, a WORKDIR that uses
+    a variable, or a relative WORKDIR on top of an image's unknown one.
     """
+    # The WORKDIR of each stage so far, under its index and its ``AS`` name:
+    # an absolute path, or None when it is not known.
+    stages: dict[str, str | None] = {}
+    names: list[str] = []
     workdir: str | None = None
     for raw in text.splitlines():
-        line = raw.strip()
-        instruction = line.split(maxsplit=1)[0].upper() if line else ""
+        words = raw.split()
+        instruction = words[0].upper() if words else ""
         if instruction == "FROM":
-            workdir = None
-            continue
-        if instruction != "WORKDIR":
-            continue
-        value = line[len("WORKDIR"):].strip().strip('"').strip("'")
-        if not value or "$" in value:
-            workdir = None
-            continue
-        if value.startswith("/") or workdir is None:
-            workdir = value
+            refs = [word for word in words[1:] if not word.startswith("--")]
+            workdir = stages.get(refs[0].lower()) if refs else None
+            names = [str(len([key for key in stages if key.isdigit()]))]
+            if len(refs) >= 3 and refs[1].upper() == "AS":
+                names.append(refs[2].lower())
+        elif instruction == "WORKDIR":
+            value = raw.strip()[len("WORKDIR"):].strip().strip('"').strip("'")
+            if not value or "$" in value:
+                workdir = None
+            elif value.startswith("/"):
+                workdir = value
+            elif workdir is not None:
+                workdir = f"{workdir.rstrip('/')}/{value}"
         else:
-            workdir = f"{workdir.rstrip('/')}/{value}"
+            continue
+        for name in names:
+            stages[name] = workdir
     return workdir
 
 

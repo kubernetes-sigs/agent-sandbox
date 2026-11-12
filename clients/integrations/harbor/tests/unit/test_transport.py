@@ -512,3 +512,23 @@ async def test_exec_stops_keeping_output_past_the_cap(monkeypatch):
     assert isinstance(resp._all, mod._IgnoredIO)           # no second copy of each frame
     assert resp._frames_immediately_available() is False   # one frame per update
     ex.shutdown(wait=True)
+
+
+async def test_wait_ready_does_not_probe_when_the_slot_comes_free_past_the_deadline(monkeypatch):
+    import asyncio
+    import k8s_agent_sandbox_harbor.transport.podexec as mod
+
+    slots = asyncio.Semaphore(1)
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    probes: list[int] = []
+    monkeypatch.setattr(mod, "stream", lambda fn, pod, ns, **kw: (probes.append(1), FakeResp())[1])
+    # Start, the budget check before the slot wait, then the check after it.
+    clock = itertools.chain([0.0, 0.0], itertools.repeat(100.0))
+    monkeypatch.setattr(mod, "_now", lambda: next(clock))
+    api = types.SimpleNamespace(connect_get_namespaced_pod_exec=object())
+    t = PodExecTransport(api_factory=lambda: api, pod="p", namespace="ns", container="main",
+                         executor=ex, slots=slots)
+    with pytest.raises(TimeoutError, match="did not accept exec within 60s"):
+        await t.wait_ready(timeout_s=60)
+    assert probes == [] and not slots.locked()             # no probe, and the slot went back
+    ex.shutdown(wait=True)

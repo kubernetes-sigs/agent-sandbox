@@ -28,7 +28,7 @@ import sys
 import tempfile
 import uuid
 from types import TracebackType
-from typing import Any, Generic, Self, TypeVar
+from typing import Any, Generic, Literal, Self, TypeVar
 
 from kubernetes import client as sync_client
 from kubernetes_asyncio import client as async_client
@@ -255,6 +255,8 @@ class AsyncSandboxClient(Generic[T]):
         claim_name: str | None = None,
         adopt_existing: bool = False,
         shutdown_after_seconds: int | None = None,
+        shutdown_policy: Literal["Delete", "DeleteForeground", "Retain"] | None = None,
+        ttl_seconds_after_finished: int | None = None,
         volume_claim_templates: list[dict[str, Any]] | None = None,
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
@@ -273,12 +275,23 @@ class AsyncSandboxClient(Generic[T]):
             adopt_existing: On AlreadyExists, attach to the existing named Claim after
                 checking its warm pool and that it is not terminating. Requires
                 claim_name. Creation options are not reapplied on adoption;
-                an existing shutdownTime is preserved.
+                the existing lifecycle is preserved.
             shutdown_after_seconds: Optional TTL in seconds. When set, the
                 claim's ``spec.lifecycle`` is populated with a ``shutdownTime``
                 of *now + shutdown_after_seconds* (UTC) and a ``shutdownPolicy``
-                of ``"Delete"``, so the controller auto-deletes the claim on
-                expiry. Must be a positive integer.
+                of ``"Delete"`` unless shutdown_policy is given.
+                Must be a positive integer.
+            shutdown_policy: Value for ``spec.lifecycle.shutdownPolicy``.
+                When a timer is set and no policy is given, the SDK sends Delete;
+                the API's own default for an omitted policy is Retain.
+                Retain keeps the claim and deletes its Sandbox. With cleanup
+                enabled and a generated name, the client still deletes a Retain
+                claim on exit.
+            ttl_seconds_after_finished: Seconds, zero or more, for
+                ``spec.lifecycle.ttlSecondsAfterFinished``. The timer starts only
+                when the Pod reaches Succeeded or Failed. A Pod with
+                restartPolicy Always never does, so pair this with
+                shutdown_after_seconds. With both timers, the earlier deadline wins.
             volume_claim_templates: Optional list of volume claim templates
                 to override/merge with the sandbox template.
             pod_labels: Optional labels stamped onto the running Sandbox **Pod**
@@ -306,7 +319,10 @@ class AsyncSandboxClient(Generic[T]):
 
         pod_metadata = build_pod_metadata(pod_labels, pod_annotations)
 
-        lifecycle = construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds) if shutdown_after_seconds is not None else None
+        lifecycle = construct_sandbox_claim_lifecycle_spec(
+            shutdown_after_seconds, shutdown_policy=shutdown_policy,
+            ttl_seconds_after_finished=ttl_seconds_after_finished,
+        ) or None
 
         generated_name = claim_name is None
         if adopt_existing and generated_name:
@@ -676,7 +692,8 @@ class AsyncSandboxClient(Generic[T]):
         if span.is_recording():
             span.set_attribute("sandbox.claim.name", claim_name)
             if lifecycle:
-                span.set_attribute("sandbox.lifecycle.shutdown_time", lifecycle["shutdownTime"])
+                if "shutdownTime" in lifecycle:
+                    span.set_attribute("sandbox.lifecycle.shutdown_time", lifecycle["shutdownTime"])
                 span.set_attribute("sandbox.lifecycle.shutdown_policy", lifecycle["shutdownPolicy"])
 
         annotations = {}

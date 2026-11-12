@@ -5997,6 +5997,93 @@ func TestReconcilePVCs(t *testing.T) {
 	}
 }
 
+func TestSandboxLifecycleDeletesObservedUID(t *testing.T) {
+	for _, tc := range []struct {
+		action, kind string
+	}{
+		{action: "expiry", kind: "Sandbox"},
+		{action: "expiry", kind: "Pod"},
+		{action: "expiry", kind: "Service"},
+		{action: "suspend", kind: "Pod"},
+		{action: "disable", kind: "Service"},
+		{action: "recreate", kind: "Pod"},
+	} {
+		t.Run(tc.action+"/"+tc.kind, func(t *testing.T) {
+			sandbox := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "expired", Namespace: "default", UID: sandboxUID},
+				Spec: sandboxv1beta1.SandboxSpec{Lifecycle: sandboxv1beta1.Lifecycle{
+					ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
+				}},
+			}
+			switch tc.action {
+			case "suspend":
+				sandbox.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeSuspended
+			case "disable":
+				sandbox.Spec.Service = new(false)
+			case "recreate":
+				sandbox.Spec.FailedPodPolicy = sandboxv1beta1.FailedPodPolicyRecreate
+			}
+			objects := []runtime.Object{sandbox}
+			uid := sandbox.UID
+			switch tc.kind {
+			case "Sandbox":
+				sandbox.Spec.ShutdownPolicy = ptr.To(sandboxv1beta1.ShutdownPolicyDelete)
+			case "Pod":
+				uid = "observed-pod"
+				pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+					Name: sandbox.Name, Namespace: sandbox.Namespace, UID: uid,
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandbox.Name)},
+				}}
+				if tc.action == "recreate" {
+					pod.Status.Phase = corev1.PodFailed
+				}
+				objects = append(objects, pod)
+			case "Service":
+				uid = "observed-service"
+				objects = append(objects, &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+					Name: sandbox.Name, Namespace: sandbox.Namespace, UID: uid,
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandbox.Name)},
+				}})
+			}
+			conflict := k8serrors.NewConflict(schema.GroupResource{Resource: strings.ToLower(tc.kind)}, sandbox.Name, errors.New("object was recreated"))
+			deletes := 0
+			fc := newFakeClientWithInterceptor(interceptor.Funcs{
+				Delete: func(_ context.Context, _ client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+					deletes++
+					options := (&client.DeleteOptions{}).ApplyOptions(opts)
+					// The fake client does not enforce UID preconditions. Check
+					// the API request and return the replacement's conflict.
+					require.NotNil(t, options.Preconditions)
+					require.NotNil(t, options.Preconditions.UID)
+					require.Equal(t, uid, *options.Preconditions.UID)
+					require.Equal(t, uid, obj.GetUID())
+					return conflict
+				},
+			}, objects...)
+			r := &SandboxReconciler{Client: fc, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+			var err error
+			switch tc.action {
+			case "expiry":
+				var deleted bool
+				deleted, err = r.handleSandboxExpiry(t.Context(), sandbox)
+				require.False(t, deleted)
+			case "disable":
+				_, err = r.reconcileService(t.Context(), sandbox, NameHash(sandbox.Name))
+			default:
+				_, _, err = r.reconcilePod(t.Context(), sandbox, NameHash(sandbox.Name), nil)
+			}
+			require.ErrorIs(t, err, conflict)
+			require.Equal(t, 1, deletes)
+			if tc.action == "expiry" {
+				require.Empty(t, sandbox.Status.Conditions, "incomplete cleanup must not mark the Sandbox expired")
+			}
+			if tc.action == "recreate" {
+				require.False(t, r.recreateBackoff.has(client.ObjectKeyFromObject(sandbox)), "rejected deletion must not start failure backoff")
+			}
+		})
+	}
+}
+
 func TestSandboxExpiry(t *testing.T) {
 	now := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 

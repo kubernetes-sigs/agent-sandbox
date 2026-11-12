@@ -1532,7 +1532,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 		if ownership == resourceOwnedBySandbox {
 			logger.Info("Deleting owned service because service is disabled",
 				"Service.Name", service.Name, "Sandbox.Name", sandbox.Name)
-			if err := r.Delete(ctx, service); err != nil && !k8serrors.IsNotFound(err) {
+			if err := r.Delete(ctx, service, client.Preconditions{UID: &service.UID}); err != nil && !k8serrors.IsNotFound(err) {
 				return nil, fmt.Errorf("failed to delete service: %w", err)
 			}
 		}
@@ -1757,7 +1757,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			case resourceOwnedBySandbox:
 				if pod.DeletionTimestamp.IsZero() {
 					logger.Info("Deleting Pod because .Spec.OperatingMode is Suspended", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
-					if err := r.Delete(ctx, pod); err != nil {
+					if err := r.Delete(ctx, pod, client.Preconditions{UID: &pod.UID}); err != nil {
 						return pod, 0, fmt.Errorf("failed to delete pod: %w", err)
 					}
 				} else {
@@ -1899,7 +1899,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 						"pod.Name": pod.Name,
 					})
 				}
-				if err := r.Delete(ctx, pod); err != nil {
+				if err := r.Delete(ctx, pod, client.Preconditions{UID: &pod.UID}); err != nil {
 					if !k8serrors.IsNotFound(err) {
 						return nil, 0, fmt.Errorf("failed to delete Failed pod for recreate: %w", err)
 					}
@@ -2293,6 +2293,8 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 	logger := log.FromContext(ctx)
 	var allErrors error
 
+	// Cache snapshots can outlive an object. Bind each delete to the observed
+	// UID so a replacement with the same name survives stale expiry cleanup.
 	// Delete pod only if owned by this sandbox
 	podName := resolvePodName(sandbox)
 	pod := &corev1.Pod{}
@@ -2304,7 +2306,7 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 		ownership, controllerRef := checkOwnership(pod, sandbox)
 		switch ownership {
 		case resourceOwnedBySandbox:
-			if err := r.Delete(ctx, pod); err != nil && !k8serrors.IsNotFound(err) {
+			if err := r.Delete(ctx, pod, client.Preconditions{UID: &pod.UID}); err != nil && !k8serrors.IsNotFound(err) {
 				allErrors = errors.Join(allErrors, fmt.Errorf("failed to delete pod: %w", err))
 			}
 		case resourceUnowned:
@@ -2327,7 +2329,7 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 		ownership, controllerRef := checkOwnership(service, sandbox)
 		switch ownership {
 		case resourceOwnedBySandbox:
-			if err := r.Delete(ctx, service); err != nil && !k8serrors.IsNotFound(err) {
+			if err := r.Delete(ctx, service, client.Preconditions{UID: &service.UID}); err != nil && !k8serrors.IsNotFound(err) {
 				allErrors = errors.Join(allErrors, fmt.Errorf("failed to delete service: %w", err))
 			}
 		case resourceUnowned:
@@ -2341,7 +2343,7 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 	}
 
 	if sandbox.Spec.ShutdownPolicy != nil && *sandbox.Spec.ShutdownPolicy == sandboxv1beta1.ShutdownPolicyDelete {
-		if err := r.Delete(ctx, sandbox); err != nil && !k8serrors.IsNotFound(err) {
+		if err := r.Delete(ctx, sandbox, client.Preconditions{UID: &sandbox.UID}); err != nil && !k8serrors.IsNotFound(err) {
 			allErrors = errors.Join(allErrors, fmt.Errorf("failed to delete sandbox: %w", err))
 		} else {
 			return true, nil

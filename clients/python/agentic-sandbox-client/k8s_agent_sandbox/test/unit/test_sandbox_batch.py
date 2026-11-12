@@ -6120,5 +6120,88 @@ class TestParallelPrecheck(BaseClaimBatchTest):
         self.assertEqual(helper.get_sandbox_template.call_count, 1)
 
 
+class TestReleaseAllMembers(BaseClaimBatchTest):
+
+    def test_release_members_deletes_all_pools_by_batch_label_and_keeps_batch_open(self):
+        helper = self.cluster.helper
+        batch = self.claim(
+            [BatchGroup(warmpool="pool-a", size=0), BatchGroup(warmpool="pool-b", size=0)],
+            max_in_flight=4,
+        )
+        wp_reads_at_open = helper.get_sandbox_warmpool.call_count
+        m_a = batch.acquire("pool-a", timeout=5)
+        m_b = batch.acquire("pool-b", timeout=5)
+        self.assertEqual({m.claim_name for m in batch.members()}, {m_a.claim_name, m_b.claim_name})
+
+        # Failed deletecollection keeps member deletes fenced for retry, then succeeds in 1 call.
+        denied = k8s_client.ApiException(status=403)
+        helper.delete_sandbox_claims_by_label.side_effect = [denied, None]
+        with self.assertRaises(k8s_client.ApiException):
+            batch.release_members()
+        self.assertTrue(bool(batch._state._pending_deletes))
+
+        helper.delete_sandbox_claims_by_label.reset_mock()
+        batch.release_members()
+        self.assertEqual(helper.delete_sandbox_claims_by_label.call_count, 1)
+        helper.delete_sandbox_claim.assert_not_called()
+        helper.delete_batch_lease.assert_not_called()
+        self.assertEqual(batch.members(), [])
+        self.assertEqual(batch._state._pending_deletes, {})
+        self.assertIsNone(batch.err())
+
+        # Batch, Lease, watch, and _checked_pools stay open for subsequent acquires (0 extra pool GETs).
+        m_a2 = batch.acquire("pool-a", timeout=5)
+        m_b2 = batch.acquire("pool-b", timeout=5)
+        self.assertNotIn(m_a2.claim_name, {m_a.claim_name, m_b.claim_name})
+        self.assertEqual({m.claim_name for m in batch.members()}, {m_a2.claim_name, m_b2.claim_name})
+        self.assertEqual(helper.get_sandbox_warmpool.call_count, wp_reads_at_open)
+
+
+    def test_release_members_retries_connections_an_earlier_release_failed_to_close(self):
+        batch = self.claim([BatchGroup(warmpool="pool-a", size=0)], max_in_flight=4)
+        member = batch.acquire("pool-a", timeout=5)
+        cached = MagicMock(close_connection=MagicMock(side_effect=[RuntimeError("close failed"), None]))
+        batch._connected[member.claim_name] = (cached, None)
+
+        batch.release_members()
+        self.assertEqual(batch._connected, {member.claim_name: (cached, None)})
+
+        stale = MagicMock(close_connection=MagicMock())
+        batch._stale_connections[stale] = None
+        batch.release_members()
+        self.assertEqual(cached.close_connection.call_count, 2)
+        stale.close_connection.assert_called_once()
+        self.assertEqual(batch._connected, {})
+        self.assertEqual(batch._stale_connections, {})
+
+    def test_release_members_makes_an_in_flight_acquire_raise(self):
+        helper = self.cluster.helper
+        batch = self.claim([BatchGroup(warmpool="pool-a", size=0)], max_in_flight=4)
+        self.cluster.ready_on_create = False
+        with ThreadPoolExecutor(1) as pool:
+            future = pool.submit(batch.acquire, "pool-a", timeout=5)
+            _wait_until(lambda: helper.create_sandbox_claim.call_count == 1)
+            batch.release_members()
+            self.assertRegex(str(future.exception(timeout=5)), "released before it was Ready")
+        # Its create may have landed after the label delete, so it is also deleted by name.
+        self.assertEqual([c.args[0] for c in helper.delete_sandbox_claim.call_args_list], ["b1-0"])
+        self.assertEqual(batch.members(), [])
+
+    def test_release_members_deletes_a_fill_create_that_lands_afterwards(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        self.cluster.create_hook = lambda name: gate.wait(5) if name == "b1-0" else None
+        batch = self.claim([BatchGroup(warmpool="pool-a", size=2)], max_in_flight=1)
+        helper = self.cluster.helper
+        _wait_until(lambda: helper.create_sandbox_claim.call_count == 1)
+        batch.release_members()
+        gate.set()  # b1-0's create lands after the release.
+        _wait_until(lambda: helper.delete_sandbox_claim.call_count == 1)
+        self.assertEqual(helper.delete_sandbox_claim.call_args.args[0], "b1-0")
+        # b1-1 was still planned, so it is never sent.
+        self.assertEqual(self.cluster.names(), ["b1-0"])
+        self.assertEqual(batch.members(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

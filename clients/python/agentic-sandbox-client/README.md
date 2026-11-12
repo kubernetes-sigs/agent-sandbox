@@ -770,14 +770,15 @@ watch or Lease renewal stops with an error, so check `batch.err()` after the loo
 batch's claims and then its Lease; `detach(grace=None)` instead leaves everything in place and releases the
 Lease so `get_batch()` can take the batch over.
 
-Three methods free sandboxes before `release()`. `release_member(member)` deletes one member's claim.
+Four methods free sandboxes before `release()`. `release_member(member)` deletes one member's claim.
 `release_group(warmpool)` deletes every claim of a pool, pending ones included, for example a group that
 `group_outcomes()` yields with an error, whose claims are otherwise kept until `release()`.
+`release_members()` deletes every claim across all pools in the batch via label-scoped `deletecollection` while keeping the batch, its Lease, and its watch open for later `acquire()` calls.
 `release_not_ready()` stops creating claims and deletes every initial claim that isn't Ready and was never
 handed out, once you have what you need. Member deletes and the initial claims share `max_in_flight`, which
 defaults to 20 on a handle from `get_batch()`. Released members are never handed out, are dropped from `members()`, and
 count as unable to become Ready, so releasing members before a group or the quorum has been decided can make
-it unreachable. Read a failed member's `reason` before releasing it. The three methods delete nothing once
+it unreachable. Read a failed member's `reason` before releasing it. All four methods delete nothing once
 this handle loses the batch's Lease or is detached, and raise `BatchError`. A watch error sets `err()` but
 leaves the Lease held, so they still delete claims after one.
 
@@ -785,7 +786,7 @@ leaves the Lease held, so they still delete claims after one.
 it is Ready, for example to replace a member released with `release_member()`. `acquire()` writes non-empty `pod_annotations` to `spec.additionalPodMetadata.annotations` so the controller propagates them onto the sandbox pod. `BatchGroup` has no pod annotation field, so callers that need per-pod annotations on every member pass `size=0` groups to `claim_batch()` and call `acquire()`. Its claim takes the next unused
 ordinal, so ordinals are never reused, even across `detach()` and `get_batch()`. It isn't one of the initial
 claims, so `events()`, the quorum consumers and `release_not_ready()` leave it alone, but `release_group()` on
-its pool releases it, and its `shutdownTime` counts from its own create. Its create follows the initial
+its pool or `release_members()` releases it, and its `shutdownTime` counts from its own create. Its create follows the initial
 claims' pacing, except that a create the pool's Ready sandboxes cover skips `create_rps` pacing. Once callers spend the
 count from the pool's check and `create_rps` pacing would delay the next create, `acquire()` reads the pool again at most
 once a second per pool (unless an expired `timeout` cuts a read short before recording it). When the watch observes a claim from a pool start cold before becoming Ready, the batch zeroes that
@@ -796,8 +797,8 @@ or getting the member Ready doesn't finish within `timeout`, which defaults to `
 subclass `BatchError`, which `acquire()` also raises directly when the handle stops; checking a pool not yet in the batch
 can also raise `SandboxWarmPoolNotFoundError` or `SandboxTemplateNotFoundError` (both `SandboxError`) or a
 Kubernetes API or network error. If it raises, including on a cancellation, `acquire()` drops the member from `members()` and deletes
-its claim unless the claim is already gone, its create was rejected, or this handle lost the batch's Lease. `release_not_ready()`
-and `release()` retry a failed delete, and calling `acquire()` again tries a new claim.
+its claim unless the claim is already gone, its create was rejected, or this handle lost the batch's Lease. `release_not_ready()`,
+`release_members()`, and `release()` retry a failed delete, and calling `acquire()` again tries a new claim.
 
 The `claim_batch()` defaults are `create_rps=50`, `max_in_flight=20`, `quorum_timeout=600` seconds,
 `work_budget=3600` seconds, and `lease_duration=60` seconds. The client's Kubernetes API connection pool must hold
@@ -832,7 +833,7 @@ supports all of the above.
   are created.
 - `lease_degraded()`: whether Lease renewal is failing, from the first failed renewal until one succeeds.
 - `acquire(warmpool, timeout=None, *, pod_annotations=None)`, described above.
-- `release_member(member)`, `release_group(warmpool)`, and `release_not_ready()`, described above.
+- `release_member(member)`, `release_group(warmpool)`, `release_members()`, and `release_not_ready()`, described above.
 - `release()` deletes the batch's claims, then its Lease. Idempotent. It raises `BatchInUseError` and deletes
   nothing more if another handle holds the batch's Lease.
 - `detach(grace=None)`: stops the background tasks and releases the Lease so another `get_batch` can take over; idempotent.

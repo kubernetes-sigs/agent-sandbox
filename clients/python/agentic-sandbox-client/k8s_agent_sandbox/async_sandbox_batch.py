@@ -940,8 +940,8 @@ class AsyncSandboxBatch:
         groups is checked once per handle, like ``claim_batch`` checks its pools. The claim takes the
         next unused ordinal and carries its pool's group label but no group annotations, so it is
         never one of the initial claims. ``events()``, ``group_outcomes()``, ``wait_for_quorum()``
-        and ``release_not_ready()`` leave it alone, and ``release_group()`` on its pool releases it
-        with the pool's other members. Its ``shutdownTime`` is the
+        and ``release_not_ready()`` leave it alone, and ``release_group()`` on its pool or
+        ``release_members()`` releases it with the batch's other members. Its ``shutdownTime`` is the
         time of its create plus ``quorum_timeout`` plus ``work_budget`` plus 600 seconds, and its
         create follows the initial claims' retries and pacing. Like theirs, a create that the
         pool's Ready sandboxes cover skips ``create_rps`` pacing. Once callers spend the Ready
@@ -953,12 +953,12 @@ class AsyncSandboxBatch:
         ``max_in_flight``, which defaults to 20 on a handle from ``get_batch``.
 
         If it raises, including on a cancellation, the member is dropped from ``members()`` and its
-        claim is deleted, unless the claim is already gone or its create was rejected. A failed delete is
-        retried by ``release_not_ready()`` and ``release()``. Once this handle loses the batch's
-        Lease it keeps the claim, which ``release()`` deletes only if no other handle has taken the
-        Lease since. It never creates a second claim, so call it again to try again. A member it
-        returned that fails later shows in ``members()`` like any other, and ``release_member``
-        frees it.
+        claim is deleted, unless the claim is already gone or its create was rejected. A failed
+        delete is retried by ``release_not_ready()``, ``release_members()``, and ``release()``. Once
+        this handle loses the batch's Lease it keeps the claim, which ``release()`` deletes only if
+        no other handle has taken the Lease since. It never creates a second claim, so call it again
+        to try again. A member it returned that fails later shows in ``members()`` like any other,
+        and ``release_member`` frees it.
 
         ``TerminalMemberError`` and ``BatchTimeoutError`` both subclass ``BatchError``, and
         ``except SandboxError`` also covers a missing pool or template. Bad arguments raise
@@ -986,8 +986,8 @@ class AsyncSandboxBatch:
                 sending any create or create retry that ``create_rps`` pacing or ``max_in_flight``
                 cannot start before the deadline.
             BatchError: If this handle has been detached or released, or ``err()`` is set, when
-                called or while waiting, or if ``release_member`` or ``release_group`` releases the
-                member before it is Ready.
+                called or while waiting, or if ``release_member``, ``release_group``, or
+                ``release_members`` releases the member before it is Ready.
             ApiException: If checking an unchecked warm pool fails with an API error such as a
                 403.
             aiohttp.ClientError, TimeoutError: If checking an unchecked warm pool fails before
@@ -1404,25 +1404,68 @@ class AsyncSandboxBatch:
                 After the last round, the last transient error is raised (an ``ApiException``
                 or a transport error).
         """
+        await self._release_pools(warmpool)
+
+    async def release_members(self) -> None:
+        """Deletes every claim the batch currently holds across all pools, pending ones included,
+        and drops their members from ``members()`` while keeping the batch, its Lease, and its
+        watch open for subsequent ``acquire()`` calls.
+
+        All planned fill creates not yet sent are skipped, in-flight ``acquire()`` calls raise
+        ``BatchError``, and a create that lands afterwards is deleted. Released members are never
+        handed out afterwards and emit no ``MEMBER_LOST``.
+
+        Claims are deleted like ``release()`` deletes the batch's, with label-scoped
+        deletecollection rounds across the whole batch. If they fail, calling ``release_members``
+        again retries.
+
+        Raises:
+            BatchError: If this handle has been detached or released, once this handle loses the
+                batch's Lease, or if claims are still not being deleted after the last round.
+            ApiException: For a non-transient error such as a 403, which is raised at once.
+                After the last round, the last transient error is raised (an ``ApiException``
+                or a transport error).
+        """
+        await self._release_pools(None)
+
+    async def _release_pools(self, warmpool: str | None) -> None:
+        """Releases every claim from ``warmpool``, or from every pool if it is ``None``, then deletes
+        the claims with deletecollection rounds scoped to the pool's or the whole batch's label.
+        """
         async with self._changed:
             self._check_lease_held_locked()
-            if not self._state.has_pool(warmpool):
+            # Checked under the same lock hold as the release, so the pool can't change in between.
+            if warmpool is not None and not self._state.has_pool(warmpool):
                 raise ValueError(f"batch '{self.batch_id}' has no group or members for warm pool '{warmpool}'")
             self._drop_planned_creates(warmpool)
-            acquiring = self._state.acquiring_in_pool(warmpool)
-            names = self._state.release_group(warmpool)
+            if warmpool is None:
+                acquiring, pending_seqs = self._state.release_members()
+                # Every member is released, so this also retries the connections earlier releases
+                # failed to close, which stay cached under claims that are no longer members.
+                names: list[str] | None = None
+                action, scope = "release_members", f"batch '{self.batch_id}' members"
+                selector = batch_utils.batch_claim_label_selector(self.batch_id, self._lease_uid)
+            else:
+                acquiring, pending_seqs = self._state.acquiring_in_pool(warmpool), {}
+                names = self._state.release_group(warmpool)
+                action, scope = "release_group", f"batch '{self.batch_id}' group '{warmpool}'"
+                selector = batch_utils.group_label_selector(self.batch_id, warmpool, self._lease_uid)
             for name in acquiring:
                 self._wake_acquire(name)
             self._changed.notify_all()
-        await self._close_cached_connections("release_group", names)
+        await self._close_cached_connections(action, names)
         await _delete_claims_in_rounds(
             self._client.k8s_helper,
             self.namespace,
-            batch_utils.group_label_selector(self.batch_id, warmpool, self._lease_uid),
-            f"batch '{self.batch_id}' group '{warmpool}'",
+            selector,
+            scope,
             guard=self._member_delete,
             deadline=lambda: self._lease_expires_at,
         )
+        if pending_seqs:
+            async with self._lock:
+                for name, seq in pending_seqs.items():
+                    self._state.note_deleted(name, seq)
 
     def _drop_planned_creates(self, warmpool: str | None) -> None:
         """Releases the planned creates not yet sent, of one pool or of every pool, so they don't

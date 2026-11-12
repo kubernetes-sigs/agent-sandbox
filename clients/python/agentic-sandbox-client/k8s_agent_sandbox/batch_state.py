@@ -498,6 +498,26 @@ class BatchState:
             self.release_claim(name, warmpool)
         return names
 
+    def release_members(self) -> tuple[list[str], dict[str, int]]:
+        """Stops all fill creates and releases every member across all pools in the batch,
+        acquired ones included, along with acquire() claims the watch hasn't seen yet.
+        Returns ``(acquiring_names, pending_delete_seqs)`` so the handle can wake in-flight acquires
+        and clear member deletes once the batch-scoped deletecollection completes (while keeping
+        them pending if deletecollection fails).
+        """
+        pools = (
+            self._declared_pools
+            | set(self._members_by_pool)
+            | set(self._acquiring_by_pool)
+            | set(self._checking_acquires)
+        )
+        live_members = list(self._members.values())
+        acquiring = list(self._acquiring)
+        for pool in pools:
+            self.release_group(pool)
+        self._take_deletes(live_members)
+        return acquiring, dict(self._pending_deletes)
+
     def acquiring_in_pool(self, warmpool: str) -> list[str]:
         """Returns in-flight ``acquire()`` claim names for ``warmpool``."""
         return list(self._acquiring_by_pool.get(warmpool, ()))

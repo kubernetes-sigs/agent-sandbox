@@ -589,10 +589,12 @@ This mode is opt-in. `SandboxdPodTunnelConnectionConfig` continues to connect
 directly to the sandbox Pod. The router caps REST request timeouts at its proxy
 timeout. When the router is not in `allow-all` mode, set `router_auth_token`.
 The SDK sends that token as `Authorization` on REST requests and gRPC calls.
-Use a Kubernetes bearer token for `tokenreview`, or a scoped token for
-`scoped-token`. The router strips `Authorization`, so the SDK sends `auth_token`
-in `X-Sandboxd-Token` instead. sandboxd accepts that header since
-[#2164](https://github.com/kubernetes-sigs/agent-sandbox/pull/2164).
+Use a Kubernetes bearer token for `tokenreview`, or a v1 or
+[sandbox-scoped v2](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/sandbox-router/README.md#scoped-token-authorizer)
+token for `scoped-token`. Mint a scoped token after its claim binds, then attach
+with `get_sandbox(claim_name)`. The router strips `Authorization`, so the SDK
+sends `auth_token` in `X-Sandboxd-Token` instead. sandboxd accepts that header
+since [#2164](https://github.com/kubernetes-sigs/agent-sandbox/pull/2164).
 
 ### 10. Labels and Pod Metadata
 

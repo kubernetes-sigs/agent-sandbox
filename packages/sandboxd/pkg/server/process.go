@@ -183,6 +183,14 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		if err != nil {
 			return mapCommandError(err, "failed to start command with PTY")
 		}
+		// creack/pty opens the master in blocking mode. Enable Go's poller
+		// before exposing it so deadlines and Close can interrupt stdin writes.
+		if err := syscall.SetNonblock(int(ptyFile.Fd()), true); err != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = ptyFile.Close()
+			_ = cmd.Wait()
+			return status.Errorf(codes.Internal, "failed to configure PTY: %v", err)
+		}
 		proc.PTY = ptyFile
 		proc.Stdin = ptyFile
 	} else {
@@ -646,7 +654,10 @@ func (s *ProcessServer) terminateExecution(ctx context.Context, cmd *exec.Cmd) c
 }
 
 // WriteStdin sends input bytes or EOF to a running process.
-func (s *ProcessServer) WriteStdin(_ context.Context, req *processv1.WriteStdinRequest) (*processv1.WriteStdinResponse, error) {
+func (s *ProcessServer) WriteStdin(ctx context.Context, req *processv1.WriteStdinRequest) (*processv1.WriteStdinResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
 	proc, ok := s.registry.Get(req.GetProcessId())
 	if !ok {
 		return nil, status.Errorf(codes.NotFound, "process %d not found", req.GetProcessId())
@@ -667,7 +678,10 @@ func (s *ProcessServer) WriteStdin(_ context.Context, req *processv1.WriteStdinR
 		return nil, status.Errorf(codes.FailedPrecondition, "process %d has no stdin", req.GetProcessId())
 	}
 	if input := req.GetInput(); len(input) > 0 {
-		if _, err := proc.Stdin.Write(input); err != nil {
+		if err := proc.WriteStdin(ctx, input); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil, status.FromContextError(err).Err()
+			}
 			return nil, status.Errorf(codes.Internal, "failed to write stdin: %v", err)
 		}
 	}

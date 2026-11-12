@@ -17,14 +17,15 @@
 package processmanager
 
 import (
+	"context"
 	"errors"
-	"io"
 	"os"
 	"os/exec"
 	"sync"
 	"syscall"
+	"time"
 
-	"github.com/creack/pty"
+	"golang.org/x/sys/unix"
 )
 
 // ManagedProcess wraps a running OS process, tracking its virtual ID, PTY
@@ -35,13 +36,14 @@ type ManagedProcess struct {
 	ID    int32
 	Cmd   *exec.Cmd
 	PTY   *os.File // Non-nil if a PTY was allocated.
-	Stdin io.WriteCloser
+	Stdin *os.File // Pipe writer or PTY master; must support write deadlines.
 	// Done is closed once the process has exited and its exit code recorded.
 	Done chan struct{}
 
-	mu        sync.Mutex
-	exitCode  int32
-	completed bool
+	mu         sync.Mutex
+	exitCode   int32
+	completed  bool
+	stdinWrite chan struct{}
 }
 
 // SetExitCode records the process exit code and marks it completed.
@@ -87,6 +89,48 @@ func (p *ManagedProcess) Signal(sig syscall.Signal) error {
 // rather than signal end of input.
 var ErrStdinIsTerminal = errors.New("stdin is a PTY")
 
+// WriteStdin writes input until it is delivered or ctx is canceled. A canceled
+// write may have delivered part of input; the stdin remains open for later calls.
+func (p *ManagedProcess) WriteStdin(ctx context.Context, input []byte) error {
+	// Write deadlines belong to the file, so each request must own both
+	// its write and cancellation callback before another request can write.
+	p.mu.Lock()
+	if p.stdinWrite == nil {
+		p.stdinWrite = make(chan struct{}, 1)
+	}
+	gate := p.stdinWrite
+	p.mu.Unlock()
+	select {
+	case gate <- struct{}{}:
+		defer func() { <-gate }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := p.Stdin.SetWriteDeadline(time.Time{}); err != nil {
+		return err
+	}
+
+	interrupted := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		_ = p.Stdin.SetWriteDeadline(time.Now())
+		close(interrupted)
+	})
+	_, err := p.Stdin.Write(input)
+	if !stop() {
+		<-interrupted
+	}
+	// Wait for cancellation before clearing the deadline, so an old request
+	// cannot interrupt the next writer. CloseStdin can run throughout the write.
+	_ = p.Stdin.SetWriteDeadline(time.Time{})
+	if err != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
+}
+
 // CloseStdin closes the process stdin writer if present.
 func (p *ManagedProcess) CloseStdin() error {
 	p.mu.Lock()
@@ -94,7 +138,7 @@ func (p *ManagedProcess) CloseStdin() error {
 	if p.Stdin == nil {
 		return nil
 	}
-	if p.PTY != nil && p.Stdin == io.WriteCloser(p.PTY) {
+	if p.PTY != nil && p.Stdin == p.PTY {
 		return ErrStdinIsTerminal
 	}
 	return p.Stdin.Close()
@@ -107,10 +151,19 @@ func (p *ManagedProcess) ResizeTTY(cols, rows uint16) error {
 	if p.completed || p.PTY == nil {
 		return errors.New("process is completed or has no active PTY")
 	}
-	return pty.Setsize(p.PTY, &pty.Winsize{
-		Cols: cols,
-		Rows: rows,
-	})
+	// pty.Setsize calls File.Fd, which switches the master to blocking I/O
+	// and prevents write deadlines from interrupting backpressured input.
+	conn, err := p.PTY.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var resizeErr error
+	if err := conn.Control(func(fd uintptr) {
+		resizeErr = unix.IoctlSetWinsize(int(fd), unix.TIOCSWINSZ, &unix.Winsize{Col: cols, Row: rows})
+	}); err != nil {
+		return err
+	}
+	return resizeErr
 }
 
 // ClosePTY closes the PTY master handle under lock and clears the reference.

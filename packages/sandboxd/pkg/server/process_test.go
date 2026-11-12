@@ -336,6 +336,312 @@ func TestWriteStdinNotFound(t *testing.T) {
 	require.Equal(t, codes.NotFound, status.Code(err))
 }
 
+func TestWriteStdinCanceledContextDoesNotWrite(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	require.NoError(t, err)
+	t.Cleanup(func() { closeAll(reader, writer) })
+	registry := processmanager.NewProcessRegistry()
+	registry.Register(&processmanager.ManagedProcess{ID: 1, Stdin: writer})
+	server := NewProcessServer(t.TempDir(), registry, 0, logr.Discard())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = server.WriteStdin(ctx, &processv1.WriteStdinRequest{
+		ProcessId: 1,
+		Payload:   &processv1.WriteStdinRequest_Input{Input: []byte("canceled")},
+	})
+	require.Equal(t, codes.Canceled, status.Code(err))
+	require.NoError(t, writer.Close())
+	input, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.Empty(t, input)
+}
+
+func TestWriteStdinCancellationUnblocksHandler(t *testing.T) {
+	for _, deadline := range []bool{false, true} {
+		t.Run(fmt.Sprintf("deadline=%t", deadline), func(t *testing.T) {
+			reader, writer, err := os.Pipe()
+			require.NoError(t, err)
+			registry := processmanager.NewProcessRegistry()
+			registry.Register(&processmanager.ManagedProcess{ID: 1, Stdin: writer})
+			server := NewProcessServer(t.TempDir(), registry, 0, logr.Discard())
+			ctx, cancel := context.WithCancel(context.Background())
+			if deadline {
+				cancel()
+				ctx, cancel = context.WithTimeout(context.Background(), 250*time.Millisecond)
+			}
+			defer cancel()
+			returned := make(chan error, 1)
+			finished := make(chan struct{})
+			go func() {
+				defer close(finished)
+				_, err := server.WriteStdin(ctx, &processv1.WriteStdinRequest{
+					ProcessId: 1,
+					Payload:   &processv1.WriteStdinRequest_Input{Input: bytes.Repeat([]byte("x"), 1<<20)},
+				})
+				returned <- err
+			}()
+			t.Cleanup(func() {
+				closeAll(reader, writer)
+				<-finished
+			})
+			// Observing a byte establishes that the handler reached the real
+			// pipe. The remaining payload exceeds its capacity without a reader.
+			require.NoError(t, reader.SetReadDeadline(time.Now().Add(5*time.Second)))
+			_, err = io.ReadFull(reader, make([]byte, 1))
+			require.NoError(t, err)
+			if !deadline {
+				cancel()
+			}
+			select {
+			case err := <-returned:
+				want := codes.Canceled
+				if deadline {
+					want = codes.DeadlineExceeded
+				}
+				require.Equal(t, want, status.Code(err))
+			case <-time.After(2 * time.Second):
+				t.Fatal("WriteStdin handler remained blocked after request cancellation")
+			}
+
+			// A canceled request must leave stdin usable and must finish its
+			// deadline callback before a subsequent request starts writing.
+			input := make(chan []byte, 1)
+			go func() {
+				data, _ := io.ReadAll(reader)
+				input <- data
+			}()
+			_, err = server.WriteStdin(testCtx(t), &processv1.WriteStdinRequest{
+				ProcessId: 1,
+				Payload:   &processv1.WriteStdinRequest_Input{Input: []byte("next-input")},
+			})
+			require.NoError(t, err)
+			require.NoError(t, writer.Close())
+			require.True(t, bytes.HasSuffix(<-input, []byte("next-input")))
+		})
+	}
+}
+
+func TestWriteStdinQueuedCancellationPreservesActiveWriter(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	require.NoError(t, err)
+	registry := processmanager.NewProcessRegistry()
+	registry.Register(&processmanager.ManagedProcess{ID: 1, Stdin: writer})
+	server := NewProcessServer(t.TempDir(), registry, 0, logr.Discard())
+	payload := bytes.Repeat([]byte("x"), 1<<20)
+	activeCtx := testCtx(t)
+	active := make(chan error, 1)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		_, err := server.WriteStdin(activeCtx, &processv1.WriteStdinRequest{
+			ProcessId: 1,
+			Payload:   &processv1.WriteStdinRequest_Input{Input: payload},
+		})
+		active <- err
+	}()
+	t.Cleanup(func() {
+		closeAll(reader, writer)
+		<-finished
+	})
+	require.NoError(t, reader.SetReadDeadline(time.Now().Add(5*time.Second)))
+	first := make([]byte, 1)
+	_, err = io.ReadFull(reader, first)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(testCtx(t), 100*time.Millisecond)
+	defer cancel()
+	queued := make(chan error, 1)
+	queuedDone := make(chan struct{})
+	go func() {
+		defer close(queuedDone)
+		_, err := server.WriteStdin(ctx, &processv1.WriteStdinRequest{
+			ProcessId: 1,
+			Payload:   &processv1.WriteStdinRequest_Input{Input: []byte("canceled")},
+		})
+		queued <- err
+	}()
+	t.Cleanup(func() {
+		closeAll(reader, writer)
+		<-queuedDone
+	})
+	select {
+	case err := <-queued:
+		require.Equal(t, codes.DeadlineExceeded, status.Code(err))
+	case <-time.After(2 * time.Second):
+		t.Fatal("queued WriteStdin ignored its deadline")
+	}
+	select {
+	case err := <-active:
+		t.Fatalf("queued cancellation interrupted active writer: %v", err)
+	default:
+	}
+	received := make([]byte, len(payload)-1)
+	_, err = io.ReadFull(reader, received)
+	require.NoError(t, err)
+	require.NoError(t, <-active)
+	require.NoError(t, writer.Close())
+	rest, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.Empty(t, rest, "canceled queued request wrote bytes")
+	require.Equal(t, payload, append(first, received...))
+}
+
+func TestWriteStdinEOFUnblocksActiveWriter(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	require.NoError(t, err)
+	registry := processmanager.NewProcessRegistry()
+	registry.Register(&processmanager.ManagedProcess{ID: 1, Stdin: writer})
+	server := NewProcessServer(t.TempDir(), registry, 0, logr.Discard())
+	ctx := testCtx(t)
+	returned := make(chan error, 1)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		_, err := server.WriteStdin(ctx, &processv1.WriteStdinRequest{
+			ProcessId: 1,
+			Payload:   &processv1.WriteStdinRequest_Input{Input: bytes.Repeat([]byte("x"), 1<<20)},
+		})
+		returned <- err
+	}()
+	t.Cleanup(func() {
+		closeAll(reader, writer)
+		<-finished
+	})
+	require.NoError(t, reader.SetReadDeadline(time.Now().Add(5*time.Second)))
+	_, err = io.ReadFull(reader, make([]byte, 1))
+	require.NoError(t, err)
+	_, err = server.WriteStdin(testCtx(t), &processv1.WriteStdinRequest{
+		ProcessId: 1,
+		Payload:   &processv1.WriteStdinRequest_Eof{Eof: &emptypb.Empty{}},
+	})
+	require.NoError(t, err)
+	select {
+	case err := <-returned:
+		require.Equal(t, codes.Internal, status.Code(err))
+	case <-time.After(2 * time.Second):
+		t.Fatal("EOF did not release the active stdin writer")
+	}
+}
+
+func TestWriteStdinGRPCCancellationPreservesProcess(t *testing.T) {
+	for _, usePTY := range []bool{false, true} {
+		t.Run(fmt.Sprintf("pty=%t", usePTY), func(t *testing.T) {
+			rootDir := t.TempDir()
+			registry := processmanager.NewProcessRegistry()
+			handlerDone := make(chan error, 8)
+			grpcServer := grpc.NewServer(grpc.UnaryInterceptor(func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+				response, err := handler(ctx, req)
+				if info.FullMethod == processv1.ProcessService_WriteStdin_FullMethodName {
+					handlerDone <- err
+				}
+				return response, err
+			}))
+			processv1.RegisterProcessServiceServer(grpcServer, NewProcessServer(rootDir, registry, 0, logr.Discard()))
+			client := connectProcessClient(t, grpcServer)
+			ctx := testCtx(t)
+			// The child acknowledges its first input byte, then stops reading
+			// until the test creates the file. This fills a real pipe or PTY
+			// without relying on a sleep to establish backpressure.
+			script := "printf input-ready; dd bs=1 count=1 of=/dev/null 2>/dev/null; printf input-started; while [ ! -f resume ]; do sleep 0.01; done; exec cat"
+			req := &processv1.StartRequest{Config: &processv1.ProcessConfig{Command: []string{"sh", "-c", script}}}
+			if usePTY {
+				req.Pty = &processv1.PTY{Cols: 80, Rows: 24}
+				req.Config.Command[2] = "stty raw -echo; " + script
+			}
+			stream, err := client.Start(ctx, req)
+			require.NoError(t, err)
+			pid := recvInit(t, stream)
+			t.Cleanup(func() {
+				if !t.Failed() {
+					return
+				}
+				// Let the child consume input before shutdown, even when the
+				// cancellation regression leaves a blocking PTY write behind.
+				_ = os.WriteFile(filepath.Join(rootDir, "resume"), nil, 0600)
+				drained := make(chan struct{})
+				go func() {
+					defer close(drained)
+					for {
+						if _, err := stream.Recv(); err != nil {
+							return
+						}
+					}
+				}()
+				select {
+				case err := <-handlerDone:
+					t.Logf("stdin handler returned during cleanup: %v", err)
+				case <-time.After(5 * time.Second):
+					t.Error("stdin handler did not finish after input consumption resumed")
+				}
+				registry.SignalAll(syscall.SIGKILL)
+				select {
+				case <-drained:
+				case <-time.After(5 * time.Second):
+					t.Error("Start stream did not finish during cleanup")
+				}
+			})
+			if usePTY {
+				_, err = client.ResizeTTY(ctx, &processv1.ResizeTTYRequest{ProcessId: pid, Cols: 120, Rows: 40})
+				require.NoError(t, err)
+			}
+			var output bytes.Buffer
+			for !strings.Contains(output.String(), "input-ready") {
+				event, err := stream.Recv()
+				require.NoError(t, err)
+				output.Write(event.GetStdout())
+			}
+			writeCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			clientDone := make(chan error, 1)
+			go func() {
+				_, err := client.WriteStdin(writeCtx, &processv1.WriteStdinRequest{
+					ProcessId: pid,
+					Payload:   &processv1.WriteStdinRequest_Input{Input: bytes.Repeat([]byte("x"), 1<<20)},
+				})
+				clientDone <- err
+			}()
+			for !strings.Contains(output.String(), "input-started") {
+				event, err := stream.Recv()
+				require.NoError(t, err)
+				output.Write(event.GetStdout())
+			}
+			if usePTY {
+				_, err = client.ResizeTTY(ctx, &processv1.ResizeTTYRequest{ProcessId: pid, Cols: 100, Rows: 30})
+				require.NoError(t, err)
+			}
+			cancel()
+			require.Equal(t, codes.Canceled, status.Code(<-clientDone))
+			// The client can return before the server sees cancellation, so
+			// observe the server handler as well as the RPC's result.
+			select {
+			case err := <-handlerDone:
+				require.Equal(t, codes.Canceled, status.Code(err))
+			case <-time.After(2 * time.Second):
+				t.Fatal("canceled gRPC left its server handler blocked")
+			}
+			proc, ok := registry.Get(pid)
+			require.True(t, ok)
+			require.False(t, proc.IsCompleted())
+			require.NoError(t, os.WriteFile(filepath.Join(rootDir, "resume"), nil, 0600))
+			_, err = client.WriteStdin(ctx, &processv1.WriteStdinRequest{
+				ProcessId: pid,
+				Payload:   &processv1.WriteStdinRequest_Input{Input: []byte("next-input")},
+			})
+			require.NoError(t, err)
+			for !strings.Contains(output.String(), "next-input") {
+				event, err := stream.Recv()
+				require.NoError(t, err)
+				output.Write(event.GetStdout())
+			}
+			_, err = client.SendSignal(ctx, &processv1.SendSignalRequest{ProcessId: pid, Signal: processv1.Signal_SIGNAL_SIGKILL})
+			require.NoError(t, err)
+			res := drainStart(t, stream)
+			require.Equal(t, int32(137), res.exitCode)
+		})
+	}
+}
+
 func TestSendSignalNotFound(t *testing.T) {
 	client := newProcessClient(t, t.TempDir())
 

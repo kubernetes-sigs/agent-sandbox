@@ -20,7 +20,8 @@ as flaky (intermittent), consistently failing, or an infrastructure failure
 (the job died before tests ran), and prints a markdown report. Red runs with
 no failing testcase are resolved against the run's GCS artifacts first:
 aborted runs, stale-PR clone failures, and pre-test PR breakage (compile,
-vet, mypy gates) are reported separately instead of being counted as infra.
+vet, mypy, and generated-file gates) are reported separately instead of being
+counted as infra.
 Per-test failures are not counted when the run was aborted, when a whole
 suite failed at once (broken fixture), or when the failing PR modified the
 test's own sources; such PR-local failures are listed but never filed. A test
@@ -203,13 +204,17 @@ def make_artifact_fetcher(gcs_query, build_id):
     def fetch(name):
         """Returns the parsed artifact, None when the run has no such file.
 
-        Raises FetchUnavailable when the server could not be reached, so a
-        network blip is never mistaken for a missing artifact.
+        JSON artifacts are parsed; a .txt artifact (build-log.txt) is
+        returned as text. Raises FetchUnavailable when the server could not
+        be reached, so a network blip is never mistaken for a missing
+        artifact.
         """
         base = resolve()
         if not base:
             return None
         try:
+            if name.endswith(".txt"):
+                return fetch_text(f"{base}/{name}")
             return fetch_json(f"{base}/{name}")
         except FetchUnavailable:
             raise
@@ -234,6 +239,13 @@ def clone_merge_conflict(record):
     return False
 
 
+# Error lines printed by junit-less gates when the PR's own change fails
+# them. dev/ci/presubmits/test-autogen-up-to-date writes no junit at all, so
+# a PR with stale generated files goes red in the same shape as a pod that
+# died, and only the build log tells them apart.
+PRETEST_GATE_MARKERS = ("ERROR: Generated files out-of-date",)
+
+
 def classify_red_run(has_failing_test, has_test_results, fetch_artifact):
     """Classifies why one red Overall column went red.
 
@@ -245,8 +257,10 @@ def classify_red_run(has_failing_test, has_test_results, fetch_artifact):
       "aborted"         -- run was cancelled, not a failure at all
       "test_failure"    -- a junit testcase failed; the per-test rows tell
                            the story
-      "pretest_failure" -- junit exists with zero failing testcases: the PR
-                           broke a pre-test gate, author-actionable
+      "pretest_failure" -- junit exists with zero failing testcases, or a
+                           junit-less gate printed one of
+                           PRETEST_GATE_MARKERS: the PR broke a pre-test
+                           gate, author-actionable
       "clone_failure"   -- the PR no longer merges cleanly onto main: a
                            merge conflict verified in clone-records.json
                            (rebase needed)
@@ -256,9 +270,9 @@ def classify_red_run(has_failing_test, has_test_results, fetch_artifact):
                            verdict is possible; counted nowhere
 
     fetch_artifact(name) returns the parsed JSON artifact from the run's GCS
-    dir, None when the run has no such file, and raises FetchUnavailable
-    when the server could not be reached; only artifacts needed for the
-    verdict are fetched.
+    dir (the raw text for build-log.txt), None when the run has no such
+    file, and raises FetchUnavailable when the server could not be reached;
+    only artifacts needed for the verdict are fetched.
     """
     try:
         finished = fetch_artifact("finished.json") or {}
@@ -285,8 +299,16 @@ def classify_red_run(has_failing_test, has_test_results, fetch_artifact):
             # The clone failed without a merge conflict (network error,
             # unreachable ref): that is infrastructure, not a stale PR.
             return "infra"
-    # Without clone-records.json the cause of a junit-less red run cannot
-    # be proven benign, so it stays in the infra count.
+    # A junit-less gate (autogen) leaves no test rows to show that the PR's
+    # own change failed it; its build log ends with the gate's error line.
+    try:
+        build_log = fetch_artifact("build-log.txt")
+    except FetchUnavailable:
+        return "unknown"
+    if build_log and any(marker in build_log for marker in PRETEST_GATE_MARKERS):
+        return "pretest_failure"
+    # Without a gate marker or clone-records.json the cause of a junit-less
+    # red run cannot be proven benign, so it stays in the infra count.
     return "infra"
 
 
@@ -924,7 +946,7 @@ def render_report(dashboard, flaky, consistent, infra, window, pr_local=(),
         if i.get("pretest_failures"):
             lines.append(
                 f"- {i['tab']}: {i['pretest_failures']} red run(s) were "
-                f"pre-test PR breakage (compile/vet/mypy gates — "
+                f"pre-test PR breakage (compile/vet/mypy/autogen gates — "
                 f"author-actionable)")
         if i.get("unknown_runs"):
             lines.append(
@@ -1204,8 +1226,8 @@ Job history: {i['job_history']}
 
 These are not fixed by editing tests; look at `dev/ci/shared/runner.py` retries,
 image prepulls, or job resources. Aborted runs, stale-PR clone failures, and
-PRs that break a pre-test gate (compile/vet/mypy) are already excluded from
-this count.
+PRs that break a pre-test gate (compile/vet/mypy/generated files) are already
+excluded from this count.
 
 /kind flake
 <!-- last-reported-failure={i['last_failure_ts']} -->

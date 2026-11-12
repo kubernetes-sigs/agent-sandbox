@@ -11,20 +11,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Non-blocking command execution for legacy and sandboxd runtimes."""
+
 import asyncio
 from typing import Any, cast
-
-"""Non-blocking command execution for legacy and sandboxd runtimes."""
 
 from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
 from k8s_agent_sandbox.commands._process_handle import AsyncProcessHandle
 from k8s_agent_sandbox.commands.command_executor import (
+    _bounded_execute_request,
+    _bounded_execution_result,
     _check_process_options,
+    _check_response_capacity,
     _execute_request,
     _extract_executable,
     _process_config,
+    _validate_rpc_timeout,
 )
-from k8s_agent_sandbox.models import ExecutionResult, PtySize
+from k8s_agent_sandbox.models import BoundedExecutionResult, ExecutionLimits, ExecutionResult, PtySize
 from k8s_agent_sandbox.trace_manager import async_trace_span, trace
 
 
@@ -108,6 +112,79 @@ class AsyncCommandExecutor:
                 f"Server returned invalid execution result format: {response_data}"
             ) from e
 
+        if span.is_recording():
+            span.set_attribute("sandbox.exit_code", result.exit_code)
+        return result
+
+    @async_trace_span("run_with_limits")
+    async def run_with_limits(
+        self,
+        command: str,
+        timeout: float = 60,
+        *,
+        time_limit: float | None = None,
+        stdout_limit_bytes: int | None = None,
+        stderr_limit_bytes: int | None = None,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+    ) -> BoundedExecutionResult:
+        """Run a shell command with sandboxd's execution and output budgets.
+
+        Async mirror of :meth:`CommandExecutor.run_with_limits`. timeout is
+        the independent gRPC deadline in seconds. time_limit bounds execution,
+        including launch and output collection. Each stream retains its own
+        byte-limited prefix and decodes it as UTF-8 with replacement. Unset
+        limits inherit deployment policy. Transport errors raise RuntimeError;
+        servers without ExecuteWithLimits raise NotImplementedError. Explicit
+        output budgets plus 1 KiB of protobuf overhead must fit in the
+        connection's grpc_max_receive_message_bytes (4 MiB by default).
+        """
+        sandboxd = self.connector.is_sandboxd()
+        if not sandboxd:
+            raise NotImplementedError("commands.run_with_limits() requires the sandboxd runtime")
+        _check_process_options(env, cwd, sandboxd)
+        limits = ExecutionLimits(
+            time_limit=time_limit,
+            stdout_limit_bytes=stdout_limit_bytes,
+            stderr_limit_bytes=stderr_limit_bytes,
+        )
+        _check_response_capacity(limits, self.connector.connection_config)
+        timeout = _validate_rpc_timeout(timeout)
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.command.executable", _extract_executable(command))
+
+        try:
+            import grpc
+            from k8s_agent_sandbox.commands._process_stubs import (
+                process_pb2,
+                process_pb2_grpc,
+            )
+        except ImportError as e:
+            raise ImportError(
+                "the sandboxd runtime requires gRPC support; install the "
+                "'grpc' extra: pip install k8s-agent-sandbox[grpc]"
+            ) from e
+
+        request = _bounded_execute_request(process_pb2, command, limits, env, cwd)
+        await self.connector.connect()
+        channel = await self.connector.grpc_channel()
+        stub = process_pb2_grpc.ProcessServiceStub(channel)
+        try:
+            response = await stub.ExecuteWithLimits(request, timeout=_validate_rpc_timeout(timeout))
+        except grpc.RpcError as e:
+            rpc_error = cast("grpc.aio.AioRpcError", e)
+            if rpc_error.code() == grpc.StatusCode.UNIMPLEMENTED:
+                raise NotImplementedError(
+                    "commands.run_with_limits() requires sandboxd with "
+                    f"ExecuteWithLimits support: {rpc_error.details()}"
+                ) from e
+            if rpc_error.code() == grpc.StatusCode.UNAVAILABLE:
+                await self.connector.invalidate_sandboxd_transport(channel)
+            raise RuntimeError(
+                f"sandboxd ExecuteWithLimits failed ({rpc_error.code()}): {rpc_error.details()}"
+            ) from e
+        result = _bounded_execution_result(process_pb2, response)
         if span.is_recording():
             span.set_attribute("sandbox.exit_code", result.exit_code)
         return result

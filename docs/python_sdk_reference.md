@@ -288,6 +288,79 @@ Exit code of the command.
 
 True if the runtime killed the command for exceeding its time limit.
 
+<a id="k8s_agent_sandbox.models.ExecutionLimits"></a>
+
+### ExecutionLimits Objects
+
+```python
+class ExecutionLimits(BaseModel)
+```
+
+Execution budgets for commands.run_with_limits().
+
+Unset limits inherit sandboxd's deployment defaults or maxima. When a
+deployment leaves a limit unconfigured, that resource remains unlimited.
+Explicit limits must be positive and within the deployment maximum.
+
+<a id="k8s_agent_sandbox.models.ExecutionLimits.time_limit"></a>
+
+#### time\_limit
+
+Execution seconds, including launch and output collection, rounded to nanoseconds.
+
+<a id="k8s_agent_sandbox.models.ExecutionLimits.stdout_limit_bytes"></a>
+
+#### stdout\_limit\_bytes
+
+Maximum retained stdout prefix in bytes.
+
+<a id="k8s_agent_sandbox.models.ExecutionLimits.stderr_limit_bytes"></a>
+
+#### stderr\_limit\_bytes
+
+Maximum retained stderr prefix in bytes.
+
+<a id="k8s_agent_sandbox.models.BoundedExecutionResult"></a>
+
+### BoundedExecutionResult Objects
+
+```python
+class BoundedExecutionResult(ExecutionResult)
+```
+
+Outcome returned by commands.run_with_limits().
+
+stdout and stderr contain the retained prefixes, decoded as UTF-8 with
+replacement for invalid or incomplete characters. Byte limits apply before
+decoding, so re-encoding the text can exceed those limits.
+exit_code is sandboxd's actual result, including 128+signal for termination
+by signal. timed_out is true only for a server-reported execution time limit.
+Transport failures raise an exception instead of producing a result.
+
+<a id="k8s_agent_sandbox.models.BoundedExecutionResult.termination_reason"></a>
+
+#### termination\_reason
+
+"exited", "time_limit_exceeded", "unspecified", or a future enum value as a decimal string.
+
+<a id="k8s_agent_sandbox.models.BoundedExecutionResult.elapsed_duration"></a>
+
+#### elapsed\_duration
+
+Wall-clock seconds from launch preparation through termination and I/O cleanup.
+
+<a id="k8s_agent_sandbox.models.BoundedExecutionResult.stdout_truncated"></a>
+
+#### stdout\_truncated
+
+True when sandboxd discarded stdout beyond its byte limit.
+
+<a id="k8s_agent_sandbox.models.BoundedExecutionResult.stderr_truncated"></a>
+
+#### stderr\_truncated
+
+True when sandboxd discarded stderr beyond its byte limit.
+
 <a id="k8s_agent_sandbox.models.LegacyExecuteRequest"></a>
 
 ### LegacyExecuteRequest Objects
@@ -685,6 +758,12 @@ sandboxd REST filesystem port on the pod.
 
 sandboxd gRPC ProcessService port on the pod.
 
+<a id="k8s_agent_sandbox.models.SandboxdPodTunnelConnectionConfig.grpc_max_receive_message_bytes"></a>
+
+#### grpc\_max\_receive\_message\_bytes
+
+Fixed per-channel receive capacity; None preserves gRPC's 4 MiB default.
+
 <a id="k8s_agent_sandbox.models.SandboxdPodTunnelConnectionConfig.port_forward_ready_timeout"></a>
 
 #### port\_forward\_ready\_timeout
@@ -734,6 +813,12 @@ sandboxd REST port, not the router port.
 
 sandboxd gRPC port, not the router port.
 
+<a id="k8s_agent_sandbox.models.SandboxdRouterTunnelConnectionConfig.grpc_max_receive_message_bytes"></a>
+
+#### grpc\_max\_receive\_message\_bytes
+
+Fixed per-channel receive capacity; None preserves gRPC's 4 MiB default.
+
 <a id="k8s_agent_sandbox.models.SandboxdRouterTunnelConnectionConfig.router_namespace"></a>
 
 #### router\_namespace
@@ -773,6 +858,12 @@ listener to port 9090.
 #### auth\_token
 
 Optional bearer token for sandboxd REST and gRPC.
+
+<a id="k8s_agent_sandbox.models.SandboxdInClusterConnectionConfig.grpc_max_receive_message_bytes"></a>
+
+#### grpc\_max\_receive\_message\_bytes
+
+Fixed per-channel receive capacity; None preserves gRPC's 4 MiB default.
 
 <a id="k8s_agent_sandbox.models.SandboxInClusterConnectionConfig"></a>
 

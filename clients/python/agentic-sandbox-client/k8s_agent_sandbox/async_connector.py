@@ -641,6 +641,10 @@ class AsyncSandboxConnector:
                     self._grpc_channel_target = None
                     self._grpc_channel_pod_ip = None
                 metadata = dict(self._sandboxd_auth_headers)
+                channel_options: dict[str, Any] = {}
+                receive_capacity = getattr(self.connection_config, "grpc_max_receive_message_bytes", None)
+                if receive_capacity is not None:
+                    channel_options["options"] = [("grpc.max_receive_message_length", receive_capacity)]
                 if isinstance(self.connection_config, SandboxdRouterTunnelConnectionConfig):
                     metadata.update({
                         "x-sandbox-id": self.id,
@@ -650,12 +654,13 @@ class AsyncSandboxConnector:
                     if pod_ip:
                         metadata["x-sandbox-pod-ip"] = pod_ip
                 if not metadata:
-                    channel = grpc.aio.insecure_channel(self.grpc_target)
+                    channel = grpc.aio.insecure_channel(self.grpc_target, **channel_options)
                 else:
                     from ._grpc_auth import async_metadata_interceptors
 
                     channel = grpc.aio.insecure_channel(
-                        self.grpc_target, interceptors=async_metadata_interceptors(metadata)
+                        self.grpc_target, interceptors=async_metadata_interceptors(metadata),
+                        **channel_options,
                     )
                 self._grpc_channel = channel
                 self._grpc_channel_target = self.grpc_target

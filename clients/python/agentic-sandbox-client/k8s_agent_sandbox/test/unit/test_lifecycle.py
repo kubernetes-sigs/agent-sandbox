@@ -79,6 +79,7 @@ class TestOptionalClaimLifecycle(unittest.TestCase):
         cases = [
             ({}, {}),
             ({"ttl_seconds_after_finished": 0}, {"shutdownPolicy": "Delete", "ttlSecondsAfterFinished": 0}),
+            ({"ttl_seconds_after_finished": 2147483647}, {"shutdownPolicy": "Delete", "ttlSecondsAfterFinished": 2147483647}),
             ({"shutdown_policy": "Retain"}, {"shutdownPolicy": "Retain"}),
             ({"shutdown_policy": "DeleteForeground", "shutdown_after_seconds": 300},
              {"shutdownPolicy": "DeleteForeground", "shutdownTime": "2026-06-15T12:05:00Z"}),
@@ -93,7 +94,7 @@ class TestOptionalClaimLifecycle(unittest.TestCase):
                 construct_sandbox_claim_lifecycle_spec(shutdown_policy=policy)
 
     def test_invalid_ttl_seconds_after_finished(self):
-        for ttl in (-1, True, 1.5):
+        for ttl in (-1, True, 1.5, 2147483648):
             with self.subTest(ttl=ttl), self.assertRaisesRegex(ValueError, "ttl_seconds_after_finished"):
                 construct_sandbox_claim_lifecycle_spec(ttl_seconds_after_finished=ttl)
 

@@ -116,9 +116,9 @@ def construct_sandbox_claim_lifecycle_spec(
             )
         lifecycle["shutdownPolicy"] = shutdown_policy
     if ttl_seconds_after_finished is not None:
-        if type(ttl_seconds_after_finished) is not int or ttl_seconds_after_finished < 0:
+        if not (type(ttl_seconds_after_finished) is int and 0 <= ttl_seconds_after_finished <= 2147483647):
             raise ValueError(
-                f"ttl_seconds_after_finished must be a nonnegative integer, got {ttl_seconds_after_finished!r}"
+                f"ttl_seconds_after_finished must be a nonnegative 32-bit integer, got {ttl_seconds_after_finished!r}"
             )
         lifecycle["ttlSecondsAfterFinished"] = ttl_seconds_after_finished
     if shutdown_after_seconds is not None:

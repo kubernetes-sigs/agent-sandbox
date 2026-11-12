@@ -790,3 +790,18 @@ async def test_generated_rollback_with_known_uid_does_not_delete_a_replacement(s
             await invoke(client.create_sandbox, 'pool-a')
     assert len(await invoke(client.list_all_sandboxes)) == 1
     assert api.deletes == []
+
+
+@pytest.mark.asyncio
+async def test_ttl_seconds_after_finished_without_shutdown_time(sdk_client):
+    api, client, _ = sdk_client
+    span = MagicMock()
+    span.is_recording.return_value = True
+    with patch('k8s_agent_sandbox.trace_manager.trace.get_current_span', return_value=span), \
+            patch.object(api, 'create_namespaced_custom_object', wraps=api.create_namespaced_custom_object) as create:
+        await invoke(client.create_sandbox, 'pool-a', shutdown_policy='Retain', ttl_seconds_after_finished=60)
+    assert create.call_args.kwargs['body']['spec']['lifecycle'] == {
+        'shutdownPolicy': 'Retain', 'ttlSecondsAfterFinished': 60,
+    }
+    assert not any(call.args[0] == 'sandbox.lifecycle.shutdown_time'
+                   for call in span.set_attribute.call_args_list)

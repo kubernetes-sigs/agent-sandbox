@@ -115,6 +115,10 @@ def render_pod_spec(image: str, resources: ResourceSpec, options: EnvironmentOpt
         container["securityContext"] = {"runAsUser": 0, "runAsGroup": 0}
     spec: dict[str, Any] = {
         "automountServiceAccountToken": False,
+        # ``sleep`` as PID 1 ignores SIGTERM, so with the default grace period
+        # a deleted claim's pod holds its CPU and memory requests for 30 s.
+        # Nothing in the sandbox needs a graceful shutdown.
+        "terminationGracePeriodSeconds": 1,
         "containers": [container],
     }
     if options.run_as_root:

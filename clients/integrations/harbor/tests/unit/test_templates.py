@@ -47,6 +47,7 @@ def test_render_template_pod_spec_and_network():
     assert c["resources"] == {"requests": {"cpu": "1", "memory": "2048Mi", "ephemeral-storage": "10240Mi"},
                               "limits": {"cpu": "1", "memory": "2048Mi"}}
     assert pod["automountServiceAccountToken"] is False and pod["runtimeClassName"] == "gvisor"
+    assert pod["terminationGracePeriodSeconds"] == 1
     assert pod["nodeSelector"] == {"pool": "sb"} and pod["imagePullSecrets"] == [{"name": "ps"}]
     assert pod["tolerations"] == [{"key": "sandbox", "operator": "Exists"}]
     egress = t["spec"]["networkPolicy"]["egress"]

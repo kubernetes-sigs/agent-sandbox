@@ -31,14 +31,15 @@ import shlex
 import threading
 import time
 import uuid
-from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable
 
 import websocket
 from harbor.environments.base import ExecResult
 from kubernetes import client
 from kubernetes.client.rest import ApiException
-from kubernetes.stream import stream
+from kubernetes.stream import stream, ws_client
+
+_IgnoredIO = getattr(ws_client, "_IgnoredIO", None)
 
 # A command that outlives its in-sandbox ``timeout`` by this much is cut from
 # the client side too (the sandbox-side timeout is the normal path).
@@ -58,13 +59,18 @@ _now = time.monotonic
 
 
 _connect_wrapped = False
+# Set on a thread while this transport opens a stream, so the default connect
+# timeout applies to its sockets only and not to another user of
+# websocket-client in the same process.
+_connect_scope = threading.local()
 
 
 def ensure_connect_timeout(seconds: float = _CONNECT_TIMEOUT_S) -> None:
     """Give ``websocket.WebSocket.connect`` a default socket timeout.
 
-    Installed once per process. A caller that passes its own ``timeout`` to
-    ``connect`` or set one on the socket keeps it; only the "no timeout at
+    Installed once per process, and applied only to a socket this transport
+    opens (see ``_connect_scope``). A caller that passes its own ``timeout``
+    to ``connect`` or set one on the socket keeps it; only the "no timeout at
     all" case changes, and only to a deadline. The timeout also bounds a
     blocked read, which the exec loop never does: it reads after ``select``
     reports data.
@@ -76,7 +82,8 @@ def ensure_connect_timeout(seconds: float = _CONNECT_TIMEOUT_S) -> None:
 
     @functools.wraps(original)
     def connect(self: Any, url: str, **options: Any) -> Any:
-        if "timeout" not in options and getattr(self.sock_opt, "timeout", None) is None:
+        if (getattr(_connect_scope, "active", False) and "timeout" not in options
+                and getattr(self.sock_opt, "timeout", None) is None):
             options["timeout"] = seconds
         return original(self, url, **options)
 
@@ -127,10 +134,31 @@ def upload_command(target_dir: str, marker_path: str) -> str:
     return f"mkdir -p {target} && tar xf - -C {target} && : > {shlex.quote(marker_path)}"
 
 
-@dataclass
-class _Streams:
-    stdout: str = ""
-    stderr: str = ""
+class _Output:
+    """One output stream of a command, kept up to a cap.
+
+    Chunks past the cap are dropped while the stream is still drained, so the
+    command does not block on a full pipe and memory stays near the cap. The
+    chunks are joined once at the end; appending to a string per frame is
+    quadratic for a large output.
+    """
+
+    def __init__(self, cap: int):
+        self._cap = cap
+        self._parts: list[str] = []
+        self._size = 0
+
+    def add(self, chunk: str) -> None:
+        if self._cap and self._size > self._cap:
+            return
+        self._parts.append(chunk)
+        self._size += len(chunk)
+
+    def text(self) -> str:
+        text = "".join(self._parts)
+        if self._cap and len(text) > self._cap:
+            return text[: self._cap] + _TRUNCATED_MARK
+        return text
 
 
 class PodExecTransport:
@@ -167,14 +195,27 @@ class PodExecTransport:
 
     def _open(self, command: list[str], *, stdin: bool, binary: bool) -> Any:
         api = self._api_factory()
-        return stream(api.connect_get_namespaced_pod_exec, self.pod, self.namespace,
-                      command=command, container=self.container, stderr=True, stdin=stdin,
-                      stdout=True, tty=False, _preload_content=False, binary=binary)
-
-    def _cap(self, text: str) -> str:
-        if self._max_output and len(text) > self._max_output:
-            return text[: self._max_output] + _TRUNCATED_MARK
-        return text
+        _connect_scope.active = True
+        try:
+            resp = stream(api.connect_get_namespaced_pod_exec, self.pod, self.namespace,
+                          command=command, container=self.container, stderr=True, stdin=stdin,
+                          stdout=True, tty=False, _preload_content=False, binary=binary)
+        finally:
+            _connect_scope.active = False
+        # The client keeps a second copy of every frame for ``read_all``, which
+        # this transport never calls, and ``stream`` has no option to turn that
+        # off. Without this a large output or download is held twice.
+        if _IgnoredIO is not None and hasattr(resp, "_all"):
+            resp._all = _IgnoredIO()
+        # Newer clients make one ``update()`` consume every frame that is
+        # already available and append each to a string. A command that writes
+        # faster than the frames are read then never returns from ``update()``:
+        # the output cap cannot apply and the append is quadratic. Every loop
+        # here reads the channels after each ``update()`` until the stream
+        # closes, so one frame per call loses nothing.
+        if hasattr(resp, "_frames_immediately_available"):
+            resp._frames_immediately_available = lambda: False
+        return resp
 
     @staticmethod
     def _return_code(resp: Any) -> int:
@@ -201,13 +242,28 @@ class PodExecTransport:
         """Wait until the container accepts exec (it can lag the pod's Ready)."""
         deadline = _now() + timeout_s
         attempt = 0
+        last = "no exec slot was free"
+
+        def expired() -> TimeoutError:
+            return TimeoutError(f"container {self.container} of pod {self.pod} did not accept "
+                                f"exec within {timeout_s:.0f}s: {last}")
+
         while True:
+            # The probe takes a slot like any other call, so a burst of
+            # starting trials cannot fill the pool and starve an exec whose
+            # timeout is already running. The wait for the slot counts against
+            # the deadline; the probe itself is not cut short, because its
+            # thread would keep running after the slot was released.
+            remaining = deadline - _now()
+            if remaining <= 0:
+                raise expired()
+            if self._slots is not None:
+                try:
+                    await asyncio.wait_for(self._slots.acquire(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    raise expired() from None
             try:
-                # The probe takes a slot like any other call, so a burst of
-                # starting trials cannot fill the pool and starve an exec
-                # whose timeout is already running.
-                async with self._slot():
-                    await self._run(self._probe)
+                await self._run(self._probe)
                 return
             except ApiException as exc:
                 if exc.status == 404:
@@ -215,10 +271,12 @@ class PodExecTransport:
                 last = f"{exc.status} {exc.reason}"
             except Exception as exc:  # noqa: BLE001 - retried until the deadline
                 last = repr(exc)
+            finally:
+                if self._slots is not None:
+                    self._slots.release()
             attempt += 1
             if _now() >= deadline:
-                raise TimeoutError(f"container {self.container} of pod {self.pod} did not accept "
-                                   f"exec within {timeout_s:.0f}s: {last}")
+                raise expired()
             if attempt % 10 == 1:
                 self._logger.debug("exec not ready on %s (%s); retrying", self.pod, last)
             await asyncio.sleep(2)
@@ -228,7 +286,7 @@ class PodExecTransport:
         resp = self._open(command, stdin=False, binary=False)
         holder["resp"] = resp
         abandoned: threading.Event = holder["abandoned"]
-        out = _Streams()
+        stdout, stderr = _Output(self._max_output), _Output(self._max_output)
         try:
             # The caller sets ``abandoned`` when it stops waiting (timeout or
             # cancellation), so this thread returns to the pool within one
@@ -236,12 +294,12 @@ class PodExecTransport:
             while resp.is_open() and not abandoned.is_set():
                 resp.update(timeout=1)
                 if resp.peek_stdout():
-                    out.stdout += resp.read_stdout()
+                    stdout.add(resp.read_stdout())
                 if resp.peek_stderr():
-                    out.stderr += resp.read_stderr()
+                    stderr.add(resp.read_stderr())
         finally:
             resp.close()
-        return out.stdout, out.stderr, self._return_code(resp)
+        return stdout.text(), stderr.text(), self._return_code(resp)
 
     def _abandon(self, holder: dict[str, Any]) -> asyncio.Future[None]:
         """Stop the blocking call behind ``holder`` and close its stream.
@@ -286,7 +344,7 @@ class PodExecTransport:
                 raise
             except ApiException as exc:
                 raise self._translate(exc) from exc
-        return ExecResult(stdout=self._cap(stdout), stderr=self._cap(stderr), return_code=code)
+        return ExecResult(stdout=stdout, stderr=stderr, return_code=code)
 
     # --- files ----------------------------------------------------------------
     def _upload_blocking(self, data: bytes, target_dir: str,

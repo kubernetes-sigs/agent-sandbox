@@ -168,7 +168,7 @@ async def test_wait_ready_retries_then_succeeds(transport, monkeypatch):
 
 async def test_wait_ready_times_out_with_last_error(transport, monkeypatch):
     import k8s_agent_sandbox_harbor.transport.podexec as mod
-    clock = itertools.chain([0.0], itertools.repeat(100.0))
+    clock = itertools.chain([0.0, 0.0], itertools.repeat(100.0))   # start, first budget check
     monkeypatch.setattr(mod, "_now", lambda: next(clock))
 
     async def no_sleep(_):
@@ -359,6 +359,7 @@ async def test_cancelled_exec_closes_its_stream_and_frees_the_thread(monkeypatch
     """A cancelled call must give its thread back: with one exec thread, the
     next call runs instead of timing out behind the abandoned stream."""
     import asyncio
+    import threading
     import k8s_agent_sandbox_harbor.transport.podexec as mod
 
     class OpenResp(FakeResp):
@@ -368,14 +369,23 @@ async def test_cancelled_exec_closes_its_stream_and_frees_the_thread(monkeypatch
 
     hung = OpenResp()
     responses = [hung, FakeResp(stdout="next")]
-    monkeypatch.setattr(mod, "stream", lambda fn, pod, ns, **kw: responses.pop(0))
+    opened = threading.Event()
+
+    def fake_stream(fn, pod, ns, **kw):
+        resp = responses.pop(0)
+        opened.set()
+        return resp
+
+    monkeypatch.setattr(mod, "stream", fake_stream)
     ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     api = types.SimpleNamespace(connect_get_namespaced_pod_exec=object())
     t = PodExecTransport(api_factory=lambda: api, pod="p", namespace="ns", container="main",
                          executor=ex, slots=asyncio.Semaphore(1))
     try:
         task = asyncio.create_task(t.exec("sleep 300"))
-        await asyncio.sleep(0.2)                           # the call is inside the stream
+        # Cancel only once the first call holds the hung stream, so the second
+        # call cannot take it whatever the scheduling.
+        assert await asyncio.get_running_loop().run_in_executor(None, opened.wait, 5)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -405,10 +415,15 @@ def test_connect_gets_a_default_timeout_only_when_none_is_set(monkeypatch):
         def __init__(self, timeout=None):
             self.sock_opt = types.SimpleNamespace(timeout=timeout)
 
-    websocket.WebSocket.connect(Sock(), "wss://x")          # no timeout anywhere -> default
-    websocket.WebSocket.connect(Sock(), "wss://x", timeout=3)   # caller's wins
-    websocket.WebSocket.connect(Sock(timeout=5), "wss://x")     # socket's wins
-    assert [o.get("timeout") for o in seen] == [12, 3, None]
+    websocket.WebSocket.connect(Sock(), "wss://x")          # another library's socket: untouched
+    mod._connect_scope.active = True                        # as while the transport opens a stream
+    try:
+        websocket.WebSocket.connect(Sock(), "wss://x")          # no timeout anywhere -> default
+        websocket.WebSocket.connect(Sock(), "wss://x", timeout=3)   # caller's wins
+        websocket.WebSocket.connect(Sock(timeout=5), "wss://x")     # socket's wins
+    finally:
+        mod._connect_scope.active = False
+    assert [o.get("timeout") for o in seen] == [None, 12, 3, None]
     assert websocket.WebSocket.connect.__wrapped__ is fake_connect
 
 
@@ -430,4 +445,70 @@ async def test_wait_ready_probe_takes_a_slot(monkeypatch):
     slots.release()
     await asyncio.wait_for(task, timeout=5)
     assert probes == [1]
+    ex.shutdown(wait=True)
+
+
+async def test_wait_ready_counts_the_slot_wait_against_its_deadline(monkeypatch):
+    """A probe that cannot get a slot must fail at the deadline, not wait for
+    as long as another call holds the slot."""
+    import asyncio
+    import k8s_agent_sandbox_harbor.transport.podexec as mod
+
+    slots = asyncio.Semaphore(1)
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    probes: list[int] = []
+    monkeypatch.setattr(mod, "stream", lambda fn, pod, ns, **kw: (probes.append(1), FakeResp())[1])
+    api = types.SimpleNamespace(connect_get_namespaced_pod_exec=object())
+    t = PodExecTransport(api_factory=lambda: api, pod="p", namespace="ns", container="main",
+                         executor=ex, slots=slots)
+    await slots.acquire()                                  # held for the whole test
+    with pytest.raises(TimeoutError, match="no exec slot was free"):
+        await asyncio.wait_for(t.wait_ready(timeout_s=0.2), timeout=5)
+    assert probes == []
+    slots.release()
+    await asyncio.wait_for(t.wait_ready(timeout_s=5), timeout=5)   # the slot was not leaked
+    assert probes == [1]
+    ex.shutdown(wait=True)
+
+
+async def test_exec_stops_keeping_output_past_the_cap(monkeypatch):
+    """The cap bounds memory while the stream runs, not only the result."""
+    import k8s_agent_sandbox_harbor.transport.podexec as mod
+
+    class ChattyResp(FakeResp):
+        def __init__(self):
+            super().__init__()
+            self.left = 500
+            self._all = object()                           # the client's duplicate capture
+
+        def _frames_immediately_available(self):           # newer clients: drain all in one update
+            return True
+
+        def is_open(self):
+            return self.left > 0
+
+        def update(self, timeout=None):
+            self.left -= 1
+
+        def peek_stdout(self):
+            return True
+
+        def read_stdout(self):
+            return "x" * 10
+
+    resp = ChattyResp()
+    monkeypatch.setattr(mod, "stream", lambda fn, pod, ns, **kw: resp)
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    api = types.SimpleNamespace(connect_get_namespaced_pod_exec=object())
+    t = PodExecTransport(api_factory=lambda: api, pod="p", namespace="ns", container="main",
+                         executor=ex, max_output_bytes=16)
+    outputs: list = []
+    real = mod._Output
+    monkeypatch.setattr(mod, "_Output", lambda cap: (outputs.append(real(cap)), outputs[-1])[1])
+    r = await t.exec("yes")
+    assert r.stdout == "x" * 16 + mod._TRUNCATED_MARK
+    assert resp.left == 0                                  # drained to the end
+    assert outputs[0]._size <= 16 + 10                     # kept near the cap, not all 5000
+    assert isinstance(resp._all, mod._IgnoredIO)           # no second copy of each frame
+    assert resp._frames_immediately_available() is False   # one frame per update
     ex.shutdown(wait=True)

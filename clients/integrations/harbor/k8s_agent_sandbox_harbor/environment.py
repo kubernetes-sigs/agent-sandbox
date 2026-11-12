@@ -30,9 +30,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import json
 import logging
 import shlex
+import tarfile
 import time
 from pathlib import Path
 from typing import Any
@@ -65,12 +67,17 @@ def dockerfile_workdir(text: str) -> str | None:
 
     Relative WORKDIRs resolve against the previous one, as Docker does. A
     WORKDIR that uses a variable is not resolved and yields None, so the
-    image's own default applies.
+    image's own default applies. Each ``FROM`` starts a new stage, so only the
+    last stage's WORKDIR counts.
     """
     workdir: str | None = None
     for raw in text.splitlines():
         line = raw.strip()
-        if not line.upper().startswith("WORKDIR"):
+        instruction = line.split(maxsplit=1)[0].upper() if line else ""
+        if instruction == "FROM":
+            workdir = None
+            continue
+        if instruction != "WORKDIR":
             continue
         value = line[len("WORKDIR"):].strip().strip('"').strip("'")
         if not value or "$" in value:
@@ -322,7 +329,8 @@ class AgentSandboxEnvironment(BaseEnvironment):
                 raise
             except Exception as exc:  # noqa: BLE001 - retried, then reported
                 last = exc
-                await asyncio.sleep(2 * (attempt + 1))
+                if attempt + 1 < _TERMINATE_ATTEMPTS:
+                    await asyncio.sleep(2 * (attempt + 1))
         self.logger.error("could not delete claim %s after %d attempts: %s "
                           "(the claim's shutdown time still bounds it)",
                           self.claim_name, _TERMINATE_ATTEMPTS, last)
@@ -368,8 +376,6 @@ class AgentSandboxEnvironment(BaseEnvironment):
         data = await self._require_transport().download_tar(source_dir or "/", single=name)
         target = Path(target_path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        import io
-        import tarfile
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tar:
             member = next((m for m in tar.getmembers() if m.isfile()), None)
             if member is None:

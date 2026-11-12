@@ -58,11 +58,11 @@ def object_name(prefix: str, *key_parts: str) -> str:
     """A DNS-1123 object name: ``prefix`` plus a short hash of ``key_parts``.
 
     The prefix is lower-cased and reduced to ``[a-z0-9-]`` so a caller-supplied
-    prefix cannot produce an invalid name.
+    prefix cannot produce an invalid name. A long prefix is cut, never the
+    hash: the hash is what keeps two objects apart.
     """
-    clean = _NAME_UNSAFE.sub("-", prefix.lower()).strip("-")
-    name = f"{clean}-{short_hash(*key_parts)}" if clean else short_hash(*key_parts)
-    return name[:_LABEL_MAX].rstrip("-")
+    clean = _NAME_UNSAFE.sub("-", prefix.lower())[:_LABEL_MAX - _HASH_LEN - 1].strip("-")
+    return f"{clean}-{short_hash(*key_parts)}" if clean else short_hash(*key_parts)
 
 
 def label_value(raw: str) -> str:

@@ -34,3 +34,6 @@ def test_object_name_is_dns_safe_and_stable():
     assert name == "hb-" + short_hash("alexgshaw/x:1", "{}") and len(name) <= 63
     assert object_name("Hb_Prefix!", "k") .startswith("hb-prefix-")
     assert object_name("", "k") == short_hash("k")
+    # A long prefix is cut; the hash that tells two objects apart is kept whole.
+    a, b = object_name("p" * 80, "image-a"), object_name("p" * 80, "image-b")
+    assert len(a) == 63 and a.endswith(short_hash("image-a")) and a != b

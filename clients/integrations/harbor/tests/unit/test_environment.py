@@ -143,8 +143,10 @@ async def test_stop_without_delete_keeps_the_claim(task_dir, trial_paths, env_co
 async def test_stop_retries_a_failed_terminate(task_dir, trial_paths, env_config, fake_clients, monkeypatch):
     import k8s_agent_sandbox_harbor.environment as mod
 
-    async def no_sleep(_):
-        return None
+    sleeps: list[float] = []
+
+    async def no_sleep(seconds):
+        sleeps.append(seconds)
 
     monkeypatch.setattr(mod.asyncio, "sleep", no_sleep)
     env = make_env(task_dir, trial_paths, env_config)
@@ -152,7 +154,25 @@ async def test_stop_retries_a_failed_terminate(task_dir, trial_paths, env_config
     sb = fake_clients["sandbox_client"].sandboxes[0]
     sb._fail = 2
     await env.stop(delete=True)
-    assert sb.terminated == 1
+    assert sb.terminated == 1 and sleeps == [2, 4]
+
+
+async def test_stop_does_not_sleep_after_the_last_failed_terminate(task_dir, trial_paths, env_config,
+                                                                   fake_clients, monkeypatch):
+    import k8s_agent_sandbox_harbor.environment as mod
+
+    sleeps: list[float] = []
+
+    async def no_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(mod.asyncio, "sleep", no_sleep)
+    env = make_env(task_dir, trial_paths, env_config)
+    await env.start(force_build=False)
+    sb = fake_clients["sandbox_client"].sandboxes[0]
+    sb._fail = 3
+    await env.stop(delete=True)
+    assert sb.terminated == 0 and sleeps == [2, 4]            # nothing follows the third attempt
 
 
 async def test_prebuilt_task_without_dockerfile_uploads_environment_dir(task_dir, trial_paths,
@@ -192,6 +212,9 @@ def test_dockerfile_workdir_parsing():
     assert dockerfile_workdir("FROM x\nWORKDIR /app\nworkdir src\n") == "/app/src"
     assert dockerfile_workdir("FROM x\nWORKDIR $HOME/app\n") is None
     assert dockerfile_workdir("FROM x\nRUN true\n") is None
+    # A build stage's WORKDIR does not carry into the final stage.
+    assert dockerfile_workdir("FROM a AS build\nWORKDIR /src\nFROM b\nCOPY --from=build /src/x /x\n") is None
+    assert dockerfile_workdir("FROM a AS build\nWORKDIR /src\nfrom b\nWORKDIR /app\n") == "/app"
 
 
 class _Groups:

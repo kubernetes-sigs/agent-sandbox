@@ -299,6 +299,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 
 		waitErr = cmd.Wait()
 		waitForReaders(&streamWg, func() { closeAll(stdoutR, stderrR) })
+		closeAll(stdoutR, stderrR)
 	}
 
 	exitCode := int32(0)

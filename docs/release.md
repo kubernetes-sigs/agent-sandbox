@@ -9,7 +9,7 @@ The project uses Google Artifact Registry (GAR) for container image storage and 
 ### Registries
 
 -   **Staging Registry**: `us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox`.
-    This is where all intermediate and development images are pushed as postsubmits. See [post-agent-sandbox-push-images job history](https://prow.k8s.io/job-history/gs/kubernetes-ci-logs/logs/post-agent-sandbox-push-images).
+    This is where all intermediate and development images are pushed as postsubmits. See [post-agent-sandbox-push-images job history](https://prow.k8s.io/job-history/gs/kubernetes-ci-logs/logs/post-agent-sandbox-push-images). The Helm chart is also packaged and pushed here as an OCI artifact at `oci://us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/charts/agent-sandbox` on the same postsubmit, via `cloudbuild.yaml`.
 -   **Production Registry**: `registry.k8s.io/agent-sandbox`.
     Official releases are served from this registry.
 

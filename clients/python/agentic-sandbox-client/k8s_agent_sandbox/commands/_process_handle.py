@@ -235,9 +235,7 @@ class ProcessHandle:
                 rpc_error, rpc_error.code(), self.process_id) from e
 
     def close(self) -> None:
-        """Cancel the underlying stream if it is still open."""
-        if self._finished:
-            return
+        """Cancel the RPC, including a wait for trailers after Exit."""
         try:
             self._stream.cancel()
         except Exception:
@@ -326,9 +324,7 @@ class AsyncProcessHandle:
             raise _signal_error(e, e.code(), self.process_id) from e
 
     async def close(self) -> None:
-        """Cancel the underlying stream if it is still open."""
-        if self._finished:
-            return
+        """Cancel the RPC, including a wait for trailers after Exit."""
         try:
             self._stream.cancel()
         except Exception:

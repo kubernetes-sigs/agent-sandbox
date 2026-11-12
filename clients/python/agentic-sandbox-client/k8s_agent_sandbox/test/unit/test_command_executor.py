@@ -19,6 +19,8 @@ import signal as sig
 import threading
 import sys
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -521,6 +523,34 @@ class _FakeStream:
         self.cancelled = True
 
 
+@contextmanager
+def _pending_process_trailers(pb2, pb2_grpc, invalid_after_exit):
+    """Keep a real Start RPC open after Exit until the client cancels it."""
+    import grpc
+
+    ended = threading.Event()
+
+    class Service(pb2_grpc.ProcessServiceServicer):
+        def Start(self, request, context):
+            context.add_callback(ended.set)
+            yield _make_start_response(pb2, init=42)
+            yield _make_start_response(pb2, exit_code=0)
+            if invalid_after_exit:
+                yield _make_start_response(pb2, stdout=b"late")
+            ended.wait(5)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        server = grpc.server(pool)
+        pb2_grpc.add_ProcessServiceServicer_to_server(Service(), server)
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        try:
+            yield f"127.0.0.1:{port}", ended
+        finally:
+            server.stop(0).wait(5)
+            ended.set()
+
+
 class TestProcessHandleSync(unittest.TestCase):
     """Exercise the streaming ProcessHandle using in-memory fakes.
 
@@ -739,6 +769,31 @@ class TestProcessHandleSync(unittest.TestCase):
         with executor.start("noop"):
             pass  # no exit event seen, so __exit__ must cancel
         self.assertTrue(stream.cancelled)
+
+    def test_context_manager_cancels_after_exit_before_trailers(self):
+        import grpc
+
+        for invalid in (False, True):
+            with self.subTest(invalid_after_exit=invalid):
+                with _pending_process_trailers(
+                        self.pb2, self.pb2_grpc, invalid) as (target, ended):
+                    with grpc.insecure_channel(target) as channel:
+                        connector = MagicMock()
+                        connector.is_sandboxd.return_value = True
+                        connector.grpc_channel.return_value = channel
+                        executor = CommandExecutor(
+                            connector, MagicMock(), "sandbox-client")
+                        expected = self.assertRaisesRegex(
+                            RuntimeError, "event arrived after Exit"
+                        ) if invalid else nullcontext()
+                        with expected:
+                            with executor.start("noop", timeout=2) as handle:
+                                for event in handle.events():
+                                    if event.type == "exit" and not invalid:
+                                        break
+                        self.assertTrue(
+                            ended.wait(1), "Start stayed open after context exit")
+                        handle.close()
 
 
 class _StalledStream:
@@ -998,6 +1053,33 @@ class TestAsyncProcessHandle(unittest.IsolatedAsyncioTestCase):
         async with await executor.start("noop"):
             pass  # no exit event seen, so __aexit__ must cancel
         self.assertTrue(stream.cancelled)
+
+    async def test_context_manager_cancels_after_exit_before_trailers(self):
+        import grpc
+
+        for invalid in (False, True):
+            with self.subTest(invalid_after_exit=invalid):
+                with _pending_process_trailers(
+                        self.pb2, self.pb2_grpc, invalid) as (target, ended):
+                    async with grpc.aio.insecure_channel(target) as channel:
+                        connector = MagicMock()
+                        connector.is_sandboxd.return_value = True
+                        connector.connect = AsyncMock()
+                        connector.grpc_channel = AsyncMock(return_value=channel)
+                        executor = AsyncCommandExecutor(
+                            connector, MagicMock(), "sandbox-client")
+                        expected = self.assertRaisesRegex(
+                            RuntimeError, "event arrived after Exit"
+                        ) if invalid else nullcontext()
+                        with expected:
+                            async with await executor.start("noop", timeout=2) as handle:
+                                async for event in handle.events():
+                                    if event.type == "exit" and not invalid:
+                                        break
+                        self.assertTrue(
+                            await asyncio.to_thread(ended.wait, 1),
+                            "Start stayed open after context exit")
+                        await handle.close()
 
 
 if __name__ == "__main__":

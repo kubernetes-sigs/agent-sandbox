@@ -204,6 +204,30 @@ class TestSandboxdFilesystem(unittest.TestCase):
         self.assertEqual(entries[0].mode, "0644")
         self.assertEqual(entries[1].type, "directory")
 
+    def test_list_recursive_sends_query(self):
+        resp = MagicMock()
+        resp.json.return_value = {"path": "/notes", "entries": []}
+        self._connector.send_request.return_value = resp
+        for kwargs, endpoint in (
+            ({}, "v1/files/notes"),
+            ({"recursive": True}, "v1/files/notes?recursive=true"),
+            ({"recursive": True, "max_depth": 2},
+             "v1/files/notes?recursive=true&max_depth=2"),
+            # max_depth has no effect without recursive.
+            ({"max_depth": 2}, "v1/files/notes"),
+        ):
+            with self.subTest(kwargs=kwargs):
+                self._fs.list("notes", **kwargs)
+                args, _ = self._last_call()
+                self.assertEqual(args[:2], ("GET", endpoint))
+
+    def test_list_rejects_invalid_max_depth(self):
+        for depth in (0, -1, True, "2"):
+            with self.subTest(depth=depth), self.assertRaisesRegex(
+                    ValueError, "max_depth"):
+                self._fs.list("notes", recursive=True, max_depth=depth)
+        self._connector.send_request.assert_not_called()
+
     def test_exists_true_on_head_ok(self):
         resp = MagicMock()
         resp.status_code = 200
@@ -282,6 +306,45 @@ class TestSandboxdFilesystem(unittest.TestCase):
                 call()
         self._connector.send_request.assert_not_called()
 
+    def test_extract_sends_tar_body(self):
+        self._fs.extract("src dir", b"tar-bytes")
+        args, kwargs = self._last_call()
+        self.assertEqual(args[:2], ("PUT", "v1/files/src%20dir?extract=tar"))
+        self.assertEqual(kwargs["data"], b"tar-bytes")
+        self.assertFalse(kwargs["_disable_retries"])
+
+    def test_extract_streams_file_object_without_retries(self):
+        self._fs.extract("src", io.BytesIO(b"tar-bytes"))
+        _, kwargs = self._last_call()
+        self.assertEqual(b"".join(kwargs["data"]), b"tar-bytes")
+        self.assertTrue(kwargs["_disable_retries"])
+
+    def test_extract_accepts_the_sandbox_root(self):
+        for path in (".", "/"):
+            with self.subTest(path=path):
+                self._fs.extract(path, b"tar-bytes")
+                args, _ = self._last_call()
+                self.assertEqual(args[:2], ("PUT", "v1/files/?extract=tar"))
+
+    def test_other_ops_reject_the_sandbox_root(self):
+        for call in (
+            lambda: self._fs.mkdir("/"),
+            lambda: self._fs.move(".", "b"),
+            lambda: self._fs.copy("/", "b"),
+        ):
+            with self.subTest(), self.assertRaisesRegex(ValueError, "sandbox root"):
+                call()
+        self._connector.send_request.assert_not_called()
+
+    def test_extract_rejects_bad_arguments(self):
+        for call, error in (
+            (lambda: self._fs.extract("", b"x"), ValueError),
+            (lambda: self._fs.extract("src", io.StringIO("x")), TypeError),
+        ):
+            with self.subTest(), self.assertRaises(error):
+                call()
+        self._connector.send_request.assert_not_called()
+
 
 class TestLegacyFileOpsUnsupported(unittest.TestCase):
     def test_sandboxd_only_ops_raise_on_legacy(self):
@@ -293,11 +356,20 @@ class TestLegacyFileOpsUnsupported(unittest.TestCase):
             lambda: fs.mkdir("d"),
             lambda: fs.move("a", "b"),
             lambda: fs.copy("a", "b"),
+            lambda: fs.extract("d", b"x"),
             lambda: fs.write("a", b"x", append=True),
             lambda: fs.write("a", b"x", create_only=True),
         ):
             with self.subTest(), self.assertRaises(NotImplementedError):
                 call()
+        connector.send_request.assert_not_called()
+
+    def test_recursive_list_raises_on_legacy(self):
+        connector = MagicMock()
+        connector.is_sandboxd.return_value = False
+        fs = Filesystem(connector, MagicMock(), trace_service_name="test")
+        with self.assertRaises(NotImplementedError):
+            fs.list("d", recursive=True)
         connector.send_request.assert_not_called()
 
 

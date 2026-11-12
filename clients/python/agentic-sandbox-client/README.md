@@ -325,12 +325,18 @@ written = await sandbox.files.read_to(
 On the sandboxd runtime, `files.mkdir(path, parents=False)`,
 `files.move(source, destination, overwrite=False)` and
 `files.copy(source, destination, overwrite=False)` create, rename and copy
-paths. The legacy runtime raises `NotImplementedError`.
+paths. `files.list(path, recursive=True, max_depth=2)` includes nested entries,
+named relative to `path`. The legacy runtime raises `NotImplementedError` for
+all of these.
 
 `files.write(path, content, append=True)` adds to the end of a file, and
 `create_only=True` fails with a 412 `SandboxRequestError` if the path exists.
 Neither is retried, and an append is not atomic. The legacy runtime raises
 `NotImplementedError`.
+
+`files.extract(path, archive)` unpacks a tar archive, optionally gzipped, into
+a directory, or the sandbox root for `/`. `archive` is `bytes` or a binary file
+object. The legacy runtime raises `NotImplementedError`.
 
 ### 6. Async Client
 

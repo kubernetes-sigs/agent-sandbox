@@ -180,11 +180,13 @@ def _sandboxd_op_endpoint(
     path: str,
     action: str = "",
     query: Mapping[str, str] | None = None,
+    allow_root: bool = False,
 ) -> str:
     """Return the endpoint for a sandboxd-only file operation.
 
     Raises NotImplementedError on the legacy runtime, which has none of these
-    endpoints, and ValueError for an empty path.
+    endpoints, and ValueError for an empty path or, unless ``allow_root`` is
+    set, one that names the sandbox root.
     """
     if not connector.is_sandboxd():
         raise NotImplementedError(
@@ -194,7 +196,7 @@ def _sandboxd_op_endpoint(
     if path == "":
         raise ValueError(f"{op}: path must not be empty")
     endpoint = _sandboxd_files_endpoint(path)
-    if endpoint == "v1/files/":
+    if endpoint == "v1/files/" and not allow_root:
         raise ValueError(f"{op}: path {path!r} names the sandbox root")
     endpoint += action
     if query:
@@ -231,6 +233,34 @@ def _check_write_options(
         )
 
 
+def _list_endpoint(
+    connector: _RuntimeProbe, path: str, recursive: bool, max_depth: int | None
+) -> str:
+    """Return the sandboxd endpoint for a directory listing.
+
+    Raises NotImplementedError when ``recursive`` is set on the legacy
+    runtime, and ValueError when ``max_depth`` is not a positive integer.
+    """
+    if max_depth is not None and (
+        isinstance(max_depth, bool) or not isinstance(max_depth, int) or max_depth < 1
+    ):
+        raise ValueError(f"list: max_depth must be a positive integer, got {max_depth!r}")
+    if recursive and not connector.is_sandboxd():
+        raise NotImplementedError(
+            "recursive listing is only supported by the sandboxd runtime; the "
+            "legacy python-runtime lists a single directory level"
+        )
+    endpoint = _sandboxd_files_endpoint(path)
+    query = {}
+    if recursive:
+        query["recursive"] = "true"
+        if max_depth is not None:
+            query["max_depth"] = str(max_depth)
+    if query:
+        endpoint += "?" + urllib.parse.urlencode(query)
+    return endpoint
+
+
 def _mkdir_endpoint(connector: _RuntimeProbe, path: str, parents: bool) -> str:
     """Return the endpoint for a sandboxd directory creation."""
     query = {"type": "directory"}
@@ -255,6 +285,26 @@ def _transfer_endpoint(
     # The encoded path has no literal colon, so sandboxd splits the action
     # off at the last one.
     return _sandboxd_op_endpoint(connector, op, source, f":{op}", query)
+
+
+def _extract_endpoint(connector: _RuntimeProbe, path: str) -> str:
+    """Return the endpoint for a sandboxd tar extraction.
+
+    The path may name the sandbox root.
+    """
+    return _sandboxd_op_endpoint(
+        connector, "extract", path, query={"extract": "tar"}, allow_root=True)
+
+
+def _coerce_binary(
+    content: bytes | bytearray | memoryview | BinaryIO,
+) -> bytes | BinaryIO:
+    """Return binary content as bytes or a validated binary stream."""
+    if isinstance(content, (bytearray, memoryview)):
+        return bytes(content)
+    if not isinstance(content, bytes):
+        _validate_binary_stream(content)
+    return content
 
 
 class Filesystem:
@@ -299,10 +349,8 @@ class Filesystem:
         _check_write_options(self.connector, append, create_only)
         if isinstance(content, str):
             content = content.encode("utf-8")
-        elif isinstance(content, (bytearray, memoryview)):
-            content = bytes(content)
-        elif not isinstance(content, bytes):
-            _validate_binary_stream(content)
+        else:
+            content = _coerce_binary(content)
 
         span = trace.get_current_span()
         if span.is_recording():
@@ -520,16 +568,30 @@ class Filesystem:
         return total
 
     @trace_span("list")
-    def list(self, path: str, timeout: int = 60) -> List[FileEntry]:
-        """List files and directories at a sandbox-relative path."""
+    def list(
+        self,
+        path: str,
+        timeout: int = 60,
+        recursive: bool = False,
+        max_depth: int | None = None,
+    ) -> List[FileEntry]:
+        """List files and directories at a sandbox-relative path.
+
+        With ``recursive=True`` the listing includes nested entries, and entry
+        names are paths relative to ``path``. ``max_depth`` limits how many
+        levels it descends, where 1 lists only the directory's own entries.
+        ``recursive=True`` needs the sandboxd runtime; the legacy python-runtime
+        raises NotImplementedError.
+        """
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
         encoded_path = urllib.parse.quote(path, safe='')
+        endpoint = _list_endpoint(self.connector, path, recursive, max_depth)
 
         if self.connector.is_sandboxd():
             response = self.connector.send_request(
-                "GET", _sandboxd_files_endpoint(path), timeout=timeout)
+                "GET", endpoint, timeout=timeout)
             try:
                 listing = response.json()
             except ValueError as e:
@@ -662,3 +724,34 @@ class Filesystem:
             self.connector, "copy", source, destination, overwrite)
         self.connector.send_request("POST", endpoint, timeout=timeout)
         logger.info(f"Path '{source}' copied to '{destination}'.")
+
+    @trace_span("extract")
+    def extract(
+        self, path: str, archive: bytes | BinaryIO, timeout: int = 60
+    ) -> None:
+        """Unpack a tar archive, optionally gzipped, into a directory.
+
+        sandboxd runtime only. ``path`` may be ``/`` for the sandbox root.
+        Missing directories are created. The unpack is not atomic, so a
+        failure leaves the entries written so far. Binary file objects are
+        streamed once without retries. The legacy python-runtime raises
+        NotImplementedError.
+        """
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", path)
+        endpoint = _extract_endpoint(self.connector, path)
+        archive = _coerce_binary(archive)
+        data: bytes | Iterator[bytes]
+        if isinstance(archive, bytes):
+            data = archive
+        else:
+            data = _iter_binary_chunks(archive)
+        self.connector.send_request(
+            "PUT", endpoint,
+            data=data,
+            headers={"Content-Type": "application/octet-stream"},
+            timeout=timeout,
+            _disable_retries=not isinstance(archive, bytes),
+        )
+        logger.info(f"Archive extracted into '{path}'.")

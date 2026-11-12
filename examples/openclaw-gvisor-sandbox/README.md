@@ -15,7 +15,7 @@ persistent workspace PVC. Ships access flows for both kind (NodePort) and GKE (L
   - `kind-service.yaml` — `NodePort` on `30789`, paired with the kind port mapping below.
   - `gke-service.yaml` — `LoadBalancer`, GKE provisions an external IP.
 - `run-test-kind.sh` that applies everything, verifies the gateway via NodePort,
-  and asserts the PVC survives a pod restart.
+  checks that it rejects the warm-pool spare's token, and asserts the PVC survives a pod restart.
 
 ## Prerequisites
 
@@ -56,14 +56,15 @@ For kind, the easiest path is the end-to-end test script:
 
 It pulls the image, loads it into kind, applies the manifests, waits for the
 claim's pod to become ready, checks the gateway via `http://127.0.0.1:30789`,
-and runs the PVC persistence test.
+checks gateway token isolation, and runs the PVC persistence test. If your CNI
+enforces NetworkPolicy on NodePort traffic, allow ingress from the test host to
+the claimed Pod on TCP port 18789 for the duration of the test.
 
 ### Apply manually
 
 ```bash
-TOKEN="$(openssl rand -hex 32)"
 kubectl apply -f openclaw-config.yaml
-sed "s/dummy-token-for-sandbox/${TOKEN}/g" openclaw-template.yaml | kubectl apply -f -
+kubectl apply -f openclaw-template.yaml
 kubectl apply -f openclaw-warmpool.yaml
 kubectl apply -f openclaw-claim.yaml
 kubectl apply -f kind-service.yaml          # or gke-service.yaml on GKE
@@ -153,17 +154,23 @@ Then browse to `http://localhost:18789`. Common failure modes:
 
 ## Retrieve the gateway token
 
-Whichever access path you took, the UI will prompt for a token. The value is
-the random string `sed` injected into the template's `OPENCLAW_GATEWAY_TOKEN`
-env var at apply time. Pull it back out of the running pod:
+On first startup, each OpenClaw gateway generates a random token and saves it
+in its Pod's writable config. Once the gateway is ready, retrieve the token
+from the Pod belonging to your claim:
 
 ```bash
 SANDBOX_NAME=$(kubectl get sandboxclaim openclaw-sandbox-claim -o jsonpath='{.status.sandbox.name}')
 POD="$SANDBOX_NAME"
-kubectl exec "$POD" -- printenv OPENCLAW_GATEWAY_TOKEN
+kubectl exec "$POD" -c openclaw -- node -p 'require(process.env.OPENCLAW_CONFIG_PATH).gateway.auth.token'
 ```
 
-Copy the printed value into the UI's token form.
+Copy the printed value into the UI's token form. If the controller replaces the
+Pod, retrieve its new token. The workspace and browser pairing stay on the PVC.
+
+Existing claims and warm-pool spares keep their original Pod spec. When upgrading
+from the shared-token template, back up any workspace data, then recreate the
+claim, warm pool, and template using the updated manifests. Deleting the claim
+in this example also deletes its PVC.
 
 ## Browser pairing / device authorization
 
@@ -248,21 +255,13 @@ kubectl delete -f openclaw-template.yaml
 4. Redeploy with the updated template:
 
 ```bash
-TOKEN="$(openssl rand -hex 32)"
-sed "s/dummy-token-for-sandbox/${TOKEN}/g" openclaw-template.yaml | kubectl apply -f -
+kubectl apply -f openclaw-template.yaml
 kubectl apply -f openclaw-warmpool.yaml
 kubectl apply -f openclaw-claim.yaml
 ```
 
-5. Wait for the new pod, retrieve the new gateway token, and re-pair your
-   browser using the "Browser pairing / device authorization" section above:
-
-```bash
-SANDBOX_NAME=$(kubectl get sandboxclaim openclaw-sandbox-claim -o jsonpath='{.status.sandbox.name}')
-POD="$SANDBOX_NAME"
-kubectl wait --for=condition=ready pod/"$POD" --timeout=180s
-kubectl exec "$POD" -- printenv OPENCLAW_GATEWAY_TOKEN
-```
+5. Once the gateway is ready, [retrieve the new token](#retrieve-the-gateway-token)
+   and [pair your browser](#browser-pairing--device-authorization) again.
 
 To inject multiple provider keys at once, use `envFrom` instead:
 

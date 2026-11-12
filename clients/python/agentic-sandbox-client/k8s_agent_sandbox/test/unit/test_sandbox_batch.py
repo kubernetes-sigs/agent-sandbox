@@ -6026,5 +6026,99 @@ class TestHandleLookupAndPoolScopedWakeups(BaseBatchClientTest):
         self.assertFalse(waiter_b.is_set())
 
 
+class TestParallelPrecheck(BaseClaimBatchTest):
+
+    def test_claim_batch_prechecks_multiple_pools_concurrently(self):
+        helper = self.cluster.helper
+        in_flight = 0
+        peak_in_flight = 0
+        lock = threading.Lock()
+        sleep_s = 0.04
+
+        def get_warmpool(name, *args, **kwargs):
+            nonlocal in_flight, peak_in_flight
+            with lock:
+                in_flight += 1
+                peak_in_flight = max(peak_in_flight, in_flight)
+            try:
+                time.sleep(sleep_s)
+                tmpl = "shared-tmpl" if int(name.split("-")[-1]) % 2 == 0 else f"tmpl-{name}"
+                return {"spec": {"sandboxTemplateRef": {"name": tmpl}}, "status": {"readyReplicas": 3}}
+            finally:
+                with lock:
+                    in_flight -= 1
+
+        def get_template(name, *args, **kwargs):
+            nonlocal in_flight, peak_in_flight
+            with lock:
+                in_flight += 1
+                peak_in_flight = max(peak_in_flight, in_flight)
+            try:
+                time.sleep(sleep_s)
+                return {"metadata": {"name": name}}
+            finally:
+                with lock:
+                    in_flight -= 1
+
+        helper.get_sandbox_warmpool.side_effect = get_warmpool
+        helper.get_sandbox_template.side_effect = get_template
+        groups = [BatchGroup(warmpool=f"pool-{i}", size=0) for i in range(12)]
+        batch = self.claim(groups, max_in_flight=6)
+        self.assertGreater(peak_in_flight, 1)
+        self.assertLessEqual(peak_in_flight, 6)
+        self.assertEqual(helper.get_sandbox_warmpool.call_count, 12)
+        # 7 distinct templates, which pools sharing one may each fetch while none has checked it yet.
+        template_reads = helper.get_sandbox_template.call_count
+        self.assertGreaterEqual(template_reads, 7)
+        self.assertLessEqual(template_reads, 12)
+
+        # Subsequent acquire() on prechecked pools performs 0 additional GETs.
+        m = batch.acquire("pool-5", timeout=5)
+        self.assertEqual(m.warmpool, "pool-5")
+        self.assertEqual(helper.get_sandbox_warmpool.call_count, 12)
+        self.assertEqual(helper.get_sandbox_template.call_count, template_reads)
+
+    def test_claim_batch_parallel_precheck_preserves_input_order_errors(self):
+        helper = self.cluster.helper
+        helper.get_sandbox_warmpool.side_effect = lambda name, *a, **kw: (
+            None if name == "pool-0" else {"spec": {"sandboxTemplateRef": {"name": "tmpl-1"}}}
+        )
+        with self.assertRaises(SandboxWarmPoolNotFoundError):
+            self.claim(
+                [BatchGroup(warmpool="pool-0", size=0), BatchGroup(warmpool="pool-1", size=0)],
+                max_in_flight=4,
+            )
+
+        helper.get_sandbox_warmpool.side_effect = lambda name, *a, **kw: (
+            {"spec": {"sandboxTemplateRef": {"name": "missing-tmpl"}}}
+            if name == "pool-0"
+            else None
+        )
+        helper.get_sandbox_template.return_value = None
+        with self.assertRaises(SandboxTemplateNotFoundError):
+            self.claim(
+                [BatchGroup(warmpool="pool-0", size=0), BatchGroup(warmpool="pool-1", size=0)],
+                max_in_flight=4,
+            )
+
+    def test_parallel_precheck_skips_a_template_another_pool_already_checked(self):
+        helper = self.cluster.helper
+        pool_2_started = threading.Event()
+
+        def get_warmpool(name, *args, **kwargs):
+            # pool-2 gets a slot only once pool-0's check, template included, has finished, and pool-1
+            # waits for pool-2, so both find the shared template already checked.
+            if name == "pool-1":
+                self.assertTrue(pool_2_started.wait(5))
+            elif name == "pool-2":
+                pool_2_started.set()
+            return {"spec": {"sandboxTemplateRef": {"name": "shared-tmpl"}}}
+
+        helper.get_sandbox_warmpool.side_effect = get_warmpool
+        self.claim([BatchGroup(warmpool=f"pool-{i}", size=0) for i in range(3)], max_in_flight=2)
+        self.assertEqual(helper.get_sandbox_warmpool.call_count, 3)
+        self.assertEqual(helper.get_sandbox_template.call_count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

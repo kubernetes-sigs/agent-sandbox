@@ -308,7 +308,12 @@ class AsyncSandboxBatch:
         """Create a batch: precheck, create its Lease, start the watch, then create claims in the background."""
         helper = client.k8s_helper
         timeout = batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS
-        ready = await _precheck_pools(helper, [g.warmpool for g in args.groups], namespace)
+        ready = await _precheck_pools(
+            helper,
+            [g.warmpool for g in args.groups],
+            namespace,
+            max_concurrency=args.max_in_flight,
+        )
 
         size = sum(g.size for g in args.groups)
         # One shutdownTime for the whole fill. Quorum can come as late as quorum_timeout after the
@@ -2426,6 +2431,8 @@ async def _precheck_pools(
     warmpools: Iterable[str],
     namespace: str,
     timeout: int | float | Callable[[], Awaitable[float]] = batch_utils.BATCH_REQUEST_TIMEOUT_SECONDS,
+    *,
+    max_concurrency: int = 1,
 ) -> dict[str, int]:
     """Checks that each warm pool and the SandboxTemplate it references exist, and returns each
     pool's Ready replica count.
@@ -2434,33 +2441,47 @@ async def _precheck_pools(
         SandboxWarmPoolNotFoundError: If a warm pool doesn't exist.
         SandboxTemplateNotFoundError: If a warm pool's template doesn't exist, or it names none.
     """
+    pools = list(dict.fromkeys(warmpools))
     checked_templates: set[str] = set()
-    ready: dict[str, int] = {}
-    for name in warmpools:
+
+    async def check_pool(name: str) -> int:
         step_timeout = await timeout() if callable(timeout) else timeout
-        warmpool = await helper.get_sandbox_warmpool(
-            name, namespace, _request_timeout=step_timeout
-        )
+        warmpool = await helper.get_sandbox_warmpool(name, namespace, _request_timeout=step_timeout)
         if warmpool is None:
             raise SandboxWarmPoolNotFoundError(
                 f"SandboxWarmPool '{name}' not found in namespace '{namespace}'"
             )
-        ready[name] = batch_utils.warmpool_ready_replicas(warmpool)
         template = batch_utils.warmpool_template_name(warmpool)
         if template is None:
             raise SandboxTemplateNotFoundError(
                 f"SandboxWarmPool '{name}' does not reference a SandboxTemplate"
             )
-        if template in checked_templates:
-            continue
-        step_timeout = await timeout() if callable(timeout) else timeout
-        if await helper.get_sandbox_template(
-            template, namespace, _request_timeout=step_timeout
-        ) is None:
-            raise SandboxTemplateNotFoundError(
-                f"SandboxTemplate '{template}' not found in namespace '{namespace}'"
-            )
-        checked_templates.add(template)
+        if template not in checked_templates:
+            step_timeout = await timeout() if callable(timeout) else timeout
+            if await helper.get_sandbox_template(template, namespace, _request_timeout=step_timeout) is None:
+                raise SandboxTemplateNotFoundError(
+                    f"SandboxTemplate '{template}' not found in namespace '{namespace}'"
+                )
+            checked_templates.add(template)
+        return batch_utils.warmpool_ready_replicas(warmpool)
+
+    if len(pools) <= 1 or max_concurrency <= 1:
+        return {name: await check_pool(name) for name in pools}
+    # Pools that share a template may each fetch it while no check of it has finished, rather than
+    # waiting on each other's checks.
+    slots = asyncio.Semaphore(min(len(pools), max_concurrency))
+
+    async def check_pool_in_slot(name: str) -> int:
+        async with slots:
+            return await check_pool(name)
+
+    results = await asyncio.gather(*(check_pool_in_slot(name) for name in pools), return_exceptions=True)
+    ready: dict[str, int] = {}
+    for name, result in zip(pools, results, strict=True):
+        # The first failure in input order is the one the sequential check would raise.
+        if isinstance(result, BaseException):
+            raise result
+        ready[name] = result
     return ready
 
 

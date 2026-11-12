@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -8131,4 +8132,154 @@ func TestSandboxStaleStatusPatchConflictDroppedWithoutMetrics(t *testing.T) {
 	require.Equal(t, 3, statusPatchAttempts)
 	require.InDelta(t, 1.0, testutil.ToFloat64(asmetrics.SandboxSuspendTotal.WithLabelValues("default", "unknown", "None", "requested")), 0.001)
 	require.InDelta(t, 1.0, testutil.ToFloat64(asmetrics.SandboxSuspendTotal.WithLabelValues("default", "unknown", "None", "pod_terminated")), 0.001)
+}
+
+func TestReconcileResourcePatchConflicts(t *testing.T) {
+	for _, kind := range []string{"pod", "failed-pod", "pod-metadata", "pvc", "service-drift", "service-adoption"} {
+		changes := []string{"unchanged", "controller", "additional-owner", "authorization"}
+		if kind == "pod-metadata" {
+			changes = []string{"status"}
+		}
+		for _, change := range changes {
+			t.Run(kind+"/"+change, func(t *testing.T) {
+				ctx := t.Context()
+				c := newFakeClient()
+				ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "patch-race-"}}
+				require.NoError(t, c.Create(ctx, ns))
+				sb := &sandboxv1beta1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{Name: "sandbox", Namespace: ns.Name, UID: sandboxUID},
+					Spec: sandboxv1beta1.SandboxSpec{
+						SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+							Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "registry.k8s.io/pause:3.10", Ports: []corev1.ContainerPort{{ContainerPort: 80}}}}},
+						}},
+					},
+				}
+				sb.Spec.Service = new(kind == "service-drift" || kind == "service-adoption")
+				pvcSpec := corev1.PersistentVolumeClaimSpec{AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}}}
+				if kind == "pvc" {
+					sb.Spec.VolumeClaimTemplates = []sandboxv1beta1.PersistentVolumeClaimTemplate{{EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"}, Spec: pvcSpec}}
+				}
+				if kind == "failed-pod" {
+					sb.Spec.FailedPodPolicy = sandboxv1beta1.FailedPodPolicyRecreate
+				}
+				require.NoError(t, c.Create(ctx, sb))
+				owner := metav1.OwnerReference{APIVersion: sandboxv1beta1.GroupVersion.String(), Kind: "Sandbox", Name: sb.Name, UID: sb.UID, Controller: new(true), BlockOwnerDeletion: new(true)}
+				observer := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "observer", Namespace: ns.Name, UID: "observer-uid"}}
+				require.NoError(t, c.Create(ctx, observer))
+				extraOwner := metav1.OwnerReference{APIVersion: "v1", Kind: "ConfigMap", Name: observer.Name, UID: observer.UID}
+				metadata := metav1.ObjectMeta{Name: sb.Name, Namespace: ns.Name, Labels: map[string]string{sandboxv1beta1.SandboxAdoptableLabel: "true"}}
+				var target client.Object
+				switch kind {
+				case "pod", "failed-pod", "pod-metadata":
+					if kind == "pod-metadata" {
+						metadata.OwnerReferences = []metav1.OwnerReference{owner}
+					}
+					target = &corev1.Pod{ObjectMeta: metadata, Spec: sb.Spec.PodTemplate.Spec}
+				case "pvc":
+					metadata.Name = "data-" + sb.Name
+					target = &corev1.PersistentVolumeClaim{ObjectMeta: metadata, Spec: pvcSpec}
+				default:
+					if kind == "service-drift" {
+						metadata.OwnerReferences = []metav1.OwnerReference{owner}
+					}
+					target = &corev1.Service{ObjectMeta: metadata, Spec: corev1.ServiceSpec{ClusterIP: corev1.ClusterIPNone, Selector: map[string]string{"app": "before"}, Ports: []corev1.ServicePort{{Port: 8081, TargetPort: intstr.FromInt32(8081)}}}}
+				}
+				require.NoError(t, c.Create(ctx, target))
+				if kind == "failed-pod" {
+					pod := target.(*corev1.Pod)
+					pod.Status.Phase = corev1.PodFailed
+					require.NoError(t, c.Status().Update(ctx, pod))
+				}
+				var beforeWrite client.Object
+				interleaved := false
+				interleave := func(obj client.Object) {
+					if interleaved || reflect.TypeOf(obj) != reflect.TypeOf(target) || client.ObjectKeyFromObject(obj) != client.ObjectKeyFromObject(target) {
+						return
+					}
+					interleaved = true
+					current := target.DeepCopyObject().(client.Object)
+					require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(target), current))
+					switch change {
+					case "status":
+						pod := current.(*corev1.Pod)
+						pod.Status.Phase = corev1.PodPending
+						pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: "Scheduling"}}
+						require.NoError(t, c.Status().Update(ctx, pod))
+					case "controller":
+						other := extraOwner
+						other.Controller = new(true)
+						current.SetOwnerReferences([]metav1.OwnerReference{other})
+					case "additional-owner":
+						current.SetOwnerReferences(append(current.GetOwnerReferences(), extraOwner))
+					case "authorization":
+						current.SetLabels(nil)
+						current.SetOwnerReferences(nil)
+					}
+					if change != "unchanged" && change != "status" {
+						require.NoError(t, c.Update(ctx, current))
+					}
+					beforeWrite = current.DeepCopyObject().(client.Object)
+				}
+				wrapped := interceptor.NewClient(c, interceptor.Funcs{
+					Patch: func(ctx context.Context, underlying client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						interleave(obj)
+						return underlying.Patch(ctx, obj, patch, opts...)
+					},
+					Update: func(ctx context.Context, underlying client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+						interleave(obj)
+						return underlying.Update(ctx, obj, opts...)
+					},
+				})
+				r := &SandboxReconciler{Client: wrapped, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+				request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sb)}
+				_, reconcileErr := r.Reconcile(ctx, request)
+				require.True(t, interleaved, "target write was not reached")
+				current := target.DeepCopyObject().(client.Object)
+				if kind == "failed-pod" && change == "unchanged" {
+					require.NoError(t, reconcileErr)
+					require.True(t, k8serrors.IsNotFound(c.Get(ctx, client.ObjectKeyFromObject(target), current)))
+					return
+				}
+				require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(target), current))
+				if change == "status" {
+					require.NoError(t, reconcileErr)
+					require.Equal(t, beforeWrite.(*corev1.Pod).Status, current.(*corev1.Pod).Status)
+					require.Equal(t, NameHash(sb.Name), current.GetLabels()[sandboxv1beta1.SandboxNameHashLabel])
+					return
+				}
+				if change != "unchanged" {
+					preserved := assert.Equal(t, beforeWrite, current, "stale write changed the concurrently updated resource")
+					conflict := assert.True(t, k8serrors.IsConflict(reconcileErr), "expected API conflict, got %v", reconcileErr)
+					if !preserved || !conflict {
+						return
+					}
+				} else {
+					require.NoError(t, reconcileErr)
+				}
+				// A later reconciliation reads the current resource and repeats eligibility checks.
+				_, retryErr := r.Reconcile(ctx, request)
+				if change == "unchanged" || change == "additional-owner" {
+					require.NoError(t, retryErr)
+					if kind == "failed-pod" {
+						require.True(t, k8serrors.IsNotFound(c.Get(ctx, client.ObjectKeyFromObject(target), current)))
+						return
+					}
+					require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(target), current))
+					require.True(t, metav1.IsControlledBy(current, sb))
+					if change == "additional-owner" {
+						require.Contains(t, current.GetOwnerReferences(), extraOwner)
+					}
+					if svc, ok := current.(*corev1.Service); ok {
+						require.Equal(t, map[string]string{sandboxv1beta1.SandboxNameHashLabel: NameHash(sb.Name)}, svc.Spec.Selector)
+						require.True(t, servicePortsEqual(servicePortsForSandbox(sb), svc.Spec.Ports))
+					}
+				} else {
+					require.Error(t, retryErr)
+					require.False(t, k8serrors.IsConflict(retryErr), "%v", retryErr)
+					require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(target), current))
+					require.Equal(t, beforeWrite, current)
+				}
+			})
+		}
+	}
 }

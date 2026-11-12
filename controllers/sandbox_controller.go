@@ -1595,7 +1595,8 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 		desiredSelector := map[string]string{
 			sandboxv1beta1.SandboxNameHashLabel: nameHash,
 		}
-		patch := client.MergeFrom(service.DeepCopy())
+		// Recheck ownership on retry if the Service changes before this write.
+		patch := client.MergeFromWithOptions(service.DeepCopy(), client.MergeFromWithOptimisticLock{})
 		needsUpdate := false
 
 		if service.Labels == nil {
@@ -1820,6 +1821,8 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 					pod.Name, sandboxv1beta1.SandboxAdoptableLabel, sandboxv1beta1.SandboxNameHashLabel)
 			}
 
+			// Adoption relies on the ownership and authorization labels we read.
+			patch = client.MergeFromWithOptions(pod.DeepCopy(), client.MergeFromWithOptimisticLock{})
 			if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
 				return nil, 0, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
 			}
@@ -1853,9 +1856,9 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			// one bound: the safe-to-evict strip protects the adopted pod from
 			// cluster-autoscaler eviction, so a deferred write must land within
 			// min(window, podMetadataFlushBound) (<1s), well inside any
-			// realistic autoscaler scan interval. Synchronous mode
-			// (WriteBehindWindow 0, the default) keeps the single
-			// optimistic-lock-free merge patch: one API round-trip, no
+			// realistic autoscaler scan interval. For already-owned Pods,
+			// synchronous mode (WriteBehindWindow 0, the default) keeps the
+			// optimistic-lock-free metadata patch: one API round-trip, no
 			// 409/backoff risk.
 			//
 			// Deferral mechanism (RequeueAfter): while the window has
@@ -2242,7 +2245,8 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 
 				logger.Info("Adopting unowned PVC", "PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)
 
-				patch := client.MergeFrom(pvc.DeepCopy())
+				// Preserve concurrent owner changes and recheck authorization on retry.
+				patch := client.MergeFromWithOptions(pvc.DeepCopy(), client.MergeFromWithOptimisticLock{})
 				if err := ctrl.SetControllerReference(sandbox, pvc, r.Scheme); err != nil {
 					return fmt.Errorf("SetControllerReference for PVC failed: %w", err)
 				}

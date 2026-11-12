@@ -249,10 +249,17 @@ class BatchState:
         self._group_outcomes: dict[str, GroupOutcome] = {}   # Each group's final outcome
         self._events_to_yield: deque[BatchEvent] = deque()  # Events events() hasn't returned yet; oldest first
         self._group_outcomes_to_yield: deque[GroupOutcome] = deque()  # Outcomes group_outcomes() hasn't returned yet; oldest first
+        # Pools released after their group succeeded with members. pop_group_outcome() returns a
+        # BatchError outcome in place of a success it hasn't returned yet, which spares
+        # release_group() a queue scan.
+        self._revoked_outcomes: set[str] = set()
         self._fill_expired = False
         # The quorum's result once it is decided, either the members it returns or the error it failed with.
         self._quorum_members: list[Member] | None = None
         self._quorum_error: Exception | None = None
+        # Whether wait_for_quorum() has taken the quorum's result, after which releasing its members
+        # can no longer take them back.
+        self._quorum_delivered = False
         # Groups with fewer than min_ready held members, so the quorum is reached when this is empty.
         self._groups_short_of_quorum: set[str] = set(self._group_by_pool)
         # Claims the caller released, including fill creates it stopped, mapped to their pool. They are
@@ -279,8 +286,9 @@ class BatchState:
         # without burning an ordinal.
         self._checking_acquires: Counter[str] = Counter()
         self._pool_release_seq: dict[str, int] = {}
-        # Label-scoped release deletes in flight per pool, or under None for every pool. They cover
-        # the pool's pending deletes, so release_not_ready() leaves those to them.
+        # Label-scoped release deletes in flight per pool, or under None for every pool. They would
+        # also delete a claim acquire() created meanwhile, so acquire() waits for them to end, and
+        # they cover the pool's pending deletes, so release_not_ready() leaves those to them.
         self._release_sweeps: Counter[str | None] = Counter()
         # Holds newly seen claims only while unreconciled (status: {} or AdoptionConflict), until
         # the controller writes their first warm or cold status, rather than while cold pods boot,
@@ -497,6 +505,11 @@ class BatchState:
         handle can close their connections. It deletes them by label, and their deletes stay pending
         until the handle notes that the label delete succeeded, so a delete by name, such as one from
         ``terminate()``, still runs if it fails.
+
+        A successful group outcome with members not yet returned, or a reached quorum that
+        ``wait_for_quorum()`` hasn't returned and that includes the pool's members, fails with
+        ``BatchError`` instead. A quorum failed this way hands out none of its members, and drops
+        the Ready members still queued for ``events()``.
         """
         self._fill_stopped_pools.add(warmpool)
         self._pool_release_seq[warmpool] = self._pool_release_seq.get(warmpool, 0) + 1
@@ -505,6 +518,25 @@ class BatchState:
         for name in (*(m.claim_name for m in members), *acquiring):
             self.release_claim(name, warmpool)
         self._take_deletes(members)
+        # A decided result consumers haven't taken yet would still hand out the members released here.
+        # A success with no members, from a min_ready of 0, hands out none, so it stands.
+        outcome = self._group_outcomes.get(warmpool)
+        if outcome is not None and outcome.error is None and outcome.members:
+            self._revoked_outcomes.add(warmpool)
+        # A reached quorum holds min_ready members of every group, so it holds this pool's if its
+        # min_ready isn't 0.
+        if self._quorum_members and not self._quorum_delivered and self._min_ready.get(warmpool, 0):
+            # Like any failed quorum, it hands out none of its members, so the other pools' members
+            # it held are no longer handed out and the Ready members still queued for events() are
+            # dropped. Members events() already yielded stay handed out.
+            self._dispatched.difference_update(m.claim_name for m in self._quorum_members)
+            queued = self._events_to_yield
+            self._events_to_yield = deque(e for e in queued if e.type is not BatchEventType.MEMBER_READY)
+            self._dispatched.difference_update(
+                e.member.claim_name for e in queued if e.type is BatchEventType.MEMBER_READY
+            )
+            self._quorum_members = None
+            self._quorum_error = BatchError(f"warm pool '{warmpool}' was released before wait_for_quorum() returned")
         return [m.claim_name for m in members]
 
     def release_members(self) -> tuple[list[str], dict[str, int]]:
@@ -521,7 +553,8 @@ class BatchState:
             | set(self._checking_acquires)
         )
         acquiring = list(self._acquiring)
-        for pool in pools:
+        # Sorted so a quorum this fails always names the same pool.
+        for pool in sorted(pools):
             self.release_group(pool)
         return acquiring, dict(self._pending_deletes)
 
@@ -603,8 +636,8 @@ class BatchState:
             self._checking_acquires.pop(warmpool, None)
 
     def release_sweeping(self, warmpool: str | None) -> bool:
-        """Whether a label delete in flight covers ``warmpool``, so ``release_not_ready()`` leaves
-        its pending deletes to that delete.
+        """Whether a label delete in flight covers ``warmpool``, so ``acquire()`` must not create a
+        claim in it yet and ``release_not_ready()`` leaves its pending deletes to that delete.
         """
         return bool(self._release_sweeps[None] or self._release_sweeps[warmpool])
 
@@ -876,10 +909,13 @@ class BatchState:
         # quorum in between. That quorum stays reached, and the caller gets its members.
         return self._quorum_members or [], self._quorum_error
 
-    def quorum_result(self) -> tuple[list[Member], Exception | None] | None:
-        """Returns the quorum's members and the error it failed with, or ``None`` while it is undecided."""
+    def take_quorum_result(self) -> tuple[list[Member], Exception | None] | None:
+        """Returns the quorum's members and the error it failed with, or ``None`` while it is undecided.
+        ``wait_for_quorum()`` takes the result through this, so a decided result counts as returned.
+        """
         if self._quorum_members is None and self._quorum_error is None:
             return None
+        self._quorum_delivered = True
         return self._quorum_members or [], self._quorum_error
 
     def set_mode(self, mode: ConsumerMode) -> None:
@@ -994,7 +1030,15 @@ class BatchState:
         return None
 
     def pop_group_outcome(self) -> GroupOutcome | None:
-        return self._group_outcomes_to_yield.popleft() if self._group_outcomes_to_yield else None
+        if not self._group_outcomes_to_yield:
+            return None
+        outcome = self._group_outcomes_to_yield.popleft()
+        if outcome.warmpool in self._revoked_outcomes:
+            outcome = self._group_outcomes[outcome.warmpool] = GroupOutcome(
+                warmpool=outcome.warmpool,
+                error=BatchError(f"warm pool '{outcome.warmpool}' was released before its group outcome was returned"),
+            )
+        return outcome
 
     def fill_settled(self) -> bool:
         """Whether every fill member's outcome is decided, or if the fill deadline has passed."""

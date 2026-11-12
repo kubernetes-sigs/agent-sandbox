@@ -347,7 +347,7 @@ def _drain_events(state):
 
 def _quorum(state):
     """The quorum's member names, its error, or ``None`` while it is undecided."""
-    result = state.quorum_result()
+    result = state.take_quorum_result()
     if result is None:
         return None
     members, error = result
@@ -857,6 +857,86 @@ class TestRelease(unittest.TestCase):
         self.assertEqual([m.claim_name for m in outcomes["pool-b"].members], ["b1-3"])
         self.assertTrue(state.fill_settled())
 
+    def test_release_group_fails_a_successful_outcome_not_yet_returned(self):
+        state = _state(
+            BatchGroup(warmpool="pool-a", size=1), BatchGroup(warmpool="pool-b", size=1),
+            mode=batch_state.ConsumerMode.GROUP,
+        )
+        state.upsert_claim(_ready("b1-0"))
+        state.upsert_claim(_ready("b1-1", "pool-b"))
+        state.release_group("pool-a")
+        outcomes = {r.warmpool: r for r in _drain_groups(state)}
+        self.assertIsInstance(outcomes["pool-a"].error, BatchError)
+        self.assertEqual(outcomes["pool-a"].members, [])
+        self.assertEqual([m.claim_name for m in outcomes["pool-b"].members], ["b1-1"])
+        # An outcome already returned stays as it was.
+        state.release_group("pool-b")
+        self.assertEqual(_drain_groups(state), [])
+
+    def test_release_group_keeps_a_memberless_success_whether_released_before_or_after_the_mode(self):
+        for release_first in (False, True):
+            with self.subTest(release_first=release_first):
+                state = _state(
+                    BatchGroup(warmpool="pool-a", size=1, min_ready=0),
+                    BatchGroup(warmpool="pool-b", size=1, min_ready=0),
+                )
+                if release_first:
+                    state.release_group("pool-a")
+                state.set_mode(batch_state.ConsumerMode.GROUP)
+                if not release_first:
+                    state.release_group("pool-a")
+                outcomes = {r.warmpool: r for r in _drain_groups(state)}
+                self.assertIsNone(outcomes["pool-a"].error)
+                self.assertEqual(outcomes["pool-a"].members, [])
+
+    def test_release_group_fails_a_reached_quorum_not_yet_returned(self):
+        for returned in (False, True):
+            with self.subTest(returned=returned):
+                state = _state(
+                    BatchGroup(warmpool="pool-a", size=1), BatchGroup(warmpool="pool-b", size=1),
+                    mode=batch_state.ConsumerMode.QUORUM,
+                )
+                state.upsert_claim(_ready("b1-0"))
+                state.upsert_claim(_ready("b1-1", "pool-b"))
+                if returned:
+                    self.assertEqual(_quorum(state), ["b1-0", "b1-1"])
+                state.release_group("pool-a")
+                result = _quorum(state)
+                if returned:
+                    self.assertEqual(result, ["b1-0", "b1-1"])
+                else:
+                    self.assertIsInstance(result, BatchError)
+                    self.assertNotIsInstance(result, QuorumUnreachableError)
+
+    def test_a_quorum_failed_by_a_release_hands_out_none_of_its_members(self):
+        cases = {
+            # Both groups have an extra queued for events(); pool-b's quorum member survives the release.
+            "extras in both groups": (
+                (BatchGroup(warmpool="pool-a", size=2, min_ready=1), BatchGroup(warmpool="pool-b", size=2, min_ready=1)),
+                (("b1-0", "pool-a"), ("b1-1", "pool-a"), ("b1-2", "pool-b"), ("b1-3", "pool-b")),
+                "pool-a",
+                ["b1-2", "b1-3"],
+            ),
+            # pool-a's quorum member and its extra both survive the release of pool-b.
+            "release the group without extras": (
+                (BatchGroup(warmpool="pool-a", size=2, min_ready=1), BatchGroup(warmpool="pool-b", size=1)),
+                (("b1-0", "pool-a"), ("b1-1", "pool-a"), ("b1-2", "pool-b")),
+                "pool-b",
+                ["b1-0", "b1-1"],
+            ),
+        }
+        for name, (groups, ready, released, survivors) in cases.items():
+            with self.subTest(name):
+                state = _state(*groups, mode=batch_state.ConsumerMode.QUORUM)
+                for claim_name, pool in ready:
+                    state.upsert_claim(_ready(claim_name, pool))
+                state.release_group(released)
+                self.assertIsInstance(_quorum(state), BatchError)
+                self.assertEqual(_drain_events(state), [])
+                self.assertEqual(state._dispatched, set())
+                # The survivors stay members that were never handed out.
+                self.assertEqual([m.claim_name for m in state.members()], survivors)
+
     def test_a_retried_release_group_covers_the_deletes_a_failed_one_left(self):
         state = _state(BatchGroup(warmpool="pool-a", size=2), BatchGroup(warmpool="pool-b", size=1))
         for name, pool in (("b1-0", "pool-a"), ("b1-1", "pool-a"), ("b1-2", "pool-b")):
@@ -872,6 +952,19 @@ class TestRelease(unittest.TestCase):
             state.note_deleted(name, seq)
         self.assertEqual(state.pending_deletes_in_pool("pool-a"), {})
         self.assertEqual(state.release_not_ready(), ["b1-2"])
+
+    def test_release_members_names_the_first_pool_in_sorted_order_when_it_fails_a_quorum(self):
+        state = _state(
+            BatchGroup(warmpool="pool-c", size=1), BatchGroup(warmpool="pool-b", size=1),
+            BatchGroup(warmpool="pool-a", size=1),
+            mode=batch_state.ConsumerMode.QUORUM,
+        )
+        for name, pool in (("b1-0", "pool-c"), ("b1-1", "pool-b"), ("b1-2", "pool-a")):
+            state.upsert_claim(_ready(name, pool))
+        state.release_members()
+        error = _quorum(state)
+        self.assertIsInstance(error, BatchError)
+        self.assertIn("'pool-a'", str(error))
 
     def test_late_fill_claims_in_released_pools_queue_watch_deletes_once_unless_terminating(self):
         state = _state(BatchGroup(warmpool="pool-a", size=4, min_ready=1))

@@ -823,7 +823,9 @@ class AsyncSandboxBatch:
         of its members can still become Ready, or to ``BatchTimeoutError`` if it hasn't reached
         ``min_ready`` within the quorum timeout. The handle checks that deadline only while a consumer
         waits or claims are still being created, so a group that reaches ``min_ready`` after the
-        deadline, before any consumer checks it, still succeeds.
+        deadline, before any consumer checks it, still succeeds. A group that ``release_group()`` or
+        ``release_members()`` releases after it succeeds with members but before it is yielded is
+        yielded with a ``BatchError`` instead.
         The iterator ends once every group has yielded, or once ``err()`` is set. Calling it again
         continues with the groups that haven't yielded yet.
 
@@ -854,13 +856,14 @@ class AsyncSandboxBatch:
             QuorumUnreachableError: If too few members of a group can still become Ready.
             BatchTimeoutError: If the quorum isn't reached within the quorum timeout.
             BatchError: If ``events()`` or ``group_outcomes()`` was called first, this method
-                was already called, ``err()`` is set while waiting, or this handle has been
-                detached or released, when called or while waiting.
+                was already called, ``err()`` is set while waiting, this handle has been
+                detached or released, when called or while waiting, or ``release_group()`` or
+                ``release_members()`` released a group the reached quorum holds before it returned.
         """
         self._check_active()
         self._state.set_mode(batch_state.ConsumerMode.QUORUM)
         try:
-            result = await self._next(self._state.quorum_result, lambda: False)
+            result = await self._next(self._state.take_quorum_result, lambda: False)
             if result is None:
                 raise BatchError(
                     f"batch '{self.batch_id}' stopped while waiting for quorum"
@@ -950,7 +953,9 @@ class AsyncSandboxBatch:
         ``timeout`` cuts a read short before recording it). When the watch observes a claim from a
         pool start cold before becoming Ready, the batch zeroes that pool's credit and defers its
         next refresh. Fill creates, ``acquire()`` creates and pool reads, and member deletes share
-        ``max_in_flight``, which defaults to 20 on a handle from ``get_batch``.
+        ``max_in_flight``, which defaults to 20 on a handle from ``get_batch``. While
+        ``release_group()`` on the pool or ``release_members()`` is deleting claims, ``acquire()``
+        waits for it to finish before creating its claim, since those deletes would remove it too.
 
         If it raises, including on a cancellation, the member is dropped from ``members()`` and its
         claim is deleted, unless the claim is already gone or its create was rejected. A failed
@@ -982,7 +987,8 @@ class AsyncSandboxBatch:
                 ``CreateFailed``), the member fails terminally, or someone else deletes its claim
                 (the member is ``LOST``) before it is Ready.
             BatchTimeoutError: If checking an unchecked warm pool, creating the claim, or waiting
-                for the member to be Ready doesn't finish within ``timeout``. ``acquire()`` skips
+                for the member to be Ready doesn't finish within ``timeout``, including while
+                waiting for ``release_group()`` or ``release_members()`` to finish. ``acquire()`` skips
                 sending any create or create retry that ``create_rps`` pacing or ``max_in_flight``
                 cannot start before the deadline.
             BatchError: If this handle has been detached or released, or ``err()`` is set, when
@@ -1015,6 +1021,13 @@ class AsyncSandboxBatch:
                     self._check_healthy()
                     self._check_acquire_pool_active(warmpool, acquire_seq)
                     now = time.monotonic()
+                    if self._state.release_sweeping(warmpool):
+                        # The sweep's label delete would also delete a claim created now.
+                        if now >= deadline:
+                            raise BatchTimeoutError(f"warm pool '{warmpool}' was still being released after {wait:g}s")
+                        with contextlib.suppress(asyncio.TimeoutError):
+                            await asyncio.wait_for(self._changed.wait(), min(deadline, self._lease_expires_at) - now)
+                        continue
                     covered = now < deadline and self._warm_credit.take(warmpool)
                     need_refresh = (
                         not covered
@@ -1394,7 +1407,11 @@ class AsyncSandboxBatch:
         Its members are never handed out afterwards and emit no ``MEMBER_LOST``. The initial ones
         count as unable to become Ready, so releasing a group before a quorum consumer has decided
         makes it, or the quorum, unreachable. Works with any consumer, typically on a group that
-        ``group_outcomes()`` yields with an error.
+        ``group_outcomes()`` yields with an error. A successful outcome with members that
+        ``group_outcomes()`` hasn't yielded yet, or a reached quorum ``wait_for_quorum()`` hasn't
+        returned that includes the group's members, fails with ``BatchError`` instead. Such a quorum
+        hands out none of its members, and ``events()`` drops the Ready members it hasn't yielded
+        yet.
 
         Claims are deleted like ``release()`` deletes the batch's, with deletecollection rounds
         scoped to the group's label. If they fail, calling ``release_group`` again retries.
@@ -1416,7 +1433,9 @@ class AsyncSandboxBatch:
 
         All planned fill creates not yet sent are skipped, in-flight ``acquire()`` calls raise
         ``BatchError``, and a create that lands afterwards is deleted. Released members are never
-        handed out afterwards and emit no ``MEMBER_LOST``.
+        handed out afterwards and emit no ``MEMBER_LOST``. Like ``release_group()``, a successful group
+        outcome with members, or a reached quorum that holds members of a group with a ``min_ready``
+        above 0, that wasn't returned yet fails with ``BatchError``.
 
         Claims are deleted like ``release()`` deletes the batch's, with label-scoped
         deletecollection rounds across the whole batch. If they fail, calling ``release_members``
@@ -1480,9 +1499,12 @@ class AsyncSandboxBatch:
                         self._state.note_deleted(name, seq)
         finally:
             if swept:
-                # Ended without awaiting the lock, so a cancellation can't leave release_not_ready()
-                # skipping the pool's pending deletes after the label delete stopped.
+                # Ended before awaiting the lock, so a cancellation there can't leave acquire() waiting
+                # on the sweep or release_not_ready() skipping its deletes. A waiting acquire() missing
+                # the notify still wakes by its deadline.
                 self._state.end_release(warmpool)
+                async with self._changed:
+                    self._changed.notify_all()
 
     def _drop_planned_creates(self, warmpool: str | None) -> None:
         """Releases the planned creates not yet sent, of one pool or of every pool, so they don't

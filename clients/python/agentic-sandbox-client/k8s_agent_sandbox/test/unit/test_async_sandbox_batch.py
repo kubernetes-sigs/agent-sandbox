@@ -6309,6 +6309,69 @@ class TestAsyncReleaseAllMembers(BaseClaimBatchTest):
                 expected = [member.claim_name] if label_delete_error is not None else []
                 self.assertEqual([c.args[0] for c in helper.delete_sandbox_claim.call_args_list], expected)
 
+    async def test_an_acquire_started_during_a_release_sweep_waits_for_it_and_survives(self):
+        helper = self.cluster.helper
+        batch = await self.claim([BatchGroup(warmpool="pool-a", size=0)], max_in_flight=4)
+        await batch.acquire("pool-a", timeout=5)
+        sweeping = asyncio.Event()
+        gate = asyncio.Event()
+
+        async def slow_delete(*args, **kwargs):
+            self.cluster.calls.append("deletecollection")
+            sweeping.set()
+            await gate.wait()
+
+        helper.delete_sandbox_claims_by_label.side_effect = slow_delete
+        for release in (lambda: batch.release_group("pool-a"), batch.release_members):
+            with self.subTest(release=release):
+                sweeping.clear()
+                gate.clear()
+                self.cluster.calls.clear()
+                releasing = asyncio.create_task(release())
+                await asyncio.wait_for(sweeping.wait(), 5)
+                acquiring = asyncio.create_task(batch.acquire("pool-a", timeout=5))
+                await asyncio.sleep(0.1)
+                # The sweep's label delete would also delete a claim created now.
+                self.assertEqual(self.cluster.calls, ["deletecollection"])
+                gate.set()
+                await asyncio.wait_for(releasing, 5)
+                member = await asyncio.wait_for(acquiring, 5)
+                self.assertEqual(self.cluster.calls, ["deletecollection", "create"])
+                self.assertEqual(batch.members(), [member])
+
+    async def test_release_members_fails_group_outcomes_not_yet_returned(self):
+        batch = await self.claim([BatchGroup(warmpool="pool-a", size=1), BatchGroup(warmpool="pool-b", size=1)])
+        await _wait_until(lambda: sum(m.state is MemberState.READY for m in batch.members()) == 2)
+        groups = batch.group_outcomes()
+        await batch.release_members()
+        outcomes = await _drain(groups)
+        self.assertEqual(sorted(o.warmpool for o in outcomes), ["pool-a", "pool-b"])
+        for outcome in outcomes:
+            self.assertEqual(outcome.members, [])
+            self.assertIsInstance(outcome.error, BatchError)
+            self.assertNotIsInstance(outcome.error, QuorumUnreachableError)
+
+    async def test_an_acquire_whose_deadline_passes_during_a_release_sweep_times_out(self):
+        helper = self.cluster.helper
+        batch = await self.claim([BatchGroup(warmpool="pool-a", size=0)], max_in_flight=4)
+        await batch.acquire("pool-a", timeout=5)
+        sweeping = asyncio.Event()
+        gate = asyncio.Event()
+        self.addCleanup(gate.set)
+
+        async def slow_delete(*args, **kwargs):
+            sweeping.set()
+            await gate.wait()
+
+        helper.delete_sandbox_claims_by_label.side_effect = slow_delete
+        releasing = asyncio.create_task(batch.release_members())
+        await asyncio.wait_for(sweeping.wait(), 5)
+        with self.assertRaisesRegex(BatchTimeoutError, "still being released"):
+            await batch.acquire("pool-a", timeout=0.2)
+        self.assertEqual(helper.create_sandbox_claim.await_count, 1)
+        gate.set()
+        await asyncio.wait_for(releasing, 5)
+
     async def test_a_release_interrupted_right_after_its_sweep_starts_still_ends_it(self):
         batch = await self.claim([BatchGroup(warmpool="pool-a", size=0)], max_in_flight=4)
         real_start = batch._state.start_release
@@ -6330,6 +6393,7 @@ class TestAsyncReleaseAllMembers(BaseClaimBatchTest):
             with self.assertRaisesRegex(RuntimeError, "interrupted"):
                 await batch.release_members()
         self.assertFalse(batch._state.release_sweeping("pool-a"))
+        await batch.acquire("pool-a", timeout=1)
 
     async def test_a_release_interrupted_entering_start_release_leaves_another_release_running(self):
         helper = self.cluster.helper

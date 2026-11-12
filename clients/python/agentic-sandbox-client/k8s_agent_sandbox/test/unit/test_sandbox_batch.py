@@ -6249,6 +6249,70 @@ class TestReleaseAllMembers(BaseClaimBatchTest):
                 expected = [member.claim_name] if label_delete_error is not None else []
                 self.assertEqual([c.args[0] for c in helper.delete_sandbox_claim.call_args_list], expected)
 
+    def test_an_acquire_started_during_a_release_sweep_waits_for_it_and_survives(self):
+        helper = self.cluster.helper
+        batch = self.claim([BatchGroup(warmpool="pool-a", size=0)], max_in_flight=4)
+        batch.acquire("pool-a", timeout=5)
+        sweeping = threading.Event()
+        gate = threading.Event()
+
+        def slow_delete(*args, **kwargs):
+            self.cluster.calls.append("deletecollection")
+            sweeping.set()
+            gate.wait(5)
+
+        helper.delete_sandbox_claims_by_label.side_effect = slow_delete
+        for release in (lambda: batch.release_group("pool-a"), batch.release_members):
+            with self.subTest(release=release), ThreadPoolExecutor(2) as pool:
+                sweeping.clear()
+                gate.clear()
+                self.cluster.calls.clear()
+                releasing = pool.submit(release)
+                self.assertTrue(sweeping.wait(5))
+                acquiring = pool.submit(batch.acquire, "pool-a", timeout=5)
+                time.sleep(0.1)
+                # The sweep's label delete would also delete a claim created now.
+                self.assertEqual(self.cluster.calls, ["deletecollection"])
+                gate.set()
+                releasing.result(5)
+                member = acquiring.result(5)
+                self.assertEqual(self.cluster.calls, ["deletecollection", "create"])
+                self.assertEqual(batch.members(), [member])
+
+    def test_release_members_fails_group_outcomes_not_yet_returned(self):
+        batch = self.claim([BatchGroup(warmpool="pool-a", size=1), BatchGroup(warmpool="pool-b", size=1)])
+        _wait_until(lambda: sum(m.state is MemberState.READY for m in batch.members()) == 2)
+        groups = batch.group_outcomes()
+        batch.release_members()
+        outcomes = _drain(groups)
+        self.assertEqual(sorted(o.warmpool for o in outcomes), ["pool-a", "pool-b"])
+        for outcome in outcomes:
+            self.assertEqual(outcome.members, [])
+            self.assertIsInstance(outcome.error, BatchError)
+            self.assertNotIsInstance(outcome.error, QuorumUnreachableError)
+
+    def test_an_acquire_whose_deadline_passes_during_a_release_sweep_times_out(self):
+        helper = self.cluster.helper
+        batch = self.claim([BatchGroup(warmpool="pool-a", size=0)], max_in_flight=4)
+        batch.acquire("pool-a", timeout=5)
+        sweeping = threading.Event()
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+
+        def slow_delete(*args, **kwargs):
+            sweeping.set()
+            gate.wait(5)
+
+        helper.delete_sandbox_claims_by_label.side_effect = slow_delete
+        with ThreadPoolExecutor(1) as pool:
+            releasing = pool.submit(batch.release_members)
+            self.assertTrue(sweeping.wait(5))
+            with self.assertRaisesRegex(BatchTimeoutError, "still being released"):
+                batch.acquire("pool-a", timeout=0.2)
+            self.assertEqual(helper.create_sandbox_claim.call_count, 1)
+            gate.set()
+            releasing.result(5)
+
     def test_a_release_interrupted_right_after_its_sweep_starts_still_ends_it(self):
         batch = self.claim([BatchGroup(warmpool="pool-a", size=0)], max_in_flight=4)
         real_start = batch._state.start_release
@@ -6270,6 +6334,7 @@ class TestReleaseAllMembers(BaseClaimBatchTest):
             with self.assertRaisesRegex(RuntimeError, "interrupted"):
                 batch.release_members()
         self.assertFalse(batch._state.release_sweeping("pool-a"))
+        batch.acquire("pool-a", timeout=1)
 
     def test_a_release_interrupted_entering_start_release_leaves_another_release_running(self):
         helper = self.cluster.helper

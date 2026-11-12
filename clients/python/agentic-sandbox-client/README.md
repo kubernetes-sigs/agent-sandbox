@@ -746,14 +746,18 @@ A batch's claims are consumed in one of three modes, fixed by whichever method i
   Ready, and `BatchTimeoutError` if the quorum isn't reached within `quorum_timeout` of the batch's last claim
   create. After that no members are handed out and no more claims are created, and the same holds if the wait
   ends with any other exception, such as a cancellation or `KeyboardInterrupt`. It raises `BatchError` if the
-  batch's watch or Lease renewal stops with an error while it waits, and it can be called only once.
+  batch's watch or Lease renewal stops with an error while it waits, or if `release_group()` or
+  `release_members()` releases a group with a `min_ready` above 0 from a reached quorum before it returns,
+  and it can be called only once.
   If every group has `min_ready=0`, it returns an empty list at once. The handle checks the deadline only
   while a consumer waits or claims are still being created, so a quorum reached after the deadline, before any
   consumer checks it, still succeeds.
 - `group_outcomes()` (group mode) yields one `GroupOutcome` per group, holding either its first
   `min_ready` Ready members, in the order they became Ready, or an `error`. A group fails with `QuorumUnreachableError` once
   too few of its members can still become Ready, and with `BatchTimeoutError` if it hasn't reached `min_ready`
-  within `quorum_timeout` of the batch's last claim create. A failed group is finished, so no more of its
+  within `quorum_timeout` of the batch's last claim create. A group that `release_group()` or
+  `release_members()` releases after it succeeds with members but before it is yielded fails with `BatchError`.
+  A failed group is finished, so no more of its
   claims are created and none of its members are handed out. The handle checks the deadline only while a
   consumer waits or claims are still being created, so a group that reaches `min_ready` after the deadline,
   before any consumer checks it, still succeeds.
@@ -762,7 +766,8 @@ A batch's claims are consumed in one of three modes, fixed by whichever method i
   Called first (stream mode), it streams every Ready member. Called after `group_outcomes()`, it hands out a
   group's members only after that group has yielded successfully, starting with the Ready members beyond
   its first `min_ready` and then later ones as they become Ready. Called after `wait_for_quorum()`, it hands
-  out the Ready members the quorum didn't return once the quorum is reached. `group_outcomes()` and
+  out the Ready members the quorum didn't return once the quorum is reached, and drops those still queued if a
+  release fails the quorum before it returns. `group_outcomes()` and
   `wait_for_quorum()` can't be called after `events()` or after each other.
 
 Both iterators can be called again to continue where they stopped. They also end early if the batch's
@@ -791,9 +796,11 @@ claims' pacing, except that a create the pool's Ready sandboxes cover skips `cre
 count from the pool's check and `create_rps` pacing would delay the next create, `acquire()` reads the pool again at most
 once a second per pool (unless an expired `timeout` cuts a read short before recording it). When the watch observes a claim from a pool start cold before becoming Ready, the batch zeroes that
 pool's credit and defers its next refresh. Its create and pool reads also share `max_in_flight` with
-the initial claims and member deletes. `acquire()` raises `TerminalMemberError` if the create fails or the
-member fails or is deleted before it is Ready, and `BatchTimeoutError` if checking an unchecked warm pool
-or getting the member Ready doesn't finish within `timeout`, which defaults to `quorum_timeout`. Both
+the initial claims and member deletes. While `release_group()` on its pool or `release_members()` is
+deleting claims, `acquire()` waits for it to finish before creating its claim, since those deletes would
+remove it too. `acquire()` raises `TerminalMemberError` if the create fails or the
+member fails or is deleted before it is Ready, and `BatchTimeoutError` if checking an unchecked warm pool,
+waiting for such a release, or getting the member Ready doesn't finish within `timeout`, which defaults to `quorum_timeout`. Both
 subclass `BatchError`, which `acquire()` also raises directly when the handle stops; checking a pool not yet in the batch
 can also raise `SandboxWarmPoolNotFoundError` or `SandboxTemplateNotFoundError` (both `SandboxError`) or a
 Kubernetes API or network error. If it raises, including on a cancellation, `acquire()` drops the member from `members()` and deletes

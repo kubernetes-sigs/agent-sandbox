@@ -823,7 +823,9 @@ class GroupOutcome()
 One group's quorum outcome, yielded by ``SandboxBatch.group_outcomes()``.
 
 On success, ``members`` holds exactly ``min_ready`` Ready members and ``error`` is ``None``.
-On failure, ``error`` is a ``QuorumUnreachableError`` or ``BatchTimeoutError`` and ``members`` is empty.
+On failure, ``error`` is a ``QuorumUnreachableError`` or ``BatchTimeoutError``, or a ``BatchError`` if
+``release_group()`` or ``release_members()`` released the group before a success with members was
+yielded, and ``members`` is empty.
 
 This is a dataclass rather than a Pydantic model because ``error`` holds a ``BatchError``
 instance (preserving traceback and causes) rather than serializable data.
@@ -985,7 +987,9 @@ fails is still yielded, with ``error`` set to ``QuorumUnreachableError`` once to
 of its members can still become Ready, or to ``BatchTimeoutError`` if it hasn't reached
 ``min_ready`` within the quorum timeout. The handle checks that deadline only while a consumer
 waits or claims are still being created, so a group that reaches ``min_ready`` after the
-deadline, before any consumer checks it, still succeeds.
+deadline, before any consumer checks it, still succeeds. A group that ``release_group()`` or
+``release_members()`` releases after it succeeds with members but before it is yielded is
+yielded with a ``BatchError`` instead.
 The iterator ends once every group has yielded, or once ``err()`` is set. Calling it again
 continues with the groups that haven't yielded yet.
 
@@ -1021,8 +1025,9 @@ created, so a quorum reached after the deadline, before any consumer checks it, 
 - `QuorumUnreachableError` - If too few members of a group can still become Ready.
 - `BatchTimeoutError` - If the quorum isn't reached within the quorum timeout.
 - `BatchError` - If ``events()`` or ``group_outcomes()`` was called first, this method
-  was already called, ``err()`` is set while waiting, or this handle has been
-  detached or released, when called or while waiting.
+  was already called, ``err()`` is set while waiting, this handle has been
+  detached or released, when called or while waiting, or ``release_group()`` or
+  ``release_members()`` released a group the reached quorum holds before it returned.
 
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.acquire"></a>
 
@@ -1041,8 +1046,8 @@ The pool can be any warm pool in the batch's namespace. A pool that isn't one of
 groups is checked once per handle, like ``claim_batch`` checks its pools. The claim takes the
 next unused ordinal and carries its pool's group label but no group annotations, so it is
 never one of the initial claims. ``events()``, ``group_outcomes()``, ``wait_for_quorum()``
-and ``release_not_ready()`` leave it alone, and ``release_group()`` on its pool releases it
-with the pool's other members. Its ``shutdownTime`` is the
+and ``release_not_ready()`` leave it alone, and ``release_group()`` on its pool or
+``release_members()`` releases it with the batch's other members. Its ``shutdownTime`` is the
 time of its create plus ``quorum_timeout`` plus ``work_budget`` plus 600 seconds, and its
 create follows the initial claims' retries and pacing. Like theirs, a create that the
 pool's Ready sandboxes cover skips ``create_rps`` pacing. Once callers spend the Ready
@@ -1051,15 +1056,17 @@ count from the pool's check and ``create_rps`` pacing would delay the next creat
 ``timeout`` cuts a read short before recording it). When the watch observes a claim from a
 pool start cold before becoming Ready, the batch zeroes that pool's credit and defers its
 next refresh. Fill creates, ``acquire()`` creates and pool reads, and member deletes share
-``max_in_flight``, which defaults to 20 on a handle from ``get_batch``.
+``max_in_flight``, which defaults to 20 on a handle from ``get_batch``. While
+``release_group()`` on the pool or ``release_members()`` is deleting claims, ``acquire()``
+waits for it to finish before creating its claim, since those deletes would remove it too.
 
 If it raises, including on a cancellation, the member is dropped from ``members()`` and its
-claim is deleted, unless the claim is already gone or its create was rejected. A failed delete is
-retried by ``release_not_ready()`` and ``release()``. Once this handle loses the batch's
-Lease it keeps the claim, which ``release()`` deletes only if no other handle has taken the
-Lease since. It never creates a second claim, so call it again to try again. A member it
-returned that fails later shows in ``members()`` like any other, and ``release_member``
-frees it.
+claim is deleted, unless the claim is already gone or its create was rejected. A failed
+delete is retried by ``release_not_ready()``, ``release_members()``, and ``release()``. Once
+this handle loses the batch's Lease it keeps the claim, which ``release()`` deletes only if
+no other handle has taken the Lease since. It never creates a second claim, so call it again
+to try again. A member it returned that fails later shows in ``members()`` like any other,
+and ``release_member`` frees it.
 
 ``TerminalMemberError`` and ``BatchTimeoutError`` both subclass ``BatchError``, and
 ``except SandboxError`` also covers a missing pool or template. Bad arguments raise
@@ -1086,12 +1093,13 @@ frees it.
   ``CreateFailed``), the member fails terminally, or someone else deletes its claim
   (the member is ``LOST``) before it is Ready.
 - `BatchTimeoutError` - If checking an unchecked warm pool, creating the claim, or waiting
-  for the member to be Ready doesn't finish within ``timeout``. ``acquire()`` skips
+  for the member to be Ready doesn't finish within ``timeout``, including while
+  waiting for ``release_group()`` or ``release_members()`` to finish. ``acquire()`` skips
   sending any create or create retry that ``create_rps`` pacing or ``max_in_flight``
   cannot start before the deadline.
 - `BatchError` - If this handle has been detached or released, or ``err()`` is set, when
-  called or while waiting, or if ``release_member`` or ``release_group`` releases the
-  member before it is Ready.
+  called or while waiting, or if ``release_member``, ``release_group``, or
+  ``release_members`` releases the member before it is Ready.
 - `ApiException` - If checking an unchecked warm pool fails with an API error such as a
   403.
 - `urllib3.exceptions.HTTPError` - If checking an unchecked warm pool fails before
@@ -1142,7 +1150,8 @@ what you need.
 
 Deletes each claim like ``release_member``. Member deletes and claim creates share
 ``max_in_flight``, which defaults to 20 on a handle from ``get_batch``. If a delete fails,
-calling ``release_not_ready`` again retries it.
+calling ``release_not_ready`` again retries it. While ``release_group()`` or ``release_members()``
+is deleting a pool's claims, the pool's pending deletes are left to it.
 
 **Raises**:
 
@@ -1168,7 +1177,11 @@ The group's creates not yet sent are skipped, and a create that lands afterwards
 Its members are never handed out afterwards and emit no ``MEMBER_LOST``. The initial ones
 count as unable to become Ready, so releasing a group before a quorum consumer has decided
 makes it, or the quorum, unreachable. Works with any consumer, typically on a group that
-``group_outcomes()`` yields with an error.
+``group_outcomes()`` yields with an error. A successful outcome with members that
+``group_outcomes()`` hasn't yielded yet, or a reached quorum ``wait_for_quorum()`` hasn't
+returned that includes the group's members, fails with ``BatchError`` instead. Such a quorum
+hands out none of its members, and ``events()`` drops the Ready members it hasn't yielded
+yet.
 
 Claims are deleted like ``release()`` deletes the batch's, with deletecollection rounds
 scoped to the group's label. If they fail, calling ``release_group`` again retries.
@@ -1176,6 +1189,36 @@ scoped to the group's label. If they fail, calling ``release_group`` again retri
 **Raises**:
 
 - `ValueError` - If the batch has no group, member or ``acquire()`` in flight for ``warmpool``.
+- `BatchError` - If this handle has been detached or released, once this handle loses the
+  batch's Lease, or if claims are still not being deleted after the last round.
+- `ApiException` - For a non-transient error such as a 403, which is raised at once.
+  After the last round, the last transient error is raised (an ``ApiException``
+  or a transport error).
+
+<a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.release_members"></a>
+
+##### release\_members
+
+```python
+def release_members() -> None
+```
+
+Deletes every claim the batch currently holds across all pools, pending ones included,
+and drops their members from ``members()`` while keeping the batch, its Lease, and its
+watch open for subsequent ``acquire()`` calls.
+
+All planned fill creates not yet sent are skipped, in-flight ``acquire()`` calls raise
+``BatchError``, and a create that lands afterwards is deleted. Released members are never
+handed out afterwards and emit no ``MEMBER_LOST``. Like ``release_group()``, a successful group
+outcome with members, or a reached quorum that holds members of a group with a ``min_ready``
+above 0, that wasn't returned yet fails with ``BatchError``.
+
+Claims are deleted like ``release()`` deletes the batch's, with label-scoped
+deletecollection rounds across the whole batch. If they fail, calling ``release_members``
+again retries.
+
+**Raises**:
+
 - `BatchError` - If this handle has been detached or released, once this handle loses the
   batch's Lease, or if claims are still not being deleted after the last round.
 - `ApiException` - For a non-transient error such as a 403, which is raised at once.

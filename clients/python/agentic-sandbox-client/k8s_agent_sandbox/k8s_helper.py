@@ -126,8 +126,8 @@ class _UnretriedApiClient(client.ApiClient):
         self._cookie = value
 
 
-def _api_client_without_retries(api_client: client.ApiClient | None) -> client.ApiClient:
-    """Returns an ``ApiClient`` like ``api_client`` (or the default one) whose requests urllib3
+def _api_client_without_retries(api_client: client.ApiClient) -> client.ApiClient:
+    """Returns an ``ApiClient`` like ``api_client`` whose requests urllib3
     doesn't retry, so batch Lease and custom-object callers run their own deadline- and
     conflict-aware retry logic.
 
@@ -136,11 +136,20 @@ def _api_client_without_retries(api_client: client.ApiClient | None) -> client.A
     the Lease's expiry inside one SDK call, and a retried Lease write that already landed comes back
     as a conflict. The async helper needs no counterpart, since aiohttp doesn't retry requests.
     """
-    if api_client is not None:
-        return _UnretriedApiClient(api_client)
-    configuration = client.Configuration.get_default_copy()
-    configuration.retries = False
-    return client.ApiClient(configuration=configuration)
+    return _UnretriedApiClient(api_client)
+
+
+def _close_api_client(api_client: client.ApiClient) -> None:
+    """Closes ``api_client``'s thread pool and its HTTP connection pool.
+
+    kubernetes 35's ``ApiClient.close()`` only closes the thread pool and leaves
+    ``rest_client.pool_manager``'s sockets open until garbage collection. kubernetes 37 clears the
+    pool itself, so clearing it again there does nothing.
+    """
+    try:
+        api_client.close()
+    finally:
+        api_client.rest_client.pool_manager.clear()
 
 
 def _claim_list_pages(
@@ -227,20 +236,45 @@ class K8sHelper:
         validate_pool_size(pool_size, api_client)
         # Kept so kubectl subprocesses can target the same cluster.
         self.injected_api_client = api_client
-        if api_client is None:
-            try:
-                config.load_incluster_config()
-            except config.ConfigException:
-                config.load_kube_config(temp_file_path=kube_config_temp_dir)
-            if pool_size is not None:
-                configuration = client.Configuration.get_default_copy()
-                configuration.connection_pool_maxsize = pool_size
-                api_client = client.ApiClient(configuration=configuration)
-        self.custom_objects_api = client.CustomObjectsApi(api_client)
-        unretried_api_client = _api_client_without_retries(api_client)
-        self._batch_custom_objects_api = client.CustomObjectsApi(unretried_api_client)
-        self.core_v1_api = client.CoreV1Api(api_client)
-        self.coordination_v1_api = client.CoordinationV1Api(unretried_api_client)
+        self._owned_api_client: client.ApiClient | None = None
+        self._batch_api_client: client.ApiClient | None = None
+        try:
+            if api_client is None:
+                try:
+                    config.load_incluster_config()
+                except config.ConfigException:
+                    config.load_kube_config(temp_file_path=kube_config_temp_dir)
+                if pool_size is None:
+                    api_client = client.ApiClient()
+                else:
+                    configuration = client.Configuration.get_default_copy()
+                    configuration.connection_pool_maxsize = pool_size
+                    api_client = client.ApiClient(configuration=configuration)
+                self._owned_api_client = api_client
+            self.custom_objects_api = client.CustomObjectsApi(api_client)
+            unretried_api_client = _api_client_without_retries(api_client)
+            self._batch_api_client = unretried_api_client
+            self._batch_custom_objects_api = client.CustomObjectsApi(unretried_api_client)
+            self.core_v1_api = client.CoreV1Api(api_client)
+            self.coordination_v1_api = client.CoordinationV1Api(unretried_api_client)
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        """Closes the Kubernetes API client connection pools owned by this helper.
+
+        A caller-injected ``api_client`` is left open and remains attached to
+        this helper.
+        """
+        try:
+            if self._batch_api_client is not None:
+                _close_api_client(self._batch_api_client)
+                self._batch_api_client = None
+        finally:
+            if self._owned_api_client is not None:
+                _close_api_client(self._owned_api_client)
+                self._owned_api_client = None
 
     def api_pool_size(self) -> int | None:
         """Returns the size of the Kubernetes API connection pool that creates and the watch use, or

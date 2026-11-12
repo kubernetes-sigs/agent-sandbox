@@ -68,3 +68,38 @@ except ImportError:
                 "AsyncSandboxBatch requires the 'async' extras. "
                 "Install with: pip install k8s-agent-sandbox[async]"
             )
+
+
+__all__ = [
+    "AsyncSandboxBatch",
+    "AsyncSandboxClient",
+    "BatchError",
+    "BatchEvent",
+    "BatchEventType",
+    "BatchExistsError",
+    "BatchGroup",
+    "BatchInUseError",
+    "BatchLeaseExpiredError",
+    "BatchNotFoundError",
+    "BatchTimeoutError",
+    "GroupOutcome",
+    "Member",
+    "MemberState",
+    "QuorumUnreachableError",
+    "SandboxBatch",
+    "SandboxClaimFailedError",
+    "SandboxClient",
+    "SandboxError",
+    "SandboxNoServiceError",
+    "SandboxNotFoundError",
+    "SandboxNotReadyError",
+    "SandboxPortForwardError",
+    "SandboxRequestError",
+    "SandboxServiceUnavailableError",
+    "SandboxTemplateNotFoundError",
+    "SandboxWarmPoolNotFoundError",
+    "SandboxdInClusterConnectionConfig",
+    "TerminalMemberError",
+    "get_metrics",
+    "print_metrics",
+]

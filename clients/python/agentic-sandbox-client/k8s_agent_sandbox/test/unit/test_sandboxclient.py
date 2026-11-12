@@ -986,5 +986,38 @@ class TestLibraryLogging(unittest.TestCase):
         self.assertEqual(offenders, [])
 
 
+class TestPublicExports(unittest.TestCase):
+    """Package root declares explicit PEP 561 __all__ exports."""
+
+    def test_dunder_all_exports_every_public_root_symbol(self):
+        import k8s_agent_sandbox
+
+        init_path = Path(__file__).resolve().parents[2] / "__init__.py"
+        tree = ast.parse(init_path.read_text())
+        bound_public: set[str] = set()
+
+        def collect(stmts):
+            for stmt in stmts:
+                if isinstance(stmt, ast.ImportFrom):
+                    for alias in stmt.names:
+                        name = alias.asname or alias.name
+                        if not name.startswith("_"):
+                            bound_public.add(name)
+                elif isinstance(stmt, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if not stmt.name.startswith("_"):
+                        bound_public.add(stmt.name)
+                elif isinstance(stmt, ast.Try):
+                    collect(stmt.body)
+                    for handler in stmt.handlers:
+                        collect(handler.body)
+
+        collect(tree.body)
+        declared = list(k8s_agent_sandbox.__all__)
+        self.assertEqual(len(declared), len(set(declared)))
+        self.assertEqual(set(declared), bound_public)
+        for name in declared:
+            self.assertTrue(hasattr(k8s_agent_sandbox, name), name)
+
+
 if __name__ == '__main__':
     unittest.main()

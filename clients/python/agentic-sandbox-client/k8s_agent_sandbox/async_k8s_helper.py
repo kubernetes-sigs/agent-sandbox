@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import functools
 import logging
 import math
 import time
@@ -51,6 +52,30 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def _raise_for_status(response: aiohttp.ClientResponse) -> None:
+    """Raises ``ApiException`` for a non-2xx response requested with ``_preload_content=False``,
+    which kubernetes_asyncio returns unread without checking its status. The exception keeps the
+    response's headers, such as Retry-After.
+    """
+    if 200 <= response.status <= 299:
+        return
+    try:
+        raw = await response.read()
+    except BaseException:
+        # A body read cut short leaves the connection mid-response, so it can't go back to the pool.
+        response.close()
+        raise
+    finally:
+        response.release()
+    # kubernetes_asyncio 36's stub types http_resp as an aiohttp response and ApiException.body as
+    # bytes | None, though its own REST client passes a RESTResponse(resp, bytes) and
+    # ApiClient.__call_api decodes body to str. Invalid UTF-8 bytes are replaced so a binary proxy
+    # error page still raises ApiException instead of UnicodeDecodeError.
+    err = client.ApiException(http_resp=cast(Any, RESTResponse(response, raw)))
+    err.body = cast(Any, raw.decode("utf-8", errors="replace"))
+    raise err
 
 
 async def _claim_list_pages(
@@ -751,10 +776,21 @@ class AsyncK8sHelper:
         """
         await self._ensure_initialized()
 
+        list_fn = self.custom_objects_api.list_namespaced_custom_object
+
+        @functools.wraps(list_fn)
+        async def _checked_list(*args: Any, **kwargs: Any) -> aiohttp.ClientResponse:
+            # Watch.stream passes _preload_content=False, which skips the generated client's HTTP
+            # status check. Validate non-2xx responses here so non-JSON errors raise ApiException
+            # and 429 responses preserve their HTTP headers such as Retry-After.
+            response = cast(aiohttp.ClientResponse, await list_fn(*args, **kwargs))
+            await _raise_for_status(response)
+            return response
+
         w = watch.Watch()
         try:
             async for event in w.stream(
-                func=self.custom_objects_api.list_namespaced_custom_object,
+                func=_checked_list,
                 namespace=namespace,
                 group=CLAIM_API_GROUP,
                 version=CLAIM_API_VERSION,
@@ -875,17 +911,8 @@ class AsyncK8sHelper:
             _preload_content=False,
             _request_timeout=_request_timeout,
         ))
+        await _raise_for_status(response)
         try:
-            if not 200 <= response.status <= 299:
-                # Replace invalid UTF-8 bytes so a binary proxy error page still raises ApiException
-                # instead of UnicodeDecodeError.
-                body = (await response.read()).decode("utf-8", errors="replace")
-                # kubernetes_asyncio 36's stub types http_resp as an aiohttp response and
-                # ApiException.body as bytes | None, though its own REST client passes a
-                # RESTResponse(resp, bytes) and ApiClient.__call_api decodes body to str.
-                err = client.ApiException(http_resp=cast(Any, RESTResponse(response, body.encode("utf-8"))))
-                err.body = cast(Any, body)
-                raise err
             async for _ in response.content.iter_any():
                 pass
         finally:
@@ -935,7 +962,10 @@ class AsyncK8sHelper:
         A caller-injected ``api_client`` is left open and remains attached to
         this helper. Only a client created internally is closed and cleared.
         """
-        if self._api_client and self._owns_api_client:
-            await self._api_client.close()
+        async with self._init_lock:
+            if not (self._api_client and self._owns_api_client):
+                return
+            api_client = self._api_client
             self._api_client = None
             self._initialized = False
+        await api_client.close()

@@ -314,7 +314,9 @@ class GroupOutcome:
     """One group's quorum outcome, yielded by ``SandboxBatch.group_outcomes()``.
 
     On success, ``members`` holds exactly ``min_ready`` Ready members and ``error`` is ``None``.
-    On failure, ``error`` is a ``QuorumUnreachableError`` or ``BatchTimeoutError`` and ``members`` is empty.
+    On failure, ``error`` is a ``QuorumUnreachableError`` or ``BatchTimeoutError``, or a ``BatchError`` if
+    ``release_group()`` or ``release_members()`` released the group before a success with members was
+    yielded, and ``members`` is empty.
 
     This is a dataclass rather than a Pydantic model because ``error`` holds a ``BatchError``
     instance (preserving traceback and causes) rather than serializable data.

@@ -42,6 +42,8 @@ export interface ProcessClientOptions {
   maxCommandOutputSize: number;
   /** `Authorization` header value sent on every RPC, when set. */
   authorization?: string;
+  /** Lowercase x-sandbox-* routing metadata, sent only in router mode. */
+  routingMetadata?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -221,6 +223,18 @@ function authInterceptor(authorization: string): Interceptor {
   };
 }
 
+/** Attaches the sandbox-router routing metadata to every RPC. */
+function routingInterceptor(
+  metadata: Readonly<Record<string, string>>,
+): Interceptor {
+  return (next) => (req) => {
+    for (const [key, value] of Object.entries(metadata)) {
+      req.header.set(key, value);
+    }
+    return next(req);
+  };
+}
+
 type UnaryCallOptions = { timeoutMs: number; signal: AbortSignal };
 
 /** The wire shape of one StartResponse, as far as this module reads it. */
@@ -285,9 +299,14 @@ export class ProcessClient {
           sessionManager,
           readMaxBytes: this.opts.maxCommandOutputSize,
           // One interceptor covers unary and streaming calls alike.
-          interceptors: this.opts.authorization
-            ? [authInterceptor(this.opts.authorization)]
-            : [],
+          interceptors: [
+            ...(this.opts.routingMetadata
+              ? [routingInterceptor(this.opts.routingMetadata)]
+              : []),
+            ...(this.opts.authorization
+              ? [authInterceptor(this.opts.authorization)]
+              : []),
+          ],
         });
         if (this.closed) {
           sessionManager.abort();

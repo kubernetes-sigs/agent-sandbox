@@ -43,6 +43,8 @@ export interface PodTunnelOptions {
   /** Budget for each individual WS handshake (one per accepted TCP socket). */
   handshakeTimeoutMs: number;
   logger: Logger;
+  /** Open one listener serving both REST and gRPC (the router does too). */
+  sharedPort?: boolean;
   /**
    * Test seam: overrides the WebSocket implementation used to dial the
    * apiserver. Defaults to the `ws` package, matching production.
@@ -123,9 +125,12 @@ export class PodTunnel {
   constructor(private readonly opts: PodTunnelOptions) {}
 
   get endpoints(): PodTunnelEndpoints {
+    const restBaseUrl = `http://127.0.0.1:${this.restLocalPort}`;
     return {
-      restBaseUrl: `http://127.0.0.1:${this.restLocalPort}`,
-      grpcBaseUrl: `http://127.0.0.1:${this.grpcLocalPort}`,
+      restBaseUrl,
+      grpcBaseUrl: this.opts.sharedPort
+        ? restBaseUrl
+        : `http://127.0.0.1:${this.grpcLocalPort}`,
     };
   }
 
@@ -158,6 +163,13 @@ export class PodTunnel {
         "listener",
         { cause: err },
       );
+    }
+
+    // The router serves sandboxd's REST and gRPC APIs on one port, so a
+    // shared-port tunnel stops after a single listener and reports the same
+    // local address for both base URLs.
+    if (this.opts.sharedPort) {
+      return this.endpoints;
     }
 
     this.grpcServer = net.createServer((socket) =>

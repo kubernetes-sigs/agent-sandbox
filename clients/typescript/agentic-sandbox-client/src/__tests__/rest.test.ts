@@ -72,6 +72,7 @@ function makeClient(
     maxUploadSize: number;
     maxMetadataResponseSize: number;
     authorization: string;
+    routingHeaders: Readonly<Record<string, string>>;
   }> = {},
 ): SandboxdRestClient {
   return new SandboxdRestClient({
@@ -80,6 +81,7 @@ function makeClient(
     maxUploadSize: overrides.maxUploadSize ?? 1024 * 1024,
     maxMetadataResponseSize: overrides.maxMetadataResponseSize ?? 1024 * 1024,
     authorization: overrides.authorization,
+    routingHeaders: overrides.routingHeaders,
   });
 }
 
@@ -508,6 +510,48 @@ describe("SandboxdRestClient authorization", () => {
       expect(JSON.stringify(err)).not.toContain("wrong-token");
       expect((err as Error).message).not.toContain("wrong-token");
     }
+  });
+});
+
+describe("SandboxdRestClient routing headers", () => {
+  it("sends the sandbox-router routing headers on every request", async () => {
+    activeServer = await startServer((req, res) => {
+      if (req.method === "PUT") {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok", uptime_seconds: 1 }));
+    });
+    const client = makeClient(activeServer.baseUrl, {
+      routingHeaders: {
+        "X-Sandbox-ID": "sb-kata",
+        "X-Sandbox-Namespace": "default",
+        "X-Sandbox-Port": "18080",
+        "X-Sandbox-Pod-IP": "10.244.0.7",
+      },
+    });
+    const signal = new AbortController().signal;
+    await client.health(signal);
+    await client.write("a.txt", new Uint8Array([1]), {}, signal);
+
+    expect(activeServer.requests).toHaveLength(2);
+    for (const req of activeServer.requests) {
+      expect(req.headers["x-sandbox-id"]).toBe("sb-kata");
+      expect(req.headers["x-sandbox-namespace"]).toBe("default");
+      expect(req.headers["x-sandbox-port"]).toBe("18080");
+      expect(req.headers["x-sandbox-pod-ip"]).toBe("10.244.0.7");
+    }
+  });
+
+  it("sends no routing headers when none are configured", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok", uptime_seconds: 1 }));
+    });
+    await makeClient(activeServer.baseUrl).health(new AbortController().signal);
+    expect(activeServer.requests[0].headers["x-sandbox-id"]).toBeUndefined();
   });
 });
 

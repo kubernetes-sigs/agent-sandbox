@@ -494,6 +494,79 @@ describe("ProcessClient authorization", () => {
   });
 });
 
+describe("ProcessClient routingMetadata", () => {
+  it("sends sandbox-router routing metadata on unary calls", async () => {
+    const seen: Array<Record<string, string | null>> = [];
+    activeServer = await startH2Server((router) => {
+      router.service(ProcessService, {
+        execute: (_req, ctx) => {
+          seen.push({
+            id: ctx.requestHeader.get("x-sandbox-id"),
+            namespace: ctx.requestHeader.get("x-sandbox-namespace"),
+            port: ctx.requestHeader.get("x-sandbox-port"),
+            podIp: ctx.requestHeader.get("x-sandbox-pod-ip"),
+            token: ctx.requestHeader.get("x-sandboxd-token"),
+          });
+          return create(ExecuteResponseSchema, { exitCode: 0 });
+        },
+      });
+    });
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+      routingMetadata: {
+        "x-sandbox-id": "sb-kata",
+        "x-sandbox-namespace": "default",
+        "x-sandbox-port": "19090",
+        "x-sandbox-pod-ip": "10.244.0.7",
+        "x-sandboxd-token": "tok-sandboxd-9a2f",
+      },
+    });
+
+    await activeClient.run(
+      { command: ["true"] },
+      30_000,
+      new AbortController().signal,
+    );
+
+    expect(seen).toEqual([
+      {
+        id: "sb-kata",
+        namespace: "default",
+        port: "19090",
+        podIp: "10.244.0.7",
+        token: "tok-sandboxd-9a2f",
+      },
+    ]);
+  });
+
+  it("sends no routing metadata when none is configured", async () => {
+    const seen: Array<Record<string, string | null>> = [];
+    activeServer = await startH2Server((router) => {
+      router.service(ProcessService, {
+        execute: (_req, ctx) => {
+          seen.push({
+            id: ctx.requestHeader.get("x-sandbox-id"),
+          });
+          return create(ExecuteResponseSchema, { exitCode: 0 });
+        },
+      });
+    });
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+
+    await activeClient.run(
+      { command: ["true"] },
+      30_000,
+      new AbortController().signal,
+    );
+
+    expect(seen).toEqual([{ id: null }]);
+  });
+});
+
 describe("ProcessClient.start", () => {
   const initMsg = () =>
     create(StartResponseSchema, {

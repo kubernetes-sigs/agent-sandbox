@@ -370,6 +370,34 @@ describe("PodTunnel", () => {
     );
   });
 
+  it("shares one local port for REST and gRPC when sharedPort is set", async () => {
+    echo = await startEchoServer();
+    api = await startFakeApiServer({ targetPort: echo.port });
+    tunnel = new PodTunnel({
+      kubeConfig: makeTestKubeConfig(api.port),
+      namespace: "ns1",
+      podName: "pod1",
+      restTargetPort: 8080,
+      grpcTargetPort: 8080,
+      handshakeTimeoutMs: 5000,
+      logger: noopLogger,
+      sharedPort: true,
+    });
+    const endpoints = await tunnel.start();
+    expect(endpoints.restBaseUrl).toBe(endpoints.grpcBaseUrl);
+
+    // A single connection reaches the echo server through the shared port.
+    const client = await connectClient(
+      Number(new URL(endpoints.restBaseUrl).port),
+    );
+    const received = new Promise<Buffer>((resolve) =>
+      client.once("data", resolve),
+    );
+    client.write("hello router");
+    expect((await received).toString()).toBe("hello router");
+    client.destroy();
+  });
+
   describe("apiserver dial", () => {
     function newTunnel(kubeConfig: k8s.KubeConfig): PodTunnel {
       return new PodTunnel({

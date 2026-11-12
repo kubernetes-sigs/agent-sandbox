@@ -273,6 +273,72 @@ describe("SandboxClient (registry)", () => {
         expect((err as SandboxError).message).not.toContain(authToken);
       }
     });
+
+    it.each([
+      "",
+      "has space",
+      "tab\there",
+      "new\nline",
+      "t\u00f6ken",
+      42 as unknown as string,
+    ])("throws SandboxError for sandboxd.routerAuthToken = %p without echoing it", (routerAuthToken) => {
+      const err = (() => {
+        try {
+          new SandboxClient({ sandboxd: { routerAuthToken } });
+        } catch (e) {
+          return e;
+        }
+      })();
+      expect(err).toBeInstanceOf(SandboxError);
+      expect((err as SandboxError).message).toMatch(
+        /sandboxd\.routerAuthToken/,
+      );
+      if (typeof routerAuthToken === "string" && routerAuthToken !== "") {
+        expect((err as SandboxError).message).not.toContain(routerAuthToken);
+      }
+    });
+
+    it("accepts a router-port-forward sandboxd configuration", () => {
+      expect(
+        () =>
+          new SandboxClient({
+            sandboxd: {
+              connectivity: "router-port-forward",
+              routerNamespace: "agent-sandbox-system",
+              disablePodIPRouting: true,
+            },
+          }),
+      ).not.toThrow();
+    });
+
+    it.each([
+      "",
+      "Bad_NS",
+      "UPPER",
+      "-leading",
+      "trailing-",
+      "a".repeat(64),
+      42 as unknown as string,
+    ])("throws SandboxError for sandboxd.routerNamespace = %p", (routerNamespace) => {
+      expect(
+        () => new SandboxClient({ sandboxd: { routerNamespace } }),
+      ).toThrow(/sandboxd\.routerNamespace/);
+    });
+
+    it.each([
+      "yes",
+      1,
+      null,
+    ])("throws SandboxError for sandboxd.disablePodIPRouting = %p", (disablePodIPRouting) => {
+      expect(
+        () =>
+          new SandboxClient({
+            sandboxd: {
+              disablePodIPRouting: disablePodIPRouting as unknown as boolean,
+            },
+          }),
+      ).toThrow(/sandboxd\.disablePodIPRouting/);
+    });
   });
 
   // ===== in-cluster connectivity =====
@@ -1379,6 +1445,36 @@ describe("SandboxClient (registry)", () => {
       expect(ready).not.toBe(early);
       expect(ready.podIP).toBe("10.0.0.9");
       expect(early.isActive).toBe(false);
+    });
+
+    it("reuses a router-port-forward handle that has no pod IP", async () => {
+      const pending = {
+        metadata: { name: "sb-router", annotations: {} },
+        status: { conditions: [{ type: "Ready", status: "False" }] },
+      };
+      const resolved = { status: { sandbox: { name: "sb-router" } } };
+      mockGetNamespacedCustomObject
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce(resolved)
+        .mockResolvedValueOnce(pending);
+
+      const client = new SandboxClient({
+        sandboxd: { connectivity: "router-port-forward" },
+      });
+      const early = await client.getSandbox("claim-router", undefined, {
+        waitForReady: false,
+      });
+      expect(early.podIP).toBe("");
+
+      mockGetNamespacedCustomObject
+        .mockResolvedValueOnce(resolved)
+        .mockResolvedValueOnce(pending);
+
+      const again = await client.getSandbox("claim-router", undefined, {
+        waitForReady: false,
+      });
+      expect(again).toBe(early);
+      expect(early.isActive).toBe(true);
     });
 
     it("bounds claim resolution by resolveTimeout instead of the ready timeout", async () => {

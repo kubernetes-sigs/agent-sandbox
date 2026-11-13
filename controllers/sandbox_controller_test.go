@@ -6001,7 +6001,7 @@ func TestReconcilePVCs(t *testing.T) {
 // Sandbox: the garbage collector releases the Sandbox's PVC, Pod, and Service
 // before the informer cache shows the Sandbox's deletionTimestamp. The
 // controller must not adopt them back, or the garbage collector deletes them
-// together with the Sandbox.
+// together with the Sandbox. A live Sandbox still adopts them.
 func TestReconcileSkipsAdoptionWhenSandboxIsDeleting(t *testing.T) {
 	sandboxName := "test-sandbox"
 	sandboxNs := "test-ns"
@@ -6046,12 +6046,14 @@ func TestReconcileSkipsAdoptionWhenSandboxIsDeleting(t *testing.T) {
 	recreatedSandbox.UID = "recreated-sandbox-uid"
 
 	testCases := []struct {
-		name       string
-		apiSandbox *sandboxv1beta1.Sandbox
+		name        string
+		apiSandbox  *sandboxv1beta1.Sandbox
+		wantAdopted bool
 	}{
 		{name: "sandbox is being deleted", apiSandbox: deletingSandbox},
 		{name: "sandbox is gone"},
 		{name: "sandbox was recreated with a new UID", apiSandbox: recreatedSandbox},
+		{name: "sandbox is live", apiSandbox: cachedSandbox, wantAdopted: true},
 	}
 
 	for _, tc := range testCases {
@@ -6076,7 +6078,13 @@ func TestReconcileSkipsAdoptionWhenSandboxIsDeleting(t *testing.T) {
 					name = pvcName
 				}
 				require.NoError(t, r.Get(t.Context(), types.NamespacedName{Name: name, Namespace: sandboxNs}, child))
-				assert.Empty(t, child.GetOwnerReferences(), "expected %T %q to stay unowned", child, name)
+				if !tc.wantAdopted {
+					assert.Empty(t, child.GetOwnerReferences(), "expected %T %q to stay unowned", child, name)
+					continue
+				}
+				ownerRef := metav1.GetControllerOf(child)
+				require.NotNil(t, ownerRef, "expected %T %q to be adopted", child, name)
+				assert.Equal(t, sandboxUID, ownerRef.UID, "expected %T %q to be adopted by the live sandbox", child, name)
 			}
 		})
 	}

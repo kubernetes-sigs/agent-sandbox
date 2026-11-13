@@ -851,6 +851,25 @@ async with await sandbox.commands.start("python long_task.py") as handle:
 `NotImplementedError` on the legacy python-runtime connector, which does not
 expose a streaming exec endpoint.
 
+## Suspend and resume
+
+`suspend()` sets the Sandbox operating mode to `Suspended` and waits for the
+controller to report it. `resume()` sets the mode to `Running` and waits for
+the Sandbox to become ready. The next command or file request reconnects.
+
+```python
+sandbox.suspend()
+print(sandbox.is_suspended())  # True
+sandbox.resume(timeout=60)
+print(sandbox.commands.run("cat /workspace/note.txt").stdout)
+```
+
+Data on a persistent volume survives. Processes, memory, and `emptyDir` volumes
+do not. Both methods raise on failure and take a keyword-only `timeout` in
+seconds, 180 by default. `AsyncSandbox` provides the same methods with `await`.
+For snapshot-backed suspension on GKE, use the
+[GKE snapshot extension](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/k8s_agent_sandbox/gke_extensions/snapshots/README.md).
+
 ## Testing
 
 A test script is included to verify the full lifecycle (Creation -> Execution -> File I/O -> Cleanup).

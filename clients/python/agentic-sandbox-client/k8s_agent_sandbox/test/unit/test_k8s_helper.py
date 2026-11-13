@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import os
 import tempfile
 import unittest
@@ -24,7 +25,7 @@ from pydantic import ValidationError
 from k8s_agent_sandbox.models import AdditionalPodMetadata
 from k8s_agent_sandbox.k8s_helper import K8sHelper
 from k8s_agent_sandbox.exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxTemplateNotFoundError
-from k8s_agent_sandbox.constants import CLIENT_REQUEST_TIME_ANNOTATION
+from k8s_agent_sandbox.constants import CLIENT_REQUEST_TIME_ANNOTATION, SANDBOX_API_GROUP, SANDBOX_API_VERSION, SANDBOX_PLURAL_NAME
 from k8s_agent_sandbox.models import SandboxClaimEnvVar
 
 
@@ -842,6 +843,46 @@ class TestK8sHelperWatchResourceVersion(unittest.TestCase):
     resourceVersion (the created claim's, or "0") so the apiserver serves it
     from the watch cache — an unset resourceVersion forces a quorum etcd read
     to establish initial state on every wait."""
+
+    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
+    def test_suspended_wait_skips_stale_generation(
+        self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls
+    ):
+        mock_watch_class.return_value.stream.return_value = [
+            {"type": "MODIFIED", "object": {"status": {
+                "conditions": [{"type": "Suspended", "status": "True", "observedGeneration": generation}],
+                "podIPs": [f"10.0.0.{generation}"],
+            }}}
+            for generation in (1, 2)
+        ]
+        helper = K8sHelper()
+
+        ip = helper.wait_for_sandbox_ready(
+            "test-sandbox", "default", timeout=5, condition="Suspended", min_generation=2,
+        )
+
+        self.assertEqual(ip, "10.0.0.2")
+
+    def test_patch_sandbox_operating_mode(self, mock_config, mock_api_cls, mock_core_cls):
+        from kubernetes.client.api.custom_objects_api import CustomObjectsApi
+
+        with client.ApiClient() as api:
+            helper = K8sHelper(api_client=api)
+            helper.custom_objects_api = CustomObjectsApi(api)
+            response = urllib3.HTTPResponse(body=b"{}", status=200, headers={"Content-Type": "application/json"})
+            with patch.object(api.rest_client.pool_manager, "request", return_value=response) as request:
+                helper.patch_sandbox_operating_mode("test-sandbox", "default", "Suspended", "original")
+
+                sent = request.call_args.kwargs
+                self.assertEqual(sent["headers"]["Content-Type"], "application/merge-patch+json")
+                self.assertEqual(
+                    json.loads(sent["body"]),
+                    {"metadata": {"uid": "original"}, "spec": {"operatingMode": "Suspended"}},
+                )
+                request.side_effect = AssertionError("Empty UID reached the transport")
+                for uid in ("", None):
+                    with self.assertRaises(ValueError):
+                        helper.patch_sandbox_operating_mode("test-sandbox", "default", "Suspended", uid)
 
     @staticmethod
     def _ready_event(rv="7"):

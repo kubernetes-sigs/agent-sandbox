@@ -103,12 +103,15 @@ func (t *portForwardTunnel) monitorPortForward(errChan <-chan error, stderrBuf *
 		select {
 		case err = <-errChan:
 		case <-timer.C:
+			// As below: a reconnect may have replaced this tunnel, and
+			// onDied would tear down the replacement.
 			t.mu.Lock()
-			if t.portForwardStopChan == myStopChan {
+			shouldNotify := t.portForwardStopChan == myStopChan
+			if shouldNotify {
 				t.portForwardStopChan = nil
 			}
 			t.mu.Unlock()
-			if t.onDied != nil {
+			if shouldNotify && t.onDied != nil {
 				t.onDied(fmt.Errorf(
 					"%w: ForwardPorts goroutine did not exit within %s",
 					ErrPortForwardDied, monitorExitTimeout,

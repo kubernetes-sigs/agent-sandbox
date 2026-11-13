@@ -35,6 +35,7 @@ from k8s_agent_sandbox.models import (
     FileEntry,
     SandboxdInClusterConnectionConfig,
     SandboxdPodTunnelConnectionConfig,
+    SandboxdRouterTunnelConnectionConfig,
 )
 
 
@@ -68,6 +69,28 @@ class TestFileEntryParsing(unittest.TestCase):
 
 
 class TestSandboxdConfig(unittest.TestCase):
+    def test_router_config_defaults(self):
+        from k8s_agent_sandbox import SandboxdRouterTunnelConnectionConfig as PublicRouterConfig
+
+        self.assertIs(PublicRouterConfig, SandboxdRouterTunnelConnectionConfig)
+        config = SandboxdRouterTunnelConnectionConfig()
+        self.assertEqual((config.rest_port, config.grpc_port), (8080, 9090))
+        self.assertEqual(config.router_namespace, "agent-sandbox-system")
+        self.assertEqual(config.port_forward_ready_timeout, 30)
+        self.assertIsNone(config.router_auth_token)
+        self.assertFalse(config.pod_ip_routing)
+
+    def test_router_config_validation(self):
+        for values in (
+            {"rest_port": 0}, {"grpc_port": 65536},
+            {"rest_port": 9090}, {"port_forward_ready_timeout": 0},
+            {"router_namespace": ""}, {"router_namespace": "Invalid"},
+            {"router_namespace": "a" * 64}, {"router_namespace": "ns\n"},
+            {"router_auth_token": ""}, {"router_auth_token": "has space"},
+        ):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                SandboxdRouterTunnelConnectionConfig(**values)
+
     def test_defaults(self):
         cfg = SandboxdPodTunnelConnectionConfig()
         self.assertEqual(cfg.rest_port, 8080)
@@ -205,14 +228,57 @@ class TestSandboxdFilesystem(unittest.TestCase):
             self._fs.delete("")
         self._connector.send_request.assert_not_called()
 
+    def test_mkdir_sends_directory_type(self):
+        self._fs.mkdir("a/b")
+        args, _ = self._last_call()
+        self.assertEqual(args[:2], ("PUT", "v1/files/a%2Fb?type=directory"))
 
-class TestLegacyDeleteUnsupported(unittest.TestCase):
-    def test_delete_raises_on_legacy(self):
+    def test_mkdir_parents(self):
+        self._fs.mkdir("a/b", parents=True)
+        args, _ = self._last_call()
+        self.assertEqual(
+            args[:2], ("PUT", "v1/files/a%2Fb?type=directory&parents=true"))
+
+    def test_move_and_copy_send_destination(self):
+        for op in ("move", "copy"):
+            with self.subTest(op=op):
+                getattr(self._fs, op)("src dir/a.txt", "dst/b.txt")
+                args, _ = self._last_call()
+                self.assertEqual(args[0], "POST")
+                self.assertEqual(
+                    args[1],
+                    f"v1/files/src%20dir%2Fa.txt:{op}?destination=dst%2Fb.txt")
+
+    def test_move_overwrite(self):
+        self._fs.move("a", "b", overwrite=True)
+        args, _ = self._last_call()
+        self.assertEqual(
+            args[1], "v1/files/a:move?destination=b&overwrite=true")
+
+    def test_mkdir_move_copy_reject_empty_arguments(self):
+        for call in (
+            lambda: self._fs.mkdir(""),
+            lambda: self._fs.move("", "b"),
+            lambda: self._fs.copy("a", ""),
+        ):
+            with self.subTest(), self.assertRaisesRegex(ValueError, "must not be empty"):
+                call()
+        self._connector.send_request.assert_not_called()
+
+
+class TestLegacyFileOpsUnsupported(unittest.TestCase):
+    def test_sandboxd_only_ops_raise_on_legacy(self):
         connector = MagicMock()
         connector.is_sandboxd.return_value = False
         fs = Filesystem(connector, MagicMock(), trace_service_name="test")
-        with self.assertRaises(NotImplementedError):
-            fs.delete("f.txt")
+        for call in (
+            lambda: fs.delete("f.txt"),
+            lambda: fs.mkdir("d"),
+            lambda: fs.move("a", "b"),
+            lambda: fs.copy("a", "b"),
+        ):
+            with self.subTest(), self.assertRaises(NotImplementedError):
+                call()
         connector.send_request.assert_not_called()
 
 

@@ -120,11 +120,14 @@ type Config struct {
 	// ClusterDomain is the Kubernetes cluster DNS suffix used to build target
 	// service FQDNs (e.g. "cluster.local"). Honors CLUSTER_DOMAIN.
 	ClusterDomain string
-	// ProxyTimeout bounds the total time spent proxying a single request to
-	// an upstream sandbox. Honors PROXY_TIMEOUT_SECONDS (numeric seconds).
+	// ProxyTimeout bounds normal HTTP requests, not gRPC or upgrades.
+	// Honors PROXY_TIMEOUT_SECONDS (numeric seconds).
 	ProxyTimeout time.Duration
-	// ResponseHeaderTimeout bounds the time spent waiting for the upstream
-	// to start sending the response headers.
+	// GRPCProxyTimeout is an optional total RPC duration cap, including
+	// discovery and authorization. Zero leaves the caller's budget intact.
+	GRPCProxyTimeout time.Duration
+	// ResponseHeaderTimeout bounds the wait for HTTP upstream headers.
+	// gRPC uses its effective RPC budget instead.
 	ResponseHeaderTimeout time.Duration
 	// ShutdownTimeout bounds the time each HTTP server is allowed to drain
 	// in-flight requests on SIGTERM.
@@ -323,6 +326,13 @@ type Config struct {
 	// same-origin check this exists to make actually match reality.
 	// Has no effect without AuthzCookieName.
 	AuthzTrustForwardedProto bool
+	// GRPCWebAllowedOrigins is the allowlist of browser origins permitted
+	// to call the router with gRPC-Web. A same-origin request is always
+	// allowed regardless of this list. When the list is empty (the
+	// default), only same-origin browser callers receive CORS headers;
+	// cross-origin requests are still proxied but the browser blocks the
+	// response. Each entry has the form scheme://host[:port].
+	GRPCWebAllowedOrigins []string
 }
 
 // Defaults returns a Config populated with the default values used when no
@@ -393,6 +403,9 @@ func (c *Config) Validate() error {
 
 	if c.ProxyTimeout <= 0 {
 		return fmt.Errorf("--proxy-timeout must be positive, got %s", c.ProxyTimeout)
+	}
+	if c.GRPCProxyTimeout < 0 {
+		return fmt.Errorf("--grpc-proxy-timeout must be non-negative, got %s", c.GRPCProxyTimeout)
 	}
 	if c.ResponseHeaderTimeout <= 0 {
 		return fmt.Errorf("--response-header-timeout must be positive, got %s", c.ResponseHeaderTimeout)
@@ -503,6 +516,11 @@ func (c *Config) Validate() error {
 	}
 	if len(c.AuthzCookieAllowedOrigins) > 0 && c.AuthzCookieName == "" {
 		return errors.New("--authz-cookie-allowed-origins has no effect without --authz-cookie-name, which is what runs the same-origin check it configures")
+	}
+	for _, origin := range c.GRPCWebAllowedOrigins {
+		if !validOriginPattern(origin) {
+			return fmt.Errorf("--grpc-web-allowed-origins entry %q must have the form scheme://host[:port], with no path/query/fragment", origin)
+		}
 	}
 	if c.AuthzTrustForwardedProto && c.AuthzCookieName == "" {
 		return errors.New("--authz-trust-forwarded-proto has no effect without --authz-cookie-name, which is what runs the same-origin check it affects")

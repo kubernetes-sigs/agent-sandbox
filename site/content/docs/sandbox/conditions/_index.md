@@ -36,6 +36,7 @@ Summarizes whether the Sandbox can serve traffic. It is `True` only when the bac
 | `False` | `SandboxSuspended` | The Sandbox is suspending or suspended (`spec.operatingMode: Suspended`). |
 | `False` | `PodSucceeded` | The Pod completed successfully. |
 | `False` | `PodFailed` | The Pod failed. |
+| `False` | `PodTerminating` | The Pod has a deletion timestamp, even if it already reached Failed or Succeeded, which `Finished` reports. With `spec.failedPodPolicy: Recreate`, the controller replaces a Failed Pod instead, so Ready is `DependenciesNotReady` and `Finished` is absent. |
 | `False` | `SandboxExpired` | `spec.shutdownTime` was reached. Resource cleanup may still be pending or in progress. See [shutdown time]({{< ref "/docs/sandbox/lifecycle" >}}). |
 
 ### Suspended
@@ -52,7 +53,7 @@ Reports progress of a suspension. It is never removed: a running Sandbox reports
 
 ### Finished
 
-Present only while an owned Pod is in a terminal phase. It is always `True`. Expiry does not create it, but `shutdownPolicy: Retain` keeps an existing one. `Delete` removes the Sandbox.
+Present only while the controller reports an owned Pod in a terminal phase. It is always `True`. With `spec.failedPodPolicy: Recreate`, a Failed Pod is left out of status while a replacement is pending, so this condition is absent then. Expiry does not create it, but `shutdownPolicy: Retain` keeps an existing one. `Delete` removes the Sandbox.
 
 | Status | Reason | Meaning |
 | --- | --- | --- |
@@ -63,9 +64,10 @@ Present only while an owned Pod is in a terminal phase. It is always `True`. Exp
 
 Mirrors the backing Pod's `PodScheduled` condition, so you can see why a Sandbox is not scheduled without reading the Pod. It is absent when the Pod is confirmed absent or not owned by the Sandbox. A failed Pod lookup does not remove it, see `PodSchedulingUnknown`.
 
-The status, reason and message are copied from the Pod, so reasons set by the scheduler (such as `Unschedulable` or `SchedulingGated`) pass through unchanged. The controller adds two reasons of its own:
+The status, reason and message are copied from the Pod unless an unscheduled Pod is terminating, so reasons set by the scheduler (such as `Unschedulable` or `SchedulingGated`) pass through unchanged. The controller adds three reasons of its own:
 
 | Status | Reason | Meaning |
 | --- | --- | --- |
 | `True` | `PodScheduled` | The Pod is scheduled to a node. Used when the Pod condition has no reason. |
+| `False` | `PodTerminating` | An unscheduled Pod is terminating (`deletionTimestamp` is set). Scheduled Pods keep `True`. |
 | `False` or `Unknown` | `PodSchedulingUnknown` | The Pod has not reported a `PodScheduled` condition yet, the Pod condition is not `True` and has no reason, or the Pod state could not be read. |

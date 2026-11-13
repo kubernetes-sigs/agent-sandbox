@@ -64,6 +64,8 @@ type Target struct {
 // knobs in a struct rather than as positional args keeps the call
 // site readable as the validation surface grows.
 type ParseOptions struct {
+	// RequirePort prevents native gRPC from inheriting the legacy HTTP port.
+	RequirePort bool
 	// AllowLoopbackPodIP, when true, lets a loopback address in
 	// X-Sandbox-Pod-IP pass validation. See config.Config for the
 	// production reasoning.
@@ -95,6 +97,9 @@ func ParseSandboxHeaders(h http.Header, opts ParseOptions) (Target, *Error) {
 	}
 
 	port := DefaultSandboxPort
+	if opts.RequirePort && h.Get(HeaderSandboxPort) == "" {
+		return Target{}, &Error{Status: http.StatusBadRequest, Detail: "X-Sandbox-Port header is required for gRPC."}
+	}
 	if raw := h.Get(HeaderSandboxPort); raw != "" {
 		n, err := strconv.Atoi(raw)
 		if err != nil {

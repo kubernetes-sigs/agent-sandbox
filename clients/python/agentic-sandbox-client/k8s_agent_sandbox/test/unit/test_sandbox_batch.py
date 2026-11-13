@@ -52,6 +52,7 @@ from k8s_agent_sandbox.constants import (
 )
 from k8s_agent_sandbox.exceptions import (
     BatchError,
+    SandboxResponseTooLargeError,
     BatchExistsError,
     BatchInUseError,
     BatchLeaseExpiredError,
@@ -69,6 +70,7 @@ from k8s_agent_sandbox.models import (
     BatchGroup,
     MemberState,
     SandboxDirectConnectionConfig,
+    SandboxFileConfig,
 )
 from k8s_agent_sandbox.sandbox import Sandbox
 from k8s_agent_sandbox.sandbox_batch import SandboxBatch
@@ -1246,6 +1248,7 @@ class TestConnect(unittest.TestCase):
 
     def setUp(self):
         self.mock_client = MagicMock()
+        self.mock_client.file_config = None
         self.mock_sandbox_instance = MagicMock()
         self.mock_client.sandbox_class.return_value = self.mock_sandbox_instance
         self.handle = _make_handle(self.mock_client)
@@ -1273,6 +1276,29 @@ class TestConnect(unittest.TestCase):
         self.mock_client.k8s_helper.get_sandbox.assert_not_called()
         self.assertIs(sandbox, self.mock_sandbox_instance)
         self.assertEqual(sandbox._seeded_pod_ip, "10.0.0.1")
+
+    def test_forwards_client_file_config_when_set(self):
+        patcher = patch("k8s_agent_sandbox.sandbox_client.K8sHelper")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        real_client = SandboxClient(
+            connection_config=SandboxDirectConnectionConfig(api_url="http://test-router:8080"),
+            file_config=SandboxFileConfig(max_download_size=4),
+            cleanup=False,
+        )
+        handle = _make_handle(real_client)
+        handle._state.upsert_claim(
+            _claim("b1-0", conditions=[{"type": "Ready", "status": "True"}], sandbox={"name": "sbx-1"})
+        )
+        sandbox = handle.connect(handle.members()[0])
+        self.addCleanup(sandbox.close_connection)
+
+        response = MagicMock(status_code=200, headers={})
+        response.iter_content.return_value = iter([b"oversized"])
+        with patch.object(sandbox.connector, "send_request", return_value=response):
+            with self.assertRaises(SandboxResponseTooLargeError):
+                sandbox.files.read("file.bin")
+        response.close.assert_called_once_with()
 
     def test_repeat_call_returns_same_handle(self):
         self.handle._state.upsert_claim(
@@ -1412,6 +1438,8 @@ class TestConnect(unittest.TestCase):
     def test_terminate_on_a_connected_sandbox_deletes_through_release_member(self):
         client = self._real_client()
         handle, sbx = self._connect_member(client)
+        observed_claim_names: list[str | None] = []
+        sbx._on_terminated = lambda s: observed_claim_names.append(s.claim_name)
         sbx.terminate()
         client.k8s_helper.delete_sandbox_claim.assert_called_once_with(
             "b1-0",
@@ -1420,6 +1448,8 @@ class TestConnect(unittest.TestCase):
             log_level=logging.DEBUG,
             batch=True,
         )
+        self.assertEqual(observed_claim_names, ["b1-0"])
+        self.assertIsNone(sbx._on_terminated)
         self.assertEqual(handle.members(), [])
         self.assertIsNone(sbx.claim_name)
         self.assertFalse(sbx.is_active)
@@ -1514,7 +1544,14 @@ class TestConnect(unittest.TestCase):
                     on_close()
 
         mock_client = MagicMock()
+        mock_client.file_config = None
         mock_client.sandbox_class = _StubSandbox
+
+        with patch("k8s_agent_sandbox.sandbox_client.K8sHelper"):
+            real_client = SandboxClient(
+                connection_config=SandboxDirectConnectionConfig(api_url="http://test-router:8080"),
+                cleanup=False,
+            )
 
         was_enabled = gc.isenabled()
         gc.disable()
@@ -1543,6 +1580,20 @@ class TestConnect(unittest.TestCase):
             self.assertIsNone(batch_ref2())
             del sbx2
             self.assertIsNone(sbx_ref2())
+
+            real_handle = _make_handle(real_client)
+            real_handle._state.upsert_claim(
+                _claim("b1-0", conditions=[{"type": "Ready", "status": "True"}], sandbox={"name": "sbx-1"})
+            )
+            real_sbx = real_handle.connect(real_handle.members()[0])
+            real_batch_ref = weakref.ref(real_handle)
+            real_sbx_ref = weakref.ref(real_sbx)
+            real_client_ref = weakref.ref(real_client)
+            real_sbx.close_connection()
+            del real_sbx, real_handle, real_client
+            self.assertIsNone(real_sbx_ref())
+            self.assertIsNone(real_batch_ref())
+            self.assertIsNone(real_client_ref())
         finally:
             if was_enabled:
                 gc.enable()
@@ -2560,7 +2611,7 @@ class TestConsumers(BaseClaimBatchTest):
         consumer = threading.Thread(target=consume)
         consumer.start()
         time.sleep(0.1)
-        self.client._delete_automatic_sandboxes()
+        self.client.__exit__(None, None, None)
         consumer.join(5)
         self.assertEqual(len(errors), 1)
 
@@ -5504,8 +5555,11 @@ class TestClientBatchCleanup(BaseClaimBatchTest):
 
     @patch.object(SandboxBatch, "_start", lambda self: None)
     def test_delete_all_releases_every_tracked_batch_and_exit_cleanup_detaches_attached_ones(self):
-        for cleanup, exiting in (("delete_all", False), ("_delete_automatic_sandboxes", True)):
-            with self.subTest(cleanup):
+        for name, cleanup, exiting in (
+            ("delete_all", self.client.delete_all, False),
+            ("__exit__", lambda: self.client.__exit__(None, None, None), True),
+        ):
+            with self.subTest(name):
                 self.client._active_batches.clear()
                 claimed = self.claim([BatchGroup(warmpool="pool-a", size=1)], batch_id="b1")
                 self.cluster.helper.list_sandbox_claim_objects.return_value = ([_claim("b2-0")], "5")
@@ -5516,7 +5570,7 @@ class TestClientBatchCleanup(BaseClaimBatchTest):
 
                 self.cluster.helper.read_batch_lease.return_value = _lease(holder_identity=attached._holder_identity)
                 with patch.object(SandboxBatch, "release", autospec=True) as release:
-                    getattr(self.client, cleanup)()
+                    cleanup()
                 released = {claimed} if exiting else {claimed, attached}
                 self.assertEqual({c.args[0] for c in release.call_args_list}, released)
                 self.assertEqual(attached._lease_released, exiting)
@@ -5618,7 +5672,7 @@ class TestClientBatchCleanup(BaseClaimBatchTest):
             handle.release()
 
         # Exit cleanup still retries a release that started on an attached handle.
-        self.client._delete_automatic_sandboxes()
+        self.client.__exit__(None, None, None)
 
         # After the failed detach write, every Lease write is a release taking the Lease, not a detach.
         written = [c.args[2] for c in helper.replace_batch_lease.call_args_list[1:]]
@@ -5635,7 +5689,7 @@ class TestClientBatchCleanup(BaseClaimBatchTest):
         helper.replace_batch_lease.side_effect = RuntimeError("api down")
 
         with self.assertLogs(level="ERROR"):
-            self.client._delete_automatic_sandboxes()
+            self.client.__exit__(None, None, None)
 
         # The detach makes the only Lease write. The handle stays registered so the next cleanup finishes it.
         self.assertEqual([c.args[2].spec.holder_identity for c in helper.replace_batch_lease.call_args_list], [None])
@@ -5655,7 +5709,7 @@ class TestClientBatchCleanup(BaseClaimBatchTest):
                 super().__setattr__(name, value)
                 # Another thread's exit cleanup runs once detach() has set _detached but not yet _detach_grace.
                 if name == "_detached" and value and not lock.threads:
-                    lock.start_racing(self._client._delete_automatic_sandboxes)
+                    lock.start_racing(self._client.__exit__, None, None, None)
 
         handle.__class__ = CleanupBetweenDetachWrites
         handle.detach()
@@ -5767,7 +5821,7 @@ class TestClientBatchCleanup(BaseClaimBatchTest):
         in_transition = threading.Event()
         entered_finish_detach = threading.Event()
         orig_notify = handle._notify_all
-        orig_finish_detach = self.client._finish_detach
+        orig_finish_detach = SandboxClient._finish_detach
 
         def notify_while_holding_lock() -> None:
             # Pause inside handle._lock after _detached turns True and before _detach_grace is set.
@@ -5780,17 +5834,16 @@ class TestClientBatchCleanup(BaseClaimBatchTest):
             return orig_finish_detach(b)
 
         handle._notify_all = notify_while_holding_lock
-        self.client._finish_detach = finish_detach_with_signal
+        with patch.object(SandboxClient, "_finish_detach", side_effect=finish_detach_with_signal):
+            worker = threading.Thread(target=handle.detach, kwargs={"grace": 42})
+            worker.start()
+            self.assertTrue(in_transition.wait(timeout=2.5))
 
-        worker = threading.Thread(target=handle.detach, kwargs={"grace": 42})
-        worker.start()
-        self.assertTrue(in_transition.wait(timeout=2.5))
+            cleanup = threading.Thread(target=self.client.delete_all)
+            cleanup.start()
 
-        cleanup = threading.Thread(target=self.client.delete_all)
-        cleanup.start()
-
-        worker.join(timeout=2.5)
-        cleanup.join(timeout=2.5)
+            worker.join(timeout=2.5)
+            cleanup.join(timeout=2.5)
         self.assertFalse(worker.is_alive())
         self.assertFalse(cleanup.is_alive())
         self.assertTrue(handle._lease_released)
@@ -5799,6 +5852,52 @@ class TestClientBatchCleanup(BaseClaimBatchTest):
         written = helper.replace_batch_lease.call_args.args[2]
         self.assertIsNone(written.spec.holder_identity)
         self.assertEqual(written.spec.lease_duration_seconds, 42)
+
+    @patch.object(SandboxBatch, "_start", lambda self: None)
+    def test_dropped_client_is_freed_and_its_exit_hook_releases_active_batch(self):
+        class _HelperProxy:
+            def __init__(self, target):
+                self._target = target
+
+            def __getattr__(self, name):
+                return getattr(self._target, name)
+
+        for released in (True, False):
+            with self.subTest(released=released):
+                self.cluster.helper.delete_batch_lease.reset_mock()
+                self.cluster.helper.delete_sandbox_claims_by_label.reset_mock()
+                self.cluster.helper.close.reset_mock()
+                with patch(
+                    "k8s_agent_sandbox.sandbox_client.K8sHelper",
+                    side_effect=lambda **_kw: _HelperProxy(self.cluster.helper),
+                ), patch("k8s_agent_sandbox.sandbox_client.atexit") as mock_atexit:
+                    client = SandboxClient(cleanup=True)
+                exit_hook = mock_atexit.register.call_args.args[0]
+                batch = client.claim_batch([BatchGroup(warmpool="pool-a", size=1)], batch_id="b1")
+                self.cluster.helper.read_batch_lease.return_value = _lease(holder_identity=batch._holder_identity)
+                if released:
+                    batch.release()
+                    self.cluster.helper.delete_batch_lease.reset_mock()
+                    self.cluster.helper.delete_sandbox_claims_by_label.reset_mock()
+                # With the collector off, only reference counting can free the client and helper.
+                gc.disable()
+                try:
+                    client_ref = weakref.ref(client)
+                    helper_ref = weakref.ref(client.k8s_helper)
+                    del batch, client
+                    if released:
+                        self.assertIsNone(client_ref())
+                        self.assertIsNone(helper_ref())
+                    exit_hook()
+                    self.assertIsNone(client_ref())
+                    self.assertIsNone(helper_ref())
+                finally:
+                    gc.enable()
+                self.assertEqual(
+                    self.cluster.helper.delete_sandbox_claims_by_label.call_count, 0 if released else 1
+                )
+                self.assertEqual(self.cluster.helper.delete_batch_lease.call_count, 0 if released else 1)
+                self.assertEqual(self.cluster.helper.close.call_count, 0 if released else 1)
 
 
 class TestCreateDrainPacingAndAcquireWakeup(BaseBatchClientTest):

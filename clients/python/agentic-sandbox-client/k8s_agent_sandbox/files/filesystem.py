@@ -19,7 +19,7 @@ import logging
 import posixpath
 import secrets
 import urllib.parse
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from typing import Any, BinaryIO, List, Protocol
 
 from urllib3.fields import RequestField
@@ -27,13 +27,40 @@ from urllib3.fields import RequestField
 import requests
 
 from k8s_agent_sandbox.connector import SandboxConnector
-from k8s_agent_sandbox.exceptions import SandboxRequestError
-from k8s_agent_sandbox.models import FileEntry
+from k8s_agent_sandbox.exceptions import SandboxRequestError, SandboxResponseTooLargeError
+from k8s_agent_sandbox.models import FileEntry, SandboxFileConfig
 from k8s_agent_sandbox.trace_manager import trace, trace_span
 
 logger = logging.getLogger(__name__)
 
 _STREAM_CHUNK_SIZE = 64 * 1024
+
+
+def _download_limit(config: SandboxFileConfig, max_bytes: int | None) -> int | None:
+    """A per-call limit may tighten, but never loosen, the instance limit."""
+    if max_bytes is not None:
+        if type(max_bytes) is not int:
+            raise ValueError("max_bytes must be an integer or None.")
+        if max_bytes < 0:
+            raise ValueError("max_bytes must be greater than or equal to zero.")
+    max_download_size = config.max_download_size
+    if max_download_size is None:
+        return max_bytes
+    if max_bytes is None:
+        return max_download_size
+    return min(max_download_size, max_bytes)
+
+
+def _check_download_headers(headers: Mapping[str, str], max_bytes: int | None) -> None:
+    # Content-Length describes encoded data; the iterators yield decoded bytes.
+    if max_bytes is None or headers.get("Content-Encoding", "identity").strip().lower() != "identity":
+        return
+    try:
+        declared_size = int(headers["Content-Length"])
+    except (KeyError, TypeError, ValueError):
+        return
+    if declared_size > max_bytes:
+        raise SandboxResponseTooLargeError(f"File size exceeds limit of {max_bytes} bytes.")
 
 
 class BinaryWriter(Protocol):
@@ -106,6 +133,10 @@ def _iter_multipart_body(
 
 def _sandboxd_files_endpoint(path: str) -> str:
     """Return the sandboxd REST path for a sandbox-relative file path."""
+    # HTTP clients and proxies may decode %2E before the server routes it.
+    # Use the root endpoint directly to avoid a dot-segment redirect.
+    if path == ".":
+        return "v1/files/"
     encoded = []
     for segment in path.split("/"):
         if segment == ".":
@@ -117,6 +148,63 @@ def _sandboxd_files_endpoint(path: str) -> str:
     return f"v1/files/{'%2F'.join(encoded)}"
 
 
+class _RuntimeProbe(Protocol):
+    """The part of a sync or async connector that the endpoint helpers use."""
+
+    def is_sandboxd(self) -> bool: ...
+
+
+def _sandboxd_op_endpoint(
+    connector: _RuntimeProbe,
+    op: str,
+    path: str,
+    action: str = "",
+    query: Mapping[str, str] | None = None,
+) -> str:
+    """Return the endpoint for a sandboxd-only file operation.
+
+    Raises NotImplementedError on the legacy runtime, which has none of these
+    endpoints, and ValueError for an empty path.
+    """
+    if not connector.is_sandboxd():
+        raise NotImplementedError(
+            f"{op}() is only supported by the sandboxd runtime; the legacy "
+            f"python-runtime has no {op} endpoint"
+        )
+    if path == "":
+        raise ValueError(f"{op}: path must not be empty")
+    endpoint = _sandboxd_files_endpoint(path) + action
+    if query:
+        endpoint += "?" + urllib.parse.urlencode(query)
+    return endpoint
+
+
+def _mkdir_endpoint(connector: _RuntimeProbe, path: str, parents: bool) -> str:
+    """Return the endpoint for a sandboxd directory creation."""
+    query = {"type": "directory"}
+    if parents:
+        query["parents"] = "true"
+    return _sandboxd_op_endpoint(connector, "mkdir", path, query=query)
+
+
+def _transfer_endpoint(
+    connector: _RuntimeProbe,
+    op: str,
+    source: str,
+    destination: str,
+    overwrite: bool,
+) -> str:
+    """Return the endpoint for a sandboxd move or copy."""
+    if destination == "":
+        raise ValueError(f"{op}: destination must not be empty")
+    query = {"destination": destination}
+    if overwrite:
+        query["overwrite"] = "true"
+    # The encoded path has no literal colon, so sandboxd splits the action
+    # off at the last one.
+    return _sandboxd_op_endpoint(connector, op, source, f":{op}", query)
+
+
 class Filesystem:
     """
     Handles file operations within the sandbox.
@@ -126,11 +214,13 @@ class Filesystem:
     (``connector.is_sandboxd()``).
     """
     def __init__(
-        self, connector: SandboxConnector, tracer: Any, trace_service_name: str
+        self, connector: SandboxConnector, tracer: Any, trace_service_name: str,
+        *, file_config: SandboxFileConfig | None = None,
     ) -> None:
         self.connector = connector
         self.tracer = tracer
         self.trace_service_name = trace_service_name
+        self._file_config = file_config or SandboxFileConfig()
 
     @trace_span("write")
     def write(
@@ -241,7 +331,17 @@ class Filesystem:
         allow_unsafe_paths: bool = False,
 
     ) -> bytes:
-        """Read a sandbox-relative file and return its raw bytes."""
+        """Read a sandbox-relative file and return its complete raw bytes.
+
+        A configured ``max_download_size`` is enforced while downloading;
+        exceeding it raises ``SandboxResponseTooLargeError`` without returning
+        partial content. Downloads remain unlimited when it is unset.
+        """
+        if self._file_config.max_download_size is not None:
+            with io.BytesIO() as destination:
+                self._read_to(path, destination, timeout, allow_unsafe_paths, None)
+                return destination.getvalue()
+
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
@@ -272,18 +372,22 @@ class Filesystem:
     ) -> int:
         """Stream a sandbox file into a caller-owned binary destination.
 
-        The destination is never closed. If ``max_bytes`` is set, at most that
-        many bytes are written before an oversized download raises
-        ``RuntimeError``. Data written before an error remains in the
-        destination. The returned value is the number of bytes written.
+        The destination is never closed. The smaller of ``max_bytes`` and the
+        configured ``max_download_size`` applies, ignoring unset limits.
+        At most that many bytes are written before an oversized download raises
+        ``SandboxResponseTooLargeError`` (a ``RuntimeError`` subclass). Data
+        written before an error remains in the destination. The returned value
+        is the number of bytes written.
         """
+        return self._read_to(path, destination, timeout, allow_unsafe_paths, max_bytes)
+
+    def _read_to(
+        self, path: str, destination: BinaryWriter, timeout: int,
+        allow_unsafe_paths: bool, max_bytes: int | None,
+    ) -> int:
         if destination is None or not callable(getattr(destination, "write", None)):
             raise TypeError("Download destination must provide a write(bytes) method.")
-        if max_bytes is not None:
-            if type(max_bytes) is not int:
-                raise ValueError("max_bytes must be an integer or None.")
-            if max_bytes < 0:
-                raise ValueError("max_bytes must be greater than or equal to zero.")
+        max_bytes = _download_limit(self._file_config, max_bytes)
 
         span = trace.get_current_span()
         if span.is_recording():
@@ -308,16 +412,7 @@ class Filesystem:
                     status_code=response.status_code,
                     response=response,
                 )
-            content_length = response.headers.get("Content-Length")
-            if max_bytes is not None and content_length is not None:
-                try:
-                    declared_size = int(content_length)
-                except (TypeError, ValueError):
-                    declared_size = None
-                if declared_size is not None and declared_size > max_bytes:
-                    raise RuntimeError(
-                        f"File size exceeds limit of {max_bytes} bytes."
-                    )
+            _check_download_headers(response.headers, max_bytes)
 
             for chunk in response.iter_content(chunk_size=_STREAM_CHUNK_SIZE):
                 if not chunk:
@@ -327,7 +422,7 @@ class Filesystem:
                     if len(chunk) > remaining:
                         if remaining > 0:
                             total += _write_all(destination, chunk[:remaining])
-                        raise RuntimeError(
+                        raise SandboxResponseTooLargeError(
                             f"File size exceeds limit of {max_bytes} bytes."
                         )
                 total += _write_all(destination, chunk)
@@ -436,15 +531,55 @@ class Filesystem:
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
-        if not self.connector.is_sandboxd():
-            raise NotImplementedError(
-                "delete() is only supported by the sandboxd runtime; the legacy "
-                "python-runtime has no delete endpoint"
-            )
-        if path == "":
-            raise ValueError("delete: path must not be empty")
-        endpoint = _sandboxd_files_endpoint(path)
-        if recursive:
-            endpoint += "?recursive=true"
+        endpoint = _sandboxd_op_endpoint(
+            self.connector, "delete", path,
+            query={"recursive": "true"} if recursive else None)
         self.connector.send_request("DELETE", endpoint, timeout=timeout)
         logger.info(f"Path '{path}' deleted successfully.")
+
+    @trace_span("mkdir")
+    def mkdir(self, path: str, parents: bool = False, timeout: int = 60) -> None:
+        """Create a directory. sandboxd runtime only.
+
+        Succeeds if the directory already exists. With ``parents=False`` a
+        missing parent fails with a 404. The legacy python-runtime raises
+        NotImplementedError.
+        """
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", path)
+        endpoint = _mkdir_endpoint(self.connector, path, parents)
+        self.connector.send_request("PUT", endpoint, timeout=timeout)
+        logger.info(f"Directory '{path}' created successfully.")
+
+    @trace_span("move")
+    def move(
+        self, source: str, destination: str, overwrite: bool = False, timeout: int = 60
+    ) -> None:
+        """Rename a file or directory. sandboxd runtime only.
+
+        Missing parents of ``destination`` are created. An existing destination
+        fails with a 409 unless ``overwrite=True``, which replaces a file but
+        never a directory. The legacy python-runtime raises
+        NotImplementedError.
+        """
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", source)
+        endpoint = _transfer_endpoint(
+            self.connector, "move", source, destination, overwrite)
+        self.connector.send_request("POST", endpoint, timeout=timeout)
+        logger.info(f"Path '{source}' moved to '{destination}'.")
+
+    @trace_span("copy")
+    def copy(
+        self, source: str, destination: str, overwrite: bool = False, timeout: int = 60
+    ) -> None:
+        """Copy a file or directory with the same rules as ``move()``."""
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", source)
+        endpoint = _transfer_endpoint(
+            self.connector, "copy", source, destination, overwrite)
+        self.connector.send_request("POST", endpoint, timeout=timeout)
+        logger.info(f"Path '{source}' copied to '{destination}'.")

@@ -45,6 +45,7 @@ from .models import AdditionalPodMetadata
 from .exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
 from .utils import (
     construct_sandbox_claim_env_spec,
+    current_not_ready,
     is_valid_gateway_hostname,
     is_valid_ip,
     select_pod_ip,
@@ -297,6 +298,7 @@ class AsyncK8sHelper:
     async def wait_for_claim_ready(
         self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None,
         *, expected_uid: str | None = None, initial_claim: dict[str, Any] | None = None,
+        require_current_generation: bool = False,
     ) -> str:
         """Watches the SandboxClaim until it is bound to a sandbox AND its
         Ready condition is True, then returns the sandbox name.
@@ -315,14 +317,19 @@ class AsyncK8sHelper:
             expected_uid: If provided, reject events for a same-name replacement.
             initial_claim: Optional create/GET response to evaluate before
                 waiting for future watch events.
+            require_current_generation: If True, also require the Ready condition's
+                observedGeneration to equal metadata.generation in each snapshot.
+                Missing generation fields remain pending. Defaults to False.
         """
         return await self._watch_claim(claim_name, namespace, timeout, require_ready=True,
                                        resource_version=resource_version,
-                                       expected_uid=expected_uid, initial_claim=initial_claim)
+                                       expected_uid=expected_uid, initial_claim=initial_claim,
+                                       require_current_generation=require_current_generation)
 
     async def _watch_claim(self, claim_name: str, namespace: str, timeout: int, require_ready: bool,
                            resource_version: str | None = None,
-                           *, expected_uid: str | None = None, initial_claim: dict[str, Any] | None = None) -> str:
+                           *, expected_uid: str | None = None, initial_claim: dict[str, Any] | None = None,
+                           require_current_generation: bool = False) -> str:
         """Shared SandboxClaim watch loop.
 
         Returns the sandbox name once ``status.sandbox.name`` is populated;
@@ -397,32 +404,31 @@ class AsyncK8sHelper:
                             rv = seen_rv
                         status = claim_object.get("status") or {}
 
-                        ready = False
-                        for cond in status.get("conditions", []):
-                            if (
-                                cond.get("type") == "Ready"
-                                and cond.get("status") == "False"
-                                and cond.get("reason") == "TemplateNotFound"
-                            ):
+                        not_ready = current_not_ready(claim_object)
+                        if not_ready is not None:
+                            reason = not_ready.get("reason")
+                            if reason == "TemplateNotFound":
                                 raise SandboxTemplateNotFoundError(
-                                    f"SandboxTemplate requested does not exist: {cond.get('message', 'Template not found')}"
+                                    f"SandboxTemplate requested does not exist: {not_ready.get('message', 'Template not found')}"
                                 )
-                            elif cond.get("reason") == "WarmPoolNotFound":
+                            if reason == "WarmPoolNotFound":
                                 raise SandboxWarmPoolNotFoundError(
-                                    f"SandboxWarmPool requested does not exist: {cond.get('message', 'WarmPool not found')}"
+                                    f"SandboxWarmPool requested does not exist: {not_ready.get('message', 'WarmPool not found')}"
                                 )
-                            elif (
-                                cond.get("type") == "Ready"
-                                and cond.get("status") == "False"
-                                and cond.get("reason") in TERMINAL_CLAIM_READY_REASONS
-                            ):
+                            if reason in TERMINAL_CLAIM_READY_REASONS:
                                 # The controller reported a failure it will not
                                 # retry; waiting out the timeout cannot succeed.
                                 raise SandboxClaimFailedError(
                                     f"SandboxClaim '{claim_name}' failed with terminal reason "
-                                    f"{cond.get('reason')}: {cond.get('message', '')}"
+                                    f"{reason}: {not_ready.get('message', '')}"
                                 )
-                            if cond.get("type") == "Ready" and cond.get("status") == "True":
+
+                        ready = False
+                        for cond in status.get("conditions", []):
+                            if (cond.get("type") == "Ready" and cond.get("status") == "True"
+                                    and (not require_current_generation
+                                         or (metadata.get("generation") is not None
+                                             and cond.get("observedGeneration") == metadata["generation"]))):
                                 ready = True
 
                         sandbox_status = status.get("sandbox", {})

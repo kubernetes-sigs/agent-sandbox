@@ -194,6 +194,7 @@ def gather_manifests(manifests_path):
 
 
     for root, dirs, files in os.walk(manifests_path):
+        dirs[:] = [d for d in dirs if d != "hardening"] # Exclude the hardening directory
         for filename in files:
             if not (filename.endswith(".yaml") or filename.endswith(".yml")):
                 continue

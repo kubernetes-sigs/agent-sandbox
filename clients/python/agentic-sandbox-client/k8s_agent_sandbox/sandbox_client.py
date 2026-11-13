@@ -19,16 +19,18 @@ file I/O) via the Sandbox resource handle.
 
 import uuid
 import atexit
+import functools
 import logging
 import threading
-from collections.abc import Sequence
+import weakref
+from collections.abc import Callable, Sequence
 from types import TracebackType
 from typing import Any, Dict, Generic, List, Self, Tuple, Type, TypeVar
 
 from kubernetes import client
 from kubernetes.client import ApiException
 
-from .claim_adoption import validate_claim_name, validate_claim_for_adoption
+from .claim_adoption import validate_claim_name, validate_claim_for_adoption, is_already_exists
 
 # Import all tracing components from the trace_manager module
 from .trace_manager import (
@@ -41,6 +43,7 @@ from .models import (
     AdditionalPodMetadata,
     BatchGroup,
     SandboxConnectionConfig,
+    SandboxFileConfig,
     SandboxLocalTunnelConnectionConfig,
     SandboxTracerConfig,
 )
@@ -68,6 +71,8 @@ class SandboxClient(Generic[T]):
         cleanup: bool = False,
         api_client: client.ApiClient | None = None,
         pool_size: int | None = None,
+        *,
+        file_config: SandboxFileConfig | None = None,
     ) -> None:
         """
         Initializes the SandboxClient.
@@ -75,7 +80,7 @@ class SandboxClient(Generic[T]):
         Args:
             connection_config: Configuration for connecting to the sandboxes. 
                 Defaults to SandboxLocalTunnelConnectionConfig() which uses 
-                kubectl port-forwarding. Sandboxd supports a pod tunnel or the
+                kubectl port-forwarding. Sandboxd supports a Pod or router tunnel, or the
                 explicit Service DNS / Pod IP in-cluster connection config.
             tracer_config: Configuration for OpenTelemetry tracing. 
                 Defaults to an empty SandboxTracerConfig (tracing disabled).
@@ -89,9 +94,12 @@ class SandboxClient(Generic[T]):
             pool_size: Optional size of the Kubernetes API connection pool. A batch
                 needs at least its ``max_in_flight`` plus 2. Can't be combined with
                 ``api_client``; set ``connection_pool_maxsize`` on its configuration instead.
+            file_config: File download limits for created and attached sandboxes.
+                Defaults to unlimited downloads.
         """
         # Sandbox related configuration
         self.connection_config = connection_config or SandboxLocalTunnelConnectionConfig()
+        self.file_config = file_config
         
         # Tracer configuration
         self.tracer_config = tracer_config or SandboxTracerConfig()
@@ -103,6 +111,7 @@ class SandboxClient(Generic[T]):
         self.k8s_helper = K8sHelper(api_client=api_client, pool_size=pool_size)
         
         # Tracks all the active client side connections to the created sandbox claims
+        # The exit hook holds these four containers, so the client changes them in place and never rebinds them.
         self._active_connection_sandboxes: Dict[Tuple[str, str], T] = {}
         self._explicit_claims: set[tuple[str, str]] = set()
         # Batch handles from claim_batch() and get_batch() until they are released or detached
@@ -114,7 +123,17 @@ class SandboxClient(Generic[T]):
         
         # Optional automatic cleanup of sandboxes on program termination
         if cleanup:
-            atexit.register(self._delete_automatic_sandboxes)
+            # Register a static method bound to the cleanup data with functools.partial, so the hook
+            # never keeps the client alive. A bound method of the client would keep it alive until exit.
+            atexit.register(functools.partial(
+                SandboxClient._delete_automatic_sandboxes,
+                self._active_connection_sandboxes,
+                self._explicit_claims,
+                self._active_batches,
+                self._closing_batches,
+                self._batches_lock,
+                weakref.ref(self.k8s_helper),
+            ))
 
     def __enter__(self) -> Self:
         return self
@@ -126,7 +145,14 @@ class SandboxClient(Generic[T]):
         exc_tb: TracebackType | None,
     ) -> None:
         # Same cleanup as the atexit hook and AsyncSandboxClient.__aexit__.
-        self._delete_automatic_sandboxes()
+        SandboxClient._delete_automatic_sandboxes(
+            self._active_connection_sandboxes,
+            self._explicit_claims,
+            self._active_batches,
+            self._closing_batches,
+            self._batches_lock,
+            weakref.ref(self.k8s_helper),
+        )
 
     def create_sandbox(
         self,
@@ -154,7 +180,7 @@ class SandboxClient(Generic[T]):
                 (``SandboxClaim.metadata.labels``).
             claim_name: Optional DNS-1123 Claim name. Explicit names remain
                 caller-owned and are excluded from automatic cleanup.
-            adopt_existing: On 409, attach to the existing named Claim after
+            adopt_existing: On AlreadyExists, attach to the existing named Claim after
                 checking its warm pool and that it is not terminating. Requires
                 claim_name. Creation options are not reapplied on adoption;
                 an existing shutdownTime is preserved.
@@ -219,7 +245,7 @@ class SandboxClient(Generic[T]):
             except ApiException as error:
                 if error.status == 409:
                     cleanup_generated = False
-                if not (adopt_existing and error.status == 409):
+                if not (adopt_existing and is_already_exists(error)):
                     raise
                 created_claim = self.k8s_helper.get_sandbox_claim(claim_name, namespace)
             if not generated_name:
@@ -256,6 +282,7 @@ class SandboxClient(Generic[T]):
                 connection_config=self.connection_config,
                 tracer_config=self.tracer_config,
                 k8s_helper=self.k8s_helper,
+                **({"file_config": self.file_config} if self.file_config is not None else {}),
             )
         except Exception:
             if cleanup_generated:
@@ -268,6 +295,7 @@ class SandboxClient(Generic[T]):
             raise
 
         previous = self._active_connection_sandboxes.get((namespace, claim_name))
+        sandbox._on_terminated = functools.partial(self._untrack, self._active_connection_sandboxes)
         self._active_connection_sandboxes[(namespace, claim_name)] = sandbox
         if previous is not None:
             previous.close_connection()
@@ -312,12 +340,22 @@ class SandboxClient(Generic[T]):
                 existing.close_connection()
             raise SandboxNotFoundError(f"Sandbox claim '{claim_name}' not found or resolution failed in namespace '{namespace}': {e}") from e
 
-        # If it's already in the registry and active (and verified on K8s), return the existing object
-        if existing and existing.is_active:
+        # Reuse the tracked handle only while it is active and still bound to
+        # the claim's current sandbox. A claim deleted and re-created under the
+        # same name keeps that name, so the handle's sandbox_id is what tells
+        # us the claim now points at a different sandbox.
+        if existing and existing.is_active and existing.sandbox_id == sandbox_id:
             return existing
 
-        # If the sandbox is not active, pop it out from the tracking list
+        # Drop the inactive or stale handle. close_connection() only releases
+        # local resources, so the claim's current sandbox is untouched. A
+        # failed close must not block the replacement: the caller needs a
+        # handle for the current sandbox either way.
         if existing:
+            try:
+                existing.close_connection()
+            except Exception as e:
+                logger.error(f"Failed to close stale sandbox connection for '{claim_name}' in namespace '{namespace}': {e}")
             self._active_connection_sandboxes.pop(key, None)
 
         # Re-attach: Create a fresh handle for the existing ID
@@ -327,9 +365,11 @@ class SandboxClient(Generic[T]):
             namespace=namespace,
             connection_config=self.connection_config,
             tracer_config=self.tracer_config,
-            k8s_helper=self.k8s_helper
+            k8s_helper=self.k8s_helper,
+            **({"file_config": self.file_config} if self.file_config is not None else {}),
         )
 
+        new_handle._on_terminated = functools.partial(self._untrack, self._active_connection_sandboxes)
         self._active_connection_sandboxes[key] = new_handle
         return new_handle
     
@@ -349,6 +389,19 @@ class SandboxClient(Generic[T]):
                 self._active_connection_sandboxes.pop(key, None)
         return list(self._active_connection_sandboxes.keys())
       
+    @staticmethod
+    def _untrack(registry: Dict[Tuple[str, str], T], sandbox: Sandbox) -> None:
+        # terminate() calls this after a successful delete, while claim_name is still
+        # set, so the None check only narrows its type. A newer handle may have
+        # replaced this one for the same claim, so remove only this exact handle.
+        # This is static and bound to the registry with functools.partial, so a tracked
+        # handle never keeps the client alive. An instance method would keep it alive.
+        if sandbox.claim_name is None:
+            return
+        key = (sandbox.namespace, sandbox.claim_name)
+        if registry.get(key) is sandbox:
+            del registry[key]
+
     def list_all_sandboxes(self, namespace: str = "default", label_selector: str | None = None) -> List[str]:
         """
         Lists all SandboxClaim names currently existing in the Kubernetes cluster
@@ -534,19 +587,31 @@ class SandboxClient(Generic[T]):
         self._track_closing(batch)
 
     def _track_closing(self, batch: SandboxBatch) -> None:
+        SandboxClient._track_closing_batch(
+            self._active_batches, self._closing_batches, self._batches_lock, batch
+        )
+
+    @staticmethod
+    def _track_closing_batch(
+        active_batches: dict[tuple[str, str], SandboxBatch],
+        closing_batches: set[SandboxBatch],
+        batches_lock: threading.Lock,
+        batch: SandboxBatch,
+    ) -> None:
         # Every connection that fails to close is retried at the next client cleanup until it closes.
         # A handle that is no longer its batch's live one waits here, and cleanup only closes its
         # connections.
         key = (batch.namespace, batch.batch_id)
-        with self._batches_lock:
+        with batches_lock:
             with batch._lock:
                 has_connections = bool(batch._connected or batch._stale_connections)
-            if has_connections and self._active_batches.get(key) is not batch:
-                self._closing_batches.add(batch)
+            if has_connections and active_batches.get(key) is not batch:
+                closing_batches.add(batch)
             else:
-                self._closing_batches.discard(batch)
+                closing_batches.discard(batch)
 
-    def _finish_detach(self, batch: SandboxBatch) -> bool:
+    @staticmethod
+    def _finish_detach(batch: SandboxBatch) -> bool:
         # A caller whose detach() didn't finish has handed the batch off, so cleanup finishes the detach
         # instead of stopping or releasing the batch. If that fails too, nothing is deleted and the
         # handle stays registered for the next cleanup.
@@ -560,12 +625,17 @@ class SandboxClient(Generic[T]):
             logger.error(f"Failed to finish detaching batch '{batch.batch_id}': {e}")
         return True
 
-    def _retry_closing_batches(self) -> None:
-        with self._batches_lock:
-            closing = list(self._closing_batches)
+    @staticmethod
+    def _retry_closing_batches(
+        active_batches: dict[tuple[str, str], SandboxBatch],
+        closing_batches: set[SandboxBatch],
+        batches_lock: threading.Lock,
+    ) -> None:
+        with batches_lock:
+            closing = list(closing_batches)
         for batch in closing:
             batch._close_cached_connections("client cleanup")
-            self._track_closing(batch)
+            SandboxClient._track_closing_batch(active_batches, closing_batches, batches_lock, batch)
 
     def delete_sandbox(self, claim_name: str, namespace: str = "default") -> None:
         """Stops the client side connection and deletes the Kubernetes resources.
@@ -578,12 +648,11 @@ class SandboxClient(Generic[T]):
         """
         key = (namespace, claim_name)
         sandbox = self._active_connection_sandboxes.get(key)
+        if sandbox:
+            self._delete_tracked_sandbox(self._active_connection_sandboxes, key, sandbox)
+            return
         try:
-            if sandbox:
-                sandbox.terminate()
-                self._active_connection_sandboxes.pop(key, None)
-            else:
-                self._delete_claim(claim_name, namespace)
+            self._delete_claim(claim_name, namespace)
         except Exception as e:
             logger.error(f"Failed to delete sandbox '{claim_name}' in namespace '{namespace}': {e}")
             
@@ -605,24 +674,56 @@ class SandboxClient(Generic[T]):
                 logger.error(
                     f"Cleanup failed for {claim_name} in namespace {ns}: {e}"
                 )
-        self._release_batches(exiting=False)
+        SandboxClient._release_batches(
+            self._active_batches, self._closing_batches, self._batches_lock, exiting=False
+        )
 
-    def _delete_automatic_sandboxes(self) -> None:
+    @staticmethod
+    def _delete_tracked_sandbox(registry: Dict[Tuple[str, str], T], key: Tuple[str, str], sandbox: Sandbox) -> None:
+        # delete_sandbox and exit cleanup both call this, so they delete a tracked sandbox the same way.
+        namespace, claim_name = key
         try:
-            for key, sandbox in list(self._active_connection_sandboxes.items()):
+            sandbox.terminate()
+            registry.pop(key, None)
+        except Exception as e:
+            logger.error(f"Failed to delete sandbox '{claim_name}' in namespace '{namespace}': {e}")
+
+    @staticmethod
+    def _delete_automatic_sandboxes(
+        registry: Dict[Tuple[str, str], T],
+        explicit_claims: set[tuple[str, str]],
+        active_batches: dict[tuple[str, str], SandboxBatch],
+        closing_batches: set[SandboxBatch],
+        batches_lock: threading.Lock,
+        k8s_helper_ref: Callable[[], K8sHelper | None],
+    ) -> None:
+        # Resolve before popping tracked handles that may hold the last reference to k8s_helper.
+        k8s_helper = k8s_helper_ref()
+        try:
+            for key, sandbox in list(registry.items()):
                 namespace, claim_name = key
                 try:
-                    if key in self._explicit_claims:
+                    if key in explicit_claims:
                         sandbox.close_connection()
                     else:
-                        self.delete_sandbox(claim_name, namespace)
+                        # This static hook has no client to dispatch through, so it calls _delete_tracked_sandbox
+                        # directly. A subclass override of delete_sandbox does not run during exit cleanup or __exit__.
+                        SandboxClient._delete_tracked_sandbox(registry, key, sandbox)
                 except Exception as e:
                     logger.error(f"Cleanup failed for {claim_name} in namespace {namespace}: {e}")
-            self._release_batches(exiting=True)
+            SandboxClient._release_batches(active_batches, closing_batches, batches_lock, exiting=True)
         finally:
-            self.k8s_helper.close()
+            if k8s_helper is not None:
+                k8s_helper.close()
 
-    def _release_batches(self, exiting: bool) -> None:
+    @staticmethod
+    def _release_batches(
+        active_batches: dict[tuple[str, str], SandboxBatch],
+        closing_batches: set[SandboxBatch],
+        batches_lock: threading.Lock,
+        *,
+        exiting: bool,
+    ) -> None:
         """Releases every tracked batch, except that exit cleanup detaches attached ones.
 
         ``exiting`` says which caller runs the cleanup, while a handle's ``_attached`` says how this
@@ -631,11 +732,11 @@ class SandboxClient(Generic[T]):
         reaches exit without detach() has no handoff. delete_all() passes False, because it is an
         explicit request to delete, so it releases attached batches too.
         """
-        self._retry_closing_batches()
-        with self._batches_lock:
-            batches = list(self._active_batches.items())
+        SandboxClient._retry_closing_batches(active_batches, closing_batches, batches_lock)
+        with batches_lock:
+            batches = list(active_batches.items())
         for (namespace, batch_id), batch in batches:
-            if self._finish_detach(batch):
+            if SandboxClient._finish_detach(batch):
                 continue
             # detach() sets _detached and _detach_grace under the handle's lock. A read between the two writes
             # looks like a started release, so cleanup makes its choice under the same lock.

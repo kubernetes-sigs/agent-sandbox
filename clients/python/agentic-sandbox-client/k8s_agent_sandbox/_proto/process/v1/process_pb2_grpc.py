@@ -39,6 +39,11 @@ class ProcessServiceStub:
                 request_serializer=process_dot_v1_dot_process__pb2.ExecuteRequest.SerializeToString,
                 response_deserializer=process_dot_v1_dot_process__pb2.ExecuteResponse.FromString,
                 _registered_method=True)
+        self.ExecuteWithLimits = channel.unary_unary(
+                '/process.v1.ProcessService/ExecuteWithLimits',
+                request_serializer=process_dot_v1_dot_process__pb2.ExecuteWithLimitsRequest.SerializeToString,
+                response_deserializer=process_dot_v1_dot_process__pb2.ExecuteWithLimitsResponse.FromString,
+                _registered_method=True)
         self.WriteStdin = channel.unary_unary(
                 '/process.v1.ProcessService/WriteStdin',
                 request_serializer=process_dot_v1_dot_process__pb2.WriteStdinRequest.SerializeToString,
@@ -72,6 +77,14 @@ class ProcessServiceServicer:
     def Execute(self, request, context):
         """Execute runs a short-lived command synchronously to completion and returns stdout,
         stderr, and the exit code atomically. Use when real-time streaming is not required.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ExecuteWithLimits(self, request, context):
+        """ExecuteWithLimits captures bounded output and reports execution outcomes.
+        Older runtimes reject this method instead of ignoring requested limits.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -114,6 +127,11 @@ def add_ProcessServiceServicer_to_server(servicer, server):
                     servicer.Execute,
                     request_deserializer=process_dot_v1_dot_process__pb2.ExecuteRequest.FromString,
                     response_serializer=process_dot_v1_dot_process__pb2.ExecuteResponse.SerializeToString,
+            ),
+            'ExecuteWithLimits': grpc.unary_unary_rpc_method_handler(
+                    servicer.ExecuteWithLimits,
+                    request_deserializer=process_dot_v1_dot_process__pb2.ExecuteWithLimitsRequest.FromString,
+                    response_serializer=process_dot_v1_dot_process__pb2.ExecuteWithLimitsResponse.SerializeToString,
             ),
             'WriteStdin': grpc.unary_unary_rpc_method_handler(
                     servicer.WriteStdin,
@@ -186,6 +204,33 @@ class ProcessService:
             '/process.v1.ProcessService/Execute',
             process_dot_v1_dot_process__pb2.ExecuteRequest.SerializeToString,
             process_dot_v1_dot_process__pb2.ExecuteResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ExecuteWithLimits(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/process.v1.ProcessService/ExecuteWithLimits',
+            process_dot_v1_dot_process__pb2.ExecuteWithLimitsRequest.SerializeToString,
+            process_dot_v1_dot_process__pb2.ExecuteWithLimitsResponse.FromString,
             options,
             channel_credentials,
             insecure,

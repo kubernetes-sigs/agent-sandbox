@@ -46,10 +46,17 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-const (
-	// DefaultTimeout is the default timeout for WaitForObject and WaitForObjectNotFound.
-	DefaultTimeout = 60 * time.Second
-)
+// DefaultTimeout is the fallback timeout for WaitForObject and WaitForObjectNotFound
+// when the context carries no deadline. Override via SANDBOX_DEFAULT_TIMEOUT (e.g. "5m")
+// for runtimes with slower pod startup such as kata-remote.
+var DefaultTimeout = func() time.Duration {
+	if v := os.Getenv("SANDBOX_DEFAULT_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 60 * time.Second
+}()
 
 // ClusterClient is an abstraction layer for test cases to interact with the cluster.
 type ClusterClient struct {

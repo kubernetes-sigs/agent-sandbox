@@ -19,20 +19,22 @@ Tracks all active handles to ensure flat code structure and safe cleanup.
 
 <a id="k8s_agent_sandbox.sandbox_client.SandboxClient.sandbox_class"></a>
 
-##### sandbox\_class
+#### sandbox\_class
 
 type: ignore
 
 <a id="k8s_agent_sandbox.sandbox_client.SandboxClient.__init__"></a>
 
-##### \_\_init\_\_
+#### \_\_init\_\_
 
 ```python
 def __init__(connection_config: SandboxConnectionConfig | None = None,
              tracer_config: SandboxTracerConfig | None = None,
              cleanup: bool = False,
              api_client: client.ApiClient | None = None,
-             pool_size: int | None = None) -> None
+             pool_size: int | None = None,
+             *,
+             file_config: SandboxFileConfig | None = None) -> None
 ```
 
 Initializes the SandboxClient.
@@ -41,7 +43,7 @@ Initializes the SandboxClient.
 
 - `connection_config` - Configuration for connecting to the sandboxes.
   Defaults to SandboxLocalTunnelConnectionConfig() which uses
-  kubectl port-forwarding. Sandboxd supports a pod tunnel or the
+  kubectl port-forwarding. Sandboxd supports a Pod or router tunnel, or the
   explicit Service DNS / Pod IP in-cluster connection config.
 - `tracer_config` - Configuration for OpenTelemetry tracing.
   Defaults to an empty SandboxTracerConfig (tracing disabled).
@@ -55,10 +57,12 @@ Initializes the SandboxClient.
 - `pool_size` - Optional size of the Kubernetes API connection pool. A batch
   needs at least its ``max_in_flight`` plus 2. Can't be combined with
   ``api_client``; set ``connection_pool_maxsize`` on its configuration instead.
+- `file_config` - File download limits for created and attached sandboxes.
+  Defaults to unlimited downloads.
 
 <a id="k8s_agent_sandbox.sandbox_client.SandboxClient.create_sandbox"></a>
 
-##### create\_sandbox
+#### create\_sandbox
 
 ```python
 def create_sandbox(warmpool: str,
@@ -87,7 +91,7 @@ the underlying infrastructure.
   (``SandboxClaim.metadata.labels``).
 - `claim_name` - Optional DNS-1123 Claim name. Explicit names remain
   caller-owned and are excluded from automatic cleanup.
-- `adopt_existing` - On 409, attach to the existing named Claim after
+- `adopt_existing` - On AlreadyExists, attach to the existing named Claim after
   checking its warm pool and that it is not terminating. Requires
   claim_name. Creation options are not reapplied on adoption;
   an existing shutdownTime is preserved.
@@ -119,7 +123,7 @@ the underlying infrastructure.
 
 <a id="k8s_agent_sandbox.sandbox_client.SandboxClient.get_sandbox"></a>
 
-##### get\_sandbox
+#### get\_sandbox
 
 ```python
 def get_sandbox(claim_name: str,
@@ -148,7 +152,7 @@ If the handle is closed or missing, it re-attaches to the infrastructure.
 
 <a id="k8s_agent_sandbox.sandbox_client.SandboxClient.list_active_sandboxes"></a>
 
-##### list\_active\_sandboxes
+#### list\_active\_sandboxes
 
 ```python
 def list_active_sandboxes() -> List[Tuple[str, str]]
@@ -166,7 +170,7 @@ Returns a list of tuples containing (namespace, claim_name) currently managed by
 
 <a id="k8s_agent_sandbox.sandbox_client.SandboxClient.list_all_sandboxes"></a>
 
-##### list\_all\_sandboxes
+#### list\_all\_sandboxes
 
 ```python
 def list_all_sandboxes(namespace: str = "default",
@@ -193,7 +197,7 @@ for the given namespace.
 
 <a id="k8s_agent_sandbox.sandbox_client.SandboxClient.claim_batch"></a>
 
-##### claim\_batch
+#### claim\_batch
 
 ```python
 def claim_batch(groups: Sequence[BatchGroup],
@@ -296,7 +300,7 @@ watch or Lease renewal shows in ``err()``.
 
 <a id="k8s_agent_sandbox.sandbox_client.SandboxClient.get_batch"></a>
 
-##### get\_batch
+#### get\_batch
 
 ```python
 def get_batch(batch_id: str, namespace: str = "default") -> SandboxBatch
@@ -342,7 +346,7 @@ and a failed request raises the transport's own error.
 
 <a id="k8s_agent_sandbox.sandbox_client.SandboxClient.delete_sandbox"></a>
 
-##### delete\_sandbox
+#### delete\_sandbox
 
 ```python
 def delete_sandbox(claim_name: str, namespace: str = "default") -> None
@@ -359,7 +363,7 @@ Stops the client side connection and deletes the Kubernetes resources.
 
 <a id="k8s_agent_sandbox.sandbox_client.SandboxClient.delete_all"></a>
 
-##### delete\_all
+#### delete\_all
 
 ```python
 def delete_all() -> None
@@ -377,7 +381,7 @@ Cleanup all tracked sandboxes managed by this client, and release every tracked 
 
 <a id="k8s_agent_sandbox.sandbox_client.SandboxClient.get_sandbox_claim_warmpool_name"></a>
 
-##### get\_sandbox\_claim\_warmpool\_name
+#### get\_sandbox\_claim\_warmpool\_name
 
 ```python
 def get_sandbox_claim_warmpool_name(claim_name: str, namespace: str) -> str
@@ -388,6 +392,8 @@ Get warmpool name of a sandbox claim.
 <a id="k8s_agent_sandbox.models"></a>
 
 ## k8s\_agent\_sandbox.models
+
+Configuration and wire-format models for the Python SDK.
 
 <a id="k8s_agent_sandbox.models.ExecutionResult"></a>
 
@@ -401,25 +407,25 @@ A structured object for holding the result of a command execution.
 
 <a id="k8s_agent_sandbox.models.ExecutionResult.stdout"></a>
 
-##### stdout
+#### stdout
 
 Standard output from the command.
 
 <a id="k8s_agent_sandbox.models.ExecutionResult.stderr"></a>
 
-##### stderr
+#### stderr
 
 Standard error from the command.
 
 <a id="k8s_agent_sandbox.models.ExecutionResult.exit_code"></a>
 
-##### exit\_code
+#### exit\_code
 
 Exit code of the command.
 
 <a id="k8s_agent_sandbox.models.ExecutionResult.timed_out"></a>
 
-##### timed\_out
+#### timed\_out
 
 True if the runtime killed the command for exceeding its time limit.
 
@@ -435,15 +441,55 @@ Request body for the legacy python-runtime /execute endpoint.
 
 <a id="k8s_agent_sandbox.models.LegacyExecuteRequest.command"></a>
 
-##### command
+#### command
 
 Shell command to run.
 
 <a id="k8s_agent_sandbox.models.LegacyExecuteRequest.timeout_seconds"></a>
 
-##### timeout\_seconds
+#### timeout\_seconds
 
 Limit on how long the command may run; omitted when unset.
+
+<a id="k8s_agent_sandbox.models.ProcessOutputEvent"></a>
+
+### ProcessOutputEvent Objects
+
+```python
+class ProcessOutputEvent(BaseModel)
+```
+
+A chunk of stdout or stderr from a process started with commands.start().
+
+``data`` is raw bytes, not text: a multi-byte character can be split
+across two chunks, so callers decode the stream rather than each chunk.
+A PTY process never produces ``stderr`` events, because the terminal
+merges stderr into stdout.
+
+<a id="k8s_agent_sandbox.models.ProcessExitEvent"></a>
+
+### ProcessExitEvent Objects
+
+```python
+class ProcessExitEvent(BaseModel)
+```
+
+Terminal event of a process started with commands.start().
+
+``exit_code`` is -1 when the process was killed by a signal: sandboxd
+reports Go's ExitCode(), not the shell's 128+N convention.
+
+<a id="k8s_agent_sandbox.models.PtySize"></a>
+
+### PtySize Objects
+
+```python
+class PtySize(BaseModel)
+```
+
+Pseudo-terminal geometry for commands.start().
+
+Mirrors the TypeScript SDK's ``PtySize``.
 
 <a id="k8s_agent_sandbox.models.FileEntry"></a>
 
@@ -462,37 +508,37 @@ one shape. ``modified`` is always a timezone-aware datetime.
 
 <a id="k8s_agent_sandbox.models.FileEntry.name"></a>
 
-##### name
+#### name
 
 Name of the file.
 
 <a id="k8s_agent_sandbox.models.FileEntry.size"></a>
 
-##### size
+#### size
 
 Size of the file in bytes.
 
 <a id="k8s_agent_sandbox.models.FileEntry.type"></a>
 
-##### type
+#### type
 
 Type of the entry (file or directory).
 
 <a id="k8s_agent_sandbox.models.FileEntry.modified"></a>
 
-##### modified
+#### modified
 
 Last modification time (timezone-aware).
 
 <a id="k8s_agent_sandbox.models.FileEntry.mode"></a>
 
-##### mode
+#### mode
 
 Octal permission bits (sandboxd only), e.g. "0644".
 
 <a id="k8s_agent_sandbox.models.FileEntry.from_legacy"></a>
 
-##### from\_legacy
+#### from\_legacy
 
 ```python
 @classmethod
@@ -503,7 +549,7 @@ Build from the legacy python-runtime listing entry.
 
 <a id="k8s_agent_sandbox.models.FileEntry.from_sandboxd"></a>
 
-##### from\_sandboxd
+#### from\_sandboxd
 
 ```python
 @classmethod
@@ -511,6 +557,112 @@ def from_sandboxd(cls, entry: dict[str, Any]) -> "FileEntry"
 ```
 
 Build from a sandboxd DirectoryListing entry.
+
+<a id="k8s_agent_sandbox.models.FileEvent"></a>
+
+### FileEvent Objects
+
+```python
+class FileEvent(BaseModel)
+```
+
+A filesystem change observed by :meth:`FileWatcher.watch`.
+
+Mirrors the ``watcher.v1.FileEvent`` protobuf message with SDK-idiomatic
+field names. ``type`` is a string matching the proto names (``create``,
+``write``, ``remove``, ``rename``, ``chmod``, ``error``); future proto
+versions may introduce additional values, so consumers should tolerate
+unknown types rather than treating the set as closed.
+
+For ``rename`` events, ``path`` carries the OLD (source) path; when the
+new name lands inside the watched tree it arrives as a separate
+``create`` event. Pair the two to reconstruct renames.
+
+<a id="k8s_agent_sandbox.models.FileEvent.type"></a>
+
+#### type
+
+Kind of change observed (e.g. "create", "write", "rename").
+
+<a id="k8s_agent_sandbox.models.FileEvent.path"></a>
+
+#### path
+
+Sandbox-relative path; for ``rename`` events the OLD path.
+
+<a id="k8s_agent_sandbox.models.FileEvent.error"></a>
+
+#### error
+
+For ``error`` events, a human-readable message; empty otherwise.
+
+<a id="k8s_agent_sandbox.models.SandboxHealth"></a>
+
+### SandboxHealth Objects
+
+```python
+class SandboxHealth(BaseModel)
+```
+
+Sandbox liveness/readiness reported by sandboxd's /v1/health endpoint.
+
+Mirrors the Go SDK's ``sandbox.Health`` and the TypeScript SDK's
+``SandboxHealth``.
+
+<a id="k8s_agent_sandbox.models.SandboxHealth.status"></a>
+
+#### status
+
+HealthResponse.status enum in the sandboxd spec.
+
+<a id="k8s_agent_sandbox.models.SandboxHealth.uptime_seconds"></a>
+
+#### uptime\_seconds
+
+Seconds sandboxd has been running.
+
+<a id="k8s_agent_sandbox.models.SandboxHealth.from_sandboxd"></a>
+
+#### from\_sandboxd
+
+```python
+@classmethod
+def from_sandboxd(cls, payload: dict[str, Any]) -> "SandboxHealth"
+```
+
+Build from a sandboxd /v1/health response body.
+
+<a id="k8s_agent_sandbox.models.SandboxMetadata"></a>
+
+### SandboxMetadata Objects
+
+```python
+class SandboxMetadata(BaseModel)
+```
+
+Runtime environment metadata reported by sandboxd's /v1/metadata endpoint.
+
+Only non-sensitive orchestrator-injected configuration is exposed here;
+the sandboxd spec forbids serving credentials from /v1/metadata. Mirrors
+the Go SDK's ``sandbox.Metadata`` and the TypeScript SDK's
+``SandboxMetadata``.
+
+<a id="k8s_agent_sandbox.models.SandboxMetadata.env"></a>
+
+#### env
+
+Orchestrator-injected environment variables; empty when none apply.
+
+<a id="k8s_agent_sandbox.models.SandboxMetadata.from_sandboxd"></a>
+
+#### from\_sandboxd
+
+```python
+@classmethod
+def from_sandboxd(cls, payload: dict[str, Any]) -> "SandboxMetadata"
+```
+
+Build from a sandboxd /v1/metadata response body.
 
 <a id="k8s_agent_sandbox.models.SandboxClaimEnvVar"></a>
 
@@ -524,13 +676,13 @@ Represents an environment variable entry in a SandboxClaim spec.
 
 <a id="k8s_agent_sandbox.models.SandboxClaimEnvVar.name"></a>
 
-##### name
+#### name
 
 Name of the environment variable.
 
 <a id="k8s_agent_sandbox.models.SandboxClaimEnvVar.value"></a>
 
-##### value
+#### value
 
 Value of the environment variable.
 
@@ -549,31 +701,31 @@ behind an authenticating gateway.
 
 <a id="k8s_agent_sandbox.models.SandboxDirectConnectionConfig.api_url"></a>
 
-##### api\_url
+#### api\_url
 
 Direct URL to the router.
 
 <a id="k8s_agent_sandbox.models.SandboxDirectConnectionConfig.server_port"></a>
 
-##### server\_port
+#### server\_port
 
 Port the sandbox container listens on.
 
 <a id="k8s_agent_sandbox.models.SandboxDirectConnectionConfig.extra_headers"></a>
 
-##### extra\_headers
+#### extra\_headers
 
 Sent on every request.
 
 <a id="k8s_agent_sandbox.models.SandboxDirectConnectionConfig.client_cert"></a>
 
-##### client\_cert
+#### client\_cert
 
 (certificate path, private key path) for mTLS.
 
 <a id="k8s_agent_sandbox.models.SandboxDirectConnectionConfig.ca_cert"></a>
 
-##### ca\_cert
+#### ca\_cert
 
 CA bundle path used to verify the router; default trust store if unset.
 
@@ -589,25 +741,25 @@ Configuration for connecting via Kubernetes Gateway API.
 
 <a id="k8s_agent_sandbox.models.SandboxGatewayConnectionConfig.gateway_name"></a>
 
-##### gateway\_name
+#### gateway\_name
 
 Name of the Gateway resource.
 
 <a id="k8s_agent_sandbox.models.SandboxGatewayConnectionConfig.gateway_namespace"></a>
 
-##### gateway\_namespace
+#### gateway\_namespace
 
 Namespace where the Gateway resource resides.
 
 <a id="k8s_agent_sandbox.models.SandboxGatewayConnectionConfig.gateway_ready_timeout"></a>
 
-##### gateway\_ready\_timeout
+#### gateway\_ready\_timeout
 
 Timeout in seconds to wait for Gateway IP.
 
 <a id="k8s_agent_sandbox.models.SandboxGatewayConnectionConfig.server_port"></a>
 
-##### server\_port
+#### server\_port
 
 Port the sandbox container listens on.
 
@@ -623,19 +775,19 @@ Configuration for connecting via kubectl port-forward.
 
 <a id="k8s_agent_sandbox.models.SandboxLocalTunnelConnectionConfig.port_forward_ready_timeout"></a>
 
-##### port\_forward\_ready\_timeout
+#### port\_forward\_ready\_timeout
 
 Timeout in seconds to wait for port-forward to be ready.
 
 <a id="k8s_agent_sandbox.models.SandboxLocalTunnelConnectionConfig.server_port"></a>
 
-##### server\_port
+#### server\_port
 
 Port the sandbox container listens on.
 
 <a id="k8s_agent_sandbox.models.SandboxLocalTunnelConnectionConfig.router_namespace"></a>
 
-##### router\_namespace
+#### router\_namespace
 
 Namespace where the Router service resides.
 
@@ -653,25 +805,93 @@ sandboxd (KEP-539.2) exposes two listeners: the Filesystem & Runtime REST
 API and the gRPC ProcessService. This config port-forwards directly to the
 sandbox pod, reaching both.
 
-Doesn't work on Kata or gVisor; use SandboxdInClusterConnectionConfig for those.
+For Kata or gVisor, use SandboxdRouterTunnelConnectionConfig or
+SandboxdInClusterConnectionConfig.
+
+<a id="k8s_agent_sandbox.models.SandboxdPodTunnelConnectionConfig.auth_token"></a>
+
+#### auth\_token
+
+Optional bearer token for sandboxd REST and gRPC.
 
 <a id="k8s_agent_sandbox.models.SandboxdPodTunnelConnectionConfig.rest_port"></a>
 
-##### rest\_port
+#### rest\_port
 
 sandboxd REST filesystem port on the pod.
 
 <a id="k8s_agent_sandbox.models.SandboxdPodTunnelConnectionConfig.grpc_port"></a>
 
-##### grpc\_port
+#### grpc\_port
 
 sandboxd gRPC ProcessService port on the pod.
 
 <a id="k8s_agent_sandbox.models.SandboxdPodTunnelConnectionConfig.port_forward_ready_timeout"></a>
 
-##### port\_forward\_ready\_timeout
+#### port\_forward\_ready\_timeout
 
 Seconds to wait for port-forward readiness.
+
+<a id="k8s_agent_sandbox.models.SandboxdRouterTunnelConnectionConfig"></a>
+
+### SandboxdRouterTunnelConnectionConfig Objects
+
+```python
+class SandboxdRouterTunnelConnectionConfig(BaseModel)
+```
+
+Connect to sandboxd through a port-forward to sandbox-router-svc.
+
+REST and gRPC share the router's port 8080. Routing headers and metadata
+select the Sandbox and its REST or gRPC port. gRPC requires sandbox-router
+v1.0.9 or later. Set ``router_auth_token`` when the router requires
+authentication. The SDK sends that token as ``Authorization``, which the
+router strips. It sends ``auth_token`` as ``X-Sandboxd-Token``, which the
+router forwards to sandboxd.
+``pod_ip_routing`` stays false so the router selects the Pod from its cache
+or DNS. Scoped tokens reject ``X-Sandbox-Pod-IP``.
+
+<a id="k8s_agent_sandbox.models.SandboxdRouterTunnelConnectionConfig.auth_token"></a>
+
+#### auth\_token
+
+sandboxd token. Sent as X-Sandboxd-Token because the router strips Authorization.
+
+<a id="k8s_agent_sandbox.models.SandboxdRouterTunnelConnectionConfig.router_auth_token"></a>
+
+#### router\_auth\_token
+
+Bearer token for the router. Sent as Authorization on REST and gRPC. The router strips it.
+
+<a id="k8s_agent_sandbox.models.SandboxdRouterTunnelConnectionConfig.rest_port"></a>
+
+#### rest\_port
+
+sandboxd REST port, not the router port.
+
+<a id="k8s_agent_sandbox.models.SandboxdRouterTunnelConnectionConfig.grpc_port"></a>
+
+#### grpc\_port
+
+sandboxd gRPC port, not the router port.
+
+<a id="k8s_agent_sandbox.models.SandboxdRouterTunnelConnectionConfig.router_namespace"></a>
+
+#### router\_namespace
+
+Namespace of sandbox-router-svc. Defaults to agent-sandbox-system.
+
+<a id="k8s_agent_sandbox.models.SandboxdRouterTunnelConnectionConfig.port_forward_ready_timeout"></a>
+
+#### port\_forward\_ready\_timeout
+
+Seconds to wait for the router tunnel. Must be positive.
+
+<a id="k8s_agent_sandbox.models.SandboxdRouterTunnelConnectionConfig.pod_ip_routing"></a>
+
+#### pod\_ip\_routing
+
+Send X-Sandbox-Pod-IP on REST and gRPC. Set true only when the router cache is disabled and the Sandbox has no Service.
 
 <a id="k8s_agent_sandbox.models.SandboxdInClusterConnectionConfig"></a>
 
@@ -689,6 +909,12 @@ enabled on the Sandbox template. ``in-cluster-pod-ip`` uses
 REST filesystem listener defaults to port 8080 and its gRPC ProcessService
 listener to port 9090.
 
+<a id="k8s_agent_sandbox.models.SandboxdInClusterConnectionConfig.auth_token"></a>
+
+#### auth\_token
+
+Optional bearer token for sandboxd REST and gRPC.
+
 <a id="k8s_agent_sandbox.models.SandboxInClusterConnectionConfig"></a>
 
 ### SandboxInClusterConnectionConfig Objects
@@ -705,7 +931,7 @@ is unavailable, it falls back to the stable Kubernetes DNS endpoint:
 
 <a id="k8s_agent_sandbox.models.SandboxInClusterConnectionConfig.server_port"></a>
 
-##### server\_port
+#### server\_port
 
 Port the sandbox container listens on.
 
@@ -723,6 +949,22 @@ Labels and annotations stamped onto the running Sandbox Pod (not the
 SandboxClaim object). Omit empty sections so the manifest never carries
 an empty ``additionalPodMetadata``.
 
+<a id="k8s_agent_sandbox.models.SandboxFileConfig"></a>
+
+### SandboxFileConfig Objects
+
+```python
+class SandboxFileConfig(BaseModel)
+```
+
+Client-side file download limits, shared by read() and read_to().
+
+<a id="k8s_agent_sandbox.models.SandboxFileConfig.max_download_size"></a>
+
+#### max\_download\_size
+
+Maximum file bytes downloaded; None preserves unlimited reads.
+
 <a id="k8s_agent_sandbox.models.SandboxTracerConfig"></a>
 
 ### SandboxTracerConfig Objects
@@ -735,13 +977,13 @@ Configuration for tracer level information
 
 <a id="k8s_agent_sandbox.models.SandboxTracerConfig.enable_tracing"></a>
 
-##### enable\_tracing
+#### enable\_tracing
 
 Whether to enable OpenTelemetry tracing.
 
 <a id="k8s_agent_sandbox.models.SandboxTracerConfig.trace_service_name"></a>
 
-##### trace\_service\_name
+#### trace\_service\_name
 
 Service name used for traces.
 
@@ -757,7 +999,7 @@ Represents one warmpool in a batch for multi-pool batch claiming.
 
 <a id="k8s_agent_sandbox.models.BatchGroup.min_ready"></a>
 
-##### min\_ready
+#### min\_ready
 
 Defaults to ``size``.
 
@@ -787,7 +1029,7 @@ Represents the identity of a single claim in a batch.
 
 <a id="k8s_agent_sandbox.models.Member.warmpool"></a>
 
-##### warmpool
+#### warmpool
 
 The group this member belongs to.
 
@@ -854,7 +1096,7 @@ A claimed batch also creates its claims on background worker threads.
 
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.groups"></a>
 
-##### groups
+#### groups
 
 ```python
 @property
@@ -865,7 +1107,7 @@ The batch's ``BatchGroup``\ s; one per warm pool.
 
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.size"></a>
 
-##### size
+#### size
 
 ```python
 @property
@@ -876,7 +1118,7 @@ The total number of claims across all groups.
 
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.members"></a>
 
-##### members
+#### members
 
 ```python
 def members(warmpool: str | None = None) -> list[Member]
@@ -886,7 +1128,7 @@ Returns a snapshot of the batch's members, optionally filtered to one warm pool.
 
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.get_member"></a>
 
-##### get\_member
+#### get\_member
 
 ```python
 def get_member(claim_name: str) -> Member | None
@@ -896,7 +1138,7 @@ Returns the current ``Member`` for ``claim_name``, or ``None`` if it is not in t
 
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.connect"></a>
 
-##### connect
+#### connect
 
 ```python
 def connect(member: Member) -> "Sandbox"
@@ -917,7 +1159,7 @@ can no longer vouch for the member.
 
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.err"></a>
 
-##### err
+#### err
 
 ```python
 def err() -> Exception | None
@@ -931,7 +1173,7 @@ member with reason ``CreateFailed``.
 
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.lease_degraded"></a>
 
-##### lease\_degraded
+#### lease\_degraded
 
 ```python
 def lease_degraded() -> bool
@@ -944,7 +1186,7 @@ renewal stops on an error, such as the Lease expiring, so it can be polled at an
 
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.events"></a>
 
-##### events
+#### events
 
 ```python
 def events() -> Iterator[BatchEvent]
@@ -974,7 +1216,7 @@ the previous iterator stopped. ``members()`` always shows each claim's current s
 
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.group_outcomes"></a>
 
-##### group\_outcomes
+#### group\_outcomes
 
 ```python
 def group_outcomes() -> Iterator[GroupOutcome]
@@ -1000,7 +1242,7 @@ continues with the groups that haven't yielded yet.
 
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.wait_for_quorum"></a>
 
-##### wait\_for\_quorum
+#### wait\_for\_quorum
 
 ```python
 def wait_for_quorum() -> list[Member]
@@ -1031,7 +1273,7 @@ created, so a quorum reached after the deadline, before any consumer checks it, 
 
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.acquire"></a>
 
-##### acquire
+#### acquire
 
 ```python
 def acquire(warmpool: str,
@@ -1107,7 +1349,7 @@ and ``release_member`` frees it.
 
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.release_member"></a>
 
-##### release\_member
+#### release\_member
 
 ```python
 def release_member(member: Member) -> None
@@ -1131,7 +1373,7 @@ counts as deleted, and transient errors are retried. If the delete fails, callin
 
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.release_not_ready"></a>
 
-##### release\_not\_ready
+#### release\_not\_ready
 
 ```python
 def release_not_ready() -> None
@@ -1162,7 +1404,7 @@ is deleting a pool's claims, the pool's pending deletes are left to it.
 
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.release_group"></a>
 
-##### release\_group
+#### release\_group
 
 ```python
 def release_group(warmpool: str) -> None
@@ -1197,7 +1439,7 @@ scoped to the group's label. If they fail, calling ``release_group`` again retri
 
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.release_members"></a>
 
-##### release\_members
+#### release\_members
 
 ```python
 def release_members() -> None
@@ -1227,7 +1469,7 @@ again retries.
 
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.release"></a>
 
-##### release
+#### release
 
 ```python
 def release() -> None
@@ -1258,7 +1500,7 @@ raises ``BatchInUseError`` and deletes nothing. While it runs, a ``detach()`` ca
 
 <a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.detach"></a>
 
-##### detach
+#### detach
 
 ```python
 def detach(grace: int | None = None) -> None

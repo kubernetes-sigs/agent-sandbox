@@ -126,8 +126,18 @@ class AsyncSandboxFleet:
   def report(self):
     return self._fleet.report
 
-  def load_tasks(self, source, *, image_rewrite=None) -> list[Task]:
-    return self._fleet.load_tasks(source, image_rewrite=image_rewrite)
+  def load_tasks(self, source, *, image_rewrite=None, image_field=None,
+                 id_field=None) -> list[Task]:
+    return self._fleet.load_tasks(source, image_rewrite=image_rewrite,
+                                  image_field=image_field, id_field=id_field)
+
+  def add_tasks(self, source, *, image_rewrite=None) -> list[Task]:
+    return self._fleet.add_tasks(source, image_rewrite=image_rewrite)
+
+  async def wait_pools_ready(self, images, *, timeout: float | None = None,
+                             replicas=None) -> dict[str, bool]:
+    return await self._to_thread(self._fleet.wait_pools_ready, images,
+                                 timeout=timeout, replicas=replicas)
 
   def image_counts(self):
     return self._fleet.image_counts()
@@ -156,8 +166,8 @@ class AsyncSandboxFleet:
     return await self._to_thread(self._fleet.start_warmpools, wait,
                                  create_budget=create_budget)
 
-  async def prepull(self, wait: bool = True):
-    return await self._to_thread(self._fleet.prepull, wait)
+  async def prepull(self, wait: bool = True, **overrides):
+    return await self._to_thread(self._fleet.prepull, wait, **overrides)
 
   async def prepull_delete(self):
     return await self._to_thread(self._fleet.prepull_delete)
@@ -201,8 +211,11 @@ class AsyncSandboxFleet:
     return await self._to_thread(self._fleet.restore, handle, snapshot_uid,
                                  timeout=timeout)
 
-  async def teardown(self, delete_namespace: bool = False):
-    return await self._to_thread(self._fleet.teardown, delete_namespace)
+  async def teardown(self, delete_namespace: bool = False, *, verify: bool = False):
+    return await self._to_thread(self._fleet.teardown, delete_namespace, verify=verify)
+
+  async def verify_teardown(self):
+    return await self._to_thread(self._fleet.verify_teardown)
 
   async def __aenter__(self) -> "AsyncSandboxFleet":
     return await self.setup()

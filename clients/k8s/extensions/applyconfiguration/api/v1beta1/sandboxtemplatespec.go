@@ -17,6 +17,7 @@
 package v1beta1
 
 import (
+	agentsandboxapiv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	apiv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/applyconfiguration/api/v1beta1"
 	extensionsapiv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
@@ -108,6 +109,14 @@ func (b *SandboxTemplateSpecApplyConfiguration) WithVolumeClaimTemplates(values 
 // If called multiple times, the Service field is set to the value of the last call.
 func (b *SandboxTemplateSpecApplyConfiguration) WithService(value bool) *SandboxTemplateSpecApplyConfiguration {
 	b.SandboxBlueprintApplyConfiguration.Service = &value
+	return b
+}
+
+// WithFailedPodPolicy sets the FailedPodPolicy field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the FailedPodPolicy field is set to the value of the last call.
+func (b *SandboxTemplateSpecApplyConfiguration) WithFailedPodPolicy(value agentsandboxapiv1beta1.FailedPodPolicy) *SandboxTemplateSpecApplyConfiguration {
+	b.SandboxBlueprintApplyConfiguration.FailedPodPolicy = &value
 	return b
 }
 

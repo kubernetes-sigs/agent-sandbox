@@ -133,6 +133,10 @@ type SandboxClaimSpec struct {
 
 	// volumeClaimTemplates is a list of persistent volume claims to be created for the sandbox.
 	// Specifying this field forces a cold start because warm pool pods will not have these volumes.
+	// Each entry must have a unique, non-empty metadata.name.
+	// At most 128 entries: the cap only bounds the CEL cost of the uniqueness rule.
+	// +kubebuilder:validation:MaxItems=128
+	// +kubebuilder:validation:XValidation:rule="self.all(a, !has(a.metadata) || !has(a.metadata.name) || self.exists_one(b, has(b.metadata) && has(b.metadata.name) && b.metadata.name == a.metadata.name))",message="volumeClaimTemplates names must be unique"
 	// +optional
 	// +listType=atomic
 	VolumeClaimTemplates []sandboxv1beta1.PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`

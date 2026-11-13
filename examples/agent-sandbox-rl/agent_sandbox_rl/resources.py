@@ -49,6 +49,10 @@ class DiscoveredPool:
   template: str
   image: str
   replicas: int
+  # Container that runs the image: ``agent-runtime`` when the template names
+  # one, else the lone container of a foreign single-container template. Exec
+  # on an adopted handle must name it (the exec API has no default container).
+  runtime_container: "str | None" = None
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -89,6 +93,20 @@ def _deep_merge(base: dict, override: dict) -> dict:
 class _TemplateChanged(Exception):
   """A conditioned write to a SandboxTemplate hit a newer object (HTTP 409): it
   changed, or was deleted and recreated, after it was read."""
+
+
+def _container_resources(spec) -> dict:
+  """Kubernetes ``resources`` for the runtime container: requests always,
+  limits only for the fields set (an unset limit stays unlimited)."""
+  out = {"requests": {"cpu": spec.cpu, "memory": spec.memory}}
+  limits = {}
+  if spec.cpu_limit is not None:
+    limits["cpu"] = spec.cpu_limit
+  if spec.memory_limit is not None:
+    limits["memory"] = spec.memory_limit
+  if limits:
+    out["limits"] = limits
+  return out
 
 
 class Resources:
@@ -204,11 +222,11 @@ class Resources:
             "command": list(template.keepalive_command),
             "stdin": True,
             "tty": True,
-            "resources": {"requests": {
-                "cpu": template.resources.cpu,
-                "memory": template.resources.memory,
-            }},
+            "resources": _container_resources(template.resources),
         }],
+        # Hardened by default (see TemplateSpec); extra_pod_spec can override.
+        "automountServiceAccountToken": template.automount_service_account_token,
+        "shareProcessNamespace": template.share_process_namespace,
     }
     if template.runtime_class:
       pod_spec["runtimeClassName"] = template.runtime_class
@@ -271,6 +289,23 @@ class Resources:
           pod_spec["containers"] = merged_containers
       pod_spec.update(extra)
 
+    # Extra containers (and init containers) from the escape hatch: copy them so
+    # a per-template substitution never writes into the caller's TemplateSpec,
+    # resolve the task-image placeholder, and give a task-image container the
+    # template's pull policy when it names none (the runtime container already
+    # has it; any other image keeps the Kubernetes default).
+    for key in ("containers", "initContainers"):
+      if key in pod_spec:
+        resolved = []
+        for c in pod_spec[key]:
+          if isinstance(c, dict):
+            c = dict(c)
+            if c.get("image") == constants.TASK_IMAGE_PLACEHOLDER:
+              c["image"] = image
+              c.setdefault("imagePullPolicy", template.image_pull_policy)
+          resolved.append(c)
+        pod_spec[key] = resolved
+
     spec: dict = {
         "podTemplate": {
             # See _pod_template_labels: this is how pods carry the run id.
@@ -280,6 +315,8 @@ class Resources:
     }
     if template.network_policy_management:
       spec["networkPolicyManagement"] = template.network_policy_management
+    if template.extra_template_spec:
+      spec.update(template.extra_template_spec)
     return {
         "apiVersion": f"{constants.GROUP}/{constants.VERSION}",
         "kind": "SandboxTemplate",
@@ -779,8 +816,10 @@ class Resources:
       cont = getattr(resp.metadata, "_continue", None)
     return total
 
-  def delete_claim(self, name: str) -> None:
-    self._delete(constants.CLAIMS_PLURAL, name, "SandboxClaim")
+  def delete_claim(self, name: str, *,
+                   request_timeout: float | tuple[float, float] | None = None) -> None:
+    self._delete(constants.CLAIMS_PLURAL, name, "SandboxClaim",
+                 request_timeout=request_timeout)
 
   def delete_sandbox(self, name: str) -> None:
     self._delete(constants.SANDBOXES_PLURAL, name, "Sandbox",
@@ -835,12 +874,18 @@ class Resources:
 
   # --- adoption ---------------------------------------------------------- #
   def template_images(self, label_selector: str | None = None) -> "dict[str, str]":
-    """Map SandboxTemplate name -> the container image it runs.
+    """Map SandboxTemplate name -> the container image it runs."""
+    return {name: image
+            for name, (image, _) in self._template_runtimes(label_selector).items()}
+
+  def _template_runtimes(self, label_selector: str | None = None
+                         ) -> "dict[str, tuple[str, str]]":
+    """Map SandboxTemplate name -> (image, name of the container running it).
 
     Read back off the live objects rather than recomputed from a name, so it
     works for templates this package did not write (no assumption about the
     `<prefix><md5>` scheme, which only holds for our own)."""
-    out: dict[str, str] = {}
+    out: dict[str, tuple[str, str]] = {}
     for obj in self._list_objects(constants.TEMPLATES_PLURAL, label_selector):
       name = (obj.get("metadata") or {}).get("name")
       containers = ((((obj.get("spec") or {}).get("podTemplate") or {})
@@ -864,7 +909,7 @@ class Resources:
         chosen = containers[0]
       image = chosen.get("image")
       if image:
-        out[name] = image
+        out[name] = (image, chosen.get("name") or constants.RUNTIME_CONTAINER)
     return out
 
   def discover_pools(self, label_selector: str | None = None
@@ -879,7 +924,7 @@ class Resources:
 
     ``label_selector`` is normally left unset: an adopted pool belongs to its
     provisioner and does not carry our management labels."""
-    images = self.template_images(label_selector)
+    runtimes = self._template_runtimes(label_selector)
     found: dict[str, DiscoveredPool] = {}
     for obj in self._list_objects(constants.WARMPOOLS_PLURAL, label_selector):
       name = (obj.get("metadata") or {}).get("name")
@@ -887,20 +932,21 @@ class Resources:
       tref = (spec.get("sandboxTemplateRef") or {}).get("name")
       if not name or not tref:
         continue
-      image = images.get(tref)
-      if image is None:
+      hit = runtimes.get(tref)
+      if hit is None:
         logger.debug("warm pool '%s' references template '%s', which was not "
                      "listed (or has no image); skipping", name, tref)
         continue
+      image, runtime_container = hit
       replicas = int(spec.get("replicas", 0) or 0)
       prev = found.get(image)
       if prev is None:
-        found[image] = DiscoveredPool(name, tref, image, replicas)
+        found[image] = DiscoveredPool(name, tref, image, replicas, runtime_container)
         continue
       # Two pools serving one image is legal and happens (a leftover alongside a
       # fresh one). Pick deterministically — deepest wins, name breaks the tie —
       # so repeated planning of the same namespace does not flip between them.
-      winner = (DiscoveredPool(name, tref, image, replicas)
+      winner = (DiscoveredPool(name, tref, image, replicas, runtime_container)
                 if (replicas, prev.pool) > (prev.replicas, name) else prev)
       logger.warning("image %s is served by more than one warm pool (%s, %s); "
                      "using '%s' (%d replicas)", image, prev.pool, name,
@@ -924,14 +970,18 @@ class Resources:
 
   def _delete(self, plural: str, name: str, kind: str, *,
               group: str = constants.GROUP, version: str = constants.VERSION,
-              uid: str | None = None) -> None:
+              uid: str | None = None,
+              request_timeout: float | tuple[float, float] | None = None) -> None:
     opts = client.V1DeleteOptions(
         grace_period_seconds=0,
         preconditions=client.V1Preconditions(uid=uid) if uid else None)
+    # `request_timeout` bounds the API call ((connect, read) seconds); callers on
+    # a latency-sensitive path pass one so a stalled apiserver cannot pin them.
+    extra = {"_request_timeout": request_timeout} if request_timeout is not None else {}
     try:
       self.custom_api.delete_namespaced_custom_object(
           group=group, version=version,
-          namespace=self.namespace, plural=plural, name=name, body=opts)
+          namespace=self.namespace, plural=plural, name=name, body=opts, **extra)
       logger.info("Deleted %s '%s'", kind, name)
     except client.ApiException as e:
       if e.status == 404:

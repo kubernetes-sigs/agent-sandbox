@@ -15,11 +15,16 @@
 import logging
 from collections.abc import Callable
 from .trace_manager import create_tracer_manager
+from .trace_manager import trace_span
 from .commands.command_executor import CommandExecutor
 from .files.filesystem import Filesystem
+from .watcher.file_watcher import FileWatcher
 from .models import (
     SandboxConnectionConfig,
+    SandboxFileConfig,
+    SandboxHealth,
     SandboxLocalTunnelConnectionConfig,
+    SandboxMetadata,
     SandboxTracerConfig,
 )
 from .k8s_helper import K8sHelper
@@ -40,6 +45,11 @@ class Sandbox:
     - Handling the underlying connection.
     - Integrating with OpenTelemetry for tracing operations.
     """
+
+    # The client that tracks this handle sets this hook, so terminate() can drop the
+    # client's entry once the claim is gone.
+    _on_terminated: Callable[["Sandbox"], None] | None = None
+
     def __init__(
         self,
         claim_name: str,
@@ -48,6 +58,8 @@ class Sandbox:
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
         k8s_helper: K8sHelper | None = None,
+        *,
+        file_config: SandboxFileConfig | None = None,
     ) -> None:
         # Sandbox Related Configuration
         self.claim_name: str | None = claim_name
@@ -75,7 +87,11 @@ class Sandbox:
 
         # Initialisation of namespaced engines
         self._commands: CommandExecutor | None = CommandExecutor(self.connector, self.tracer, self.trace_service_name)
-        self._files: Filesystem | None = Filesystem(self.connector, self.tracer, self.trace_service_name)
+        self._files: Filesystem | None = Filesystem(
+            self.connector, self.tracer, self.trace_service_name,
+            **({"file_config": file_config} if file_config is not None else {}),
+        )
+        self._watcher: FileWatcher | None = FileWatcher(self.connector, self.tracer, self.trace_service_name)
         
         # Internal state tracking
         self._is_closed = False
@@ -168,6 +184,39 @@ class Sandbox:
 
         return "SandboxNotReady", "Unknown message"
 
+    @trace_span("health")
+    def health(self, timeout: int = 60) -> SandboxHealth:
+        """Query sandboxd's /v1/health endpoint. sandboxd runtime only.
+
+        The legacy python-runtime has no equivalent endpoint and raises
+        ``NotImplementedError``.
+        """
+        if not self.connector.is_sandboxd():
+            raise NotImplementedError(
+                "health() is only supported by the sandboxd runtime; the "
+                "legacy python-runtime has no equivalent endpoint"
+            )
+        response = self.connector.send_request(
+            "GET", "v1/health", timeout=timeout)
+        return SandboxHealth.from_sandboxd(response.json())
+
+    @trace_span("metadata")
+    def metadata(self, timeout: int = 60) -> SandboxMetadata:
+        """Query sandboxd's /v1/metadata endpoint. sandboxd runtime only.
+
+        Returns orchestrator-injected, non-sensitive runtime configuration
+        (e.g. sandbox id, workspace path, env). The legacy python-runtime
+        has no equivalent endpoint and raises ``NotImplementedError``.
+        """
+        if not self.connector.is_sandboxd():
+            raise NotImplementedError(
+                "metadata() is only supported by the sandboxd runtime; the "
+                "legacy python-runtime has no equivalent endpoint"
+            )
+        response = self.connector.send_request(
+            "GET", "v1/metadata", timeout=timeout)
+        return SandboxMetadata.from_sandboxd(response.json())
+
     @property
     def commands(self) -> CommandExecutor | None:
         return self._commands
@@ -175,6 +224,11 @@ class Sandbox:
     @property
     def files(self) -> Filesystem | None:
         return self._files
+
+    @property
+    def watcher(self) -> FileWatcher | None:
+        """Filesystem event streaming interface (sandboxd runtime only)."""
+        return self._watcher
 
     @property
     def is_active(self) -> bool:
@@ -199,10 +253,16 @@ class Sandbox:
         self._pod_name = None
         # Close client side connection
         self.connector.close()
+        # SandboxConnector.close() also resets live connections on errors and
+        # during snapshot suspend and resume, so it keeps the sandbox callbacks.
+        # close_connection() drops them here once this Sandbox closes for good.
+        # AsyncSandboxConnector.close() is final and drops them itself.
+        self.connector._release_sandbox_callbacks()
         
         # Don't allow anymore further executions.
         self._commands = None
         self._files = None
+        self._watcher = None
         
         # Cleanup Trace if it exists
         if self.tracing_manager:
@@ -254,14 +314,26 @@ class Sandbox:
             try:
                 self.close_connection()
             finally:
-                self._claim_deleter = None
-                self.claim_name = None
+                try:
+                    if self._on_terminated is not None:
+                        self._on_terminated(self)
+                finally:
+                    self._on_terminated = None
+                    self._claim_deleter = None
+                    self.claim_name = None
             return
 
         # Close the client side connection and trace manager lifecycle
         self.close_connection()
 
         self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace)
+
+        # The client stops tracking the handle here because its claim is gone. Call
+        # _on_terminated before clearing claim_name, because that name is the client's key.
+        # Drop the hook afterwards, so a kept handle does not keep the client's registry alive.
+        if self._on_terminated is not None:
+            self._on_terminated(self)
+            self._on_terminated = None
 
         # Clear only after success so a failed delete can be retried.
         self.claim_name = None

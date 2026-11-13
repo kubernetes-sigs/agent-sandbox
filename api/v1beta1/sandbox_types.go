@@ -48,7 +48,8 @@ const (
 	// terminated (reason PodTerminated), and False while the Pod is still terminating
 	// (reason PodTerminating).
 	// The condition is never removed: once the Sandbox runs again it reports False with
-	// reason NotSuspended. Consumers should treat Ready as the authoritative signal.
+	// reason Resumed, and a Sandbox that was never suspended reports False with reason
+	// NotSuspended. Consumers should treat Ready as the authoritative signal.
 	SandboxConditionSuspended ConditionType = "Suspended"
 	// SandboxReasonSuspendedPodTerminated indicates the Suspended condition is True because the backing Pod has been terminated.
 	SandboxReasonSuspendedPodTerminated = "PodTerminated"
@@ -59,8 +60,13 @@ const (
 	SandboxReasonSuspendedPodTerminating = "PodTerminating"
 	// SandboxReasonSuspendedPodNotOwned indicates the Suspended condition is False because a Pod exists with the Sandbox's name but is not owned by this Sandbox.
 	SandboxReasonSuspendedPodNotOwned = "PodNotOwned"
-	// SandboxReasonNotSuspended indicates the Suspended condition is False because the Sandbox is running.
+	// SandboxReasonNotSuspended indicates the Suspended condition is False because the Sandbox is
+	// running and has never been suspended.
 	SandboxReasonNotSuspended = "NotSuspended"
+	// SandboxReasonResumed indicates the Suspended condition is False because the Sandbox is running
+	// again after a suspension: its current Pod was started by a resume. The reason stays until the
+	// next suspend, so metrics can tell resumed Sandboxes apart from created ones.
+	SandboxReasonResumed = "Resumed"
 	// SandboxReasonSuspendedPodStateUnknown indicates the Suspended condition is Unknown because reconciling the Pod failed, so its state cannot be determined.
 	SandboxReasonSuspendedPodStateUnknown = "PodStateUnknown"
 

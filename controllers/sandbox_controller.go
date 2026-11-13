@@ -697,6 +697,10 @@ func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sa
 	}
 
 	if sandbox.Spec.OperatingMode != sandboxv1beta1.SandboxOperatingModeSuspended {
+		if sandboxWasSuspended(sandbox) {
+			suspended.Reason = sandboxv1beta1.SandboxReasonResumed
+			suspended.Message = "Sandbox has resumed from a suspension"
+		}
 		return suspended
 	}
 
@@ -724,6 +728,23 @@ func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sa
 	suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodTerminating
 	suspended.Message = "Pod is terminating. Sandbox is suspending"
 	return suspended
+}
+
+// sandboxWasSuspended reports whether a running Sandbox's current Pod was started by a
+// resume rather than by creation. The previous Suspended condition is the record: True
+// means the Pod had been terminated, PodTerminating means its deletion was already
+// under way, and Resumed carries an earlier verdict forward. Reading status rather than
+// timing keeps the answer exact across controller restarts.
+func sandboxWasSuspended(sandbox *sandboxv1beta1.Sandbox) bool {
+	previous := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
+	if previous == nil {
+		return false
+	}
+	if previous.Status == metav1.ConditionTrue {
+		return true
+	}
+	return previous.Reason == sandboxv1beta1.SandboxReasonSuspendedPodTerminating ||
+		previous.Reason == sandboxv1beta1.SandboxReasonResumed
 }
 
 func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbox, err error, svc *corev1.Service, pod *corev1.Pod) metav1.Condition {
@@ -1146,8 +1167,8 @@ func (r *SandboxReconciler) recordLifecycleMetrics(ctx context.Context, oldStatu
 		r.resumeStartTimes.Delete(key)
 
 		wasJustAnchored := false
-		if oldSuspended != nil && oldSuspended.Reason == sandboxv1beta1.SandboxReasonNotSuspended &&
-			newSuspended != nil && newSuspended.Reason != sandboxv1beta1.SandboxReasonNotSuspended {
+		if oldSuspended != nil && isRunningSuspendedReason(oldSuspended.Reason) &&
+			newSuspended != nil && !isRunningSuspendedReason(newSuspended.Reason) {
 			asmetrics.RecordSandboxSuspend(sandbox.Namespace, templateName, ownedBy, asmetrics.SuspendResultRequested)
 			wasJustAnchored = r.suspendStartTimes.anchor(key, sandbox.UID, time.Now())
 			logger.V(4).Info("Observed Sandbox suspend requested", "justAnchored", wasJustAnchored)
@@ -1204,6 +1225,12 @@ func (r *SandboxReconciler) recordLifecycleMetrics(ctx context.Context, oldStatu
 			asmetrics.RecordSandboxResume(sandbox.Namespace, templateName, ownedBy, asmetrics.ResumeResultError)
 		}
 	}
+}
+
+// isRunningSuspendedReason reports whether a Suspended condition reason describes a
+// running Sandbox, so that a suspend requested from either state is counted once.
+func isRunningSuspendedReason(reason string) bool {
+	return reason == sandboxv1beta1.SandboxReasonNotSuspended || reason == sandboxv1beta1.SandboxReasonResumed
 }
 
 // nodeNameOnlyChange reports whether the node assignment is the only

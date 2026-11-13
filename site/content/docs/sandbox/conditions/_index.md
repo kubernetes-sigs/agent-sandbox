@@ -41,14 +41,15 @@ Summarizes whether the Sandbox can serve traffic. It is `True` only when the bac
 
 ### Suspended
 
-Reports progress of a suspension. It is never removed: a running Sandbox reports `False` with reason `NotSuspended`. The deprecated reason `PodNotTerminated` is no longer set.
+Reports progress of a suspension. It is never removed: a running Sandbox reports `False` with reason `NotSuspended` if it has never been suspended, or `Resumed` if its current Pod was started by a resume. The deprecated reason `PodNotTerminated` is no longer set.
 
 | Status | Reason | Meaning |
 | --- | --- | --- |
 | `True` | `PodTerminated` | The Pod has been terminated. The Sandbox is suspended. |
 | `False` | `PodTerminating` | The Pod is still terminating. |
 | `False` | `PodNotOwned` | A Pod with the Sandbox's name exists but is not owned by it, so the controller refused to delete it. |
-| `False` | `NotSuspended` | The Sandbox is not suspended. |
+| `False` | `NotSuspended` | The Sandbox is running and has never been suspended. |
+| `False` | `Resumed` | The Sandbox is running again after a suspension. The reason stays until the next suspend. |
 | `Unknown` | `PodStateUnknown` | Reconciling the Pod failed, so the suspension cannot be confirmed. |
 
 ### Finished

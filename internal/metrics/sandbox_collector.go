@@ -35,14 +35,15 @@ const (
 
 // AgentSandboxesMetricKey is used to aggregate counts for identical Sandboxes metric label combinations.
 type AgentSandboxesMetricKey struct {
-	Namespace      string
-	ReadyCondition string
-	Expired        string
-	OperatingMode  string
-	LaunchType     string
-	Template       string
-	OwnedBy        string
-	CreatedBy      string
+	Namespace       string
+	ReadyCondition  string
+	Expired         string
+	OperatingMode   string
+	SuspendedReason string
+	LaunchType      string
+	Template        string
+	OwnedBy         string
+	CreatedBy       string
 }
 
 // NewAgentSandboxesConstMetric creates a new Prometheus ConstMetric for the agent_sandboxes gauge.
@@ -55,6 +56,7 @@ func NewAgentSandboxesConstMetric(count int, key AgentSandboxesMetricKey) promet
 		key.ReadyCondition,
 		key.Expired,
 		key.OperatingMode,
+		key.SuspendedReason,
 		key.LaunchType,
 		key.Template,
 		key.OwnedBy,
@@ -125,6 +127,7 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 
 		operatingModeStr := SandboxOperatingModeLabel(&sandbox)
+		suspendedReasonStr := SandboxSuspendedReasonLabel(&sandbox)
 
 		launchTypeStr := LaunchTypeCold
 		if sandbox.Labels[sandboxv1beta1.SandboxLaunchTypeLabel] == sandboxv1beta1.SandboxLaunchTypeWarm {
@@ -140,14 +143,15 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 
 		key := AgentSandboxesMetricKey{
-			Namespace:      sandbox.Namespace,
-			ReadyCondition: readyConditionStr,
-			Expired:        expiredStr,
-			OperatingMode:  operatingModeStr,
-			LaunchType:     launchTypeStr,
-			Template:       sandboxTemplateStr,
-			OwnedBy:        ownedByStr,
-			CreatedBy:      createdByStr,
+			Namespace:       sandbox.Namespace,
+			ReadyCondition:  readyConditionStr,
+			Expired:         expiredStr,
+			OperatingMode:   operatingModeStr,
+			SuspendedReason: suspendedReasonStr,
+			LaunchType:      launchTypeStr,
+			Template:        sandboxTemplateStr,
+			OwnedBy:         ownedByStr,
+			CreatedBy:       createdByStr,
 		}
 		counts[key]++
 	}

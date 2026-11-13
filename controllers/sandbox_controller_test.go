@@ -383,7 +383,8 @@ func TestComputeConditions(t *testing.T) {
 			svc: &corev1.Service{},
 			pod: nil,
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
+				// Leaving Suspended=True records the resume on the condition's reason.
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "Resumed", Message: "Sandbox has resumed from a suspension"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod does not exist; Service Exists"},
 			},
 		},
@@ -7667,6 +7668,15 @@ func TestRecordLifecycleMetrics_SuspendAndResume(t *testing.T) {
 			wantSuspendEntryUID:  sandboxUID,
 		},
 		{
+			// After a resume the Suspended reason is Resumed, not NotSuspended; a
+			// second suspend must still be counted as requested.
+			name:                 "suspend requested from a resumed Sandbox anchors timer and increments requested counter",
+			sandbox:              newSandbox(sandboxv1beta1.SandboxOperatingModeSuspended, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspendedPodTerminating, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspended),
+			oldStatus:            statusWithConditions(condSuspended(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonResumed), condReady(metav1.ConditionTrue, sandboxv1beta1.SandboxReasonDependenciesReady)),
+			wantSuspendRequested: 1,
+			wantSuspendEntryUID:  sandboxUID,
+		},
+		{
 			name:                  "suspend completion records pod_terminated and suspend latency after anchor",
 			seedSuspend:           &lifecycleTimeEntry{timestamp: time.Now().Add(-500 * time.Millisecond), uid: sandboxUID},
 			sandbox:               newSandbox(sandboxv1beta1.SandboxOperatingModeSuspended, metav1.ConditionTrue, sandboxv1beta1.SandboxReasonSuspendedPodTerminated, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspended),
@@ -7703,7 +7713,7 @@ func TestRecordLifecycleMetrics_SuspendAndResume(t *testing.T) {
 		},
 		{
 			name:                "anchors resume start when leaving Suspended=True, not yet Ready",
-			sandbox:             newSandbox(sandboxv1beta1.SandboxOperatingModeRunning, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNotSuspended, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonDependenciesNotReady),
+			sandbox:             newSandbox(sandboxv1beta1.SandboxOperatingModeRunning, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonResumed, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonDependenciesNotReady),
 			oldStatus:           statusWithConditions(condSuspended(metav1.ConditionTrue, sandboxv1beta1.SandboxReasonSuspendedPodTerminated)),
 			wantResumeRequested: 1,
 			wantResumeEntryUID:  sandboxUID,
@@ -7711,21 +7721,21 @@ func TestRecordLifecycleMetrics_SuspendAndResume(t *testing.T) {
 		{
 			name:                 "records resume ready and latency once Ready after an anchor",
 			seedResume:           &lifecycleTimeEntry{timestamp: time.Now().Add(-2 * time.Second), uid: sandboxUID},
-			sandbox:              newSandbox(sandboxv1beta1.SandboxOperatingModeRunning, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNotSuspended, metav1.ConditionTrue, sandboxv1beta1.SandboxReasonDependenciesReady),
-			oldStatus:            statusWithConditions(condSuspended(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNotSuspended), condReady(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonDependenciesNotReady)),
+			sandbox:              newSandbox(sandboxv1beta1.SandboxOperatingModeRunning, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonResumed, metav1.ConditionTrue, sandboxv1beta1.SandboxReasonDependenciesReady),
+			oldStatus:            statusWithConditions(condSuspended(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonResumed), condReady(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonDependenciesNotReady)),
 			wantResumeReady:      1,
 			wantResumeLatencyObs: 1,
 		},
 		{
 			name:                "same-reconcile resume request and Ready=True skips ~0ms latency sample and clears timer",
-			sandbox:             newSandbox(sandboxv1beta1.SandboxOperatingModeRunning, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNotSuspended, metav1.ConditionTrue, sandboxv1beta1.SandboxReasonDependenciesReady),
+			sandbox:             newSandbox(sandboxv1beta1.SandboxOperatingModeRunning, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonResumed, metav1.ConditionTrue, sandboxv1beta1.SandboxReasonDependenciesReady),
 			oldStatus:           statusWithConditions(condSuspended(metav1.ConditionTrue, sandboxv1beta1.SandboxReasonSuspendedPodTerminated)),
 			wantResumeRequested: 1,
 			wantResumeReady:     1,
 		},
 		{
 			name:      "does not anchor if prior Suspended condition was False (canceled suspend)",
-			sandbox:   newSandbox(sandboxv1beta1.SandboxOperatingModeRunning, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNotSuspended, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonDependenciesNotReady),
+			sandbox:   newSandbox(sandboxv1beta1.SandboxOperatingModeRunning, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonResumed, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonDependenciesNotReady),
 			oldStatus: statusWithConditions(condSuspended(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspendedPodTerminating)),
 		},
 		{
@@ -7744,16 +7754,16 @@ func TestRecordLifecycleMetrics_SuspendAndResume(t *testing.T) {
 		{
 			name:               "records resume error when an in-flight resume hits ReconcilerError",
 			seedResume:         &lifecycleTimeEntry{timestamp: time.Now().Add(-time.Second), uid: sandboxUID},
-			sandbox:            newSandbox(sandboxv1beta1.SandboxOperatingModeRunning, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNotSuspended, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonReconcilerError),
-			oldStatus:          statusWithConditions(condSuspended(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNotSuspended), condReady(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonDependenciesNotReady)),
+			sandbox:            newSandbox(sandboxv1beta1.SandboxOperatingModeRunning, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonResumed, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonReconcilerError),
+			oldStatus:          statusWithConditions(condSuspended(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonResumed), condReady(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonDependenciesNotReady)),
 			wantResumeError:    1,
 			wantResumeEntryUID: sandboxUID,
 		},
 		{
 			name:               "counts resume error at most once per anchored resume across error flaps",
 			seedResume:         &lifecycleTimeEntry{timestamp: time.Now().Add(-time.Second), uid: sandboxUID, errorRecorded: true},
-			sandbox:            newSandbox(sandboxv1beta1.SandboxOperatingModeRunning, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNotSuspended, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonReconcilerError),
-			oldStatus:          statusWithConditions(condSuspended(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNotSuspended), condReady(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonDependenciesNotReady)),
+			sandbox:            newSandbox(sandboxv1beta1.SandboxOperatingModeRunning, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonResumed, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonReconcilerError),
+			oldStatus:          statusWithConditions(condSuspended(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonResumed), condReady(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonDependenciesNotReady)),
 			wantResumeEntryUID: sandboxUID,
 		},
 	}
@@ -8131,4 +8141,77 @@ func TestSandboxStaleStatusPatchConflictDroppedWithoutMetrics(t *testing.T) {
 	require.Equal(t, 3, statusPatchAttempts)
 	require.InDelta(t, 1.0, testutil.ToFloat64(asmetrics.SandboxSuspendTotal.WithLabelValues("default", "unknown", "None", "requested")), 0.001)
 	require.InDelta(t, 1.0, testutil.ToFloat64(asmetrics.SandboxSuspendTotal.WithLabelValues("default", "unknown", "None", "pod_terminated")), 0.001)
+}
+
+func TestComputeSuspendedCondition_ResumedReason(t *testing.T) {
+	previous := func(status metav1.ConditionStatus, reason string) []metav1.Condition {
+		return []metav1.Condition{{
+			Type:   string(sandboxv1beta1.SandboxConditionSuspended),
+			Status: status,
+			Reason: reason,
+		}}
+	}
+	tests := []struct {
+		name       string
+		mode       sandboxv1beta1.SandboxOperatingMode
+		previous   []metav1.Condition
+		wantStatus metav1.ConditionStatus
+		wantReason string
+	}{
+		{
+			name:       "created Sandbox reports NotSuspended",
+			mode:       sandboxv1beta1.SandboxOperatingModeRunning,
+			wantStatus: metav1.ConditionFalse,
+			wantReason: sandboxv1beta1.SandboxReasonNotSuspended,
+		},
+		{
+			name:       "running after a completed suspension reports Resumed",
+			mode:       sandboxv1beta1.SandboxOperatingModeRunning,
+			previous:   previous(metav1.ConditionTrue, sandboxv1beta1.SandboxReasonSuspendedPodTerminated),
+			wantStatus: metav1.ConditionFalse,
+			wantReason: sandboxv1beta1.SandboxReasonResumed,
+		},
+		{
+			// The Pod's deletion was already issued, so the next Pod is started by a resume.
+			name:       "running while the suspended Pod is still terminating reports Resumed",
+			mode:       sandboxv1beta1.SandboxOperatingModeRunning,
+			previous:   previous(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspendedPodTerminating),
+			wantStatus: metav1.ConditionFalse,
+			wantReason: sandboxv1beta1.SandboxReasonResumed,
+		},
+		{
+			name:       "Resumed is kept on later reconciles",
+			mode:       sandboxv1beta1.SandboxOperatingModeRunning,
+			previous:   previous(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonResumed),
+			wantStatus: metav1.ConditionFalse,
+			wantReason: sandboxv1beta1.SandboxReasonResumed,
+		},
+		{
+			// The controller refused to delete a foreign Pod, so nothing was ever suspended.
+			name:       "running after PodNotOwned reports NotSuspended",
+			mode:       sandboxv1beta1.SandboxOperatingModeRunning,
+			previous:   previous(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspendedPodNotOwned),
+			wantStatus: metav1.ConditionFalse,
+			wantReason: sandboxv1beta1.SandboxReasonNotSuspended,
+		},
+		{
+			name:       "a second suspend replaces Resumed",
+			mode:       sandboxv1beta1.SandboxOperatingModeSuspended,
+			previous:   previous(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonResumed),
+			wantStatus: metav1.ConditionTrue,
+			wantReason: sandboxv1beta1.SandboxReasonSuspendedPodTerminated,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sandbox := &sandboxv1beta1.Sandbox{
+				Spec:   sandboxv1beta1.SandboxSpec{OperatingMode: tc.mode},
+				Status: sandboxv1beta1.SandboxStatus{Conditions: tc.previous},
+			}
+			r := &SandboxReconciler{}
+			got := r.computeSuspendedCondition(sandbox, nil, nil)
+			assert.Equal(t, tc.wantStatus, got.Status)
+			assert.Equal(t, tc.wantReason, got.Reason)
+		})
+	}
 }

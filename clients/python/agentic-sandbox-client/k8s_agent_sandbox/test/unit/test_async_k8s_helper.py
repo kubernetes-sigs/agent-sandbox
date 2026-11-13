@@ -31,7 +31,7 @@ from kubernetes_asyncio.config import incluster_config
 from k8s_agent_sandbox.models import AdditionalPodMetadata
 from k8s_agent_sandbox.async_k8s_helper import AsyncK8sHelper
 from k8s_agent_sandbox.exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError
-from k8s_agent_sandbox.constants import CLIENT_REQUEST_TIME_ANNOTATION
+from k8s_agent_sandbox.constants import CLIENT_REQUEST_TIME_ANNOTATION, SANDBOX_API_GROUP, SANDBOX_API_VERSION, SANDBOX_PLURAL_NAME
 
 
 class TestAsyncK8sHelperCreateSandboxClaim(unittest.IsolatedAsyncioTestCase):
@@ -438,6 +438,38 @@ class TestAsyncK8sHelperWaitForSandboxReady(unittest.IsolatedAsyncioTestCase):
         self.helper = AsyncK8sHelper()
         self.helper._initialized = True
         self.helper.custom_objects_api = MagicMock()
+
+    async def test_suspended_wait_skips_stale_generation(self):
+        async def _async_gen(*args, **kwargs):
+            for generation in (1, 2):
+                yield {"type": "MODIFIED", "object": {"status": {
+                    "conditions": [{"type": "Suspended", "status": "True", "observedGeneration": generation}],
+                    "podIPs": [f"10.0.0.{generation}"],
+                }}}
+
+        with patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch") as MockWatch:
+            MockWatch.return_value.stream = _async_gen
+            MockWatch.return_value.close = AsyncMock()
+            ip = await self.helper.wait_for_sandbox_ready(
+                "test-sandbox", "default", timeout=5, condition="Suspended", min_generation=2,
+            )
+
+        self.assertEqual(ip, "10.0.0.2")
+
+    async def test_patch_sandbox_operating_mode(self):
+        self.helper.custom_objects_api.patch_namespaced_custom_object = AsyncMock()
+
+        await self.helper.patch_sandbox_operating_mode("test-sandbox", "default", "Suspended", "original")
+
+        self.helper.custom_objects_api.patch_namespaced_custom_object.assert_awaited_once_with(
+            group=SANDBOX_API_GROUP, version=SANDBOX_API_VERSION, namespace="default",
+            plural=SANDBOX_PLURAL_NAME, name="test-sandbox",
+            body=[
+                {"op": "test", "path": "/metadata/uid", "value": "original"},
+                {"op": "add", "path": "/spec/operatingMode", "value": "Suspended"},
+            ],
+            _content_type="application/json-patch+json",
+        )
 
     async def test_returns_first_pod_ip_when_ready(self):
         async def _async_gen(*args, **kwargs):

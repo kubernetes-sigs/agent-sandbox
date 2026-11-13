@@ -14,13 +14,16 @@
 
 """Async handle for one running Sandbox and its local client resources."""
 
+import asyncio
 import logging
-from typing import Callable
+import time
+from typing import Any, Callable, Literal
 
 from .async_connector import AsyncSandboxConnector
 from .async_k8s_helper import AsyncK8sHelper
 from .commands.async_command_executor import AsyncCommandExecutor
 from .constants import POD_NAME_ANNOTATION
+from .exceptions import SandboxError, SandboxNotFoundError
 from .files.async_filesystem import AsyncFilesystem
 from .models import (
     SandboxConnectionConfig,
@@ -81,15 +84,7 @@ class AsyncSandbox:
 
         self.k8s_helper = k8s_helper or AsyncK8sHelper()
 
-        self.connector = AsyncSandboxConnector(
-            sandbox_id=self.sandbox_id,
-            namespace=self.namespace,
-            connection_config=self.connection_config,
-            k8s_helper=self.k8s_helper,
-            get_pod_ip=self.get_pod_ip,
-            get_pod_name=self.get_pod_name,
-            get_service_fqdn=self.get_service_fqdn,
-        )
+        self.connector = self._new_connector()
 
         self.tracer_config = tracer_config or SandboxTracerConfig()
         self.trace_service_name = self.tracer_config.trace_service_name
@@ -106,9 +101,90 @@ class AsyncSandbox:
             self.connector, self.tracer, self.trace_service_name
         )
 
+        self._lifecycle_uid: str | None = None
+        self._lifecycle_lock = asyncio.Lock()
         self._is_closed = False
         self._pod_name: str | None = None
         self._sandbox_name_hash: str | None = None
+
+    async def suspend(self, *, timeout: int = 180) -> None:
+        """Suspend the Sandbox and wait for the controller to report `Suspended`.
+
+        This handle stays active. `timeout` covers the wait for the condition and
+        for another suspend or resume call on this handle to finish.
+        """
+        await self._change_operating_mode("Suspended", timeout)
+
+    async def resume(self, *, timeout: int = 180) -> None:
+        """Resume the Sandbox and wait for the controller to report `Ready`."""
+        await self._change_operating_mode("Running", timeout)
+
+    async def is_suspended(self) -> bool:
+        """Return whether the requested operating mode is `Suspended`."""
+        return (await self._read_lifecycle())[1] == "Suspended"
+
+    async def _read_lifecycle(self) -> tuple[dict[str, Any], str]:
+        """Return the Sandbox and its requested operating mode,
+        and raise if the Sandbox was replaced.
+        """
+        resource = await self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace)
+        if resource is None:
+            raise SandboxNotFoundError(f"Sandbox '{self.sandbox_id}' no longer exists")
+        uid = resource["metadata"]["uid"]
+        if self._lifecycle_uid not in (None, uid):
+            raise SandboxNotFoundError(f"Sandbox '{self.sandbox_id}' was replaced")
+        self._lifecycle_uid = uid
+        return resource, resource.get("spec", {}).get("operatingMode", "Running")
+
+    async def _change_operating_mode(self, mode: Literal["Running", "Suspended"], timeout: int) -> None:
+        if self._is_closed:
+            raise RuntimeError("Sandbox connection is closed")
+        start = time.monotonic()
+        try:
+            if self._lifecycle_lock.locked():
+                await asyncio.wait_for(self._lifecycle_lock.acquire(), timeout=timeout)
+            else:
+                await self._lifecycle_lock.acquire()
+        except TimeoutError:
+            raise TimeoutError("Timed out waiting for the lifecycle lock") from None
+        try:
+            resource, current_mode = await self._read_lifecycle()
+            if current_mode != mode:
+                resource = await self.k8s_helper.patch_sandbox_operating_mode(
+                    self.sandbox_id, self.namespace, mode, resource["metadata"]["uid"],
+                )
+            if "Suspended" in (mode, current_mode):
+                # AsyncSandboxConnector cannot be reused after close().
+                old_connector = self.connector
+                connector = self._new_connector()
+                connector._default_ssl_context = old_connector._default_ssl_context
+                for owner in (self, self._commands, self._files, self._watcher):
+                    if owner is not None:
+                        owner.connector = connector
+                self._pod_name = None
+                await old_connector.close()
+            await self.k8s_helper.wait_for_sandbox_ready(
+                self.sandbox_id, self.namespace, max(0, timeout - int(time.monotonic() - start)),
+                condition="Suspended" if mode == "Suspended" else "Ready",
+                min_generation=resource["metadata"]["generation"],
+            )
+            if (await self._read_lifecycle())[1] != mode:
+                raise SandboxError(
+                    f"Sandbox '{self.sandbox_id}' changed operating mode while waiting for {mode}"
+                )
+        finally:
+            self._lifecycle_lock.release()
+
+    def _new_connector(self) -> AsyncSandboxConnector:
+        return AsyncSandboxConnector(
+            sandbox_id=self.sandbox_id,
+            namespace=self.namespace,
+            connection_config=self.connection_config,
+            k8s_helper=self.k8s_helper,
+            get_pod_ip=self.get_pod_ip,
+            get_pod_name=self.get_pod_name,
+            get_service_fqdn=self.get_service_fqdn,
+        )
 
     async def get_pod_name(self) -> str:
         """Fetches the Sandbox object from Kubernetes and retrieves its current pod name."""

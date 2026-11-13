@@ -349,22 +349,27 @@ class AsyncK8sHelper:
                 await w.close()
 
     async def wait_for_sandbox_ready(
-        self, name: str, namespace: str, timeout: int
+        self, name: str, namespace: str, timeout: int,
+        *, condition: str = "Ready", min_generation: int = 0,
     ) -> str | None:
         """Waits for the Sandbox custom resource to have a 'Ready' status.
 
         Returns the selected pod IP from the sandbox status when ready, or None if
         no valid IP can be selected.
+
+        `condition` names the condition to wait for. The wait ignores a condition
+        whose `observedGeneration` is less than `min_generation`.
         """
         await self._ensure_initialized()
 
+        description = "ready" if condition == "Ready" else f"{condition}=True"
         deadline = time.monotonic() + timeout
-        logger.info(f"Watching for Sandbox {name} to become ready...")
+        logger.info(f"Watching for Sandbox {name} to become {description}...")
         while True:
             remaining = math.ceil(deadline - time.monotonic())
             if remaining <= 0:
                 raise TimeoutError(
-                    f"Sandbox {name} did not become ready within {timeout} seconds."
+                    f"Sandbox {name} did not become {description} within {timeout} seconds."
                 )
             w = watch.Watch()
             try:
@@ -385,18 +390,19 @@ class AsyncK8sHelper:
                         conditions = status.get("conditions", [])
                         for cond in conditions:
                             if (
-                                cond.get("type") == "Ready"
+                                cond.get("type") == condition
                                 and cond.get("status") == "True"
+                                and (cond.get("observedGeneration") or 0) >= min_generation
                             ):
-                                logger.info(f"Sandbox {name} is ready.")
+                                logger.info(f"Sandbox {name} is {description}.")
                                 pod_ips = status.get("podIPs", [])
                                 return select_pod_ip(pod_ips)
                     elif event["type"] == "DELETED":
                         logger.error(
-                            f"Sandbox {name} was deleted before becoming ready."
+                            f"Sandbox {name} was deleted before becoming {description}."
                         )
                         raise SandboxNotFoundError(
-                            f"Sandbox {name} was deleted before becoming ready."
+                            f"Sandbox {name} was deleted before becoming {description}."
                         )
             except aiohttp.ClientSSLError:
                 raise
@@ -437,6 +443,25 @@ class AsyncK8sHelper:
             if e.status != 404:
                 logger.error(f"Error terminating SandboxClaim {name}: {e}")
                 raise
+
+    async def patch_sandbox_operating_mode(
+        self, name: str, namespace: str, mode: str, uid: str,
+    ) -> dict[str, Any]:
+        """Change operating mode only if the named Sandbox still has this UID."""
+        await self._ensure_initialized()
+        request_options: dict[str, Any] = {"_content_type": "application/json-patch+json"}
+        return cast(dict[str, Any], await self.custom_objects_api.patch_namespaced_custom_object(
+            group=SANDBOX_API_GROUP,
+            version=SANDBOX_API_VERSION,
+            namespace=namespace,
+            plural=SANDBOX_PLURAL_NAME,
+            name=name,
+            body=[
+                {"op": "test", "path": "/metadata/uid", "value": uid},
+                {"op": "add", "path": "/spec/operatingMode", "value": mode},
+            ],
+            **request_options,
+        ))
 
     async def get_sandbox(self, name: str, namespace: str) -> dict[str, Any] | None:
         """Gets a Sandbox custom resource."""

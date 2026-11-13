@@ -82,6 +82,22 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
     def tearDown(self):
         logging.info(f"Finished {self._testMethodName}.")
 
+    @patch(
+        "k8s_agent_sandbox.gke_extensions.snapshots.sandbox_with_snapshot_support.wait_for_pod_termination",
+        return_value=True,
+    )
+    @patch.object(SandboxWithSnapshotSupport, "_restore_internal", return_value=RestorationResponse(
+        success=True, restored_from_snapshot=True, snapshot_uid="snapshot",
+    ))
+    @patch.object(SandboxWithSnapshotSupport, "_get_latest_snapshot_uid", return_value="snapshot")
+    @patch.object(SandboxWithSnapshotSupport, "is_suspended", side_effect=[False, True])
+    def test_timeout_overrides_wait_timeout(self, mock_is_suspended, mock_latest, mock_restore, mock_wait):
+        self.sandbox.suspend(snapshot_before_suspend=False, wait_timeout=30, timeout=60)
+        self.sandbox.resume(wait_timeout=30, timeout=60)
+
+        self.assertEqual(mock_wait.call_args.args[-1], 60)
+        mock_restore.assert_called_once_with("snapshot", 60)
+
     @patch("k8s_agent_sandbox.gke_extensions.snapshots.utils.watch.Watch")
     def test_snapshots_create_success(self, mock_watch_cls):
         mock_watch = MagicMock()

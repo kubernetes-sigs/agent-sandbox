@@ -23,19 +23,19 @@ import (
 	"go.opentelemetry.io/otel/metric/noop"
 )
 
-// discoveryLatencyInstrumentName mirrors the Python SDK's
-// sandbox_client_discovery_latency_ms. The OTel Prometheus exporter
-// sanitizes dots to underscores, so exporting this histogram yields the
-// same metric name in both SDKs. The unit is deliberately left unset and
-// values are recorded in milliseconds, because the exporter would
-// otherwise append a unit suffix and break the shared name.
-const discoveryLatencyInstrumentName = "sandbox.client.discovery.latency.ms"
+// discoveryLatencyInstrumentName follows the OTel convention of keeping the
+// unit out of the name and declaring it with metric.WithUnit instead. The
+// OTel Prometheus exporter sanitizes dots to underscores and appends the
+// unit, so this histogram exports as
+// sandbox_client_discovery_latency_seconds, the name the Python SDK's
+// discovery latency metric is moving to.
+const discoveryLatencyInstrumentName = "sandbox.client.discovery.latency"
 
-// discoveryLatencyBucketsMs matches the Python SDK's _LATENCY_BUCKETS_MS so
-// cross-SDK dashboards aggregate identically.
-var discoveryLatencyBucketsMs = []float64{
-	100, 250, 500, 750, 1000, 1250, 1500, 2000, 2500, 5000,
-	10000, 30000, 60000, 120000, 240000,
+// discoveryLatencyBucketsSeconds are the Python SDK's _LATENCY_BUCKETS_MS
+// expressed in seconds, so cross-SDK dashboards aggregate identically.
+var discoveryLatencyBucketsSeconds = []float64{
+	0.1, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 5,
+	10, 30, 60, 120, 240,
 }
 
 // newMeter configures a meter from Options, mirroring newTracer.
@@ -57,8 +57,9 @@ func newMeter(opts Options) metric.Meter {
 func newDiscoveryLatencyHistogram(meter metric.Meter, log logr.Logger) metric.Float64Histogram {
 	hist, err := meter.Float64Histogram(
 		discoveryLatencyInstrumentName,
-		metric.WithDescription("Latency of establishing connection to the sandbox in milliseconds"),
-		metric.WithExplicitBucketBoundaries(discoveryLatencyBucketsMs...),
+		metric.WithDescription("Latency of establishing connection to the sandbox"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(discoveryLatencyBucketsSeconds...),
 	)
 	if err != nil {
 		log.Error(err, "Failed to create discovery latency histogram; sandbox client metrics are disabled")

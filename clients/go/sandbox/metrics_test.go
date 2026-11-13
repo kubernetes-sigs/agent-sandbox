@@ -91,9 +91,9 @@ func TestConnectorConnect_RecordsDiscoveryLatencyOnSuccess(t *testing.T) {
 	if !attrsContain(p.Attributes, "status", "success") {
 		t.Errorf("got attributes %v, want status=success", p.Attributes)
 	}
-	// Buckets must match the Python SDK's _LATENCY_BUCKETS_MS so cross-SDK
-	// dashboards aggregate identically.
-	wantBounds := []float64{100, 250, 500, 750, 1000, 1250, 1500, 2000, 2500, 5000, 10000, 30000, 60000, 120000, 240000}
+	// Buckets must be the Python SDK's _LATENCY_BUCKETS_MS expressed in
+	// seconds so cross-SDK dashboards aggregate identically.
+	wantBounds := []float64{0.1, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 5, 10, 30, 60, 120, 240}
 	if len(p.Bounds) != len(wantBounds) {
 		t.Fatalf("got %d bucket bounds, want %d: %v", len(p.Bounds), len(wantBounds), p.Bounds)
 	}
@@ -183,9 +183,10 @@ func TestNewMeter_NilProviderFallsBackToGlobal(t *testing.T) {
 
 func TestNewDiscoveryLatencyHistogram_InstrumentName(t *testing.T) {
 	// Guards the cross-SDK contract: the OTel Prometheus exporter renders
-	// this instrument name as sandbox_client_discovery_latency_ms.
-	if discoveryLatencyInstrumentName != "sandbox.client.discovery.latency.ms" {
-		t.Errorf("instrument name = %q, want sandbox.client.discovery.latency.ms", discoveryLatencyInstrumentName)
+	// this instrument name and its "s" unit as
+	// sandbox_client_discovery_latency_seconds.
+	if discoveryLatencyInstrumentName != "sandbox.client.discovery.latency" {
+		t.Errorf("instrument name = %q, want sandbox.client.discovery.latency", discoveryLatencyInstrumentName)
 	}
 
 	reader := metric.NewManualReader()

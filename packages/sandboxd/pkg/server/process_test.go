@@ -22,6 +22,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -270,6 +272,43 @@ func TestStartStreamsStdoutStderrAndExit(t *testing.T) {
 	require.Equal(t, "out\n", res.stdout.String())
 	require.Equal(t, "err\n", res.stderr.String())
 	require.Equal(t, int32(7), res.exitCode)
+}
+
+func TestStartClosesOutputPipes(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires Linux /proc file descriptors")
+	}
+	// Disable GC so finalizers can't close the leaked readers and hide the leak.
+	previousGC := debug.SetGCPercent(-1)
+	t.Cleanup(func() { debug.SetGCPercent(previousGC) })
+	client := newProcessClient(t, t.TempDir())
+
+	pipeCount := func() int {
+		t.Helper()
+		entries, err := os.ReadDir("/proc/self/fd")
+		require.NoError(t, err)
+		count := 0
+		for _, entry := range entries {
+			target, err := os.Readlink(filepath.Join("/proc/self/fd", entry.Name()))
+			if err == nil && strings.HasPrefix(target, "pipe:[") {
+				count++
+			}
+		}
+		return count
+	}
+
+	before := pipeCount()
+	stream, err := client.Start(testCtx(t), &processv1.StartRequest{
+		Config: &processv1.ProcessConfig{Command: []string{
+			"sh", "-c", "printf stdout; printf stderr >&2",
+		}},
+	})
+	require.NoError(t, err)
+	result := drainStart(t, stream)
+	require.Equal(t, "stdout", result.stdout.String())
+	require.Equal(t, "stderr", result.stderr.String())
+	require.Equal(t, int32(0), result.exitCode)
+	require.Equal(t, before, pipeCount(), "completed streams must close both output readers")
 }
 
 func TestWriteStdinAndEOF(t *testing.T) {

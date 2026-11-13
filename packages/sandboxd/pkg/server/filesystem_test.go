@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"mime/multipart"
 	"net/http"
@@ -98,6 +99,7 @@ func TestFileTransfersRejectNamedPipes(t *testing.T) {
 	}{
 		{name: "get", method: http.MethodGet},
 		{name: "head", method: http.MethodHead},
+		{name: "stat", method: http.MethodGet, query: "?stat=true"},
 		{name: "append without reader", method: http.MethodPut, query: "?append=true"},
 		{name: "append with reader", method: http.MethodPut, query: "?append=true", reader: true},
 	} {
@@ -626,6 +628,14 @@ func TestGetRecursiveListingEntryCap(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	require.Equal(t, "INVALID_ARGUMENT", decodeError(t, rec).Code)
 
+	// Stat returns one entry even when a recursive listing would exceed the cap.
+	rec = doRequest(handler, http.MethodGet, "/v1/files/?stat=true&type=directory&recursive=true", nil, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var entry FileEntry
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &entry))
+	require.Equal(t, "/", entry.Name)
+	require.Equal(t, "directory", entry.Type)
+
 	// Exactly at the cap is allowed, and so are listings that are not recursive.
 	rec = doRequest(handler, http.MethodGet, "/v1/files/?recursive=true&max_depth=2", nil, nil)
 	require.Len(t, listingNames(t, rec), 5)
@@ -710,6 +720,143 @@ func TestGetRecursiveListingStopsWhenRequestCanceled(t *testing.T) {
 
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 	require.Equal(t, "INTERNAL", decodeError(t, rec).Code)
+}
+
+func TestGetFileStat(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.Mkdir(filepath.Join(root, "dir"), 0o750))
+	file := filepath.Join(root, "dir", "file.txt")
+	require.NoError(t, os.WriteFile(file, []byte("contents"), 0o640))
+	mtime := time.Unix(1700000000, 123456789)
+	require.NoError(t, os.Chtimes(file, mtime, mtime))
+	require.NoError(t, os.Symlink(file, filepath.Join(root, "alias")))
+
+	for _, tc := range []struct {
+		path, name, kind string
+	}{
+		{"dir/file.txt", "file.txt", "file"},
+		{"dir%2Ffile.txt", "file.txt", "file"},
+		{"dir", "dir", "directory"},
+		{"dir/", "dir", "directory"},
+		{"", "/", "directory"},
+		{"alias", "alias", "file"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			rec := doRequest(handler, http.MethodGet, "/v1/files/"+tc.path+"?stat=true", nil, nil)
+			require.Equal(t, http.StatusOK, rec.Code)
+			require.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+			var entry FileEntry
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &entry))
+			require.Equal(t, tc.name, entry.Name)
+			require.Equal(t, tc.kind, entry.Type)
+			localPath, err := url.PathUnescape(tc.path)
+			require.NoError(t, err)
+			info, err := os.Stat(filepath.Join(root, localPath))
+			require.NoError(t, err)
+			require.Equal(t, info.Size(), entry.Size)
+			require.Equal(t, fmt.Sprintf("%04o", info.Mode().Perm()), entry.Mode)
+			gotTime, err := time.Parse(time.RFC3339Nano, entry.ModifiedAt)
+			require.NoError(t, err)
+			require.True(t, info.ModTime().Equal(gotTime), "stat must preserve filesystem timestamp precision")
+		})
+	}
+}
+
+func TestGetFileStatErrors(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	require.NoError(t, os.WriteFile(outside, []byte("private"), 0o600))
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "escape")))
+	require.NoError(t, os.Symlink(filepath.Join(root, "missing"), filepath.Join(root, "broken")))
+	for _, tc := range []struct {
+		path   string
+		status int
+		code   string
+	}{
+		{"missing?stat=banana", http.StatusBadRequest, "INVALID_ARGUMENT"},
+		{"?stat=true&type=file", http.StatusConflict, "CONFLICT"},
+		{"?stat=true&max_depth=bad", http.StatusBadRequest, "INVALID_ARGUMENT"},
+		{"missing?stat=true", http.StatusNotFound, "NOT_FOUND"},
+		{"broken?stat=true", http.StatusNotFound, "NOT_FOUND"},
+		{"escape?stat=true", http.StatusForbidden, "PERMISSION_DENIED"},
+		{"%2E%2E/outside.txt?stat=true", http.StatusForbidden, "PERMISSION_DENIED"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			rec := doRequest(handler, http.MethodGet, "/v1/files/"+tc.path, nil, nil)
+			require.Equal(t, tc.status, rec.Code)
+			require.Equal(t, tc.code, decodeError(t, rec).Code)
+		})
+	}
+}
+
+func TestGetFileStatWithoutReadPermission(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "file.txt"), []byte("contents"), 0o000))
+	dir := filepath.Join(root, "dir")
+	require.NoError(t, os.Mkdir(dir, 0o000))
+	t.Cleanup(func() { require.NoError(t, os.Chmod(dir, 0o700)) })
+	for _, path := range []string{"file.txt", "dir"} {
+		rec := doRequest(handler, http.MethodGet, "/v1/files/"+path+"?stat=true", nil, nil)
+		require.Equal(t, http.StatusOK, rec.Code, "stat must not require reading the target")
+		var entry FileEntry
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &entry))
+		require.Equal(t, "0000", entry.Mode)
+	}
+}
+
+func TestFileStatPreservesReadAndHead(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "file.txt"), []byte("contents"), 0o640))
+	for _, query := range []string{"", "?stat=false"} {
+		rec := doRequest(handler, http.MethodGet, "/v1/files/file.txt"+query, nil, nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.Equal(t, "contents", rec.Body.String())
+		rec = doRequest(handler, http.MethodGet, "/v1/files/"+query, nil, nil)
+		var listing DirectoryListing
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &listing))
+		require.Len(t, listing.Entries, 1)
+	}
+	// Exercise the HTTP server's HEAD body suppression, including the JSON stat response.
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	for _, path := range []string{"file.txt", "file.txt?stat=true", "?stat=true"} {
+		resp, err := srv.Client().Head(srv.URL + "/v1/files/" + path)
+		require.NoError(t, err)
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, resp.Body.Close())
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		require.Empty(t, body)
+		if path == "file.txt" {
+			require.Equal(t, "8", resp.Header.Get("Content-Length"))
+			require.NotEmpty(t, resp.Header.Get("Last-Modified"))
+		} else {
+			require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+		}
+	}
+}
+
+func TestDirectoryListingPreservesSubsecondModificationTime(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	file := filepath.Join(root, "file.txt")
+	require.NoError(t, os.WriteFile(file, []byte("contents"), 0o640))
+	var previous string
+	for _, nanos := range []int64{123456789, 987654321} {
+		mtime := time.Unix(1700000000, nanos)
+		require.NoError(t, os.Chtimes(file, mtime, mtime))
+		info, err := os.Stat(file)
+		require.NoError(t, err)
+		rec := doRequest(handler, http.MethodGet, "/v1/files/", nil, nil)
+		var listing DirectoryListing
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &listing))
+		require.Len(t, listing.Entries, 1)
+		got := listing.Entries[0].ModifiedAt
+		parsed, err := time.Parse(time.RFC3339Nano, got)
+		require.NoError(t, err)
+		require.True(t, info.ModTime().Equal(parsed), "listing must preserve filesystem timestamp precision")
+		require.NotEqual(t, previous, got)
+		previous = got
+	}
 }
 
 func TestGetMissingFileNotFound(t *testing.T) {

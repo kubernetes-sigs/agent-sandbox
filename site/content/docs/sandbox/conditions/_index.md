@@ -50,7 +50,7 @@ Reports progress of a suspension. It is never removed: a running Sandbox reports
 | `False` | `PodNotOwned` | A Pod with the Sandbox's name exists but is not owned by it, so the controller refused to delete it. |
 | `False` | `NotSuspended` | The Sandbox is running and has never been suspended. |
 | `False` | `Resumed` | The Sandbox is running again after a suspension. The reason stays until the next suspend. |
-| `Unknown` | `PodStateUnknown` | Reconciling the Pod failed, so the suspension cannot be confirmed. |
+| `Unknown` | `PodStateUnknown` | Reconciling the Pod failed before the suspension was confirmed. A suspension that already reached `True` stays `True` through a failed lookup. |
 
 ### Finished
 

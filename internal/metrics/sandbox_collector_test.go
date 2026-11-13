@@ -524,6 +524,36 @@ func TestSandboxCollector(t *testing.T) {
 			},
 		},
 		{
+			name: "suspend error states keep their reasons",
+			sandboxes: []runtime.Object{
+				&sandboxv1beta1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{Name: "sandbox-not-owned", Namespace: "default"},
+					Spec:       sandboxv1beta1.SandboxSpec{OperatingMode: sandboxv1beta1.SandboxOperatingModeSuspended},
+					Status: sandboxv1beta1.SandboxStatus{
+						Conditions: []metav1.Condition{
+							{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: sandboxv1beta1.SandboxReasonSuspended},
+							{Type: string(sandboxv1beta1.SandboxConditionSuspended), Status: metav1.ConditionFalse, Reason: sandboxv1beta1.SandboxReasonSuspendedPodNotOwned},
+						},
+					},
+				},
+				&sandboxv1beta1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{Name: "sandbox-state-unknown", Namespace: "default"},
+					Spec:       sandboxv1beta1.SandboxSpec{OperatingMode: sandboxv1beta1.SandboxOperatingModeSuspended},
+					Status: sandboxv1beta1.SandboxStatus{
+						Conditions: []metav1.Condition{
+							{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: sandboxv1beta1.SandboxReasonReconcilerError},
+							{Type: string(sandboxv1beta1.SandboxConditionSuspended), Status: metav1.ConditionUnknown, Reason: sandboxv1beta1.SandboxReasonSuspendedPodStateUnknown},
+						},
+					},
+				},
+			},
+			expectedCount: 2,
+			expectedLabels: map[string]int{
+				"created_by:unknown expired:false launch_type:cold namespace:default operating_mode:Suspended owned_by:None ready_condition:false sandbox_template:unknown suspended_reason:PodNotOwned":     1,
+				"created_by:unknown expired:false launch_type:cold namespace:default operating_mode:Suspended owned_by:None ready_condition:false sandbox_template:unknown suspended_reason:PodStateUnknown": 1,
+			},
+		},
+		{
 			// A reason the controller never writes must not open a new series.
 			name: "unrecognized suspended reason is normalized to unknown",
 			sandboxes: []runtime.Object{

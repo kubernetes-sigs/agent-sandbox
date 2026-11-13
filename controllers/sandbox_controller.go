@@ -705,6 +705,16 @@ func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sa
 	}
 
 	if pod == nil && podErr != nil {
+		// A failed lookup carries no new information. Once the suspension has
+		// completed, only this controller could bring the Pod back and it does
+		// not while the mode is Suspended, so keep the completed state instead
+		// of overwriting the record a later resume reports Resumed from.
+		if previous := meta.FindStatusCondition(sandbox.Status.Conditions, suspended.Type); previous != nil && previous.Status == metav1.ConditionTrue {
+			suspended.Status = metav1.ConditionTrue
+			suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodTerminated
+			suspended.Message = "Pod has been terminated. Sandbox is suspended"
+			return suspended
+		}
 		suspended.Status = metav1.ConditionUnknown
 		suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodStateUnknown
 		suspended.Message = "Pod state is unknown. Sandbox suspension cannot be confirmed"
@@ -732,19 +742,17 @@ func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sa
 
 // sandboxWasSuspended reports whether a running Sandbox's current Pod was started by a
 // resume rather than by creation. The previous Suspended condition is the record: True
-// means the Pod had been terminated, PodTerminating means its deletion was already
-// under way, and Resumed carries an earlier verdict forward. Reading status rather than
+// means the suspension completed, and Resumed carries an earlier verdict forward.
+// A suspend canceled before it completed (PodTerminating, PodNotOwned, or an
+// unconfirmed PodStateUnknown) is not a resume: the Pod may never have been deleted,
+// and agent_sandbox_resume_total does not count it either. Reading status rather than
 // timing keeps the answer exact across controller restarts.
 func sandboxWasSuspended(sandbox *sandboxv1beta1.Sandbox) bool {
 	previous := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
 	if previous == nil {
 		return false
 	}
-	if previous.Status == metav1.ConditionTrue {
-		return true
-	}
-	return previous.Reason == sandboxv1beta1.SandboxReasonSuspendedPodTerminating ||
-		previous.Reason == sandboxv1beta1.SandboxReasonResumed
+	return previous.Status == metav1.ConditionTrue || previous.Reason == sandboxv1beta1.SandboxReasonResumed
 }
 
 func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbox, err error, svc *corev1.Service, pod *corev1.Pod) metav1.Condition {

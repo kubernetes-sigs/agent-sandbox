@@ -7735,7 +7735,7 @@ func TestRecordLifecycleMetrics_SuspendAndResume(t *testing.T) {
 		},
 		{
 			name:      "does not anchor if prior Suspended condition was False (canceled suspend)",
-			sandbox:   newSandbox(sandboxv1beta1.SandboxOperatingModeRunning, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonResumed, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonDependenciesNotReady),
+			sandbox:   newSandbox(sandboxv1beta1.SandboxOperatingModeRunning, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNotSuspended, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonDependenciesNotReady),
 			oldStatus: statusWithConditions(condSuspended(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspendedPodTerminating)),
 		},
 		{
@@ -8151,55 +8151,90 @@ func TestComputeSuspendedCondition_ResumedReason(t *testing.T) {
 			Reason: reason,
 		}}
 	}
+	const (
+		msgNotSuspended = "Sandbox is not suspended"
+		msgResumed      = "Sandbox has resumed from a suspension"
+		msgTerminated   = "Pod has been terminated. Sandbox is suspended"
+		msgUnknown      = "Pod state is unknown. Sandbox suspension cannot be confirmed"
+	)
 	tests := []struct {
-		name       string
-		mode       sandboxv1beta1.SandboxOperatingMode
-		previous   []metav1.Condition
-		wantStatus metav1.ConditionStatus
-		wantReason string
+		name        string
+		mode        sandboxv1beta1.SandboxOperatingMode
+		previous    []metav1.Condition
+		podErr      error
+		wantStatus  metav1.ConditionStatus
+		wantReason  string
+		wantMessage string
 	}{
 		{
-			name:       "created Sandbox reports NotSuspended",
-			mode:       sandboxv1beta1.SandboxOperatingModeRunning,
-			wantStatus: metav1.ConditionFalse,
-			wantReason: sandboxv1beta1.SandboxReasonNotSuspended,
+			name:        "created Sandbox reports NotSuspended",
+			mode:        sandboxv1beta1.SandboxOperatingModeRunning,
+			wantStatus:  metav1.ConditionFalse,
+			wantReason:  sandboxv1beta1.SandboxReasonNotSuspended,
+			wantMessage: msgNotSuspended,
 		},
 		{
-			name:       "running after a completed suspension reports Resumed",
-			mode:       sandboxv1beta1.SandboxOperatingModeRunning,
-			previous:   previous(metav1.ConditionTrue, sandboxv1beta1.SandboxReasonSuspendedPodTerminated),
-			wantStatus: metav1.ConditionFalse,
-			wantReason: sandboxv1beta1.SandboxReasonResumed,
+			name:        "running after a completed suspension reports Resumed",
+			mode:        sandboxv1beta1.SandboxOperatingModeRunning,
+			previous:    previous(metav1.ConditionTrue, sandboxv1beta1.SandboxReasonSuspendedPodTerminated),
+			wantStatus:  metav1.ConditionFalse,
+			wantReason:  sandboxv1beta1.SandboxReasonResumed,
+			wantMessage: msgResumed,
 		},
 		{
-			// The Pod's deletion was already issued, so the next Pod is started by a resume.
-			name:       "running while the suspended Pod is still terminating reports Resumed",
-			mode:       sandboxv1beta1.SandboxOperatingModeRunning,
-			previous:   previous(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspendedPodTerminating),
-			wantStatus: metav1.ConditionFalse,
-			wantReason: sandboxv1beta1.SandboxReasonResumed,
+			// A failed delete leaves the original Pod running under PodTerminating;
+			// canceling the suspend then must not claim a resume.
+			name:        "suspend canceled while the Pod is still terminating keeps NotSuspended",
+			mode:        sandboxv1beta1.SandboxOperatingModeRunning,
+			previous:    previous(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspendedPodTerminating),
+			wantStatus:  metav1.ConditionFalse,
+			wantReason:  sandboxv1beta1.SandboxReasonNotSuspended,
+			wantMessage: msgNotSuspended,
 		},
 		{
-			name:       "Resumed is kept on later reconciles",
-			mode:       sandboxv1beta1.SandboxOperatingModeRunning,
-			previous:   previous(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonResumed),
-			wantStatus: metav1.ConditionFalse,
-			wantReason: sandboxv1beta1.SandboxReasonResumed,
+			name:        "Resumed is kept on later reconciles",
+			mode:        sandboxv1beta1.SandboxOperatingModeRunning,
+			previous:    previous(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonResumed),
+			wantStatus:  metav1.ConditionFalse,
+			wantReason:  sandboxv1beta1.SandboxReasonResumed,
+			wantMessage: msgResumed,
 		},
 		{
 			// The controller refused to delete a foreign Pod, so nothing was ever suspended.
-			name:       "running after PodNotOwned reports NotSuspended",
-			mode:       sandboxv1beta1.SandboxOperatingModeRunning,
-			previous:   previous(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspendedPodNotOwned),
-			wantStatus: metav1.ConditionFalse,
-			wantReason: sandboxv1beta1.SandboxReasonNotSuspended,
+			name:        "running after PodNotOwned reports NotSuspended",
+			mode:        sandboxv1beta1.SandboxOperatingModeRunning,
+			previous:    previous(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspendedPodNotOwned),
+			wantStatus:  metav1.ConditionFalse,
+			wantReason:  sandboxv1beta1.SandboxReasonNotSuspended,
+			wantMessage: msgNotSuspended,
 		},
 		{
-			name:       "a second suspend replaces Resumed",
-			mode:       sandboxv1beta1.SandboxOperatingModeSuspended,
-			previous:   previous(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonResumed),
-			wantStatus: metav1.ConditionTrue,
-			wantReason: sandboxv1beta1.SandboxReasonSuspendedPodTerminated,
+			name:        "a second suspend replaces Resumed",
+			mode:        sandboxv1beta1.SandboxOperatingModeSuspended,
+			previous:    previous(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonResumed),
+			wantStatus:  metav1.ConditionTrue,
+			wantReason:  sandboxv1beta1.SandboxReasonSuspendedPodTerminated,
+			wantMessage: msgTerminated,
+		},
+		{
+			// A transient lookup error must not erase a completed suspension, or
+			// the resume that follows would be reported as a fresh creation.
+			name:        "completed suspension survives a failed Pod lookup",
+			mode:        sandboxv1beta1.SandboxOperatingModeSuspended,
+			previous:    previous(metav1.ConditionTrue, sandboxv1beta1.SandboxReasonSuspendedPodTerminated),
+			podErr:      errors.New("list pods: connection refused"),
+			wantStatus:  metav1.ConditionTrue,
+			wantReason:  sandboxv1beta1.SandboxReasonSuspendedPodTerminated,
+			wantMessage: msgTerminated,
+		},
+		{
+			name:        "failed Pod lookup before the suspension completed reports Unknown",
+			mode:        sandboxv1beta1.SandboxOperatingModeSuspended,
+			previous:    previous(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspendedPodTerminating),
+			podErr:      errors.New("list pods: connection refused"),
+			wantStatus:  metav1.ConditionUnknown,
+			wantReason:  sandboxv1beta1.SandboxReasonSuspendedPodStateUnknown,
+			wantMessage: msgUnknown,
 		},
 	}
 	for _, tc := range tests {
@@ -8209,9 +8244,10 @@ func TestComputeSuspendedCondition_ResumedReason(t *testing.T) {
 				Status: sandboxv1beta1.SandboxStatus{Conditions: tc.previous},
 			}
 			r := &SandboxReconciler{}
-			got := r.computeSuspendedCondition(sandbox, nil, nil)
+			got := r.computeSuspendedCondition(sandbox, nil, tc.podErr)
 			assert.Equal(t, tc.wantStatus, got.Status)
 			assert.Equal(t, tc.wantReason, got.Reason)
+			assert.Equal(t, tc.wantMessage, got.Message)
 		})
 	}
 }

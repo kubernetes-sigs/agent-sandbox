@@ -123,6 +123,51 @@ class ClassifyRedRunTest(unittest.TestCase):
             ))
         self.assertEqual(cls, "infra")
 
+    def test_autogen_gate_failure_is_pretest_breakage(self):
+        # presubmit-test-autogen-up-to-date writes no junit, so a PR with
+        # stale generated files is a red column with a clean clone; the
+        # gate's error line in the build log marks it as the PR's breakage.
+        data = artifacts(
+            finished={"result": "FAILURE", "revision": "abc"},
+            clone_records=[{"refs": {"repo": "agent-sandbox"}}],
+        )
+
+        def fetch(name):
+            if name == "build-log.txt":
+                return ("Full diff:\n M docs/go_sdk_reference.md\n"
+                        "ERROR: Generated files out-of-date. Please run "
+                        "'dev/tools/fix-api-docs' and update your PR.\n")
+            return data(name)
+
+        self.assertEqual(flake_report.classify_red_run(False, False, fetch),
+                         "pretest_failure")
+
+    def test_build_log_without_gate_marker_stays_infra(self):
+        data = artifacts(
+            finished={"result": "FAILURE", "revision": "abc"},
+            clone_records=[{"refs": {"repo": "agent-sandbox"}}],
+        )
+
+        def fetch(name):
+            if name == "build-log.txt":
+                return "Error: wait time exceeded during validation\n"
+            return data(name)
+
+        self.assertEqual(flake_report.classify_red_run(False, False, fetch), "infra")
+
+    def test_unreachable_build_log_is_unknown_not_infra(self):
+        data = artifacts(
+            finished={"result": "FAILURE", "revision": "abc"},
+            clone_records=[{"refs": {"repo": "agent-sandbox"}}],
+        )
+
+        def fetch(name):
+            if name == "build-log.txt":
+                raise flake_report.FetchUnavailable("down")
+            return data(name)
+
+        self.assertEqual(flake_report.classify_red_run(False, False, fetch), "unknown")
+
     def test_missing_artifacts_stay_infra(self):
         # When the run dir has no finished.json or clone-records.json we
         # cannot prove a benign cause; keep the conservative verdict.

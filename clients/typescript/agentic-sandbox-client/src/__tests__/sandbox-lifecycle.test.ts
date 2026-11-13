@@ -242,6 +242,57 @@ describe("Sandbox suspend/resume", () => {
       controller.abort(reason);
       await result;
     });
+
+    it("does not patch when the caller already aborted", async () => {
+      mockGet.mockResolvedValue(sandboxObj({ mode: "Running" }));
+      const reason = new Error("stop");
+
+      await expect(
+        new Sandbox(createInit()).suspend({
+          signal: AbortSignal.abort(reason),
+        }),
+      ).rejects.toBe(reason);
+
+      expect(mockPatch).not.toHaveBeenCalled();
+    });
+
+    it("does not patch when the caller aborts during the first read", async () => {
+      const controller = new AbortController();
+      const reason = new Error("stop");
+      mockGet.mockImplementationOnce(async () => {
+        controller.abort(reason);
+        return sandboxObj({ mode: "Running" });
+      });
+
+      await expect(
+        new Sandbox(createInit()).suspend({ signal: controller.signal }),
+      ).rejects.toBe(reason);
+
+      expect(mockPatch).not.toHaveBeenCalled();
+    });
+
+    it("expires a queued call without patching", async () => {
+      // The first call polls for 30s; the queued call has a 1s budget.
+      mockGet
+        .mockResolvedValueOnce(sandboxObj({ mode: "Running" }))
+        .mockResolvedValue(sandboxObj({ mode: "Suspended" }));
+      mockPatch.mockResolvedValueOnce(
+        sandboxObj({ mode: "Suspended", generation: 2 }),
+      );
+      const sandbox = new Sandbox(createInit());
+      const first = sandbox.suspend({ timeoutMs: 30_000 });
+      const firstResult = expect(first).rejects.toThrow(SandboxTimeoutError);
+      const queued = expect(
+        sandbox.resume({ timeoutMs: 1000 }),
+      ).rejects.toThrow(SandboxTimeoutError);
+
+      await vi.advanceTimersByTimeAsync(1500);
+      await queued;
+      await vi.advanceTimersByTimeAsync(40_000);
+      await firstResult;
+
+      expect(mockPatch).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe("resume()", () => {
@@ -429,6 +480,48 @@ describe("Sandbox suspend/resume", () => {
 
       expect(transports).toHaveLength(2);
       expect((transports[1] as { podIP?: string }).podIP).toBe("10.0.0.9");
+    });
+
+    it("discards a connect that was still pending when suspend() ran", async () => {
+      const transports: Array<{ close: ReturnType<typeof vi.fn> }> = [];
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      mockCreateStrategy.mockImplementation((connectivity: string) => ({
+        connectivity,
+        open: vi.fn(async () => {
+          // Only the first connect is held open.
+          if (transports.length === 0) {
+            transports.push({ close: vi.fn().mockResolvedValue(undefined) });
+            await gate;
+            return {
+              ...transports[0],
+              restBaseUrl: baseUrl,
+              grpcBaseUrl: baseUrl,
+            };
+          }
+          throw new Error("unexpected connect");
+        }),
+      }));
+      const sandbox = new Sandbox(createInit());
+      const pending = sandbox.health().catch((e) => e);
+      await vi.waitFor(() => expect(transports).toHaveLength(1));
+
+      mockGet
+        .mockResolvedValueOnce(sandboxObj({ mode: "Running" }))
+        .mockResolvedValueOnce(
+          sandboxObj({ mode: "Suspended", conditions: [cond("Suspended", 2)] }),
+        );
+      mockPatch.mockResolvedValueOnce(
+        sandboxObj({ mode: "Suspended", generation: 2 }),
+      );
+      await sandbox.suspend();
+      release();
+
+      // The stale connect is torn down and its waiter fails instead of reusing it.
+      expect(await pending).toBeInstanceOf(Error);
+      expect(transports[0].close).toHaveBeenCalled();
     });
   });
 });

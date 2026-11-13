@@ -518,6 +518,7 @@ export class Sandbox {
   private generationCounter = 0;
   private currentGeneration: ConnectionGeneration | null = null;
   private connectingPromise: Promise<ConnectionGeneration> | null = null;
+  private connectionEpoch = 0;
   private invalidationPromise: Promise<void> | null = null;
   private releaseLocalPromise: Promise<void> | null = null;
   private deletionPromise: Promise<void> | null = null;
@@ -692,22 +693,29 @@ export class Sandbox {
    */
   async suspend(opts?: SuspendResumeOptions): Promise<void> {
     const budget = lifecycleBudget(opts);
-    return this.serializeLifecycle(async () => {
-      const signal = this.lifecycleSignal(opts);
-      const { uid, generation } = await this.setOperatingMode("Suspended");
-      // Close first so a timed-out wait does not leave a connection to a dying pod.
-      await this.dropConnection("Sandbox is suspending");
-      await this.waitForSandbox(
-        "suspend",
-        uid,
-        budget,
-        signal,
-        (obj) =>
-          operatingModeOf(obj) === "Suspended" &&
-          conditionObserved(obj, "Suspended", generation),
-      );
-      this.logger.info(`Sandbox '${this.sandboxName}' suspended`);
-    });
+    const { signal, dispose } = this.lifecycleSignal(opts, budget, "suspend");
+    try {
+      await this.serializeLifecycle(signal, async () => {
+        const { uid, generation } = await this.setOperatingMode(
+          "Suspended",
+          signal,
+        );
+        // Close first so a timed-out wait does not leave a connection to a dying pod.
+        await this.dropConnection("Sandbox is suspending");
+        await this.waitForSandbox(
+          "suspend",
+          uid,
+          budget,
+          signal,
+          (obj) =>
+            operatingModeOf(obj) === "Suspended" &&
+            conditionObserved(obj, "Suspended", generation),
+        );
+        this.logger.info(`Sandbox '${this.sandboxName}' suspended`);
+      });
+    } finally {
+      dispose();
+    }
   }
 
   /**
@@ -717,28 +725,38 @@ export class Sandbox {
    */
   async resume(opts?: SuspendResumeOptions): Promise<void> {
     const budget = lifecycleBudget(opts);
-    return this.serializeLifecycle(async () => {
-      const signal = this.lifecycleSignal(opts);
-      const { uid, generation, changed } =
-        await this.setOperatingMode("Running");
-      if (changed) await this.dropConnection("Sandbox is resuming");
-      const obj = await this.waitForSandbox(
-        "become ready",
-        uid,
-        budget,
-        signal,
-        (o) =>
-          operatingModeOf(o) === "Running" &&
-          conditionObserved(o, "Ready", generation),
-      );
-      const podIP = podIPOf(obj);
-      if (changed || (podIP && podIP !== this._podIP)) {
-        await this.dropConnection("Sandbox pod changed");
-        this._podIP = podIP;
-        this.connectionStrategy = this.createStrategy();
-      }
-      this.logger.info(`Sandbox '${this.sandboxName}' resumed`);
-    });
+    const { signal, dispose } = this.lifecycleSignal(
+      opts,
+      budget,
+      "become ready",
+    );
+    try {
+      await this.serializeLifecycle(signal, async () => {
+        const { uid, generation, changed } = await this.setOperatingMode(
+          "Running",
+          signal,
+        );
+        if (changed) await this.dropConnection("Sandbox is resuming");
+        const obj = await this.waitForSandbox(
+          "become ready",
+          uid,
+          budget,
+          signal,
+          (o) =>
+            operatingModeOf(o) === "Running" &&
+            conditionObserved(o, "Ready", generation),
+        );
+        const podIP = podIPOf(obj);
+        if (changed || (podIP && podIP !== this._podIP)) {
+          await this.dropConnection("Sandbox pod changed");
+          this._podIP = podIP;
+          this.connectionStrategy = this.createStrategy();
+        }
+        this.logger.info(`Sandbox '${this.sandboxName}' resumed`);
+      });
+    } finally {
+      dispose();
+    }
   }
 
   /**
@@ -798,11 +816,15 @@ export class Sandbox {
    */
   private async setOperatingMode(
     mode: "Running" | "Suspended",
+    signal: AbortSignal,
   ): Promise<{ uid: string; generation: number; changed: boolean }> {
     if (!this.isActive) {
       throw new SandboxClosedError("Sandbox handle is closed");
     }
+    if (signal.aborted) throw signal.reason;
     const obj = await this.readLiveSandbox();
+    // A cancelled or expired call must not change the operating mode.
+    if (signal.aborted) throw signal.reason;
     const metadata = obj.metadata as Record<string, unknown>;
     const uid = metadata.uid;
     if (typeof uid !== "string" || uid === "") {
@@ -856,6 +878,7 @@ export class Sandbox {
     while (true) {
       if (signal.aborted) throw signal.reason;
       const obj = await this.readLiveSandbox(uid);
+      if (signal.aborted) throw signal.reason;
       if (done(obj)) return obj;
       const remaining = budget.deadline - Date.now();
       if (remaining <= 0) {
@@ -867,22 +890,53 @@ export class Sandbox {
     }
   }
 
-  /** Aborts when the caller cancels or the handle closes. */
-  private lifecycleSignal(opts: SuspendResumeOptions | undefined): AbortSignal {
-    const signals = [this.connectAbortController.signal];
+  /**
+   * Aborts when the caller cancels, the handle closes, or the budget runs out.
+   * The budget starts at the call, so it also covers time spent queued.
+   */
+  private lifecycleSignal(
+    opts: SuspendResumeOptions | undefined,
+    budget: { timeoutMs: number },
+    description: string,
+  ): { signal: AbortSignal; dispose: () => void } {
+    const timeout = new AbortController();
+    const timer = setTimeout(() => {
+      timeout.abort(
+        new SandboxTimeoutError(
+          `Sandbox '${this.sandboxName}' did not ${description} within ${budget.timeoutMs}ms.`,
+        ),
+      );
+    }, budget.timeoutMs);
+    const signals = [this.connectAbortController.signal, timeout.signal];
     if (opts?.signal) signals.push(opts.signal);
-    return AbortSignal.any(signals);
+    return {
+      signal: AbortSignal.any(signals),
+      dispose: () => clearTimeout(timer),
+    };
   }
 
-  /** Runs suspend() and resume() calls one at a time. */
-  private serializeLifecycle<T>(fn: () => Promise<T>): Promise<T> {
-    const run = this.lifecycleTail.then(fn, fn);
+  /**
+   * Runs suspend() and resume() calls one at a time. A call that is aborted or
+   * expires while queued rejects at once and never starts.
+   */
+  private serializeLifecycle<T>(
+    signal: AbortSignal,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const start = async () => {
+      if (signal.aborted) throw signal.reason;
+      return fn();
+    };
+    const run = this.lifecycleTail.then(start, start);
     this.lifecycleTail = run.catch(() => {});
-    return run;
+    return Promise.race([run, this.rejectOnAbort(signal)]);
   }
 
   /** Discards the current sandboxd connection; the next call reconnects. */
   private async dropConnection(reason: string): Promise<void> {
+    // Connect attempts that started before the drop must not install a generation.
+    this.connectionEpoch++;
+    this.connectingPromise = null;
     const gen = this.currentGeneration;
     if (gen) {
       this.invalidateGeneration(
@@ -1094,6 +1148,7 @@ export class Sandbox {
     }
 
     if (!this.connectingPromise) {
+      const epoch = this.connectionEpoch;
       const attempt = this.doConnect()
         .then(async (gen) => {
           // connectAbortController fires synchronously at the start of
@@ -1104,11 +1159,18 @@ export class Sandbox {
             await this.teardownGeneration(gen);
             throw new SandboxClosedError("Sandbox handle is closed");
           }
+          if (this.connectionEpoch !== epoch) {
+            await this.teardownGeneration(gen);
+            throw new SandboxConnectionError(
+              "Connection was reset while connecting",
+              "unavailable",
+            );
+          }
           this.currentGeneration = gen;
           return gen;
         })
         .finally(() => {
-          this.connectingPromise = null;
+          if (this.connectingPromise === attempt) this.connectingPromise = null;
         });
       attempt.catch(() => {});
       this.connectingPromise = attempt;

@@ -2,7 +2,7 @@
 
 This TypeScript client provides a high-level interface for creating and interacting with sandboxes managed by the Agent Sandbox controller, mirroring the [Go client](../../go/README.md) and [Python client](../../python/agentic-sandbox-client/README.md).
 
-The surface covers the Kubernetes resource layer (provisioning a `SandboxClaim`, watching it to readiness, and tearing it down via `SandboxClient` / `Sandbox`) and the sandboxd runtime layer (`sandbox.commands.{run,start}()`, `sandbox.files.{read,write,readStream,writeStream,exists,list,delete,mkdir,move,copy}()`, `sandbox.health()`, and `sandbox.metadata()`), plus `sandbox.status()` for the Sandbox's Kubernetes readiness. `start()` covers long-running and interactive processes: streamed output, stdin, signals, and a PTY with resizing.
+The surface covers the Kubernetes resource layer (provisioning a `SandboxClaim`, watching it to readiness, and tearing it down via `SandboxClient` / `Sandbox`) and the sandboxd runtime layer (`sandbox.commands.{run,start}()`, `sandbox.files.{read,write,readStream,writeStream,exists,list,delete,mkdir,move,copy}()`, `sandbox.health()`, and `sandbox.metadata()`), plus `sandbox.status()` for the Sandbox's Kubernetes readiness and `sandbox.{suspend,resume,isSuspended}()` for its operating mode. `start()` covers long-running and interactive processes: streamed output, stdin, signals, and a PTY with resizing.
 
 ## Usage
 
@@ -341,6 +341,19 @@ const { status, message } = await sandbox.status();
 ```
 
 It resolves with `SandboxNotFound` when the Sandbox object is gone (also after `close()`) and rejects with a `SandboxError` on any other read failure. The values match the Python client's `status()`.
+
+### Suspend and resume
+
+`suspend()` sets the Sandbox operating mode to `Suspended`, closes the sandboxd connection, and waits for the controller to report it. `resume()` sets the mode to `Running` and waits for the Sandbox to become ready. The next `files` or `commands` call reconnects.
+
+```ts
+await sandbox.suspend();
+console.log(await sandbox.isSuspended()); // true
+await sandbox.resume({ timeoutMs: 60_000 });
+console.log((await sandbox.commands.run("cat", ["/workspace/note.txt"])).stdout);
+```
+
+Data on a persistent volume survives. Processes, memory, and `emptyDir` volumes do not. Both methods reject on failure and take `timeoutMs` (180000 by default) and `signal`. They poll the Sandbox, so the credentials need `get` and `patch` on `sandboxes`. They match the Go and Python clients.
 
 ### Interactive processes
 

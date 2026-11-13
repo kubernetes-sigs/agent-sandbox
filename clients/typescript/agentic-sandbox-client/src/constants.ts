@@ -56,6 +56,12 @@ export const DEFAULT_MAX_COMMAND_OUTPUT_SIZE = 4 * 1024 * 1024;
 // dependency import, connect wait, and response processing.
 export const DEFAULT_OPERATION_TIMEOUT_MS = 60_000;
 
+// Default budget for suspend() and resume(), matching the Go and Python SDKs.
+export const DEFAULT_LIFECYCLE_TIMEOUT_MS = 180_000;
+
+// How often suspend() and resume() re-read the Sandbox while they wait.
+export const LIFECYCLE_POLL_INTERVAL_MS = 500;
+
 // A single WriteStdin RPC carries at most this many bytes; larger writes are
 // split into sequential chunks. sandboxd's gRPC server rejects messages over
 // grpc-go's 4 MiB default, so this stays well below it.

@@ -28,6 +28,10 @@ For the benchmark data and sizing rationale behind these settings — including 
 * `--sandbox-warm-pool-replenish-delay` (default: `0`): How long the SandboxWarmPool controller defers creating replacement sandboxes after pool members drop out of the pool (e.g. a burst of SandboxClaims adopting warm sandboxes), so the burst gets API server priority. The hold re-arms while members keep dropping. `0` (default) replenishes immediately. Caution: while refill is deferred, a failed claim create can leave the pool drained — see the fragility warning in [Performance Tuning](performance-tuning.md#warm-pool-refill-shaping) before enabling.
 * `--enable-warm-pool-eviction` (default: `true`): Mark pods created by a warm pool as ready-to-evict by default.
 
+## Warm Pool Readiness
+
+A `SandboxWarmPool` can override the readiness grace period for its own sandboxes with `spec.readinessGracePeriodSeconds`, for example for a pool backed by a slower runtime. The effective value is the pool field, then an explicitly set `--sandbox-warm-pool-readiness-grace-period` flag, then the value from the [agent-sandbox-config ConfigMap](#agent-sandbox-config-configmap), then the built-in default. The unschedulable re-check interval stays controller-level.
+
 ## API Write and Cache Optimization
 
 * `--disable-sandbox-events` (default: `false`): Disable Kubernetes Event emission from the Sandbox controller (its `Eventf` calls become no-ops), reducing API server and etcd write volume during large warm-pool fills and high-churn workloads.

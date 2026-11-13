@@ -1363,6 +1363,8 @@ func compareSandboxBlueprint(template *extensionsv1beta1.SandboxTemplate, actual
 	return comparePodSpecs(template, &actualSandboxSpec.PodTemplate.Spec) &&
 		compareVolumeClaimTemplates(template, actualSandboxSpec.VolumeClaimTemplates) &&
 		equality.Semantic.DeepEqual(template.Spec.Service, actualSandboxSpec.Service) &&
+		template.Spec.PersistentVolumeClaimRetentionPolicy.EffectiveWhenDeleted() ==
+			actualSandboxSpec.PersistentVolumeClaimRetentionPolicy.EffectiveWhenDeleted() &&
 		normalizeFailedPodPolicy(template.Spec.FailedPodPolicy) ==
 			normalizeFailedPodPolicy(actualSandboxSpec.FailedPodPolicy)
 }

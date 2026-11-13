@@ -1241,6 +1241,63 @@ func NameHash(objectName string) string {
 	return string(buf[:])
 }
 
+// releaseRetainedPVC removes the sandbox's owner references from pvc with an
+// optimistic-lock patch, so a retained PVC is not garbage collected with the
+// sandbox. It does nothing when pvc holds no reference to the sandbox.
+func (r *SandboxReconciler) releaseRetainedPVC(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, pvc *corev1.PersistentVolumeClaim) error {
+	patch := client.MergeFromWithOptions(pvc.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	if !removeSandboxOwnerReferences(pvc, sandbox) {
+		return nil
+	}
+	log.FromContext(ctx).Info("Removing Sandbox owner reference from PVC because retention policy is Retain", "PVC.Name", pvc.Name, "Sandbox.Name", sandbox.Name)
+	if err := r.Patch(ctx, pvc, patch); err != nil {
+		return fmt.Errorf("failed to patch PVC without owner reference: %w", err)
+	}
+	return nil
+}
+
+// retainExistingPVCs applies a Retain policy to the sandbox's existing PVCs
+// without creating any: it is the expiry path's counterpart of reconcilePVCs,
+// which an expired sandbox no longer reaches. Under Delete it does nothing.
+func (r *SandboxReconciler) retainExistingPVCs(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) error {
+	if sandbox.Spec.PersistentVolumeClaimRetentionPolicy.EffectiveWhenDeleted() != sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain {
+		return nil
+	}
+	for _, pvcTemplate := range sandbox.Spec.VolumeClaimTemplates {
+		pvc := &corev1.PersistentVolumeClaim{}
+		pvcName := pvcTemplate.Name + "-" + sandbox.Name
+		if err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: sandbox.Namespace}, pvc); err != nil {
+			if k8serrors.IsNotFound(err) {
+				continue
+			}
+			return fmt.Errorf("failed to get PVC: %w", err)
+		}
+		if err := r.releaseRetainedPVC(ctx, sandbox, pvc); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// removeSandboxOwnerReferences drops every owner reference to sandbox from
+// obj and reports whether any was removed; obj is changed in place only then.
+func removeSandboxOwnerReferences(obj client.Object, sandbox *sandboxv1beta1.Sandbox) bool {
+	ownerRefs := obj.GetOwnerReferences()
+	filtered := make([]metav1.OwnerReference, 0, len(ownerRefs))
+	removed := false
+	for _, ref := range ownerRefs {
+		if ref.UID == sandbox.UID {
+			removed = true
+			continue
+		}
+		filtered = append(filtered, ref)
+	}
+	if removed {
+		obj.SetOwnerReferences(filtered)
+	}
+	return removed
+}
+
 // hasSystemReservedPrefix reports whether a key uses a label/annotation prefix
 // reserved for the sandbox system or its extensions.
 func hasSystemReservedPrefix(key string) bool {
@@ -2208,12 +2265,18 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 	return updated
 }
 
+// reconcilePVCs ensures a PVC exists for each of the sandbox's
+// volumeClaimTemplates. Under the default Delete retention policy the sandbox
+// owns each PVC, so the PVCs are garbage collected with it; under Retain the
+// sandbox never takes ownership and drops any it holds, so the PVCs outlive it.
 func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, nameHash string) error {
 	logger := log.FromContext(ctx)
 
 	// Start a child span of ReconcileSandbox
 	ctx, end := r.Tracer.StartSpan(ctx, nil, "reconcilePVCs", nil)
 	defer end()
+
+	retentionWhenDeleted := sandbox.Spec.PersistentVolumeClaimRetentionPolicy.EffectiveWhenDeleted()
 
 	for _, pvcTemplate := range sandbox.Spec.VolumeClaimTemplates {
 		pvc := &corev1.PersistentVolumeClaim{}
@@ -2240,6 +2303,16 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 						pvcName, sandboxv1beta1.SandboxAdoptableLabel, sandboxv1beta1.SandboxNameHashLabel)
 				}
 
+				if retentionWhenDeleted == sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain {
+					logger.V(4).Info("Using unowned PVC without adopting because retention policy is Retain", "PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)
+					// A non-controller owner reference to this sandbox would still
+					// make the PVC a garbage-collection dependent; drop it too.
+					if err := r.releaseRetainedPVC(ctx, sandbox, pvc); err != nil {
+						return err
+					}
+					continue
+				}
+
 				logger.Info("Adopting unowned PVC", "PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)
 
 				patch := client.MergeFrom(pvc.DeepCopy())
@@ -2251,7 +2324,13 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 				}
 
 			case resourceOwnedBySandbox:
-				// Already owned by this sandbox — no action needed.
+				if retentionWhenDeleted != sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain {
+					// Already owned by this sandbox — no action needed.
+					continue
+				}
+				if err := r.releaseRetainedPVC(ctx, sandbox, pvc); err != nil {
+					return err
+				}
 			}
 			continue
 		}
@@ -2277,8 +2356,10 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 			},
 			Spec: pvcTemplate.Spec,
 		}
-		if err := ctrl.SetControllerReference(sandbox, pvc, r.Scheme); err != nil {
-			return fmt.Errorf("SetControllerReference for PVC failed: %w", err)
+		if retentionWhenDeleted != sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain {
+			if err := ctrl.SetControllerReference(sandbox, pvc, r.Scheme); err != nil {
+				return fmt.Errorf("SetControllerReference for PVC failed: %w", err)
+			}
 		}
 		if err := r.Create(ctx, pvc, client.FieldOwner(sandboxControllerFieldOwner)); err != nil {
 			logger.Error(err, "Failed to create PVC", "PVC.Namespace", sandbox.Namespace, "PVC.Name", pvcName)
@@ -2340,7 +2421,14 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 		}
 	}
 
-	if sandbox.Spec.ShutdownPolicy != nil && *sandbox.Spec.ShutdownPolicy == sandboxv1beta1.ShutdownPolicyDelete {
+	// Release retained PVCs before the sandbox can be deleted below, so the
+	// garbage collector never sees them as its dependents.
+	retainErr := r.retainExistingPVCs(ctx, sandbox)
+	if retainErr != nil {
+		allErrors = errors.Join(allErrors, retainErr)
+	}
+
+	if retainErr == nil && sandbox.Spec.ShutdownPolicy != nil && *sandbox.Spec.ShutdownPolicy == sandboxv1beta1.ShutdownPolicyDelete {
 		if err := r.Delete(ctx, sandbox); err != nil && !k8serrors.IsNotFound(err) {
 			allErrors = errors.Join(allErrors, fmt.Errorf("failed to delete sandbox: %w", err))
 		} else {

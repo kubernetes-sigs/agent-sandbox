@@ -56,6 +56,10 @@ type SandboxBlueprintApplyConfiguration struct {
 	// Each entry must have a unique, non-empty metadata.name.
 	// At most 128 entries: the cap only bounds the CEL cost of the uniqueness rule.
 	VolumeClaimTemplates []PersistentVolumeClaimTemplateApplyConfiguration `json:"volumeClaimTemplates,omitempty"`
+	// persistentVolumeClaimRetentionPolicy controls lifecycle of PVCs created
+	// from volumeClaimTemplates.
+	// Defaults to Delete for backward compatibility.
+	PersistentVolumeClaimRetentionPolicy *PersistentVolumeClaimRetentionPolicyApplyConfiguration `json:"persistentVolumeClaimRetentionPolicy,omitempty"`
 	// service controls whether the controller should automatically create a
 	// headless Service for the Sandbox workload.
 	// When unset, the controller preserves existing Services for backward
@@ -99,6 +103,14 @@ func (b *SandboxBlueprintApplyConfiguration) WithVolumeClaimTemplates(values ...
 		}
 		b.VolumeClaimTemplates = append(b.VolumeClaimTemplates, *values[i])
 	}
+	return b
+}
+
+// WithPersistentVolumeClaimRetentionPolicy sets the PersistentVolumeClaimRetentionPolicy field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the PersistentVolumeClaimRetentionPolicy field is set to the value of the last call.
+func (b *SandboxBlueprintApplyConfiguration) WithPersistentVolumeClaimRetentionPolicy(value *PersistentVolumeClaimRetentionPolicyApplyConfiguration) *SandboxBlueprintApplyConfiguration {
+	b.PersistentVolumeClaimRetentionPolicy = value
 	return b
 }
 

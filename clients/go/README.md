@@ -351,18 +351,21 @@ All options are documented on the `Options` struct in
 
 ## Metrics
 
-The client records `sandbox.client.discovery.latency.ms`, a histogram of how
-long connecting to a sandbox takes, in milliseconds. It covers every
+The client records `sandbox.client.discovery.latency`, a histogram of how
+long connecting to a sandbox takes, in seconds. It covers every
 connectivity mode and both the initial connect and reconnects. Each
 observation carries a `mode` attribute (`gateway`, `port-forward`,
 `router-port-forward`, `sandboxd-pod-tunnel`, `in-cluster-pod-ip`,
 `in-cluster-service`, or `direct`) and a `status` attribute (`success` or
-`failure`). The name and bucket boundaries match the Python SDK's
-`sandbox_client_discovery_latency_ms`, and the OTel Prometheus exporter
-renders this histogram under that same name.
+`failure`). The OTel Prometheus exporter renders this histogram as
+`sandbox_client_discovery_latency_seconds`, and the bucket boundaries are
+the Python SDK's boundaries expressed in seconds, so cross-SDK dashboards
+aggregate identically.
 
-Metrics are off by default: `MeterProvider` nil falls back to the global
-OpenTelemetry noop provider. Pass a real `MeterProvider` to record:
+Unless `MeterProvider` is set, the histogram is recorded through the global
+OpenTelemetry meter provider (`otel.GetMeterProvider()`), which is a noop
+until the application configures a real provider. Set `MeterProvider` to
+record through a provider the client controls:
 
 ```go
 client, err := sandbox.NewClient(ctx, sandbox.Options{

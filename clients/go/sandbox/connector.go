@@ -214,7 +214,7 @@ func (c *connector) Connect(ctx context.Context) error {
 		status = "failure"
 	}
 	if c.discoveryLatency != nil {
-		c.discoveryLatency.Record(ctx, float64(time.Since(start))/float64(time.Millisecond),
+		c.discoveryLatency.Record(ctx, time.Since(start).Seconds(),
 			metric.WithAttributes(
 				attribute.String("mode", mode),
 				attribute.String("status", status),

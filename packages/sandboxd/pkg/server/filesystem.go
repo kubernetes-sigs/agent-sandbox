@@ -257,6 +257,10 @@ func (s *RESTServer) handleGetFile(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	stat, ok := s.boolQuery(w, r, "stat")
+	if !ok {
+		return
+	}
 	maxDepth, ok := s.listDepth(w, r)
 	if !ok {
 		return
@@ -281,6 +285,15 @@ func (s *RESTServer) handleGetFile(w http.ResponseWriter, r *http.Request) {
 
 	if msg := typeMismatch(wantType, info.IsDir()); msg != "" {
 		s.writeError(w, http.StatusConflict, "CONFLICT", msg)
+		return
+	}
+
+	if stat {
+		if !info.IsDir() && !info.Mode().IsRegular() {
+			s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", errUnsupportedFileType.Error())
+			return
+		}
+		s.writeJSON(w, http.StatusOK, fileEntryFromInfo(filepath.Base("/"+r.PathValue("path")), info))
 		return
 	}
 
@@ -414,6 +427,10 @@ func (s *RESTServer) fileEntry(d fs.DirEntry, name, sandboxPath string) (entry F
 			return FileEntry{}, false
 		}
 	}
+	return fileEntryFromInfo(name, info), true
+}
+
+func fileEntryFromInfo(name string, info fs.FileInfo) FileEntry {
 	entryType := entryTypeFile
 	if info.IsDir() {
 		entryType = entryTypeDirectory
@@ -422,9 +439,9 @@ func (s *RESTServer) fileEntry(d fs.DirEntry, name, sandboxPath string) (entry F
 		Name:       name,
 		Size:       info.Size(),
 		Type:       entryType,
-		ModifiedAt: info.ModTime().UTC().Format(time.RFC3339),
+		ModifiedAt: info.ModTime().UTC().Format(time.RFC3339Nano),
 		Mode:       fmt.Sprintf("%04o", info.Mode().Perm()),
-	}, true
+	}
 }
 
 func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {

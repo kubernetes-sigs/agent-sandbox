@@ -203,6 +203,7 @@ iteration (Python).
 | Method | Endpoint | Purpose |
 |---|---|---|
 | `GET` | `/v1/files/{path}` | File → raw bytes (`application/octet-stream`); directory → JSON `DirectoryListing`. Optional `type` query (`file` or `directory`, also on `HEAD`): `409` if the path is the other kind. `recursive=true` lists nested directories too, and `max_depth=N` limits how deep (entry names become paths relative to the listed directory). A recursive listing over 10000 entries fails with `400`. |
+| `GET` | `/v1/files/{path}?stat=true` | Metadata for one file or directory as a JSON `FileEntry`. |
 | `HEAD` | `/v1/files/{path}` | Existence/metadata probe without transferring the body. |
 | `PUT` | `/v1/files/{path}` | Atomic write (temp file + rename), auto-creates parents. Optional `mode` query (`^0[0-7]{3}$`, default `0644`). `append=true` adds to the end of the file instead (not atomic). `type=directory` creates a directory instead (body ignored, `parents=true` also creates missing parents, default mode `0755`). `If-None-Match: *` creates the file only if the path does not exist, else `412`. `extract=tar` unpacks a tar body, optionally gzipped, into the directory at the path (not atomic). Accepts raw bytes or `multipart/form-data` (`file` part). |
 | `DELETE` | `/v1/files/{path}` | Remove a file or directory; `recursive=true` for `rm -rf` behavior; `409` on a non-empty directory otherwise. A symlink as the last path component is removed itself, not followed. |
@@ -214,6 +215,18 @@ iteration (Python).
 All `{path}` values are resolved against the sandbox root (`/workspace` by
 default) via symlink-aware sanitization; traversal attempts return
 `403 {"code":"PERMISSION_DENIED"}`.
+
+For example, `GET /v1/files/notes.txt?stat=true` returns:
+
+```json
+{"name":"notes.txt","size":11,"type":"file","modified_at":"2026-10-26T10:00:00.123456789Z","mode":"0644"}
+```
+
+Stat follows symlinks within the sandbox root and uses the requested basename
+(`/` for the root). It returns the filesystem-reported size and permission bits
+without reading the file or walking a directory, even with `recursive=true`.
+The optional `type` check still applies. Both stat and directory listings
+preserve sub-second modification times in UTC.
 
 ### Concurrency semantics
 

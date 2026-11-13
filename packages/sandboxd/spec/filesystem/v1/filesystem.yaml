@@ -45,20 +45,24 @@ paths:
       - $ref: "#/components/parameters/FilePath"
 
     get:
-      summary: Read a file or list a directory
+      summary: Read a file, list a directory, or get path metadata
       description: >
         If the path points to a file, returns raw file bytes (application/octet-stream).
         If the path points to a directory, returns a structured directory listing (application/json).
+        With stat=true, returns one FileEntry for the requested file or directory.
+        The name is the basename of the requested path ("/" for the sandbox root).
+        Symlinks within the sandbox root report metadata for their target.
         Named pipes, devices, and other special files fail with 400.
         Pass type to fail with 409 instead when the path is not of the expected kind.
         Pass recursive=true to also list nested directories.
       parameters:
         - $ref: "#/components/parameters/ExpectedType"
+        - $ref: "#/components/parameters/Stat"
         - $ref: "#/components/parameters/ListRecursive"
         - $ref: "#/components/parameters/ListMaxDepth"
       responses:
         "200":
-          description: File contents or directory listing
+          description: File contents, directory listing, or metadata for the requested path
           content:
             application/octet-stream:
               schema:
@@ -66,7 +70,9 @@ paths:
                 format: binary
             application/json:
               schema:
-                $ref: "#/components/schemas/DirectoryListing"
+                oneOf:
+                  - $ref: "#/components/schemas/DirectoryListing"
+                  - $ref: "#/components/schemas/FileEntry"
         "400":
           $ref: "#/components/responses/BadRequest"
         "403":
@@ -83,6 +89,7 @@ paths:
       description: Returns the same status and metadata headers as GET without a response body.
       parameters:
         - $ref: "#/components/parameters/ExpectedType"
+        - $ref: "#/components/parameters/Stat"
         - $ref: "#/components/parameters/ListRecursive"
         - $ref: "#/components/parameters/ListMaxDepth"
       responses:
@@ -90,7 +97,7 @@ paths:
           description: Path exists
         "400":
           description: >
-            The type, recursive, or max_depth query is invalid, or a recursive listing
+            The type, stat, recursive, or max_depth query is invalid, or a recursive listing
             exceeds 10000 entries, or the path is a special file such as a named pipe
         "403":
           description: Path escapes sandbox root, or permission is denied during path lookup or file open
@@ -388,6 +395,13 @@ components:
         Kind of path the client expects. If the path exists but is the other kind,
         the request fails with 409 instead of returning the other representation.
         Omit it to accept either.
+    Stat:
+      name: stat
+      in: query
+      schema:
+        type: boolean
+        default: false
+      description: Return metadata without opening the file or listing directory entries. Listing depth does not affect this response.
     ListRecursive:
       name: recursive
       in: query
@@ -451,6 +465,7 @@ components:
         modified_at:
           type: string
           format: date-time
+          description: UTC modification time including available sub-second precision.
         mode:
           type: string
           description: Octal permission bits

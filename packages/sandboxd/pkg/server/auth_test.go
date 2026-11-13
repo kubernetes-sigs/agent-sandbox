@@ -102,6 +102,13 @@ func TestRESTRequiresBearerToken(t *testing.T) {
 
 	require.Equal(t, http.StatusNoContent, put("Bearer "+testToken))
 	require.Equal(t, http.StatusNoContent, put("bearer "+testToken))
+
+	rec = doRequest(handler, http.MethodGet, "/v1/files/a.txt?stat=true", nil, nil)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	rec = doRequest(handler, http.MethodGet, "/v1/files/a.txt?stat=true", nil,
+		http.Header{"Authorization": {"Bearer " + testToken}})
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), `"name":"a.txt"`)
 }
 
 func TestRESTAcceptsTokenHeader(t *testing.T) {

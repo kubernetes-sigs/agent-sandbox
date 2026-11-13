@@ -52,7 +52,10 @@ func TestSandboxSuspendResumeCycleWithOperatingMode(t *testing.T) {
 	// given spec generation. Suspended must persist across the whole lifecycle
 	// (never disappear), toggling True<->False with its observedGeneration
 	// tracking the spec generation.
-	runningStatus := func(gen int64) sandboxv1beta1.SandboxStatus {
+	// runningStatus takes the Suspended reason because it differs between a
+	// Sandbox that was created (NotSuspended) and one that came back from a
+	// suspension (Resumed, kept until the next suspend).
+	runningStatus := func(gen int64, suspendedReason, suspendedMessage string) sandboxv1beta1.SandboxStatus {
 		return sandboxv1beta1.SandboxStatus{
 			Service: svc, ServiceFQDN: fqdn, LabelSelector: selector,
 			Conditions: []metav1.Condition{
@@ -60,8 +63,8 @@ func TestSandboxSuspendResumeCycleWithOperatingMode(t *testing.T) {
 					Type:               string(sandboxv1beta1.SandboxConditionSuspended),
 					Status:             metav1.ConditionFalse,
 					ObservedGeneration: gen,
-					Reason:             sandboxv1beta1.SandboxReasonNotSuspended,
-					Message:            "Sandbox is not suspended",
+					Reason:             suspendedReason,
+					Message:            suspendedMessage,
 				},
 				{
 					Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
@@ -102,7 +105,7 @@ func TestSandboxSuspendResumeCycleWithOperatingMode(t *testing.T) {
 	}
 
 	// 1. Initial running state at generation 1: Pod and Service exist.
-	tc.MustWaitForObject(sandboxObj, predicates.SandboxHasStatus(runningStatus(1)))
+	tc.MustWaitForObject(sandboxObj, predicates.SandboxHasStatus(runningStatus(1, sandboxv1beta1.SandboxReasonNotSuspended, "Sandbox is not suspended")))
 	service := &corev1.Service{}
 	service.Name = "my-sandbox"
 	service.Namespace = ns.Name
@@ -138,13 +141,13 @@ func TestSandboxSuspendResumeCycleWithOperatingMode(t *testing.T) {
 		require.NoError(t, tc.WaitForObjectNotFound(t.Context(), pod))
 		tc.MustMatchPredicates(service, predicates.NotDeleted())
 
-		// Resume: Pod is recreated, Service persists, Suspended -> False/NotSuspended.
+		// Resume: Pod is recreated, Service persists, Suspended -> False/Resumed.
 		gen++
 		time.Sleep(1 * time.Second) // Ensure LastTransitionTime advances
 		framework.MustUpdateObject(tc.ClusterClient, sandboxObj, func(obj *sandboxv1beta1.Sandbox) {
 			obj.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeRunning
 		})
-		tc.MustWaitForObject(sandboxObj, predicates.SandboxHasStatus(runningStatus(gen)))
+		tc.MustWaitForObject(sandboxObj, predicates.SandboxHasStatus(runningStatus(gen, sandboxv1beta1.SandboxReasonResumed, "Sandbox has resumed from a suspension")))
 
 		resumeTime := getSuspendedConditionTime(t, tc, sandboxObj)
 		require.True(t, resumeTime.After(lastTime), "resumed LastTransitionTime must advance (resumeTime=%v, lastTime=%v)", resumeTime, lastTime)

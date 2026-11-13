@@ -48,6 +48,7 @@ Those last two measure across a process boundary and inherit any clock skew betw
 | `ready_condition` | `true` or `false`, from the `Ready` condition of the `Sandbox`. |
 | `expired` | `true` when the `Ready` condition reason is `SandboxExpired`, otherwise `false`. |
 | `operating_mode` | `Running` or `Suspended`, from `spec.operatingMode`. A Sandbox in `Suspended` mode frees its node capacity only once its `Suspended` condition is `True`. |
+| `suspended_reason` | The `Suspended` condition's reason: `NotSuspended` (created, never suspended), `Resumed` (suspended and resumed since it was created), `PodTerminating`, `PodTerminated`, `PodNotOwned`, or `PodStateUnknown`; `unknown` when the condition is absent or carries a value the controller does not write. Together with `operating_mode: Running`, `Resumed` counts the capacity held by resumed Sandboxes. |
 | `pod_condition` | `ready` when the adopted Sandbox was already Ready at adoption, `not_ready` otherwise. Despite the name this reads the Sandbox's `Ready` condition rather than the Pod's, and cold launches are always recorded as `not_ready`. |
 | `warmpool_name` | The claim's `spec.warmPoolRef.name`. On a warm launch the adopted Sandbox's owning `SandboxWarmPool` is guaranteed to match it, since `verifySandboxCandidate` rejects a candidate owned by any other pool. |
 | `git_version`, `git_commit`, `build_date`, `go_version`, `compiler`, `platform` | Build metadata baked into the controller binary. Constant for the lifetime of a process. |

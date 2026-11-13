@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
@@ -273,6 +274,11 @@ var (
 	// - ready_condition: "true" | "false"
 	// - expired: "true" | "false"
 	// - operating_mode: "Running" | "Suspended", from spec.operatingMode.
+	// - suspended_reason: the Suspended condition's reason ("NotSuspended" | "Resumed" |
+	//   "PodTerminating" | "PodTerminated" | "PodNotOwned" | "PodStateUnknown"), or "unknown"
+	//   when the condition is absent. "Resumed" marks a running Sandbox that has been suspended
+	//   and resumed since it was created, which operating_mode alone cannot tell from one that
+	//   never was.
 	// - launch_type: "warm" | "cold"
 	// - sandbox_template: sandboxTemplateRef, or "unknown" when the Sandbox carries no template annotation.
 	//   Note this sentinel differs from the "__unknown__" the SandboxClaim metrics use, so the two
@@ -282,7 +288,7 @@ var (
 	AgentSandboxesDesc = prometheus.NewDesc(
 		"agent_sandboxes",
 		"Monitor the point-in-time number of sandboxes in the cluster.",
-		[]string{"namespace", "ready_condition", "expired", "operating_mode", "launch_type", "sandbox_template", "owned_by", "created_by"},
+		[]string{"namespace", "ready_condition", "expired", "operating_mode", "suspended_reason", "launch_type", "sandbox_template", "owned_by", "created_by"},
 		nil,
 	)
 
@@ -418,6 +424,26 @@ func SandboxOperatingModeLabel(sandbox *sandboxv1beta1.Sandbox) string {
 		return string(sandbox.Spec.OperatingMode)
 	}
 	return string(sandboxv1beta1.SandboxOperatingModeRunning)
+}
+
+// SandboxSuspendedReasonLabel returns the suspended_reason label value: the Suspended
+// condition's reason when it is one the controller writes, "unknown" otherwise. The
+// allowlist keeps the label's cardinality fixed even if status is edited by hand.
+func SandboxSuspendedReasonLabel(sandbox *sandboxv1beta1.Sandbox) string {
+	cond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
+	if cond == nil {
+		return "unknown"
+	}
+	switch cond.Reason {
+	case sandboxv1beta1.SandboxReasonNotSuspended,
+		sandboxv1beta1.SandboxReasonResumed,
+		sandboxv1beta1.SandboxReasonSuspendedPodTerminating,
+		sandboxv1beta1.SandboxReasonSuspendedPodTerminated,
+		sandboxv1beta1.SandboxReasonSuspendedPodNotOwned,
+		sandboxv1beta1.SandboxReasonSuspendedPodStateUnknown:
+		return cond.Reason
+	}
+	return "unknown"
 }
 
 // RecordSandboxSuspend increments the total count of Sandbox suspend lifecycle events.

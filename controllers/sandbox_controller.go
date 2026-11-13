@@ -697,10 +697,27 @@ func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sa
 	}
 
 	if sandbox.Spec.OperatingMode != sandboxv1beta1.SandboxOperatingModeSuspended {
+		if sandboxWasSuspended(sandbox) {
+			suspended.Reason = sandboxv1beta1.SandboxReasonResumed
+			suspended.Message = "Sandbox has resumed from a suspension"
+		}
 		return suspended
 	}
 
 	if pod == nil && podErr != nil {
+		// A failed lookup carries no new information. Once the suspension has
+		// completed, only this controller could bring the Pod back and it does
+		// not while the mode is Suspended, so keep the completed state instead
+		// of overwriting the record a later resume reports Resumed from. A
+		// multiple-Pods error is not a failed lookup: owned Pods are known to be
+		// running, so the suspension can no longer be confirmed.
+		previous := meta.FindStatusCondition(sandbox.Status.Conditions, suspended.Type)
+		if previous != nil && previous.Status == metav1.ConditionTrue && !isMultipleSandboxPodsError(podErr) {
+			suspended.Status = metav1.ConditionTrue
+			suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodTerminated
+			suspended.Message = "Pod has been terminated. Sandbox is suspended"
+			return suspended
+		}
 		suspended.Status = metav1.ConditionUnknown
 		suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodStateUnknown
 		suspended.Message = "Pod state is unknown. Sandbox suspension cannot be confirmed"
@@ -724,6 +741,21 @@ func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sa
 	suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodTerminating
 	suspended.Message = "Pod is terminating. Sandbox is suspending"
 	return suspended
+}
+
+// sandboxWasSuspended reports whether a running Sandbox has been suspended and resumed
+// since it was created. The previous Suspended condition is the record: True means the
+// suspension completed, and Resumed carries an earlier verdict forward.
+// A suspend canceled before it completed (PodTerminating, PodNotOwned, or an
+// unconfirmed PodStateUnknown) is not a resume: the Pod may never have been deleted,
+// and agent_sandbox_resume_total does not count it either. Reading status rather than
+// timing keeps the answer exact across controller restarts.
+func sandboxWasSuspended(sandbox *sandboxv1beta1.Sandbox) bool {
+	previous := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
+	if previous == nil {
+		return false
+	}
+	return previous.Status == metav1.ConditionTrue || previous.Reason == sandboxv1beta1.SandboxReasonResumed
 }
 
 func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbox, err error, svc *corev1.Service, pod *corev1.Pod) metav1.Condition {
@@ -1146,8 +1178,8 @@ func (r *SandboxReconciler) recordLifecycleMetrics(ctx context.Context, oldStatu
 		r.resumeStartTimes.Delete(key)
 
 		wasJustAnchored := false
-		if oldSuspended != nil && oldSuspended.Reason == sandboxv1beta1.SandboxReasonNotSuspended &&
-			newSuspended != nil && newSuspended.Reason != sandboxv1beta1.SandboxReasonNotSuspended {
+		if oldSuspended != nil && isRunningSuspendedReason(oldSuspended.Reason) &&
+			newSuspended != nil && !isRunningSuspendedReason(newSuspended.Reason) {
 			asmetrics.RecordSandboxSuspend(sandbox.Namespace, templateName, ownedBy, asmetrics.SuspendResultRequested)
 			wasJustAnchored = r.suspendStartTimes.anchor(key, sandbox.UID, time.Now())
 			logger.V(4).Info("Observed Sandbox suspend requested", "justAnchored", wasJustAnchored)
@@ -1204,6 +1236,12 @@ func (r *SandboxReconciler) recordLifecycleMetrics(ctx context.Context, oldStatu
 			asmetrics.RecordSandboxResume(sandbox.Namespace, templateName, ownedBy, asmetrics.ResumeResultError)
 		}
 	}
+}
+
+// isRunningSuspendedReason reports whether a Suspended condition reason describes a
+// running Sandbox, so that a suspend requested from either state is counted once.
+func isRunningSuspendedReason(reason string) bool {
+	return reason == sandboxv1beta1.SandboxReasonNotSuspended || reason == sandboxv1beta1.SandboxReasonResumed
 }
 
 // nodeNameOnlyChange reports whether the node assignment is the only

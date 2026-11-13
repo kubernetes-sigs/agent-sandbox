@@ -1008,21 +1008,6 @@ Raised when the sandboxd transport fails outside a timeout or cancellation.
 - `detail` - A truncated diagnostic, or ``None``. Never a raw response
   object, and never the untruncated server text.
 
-<a id="k8s_agent_sandbox.exceptions.SandboxConnectionError.__reduce__"></a>
-
-#### \_\_reduce\_\_
-
-```python
-def __reduce__() -> tuple[Any, ...]
-```
-
-Rebuild the exception with its classification when unpickled.
-
-``BaseException`` reconstructs an exception by calling the class with
-``args``, which holds the message alone, so the required ``kind``
-argument would be missing. ``ProcessPoolExecutor`` goes through here
-to re-raise a worker's error in the parent process.
-
 <a id="k8s_agent_sandbox.exceptions.SandboxdRpcError"></a>
 
 ### SandboxdRpcError Objects
@@ -1039,19 +1024,6 @@ Raised for a sandboxd gRPC status that is not a timeout or a transport failure.
   ``"resource_exhausted"``, or ``"unknown"`` for an unrecognized
   status. Never the raw status details, which go in ``detail``.
 - `detail` - A truncated diagnostic, or ``None``.
-
-<a id="k8s_agent_sandbox.exceptions.SandboxdRpcError.__reduce__"></a>
-
-#### \_\_reduce\_\_
-
-```python
-def __reduce__() -> tuple[Any, ...]
-```
-
-Rebuild the exception with its status code when unpickled.
-
-See :meth:`SandboxConnectionError.__reduce__`. ``type(self)`` keeps
-the subclasses rebuilding as themselves.
 
 <a id="k8s_agent_sandbox.exceptions.SandboxdProcessNotFoundError"></a>
 

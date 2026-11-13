@@ -123,13 +123,10 @@ class SandboxConnectionError(SandboxError):
         self.detail = detail
 
     def __reduce__(self) -> tuple[Any, ...]:
-        """Rebuild the exception with its classification when unpickled.
-
-        ``BaseException`` reconstructs an exception by calling the class with
-        ``args``, which holds the message alone, so the required ``kind``
-        argument would be missing. ``ProcessPoolExecutor`` goes through here
-        to re-raise a worker's error in the parent process.
-        """
+        # BaseException rebuilds an exception by calling the class with args,
+        # which holds the message alone, so unpickling would leave out the
+        # required kind. ProcessPoolExecutor comes through here to re-raise a
+        # worker's error in the parent process.
         return (type(self), (str(self), self.kind, self.detail))
 
 
@@ -154,11 +151,9 @@ class SandboxdRpcError(SandboxError):
         self.detail = detail
 
     def __reduce__(self) -> tuple[Any, ...]:
-        """Rebuild the exception with its status code when unpickled.
-
-        See :meth:`SandboxConnectionError.__reduce__`. ``type(self)`` keeps
-        the subclasses rebuilding as themselves.
-        """
+        # As in SandboxConnectionError: args carries only the message, so the
+        # required code is restored here instead. type(self) keeps the
+        # subclasses rebuilding as themselves.
         return (type(self), (str(self), self.code, self.detail))
 
 

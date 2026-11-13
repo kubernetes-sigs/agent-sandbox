@@ -1,0 +1,91 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Reference GitHub Actions workflow. This file is inert where it lives:
+# copy it to .github/workflows/ of YOUR repository to activate it.
+#
+# The job below does not build on the GitHub-hosted runner itself. It only
+# checks out the repo, points kubectl at your cluster, and hands the build
+# commands to run_ci_job.py, which claims a warm sandbox and runs them there.
+#
+# Requires a cluster with agent-sandbox and the extension controllers
+# installed, plus the manifests from this directory applied. The kubeconfig
+# is expected in a repository secret (Settings → Secrets → Actions); scope
+# its credentials to the CI namespace with least-privilege RBAC.
+
+name: ci-on-sandbox
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # GitHub withholds repository secrets from fork pull requests and from
+    # Dependabot-triggered runs, so CI_SANDBOX_KUBECONFIG would be empty
+    # there. Dependabot PRs come from a branch in this same repository, so
+    # the repo comparison alone does not skip them — check the actor too.
+    # Fork PRs need a separate trust mechanism (e.g. a maintainer-triggered
+    # workflow_dispatch run); that is out of scope for this example.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]')
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install the sandbox SDK
+      run: pip install k8s-agent-sandbox
+
+    - name: Configure kubeconfig
+      env:
+        KUBECONFIG_DATA: ${{ secrets.CI_SANDBOX_KUBECONFIG }}
+      run: |
+        if [ -z "$KUBECONFIG_DATA" ]; then
+          echo "::error::CI_SANDBOX_KUBECONFIG secret is not available"
+          exit 1
+        fi
+        mkdir -p ~/.kube
+        printf '%s' "$KUBECONFIG_DATA" > ~/.kube/config
+
+    - name: Run the CI job in a sandbox
+      env:
+        SANDBOX_NAMESPACE: ci
+        SANDBOX_WARMPOOL_NAME: ci-runner-pool
+      run: |
+        python examples/ci-runner-sandbox/run_ci_job.py \
+          --claim-name "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+          --timeout 1800 \
+          -- \
+          "git clone https://github.com/$(echo "$GITHUB_REPOSITORY") /workspace/repo" \
+          "cd /workspace/repo && git fetch origin $GITHUB_REF && git checkout $GITHUB_SHA" \
+          "cd /workspace/repo && make build" \
+          "cd /workspace/repo && make test"
+      # On pull_request events GITHUB_SHA is the synthetic merge commit under
+      # refs/pull/<n>/merge, which a plain clone does not contain, so fetch
+      # GITHUB_REF first. Then check out GITHUB_SHA rather than FETCH_HEAD:
+      # FETCH_HEAD is wherever the ref points at fetch time, which may have
+      # advanced past the commit that triggered this run. If the PR was
+      # updated mid-run its old merge commit is unreachable and the checkout
+      # fails loudly — fine, because the update triggered a newer run that
+      # supersedes this one.
+      # Replace the git commands above with whatever fetches your code (a
+      # checkout action + workspace upload also works), and the make targets
+      # with your project's real build/test commands.

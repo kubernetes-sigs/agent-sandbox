@@ -255,6 +255,10 @@ class AsyncSandboxConnector:
                 # rotations. Report invalid paths during handle construction.
                 self._ssl_context = _build_ssl_context(connection_config)
 
+    def transfer_state_from(self, other: "AsyncSandboxConnector") -> None:
+        """Carry the default SSL-context provider when the handle replaces a closed connector."""
+        self._default_ssl_context = other._default_ssl_context
+
     def _ensure_client(self) -> httpx.AsyncClient:
         """Create the HTTP client on first use within this connector's event loop."""
         if self._client is None:

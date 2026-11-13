@@ -68,6 +68,17 @@ class TestAsyncSandboxdConnector(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(connector.should_inject_router_headers())
         await connector.close()
 
+    async def test_transfer_state_from(self):
+        old_connector = self._build()
+        old_connector._default_ssl_context = MagicMock()
+        connector = self._build()
+        try:
+            connector.transfer_state_from(old_connector)
+            self.assertIs(connector._default_ssl_context, old_connector._default_ssl_context)
+        finally:
+            await connector.close()
+            await old_connector.close()
+
     async def test_disable_retries_for_non_replayable_request_body(self):
         connector = self._build()
         connector._resolve_base_url = AsyncMock(return_value="http://127.0.0.1:18080")

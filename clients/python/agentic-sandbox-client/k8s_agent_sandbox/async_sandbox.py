@@ -158,7 +158,7 @@ class AsyncSandbox:
                 # AsyncSandboxConnector cannot be reused after close().
                 old_connector = self.connector
                 connector = self._new_connector()
-                connector._default_ssl_context = old_connector._default_ssl_context
+                connector.transfer_state_from(old_connector)
                 for owner in (self, self._commands, self._files, self._watcher):
                     if owner is not None:
                         owner.connector = connector

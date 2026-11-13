@@ -1111,7 +1111,7 @@ func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1beta1.Sa
 	}
 	readyCondition := r.computeReadyCondition(claim, sandbox, err, isClaimExpired)
 	meta.SetStatusCondition(&claim.Status.Conditions, readyCondition)
-	r.syncFinishedCondition(claim, sandbox, isClaimExpired)
+	r.syncFinishedCondition(claim, sandbox)
 
 	if sandbox != nil {
 		claim.Status.SandboxStatus.Name = sandbox.Name
@@ -1127,24 +1127,35 @@ func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1beta1.Sa
 	}
 }
 
-func (r *SandboxClaimReconciler) syncFinishedCondition(claim *extensionsv1beta1.SandboxClaim, sandbox *v1beta1.Sandbox, isClaimExpired bool) {
+// syncFinishedCondition mirrors the Sandbox's Finished condition onto the claim,
+// where Finished=True starts ttlSecondsAfterFinished.
+func (r *SandboxClaimReconciler) syncFinishedCondition(claim *extensionsv1beta1.SandboxClaim, sandbox *v1beta1.Sandbox) {
 	if sandbox != nil {
-		finishedCondition := meta.FindStatusCondition(sandbox.Status.Conditions, string(v1beta1.SandboxConditionFinished))
-		if finishedCondition != nil {
+		if finishedCondition := meta.FindStatusCondition(sandbox.Status.Conditions, string(v1beta1.SandboxConditionFinished)); finishedCondition != nil {
 			// Mirror a copy that reports the claim's own generation; the Sandbox's
 			// generation would make the condition look stale after a claim-only spec change.
 			condition := *finishedCondition
 			condition.ObservedGeneration = claim.Generation
 			meta.SetStatusCondition(&claim.Status.Conditions, condition)
-		} else {
-			meta.RemoveStatusCondition(&claim.Status.Conditions, string(v1beta1.SandboxConditionFinished))
+			return
 		}
+	}
+
+	// Without a Sandbox value to copy, as on a reconcile error or after expiry,
+	// keep the recorded Finished. Neither changes whether the workload finished,
+	// so ttlSecondsAfterFinished keeps running.
+	if recorded := meta.FindStatusCondition(claim.Status.Conditions, string(v1beta1.SandboxConditionFinished)); recorded != nil {
+		recorded.ObservedGeneration = claim.Generation
 		return
 	}
 
-	if !isClaimExpired {
-		meta.RemoveStatusCondition(&claim.Status.Conditions, string(v1beta1.SandboxConditionFinished))
-	}
+	meta.SetStatusCondition(&claim.Status.Conditions, metav1.Condition{
+		Type:               string(v1beta1.SandboxConditionFinished),
+		Status:             metav1.ConditionUnknown,
+		ObservedGeneration: claim.Generation,
+		Reason:             extensionsv1beta1.SandboxStateUnknownReason,
+		Message:            "Sandbox has not reported Finished yet",
+	})
 }
 
 // ensureClaimIdentityLabels sets SandboxIDLabel (= claim.UID) on the given label map,

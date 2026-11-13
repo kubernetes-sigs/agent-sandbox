@@ -109,3 +109,25 @@ func TestTimeLeft(t *testing.T) {
 		})
 	}
 }
+
+// TestFinishedCondition pins that only Finished=True starts ttlSecondsAfterFinished.
+// The condition is always present, so False and Unknown must not count as finished.
+func TestFinishedCondition(t *testing.T) {
+	testCases := []struct {
+		name   string
+		status metav1.ConditionStatus
+		want   bool
+	}{
+		{name: "true", status: metav1.ConditionTrue, want: true},
+		{name: "false", status: metav1.ConditionFalse},
+		{name: "unknown", status: metav1.ConditionUnknown},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			conditions := []metav1.Condition{{Type: "Finished", Status: tc.status}}
+			require.Equal(t, tc.want, FinishedCondition(conditions, "Finished") != nil)
+		})
+	}
+	require.Nil(t, FinishedCondition(nil, "Finished"), "a missing condition is not finished")
+}

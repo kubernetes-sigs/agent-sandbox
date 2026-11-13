@@ -1195,10 +1195,14 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			if err := client.Get(context.Background(), req.NamespacedName, &updatedClaim); err != nil {
 				t.Fatalf("get sandbox claim: (%v)", err)
 			}
-			if len(updatedClaim.Status.Conditions) != 1 {
-				t.Fatalf("expected 1 condition, got %d", len(updatedClaim.Status.Conditions))
+			if len(updatedClaim.Status.Conditions) != 2 {
+				t.Fatalf("expected Ready and Finished conditions, got %+v", updatedClaim.Status.Conditions)
 			}
-			condition := updatedClaim.Status.Conditions[0]
+			readyCondition := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+			if readyCondition == nil {
+				t.Fatalf("expected a Ready condition, got %+v", updatedClaim.Status.Conditions)
+			}
+			condition := *readyCondition
 			if tc.expectedCondition.Reason == "ReconcilerError" || tc.expectedCondition.Reason == "InvalidMetadata" {
 				if condition.Reason != tc.expectedCondition.Reason {
 					t.Errorf("expected condition reason %q, got %q", tc.expectedCondition.Reason, condition.Reason)

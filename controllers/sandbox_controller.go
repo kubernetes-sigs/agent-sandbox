@@ -568,26 +568,8 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	}
 
 	// compute and set overall conditions
-	conditions := r.computeConditions(sandbox, conditionErrors, svc, pod, podErr)
-	// Conditions that are only present while they apply: Finished has no
-	// meaning without a terminal pod, PodScheduled none without a pod at
-	// all. Any of these not computed this pass is removed from status.
-	// Suspended is deliberately NOT in this set: it is persistent and
-	// transitions to False rather than being removed (see #1150).
-	presentWhileApplicable := map[string]bool{
-		string(sandboxv1beta1.SandboxConditionFinished):     false,
-		string(sandboxv1beta1.SandboxConditionPodScheduled): false,
-	}
-	for _, condition := range conditions {
+	for _, condition := range r.computeConditions(sandbox, conditionErrors, svc, pod, podErr) {
 		meta.SetStatusCondition(&sandbox.Status.Conditions, condition)
-		if _, ok := presentWhileApplicable[condition.Type]; ok {
-			presentWhileApplicable[condition.Type] = true
-		}
-	}
-	for condType, present := range presentWhileApplicable {
-		if !present {
-			meta.RemoveStatusCondition(&sandbox.Status.Conditions, condType)
-		}
 	}
 
 	return recreateRequeue, allErrors
@@ -605,21 +587,12 @@ func (r *SandboxReconciler) recordMultiplePodsEvent(sandbox *sandboxv1beta1.Sand
 }
 
 func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1beta1.Sandbox, err error, svc *corev1.Service, pod *corev1.Pod, podErr error) []metav1.Condition {
-	var conditions []metav1.Condition
-
-	conditions = append(conditions, r.computeSuspendedCondition(sandbox, pod, podErr))
-
-	if finished := r.computeFinishedCondition(sandbox, pod); finished != nil {
-		conditions = append(conditions, *finished)
+	return []metav1.Condition{
+		r.computeSuspendedCondition(sandbox, pod, podErr),
+		r.computeFinishedCondition(sandbox, pod, podErr),
+		r.computePodScheduledCondition(sandbox, pod, podErr),
+		r.computeReadyCondition(sandbox, err, svc, pod),
 	}
-
-	if podScheduled := r.computePodScheduledCondition(sandbox, pod, podErr); podScheduled != nil {
-		conditions = append(conditions, *podScheduled)
-	}
-
-	conditions = append(conditions, r.computeReadyCondition(sandbox, err, svc, pod))
-
-	return conditions
 }
 
 // computePodScheduledCondition mirrors the backing Pod's PodScheduled
@@ -632,19 +605,18 @@ func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1beta1.Sandbox, e
 // Pod reason maps to a fallback: PodScheduled for status True (the scheduler
 // sets no reason on success — the expected case) and PodSchedulingUnknown
 // for any other status missing a reason.
-// Returns nil when the Pod is confirmed absent: the condition is removed rather
-// than reporting a misleading False for suspended or expired sandboxes. A Pod
-// this Sandbox does not own is likewise not mirrored, so a foreign Pod holding
-// the name cannot leak its scheduling state into this Sandbox's status.
-func (r *SandboxReconciler) computePodScheduledCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod, podErr error) *metav1.Condition {
-	condition := &metav1.Condition{
+// When the Pod is confirmed absent, the condition reports False with reason
+// PodAbsent. A Pod this Sandbox does not own counts as absent, so a foreign Pod
+// holding the name cannot leak its scheduling state into this Sandbox's status.
+func (r *SandboxReconciler) computePodScheduledCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod, podErr error) metav1.Condition {
+	condition := metav1.Condition{
 		Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
 		ObservedGeneration: sandbox.Generation,
 	}
 
 	// Reconciling the Pod failed, so a nil pod does not prove the Pod is gone.
-	// Report the scheduling state as unknown instead of dropping the condition,
-	// which would read as "no backing Pod" on a transient API error.
+	// Report the scheduling state as unknown instead of PodAbsent, which would
+	// read as "no backing Pod" on a transient API error.
 	if pod == nil && podErr != nil {
 		condition.Status = metav1.ConditionUnknown
 		condition.Reason = sandboxv1beta1.SandboxReasonPodSchedulingUnknown
@@ -653,7 +625,10 @@ func (r *SandboxReconciler) computePodScheduledCondition(sandbox *sandboxv1beta1
 	}
 
 	if !isOwnedBySandbox(pod, sandbox) {
-		return nil
+		condition.Status = metav1.ConditionFalse
+		condition.Reason = sandboxv1beta1.SandboxReasonPodAbsent
+		condition.Message = "Sandbox has no backing Pod"
+		return condition
 	}
 
 	for _, podCond := range pod.Status.Conditions {
@@ -883,40 +858,60 @@ func containerIssue(kind string, statuses []corev1.ContainerStatus) string {
 	return ""
 }
 
-func (r *SandboxReconciler) computeFinishedCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) *metav1.Condition {
+func (r *SandboxReconciler) computeFinishedCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod, podErr error) metav1.Condition {
+	suspended := sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended
+	// Reconciling the Pod failed, so a nil pod does not prove the Pod is gone.
+	lookupFailed := pod == nil && podErr != nil
+	terminating := isOwnedBySandbox(pod, sandbox) && !pod.DeletionTimestamp.IsZero()
+
+	// Keep the recorded value while suspended, while the Pod is terminating, and
+	// when the Pod can't be read. Deleting the Pod doesn't undo a finished run,
+	// the terminal phase the kubelet sets on a deleted Pod isn't a finish, and a
+	// failed read proves nothing. Changing the status would move
+	// lastTransitionTime, which restarts a SandboxClaim's ttlSecondsAfterFinished
+	// and counts the finish again in agent_sandbox_finished_total.
+	if existing := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished)); existing != nil && (suspended || terminating || lookupFailed) {
+		kept := *existing
+		kept.ObservedGeneration = sandbox.Generation
+		return kept
+	}
+
+	condition := metav1.Condition{
+		Type:               string(sandboxv1beta1.SandboxConditionFinished),
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: sandbox.Generation,
+		Reason:             sandboxv1beta1.SandboxReasonNotFinished,
+		Message:            "Sandbox has no backing Pod",
+	}
+
+	if lookupFailed {
+		condition.Status = metav1.ConditionUnknown
+		condition.Reason = sandboxv1beta1.SandboxReasonPodStateUnknown
+		condition.Message = "Pod state is unknown. Pod phase cannot be determined"
+		return condition
+	}
+
 	// Only a Pod this Sandbox owns may drive its Finished condition
 	if !isOwnedBySandbox(pod, sandbox) {
-		return nil
+		return condition
 	}
 
-	// Suspend deletes the Pod, and the kubelet moves a deleted Pod to
-	// Succeeded or Failed before removing it. That terminal phase comes from
-	// our own deletion, not the workload finishing, and SandboxClaim mirrors
-	// Finished to start ttlSecondsAfterFinished. Don't report it as a finish;
-	// keep whatever Finished was recorded before the suspend.
-	if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
-		if existing := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished)); existing != nil {
-			kept := *existing
-			return &kept
-		}
-		return nil
-	}
-
-	condition := &metav1.Condition{
-		Type:               string(sandboxv1beta1.SandboxConditionFinished),
-		Status:             metav1.ConditionTrue,
-		ObservedGeneration: sandbox.Generation,
+	if suspended {
+		condition.Message = "Sandbox is suspending"
+		return condition
 	}
 
 	switch pod.Status.Phase {
 	case corev1.PodSucceeded:
+		condition.Status = metav1.ConditionTrue
 		condition.Reason = sandboxv1beta1.SandboxReasonPodSucceeded
 		condition.Message = "Pod completed successfully"
 	case corev1.PodFailed:
+		condition.Status = metav1.ConditionTrue
 		condition.Reason = sandboxv1beta1.SandboxReasonPodFailed
 		condition.Message = "Pod failed"
 	default:
-		return nil
+		condition.Message = "Pod has not reached a terminal phase"
 	}
 
 	return condition
@@ -2354,14 +2349,7 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 		// Drop live-resource status while retaining terminal conditions.
 		conditions := sandbox.Status.Conditions
 		sandbox.Status = sandboxv1beta1.SandboxStatus{Conditions: conditions}
-		// Update status to mark as expired
-		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
-			Type:               string(sandboxv1beta1.SandboxConditionReady),
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: sandbox.Generation,
-			Reason:             sandboxv1beta1.SandboxReasonExpired,
-			Message:            "Sandbox has expired",
-		})
+		setSandboxExpiredCondition(sandbox)
 	}
 
 	return false, allErrors
@@ -2397,10 +2385,27 @@ func setSandboxExpiredCondition(sandbox *sandboxv1beta1.Sandbox) {
 		Message:            "Sandbox has expired",
 	})
 	// Expiry tears down the backing pod and skips reconcileChildResources
-	// (where PodScheduled is normally maintained), so drop the mirrored
-	// condition here or it would linger with stale pre-expiry contents.
-	// Finished, by contrast, is deliberately preserved across expiry.
-	meta.RemoveStatusCondition(&sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionPodScheduled))
+	// (where PodScheduled is normally maintained), so report the final state
+	// here or the condition would keep its stale pre-expiry contents.
+	meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+		Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: sandbox.Generation,
+		Reason:             sandboxv1beta1.SandboxReasonExpired,
+		Message:            "Sandbox has expired",
+	})
+	// Finished, by contrast, is deliberately preserved across expiry. Add it
+	// only if it was never set, for example when the Sandbox expired before
+	// its first reconcile.
+	if meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished)) == nil {
+		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+			Type:               string(sandboxv1beta1.SandboxConditionFinished),
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: sandbox.Generation,
+			Reason:             sandboxv1beta1.SandboxReasonNotFinished,
+			Message:            "Sandbox expired before its Pod finished",
+		})
+	}
 }
 
 // sandboxMarkedExpired checks if the sandbox is already marked as expired.

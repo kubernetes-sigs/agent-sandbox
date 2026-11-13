@@ -767,11 +767,13 @@ func (s *RESTServer) atomicReplace(check func(target string) error) func(target 
 // atomicWrite streams src into target using the temp-file-then-rename
 // strategy. Parent directories are created automatically.
 //
-// Concurrency: handlers run in parallel (one goroutine per request, no
-// cross-request locking). Each successful rename(2) publishes a complete file
-// atomically, so an already-open reader sees either the previous complete file
-// or the new one. A concurrent delete can remove the temporary file or its
-// parent directory before rename, in which case the write fails.
+// Concurrency: handlers run in parallel (one goroutine per request). This
+// function takes no lock; overwriting PUTs and tar entries serialize on
+// replaceLocks instead, and only the :copy path calls it directly. Each
+// successful rename(2) publishes a complete file atomically, so an already-open
+// reader sees either the previous complete file or the new one. A concurrent
+// delete can remove the temporary file or its parent directory before rename,
+// in which case the write fails.
 func atomicWrite(target string, src io.Reader, mode os.FileMode) error {
 	return writeViaTemp(target, src, mode, os.Rename)
 }

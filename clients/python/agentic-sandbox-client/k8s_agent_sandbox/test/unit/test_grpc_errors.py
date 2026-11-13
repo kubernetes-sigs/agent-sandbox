@@ -14,10 +14,12 @@
 
 """Unit tests for the sandboxd gRPC status -> exception mapping."""
 
+import pickle
 import unittest
 
 from k8s_agent_sandbox._grpc_errors import classify_rpc_error
 from k8s_agent_sandbox.exceptions import (
+    SandboxClosedError,
     SandboxConnectionError,
     SandboxdPermissionError,
     SandboxdProcessNotFoundError,
@@ -178,6 +180,51 @@ class TestClassifyRpcError(unittest.TestCase):
                 self._rpc_error(grpc.StatusCode.INTERNAL), operation="Execute"),
             RuntimeError,
         )
+
+
+class TestTypedErrorsSurviveAProcessBoundary(unittest.TestCase):
+    """Every typed error can be pickled and rebuilt.
+
+    ``ProcessPoolExecutor`` pickles a worker's exception to re-raise it in
+    the parent. ``BaseException`` rebuilds from ``args``, which holds the
+    message alone, so a class whose extra arguments are required has to say
+    how to reconstruct itself.
+    """
+
+    def _round_trip(self, err):
+        restored = pickle.loads(pickle.dumps(err))
+        self.assertIs(type(restored), type(err))
+        self.assertEqual(str(restored), str(err))
+        return restored
+
+    def test_a_connection_error_keeps_its_kind_and_detail(self):
+        restored = self._round_trip(
+            SandboxConnectionError(
+                "sandboxd is unavailable", "unavailable", "no route to host"))
+        self.assertEqual(restored.kind, "unavailable")
+        self.assertEqual(restored.detail, "no route to host")
+
+    def test_an_rpc_error_keeps_its_code_and_detail(self):
+        # The subclasses inherit __reduce__ and must still rebuild as
+        # themselves, which is why each one is round-tripped here.
+        for cls in (
+            SandboxdRpcError,
+            SandboxdProcessNotFoundError,
+            SandboxdPermissionError,
+        ):
+            with self.subTest(cls=cls.__name__):
+                restored = self._round_trip(
+                    cls("sandboxd Execute failed", "not_found", "no such path"))
+                self.assertEqual(restored.code, "not_found")
+                self.assertEqual(restored.detail, "no such path")
+
+    def test_the_errors_carrying_only_a_message_round_trip_too(self):
+        for err in (
+            SandboxTimeoutError("sandboxd Execute exceeded its deadline"),
+            SandboxClosedError("the sandbox connection is closed"),
+        ):
+            with self.subTest(cls=type(err).__name__):
+                self._round_trip(err)
 
 
 if __name__ == "__main__":

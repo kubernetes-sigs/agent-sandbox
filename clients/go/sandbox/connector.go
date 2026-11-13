@@ -30,6 +30,8 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
@@ -94,6 +96,10 @@ type connector struct {
 	log           logr.Logger
 	tracer        trace.Tracer
 	svcName       string
+
+	// discoveryLatency records how long strategy.Connect takes. Nil means
+	// the caller did not wire metrics; Connect skips recording.
+	discoveryLatency metric.Float64Histogram
 }
 
 // connectorConfig holds the parameters needed to construct a connector.
@@ -111,6 +117,7 @@ type connectorConfig struct {
 	Log                 logr.Logger
 	Tracer              trace.Tracer
 	TraceServiceName    string
+	DiscoveryLatency    metric.Float64Histogram
 }
 
 // newConnector creates a connector with the given configuration.
@@ -155,9 +162,10 @@ func newConnector(cfg connectorConfig) *connector {
 				return http.ErrUseLastResponse
 			},
 		},
-		log:     cfg.Log,
-		tracer:  cfg.Tracer,
-		svcName: cfg.TraceServiceName,
+		log:              cfg.Log,
+		tracer:           cfg.Tracer,
+		svcName:          cfg.TraceServiceName,
+		discoveryLatency: cfg.DiscoveryLatency,
 	}
 }
 
@@ -183,9 +191,52 @@ func (c *connector) SetPodIP(ip string) {
 	}
 }
 
-// Connect delegates to the strategy to discover and set the base URL.
+// strategyMode returns the connectivity mode label used in logs and the
+// discovery latency metric. It is a pure mapping so the failure path of
+// Connect can report the mode that was attempted.
+func strategyMode(strategy ConnectionStrategy) string {
+	switch s := strategy.(type) {
+	case *gatewayStrategy:
+		return "gateway"
+	case *tunnelStrategy:
+		if s.routerREST {
+			return string(ConnectivityRouterPortForward)
+		}
+		return "port-forward"
+	case *podTunnelStrategy:
+		return "sandboxd-pod-tunnel"
+	case *inClusterStrategy:
+		if s.useServiceDNS {
+			return "in-cluster-service"
+		}
+		return "in-cluster-pod-ip"
+	case *DirectStrategy:
+		return "direct"
+	default:
+		// ConnectionStrategy is exported; a caller-supplied implementation
+		// is none of the modes above, and labeling it "direct" would
+		// misreport both the log line and the metric.
+		return "unknown"
+	}
+}
+
+// Connect delegates to the strategy to discover and set the base URL, and
+// records the discovery latency with the attempted mode and its outcome.
 func (c *connector) Connect(ctx context.Context) error {
+	mode := strategyMode(c.strategy)
+	start := time.Now()
 	url, err := c.strategy.Connect(ctx)
+	status := "success"
+	if err != nil {
+		status = "failure"
+	}
+	if c.discoveryLatency != nil {
+		c.discoveryLatency.Record(ctx, time.Since(start).Seconds(),
+			metric.WithAttributes(
+				attribute.String("mode", mode),
+				attribute.String("status", status),
+			))
+	}
 	if err != nil {
 		return err
 	}
@@ -193,24 +244,9 @@ func (c *connector) Connect(ctx context.Context) error {
 	c.baseURL = url
 	c.lastError = nil
 	c.mu.Unlock()
-	mode := "direct"
-	switch s := c.strategy.(type) {
-	case *gatewayStrategy:
-		mode = "gateway"
-	case *tunnelStrategy:
-		mode = "port-forward"
-		if s.routerREST {
-			mode = string(ConnectivityRouterPortForward)
-			// The router serves gRPC on the same port as REST.
-			c.SetGRPCTarget(strings.TrimPrefix(url, "http://"))
-		}
-	case *podTunnelStrategy:
-		mode = "sandboxd-pod-tunnel"
-	case *inClusterStrategy:
-		mode = "in-cluster-pod-ip"
-		if s.useServiceDNS {
-			mode = "in-cluster-service"
-		}
+	if ts, ok := c.strategy.(*tunnelStrategy); ok && ts.routerREST {
+		// The router serves gRPC on the same port as REST.
+		c.SetGRPCTarget(strings.TrimPrefix(url, "http://"))
 	}
 	c.log.Info("API URL discovered", "url", url, "mode", mode)
 	return nil

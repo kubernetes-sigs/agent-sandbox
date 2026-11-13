@@ -367,6 +367,33 @@ All options are documented on the `Options` struct in
 - `GatewayName`: set to enable Gateway mode.
 - `APIURL`: set for Direct URL mode (takes precedence over `GatewayName`).
 - `TracerProvider`: OpenTelemetry integration.
+- `MeterProvider`: OpenTelemetry metrics integration. See
+  [Metrics](#metrics).
+
+## Metrics
+
+The client records `sandbox.client.discovery.latency`, a histogram of how
+long connecting to a sandbox takes, in seconds. It covers every
+connectivity mode and both the initial connect and reconnects. Each
+observation carries a `mode` attribute (`gateway`, `port-forward`,
+`router-port-forward`, `sandboxd-pod-tunnel`, `in-cluster-pod-ip`,
+`in-cluster-service`, or `direct`) and a `status` attribute (`success` or
+`failure`). The OTel Prometheus exporter renders this histogram as
+`sandbox_client_discovery_latency_seconds`, and the bucket boundaries are
+the Python SDK's boundaries expressed in seconds, so cross-SDK dashboards
+aggregate identically.
+
+Unless `MeterProvider` is set, the histogram is recorded through the global
+OpenTelemetry meter provider (`otel.GetMeterProvider()`), which is a noop
+until the application configures a real provider. Set `MeterProvider` to
+record through a provider the client controls:
+
+```go
+client, err := sandbox.NewClient(ctx, sandbox.Options{
+    WarmPoolName:  "my-pool",
+    MeterProvider: sdkmetric.NewMeterProvider(/* readers, views */),
+})
+```
 
 Operations accept `WithTimeout` for a total operation timeout. HTTP operations
 override their default request timeout; sandboxd gRPC commands use the caller

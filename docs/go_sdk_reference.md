@@ -1170,6 +1170,12 @@ type Options struct {
     // If nil, falls back to otel.GetTracerProvider (noop by default).
     TracerProvider trace.TracerProvider
 
+    // MeterProvider sets the OpenTelemetry MeterProvider for client metrics
+    // (e.g. the sandbox.client.discovery.latency histogram). If nil, metrics
+    // are recorded through otel.GetMeterProvider, so an application that
+    // configures a global provider records them without opting in here.
+    MeterProvider metric.MeterProvider
+
     // DisablePodIPRouting suppresses the X-Sandbox-Pod-IP header even when a
     // pod IP is available. Use in environments with strict network policies,
     // service meshes, or secure overlays where direct pod-to-pod IP routing is

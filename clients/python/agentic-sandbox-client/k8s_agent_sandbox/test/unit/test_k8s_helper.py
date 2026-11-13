@@ -874,9 +874,10 @@ class TestK8sHelperWatchResourceVersion(unittest.TestCase):
                 helper.patch_sandbox_operating_mode("test-sandbox", "default", "Suspended", "original")
 
                 sent = request.call_args.kwargs
+                self.assertEqual(sent["headers"]["Content-Type"], "application/merge-patch+json")
                 self.assertEqual(
-                    (sent["headers"]["Content-Type"], json.loads(sent["body"])),
-                    ("application/merge-patch+json", {"metadata": {"uid": "original"}, "spec": {"operatingMode": "Suspended"}}),
+                    json.loads(sent["body"]),
+                    {"metadata": {"uid": "original"}, "spec": {"operatingMode": "Suspended"}},
                 )
                 request.side_effect = AssertionError("Empty UID reached the transport")
                 for uid in ("", None):

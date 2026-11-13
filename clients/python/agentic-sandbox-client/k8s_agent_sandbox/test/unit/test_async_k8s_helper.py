@@ -465,9 +465,10 @@ class TestAsyncK8sHelperWaitForSandboxReady(unittest.IsolatedAsyncioTestCase):
                 await helper.patch_sandbox_operating_mode("test-sandbox", "default", "Suspended", "original")
 
                 sent = request.call_args.kwargs
+                self.assertEqual(sent["headers"]["Content-Type"], "application/merge-patch+json")
                 self.assertEqual(
-                    (sent["headers"]["Content-Type"], json.loads(sent["data"])),
-                    ("application/merge-patch+json", {"metadata": {"uid": "original"}, "spec": {"operatingMode": "Suspended"}}),
+                    json.loads(sent["data"]),
+                    {"metadata": {"uid": "original"}, "spec": {"operatingMode": "Suspended"}},
                 )
                 request.side_effect = AssertionError("Empty UID reached the transport")
                 for uid in ("", None):

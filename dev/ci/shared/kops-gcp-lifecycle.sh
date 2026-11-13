@@ -203,7 +203,7 @@ kops_validate_cluster() {
 kops_capture_igm_diagnostics() {
   local out_dir="${ARTIFACTS:-.}"
   mkdir -p "${out_dir}"
-  local igm="a-control-plane-${ZONE}-${CLUSTER_NAME}"
+  local igm="$(kops_control_plane_igm_name)"
   local out_file="${out_dir}/control-plane-igm-diagnostics.log"
   echo "Saving managed instance group diagnostics to ${out_file}..."
   {
@@ -224,11 +224,20 @@ kops_capture_igm_diagnostics() {
   } > "${out_file}" 2>&1 || true
 }
 
+# kOps names a managed instance group after the zone's last component, the
+# instance group, and the cluster (NameForInstanceGroupManager in
+# upup/pkg/fi/cloudup/gce), so the control-plane group in us-central1-b is
+# b-control-plane-us-central1-b-<cluster>. Deriving the prefix from ZONE keeps
+# every lookup pointed at the group that exists after a zone move.
+kops_control_plane_igm_name() {
+  echo "${ZONE##*-}-control-plane-${ZONE}-${CLUSTER_NAME}"
+}
+
 # Prints the error codes the control-plane managed instance group has
 # recorded for its current instance create attempts, one per line.
 kops_control_plane_igm_error_codes() {
   gcloud compute instance-groups managed list-errors \
-    "a-control-plane-${ZONE}-${CLUSTER_NAME}" \
+    "$(kops_control_plane_igm_name)" \
     --zone="${ZONE}" --project="${PROJECT_ID}" \
     --format="value(error.code)" 2>/dev/null || true
 }
@@ -238,7 +247,7 @@ kops_control_plane_igm_error_codes() {
 kops_control_plane_running() {
   local status
   status=$(gcloud compute instance-groups managed list-instances \
-    "a-control-plane-${ZONE}-${CLUSTER_NAME}" \
+    "$(kops_control_plane_igm_name)" \
     --zone="${ZONE}" --project="${PROJECT_ID}" \
     --format="value(instanceStatus,currentAction)" 2>/dev/null | head -n1 || true)
   [[ "${status}" == "RUNNING"$'\t'"NONE" ]]
@@ -311,7 +320,7 @@ kops_capture_cp_serial_port() {
   mkdir -p "${out_dir}"
   local cp_instance
   cp_instance=$(gcloud compute instance-groups managed list-instances \
-    "a-control-plane-${ZONE}-${CLUSTER_NAME}" \
+    "$(kops_control_plane_igm_name)" \
     --zone="${ZONE}" --project="${PROJECT_ID}" \
     --format="value(instance.basename())" 2>/dev/null | head -n1 || true)
   if [[ -z "${cp_instance}" ]]; then

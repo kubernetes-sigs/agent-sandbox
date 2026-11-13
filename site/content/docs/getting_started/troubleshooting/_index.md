@@ -167,9 +167,9 @@ The old Pod is removed only when the Node object is deleted (the Pod garbage col
 
 **What to do.**
 
-- On Spot or preemptible nodes, keep `terminationGracePeriodSeconds`, and any `preStop` wait, shorter than the provider's notice. A longer grace period cannot keep the work alive, because the machine is stopped anyway, and it delays the replacement.
+- On Spot or preemptible nodes, keep `terminationGracePeriodSeconds`, and any `preStop` wait, shorter than the time the node actually gives Pods to stop, not just the provider's notice. With graceful node shutdown the kubelet splits the notice: on GKE Spot nodes, by default, ordinary Pods get 15 of the 30 seconds. Check your nodes' `shutdownGracePeriod` and `shutdownGracePeriodCriticalPods`, and leave time for the notice to be handled. A longer grace period cannot keep the work alive, because the machine is stopped anyway, and it delays the replacement.
 - Keep the node autoscaler current. On AWS, Karpenter releases a Node at once when its instance no longer exists. Before karpenter-provider-aws v1.14.1, that check read a cache that never dropped terminated instances, so the Node was held for the full grace period.
-- To recover now, once you have confirmed that the machine is gone, release the old Pod with one of:
+- To recover now, once you have confirmed that the machine is shut down and will not restart (for example, the cloud instance is terminated), release the old Pod with one of:
 
   ```bash
   # Non-graceful node shutdown: the Pod is removed and its volumes detach
@@ -179,4 +179,10 @@ The old Pod is removed only when the Node object is deleted (the Pod garbage col
   kubectl delete pod <pod-name> --grace-period=0 --force
   ```
 
-  Never do this while the machine might still be running: two Pods would then share the volume.
+  Never do this while the machine might still be running or restarting: the old workload could then write to the volume while its replacement uses it.
+
+  If the node later comes back into service, remove the taint once its workloads have moved, so ordinary Pods can run there again:
+
+  ```bash
+  kubectl taint node <node-name> node.kubernetes.io/out-of-service=nodeshutdown:NoExecute-
+  ```

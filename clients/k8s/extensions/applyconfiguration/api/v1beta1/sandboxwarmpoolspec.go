@@ -24,6 +24,10 @@ type SandboxWarmPoolSpecApplyConfiguration struct {
 	// replicas is the desired number of sandboxes in the pool.
 	// This field is controlled by an HPA if specified.
 	Replicas *int32 `json:"replicas,omitempty"`
+	// ttlSecondsAfterCreated limits how long the SandboxWarmPool exists after creation.
+	// When set, the controller deletes the SandboxWarmPool after the TTL expires.
+	// When unset, the SandboxWarmPool is not automatically reaped based on its age.
+	TTLSecondsAfterCreated *int32 `json:"ttlSecondsAfterCreated,omitempty"`
 	// sandboxTemplateRef - name of the SandboxTemplate to be used for creating a Sandbox
 	// Warning: Any change to the json tag "sandboxTemplateRef" must be synchronized with the TemplateRefField constant.
 	TemplateRef *SandboxTemplateRefApplyConfiguration `json:"sandboxTemplateRef,omitempty"`
@@ -49,6 +53,14 @@ func SandboxWarmPoolSpec() *SandboxWarmPoolSpecApplyConfiguration {
 // If called multiple times, the Replicas field is set to the value of the last call.
 func (b *SandboxWarmPoolSpecApplyConfiguration) WithReplicas(value int32) *SandboxWarmPoolSpecApplyConfiguration {
 	b.Replicas = &value
+	return b
+}
+
+// WithTTLSecondsAfterCreated sets the TTLSecondsAfterCreated field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the TTLSecondsAfterCreated field is set to the value of the last call.
+func (b *SandboxWarmPoolSpecApplyConfiguration) WithTTLSecondsAfterCreated(value int32) *SandboxWarmPoolSpecApplyConfiguration {
+	b.TTLSecondsAfterCreated = &value
 	return b
 }
 

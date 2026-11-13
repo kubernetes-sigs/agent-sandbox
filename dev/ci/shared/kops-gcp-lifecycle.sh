@@ -46,6 +46,18 @@ UNIQUE_SUFFIX="$(date +%Y%m%d-%H%M%S)"
 
 KOPS_VERSION="${KOPS_VERSION:-v1.36.0}"
 
+# Zones tried, in order, when the control-plane managed instance group reports
+# ZONE_RESOURCE_POOL_EXHAUSTED for the requested machine type. On 2026-11-12
+# both benchmark presubmits lost their c3 control plane this way in
+# us-central1-a (#1921): the group retried the create for 13 minutes, the VM
+# booted 26 minutes after `kops update`, and `kops validate` had already given
+# up. c3-standard-8/22 and n2 are offered in all four us-central1 zones.
+KOPS_FALLBACK_ZONES="${KOPS_FALLBACK_ZONES:-us-central1-b us-central1-c us-central1-f}"
+# Seconds to watch the control-plane group for a capacity error after
+# `kops update` before handing over to `kops validate`. The first
+# ZONE_RESOURCE_POOL_EXHAUSTED error in the 11-12 runs arrived after 5 minutes.
+KOPS_CAPACITY_WATCH_SECONDS="${KOPS_CAPACITY_WATCH_SECONDS:-480}"
+
 # kops_go_install retries `go install` so a transient checksum-database or
 # module-proxy error does not fail a 30-minute lane before a cluster exists.
 # Compiling kOps verifies a few hundred modules against sum.golang.org, and
@@ -163,6 +175,8 @@ kops_apply_and_validate() {
   echo "Applying cluster configuration..."
   kops update cluster --name "${CLUSTER_NAME}" --yes
 
+  kops_relocate_on_capacity_exhaustion
+
   echo "Exporting kubeconfig..."
   kops export kubeconfig --name "${CLUSTER_NAME}" --admin
 
@@ -189,7 +203,8 @@ kops_validate_cluster() {
 kops_capture_igm_diagnostics() {
   local out_dir="${ARTIFACTS:-.}"
   mkdir -p "${out_dir}"
-  local igm="a-control-plane-${ZONE}-${CLUSTER_NAME}"
+  local igm
+  igm="$(kops_control_plane_igm_name)"
   local out_file="${out_dir}/control-plane-igm-diagnostics.log"
   echo "Saving managed instance group diagnostics to ${out_file}..."
   {
@@ -205,9 +220,99 @@ kops_capture_igm_diagnostics() {
     echo
     echo "== failed GCE operations in ${PROJECT_ID} (newest first) =="
     gcloud compute operations list --project="${PROJECT_ID}" \
-      --filter="error:*" --sort-by="~insertTime" --limit=50 \
+      --filter="httpErrorStatusCode>=400" --sort-by="~insertTime" --limit=50 \
       --format="table(insertTime,operationType,targetLink.basename(),error.errors[].code,error.errors[].message)"
   } > "${out_file}" 2>&1 || true
+}
+
+# kOps names a managed instance group after the zone's last component, the
+# instance group, and the cluster (NameForInstanceGroupManager in
+# upup/pkg/fi/cloudup/gce), so the control-plane group in us-central1-b is
+# b-control-plane-us-central1-b-<cluster>. Deriving the prefix from ZONE keeps
+# every lookup pointed at the group that exists after a zone move.
+kops_control_plane_igm_name() {
+  echo "${ZONE##*-}-control-plane-${ZONE}-${CLUSTER_NAME}"
+}
+
+# Prints the error codes the control-plane managed instance group has
+# recorded for its current instance create attempts, one per line.
+kops_control_plane_igm_error_codes() {
+  gcloud compute instance-groups managed list-errors \
+    "$(kops_control_plane_igm_name)" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --format="value(error.code)" 2>/dev/null || true
+}
+
+# Succeeds once the control-plane group has a RUNNING instance with no
+# pending action.
+kops_control_plane_running() {
+  local status
+  status=$(gcloud compute instance-groups managed list-instances \
+    "$(kops_control_plane_igm_name)" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --format="value(instanceStatus,currentAction)" 2>/dev/null | head -n1 || true)
+  [[ "${status}" == "RUNNING"$'\t'"NONE" ]]
+}
+
+# Watches the control-plane group for up to KOPS_CAPACITY_WATCH_SECONDS.
+# Returns 1 as soon as the group reports ZONE_RESOURCE_POOL_EXHAUSTED, 0 when
+# the instance is running or the watch expires without a capacity error (any
+# other delay is left to `kops validate` and its diagnostics).
+kops_watch_control_plane_capacity() {
+  local deadline=$(( $(date +%s) + KOPS_CAPACITY_WATCH_SECONDS ))
+  echo "Watching control-plane capacity in ${ZONE} for up to ${KOPS_CAPACITY_WATCH_SECONDS}s..."
+  while (( $(date +%s) < deadline )); do
+    if kops_control_plane_running; then
+      echo "Control-plane instance is running in ${ZONE}."
+      return 0
+    fi
+    if kops_control_plane_igm_error_codes | grep -q "^ZONE_RESOURCE_POOL_EXHAUSTED"; then
+      echo "Control-plane group in ${ZONE} reports ZONE_RESOURCE_POOL_EXHAUSTED."
+      return 1
+    fi
+    sleep 20
+  done
+  echo "No capacity error from the control-plane group within ${KOPS_CAPACITY_WATCH_SECONDS}s; continuing to validation."
+  return 0
+}
+
+# Recreates the cluster in another zone from its own exported spec. Every
+# zone-bound name in the spec (subnet, instance groups, etcd members) embeds
+# the zone string, so one substitution moves all of them together. The
+# cluster name and state store are unchanged, so cleanup still finds it.
+kops_move_cluster_to_zone() {
+  local new_zone="$1"
+  local spec="${WORKDIR}/cluster-${new_zone}.yaml"
+  echo "Recreating ${CLUSTER_NAME} in ${new_zone} (control-plane capacity exhausted in ${ZONE})..."
+  {
+    kops get cluster --name "${CLUSTER_NAME}" -o yaml
+    echo "---"
+    kops get instancegroups --name "${CLUSTER_NAME}" -o yaml
+  } | sed "s/${ZONE}/${new_zone}/g" > "${spec}"
+  kops delete cluster --name "${CLUSTER_NAME}" --yes
+  kops create -f "${spec}"
+  ZONE="${new_zone}"
+  kops update cluster --name "${CLUSTER_NAME}" --yes
+}
+
+# After `kops update`, moves the cluster through KOPS_FALLBACK_ZONES while
+# the current zone cannot place the control plane. Falls through to
+# validation (which captures the group's errors) when every zone is
+# exhausted, so the failure is still reported with its cause.
+kops_relocate_on_capacity_exhaustion() {
+  local zone
+  # shellcheck disable=SC2086  # word-split the space-separated zone list
+  for zone in ${KOPS_FALLBACK_ZONES}; do
+    if kops_watch_control_plane_capacity; then
+      return 0
+    fi
+    if [[ "${zone}" == "${ZONE}" ]]; then
+      continue
+    fi
+    kops_move_cluster_to_zone "${zone}"
+  done
+  kops_watch_control_plane_capacity || \
+    echo "Control-plane capacity exhausted in every zone tried; leaving the last attempt to validation."
 }
 
 kops_capture_cp_serial_port() {
@@ -216,7 +321,7 @@ kops_capture_cp_serial_port() {
   mkdir -p "${out_dir}"
   local cp_instance
   cp_instance=$(gcloud compute instance-groups managed list-instances \
-    "a-control-plane-${ZONE}-${CLUSTER_NAME}" \
+    "$(kops_control_plane_igm_name)" \
     --zone="${ZONE}" --project="${PROJECT_ID}" \
     --format="value(instance.basename())" 2>/dev/null | head -n1 || true)
   if [[ -z "${cp_instance}" ]]; then

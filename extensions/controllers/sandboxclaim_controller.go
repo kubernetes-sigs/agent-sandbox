@@ -1365,7 +1365,7 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 		// claim would bind to a Pod that is going away. Keep it queued, since a
 		// Pod that is recreated makes the member usable again.
 		if isSandboxPodEnding(adopted) {
-			logger.V(1).Info("Skipping candidate whose Pod is ending", "sandbox", adopted.Name, "warmPool", claim.Spec.WarmPoolRef.Name)
+			logger.V(4).Info("Skipping candidate whose Pod is ending", "sandbox", adopted.Name, "warmPool", claim.Spec.WarmPoolRef.Name)
 			skipped = append(skipped, adoptedKey)
 			continue
 		}

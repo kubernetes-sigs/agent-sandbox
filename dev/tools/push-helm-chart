@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Packages the helm/ chart and optionally pushes it as an OCI artifact.
+
+The chart is packaged with the helm binary pinned in dev/tools/go.mod. When
+`--git-tag` is supplied (as in cloudbuild.yaml), the chart's `version` and
+`appVersion` are derived from the git tag so published chart versions follow
+release tags. With `--push`, the resulting .tgz is pushed to
+`${IMAGE_PREFIX}/charts` as an OCI artifact.
+
+Without `--push` the script only packages the chart into a temporary directory
+to validate it, so it is safe to run locally at any time.
+"""
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+import tempfile
+
+from shared import utils
+
+# Where published agent-sandbox artifacts live in the staging registry.
+DEFAULT_IMAGE_PREFIX = "us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox"
+
+CHART_NAME_RE = re.compile(r"^name:\s*(.+?)\s*$", re.MULTILINE)
+CHART_VERSION_RE = re.compile(
+    r"^version:\s*[\"']?(\d+\.\d+\.\d+)[\"']?\s*$", re.MULTILINE)
+PROW_DATE_PREFIX_RE = re.compile(r"^v\d{8}-")
+SEMVER_TAG_RE = re.compile(r"^v?(\d+\.\d+\.\d+(?:[-.]?rc\.?\d+)?(?:\.post\d+)?)$")
+
+
+def chart_info(chart_yaml):
+    """Parses (name, version) from Chart.yaml contents."""
+    name = CHART_NAME_RE.search(chart_yaml)
+    version = CHART_VERSION_RE.search(chart_yaml)
+    if not name:
+        raise ValueError("Chart.yaml has no 'name:' field")
+    if not version:
+        raise ValueError("Chart.yaml has no 'version: X.Y.Z' field")
+    return name.group(1).strip(), version.group(1)
+
+
+def resolve_versions(default_chart_version, git_tag=None):
+    """Returns (chart_version, app_version) for packaging.
+
+    When git_tag is omitted, returns (default_chart_version, None) so local
+    packaging uses Chart.yaml as-is. When git_tag is a release or RC tag
+    (with or without Prow's `vYYYYMMDD-` prefix), derives a SemVer
+    chart_version (`X.Y.Z...`) and `v`-prefixed app_version (`vX.Y.Z...`)
+    to match promoted registry.k8s.io images. Non-release tags (such as
+    `git describe` postsubmit tags) keep the full tag as app_version so it
+    matches the staging image tag, with a `0.0.0-<tag>` chart_version.
+    """
+    if not git_tag:
+        return default_chart_version, None
+
+    stripped = PROW_DATE_PREFIX_RE.sub("", git_tag.strip())
+    match = SEMVER_TAG_RE.match(stripped)
+    if match:
+        semver_part = match.group(1)
+        return semver_part, f"v{semver_part}"
+
+    return f"0.0.0-{git_tag.strip()}", git_tag.strip()
+
+
+def registry_host(image_prefix):
+    """The registry host of an image prefix (its first path component)."""
+    return image_prefix.split("/", 1)[0]
+
+
+def oci_charts_repo(image_prefix):
+    """The OCI repository URI passed to `helm push`.
+
+    helm push appends "/${chart_name}:${version}" to this reference.
+    """
+    return f"oci://{image_prefix}/charts"
+
+
+def go_tool_env():
+    """Process environment for `go tool` invocations.
+
+    Defaults GOTOOLCHAIN to auto so helm can be built under
+    gcb-docker-gcloud even when its system Go is older than the version the
+    dev/tools module requires.
+    """
+    env = os.environ.copy()
+    env["GOTOOLCHAIN"] = env.get("GOTOOLCHAIN") or "auto"
+    return env
+
+
+def package_chart(repo_root, chart_dir, out_dir, chart_version=None, app_version=None):
+    """Packages the chart into out_dir."""
+    cmd = ["helm", "package", chart_dir, "--destination", out_dir]
+    if chart_version:
+        cmd.extend(["--version", chart_version])
+    if app_version:
+        cmd.extend(["--app-version", app_version])
+    subprocess.check_call(
+        utils.go_tool_args(*cmd),
+        cwd=repo_root, env=go_tool_env(),
+    )
+
+
+def configure_gcloud_for_registry(image_prefix):
+    """Authenticates the Docker credential helper for the artifact registry."""
+    subprocess.check_call(
+        ["gcloud", "auth", "configure-docker",
+         registry_host(image_prefix), "--quiet"],
+    )
+
+
+def push_chart(repo_root, out_dir, image_prefix, chart_name, chart_version):
+    """Pushes the packaged .tgz as an OCI artifact."""
+    tgz = os.path.join(out_dir, f"{chart_name}-{chart_version}.tgz")
+    subprocess.check_call(
+        utils.go_tool_args(
+            "helm", "push", tgz, oci_charts_repo(image_prefix)),
+        cwd=repo_root, env=go_tool_env(),
+    )
+
+
+def main(args):
+    repo_root = utils.get_repo_root()
+    chart_dir = os.path.join(repo_root, "helm")
+    chart_path = os.path.join(chart_dir, "Chart.yaml")
+    if not os.path.isfile(chart_path):
+        sys.exit(f"ERROR: {chart_path} does not exist.")
+
+    try:
+        with open(chart_path) as f:
+            chart_name, default_version = chart_info(f.read())
+    except ValueError as exc:
+        sys.exit(f"ERROR: {exc}")
+
+    chart_version, app_version = resolve_versions(default_version, args.git_tag)
+    image_prefix = (args.image_prefix or DEFAULT_IMAGE_PREFIX).rstrip("/")
+    oci_ref = f"{oci_charts_repo(image_prefix)}/{chart_name}:{chart_version}"
+
+    # Package into a throwaway directory so the worktree stays clean whether
+    # or not the push fails partway through.
+    with tempfile.TemporaryDirectory(prefix="agent-sandbox-chart-") as out_dir:
+        print(f"packaging chart {chart_name}-{chart_version}...")
+        package_chart(repo_root, chart_dir, out_dir,
+                      chart_version=chart_version, app_version=app_version)
+
+        if not args.push:
+            print(
+                f"dry run: validated package {chart_name}-{chart_version}.tgz "
+                f"(temp dir cleaned up); not pushing {oci_ref}."
+            )
+            return 0
+
+        print(f"authenticating docker for {registry_host(image_prefix)}...")
+        configure_gcloud_for_registry(image_prefix)
+        push_chart(repo_root, out_dir, image_prefix, chart_name, chart_version)
+        print(f"pushed chart to {oci_ref}")
+
+    return 0
+
+
+def make_parser():
+    """Argument parser for push-helm-chart."""
+    parser = argparse.ArgumentParser(
+        description="Package and optionally push the helm chart as an OCI artifact")
+    parser.add_argument(
+        "--image-prefix",
+        dest="image_prefix",
+        type=str,
+        default=os.getenv("IMAGE_PREFIX"),
+        help=f"Registry path under which the chart is stored "
+             f"(defaults to {DEFAULT_IMAGE_PREFIX}; a trailing slash is ignored).")
+    parser.add_argument(
+        "--git-tag",
+        dest="git_tag",
+        type=str,
+        default=os.getenv("GIT_TAG"),
+        help="Git/Prow tag (e.g. vYYYYMMDD-v0.3.10 or v0.3.10) used to stamp "
+             "the chart version and appVersion. Falls back to Chart.yaml version.")
+    parser.add_argument(
+        "--push",
+        dest="push",
+        action="store_true",
+        default=os.getenv("PUSH_CHART", "false").lower() in ("1", "true", "yes", "on"),
+        help="Push the packaged chart to --image-prefix instead of only packaging "
+             "it. Also read from the PUSH_CHART environment variable.")
+    return parser
+
+
+if __name__ == "__main__":
+    sys.exit(main(make_parser().parse_args()))

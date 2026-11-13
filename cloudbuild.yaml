@@ -12,6 +12,15 @@ steps:
       - "--image-prefix=${_IMAGE_PREFIX}/"
       - "--extra-image-tag=${_GIT_TAG}-${_CONFIG}"
       - "--extra-image-tag=latest-${_CONFIG}"
+  # This step packages the helm chart and pushes it as an OCI artifact to the
+  # staging Artifact Registry, alongside the container images above.
+  - name: "gcr.io/k8s-staging-test-infra/gcb-docker-gcloud"
+    entrypoint: "python3"
+    args:
+      - "./dev/tools/push-helm-chart"
+      - "--image-prefix=${_IMAGE_PREFIX}/"
+      - "--git-tag=${_GIT_TAG}"
+      - "--push"
 
 options:
   enableStructuredLogging: true

@@ -114,6 +114,9 @@ def test_main_passes_claim_name_and_ttl_to_sdk():
         ("--leading-trailing--", "leading-trailing"),
         ("", ""),
         ("***", ""),
+        # Truncation must not leave a trailing hyphen: the SDK rejects
+        # claim names that do not end with an alphanumeric.
+        ("a" * 59 + "-b", "a" * 59),
     ],
 )
 def test_sanitize_claim_name(raw, expected):

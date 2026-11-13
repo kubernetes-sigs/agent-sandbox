@@ -34,6 +34,14 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # GitHub withholds repository secrets from fork pull requests (and from
+    # Dependabot), so CI_SANDBOX_KUBECONFIG would be empty there and the job
+    # could not reach the cluster. Restrict the job to same-repository events.
+    # Fork PRs need a separate trust mechanism (e.g. a maintainer-triggered
+    # workflow_dispatch run); that is out of scope for this example.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     steps:
     - uses: actions/checkout@v4
 
@@ -48,6 +56,10 @@ jobs:
       env:
         KUBECONFIG_DATA: ${{ secrets.CI_SANDBOX_KUBECONFIG }}
       run: |
+        if [ -z "$KUBECONFIG_DATA" ]; then
+          echo "::error::CI_SANDBOX_KUBECONFIG secret is not available"
+          exit 1
+        fi
         mkdir -p ~/.kube
         printf '%s' "$KUBECONFIG_DATA" > ~/.kube/config
 
@@ -61,9 +73,14 @@ jobs:
           --timeout 1800 \
           -- \
           "git clone https://github.com/$(echo "$GITHUB_REPOSITORY") /workspace/repo" \
-          "cd /workspace/repo && git checkout $GITHUB_SHA" \
+          "cd /workspace/repo && git fetch origin $GITHUB_REF && git checkout FETCH_HEAD" \
           "cd /workspace/repo && make build" \
           "cd /workspace/repo && make test"
-      # Replace the git clone/checkout commands above with whatever fetches
-      # your code (a checkout action + workspace upload also works), and the
-      # make targets with your project's real build/test commands.
+      # On pull_request events GITHUB_SHA is the synthetic merge commit under
+      # refs/pull/<n>/merge, which a plain clone does not contain — checking
+      # it out directly fails. GITHUB_REF names the right ref for every event
+      # (refs/pull/<n>/merge for PRs, refs/heads/<branch> for pushes), so
+      # fetching it and checking out FETCH_HEAD works for both.
+      # Replace the git commands above with whatever fetches your code (a
+      # checkout action + workspace upload also works), and the make targets
+      # with your project's real build/test commands.

@@ -54,6 +54,9 @@ spec:
             memory: "1Gi"
             ephemeral-storage: "2Gi"
           limits:
+            # Cap memory: requests alone only affect scheduling, and CI jobs
+            # run untrusted code that could otherwise exhaust the node.
+            memory: "1Gi"
             ephemeral-storage: "5Gi"
         volumeMounts:
         - name: workspace

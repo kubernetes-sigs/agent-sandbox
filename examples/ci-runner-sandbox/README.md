@@ -3,8 +3,11 @@
 Run each CI job in its own Agent Sandbox. Instead of executing untrusted
 pull-request code on a shared, long-lived runner, the CI system claims a
 pre-warmed sandbox per job, runs the build and test commands inside it,
-streams the output back to the CI log, and destroys the sandbox when the job
-ends. Every job gets a clean environment, a hard resource ceiling, and
+echoes the output back to the CI log as each command finishes, and destroys
+the sandbox when the job ends. (Output is per-command, not live-streamed:
+the legacy runtime this image uses has no streaming exec. Use the sandboxd
+runtime — see [sandboxd-sandbox](../sandboxd-sandbox) — if you need output
+while a long build is still running.) Every job gets a clean environment, a hard resource ceiling, and
 isolation from other jobs — and a crashed CI job cannot leak a sandbox,
 because the claim carries a shutdown time the controller enforces.
 

@@ -21,7 +21,7 @@ claim carries a shutdown time so the controller reclaims it even when this
 process dies without cleanup.
 
 Usage:
-    python run_ci_job.py [--namespace NS] [--timeout SECS] -- make build "make test"
+    python run_ci_job.py [--namespace NS] [--timeout SECS] -- "make build" "make test"
 """
 
 import argparse
@@ -55,7 +55,9 @@ def sanitize_claim_name(raw: str) -> str:
     fit the "ci-" prefix within Kubernetes' 63-character limit.
     """
     cleaned = re.sub(r"[^a-z0-9-]+", "-", raw.lower()).strip("-")
-    return cleaned[:60]
+    # Strip again after truncation: a cut can land on a hyphen, and the SDK's
+    # DNS-1123 validation rejects names that end with one.
+    return cleaned[:60].rstrip("-")
 
 
 def build_claim_name(run_id: str) -> str:

@@ -846,3 +846,223 @@ Whether to enable OpenTelemetry tracing.
 
 Service name used for traces.
 
+<a id="k8s_agent_sandbox.exceptions"></a>
+
+## k8s\_agent\_sandbox.exceptions
+
+<a id="k8s_agent_sandbox.exceptions.SandboxError"></a>
+
+### SandboxError Objects
+
+```python
+class SandboxError(RuntimeError)
+```
+
+Base class for all sandbox-related errors.
+
+<a id="k8s_agent_sandbox.exceptions.SandboxResponseTooLargeError"></a>
+
+### SandboxResponseTooLargeError Objects
+
+```python
+class SandboxResponseTooLargeError(SandboxError)
+```
+
+Raised when a file download exceeds its configured byte limit.
+
+<a id="k8s_agent_sandbox.exceptions.SandboxNotReadyError"></a>
+
+### SandboxNotReadyError Objects
+
+```python
+class SandboxNotReadyError(SandboxError)
+```
+
+Raised when the sandbox is not ready for communication.
+
+<a id="k8s_agent_sandbox.exceptions.SandboxNoServiceError"></a>
+
+### SandboxNoServiceError Objects
+
+```python
+class SandboxNoServiceError(SandboxError)
+```
+
+Raised in ``in-cluster-service`` mode if the Sandbox has no Service FQDN.
+
+<a id="k8s_agent_sandbox.exceptions.SandboxNotFoundError"></a>
+
+### SandboxNotFoundError Objects
+
+```python
+class SandboxNotFoundError(SandboxError)
+```
+
+Raised when the sandbox or sandbox claim cannot be found or was deleted.
+
+<a id="k8s_agent_sandbox.exceptions.SnapshotNotFoundError"></a>
+
+### SnapshotNotFoundError Objects
+
+```python
+class SnapshotNotFoundError(SandboxError)
+```
+
+Raised when the requested snapshot does not exist.
+
+<a id="k8s_agent_sandbox.exceptions.SandboxTemplateNotFoundError"></a>
+
+### SandboxTemplateNotFoundError Objects
+
+```python
+class SandboxTemplateNotFoundError(SandboxError)
+```
+
+Raised when the requested sandbox template does not exist.
+
+<a id="k8s_agent_sandbox.exceptions.SandboxWarmPoolNotFoundError"></a>
+
+### SandboxWarmPoolNotFoundError Objects
+
+```python
+class SandboxWarmPoolNotFoundError(SandboxError)
+```
+
+Raised when the requested sandbox warm pool does not exist.
+
+<a id="k8s_agent_sandbox.exceptions.SandboxPortForwardError"></a>
+
+### SandboxPortForwardError Objects
+
+```python
+class SandboxPortForwardError(SandboxError)
+```
+
+Raised when the port-forward process crashes.
+
+<a id="k8s_agent_sandbox.exceptions.SandboxMetadataError"></a>
+
+### SandboxMetadataError Objects
+
+```python
+class SandboxMetadataError(SandboxError)
+```
+
+Raised when the sandbox object is missing expected metadata.
+
+<a id="k8s_agent_sandbox.exceptions.SandboxRequestError"></a>
+
+### SandboxRequestError Objects
+
+```python
+class SandboxRequestError(SandboxError)
+```
+
+Raised when an HTTP request to the sandbox fails.
+
+**Attributes**:
+
+- `status_code` - The HTTP status code, if available.
+- `response` - The raw response object (``requests.Response`` or
+  ``httpx.Response``), if available.
+
+<a id="k8s_agent_sandbox.exceptions.SandboxClaimFailedError"></a>
+
+### SandboxClaimFailedError Objects
+
+```python
+class SandboxClaimFailedError(SandboxError)
+```
+
+The SandboxClaim reported a terminal Ready=False reason.
+
+The claim controller will not retry these (e.g. InvalidMetadata,
+VolumeClaimTemplatesError, ClaimExpired); the claim will not become
+ready without user action, so ready-waits raise instead of waiting
+out the timeout.
+
+<a id="k8s_agent_sandbox.exceptions.SandboxTimeoutError"></a>
+
+### SandboxTimeoutError Objects
+
+```python
+class SandboxTimeoutError(SandboxError, TimeoutError)
+```
+
+Raised when an operation did not complete within its deadline.
+
+Also a builtin ``TimeoutError`` so callers written against the previous
+behaviour keep working. That makes it an ``OSError`` too, by way of
+``TimeoutError``.
+
+<a id="k8s_agent_sandbox.exceptions.SandboxClosedError"></a>
+
+### SandboxClosedError Objects
+
+```python
+class SandboxClosedError(SandboxError)
+```
+
+Raised when an operation is attempted on a handle that was closed.
+
+<a id="k8s_agent_sandbox.exceptions.SandboxConnectionError"></a>
+
+### SandboxConnectionError Objects
+
+```python
+class SandboxConnectionError(SandboxError)
+```
+
+Raised when the sandboxd transport fails outside a timeout or cancellation.
+
+**Attributes**:
+
+- `kind` - Fixed classification of the failure, one of
+  ``SANDBOX_CONNECTION_ERROR_KINDS``.
+- `detail` - A truncated diagnostic, or ``None``. Never a raw response
+  object, and never the untruncated server text.
+
+<a id="k8s_agent_sandbox.exceptions.SandboxdRpcError"></a>
+
+### SandboxdRpcError Objects
+
+```python
+class SandboxdRpcError(SandboxError)
+```
+
+Raised for a sandboxd gRPC status that is not a timeout or a transport failure.
+
+**Attributes**:
+
+- `code` - The gRPC status name in lowercase snake_case, for example
+  ``"resource_exhausted"``, or ``"unknown"`` for an unrecognized
+  status. Never the raw status details, which go in ``detail``.
+- `detail` - A truncated diagnostic, or ``None``.
+
+<a id="k8s_agent_sandbox.exceptions.SandboxdProcessNotFoundError"></a>
+
+### SandboxdProcessNotFoundError Objects
+
+```python
+class SandboxdProcessNotFoundError(SandboxdRpcError, LookupError)
+```
+
+Raised when sandboxd has no record of the process being addressed.
+
+Also a builtin ``LookupError``, which is what ``signal()`` raised for a
+``NOT_FOUND`` status before this class existed.
+
+<a id="k8s_agent_sandbox.exceptions.SandboxdPermissionError"></a>
+
+### SandboxdPermissionError Objects
+
+```python
+class SandboxdPermissionError(SandboxdRpcError, PermissionError)
+```
+
+Raised when sandboxd refuses an operation on a path or process.
+
+Also a builtin ``PermissionError``, which is what ``signal()`` raised for a
+``PERMISSION_DENIED`` status before this class existed. That makes it an
+``OSError`` too.
+

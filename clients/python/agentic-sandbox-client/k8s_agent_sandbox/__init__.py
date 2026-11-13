@@ -19,6 +19,12 @@ from .models import SandboxdInClusterConnectionConfig, SandboxdRouterTunnelConne
 from .metrics_utils import get_metrics, print_metrics
 from .exceptions import (
     SandboxError,
+    SandboxClosedError,
+    SandboxConnectionError,
+    SandboxdPermissionError,
+    SandboxdProcessNotFoundError,
+    SandboxdRpcError,
+    SandboxTimeoutError,
     SandboxNotFoundError,
     SandboxTemplateNotFoundError,
     SandboxWarmPoolNotFoundError,

@@ -2307,6 +2307,23 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		return sb
 	}
 
+	createFinishedWarmPoolSandbox := func(name string, creationTime metav1.Time) *sandboxv1beta1.Sandbox {
+		sb := createWarmPoolSandbox(name, creationTime, false)
+		sb.Status.Conditions = []metav1.Condition{
+			{
+				Type:   string(sandboxv1beta1.SandboxConditionReady),
+				Status: metav1.ConditionFalse,
+				Reason: sandboxv1beta1.SandboxReasonPodFailed,
+			},
+			{
+				Type:   string(sandboxv1beta1.SandboxConditionFinished),
+				Status: metav1.ConditionTrue,
+				Reason: sandboxv1beta1.SandboxReasonPodFailed,
+			},
+		}
+		return sb
+	}
+
 	// matchingBlueprintHash is the blueprint hash the warm pool controller would stamp on a
 	// fresh sandbox for this template; a candidate carrying it is considered current under Recreate.
 	matchingBlueprintHash, hashErr := computeSandboxBlueprintHash(template)
@@ -2418,6 +2435,28 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectSandboxAdoption:   true,
 			expectedAdoptedSandbox:  "not-ready-1",
 			expectNewSandboxCreated: false,
+		},
+		{
+			name: "skips finished warm pool sandbox and adopts next non-ready candidate",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				createFinishedWarmPoolSandbox("finished-sb", metav1.Time{Time: metav1.Now().Add(-2 * time.Hour)}),
+				createWarmPoolSandbox("not-ready-1", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, false),
+			},
+			expectSandboxAdoption:   true,
+			expectedAdoptedSandbox:  "not-ready-1",
+			expectNewSandboxCreated: false,
+		},
+		{
+			name: "creates new sandbox when only finished warm pool sandboxes exist",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				createFinishedWarmPoolSandbox("finished-sb", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}),
+			},
+			expectSandboxAdoption:   false,
+			expectNewSandboxCreated: true,
 		},
 		{
 			name: "falls through to cold creation after grace expires when warm candidates lack PodIPs",

@@ -203,7 +203,8 @@ kops_validate_cluster() {
 kops_capture_igm_diagnostics() {
   local out_dir="${ARTIFACTS:-.}"
   mkdir -p "${out_dir}"
-  local igm="$(kops_control_plane_igm_name)"
+  local igm
+  igm="$(kops_control_plane_igm_name)"
   local out_file="${out_dir}/control-plane-igm-diagnostics.log"
   echo "Saving managed instance group diagnostics to ${out_file}..."
   {

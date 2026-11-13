@@ -25,7 +25,8 @@ helm install agent-sandbox \
   oci://us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/charts/agent-sandbox \
   --version <version> \
   --namespace agent-sandbox-system \
-  --create-namespace
+  --create-namespace \
+  --set image.repository=us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/agent-sandbox-controller
 ```
 
 ### Install with extensions enabled

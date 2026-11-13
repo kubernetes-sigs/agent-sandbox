@@ -73,9 +73,15 @@ class TestResolveVersions(unittest.TestCase):
             push_helm_chart.resolve_versions("0.1.2", "v0.3.10"),
         )
 
+    def test_prow_rc_release_tag(self):
+        self.assertEqual(
+            ("0.3.10-rc.1", "v0.3.10-rc.1"),
+            push_helm_chart.resolve_versions("0.1.2", "v20261102-v0.3.10-rc.1"),
+        )
+
     def test_prow_postsubmit_git_describe_tag(self):
         self.assertEqual(
-            ("0.3.10-5-g2cc28d6", "v0.3.10-5-g2cc28d6"),
+            ("0.0.0-v20261102-v0.3.10-5-g2cc28d6", "v20261102-v0.3.10-5-g2cc28d6"),
             push_helm_chart.resolve_versions("0.1.2", "v20261102-v0.3.10-5-g2cc28d6"),
         )
 

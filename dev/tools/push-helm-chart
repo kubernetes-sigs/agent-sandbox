@@ -21,8 +21,8 @@ The chart is packaged with the helm binary pinned in dev/tools/go.mod. When
 release tags. With `--push`, the resulting .tgz is pushed to
 `${IMAGE_PREFIX}/charts` as an OCI artifact.
 
-Without `--push` the script only packages the chart and reports the artifact
-path, so it is safe to run locally at any time.
+Without `--push` the script only packages the chart into a temporary directory
+to validate it, so it is safe to run locally at any time.
 """
 
 import argparse
@@ -41,7 +41,7 @@ CHART_NAME_RE = re.compile(r"^name:\s*(.+?)\s*$", re.MULTILINE)
 CHART_VERSION_RE = re.compile(
     r"^version:\s*[\"']?(\d+\.\d+\.\d+)[\"']?\s*$", re.MULTILINE)
 PROW_DATE_PREFIX_RE = re.compile(r"^v\d{8}-")
-SEMVER_TAG_RE = re.compile(r"^v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$")
+SEMVER_TAG_RE = re.compile(r"^v?(\d+\.\d+\.\d+(?:[-.]?rc\.?\d+)?(?:\.post\d+)?)$")
 
 
 def chart_info(chart_yaml):
@@ -59,10 +59,12 @@ def resolve_versions(default_chart_version, git_tag=None):
     """Returns (chart_version, app_version) for packaging.
 
     When git_tag is omitted, returns (default_chart_version, None) so local
-    packaging uses Chart.yaml as-is. When git_tag is set (e.g. Prow's
-    `vYYYYMMDD-vX.Y.Z` or `vX.Y.Z`), strips any `vYYYYMMDD-` build-date prefix
-    to derive a strict SemVer chart_version (`X.Y.Z...`) and a `v`-prefixed
-    controller image app_version (`vX.Y.Z...`).
+    packaging uses Chart.yaml as-is. When git_tag is a release or RC tag
+    (with or without Prow's `vYYYYMMDD-` prefix), derives a SemVer
+    chart_version (`X.Y.Z...`) and `v`-prefixed app_version (`vX.Y.Z...`)
+    to match promoted registry.k8s.io images. Non-release tags (such as
+    `git describe` postsubmit tags) keep the full tag as app_version so it
+    matches the staging image tag, with a `0.0.0-<tag>` chart_version.
     """
     if not git_tag:
         return default_chart_version, None
@@ -70,8 +72,8 @@ def resolve_versions(default_chart_version, git_tag=None):
     stripped = PROW_DATE_PREFIX_RE.sub("", git_tag.strip())
     match = SEMVER_TAG_RE.match(stripped)
     if match:
-        semver_Part = match.group(1)
-        return semver_Part, f"v{semver_Part}"
+        semver_part = match.group(1)
+        return semver_part, f"v{semver_part}"
 
     return f"0.0.0-{git_tag.strip()}", git_tag.strip()
 
@@ -155,10 +157,12 @@ def main(args):
         print(f"packaging chart {chart_name}-{chart_version}...")
         package_chart(repo_root, chart_dir, out_dir,
                       chart_version=chart_version, app_version=app_version)
-        print(f"packaged chart: {chart_name}-{chart_version}.tgz")
 
         if not args.push:
-            print(f"dry run: not pushing {oci_ref}.")
+            print(
+                f"dry run: validated package {chart_name}-{chart_version}.tgz "
+                f"(temp dir cleaned up); not pushing {oci_ref}."
+            )
             return 0
 
         print(f"authenticating docker for {registry_host(image_prefix)}...")

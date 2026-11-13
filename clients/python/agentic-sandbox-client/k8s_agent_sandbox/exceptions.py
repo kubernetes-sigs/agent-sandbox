@@ -122,6 +122,16 @@ class SandboxConnectionError(SandboxError):
         self.kind = kind
         self.detail = detail
 
+    def __reduce__(self) -> tuple[Any, ...]:
+        """Rebuild the exception with its classification when unpickled.
+
+        ``BaseException`` reconstructs an exception by calling the class with
+        ``args``, which holds the message alone, so the required ``kind``
+        argument would be missing. ``ProcessPoolExecutor`` goes through here
+        to re-raise a worker's error in the parent process.
+        """
+        return (type(self), (str(self), self.kind, self.detail))
+
 
 class SandboxdRpcError(SandboxError):
     """Raised for a sandboxd gRPC status that is not a timeout or a transport failure.
@@ -142,6 +152,14 @@ class SandboxdRpcError(SandboxError):
         super().__init__(message)
         self.code = code
         self.detail = detail
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        """Rebuild the exception with its status code when unpickled.
+
+        See :meth:`SandboxConnectionError.__reduce__`. ``type(self)`` keeps
+        the subclasses rebuilding as themselves.
+        """
+        return (type(self), (str(self), self.code, self.detail))
 
 
 class SandboxdProcessNotFoundError(SandboxdRpcError, LookupError):

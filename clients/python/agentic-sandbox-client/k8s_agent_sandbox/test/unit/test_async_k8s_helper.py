@@ -457,19 +457,22 @@ class TestAsyncK8sHelperWaitForSandboxReady(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ip, "10.0.0.2")
 
     async def test_patch_sandbox_operating_mode(self):
-        self.helper.custom_objects_api.patch_namespaced_custom_object = AsyncMock()
+        async with client.ApiClient() as api:
+            helper = AsyncK8sHelper(api_client=api)
+            response = MagicMock(status=200, reason="OK", headers={"Content-Type": "application/json"})
+            response.read = AsyncMock(return_value=b"{}")
+            with patch.object(api.rest_client.pool_manager, "request", new=AsyncMock(return_value=response)) as request:
+                await helper.patch_sandbox_operating_mode("test-sandbox", "default", "Suspended", "original")
 
-        await self.helper.patch_sandbox_operating_mode("test-sandbox", "default", "Suspended", "original")
-
-        self.helper.custom_objects_api.patch_namespaced_custom_object.assert_awaited_once_with(
-            group=SANDBOX_API_GROUP, version=SANDBOX_API_VERSION, namespace="default",
-            plural=SANDBOX_PLURAL_NAME, name="test-sandbox",
-            body=[
-                {"op": "test", "path": "/metadata/uid", "value": "original"},
-                {"op": "add", "path": "/spec/operatingMode", "value": "Suspended"},
-            ],
-            _content_type="application/json-patch+json",
-        )
+                sent = request.call_args.kwargs
+                self.assertEqual(
+                    (sent["headers"]["Content-Type"], json.loads(sent["data"])),
+                    ("application/merge-patch+json", {"metadata": {"uid": "original"}, "spec": {"operatingMode": "Suspended"}}),
+                )
+                request.side_effect = AssertionError("Empty UID reached the transport")
+                for uid in ("", None):
+                    with self.assertRaises(ValueError):
+                        await helper.patch_sandbox_operating_mode("test-sandbox", "default", "Suspended", uid)
 
     async def test_returns_first_pod_ip_when_ready(self):
         async def _async_gen(*args, **kwargs):

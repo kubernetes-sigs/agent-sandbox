@@ -411,17 +411,16 @@ class K8sHelper:
         self, name: str, namespace: str, mode: str, uid: str,
     ) -> dict[str, Any]:
         """Change operating mode only if the named Sandbox still has this UID."""
+        if not uid:
+            raise ValueError("Sandbox UID must not be empty")
+        # The API server rejects UID changes, so this also refuses a replaced Sandbox.
         return cast(dict[str, Any], self.custom_objects_api.patch_namespaced_custom_object(
             group=SANDBOX_API_GROUP,
             version=SANDBOX_API_VERSION,
             namespace=namespace,
             plural=SANDBOX_PLURAL_NAME,
             name=name,
-            body=[
-                {"op": "test", "path": "/metadata/uid", "value": uid},
-                {"op": "add", "path": "/spec/operatingMode", "value": mode},
-            ],
-            _content_type="application/json-patch+json",
+            body={"metadata": {"uid": uid}, "spec": {"operatingMode": mode}},
         ))
 
     def get_sandbox(self, name: str, namespace: str) -> dict[str, Any] | None:

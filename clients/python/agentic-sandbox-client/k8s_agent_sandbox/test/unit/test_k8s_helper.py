@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import os
 import tempfile
 import unittest
@@ -863,19 +864,24 @@ class TestK8sHelperWatchResourceVersion(unittest.TestCase):
         self.assertEqual(ip, "10.0.0.2")
 
     def test_patch_sandbox_operating_mode(self, mock_config, mock_api_cls, mock_core_cls):
-        helper = K8sHelper()
+        from kubernetes.client.api.custom_objects_api import CustomObjectsApi
 
-        helper.patch_sandbox_operating_mode("test-sandbox", "default", "Suspended", "original")
+        with client.ApiClient() as api:
+            helper = K8sHelper(api_client=api)
+            helper.custom_objects_api = CustomObjectsApi(api)
+            response = urllib3.HTTPResponse(body=b"{}", status=200, headers={"Content-Type": "application/json"})
+            with patch.object(api.rest_client.pool_manager, "request", return_value=response) as request:
+                helper.patch_sandbox_operating_mode("test-sandbox", "default", "Suspended", "original")
 
-        mock_api_cls.return_value.patch_namespaced_custom_object.assert_called_once_with(
-            group=SANDBOX_API_GROUP, version=SANDBOX_API_VERSION, namespace="default",
-            plural=SANDBOX_PLURAL_NAME, name="test-sandbox",
-            body=[
-                {"op": "test", "path": "/metadata/uid", "value": "original"},
-                {"op": "add", "path": "/spec/operatingMode", "value": "Suspended"},
-            ],
-            _content_type="application/json-patch+json",
-        )
+                sent = request.call_args.kwargs
+                self.assertEqual(
+                    (sent["headers"]["Content-Type"], json.loads(sent["body"])),
+                    ("application/merge-patch+json", {"metadata": {"uid": "original"}, "spec": {"operatingMode": "Suspended"}}),
+                )
+                request.side_effect = AssertionError("Empty UID reached the transport")
+                for uid in ("", None):
+                    with self.assertRaises(ValueError):
+                        helper.patch_sandbox_operating_mode("test-sandbox", "default", "Suspended", uid)
 
     @staticmethod
     def _ready_event(rv="7"):

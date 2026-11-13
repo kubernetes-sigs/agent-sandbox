@@ -141,6 +141,7 @@ class AsyncSandbox:
             raise RuntimeError("Sandbox connection is closed")
         start = time.monotonic()
         try:
+            # A free lock avoids wait_for's zero-timeout failures and cancellation handling.
             if self._lifecycle_lock.locked():
                 await asyncio.wait_for(self._lifecycle_lock.acquire(), timeout=timeout)
             else:

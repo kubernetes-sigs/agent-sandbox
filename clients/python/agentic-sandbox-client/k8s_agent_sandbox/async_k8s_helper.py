@@ -448,18 +448,18 @@ class AsyncK8sHelper:
         self, name: str, namespace: str, mode: str, uid: str,
     ) -> dict[str, Any]:
         """Change operating mode only if the named Sandbox still has this UID."""
+        if not uid:
+            raise ValueError("Sandbox UID must not be empty")
         await self._ensure_initialized()
-        request_options: dict[str, Any] = {"_content_type": "application/json-patch+json"}
+        # kubernetes_asyncio otherwise sends this dictionary body as JSON Patch.
+        request_options: dict[str, Any] = {"_content_type": "application/merge-patch+json"}
         return cast(dict[str, Any], await self.custom_objects_api.patch_namespaced_custom_object(
             group=SANDBOX_API_GROUP,
             version=SANDBOX_API_VERSION,
             namespace=namespace,
             plural=SANDBOX_PLURAL_NAME,
             name=name,
-            body=[
-                {"op": "test", "path": "/metadata/uid", "value": uid},
-                {"op": "add", "path": "/spec/operatingMode", "value": mode},
-            ],
+            body={"metadata": {"uid": uid}, "spec": {"operatingMode": mode}},
             **request_options,
         ))
 

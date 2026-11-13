@@ -60,6 +60,7 @@ export type {
   SandboxMetadata,
   SandboxStatus,
   StartOptions,
+  SuspendResumeOptions,
   VolumeClaimTemplate,
   WriteOptions,
 } from "./types.js";

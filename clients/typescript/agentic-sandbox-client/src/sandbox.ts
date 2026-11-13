@@ -31,6 +31,7 @@ import {
   CLAIM_API_VERSION,
   CLAIM_PLURAL_NAME,
   CLEANUP_TIMEOUT_MS,
+  DEFAULT_LIFECYCLE_TIMEOUT_MS,
   DEFAULT_MAX_COMMAND_OUTPUT_SIZE,
   DEFAULT_MAX_DOWNLOAD_SIZE,
   DEFAULT_MAX_METADATA_RESPONSE_SIZE,
@@ -38,6 +39,7 @@ import {
   DEFAULT_PORT_FORWARD_READY_TIMEOUT_MS,
   DEFAULT_SANDBOXD_GRPC_PORT,
   DEFAULT_SANDBOXD_REST_PORT,
+  LIFECYCLE_POLL_INTERVAL_MS,
   SANDBOX_API_GROUP,
   SANDBOX_API_VERSION,
   SANDBOX_PLURAL_NAME,
@@ -48,6 +50,8 @@ import {
   SandboxConnectionError,
   SandboxdApiError,
   SandboxError,
+  SandboxMetadataError,
+  SandboxNotFoundError,
   SandboxTimeoutError,
 } from "./exceptions.js";
 import { SandboxFiles } from "./files.js";
@@ -85,6 +89,7 @@ import type {
   SandboxMetadata,
   SandboxStatus,
   StartOptions,
+  SuspendResumeOptions,
   WriteOptions,
 } from "./types.js";
 
@@ -139,6 +144,47 @@ export async function raceWithTimeout<T>(
       clearTimeout(timer);
     }
   }
+}
+
+function operatingModeOf(obj: Record<string, unknown>): string | undefined {
+  const spec = (obj.spec as Record<string, unknown>) ?? {};
+  return typeof spec.operatingMode === "string"
+    ? spec.operatingMode
+    : undefined;
+}
+
+function generationOf(obj: Record<string, unknown>): number {
+  const metadata = (obj.metadata as Record<string, unknown>) ?? {};
+  return typeof metadata.generation === "number" ? metadata.generation : 0;
+}
+
+function podIPOf(obj: Record<string, unknown>): string {
+  const status = (obj.status as Record<string, unknown>) ?? {};
+  return selectPodIP(Array.isArray(status.podIPs) ? status.podIPs : []);
+}
+
+/** True when the condition is `True` and was observed at `minGeneration` or later. */
+function conditionObserved(
+  obj: Record<string, unknown>,
+  type: string,
+  minGeneration: number,
+): boolean {
+  const cond = readConditions(obj).find((c) => c.type === type);
+  return (
+    cond?.status === "True" &&
+    Number(cond.observedGeneration ?? 0) >= minGeneration
+  );
+}
+
+function lifecycleBudget(opts: SuspendResumeOptions | undefined): {
+  timeoutMs: number;
+  deadline: number;
+} {
+  const timeoutMs =
+    opts?.timeoutMs === undefined
+      ? DEFAULT_LIFECYCLE_TIMEOUT_MS
+      : validateTimeoutMs("timeoutMs", opts.timeoutMs);
+  return { timeoutMs, deadline: Date.now() + timeoutMs };
 }
 
 /** @internal — fully validated/defaulted form of SandboxdOptions. */
@@ -446,11 +492,7 @@ export class Sandbox {
   readonly claimName: string;
   readonly sandboxName: string;
   readonly podName: string;
-  /**
-   * The pod IP (IPv4 preferred) observed when the handle was created, or ""
-   * when unknown. Not refreshed if the pod is later rescheduled.
-   */
-  readonly podIP: string;
+  private _podIP: string;
   /**
    * In-cluster DNS name of the Sandbox's headless Service, or "" when it has
    * none (spec.service unset or false).
@@ -462,7 +504,8 @@ export class Sandbox {
   protected readonly customObjectsApi: k8s.CustomObjectsApi;
   protected readonly logger: Logger;
 
-  private readonly connectionStrategy: SandboxdConnectionStrategy;
+  private connectionStrategy: SandboxdConnectionStrategy;
+  private readonly kubeConfig: k8s.KubeConfig;
   private readonly sandboxdOptions: ResolvedSandboxdOptions;
   private readonly traceServiceName: string;
 
@@ -475,9 +518,11 @@ export class Sandbox {
   private generationCounter = 0;
   private currentGeneration: ConnectionGeneration | null = null;
   private connectingPromise: Promise<ConnectionGeneration> | null = null;
+  private connectionEpoch = 0;
   private invalidationPromise: Promise<void> | null = null;
   private releaseLocalPromise: Promise<void> | null = null;
   private deletionPromise: Promise<void> | null = null;
+  private lifecycleTail: Promise<unknown> = Promise.resolve();
 
   private _files?: SandboxFiles;
   private _commands?: SandboxCommands;
@@ -486,29 +531,40 @@ export class Sandbox {
     this.claimName = init.claimName;
     this.sandboxName = init.sandboxName;
     this.podName = init.podName;
-    this.podIP = init.podIP ?? "";
+    this._podIP = init.podIP ?? "";
     this.serviceFQDN = init.serviceFQDN ?? "";
     this.namespace = init.namespace;
     this.customObjectsApi = init.customObjectsApi;
+    this.kubeConfig = init.kubeConfig;
     this.sandboxdOptions = init.sandboxdOptions;
     this.tracingManager = init.tracingManager;
     this.traceServiceName = init.traceServiceName;
     this.logger = init.logger ?? noopLogger;
-    this.connectionStrategy = createConnectionStrategy(
-      init.sandboxdOptions.connectivity,
-      {
-        kubeConfig: init.kubeConfig,
-        namespace: this.namespace,
-        podName: this.podName,
-        podIP: this.podIP,
-        serviceFQDN: this.serviceFQDN,
-        restPort: init.sandboxdOptions.restPort,
-        grpcPort: init.sandboxdOptions.grpcPort,
-        routerNamespace: init.sandboxdOptions.routerNamespace ?? this.namespace,
-        handshakeTimeoutMs: init.sandboxdOptions.portForwardReadyTimeoutMs,
-        logger: this.logger,
-      },
-    );
+    this.connectionStrategy = this.createStrategy();
+  }
+
+  /**
+   * The pod IP (IPv4 preferred) observed when the handle was created, or ""
+   * when unknown. Refreshed by `resume()`, but not if the pod is rescheduled
+   * for any other reason.
+   */
+  get podIP(): string {
+    return this._podIP;
+  }
+
+  private createStrategy(): SandboxdConnectionStrategy {
+    return createConnectionStrategy(this.sandboxdOptions.connectivity, {
+      kubeConfig: this.kubeConfig,
+      namespace: this.namespace,
+      podName: this.podName,
+      podIP: this._podIP,
+      serviceFQDN: this.serviceFQDN,
+      restPort: this.sandboxdOptions.restPort,
+      grpcPort: this.sandboxdOptions.grpcPort,
+      routerNamespace: this.sandboxdOptions.routerNamespace ?? this.namespace,
+      handshakeTimeoutMs: this.sandboxdOptions.portForwardReadyTimeoutMs,
+      logger: this.logger,
+    });
   }
 
   /**
@@ -584,26 +640,12 @@ export class Sandbox {
    * Unlike `health()`, this does not connect to sandboxd.
    */
   async status(): Promise<SandboxStatus> {
-    let sandboxObj: Record<string, unknown>;
-    try {
-      sandboxObj = (await this.customObjectsApi.getNamespacedCustomObject({
-        group: SANDBOX_API_GROUP,
-        version: SANDBOX_API_VERSION,
-        namespace: this.namespace,
-        plural: SANDBOX_PLURAL_NAME,
-        name: this.sandboxName,
-      })) as Record<string, unknown>;
-    } catch (err: unknown) {
-      if (isK8s404(err)) {
-        return {
-          status: "SandboxNotFound",
-          message: "Sandbox object not found in Kubernetes.",
-        };
-      }
-      throw new SandboxError(
-        `Failed to read Sandbox '${this.sandboxName}' in namespace '${this.namespace}'.`,
-        { cause: err },
-      );
+    const sandboxObj = await this.readSandboxObject();
+    if (!sandboxObj) {
+      return {
+        status: "SandboxNotFound",
+        message: "Sandbox object not found in Kubernetes.",
+      };
     }
 
     const ready = findReadyCondition(sandboxObj);
@@ -629,9 +671,103 @@ export class Sandbox {
    * {@link SandboxError}.
    */
   async getPodIP(): Promise<string | undefined> {
-    let sandboxObj: Record<string, unknown>;
+    const sandboxObj = await this.readSandboxObject();
+    return (sandboxObj && podIPOf(sandboxObj)) || undefined;
+  }
+
+  /**
+   * Whether the Sandbox asks the controller to stay suspended
+   * (`spec.operatingMode` is `Suspended`). This is the desired state: the pod
+   * may still be terminating, which `suspend()` waits for. Rejects with a
+   * {@link SandboxNotFoundError} when the Sandbox object is gone.
+   */
+  async isSuspended(): Promise<boolean> {
+    const obj = await this.readLiveSandbox();
+    return operatingModeOf(obj) === "Suspended";
+  }
+
+  /**
+   * Sets `spec.operatingMode` to `Suspended`, closes the sandboxd connection,
+   * and waits for the `Suspended` condition. Idempotent. Persistent volumes
+   * survive; processes, memory and `emptyDir` data do not.
+   */
+  async suspend(opts?: SuspendResumeOptions): Promise<void> {
+    const budget = lifecycleBudget(opts);
+    const { signal, dispose } = this.lifecycleSignal(opts, budget, "suspend");
     try {
-      sandboxObj = (await this.customObjectsApi.getNamespacedCustomObject({
+      await this.serializeLifecycle(signal, async () => {
+        const { uid, generation } = await this.setOperatingMode(
+          "Suspended",
+          signal,
+        );
+        // Close first so a timed-out wait does not leave a connection to a dying pod.
+        await this.dropConnection("Sandbox is suspending");
+        await this.waitForSandbox(
+          "suspend",
+          uid,
+          budget,
+          signal,
+          (obj) =>
+            operatingModeOf(obj) === "Suspended" &&
+            conditionObserved(obj, "Suspended", generation),
+        );
+        this.logger.info(`Sandbox '${this.sandboxName}' suspended`);
+      });
+    } finally {
+      dispose();
+    }
+  }
+
+  /**
+   * Sets `spec.operatingMode` to `Running` and waits for the `Ready`
+   * condition. Idempotent. The next `files` or `commands` call connects to
+   * the new pod.
+   */
+  async resume(opts?: SuspendResumeOptions): Promise<void> {
+    const budget = lifecycleBudget(opts);
+    const { signal, dispose } = this.lifecycleSignal(
+      opts,
+      budget,
+      "become ready",
+    );
+    try {
+      await this.serializeLifecycle(signal, async () => {
+        const { uid, generation, changed } = await this.setOperatingMode(
+          "Running",
+          signal,
+        );
+        if (changed) await this.dropConnection("Sandbox is resuming");
+        const obj = await this.waitForSandbox(
+          "become ready",
+          uid,
+          budget,
+          signal,
+          (o) =>
+            operatingModeOf(o) === "Running" &&
+            conditionObserved(o, "Ready", generation),
+        );
+        const podIP = podIPOf(obj);
+        if (changed || (podIP && podIP !== this._podIP)) {
+          await this.dropConnection("Sandbox pod changed");
+          this._podIP = podIP;
+          this.connectionStrategy = this.createStrategy();
+        }
+        this.logger.info(`Sandbox '${this.sandboxName}' resumed`);
+      });
+    } finally {
+      dispose();
+    }
+  }
+
+  /**
+   * Reads the Sandbox object. Resolves with `undefined` when it is gone.
+   * Any other failure rejects with a {@link SandboxError}.
+   */
+  private async readSandboxObject(): Promise<
+    Record<string, unknown> | undefined
+  > {
+    try {
+      return (await this.customObjectsApi.getNamespacedCustomObject({
         group: SANDBOX_API_GROUP,
         version: SANDBOX_API_VERSION,
         namespace: this.namespace,
@@ -645,10 +781,170 @@ export class Sandbox {
         { cause: err },
       );
     }
+  }
 
-    const status = (sandboxObj.status as Record<string, unknown>) ?? {};
-    const podIPs = Array.isArray(status.podIPs) ? status.podIPs : [];
-    return selectPodIP(podIPs) || undefined;
+  /**
+   * Like readSandboxObject(), but rejects with a SandboxNotFoundError when the
+   * Sandbox is gone, terminating, or replaced (different `uid`).
+   */
+  private async readLiveSandbox(
+    uid?: string,
+  ): Promise<Record<string, unknown>> {
+    const obj = await this.readSandboxObject();
+    const metadata = (obj?.metadata as Record<string, unknown>) ?? {};
+    if (!obj) {
+      throw new SandboxNotFoundError(
+        `Sandbox '${this.sandboxName}' not found in namespace '${this.namespace}'.`,
+      );
+    }
+    if (metadata.deletionTimestamp) {
+      throw new SandboxNotFoundError(
+        `Sandbox '${this.sandboxName}' is terminating.`,
+      );
+    }
+    if (uid !== undefined && metadata.uid !== uid) {
+      throw new SandboxNotFoundError(
+        `Sandbox '${this.sandboxName}' was replaced.`,
+      );
+    }
+    return obj;
+  }
+
+  /**
+   * Sets `spec.operatingMode` unless already set. Resolves with the UID and
+   * the generation the controller must observe.
+   */
+  private async setOperatingMode(
+    mode: "Running" | "Suspended",
+    signal: AbortSignal,
+  ): Promise<{ uid: string; generation: number; changed: boolean }> {
+    if (!this.isActive) {
+      throw new SandboxClosedError("Sandbox handle is closed");
+    }
+    if (signal.aborted) throw signal.reason;
+    const obj = await this.readLiveSandbox();
+    // A cancelled or expired call must not change the operating mode.
+    if (signal.aborted) throw signal.reason;
+    const metadata = obj.metadata as Record<string, unknown>;
+    const uid = metadata.uid;
+    if (typeof uid !== "string" || uid === "") {
+      throw new SandboxMetadataError(
+        `Sandbox '${this.sandboxName}' has no metadata.uid.`,
+      );
+    }
+    if (operatingModeOf(obj) === mode) {
+      return { uid, generation: generationOf(obj), changed: false };
+    }
+    let patched: Record<string, unknown>;
+    try {
+      // The test op rejects the patch if the Sandbox was replaced after the read.
+      patched = (await this.customObjectsApi.patchNamespacedCustomObject({
+        group: SANDBOX_API_GROUP,
+        version: SANDBOX_API_VERSION,
+        namespace: this.namespace,
+        plural: SANDBOX_PLURAL_NAME,
+        name: this.sandboxName,
+        body: [
+          { op: "test", path: "/metadata/uid", value: uid },
+          { op: "add", path: "/spec/operatingMode", value: mode },
+        ],
+      })) as Record<string, unknown>;
+    } catch (err: unknown) {
+      if (isK8s404(err)) {
+        throw new SandboxNotFoundError(
+          `Sandbox '${this.sandboxName}' not found in namespace '${this.namespace}'.`,
+          { cause: err },
+        );
+      }
+      throw new SandboxError(
+        `Failed to set operatingMode ${mode} on Sandbox '${this.sandboxName}' in namespace '${this.namespace}'.`,
+        { cause: err },
+      );
+    }
+    return { uid, generation: generationOf(patched), changed: true };
+  }
+
+  /**
+   * Polls the Sandbox until `done` accepts it. Rejects with a
+   * SandboxTimeoutError once the budget runs out.
+   */
+  private async waitForSandbox(
+    description: string,
+    uid: string,
+    budget: { timeoutMs: number; deadline: number },
+    signal: AbortSignal,
+    done: (obj: Record<string, unknown>) => boolean,
+  ): Promise<Record<string, unknown>> {
+    while (true) {
+      if (signal.aborted) throw signal.reason;
+      const obj = await this.readLiveSandbox(uid);
+      if (signal.aborted) throw signal.reason;
+      if (done(obj)) return obj;
+      const remaining = budget.deadline - Date.now();
+      if (remaining <= 0) {
+        throw new SandboxTimeoutError(
+          `Sandbox '${this.sandboxName}' did not ${description} within ${budget.timeoutMs}ms.`,
+        );
+      }
+      await this.sleep(Math.min(LIFECYCLE_POLL_INTERVAL_MS, remaining), signal);
+    }
+  }
+
+  /**
+   * Aborts when the caller cancels, the handle closes, or the budget runs out.
+   * The budget starts at the call, so it also covers time spent queued.
+   */
+  private lifecycleSignal(
+    opts: SuspendResumeOptions | undefined,
+    budget: { timeoutMs: number },
+    description: string,
+  ): { signal: AbortSignal; dispose: () => void } {
+    const timeout = new AbortController();
+    const timer = setTimeout(() => {
+      timeout.abort(
+        new SandboxTimeoutError(
+          `Sandbox '${this.sandboxName}' did not ${description} within ${budget.timeoutMs}ms.`,
+        ),
+      );
+    }, budget.timeoutMs);
+    const signals = [this.connectAbortController.signal, timeout.signal];
+    if (opts?.signal) signals.push(opts.signal);
+    return {
+      signal: AbortSignal.any(signals),
+      dispose: () => clearTimeout(timer),
+    };
+  }
+
+  /**
+   * Runs suspend() and resume() calls one at a time. A call that is aborted or
+   * expires while queued rejects at once and never starts.
+   */
+  private serializeLifecycle<T>(
+    signal: AbortSignal,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const start = async () => {
+      if (signal.aborted) throw signal.reason;
+      return fn();
+    };
+    const run = this.lifecycleTail.then(start, start);
+    this.lifecycleTail = run.catch(() => {});
+    return Promise.race([run, this.rejectOnAbort(signal)]);
+  }
+
+  /** Discards the current sandboxd connection; the next call reconnects. */
+  private async dropConnection(reason: string): Promise<void> {
+    // Connect attempts that started before the drop must not install a generation.
+    this.connectionEpoch++;
+    this.connectingPromise = null;
+    const gen = this.currentGeneration;
+    if (gen) {
+      this.invalidateGeneration(
+        gen,
+        new SandboxConnectionError(reason, "unavailable"),
+      );
+    }
+    await this.invalidationPromise;
   }
 
   /**
@@ -852,6 +1148,7 @@ export class Sandbox {
     }
 
     if (!this.connectingPromise) {
+      const epoch = this.connectionEpoch;
       const attempt = this.doConnect()
         .then(async (gen) => {
           // connectAbortController fires synchronously at the start of
@@ -862,11 +1159,18 @@ export class Sandbox {
             await this.teardownGeneration(gen);
             throw new SandboxClosedError("Sandbox handle is closed");
           }
+          if (this.connectionEpoch !== epoch) {
+            await this.teardownGeneration(gen);
+            throw new SandboxConnectionError(
+              "Connection was reset while connecting",
+              "unavailable",
+            );
+          }
           this.currentGeneration = gen;
           return gen;
         })
         .finally(() => {
-          this.connectingPromise = null;
+          if (this.connectingPromise === attempt) this.connectingPromise = null;
         });
       attempt.catch(() => {});
       this.connectingPromise = attempt;

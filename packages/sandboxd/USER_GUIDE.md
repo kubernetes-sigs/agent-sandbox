@@ -205,7 +205,7 @@ iteration (Python).
 | `GET` | `/v1/files/{path}` | File → raw bytes (`application/octet-stream`); directory → JSON `DirectoryListing`. Optional `type` query (`file` or `directory`, also on `HEAD`): `409` if the path is the other kind. `recursive=true` lists nested directories too, and `max_depth=N` limits how deep (entry names become paths relative to the listed directory). A recursive listing over 10000 entries fails with `400`. |
 | `GET` | `/v1/files/{path}?stat=true` | Metadata for one file or directory as a JSON `FileEntry`. |
 | `HEAD` | `/v1/files/{path}` | Existence/metadata probe without transferring the body. |
-| `PUT` | `/v1/files/{path}` | Atomic write (temp file + rename), auto-creates parents. Optional `mode` query (`^0[0-7]{3}$`, default `0644`). `append=true` adds to the end of the file instead (not atomic). `type=directory` creates a directory instead (body ignored, `parents=true` also creates missing parents, default mode `0755`). `If-None-Match: *` creates the file only if the path does not exist, else `412`. `extract=tar` unpacks a tar body, optionally gzipped, into the directory at the path (not atomic). Accepts raw bytes or `multipart/form-data` (`file` part). |
+| `PUT` | `/v1/files/{path}` | Atomic write (temp file + rename), auto-creates parents. Optional `mode` query (`^0[0-7]{3}$`, default `0644`). `append=true` adds to the end of the file instead (not atomic). `type=directory` creates a directory instead (body ignored, `parents=true` also creates missing parents, default mode `0755`). `If-None-Match: *` creates the file only if the path does not exist, else `412`. `If-Unmodified-Since` writes only if the file exists and was not modified after that date, else `412` (also for a directory). `extract=tar` unpacks a tar body, optionally gzipped, into the directory at the path (not atomic). Accepts raw bytes or `multipart/form-data` (`file` part). |
 | `DELETE` | `/v1/files/{path}` | Remove a file or directory; `recursive=true` for `rm -rf` behavior; `409` on a non-empty directory otherwise. A symlink as the last path component is removed itself, not followed. |
 | `POST` | `/v1/files/{path}:move` | Rename or move to the required `destination` query path, auto-creating parents. `409` if the destination exists, except that `overwrite=true` replaces a file with a file. Directories are never replaced. A symlink as the last path component is moved or replaced itself, not followed. |
 | `POST` | `/v1/files/{path}:copy` | Same as `:move`, but copies. Directories are copied recursively, files keep their mode, and symlinks inside a directory are copied as links. |
@@ -230,7 +230,8 @@ preserve sub-second modification times in UTC.
 
 ### Concurrency semantics
 
-Requests are handled in parallel, with no server-side serialization. The
+Requests are handled in parallel, with no server-side serialization, except that
+overwrites of one path take a short lock around the rename. The
 atomic-write strategy prevents partial file contents for replacement writes (not
 appends, see below), but it does not impose an ordering across requests:
 
@@ -247,6 +248,12 @@ appends, see below), but it does not impose an ordering across requests:
 - **Create-only writes (`If-None-Match: *`)** - when several race to create one
   path, exactly one succeeds and the rest get `412`. It needs hard link support,
   so it fails on volumes without it, such as GCS FUSE.
+- **Conditional writes (`If-Unmodified-Since`)** - the date is compared with the
+  file's modification time at one-second precision, so a change in the same
+  second as the date is not detected, and two writers with that date can both
+  succeed. The check and the rename are atomic against other overwriting `PUT`
+  requests and file entries of `extract=tar`, but not against `DELETE`, `POST`, `append=true`, or processes in the
+  sandbox. A missing path or a directory gets `412`.
 - **Appends (`append=true`)** are written in place, not atomically: a read can
   see a partial append, and concurrent appends to one path can interleave. A
   retried append adds the body again.
@@ -343,6 +350,10 @@ curl -sf -X PUT -H "Content-Type: application/octet-stream" \
 
 # Create only if missing (412 if it exists)
 curl -sf -X PUT -H "If-None-Match: *" --data-binary "x" localhost:8080/v1/files/src/new.py
+
+# Overwrite only if unchanged since the Last-Modified date from a GET or HEAD (412 if changed)
+curl -sf -X PUT -H "If-Unmodified-Since: Sun, 01 Nov 2026 12:00:00 GMT" \
+  --data-binary "x" localhost:8080/v1/files/src/main.py
 
 # Read it back
 curl -sf localhost:8080/v1/files/src/main.py

@@ -8228,6 +8228,17 @@ func TestComputeSuspendedCondition_ResumedReason(t *testing.T) {
 			wantMessage: msgTerminated,
 		},
 		{
+			// Two owned Pods mean Pods are running; that is not a failed lookup and
+			// must not be reported as a completed suspension.
+			name:        "multiple owned Pods after a completed suspension report Unknown",
+			mode:        sandboxv1beta1.SandboxOperatingModeSuspended,
+			previous:    previous(metav1.ConditionTrue, sandboxv1beta1.SandboxReasonSuspendedPodTerminated),
+			podErr:      &multipleSandboxPodsError{count: 2},
+			wantStatus:  metav1.ConditionUnknown,
+			wantReason:  sandboxv1beta1.SandboxReasonSuspendedPodStateUnknown,
+			wantMessage: msgUnknown,
+		},
+		{
 			name:        "failed Pod lookup before the suspension completed reports Unknown",
 			mode:        sandboxv1beta1.SandboxOperatingModeSuspended,
 			previous:    previous(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonSuspendedPodTerminating),

@@ -276,8 +276,9 @@ var (
 	// - operating_mode: "Running" | "Suspended", from spec.operatingMode.
 	// - suspended_reason: the Suspended condition's reason ("NotSuspended" | "Resumed" |
 	//   "PodTerminating" | "PodTerminated" | "PodNotOwned" | "PodStateUnknown"), or "unknown"
-	//   when the condition is absent. "Resumed" marks a running Sandbox whose current Pod was
-	//   started by a resume, which operating_mode alone cannot tell from a created one.
+	//   when the condition is absent. "Resumed" marks a running Sandbox that has been suspended
+	//   and resumed since it was created, which operating_mode alone cannot tell from one that
+	//   never was.
 	// - launch_type: "warm" | "cold"
 	// - sandbox_template: sandboxTemplateRef, or "unknown" when the Sandbox carries no template annotation.
 	//   Note this sentinel differs from the "__unknown__" the SandboxClaim metrics use, so the two

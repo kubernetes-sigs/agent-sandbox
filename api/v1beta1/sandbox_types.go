@@ -63,9 +63,8 @@ const (
 	// SandboxReasonNotSuspended indicates the Suspended condition is False because the Sandbox is
 	// running and has never been suspended.
 	SandboxReasonNotSuspended = "NotSuspended"
-	// SandboxReasonResumed indicates the Suspended condition is False because the Sandbox is running
-	// again after a suspension: its current Pod was started by a resume. The reason stays until the
-	// next suspend, so metrics can tell resumed Sandboxes apart from created ones.
+	// SandboxReasonResumed indicates the Suspended condition is False because the Sandbox has been
+	// suspended and resumed since it was created. The reason stays until the next suspend.
 	SandboxReasonResumed = "Resumed"
 	// SandboxReasonSuspendedPodStateUnknown indicates the Suspended condition is Unknown because reconciling the Pod failed, so its state cannot be determined.
 	SandboxReasonSuspendedPodStateUnknown = "PodStateUnknown"

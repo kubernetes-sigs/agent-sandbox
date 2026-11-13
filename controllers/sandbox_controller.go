@@ -708,8 +708,11 @@ func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sa
 		// A failed lookup carries no new information. Once the suspension has
 		// completed, only this controller could bring the Pod back and it does
 		// not while the mode is Suspended, so keep the completed state instead
-		// of overwriting the record a later resume reports Resumed from.
-		if previous := meta.FindStatusCondition(sandbox.Status.Conditions, suspended.Type); previous != nil && previous.Status == metav1.ConditionTrue {
+		// of overwriting the record a later resume reports Resumed from. A
+		// multiple-Pods error is not a failed lookup: owned Pods are known to be
+		// running, so the suspension can no longer be confirmed.
+		previous := meta.FindStatusCondition(sandbox.Status.Conditions, suspended.Type)
+		if previous != nil && previous.Status == metav1.ConditionTrue && !isMultipleSandboxPodsError(podErr) {
 			suspended.Status = metav1.ConditionTrue
 			suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodTerminated
 			suspended.Message = "Pod has been terminated. Sandbox is suspended"
@@ -740,9 +743,9 @@ func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sa
 	return suspended
 }
 
-// sandboxWasSuspended reports whether a running Sandbox's current Pod was started by a
-// resume rather than by creation. The previous Suspended condition is the record: True
-// means the suspension completed, and Resumed carries an earlier verdict forward.
+// sandboxWasSuspended reports whether a running Sandbox has been suspended and resumed
+// since it was created. The previous Suspended condition is the record: True means the
+// suspension completed, and Resumed carries an earlier verdict forward.
 // A suspend canceled before it completed (PodTerminating, PodNotOwned, or an
 // unconfirmed PodStateUnknown) is not a resume: the Pod may never have been deleted,
 // and agent_sandbox_resume_total does not count it either. Reading status rather than

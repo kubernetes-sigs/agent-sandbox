@@ -452,10 +452,12 @@ and never changes a Sandbox after a SandboxClaim owns it.
 The envVarsInjectionPolicy and volumeClaimTemplatesPolicy fields are checked only when a
 SandboxClaim creates its Sandbox.
 
-Two edits do reach existing Sandboxes. A networkPolicy change applies to every Sandbox that
-uses the template. A change to the podTemplate labels or annotations reaches a claimed Sandbox
-the next time the controller reconciles its SandboxClaim. The edit does not trigger that
-reconcile itself.
+Two edits do reach existing Sandboxes. When networkPolicyManagement is Managed, a networkPolicy
+change applies to every Sandbox that uses the template. A change to the podTemplate labels or
+annotations reaches a claimed Sandbox the next time the controller reconciles its SandboxClaim,
+unless the claim's additionalPodMetadata sets the same key to a different value. In that case
+the reconcile fails with a metadata override conflict and the Sandbox keeps its old metadata.
+The edit does not trigger that reconcile itself.
 
 
 

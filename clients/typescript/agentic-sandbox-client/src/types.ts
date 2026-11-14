@@ -380,13 +380,31 @@ export interface CreateSandboxOptions {
   sandboxReadyTimeout?: number;
   labels?: Record<string, string>;
   /**
-   * Delete the claim and its sandbox after this many seconds, measured from
-   * the createSandbox call (including provisioning time). Sets the claim's
+   * Expire the claim after this many seconds, measured from the createSandbox
+   * call (including provisioning time). Sets the claim's
    * `spec.lifecycle.shutdownTime` to that absolute deadline and its
-   * `spec.lifecycle.shutdownPolicy` to `"Delete"`. Must be a positive integer
-   * that produces a valid RFC3339 deadline. Omit to leave expiration unset.
+   * `spec.lifecycle.shutdownPolicy` to `"Delete"` unless `shutdownPolicy` is
+   * given. Must be a positive integer that produces a valid RFC3339 deadline.
+   * Omit to leave expiration unset.
    */
   shutdownAfterSeconds?: number;
+  /**
+   * Value for the claim's `spec.lifecycle.shutdownPolicy`. `"Delete"` deletes
+   * the claim and its sandbox. `"DeleteForeground"` does the same but keeps
+   * the claim visible until the sandbox and its Pod are gone. `"Retain"`
+   * deletes the sandbox and keeps the expired claim. When a timer is set and
+   * no policy is given, the SDK sends `"Delete"`; the API's own default for an
+   * omitted policy is `"Retain"`.
+   */
+  shutdownPolicy?: "Delete" | "DeleteForeground" | "Retain";
+  /**
+   * Seconds, zero or more, for the claim's
+   * `spec.lifecycle.ttlSecondsAfterFinished`. The timer starts only when the
+   * Pod reaches Succeeded or Failed. A Pod with `restartPolicy: Always` never
+   * does, so pair this with `shutdownAfterSeconds`. With both timers, the
+   * earlier deadline wins.
+   */
+  ttlSecondsAfterFinished?: number;
   /**
    * Labels stamped onto the running Sandbox Pod through the claim's
    * `spec.additionalPodMetadata.labels`. Unlike `labels`, which land on the

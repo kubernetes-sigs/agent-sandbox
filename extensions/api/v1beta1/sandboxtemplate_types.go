@@ -163,6 +163,18 @@ type SandboxTemplateSpec struct {
 // +kubebuilder:resource:scope=Namespaced,shortName=sandboxtemplate
 // +kubebuilder:storageversion
 // SandboxTemplate is the Schema for the sandbox template API.
+//
+// Editing a SandboxTemplate does not change the spec of a Sandbox that already exists.
+// A SandboxClaim that creates its own Sandbox copies the template at that moment.
+// A SandboxWarmPool keeps or replaces its unclaimed Sandboxes according to its updateStrategy,
+// and never changes a Sandbox after a SandboxClaim owns it.
+// The envVarsInjectionPolicy and volumeClaimTemplatesPolicy fields are checked only when a
+// SandboxClaim creates its Sandbox.
+//
+// Two edits do reach existing Sandboxes. A networkPolicy change applies to every Sandbox that
+// uses the template. A change to the podTemplate labels or annotations reaches a claimed Sandbox
+// the next time the controller reconciles its SandboxClaim. The edit does not trigger that
+// reconcile itself.
 type SandboxTemplate struct {
 	metav1.TypeMeta `json:",inline"`
 

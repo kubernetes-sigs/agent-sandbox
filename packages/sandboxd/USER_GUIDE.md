@@ -256,10 +256,12 @@ appends, see below), but it does not impose an ordering across requests:
   destination is not atomic with them, so a concurrent writer can win the race.
 - **Archive extraction (`extract=tar`)** writes each file atomically but the
   archive as a whole is not: an error leaves the entries written so far. An
-  archive over 100000 entries or 1 GiB of file data fails with `413`. Symlink
-  targets are written as given, so a link can point outside the extraction
-  directory. Only later requests through the API are confined to the sandbox
-  root.
+  archive over 100000 entries or 1 GiB of file data fails with `413`. Gzip
+  checksums covering the extracted archive are validated before reporting
+  success. Decompressed data remaining in its final gzip member has a separate
+  1 GiB limit and also fails with `413` when exceeded. Symlink targets are
+  written as given, so a link can point outside the extraction directory.
+  Only later requests through the API are confined to the sandbox root.
 
 There is no cross-request transaction or compare-and-swap; agents that need
 ordering or coordination on shared paths must layer it themselves.

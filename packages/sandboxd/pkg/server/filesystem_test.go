@@ -1635,7 +1635,16 @@ func TestExtractTar(t *testing.T) {
 		tarFile("x/y/z.txt", "Z", 0o644),
 		tarSymlink("d/ln", "a.txt"),
 	)
-	for name, body := range map[string][]byte{"plain": archive, "gzip": gzipped(t, archive)} {
+	// Split inside a tar header to exercise reads across gzip members.
+	multistream := append(gzipped(t, archive[:517]), gzipped(t, archive[517:])...)
+	for name, body := range map[string][]byte{
+		"plain":                 archive,
+		"gzip":                  gzipped(t, archive),
+		"padded gzip":           gzipped(t, append(bytes.Clone(archive), make([]byte, 4096)...)),
+		"multistream gzip":      multistream,
+		"padding after gzip":    append(gzipped(t, archive), make([]byte, 512)...),
+		"padding after members": append(bytes.Clone(multistream), make([]byte, 512)...),
+	} {
 		t.Run(name, func(t *testing.T) {
 			_, handler, root := newRESTFixture(t)
 
@@ -1829,6 +1838,43 @@ func TestExtractTarRejections(t *testing.T) {
 			wantStatus: http.StatusBadRequest, wantCode: "INVALID_ARGUMENT",
 		},
 		{
+			name: "corrupt gzip payload",
+			archive: func(t *testing.T, _ string) []byte {
+				var buf bytes.Buffer
+				gw, err := gzip.NewWriterLevel(&buf, gzip.NoCompression)
+				require.NoError(t, err)
+				_, err = gw.Write(append(valid(t), make([]byte, 4096)...))
+				require.NoError(t, err)
+				require.NoError(t, gw.Close())
+				body := buf.Bytes()
+				// A stored DEFLATE block lets one payload byte change while
+				// preserving the tar headers and the original gzip checksum.
+				offset := bytes.Index(body, []byte("BBBBBBBBBB"))
+				require.NotEqual(t, -1, offset)
+				body[offset] ^= 1
+				return body
+			},
+			wantStatus: http.StatusBadRequest, wantCode: "INVALID_ARGUMENT",
+		},
+		{
+			name: "corrupt final gzip member",
+			archive: func(t *testing.T, _ string) []byte {
+				archive := append(valid(t), make([]byte, 4096)...)
+				last := gzipped(t, archive[517:])
+				last[len(last)-8] ^= 1
+				return append(gzipped(t, archive[:517]), last...)
+			},
+			wantStatus: http.StatusBadRequest, wantCode: "INVALID_ARGUMENT",
+		},
+		{
+			name: "truncated gzip trailer",
+			archive: func(t *testing.T, _ string) []byte {
+				body := gzipped(t, append(valid(t), make([]byte, 4096)...))
+				return body[:len(body)-4]
+			},
+			wantStatus: http.StatusBadRequest, wantCode: "INVALID_ARGUMENT",
+		},
+		{
 			name:       "unknown format",
 			query:      "?extract=zip",
 			archive:    func(t *testing.T, _ string) []byte { return valid(t) },
@@ -1904,6 +1950,7 @@ func TestExtractTarCaps(t *testing.T) {
 		entries int
 		bytes   int64
 		archive []tarEntry
+		padding int
 		// wantWritten lists the files that exist after the request.
 		wantWritten []string
 		wantStatus  int
@@ -1928,13 +1975,23 @@ func TestExtractTarCaps(t *testing.T) {
 			archive:     []tarEntry{tarFile("a", "AAAA", 0o644), tarFile("b", "BBBBB", 0o644)},
 			wantWritten: []string{"a"}, wantStatus: http.StatusRequestEntityTooLarge,
 		},
+		{
+			name: "trailing gzip bytes at the cap", entries: 10, bytes: 512,
+			archive: []tarEntry{tarFile("a", "A", 0o644)}, padding: 512,
+			wantWritten: []string{"a"}, wantStatus: http.StatusNoContent,
+		},
+		{
+			name: "trailing gzip bytes over the cap", entries: 10, bytes: 512,
+			archive: []tarEntry{tarFile("a", "A", 0o644)}, padding: 513,
+			wantWritten: []string{"a"}, wantStatus: http.StatusRequestEntityTooLarge,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			s, handler, root := newRESTFixture(t)
 			s.maxExtractEntries = tc.entries
 			s.maxExtractBytes = tc.bytes
-			archive := gzipped(t, buildTar(t, tc.archive...))
+			archive := gzipped(t, append(buildTar(t, tc.archive...), make([]byte, tc.padding)...))
 
 			rec := doRequest(handler, http.MethodPut, "/v1/files/dest?extract=tar", archive, nil)
 			require.Equal(t, tc.wantStatus, rec.Code, rec.Body.String())

@@ -83,6 +83,7 @@ type RESTServer struct {
 	// maxListEntries is swappable for tests; defaults to maxRecursiveEntries.
 	maxListEntries int
 	// maxExtractEntries and maxExtractBytes are swappable for tests.
+	// maxExtractBytes caps file data and trailing gzip data separately.
 	maxExtractEntries int
 	maxExtractBytes   int64
 	// metadataEnv returns the filtered /v1/metadata env map, computed once
@@ -815,6 +816,30 @@ func (s *RESTServer) putArchive(w http.ResponseWriter, r *http.Request, target s
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// archiveGzipReader opens the next gzip member only when the tar reader needs
+// more data. This lets extraction validate the final member's checksum while
+// leaving padding after that member unread.
+type archiveGzipReader struct {
+	*gzip.Reader
+	source *bufio.Reader
+}
+
+func (r *archiveGzipReader) Read(p []byte) (int, error) {
+	for {
+		n, err := r.Reader.Read(p)
+		if err != io.EOF {
+			return n, err
+		}
+		if n > 0 {
+			return n, nil
+		}
+		if err := r.Reader.Reset(r.source); err != nil {
+			return 0, err
+		}
+		r.Multistream(false)
+	}
+}
+
 // extractTar writes the entries of the tar stream src below dir.
 func (s *RESTServer) extractTar(src io.Reader, dir string) error {
 	buffered := bufio.NewReader(src)
@@ -825,7 +850,8 @@ func (s *RESTServer) extractTar(src io.Reader, dir string) error {
 			return fmt.Errorf("reading archive: %w", err)
 		}
 		defer func() { _ = gz.Close() }()
-		src = gz
+		gz.Multistream(false)
+		src = &archiveGzipReader{Reader: gz, source: buffered}
 	}
 
 	// tar.Reader yields exactly hdr.Size bytes per file, so the header size
@@ -835,6 +861,17 @@ func (s *RESTServer) extractTar(src io.Reader, dir string) error {
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
+			if gz, ok := src.(*archiveGzipReader); ok {
+				// tar EOF can precede padding and the gzip checksum. Close does
+				// not validate the checksum, so read through it with bounded work.
+				n, err := io.Copy(io.Discard, io.LimitReader(gz.Reader, s.maxExtractBytes+1))
+				if n > s.maxExtractBytes {
+					return errArchiveTooLarge
+				}
+				if err != nil {
+					return fmt.Errorf("reading archive: %w", err)
+				}
+			}
 			return nil
 		}
 		if err != nil {
@@ -927,7 +964,7 @@ func (s *RESTServer) writeExtractError(w http.ResponseWriter, err error) {
 			"archive entry outside the destination directory is forbidden")
 	case errors.Is(err, errArchiveTooLarge):
 		s.writeError(w, http.StatusRequestEntityTooLarge, "RESOURCE_EXHAUSTED",
-			fmt.Sprintf("archive exceeds %d entries or %d bytes of file data", s.maxExtractEntries, s.maxExtractBytes))
+			fmt.Sprintf("archive exceeds %d entries or the %d-byte limit for file data or trailing gzip data", s.maxExtractEntries, s.maxExtractBytes))
 	case errors.Is(err, errArchiveConflict), errors.Is(err, syscall.ENOTDIR):
 		s.writeError(w, http.StatusConflict, "CONFLICT",
 			"an archive entry conflicts with an existing file or directory")

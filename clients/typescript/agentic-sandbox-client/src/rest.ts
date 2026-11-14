@@ -878,8 +878,9 @@ export class SandboxdRestClient {
   /**
    * Streams a tar archive, optionally gzipped, to sandboxd, which unpacks it
    * into the directory at `path`. The root aliases name the sandbox root.
-   * Streaming, limits, and failure handling are the same as writeStream().
-   * Returns the number of bytes sent.
+   * Streaming, limits, and failure handling are the same as writeStream(),
+   * except that an early 204 is accepted: sandboxd stops reading at the tar
+   * end marker. Returns the number of bytes sent before that point.
    */
   async extract(
     path: string,
@@ -894,6 +895,7 @@ export class SandboxdRestClient {
       { "Content-Type": "application/octet-stream" },
       archive,
       signal,
+      false,
     );
   }
 
@@ -904,6 +906,7 @@ export class SandboxdRestClient {
     headers: Record<string, string>,
     content: ReadableStream<Uint8Array>,
     signal: AbortSignal,
+    requireEof = true,
   ): Promise<number> {
     let sourceReader: ReadableStreamDefaultReader<Uint8Array>;
     try {
@@ -952,6 +955,7 @@ export class SandboxdRestClient {
         controller,
         signal,
       ).catch(() => {});
+      if (!requireEof) return bytesSent();
       throw invalidResponse(
         "sandboxd acknowledged the write before the input stream reached EOF",
       );

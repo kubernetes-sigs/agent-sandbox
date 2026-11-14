@@ -1249,6 +1249,33 @@ describe("SandboxdRestClient.extract", () => {
     expect(req.body.toString()).toBe("tarball");
   });
 
+  it("accepts a 204 sent before the archive source reaches EOF", async () => {
+    // sandboxd stops reading at the tar end marker, so trailing bytes may be unread.
+    const server = await startServerWithLiveByteCount((_req, res) => {
+      res.writeHead(204, { Connection: "close" });
+      res.end();
+    });
+    const client = makeClient(server.baseUrl);
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        await new Promise((r) => setTimeout(r, 20));
+        controller.enqueue(new Uint8Array(4));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    try {
+      await expect(
+        client.extract("d", stream, new AbortController().signal),
+      ).resolves.toBeGreaterThanOrEqual(0);
+      expect(cancelled).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+
   it("targets the sandbox root for '' and '.'", async () => {
     activeServer = await startServer((_req, res) => {
       res.writeHead(204);

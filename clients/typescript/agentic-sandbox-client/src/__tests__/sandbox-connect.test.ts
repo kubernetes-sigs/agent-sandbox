@@ -1419,6 +1419,53 @@ describe("Sandbox streaming integration", () => {
     expect(restBackend.fileRequests).toEqual([]);
   });
 
+  it("extract streams the archive to sandboxd and records the operation", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    const { tracingManager, events } = makeRecordingTracerManager();
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+      tracingManager,
+    });
+
+    await sandbox.files.extract(
+      "repo",
+      new Blob(["tar bytes"]).stream() as ReadableStream<Uint8Array>,
+    );
+
+    expect(restBackend.fileRequests).toEqual([
+      "PUT /v1/files/repo?extract=tar",
+    ]);
+    expect(restBackend.putBodies[0].toString()).toBe("tar bytes");
+    expect(events).toContain("attr:sandbox.file.operation=extract");
+    expect(events).toContain("attr:sandbox.file.size=9");
+  });
+
+  it("extract rejects bad input before connecting", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+    });
+    const archive = () =>
+      new Blob(["x"]).stream() as ReadableStream<Uint8Array>;
+    const locked = archive();
+    locked.getReader();
+
+    await expect(sandbox.files.extract("/abs", archive())).rejects.toThrow(
+      SandboxError,
+    );
+    await expect(sandbox.files.extract("d", locked)).rejects.toThrow(
+      /already locked/,
+    );
+    expect(restBackend.healthHits).toBe(0);
+    expect(restBackend.fileRequests).toEqual([]);
+  });
+
   it("writeStream sends the exact content and reuses the generation for the next call", async () => {
     restBackend = await startRestBackend();
     api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });

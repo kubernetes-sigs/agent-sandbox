@@ -2,7 +2,7 @@
 
 This TypeScript client provides a high-level interface for creating and interacting with sandboxes managed by the Agent Sandbox controller, mirroring the [Go client](../../go/README.md) and [Python client](../../python/agentic-sandbox-client/README.md).
 
-The surface covers the Kubernetes resource layer (provisioning a `SandboxClaim`, watching it to readiness, and tearing it down via `SandboxClient` / `Sandbox`) and the sandboxd runtime layer (`sandbox.commands.{run,start}()`, `sandbox.files.{read,write,readStream,writeStream,exists,list,stat,delete,mkdir,move,copy}()`, `sandbox.health()`, and `sandbox.metadata()`), plus `sandbox.status()` for the Sandbox's Kubernetes readiness. `start()` covers long-running and interactive processes: streamed output, stdin, signals, and a PTY with resizing.
+The surface covers the Kubernetes resource layer (provisioning a `SandboxClaim`, watching it to readiness, and tearing it down via `SandboxClient` / `Sandbox`) and the sandboxd runtime layer (`sandbox.commands.{run,start}()`, `sandbox.files.{read,write,readStream,writeStream,exists,list,stat,delete,mkdir,move,copy,extract}()`, `sandbox.health()`, and `sandbox.metadata()`), plus `sandbox.status()` for the Sandbox's Kubernetes readiness. `start()` covers long-running and interactive processes: streamed output, stdin, signals, and a PTY with resizing.
 
 ## Usage
 
@@ -428,7 +428,7 @@ await shell.write("stty size\nexit\n");
 
 All file paths are sandbox-root-relative POSIX paths and are validated **before any network request**, without being decoded or normalized first:
 
-- `""` and `"."` (and equivalent all-dot/empty-segment forms) refer to the sandbox root. `list()` and `exists()` accept it; `read()` passes validation but then rejects because the root is a directory; `write()`, `delete()`, `mkdir()`, `move()`, and `copy()` reject it up front, and `write()`/`delete()` also reject a trailing `/`.
+- `""` and `"."` (and equivalent all-dot/empty-segment forms) refer to the sandbox root. `list()`, `exists()` and `extract()` accept it; `read()` passes validation but then rejects because the root is a directory; `write()`, `delete()`, `mkdir()`, `move()`, and `copy()` reject it up front, and `write()`/`delete()` also reject a trailing `/`.
 - An absolute path (leading `/`) is always rejected.
 - Any `..` path segment is always rejected, including for `exists()` (which never silently reports `false` for a rejected path — it throws).
 
@@ -451,6 +451,7 @@ What "retrying" safely means differs per method:
 | `write()` with `createOnly` | No | Call it again | If the acknowledgement was lost, the retry fails with `FAILED_PRECONDITION` because the file exists. Cannot be combined with `append`. A sandboxd that predates `append` and `createOnly` ignores them and replaces the file, so use them only with a matching sandboxd. |
 | `mkdir()` | No | Call it again | Idempotent: it succeeds when the directory already exists. |
 | `move()` / `copy()` | No | Check the source and destination first | If the acknowledgement was lost, the operation may already have happened. A repeated `move()` then fails with `NOT_FOUND` because the source is gone. A repeated `copy()` fails with `CONFLICT` because the destination exists, unless `overwrite` replaces a destination file. |
+| `extract()` | No | Provide a fresh stream producing the same archive | The unpack is not atomic, so a failed call leaves the entries written so far. Same streaming caveats as `writeStream()`. |
 | `readStream()` | No | Call it again from the beginning | Discard any partial output and reset your destination first — a partial download is never resumed. The file may have changed between attempts. |
 | `writeStream()` | No | Provide a fresh stream producing the same content | The input stream is consumed at most once, so retrying needs a new stream instance, not the same one rewound. Same atomicity/acknowledgement/concurrent-update caveats as `write()`. With `append`, an oversized or interrupted stream can leave a prefix in the target, and a retry adds it again. |
 

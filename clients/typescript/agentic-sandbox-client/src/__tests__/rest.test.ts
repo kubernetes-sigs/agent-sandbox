@@ -118,6 +118,12 @@ describe("resolveSandboxPath", () => {
     }
   });
 
+  it("maps '' and '.' to the sandbox root for extract and drops a trailing slash", () => {
+    expect(resolveSandboxPath("", "extract")).toBe("");
+    expect(resolveSandboxPath("./", "extract")).toBe("");
+    expect(resolveSandboxPath("dir/", "extract")).toBe("dir");
+  });
+
   it("rejects a trailing slash for write/delete and drops it for read/list/exists", () => {
     expect(() => resolveSandboxPath("dir/", "write")).toThrow(SandboxError);
     expect(() => resolveSandboxPath("dir/", "delete")).toThrow(SandboxError);
@@ -136,6 +142,7 @@ describe("resolveSandboxPath", () => {
       "mkdir",
       "move",
       "copy",
+      "extract",
     ] as const) {
       expect(() => resolveSandboxPath("/etc/passwd", op)).toThrow(SandboxError);
     }
@@ -1221,6 +1228,93 @@ describe("SandboxdRestClient.writeStream", () => {
 });
 
 // ---------- exists ----------
+
+describe("SandboxdRestClient.extract", () => {
+  it("PUTs the archive with extract=tar and returns the byte count", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    const bytesSent = await client.extract(
+      "src/dir",
+      toReadableStream(textChunks("tar", "ball")),
+      new AbortController().signal,
+    );
+    const req = activeServer.requests[0];
+    expect(bytesSent).toBe(7);
+    expect(req.method).toBe("PUT");
+    expect(req.url).toBe("/v1/files/src/dir?extract=tar");
+    expect(req.headers["content-type"]).toBe("application/octet-stream");
+    expect(req.body.toString()).toBe("tarball");
+  });
+
+  it("targets the sandbox root for '' and '.'", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    const signal = new AbortController().signal;
+    await client.extract("", toReadableStream([]), signal);
+    await client.extract(".", toReadableStream([]), signal);
+    expect(activeServer.requests.map((r) => r.url)).toEqual([
+      "/v1/files/?extract=tar",
+      "/v1/files/?extract=tar",
+    ]);
+  });
+
+  it("maps an error response to SandboxdApiError", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(409, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ code: "CONFLICT", message: "entry exists" }));
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await expect(
+      client.extract(
+        "d",
+        toReadableStream(textChunks("x")),
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "CONFLICT",
+    } satisfies Partial<SandboxdApiError>);
+  });
+
+  it("rejects a bad path and a locked stream before sending any request", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    const signal = new AbortController().signal;
+    await expect(
+      client.extract("../d", toReadableStream([]), signal),
+    ).rejects.toThrow(SandboxError);
+    const locked = toReadableStream(textChunks("x"));
+    locked.getReader();
+    await expect(client.extract("d", locked, signal)).rejects.toThrow(
+      /extract archive is already locked/,
+    );
+    expect(activeServer.requests).toHaveLength(0);
+  });
+
+  it("rejects an archive over the upload limit", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl, { maxUploadSize: 4 });
+    await expect(
+      client.extract(
+        "d",
+        toReadableStream(textChunks("too large")),
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(SandboxError);
+  });
+});
 
 describe("SandboxdRestClient.exists", () => {
   it("returns true on 2xx and issues a HEAD request", async () => {

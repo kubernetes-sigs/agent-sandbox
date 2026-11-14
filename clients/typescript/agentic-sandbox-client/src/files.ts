@@ -62,6 +62,11 @@ export interface FilesOperations {
     destination: string,
     opts?: MoveCopyOptions,
   ): Promise<void>;
+  extract(
+    path: string,
+    archive: ReadableStream<Uint8Array>,
+    opts?: FileCallOptions,
+  ): Promise<void>;
 }
 
 /**
@@ -219,5 +224,22 @@ export class SandboxFiles {
     opts?: MoveCopyOptions,
   ): Promise<void> {
     return this.ops.copy(source, destination, opts);
+  }
+
+  /**
+   * Unpacks a tar archive, optionally gzipped, into the directory at `path`,
+   * creating it when missing. `""` or `"."` names the sandbox root. The
+   * archive is streamed once and bounded by `sandboxd.maxUploadSize`. The
+   * SDK never retries automatically, and the unpack is not atomic, so a
+   * failed call leaves the entries written so far. To retry, provide a fresh
+   * stream. Streaming, timeout, and cancellation behave like `writeStream()`.
+   * Requires the sandboxd runtime.
+   */
+  extract(
+    path: string,
+    archive: ReadableStream<Uint8Array>,
+    opts?: FileCallOptions,
+  ): Promise<void> {
+    return this.ops.extract(path, archive, opts);
   }
 }

@@ -53,7 +53,8 @@ export type SandboxPathOperation =
   | "delete"
   | "mkdir"
   | "move"
-  | "copy";
+  | "copy"
+  | "extract";
 
 function invalidArgument(message: string): SandboxError {
   return new SandboxError(message, { telemetryCode: "invalid_argument" });
@@ -863,21 +864,52 @@ export class SandboxdRestClient {
     signal: AbortSignal,
   ): Promise<number> {
     const { query, headers } = writeRequestParts(opts);
-    if (content.locked) {
-      throw invalidArgument(
-        "writeStream content is already locked by another reader",
-      );
-    }
     const encoded = resolveSandboxPath(path, "write");
-    const reqPath = `/v1/files/${encoded}`;
+    return this.putStream(
+      "writeStream content",
+      `/v1/files/${encoded}`,
+      query,
+      headers,
+      content,
+      signal,
+    );
+  }
 
+  /**
+   * Streams a tar archive, optionally gzipped, to sandboxd, which unpacks it
+   * into the directory at `path`. The root aliases name the sandbox root.
+   * Streaming, limits, and failure handling are the same as writeStream().
+   * Returns the number of bytes sent.
+   */
+  async extract(
+    path: string,
+    archive: ReadableStream<Uint8Array>,
+    signal: AbortSignal,
+  ): Promise<number> {
+    const encoded = resolveSandboxPath(path, "extract");
+    return this.putStream(
+      "extract archive",
+      `/v1/files/${encoded}`,
+      { extract: "tar" },
+      { "Content-Type": "application/octet-stream" },
+      archive,
+      signal,
+    );
+  }
+
+  private async putStream(
+    what: string,
+    reqPath: string,
+    query: Record<string, string> | undefined,
+    headers: Record<string, string>,
+    content: ReadableStream<Uint8Array>,
+    signal: AbortSignal,
+  ): Promise<number> {
     let sourceReader: ReadableStreamDefaultReader<Uint8Array>;
     try {
       sourceReader = content.getReader();
     } catch {
-      throw invalidArgument(
-        "writeStream content is already locked by another reader",
-      );
+      throw invalidArgument(`${what} is already locked by another reader`);
     }
 
     const controller = new AbortController();

@@ -549,6 +549,7 @@ export class Sandbox {
           this.transferImpl("move", source, destination, opts),
         copy: (source, destination, opts) =>
           this.transferImpl("copy", source, destination, opts),
+        extract: (path, archive, opts) => this.extractImpl(path, archive, opts),
       });
     }
     return this._files;
@@ -1654,21 +1655,56 @@ export class Sandbox {
   ): Promise<void> {
     resolveSandboxPath(path, "write");
     validateWriteOptions(opts ?? {});
+    return this.streamUpload(
+      "write_stream",
+      "writeStream content",
+      content,
+      opts,
+      (gen, signal) => gen.rest.writeStream(path, content, opts ?? {}, signal),
+    );
+  }
+
+  private async extractImpl(
+    path: string,
+    archive: ReadableStream<Uint8Array>,
+    opts?: FileCallOptions,
+  ): Promise<void> {
+    resolveSandboxPath(path, "extract");
+    return this.streamUpload(
+      "extract",
+      "extract archive",
+      archive,
+      opts,
+      (gen, signal) => gen.rest.extract(path, archive, signal),
+    );
+  }
+
+  /**
+   * Runs a streaming upload. A failure of the caller's source stream is
+   * never a sandboxd connection problem, so it is unwrapped for the caller.
+   * `operation` names the span, `what` names the stream in error messages.
+   */
+  private async streamUpload(
+    operation: string,
+    what: string,
+    content: ReadableStream<Uint8Array>,
+    opts: RuntimeCallOptions | undefined,
+    send: (gen: ConnectionGeneration, signal: AbortSignal) => Promise<number>,
+  ): Promise<void> {
     if (content.locked) {
-      throw new SandboxError(
-        "writeStream content is already locked by another reader",
-        { telemetryCode: "invalid_argument" },
-      );
+      throw new SandboxError(`${what} is already locked by another reader`, {
+        telemetryCode: "invalid_argument",
+      });
     }
     const timeoutMs = validateTimeoutMs("timeoutMs", opts?.timeoutMs);
     try {
       await this.operate<number>(
-        "files.write_stream",
+        `files.${operation}`,
         timeoutMs,
         opts?.signal,
         (span) => {
           if (span.isRecording()) {
-            span.setAttribute("sandbox.file.operation", "write_stream");
+            span.setAttribute("sandbox.file.operation", operation);
           }
         },
         (span, bytesSent) => {
@@ -1676,8 +1712,7 @@ export class Sandbox {
             span.setAttribute("sandbox.file.size", bytesSent);
           }
         },
-        (gen, signal) =>
-          gen.rest.writeStream(path, content, opts ?? {}, signal),
+        send,
       );
     } catch (err) {
       if (err instanceof SourceFailure) {

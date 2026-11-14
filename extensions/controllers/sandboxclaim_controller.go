@@ -1364,8 +1364,8 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 		// for a while. Never hand it out, not even as the unready fallback: the
 		// claim would bind to a Pod that is going away. Keep it queued, since a
 		// Pod that is recreated makes the member usable again.
-		if isSandboxPodEnding(adopted) {
-			logger.V(4).Info("Skipping candidate whose Pod is ending", "sandbox", adopted.Name, "warmPool", claim.Spec.WarmPoolRef.Name)
+		if reason, ending := sandboxPodEndingReason(adopted); ending {
+			logger.V(4).Info("Skipping candidate whose Pod is ending", "sandbox", adopted.Name, "warmPool", claim.Spec.WarmPoolRef.Name, "reason", reason)
 			skipped = append(skipped, adoptedKey)
 			continue
 		}
@@ -1780,18 +1780,18 @@ func (r *SandboxClaimReconciler) removeAssignedSandboxReference(ctx context.Cont
 	return err
 }
 
-// isSandboxPodEnding reports whether the Sandbox's Ready condition says its
-// Pod is terminating or has ended.
-func isSandboxPodEnding(sb *v1beta1.Sandbox) bool {
+// sandboxPodEndingReason returns the Ready reason when the Sandbox's Ready
+// condition says its Pod is terminating or has ended.
+func sandboxPodEndingReason(sb *v1beta1.Sandbox) (string, bool) {
 	ready := meta.FindStatusCondition(sb.Status.Conditions, string(v1beta1.SandboxConditionReady))
 	if ready == nil || ready.Status == metav1.ConditionTrue {
-		return false
+		return "", false
 	}
 	switch ready.Reason {
 	case v1beta1.SandboxReasonPodTerminating, v1beta1.SandboxReasonPodSucceeded, v1beta1.SandboxReasonPodFailed:
-		return true
+		return ready.Reason, true
 	}
-	return false
+	return "", false
 }
 
 // isSandboxReady checks if a sandbox has Ready=True condition.

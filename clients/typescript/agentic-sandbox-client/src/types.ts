@@ -400,9 +400,10 @@ export interface CreateSandboxOptions {
   /**
    * Seconds, zero or more, for the claim's
    * `spec.lifecycle.ttlSecondsAfterFinished`. The timer starts only when the
-   * Pod reaches Succeeded or Failed. A Pod with `restartPolicy: Always` never
-   * does, so pair this with `shutdownAfterSeconds`. With both timers, the
-   * earlier deadline wins.
+   * Pod reaches Succeeded or Failed. A Pod with `restartPolicy: Always` does
+   * not reach either phase when its containers exit, although node-pressure
+   * eviction can still mark it Failed, so pair this with
+   * `shutdownAfterSeconds`. With both timers, the earlier deadline wins.
    */
   ttlSecondsAfterFinished?: number;
   /**

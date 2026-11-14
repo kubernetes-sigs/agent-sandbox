@@ -81,9 +81,11 @@ the expired claim. When a timer is set and no policy is given, the SDK sends
 `"Delete"`; the API's own default for an omitted policy is `"Retain"`.
 
 The `ttlSecondsAfterFinished` timer starts only when the Pod reaches `Succeeded`
-or `Failed`. A Pod with `restartPolicy: Always` never does, so pair it with
-`shutdownAfterSeconds`. With both timers, the earlier deadline wins. Invalid
-values for either option reject with `SandboxError` before provisioning.
+or `Failed`. A Pod with `restartPolicy: Always` does not reach either phase when
+its containers exit, although node-pressure eviction can still mark it `Failed`,
+so pair it with `shutdownAfterSeconds`. With both timers, the earlier deadline
+wins. Invalid values for either option reject with `SandboxError` before
+provisioning.
 `sandbox.close()` still deletes a `"Retain"` claim, and so does
 `enableAutoCleanup()` for a claim with a generated name.
 

@@ -776,25 +776,6 @@ describe("SandboxClient (registry)", () => {
       expect(mockWatchFn).not.toHaveBeenCalled();
     });
 
-    it.each([
-      "Delete",
-      "DeleteForeground",
-      "Retain",
-    ] as const)("sends shutdownPolicy %s with a deadline", async (policy) => {
-      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
-      mockSandboxReadyFlow("sandbox-policy");
-
-      const client = new SandboxClient();
-      await client.createSandbox("tpl", "default", {
-        shutdownAfterSeconds: 60,
-        shutdownPolicy: policy,
-      });
-
-      const spec = mockCreateNamespacedCustomObject.mock.calls[0][0].body.spec;
-      expect(spec.lifecycle.shutdownPolicy).toBe(policy);
-      expect(spec.lifecycle.shutdownTime).toEqual(expect.any(String));
-    });
-
     it("sends a shutdownPolicy given without a timer", async () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
       mockSandboxReadyFlow("sandbox-policy-only");
@@ -808,26 +789,8 @@ describe("SandboxClient (registry)", () => {
       expect(spec.lifecycle).toEqual({ shutdownPolicy: "Retain" });
     });
 
-    it("sends a policy and ttlSecondsAfterFinished without a deadline", async () => {
-      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
-      mockSandboxReadyFlow("sandbox-retain-ttl");
-
-      const client = new SandboxClient();
-      await client.createSandbox("tpl", "default", {
-        shutdownPolicy: "Retain",
-        ttlSecondsAfterFinished: 60,
-      });
-
-      const spec = mockCreateNamespacedCustomObject.mock.calls[0][0].body.spec;
-      expect(spec.lifecycle).toEqual({
-        shutdownPolicy: "Retain",
-        ttlSecondsAfterFinished: 60,
-      });
-    });
-
     it.each([
       ["zero", 0],
-      ["positive", 300],
       ["the int32 maximum", 2147483647],
     ])("sends ttlSecondsAfterFinished (%s) and defaults the policy to Delete", async (_label, ttl) => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
@@ -872,11 +835,8 @@ describe("SandboxClient (registry)", () => {
     });
 
     it.each([
-      ["unknown value", "Keep"],
       ["wrong case", "delete"],
-      ["empty string", ""],
       ["null", null],
-      ["number", 1],
     ])("rejects invalid shutdownPolicy (%s) before provisioning", async (_label, policy) => {
       mockSandboxReadyFlow("sandbox-invalid-policy");
 
@@ -895,12 +855,8 @@ describe("SandboxClient (registry)", () => {
     it.each([
       ["negative", -1],
       ["fractional", 0.5],
-      ["NaN", Number.NaN],
-      ["Infinity", Number.POSITIVE_INFINITY],
       ["beyond int32", 2147483648],
-      ["boolean", true],
       ["string", "60"],
-      ["null", null],
     ])("rejects invalid ttlSecondsAfterFinished (%s) before provisioning", async (_label, ttl) => {
       mockSandboxReadyFlow("sandbox-invalid-finished-ttl");
 

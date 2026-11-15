@@ -5997,6 +5997,39 @@ func TestReconcilePVCs(t *testing.T) {
 	}
 }
 
+func TestReconcileDoesNotReadoptWhenSandboxDeletingOnServer(t *testing.T) {
+	nameHash := NameHash("test-sandbox")
+	labels := map[string]string{sandboxv1beta1.SandboxNameHashLabel: nameHash}
+	meta := metav1.ObjectMeta{Name: "test-sandbox", Namespace: "test-ns", UID: "sandbox-uid-123"}
+
+	// The cached copy looks alive, the API server copy is already deleting.
+	cached := &sandboxv1beta1.Sandbox{ObjectMeta: meta}
+	cached.Spec.VolumeClaimTemplates = []sandboxv1beta1.PersistentVolumeClaimTemplate{
+		{EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"}},
+	}
+	cached.Spec.PodTemplate.Spec.Containers = []corev1.Container{{Name: "main", Ports: []corev1.ContainerPort{{ContainerPort: 8080}}}}
+	live := cached.DeepCopy()
+	live.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	live.Finalizers = []string{"foregroundDeletion"}
+
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "data-test-sandbox", Namespace: "test-ns", Labels: labels}}
+	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "test-ns", Labels: labels}}
+	r := SandboxReconciler{
+		Client: newFakeClient(live, pvc, svc),
+		Scheme: Scheme,
+		Tracer: asmetrics.NewNoOp(),
+	}
+
+	require.NoError(t, r.reconcilePVCs(t.Context(), cached, nameHash))
+	_, err := r.reconcileService(t.Context(), cached, nameHash)
+	require.NoError(t, err)
+
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pvc), pvc))
+	assert.Empty(t, pvc.OwnerReferences)
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(svc), svc))
+	assert.Empty(t, svc.OwnerReferences)
+}
+
 func TestSandboxExpiry(t *testing.T) {
 	now := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 

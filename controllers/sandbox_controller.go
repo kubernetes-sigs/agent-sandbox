@@ -295,6 +295,8 @@ func (m *lifecycleTimeMap) markError(key types.NamespacedName, uid types.UID) bo
 // SandboxReconciler reconciles a Sandbox object.
 type SandboxReconciler struct {
 	client.Client
+	// APIReader reads straight from the API server. Falls back to Client when unset.
+	APIReader     client.Reader
 	Scheme        *runtime.Scheme
 	Recorder      events.EventRecorder
 	Tracer        asmetrics.Instrumenter
@@ -1573,6 +1575,10 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 				service.Name, service.Spec.ClusterIP, corev1.ClusterIPNone)
 		}
 
+		if gone, err := r.sandboxGone(ctx, sandbox); err != nil || gone {
+			return nil, err
+		}
+
 		logger.Info("Adopting unowned service", "Service.Name", service.Name, "Sandbox.Name", sandbox.Name)
 
 		if service.Labels == nil {
@@ -2208,6 +2214,23 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 	return updated
 }
 
+// sandboxGone reports whether the Sandbox is deleting or replaced, per the API server.
+// A stale cache can miss that, and re-adopting an orphaned child makes the GC delete it.
+func (r *SandboxReconciler) sandboxGone(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) (bool, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	live := &sandboxv1beta1.Sandbox{}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(sandbox), live); err != nil {
+		if k8serrors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("failed to get sandbox: %w", err)
+	}
+	return live.UID != sandbox.UID || !live.DeletionTimestamp.IsZero(), nil
+}
+
 func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, nameHash string) error {
 	logger := log.FromContext(ctx)
 
@@ -2238,6 +2261,10 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 						"RequiredLabel", sandboxv1beta1.SandboxAdoptableLabel, "TrackingLabel", sandboxv1beta1.SandboxNameHashLabel)
 					return fmt.Errorf("cannot adopt unowned PVC %q: missing required pool authorization label (%q) or sandbox tracking label (%q)",
 						pvcName, sandboxv1beta1.SandboxAdoptableLabel, sandboxv1beta1.SandboxNameHashLabel)
+				}
+
+				if gone, err := r.sandboxGone(ctx, sandbox); err != nil || gone {
+					return err
 				}
 
 				logger.Info("Adopting unowned PVC", "PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)

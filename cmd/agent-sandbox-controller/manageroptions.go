@@ -41,9 +41,14 @@ type leaderElectionTiming struct {
 	RetryPeriod   time.Duration
 }
 
-// validate applies the same rules as client-go's leaderelection.NewLeaderElector,
+// validate applies the rules of client-go's leaderelection.NewLeaderElector,
 // so that a bad combination fails at startup with the flag names in the error
-// instead of when the manager starts leader election.
+// instead of when the manager starts leader election. It is stricter in one
+// case: the Lease stores the lease duration in whole seconds, and candidates
+// use that stored value to decide when the Lease has expired, so the lease
+// duration rounded down to whole seconds must exceed the renew deadline.
+// Otherwise a candidate could take over while the old leader is still
+// retrying its renewal, and both would reconcile for a short time.
 func (t leaderElectionTiming) validate() error {
 	if t.LeaseDuration <= 0 {
 		return fmt.Errorf("--leader-elect-lease-duration must be greater than zero, got %s", t.LeaseDuration)
@@ -54,8 +59,8 @@ func (t leaderElectionTiming) validate() error {
 	if t.RetryPeriod <= 0 {
 		return fmt.Errorf("--leader-elect-retry-period must be greater than zero, got %s", t.RetryPeriod)
 	}
-	if t.LeaseDuration <= t.RenewDeadline {
-		return fmt.Errorf("--leader-elect-lease-duration (%s) must be greater than --leader-elect-renew-deadline (%s)",
+	if t.LeaseDuration.Truncate(time.Second) <= t.RenewDeadline {
+		return fmt.Errorf("--leader-elect-lease-duration (%s), rounded down to whole seconds as stored in the Lease, must be greater than --leader-elect-renew-deadline (%s)",
 			t.LeaseDuration, t.RenewDeadline)
 	}
 	if t.RenewDeadline <= time.Duration(leaderelection.JitterFactor*float64(t.RetryPeriod)) {

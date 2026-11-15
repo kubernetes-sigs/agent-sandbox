@@ -103,6 +103,10 @@ func TestLeaderElectionTimingValidate(t *testing.T) {
 		name    string
 		timing  leaderElectionTiming
 		wantErr string
+		// stricterThanClientGo marks inputs that client-go accepts but
+		// validate() rejects, because the lease duration stored in the Lease
+		// in whole seconds would not exceed the renew deadline.
+		stricterThanClientGo bool
 	}{
 		{name: "defaults", timing: defaultTiming},
 		{name: "longer timings for a slow API server", timing: leaderElectionTiming{LeaseDuration: 60 * time.Second, RenewDeadline: 40 * time.Second, RetryPeriod: 5 * time.Second}},
@@ -110,6 +114,10 @@ func TestLeaderElectionTimingValidate(t *testing.T) {
 		{name: "negative renew deadline", timing: leaderElectionTiming{LeaseDuration: 15 * time.Second, RenewDeadline: -time.Second, RetryPeriod: 2 * time.Second}, wantErr: "--leader-elect-renew-deadline must be greater than zero"},
 		{name: "zero retry period", timing: leaderElectionTiming{LeaseDuration: 15 * time.Second, RenewDeadline: 10 * time.Second, RetryPeriod: 0}, wantErr: "--leader-elect-retry-period must be greater than zero"},
 		{name: "lease duration equal to renew deadline", timing: leaderElectionTiming{LeaseDuration: 10 * time.Second, RenewDeadline: 10 * time.Second, RetryPeriod: 2 * time.Second}, wantErr: "must be greater than --leader-elect-renew-deadline"},
+		{name: "fractional lease duration above renew deadline in whole seconds", timing: leaderElectionTiming{LeaseDuration: 15500 * time.Millisecond, RenewDeadline: 10 * time.Second, RetryPeriod: 2 * time.Second}},
+		{name: "lease duration not above renew deadline in whole seconds", timing: leaderElectionTiming{LeaseDuration: 1500 * time.Millisecond, RenewDeadline: 1400 * time.Millisecond, RetryPeriod: 100 * time.Millisecond}, wantErr: "rounded down to whole seconds", stricterThanClientGo: true},
+		{name: "lease duration rounds down to whole renew deadline", timing: leaderElectionTiming{LeaseDuration: 10900 * time.Millisecond, RenewDeadline: 10 * time.Second, RetryPeriod: 2 * time.Second}, wantErr: "rounded down to whole seconds", stricterThanClientGo: true},
+		{name: "sub-second lease duration", timing: leaderElectionTiming{LeaseDuration: 900 * time.Millisecond, RenewDeadline: 500 * time.Millisecond, RetryPeriod: 100 * time.Millisecond}, wantErr: "rounded down to whole seconds", stricterThanClientGo: true},
 		{name: "renew deadline equal to jittered retry period", timing: leaderElectionTiming{LeaseDuration: 15 * time.Second, RenewDeadline: 12 * time.Second, RetryPeriod: 10 * time.Second}, wantErr: "x --leader-elect-retry-period"},
 		{name: "renew deadline just above jittered retry period", timing: leaderElectionTiming{LeaseDuration: 15 * time.Second, RenewDeadline: 12*time.Second + time.Nanosecond, RetryPeriod: 10 * time.Second}},
 	}
@@ -122,9 +130,10 @@ func TestLeaderElectionTimingValidate(t *testing.T) {
 				require.ErrorContains(t, err, tc.wantErr)
 			}
 
-			// The validation must accept exactly what client-go accepts, so
-			// a value that passes at startup cannot fail later when the
-			// manager starts leader election.
+			// The validation must reject everything client-go rejects, so a
+			// value that passes at startup cannot fail later when the manager
+			// starts leader election. Apart from the whole-second Lease rule,
+			// it must also accept everything client-go accepts.
 			_, clientGoErr := leaderelection.NewLeaderElector(leaderelection.LeaderElectionConfig{
 				Lock:          &resourcelock.LeaseLock{LockConfig: resourcelock.ResourceLockConfig{Identity: "test"}},
 				LeaseDuration: tc.timing.LeaseDuration,
@@ -135,6 +144,10 @@ func TestLeaderElectionTimingValidate(t *testing.T) {
 					OnStoppedLeading: func() {},
 				},
 			})
+			if tc.stricterThanClientGo {
+				require.NoError(t, clientGoErr, "client-go now rejects this input; drop stricterThanClientGo")
+				return
+			}
 			assert.Equal(t, err == nil, clientGoErr == nil,
 				"validate() and client-go disagree: validate=%v client-go=%v", err, clientGoErr)
 		})

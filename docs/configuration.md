@@ -52,19 +52,23 @@ election, and which controllers it registers — rather than cluster-wide behavi
 * `--leader-election-namespace` (default: `""`): Namespace in which the leader-election resource
   is created. When empty, the controller auto-detects the namespace it is running in.
 * `--leader-elect-lease-duration` (default: `15s`): How long non-leader candidates wait after the
-  last observed Lease renewal before they try to take over leadership. This is also the longest
-  time without an active controller after a leader crashes.
+  last observed Lease renewal before they try to take over leadership. After a leader crashes,
+  the controller is inactive for roughly this long, plus up to a few retry periods and any API
+  latency while a candidate notices the expired Lease and acquires it. The Lease stores this value
+  in whole seconds; rounded down, it must be greater than `--leader-elect-renew-deadline`.
 * `--leader-elect-renew-deadline` (default: `10s`): How long the leader keeps retrying a Lease
   renewal before it gives up leadership. The controller exits when it loses leadership, so on a
   cluster where API server or etcd requests are sometimes slow, a short deadline turns a slow
-  period into controller restarts. Must be less than `--leader-elect-lease-duration`.
+  period into controller restarts. Must be less than `--leader-elect-lease-duration` in whole
+  seconds.
 * `--leader-elect-retry-period` (default: `2s`): How long leader-election clients wait between
   attempts to acquire or renew the Lease. `--leader-elect-renew-deadline` must be greater than
   1.2 times this value.
 
   The defaults match controller-runtime and suit most clusters. To tolerate a slow API server or
   etcd, raise all three together, for example `60s`, `40s` and `5s`. Longer values also delay
-  failover when the leader crashes, by up to the lease duration.
+  failover when the leader crashes, since candidates wait out the lease duration before they try to
+  take over.
 * `--extensions` (default: `false`): Enable the extensions controllers (`SandboxTemplate`,
   `SandboxWarmPool`, `SandboxClaim`).
 * `--version`: Print version information and exit.

@@ -295,6 +295,28 @@ class TestSandbox(unittest.TestCase):
         self.sandbox._is_closed = True
         self.assertFalse(self.sandbox.is_active)
 
+    def test_close_connection_marks_sub_clients_closed(self):
+        """A reference kept from before the close must report it, not break.
+
+        close_connection() drops the sandbox's own references, so the guard
+        has to live on the sub-clients themselves.
+        """
+        from k8s_agent_sandbox.commands.command_executor import CommandExecutor
+        from k8s_agent_sandbox.exceptions import SandboxClosedError
+        from k8s_agent_sandbox.files.filesystem import Filesystem
+
+        commands = CommandExecutor(MagicMock(), MagicMock(), "test")
+        files = Filesystem(MagicMock(), MagicMock(), "test")
+        self.sandbox._commands = commands
+        self.sandbox._files = files
+
+        self.sandbox.close_connection()
+
+        with self.assertRaises(SandboxClosedError):
+            commands.run("echo hi")
+        with self.assertRaises(SandboxClosedError):
+            files.list(".")
+
     def test_close_connection(self):
         """Tests the public close_connection method."""
         self.sandbox.close_connection()

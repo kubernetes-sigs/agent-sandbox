@@ -33,6 +33,7 @@ from k8s_agent_sandbox.async_connector import (
     MAX_RETRIES,
 )
 from k8s_agent_sandbox.exceptions import (
+    SandboxClosedError,
     SandboxNoServiceError,
     SandboxNotReadyError,
     SandboxPortForwardError,
@@ -243,7 +244,7 @@ class TestAsyncSandboxdConnector(unittest.IsolatedAsyncioTestCase):
         connector = self._build()
         await connector.close()
 
-        with self.assertRaisesRegex(RuntimeError, "closed"):
+        with self.assertRaisesRegex(SandboxClosedError, "closed"):
             await connector.connect()
 
     def test_connector_atexit_cleanup_releases_state_without_async_closes(self):

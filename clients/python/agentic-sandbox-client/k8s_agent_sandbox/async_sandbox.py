@@ -313,6 +313,17 @@ class AsyncSandbox:
         """
         return not self._is_closed and self._commands is not None and self._files is not None
 
+    def _mark_sub_clients_closed(self) -> None:
+        """Mark the command, file and watch clients closed.
+
+        Called before their references are dropped, so a caller holding one
+        from before the close gets a SandboxClosedError rather than acting on
+        a half-torn-down connector.
+        """
+        for client in (self._commands, self._files, self._watcher):
+            if client is not None:
+                client._mark_closed()
+
     async def close_connection(self) -> None:
         """
         Closes the client-side connection and disables execution engines locally,
@@ -324,6 +335,8 @@ class AsyncSandbox:
             return
 
         await self.connector.close()
+
+        self._mark_sub_clients_closed()
 
         self._commands = None
         self._files = None
@@ -341,6 +354,8 @@ class AsyncSandbox:
     def _close_for_atexit(self) -> None:
         """Release local resources without touching the owning event loop."""
         self.connector._close_for_atexit()
+        self._mark_sub_clients_closed()
+
         self._commands = None
         self._files = None
         self._watcher = None

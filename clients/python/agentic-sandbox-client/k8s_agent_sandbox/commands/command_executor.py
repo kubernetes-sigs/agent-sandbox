@@ -14,10 +14,13 @@
 
 import threading
 from typing import Any, cast
+from k8s_agent_sandbox._grpc_errors import classify_rpc_error
 from k8s_agent_sandbox.commands._process_handle import ProcessHandle
 from k8s_agent_sandbox.connector import SandboxConnector
+from k8s_agent_sandbox.exceptions import SandboxTimeoutError
 from k8s_agent_sandbox.models import ExecutionResult, LegacyExecuteRequest, PtySize
 from k8s_agent_sandbox.trace_manager import trace, trace_span
+from k8s_agent_sandbox.utils import ClosableClient
 
 # Extra time the HTTP read waits beyond command_timeout, so the response the
 # runtime sends after killing a timed-out command still arrives.
@@ -75,7 +78,7 @@ def _execute_request(
     return payload, max(timeout, command_timeout + _COMMAND_TIMEOUT_MARGIN_SECONDS)
 
 
-class CommandExecutor:
+class CommandExecutor(ClosableClient):
     """
     Handles execution of commands within the sandbox.
     """
@@ -120,6 +123,7 @@ class CommandExecutor:
                 root. Only the sandboxd runtime supports it; the legacy
                 runtime raises NotImplementedError.
         """
+        self._ensure_open()
         sandboxd = self.connector.is_sandboxd()
         _check_process_options(env, cwd, sandboxd)
         span = trace.get_current_span()
@@ -184,6 +188,7 @@ class CommandExecutor:
         Only the sandboxd runtime implements ProcessService.Start; the legacy
         python-runtime raises ``NotImplementedError``.
         """
+        self._ensure_open()
         sandboxd = self.connector.is_sandboxd()
         if not sandboxd:
             raise NotImplementedError(
@@ -235,17 +240,18 @@ class CommandExecutor:
         try:
             return ProcessHandle.from_stream(stub, process_pb2, stream_call)
         except grpc.RpcError as e:
+            # Our own cancellation reaches us as an RpcError, so the timeout
+            # is resolved before the status is classified as a transport
+            # failure.
             if start_timed_out.is_set():
-                raise TimeoutError(
+                raise SandboxTimeoutError(
                     f"sandboxd did not report the process started within "
                     f"{timeout}s"
                 ) from e
             rpc_error = cast("grpc.Call", e)
             if rpc_error.code() == grpc.StatusCode.UNAVAILABLE:
                 self.connector.invalidate_sandboxd_transport(channel)
-            raise RuntimeError(
-                f"sandboxd Start failed ({rpc_error.code()}): {rpc_error.details()}"
-            ) from e
+            raise classify_rpc_error(e, operation="Start") from e
         finally:
             timer.cancel()
 
@@ -296,9 +302,7 @@ class CommandExecutor:
                 )
             if rpc_error.code() == grpc.StatusCode.UNAVAILABLE:
                 self.connector.invalidate_sandboxd_transport(channel)
-            raise RuntimeError(
-                f"sandboxd process service failed ({rpc_error.code()}): {rpc_error.details()}"
-            ) from e
+            raise classify_rpc_error(e, operation="Execute") from e
         return ExecutionResult(
             stdout=response.stdout.decode("utf-8", errors="replace"),
             stderr=response.stderr.decode("utf-8", errors="replace"),

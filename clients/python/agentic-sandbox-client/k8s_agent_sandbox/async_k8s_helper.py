@@ -36,7 +36,7 @@ from .constants import (
     TERMINAL_CLAIM_READY_REASONS,
 )
 from .models import AdditionalPodMetadata
-from .exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
+from .exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxTimeoutError, SandboxWarmPoolNotFoundError
 from .utils import (
     construct_sandbox_claim_env_spec,
     current_not_ready,
@@ -239,7 +239,7 @@ class AsyncK8sHelper:
             # timeoutSeconds is integral; preserve a positive fractional budget.
             remaining = math.ceil(deadline - time.monotonic())
             if remaining <= 0:
-                raise TimeoutError(
+                raise SandboxTimeoutError(
                     f"Could not resolve {wait_target} from claim "
                     f"'{claim_name}' within {timeout} seconds."
                 )
@@ -368,7 +368,7 @@ class AsyncK8sHelper:
         while True:
             remaining = math.ceil(deadline - time.monotonic())
             if remaining <= 0:
-                raise TimeoutError(
+                raise SandboxTimeoutError(
                     f"Sandbox {name} did not become {description} within {timeout} seconds."
                 )
             w = watch.Watch()
@@ -544,7 +544,7 @@ class AsyncK8sHelper:
         while True:
             remaining = math.ceil(deadline - time.monotonic())
             if remaining <= 0:
-                raise TimeoutError(f"Gateway '{gateway_name}' did not get an IP.")
+                raise SandboxTimeoutError(f"Gateway '{gateway_name}' did not get an IP.")
             w = watch.Watch()
             try:
                 async for event in w.stream(

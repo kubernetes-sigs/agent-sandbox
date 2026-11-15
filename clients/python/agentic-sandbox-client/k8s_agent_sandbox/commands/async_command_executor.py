@@ -16,6 +16,7 @@ from typing import Any, cast
 
 """Non-blocking command execution for legacy and sandboxd runtimes."""
 
+from k8s_agent_sandbox._grpc_errors import classify_rpc_error
 from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
 from k8s_agent_sandbox.commands._process_handle import AsyncProcessHandle
 from k8s_agent_sandbox.commands.command_executor import (
@@ -24,11 +25,13 @@ from k8s_agent_sandbox.commands.command_executor import (
     _extract_executable,
     _process_config,
 )
+from k8s_agent_sandbox.exceptions import SandboxTimeoutError
 from k8s_agent_sandbox.models import ExecutionResult, PtySize
 from k8s_agent_sandbox.trace_manager import async_trace_span, trace
+from k8s_agent_sandbox.utils import ClosableClient
 
 
-class AsyncCommandExecutor:
+class AsyncCommandExecutor(ClosableClient):
     """Run commands through legacy HTTP or sandboxd's gRPC service."""
 
     def __init__(
@@ -72,6 +75,7 @@ class AsyncCommandExecutor:
                 root. Only the sandboxd runtime supports it; the legacy
                 runtime raises NotImplementedError.
         """
+        self._ensure_open()
         sandboxd = self.connector.is_sandboxd()
         _check_process_options(env, cwd, sandboxd)
         span = trace.get_current_span()
@@ -155,9 +159,7 @@ class AsyncCommandExecutor:
                 )
             if rpc_error.code() == grpc.StatusCode.UNAVAILABLE:
                 await self.connector.invalidate_sandboxd_transport(channel)
-            raise RuntimeError(
-                f"sandboxd process service failed ({rpc_error.code()}): {rpc_error.details()}"
-            ) from e
+            raise classify_rpc_error(e, operation="Execute") from e
         return ExecutionResult(
             stdout=response.stdout.decode("utf-8", errors="replace"),
             stderr=response.stderr.decode("utf-8", errors="replace"),
@@ -183,6 +185,7 @@ class AsyncCommandExecutor:
         Only the sandboxd runtime implements ProcessService.Start; the legacy
         python-runtime raises ``NotImplementedError``.
         """
+        self._ensure_open()
         sandboxd = self.connector.is_sandboxd()
         if not sandboxd:
             raise NotImplementedError(
@@ -226,13 +229,11 @@ class AsyncCommandExecutor:
                 timeout,
             )
         except asyncio.TimeoutError as e:
-            raise TimeoutError(
+            raise SandboxTimeoutError(
                 f"sandboxd did not report the process started within {timeout}s"
             ) from e
         except grpc.RpcError as e:
             rpc_error = cast("grpc.aio.AioRpcError", e)
             if rpc_error.code() == grpc.StatusCode.UNAVAILABLE:
                 await self.connector.invalidate_sandboxd_transport(channel)
-            raise RuntimeError(
-                f"sandboxd Start failed ({rpc_error.code()}): {rpc_error.details()}"
-            ) from e
+            raise classify_rpc_error(e, operation="Start") from e

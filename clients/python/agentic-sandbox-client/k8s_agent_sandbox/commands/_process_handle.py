@@ -23,6 +23,8 @@ SDK's ``ProcessHandle`` and the TypeScript SDK's ``ProcessHandle``.
 
 from typing import Any, AsyncIterator, Iterator, cast
 
+from k8s_agent_sandbox._grpc_errors import classify_rpc_error
+from k8s_agent_sandbox.exceptions import SandboxClosedError, SandboxConnectionError
 from k8s_agent_sandbox.models import (
     ProcessEvent,
     ProcessExitEvent,
@@ -76,9 +78,10 @@ def _read_init(response: Any) -> int:
     ``process_id`` be set before ``start()`` returns.
     """
     if response.WhichOneof("event") != "init" or not response.init.process_id:
-        raise RuntimeError(
+        raise SandboxConnectionError(
             "sandboxd protocol error: expected an Init event with a nonzero "
-            "process ID as the first message of ProcessService.Start"
+            "process ID as the first message of ProcessService.Start",
+            "protocol",
         )
     return cast(int, response.init.process_id)
 
@@ -95,7 +98,8 @@ def _to_event(response: Any, exit_seen: bool) -> tuple[ProcessEvent, bool]:
     identically to exit_code=0.
     """
     if exit_seen:
-        raise RuntimeError("sandboxd protocol error: an event arrived after Exit")
+        raise SandboxConnectionError(
+            "sandboxd protocol error: an event arrived after Exit", "protocol")
     which = response.WhichOneof("event")
     if which == "stdout":
         return ProcessOutputEvent(type="stdout", data=response.stdout), False
@@ -105,10 +109,12 @@ def _to_event(response: Any, exit_seen: bool) -> tuple[ProcessEvent, bool]:
         return ProcessExitEvent(exit_code=response.exit.exit_code), True
     if which == "init":
         # start() already consumed the one Init sandboxd sends.
-        raise RuntimeError(
-            "sandboxd protocol error: a second Init event arrived mid-stream")
-    raise RuntimeError(
-        "sandboxd protocol error: stream carried an unrecognized event")
+        raise SandboxConnectionError(
+            "sandboxd protocol error: a second Init event arrived mid-stream",
+            "protocol")
+    raise SandboxConnectionError(
+        "sandboxd protocol error: stream carried an unrecognized event",
+        "protocol")
 
 
 _EMPTY_STREAM = (
@@ -128,21 +134,6 @@ def _cancel_quietly(stream_call: Any) -> None:
         stream_call.cancel()
     except Exception:
         pass
-
-
-def _signal_error(exc: Any, code: Any, process_id: int) -> Exception:
-    """Translate a SendSignal gRPC error into the SDK's exception taxonomy."""
-    import grpc
-
-    if code == grpc.StatusCode.DEADLINE_EXCEEDED:
-        return TimeoutError("sandboxd SendSignal timed out: {}".format(exc.details()))
-    if code == grpc.StatusCode.NOT_FOUND:
-        return LookupError(f"process {process_id} not found: {exc.details()}")
-    if code == grpc.StatusCode.PERMISSION_DENIED:
-        return PermissionError(
-            f"not permitted to signal process {process_id}: {exc.details()}"
-        )
-    return RuntimeError(f"sandboxd SendSignal failed ({code}): {exc.details()}")
 
 
 class ProcessHandle:
@@ -168,6 +159,7 @@ class ProcessHandle:
         self._iter = iter(stream_call) if iterator is None else iterator
         self.process_id = process_id
         self._finished = False
+        self._closed = False
 
     @classmethod
     def from_stream(cls, stub: Any, proto_module: Any,
@@ -181,7 +173,7 @@ class ProcessHandle:
         try:
             first = next(iterator, None)
             if first is None:
-                raise RuntimeError(_EMPTY_STREAM)
+                raise SandboxConnectionError(_EMPTY_STREAM, "protocol")
             process_id = _read_init(first)
         except BaseException:
             _cancel_quietly(stream_call)
@@ -203,23 +195,26 @@ class ProcessHandle:
                 event, self._finished = _to_event(response, self._finished)
                 yield event
         except grpc.RpcError as e:
-            rpc_error = cast("grpc.Call", e)
-            raise RuntimeError(
-                "sandboxd process stream failed "
-                f"({rpc_error.code()}): {rpc_error.details()}"
-            ) from e
+            # close() cancels the stream itself, so a cancelled read after
+            # close is this handle's own doing, not a transport failure.
+            if self._closed:
+                raise SandboxClosedError("the process handle is closed") from e
+            raise classify_rpc_error(e, operation="Start") from e
+        if self._closed and not self._finished:
+            raise SandboxClosedError("the process handle is closed")
         if not self._finished:
-            raise RuntimeError(
+            raise SandboxConnectionError(
                 "sandboxd protocol error: the process stream ended without an "
-                "Exit event")
+                "Exit event",
+                "protocol")
 
     def signal(self, sig: int | str,
                timeout: float = _DEFAULT_SIGNAL_TIMEOUT_SECONDS) -> None:
         """Deliver ``sig`` (SIGINT/SIGTERM/SIGKILL) to the running process.
 
         ``timeout`` sets how many seconds to wait for the RPC response.
-        It defaults to five. A timeout raises ``TimeoutError`` with the
-        gRPC error as its cause. Timeout leaves Start open; the signal may
+        It defaults to five. A timeout raises ``SandboxTimeoutError`` with
+        the gRPC error as its cause. Timeout leaves Start open; the signal may
         already have been delivered.
         """
         import grpc
@@ -230,12 +225,12 @@ class ProcessHandle:
         try:
             self._stub.SendSignal(request, timeout=timeout)
         except grpc.RpcError as e:
-            rpc_error = cast("grpc.Call", e)
-            raise _signal_error(
-                rpc_error, rpc_error.code(), self.process_id) from e
+            raise classify_rpc_error(
+                e, operation="SendSignal", process_id=self.process_id) from e
 
     def close(self) -> None:
         """Cancel the underlying stream if it is still open."""
+        self._closed = True
         if self._finished:
             return
         try:
@@ -254,6 +249,7 @@ class AsyncProcessHandle:
         self._stream = stream_call
         self.process_id = process_id
         self._finished = False
+        self._closed = False
 
     @classmethod
     async def from_stream(
@@ -269,7 +265,7 @@ class AsyncProcessHandle:
         try:
             first = await stream_call.read()
             if first is grpc.aio.EOF:
-                raise RuntimeError(_EMPTY_STREAM)
+                raise SandboxConnectionError(_EMPTY_STREAM, "protocol")
             process_id = _read_init(first)
         except BaseException:
             _cancel_quietly(stream_call)
@@ -297,22 +293,27 @@ class AsyncProcessHandle:
                     break
                 event, self._finished = _to_event(response, self._finished)
                 yield event
-        except grpc.aio.AioRpcError as e:
-            raise RuntimeError(
-                f"sandboxd process stream failed ({e.code()}): {e.details()}"
-            ) from e
+        except grpc.RpcError as e:
+            # close() cancels the stream itself, so a cancelled read after
+            # close is this handle's own doing, not a transport failure.
+            if self._closed:
+                raise SandboxClosedError("the process handle is closed") from e
+            raise classify_rpc_error(e, operation="Start") from e
+        if self._closed and not self._finished:
+            raise SandboxClosedError("the process handle is closed")
         if not self._finished:
-            raise RuntimeError(
+            raise SandboxConnectionError(
                 "sandboxd protocol error: the process stream ended without an "
-                "Exit event")
+                "Exit event",
+                "protocol")
 
     async def signal(self, sig: int | str,
                      timeout: float = _DEFAULT_SIGNAL_TIMEOUT_SECONDS) -> None:
         """Deliver ``sig`` (SIGINT/SIGTERM/SIGKILL) to the running process.
 
         ``timeout`` sets how many seconds to wait for the RPC response.
-        It defaults to five. A timeout raises ``TimeoutError`` with the
-        gRPC error as its cause. Timeout leaves Start open; the signal may
+        It defaults to five. A timeout raises ``SandboxTimeoutError`` with
+        the gRPC error as its cause. Timeout leaves Start open; the signal may
         already have been delivered.
         """
         import grpc
@@ -322,11 +323,13 @@ class AsyncProcessHandle:
         )
         try:
             await self._stub.SendSignal(request, timeout=timeout)
-        except grpc.aio.AioRpcError as e:
-            raise _signal_error(e, e.code(), self.process_id) from e
+        except grpc.RpcError as e:
+            raise classify_rpc_error(
+                e, operation="SendSignal", process_id=self.process_id) from e
 
     async def close(self) -> None:
         """Cancel the underlying stream if it is still open."""
+        self._closed = True
         if self._finished:
             return
         try:

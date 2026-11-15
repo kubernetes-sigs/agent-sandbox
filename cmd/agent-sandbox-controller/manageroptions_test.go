@@ -15,19 +15,30 @@
 package main
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/leaderelection"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
+
+var defaultTiming = leaderElectionTiming{
+	LeaseDuration: defaultLeaderElectionLeaseDuration,
+	RenewDeadline: defaultLeaderElectionRenewDeadline,
+	RetryPeriod:   defaultLeaderElectionRetryPeriod,
+}
 
 // TestBuildManagerOptionsReleasesLeaseOnCancel pins the graceful-shutdown
 // behavior: the manager must release its leader-election Lease when it stops
 // cleanly, so a rolling update hands leadership over immediately instead of
 // waiting out the LeaseDuration.
 func TestBuildManagerOptionsReleasesLeaseOnCancel(t *testing.T) {
-	opts := buildManagerOptions(runtime.NewScheme(), metricsserver.Options{}, ":8081", true, "agent-sandbox-system")
+	opts := buildManagerOptions(runtime.NewScheme(), metricsserver.Options{}, ":8081", true, "agent-sandbox-system", defaultTiming)
 	assert.True(t, opts.LeaderElectionReleaseOnCancel,
 		"LeaderElectionReleaseOnCancel must stay true so graceful shutdowns hand over leadership without waiting out the LeaseDuration")
 }
@@ -36,7 +47,7 @@ func TestBuildManagerOptionsReleasesLeaseOnCancel(t *testing.T) {
 // changing it would let two controller versions run as leaders concurrently
 // during an upgrade.
 func TestBuildManagerOptionsLeaderElectionID(t *testing.T) {
-	opts := buildManagerOptions(runtime.NewScheme(), metricsserver.Options{}, ":8081", true, "")
+	opts := buildManagerOptions(runtime.NewScheme(), metricsserver.Options{}, ":8081", true, "", defaultTiming)
 	assert.Equal(t, "a3317529.agent-sandbox.x-k8s.io", opts.LeaderElectionID)
 }
 
@@ -48,7 +59,7 @@ func TestBuildManagerOptionsPassThrough(t *testing.T) {
 
 	for _, enableLeaderElection := range []bool{true, false} {
 		for _, namespace := range []string{"", "agent-sandbox-system"} {
-			opts := buildManagerOptions(scheme, metricsOpts, ":8081", enableLeaderElection, namespace)
+			opts := buildManagerOptions(scheme, metricsOpts, ":8081", enableLeaderElection, namespace, defaultTiming)
 			assert.Equal(t, enableLeaderElection, opts.LeaderElection,
 				"LeaderElection must pass through --leader-elect")
 			assert.Equal(t, namespace, opts.LeaderElectionNamespace,
@@ -57,5 +68,75 @@ func TestBuildManagerOptionsPassThrough(t *testing.T) {
 			assert.Equal(t, ":8081", opts.HealthProbeBindAddress)
 			assert.Equal(t, ":8080", opts.Metrics.BindAddress)
 		}
+	}
+}
+
+// TestBuildManagerOptionsDefaultLeaderElectionTiming pins the flag defaults to
+// the controller-runtime defaults, so a deployment that does not set the
+// leader-election timing flags keeps the same Lease behavior.
+func TestBuildManagerOptionsDefaultLeaderElectionTiming(t *testing.T) {
+	opts := buildManagerOptions(runtime.NewScheme(), metricsserver.Options{}, ":8081", true, "", defaultTiming)
+	require.NotNil(t, opts.LeaseDuration)
+	require.NotNil(t, opts.RenewDeadline)
+	require.NotNil(t, opts.RetryPeriod)
+	assert.Equal(t, 15*time.Second, *opts.LeaseDuration)
+	assert.Equal(t, 10*time.Second, *opts.RenewDeadline)
+	assert.Equal(t, 2*time.Second, *opts.RetryPeriod)
+}
+
+// TestBuildManagerOptionsLeaderElectionTiming verifies that the
+// leader-election timing flags reach the manager options unchanged.
+func TestBuildManagerOptionsLeaderElectionTiming(t *testing.T) {
+	timing := leaderElectionTiming{
+		LeaseDuration: 60 * time.Second,
+		RenewDeadline: 40 * time.Second,
+		RetryPeriod:   5 * time.Second,
+	}
+	opts := buildManagerOptions(runtime.NewScheme(), metricsserver.Options{}, ":8081", true, "", timing)
+	assert.Equal(t, 60*time.Second, *opts.LeaseDuration)
+	assert.Equal(t, 40*time.Second, *opts.RenewDeadline)
+	assert.Equal(t, 5*time.Second, *opts.RetryPeriod)
+}
+
+func TestLeaderElectionTimingValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		timing  leaderElectionTiming
+		wantErr string
+	}{
+		{name: "defaults", timing: defaultTiming},
+		{name: "longer timings for a slow API server", timing: leaderElectionTiming{LeaseDuration: 60 * time.Second, RenewDeadline: 40 * time.Second, RetryPeriod: 5 * time.Second}},
+		{name: "zero lease duration", timing: leaderElectionTiming{LeaseDuration: 0, RenewDeadline: 10 * time.Second, RetryPeriod: 2 * time.Second}, wantErr: "--leader-elect-lease-duration must be greater than zero"},
+		{name: "negative renew deadline", timing: leaderElectionTiming{LeaseDuration: 15 * time.Second, RenewDeadline: -time.Second, RetryPeriod: 2 * time.Second}, wantErr: "--leader-elect-renew-deadline must be greater than zero"},
+		{name: "zero retry period", timing: leaderElectionTiming{LeaseDuration: 15 * time.Second, RenewDeadline: 10 * time.Second, RetryPeriod: 0}, wantErr: "--leader-elect-retry-period must be greater than zero"},
+		{name: "lease duration equal to renew deadline", timing: leaderElectionTiming{LeaseDuration: 10 * time.Second, RenewDeadline: 10 * time.Second, RetryPeriod: 2 * time.Second}, wantErr: "must be greater than --leader-elect-renew-deadline"},
+		{name: "renew deadline equal to jittered retry period", timing: leaderElectionTiming{LeaseDuration: 15 * time.Second, RenewDeadline: 12 * time.Second, RetryPeriod: 10 * time.Second}, wantErr: "x --leader-elect-retry-period"},
+		{name: "renew deadline just above jittered retry period", timing: leaderElectionTiming{LeaseDuration: 15 * time.Second, RenewDeadline: 12*time.Second + time.Nanosecond, RetryPeriod: 10 * time.Second}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.timing.validate()
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tc.wantErr)
+			}
+
+			// The validation must accept exactly what client-go accepts, so
+			// a value that passes at startup cannot fail later when the
+			// manager starts leader election.
+			_, clientGoErr := leaderelection.NewLeaderElector(leaderelection.LeaderElectionConfig{
+				Lock:          &resourcelock.LeaseLock{LockConfig: resourcelock.ResourceLockConfig{Identity: "test"}},
+				LeaseDuration: tc.timing.LeaseDuration,
+				RenewDeadline: tc.timing.RenewDeadline,
+				RetryPeriod:   tc.timing.RetryPeriod,
+				Callbacks: leaderelection.LeaderCallbacks{
+					OnStartedLeading: func(context.Context) {},
+					OnStoppedLeading: func() {},
+				},
+			})
+			assert.Equal(t, err == nil, clientGoErr == nil,
+				"validate() and client-go disagree: validate=%v client-go=%v", err, clientGoErr)
+		})
 	}
 }

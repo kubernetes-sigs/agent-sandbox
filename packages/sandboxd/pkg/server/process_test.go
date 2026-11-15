@@ -35,6 +35,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -82,6 +83,8 @@ type startResult struct {
 	stdout   bytes.Buffer
 	stderr   bytes.Buffer
 	exitCode int32
+	// keepAlives counts KeepAlive events.
+	keepAlives int
 }
 
 // drainStart reads the stream until the ExitEvent and returns everything seen.
@@ -106,6 +109,9 @@ func drainStart(t *testing.T, stream processv1.ProcessService_StartClient) *star
 		case *processv1.StartResponse_Exit:
 			sawExit = true
 			res.exitCode = ev.Exit.GetExitCode()
+		case *processv1.StartResponse_Keepalive:
+			require.False(t, sawExit, "KeepAlive after ExitEvent")
+			res.keepAlives++
 		}
 	}
 	require.True(t, sawExit, "no ExitEvent received")
@@ -272,6 +278,39 @@ func TestStartStreamsStdoutStderrAndExit(t *testing.T) {
 	require.Equal(t, "out\n", res.stdout.String())
 	require.Equal(t, "err\n", res.stderr.String())
 	require.Equal(t, int32(7), res.exitCode)
+}
+
+func TestStartSendsKeepAliveWhenRequested(t *testing.T) {
+	client := newProcessClient(t, t.TempDir())
+	startQuiet := func(ctx context.Context) (processv1.ProcessService_StartClient, error) {
+		return client.Start(ctx, &processv1.StartRequest{
+			Config: &processv1.ProcessConfig{Command: []string{"sh", "-c", "sleep 2.5; echo done"}},
+		})
+	}
+
+	ctx := metadata.AppendToOutgoingContext(testCtx(t), keepAliveMetadataKey, "1")
+	stream, err := startQuiet(ctx)
+	require.NoError(t, err)
+	res := drainStart(t, stream)
+	require.GreaterOrEqual(t, res.keepAlives, 2)
+	require.Equal(t, "done\n", res.stdout.String())
+
+	stream, err = startQuiet(testCtx(t))
+	require.NoError(t, err)
+	require.Zero(t, drainStart(t, stream).keepAlives)
+}
+
+func TestStartRejectsInvalidKeepAliveInterval(t *testing.T) {
+	client := newProcessClient(t, t.TempDir())
+	for _, value := range []string{"0", "-1", "soon", ""} {
+		ctx := metadata.AppendToOutgoingContext(testCtx(t), keepAliveMetadataKey, value)
+		stream, err := client.Start(ctx, &processv1.StartRequest{
+			Config: &processv1.ProcessConfig{Command: []string{"true"}},
+		})
+		require.NoError(t, err)
+		_, err = stream.Recv()
+		require.Equal(t, codes.InvalidArgument, status.Code(err), value)
+	}
 }
 
 func TestStartClosesOutputPipes(t *testing.T) {

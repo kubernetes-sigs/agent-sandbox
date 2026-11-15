@@ -89,8 +89,14 @@ message StartResponse {
     bytes stdout = 2;
     bytes stderr = 3;
     ExitEvent exit = 4;
+    KeepAlive keepalive = 5;
   }
 }
+
+// KeepAlive carries no data. sandboxd sends it on a quiet Start stream when the
+// client sets the "keepalive-ping-interval" metadata key (seconds), so idle
+// timeouts along the path do not cut the stream.
+message KeepAlive {}
 
 message ExecuteRequest {
   ProcessConfig config = 1;

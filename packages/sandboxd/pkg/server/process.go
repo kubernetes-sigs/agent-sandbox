@@ -32,6 +32,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
 
@@ -140,6 +141,10 @@ func (s *ProcessServer) buildCommand(_ context.Context, config *processv1.Proces
 
 // Start runs a command and streams stdout/stderr events until it exits.
 func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.ProcessService_StartServer) error {
+	keepAlive, err := keepAliveInterval(stream.Context())
+	if err != nil {
+		return err
+	}
 	cmd, err := s.buildCommand(stream.Context(), req.GetConfig())
 	if err != nil {
 		return err
@@ -249,6 +254,23 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 
 	var streamWg sync.WaitGroup
 	var sendMu sync.Mutex
+	lastSend := time.Now()
+	send := func(event *processv1.StartResponse) error {
+		sendMu.Lock()
+		defer sendMu.Unlock()
+		lastSend = time.Now()
+		return stream.Send(event)
+	}
+	stopKeepAlive := func() {}
+	if keepAlive > 0 {
+		stopKeepAlive = runKeepAlive(keepAlive, func() time.Duration {
+			sendMu.Lock()
+			defer sendMu.Unlock()
+			return time.Since(lastSend)
+		}, func() error {
+			return send(&processv1.StartResponse{Event: &processv1.StartResponse_Keepalive{Keepalive: &processv1.KeepAlive{}}})
+		})
+	}
 
 	// streamOutput copies reader into stdout/stderr stream events until the
 	// reader is exhausted (EOF on pipes, EIO/ErrClosed on a PTY).
@@ -266,10 +288,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 				} else {
 					event = &processv1.StartResponse{Event: &processv1.StartResponse_Stdout{Stdout: chunk}}
 				}
-				sendMu.Lock()
-				sErr := stream.Send(event)
-				sendMu.Unlock()
-				if sErr != nil {
+				if sErr := send(event); sErr != nil {
 					return
 				}
 			}
@@ -302,6 +321,8 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		closeAll(stdoutR, stderrR)
 	}
 
+	stopKeepAlive()
+
 	exitCode := int32(0)
 	if waitErr != nil {
 		if exitErr, ok := errors.AsType[*exec.ExitError](waitErr); ok {
@@ -323,6 +344,55 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		return status.Errorf(codes.Internal, "failed to send ExitEvent: %v", err)
 	}
 	return nil
+}
+
+// keepAliveMetadataKey is the request metadata key that opts a Start call in to
+// keep-alive events. Its value is the quiet period in whole seconds.
+const keepAliveMetadataKey = "keepalive-ping-interval"
+
+// keepAliveInterval returns the requested keep-alive period, or zero when the
+// client did not ask for keep-alive events.
+func keepAliveInterval(ctx context.Context) (time.Duration, error) {
+	values := metadata.ValueFromIncomingContext(ctx, keepAliveMetadataKey)
+	if len(values) == 0 {
+		return 0, nil
+	}
+	seconds, err := strconv.ParseInt(values[0], 10, 32)
+	if err != nil || seconds < 1 {
+		return 0, status.Errorf(codes.InvalidArgument, "%s must be a whole number of seconds, at least 1", keepAliveMetadataKey)
+	}
+	return time.Duration(seconds) * time.Second, nil
+}
+
+// runKeepAlive calls send whenever idle reports a quiet period of at least
+// interval. The returned function stops it and waits for it to exit.
+func runKeepAlive(interval time.Duration, idle func() time.Duration, send func() error) (stop func()) {
+	quit := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		timer := time.NewTimer(interval)
+		defer timer.Stop()
+		for {
+			select {
+			case <-quit:
+				return
+			case <-timer.C:
+			}
+			wait := interval - idle()
+			if wait <= 0 {
+				if send() != nil {
+					return
+				}
+				wait = interval
+			}
+			timer.Reset(wait)
+		}
+	}()
+	return func() {
+		close(quit)
+		<-done
+	}
 }
 
 // Execute runs a command synchronously and returns its buffered output.

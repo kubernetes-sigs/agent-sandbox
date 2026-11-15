@@ -87,11 +87,12 @@ func (h *ProcessHandle) SendSignal(ctx context.Context, signal ProcessSignal) er
 	return nil
 }
 
-// Recv returns the next stdout, stderr or exit event. An exit event must be
-// followed by io.EOF to confirm that the RPC also completed successfully.
-// Nonzero exit codes are results; RPC and protocol failures remain errors.
-// Only one Recv may be active; a second returns ErrConcurrentRecv without
-// ending the stream. SendSignal and Close may run concurrently with Recv.
+// Recv returns the next stdout, stderr or exit event, skipping keep-alives.
+// An exit event must be followed by io.EOF to confirm that the RPC also
+// completed successfully. Nonzero exit codes are results; RPC and protocol
+// failures remain errors. Only one Recv may be active; a second returns
+// ErrConcurrentRecv without ending the stream. SendSignal and Close may run
+// concurrently with Recv.
 func (h *ProcessHandle) Recv() (*ProcessEvent, error) {
 	h.mu.Lock()
 	terminal := h.terminal
@@ -106,6 +107,9 @@ func (h *ProcessHandle) Recv() (*ProcessEvent, error) {
 	h.receiving = true
 	h.mu.Unlock()
 	msg, err := h.stream.Recv()
+	for err == nil && msg.GetKeepalive() != nil {
+		msg, err = h.stream.Recv()
+	}
 	h.mu.Lock()
 	h.receiving = false
 	if h.terminal != nil {

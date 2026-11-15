@@ -282,21 +282,32 @@ func TestStartStreamsStdoutStderrAndExit(t *testing.T) {
 
 func TestStartSendsKeepAliveWhenRequested(t *testing.T) {
 	client := newProcessClient(t, t.TempDir())
-	startQuiet := func(ctx context.Context) (processv1.ProcessService_StartClient, error) {
-		return client.Start(ctx, &processv1.StartRequest{
-			Config: &processv1.ProcessConfig{Command: []string{"sh", "-c", "sleep 2.5; echo done"}},
+	start := func(ctx context.Context, script string) processv1.ProcessService_StartClient {
+		stream, err := client.Start(ctx, &processv1.StartRequest{
+			Config: &processv1.ProcessConfig{Command: []string{"sh", "-c", script}},
 		})
+		require.NoError(t, err)
+		return stream
 	}
 
 	ctx := metadata.AppendToOutgoingContext(testCtx(t), keepAliveMetadataKey, "1")
-	stream, err := startQuiet(ctx)
+	stream := start(ctx, "read line; echo done")
+	pid := recvInit(t, stream)
+	for seen := 0; seen < 2; {
+		msg, err := stream.Recv()
+		require.NoError(t, err)
+		if msg.GetKeepalive() != nil {
+			seen++
+		}
+	}
+	_, err := client.WriteStdin(ctx, &processv1.WriteStdinRequest{
+		ProcessId: pid,
+		Payload:   &processv1.WriteStdinRequest_Eof{Eof: &emptypb.Empty{}},
+	})
 	require.NoError(t, err)
-	res := drainStart(t, stream)
-	require.GreaterOrEqual(t, res.keepAlives, 2)
-	require.Equal(t, "done\n", res.stdout.String())
+	require.Equal(t, "done\n", drainStart(t, stream).stdout.String())
 
-	stream, err = startQuiet(testCtx(t))
-	require.NoError(t, err)
+	stream = start(testCtx(t), "sleep 1.5; echo done")
 	require.Zero(t, drainStart(t, stream).keepAlives)
 }
 

@@ -200,6 +200,30 @@ health, err := sb.Health(ctx)   // health.Status, health.UptimeSeconds
 meta, err := sb.Metadata(ctx)   // meta.Env (non-sensitive, SANDBOX_-prefixed by default)
 ```
 
+### Bounded Commands (sandboxd)
+
+`RunWithLimits` runs a command through sandboxd's `ExecuteWithLimits`: it
+ends the command at `TimeLimit` and keeps at most the given number of bytes
+of each stream, and reports both in the result instead of failing the call.
+A zero limit is left to sandboxd's deployment policy.
+
+```go
+result, err := sb.RunWithLimits(ctx, "make test", sandbox.RunLimits{
+    TimeLimit:        5 * time.Minute,
+    StdoutLimitBytes: 1 << 20,
+    StderrLimitBytes: 1 << 20,
+})
+if err != nil { log.Fatal(err) }
+if result.TimedOut() {
+    fmt.Println("stopped after", result.Elapsed)
+}
+fmt.Println(result.ExitCode, result.StdoutTruncated, result.StderrTruncated)
+```
+
+Without a deadline on `ctx`, the call's timeout is `RequestTimeout` plus
+`TimeLimit`. The legacy runtime and a sandboxd without `ExecuteWithLimits`
+return `ErrUnsupportedByRuntime`.
+
 ### Streaming Commands (sandboxd)
 
 `sb.Commands().Start` runs a command with the same shell-string semantics as

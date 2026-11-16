@@ -30,6 +30,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(c \*Client\) ListAllSandboxes\(ctx context.Context, namespace string, opts ...ListOption\) \(\[\]string, error\)](<#Client.ListAllSandboxes>)
 - [type Commands](<#Commands>)
   - [func \(c \*Commands\) Run\(ctx context.Context, command string, opts ...CallOption\) \(\*ExecutionResult, error\)](<#Commands.Run>)
+  - [func \(c \*Commands\) RunWithLimits\(ctx context.Context, command string, limits RunLimits, opts ...CallOption\) \(\*LimitedExecutionResult, error\)](<#Commands.RunWithLimits>)
   - [func \(c \*Commands\) Start\(ctx context.Context, command string, opts ...CallOption\) \(handle \*ProcessHandle, err error\)](<#Commands.Start>)
 - [type ConnectionStrategy](<#ConnectionStrategy>)
 - [type Connectivity](<#Connectivity>)
@@ -72,6 +73,8 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func NewK8sHelper\(restConfig \*rest.Config, log logr.Logger\) \(\*K8sHelper, error\)](<#NewK8sHelper>)
   - [func \(h \*K8sHelper\) WaitForSandboxReady\(ctx context.Context, sandboxName, namespace string\) error](<#K8sHelper.WaitForSandboxReady>)
 - [type Key](<#Key>)
+- [type LimitedExecutionResult](<#LimitedExecutionResult>)
+  - [func \(r \*LimitedExecutionResult\) TimedOut\(\) bool](<#LimitedExecutionResult.TimedOut>)
 - [type ListOption](<#ListOption>)
   - [func WithLabelSelector\(selector string\) ListOption](<#WithLabelSelector>)
 - [type Metadata](<#Metadata>)
@@ -84,6 +87,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(h \*ProcessHandle\) Recv\(\) \(\*ProcessEvent, error\)](<#ProcessHandle.Recv>)
   - [func \(h \*ProcessHandle\) SendSignal\(ctx context.Context, signal ProcessSignal\) error](<#ProcessHandle.SendSignal>)
 - [type ProcessSignal](<#ProcessSignal>)
+- [type RunLimits](<#RunLimits>)
 - [type Runtime](<#Runtime>)
 - [type Sandbox](<#Sandbox>)
   - [func New\(\_ context.Context, opts Options\) \(\*Sandbox, error\)](<#New>)
@@ -111,6 +115,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(s \*Sandbox\) ReadTo\(ctx context.Context, path string, destination io.Writer, opts ...CallOption\) \(int64, error\)](<#Sandbox.ReadTo>)
   - [func \(s \*Sandbox\) Resume\(ctx context.Context, opts ...CallOption\) error](<#Sandbox.Resume>)
   - [func \(s \*Sandbox\) Run\(ctx context.Context, command string, opts ...CallOption\) \(\*ExecutionResult, error\)](<#Sandbox.Run>)
+  - [func \(s \*Sandbox\) RunWithLimits\(ctx context.Context, command string, limits RunLimits, opts ...CallOption\) \(\*LimitedExecutionResult, error\)](<#Sandbox.RunWithLimits>)
   - [func \(s \*Sandbox\) SandboxName\(\) string](<#Sandbox.SandboxName>)
   - [func \(s \*Sandbox\) ServiceFQDN\(\) string](<#Sandbox.ServiceFQDN>)
   - [func \(s \*Sandbox\) Suspend\(ctx context.Context, opts ...CallOption\) error](<#Sandbox.Suspend>)
@@ -118,6 +123,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(s \*Sandbox\) Watchers\(\) \*Watchers](<#Sandbox.Watchers>)
   - [func \(s \*Sandbox\) Write\(ctx context.Context, path string, content \[\]byte, opts ...CallOption\) error](<#Sandbox.Write>)
   - [func \(s \*Sandbox\) WriteReader\(ctx context.Context, path string, content io.Reader, opts ...CallOption\) error](<#Sandbox.WriteReader>)
+- [type TerminationReason](<#TerminationReason>)
 - [type Watchers](<#Watchers>)
   - [func \(w \*Watchers\) WatchDir\(ctx context.Context, path string, recursive bool, opts ...CallOption\) \(\_ \<\-chan FileEvent, retErr error\)](<#Watchers.WatchDir>)
 
@@ -392,6 +398,19 @@ result, err := client.Run(ctx, "cat /etc/hostname", sandbox.WithMaxAttempts(6))
 WithMaxAttempts applies only to the legacy runtime. With RuntimeSandboxd, Run issues a single gRPC Execute regardless of the configured attempts.
 
 WithEnv and WithWorkingDir apply only to RuntimeSandboxd; the legacy runtime returns ErrUnsupportedByRuntime rather than silently ignoring them.
+
+<a name="Commands.RunWithLimits"></a>
+#### func \(\*Commands\) [RunWithLimits](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/limits.go>)
+
+```go
+func (c *Commands) RunWithLimits(ctx context.Context, command string, limits RunLimits, opts ...CallOption) (*LimitedExecutionResult, error)
+```
+
+RunWithLimits runs command like Run, through sandboxd's ExecuteWithLimits: output beyond a stream's limit is discarded instead of failing the call, and a command that reaches TimeLimit is ended and reported, not returned as an error.
+
+Without a deadline on ctx, the call gets RequestTimeout, plus TimeLimit when one is set, so the RPC outlives the command it bounds.
+
+It needs RuntimeSandboxd and a gRPC connection; the legacy runtime, and a sandboxd too old to have ExecuteWithLimits, return ErrUnsupportedByRuntime. WithEnv and WithWorkingDir apply as for Run; it never retries.
 
 <a name="Commands.Start"></a>
 #### func \(\*Commands\) [Start](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/commands.go>)
@@ -945,6 +964,32 @@ type Key struct {
 }
 ```
 
+<a name="LimitedExecutionResult"></a>
+### type [LimitedExecutionResult](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/limits.go>)
+
+LimitedExecutionResult is the outcome of RunWithLimits.
+
+```go
+type LimitedExecutionResult struct {
+    ExecutionResult
+    TerminationReason TerminationReason
+    // Elapsed is the wall-clock time from launch preparation through
+    // termination and I/O cleanup, as sandboxd measured it.
+    Elapsed         time.Duration
+    StdoutTruncated bool
+    StderrTruncated bool
+}
+```
+
+<a name="LimitedExecutionResult.TimedOut"></a>
+#### func \(\*LimitedExecutionResult\) [TimedOut](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/limits.go>)
+
+```go
+func (r *LimitedExecutionResult) TimedOut() bool
+```
+
+TimedOut reports whether sandboxd ended the command at its TimeLimit.
+
 <a name="ListOption"></a>
 ### type [ListOption](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
 
@@ -1288,6 +1333,25 @@ const (
 )
 ```
 
+<a name="RunLimits"></a>
+### type [RunLimits](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/limits.go>)
+
+RunLimits bounds one command run by RunWithLimits. A zero field is left out of the request, so sandboxd applies its deployment policy for it.
+
+```go
+type RunLimits struct {
+    // TimeLimit bounds the command's execution, including launch and output
+    // collection. sandboxd ends the command when it is reached and reports
+    // TerminationTimeLimitExceeded. It is independent of the call's deadline.
+    TimeLimit time.Duration
+    // StdoutLimitBytes and StderrLimitBytes cap how much of each stream is
+    // kept. Further output is drained and discarded, and the result reports
+    // the stream as truncated.
+    StdoutLimitBytes uint64
+    StderrLimitBytes uint64
+}
+```
+
 <a name="Runtime"></a>
 ### type [Runtime](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/options.go>)
 
@@ -1552,6 +1616,15 @@ func (s *Sandbox) Run(ctx context.Context, command string, opts ...CallOption) (
 
 
 
+<a name="Sandbox.RunWithLimits"></a>
+#### func \(\*Sandbox\) [RunWithLimits](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/limits.go>)
+
+```go
+func (s *Sandbox) RunWithLimits(ctx context.Context, command string, limits RunLimits, opts ...CallOption) (*LimitedExecutionResult, error)
+```
+
+RunWithLimits runs a command with execution limits. See Commands.RunWithLimits.
+
 <a name="Sandbox.SandboxName"></a>
 #### func \(\*Sandbox\) [SandboxName](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
 
@@ -1616,6 +1689,27 @@ func (s *Sandbox) WriteReader(ctx context.Context, path string, content io.Reade
 ```
 
 WriteReader streams content from an io.Reader without buffering the entire payload. Streaming uploads use a single request attempt because a generic reader cannot be replayed safely. Passing WithMaxAttempts with a value greater than 1 returns an error; it is not silently reduced to one attempt.
+
+<a name="TerminationReason"></a>
+### type [TerminationReason](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/limits.go>)
+
+TerminationReason is how a command run by RunWithLimits ended.
+
+```go
+type TerminationReason string
+```
+
+<a name="TerminationExited"></a>
+
+```go
+const (
+    // TerminationExited: the program exited on its own, or from a signal
+    // other than an execution limit. ExitCode says how.
+    TerminationExited TerminationReason = "exited"
+    // TerminationTimeLimitExceeded: sandboxd ended the command at TimeLimit.
+    TerminationTimeLimitExceeded TerminationReason = "time_limit_exceeded"
+)
+```
 
 <a name="Watchers"></a>
 ### type [Watchers](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/watcher.go>)

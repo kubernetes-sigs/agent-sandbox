@@ -18,9 +18,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -75,7 +77,9 @@ func (r *LimitedExecutionResult) TimedOut() bool {
 // as an error.
 //
 // Without a deadline on ctx, the call gets RequestTimeout, plus TimeLimit
-// when one is set, so the RPC outlives the command it bounds.
+// when one is set, so the RPC outlives the command it bounds. When the
+// explicit stream limits allow a response over gRPC's default 4 MiB receive
+// limit, the call accepts that much.
 //
 // It needs RuntimeSandboxd and a gRPC connection; the legacy runtime, and a
 // sandboxd too old to have ExecuteWithLimits, return ErrUnsupportedByRuntime.
@@ -113,7 +117,7 @@ func (c *Commands) RunWithLimits(ctx context.Context, command string, limits Run
 	if err != nil {
 		return fail(fmt.Errorf("%s: run with limits failed: %w", c.errPrefix(), err))
 	}
-	resp, err := processv1.NewProcessServiceClient(conn).ExecuteWithLimits(ctx, executeWithLimitsRequest(config, limits))
+	resp, err := processv1.NewProcessServiceClient(conn).ExecuteWithLimits(ctx, executeWithLimitsRequest(config, limits), receiveLimitFor(limits)...)
 	if err != nil {
 		if st, ok := status.FromError(err); ok {
 			if st.Code() == codes.Unimplemented {
@@ -141,6 +145,29 @@ func (c *Commands) RunWithLimits(ctx context.Context, command string, limits Run
 	c.log.V(1).Info("run with limits completed", "exitCode", result.ExitCode, "termination", result.TerminationReason,
 		"stdoutTruncated", result.StdoutTruncated, "stderrTruncated", result.StderrTruncated)
 	return result, nil
+}
+
+// grpcDefaultMaxRecvMsgSize is grpc-go's default limit on a received message.
+const grpcDefaultMaxRecvMsgSize = 4 << 20
+
+// executeResponseOverheadBytes covers the response's fields other than the
+// retained output.
+const executeResponseOverheadBytes = 1024
+
+// receiveLimitFor raises the call's receive limit when the explicit stream
+// limits allow a response larger than grpc-go's default, so retained output
+// is not rejected after the command already ran. It never lowers the limit:
+// a stream left to sandboxd's policy can still return up to the default.
+func receiveLimitFor(limits RunLimits) []grpc.CallOption {
+	const ceiling = math.MaxInt32
+	need := uint64(executeResponseOverheadBytes)
+	for _, n := range []uint64{limits.StdoutLimitBytes, limits.StderrLimitBytes} {
+		need = min(need+min(n, ceiling), ceiling)
+	}
+	if need <= grpcDefaultMaxRecvMsgSize {
+		return nil
+	}
+	return []grpc.CallOption{grpc.MaxCallRecvMsgSize(int(need))}
 }
 
 // executeWithLimitsRequest leaves a zero limit unset, so sandboxd's policy

@@ -408,7 +408,7 @@ func (c *Commands) RunWithLimits(ctx context.Context, command string, limits Run
 
 RunWithLimits runs command like Run, through sandboxd's ExecuteWithLimits: output beyond a stream's limit is discarded instead of failing the call, and a command that reaches TimeLimit is ended and reported, not returned as an error.
 
-Without a deadline on ctx, the call gets RequestTimeout, plus TimeLimit when one is set, so the RPC outlives the command it bounds.
+Without a deadline on ctx, the call gets RequestTimeout, plus TimeLimit when one is set, so the RPC outlives the command it bounds. When the explicit stream limits allow a response over gRPC's default 4 MiB receive limit, the call accepts that much.
 
 It needs RuntimeSandboxd and a gRPC connection; the legacy runtime, and a sandboxd too old to have ExecuteWithLimits, return ErrUnsupportedByRuntime. WithEnv and WithWorkingDir apply as for Run; it never retries.
 

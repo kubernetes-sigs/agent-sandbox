@@ -15,7 +15,9 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -116,6 +118,32 @@ func TestRunWithLimits_RefusesBadInput(t *testing.T) {
 	legacy := newReadySandboxdTestSandboxWith("http://unused.invalid", func(o *Options) { o.Runtime = RuntimeLegacyPython })
 	_, err = legacy.RunWithLimits(context.Background(), "true", RunLimits{})
 	require.ErrorIs(t, err, ErrUnsupportedByRuntime)
+}
+
+// Explicit limits can allow more retained output than gRPC's default 4 MiB
+// receive limit; the response must still arrive, since the command already ran.
+func TestRunWithLimits_ReceivesOutputAboveTheDefaultMessageLimit(t *testing.T) {
+	sb := newReadySandboxdTestSandbox("http://unused.invalid")
+	stdout := bytes.Repeat([]byte("o"), 3<<20)
+	stderr := bytes.Repeat([]byte("e"), 3<<20)
+	startFakeProcessServer(t, sb, &fakeLimitsService{response: &processv1.ExecuteWithLimitsResponse{
+		Stdout:            stdout,
+		Stderr:            stderr,
+		TerminationReason: processv1.ExecuteTerminationReason_EXECUTE_TERMINATION_REASON_EXITED,
+	}})
+
+	result, err := sb.RunWithLimits(context.Background(), "make test",
+		RunLimits{StdoutLimitBytes: 3 << 20, StderrLimitBytes: 3 << 20})
+	require.NoError(t, err)
+	require.Len(t, result.Stdout, 3<<20)
+	require.Len(t, result.Stderr, 3<<20)
+}
+
+func TestReceiveLimitFor(t *testing.T) {
+	require.Empty(t, receiveLimitFor(RunLimits{}), "no explicit limits keep the default")
+	require.Empty(t, receiveLimitFor(RunLimits{StdoutLimitBytes: 1 << 20, StderrLimitBytes: 1 << 20}), "small limits never lower it")
+	require.Len(t, receiveLimitFor(RunLimits{StdoutLimitBytes: 3 << 20, StderrLimitBytes: 3 << 20}), 1)
+	require.Len(t, receiveLimitFor(RunLimits{StdoutLimitBytes: math.MaxUint64, StderrLimitBytes: math.MaxUint64}), 1, "huge limits saturate instead of wrapping")
 }
 
 func TestTerminationReasonKeepsUnknownValues(t *testing.T) {

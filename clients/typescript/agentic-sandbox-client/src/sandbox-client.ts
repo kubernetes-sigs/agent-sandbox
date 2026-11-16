@@ -185,7 +185,64 @@ interface ClaimSpecExtras {
   additionalPodMetadata?: PodMetadata;
   env?: Array<{ name: string; value: string }>;
   volumeClaimTemplates?: VolumeClaimTemplate[];
-  lifecycle?: { shutdownTime: string; shutdownPolicy: "Delete" };
+  lifecycle?: ClaimLifecycle;
+}
+
+type ShutdownPolicy = NonNullable<CreateSandboxOptions["shutdownPolicy"]>;
+
+/** The SandboxClaim `spec.lifecycle` block the SDK sends. */
+interface ClaimLifecycle {
+  shutdownTime?: string;
+  shutdownPolicy: ShutdownPolicy;
+  ttlSecondsAfterFinished?: number;
+}
+
+const SHUTDOWN_POLICY_VALUES: readonly ShutdownPolicy[] = [
+  "Delete",
+  "DeleteForeground",
+  "Retain",
+];
+
+// The API stores ttlSecondsAfterFinished as an int32.
+const MAX_TTL_SECONDS_AFTER_FINISHED = 2147483647;
+
+/**
+ * Builds `spec.lifecycle` from the optional timers and shutdown policy, or
+ * returns undefined when the caller set none of them. A lifecycle block
+ * without an explicit policy gets `"Delete"`, because the API's own default,
+ * `"Retain"`, would leave every expired claim behind.
+ */
+function buildClaimLifecycle(
+  opts: CreateSandboxOptions | undefined,
+  shutdownTime: string | undefined,
+): ClaimLifecycle | undefined {
+  const policy = opts?.shutdownPolicy;
+  if (policy !== undefined && !SHUTDOWN_POLICY_VALUES.includes(policy)) {
+    throw new SandboxError(
+      `shutdownPolicy must be one of ${SHUTDOWN_POLICY_VALUES.map((v) => `"${v}"`).join(", ")}, got: ${String(policy)}`,
+    );
+  }
+  const ttl = opts?.ttlSecondsAfterFinished;
+  if (
+    ttl !== undefined &&
+    !(
+      Number.isInteger(ttl) &&
+      ttl >= 0 &&
+      ttl <= MAX_TTL_SECONDS_AFTER_FINISHED
+    )
+  ) {
+    throw new SandboxError(
+      `ttlSecondsAfterFinished must be a non-negative 32-bit integer, got: ${String(ttl)}`,
+    );
+  }
+  if (policy === undefined && ttl === undefined && !shutdownTime) {
+    return undefined;
+  }
+  return {
+    ...(shutdownTime ? { shutdownTime } : {}),
+    shutdownPolicy: policy ?? "Delete",
+    ...(ttl !== undefined ? { ttlSecondsAfterFinished: ttl } : {}),
+  };
 }
 
 /**
@@ -209,8 +266,9 @@ function buildClaimSpecExtras(
   if (opts?.volumeClaimTemplates?.length) {
     extras.volumeClaimTemplates = opts.volumeClaimTemplates;
   }
-  if (shutdownTime) {
-    extras.lifecycle = { shutdownTime, shutdownPolicy: "Delete" };
+  const lifecycle = buildClaimLifecycle(opts, shutdownTime);
+  if (lifecycle) {
+    extras.lifecycle = lifecycle;
   }
   return extras;
 }

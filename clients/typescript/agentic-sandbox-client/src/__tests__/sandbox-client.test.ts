@@ -776,6 +776,101 @@ describe("SandboxClient (registry)", () => {
       expect(mockWatchFn).not.toHaveBeenCalled();
     });
 
+    it("sends a shutdownPolicy given without a timer", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-policy-only");
+
+      const client = new SandboxClient();
+      await client.createSandbox("tpl", "default", {
+        shutdownPolicy: "Retain",
+      });
+
+      const spec = mockCreateNamespacedCustomObject.mock.calls[0][0].body.spec;
+      expect(spec.lifecycle).toEqual({ shutdownPolicy: "Retain" });
+    });
+
+    it.each([
+      ["zero", 0],
+      ["the int32 maximum", 2147483647],
+    ])("sends ttlSecondsAfterFinished (%s) and defaults the policy to Delete", async (_label, ttl) => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-ttl");
+
+      const client = new SandboxClient();
+      await client.createSandbox("tpl", "default", {
+        ttlSecondsAfterFinished: ttl,
+      });
+
+      const spec = mockCreateNamespacedCustomObject.mock.calls[0][0].body.spec;
+      expect(spec.lifecycle).toEqual({
+        shutdownPolicy: "Delete",
+        ttlSecondsAfterFinished: ttl,
+      });
+    });
+
+    it("sends both timers and an explicit policy together", async () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date("2026-09-10T12:00:00.000Z"));
+        mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+        mockSandboxReadyFlow("sandbox-both-timers");
+
+        const client = new SandboxClient();
+        await client.createSandbox("tpl", "default", {
+          shutdownAfterSeconds: 60,
+          shutdownPolicy: "DeleteForeground",
+          ttlSecondsAfterFinished: 10,
+        });
+
+        const spec =
+          mockCreateNamespacedCustomObject.mock.calls[0][0].body.spec;
+        expect(spec.lifecycle).toEqual({
+          shutdownTime: "2026-09-10T12:01:00.000Z",
+          shutdownPolicy: "DeleteForeground",
+          ttlSecondsAfterFinished: 10,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([
+      ["wrong case", "delete"],
+      ["null", null],
+    ])("rejects invalid shutdownPolicy (%s) before provisioning", async (_label, policy) => {
+      mockSandboxReadyFlow("sandbox-invalid-policy");
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", {
+          shutdownAfterSeconds: 60,
+          // JavaScript callers do not have TypeScript's input checks.
+          shutdownPolicy: policy as "Delete",
+        }),
+      ).rejects.toThrow(SandboxError);
+      expect(mockCreateNamespacedCustomObject).not.toHaveBeenCalled();
+      expect(mockWatchFn).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["negative", -1],
+      ["fractional", 0.5],
+      ["beyond int32", 2147483648],
+      ["string", "60"],
+    ])("rejects invalid ttlSecondsAfterFinished (%s) before provisioning", async (_label, ttl) => {
+      mockSandboxReadyFlow("sandbox-invalid-finished-ttl");
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", {
+          // JavaScript callers do not have TypeScript's input checks.
+          ttlSecondsAfterFinished: ttl as number,
+        }),
+      ).rejects.toThrow(SandboxError);
+      expect(mockCreateNamespacedCustomObject).not.toHaveBeenCalled();
+      expect(mockWatchFn).not.toHaveBeenCalled();
+    });
+
     it("throws SandboxError when warmpool is empty", async () => {
       const client = new SandboxClient();
       const pending = client.createSandbox("");

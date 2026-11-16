@@ -61,6 +61,34 @@ RFC3339 deadline; invalid values reject with `SandboxError` before provisioning.
 Omitting it leaves expiration unset. Continue to call `sandbox.close()` when work
 finishes; expiration provides a fallback if the client cannot clean up.
 
+Use `shutdownPolicy` and `ttlSecondsAfterFinished` to control what happens when
+the claim expires:
+
+```typescript
+const sandbox = await client.createSandbox("my-warm-pool", "default", {
+  shutdownAfterSeconds: 3600,
+  shutdownPolicy: "Retain",
+  ttlSecondsAfterFinished: 60,
+});
+```
+
+These populate `spec.lifecycle.shutdownPolicy` and
+`spec.lifecycle.ttlSecondsAfterFinished`, matching the Python SDK's
+`shutdown_policy` and `ttl_seconds_after_finished`. `"Delete"` deletes the claim
+and its sandbox. `"DeleteForeground"` does the same, but the claim stays visible
+until the sandbox and its Pod are gone. `"Retain"` deletes the sandbox and keeps
+the expired claim. When a timer is set and no policy is given, the SDK sends
+`"Delete"`; the API's own default for an omitted policy is `"Retain"`.
+
+The `ttlSecondsAfterFinished` timer starts only when the Pod reaches `Succeeded`
+or `Failed`. A Pod with `restartPolicy: Always` does not reach either phase when
+its containers exit, although node-pressure eviction can still mark it `Failed`,
+so pair it with `shutdownAfterSeconds`. With both timers, the earlier deadline
+wins. Invalid values for either option reject with `SandboxError` before
+provisioning.
+`sandbox.close()` still deletes a `"Retain"` claim, and so does
+`enableAutoCleanup()` for a claim with a generated name.
+
 ### Pod labels and annotations
 
 `labels` land on the SandboxClaim. Use `podLabels` and `podAnnotations` to set

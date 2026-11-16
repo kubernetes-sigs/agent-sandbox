@@ -35,6 +35,12 @@ controller:
   ##### Unset flags are omitted
   # clusterDomain: "cluster.local"
   leaderElect: true
+  # watchNamespaces restricts the controller to the listed namespaces.
+  # When set, namespace-scoped Role+RoleBinding are created in each
+  # listed namespace instead of a cluster-wide ClusterRole+ClusterRoleBinding.
+  # watchNamespaces:
+  #   - team-a
+  #   - team-b
   # leaderElectionNamespace: ""
   extensions: false
   # enableTracing: false

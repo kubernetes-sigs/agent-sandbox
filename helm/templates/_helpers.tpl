@@ -41,6 +41,34 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
+Validate controller.watchNamespaces: every entry must be non-blank,
+must not have leading/trailing whitespace, and must be unique.
+*/}}
+{{- define "agent-sandbox.validateWatchNamespaces" -}}
+{{- $seen := dict }}
+{{- range .Values.controller.watchNamespaces }}
+{{- if not (trim .) }}
+{{- fail "controller.watchNamespaces contains a blank entry; every namespace must be a non-empty string" }}
+{{- end }}
+{{- if ne (trim .) . }}
+{{- fail (printf "controller.watchNamespaces entry %q has leading/trailing whitespace; use %q" . (trim .)) }}
+{{- end }}
+{{- if hasKey $seen . }}
+{{- fail (printf "controller.watchNamespaces contains duplicate entry %q" .) }}
+{{- end }}
+{{- $_ := set $seen . true }}
+{{- end }}
+{{- end }}
+
+{{/*
+The effective leader-election namespace: explicit if set, otherwise the
+controller's deployment namespace.
+*/}}
+{{- define "agent-sandbox.leaderElectionNamespace" -}}
+{{- default (include "agent-sandbox.namespace" .) .Values.controller.leaderElectionNamespace }}
+{{- end }}
+
+{{/*
 The controller image reference.
 */}}
 {{- define "agent-sandbox.image" -}}

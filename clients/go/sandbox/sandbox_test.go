@@ -1614,6 +1614,15 @@ func TestCreateOptions_ShutdownPolicyAndTTLOverrideClientLevel(t *testing.T) {
 	if clientTTL != 60 {
 		t.Errorf("the Client-level TTL was modified: %d", clientTTL)
 	}
+
+	// An explicit empty policy replaces the Client's, restoring the Delete default.
+	var empty createOptions
+	WithShutdownPolicy("")(&empty)
+	o = Options{ShutdownAfter: time.Hour, ShutdownPolicy: extv1beta1.ShutdownPolicyRetain}
+	empty.apply(&o)
+	if got := claimLifecycle(time.Now(), &o).ShutdownPolicy; got != extv1beta1.ShutdownPolicyDelete {
+		t.Errorf("empty per-call policy should restore Delete, got %q", got)
+	}
 }
 
 func TestOpen_CreateClaimWithoutShutdownAfterHasNoLifecycle(t *testing.T) {

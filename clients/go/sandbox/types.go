@@ -15,7 +15,6 @@
 package sandbox
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -223,7 +222,7 @@ type createOptions struct {
 	claimName            string
 	adoptExisting        bool
 	shutdownAfter        *time.Duration
-	shutdownPolicy       extv1beta1.ShutdownPolicy
+	shutdownPolicy       *extv1beta1.ShutdownPolicy
 	ttlAfterFinished     *int32
 	sandboxReadyTimeout  time.Duration
 }
@@ -246,7 +245,9 @@ func (co *createOptions) apply(o *Options) {
 	if co.shutdownAfter != nil {
 		o.ShutdownAfter = *co.shutdownAfter
 	}
-	o.ShutdownPolicy = cmp.Or(co.shutdownPolicy, o.ShutdownPolicy)
+	if co.shutdownPolicy != nil {
+		o.ShutdownPolicy = *co.shutdownPolicy
+	}
 	if co.ttlAfterFinished != nil {
 		o.TTLSecondsAfterFinished = co.ttlAfterFinished
 	}
@@ -327,7 +328,7 @@ func WithShutdownAfter(d time.Duration) CreateOption {
 // CreateSandbox call, replacing Client-level Options.ShutdownPolicy.
 func WithShutdownPolicy(p extv1beta1.ShutdownPolicy) CreateOption {
 	return func(o *createOptions) {
-		o.shutdownPolicy = p
+		o.shutdownPolicy = &p
 	}
 }
 

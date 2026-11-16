@@ -229,9 +229,13 @@ kops_capture_igm_diagnostics() {
 # instance group, and the cluster (NameForInstanceGroupManager in
 # upup/pkg/fi/cloudup/gce), so the control-plane group in us-central1-b is
 # b-control-plane-us-central1-b-<cluster>. Deriving the prefix from ZONE keeps
-# every lookup pointed at the group that exists after a zone move.
+# every lookup pointed at the group that exists after a zone move. kOps also
+# replaces dots with hyphens, which this mirrors. It hashes names longer than
+# 63 characters, which this does not: the sandbox-<timestamp> cluster names
+# used here give at most 58.
 kops_control_plane_igm_name() {
-  echo "${ZONE##*-}-control-plane-${ZONE}-${CLUSTER_NAME}"
+  local name="${ZONE##*-}-control-plane-${ZONE}-${CLUSTER_NAME}"
+  echo "${name//./-}"
 }
 
 # Prints the error codes the control-plane managed instance group has

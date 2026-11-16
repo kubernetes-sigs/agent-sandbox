@@ -335,6 +335,15 @@ fmt.Println(names) // includes sb3.ClaimName()
 ttl, err := sandbox.NewClient(ctx, sandbox.Options{ShutdownAfter: time.Hour})
 if err != nil { log.Fatal(err) }
 defer ttl.DeleteAll(ctx)
+
+// Keep expired claims so callers can tell they expired
+// (Options.ShutdownPolicy, or sandbox.WithShutdownPolicy per call)
+keep, err := sandbox.NewClient(ctx, sandbox.Options{
+    ShutdownAfter:  time.Hour,
+    ShutdownPolicy: extv1beta1.ShutdownPolicyRetain,
+})
+if err != nil { log.Fatal(err) }
+defer keep.DeleteAll(ctx)
 ```
 
 ## Configuration
@@ -349,6 +358,11 @@ All options are documented on the `Options` struct in
 - `Labels`: labels added to every `SandboxClaim` the client creates.
 - `ShutdownAfter`: expire every claim this client creates after this long, so a
   crashed client does not leak sandboxes. Unset by default (no expiry).
+- `ShutdownPolicy`: `Delete`, `DeleteForeground`, or `Retain` for expired
+  claims. Defaults to `Delete` when `ShutdownAfter` or
+  `TTLSecondsAfterFinished` is set.
+- `TTLSecondsAfterFinished`: seconds to keep a claim after its workload
+  finishes. Unset by default.
 - `Connectivity`: `port-forward` (default), `router-port-forward`,
   `in-cluster-service`, or `in-cluster-pod-ip`. `router-port-forward`
   port-forwards the sandbox-router, which proxies sandboxd's REST and gRPC

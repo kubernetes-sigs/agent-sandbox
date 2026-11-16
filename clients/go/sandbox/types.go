@@ -15,6 +15,7 @@
 package sandbox
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -222,6 +223,8 @@ type createOptions struct {
 	claimName            string
 	adoptExisting        bool
 	shutdownAfter        *time.Duration
+	shutdownPolicy       extv1beta1.ShutdownPolicy
+	ttlAfterFinished     *int32
 	sandboxReadyTimeout  time.Duration
 }
 
@@ -242,6 +245,10 @@ func (co *createOptions) apply(o *Options) {
 	o.AdoptExisting = co.adoptExisting
 	if co.shutdownAfter != nil {
 		o.ShutdownAfter = *co.shutdownAfter
+	}
+	o.ShutdownPolicy = cmp.Or(co.shutdownPolicy, o.ShutdownPolicy)
+	if co.ttlAfterFinished != nil {
+		o.TTLSecondsAfterFinished = co.ttlAfterFinished
 	}
 	if co.sandboxReadyTimeout != 0 {
 		o.SandboxReadyTimeout = co.sandboxReadyTimeout
@@ -313,6 +320,22 @@ func WithVolumeClaimTemplates(templates []sandboxv1beta1.PersistentVolumeClaimTe
 func WithShutdownAfter(d time.Duration) CreateOption {
 	return func(o *createOptions) {
 		o.shutdownAfter = &d
+	}
+}
+
+// WithShutdownPolicy sets spec.lifecycle.shutdownPolicy for a single
+// CreateSandbox call, replacing Client-level Options.ShutdownPolicy.
+func WithShutdownPolicy(p extv1beta1.ShutdownPolicy) CreateOption {
+	return func(o *createOptions) {
+		o.shutdownPolicy = p
+	}
+}
+
+// WithTTLSecondsAfterFinished sets spec.lifecycle.ttlSecondsAfterFinished for a
+// single CreateSandbox call, replacing Client-level Options.TTLSecondsAfterFinished.
+func WithTTLSecondsAfterFinished(seconds int32) CreateOption {
+	return func(o *createOptions) {
+		o.ttlAfterFinished = &seconds
 	}
 }
 

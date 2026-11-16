@@ -50,6 +50,11 @@ go get sigs.k8s.io/agent-sandbox/clients/go/sandbox@latest
 
 ## Usage Examples
 
+`NewClient` returns a `*Client` that manages multiple sandboxes.
+`CreateSandbox` returns an open `*Sandbox` handle. Command, file, and lifecycle
+operations (`Run`, `Open`, `Close`, and `Disconnect`) use that handle, named `sb`
+in the examples below.
+
 ### 1. Gateway Mode
 
 Use this when running against a cluster with a public Gateway IP. The client automatically
@@ -374,7 +379,7 @@ context unless an explicit timeout is supplied. Retry options depend on the
 operation: in particular, streaming `Start` rejects attempts greater than one.
 
 ```go
-result, err := client.Run(ctx, "make build", sandbox.WithTimeout(10*time.Minute))
+result, err := sb.Run(ctx, "make build", sandbox.WithTimeout(10*time.Minute))
 ```
 
 `Run` and `Commands.Start` also take `WithEnv` and `WithWorkingDir`
@@ -383,7 +388,7 @@ result, err := client.Run(ctx, "make build", sandbox.WithTimeout(10*time.Minute)
 to the sandbox root:
 
 ```go
-result, err := client.Run(ctx, "make build",
+result, err := sb.Run(ctx, "make build",
     sandbox.WithEnv(map[string]string{"CI": "1"}),
     sandbox.WithWorkingDir("project"))
 ```
@@ -409,19 +414,19 @@ in to retries for idempotent commands; sandboxd `Run` always sends one Execute
 RPC. Streaming `Commands.Start` rejects attempts greater than one:
 
 ```go
-result, err := client.Run(ctx, "cat /etc/hostname", sandbox.WithMaxAttempts(6))
+result, err := sb.Run(ctx, "cat /etc/hostname", sandbox.WithMaxAttempts(6))
 ```
 
 ## Disconnect / Reconnect
 
-`Disconnect()` closes the transport connection **without deleting** the
-SandboxClaim. The sandbox stays alive on the server. Call `Open()` to
+`sb.Disconnect()` closes the transport connection **without deleting** the
+SandboxClaim. The sandbox stays alive on the server. Call `sb.Open()` to
 reconnect to the same sandbox:
 
 ```go
-client.Disconnect(ctx) // transport closed, claim preserved
+sb.Disconnect(ctx) // transport closed, claim preserved
 // ... later ...
-client.Open(ctx)       // reconnects to the same sandbox
+sb.Open(ctx)       // reconnects to the same sandbox
 ```
 
 This is useful for suspending a session (e.g., between user requests in a
@@ -468,15 +473,18 @@ PersistentVolumeClaim whose volume is retained; ephemeral storage, including
 
 ## Timeouts and Context
 
-`Open()` executes several sequential phases (claim creation, sandbox
+`Client.CreateSandbox()` opens the returned Sandbox before returning.
+`Sandbox.Open()` executes several sequential phases (claim creation, sandbox
 readiness, transport connection), each bounded by its own timeout
 (`SandboxReadyTimeout`, `GatewayReadyTimeout`, `PortForwardReadyTimeout`).
-**Pass a context with a deadline** to bound the total `Open()` duration:
+**Pass a context with a deadline** to bound the total creation time or a later
+`sb.Open()` reconnect:
 
 ```go
 ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 defer cancel()
-if err := client.Open(ctx); err != nil { ... }
+sb, err := client.CreateSandbox(ctx, "my-sandbox-pool", "default")
+if err != nil { log.Fatal(err) }
 ```
 
 | Option | Default | Governs |
@@ -493,43 +501,43 @@ if err := client.Open(ctx); err != nil { ... }
 ## Port-Forward Recovery
 
 In port-forward mode, a background monitor detects tunnel death and clears the
-client's ready state. Subsequent operations fail immediately with `ErrNotReady`
+sandbox handle's ready state. Subsequent operations fail immediately with `ErrNotReady`
 (wrapping `ErrPortForwardDied`) instead of timing out.
 
-To recover, call `Open()` again. The client will verify the claim and sandbox
+To recover, call `sb.Open()` again. The handle will verify the claim and sandbox
 still exist, then establish a new tunnel:
 
 ```go
-result, err := client.Run(ctx, "echo hi")
+result, err := sb.Run(ctx, "echo hi")
 if errors.Is(err, sandbox.ErrNotReady) {
     // Port-forward died; reconnect.
-    if reconnErr := client.Open(ctx); reconnErr != nil {
+    if reconnErr := sb.Open(ctx); reconnErr != nil {
         if errors.Is(reconnErr, sandbox.ErrSandboxDeleted) {
             // Claim was deleted externally; start fresh.
-            reconnErr = client.Open(ctx)
+            reconnErr = sb.Open(ctx)
         } else if errors.Is(reconnErr, sandbox.ErrOrphanedClaim) {
             // Sandbox no longer ready or verification failed; clean up and start fresh.
-            client.Close(ctx)
-            reconnErr = client.Open(ctx)
+            sb.Close(ctx)
+            reconnErr = sb.Open(ctx)
         }
         if reconnErr != nil {
             log.Fatal("reconnect failed:", reconnErr)
         }
     }
-    result, err = client.Run(ctx, "echo hi")
+    result, err = sb.Run(ctx, "echo hi")
 }
 ```
 
-If `Close()` fails to delete the claim (e.g., API server unavailable), the client
-preserves the claim name so `Close()` can be retried to clean up the orphaned claim.
-Calling `Open()` on a client with an orphaned claim returns `ErrOrphanedClaim`.
+If `sb.Close()` fails to delete the claim (e.g., API server unavailable), the handle
+preserves the claim name so `sb.Close()` can be retried to clean up the orphaned claim.
+Calling `sb.Open()` on a handle with an orphaned claim returns `ErrOrphanedClaim`.
 
 ## Error Reference
 
 | Error | Meaning |
 |-------|---------|
-| `ErrNotReady` | Client is not open or transport died. Call `Open()`. |
-| `ErrAlreadyOpen` | `Open()` called on an already-open client. Call `Close()` first. |
+| `ErrNotReady` | Sandbox handle is not open or transport died. Call `Open()`. |
+| `ErrAlreadyOpen` | `Open()` called on an already-open Sandbox handle. Call `Close()` first. |
 | `ErrOrphanedClaim` | A previous claim could not be cleaned up (failed `Close()`, failed `Open()` rollback, or sandbox disappeared during reconnect); call `Close()` to retry deletion. |
 | `ErrTimeout` | Sandbox or Gateway did not become ready within the configured timeout. |
 | `ErrClaimFailed` | SandboxClaim creation was rejected by the API server, or the claim reported a failure the controller does not retry (for example `InvalidMetadata` or `ClaimExpired`). |

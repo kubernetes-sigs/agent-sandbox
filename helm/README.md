@@ -14,11 +14,13 @@ helm install agent-sandbox ./helm/ \
   --set image.tag=<version>
 ```
 
-### Install from the staging OCI registry
+### Install from the staging OCI registry (development only)
 
-Each merge to `main` packages this chart (stamping `version` and `appVersion` from
-the git tag) and pushes it as an OCI artifact to the staging Artifact Registry.
-Install a published chart version directly:
+> **Note**: The staging OCI registry is for **development and testing only** until official chart promotion to `registry.k8s.io` is available. The postsubmit job runs on pushes across branches and tags (not only `main`), and staging chart tags are mutable (rebuilding a tagged commit overwrites the tag with a new digest).
+
+Postsubmit builds package this chart (stamping `version` and `appVersion` from
+the build's `_GIT_TAG`) and push it as an OCI artifact to the staging Artifact
+Registry. Install a staging chart version directly:
 
 ```bash
 helm install agent-sandbox \

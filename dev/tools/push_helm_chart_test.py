@@ -14,9 +14,14 @@
 
 """Unit tests for push-helm-chart."""
 
+import hashlib
 import importlib.util
+import io
 import os
+import subprocess
 import sys
+import tarfile
+import tempfile
 import unittest
 from importlib.machinery import SourceFileLoader
 from unittest import mock
@@ -63,7 +68,7 @@ class TestResolveVersions(unittest.TestCase):
 
     def test_prow_release_tag(self):
         self.assertEqual(
-            ("0.3.10", "v0.3.10"),
+            ("0.3.10", "v20261102-v0.3.10"),
             push_helm_chart.resolve_versions("0.1.2", "v20261102-v0.3.10"),
         )
 
@@ -75,8 +80,32 @@ class TestResolveVersions(unittest.TestCase):
 
     def test_prow_rc_release_tag(self):
         self.assertEqual(
-            ("0.3.10-rc.1", "v0.3.10-rc.1"),
+            ("0.3.10-rc.1", "v20261102-v0.3.10-rc.1"),
             push_helm_chart.resolve_versions("0.1.2", "v20261102-v0.3.10-rc.1"),
+        )
+
+    def test_rc_without_hyphen_normalizes_to_semver(self):
+        self.assertEqual(
+            ("0.5.0-rc5", "v0.5.0rc5"),
+            push_helm_chart.resolve_versions("0.1.2", "v0.5.0rc5"),
+        )
+
+    def test_dot_rc_normalizes_to_semver(self):
+        self.assertEqual(
+            ("0.4.4-rc1", "v0.4.4.rc1"),
+            push_helm_chart.resolve_versions("0.1.2", "v0.4.4.rc1"),
+        )
+
+    def test_post_tag_normalizes_to_semver(self):
+        self.assertEqual(
+            ("0.3.10-post1", "v0.3.10.post1"),
+            push_helm_chart.resolve_versions("0.1.2", "v0.3.10.post1"),
+        )
+
+    def test_prow_rc_without_hyphen_preserves_staging_app_version(self):
+        self.assertEqual(
+            ("0.5.0-rc5", "v20261102-v0.5.0rc5"),
+            push_helm_chart.resolve_versions("0.1.2", "v20261102-v0.5.0rc5"),
         )
 
     def test_prow_postsubmit_git_describe_tag(self):
@@ -113,25 +142,101 @@ class TestOciRef(unittest.TestCase):
         push_helm_chart.package_chart(
             "/repo", "/repo/helm", "/tmp/out",
             chart_version="0.3.10", app_version="v0.3.10",
+            helm_bin="/bin/helm",
         )
         cmd = mock_call.call_args[0][0]
         self.assertEqual(
-            ["helm", "package", "/repo/helm", "--destination", "/tmp/out",
+            ["/bin/helm", "package", "/repo/helm", "--destination", "/tmp/out",
              "--version", "0.3.10", "--app-version", "v0.3.10"],
-            cmd[-9:],
+            cmd,
         )
 
     @mock.patch.object(push_helm_chart.subprocess, "check_call")
     def test_push_chart_passes_charts_repo_without_chart_name(self, mock_call):
         push_helm_chart.push_chart(
-            "/repo", "/tmp/out", self.PREFIX, "agent-sandbox", "0.3.10"
+            "/repo", "/tmp/out", self.PREFIX, "agent-sandbox", "0.3.10",
+            helm_bin="/bin/helm",
         )
         cmd = mock_call.call_args[0][0]
         self.assertEqual(
-            ["helm", "push", "/tmp/out/agent-sandbox-0.3.10.tgz",
+            ["/bin/helm", "push", "/tmp/out/agent-sandbox-0.3.10.tgz",
              f"oci://{self.PREFIX}/charts"],
-            cmd[-4:],
+            cmd,
         )
+
+    @mock.patch.object(push_helm_chart.time, "sleep")
+    @mock.patch.object(push_helm_chart.subprocess, "check_call")
+    def test_push_chart_retries_on_transient_failure(self, mock_call, mock_sleep):
+        mock_call.side_effect = [
+            subprocess.CalledProcessError(1, ["helm", "push"]),
+            None,
+        ]
+        push_helm_chart.push_chart(
+            "/repo", "/tmp/out", self.PREFIX, "agent-sandbox", "0.3.10",
+            helm_bin="/bin/helm",
+        )
+        self.assertEqual(2, mock_call.call_count)
+        mock_sleep.assert_called_once_with(2.0)
+
+
+class TestEnsureHelm(unittest.TestCase):
+
+    def _make_helm_tarball(self, os_name, arch, payload):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            info = tarfile.TarInfo(name=f"{os_name}-{arch}/helm")
+            info.size = len(payload)
+            info.mode = 0o755
+            tf.addfile(info, io.BytesIO(payload))
+        return buf.getvalue()
+
+    def test_respects_helm_bin_env(self):
+        with mock.patch.dict(os.environ, {"HELM_BIN": "/custom/helm"}):
+            self.assertEqual("/custom/helm", push_helm_chart.ensure_helm("/repo"))
+
+    def test_downloads_verifies_and_extracts_pinned_helm(self):
+        payload = b"#!/bin/sh\necho helm\n"
+        tarball = self._make_helm_tarball("linux", "amd64", payload)
+        sha = hashlib.sha256(tarball).hexdigest()
+
+        resp = mock.MagicMock()
+        resp.__enter__.return_value = resp
+        resp.read.return_value = tarball
+
+        with tempfile.TemporaryDirectory() as repo_root, \
+             mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(push_helm_chart, "host_platform", return_value=("linux", "amd64")), \
+             mock.patch.dict(push_helm_chart.HELM_SHA256, {("linux", "amd64"): sha}), \
+             mock.patch.object(push_helm_chart.urllib.request, "urlopen", return_value=resp) as mock_open:
+            helm_path = push_helm_chart.ensure_helm(repo_root)
+            self.assertTrue(os.path.isfile(helm_path))
+            self.assertTrue(os.access(helm_path, os.X_OK))
+            with open(helm_path, "rb") as f:
+                self.assertEqual(payload, f.read())
+            self.assertEqual(1, mock_open.call_count)
+
+            # Second call uses cached binary without re-downloading.
+            self.assertEqual(helm_path, push_helm_chart.ensure_helm(repo_root))
+            self.assertEqual(1, mock_open.call_count)
+
+    def test_rejects_checksum_mismatch(self):
+        tarball = self._make_helm_tarball("linux", "amd64", b"bad")
+        resp = mock.MagicMock()
+        resp.__enter__.return_value = resp
+        resp.read.return_value = tarball
+
+        with tempfile.TemporaryDirectory() as repo_root, \
+             mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(push_helm_chart, "host_platform", return_value=("linux", "amd64")), \
+             mock.patch.dict(push_helm_chart.HELM_SHA256, {("linux", "amd64"): "0" * 64}), \
+             mock.patch.object(push_helm_chart.urllib.request, "urlopen", return_value=resp):
+            with self.assertRaises(RuntimeError):
+                push_helm_chart.ensure_helm(repo_root)
+            expected_path = os.path.join(
+                repo_root, "dev", "tools", "tmp",
+                f"helm-{push_helm_chart.HELM_VERSION}-linux-amd64", "helm",
+            )
+            self.assertFalse(os.path.exists(expected_path))
 
 
 class TestParser(unittest.TestCase):

@@ -80,6 +80,18 @@ The MCP server exposes the following tools:
     * `namespace` (str)
   * **Returns**: `status` (one of `SandboxReady`, `SandboxNotReady`, or `SandboxNotFound`), `ready` (True only when the `Ready` condition is True), and `message` (the Kubernetes condition message, empty if none is set).
 
+* **`get_sandbox_health`**: Reports whether `sandboxd` is serving inside a sandbox. Requires the sandboxd runtime.
+  * **Arguments**:
+    * `sandbox_claim_name` (str)
+    * `namespace` (str)
+    * `timeout` (int, default: 60)
+  * **Returns**: `healthy` (True only when `sandboxd` is serving requests), `uptime_seconds` (how long `sandboxd` has been running, null when not healthy), and `message` (a short reason when not healthy, empty otherwise).
+  * **Note**: this complements `get_sandbox_status`, which reports Kubernetes readiness. A sandbox whose
+    Pod is Ready can still report `healthy` false here, because `sandboxd` stops serving while it shuts
+    down. That case returns `healthy` false rather than failing, so an agent can decide whether to wait
+    or create a new sandbox. On the legacy python-runtime the tool fails with an error naming the
+    sandboxd requirement.
+
 *(The server also provides a `get_sandboxes` resource to fetch a list of existing sandboxes.)*
 
 ## Configuration

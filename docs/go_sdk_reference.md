@@ -10,6 +10,8 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 - [Constants](<#constants>)
 - [Variables](<#variables>)
 - [func NewTracerProvider\(ctx context.Context, serviceName string\) \(\*sdktrace.TracerProvider, error\)](<#NewTracerProvider>)
+- [type AttachOptions](<#AttachOptions>)
+- [type AttachRouting](<#AttachRouting>)
 - [type CallOption](<#CallOption>)
   - [func WithAppend\(\) CallOption](<#WithAppend>)
   - [func WithCreateOnly\(\) CallOption](<#WithCreateOnly>)
@@ -86,6 +88,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 - [type ProcessSignal](<#ProcessSignal>)
 - [type Runtime](<#Runtime>)
 - [type Sandbox](<#Sandbox>)
+  - [func Attach\(ctx context.Context, baseURL string, opts AttachOptions\) \(\*Sandbox, error\)](<#Attach>)
   - [func New\(\_ context.Context, opts Options\) \(\*Sandbox, error\)](<#New>)
   - [func \(s \*Sandbox\) Annotations\(\) map\[string\]string](<#Sandbox.Annotations>)
   - [func \(s \*Sandbox\) ClaimName\(\) string](<#Sandbox.ClaimName>)
@@ -175,6 +178,10 @@ var (
     // runtime or connection cannot perform (e.g. Delete on the legacy
     // python-runtime, or Run with RuntimeSandboxd and APIURL).
     ErrUnsupportedByRuntime = errors.New("operation not supported by the sandbox runtime")
+    // ErrAttached is returned by lifecycle operations (Open, Suspend, Resume,
+    // IsSuspended) on a handle returned by Attach, which has no Kubernetes
+    // client and does not own the sandbox.
+    ErrAttached = errors.New("operation not available on a handle from Attach")
     // ErrProcessProtocol indicates an invalid or incomplete process event stream.
     ErrProcessProtocol = errors.New("invalid process event stream")
     // ErrConcurrentRecv indicates that another Recv is already in progress.
@@ -190,6 +197,59 @@ func NewTracerProvider(ctx context.Context, serviceName string) (*sdktrace.Trace
 ```
 
 NewTracerProvider creates a TracerProvider with an OTLP/gRPC exporter. The endpoint is read from OTEL\_EXPORTER\_OTLP\_ENDPOINT \(default: localhost:4317\). serviceName becomes the service.name resource attribute. The caller owns the returned provider and must call Shutdown when done.
+
+<a name="AttachOptions"></a>
+### type [AttachOptions](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/attach.go>)
+
+AttachOptions configures Attach.
+
+```go
+type AttachOptions struct {
+    // Headers are sent on every REST request and, with lower-case names, as
+    // metadata on every gRPC call: for example the Authorization the
+    // endpoint in front of the sandbox expects.
+    Headers http.Header
+
+    // Routing, when set, sends the sandbox-router's X-Sandbox-* headers, with
+    // X-Sandbox-Port set to sandboxd's REST or gRPC port per call. Use it
+    // when the URL reaches a sandbox-router (for example through a Gateway).
+    Routing *AttachRouting
+
+    // TLSConfig is used for gRPC when the URL is https. Nil uses the
+    // system's roots. REST uses HTTPTransport.
+    TLSConfig *tls.Config
+
+    // HTTPTransport, RequestTimeout, PerAttemptTimeout, MaxDownloadSize,
+    // MaxUploadSize, Logger, TracerProvider and TraceServiceName behave as
+    // the Options fields of the same names.
+    HTTPTransport     http.RoundTripper
+    RequestTimeout    time.Duration
+    PerAttemptTimeout time.Duration
+    MaxDownloadSize   int64
+    MaxUploadSize     int64
+    Logger            logr.Logger
+    TracerProvider    trace.TracerProvider
+    TraceServiceName  string
+}
+```
+
+<a name="AttachRouting"></a>
+### type [AttachRouting](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/attach.go>)
+
+AttachRouting names the sandbox for the sandbox\-router.
+
+```go
+type AttachRouting struct {
+    // SandboxName is sent as X-Sandbox-ID. Required.
+    SandboxName string
+    // Namespace is sent as X-Sandbox-Namespace. Default: "default".
+    Namespace string
+    // RESTPort and GRPCPort are sandboxd's ports, sent as X-Sandbox-Port.
+    // Defaults: 8080 and 9090.
+    RESTPort int
+    GRPCPort int
+}
+```
 
 <a name="CallOption"></a>
 ### type [CallOption](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
@@ -1324,6 +1384,17 @@ type Sandbox struct {
     // contains filtered or unexported fields
 }
 ```
+
+<a name="Attach"></a>
+#### func [Attach](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/attach.go>)
+
+```go
+func Attach(ctx context.Context, baseURL string, opts AttachOptions) (*Sandbox, error)
+```
+
+Attach returns a handle to a sandbox that already exists and runs sandboxd, reached at baseURL, without the Kubernetes API. The URL serves sandboxd's REST API and, on the same host and port, its gRPC services; an https URL is dialed with TLS for both.
+
+The handle's Commands, Files, Watchers, Health and Metadata work as on an opened Sandbox. It owns no lifecycle: Open, Suspend, Resume and IsSuspended return ErrAttached, and Close only closes the connections. Use it when something else creates the sandbox \(a platform API, an operator\) and hands the caller its address and credentials.
 
 <a name="New"></a>
 #### func [New](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)

@@ -63,6 +63,10 @@ var (
 	// runtime or connection cannot perform (e.g. Delete on the legacy
 	// python-runtime, or Run with RuntimeSandboxd and APIURL).
 	ErrUnsupportedByRuntime = errors.New("operation not supported by the sandbox runtime")
+	// ErrAttached is returned by lifecycle operations (Open, Suspend, Resume,
+	// IsSuspended) on a handle returned by Attach, which has no Kubernetes
+	// client and does not own the sandbox.
+	ErrAttached = errors.New("operation not available on a handle from Attach")
 	// ErrProcessProtocol indicates an invalid or incomplete process event stream.
 	ErrProcessProtocol = errors.New("invalid process event stream")
 	// ErrConcurrentRecv indicates that another Recv is already in progress.

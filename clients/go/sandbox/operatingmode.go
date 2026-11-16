@@ -37,6 +37,9 @@ import (
 // of returning early.
 // Pass WithTimeout to override Options.SandboxReadyTimeout as the wait budget.
 func (s *Sandbox) Suspend(ctx context.Context, opts ...CallOption) error {
+	if s.attached {
+		return fmt.Errorf("%s: suspend: %w", s.errPrefix(), ErrAttached)
+	}
 	timeout := s.suspendResumeTimeout(opts)
 
 	// WithTimeout documents a total operation timeout, so the deadline
@@ -115,6 +118,9 @@ func (s *Sandbox) Suspend(ctx context.Context, opts ...CallOption) error {
 // transport always reconnects.
 // Pass WithTimeout to override Options.SandboxReadyTimeout as the wait budget.
 func (s *Sandbox) Resume(ctx context.Context, opts ...CallOption) error {
+	if s.attached {
+		return fmt.Errorf("%s: resume: %w", s.errPrefix(), ErrAttached)
+	}
 	timeout := s.suspendResumeTimeout(opts)
 
 	// WithTimeout documents a total operation timeout, so the deadline
@@ -225,6 +231,9 @@ func (s *Sandbox) Resume(ctx context.Context, opts ...CallOption) error {
 // sandbox suspended (spec.operatingMode is Suspended). It reflects the desired
 // state, not whether the pod has finished terminating; Suspend waits for that.
 func (s *Sandbox) IsSuspended(ctx context.Context) (bool, error) {
+	if s.attached {
+		return false, fmt.Errorf("%s: is suspended: %w", s.errPrefix(), ErrAttached)
+	}
 	name := s.SandboxName()
 	if name == "" {
 		return false, fmt.Errorf("%s: %w: IsSuspended needs a sandbox resolved by Open", s.errPrefix(), ErrNotReady)

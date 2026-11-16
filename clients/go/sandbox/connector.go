@@ -16,6 +16,7 @@ package sandbox
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -33,6 +34,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
@@ -83,6 +85,16 @@ type connector struct {
 	// for the router port-forward.
 	grpcTarget string
 	grpcConn   *grpc.ClientConn
+	// grpcTLS, when set, makes GRPCConn dial with TLS instead of plaintext
+	// (Attach to an https URL).
+	grpcTLS *tls.Config
+	// grpcRouterHeaders sends the X-Sandbox-* routing headers on gRPC calls
+	// for a transport other than the router port-forward (Attach with
+	// AttachRouting).
+	grpcRouterHeaders bool
+	// headers are the caller's own headers (Attach), sent on every REST
+	// request and as metadata on every gRPC call.
+	headers http.Header
 
 	requestTimeout    time.Duration
 	perAttemptTimeout time.Duration
@@ -244,7 +256,7 @@ func (c *connector) GRPCConn() (*grpc.ClientConn, error) {
 	if c.grpcTarget == "" {
 		// A direct URL names only the REST endpoint, so no target will ever
 		// be published. Say so rather than report ErrNotReady forever.
-		if _, direct := c.strategy.(*DirectStrategy); direct {
+		if _, direct := c.strategy.(*DirectStrategy); direct && c.baseURL != "" {
 			return nil, fmt.Errorf("%s: %w: APIURL reaches only the sandboxd REST API, so Run needs port-forward or in-cluster connectivity", prefix, ErrUnsupportedByRuntime)
 		}
 		if c.lastError != nil {
@@ -252,9 +264,16 @@ func (c *connector) GRPCConn() (*grpc.ClientConn, error) {
 		}
 		return nil, fmt.Errorf("%s: %w: sandboxd gRPC endpoint not connected", prefix, ErrNotReady)
 	}
-	dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
-	if ts, ok := c.strategy.(*tunnelStrategy); ok && ts.routerREST {
+	transportCreds := insecure.NewCredentials()
+	if c.grpcTLS != nil {
+		transportCreds = credentials.NewTLS(c.grpcTLS)
+	}
+	dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(transportCreds)}
+	if ts, ok := c.strategy.(*tunnelStrategy); (ok && ts.routerREST) || c.grpcRouterHeaders {
 		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(routerRouting{c: c}))
+	}
+	if len(c.headers) > 0 {
+		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(callerHeaders{md: grpcMetadata(c.headers)}))
 	}
 	if c.authHeader != "" {
 		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(sandboxdAuth{key: strings.ToLower(c.authHeader), value: c.authValue}))
@@ -289,6 +308,29 @@ func (r routerRouting) GetRequestMetadata(context.Context, ...string) (map[strin
 
 // RequireTransportSecurity returns false because GRPCConn dials without TLS.
 func (routerRouting) RequireTransportSecurity() bool { return false }
+
+// callerHeaders sends the caller's Attach headers as metadata on every gRPC
+// call.
+type callerHeaders struct {
+	md map[string]string
+}
+
+func (h callerHeaders) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
+	return h.md, nil
+}
+
+// RequireTransportSecurity returns false so an http URL (no TLS) still works.
+func (callerHeaders) RequireTransportSecurity() bool { return false }
+
+// grpcMetadata turns headers into gRPC metadata: lower-case keys, and the
+// values of a repeated header joined with ", " as HTTP allows.
+func grpcMetadata(h http.Header) map[string]string {
+	md := make(map[string]string, len(h))
+	for name, values := range h {
+		md[strings.ToLower(name)] = strings.Join(values, ", ")
+	}
+	return md
+}
 
 // sandboxdAuth sends the sandboxd token as metadata on every gRPC call.
 type sandboxdAuth struct {
@@ -446,6 +488,9 @@ func (c *connector) SendRequestWithHeaders(ctx context.Context, method, endpoint
 			return nil, fmt.Errorf("sandbox: failed to create request: %w", err)
 		}
 
+		for name, values := range c.headers {
+			req.Header[name] = append([]string(nil), values...)
+		}
 		for name, values := range extra {
 			for _, v := range values {
 				req.Header.Add(name, v)

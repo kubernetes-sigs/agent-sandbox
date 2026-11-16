@@ -44,6 +44,10 @@ type Sandbox struct {
 	opts      Options
 	log       logr.Logger
 
+	// attached is set by Attach: the handle has no Kubernetes client and
+	// manages no lifecycle.
+	attached bool
+
 	claimName   string
 	sandboxName string
 	sandboxUID  k8stypes.UID
@@ -199,42 +203,7 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 		traceServiceName: svcName,
 	}
 
-	errPrefix := s.errPrefix
-	trackOp := s.trackOp
-	getLifecycleCtx := s.currentLifecycleCtx
-
-	s.commands = &Commands{
-		connector:    conn,
-		runtime:      opts.Runtime,
-		tracer:       tracer,
-		svcName:      svcName,
-		log:          opts.Logger,
-		errPrefix:    errPrefix,
-		trackOp:      trackOp,
-		lifecycleCtx: getLifecycleCtx,
-	}
-	s.files = &Files{
-		connector:    conn,
-		runtime:      opts.Runtime,
-		tracer:       tracer,
-		svcName:      svcName,
-		log:          opts.Logger,
-		maxDownload:  opts.MaxDownloadSize,
-		maxUpload:    opts.MaxUploadSize,
-		errPrefix:    errPrefix,
-		trackOp:      trackOp,
-		lifecycleCtx: getLifecycleCtx,
-	}
-	s.watchers = &Watchers{
-		connector:    conn,
-		runtime:      opts.Runtime,
-		tracer:       tracer,
-		svcName:      svcName,
-		log:          opts.Logger,
-		errPrefix:    errPrefix,
-		trackOp:      trackOp,
-		lifecycleCtx: getLifecycleCtx,
-	}
+	s.initFacades()
 
 	// The pod tunnel needs the resolved pod name at Connect time.
 	// The in-cluster strategy needs the pod IP.
@@ -247,6 +216,47 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 	}
 
 	return s, nil
+}
+
+// initFacades builds the Commands, Files and Watchers facades over the
+// Sandbox's connector.
+func (s *Sandbox) initFacades() {
+	errPrefix := s.errPrefix
+	trackOp := s.trackOp
+	getLifecycleCtx := s.currentLifecycleCtx
+
+	s.commands = &Commands{
+		connector:    s.connector,
+		runtime:      s.opts.Runtime,
+		tracer:       s.tracer,
+		svcName:      s.traceServiceName,
+		log:          s.log,
+		errPrefix:    errPrefix,
+		trackOp:      trackOp,
+		lifecycleCtx: getLifecycleCtx,
+	}
+	s.files = &Files{
+		connector:    s.connector,
+		runtime:      s.opts.Runtime,
+		tracer:       s.tracer,
+		svcName:      s.traceServiceName,
+		log:          s.log,
+		maxDownload:  s.opts.MaxDownloadSize,
+		maxUpload:    s.opts.MaxUploadSize,
+		errPrefix:    errPrefix,
+		trackOp:      trackOp,
+		lifecycleCtx: getLifecycleCtx,
+	}
+	s.watchers = &Watchers{
+		connector:    s.connector,
+		runtime:      s.opts.Runtime,
+		tracer:       s.tracer,
+		svcName:      s.traceServiceName,
+		log:          s.log,
+		errPrefix:    errPrefix,
+		trackOp:      trackOp,
+		lifecycleCtx: getLifecycleCtx,
+	}
 }
 
 // Open creates a SandboxClaim and waits for the sandbox to become ready,
@@ -275,6 +285,9 @@ func (s *Sandbox) Open(ctx context.Context) (retErr error) {
 	// state reads below.
 	if s.connector.IsConnected() {
 		return ErrAlreadyOpen
+	}
+	if s.attached {
+		return fmt.Errorf("%s: open: %w", s.errPrefix(), ErrAttached)
 	}
 
 	s.mu.Lock()

@@ -113,6 +113,30 @@ fmt.Println(entries)
 
 With `Runtime: sandbox.RuntimeSandboxd` in `sandbox.Options`, `sb.List(ctx, ".", sandbox.WithRecursive(), sandbox.WithMaxDepth(2))` also lists nested entries. The default legacy runtime returns `ErrUnsupportedByRuntime`.
 
+### Attaching Without Kubernetes
+
+When something else creates the sandbox (a platform API, an operator) and
+hands the caller only its address and credentials, `sandbox.Attach` returns
+a handle without the Kubernetes API. The URL serves sandboxd's REST API and,
+on the same host and port, its gRPC services; an `https` URL uses TLS for
+both. `Headers` go on every REST request and gRPC call.
+
+```go
+headers := http.Header{}
+headers.Set("Authorization", "Bearer "+token)
+sb, err := sandbox.Attach(ctx, "https://sandbox.example.com", sandbox.AttachOptions{
+    Headers: headers,
+})
+if err != nil { log.Fatal(err) }
+defer sb.Close(ctx)
+
+result, err := sb.Run(ctx, "python3 --version")
+```
+
+If the URL reaches a sandbox-router, set `Routing` to send its `X-Sandbox-*`
+headers. The handle owns no lifecycle: `Open`, `Suspend`, `Resume` and
+`IsSuspended` return `ErrAttached`, and `Close` only closes its connections.
+
 ### 4. Custom Ports
 
 If your sandbox runtime listens on a port other than 8888, specify `ServerPort`.
@@ -539,6 +563,7 @@ Calling `Open()` on a client with an orphaned claim returns `ErrOrphanedClaim`.
 | `ErrRetriesExhausted` | All HTTP retry attempts failed. |
 | `ErrSandboxDeleted` | The Sandbox was deleted before becoming ready. |
 | `ErrGatewayDeleted` | The Gateway was deleted during address discovery. |
+| `ErrAttached` | A lifecycle call (`Open`, `Suspend`, `Resume`, `IsSuspended`) on a handle from `Attach`, which does not own the sandbox. |
 | `ErrProcessProtocol` | A streaming command returned invalid events or ended without the required Init/Exit. Missing-event EOF also matches `io.ErrUnexpectedEOF`. |
 | `ErrConcurrentRecv` | Another receive call is active on this process handle; the session remains open. |
 

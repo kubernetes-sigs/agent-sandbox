@@ -532,6 +532,7 @@ export class Sandbox {
   private deletionPromise: Promise<void> | null = null;
   private lifecycleTail: Promise<unknown> = Promise.resolve();
   private lastModePatch: Promise<unknown> = Promise.resolve();
+  private lifecycleUid?: string;
 
   private _files?: SandboxFiles;
   private _commands?: SandboxCommands;
@@ -818,10 +819,11 @@ export class Sandbox {
 
   /**
    * Like readSandboxObject(), but rejects with a SandboxNotFoundError when the
-   * Sandbox is gone, terminating, or replaced (different `uid`).
+   * Sandbox is gone, terminating, or replaced. The first successful read pins
+   * the `uid` on the handle, so a same-name Sandbox created later is rejected.
    */
   private async readLiveSandbox(
-    uid?: string,
+    uid: string | undefined = this.lifecycleUid,
   ): Promise<Record<string, unknown>> {
     const obj = await this.readSandboxObject();
     const metadata = (obj?.metadata as Record<string, unknown>) ?? {};
@@ -839,6 +841,13 @@ export class Sandbox {
       throw new SandboxNotFoundError(
         `Sandbox '${this.sandboxName}' was replaced.`,
       );
+    }
+    if (
+      this.lifecycleUid === undefined &&
+      typeof metadata.uid === "string" &&
+      metadata.uid !== ""
+    ) {
+      this.lifecycleUid = metadata.uid;
     }
     return obj;
   }

@@ -132,6 +132,16 @@ describe("Sandbox suspend/resume", () => {
         SandboxNotFoundError,
       );
     });
+
+    it("rejects when a same-name Sandbox replaced the first one between calls", async () => {
+      mockGet
+        .mockResolvedValueOnce(sandboxObj({ mode: "Running" }))
+        .mockResolvedValueOnce(sandboxObj({ mode: "Running", uid: "other" }));
+      const sandbox = new Sandbox(createInit());
+
+      await expect(sandbox.isSuspended()).resolves.toBe(false);
+      await expect(sandbox.isSuspended()).rejects.toThrow(/was replaced/);
+    });
   });
 
   describe("suspend()", () => {
@@ -206,6 +216,17 @@ describe("Sandbox suspend/resume", () => {
       await expect(new Sandbox(createInit()).suspend()).rejects.toThrow(
         /was replaced/,
       );
+    });
+
+    it("does not patch a same-name Sandbox that replaced the first one between calls", async () => {
+      mockGet
+        .mockResolvedValueOnce(sandboxObj({ mode: "Running" }))
+        .mockResolvedValueOnce(sandboxObj({ mode: "Running", uid: "other" }));
+      const sandbox = new Sandbox(createInit());
+
+      await sandbox.isSuspended();
+      await expect(sandbox.suspend()).rejects.toThrow(/was replaced/);
+      expect(mockPatch).not.toHaveBeenCalled();
     });
 
     it("keeps the cause when the patch fails", async () => {

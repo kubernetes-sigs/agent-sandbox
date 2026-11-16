@@ -71,6 +71,7 @@ import type {
   DirectoryListing,
   ExecutionResult,
   FileCallOptions,
+  FileEntry,
   ListOptions,
   Logger,
   MkdirOptions,
@@ -539,6 +540,7 @@ export class Sandbox {
         readStream: (path, opts) => this.readStreamImpl(path, opts),
         writeStream: (path, content, opts) =>
           this.writeStreamImpl(path, content, opts),
+        stat: (path, opts) => this.statImpl(path, opts),
         exists: (path, opts) => this.existsImpl(path, opts),
         list: (path, opts) => this.listImpl(path, opts),
         delete: (path, opts) => this.deleteFileImpl(path, opts),
@@ -1683,6 +1685,28 @@ export class Sandbox {
       }
       throw err;
     }
+  }
+
+  private async statImpl(
+    path: string,
+    opts?: FileCallOptions,
+  ): Promise<FileEntry> {
+    resolveSandboxPath(path, "stat");
+    const timeoutMs = validateTimeoutMs("timeoutMs", opts?.timeoutMs);
+    return this.operate<FileEntry>(
+      "files.stat",
+      timeoutMs,
+      opts?.signal,
+      (span) => {
+        if (span.isRecording())
+          span.setAttribute("sandbox.file.operation", "stat");
+      },
+      (span, result) => {
+        if (span.isRecording())
+          span.setAttribute("sandbox.file.size", result.size);
+      },
+      (gen, signal) => gen.rest.stat(path, signal),
+    );
   }
 
   private async existsImpl(

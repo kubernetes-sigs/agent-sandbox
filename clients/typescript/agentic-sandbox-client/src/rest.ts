@@ -47,6 +47,7 @@ export interface SandboxdRestClientOptions {
 export type SandboxPathOperation =
   | "read"
   | "write"
+  | "stat"
   | "exists"
   | "list"
   | "delete"
@@ -163,7 +164,7 @@ const ROOT_REJECTED_AS: Partial<Record<SandboxPathOperation, string>> = {
 /**
  * Validates a caller-supplied sandbox-root-relative path without decoding or
  * normalizing it first, then returns the percent-encoded path to append after
- * "/v1/files/" — "" for the sandbox root on list and exists. Read rejects
+ * "/v1/files/" — "" for the sandbox root on list, stat, and exists. Read rejects
  * that root. Separators stay literal "/".
  * "." and empty segments are dropped. Invalid paths throw before any request.
  * @internal
@@ -932,6 +933,46 @@ export class SandboxdRestClient {
     return bytesSent();
   }
 
+  async stat(path: string, signal: AbortSignal): Promise<FileEntry> {
+    const encoded = resolveSandboxPath(path, "stat");
+    const reqPath = `/v1/files/${encoded}`;
+    const { response, controller } = await this.request("GET", reqPath, {
+      signal,
+      query: { stat: "true" },
+    });
+    if (response.status !== 200) {
+      throw await this.buildApiError(
+        response,
+        controller,
+        "GET",
+        reqPath,
+        signal,
+      );
+    }
+    const bodyBytes = await readBoundedBody(
+      response,
+      this.opts.maxMetadataResponseSize,
+      controller,
+      signal,
+    );
+    if (
+      mediaType(response.headers.get("content-type")) !== "application/json"
+    ) {
+      throw invalidResponse("sandboxd stat returned a non-JSON response");
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(new TextDecoder().decode(bodyBytes));
+    } catch (err) {
+      throw invalidResponse("sandboxd stat returned malformed JSON", err);
+    }
+    const entry = parseFileEntry(parsed);
+    if (!entry) {
+      throw invalidResponse("sandboxd stat returned an unsupported file type");
+    }
+    return entry;
+  }
+
   async exists(path: string, signal: AbortSignal): Promise<boolean> {
     const encoded = resolveSandboxPath(path, "exists");
     const reqPath = `/v1/files/${encoded}`;
@@ -1157,48 +1198,53 @@ function parseDirectoryListing(raw: unknown): DirectoryListing {
   }
   const entries: FileEntry[] = [];
   for (const rawEntry of obj.entries) {
-    if (typeof rawEntry !== "object" || rawEntry === null) {
-      throw invalidResponse(
-        "sandboxd directory listing contains a non-object entry",
-      );
-    }
-    const e = rawEntry as Record<string, unknown>;
-    if (typeof e.type !== "string") {
-      throw invalidResponse("sandboxd directory entry has a non-string 'type'");
-    }
-    if (e.type !== "file" && e.type !== "directory") {
-      // Unknown entry type: skip, without logging the entry's name or type.
-      continue;
-    }
-    if (typeof e.name !== "string" || e.name.length === 0) {
-      throw invalidResponse("sandboxd directory entry has an invalid 'name'");
-    }
-    if (
-      typeof e.size !== "number" ||
-      !Number.isSafeInteger(e.size) ||
-      e.size < 0
-    ) {
-      throw invalidResponse("sandboxd directory entry has an invalid 'size'");
-    }
-    if (typeof e.modified_at !== "string" || !isValidRfc3339(e.modified_at)) {
-      throw invalidResponse(
-        "sandboxd directory entry has an invalid 'modified_at'",
-      );
-    }
-    let mode: string | undefined;
-    if (e.mode !== undefined) {
-      if (typeof e.mode !== "string" || !MODE_RE.test(e.mode)) {
-        throw invalidResponse("sandboxd directory entry has an invalid 'mode'");
-      }
-      mode = e.mode;
-    }
-    entries.push({
-      name: e.name,
-      size: e.size,
-      type: e.type,
-      modifiedAt: e.modified_at,
-      mode,
-    });
+    const entry = parseFileEntry(rawEntry);
+    if (entry) entries.push(entry);
   }
   return { path: obj.path, entries };
+}
+
+function parseFileEntry(rawEntry: unknown): FileEntry | undefined {
+  if (typeof rawEntry !== "object" || rawEntry === null) {
+    throw invalidResponse(
+      "sandboxd directory listing contains a non-object entry",
+    );
+  }
+  const e = rawEntry as Record<string, unknown>;
+  if (typeof e.type !== "string") {
+    throw invalidResponse("sandboxd directory entry has a non-string 'type'");
+  }
+  if (e.type !== "file" && e.type !== "directory") {
+    // Unknown entry type: skip, without logging the entry's name or type.
+    return undefined;
+  }
+  if (typeof e.name !== "string" || e.name.length === 0) {
+    throw invalidResponse("sandboxd directory entry has an invalid 'name'");
+  }
+  if (
+    typeof e.size !== "number" ||
+    !Number.isSafeInteger(e.size) ||
+    e.size < 0
+  ) {
+    throw invalidResponse("sandboxd directory entry has an invalid 'size'");
+  }
+  if (typeof e.modified_at !== "string" || !isValidRfc3339(e.modified_at)) {
+    throw invalidResponse(
+      "sandboxd directory entry has an invalid 'modified_at'",
+    );
+  }
+  let mode: string | undefined;
+  if (e.mode !== undefined) {
+    if (typeof e.mode !== "string" || !MODE_RE.test(e.mode)) {
+      throw invalidResponse("sandboxd directory entry has an invalid 'mode'");
+    }
+    mode = e.mode;
+  }
+  return {
+    name: e.name,
+    size: e.size,
+    type: e.type,
+    modifiedAt: e.modified_at,
+    mode,
+  };
 }

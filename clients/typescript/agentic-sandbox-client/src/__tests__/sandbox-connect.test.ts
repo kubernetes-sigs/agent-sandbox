@@ -217,6 +217,20 @@ async function startRestBackend(
     if (req.url?.startsWith("/v1/files/")) {
       fileRequests.push(`${req.method} ${req.url}`);
     }
+    if (req.method === "GET" && req.url?.endsWith("?stat=true")) {
+      if (req.url.includes("slow.txt")) return;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          name: "a.txt",
+          size: 5,
+          type: "file",
+          modified_at: "2026-11-16T00:00:00.123456789Z",
+          mode: "0644",
+        }),
+      );
+      return;
+    }
     if (
       req.method === "GET" &&
       new URL(req.url ?? "/", "http://localhost").pathname ===
@@ -1044,6 +1058,85 @@ describe("Sandbox in-cluster connectivity", () => {
     const content = await sandbox.files.read("a.txt");
     expect(new TextDecoder().decode(content)).toBe("file contents");
     expect(restBackend.healthHits).toBe(2);
+  });
+});
+
+describe("Sandbox files.stat()", () => {
+  it("uses the public facade and the shared connection", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    const { tracingManager, events } = makeRecordingTracerManager();
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+      tracingManager,
+    });
+    await expect(
+      sandbox.files.stat("dir/a.txt", { timeoutMs: 1000 }),
+    ).resolves.toEqual({
+      name: "a.txt",
+      size: 5,
+      type: "file",
+      mode: "0644",
+      modifiedAt: "2026-11-16T00:00:00.123456789Z",
+    });
+    await sandbox.files.exists("a.txt");
+    expect(restBackend.fileRequests).toEqual([
+      "GET /v1/files/dir/a.txt?stat=true",
+      "HEAD /v1/files/a.txt",
+    ]);
+    expect(restBackend.healthHits).toBe(1);
+    expect(events).toContain("attr:sandbox.file.operation=stat");
+    expect(events).toContain("attr:sandbox.file.size=5");
+  });
+
+  it("validates paths and timeout before connecting", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+    });
+    for (const path of ["../secret", "/absolute", "bad\0name"]) {
+      await expect(sandbox.files.stat(path)).rejects.toMatchObject({
+        telemetryCode: "invalid_argument",
+      });
+    }
+    await expect(
+      sandbox.files.stat("a", { timeoutMs: -1 }),
+    ).rejects.toMatchObject({ telemetryCode: "invalid_argument" });
+    expect(restBackend.healthHits).toBe(0);
+    expect(restBackend.fileRequests).toEqual([]);
+  });
+
+  it("honors timeout and cancellation and releases the operation", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+    });
+    await sandbox.files.exists("a.txt");
+    await expect(
+      sandbox.files.stat("slow.txt", { timeoutMs: 100 }),
+    ).rejects.toBeInstanceOf(SandboxTimeoutError);
+    const controller = new AbortController();
+    const pending = sandbox.files.stat("slow.txt", {
+      signal: controller.signal,
+    });
+    const rejected = expect(pending).rejects.toThrow();
+    controller.abort();
+    await rejected;
+    await expect(sandbox.files.stat("a.txt")).resolves.toMatchObject({
+      type: "file",
+    });
+    await sandbox.closeLocal();
+    await expect(sandbox.files.stat("a.txt")).rejects.toBeInstanceOf(
+      SandboxClosedError,
+    );
   });
 });
 

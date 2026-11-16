@@ -503,7 +503,10 @@ func apiVersionInGroup(apiVersion, group string) bool {
 // podReady reports whether the Pod's status carries a PodReady=True
 // condition. We require Ready (not just Running) because containers may
 // still be initializing or failing probes; routing to such a Pod produces
-// noisy 502s for the caller.
+// noisy 502s for the caller. A terminating Pod is still ready while its
+// Ready condition is True: the Sandbox creates its replacement only after
+// the old Pod is gone, so the terminating Pod is the only one that can serve
+// the sessions it still holds.
 func podReady(pod *corev1.Pod) bool {
 	for i := range pod.Status.Conditions {
 		c := &pod.Status.Conditions[i]

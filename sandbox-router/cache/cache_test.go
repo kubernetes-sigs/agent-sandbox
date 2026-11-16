@@ -199,6 +199,15 @@ func TestPodReady(t *testing.T) {
 	if podReady(p) {
 		t.Error("not-ready pod must return false")
 	}
+	p = makePod("p", "n", testUID, "1.1.1.1", true)
+	p.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	if !podReady(p) {
+		t.Error("terminating pod whose Ready condition is True must return true")
+	}
+	p.Status.Conditions[0].Status = corev1.ConditionFalse
+	if podReady(p) {
+		t.Error("terminating pod whose Ready condition is False must return false")
+	}
 }
 
 func TestCache_PreseededPodCachedOnSync(t *testing.T) {
@@ -721,6 +730,47 @@ func TestCache_CurrentPodNotReadyEvictsEntry(t *testing.T) {
 	}
 	if _, ok := c.GetByName(testPodNS, testPodName); ok {
 		t.Fatal("current Pod NotReady update must evict the name index entry")
+	}
+}
+
+// TestCache_TerminatingPodRoutableWhileReady: the Sandbox recreates its Pod
+// under the same name only after the old Pod is gone, so while a Pod
+// terminates there is no other Pod for its Sandbox. The router keeps routing
+// to it for as long as its Ready condition is True, which lets a client
+// reconnect to sessions the Pod still holds during a graceful shutdown. The
+// entry goes once the Pod reports Ready=False.
+func TestCache_TerminatingPodRoutableWhileReady(t *testing.T) {
+	const sandboxUID = types.UID("sandbox-terminating")
+	c := &Cache{
+		log:     logr.Discard(),
+		entries: make(map[types.UID]Entry),
+		byName:  make(map[string]types.UID),
+	}
+
+	pod := makePod(testPodName, testPodNS, sandboxUID, testPodIP, true)
+	pod.UID = types.UID("terminating-pod")
+	c.onAddOrUpdate(pod)
+
+	terminating := pod.DeepCopy()
+	terminating.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	c.onUpdate(pod, terminating)
+
+	if e, ok := c.Get(sandboxUID); !ok || e.PodUID != terminating.UID || e.PodIP != testPodIP {
+		t.Fatalf("terminating Pod whose Ready condition is True must stay cached: %+v, found=%v", e, ok)
+	}
+	if e, source, ok := c.Resolve(testPodNS, testPodName, ""); !ok || source != ResolutionByName || e.PodIP != testPodIP {
+		t.Fatalf("terminating Pod whose Ready condition is True must stay name-routable: entry=%+v source=%v ok=%v", e, source, ok)
+	}
+
+	terminatingNotReady := terminating.DeepCopy()
+	terminatingNotReady.Status.Conditions[0].Status = corev1.ConditionFalse
+	c.onUpdate(terminating, terminatingNotReady)
+
+	if _, ok := c.Get(sandboxUID); ok {
+		t.Fatal("terminating Pod must be evicted once its Ready condition is False")
+	}
+	if _, ok := c.GetByName(testPodNS, testPodName); ok {
+		t.Fatal("terminating Pod must leave the name index once its Ready condition is False")
 	}
 }
 

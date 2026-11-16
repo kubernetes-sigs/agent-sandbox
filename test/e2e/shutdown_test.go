@@ -67,6 +67,13 @@ func TestSandboxShutdownTime(t *testing.T) {
 					Reason:             sandboxv1beta1.SandboxReasonDependenciesReady,
 					Message:            "Pod is Ready; Service Exists",
 				},
+				{
+					Type:               string(sandboxv1beta1.SandboxConditionServing),
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 1,
+					Reason:             sandboxv1beta1.SandboxReasonServingPodReady,
+					Message:            "Pod is Ready",
+				},
 			},
 		}),
 	}
@@ -104,6 +111,13 @@ func TestSandboxShutdownTime(t *testing.T) {
 				},
 				{
 					Type:               string(sandboxv1beta1.SandboxConditionReady),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: 2,
+					Reason:             sandboxv1beta1.SandboxReasonExpired,
+					Message:            "Sandbox has expired",
+				},
+				{
+					Type:               string(sandboxv1beta1.SandboxConditionServing),
 					Status:             metav1.ConditionFalse,
 					ObservedGeneration: 2,
 					Reason:             sandboxv1beta1.SandboxReasonExpired,

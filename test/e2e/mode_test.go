@@ -76,6 +76,13 @@ func TestSandboxSuspendResumeCycleWithOperatingMode(t *testing.T) {
 					Reason:             sandboxv1beta1.SandboxReasonDependenciesReady,
 					Message:            "Pod is Ready; Service Exists",
 				},
+				{
+					Type:               string(sandboxv1beta1.SandboxConditionServing),
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: gen,
+					Reason:             sandboxv1beta1.SandboxReasonServingPodReady,
+					Message:            "Pod is Ready",
+				},
 			},
 		}
 	}
@@ -96,6 +103,13 @@ func TestSandboxSuspendResumeCycleWithOperatingMode(t *testing.T) {
 					ObservedGeneration: gen,
 					Reason:             sandboxv1beta1.SandboxReasonSuspended,
 					Message:            "Sandbox is suspended",
+				},
+				{
+					Type:               string(sandboxv1beta1.SandboxConditionServing),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: gen,
+					Reason:             sandboxv1beta1.SandboxReasonServingPodNotFound,
+					Message:            "Pod does not exist",
 				},
 			},
 		}
@@ -198,6 +212,13 @@ func TestSandboxSuspensionWithTerminatingPod(t *testing.T) {
 					Reason:             sandboxv1beta1.SandboxReasonDependenciesReady,
 					Message:            "Pod is Ready; Service Exists",
 				},
+				{
+					Type:               string(sandboxv1beta1.SandboxConditionServing),
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 1,
+					Reason:             sandboxv1beta1.SandboxReasonServingPodReady,
+					Message:            "Pod is Ready",
+				},
 			},
 		}),
 	}
@@ -279,6 +300,13 @@ func TestSandboxSuspensionWithTerminatingPod(t *testing.T) {
 					Reason:             sandboxv1beta1.SandboxReasonSuspended,
 					Message:            "Sandbox is suspending",
 				},
+				{
+					Type:               string(sandboxv1beta1.SandboxConditionServing),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: 2,
+					Reason:             sandboxv1beta1.SandboxReasonServingPodNotReady,
+					Message:            "Pod is not Running and Ready with an assigned IP",
+				},
 			},
 		}),
 	}
@@ -325,6 +353,13 @@ func TestSandboxSuspensionWithTerminatingPod(t *testing.T) {
 					ObservedGeneration: 2,
 					Reason:             sandboxv1beta1.SandboxReasonSuspended,
 					Message:            "Sandbox is suspended",
+				},
+				{
+					Type:               string(sandboxv1beta1.SandboxConditionServing),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: 2,
+					Reason:             sandboxv1beta1.SandboxReasonServingPodNotFound,
+					Message:            "Pod does not exist",
 				},
 			},
 		}),
@@ -377,6 +412,13 @@ func TestSandboxPodDeletionKeepsSuspendedFalse(t *testing.T) {
 				ObservedGeneration: 1,
 				Reason:             sandboxv1beta1.SandboxReasonDependenciesReady,
 				Message:            "Pod is Ready; Service Exists",
+			},
+			{
+				Type:               string(sandboxv1beta1.SandboxConditionServing),
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: 1,
+				Reason:             sandboxv1beta1.SandboxReasonServingPodReady,
+				Message:            "Pod is Ready",
 			},
 		},
 	}
@@ -496,6 +538,13 @@ func TestSandboxSuspensionBlockedByUnownedPodConflict(t *testing.T) {
 				ObservedGeneration: 1,
 				Reason:             sandboxv1beta1.SandboxReasonSuspended,
 				Message:            "Sandbox is suspending",
+			},
+			{
+				Type:               string(sandboxv1beta1.SandboxConditionServing),
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: 1,
+				Reason:             sandboxv1beta1.SandboxReasonServingPodNotOwned,
+				Message:            "Pod is not owned by this sandbox",
 			},
 		},
 	}

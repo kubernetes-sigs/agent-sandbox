@@ -129,6 +129,36 @@ const (
 	// Finished is absent.
 	SandboxReasonPodTerminating = "PodTerminating"
 
+	// SandboxConditionServing reports whether the backing Pod can serve the work it
+	// already holds. It mirrors the Pod's readiness regardless of termination, the
+	// way EndpointSlice separates "serving" from "ready" (KEP-1672): Status is True
+	// while the Pod is Running and its Pod Ready condition is True with at least one
+	// pod IP assigned, including while the Pod terminates. Ready, by contrast, turns
+	// False with reason PodTerminating as soon as the Pod has a deletion timestamp,
+	// so "Ready=False, Serving=True" means the Pod is draining but still reachable.
+	// Serving ignores the Service and reconcile errors that Ready also considers, so
+	// Ready=True implies Serving=True but not the reverse.
+	// Status is False when the Pod is not ready (PodNotReady), does not exist
+	// (PodNotFound), or is not owned by this Sandbox (PodNotOwned), or the Sandbox has
+	// expired (SandboxExpired), and Unknown when
+	// reconciling the Pod failed (PodStateUnknown).
+	SandboxConditionServing ConditionType = "Serving"
+	// SandboxReasonServingPodReady is the Serving=True reason: the backing Pod is
+	// Running and Ready with an assigned IP.
+	SandboxReasonServingPodReady = "PodReady"
+	// SandboxReasonServingPodNotReady is a Serving=False reason: the backing Pod
+	// exists but is not Running and Ready with an assigned IP.
+	SandboxReasonServingPodNotReady = "PodNotReady"
+	// SandboxReasonServingPodNotFound is a Serving=False reason: the Sandbox has no
+	// backing Pod, for example while it is suspended or before the Pod is created.
+	SandboxReasonServingPodNotFound = "PodNotFound"
+	// SandboxReasonServingPodNotOwned is a Serving=False reason: a Pod exists with
+	// the Sandbox's name but is not owned by this Sandbox.
+	SandboxReasonServingPodNotOwned = "PodNotOwned"
+	// SandboxReasonServingPodStateUnknown is the Serving=Unknown reason: reconciling
+	// the Pod failed, so its state cannot be determined.
+	SandboxReasonServingPodStateUnknown = "PodStateUnknown"
+
 	// SandboxConditionFinished reports that the backing Pod reached a terminal phase.
 	// It is set (Status True) only after the Pod has Succeeded or Failed, with the reason
 	// recording which; it is absent while the Pod is still running or does not exist.

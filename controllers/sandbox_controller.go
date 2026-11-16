@@ -618,8 +618,72 @@ func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1beta1.Sandbox, e
 	}
 
 	conditions = append(conditions, r.computeReadyCondition(sandbox, err, svc, pod))
+	conditions = append(conditions, r.computeServingCondition(sandbox, pod, podErr))
 
 	return conditions
+}
+
+// computeServingCondition reports whether the backing Pod is Running and Ready
+// with an assigned IP, whether or not it is terminating. Ready turns False with
+// reason PodTerminating for the whole termination window, but a Pod with a
+// graceful shutdown keeps serving the work it already holds until it reports
+// Ready=False. The Sandbox recreates its Pod under the same name only after the
+// old Pod is gone, so during that window the terminating Pod is the only one
+// that can serve. This mirrors the EndpointSlice split between "serving" and
+// "ready" (KEP-1672).
+func (r *SandboxReconciler) computeServingCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod, podErr error) metav1.Condition {
+	condition := metav1.Condition{
+		Type:               string(sandboxv1beta1.SandboxConditionServing),
+		ObservedGeneration: sandbox.Generation,
+		Status:             metav1.ConditionFalse,
+	}
+
+	// Reconciling the Pod failed, so a nil pod does not prove the Pod is gone.
+	if pod == nil && podErr != nil {
+		condition.Status = metav1.ConditionUnknown
+		condition.Reason = sandboxv1beta1.SandboxReasonServingPodStateUnknown
+		condition.Message = "Pod state is unknown. Serving cannot be determined"
+		return condition
+	}
+	if pod == nil {
+		condition.Reason = sandboxv1beta1.SandboxReasonServingPodNotFound
+		condition.Message = "Pod does not exist"
+		return condition
+	}
+	if !isOwnedBySandbox(pod, sandbox) {
+		condition.Reason = sandboxv1beta1.SandboxReasonServingPodNotOwned
+		condition.Message = "Pod is not owned by this sandbox"
+		return condition
+	}
+	if !podServing(pod) {
+		condition.Reason = sandboxv1beta1.SandboxReasonServingPodNotReady
+		condition.Message = "Pod is not Running and Ready with an assigned IP"
+		return condition
+	}
+
+	condition.Status = metav1.ConditionTrue
+	condition.Reason = sandboxv1beta1.SandboxReasonServingPodReady
+	if pod.DeletionTimestamp.IsZero() {
+		condition.Message = "Pod is Ready"
+	} else {
+		condition.Message = "Pod is terminating and still Ready"
+	}
+	return condition
+}
+
+// podServing reports whether the Pod is Running with its Ready condition True
+// and at least one pod IP. It ignores the deletion timestamp on purpose; see
+// computeServingCondition.
+func podServing(pod *corev1.Pod) bool {
+	if pod.Status.Phase != corev1.PodRunning || len(pod.Status.PodIPs) == 0 {
+		return false
+	}
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 // computePodScheduledCondition mirrors the backing Pod's PodScheduled
@@ -2391,6 +2455,16 @@ func checkSandboxExpiry(sandbox *sandboxv1beta1.Sandbox, now time.Time) (bool, t
 func setSandboxExpiredCondition(sandbox *sandboxv1beta1.Sandbox) {
 	meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
 		Type:               string(sandboxv1beta1.SandboxConditionReady),
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: sandbox.Generation,
+		Reason:             sandboxv1beta1.SandboxReasonExpired,
+		Message:            "Sandbox has expired",
+	})
+	// Expiry deletes the backing Pod and stops observing it, so Serving would
+	// otherwise keep its last pre-expiry status. An expired Sandbox serves
+	// nothing, whatever state its Pod is in.
+	meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+		Type:               string(sandboxv1beta1.SandboxConditionServing),
 		Status:             metav1.ConditionFalse,
 		ObservedGeneration: sandbox.Generation,
 		Reason:             sandboxv1beta1.SandboxReasonExpired,

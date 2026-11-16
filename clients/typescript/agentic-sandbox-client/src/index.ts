@@ -59,6 +59,7 @@ export type {
   SandboxHealth,
   SandboxMetadata,
   SandboxStatus,
+  ShutdownPolicy,
   StartOptions,
   VolumeClaimTemplate,
   WriteOptions,

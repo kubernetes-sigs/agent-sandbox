@@ -16,6 +16,7 @@ import type {
   DeleteOptions,
   DirectoryListing,
   FileCallOptions,
+  FileEntry,
   ListOptions,
   MkdirOptions,
   MoveCopyOptions,
@@ -46,6 +47,7 @@ export interface FilesOperations {
     content: ReadableStream<Uint8Array>,
     opts?: WriteOptions,
   ): Promise<void>;
+  stat(path: string, opts?: FileCallOptions): Promise<FileEntry>;
   exists(path: string, opts?: FileCallOptions): Promise<boolean>;
   list(path: string, opts?: ListOptions): Promise<DirectoryListing>;
   delete(path: string, opts?: DeleteOptions): Promise<void>;
@@ -155,6 +157,15 @@ export class SandboxFiles {
     opts?: WriteOptions,
   ): Promise<void> {
     return this.ops.writeStream(path, content, opts);
+  }
+
+  /**
+   * Returns metadata for one file or directory. Accepts "." or "" for the
+   * sandbox root and follows symlinks within that root. modifiedAt preserves
+   * sub-second precision. Requires sandboxd support for the stat query.
+   */
+  stat(path: string, opts?: FileCallOptions): Promise<FileEntry> {
+    return this.ops.stat(path, opts);
   }
 
   /** Returns whether `path` exists (file or directory). */

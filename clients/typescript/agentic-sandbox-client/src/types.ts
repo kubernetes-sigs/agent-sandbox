@@ -300,9 +300,9 @@ export interface ExecutionResult {
   exitCode: number;
 }
 
-/** One row of a DirectoryListing returned by sandbox.files.list(). */
+/** Metadata returned by sandbox.files.stat() or an entry in files.list(). */
 export interface FileEntry {
-  /** Path relative to the listed directory, including subdirectories. */
+  /** Basename for stat ("/" for the root), or path relative to the listed directory. */
   name: string;
   size: number;
   type: "file" | "directory";

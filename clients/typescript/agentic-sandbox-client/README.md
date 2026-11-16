@@ -2,7 +2,7 @@
 
 This TypeScript client provides a high-level interface for creating and interacting with sandboxes managed by the Agent Sandbox controller, mirroring the [Go client](../../go/README.md) and [Python client](../../python/agentic-sandbox-client/README.md).
 
-The surface covers the Kubernetes resource layer (provisioning a `SandboxClaim`, watching it to readiness, and tearing it down via `SandboxClient` / `Sandbox`) and the sandboxd runtime layer (`sandbox.commands.{run,start}()`, `sandbox.files.{read,write,readStream,writeStream,exists,list,delete,mkdir,move,copy}()`, `sandbox.health()`, and `sandbox.metadata()`), plus `sandbox.status()` for the Sandbox's Kubernetes readiness. `start()` covers long-running and interactive processes: streamed output, stdin, signals, and a PTY with resizing.
+The surface covers the Kubernetes resource layer (provisioning a `SandboxClaim`, watching it to readiness, and tearing it down via `SandboxClient` / `Sandbox`) and the sandboxd runtime layer (`sandbox.commands.{run,start}()`, `sandbox.files.{read,write,readStream,writeStream,exists,list,stat,delete,mkdir,move,copy}()`, `sandbox.health()`, and `sandbox.metadata()`), plus `sandbox.status()` for the Sandbox's Kubernetes readiness. `start()` covers long-running and interactive processes: streamed output, stdin, signals, and a PTY with resizing.
 
 ## Usage
 
@@ -31,12 +31,26 @@ try {
   await sandbox.files.mkdir("backup", { parents: true });
   await sandbox.files.copy("greeting.txt", "backup/greeting.txt");
 
+  const entry = await sandbox.files.stat("greeting.txt");
+  console.log(entry.size, entry.mode, entry.modifiedAt);
+
   const listing = await sandbox.files.list(".");
   console.log(listing.entries.map((e) => e.name));
 } finally {
   await sandbox.close();
 }
 ```
+
+### File metadata
+
+Use `sandbox.files.stat(path, { timeoutMs, signal })` to retrieve metadata for one
+file or directory. Use `"."` or `""` for the sandbox root. The response uses
+`FileEntry`, with `modifiedAt` preserved as an RFC3339 string including sub-second
+precision. Missing paths and access failures surface as `SandboxdApiError`.
+
+This method requires sandboxd support for `GET /v1/files/{path}?stat=true`.
+Older servers that return file contents or directory listings fail response
+validation.
 
 ### Automatic expiration
 

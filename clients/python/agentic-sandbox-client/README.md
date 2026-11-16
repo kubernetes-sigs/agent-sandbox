@@ -872,9 +872,9 @@ For snapshot-backed suspension on GKE, use the
 
 ## Errors
 
-Every exception the SDK raises derives from `SandboxError`, which is itself a
-`RuntimeError`. Catch `SandboxError` to handle anything from the SDK, or a
-specific class to react to one condition.
+The SDK's own exception classes derive from `SandboxError`, which is itself a
+`RuntimeError`. Catch `SandboxError` to handle any of them, or a specific class
+to react to one condition.
 
 Failures from the sandboxd gRPC ProcessService and FileWatcherService are
 classified by status:

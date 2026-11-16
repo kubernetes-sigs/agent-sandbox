@@ -61,6 +61,7 @@ export type {
   SandboxStatus,
   ShutdownPolicy,
   StartOptions,
+  SuspendResumeOptions,
   VolumeClaimTemplate,
   WriteOptions,
 } from "./types.js";

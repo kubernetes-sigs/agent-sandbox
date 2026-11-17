@@ -140,6 +140,27 @@ func checkOwnership(obj client.Object, sandbox *sandboxv1beta1.Sandbox) (resourc
 	return resourceOwnedByOther, controllerRef
 }
 
+// sandboxCanAdopt reports whether the Sandbox may take ownership of an
+// unowned child. It reads the Sandbox from the API server because the
+// informer cache can show a child released by an orphan delete before it
+// shows the Sandbox's deletionTimestamp. The garbage collector orphans
+// dependents only after the deletion is recorded, so a read made after the
+// child was seen unowned observes it.
+func (r *SandboxReconciler) sandboxCanAdopt(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) (bool, error) {
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+	live := &sandboxv1beta1.Sandbox{}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(sandbox), live); err != nil {
+		if k8serrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to read Sandbox before adopting a child: %w", err)
+	}
+	return live.UID == sandbox.UID && live.DeletionTimestamp.IsZero(), nil
+}
+
 // isOwnedBySandbox reports whether pod is non-nil and owned by the given Sandbox.
 func isOwnedBySandbox(pod *corev1.Pod, sandbox *sandboxv1beta1.Sandbox) bool {
 	if pod == nil {
@@ -295,6 +316,11 @@ func (m *lifecycleTimeMap) markError(key types.NamespacedName, uid types.UID) bo
 // SandboxReconciler reconciles a Sandbox object.
 type SandboxReconciler struct {
 	client.Client
+	// APIReader reads directly from the API server, bypassing the informer
+	// cache. Used only to confirm that a Sandbox still exists and is not being
+	// deleted before it adopts an unowned child. Falls back to Client when
+	// unset (e.g. in unit tests with a fake client).
+	APIReader     client.Reader
 	Scheme        *runtime.Scheme
 	Recorder      events.EventRecorder
 	Tracer        asmetrics.Instrumenter
@@ -1573,6 +1599,17 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 				service.Name, service.Spec.ClusterIP, corev1.ClusterIPNone)
 		}
 
+		canAdopt, err := r.sandboxCanAdopt(ctx, sandbox)
+		if err != nil {
+			return nil, err
+		}
+		if !canAdopt {
+			logger.V(4).Info("Refusing to adopt unowned service: Sandbox is gone or being deleted",
+				"Service.Name", service.Name, "Sandbox.Name", sandbox.Name)
+			r.clearServiceStatus(sandbox)
+			return nil, nil
+		}
+
 		logger.Info("Adopting unowned service", "Service.Name", service.Name, "Sandbox.Name", sandbox.Name)
 
 		if service.Labels == nil {
@@ -1818,6 +1855,16 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 					"RequiredLabel", sandboxv1beta1.SandboxAdoptableLabel, "TrackingLabel", sandboxv1beta1.SandboxNameHashLabel)
 				return nil, 0, fmt.Errorf("cannot adopt unowned pod %q: missing required pool authorization label (%q) or sandbox tracking label (%q)",
 					pod.Name, sandboxv1beta1.SandboxAdoptableLabel, sandboxv1beta1.SandboxNameHashLabel)
+			}
+
+			canAdopt, err := r.sandboxCanAdopt(ctx, sandbox)
+			if err != nil {
+				return nil, 0, err
+			}
+			if !canAdopt {
+				logger.V(4).Info("Refusing to adopt unowned pod: Sandbox is gone or being deleted",
+					"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name)
+				return pod, 0, nil
 			}
 
 			if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
@@ -2238,6 +2285,16 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 						"RequiredLabel", sandboxv1beta1.SandboxAdoptableLabel, "TrackingLabel", sandboxv1beta1.SandboxNameHashLabel)
 					return fmt.Errorf("cannot adopt unowned PVC %q: missing required pool authorization label (%q) or sandbox tracking label (%q)",
 						pvcName, sandboxv1beta1.SandboxAdoptableLabel, sandboxv1beta1.SandboxNameHashLabel)
+				}
+
+				canAdopt, err := r.sandboxCanAdopt(ctx, sandbox)
+				if err != nil {
+					return err
+				}
+				if !canAdopt {
+					logger.V(4).Info("Refusing to adopt unowned PVC: Sandbox is gone or being deleted",
+						"PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)
+					continue
 				}
 
 				logger.Info("Adopting unowned PVC", "PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)

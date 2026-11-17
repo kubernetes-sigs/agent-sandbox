@@ -14,7 +14,9 @@ Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) headlessly ins
 
 1. A Kubernetes cluster with the [Agent Sandbox controller and CRDs](../../README.md#installation) installed, **including the extension CRDs** (`SandboxTemplate` / `SandboxWarmPool` / `SandboxClaim` — e.g. `EXTENSIONS=true make deploy-kind`).
 2. The [Sandbox Router](../../clients/python/agentic-sandbox-client/README.md#setup-deploying-the-router) deployed (the SDK's default Tunnel mode port-forwards to it).
-3. The Python SDK: `pip install k8s-agent-sandbox`.
+3. The Python SDK installed from this Git checkout. From the repository root,
+   run `pip install -e clients/python/agentic-sandbox-client`. The example needs
+   `suspend()` and `resume()`, which are not available in the PyPI release 1.0.11.
 4. Docker, and [kind](https://kind.sigs.k8s.io/) if using the quick path.
 5. An Anthropic API key (or a compatible endpoint via `ANTHROPIC_BASE_URL`).
 
@@ -82,23 +84,32 @@ This does not make the sandbox credential-free.
 
 For a new deployment, use this **instead of** the quick-start Secret command.
 The example below assumes a proxy Service named `model-proxy` in namespace
-`model-proxy`, with Pods labeled `app: model-proxy` listening on TCP 8080.
-Use your proxy's endpoint and supported model name.
+`model-proxy`, with Service port 8080 and Pods labeled `app: model-proxy`
+listening on TCP 8080. Use the Service port in `ANTHROPIC_BASE_URL` and the Pod's
+listening port in the network policy if they differ.
+Use the proxy's ClusterIP instead of its DNS name so the sandbox does not need
+DNS access. Allowing cluster DNS would let the agent discover in-cluster Service
+names. Use your proxy's supported model name.
 
 ```bash
+PROXY_IP=$(kubectl -n model-proxy get service model-proxy -o jsonpath='{.spec.clusterIP}')
 kubectl -n <namespace> create secret generic claude-code-api-keys \
   --from-file=ANTHROPIC_API_KEY=/path/to/proxy-caller-token \
-  --from-literal=ANTHROPIC_BASE_URL=http://model-proxy.model-proxy.svc.cluster.local:8080 \
+  --from-literal=ANTHROPIC_BASE_URL=http://${PROXY_IP}:8080 \
   --from-literal=ANTHROPIC_MODEL=MODEL_NAME
 ```
 
+If you recreate the proxy Service, read its ClusterIP again and update
+`ANTHROPIC_BASE_URL` in the Secret before recreating the warm sandboxes.
+
 Without an explicit `networkPolicy`, the controller uses public DNS resolvers
-and blocks egress to private address ranges, including cluster DNS and an
-in-cluster proxy. Setting `ANTHROPIC_BASE_URL` alone does not grant network access.
+and blocks egress to private address ranges. This prevents reaching an in-cluster
+proxy in those ranges. Setting `ANTHROPIC_BASE_URL` alone does not grant network
+access.
 
 Add the following `spec.networkPolicy` to `template.yaml` before creating the
-warm pool. Adjust the namespace and Pod selectors to match your DNS and proxy
-Pods. The proxy port must match the Pod's listening port, which may differ from
+warm pool. Adjust the namespace and Pod selectors to match your proxy Pods.
+The proxy port must match the Pod's listening port, which may differ from
 the Service port. Use a network plugin that enforces Kubernetes NetworkPolicy.
 
 ```yaml
@@ -119,18 +130,6 @@ spec:
     - to:
       - namespaceSelector:
           matchLabels:
-            kubernetes.io/metadata.name: kube-system
-        podSelector:
-          matchLabels:
-            k8s-app: kube-dns
-      ports:
-      - protocol: UDP
-        port: 53
-      - protocol: TCP
-        port: 53
-    - to:
-      - namespaceSelector:
-          matchLabels:
             kubernetes.io/metadata.name: model-proxy
         podSelector:
           matchLabels:
@@ -141,19 +140,21 @@ spec:
 ```
 
 This policy replaces the default ingress and egress rules. It keeps router
-access and allows outbound connections only to DNS and the selected proxy Pods.
-It does not permit direct HTTPS connections to the public provider. Use HTTPS
-for the proxy endpoint if your deployment requires encrypted in-cluster traffic.
+access and allows outbound connections only to the selected proxy Pods, without
+allowing cluster DNS or direct HTTPS connections to the public provider. Check
+other policies selecting these Pods: NetworkPolicies are additive, so another
+policy can allow broader egress. Use HTTPS for the proxy endpoint if your
+deployment requires encrypted in-cluster traffic, with a certificate valid for
+the IP address.
 
 If the pool already exists, apply the edited template and recreate its unclaimed
 warm sandboxes with the pool-selector command in [Troubleshooting](#troubleshooting).
 On kind, rerunning `run-test-kind.sh` with the same namespace and cluster settings
 does both steps.
 
-The shared policy changes immediately, but existing sandboxes keep their Pod DNS
-configuration. Pods using the default public resolvers lose DNS access under
-these rules. Use fresh claims for this example. Do not apply this policy to a
-template with active workloads that still need the old DNS configuration.
+The shared policy changes immediately and denies all DNS egress, including to
+public resolvers. Use fresh claims for this example. Do not apply this policy to
+a template with active workloads that still need DNS access.
 
 ## How the headless pattern works
 
@@ -171,7 +172,7 @@ template with active workloads that still need the old DNS configuration.
 | --- | --- |
 | Warm pod `CreateContainerConfigError` | Secret `claude-code-api-keys` missing or key misspelled; create it, then delete this pool's warm sandboxes so they are recreated (`-n <namespace>` if not `default`): `kubectl -n <namespace> delete sandbox -l "$(kubectl -n <namespace> get sandboxwarmpool claude-code-pool -o jsonpath='{.status.selector}')"` |
 | Stage fails with authentication error text in stdout | Invalid/expired `ANTHROPIC_API_KEY`, or proxy endpoint needs `ANTHROPIC_BASE_URL` in the Secret |
-| In-cluster proxy name does not resolve or its connection times out | Add the explicit DNS/proxy policy above and recreate the warm sandboxes. Check the proxy Pod selector and listening port. A base URL alone does not override the default policy. |
+| In-cluster proxy connection times out or its name does not resolve | Use the proxy's current ClusterIP, add the explicit proxy policy above, and recreate the warm sandboxes. Check the proxy Pod selector and listening port. A base URL alone does not override the default policy. |
 | `claude command timed out` | Raise `COMMAND_TIMEOUT` in `run_claude.py` (keep < router proxy timeout) or use a faster model via `ANTHROPIC_MODEL` |
 | 502/504 from the router | Turn exceeded `--proxy-timeout`; see above |
 

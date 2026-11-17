@@ -13,13 +13,14 @@
 # limitations under the License.
 
 import threading
+from datetime import timedelta
 from typing import Any, cast
 from k8s_agent_sandbox.commands._process_handle import ProcessHandle
 from k8s_agent_sandbox.connector import SandboxConnector
 from k8s_agent_sandbox.models import ExecutionResult, LegacyExecuteRequest, PtySize
 from k8s_agent_sandbox.trace_manager import trace, trace_span
 
-# Extra time the HTTP read waits beyond command_timeout, so the response the
+# Extra time the client waits beyond command_timeout, so the response the
 # runtime sends after killing a timed-out command still arrives.
 _COMMAND_TIMEOUT_MARGIN_SECONDS = 10
 
@@ -60,6 +61,36 @@ def _process_config(
     """Builds the sandboxd ProcessConfig, keeping the shell-string API."""
     return process_pb2.ProcessConfig(
         command=["/bin/sh", "-c", command], env_vars=env, cwd=cwd or None
+    )
+
+
+def _limited_execution_result(
+    process_pb2: Any, response: Any, command_timeout: float
+) -> ExecutionResult:
+    """Maps an ExecuteWithLimits response onto the run() result."""
+    stdout = response.stdout.decode("utf-8", errors="replace")
+    stderr = response.stderr.decode("utf-8", errors="replace")
+    if response.termination_reason != (
+        process_pb2.EXECUTE_TERMINATION_REASON_TIME_LIMIT_EXCEEDED
+    ):
+        if response.stdout_truncated or response.stderr_truncated:
+            # ExecutionResult cannot mark output as partial, so fail the same
+            # way Execute does when deployment policy truncates output.
+            raise RuntimeError(
+                "sandboxd truncated the command output under its deployment policy"
+            )
+        return ExecutionResult(
+            stdout=stdout, stderr=stderr, exit_code=response.exit_code
+        )
+    if stderr and not stderr.endswith("\n"):
+        stderr += "\n"
+    # sandboxd reports the killed command's real status (usually 137); the
+    # legacy runtime reports a timeout as 124, like GNU timeout.
+    return ExecutionResult(
+        stdout=stdout,
+        stderr=f"{stderr}Command timed out after {command_timeout:g} seconds",
+        exit_code=124,
+        timed_out=True,
     )
 
 
@@ -104,15 +135,16 @@ class CommandExecutor:
             command_timeout: Optional limit, in seconds, on how long the command
                 itself may run. The sandbox kills the command when it is
                 exceeded, and the read timeout is extended past it so the
-                result still arrives. The legacy runtime reports this as an
-                ExecutionResult with ``timed_out`` set (runtimes that predate
-                the field ignore the limit). sandboxd uses it as the gRPC
-                deadline and reports an exceeded deadline the same way, with
-                exit code 124 and ``timed_out`` set; output written before the
-                deadline is not returned. Through the sandbox router a request
-                is also bounded by the router's ``--proxy-timeout`` (180s by
-                default), so a longer ``command_timeout`` ends in a 502/504
-                from the router instead of a ``timed_out`` result.
+                result still arrives. Both runtimes report this as an
+                ExecutionResult with exit code 124, ``timed_out`` set, and the
+                output written before the limit. Legacy runtimes that predate
+                the field ignore the limit. sandboxd versions without
+                ExecuteWithLimits (v1.0.9 and earlier) enforce it as the gRPC
+                deadline instead and do not return that output. Through the
+                sandbox router a legacy runtime request is also bounded by the
+                router's ``--proxy-timeout`` (180s by default), so a longer
+                ``command_timeout`` ends in a 502/504 from the router instead
+                of a ``timed_out`` result.
             env: Extra environment variables for the command, overriding the
                 sandbox's own. Only the sandboxd runtime supports it; the
                 legacy runtime raises NotImplementedError.
@@ -128,11 +160,8 @@ class CommandExecutor:
             span.set_attribute("sandbox.command.executable", executable)
 
         if sandboxd:
-            if command_timeout is None:
-                result = self._run_sandboxd(command, timeout, env=env, cwd=cwd)
-            else:
-                result = self._run_sandboxd(
-                    command, command_timeout, report_timeout=True, env=env, cwd=cwd)
+            result = self._run_sandboxd(
+                command, timeout, command_timeout, env=env, cwd=cwd)
             if span.is_recording():
                 span.set_attribute("sandbox.exit_code", result.exit_code)
             return result
@@ -253,7 +282,7 @@ class CommandExecutor:
         self,
         command: str,
         timeout: float,
-        report_timeout: bool = False,
+        command_timeout: float | None = None,
         env: dict[str, str] | None = None,
         cwd: str | None = None,
     ) -> ExecutionResult:
@@ -263,6 +292,9 @@ class CommandExecutor:
         "/bin/sh -c", matching what the legacy python-runtime did
         server-side. Generated stubs are imported lazily so the REST
         filesystem path works without grpcio installed.
+
+        With command_timeout, an exceeded limit is returned as a timed-out
+        ExecutionResult instead of raising.
         """
         try:
             import grpc
@@ -281,16 +313,38 @@ class CommandExecutor:
         self.connector.connect()
         channel = self.connector.grpc_channel()
         stub = process_pb2_grpc.ProcessServiceStub(channel)
-        request = process_pb2.ExecuteRequest(
-            config=_process_config(process_pb2, command, env, cwd),
-        )
+        config = _process_config(process_pb2, command, env, cwd)
         try:
-            response = stub.Execute(request, timeout=timeout)
+            if command_timeout is not None:
+                try:
+                    response = stub.ExecuteWithLimits(
+                        process_pb2.ExecuteWithLimitsRequest(
+                            config=config,
+                            time_limit=timedelta(seconds=command_timeout),
+                        ),
+                        timeout=command_timeout + _COMMAND_TIMEOUT_MARGIN_SECONDS,
+                    )
+                    return _limited_execution_result(
+                        process_pb2, response, command_timeout)
+                except grpc.RpcError as e:
+                    # sandboxd rejects these before running the command: older
+                    # versions lack the RPC, and a limit above the deployment
+                    # maximum is invalid. Execute then runs it as before this
+                    # RPC existed, without its output on timeout.
+                    if cast("grpc.Call", e).code() not in (
+                        grpc.StatusCode.UNIMPLEMENTED,
+                        grpc.StatusCode.INVALID_ARGUMENT,
+                    ):
+                        raise
+                timeout = command_timeout
+            response = stub.Execute(
+                process_pb2.ExecuteRequest(config=config), timeout=timeout)
         except grpc.RpcError as e:
             rpc_error = cast("grpc.Call", e)
-            if report_timeout and rpc_error.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
+            if (command_timeout is not None
+                    and rpc_error.code() == grpc.StatusCode.DEADLINE_EXCEEDED):
                 return ExecutionResult(
-                    stderr=f"Command timed out after {timeout:g} seconds",
+                    stderr=f"Command timed out after {command_timeout:g} seconds",
                     exit_code=124,
                     timed_out=True,
                 )

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+from datetime import timedelta
 from typing import Any, cast
 
 """Non-blocking command execution for legacy and sandboxd runtimes."""
@@ -19,9 +20,11 @@ from typing import Any, cast
 from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
 from k8s_agent_sandbox.commands._process_handle import AsyncProcessHandle
 from k8s_agent_sandbox.commands.command_executor import (
+    _COMMAND_TIMEOUT_MARGIN_SECONDS,
     _check_process_options,
     _execute_request,
     _extract_executable,
+    _limited_execution_result,
     _process_config,
 )
 from k8s_agent_sandbox.models import ExecutionResult, PtySize
@@ -56,15 +59,16 @@ class AsyncCommandExecutor:
             command_timeout: Optional limit, in seconds, on how long the command
                 itself may run. The sandbox kills the command when it is
                 exceeded, and the read timeout is extended past it so the
-                result still arrives. The legacy runtime reports this as an
-                ExecutionResult with ``timed_out`` set (runtimes that predate
-                the field ignore the limit). sandboxd uses it as the gRPC
-                deadline and reports an exceeded deadline the same way, with
-                exit code 124 and ``timed_out`` set; output written before the
-                deadline is not returned. Through the sandbox router a request
-                is also bounded by the router's ``--proxy-timeout`` (180s by
-                default), so a longer ``command_timeout`` ends in a 502/504
-                from the router instead of a ``timed_out`` result.
+                result still arrives. Both runtimes report this as an
+                ExecutionResult with exit code 124, ``timed_out`` set, and the
+                output written before the limit. Legacy runtimes that predate
+                the field ignore the limit. sandboxd versions without
+                ExecuteWithLimits (v1.0.9 and earlier) enforce it as the gRPC
+                deadline instead and do not return that output. Through the
+                sandbox router a legacy runtime request is also bounded by the
+                router's ``--proxy-timeout`` (180s by default), so a longer
+                ``command_timeout`` ends in a 502/504 from the router instead
+                of a ``timed_out`` result.
             env: Extra environment variables for the command, overriding the
                 sandbox's own. Only the sandboxd runtime supports it; the
                 legacy runtime raises NotImplementedError.
@@ -80,12 +84,9 @@ class AsyncCommandExecutor:
             span.set_attribute("sandbox.command.executable", executable)
 
         if sandboxd:
-            if command_timeout is None:
-                result = await self._run_sandboxd(command, timeout, env=env, cwd=cwd)
-            else:
-                result = await self._run_sandboxd(
-                    command, command_timeout, report_timeout=True, env=env, cwd=cwd
-                )
+            result = await self._run_sandboxd(
+                command, timeout, command_timeout, env=env, cwd=cwd
+            )
             if span.is_recording():
                 span.set_attribute("sandbox.exit_code", result.exit_code)
             return result
@@ -116,13 +117,13 @@ class AsyncCommandExecutor:
         self,
         command: str,
         timeout: float,
-        report_timeout: bool = False,
+        command_timeout: float | None = None,
         env: dict[str, str] | None = None,
         cwd: str | None = None,
     ) -> ExecutionResult:
         """Execute through sandboxd while preserving the shell-string API.
 
-        With report_timeout, an exceeded deadline is returned as a timed-out
+        With command_timeout, an exceeded limit is returned as a timed-out
         ExecutionResult instead of raising.
         """
         try:
@@ -140,16 +141,43 @@ class AsyncCommandExecutor:
         await self.connector.connect()
         channel = await self.connector.grpc_channel()
         stub = process_pb2_grpc.ProcessServiceStub(channel)
-        request = process_pb2.ExecuteRequest(
-            config=_process_config(process_pb2, command, env, cwd)
-        )
+        config = _process_config(process_pb2, command, env, cwd)
         try:
-            response = await stub.Execute(request, timeout=timeout)
+            if command_timeout is not None:
+                try:
+                    response = await stub.ExecuteWithLimits(
+                        process_pb2.ExecuteWithLimitsRequest(
+                            config=config,
+                            time_limit=timedelta(seconds=command_timeout),
+                        ),
+                        timeout=command_timeout + _COMMAND_TIMEOUT_MARGIN_SECONDS,
+                    )
+                    return _limited_execution_result(
+                        process_pb2, response, command_timeout
+                    )
+                except grpc.RpcError as e:
+                    # sandboxd rejects these before running the command: older
+                    # versions lack the RPC, and a limit above the deployment
+                    # maximum is invalid. Execute then runs it as before this
+                    # RPC existed, without its output on timeout.
+                    rpc_error = cast("grpc.aio.AioRpcError", e)
+                    if rpc_error.code() not in (
+                        grpc.StatusCode.UNIMPLEMENTED,
+                        grpc.StatusCode.INVALID_ARGUMENT,
+                    ):
+                        raise
+                timeout = command_timeout
+            response = await stub.Execute(
+                process_pb2.ExecuteRequest(config=config), timeout=timeout
+            )
         except grpc.RpcError as e:
             rpc_error = cast("grpc.aio.AioRpcError", e)
-            if report_timeout and rpc_error.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
+            if (
+                command_timeout is not None
+                and rpc_error.code() == grpc.StatusCode.DEADLINE_EXCEEDED
+            ):
                 return ExecutionResult(
-                    stderr=f"Command timed out after {timeout:g} seconds",
+                    stderr=f"Command timed out after {command_timeout:g} seconds",
                     exit_code=124,
                     timed_out=True,
                 )

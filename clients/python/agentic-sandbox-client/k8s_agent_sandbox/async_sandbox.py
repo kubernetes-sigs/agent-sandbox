@@ -78,6 +78,8 @@ class AsyncSandbox:
             )
 
         self.claim_name: str | None = claim_name
+        # The client pins this to the Claim observed when it creates the handle.
+        self._claim_uid: str | None = None
         self.sandbox_id = sandbox_id
         self.namespace = namespace
         self.connection_config = connection_config
@@ -354,6 +356,9 @@ class AsyncSandbox:
         cleared so later calls are a local no-op and do not issue another DELETE.
         If the claim is already gone remotely, ``delete_sandbox_claim`` treats a
         404 as success rather than raising.
+
+        Handles returned by ``AsyncSandboxClient`` delete only their original
+        Claim UID. A same-name replacement raises ``ApiException`` with status 409.
         """
         await self.close_connection()
 
@@ -361,7 +366,8 @@ class AsyncSandbox:
             # Already deleted (or never successfully created a claim).
             return
 
-        await self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace)
+        delete_kwargs: dict[str, Any] = {"expected_uid": self._claim_uid} if self._claim_uid is not None else {}
+        await self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace, **delete_kwargs)
 
         # The client stops tracking the handle here because its claim is gone. Call
         # _on_terminated before clearing claim_name, because that name is the client's key.

@@ -120,9 +120,11 @@ class TestSandboxClient(unittest.TestCase):
         mock_sandbox = MagicMock()
         mock_sandbox.is_active = True
         mock_sandbox.sandbox_id = "resolved-id"
+        mock_sandbox._claim_uid = "uid-claim"
         self.client._active_connection_sandboxes[("test-namespace", "test-claim")] = mock_sandbox
         
         self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
+        self.mock_k8s_helper.get_sandbox_claim.return_value = {"metadata": {"uid": "uid-claim"}}
         self.mock_k8s_helper.get_sandbox.return_value = {"metadata": {}}
 
         sandbox = self.client.get_sandbox("test-claim", "test-namespace")
@@ -1088,7 +1090,7 @@ def test_dropped_client_is_freed_and_its_exit_hook_still_cleans_up(tracked):
         gc.enable()
     exit_hook()
     if tracked:
-        helper.delete_sandbox_claim.assert_called_once_with(generated_name, "ns")
+        helper.delete_sandbox_claim.assert_called_once_with(generated_name, "ns", expected_uid="uid-kept")
     else:
         helper.delete_sandbox_claim.assert_not_called()
     assert not generated.is_active

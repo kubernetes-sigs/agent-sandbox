@@ -2435,4 +2435,48 @@ describe("Sandbox watcher.watch()", () => {
     await eventually(() => events.includes("end"));
     expect(events).toContain("attr:sandbox.error.code=not_found");
   });
+
+  it("ends the span when the caller's signal is aborted between reads", async () => {
+    const { tracingManager, events } = makeEndRecordingTracerManager();
+    const s = await startSandbox(tracingManager);
+    const controller = new AbortController();
+    const watch = s.watcher.watch("src", { signal: controller.signal });
+    await watch.next();
+
+    controller.abort(new Error("stop it"));
+
+    await eventually(() => events.includes("end"));
+    expect(events).toContain("attr:sandbox.error.code=cancelled");
+  });
+
+  it("ends a read that return() interrupts while it waits for the connection", async () => {
+    const { tracingManager, events } = makeEndRecordingTracerManager();
+    // Never answers /v1/health, so the connection never becomes ready.
+    const stalled = http.createServer(() => {});
+    await new Promise<void>((resolve) =>
+      stalled.listen(0, "127.0.0.1", resolve),
+    );
+    try {
+      sandbox = makeSandbox({
+        apiServerPort: UNUSED_API_SERVER_PORT,
+        restPort: (stalled.address() as net.AddressInfo).port,
+        grpcPort: 1,
+        connectivity: "in-cluster-pod-ip",
+        podIP: "127.0.0.1",
+        tracingManager,
+      });
+      const watch = sandbox.watcher.watch("src");
+      const next = watch.next();
+
+      await watch.return?.();
+
+      await expect(next).resolves.toMatchObject({ done: true });
+      await eventually(() => events.includes("end"));
+      expect(events.join("\n")).not.toContain("sandbox.error.code");
+    } finally {
+      await sandbox?.closeLocal().catch(() => {});
+      stalled.closeAllConnections();
+      stalled.close();
+    }
+  });
 });

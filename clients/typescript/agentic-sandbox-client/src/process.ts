@@ -580,12 +580,12 @@ export class ProcessClient {
   }
 
   /**
-   * Opens a WatchDir stream. sandboxd sends nothing until the first change,
-   * so this returns as soon as the request is on its way, and a rejected
-   * watch (for example a path that does not exist) surfaces on the first
-   * `next()`. The iterator ends when sandboxd ends the stream. `signal`
-   * governs the stream's whole lifetime, and no gRPC deadline is set, for
-   * the same reason as in start().
+   * Prepares a WatchDir stream. Connect sends the request on the first
+   * `next()`. sandboxd then answers only with the first event or with a
+   * refusal (for example a path that does not exist), so that read can wait
+   * as long as the directory stays unchanged. The iterator ends when sandboxd
+   * ends the stream. `signal` governs the stream's whole lifetime, and no
+   * gRPC deadline is set, for the same reason as in start().
    */
   async watchDir(
     path: string,

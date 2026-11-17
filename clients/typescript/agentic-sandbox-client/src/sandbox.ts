@@ -1815,10 +1815,16 @@ export class Sandbox {
     // only other reader, and it is absent when the opening itself failed.
     finished.catch(() => {});
 
+    // Lets return() end a read that still waits for the shared connection,
+    // without cancelling that connection for other callers.
+    const openingSignal = userSignal
+      ? AbortSignal.any([userSignal, watchAbort.signal])
+      : watchAbort.signal;
+
     const openStream = (): Promise<OpenWatch> =>
       this.runOperation<OpenWatch>(
         timeoutMs,
-        userSignal,
+        openingSignal,
         async (gen, openSignal) => {
           // As in startCommandImpl(), the deadline inside `openSignal` stops
           // applying once this returns.
@@ -1827,6 +1833,24 @@ export class Sandbox {
             path,
             recursive,
             streamSignal,
+          );
+          // The caller's signal or closeLocal() can stop the stream while no
+          // read is pending. The span must end then, not at a later read
+          // that may never come.
+          streamSignal.addEventListener(
+            "abort",
+            () => {
+              if (ended) return;
+              fail(
+                this.classifyOperationFailure(
+                  streamSignal.reason,
+                  gen,
+                  undefined,
+                  userSignal,
+                ),
+              );
+            },
+            { once: true },
           );
           return {
             next: async () => {
@@ -1865,6 +1889,8 @@ export class Sandbox {
             watch = await openStream();
           } catch (err) {
             openFailed(err);
+            // return() interrupted the opening, which is not a failure.
+            if (ended) return;
             throw err;
           }
           opened(watch);

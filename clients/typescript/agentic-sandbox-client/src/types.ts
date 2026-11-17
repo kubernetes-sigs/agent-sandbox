@@ -362,7 +362,8 @@ export interface WatchOptions {
   recursive?: boolean;
   /**
    * Budget (ms) for connecting to sandboxd before the watch starts. It does
-   * NOT bound how long the watch runs. Default: 60000.
+   * NOT bound the wait for the first event or how long the watch runs. Use
+   * `signal` to bound those. Default: 60000.
    */
   timeoutMs?: number;
   /** Aborting this signal, before or during the watch, ends the watch. */

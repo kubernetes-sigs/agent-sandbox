@@ -142,6 +142,24 @@ describe("Sandbox suspend/resume", () => {
       await expect(sandbox.isSuspended()).resolves.toBe(false);
       await expect(sandbox.isSuspended()).rejects.toThrow(/was replaced/);
     });
+
+    it("rejects a replacement returned by an overlapping first read", async () => {
+      mockGet
+        .mockResolvedValueOnce(sandboxObj({ mode: "Running" }))
+        .mockResolvedValueOnce(sandboxObj({ mode: "Running", uid: "other" }));
+      const sandbox = new Sandbox(createInit());
+
+      const [first, second] = await Promise.allSettled([
+        sandbox.isSuspended(),
+        sandbox.isSuspended(),
+      ]);
+
+      expect(first).toEqual({ status: "fulfilled", value: false });
+      expect(second).toMatchObject({ status: "rejected" });
+      expect(String((second as PromiseRejectedResult).reason)).toMatch(
+        /was replaced/,
+      );
+    });
   });
 
   describe("suspend()", () => {
@@ -408,6 +426,29 @@ describe("Sandbox suspend/resume", () => {
 
       expect(added).toHaveBeenCalledTimes(3);
       expect(removed).toHaveBeenCalledTimes(3);
+    });
+
+    it("abortable() observes a promise it rejects early for an aborted signal", async () => {
+      const sb = new Sandbox(createInit()) as unknown as {
+        abortable: (s: AbortSignal, p: Promise<unknown>) => Promise<unknown>;
+      };
+      const reason = new Error("stop");
+      const unhandled: unknown[] = [];
+      const onUnhandled = (e: unknown) => unhandled.push(e);
+      process.on("unhandledRejection", onUnhandled);
+      try {
+        await expect(
+          sb.abortable(
+            AbortSignal.abort(reason),
+            Promise.reject(new Error("late")),
+          ),
+        ).rejects.toBe(reason);
+        await new Promise((resolve) => setImmediate(resolve));
+      } finally {
+        process.off("unhandledRejection", onUnhandled);
+      }
+
+      expect(unhandled).toEqual([]);
     });
   });
 

@@ -823,7 +823,7 @@ export class Sandbox {
    * the `uid` on the handle, so a same-name Sandbox created later is rejected.
    */
   private async readLiveSandbox(
-    uid: string | undefined = this.lifecycleUid,
+    uid?: string,
   ): Promise<Record<string, unknown>> {
     const obj = await this.readSandboxObject();
     const metadata = (obj?.metadata as Record<string, unknown>) ?? {};
@@ -837,7 +837,8 @@ export class Sandbox {
         `Sandbox '${this.sandboxName}' is terminating.`,
       );
     }
-    if (uid !== undefined && metadata.uid !== uid) {
+    const expectedUid = uid ?? this.lifecycleUid;
+    if (expectedUid !== undefined && metadata.uid !== expectedUid) {
       throw new SandboxNotFoundError(
         `Sandbox '${this.sandboxName}' was replaced.`,
       );
@@ -866,6 +867,7 @@ export class Sandbox {
     if (signal.aborted) throw signal.reason;
     // A patch abandoned by a timed-out call can still land. Read after it does.
     await this.abortable(signal, this.lastModePatch);
+    if (signal.aborted) throw signal.reason;
     const obj = await this.abortable(signal, this.readLiveSandbox());
     // A cancelled or expired call must not change the operating mode.
     if (signal.aborted) throw signal.reason;
@@ -993,6 +995,7 @@ export class Sandbox {
   private abortable<T>(signal: AbortSignal, promise: Promise<T>): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       if (signal.aborted) {
+        promise.catch(() => {});
         reject(signal.reason);
         return;
       }

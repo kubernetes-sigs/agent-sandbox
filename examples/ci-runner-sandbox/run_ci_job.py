@@ -39,11 +39,13 @@ WARMPOOL = os.getenv("SANDBOX_WARMPOOL_NAME", "ci-runner-pool")
 # current context.
 KUBE_CONTEXT = os.getenv("SANDBOX_KUBE_CONTEXT", "")
 # Per-command wall-clock limit inside the sandbox. Commands reach the
-# sandbox through the sandbox-router, which caps each request at its
-# --proxy-timeout (180s default); a command that outlives that cap fails
-# with a 502/504 from the router instead of a timed_out result. Raise
-# PROXY_TIMEOUT_SECONDS on the router to at least this value — see the
-# README's Production notes.
+# sandbox through the sandbox-router, which bounds each request with its
+# --proxy-timeout (180s default) and --response-header-timeout (30s
+# default); a command that outlives either cap fails with a 502/504 from
+# the router instead of a timed_out result. Raise both arguments on the
+# router deployment to at least this value — see the README's Production
+# notes. The runtime side caps commands at SANDBOX_EXEC_TIMEOUT_SECONDS
+# (set to 1800 in sandboxtemplate.yaml), which must stay >= this value.
 DEFAULT_TIMEOUT = float(os.getenv("CI_COMMAND_TIMEOUT", "1800"))
 # Backstop TTL: the controller deletes the claim and its sandbox after this
 # many seconds even if terminate() never runs (CI job killed, network loss).

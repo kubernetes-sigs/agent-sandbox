@@ -4,10 +4,11 @@ Run each CI job in its own Agent Sandbox. Instead of executing untrusted
 pull-request code on a shared, long-lived runner, the CI system claims a
 pre-warmed sandbox per job, runs the build and test commands inside it,
 echoes the output back to the CI log as each command finishes, and destroys
-the sandbox when the job ends. Every job gets a clean environment, a hard
-resource ceiling, and isolation from other jobs, and a crashed CI job cannot
-leak a sandbox because the claim carries a shutdown time the controller
-enforces.
+the sandbox when the job ends. Every job gets its own pod with a clean
+environment and a hard resource ceiling, and a crashed CI job cannot leak a
+sandbox because the claim carries a shutdown time the controller enforces.
+Sandboxes can reach each other over the network unless the cluster restricts
+it — see the ingress-isolation note under Production notes.
 
 Output is per-command, not live-streamed: the legacy runtime this image uses
 has no streaming exec. Use the sandboxd runtime — see
@@ -23,7 +24,9 @@ workflow is included.
 * `Dockerfile`: CI tooling image — the Agent Sandbox Python runtime base plus
   `git`, `make`, `jq`, and `curl`. Extend it with your project's toolchain.
 * `sandboxtemplate.yaml`: `ci-runner-template` — non-root, no service account
-  token, an emptyDir `/workspace`, and probes on the runtime port (8888).
+  token, an emptyDir `/workspace`, probes on the runtime port (8888), and a
+  runtime exec timeout (`SANDBOX_EXEC_TIMEOUT_SECONDS`) matched to the
+  driver's `--timeout`.
 * `sandboxwarmpool.yaml`: `ci-runner-pool` — keeps 2 ready sandboxes so jobs
   claim in seconds instead of waiting for a cold pod start.
 * `run_ci_job.py`: the driver. Claims a sandbox, runs commands in order,
@@ -101,7 +104,7 @@ python run_ci_job.py \
 | --- | --- |
 | `--namespace` / `SANDBOX_NAMESPACE` | Namespace of the warm pool (default `default`). |
 | `--warmpool` / `SANDBOX_WARMPOOL_NAME` | Pool to claim from (default `ci-runner-pool`). |
-| `--timeout` / `CI_COMMAND_TIMEOUT` | Per-command wall-clock limit in seconds (default 1800). A killed command exits with code 124, provided the sandbox-router's timeout is at least as large — see Production notes. |
+| `--timeout` / `CI_COMMAND_TIMEOUT` | Per-command wall-clock limit in seconds (default 1800). A killed command exits with code 124, provided the sandbox-router's timeouts and the runtime's `SANDBOX_EXEC_TIMEOUT_SECONDS` are at least as large — see Production notes. |
 | `--ttl` | Backstop claim lifetime in seconds (default 3600). The controller deletes the claim and sandbox after it even if the driver dies. |
 | `--claim-name` / `GITHUB_RUN_ID` | Run id embedded in the claim name (`ci-<sanitized-id>`) so a leaked sandbox traces back to its job. |
 | `SANDBOX_KUBE_CONTEXT` | Optional kubeconfig context pinning both the claim and the data-plane tunnel to one cluster. |
@@ -123,11 +126,21 @@ Three layers make sure no sandbox outlives its job:
 
 * **Real clusters:** push the image to a registry and change
   `imagePullPolicy` to `IfNotPresent` in the template.
-* **Router timeout:** commands reach the sandbox through the sandbox-router,
-  which caps each request at its `--proxy-timeout` (180s by default). Set
-  `PROXY_TIMEOUT_SECONDS` on the router deployment to at least your
-  `--timeout`; otherwise a long build fails with a 502/504 from the router
-  instead of exiting with code 124.
+* **Ingress isolation:** the runtime's `/execute` endpoint on port 8888 is
+  unauthenticated, and this example ships no ingress NetworkPolicy. Without
+  a cluster-level policy, code in one sandbox can reach another sandbox's
+  `/execute`. Allow ingress to port 8888 only from the sandbox-router — see
+  [composing-sandbox-nw-policies](../composing-sandbox-nw-policies).
+* **Router timeouts:** commands reach the sandbox through the sandbox-router,
+  which bounds a request with two arguments: `--proxy-timeout` (180s by
+  default) is the total time budget, and `--response-header-timeout` (30s by
+  default) bounds the wait for response headers. The legacy runtime sends the
+  `/execute` response only after the command finishes, so both must be at
+  least your `--timeout`; otherwise a long build fails with a 502/504 from
+  the router instead of exiting with code 124. Change the arguments on the
+  router deployment: the reference deployment passes `--proxy-timeout=180s`
+  explicitly, and an explicit argument overrides the `PROXY_TIMEOUT_SECONDS`
+  environment variable.
 * **Sizing the pool:** set warm pool `replicas` to your peak number of
   concurrent jobs; claims beyond the pool wait for a cold start. Autoscale
   with [hpa-swp-scaling](../hpa-swp-scaling) or

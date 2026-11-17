@@ -36,6 +36,13 @@ spec:
         # this to IfNotPresent (see README).
         image: ci-runner-sandbox:v1
         imagePullPolicy: Never
+        env:
+        # The runtime caps each command at min(SANDBOX_EXEC_TIMEOUT_SECONDS,
+        # requested timeout) and defaults to 300s. Keep this at least the
+        # largest --timeout jobs pass to the driver (1800s by default), or
+        # long builds get killed with code 124 early.
+        - name: SANDBOX_EXEC_TIMEOUT_SECONDS
+          value: "1800"
         ports:
         - containerPort: 8888
         readinessProbe:

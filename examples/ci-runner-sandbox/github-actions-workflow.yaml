@@ -89,6 +89,8 @@ jobs:
       # Replace the git commands above with whatever fetches your code (a
       # checkout action + workspace upload also works), and the make targets
       # with your project's real build/test commands.
-      # --timeout 1800 requires PROXY_TIMEOUT_SECONDS raised to match on the
-      # sandbox-router deployment (180s default); see the example README's
-      # Production notes.
+      # --timeout 1800 requires the sandbox-router's --proxy-timeout and
+      # --response-header-timeout arguments raised to match (180s and 30s
+      # defaults), and SANDBOX_EXEC_TIMEOUT_SECONDS in the sandbox template
+      # kept at least as large (it is); see the example README's Production
+      # notes.

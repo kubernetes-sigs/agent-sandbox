@@ -477,8 +477,8 @@ PersistentVolumeClaim whose volume is retained; ephemeral storage, including
 `Sandbox.Open()` executes several sequential phases (claim creation, sandbox
 readiness, transport connection), each bounded by its own timeout
 (`SandboxReadyTimeout`, `GatewayReadyTimeout`, `PortForwardReadyTimeout`).
-**Pass a context with a deadline** to bound the total creation time or a later
-`sb.Open()` reconnect:
+**Pass a context with a deadline** to limit creation or a later `sb.Open()`
+reconnect:
 
 ```go
 ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -486,6 +486,10 @@ defer cancel()
 sb, err := client.CreateSandbox(ctx, "my-sandbox-pool", "default")
 if err != nil { log.Fatal(err) }
 ```
+
+If creation fails after creating a claim, synchronous rollback can take up to
+`CleanupTimeout` (30 seconds by default) beyond the caller's deadline before the
+call returns.
 
 | Option | Default | Governs |
 |--------|---------|---------|
@@ -512,40 +516,61 @@ result, err := sb.Run(ctx, "echo hi")
 if errors.Is(err, sandbox.ErrNotReady) {
     // Port-forward died; reconnect.
     if reconnErr := sb.Open(ctx); reconnErr != nil {
-        if errors.Is(reconnErr, sandbox.ErrSandboxDeleted) {
-            // Claim was deleted externally; start fresh.
-            reconnErr = sb.Open(ctx)
-        } else if errors.Is(reconnErr, sandbox.ErrOrphanedClaim) {
-            // Sandbox no longer ready or verification failed; clean up and start fresh.
-            sb.Close(ctx)
+        if errors.Is(reconnErr, sandbox.ErrSandboxDeleted) && sb.ClaimName() == "" {
+            // The claim was deleted and the handle's identity was cleared; start fresh.
             reconnErr = sb.Open(ctx)
         }
         if reconnErr != nil {
-            log.Fatal("reconnect failed:", reconnErr)
+            // Keep sb for investigation or an explicit cleanup retry.
+            log.Printf("reconnect failed: %v", reconnErr)
+            return
         }
     }
     result, err = sb.Run(ctx, "echo hi")
 }
 ```
 
-If `sb.Close()` fails to delete the claim (e.g., API server unavailable), the handle
-preserves the claim name so `sb.Close()` can be retried to clean up the orphaned claim.
-Calling `sb.Open()` on a handle with an orphaned claim returns `ErrOrphanedClaim`.
+`ErrSandboxDeleted` also covers a changed sandbox UID. In that case the claim
+name is preserved; inspect the replacement rather than retrying `Open()` with
+the unchanged handle or deleting the claim automatically.
+
+`ErrOrphanedClaim` can wrap temporary claim or sandbox verification errors.
+Keep the handle and claim while investigating them. A temporary sandbox
+verification failure preserves the sandbox identity so a later `Open()` can
+retry verification.
+
+Only after confirming that a claim is orphaned and deciding to delete it,
+check the cleanup error before opening a fresh sandbox:
+
+```go
+if err := sb.Close(ctx); err != nil {
+    // The claim name is retained; keep sb and retry Close() later.
+    log.Printf("claim cleanup failed: %v", err)
+    return
+}
+if err := sb.Open(ctx); err != nil {
+    log.Printf("opening a fresh sandbox failed: %v", err)
+    return
+}
+```
+
+Calling `sb.Open()` while the handle still has a claim but no sandbox identity
+returns `ErrOrphanedClaim`; retry `sb.Close()` first if cleanup previously failed.
 
 ## Error Reference
 
 | Error | Meaning |
 |-------|---------|
 | `ErrNotReady` | Sandbox handle is not open or transport died. Call `Open()`. |
-| `ErrAlreadyOpen` | `Open()` called on an already-open Sandbox handle. Call `Close()` first. |
-| `ErrOrphanedClaim` | A previous claim could not be cleaned up (failed `Close()`, failed `Open()` rollback, or sandbox disappeared during reconnect); call `Close()` to retry deletion. |
+| `ErrAlreadyOpen` | `Open()` called on an already-open Sandbox handle. Reuse the handle, or call `Disconnect()` before reconnecting if a new transport is needed. |
+| `ErrOrphanedClaim` | A claim could not be cleaned up, or claim/sandbox verification failed during reconnect. Inspect the cause before deciding to delete the claim; see Port-Forward Recovery. |
 | `ErrTimeout` | Sandbox or Gateway did not become ready within the configured timeout. |
 | `ErrClaimFailed` | SandboxClaim creation was rejected by the API server, or the claim reported a failure the controller does not retry (for example `InvalidMetadata` or `ClaimExpired`). |
 | `ErrWarmPoolNotFound` | The claim's SandboxWarmPool does not exist. |
 | `ErrTemplateNotFound` | The SandboxTemplate behind the warm pool does not exist. |
 | `ErrPortForwardDied` | The SPDY tunnel dropped. Call `Open()` to reconnect. |
 | `ErrRetriesExhausted` | All HTTP retry attempts failed. |
-| `ErrSandboxDeleted` | The Sandbox was deleted before becoming ready. |
+| `ErrSandboxDeleted` | The Sandbox was deleted before becoming ready, or the claim disappeared or sandbox UID changed during reconnect. A retained claim requires inspection. |
 | `ErrGatewayDeleted` | The Gateway was deleted during address discovery. |
 | `ErrProcessProtocol` | A streaming command returned invalid events or ended without the required Init/Exit. Missing-event EOF also matches `io.ErrUnexpectedEOF`. |
 | `ErrConcurrentRecv` | Another receive call is active on this process handle; the session remains open. |

@@ -527,6 +527,6 @@ npm install
 npm run build
 ```
 
-`sandbox.commands.run()`, `sandbox.commands.start()`, and `sandbox.watcher.watch()` additionally require the optional `@bufbuild/protobuf`, `@connectrpc/connect`, and `@connectrpc/connect-node` peer dependencies (declared as optional peers in [package.json](package.json)). They are loaded lazily on first use, so `sandbox.files.*` and everything else in the package works without them installed; calling `run()`, `start()`, or `watch()` without them throws a clear error naming the packages to install.
+`sandbox.commands.run()`, `sandbox.commands.start()`, and `sandbox.watcher.watch()` additionally require the optional `@bufbuild/protobuf`, `@connectrpc/connect`, and `@connectrpc/connect-node` peer dependencies (declared as optional peers in [package.json](package.json)). They are loaded lazily on first use, so `sandbox.files.*` and everything else in the package works without them installed; calling `run()` or `start()`, or iterating a `watch()`, without them throws a clear error naming the packages to install.
 
 See [src/index.ts](src/index.ts) for the full set of exports.

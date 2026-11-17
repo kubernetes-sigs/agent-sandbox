@@ -215,6 +215,10 @@ iteration (Python).
 All `{path}` values are resolved against the sandbox root (`/workspace` by
 default) via symlink-aware sanitization; traversal attempts return
 `403 {"code":"PERMISSION_DENIED"}`.
+A write that finds the sandbox filesystem full (or its quota exhausted)
+returns `507 {"code":"RESOURCE_EXHAUSTED"}`, and a path or path component
+longer than the filesystem allows returns `400 {"code":"INVALID_ARGUMENT"}`; other
+unexpected filesystem errors return `500 {"code":"INTERNAL"}`.
 
 For example, `GET /v1/files/notes.txt?stat=true` returns:
 

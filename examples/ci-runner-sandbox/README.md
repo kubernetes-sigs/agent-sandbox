@@ -4,12 +4,15 @@ Run each CI job in its own Agent Sandbox. Instead of executing untrusted
 pull-request code on a shared, long-lived runner, the CI system claims a
 pre-warmed sandbox per job, runs the build and test commands inside it,
 echoes the output back to the CI log as each command finishes, and destroys
-the sandbox when the job ends. (Output is per-command, not live-streamed:
-the legacy runtime this image uses has no streaming exec. Use the sandboxd
-runtime — see [sandboxd-sandbox](../sandboxd-sandbox) — if you need output
-while a long build is still running.) Every job gets a clean environment, a hard resource ceiling, and
-isolation from other jobs — and a crashed CI job cannot leak a sandbox,
-because the claim carries a shutdown time the controller enforces.
+the sandbox when the job ends. Every job gets a clean environment, a hard
+resource ceiling, and isolation from other jobs, and a crashed CI job cannot
+leak a sandbox because the claim carries a shutdown time the controller
+enforces.
+
+Output is per-command, not live-streamed: the legacy runtime this image uses
+has no streaming exec. Use the sandboxd runtime — see
+[sandboxd-sandbox](../sandboxd-sandbox) — if you need output while a long
+build is still running.
 
 This example is CI-agnostic. The driver script works from any system that can
 run Python and reach the cluster's API server; a reference GitHub Actions
@@ -98,7 +101,7 @@ python run_ci_job.py \
 | --- | --- |
 | `--namespace` / `SANDBOX_NAMESPACE` | Namespace of the warm pool (default `default`). |
 | `--warmpool` / `SANDBOX_WARMPOOL_NAME` | Pool to claim from (default `ci-runner-pool`). |
-| `--timeout` / `CI_COMMAND_TIMEOUT` | Per-command wall-clock limit in seconds (default 1800). A killed command exits with code 124. |
+| `--timeout` / `CI_COMMAND_TIMEOUT` | Per-command wall-clock limit in seconds (default 1800). A killed command exits with code 124, provided the sandbox-router's timeout is at least as large — see Production notes. |
 | `--ttl` | Backstop claim lifetime in seconds (default 3600). The controller deletes the claim and sandbox after it even if the driver dies. |
 | `--claim-name` / `GITHUB_RUN_ID` | Run id embedded in the claim name (`ci-<sanitized-id>`) so a leaked sandbox traces back to its job. |
 | `SANDBOX_KUBE_CONTEXT` | Optional kubeconfig context pinning both the claim and the data-plane tunnel to one cluster. |
@@ -120,6 +123,11 @@ Three layers make sure no sandbox outlives its job:
 
 * **Real clusters:** push the image to a registry and change
   `imagePullPolicy` to `IfNotPresent` in the template.
+* **Router timeout:** commands reach the sandbox through the sandbox-router,
+  which caps each request at its `--proxy-timeout` (180s by default). Set
+  `PROXY_TIMEOUT_SECONDS` on the router deployment to at least your
+  `--timeout`; otherwise a long build fails with a 502/504 from the router
+  instead of exiting with code 124.
 * **Sizing the pool:** set warm pool `replicas` to your peak number of
   concurrent jobs; claims beyond the pool wait for a cold start. Autoscale
   with [hpa-swp-scaling](../hpa-swp-scaling) or

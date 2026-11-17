@@ -168,6 +168,52 @@ class ClassifyRedRunTest(unittest.TestCase):
 
         self.assertEqual(flake_report.classify_red_run(False, False, fetch), "unknown")
 
+    def _image_build_failure_fetch(self):
+        data = artifacts(
+            finished={"result": "FAILURE", "revision": "abc"},
+            clone_records=[{"refs": {"repo": "agent-sandbox"}}],
+        )
+
+        def fetch(name):
+            if name == "build-log.txt":
+                return ("error: linker `cc` not found\n"
+                        "ERROR: failed to build 1 of 6 image(s): "
+                        "['python-runtime-sandbox']\n")
+            return data(name)
+        return fetch
+
+    def test_image_build_broken_by_the_pr_is_pretest_breakage(self):
+        # A dependency bump that breaks an image's own Dockerfile fails the
+        # e2e lane before junit exists; the PR touched that image's directory.
+        cls = flake_report.classify_red_run(
+            False, False, self._image_build_failure_fetch(),
+            changed_files=lambda: ["examples/python-runtime-sandbox/Dockerfile"])
+        self.assertEqual(cls, "pretest_failure")
+
+    def test_image_build_failure_in_an_untouched_image_stays_infra(self):
+        # A registry or module-proxy error breaks an image the PR never
+        # changed: that is infrastructure.
+        cls = flake_report.classify_red_run(
+            False, False, self._image_build_failure_fetch(),
+            changed_files=lambda: ["clients/go/sandbox/files.go"])
+        self.assertEqual(cls, "infra")
+
+    def test_image_build_failure_with_unknown_pr_files_stays_infra(self):
+        fetch = self._image_build_failure_fetch()
+        self.assertEqual(
+            flake_report.classify_red_run(False, False, fetch, changed_files=lambda: None),
+            "infra")
+        self.assertEqual(flake_report.classify_red_run(False, False, fetch), "infra")
+
+    def test_every_failed_image_must_be_touched_by_the_pr(self):
+        self.assertTrue(flake_report.pr_touches_images(
+            ["a/sandbox-router/Dockerfile", "examples/x/req.txt"], ["sandbox-router", "x"]))
+        self.assertFalse(flake_report.pr_touches_images(
+            ["a/sandbox-router/Dockerfile"], ["sandbox-router", "x"]))
+        self.assertEqual(
+            flake_report.failed_image_names(
+                "ERROR: failed to build 2 of 6 image(s): ['a', 'b-c']"), ["a", "b-c"])
+
     def test_missing_artifacts_stay_infra(self):
         # When the run dir has no finished.json or clone-records.json we
         # cannot prove a benign cause; keep the conservative verdict.

@@ -20,8 +20,8 @@ as flaky (intermittent), consistently failing, or an infrastructure failure
 (the job died before tests ran), and prints a markdown report. Red runs with
 no failing testcase are resolved against the run's GCS artifacts first:
 aborted runs, stale-PR clone failures, and pre-test PR breakage (compile,
-vet, mypy, and generated-file gates) are reported separately instead of being
-counted as infra.
+vet, mypy, and generated-file gates, or an image build the PR itself broke) are
+reported separately instead of being counted as infra.
 Per-test failures are not counted when the run was aborted, when a whole
 suite failed at once (broken fixture), or when the failing PR modified the
 test's own sources; such PR-local failures are listed but never filed. A test
@@ -245,8 +245,29 @@ def clone_merge_conflict(record):
 # died, and only the build log tells them apart.
 PRETEST_GATE_MARKERS = ("ERROR: Generated files out-of-date",)
 
+# dev/tools/push-images names the images it could not build. The e2e lanes
+# build every image before any test runs, so a PR that breaks one image's
+# Dockerfile or requirements also goes red with no junit.
+IMAGE_BUILD_FAILURE = re.compile(r"ERROR: failed to build \d+ of \d+ image\(s\): \[([^\]]*)\]")
 
-def classify_red_run(has_failing_test, has_test_results, fetch_artifact):
+
+def failed_image_names(build_log):
+    """Returns the image names a push-images build failure line lists."""
+    match = IMAGE_BUILD_FAILURE.search(build_log or "")
+    return re.findall(r"'([^']+)'", match.group(1)) if match else []
+
+
+def pr_touches_images(files, images):
+    """True when the PR changed a file under a directory named after every
+    failed image. Image names are their build directory's name, so this ties
+    the build failure to the PR's own change; a failure in an image the PR
+    did not touch (a registry or module-proxy error) stays infrastructure."""
+    return bool(images) and all(
+        any(image in path.split("/")[:-1] for path in files) for image in images)
+
+
+def classify_red_run(has_failing_test, has_test_results, fetch_artifact,
+                     changed_files=None):
     """Classifies why one red Overall column went red.
 
     A red Overall cell with no failing junit testcase is not necessarily an
@@ -257,10 +278,11 @@ def classify_red_run(has_failing_test, has_test_results, fetch_artifact):
       "aborted"         -- run was cancelled, not a failure at all
       "test_failure"    -- a junit testcase failed; the per-test rows tell
                            the story
-      "pretest_failure" -- junit exists with zero failing testcases, or a
+      "pretest_failure" -- junit exists with zero failing testcases, a
                            junit-less gate printed one of
-                           PRETEST_GATE_MARKERS: the PR broke a pre-test
-                           gate, author-actionable
+                           PRETEST_GATE_MARKERS, or the image build failed
+                           only on images the PR itself changed: the PR
+                           broke a pre-test step, author-actionable
       "clone_failure"   -- the PR no longer merges cleanly onto main: a
                            merge conflict verified in clone-records.json
                            (rebase needed)
@@ -272,7 +294,9 @@ def classify_red_run(has_failing_test, has_test_results, fetch_artifact):
     fetch_artifact(name) returns the parsed JSON artifact from the run's GCS
     dir (the raw text for build-log.txt), None when the run has no such
     file, and raises FetchUnavailable when the server could not be reached;
-    only artifacts needed for the verdict are fetched.
+    only artifacts needed for the verdict are fetched. changed_files() returns
+    the run's PR file paths, or None when unknown; it is only called when the
+    build log reports an image build failure.
     """
     try:
         finished = fetch_artifact("finished.json") or {}
@@ -307,8 +331,14 @@ def classify_red_run(has_failing_test, has_test_results, fetch_artifact):
         return "unknown"
     if build_log and any(marker in build_log for marker in PRETEST_GATE_MARKERS):
         return "pretest_failure"
-    # Without a gate marker or clone-records.json the cause of a junit-less
-    # red run cannot be proven benign, so it stays in the infra count.
+    images = failed_image_names(build_log)
+    if images and changed_files is not None:
+        files = changed_files()
+        if files and pr_touches_images(files, images):
+            return "pretest_failure"
+    # Without a gate marker, a PR-caused image build failure, or
+    # clone-records.json, the cause of a junit-less red run cannot be proven
+    # benign, so it stays in the infra count.
     return "infra"
 
 
@@ -620,28 +650,6 @@ def analyze_tab(dashboard, tab, window, pr_files=None):
     # a red run is indistinguishable from a legitimately failing PR.
     # A column whose artifacts could not be fetched is unknown: it might be
     # an aborted run, so it is kept out of every count rather than guessed.
-    col_class = {}
-    aborted_cols = set()
-    unknown_cols = set()
-    if test_rows:
-        for i in range(ncols):
-            red = overall is not None and cell(overall, i) in FAIL_STATUSES
-            has_fail = failing_in(i)
-            if red:
-                col_class[i] = classify_red_run(has_fail, ran_in(i), fetcher(i))
-                if col_class[i] == "aborted":
-                    aborted_cols.add(i)
-                elif col_class[i] == "unknown":
-                    unknown_cols.add(i)
-            elif has_fail:
-                try:
-                    finished = fetcher(i)("finished.json") or {}
-                except FetchUnavailable:
-                    unknown_cols.add(i)
-                    continue
-                if (finished.get("result") or "").upper() == "ABORTED":
-                    aborted_cols.add(i)
-
     col_pr = {}
 
     def pr_of(i):
@@ -654,6 +662,35 @@ def analyze_tab(dashboard, tab, window, pr_files=None):
             except FetchUnavailable:
                 col_pr[i] = None
         return col_pr[i]
+
+    def changed_files_of(i):
+        """Changed files of a column's PR, None when unknown."""
+        pr = pr_of(i)
+        return pr_files(pr) if pr_files is not None and pr else None
+
+    col_class = {}
+    aborted_cols = set()
+    unknown_cols = set()
+    if test_rows:
+        for i in range(ncols):
+            red = overall is not None and cell(overall, i) in FAIL_STATUSES
+            has_fail = failing_in(i)
+            if red:
+                col_class[i] = classify_red_run(
+                    has_fail, ran_in(i), fetcher(i),
+                    changed_files=lambda i=i: changed_files_of(i))
+                if col_class[i] == "aborted":
+                    aborted_cols.add(i)
+                elif col_class[i] == "unknown":
+                    unknown_cols.add(i)
+            elif has_fail:
+                try:
+                    finished = fetcher(i)("finished.json") or {}
+                except FetchUnavailable:
+                    unknown_cols.add(i)
+                    continue
+                if (finished.get("result") or "").upper() == "ABORTED":
+                    aborted_cols.add(i)
 
     # Columns where a large fraction of tests failed at once are a broken PR
     # or an environment-wide breakage, not per-test flakiness; exclude them
@@ -946,7 +983,7 @@ def render_report(dashboard, flaky, consistent, infra, window, pr_local=(),
         if i.get("pretest_failures"):
             lines.append(
                 f"- {i['tab']}: {i['pretest_failures']} red run(s) were "
-                f"pre-test PR breakage (compile/vet/mypy/autogen gates — "
+                f"pre-test PR breakage (compile/vet/mypy/autogen gates, own image build — "
                 f"author-actionable)")
         if i.get("unknown_runs"):
             lines.append(
@@ -1226,8 +1263,8 @@ Job history: {i['job_history']}
 
 These are not fixed by editing tests; look at `dev/ci/shared/runner.py` retries,
 image prepulls, or job resources. Aborted runs, stale-PR clone failures, and
-PRs that break a pre-test gate (compile/vet/mypy/generated files) are already
-excluded from this count.
+PRs that break a pre-test step (compile/vet/mypy/generated files, or an image
+they changed) are already excluded from this count.
 
 /kind flake
 <!-- last-reported-failure={i['last_failure_ts']} -->

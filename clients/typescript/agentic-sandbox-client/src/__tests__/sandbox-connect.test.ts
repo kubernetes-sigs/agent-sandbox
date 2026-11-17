@@ -2407,7 +2407,7 @@ describe("Sandbox watcher.watch()", () => {
     for await (const _event of s.watcher.watch("secret-dir")) break;
 
     await eventually(() => events.includes("end"));
-    expect(events).toContain("attr:sandbox.watch.recursive=false");
+    expect(events).toContain("attr:sandbox.recursive=false");
     expect(events.join("\n")).not.toContain("secret-dir");
   });
 

@@ -1882,7 +1882,7 @@ export class Sandbox {
         "watcher.watch",
         async (span) => {
           if (span.isRecording()) {
-            span.setAttribute("sandbox.watch.recursive", recursive);
+            span.setAttribute("sandbox.recursive", recursive);
           }
           let watch: OpenWatch;
           try {

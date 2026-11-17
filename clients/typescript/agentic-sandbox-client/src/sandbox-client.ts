@@ -60,6 +60,7 @@ import type {
   Logger,
   PodMetadata,
   SandboxClientOptions,
+  ShutdownPolicy,
   VolumeClaimTemplate,
 } from "./types.js";
 
@@ -187,8 +188,6 @@ interface ClaimSpecExtras {
   volumeClaimTemplates?: VolumeClaimTemplate[];
   lifecycle?: ClaimLifecycle;
 }
-
-type ShutdownPolicy = NonNullable<CreateSandboxOptions["shutdownPolicy"]>;
 
 /** The SandboxClaim `spec.lifecycle` block the SDK sends. */
 interface ClaimLifecycle {

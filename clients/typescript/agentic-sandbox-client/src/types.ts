@@ -376,6 +376,9 @@ export interface VolumeClaimTemplate {
   spec: k8s.V1PersistentVolumeClaimSpec;
 }
 
+/** Values the SandboxClaim `spec.lifecycle.shutdownPolicy` field accepts. */
+export type ShutdownPolicy = "Delete" | "DeleteForeground" | "Retain";
+
 export interface CreateSandboxOptions {
   sandboxReadyTimeout?: number;
   labels?: Record<string, string>;
@@ -396,7 +399,7 @@ export interface CreateSandboxOptions {
    * no policy is given, the SDK sends `"Delete"`; the API's own default for an
    * omitted policy is `"Retain"`.
    */
-  shutdownPolicy?: "Delete" | "DeleteForeground" | "Retain";
+  shutdownPolicy?: ShutdownPolicy;
   /**
    * Seconds, zero or more, for the claim's
    * `spec.lifecycle.ttlSecondsAfterFinished`. The timer starts only when the

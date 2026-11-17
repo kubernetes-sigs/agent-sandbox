@@ -77,6 +77,7 @@ import type {
   ExecutionResult,
   FileCallOptions,
   FileEntry,
+  FileEvent,
   ListOptions,
   Logger,
   MkdirOptions,
@@ -92,8 +93,10 @@ import type {
   SandboxStatus,
   StartOptions,
   SuspendResumeOptions,
+  WatchOptions,
   WriteOptions,
 } from "./types.js";
+import { SandboxWatcher } from "./watcher.js";
 
 /**
  * `status.conditions` of a Kubernetes object, or [] when it has none.
@@ -536,6 +539,7 @@ export class Sandbox {
 
   private _files?: SandboxFiles;
   private _commands?: SandboxCommands;
+  private _watcher?: SandboxWatcher;
 
   constructor(init: SandboxInit) {
     this.claimName = init.claimName;
@@ -623,6 +627,16 @@ export class Sandbox {
       });
     }
     return this._files;
+  }
+
+  /** Watches directories inside the sandbox. Connects to sandboxd lazily. */
+  get watcher(): SandboxWatcher {
+    if (!this._watcher) {
+      this._watcher = new SandboxWatcher({
+        watch: (path, opts) => this.watchImpl(path, opts),
+      });
+    }
+    return this._watcher;
   }
 
   /**
@@ -1758,6 +1772,153 @@ export class Sandbox {
       (_gen, signal) => fn(timeoutMs, signal),
       gen,
     );
+  }
+
+  /**
+   * Returns the iterator behind sandbox.watcher.watch(). Arguments are
+   * validated here, and the stream opens on the first `next()`. Only that
+   * opening is an in-flight operation with a deadline (runOperation()). Like
+   * a started process, a running watch is not counted in-flight, so it never
+   * holds up close(). The lifecycle abort and generation teardown end it.
+   *
+   * The tracing span stays open until the watch ends, as in
+   * readStreamImpl(). sandboxd reports a watch it cannot start on the first
+   * read, after the stream is open, so a span that ended at the opening
+   * would never record that failure.
+   */
+  private watchImpl(
+    path: string,
+    opts?: WatchOptions,
+  ): AsyncIterableIterator<FileEvent> {
+    resolveSandboxPath(path, "watch");
+    const recursive = opts?.recursive ?? false;
+    if (typeof recursive !== "boolean") {
+      throw invalidArgumentError("recursive must be a boolean");
+    }
+    const timeoutMs = validateTimeoutMs("timeoutMs", opts?.timeoutMs);
+    const userSignal = opts?.signal;
+
+    type OpenWatch = { next(): Promise<IteratorResult<FileEvent, undefined>> };
+    const watchAbort = new AbortController();
+    const done = { done: true, value: undefined } as const;
+    let opening: Promise<OpenWatch> | undefined;
+    let ended = false;
+
+    // Settles when the watch ends, which is what ends the span.
+    let finish!: () => void;
+    let fail!: (err: unknown) => void;
+    const finished = new Promise<void>((resolve, reject) => {
+      finish = resolve;
+      fail = reject;
+    });
+    // The caller already receives a failure from next(). The span is the
+    // only other reader, and it is absent when the opening itself failed.
+    finished.catch(() => {});
+
+    const openStream = (): Promise<OpenWatch> =>
+      this.runOperation<OpenWatch>(
+        timeoutMs,
+        userSignal,
+        async (gen, openSignal) => {
+          // As in startCommandImpl(), the deadline inside `openSignal` stops
+          // applying once this returns.
+          const streamSignal = AbortSignal.any([openSignal, watchAbort.signal]);
+          const events = await gen.process.watchDir(
+            path,
+            recursive,
+            streamSignal,
+          );
+          return {
+            next: async () => {
+              try {
+                return await events.next();
+              } catch (err) {
+                throw this.classifyOperationFailure(
+                  err,
+                  gen,
+                  undefined,
+                  userSignal,
+                );
+              }
+            },
+          };
+        },
+      );
+
+    const open = (): Promise<OpenWatch> => {
+      let opened!: (watch: OpenWatch) => void;
+      let openFailed!: (err: unknown) => void;
+      const ready = new Promise<OpenWatch>((resolve, reject) => {
+        opened = resolve;
+        openFailed = reject;
+      });
+      const tracingPromise = withSpan(
+        this.tracingManager?.tracer ?? null,
+        this.traceServiceName,
+        "watcher.watch",
+        async (span) => {
+          if (span.isRecording()) {
+            span.setAttribute("sandbox.watch.recursive", recursive);
+          }
+          let watch: OpenWatch;
+          try {
+            watch = await openStream();
+          } catch (err) {
+            openFailed(err);
+            throw err;
+          }
+          opened(watch);
+          await finished;
+        },
+        this.tracingManager?.parentContext,
+        (span, err) => {
+          const { code, message } = classifyForTelemetry(err, userSignal);
+          if (span.isRecording()) {
+            span.setAttribute("sandbox.error.code", code);
+          }
+          span.setStatus({ code: spanErrorStatusCode(), message });
+        },
+      );
+      // The caller receives every failure through `ready` or next(). This
+      // promise exists only to keep the span open.
+      tracingPromise.catch(() => {});
+      return ready;
+    };
+
+    const iterator: AsyncIterableIterator<FileEvent> = {
+      [Symbol.asyncIterator]: () => iterator,
+      next: async () => {
+        if (ended) return done;
+        try {
+          opening ??= open();
+          const step = await (await opening).next();
+          if (step.done) {
+            ended = true;
+            // Detaches the stream's signal from the caller's signal and the
+            // Sandbox handle's, which both outlive this watch.
+            watchAbort.abort();
+            finish();
+          }
+          return step;
+        } catch (err) {
+          // return() interrupted this read, so it ends like the iteration.
+          if (ended) return done;
+          ended = true;
+          watchAbort.abort();
+          fail(err);
+          throw err;
+        }
+      },
+      // Called when a `for await` loop is left. Aborting the stream is what
+      // makes sandboxd release the watch.
+      return: async () => {
+        ended = true;
+        watchAbort.abort();
+        finish();
+        return done;
+      },
+    };
+    return iterator;
   }
 
   private async readFileImpl(

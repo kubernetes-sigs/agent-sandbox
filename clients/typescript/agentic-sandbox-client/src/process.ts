@@ -25,15 +25,18 @@ import {
 } from "./exceptions.js";
 import type {
   ExecutionResult,
+  FileEvent,
+  FileEventType,
   ProcessEvent,
   ProcessSignal,
   PtySize,
 } from "./types.js";
 
 /**
- * gRPC process layer for sandboxd's ProcessService. Owns the optional
- * protobuf-es/Connect-ES dependencies (lazily imported), the HTTP/2 session,
- * and RPC error translation. Not part of the public API — see commands.ts.
+ * gRPC layer for sandboxd's ProcessService and FileWatcherService, which
+ * share one HTTP/2 session. Owns the optional protobuf-es/Connect-ES
+ * dependencies (lazily imported), the session, and RPC error translation.
+ * Not part of the public API — see commands.ts and watcher.ts.
  * @internal
  */
 export interface ProcessClientOptions {
@@ -73,6 +76,9 @@ type GrpcDeps = {
   SendSignalRequestSchema: typeof import("./_proto/process/v1/process_pb.js")["SendSignalRequestSchema"];
   ResizeTTYRequestSchema: typeof import("./_proto/process/v1/process_pb.js")["ResizeTTYRequestSchema"];
   Signal: typeof import("./_proto/process/v1/process_pb.js")["Signal"];
+  FileWatcherService: typeof import("./_proto/watcher/v1/watcher_pb.js")["FileWatcherService"];
+  WatchDirRequestSchema: typeof import("./_proto/watcher/v1/watcher_pb.js")["WatchDirRequestSchema"];
+  FileEventType: typeof import("./_proto/watcher/v1/watcher_pb.js")["FileEventType"];
 };
 
 type H2SessionManager = InstanceType<GrpcDeps["Http2SessionManager"]>;
@@ -103,12 +109,14 @@ async function loadGrpcDeps(): Promise<GrpcDeps> {
   if (!depsPromise) {
     depsPromise = (async () => {
       try {
-        const [protobuf, connect, connectNode, processPb] = await Promise.all([
-          import("@bufbuild/protobuf"),
-          import("@connectrpc/connect"),
-          import("@connectrpc/connect-node"),
-          import("./_proto/process/v1/process_pb.js"),
-        ]);
+        const [protobuf, connect, connectNode, processPb, watcherPb] =
+          await Promise.all([
+            import("@bufbuild/protobuf"),
+            import("@connectrpc/connect"),
+            import("@connectrpc/connect-node"),
+            import("./_proto/process/v1/process_pb.js"),
+            import("./_proto/watcher/v1/watcher_pb.js"),
+          ]);
         return {
           create: protobuf.create,
           createClient: connect.createClient,
@@ -125,12 +133,15 @@ async function loadGrpcDeps(): Promise<GrpcDeps> {
           SendSignalRequestSchema: processPb.SendSignalRequestSchema,
           ResizeTTYRequestSchema: processPb.ResizeTTYRequestSchema,
           Signal: processPb.Signal,
+          FileWatcherService: watcherPb.FileWatcherService,
+          WatchDirRequestSchema: watcherPb.WatchDirRequestSchema,
+          FileEventType: watcherPb.FileEventType,
         };
       } catch (err) {
         depsPromise = null;
         if (isModuleNotFoundError(err)) {
           throw new SandboxError(
-            "sandbox.commands requires optional dependencies that are not installed. " +
+            "sandbox.commands and sandbox.watcher require optional dependencies that are not installed. " +
               "Run: npm install @bufbuild/protobuf @connectrpc/connect @connectrpc/connect-node",
             { telemetryCode: "missing_dependency", cause: err },
           );
@@ -261,6 +272,40 @@ interface ProcessRpcClient {
   resizeTTY(req: unknown, opts: UnaryCallOptions): Promise<unknown>;
 }
 
+/** The wire shape of one watcher FileEvent. */
+type WatchEventLike = { type: number; path: string; error: string };
+
+/** Structural view of the generated FileWatcherService client. */
+interface WatcherRpcClient {
+  watchDir(
+    req: unknown,
+    opts: { signal: AbortSignal },
+  ): AsyncIterable<WatchEventLike>;
+}
+
+/** Maps the proto enum to the names the Go and Python SDKs use. */
+function fileEventType(
+  type: number,
+  types: GrpcDeps["FileEventType"],
+): FileEventType {
+  switch (type) {
+    case types.CREATE:
+      return "create";
+    case types.WRITE:
+      return "write";
+    case types.REMOVE:
+      return "remove";
+    case types.RENAME:
+      return "rename";
+    case types.CHMOD:
+      return "chmod";
+    case types.ERROR:
+      return "error";
+    default:
+      return `unknown(${type})`;
+  }
+}
+
 /**
  * A running Start stream, positioned after its InitEvent. `events` ends
  * (done) only after an "exit" event was yielded; a stream that ends any
@@ -277,6 +322,7 @@ export class ProcessClient {
   private closed = false;
   private sessionManager: { abort(reason?: Error): void } | null = null;
   private client: ProcessRpcClient | null = null;
+  private watcher: WatcherRpcClient | null = null;
   private deps: GrpcDeps | null = null;
   private initPromise: Promise<void> | null = null;
 
@@ -318,6 +364,10 @@ export class ProcessClient {
           deps.ProcessService,
           transport,
         ) as unknown as ProcessRpcClient;
+        this.watcher = deps.createClient(
+          deps.FileWatcherService,
+          transport,
+        ) as unknown as WatcherRpcClient;
       })().catch((err) => {
         // Clear the cache on failure so a later call (e.g. after installing
         // the optional dependencies, or once a transient error clears) gets
@@ -327,7 +377,7 @@ export class ProcessClient {
       });
     }
     await this.initPromise;
-    if (this.closed || !this.client || !this.deps) {
+    if (this.closed || !this.client || !this.watcher || !this.deps) {
       throw new SandboxClosedError("ProcessClient is closed");
     }
   }
@@ -529,6 +579,47 @@ export class ProcessClient {
     );
   }
 
+  /**
+   * Opens a WatchDir stream. sandboxd sends nothing until the first change,
+   * so this returns as soon as the request is on its way, and a rejected
+   * watch (for example a path that does not exist) surfaces on the first
+   * `next()`. The iterator ends when sandboxd ends the stream. `signal`
+   * governs the stream's whole lifetime, and no gRPC deadline is set, for
+   * the same reason as in start().
+   */
+  async watchDir(
+    path: string,
+    recursive: boolean,
+    signal: AbortSignal,
+  ): Promise<AsyncIterator<FileEvent, undefined>> {
+    await this.ensureInit();
+    const deps = this.deps as GrpcDeps;
+    const watcher = this.watcher as WatcherRpcClient;
+
+    const req = deps.create(deps.WatchDirRequestSchema, { path, recursive });
+    const source = watcher.watchDir(req, { signal })[Symbol.asyncIterator]();
+    return {
+      next: async () => {
+        let step: IteratorResult<WatchEventLike>;
+        try {
+          step = await source.next();
+        } catch (err) {
+          if (signal.aborted) throw signal.reason;
+          throw this.classifyError(err, deps, "WatchDir");
+        }
+        if (step.done) return { done: true, value: undefined };
+        return {
+          done: false,
+          value: {
+            type: fileEventType(step.value.type, deps.FileEventType),
+            path: step.value.path,
+            error: step.value.error,
+          },
+        };
+      },
+    };
+  }
+
   private async unary(
     rpc: string,
     signal: AbortSignal,
@@ -567,7 +658,7 @@ export class ProcessClient {
       // session the server tore down mid-call and for ECONNRESET/
       // stream-destroyed errors, respectively (see node-error.js's
       // connectErrorFromNodeReason and http2-session-manager.js). sandboxd's
-      // ProcessService never returns either as an application status, so
+      // gRPC services never return either as an application status, so
       // both mean the transport dropped out from under this call, same as a
       // socket-level failure.
       if (err.code === deps.Code.Canceled || err.code === deps.Code.Aborted) {
@@ -607,6 +698,7 @@ export class ProcessClient {
     this.sessionManager?.abort();
     this.sessionManager = null;
     this.client = null;
+    this.watcher = null;
     this.deps = null;
   }
 }

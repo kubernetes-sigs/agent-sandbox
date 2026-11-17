@@ -19,6 +19,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  type FileEvent,
   type ProcessEvent,
   type ProcessHandle,
   type Sandbox,
@@ -935,6 +936,59 @@ describe("TypeScript SDK E2E — sandbox runtime operations (sandboxd)", () => {
       await long.handle.kill();
       const result = await long.handle.wait();
       expect(result.exitCode).not.toBe(0);
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  test("watch() reports changes under a directory and rejects a missing one", async () => {
+    const client = new SandboxClient({ namespace });
+    const sandbox = await client.createSandbox(
+      SANDBOXD_WARMPOOL_NAME,
+      namespace,
+    );
+    try {
+      await sandbox.files.mkdir("watched/nested", { parents: true });
+
+      const events: FileEvent[] = [];
+      const watching = (async () => {
+        for await (const event of sandbox.watcher.watch("watched", {
+          recursive: true,
+        })) {
+          events.push(event);
+          if (event.path === "watched/nested/done.txt") break;
+        }
+      })();
+
+      // sandboxd does not confirm that the watch is in place, so keep
+      // creating files until the first one is reported.
+      let probes = 0;
+      await eventually(
+        async () => {
+          await sandbox.files.write(`watched/probe-${probes++}.txt`, "x");
+          return events.length > 0;
+        },
+        30_000,
+        () => `no watch event after ${probes} probe files`,
+      );
+      await sandbox.files.write("watched/nested/done.txt", "done");
+      await watching;
+
+      expect(events.some((e) => e.type === "error")).toBe(false);
+      expect(
+        events.some(
+          (e) => e.type === "create" && /^watched\/probe-\d+\.txt$/.test(e.path),
+        ),
+      ).toBe(true);
+      expect(events.at(-1)?.path).toBe("watched/nested/done.txt");
+
+      const missing = sandbox.watcher.watch("no-such-dir");
+      const err = await missing.next().catch((e: unknown) => e);
+      expect(isRpcError(err, "not_found")).toBe(true);
+
+      // Neither the finished watch nor the rejected one broke the connection.
+      const run = await sandbox.commands.run("echo", ["still ok"]);
+      expect(run.stdout).toBe("still ok\n");
     } finally {
       await sandbox.close();
     }

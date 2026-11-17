@@ -326,6 +326,50 @@ export interface DirectoryListing {
 }
 
 /**
+ * Kind of change a {@link FileEvent} reports. The names match the Go and
+ * Python SDKs. A sandboxd newer than this SDK can send a kind that has no
+ * name here; it arrives as `unknown(<number>)`, so handle the kinds you need
+ * and ignore the rest.
+ */
+export type FileEventType =
+  | "create"
+  | "write"
+  | "remove"
+  | "rename"
+  | "chmod"
+  | "error"
+  | `unknown(${number})`;
+
+/** One filesystem change reported by sandbox.watcher.watch(). */
+export interface FileEvent {
+  type: FileEventType;
+  /**
+   * Sandbox-root-relative path of the file or directory that changed. A
+   * `rename` event carries the old path. When the new name is inside the
+   * watched tree, it arrives as a separate `create` event.
+   */
+  path: string;
+  /** Message of an `error` event, and "" for every other type. */
+  error: string;
+}
+
+/** Options accepted by sandbox.watcher.watch(). */
+export interface WatchOptions {
+  /**
+   * Also watch subdirectories, including ones created during the watch.
+   * Default: false.
+   */
+  recursive?: boolean;
+  /**
+   * Budget (ms) for connecting to sandboxd before the watch starts. It does
+   * NOT bound how long the watch runs. Default: 60000.
+   */
+  timeoutMs?: number;
+  /** Aborting this signal, before or during the watch, ends the watch. */
+  signal?: AbortSignal;
+}
+
+/**
  * Result of sandbox.status(): the Sandbox's `Ready` condition. Values match
  * the Python SDK's `Sandbox.status()`.
  */

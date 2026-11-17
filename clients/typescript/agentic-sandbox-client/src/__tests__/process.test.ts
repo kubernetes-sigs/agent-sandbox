@@ -26,6 +26,12 @@ import {
   StartResponseSchema,
 } from "../_proto/process/v1/process_pb.js";
 import {
+  FileEventSchema,
+  FileEventType,
+  FileWatcherService,
+  type WatchDirRequest,
+} from "../_proto/watcher/v1/watcher_pb.js";
+import {
   SandboxClosedError,
   SandboxConnectionError,
   SandboxdRpcError,
@@ -684,5 +690,133 @@ describe("ProcessClient.start", () => {
       name: "SandboxdRpcError",
       code: "permission_denied",
     });
+  });
+});
+
+describe("ProcessClient.watchDir", () => {
+  async function startClient(
+    watchDir: (
+      req: WatchDirRequest,
+      ctx: { signal: AbortSignal },
+    ) => AsyncIterable<never>,
+  ): Promise<ProcessClient> {
+    activeServer = await startH2Server((router) => {
+      router.service(FileWatcherService, { watchDir: watchDir as never });
+    });
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+    return activeClient;
+  }
+
+  it("sends path and recursive, names every event type, and ends with the stream", async () => {
+    let received: WatchDirRequest | undefined;
+    const client = await startClient(async function* (req) {
+      received = req;
+      for (const type of [
+        FileEventType.CREATE,
+        FileEventType.WRITE,
+        FileEventType.REMOVE,
+        FileEventType.RENAME,
+        FileEventType.CHMOD,
+      ]) {
+        yield create(FileEventSchema, { type, path: "src/a.txt" }) as never;
+      }
+      yield create(FileEventSchema, {
+        type: FileEventType.ERROR,
+        error: "watched directory was removed",
+      }) as never;
+    });
+
+    const events = await client.watchDir(
+      "src",
+      true,
+      new AbortController().signal,
+    );
+    const seen = [];
+    while (true) {
+      const step = await events.next();
+      if (step.done) break;
+      seen.push(step.value);
+    }
+
+    expect(received).toMatchObject({ path: "src", recursive: true });
+    expect(seen.map((e) => e.type)).toEqual([
+      "create",
+      "write",
+      "remove",
+      "rename",
+      "chmod",
+      "error",
+    ]);
+    expect(seen[0]).toEqual({ type: "create", path: "src/a.txt", error: "" });
+    expect(seen[5]).toEqual({
+      type: "error",
+      path: "",
+      error: "watched directory was removed",
+    });
+  });
+
+  it("reports an event type it does not know as unknown(<number>)", async () => {
+    const client = await startClient(async function* () {
+      yield create(FileEventSchema, {
+        type: 99 as FileEventType,
+        path: "a",
+      }) as never;
+    });
+
+    const events = await client.watchDir(
+      ".",
+      false,
+      new AbortController().signal,
+    );
+
+    expect((await events.next()).value).toEqual({
+      type: "unknown(99)",
+      path: "a",
+      error: "",
+    });
+  });
+
+  it("reports a runtime without the watcher service as unimplemented", async () => {
+    activeServer = await startH2Server((router) => {
+      router.service(ProcessService, {});
+    });
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+
+    const events = await activeClient.watchDir(
+      ".",
+      false,
+      new AbortController().signal,
+    );
+
+    const err = await events.next().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SandboxdRpcError);
+    expect(err).toMatchObject({ code: "unimplemented" });
+  });
+
+  it("throws the signal's own reason when the caller aborts the stream", async () => {
+    const client = await startClient(async function* (_req, ctx) {
+      yield create(FileEventSchema, {
+        type: FileEventType.CREATE,
+        path: "a",
+      }) as never;
+      await new Promise<void>((resolve) =>
+        ctx.signal.addEventListener("abort", () => resolve(), { once: true }),
+      );
+    });
+    const controller = new AbortController();
+    const reason = new Error("caller gave up");
+    const events = await client.watchDir(".", false, controller.signal);
+    await events.next();
+    const next = events.next();
+
+    controller.abort(reason);
+
+    await expect(next).rejects.toBe(reason);
   });
 });

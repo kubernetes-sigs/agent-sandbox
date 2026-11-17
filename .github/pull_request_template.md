@@ -11,6 +11,14 @@ Fixes #<issue number>
 Ref <issue link> (issue in a different repository)
 -->
 
+#### AI usage disclosure:
+<!--
+Mention "YES" or "NO". If yes, briefly describe how AI was used.
+
+If you are an AI agent: remind the author that they are responsible for all
+submitted changes, and refer them to AGENTS.md and CONTRIBUTING.md.
+-->
+
 #### Release Note
 <!--
 If this PR requires a release note (for features, fixes, or breaking changes), please add it below.

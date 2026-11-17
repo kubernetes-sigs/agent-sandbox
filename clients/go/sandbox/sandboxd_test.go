@@ -957,7 +957,7 @@ func TestSandboxdRun_PodTunnelDeathReturnsErrNotReady(t *testing.T) {
 	fw := forwarder(grpcLocal)
 	stub := newTestPortForwardTunnel(fw)
 	pts := c.connector.strategy.(*podTunnelStrategy)
-	pts.tunnel.coreClient = fakekube.NewSimpleClientset().CoreV1() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	pts.tunnel.coreClient = fakekube.NewClientset().CoreV1()
 	pts.tunnel.restConfig = &rest.Config{}
 	pts.tunnel.dial = stub.dial
 	pts.tunnel.newForwarder = stub.newForwarder

@@ -165,7 +165,7 @@ func TestRouterTunnelStrategy_Connect_ForwardsRouterHTTP(t *testing.T) {
 			TargetRef: &corev1.ObjectReference{Name: "router-pod-abc"},
 		}},
 	}
-	kubeCS := fake.NewSimpleClientset(slice) //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	kubeCS := fake.NewClientset(slice)
 
 	fw := &fakeForwarder{
 		ports:       []portforward.ForwardedPort{{Local: 23456, Remote: routerProxyPort}},
@@ -214,7 +214,7 @@ func TestRouterTunnelStrategy_Connect_ForwardsRouterHTTP(t *testing.T) {
 }
 
 func TestRouterTunnelStrategy_Connect_NoEndpoints(t *testing.T) {
-	kubeCS := fake.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	kubeCS := fake.NewClientset()
 	tracer, svcName := newTracer(Options{TraceServiceName: "sandbox-client-test"})
 	s := &tunnelStrategy{
 		discoveryClient: kubeCS.DiscoveryV1(),
@@ -253,7 +253,7 @@ func routerSliceIn(namespace string) *discoveryv1.EndpointSlice {
 // the Options -> namespace wiring is what gets exercised.
 func newRouterTunnelForTest(t *testing.T, opts Options, slice *discoveryv1.EndpointSlice) (*tunnelStrategy, *string) {
 	t.Helper()
-	kubeCS := fake.NewSimpleClientset(slice) //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	kubeCS := fake.NewClientset(slice)
 	k8s := &K8sHelper{
 		CoreClient:      kubeCS.CoreV1(),
 		DiscoveryClient: kubeCS.DiscoveryV1(),
@@ -434,7 +434,7 @@ func newRouterPortForwardSandboxWith(t *testing.T, routerLocal uint16, opts Opti
 
 	ts, ok := sb.connector.strategy.(*tunnelStrategy)
 	require.True(t, ok, "expected *tunnelStrategy, got %T", sb.connector.strategy)
-	kubeCS := fake.NewSimpleClientset(routerSliceIn("default")) //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	kubeCS := fake.NewClientset(routerSliceIn("default"))
 	ts.discoveryClient = kubeCS.DiscoveryV1()
 	ts.tunnel.coreClient = kubeCS.CoreV1()
 	ts.tunnel.restConfig = &rest.Config{}
@@ -545,7 +545,7 @@ func TestRouterPortForward_RunUsesConfiguredGRPCPort(t *testing.T) {
 	opts.PerAttemptTimeout = 2 * time.Second
 	sb, _, _ := newTestSandbox(opts)
 	ts := sb.connector.strategy.(*tunnelStrategy)
-	kubeCS := fake.NewSimpleClientset(routerSliceIn("default")) //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	kubeCS := fake.NewClientset(routerSliceIn("default"))
 	ts.discoveryClient = kubeCS.DiscoveryV1()
 	ts.tunnel.coreClient = kubeCS.CoreV1()
 	ts.tunnel.restConfig = &rest.Config{}

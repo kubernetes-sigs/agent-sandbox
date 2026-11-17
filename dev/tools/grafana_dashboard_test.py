@@ -49,16 +49,16 @@ def _dashboard():
     return json.loads(DASHBOARD_PATH.read_text())
 
 
-def _query_expressions(value):
+def _dashboard_queries(value):
     if isinstance(value, dict):
         for key, nested in value.items():
-            if key == "expr" and isinstance(nested, str):
+            if key in ("expr", "query") and isinstance(nested, str):
                 yield nested
             else:
-                yield from _query_expressions(nested)
+                yield from _dashboard_queries(nested)
     elif isinstance(value, list):
         for nested in value:
-            yield from _query_expressions(nested)
+            yield from _dashboard_queries(nested)
 
 
 def _normalized_metric(name, documented):
@@ -70,22 +70,38 @@ def _normalized_metric(name, documented):
     return name
 
 
+def _referenced_metrics(dashboard, documented):
+    return {
+        _normalized_metric(match, documented)
+        for query in _dashboard_queries(dashboard)
+        for match in METRIC_REF_RE.findall(query)
+    }
+
+
 def test_dashboard_only_queries_documented_metric_families():
     documented = _documented_metrics()
-    referenced = {
-        _normalized_metric(match, documented)
-        for expr in _query_expressions(_dashboard())
-        for match in METRIC_REF_RE.findall(expr)
-    }
+    referenced = _referenced_metrics(_dashboard(), documented)
     assert referenced
-    assert referenced <= documented, f"Undocumented dashboard metrics: {sorted(referenced - documented)}"
+    assert referenced <= documented, (
+        f"Undocumented dashboard metrics: {sorted(referenced - documented)}"
+    )
+
+
+def test_metric_guard_also_checks_template_variable_queries():
+    documented = _documented_metrics()
+    dashboard = {
+        "templating": {
+            "list": [
+                {"query": "label_values(agent_sandbox_typo, namespace)"},
+            ],
+        },
+    }
+    assert _referenced_metrics(dashboard, documented) - documented == {
+        "agent_sandbox_typo",
+    }
 
 
 def test_dashboard_covers_the_core_controller_metric_rows():
     documented = _documented_metrics()
-    referenced = {
-        _normalized_metric(match, documented)
-        for expr in _query_expressions(_dashboard())
-        for match in METRIC_REF_RE.findall(expr)
-    }
+    referenced = _referenced_metrics(_dashboard(), documented)
     assert CORE_METRICS <= referenced

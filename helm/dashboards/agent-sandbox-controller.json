@@ -506,7 +506,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(agent_sandbox_claim_creation_total{namespace=~\"$namespace\", launch_type=\"warm\"}[5m])) / clamp_min(sum(rate(agent_sandbox_claim_creation_total{namespace=~\"$namespace\"}[5m])), 0.001)",
+          "expr": "(sum(rate(agent_sandbox_claim_creation_total{namespace=~\"$namespace\", launch_type=\"warm\"}[5m])) or vector(0)) / clamp_min(sum(rate(agent_sandbox_claim_creation_total{namespace=~\"$namespace\"}[5m])), 0.001)",
           "legendFormat": "Warm launches",
           "range": true,
           "refId": "A"

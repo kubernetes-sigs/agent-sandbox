@@ -226,6 +226,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "507":
+          $ref: "#/components/responses/InsufficientStorage"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -280,6 +282,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "507":
+          $ref: "#/components/responses/InsufficientStorage"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -312,6 +316,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "507":
+          $ref: "#/components/responses/InsufficientStorage"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -546,6 +552,12 @@ components:
         The path's current state conflicts with the request, for example a directory
         that is not empty when recursive=false, a path that is not of the kind
         requested by the type query, or a file at the path when type=directory
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InsufficientStorage:
+      description: The sandbox filesystem is full or its quota is exhausted (code RESOURCE_EXHAUSTED)
       content:
         application/json:
           schema:

@@ -1,0 +1,7 @@
+metrics:
+  grafanaDashboard:
+    enabled: true
+    additionalLabels:
+      grafana_dashboard: "1"
+    additionalAnnotations:
+      grafana_folder: Agent Sandbox

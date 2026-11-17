@@ -131,3 +131,15 @@ metrics:
     # chart's starter group. Each list item must be a full Prometheus rule
     # group object.
     additionalGroups: []
+
+  # grafanaDashboard creates a ConfigMap containing a dashboard for the
+  # controller metrics. A Grafana dashboard sidecar can discover it through
+  # the default grafana_dashboard: "1" label.
+  grafanaDashboard:
+    enabled: false
+    # additionalLabels are added to the dashboard ConfigMap. They can also
+    # override the default grafana_dashboard label for a different sidecar.
+    additionalLabels: {}
+    # additionalAnnotations are added to the dashboard ConfigMap, for example
+    # grafana_folder: Agent Sandbox.
+    additionalAnnotations: {}

@@ -129,6 +129,9 @@ The following table lists the configurable parameters and their defaults. For fl
 | `metrics.prometheusRule.enabled` | Create a Prometheus Operator `PrometheusRule` for the controller metrics endpoint (requires the prometheus-operator CRDs) | `false` |
 | `metrics.prometheusRule.additionalLabels` | Extra labels on the `PrometheusRule` (often required to match the Prometheus `ruleSelector`, e.g. `release: kube-prometheus-stack`) | `{}` |
 | `metrics.prometheusRule.additionalGroups` | Additional Prometheus rule groups appended after the chart's starter rule group | `[]` |
+| `metrics.grafanaDashboard.enabled` | Create a ConfigMap containing a Grafana dashboard for the controller metrics | `false` |
+| `metrics.grafanaDashboard.additionalLabels` | Extra labels on the dashboard ConfigMap; can override the default `grafana_dashboard: "1"` sidecar label | `{}` |
+| `metrics.grafanaDashboard.additionalAnnotations` | Extra annotations on the dashboard ConfigMap, such as `grafana_folder` | `{}` |
 
 ## Metrics
 
@@ -150,6 +153,19 @@ helm install agent-sandbox ./helm/ \
 > **Note**: The `ServiceMonitor` and `PrometheusRule` kinds are provided by the prometheus-operator CRDs (`monitoring.coreos.com/v1`). Enabling either one without those CRDs installed will fail at apply time.
 >
 > The bundled `PrometheusRule` starter set is intentionally small and is most useful once scrape discovery is configured via the chart `ServiceMonitor` or an equivalent Prometheus configuration.
+
+### Grafana dashboard
+
+The optional dashboard visualizes the documented controller metrics and can be discovered by a Grafana dashboard sidecar through the default `grafana_dashboard: "1"` ConfigMap label:
+
+```bash
+helm upgrade --install agent-sandbox ./helm/ \
+  --namespace agent-sandbox-system \
+  --set image.tag=<version> \
+  --set metrics.grafanaDashboard.enabled=true
+```
+
+If your Grafana sidecar uses a different selector, override it with `metrics.grafanaDashboard.additionalLabels`. Add folder placement or other metadata with `metrics.grafanaDashboard.additionalAnnotations`.
 
 ## Development
 

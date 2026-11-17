@@ -1,0 +1,18 @@
+{{- if .Values.metrics.grafanaDashboard.enabled }}
+{{- $supportLabels := merge (dict) .Values.metrics.grafanaDashboard.additionalLabels (dict "grafana_dashboard" "1") }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-sandbox-controller-dashboard
+  namespace: {{ include "agent-sandbox.namespace" . }}
+  labels:
+    {{- include "agent-sandbox.labels" . | nindent 4 }}
+    {{- toYaml $supportLabels | nindent 4 }}
+  {{- with .Values.metrics.grafanaDashboard.additionalAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  agent-sandbox-controller.json: |-
+{{ .Files.Get "dashboards/agent-sandbox-controller.json" | fromJson | toPrettyJson | indent 4 }}
+{{- end }}

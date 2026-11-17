@@ -17,6 +17,7 @@ Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) headlessly ins
 3. The Python SDK installed from this Git checkout. From the repository root,
    run `pip install -e clients/python/agentic-sandbox-client`. The example needs
    `suspend()` and `resume()`, which are not available in the PyPI release 1.0.11.
+   After installation, run `cd examples/claude-code-sandbox`.
 4. Docker, and [kind](https://kind.sigs.k8s.io/) if using the quick path.
 5. An Anthropic API key (or a compatible endpoint via `ANTHROPIC_BASE_URL`).
 
@@ -64,7 +65,7 @@ SUCCESS: session resumed after sandbox suspend and resume.
 `template.yaml` references the node-local image `claude-code-sandbox:v1` with `imagePullPolicy: Never`. For clusters that cannot see your Docker daemon:
 
 ```bash
-docker build -t REGISTRY/claude-code-sandbox:v1 examples/claude-code-sandbox/
+docker build -t REGISTRY/claude-code-sandbox:v1 .
 docker push REGISTRY/claude-code-sandbox:v1
 # Edit template.yaml: set image: REGISTRY/claude-code-sandbox:v1 and imagePullPolicy: IfNotPresent
 kubectl apply -f template.yaml -f warmpool.yaml
@@ -89,13 +90,17 @@ listening on TCP 8080. Use the Service port in `ANTHROPIC_BASE_URL` and the Pod'
 listening port in the network policy if they differ.
 Use the proxy's ClusterIP instead of its DNS name so the sandbox does not need
 DNS access. Allowing cluster DNS would let the agent discover in-cluster Service
-names. Use your proxy's supported model name.
+names. Use your proxy's supported model name. For a different target cluster,
+replace `kind-agent-sandbox` in both commands with its kubeconfig context.
 
 ```bash
-PROXY_IP=$(kubectl -n model-proxy get service model-proxy -o jsonpath='{.spec.clusterIP}')
-kubectl -n <namespace> create secret generic claude-code-api-keys \
+PROXY_IP=$(kubectl --context kind-agent-sandbox -n model-proxy get service model-proxy -o jsonpath='{.spec.clusterIP}')
+case "$PROXY_IP" in
+  *:*) PROXY_IP="[$PROXY_IP]" ;;
+esac
+kubectl --context kind-agent-sandbox -n <namespace> create secret generic claude-code-api-keys \
   --from-file=ANTHROPIC_API_KEY=/path/to/proxy-caller-token \
-  --from-literal=ANTHROPIC_BASE_URL=http://${PROXY_IP}:8080 \
+  --from-literal=ANTHROPIC_BASE_URL="http://${PROXY_IP}:8080" \
   --from-literal=ANTHROPIC_MODEL=MODEL_NAME
 ```
 

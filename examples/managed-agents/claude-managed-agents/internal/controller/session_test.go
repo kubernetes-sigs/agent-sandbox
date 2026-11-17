@@ -268,22 +268,29 @@ func TestDispatch_FullQueueReturnsError(t *testing.T) {
 
 // fakeRenewer records renewal calls and returns canned tokens or errors per
 // work ID. If block is non-nil, each call waits on it before returning, so
-// tests can hold a renewal in flight across the hand-off.
+// tests can hold a renewal in flight across the hand-off. blockIDs blocks
+// only the listed work IDs, which keeps renewals of other events flowing
+// when a test needs one specific renewal held at a specific moment.
 type fakeRenewer struct {
-	mu     sync.Mutex
-	calls  []string
-	tokens map[string]string
-	errs   map[string]error
-	block  chan struct{}
+	mu       sync.Mutex
+	calls    []string
+	tokens   map[string]string
+	errs     map[string]error
+	block    chan struct{}
+	blockIDs map[string]chan struct{}
 }
 
 func (f *fakeRenewer) RenewLease(ctx context.Context, workID, lastHeartbeat string) (string, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, workID+":"+lastHeartbeat)
 	block := f.block
+	perID := f.blockIDs[workID]
 	f.mu.Unlock()
 	if block != nil {
 		<-block
+	}
+	if perID != nil {
+		<-perID
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -300,6 +307,18 @@ func (f *fakeRenewer) callList() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.calls...)
+}
+
+// countRenewals returns how many recorded renewal calls start with prefix
+// (a work ID followed by ":").
+func countRenewals(renewer *fakeRenewer, prefix string) int {
+	n := 0
+	for _, c := range renewer.callList() {
+		if strings.HasPrefix(c, prefix) {
+			n++
+		}
+	}
+	return n
 }
 
 func sessionOf(mgr *SessionManager, id string) *sessionState {
@@ -488,9 +507,13 @@ func TestTakeForPost_WaitsForInFlightRenewal(t *testing.T) {
 func TestQueuedRenewal_FollowsEventIntoFlight(t *testing.T) {
 	wait := make(chan struct{})
 	fake := &fakeSandbox{waitBlock: wait}
+	blockW2 := make(chan struct{})
+	// Block only w2's renewal: a tick that catches w1 between the pop and
+	// takeForPost must not get stuck, or takeForPost would wait on a renewal
+	// that only this test can release after w1 is posted — a deadlock.
 	renewer := &fakeRenewer{
-		tokens: map[string]string{"w2": "tok2-R"},
-		block:  make(chan struct{}),
+		tokens:   map[string]string{"w2": "tok2-R"},
+		blockIDs: map[string]chan struct{}{"w2": blockW2},
 	}
 	mgr := NewSessionManager(t.Context(), SessionManagerConfig{
 		Factory:         func(string) sessionSandbox { return fake },
@@ -520,7 +543,7 @@ func TestQueuedRenewal_FollowsEventIntoFlight(t *testing.T) {
 		t.Fatal("PostWork ran while a renewal of the same work ID was in flight")
 	}
 
-	close(renewer.block)
+	close(blockW2)
 	waitForCond(t, "w2 posted", func() bool { return containsCall(fake, "post:w2") })
 	fake.mu.Lock()
 	got := fake.postedTokens["w2"]
@@ -538,7 +561,11 @@ func TestQueuedRenewal_FollowsEventIntoFlight(t *testing.T) {
 func TestRenewClaim_SkipsItemHandedOffAfterSnapshot(t *testing.T) {
 	ensure := make(chan struct{})
 	fake := &fakeSandbox{ensureBlock: ensure}
-	renewer := &fakeRenewer{block: make(chan struct{})}
+	blockW2 := make(chan struct{})
+	// Block only w2's renewal: a tick that fires before w2 is dispatched
+	// must not get stuck renewing w1, which would keep renewingID set and
+	// stop the loop from ever claiming w2.
+	renewer := &fakeRenewer{blockIDs: map[string]chan struct{}{"w2": blockW2}}
 	mgr := NewSessionManager(t.Context(), SessionManagerConfig{
 		Factory:         func(string) sessionSandbox { return fake },
 		Logger:          logr.Discard(),
@@ -564,18 +591,23 @@ func TestRenewClaim_SkipsItemHandedOffAfterSnapshot(t *testing.T) {
 		return s.renewingID == "w2"
 	})
 
+	// Renewing w1 while it is in flight but not yet posted is legitimate;
+	// count those calls. While the blocked w2 renewal holds renewingID, the
+	// loop cannot claim anything else, so this count is stable until blockW2
+	// is closed.
+	w1Before := countRenewals(renewer, "w1:")
+
 	// Hand w1 to the runner while the w2 renewal is still blocked. w1's
 	// claim comes after w2 in the same snapshot.
 	close(ensure)
 	waitForCond(t, "w1 posted", func() bool { return containsCall(fake, "post:w1") })
 
-	close(renewer.block)
+	close(blockW2)
 	time.Sleep(50 * time.Millisecond) // let the loop reach w1's claim
 
-	for _, c := range renewer.callList() {
-		if strings.HasPrefix(c, "w1:") {
-			t.Fatalf("renewal started for w1 after hand-off: %q (calls: %v)", c, renewer.callList())
-		}
+	if w1After := countRenewals(renewer, "w1:"); w1After != w1Before {
+		t.Fatalf("renewal started for w1 after hand-off: %d calls before, %d after (%v)",
+			w1Before, w1After, renewer.callList())
 	}
 }
 
@@ -584,7 +616,14 @@ func TestRenewClaim_SkipsItemHandedOffAfterSnapshot(t *testing.T) {
 func TestInFlightLeaseLost_SkipsPostWork(t *testing.T) {
 	ensure := make(chan struct{})
 	fake := &fakeSandbox{ensureBlock: ensure}
-	renewer := &fakeRenewer{errs: map[string]error{"w1": errors.New("lease gone")}}
+	inflight := make(chan struct{})
+	// Hold w1's failing renewal until the run loop has popped it: an error
+	// delivered while w1 is still queued would drop it from pending, and no
+	// in-flight event would ever exist to mark the lease lost on.
+	renewer := &fakeRenewer{
+		errs:     map[string]error{"w1": errors.New("lease gone")},
+		blockIDs: map[string]chan struct{}{"w1": inflight},
+	}
 	mgr := NewSessionManager(t.Context(), SessionManagerConfig{
 		Factory:         func(string) sessionSandbox { return fake },
 		Logger:          logr.Discard(),
@@ -596,6 +635,12 @@ func TestInFlightLeaseLost_SkipsPostWork(t *testing.T) {
 
 	_ = mgr.Dispatch(WorkEvent{SessionID: "s", WorkID: "w1", LastHeartbeat: "tok1"})
 	s := sessionOf(mgr, "s")
+	waitForCond(t, "w1 in flight", func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.inFlight != nil
+	})
+	close(inflight)
 	// The renew loop records the call before it commits leaseLost; wait for
 	// the state itself so releasing readiness cannot race the post check.
 	waitForCond(t, "lease marked lost", func() bool { return s.leaseLostForInFlight() })

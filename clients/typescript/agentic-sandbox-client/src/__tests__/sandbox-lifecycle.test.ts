@@ -387,6 +387,30 @@ describe("Sandbox suspend/resume", () => {
     });
   });
 
+  describe("abort listeners", () => {
+    it("abortable() and sleep() release their listeners once settled", async () => {
+      vi.useFakeTimers();
+      const sb = new Sandbox(createInit()) as unknown as {
+        abortable: (s: AbortSignal, p: Promise<unknown>) => Promise<unknown>;
+        sleep: (ms: number, s: AbortSignal) => Promise<void>;
+      };
+      const signal = new AbortController().signal;
+      const added = vi.spyOn(signal, "addEventListener");
+      const removed = vi.spyOn(signal, "removeEventListener");
+
+      await sb.abortable(signal, Promise.resolve(1));
+      await expect(
+        sb.abortable(signal, Promise.reject(new Error("x"))),
+      ).rejects.toThrow("x");
+      const sleeping = sb.sleep(50, signal);
+      await vi.advanceTimersByTimeAsync(50);
+      await sleeping;
+
+      expect(added).toHaveBeenCalledTimes(3);
+      expect(removed).toHaveBeenCalledTimes(3);
+    });
+  });
+
   describe("resume()", () => {
     beforeEach(() => {
       vi.useFakeTimers();

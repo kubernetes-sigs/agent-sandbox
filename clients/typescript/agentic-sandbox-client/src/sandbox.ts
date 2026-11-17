@@ -991,7 +991,24 @@ export class Sandbox {
    * queued behind it.
    */
   private abortable<T>(signal: AbortSignal, promise: Promise<T>): Promise<T> {
-    return Promise.race([promise, this.rejectOnAbort(signal)]);
+    return new Promise<T>((resolve, reject) => {
+      if (signal.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      const onAbort = () => reject(signal.reason);
+      signal.addEventListener("abort", onAbort, { once: true });
+      promise.then(
+        (v) => {
+          signal.removeEventListener("abort", onAbort);
+          resolve(v);
+        },
+        (e) => {
+          signal.removeEventListener("abort", onAbort);
+          reject(e);
+        },
+      );
+    });
   }
 
   /** Discards the current sandboxd connection; the next call reconnects. */
@@ -1376,15 +1393,15 @@ export class Sandbox {
         reject(signal.reason);
         return;
       }
-      const timer = setTimeout(resolve, ms);
-      signal.addEventListener(
-        "abort",
-        () => {
-          clearTimeout(timer);
-          reject(signal.reason);
-        },
-        { once: true },
-      );
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      signal.addEventListener("abort", onAbort, { once: true });
     });
   }
 

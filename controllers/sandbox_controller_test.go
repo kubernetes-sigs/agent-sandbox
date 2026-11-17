@@ -933,6 +933,189 @@ func TestReconcileTerminatingReadyPodKeepsServing(t *testing.T) {
 	require.Equal(t, sandboxv1beta1.SandboxReasonPodTerminating, ready.Reason)
 }
 
+// servingTestPod returns a Running, Ready Pod with an IP that the named
+// Sandbox owns. The finalizer keeps a deleted Pod in the fake client, the way
+// a preStop drain keeps it on a real cluster.
+func servingTestPod(name string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: "default",
+			Finalizers:      []string{"agents.x-k8s.io/test-hold"},
+			Labels:          map[string]string{sandboxv1beta1.SandboxNameHashLabel: NameHash(name)},
+			OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(name)},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}},
+		Status: corev1.PodStatus{
+			Phase:  corev1.PodRunning,
+			PodIPs: []corev1.PodIP{{IP: "10.0.0.1"}},
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+}
+
+func servingTestSandbox(name string, shutdownTime *metav1.Time) *sandboxv1beta1.Sandbox {
+	return &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: sandboxUID, Generation: 1},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}},
+			}},
+			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+			Lifecycle: sandboxv1beta1.Lifecycle{
+				ShutdownTime:   shutdownTime,
+				ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
+			},
+		},
+	}
+}
+
+func reconcileAndGetConditions(t *testing.T, r *SandboxReconciler, key types.NamespacedName) (ready, serving *metav1.Condition) {
+	t.Helper()
+	_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: key})
+	require.NoError(t, err)
+	var got sandboxv1beta1.Sandbox
+	require.NoError(t, r.Get(t.Context(), key, &got))
+	return meta.FindStatusCondition(got.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady)),
+		meta.FindStatusCondition(got.Status.Conditions, string(sandboxv1beta1.SandboxConditionServing))
+}
+
+// TestReconcileExpiryKeepsServingWhileDrainingPod checks that expiry does not
+// turn Serving False while the deleted Pod still drains and reports Ready.
+// Serving turns False with reason SandboxExpired once the Pod is gone.
+func TestReconcileExpiryKeepsServingWhileDrainingPod(t *testing.T) {
+	name := "expiry-drain"
+	key := types.NamespacedName{Name: name, Namespace: "default"}
+	past := metav1.NewTime(time.Now().Add(-time.Minute))
+	fc := newFakeClient(servingTestSandbox(name, &past), servingTestPod(name))
+	r := &SandboxReconciler{Client: fc, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+
+	// The first pass marks the Sandbox expired. The Pod is untouched.
+	ready, serving := reconcileAndGetConditions(t, r, key)
+	require.Equal(t, sandboxv1beta1.SandboxReasonExpired, ready.Reason)
+	require.NotNil(t, serving)
+	require.Equal(t, metav1.ConditionTrue, serving.Status)
+	require.Equal(t, sandboxv1beta1.SandboxReasonServingPodReady, serving.Reason)
+
+	// The second pass deletes the Pod, which keeps running its preStop drain.
+	ready, serving = reconcileAndGetConditions(t, r, key)
+	require.Equal(t, sandboxv1beta1.SandboxReasonExpired, ready.Reason)
+	require.Equal(t, metav1.ConditionTrue, serving.Status)
+	var pod corev1.Pod
+	require.NoError(t, fc.Get(t.Context(), key, &pod))
+	require.False(t, pod.DeletionTimestamp.IsZero(), "expiry should have deleted the Pod")
+
+	// The Pod reports the deletion, and a later pass sees it draining.
+	_, serving = reconcileAndGetConditions(t, r, key)
+	require.Equal(t, metav1.ConditionTrue, serving.Status)
+	require.Equal(t, "Pod is terminating and still Ready", serving.Message)
+
+	// The drain ends and the Pod goes away.
+	require.NoError(t, fc.Get(t.Context(), key, &pod))
+	pod.Finalizers = nil
+	require.NoError(t, fc.Update(t.Context(), &pod))
+	ready, serving = reconcileAndGetConditions(t, r, key)
+	require.Equal(t, sandboxv1beta1.SandboxReasonExpired, ready.Reason)
+	require.Equal(t, metav1.ConditionFalse, serving.Status)
+	require.Equal(t, sandboxv1beta1.SandboxReasonExpired, serving.Reason)
+}
+
+// TestReconcileExpiredBeforeUpgradeGetsServing covers a Sandbox that expired
+// under a controller without the Serving condition. Its Ready condition
+// already carries reason SandboxExpired, so the first-expiry pass never runs
+// again, yet Serving must still appear.
+func TestReconcileExpiredBeforeUpgradeGetsServing(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		drainingPod bool
+		wantStatus  metav1.ConditionStatus
+		wantReason  string
+	}{
+		{name: "pod gone", wantStatus: metav1.ConditionFalse, wantReason: sandboxv1beta1.SandboxReasonExpired},
+		{name: "pod still draining", drainingPod: true, wantStatus: metav1.ConditionTrue, wantReason: sandboxv1beta1.SandboxReasonServingPodReady},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			name := "expired-before-upgrade"
+			key := types.NamespacedName{Name: name, Namespace: "default"}
+			past := metav1.NewTime(time.Now().Add(-time.Hour))
+			sandbox := servingTestSandbox(name, &past)
+			sandbox.Status.Conditions = []metav1.Condition{{
+				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse,
+				ObservedGeneration: 1, Reason: sandboxv1beta1.SandboxReasonExpired,
+				Message: "Sandbox has expired", LastTransitionTime: past,
+			}}
+			objs := []runtime.Object{sandbox}
+			if tc.drainingPod {
+				pod := servingTestPod(name)
+				pod.DeletionTimestamp = &past
+				objs = append(objs, pod)
+			}
+			r := &SandboxReconciler{Client: newFakeClient(objs...), Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+
+			_, serving := reconcileAndGetConditions(t, r, key)
+			require.NotNil(t, serving, "an expired Sandbox must gain the Serving condition")
+			require.Equal(t, tc.wantStatus, serving.Status)
+			require.Equal(t, tc.wantReason, serving.Reason)
+		})
+	}
+}
+
+// TestSetSandboxExpiredConditionLeavesServing checks that marking a Sandbox
+// expired does not overwrite Serving. The controller can notice expiry at the
+// end of a pass, right after it computed Serving from the live Pod.
+func TestSetSandboxExpiredConditionLeavesServing(t *testing.T) {
+	sandbox := servingTestSandbox("expired-mid-pass", nil)
+	serving := metav1.Condition{
+		Type: string(sandboxv1beta1.SandboxConditionServing), Status: metav1.ConditionTrue,
+		ObservedGeneration: 1, Reason: sandboxv1beta1.SandboxReasonServingPodReady, Message: "Pod is Ready",
+	}
+	meta.SetStatusCondition(&sandbox.Status.Conditions, serving)
+
+	setSandboxExpiredCondition(sandbox)
+
+	got := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionServing))
+	require.NotNil(t, got)
+	require.Equal(t, metav1.ConditionTrue, got.Status)
+	require.Equal(t, sandboxv1beta1.SandboxReasonServingPodReady, got.Reason)
+}
+
+// TestReconcileServingForPodOwnedByAnotherController pins which reason a Pod
+// owned by another controller produces. While the Sandbox runs, reconciling
+// its Pod fails, so Serving is Unknown. Only a suspended Sandbox reads the Pod
+// without that error and reports PodNotOwned.
+func TestReconcileServingForPodOwnedByAnotherController(t *testing.T) {
+	for _, tc := range []struct {
+		mode       sandboxv1beta1.SandboxOperatingMode
+		wantStatus metav1.ConditionStatus
+		wantReason string
+	}{
+		{sandboxv1beta1.SandboxOperatingModeRunning, metav1.ConditionUnknown, sandboxv1beta1.SandboxReasonServingPodStateUnknown},
+		{sandboxv1beta1.SandboxOperatingModeSuspended, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonServingPodNotOwned},
+	} {
+		t.Run(string(tc.mode), func(t *testing.T) {
+			name := "foreign-pod"
+			key := types.NamespacedName{Name: name, Namespace: "default"}
+			sandbox := servingTestSandbox(name, nil)
+			sandbox.Spec.OperatingMode = tc.mode
+			pod := servingTestPod(name)
+			pod.OwnerReferences = []metav1.OwnerReference{{
+				APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "other", UID: "other-uid", Controller: new(true),
+			}}
+			r := &SandboxReconciler{Client: newFakeClient(sandbox, pod), Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+
+			_, _ = r.Reconcile(t.Context(), ctrl.Request{NamespacedName: key})
+			var got sandboxv1beta1.Sandbox
+			require.NoError(t, r.Get(t.Context(), key, &got))
+			serving := meta.FindStatusCondition(got.Status.Conditions, string(sandboxv1beta1.SandboxConditionServing))
+			require.NotNil(t, serving)
+			require.Equal(t, tc.wantStatus, serving.Status)
+			require.Equal(t, tc.wantReason, serving.Reason)
+		})
+	}
+}
+
 // TestReconcileInvalidServiceNameSurfacesConditionWithoutRequeue is a regression
 // test for a Sandbox whose name yields a Service name over Kubernetes'
 // 63-character limit. The apiserver permanently rejects the Service create, and

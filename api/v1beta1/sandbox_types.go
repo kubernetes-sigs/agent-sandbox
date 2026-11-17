@@ -139,9 +139,12 @@ const (
 	// Serving ignores the Service and reconcile errors that Ready also considers, so
 	// Ready=True implies Serving=True but not the reverse.
 	// Status is False when the Pod is not ready (PodNotReady), does not exist
-	// (PodNotFound), or is not owned by this Sandbox (PodNotOwned), or the Sandbox has
-	// expired (SandboxExpired), and Unknown when
-	// reconciling the Pod failed (PodStateUnknown).
+	// (PodNotFound), or is owned by something else while the Sandbox is suspended
+	// (PodNotOwned). It is Unknown when reconciling the Pod failed (PodStateUnknown),
+	// which includes a running Sandbox whose name is held by a Pod it does not own,
+	// or one that controls more than one Pod. After expiry, Serving keeps following
+	// the deleted Pod while it drains, and reports False with reason SandboxExpired
+	// once the Pod no longer serves.
 	SandboxConditionServing ConditionType = "Serving"
 	// SandboxReasonServingPodReady is the Serving=True reason: the backing Pod is
 	// Running and Ready with an assigned IP.
@@ -152,8 +155,10 @@ const (
 	// SandboxReasonServingPodNotFound is a Serving=False reason: the Sandbox has no
 	// backing Pod, for example while it is suspended or before the Pod is created.
 	SandboxReasonServingPodNotFound = "PodNotFound"
-	// SandboxReasonServingPodNotOwned is a Serving=False reason: a Pod exists with
-	// the Sandbox's name but is not owned by this Sandbox.
+	// SandboxReasonServingPodNotOwned is a Serving=False reason: the Sandbox is
+	// suspended and a Pod it does not own holds its name. A running Sandbox reports
+	// that case as Unknown with reason PodStateUnknown, because reconciling the Pod
+	// fails.
 	SandboxReasonServingPodNotOwned = "PodNotOwned"
 	// SandboxReasonServingPodStateUnknown is the Serving=Unknown reason: reconciling
 	// the Pod failed, so its state cannot be determined.

@@ -433,6 +433,10 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		r.recreateBackoff.clear(req.NamespacedName)
 		if !sandboxMarkedExpired(sandbox) {
 			setSandboxExpiredCondition(sandbox)
+			// The Pod is not deleted yet. Read it so that a Sandbox expiring
+			// before its first reconcile also reports Serving in this write.
+			pod, podErr := r.getExpiringPod(ctx, sandbox)
+			meta.SetStatusCondition(&sandbox.Status.Conditions, r.computeExpiredServingCondition(sandbox, pod, podErr))
 			if statusUpdateErr := r.updateStatus(ctx, oldStatus, oldResourceVersion, sandbox); statusUpdateErr != nil {
 				return ctrl.Result{}, statusUpdateErr
 			}
@@ -2358,13 +2362,10 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 	var allErrors error
 
 	// Delete pod only if owned by this sandbox
-	podName := resolvePodName(sandbox)
-	pod := &corev1.Pod{}
-	if err := r.Get(ctx, types.NamespacedName{Name: podName, Namespace: sandbox.Namespace}, pod); err != nil {
-		if !k8serrors.IsNotFound(err) {
-			allErrors = errors.Join(allErrors, fmt.Errorf("failed to get pod: %w", err))
-		}
-	} else {
+	pod, podErr := r.getExpiringPod(ctx, sandbox)
+	if podErr != nil {
+		allErrors = errors.Join(allErrors, podErr)
+	} else if pod != nil {
 		ownership, controllerRef := checkOwnership(pod, sandbox)
 		switch ownership {
 		case resourceOwnedBySandbox:
@@ -2427,8 +2428,38 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 			Message:            "Sandbox has expired",
 		})
 	}
+	// Report Serving even when cleanup failed, because it describes the Pod,
+	// not the cleanup. This pass runs for every expired Sandbox, so it also
+	// adds Serving to one that expired before the condition existed.
+	meta.SetStatusCondition(&sandbox.Status.Conditions, r.computeExpiredServingCondition(sandbox, pod, podErr))
 
 	return false, allErrors
+}
+
+// getExpiringPod returns the expired Sandbox's Pod, or nil if it does not exist.
+func (r *SandboxReconciler) getExpiringPod(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) (*corev1.Pod, error) {
+	pod := &corev1.Pod{}
+	if err := r.Get(ctx, types.NamespacedName{Name: resolvePodName(sandbox), Namespace: sandbox.Namespace}, pod); err != nil {
+		if k8serrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get pod: %w", err)
+	}
+	return pod, nil
+}
+
+// computeExpiredServingCondition reports Serving for an expired Sandbox. Expiry
+// deletes the Pod, and a Pod with a graceful shutdown keeps serving the work it
+// holds until it reports Ready=False, so Serving follows that Pod as it does for
+// any other deletion. Once the Pod no longer serves, the reason is
+// SandboxExpired, because expiry is why it stopped.
+func (r *SandboxReconciler) computeExpiredServingCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod, podErr error) metav1.Condition {
+	condition := r.computeServingCondition(sandbox, pod, podErr)
+	if condition.Status == metav1.ConditionFalse {
+		condition.Reason = sandboxv1beta1.SandboxReasonExpired
+		condition.Message = "Sandbox has expired"
+	}
+	return condition
 }
 
 // checks if the sandbox has expired
@@ -2460,16 +2491,8 @@ func setSandboxExpiredCondition(sandbox *sandboxv1beta1.Sandbox) {
 		Reason:             sandboxv1beta1.SandboxReasonExpired,
 		Message:            "Sandbox has expired",
 	})
-	// Expiry deletes the backing Pod and stops observing it, so Serving would
-	// otherwise keep its last pre-expiry status. An expired Sandbox serves
-	// nothing, whatever state its Pod is in.
-	meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
-		Type:               string(sandboxv1beta1.SandboxConditionServing),
-		Status:             metav1.ConditionFalse,
-		ObservedGeneration: sandbox.Generation,
-		Reason:             sandboxv1beta1.SandboxReasonExpired,
-		Message:            "Sandbox has expired",
-	})
+	// Serving is left alone because it describes the Pod, which may keep
+	// serving while it drains. handleSandboxExpiry keeps it current from the Pod.
 	// Expiry tears down the backing pod and skips reconcileChildResources
 	// (where PodScheduled is normally maintained), so drop the mirrored
 	// condition here or it would linger with stale pre-expiry contents.

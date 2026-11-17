@@ -2161,6 +2161,265 @@ func TestCreateSandboxPropagatesVolumeClaimTemplates(t *testing.T) {
 // fixtures to mark "backing Pod exists and is networked".
 const testNetworkedPodIP = "10.244.0.5"
 
+func TestCreateSandboxPropagatesPersistentVolumeClaimRetentionPolicy(t *testing.T) {
+	scheme := newScheme(t)
+	claimName := "pvc-retention-claim"
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: "default", UID: types.UID(claimName)},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "pvc-retention-warmpool"},
+		},
+	}
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pvc-retention-warmpool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "pvc-retention-template"}},
+	}
+
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "pvc-retention-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "app", Image: "test"}},
+					},
+				},
+				PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+					WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain,
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(claim, template, warmPool).
+		WithStatusSubresource(claim).Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claimName, Namespace: "default"}}
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+
+	sandbox := &sandboxv1beta1.Sandbox{}
+	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: claimName, Namespace: "default"}, sandbox)
+	require.NoError(t, err)
+	require.NotNil(t, sandbox.Spec.PersistentVolumeClaimRetentionPolicy)
+	require.Equal(t, sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain, sandbox.Spec.PersistentVolumeClaimRetentionPolicy.WhenDeleted)
+}
+
+// TestReconcileActiveKeepsClaimedSandboxPersistentVolumeClaimRetentionPolicy
+// pins that a template edit doesn't change the retention policy of a Sandbox
+// the claim already holds.
+func TestReconcileActiveKeepsClaimedSandboxPersistentVolumeClaimRetentionPolicy(t *testing.T) {
+	scheme := newScheme(t)
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "existing-retention-claim", Namespace: "default", UID: "claim-uid"},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "existing-retention-warmpool"},
+		},
+	}
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "existing-retention-warmpool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "existing-retention-template"}},
+	}
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "existing-retention-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "app", Image: "new-template-image"}},
+					},
+				},
+				PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+					WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyDelete,
+				},
+			},
+		},
+	}
+	existingSandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      claim.Name,
+			Namespace: claim.Namespace,
+			Labels: map[string]string{
+				sandboxTemplateRefHash: SandboxTemplateRefHash(template.Name),
+			},
+			Annotations: map[string]string{
+				sandboxv1beta1.SandboxTemplateRefAnnotation: template.Name,
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       "SandboxClaim",
+				Name:       claim.Name,
+				UID:        claim.UID,
+				Controller: new(true),
+			}},
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					ObjectMeta: sandboxv1beta1.PodMetadata{
+						Labels: map[string]string{
+							extensionsv1beta1.SandboxIDLabel: string(claim.UID),
+							sandboxTemplateRefHash:           SandboxTemplateRefHash(template.Name),
+						},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "app", Image: "old-running-image"}},
+					},
+				},
+				PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+					WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain,
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(claim, warmPool, template, existingSandbox).
+		WithStatusSubresource(claim).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}}
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+
+	updated := &sandboxv1beta1.Sandbox{}
+	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}, updated)
+	require.NoError(t, err)
+	require.NotNil(t, updated.Spec.PersistentVolumeClaimRetentionPolicy)
+	require.Equal(t, sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain, updated.Spec.PersistentVolumeClaimRetentionPolicy.WhenDeleted)
+}
+
+// TestSandboxClaimAdoptionPersistentVolumeClaimRetentionPolicy covers the
+// handover of a warm-pool member whose policy predates its template's (the
+// default OnReplenish strategy keeps such members until they are replaced).
+func TestSandboxClaimAdoptionPersistentVolumeClaimRetentionPolicy(t *testing.T) {
+	retain := sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain
+	del := sandboxv1beta1.PersistentVolumeClaimRetentionPolicyDelete
+	for _, tc := range []struct {
+		name           string
+		templateExists bool
+		templatePolicy sandboxv1beta1.PersistentVolumeClaimRetentionPolicyType
+		memberPolicy   sandboxv1beta1.PersistentVolumeClaimRetentionPolicyType
+		want           sandboxv1beta1.PersistentVolumeClaimRetentionPolicyType
+		wantWarning    bool
+	}{
+		{name: "applies the template's policy", templateExists: true, templatePolicy: del, memberPolicy: retain, want: del},
+		{name: "falls back to Retain without the template", memberPolicy: del, want: retain, wantWarning: true},
+		{name: "no warning when the member already retains", memberPolicy: retain, want: retain},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := newScheme(t)
+			poolName := "retention-pool"
+			warmPoolUID := types.UID("retention-pool-uid")
+			template := &extensionsv1beta1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{Name: "retention-template", Namespace: "default"},
+				Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "app", Image: "app-image"}},
+					}},
+					PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{WhenDeleted: tc.templatePolicy},
+				}},
+			}
+			warmPool := &extensionsv1beta1.SandboxWarmPool{
+				ObjectMeta: metav1.ObjectMeta{Name: poolName, Namespace: "default", UID: warmPoolUID},
+				Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+			}
+			claim := &extensionsv1beta1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "retention-claim", Namespace: "default", UID: "retention-claim-uid"},
+				Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: poolName}},
+			}
+			member := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "retention-pool-member",
+					Namespace: "default",
+					Labels: map[string]string{
+						warmPoolSandboxLabel:   sandboxcontrollers.NameHash(poolName),
+						sandboxTemplateRefHash: SandboxTemplateRefHash(template.Name),
+					},
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: extensionsv1beta1.GroupVersion.String(),
+						Kind:       extensionsv1beta1.SandboxWarmPoolKind,
+						Name:       poolName,
+						UID:        warmPoolUID,
+						Controller: new(true),
+					}},
+				},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "app", Image: "app-image"}},
+					}},
+					PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{WhenDeleted: tc.memberPolicy},
+				}},
+				Status: sandboxv1beta1.SandboxStatus{
+					Conditions: []metav1.Condition{{
+						Type:   string(sandboxv1beta1.SandboxConditionReady),
+						Status: metav1.ConditionTrue,
+						Reason: "DependenciesReady",
+					}},
+					PodIPs: []string{testNetworkedPodIP},
+				},
+			}
+
+			objects := []client.Object{claim, warmPool, member}
+			if tc.templateExists {
+				objects = append(objects, template)
+			}
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+				WithObjects(objects...).
+				WithStatusSubresource(claim).
+				Build()
+			warmQueue := queue.NewSimpleSandboxQueue()
+			warmQueue.Add(queue.GetNamespacedWarmPoolName("default", poolName), queue.SandboxKey{Namespace: "default", Name: member.Name})
+			recorder := events.NewFakeRecorder(10)
+			reconciler := &SandboxClaimReconciler{
+				Client:           fakeClient,
+				Scheme:           scheme,
+				Recorder:         recorder,
+				Tracer:           asmetrics.NewNoOp(),
+				WarmSandboxQueue: warmQueue,
+			}
+
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}}
+			_, err := reconciler.Reconcile(context.Background(), req)
+			require.NoError(t, err)
+
+			adopted := &sandboxv1beta1.Sandbox{}
+			require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: member.Name, Namespace: "default"}, adopted))
+			require.True(t, metav1.IsControlledBy(adopted, claim), "the warm-pool member should have been handed to the claim")
+			require.NotNil(t, adopted.Spec.PersistentVolumeClaimRetentionPolicy)
+			require.Equal(t, tc.want, adopted.Spec.PersistentVolumeClaimRetentionPolicy.WhenDeleted)
+
+			var warned bool
+			for len(recorder.Events) > 0 {
+				if e := <-recorder.Events; strings.Contains(e, "PVCsRetainedWithoutTemplate") {
+					warned = strings.HasPrefix(e, corev1.EventTypeWarning)
+				}
+			}
+			require.Equal(t, tc.wantWarning, warned)
+		})
+	}
+}
+
 func TestSandboxClaimSandboxAdoption(t *testing.T) {
 	template := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{

@@ -352,6 +352,9 @@ type SandboxBlueprint struct {
 	// persistentVolumeClaimRetentionPolicy controls lifecycle of PVCs created
 	// from volumeClaimTemplates.
 	// Defaults to Delete for backward compatibility.
+	// A Sandbox that a SandboxClaim takes from a warm pool gets its SandboxTemplate's
+	// policy at handover, or Retain if the template cannot be read then (with a
+	// warning event on the claim); later template edits don't change a claimed Sandbox.
 	// +optional
 	PersistentVolumeClaimRetentionPolicy *PersistentVolumeClaimRetentionPolicy `json:"persistentVolumeClaimRetentionPolicy,omitempty"`
 

@@ -2638,6 +2638,33 @@ func TestCompareSandboxBlueprint(t *testing.T) {
 			expectedResult: true,
 		},
 		{
+			name: "PVC retention policy omitted and explicit Delete should match",
+			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: basePodTemplate,
+			},
+			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: basePodTemplate,
+				PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+					WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyDelete,
+				},
+			},
+			expectedResult: true,
+		},
+		{
+			name: "PVC retention policy empty and explicit Delete should match",
+			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate:                          basePodTemplate,
+				PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{},
+			},
+			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: basePodTemplate,
+				PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+					WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyDelete,
+				},
+			},
+			expectedResult: true,
+		},
+		{
 			name: "Failed Pod policy omitted policy and Retain should match",
 			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
 				PodTemplate: basePodTemplate,
@@ -2647,6 +2674,22 @@ func TestCompareSandboxBlueprint(t *testing.T) {
 				FailedPodPolicy: sandboxv1beta1.FailedPodPolicyRetain,
 			},
 			expectedResult: true,
+		},
+		{
+			name: "PVC retention policy drift should NOT match",
+			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: basePodTemplate,
+				PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+					WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain,
+				},
+			},
+			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: basePodTemplate,
+				PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+					WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyDelete,
+				},
+			},
+			expectedResult: false,
 		},
 	}
 
@@ -2669,7 +2712,7 @@ func TestCompareSandboxBlueprint(t *testing.T) {
 // comparison logic is not tracked for drift, so a warm sandbox will not be detected
 // as stale when that field changes.
 func TestSandboxBlueprintFieldsAreCompared(t *testing.T) {
-	expectedFields := []string{"PodTemplate", "VolumeClaimTemplates", "Service", "FailedPodPolicy"}
+	expectedFields := []string{"PodTemplate", "VolumeClaimTemplates", "PersistentVolumeClaimRetentionPolicy", "Service", "FailedPodPolicy"}
 
 	var actualFields []string
 	blueprintType := reflect.TypeFor[sandboxv1beta1.SandboxBlueprint]()

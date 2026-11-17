@@ -74,6 +74,14 @@ func (b *SandboxSpecApplyConfiguration) WithVolumeClaimTemplates(values ...*Pers
 	return b
 }
 
+// WithPersistentVolumeClaimRetentionPolicy sets the PersistentVolumeClaimRetentionPolicy field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the PersistentVolumeClaimRetentionPolicy field is set to the value of the last call.
+func (b *SandboxSpecApplyConfiguration) WithPersistentVolumeClaimRetentionPolicy(value *PersistentVolumeClaimRetentionPolicyApplyConfiguration) *SandboxSpecApplyConfiguration {
+	b.SandboxBlueprintApplyConfiguration.PersistentVolumeClaimRetentionPolicy = value
+	return b
+}
+
 // WithService sets the Service field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the Service field is set to the value of the last call.

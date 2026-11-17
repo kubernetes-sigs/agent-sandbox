@@ -235,6 +235,43 @@ type PersistentVolumeClaimTemplate struct {
 	Spec corev1.PersistentVolumeClaimSpec `json:"spec"`
 }
 
+// PersistentVolumeClaimRetentionPolicyType describes how PVCs created from
+// volumeClaimTemplates are handled when the owning Sandbox is deleted.
+type PersistentVolumeClaimRetentionPolicyType string
+
+const (
+	// PersistentVolumeClaimRetentionPolicyDelete deletes PVCs when the Sandbox is deleted.
+	PersistentVolumeClaimRetentionPolicyDelete PersistentVolumeClaimRetentionPolicyType = "Delete"
+	// PersistentVolumeClaimRetentionPolicyRetain keeps PVCs when the Sandbox is deleted.
+	PersistentVolumeClaimRetentionPolicyRetain PersistentVolumeClaimRetentionPolicyType = "Retain"
+)
+
+// PersistentVolumeClaimRetentionPolicy controls lifecycle of PVCs created from volumeClaimTemplates.
+// Set whenDeleted to Retain to preserve PVC data after Sandbox deletion; users are
+// responsible for deleting retained PVCs when they are no longer needed. When an
+// existing Sandbox switches from Delete to Retain, the switch takes effect when the
+// controller next reconciles it; deleting the Sandbox before that, or while the
+// controller is unavailable, can leave the owner reference in place and allow
+// garbage collection to delete the PVC.
+type PersistentVolumeClaimRetentionPolicy struct {
+	// whenDeleted controls whether PVCs created from volumeClaimTemplates are
+	// deleted when the owning Sandbox is deleted. When set to Retain, PVCs are
+	// orphaned and survive Sandbox deletion. Defaults to Delete for backward compatibility.
+	// +kubebuilder:validation:Enum=Delete;Retain
+	// +kubebuilder:default=Delete
+	// +optional
+	WhenDeleted PersistentVolumeClaimRetentionPolicyType `json:"whenDeleted,omitempty"`
+}
+
+// EffectiveWhenDeleted returns the configured PVC retention behavior, defaulting
+// to Delete when the policy or its field is unset.
+func (p *PersistentVolumeClaimRetentionPolicy) EffectiveWhenDeleted() PersistentVolumeClaimRetentionPolicyType {
+	if p == nil || p.WhenDeleted == "" {
+		return PersistentVolumeClaimRetentionPolicyDelete
+	}
+	return p.WhenDeleted
+}
+
 // SandboxOperatingMode defines the desired operational state of the Sandbox.
 // +kubebuilder:validation:Enum=Running;Suspended
 //
@@ -297,10 +334,11 @@ type SandboxBlueprint struct {
 	// volumeClaimTemplates is a list of claims that the sandbox pod is allowed to reference.
 	// When creating a sandbox, PVCs will be created from these templates.
 	// Every claim in this list must have at least one matching access mode with a provisioner volume.
-	// Each PVC is named after the template and the Sandbox, joined by a hyphen, and is owned
-	// by the Sandbox. It is kept while the Sandbox is suspended or retained after expiry, so a
-	// resumed Pod reattaches it with its data. It is garbage collected when the Sandbox
-	// object is deleted.
+	// Each PVC is named after the template and the Sandbox, joined by a hyphen. It is kept
+	// while the Sandbox is suspended or retained after expiry, so a resumed Pod reattaches it
+	// with its data. Under the default whenDeleted: Delete, the Sandbox owns each PVC and it is
+	// garbage collected when the Sandbox object is deleted; under whenDeleted: Retain it is not
+	// owned and outlives the Sandbox (see persistentVolumeClaimRetentionPolicy).
 	// On a Sandbox this list is immutable after creation.
 	// NOTE: This list is atomic. Updates to this field will replace the entire list rather than merging with existing entries.
 	// Each entry must have a unique, non-empty metadata.name.
@@ -310,6 +348,12 @@ type SandboxBlueprint struct {
 	// +optional
 	// +listType=atomic
 	VolumeClaimTemplates []PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
+
+	// persistentVolumeClaimRetentionPolicy controls lifecycle of PVCs created
+	// from volumeClaimTemplates.
+	// Defaults to Delete for backward compatibility.
+	// +optional
+	PersistentVolumeClaimRetentionPolicy *PersistentVolumeClaimRetentionPolicy `json:"persistentVolumeClaimRetentionPolicy,omitempty"`
 
 	// service controls whether the controller should automatically create a
 	// headless Service for the Sandbox workload.

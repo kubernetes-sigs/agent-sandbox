@@ -338,6 +338,8 @@ defer ttl.DeleteAll(ctx)
 
 // Keep expired claims so callers can tell they expired
 // (Options.ShutdownPolicy, or sandbox.WithShutdownPolicy per call)
+// extv1beta1 is imported as:
+//   extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 keep, err := sandbox.NewClient(ctx, sandbox.Options{
     ShutdownAfter:  time.Hour,
     ShutdownPolicy: extv1beta1.ShutdownPolicyRetain,

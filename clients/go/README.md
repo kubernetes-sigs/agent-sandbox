@@ -221,7 +221,9 @@ fmt.Println(result.ExitCode, result.StdoutTruncated, result.StderrTruncated)
 ```
 
 Without a deadline on `ctx`, the call's timeout is `RequestTimeout` plus
-`TimeLimit`. The legacy runtime and a sandboxd without `ExecuteWithLimits`
+`TimeLimit`. The call accepts a response as large as the explicit limits allow;
+a stream left to sandboxd's policy is received within gRPC's default 4 MiB, as
+with `Run`, so set both limits when more than 4 MiB of output may come back. The legacy runtime and a sandboxd without `ExecuteWithLimits`
 return `ErrUnsupportedByRuntime`.
 
 ### Streaming Commands (sandboxd)

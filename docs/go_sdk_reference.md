@@ -1346,7 +1346,10 @@ type RunLimits struct {
     TimeLimit time.Duration
     // StdoutLimitBytes and StderrLimitBytes cap how much of each stream is
     // kept. Further output is drained and discarded, and the result reports
-    // the stream as truncated.
+    // the stream as truncated. The call accepts a response as large as the
+    // explicit limits allow; a stream left to sandboxd's policy (which may be
+    // unlimited) is received within gRPC's default 4 MiB, as with Run, so set
+    // both limits when more than 4 MiB of output may come back.
     StdoutLimitBytes uint64
     StderrLimitBytes uint64
 }

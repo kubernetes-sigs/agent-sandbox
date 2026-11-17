@@ -539,6 +539,12 @@ Keep the handle and claim while investigating them. A temporary sandbox
 verification failure preserves the sandbox identity so a later `Open()` can
 retry verification.
 
+A temporary claim verification failure instead retains the claim name but clears
+the sandbox identity. Later `Open()` calls on that unchanged handle return
+`ErrOrphanedClaim` without rechecking the claim. Keep the handle and claim for
+investigation; do not call `Close()` merely to retry verification, because it
+deletes the claim.
+
 Only after confirming that a claim is orphaned and deciding to delete it,
 check the cleanup error before opening a fresh sandbox:
 

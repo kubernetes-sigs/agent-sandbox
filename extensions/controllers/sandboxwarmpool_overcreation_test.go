@@ -1749,6 +1749,48 @@ func TestReconcilePool_StuckReplacementBackoff(t *testing.T) {
 	require.Equal(t, 0, r.observeStuckBackoff(types.NamespacedName{Namespace: warmPool.Namespace, Name: warmPool.Name}, "", false, grace, current))
 }
 
+// TestReconcilePool_StuckBackoffRechecksStableReady: a member that has only
+// just turned Ready is not yet progress. With every member Ready nothing else
+// wakes the pool, so it must schedule a recheck for when the member has stayed
+// Ready long enough, and clear the failure history then.
+func TestReconcilePool_StuckBackoffRechecksStableReady(t *testing.T) {
+	zeroGraceJitter(t)
+	base := time.Now().Truncate(time.Second)
+	warmPool, sb, template := newGraceTestPool(base, time.Minute, nil, false)
+	sb.Status.Conditions = []metav1.Condition{{
+		Type:               string(sandboxv1beta1.SandboxConditionReady),
+		Status:             metav1.ConditionTrue,
+		LastTransitionTime: metav1.Time{Time: base.Add(-5 * time.Second)},
+	}}
+	hash, err := computeSandboxBlueprintHash(template)
+	require.NoError(t, err)
+
+	scheme := newTestScheme()
+	current := base
+	r := SandboxWarmPoolReconciler{
+		Client:       newLaggingClient(newFakeClient(scheme, template, warmPool, sb)),
+		Scheme:       scheme,
+		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+		Recorder:     events.NewFakeRecorder(16),
+		now:          func() time.Time { return current },
+	}
+	key := types.NamespacedName{Namespace: warmPool.Namespace, Name: warmPool.Name}
+	grace := DefaultWarmPoolReadinessGracePeriod
+	r.noteStuckReplacement(key, hash, grace, base.Add(-time.Minute))
+	ctx := context.Background()
+
+	requeueAfter, err := r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	require.Equal(t, stuckProgressReadyFor-5*time.Second+graceRequeueSlack, requeueAfter,
+		"the recheck lands once the member has been Ready long enough")
+	require.Equal(t, 1, r.observeStuckBackoff(key, hash, false, grace, current), "not progress yet")
+
+	current = current.Add(requeueAfter)
+	_, err = r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	require.Zero(t, r.observeStuckBackoff(key, hash, false, grace, current), "a member that stayed Ready ends the backoff")
+}
+
 // TestWarmPoolDefaults pins the exported defaults behind the
 // --sandbox-warm-pool-readiness-grace-period and
 // --sandbox-warm-pool-unschedulable-recheck-interval flags. These are the

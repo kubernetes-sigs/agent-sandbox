@@ -502,6 +502,23 @@ func hasStableReadyMember(members []sandboxv1beta1.Sandbox, now time.Time) bool 
 	return false
 }
 
+// stableReadyRemaining is how long until the soonest member that is Ready but
+// not yet stably so counts as progress, or 0 if there is none. Nothing else
+// wakes a pool whose members are all Ready, so the caller schedules a recheck.
+func stableReadyRemaining(members []sandboxv1beta1.Sandbox, now time.Time) time.Duration {
+	var remaining time.Duration
+	for i := range members {
+		cond := meta.FindStatusCondition(members[i].Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+		if cond == nil || cond.Status != metav1.ConditionTrue || cond.LastTransitionTime.IsZero() {
+			continue
+		}
+		if left := stuckProgressReadyFor - now.Sub(cond.LastTransitionTime.Time); left > 0 && (remaining == 0 || left < remaining) {
+			remaining = left
+		}
+	}
+	return remaining
+}
+
 // clockNow returns the reconciler's current time (time.Now unless a test
 // injected a fake clock).
 func (r *SandboxWarmPoolReconciler) clockNow() time.Time {
@@ -672,6 +689,15 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	stuckFailures := r.observeStuckBackoff(poolKey, currentSandboxBlueprintHash, hasStableReadyMember(activeSandboxes, now), graceWindow, now)
 	stuckDelay := stuckBackoffDelay(stuckFailures)
 	stuckDeleted := false
+	// A member that only just turned Ready is not yet progress, and with every
+	// member Ready no other deadline wakes the pool, so recheck once the
+	// member has stayed Ready long enough. Otherwise the failure history and
+	// its warning would linger until some unrelated event.
+	if stuckFailures > 0 {
+		if remaining := stableReadyRemaining(activeSandboxes, now); remaining > 0 {
+			requeueAfter = minNonZeroDuration(requeueAfter, remaining+graceRequeueSlack)
+		}
+	}
 	for _, sb := range activeSandboxes {
 		if !isSandboxReady(&sb) && !sb.CreationTimestamp.IsZero() {
 			age := now.Sub(readinessGraceStart(&sb))

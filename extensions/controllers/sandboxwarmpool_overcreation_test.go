@@ -1649,6 +1649,64 @@ func TestWarmPoolSandboxEventHandler_ObservesOwnedEvents(t *testing.T) {
 
 // Repeated stuck replacements must leave time for kubelet retries while
 // unrelated claim adoption can still refill the pool.
+func TestObserveStuckBackoff_CountsRoundsAndStableReadiness(t *testing.T) {
+	r := &SandboxWarmPoolReconciler{}
+	key := types.NamespacedName{Namespace: "test", Name: "pool"}
+	start := time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC)
+	grace := 10 * time.Second
+	observe := func(at time.Time, deleted bool, ready int32, lastReady time.Time, hash string) (time.Duration, bool) {
+		t.Helper()
+		return r.observeStuckBackoff(key, deleted, ready, 2, at, lastReady, grace, hash)
+	}
+
+	delay, repeated := observe(start, true, 0, time.Time{}, "template-a")
+	require.Equal(t, stuckBackoffBase, delay)
+	require.False(t, repeated)
+
+	// A rate-limited pool can delete two members in separate reconciles
+	// within one readiness-grace window. This is one failure round.
+	delay, repeated = observe(start.Add(2*time.Second), true, 0, time.Time{}, "template-a")
+	require.Equal(t, stuckBackoffBase, delay)
+	require.False(t, repeated)
+
+	delay, repeated = observe(start.Add(grace+time.Second), true, 0, time.Time{}, "template-a")
+	require.Equal(t, 2*stuckBackoffBase, delay)
+	require.True(t, repeated)
+
+	// A crashing member can briefly report Ready between restarts. That
+	// short interval must not erase the existing replacement history.
+	briefReady := start.Add(grace + 2*time.Second)
+	delay, repeated = observe(briefReady, false, 2, briefReady, "template-a")
+	require.Zero(t, delay)
+	require.False(t, repeated)
+	delay, repeated = observe(briefReady.Add(time.Second), false, 0, time.Time{}, "template-a")
+	require.Equal(t, 2*stuckBackoffBase, delay)
+	require.True(t, repeated)
+	// One member can be consistently healthy while the other keeps failing.
+	// Partial readiness cannot reset the pool-wide failure streak.
+	delay, repeated = observe(briefReady.Add(grace), false, 1, briefReady, "template-a")
+	require.Equal(t, 2*stuckBackoffBase, delay)
+	require.True(t, repeated)
+
+	// After a complete grace period of uninterrupted readiness, a fresh
+	// failure starts at the base delay again.
+	stableReady := briefReady.Add(grace)
+	delay, repeated = observe(stableReady, false, 2, briefReady, "template-a")
+	require.Zero(t, delay)
+	require.False(t, repeated)
+	delay, repeated = observe(stableReady.Add(time.Second), true, 0, time.Time{}, "template-a")
+	require.Equal(t, stuckBackoffBase, delay)
+	require.False(t, repeated)
+
+	// Replacing the broken template gives the pool a new failure history.
+	delay, repeated = observe(stableReady.Add(2*time.Second), false, 0, time.Time{}, "template-b")
+	require.Zero(t, delay)
+	require.False(t, repeated)
+	delay, repeated = observe(stableReady.Add(3*time.Second), true, 0, time.Time{}, "template-b")
+	require.Equal(t, stuckBackoffBase, delay)
+	require.False(t, repeated)
+}
+
 func TestReconcilePool_StuckReplacementBackoff(t *testing.T) {
 	ctx := context.Background()
 	pool, template := newOverCreationFixture(1)

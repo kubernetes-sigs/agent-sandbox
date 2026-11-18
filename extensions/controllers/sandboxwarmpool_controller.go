@@ -218,6 +218,8 @@ type SandboxWarmPoolReconciler struct {
 type stuckBackoffState struct {
 	delay        time.Duration
 	lastDeletion time.Time
+	roundStart   time.Time
+	templateHash string
 	repeated     bool
 }
 
@@ -318,13 +320,18 @@ func (r *SandboxWarmPoolReconciler) forgetReplenishState(key types.NamespacedNam
 // observeStuckBackoff tracks the delay after each member's readiness grace
 // period. Delaying deletion lets kubelet retries continue and leaves
 // claim-adoption refill independent of the failure streak.
-func (r *SandboxWarmPoolReconciler) observeStuckBackoff(key types.NamespacedName, deleted bool, ready, desired int32, now, lastReady time.Time, graceWindow time.Duration) (time.Duration, bool) {
+func (r *SandboxWarmPoolReconciler) observeStuckBackoff(key types.NamespacedName, deleted bool, ready, desired int32, now, lastReady time.Time, graceWindow time.Duration, templateHash string) (time.Duration, bool) {
 	r.replenishMu.Lock()
 	defer r.replenishMu.Unlock()
 
 	st := r.stuckBackoff[key]
+	// Recovery requires the *whole* pool to remain ready for one grace window;
+	// an individual healthy member must not hide a crashing replacement.
+	stableReady := ready >= desired && !lastReady.IsZero() && !lastReady.After(now) && now.Sub(lastReady) >= graceWindow
 	// Decay after a quiet interval even if claims keep the pool below target.
-	if desired <= 0 || ready >= desired || (st != nil && (lastReady.After(st.lastDeletion) || now.Sub(st.lastDeletion) > graceWindow+2*stuckBackoffMax)) {
+	if desired <= 0 || (st != nil && ((stableReady && lastReady.After(st.lastDeletion)) ||
+		(now.Sub(st.lastDeletion) > graceWindow+2*stuckBackoffMax) ||
+		(templateHash != "" && st.templateHash != "" && templateHash != st.templateHash))) {
 		delete(r.stuckBackoff, key)
 		st = nil
 	}
@@ -336,11 +343,14 @@ func (r *SandboxWarmPoolReconciler) observeStuckBackoff(key types.NamespacedName
 			if r.stuckBackoff == nil {
 				r.stuckBackoff = make(map[types.NamespacedName]*stuckBackoffState)
 			}
-			st = &stuckBackoffState{delay: stuckBackoffBase}
+			st = &stuckBackoffState{delay: stuckBackoffBase, roundStart: now, templateHash: templateHash}
 			r.stuckBackoff[key] = st
-		} else {
+		} else if now.Sub(st.roundStart) >= graceWindow {
+			// Several members from one failed round can be removed by separate
+			// reconciles when refill is rate-limited. Count the round once.
 			st.delay = min(2*st.delay, stuckBackoffMax)
 			st.repeated = true
+			st.roundStart = now
 		}
 		st.lastDeletion = now
 	}
@@ -593,7 +603,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		}
 	}
 	graceWindow := r.readinessGracePeriod(warmPool)
-	stuckDelay, repeatedStuck := r.observeStuckBackoff(poolKey, false, readyReplicas, desiredReplicas, now, lastReady, graceWindow)
+	stuckDelay, repeatedStuck := r.observeStuckBackoff(poolKey, false, readyReplicas, desiredReplicas, now, lastReady, graceWindow, currentSandboxBlueprintHash)
 	deletedStuck := false
 	var healthySandboxes []sandboxv1beta1.Sandbox
 	unschedulableReplicas := int32(0)
@@ -670,7 +680,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	activeSandboxes = healthySandboxes
 
 	if deletedStuck {
-		stuckDelay, repeatedStuck = r.observeStuckBackoff(poolKey, true, readyReplicas, desiredReplicas, now, lastReady, graceWindow)
+		stuckDelay, repeatedStuck = r.observeStuckBackoff(poolKey, true, readyReplicas, desiredReplicas, now, lastReady, graceWindow, currentSandboxBlueprintHash)
 		logger.Info("Backing off stuck warm pool deletions", "delay", stuckDelay, "repeated", repeatedStuck)
 	}
 	currentReplicas := int32(len(activeSandboxes))

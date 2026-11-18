@@ -36,6 +36,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
@@ -2373,6 +2374,8 @@ func TestReconcilePool_PriorityClassName(t *testing.T) {
 		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
 			Spec: corev1.PodSpec{
 				PriorityClassName: "template-class",
+				Priority:          ptr.To(int32(10)),
+				PreemptionPolicy:  ptr.To(corev1.PreemptNever),
 				Containers:        []corev1.Container{{Name: "app", Image: "image-v1"}},
 			},
 		}}},
@@ -2409,6 +2412,8 @@ func TestReconcilePool_PriorityClassName(t *testing.T) {
 	items := listSandboxes()
 	require.Len(t, items, 1)
 	require.Equal(t, "warm-low", items[0].Spec.PodTemplate.Spec.PriorityClassName, "pool class replaces the template's")
+	require.Nil(t, items[0].Spec.PodTemplate.Spec.Priority, "admission resolves priority from the pool class")
+	require.Nil(t, items[0].Spec.PodTemplate.Spec.PreemptionPolicy, "admission resolves preemption policy from the pool class")
 	name := items[0].Name
 
 	// A metadata-only template edit changes the hash but is not drift.

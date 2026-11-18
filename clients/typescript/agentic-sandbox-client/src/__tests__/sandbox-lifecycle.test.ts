@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import * as http from "node:http";
+import type { Mock } from "vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { mockGet, mockPatch, mockCreateStrategy } = vi.hoisted(() => ({
@@ -33,6 +34,7 @@ import {
   SandboxNotFoundError,
   SandboxTimeoutError,
 } from "../exceptions.js";
+import type { MetricsManager } from "../metrics.js";
 import type { SandboxInit } from "../sandbox.js";
 import { normalizeSandboxdOptions, Sandbox } from "../sandbox.js";
 
@@ -741,6 +743,239 @@ describe("Sandbox suspend/resume", () => {
       // The stale connect is torn down and its waiter fails instead of reusing it.
       expect(await pending).toBeInstanceOf(Error);
       expect(transports[0].close).toHaveBeenCalled();
+    });
+  });
+
+  describe("latency metrics", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    function fakeMetrics() {
+      return {
+        discoveryLatency: { record: vi.fn() },
+        suspendLatency: { record: vi.fn() },
+        resumeLatency: { record: vi.fn() },
+      } as unknown as MetricsManager;
+    }
+
+    function recordedCalls(histogram: { record: unknown }) {
+      return (histogram.record as Mock).mock.calls as Array<
+        [number, Record<string, string>]
+      >;
+    }
+
+    it("records suspend latency with status=success", async () => {
+      mockGet
+        .mockResolvedValueOnce(sandboxObj({ mode: "Running" }))
+        .mockResolvedValueOnce(
+          sandboxObj({
+            mode: "Suspended",
+            generation: 2,
+            conditions: [cond("Suspended", 2)],
+          }),
+        );
+      mockPatch.mockResolvedValueOnce(
+        sandboxObj({ mode: "Suspended", generation: 2 }),
+      );
+      const metricsManager = fakeMetrics();
+
+      const done = new Sandbox(createInit({ metricsManager })).suspend();
+      await vi.advanceTimersByTimeAsync(500);
+      await done;
+
+      expect(recordedCalls(metricsManager.suspendLatency)).toHaveLength(1);
+      const [value, attrs] = recordedCalls(metricsManager.suspendLatency)[0];
+      expect(typeof value).toBe("number");
+      expect(attrs).toEqual({ status: "success" });
+    });
+
+    it("records suspend latency with status=failure on timeout", async () => {
+      mockGet.mockResolvedValue(sandboxObj({ mode: "Suspended" }));
+      const metricsManager = fakeMetrics();
+
+      const done = expect(
+        new Sandbox(createInit({ metricsManager })).suspend({
+          timeoutMs: 1000,
+        }),
+      ).rejects.toThrow(SandboxTimeoutError);
+      await vi.advanceTimersByTimeAsync(1500);
+      await done;
+
+      expect(recordedCalls(metricsManager.suspendLatency)).toHaveLength(1);
+      expect(recordedCalls(metricsManager.suspendLatency)[0][1]).toEqual({
+        status: "failure",
+      });
+    });
+
+    it("records suspend latency with status=failure when argument validation rejects", async () => {
+      const metricsManager = fakeMetrics();
+
+      await expect(
+        new Sandbox(createInit({ metricsManager })).suspend({ timeoutMs: 0 }),
+      ).rejects.toThrow(SandboxError);
+
+      expect(mockGet).not.toHaveBeenCalled();
+      const calls = recordedCalls(metricsManager.suspendLatency);
+      expect(calls).toHaveLength(1);
+      expect(calls[0][1]).toEqual({ status: "failure" });
+    });
+
+    it("records resume latency with status=failure when argument validation rejects", async () => {
+      const metricsManager = fakeMetrics();
+
+      await expect(
+        new Sandbox(createInit({ metricsManager })).resume({ timeoutMs: 0 }),
+      ).rejects.toThrow(SandboxError);
+
+      const calls = recordedCalls(metricsManager.resumeLatency);
+      expect(calls).toHaveLength(1);
+      expect(calls[0][1]).toEqual({ status: "failure" });
+    });
+
+    it("records resume latency with status=success", async () => {
+      mockGet.mockResolvedValue(
+        sandboxObj({
+          mode: "Running",
+          conditions: [cond("Ready", 1)],
+          podIPs: ["10.0.0.1"],
+        }),
+      );
+      const metricsManager = fakeMetrics();
+
+      const done = new Sandbox(createInit({ metricsManager })).resume();
+      await vi.advanceTimersByTimeAsync(500);
+      await done;
+
+      expect(recordedCalls(metricsManager.resumeLatency)).toHaveLength(1);
+      expect(recordedCalls(metricsManager.resumeLatency)[0][1]).toEqual({
+        status: "success",
+      });
+    });
+
+    // A cancelled call stops at an arbitrary point, so its duration is not a
+    // meaningful latency sample; the Go SDK skips context.Canceled the same
+    // way. Timeouts stay recorded as failures (covered above).
+    it("records no suspend sample when the caller's signal aborts", async () => {
+      mockGet.mockResolvedValue(sandboxObj({ mode: "Suspended" }));
+      const metricsManager = fakeMetrics();
+      const controller = new AbortController();
+      const sandbox = new Sandbox(createInit({ metricsManager }));
+
+      const done = expect(
+        sandbox.suspend({ timeoutMs: 60_000, signal: controller.signal }),
+      ).rejects.toBeDefined();
+      await vi.advanceTimersByTimeAsync(500);
+      controller.abort();
+      await done;
+
+      expect(recordedCalls(metricsManager.suspendLatency)).toHaveLength(0);
+    });
+
+    it("records no suspend sample when the handle closes during the wait", async () => {
+      mockGet.mockResolvedValue(sandboxObj({ mode: "Suspended" }));
+      const metricsManager = fakeMetrics();
+      const sandbox = new Sandbox(createInit({ metricsManager }));
+
+      const done = expect(
+        sandbox.suspend({ timeoutMs: 60_000 }),
+      ).rejects.toThrow(SandboxClosedError);
+      await vi.advanceTimersByTimeAsync(500);
+      await sandbox.closeLocal();
+      await done;
+
+      expect(recordedCalls(metricsManager.suspendLatency)).toHaveLength(0);
+    });
+
+    it("records no resume sample when the caller's signal aborts", async () => {
+      mockGet.mockResolvedValue(sandboxObj({ mode: "Running" }));
+      const metricsManager = fakeMetrics();
+      const controller = new AbortController();
+      const sandbox = new Sandbox(createInit({ metricsManager }));
+
+      const done = expect(
+        sandbox.resume({ timeoutMs: 60_000, signal: controller.signal }),
+      ).rejects.toBeDefined();
+      await vi.advanceTimersByTimeAsync(500);
+      controller.abort();
+      await done;
+
+      expect(recordedCalls(metricsManager.resumeLatency)).toHaveLength(0);
+    });
+
+    // A throwing MeterProvider must not change what callers see: recording
+    // happens in finally blocks, where an exception would replace the
+    // operation's own result or error.
+    function throwingMetrics() {
+      const record = () => {
+        throw new Error("provider exploded");
+      };
+      return {
+        discoveryLatency: { record },
+        suspendLatency: { record },
+        resumeLatency: { record },
+      } as unknown as MetricsManager;
+    }
+
+    it("suspend still resolves when recording throws", async () => {
+      mockGet
+        .mockResolvedValueOnce(sandboxObj({ mode: "Running" }))
+        .mockResolvedValueOnce(
+          sandboxObj({
+            mode: "Suspended",
+            generation: 2,
+            conditions: [cond("Suspended", 2)],
+          }),
+        );
+      mockPatch.mockResolvedValueOnce(
+        sandboxObj({ mode: "Suspended", generation: 2 }),
+      );
+
+      const done = new Sandbox(
+        createInit({ metricsManager: throwingMetrics() }),
+      ).suspend();
+      await vi.advanceTimersByTimeAsync(500);
+      await expect(done).resolves.toBeUndefined();
+    });
+
+    it("suspend failure preserves the original error when recording throws", async () => {
+      mockGet.mockResolvedValue(sandboxObj({ mode: "Suspended" }));
+
+      const done = expect(
+        new Sandbox(createInit({ metricsManager: throwingMetrics() })).suspend({
+          timeoutMs: 1000,
+        }),
+      ).rejects.toThrow(SandboxTimeoutError);
+      await vi.advanceTimersByTimeAsync(1500);
+      await done;
+    });
+
+    it("resume still resolves when recording throws", async () => {
+      mockGet.mockResolvedValue(
+        sandboxObj({
+          mode: "Running",
+          conditions: [cond("Ready", 1)],
+          podIPs: ["10.0.0.1"],
+        }),
+      );
+
+      const done = new Sandbox(
+        createInit({ metricsManager: throwingMetrics() }),
+      ).resume();
+      await vi.advanceTimersByTimeAsync(500);
+      await expect(done).resolves.toBeUndefined();
+    });
+
+    it("resume failure preserves the original error when recording throws", async () => {
+      mockGet.mockResolvedValue(sandboxObj({ mode: "Running" }));
+
+      const done = expect(
+        new Sandbox(createInit({ metricsManager: throwingMetrics() })).resume({
+          timeoutMs: 1000,
+        }),
+      ).rejects.toThrow(SandboxTimeoutError);
+      await vi.advanceTimersByTimeAsync(1500);
+      await done;
     });
   });
 });

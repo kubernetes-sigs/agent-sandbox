@@ -38,6 +38,7 @@ import {
   SandboxWarmPoolNotFoundError,
 } from "./exceptions.js";
 import { resolveLogger } from "./logger.js";
+import { MetricsManager } from "./metrics.js";
 import type { ResolvedSandboxdOptions, SandboxInit } from "./sandbox.js";
 import {
   findReadyCondition,
@@ -487,6 +488,7 @@ export class SandboxClient {
 
   private tracerInitialized = false;
   private autoCleanupActive = false;
+  private metricsManagerPromise: Promise<MetricsManager> | null = null;
 
   protected readonly kubeConfig: k8s.KubeConfig;
   protected readonly customObjectsApi: k8s.CustomObjectsApi;
@@ -744,7 +746,13 @@ export class SandboxClient {
       throw err;
     }
 
-    const init = this.sandboxInit(claimName, ns, ready, sandboxTracingManager);
+    const init = this.sandboxInit(
+      claimName,
+      ns,
+      ready,
+      sandboxTracingManager,
+      await this.ensureMetrics(),
+    );
 
     // A repeated create of a named claim finds its handle already registered.
     // Keep it, so its connections survive, unless the claim now has a new Sandbox.
@@ -956,7 +964,13 @@ export class SandboxClient {
     }
 
     const sandbox = new Sandbox(
-      this.sandboxInit(claimName, ns, ready, sandboxTracingManager),
+      this.sandboxInit(
+        claimName,
+        ns,
+        ready,
+        sandboxTracingManager,
+        await this.ensureMetrics(),
+      ),
     );
 
     this.registry.set(key, sandbox);
@@ -1020,7 +1034,15 @@ export class SandboxClient {
       throw err;
     }
 
-    return new Sandbox(this.sandboxInit("", ns, ready, sandboxTracingManager));
+    return new Sandbox(
+      this.sandboxInit(
+        "",
+        ns,
+        ready,
+        sandboxTracingManager,
+        await this.ensureMetrics(),
+      ),
+    );
   }
 
   /**
@@ -1359,6 +1381,22 @@ export class SandboxClient {
   }
 
   /**
+   * Returns the client-wide MetricsManager, loading the global OpenTelemetry
+   * metrics API once. Unlike tracing, metrics need no opt-in: without
+   * `@opentelemetry/api` or a registered MeterProvider the histograms are
+   * no-ops.
+   */
+  private ensureMetrics(): Promise<MetricsManager> {
+    if (!this.metricsManagerPromise) {
+      this.metricsManagerPromise = MetricsManager.create(
+        this.traceServiceName,
+        this.logger,
+      );
+    }
+    return this.metricsManagerPromise;
+  }
+
+  /**
    * Starts a per-sandbox lifecycle span when tracing is enabled. The handle
    * ends the span when it closes, so a caller that fails before building one
    * must end it itself.
@@ -1384,6 +1422,7 @@ export class SandboxClient {
     namespace: string,
     ready: ReadySandbox,
     tracingManager: TracerManager | null,
+    metricsManager: MetricsManager,
   ): SandboxInit {
     return {
       claimName,
@@ -1397,6 +1436,7 @@ export class SandboxClient {
       sandboxdOptions: this.sandboxdOptions,
       tracingManager,
       traceServiceName: this.traceServiceName,
+      metricsManager,
       logger: this.logger,
     };
   }

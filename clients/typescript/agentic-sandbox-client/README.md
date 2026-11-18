@@ -397,6 +397,17 @@ console.log((await sandbox.commands.run("cat", ["/workspace/note.txt"])).stdout)
 
 Data on a persistent volume survives. Processes, memory, and `emptyDir` volumes do not. Both methods reject on failure and take `timeoutMs` (180000 by default) and `signal`. A call that times out or is aborted stops waiting at once, but a Kubernetes request already sent is not cancelled, so a late `patch` can still take effect. The next call waits for that `patch` to settle before it reads the Sandbox. They poll the Sandbox, so the credentials need `get` and `patch` on `sandboxes`. They match the Go and Python clients.
 
+### Metrics
+
+The client records three OpenTelemetry histograms, in seconds:
+
+- `sandbox.client.discovery.latency` — one sample per connect attempt, with `mode` (`port-forward`, `router-port-forward`, `in-cluster-service`, or `in-cluster-pod-ip`) and `status` (`success` or `failure`).
+- `sandbox.client.suspend.latency` and `sandbox.client.resume.latency` — one sample per call, covering the wait for the Sandbox to reach its target state, with a `status` attribute.
+
+A cancelled call records no sample: an aborted `signal` or a `close()` during the wait stops the call at an arbitrary point, so its duration says nothing about sandbox latency. Timeouts still record `status="failure"`. This matches the Go client, which skips `context.Canceled` the same way.
+
+Recording goes through the global meter provider of the optional `@opentelemetry/api` peer dependency; without the package or a registered provider the histograms are no-ops. The Prometheus exporter renders them as `sandbox_client_discovery_latency_seconds`, `sandbox_client_suspend_latency_seconds`, and `sandbox_client_resume_latency_seconds`, with the same names and bucket boundaries as the Go client. The Python client still exports millisecond histograms named `sandbox_client_*_latency_ms` until [#1902](https://github.com/kubernetes-sigs/agent-sandbox/pull/1902) merges, so one dashboard query does not cover every SDK yet.
+
 ### Interactive processes
 
 `sandbox.commands.start(command, args?, options?)` starts a process and resolves, once sandboxd reports it running, with a `ProcessHandle`. Like `run()`, `[command, ...args]` is the argv (no shell), and `env`/`cwd` behave the same.

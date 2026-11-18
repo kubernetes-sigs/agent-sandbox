@@ -52,6 +52,14 @@ type SandboxWarmPoolSpecApplyConfiguration struct {
 	// The minimum is 30 seconds: a shorter period would delete members before
 	// they could start, and the pool would keep recreating them.
 	ReadinessGracePeriodSeconds *int32 `json:"readinessGracePeriodSeconds,omitempty"`
+	// priorityClassName overrides the PriorityClass of the pool's Pods. Give
+	// the pool a lower class than your other workloads so the scheduler can
+	// preempt idle warm Pods instead of the cluster adding a node.
+	// Pod priority is immutable, so a Pod keeps this class after a
+	// SandboxClaim adopts it and can still be preempted while in use.
+	// If unset, the SandboxTemplate's priorityClassName applies.
+	// Changing this field marks existing sandboxes stale.
+	PriorityClassName *string `json:"priorityClassName,omitempty"`
 }
 
 // SandboxWarmPoolSpecApplyConfiguration constructs a declarative configuration of the SandboxWarmPoolSpec type for use with
@@ -89,5 +97,13 @@ func (b *SandboxWarmPoolSpecApplyConfiguration) WithUpdateStrategy(value *Sandbo
 // If called multiple times, the ReadinessGracePeriodSeconds field is set to the value of the last call.
 func (b *SandboxWarmPoolSpecApplyConfiguration) WithReadinessGracePeriodSeconds(value int32) *SandboxWarmPoolSpecApplyConfiguration {
 	b.ReadinessGracePeriodSeconds = &value
+	return b
+}
+
+// WithPriorityClassName sets the PriorityClassName field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the PriorityClassName field is set to the value of the last call.
+func (b *SandboxWarmPoolSpecApplyConfiguration) WithPriorityClassName(value string) *SandboxWarmPoolSpecApplyConfiguration {
+	b.PriorityClassName = &value
 	return b
 }

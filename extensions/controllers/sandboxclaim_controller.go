@@ -1209,8 +1209,8 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 				if err != nil {
 					recreateResolveErr = err
 				} else {
-					expectedTemplate = template
-					expectedBlueprintHash, recreateResolveErr = computeSandboxBlueprintHash(template)
+					expectedTemplate = withPoolPriorityClass(template, warmPool)
+					expectedBlueprintHash, recreateResolveErr = computeSandboxBlueprintHash(expectedTemplate)
 				}
 			}
 		}

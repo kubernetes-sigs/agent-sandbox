@@ -90,6 +90,9 @@ const (
 	// graceRequeueSlack pads the self-scheduled post-grace requeue so the
 	// re-evaluation lands strictly after the deadline despite clock jitter.
 	graceRequeueSlack = 2 * time.Second
+
+	stuckBackoffBase = 5 * time.Second
+	stuckBackoffMax  = 5 * time.Minute
 )
 
 // graceRequeueJitterFactor spreads the self-scheduled post-grace requeues of
@@ -199,8 +202,8 @@ type SandboxWarmPoolReconciler struct {
 	// RTT and the scheduler, not batch width).
 	MaxRefillRate float64
 
-	// replenishMu guards replenishState and refillState. Distinct pools may
-	// reconcile concurrently when MaxConcurrentReconciles > 1.
+	// replenishMu guards replenishState, refillState, and stuckBackoff.
+	// Distinct pools may reconcile concurrently when MaxConcurrentReconciles > 1.
 	replenishMu sync.Mutex
 	// replenishState tracks, per pool, the last observed member count and any
 	// active replenish hold. Only used when ReplenishDelay > 0.
@@ -208,6 +211,14 @@ type SandboxWarmPoolReconciler struct {
 	// refillState tracks, per pool, the token bucket that paces replacement
 	// creates. Only used when MaxRefillRate > 0.
 	refillState map[types.NamespacedName]*refillBucket
+	// stuckBackoff paces stuck deletions without delaying unrelated refill.
+	stuckBackoff map[types.NamespacedName]*stuckBackoffState
+}
+
+type stuckBackoffState struct {
+	delay        time.Duration
+	lastDeletion time.Time
+	repeated     bool
 }
 
 // refillBucket is the per-pool token bucket behind MaxRefillRate. Tokens
@@ -294,13 +305,49 @@ func (r *SandboxWarmPoolReconciler) noteReplenishCreates(key types.NamespacedNam
 	}
 }
 
-// forgetReplenishState drops the per-pool replenish and refill bookkeeping
+// forgetReplenishState drops replenishment and stuck backoff bookkeeping
 // for a deleted pool.
 func (r *SandboxWarmPoolReconciler) forgetReplenishState(key types.NamespacedName) {
 	r.replenishMu.Lock()
 	defer r.replenishMu.Unlock()
 	delete(r.replenishState, key)
 	delete(r.refillState, key)
+	delete(r.stuckBackoff, key)
+}
+
+// observeStuckBackoff tracks the delay after each member's readiness grace
+// period. Delaying deletion lets kubelet retries continue and leaves
+// claim-adoption refill independent of the failure streak.
+func (r *SandboxWarmPoolReconciler) observeStuckBackoff(key types.NamespacedName, deleted bool, ready, desired int32, now, lastReady time.Time, graceWindow time.Duration) (time.Duration, bool) {
+	r.replenishMu.Lock()
+	defer r.replenishMu.Unlock()
+
+	st := r.stuckBackoff[key]
+	// Decay after a quiet interval even if claims keep the pool below target.
+	if desired <= 0 || ready >= desired || (st != nil && (lastReady.After(st.lastDeletion) || now.Sub(st.lastDeletion) > graceWindow+2*stuckBackoffMax)) {
+		delete(r.stuckBackoff, key)
+		st = nil
+	}
+	if desired <= 0 || ready >= desired {
+		return 0, false
+	}
+	if deleted {
+		if st == nil {
+			if r.stuckBackoff == nil {
+				r.stuckBackoff = make(map[types.NamespacedName]*stuckBackoffState)
+			}
+			st = &stuckBackoffState{delay: stuckBackoffBase}
+			r.stuckBackoff[key] = st
+		} else {
+			st.delay = min(2*st.delay, stuckBackoffMax)
+			st.repeated = true
+		}
+		st.lastDeletion = now
+	}
+	if st == nil {
+		return 0, false
+	}
+	return st.delay, st.repeated
 }
 
 // takeRefillTokens grants up to want replacement creates from the pool's
@@ -530,16 +577,34 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	activeSandboxes, inactiveReplicas, allErrors := r.filterActiveSandboxes(ctx, poolKey, warmPool, sandboxList.Items, template, currentSandboxBlueprintHash, tmplErr)
 
 	now := r.clockNow()
+	desiredReplicas := int32(1)
+	if warmPool.Spec.Replicas != nil {
+		desiredReplicas = *warmPool.Spec.Replicas
+	}
+	readyReplicas := int32(0)
+	var lastReady time.Time
+	for i := range activeSandboxes {
+		if isSandboxReady(&activeSandboxes[i]) {
+			readyReplicas++
+			condition := meta.FindStatusCondition(activeSandboxes[i].Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+			if condition.LastTransitionTime.After(lastReady) {
+				lastReady = condition.LastTransitionTime.Time
+			}
+		}
+	}
+	graceWindow := r.readinessGracePeriod(warmPool)
+	stuckDelay, repeatedStuck := r.observeStuckBackoff(poolKey, false, readyReplicas, desiredReplicas, now, lastReady, graceWindow)
+	deletedStuck := false
 	var healthySandboxes []sandboxv1beta1.Sandbox
 	unschedulableReplicas := int32(0)
 	gatedReplicas := int32(0)
 	// nextGraceDeadline is the time remaining until the earliest readiness
 	// grace deadline among not-yet-Ready sandboxes (0 = none pending).
 	var nextGraceDeadline time.Duration
-	graceWindow := r.readinessGracePeriod(warmPool)
 	for _, sb := range activeSandboxes {
 		if !isSandboxReady(&sb) && !sb.CreationTimestamp.IsZero() {
-			age := now.Sub(readinessGraceStart(&sb))
+			graceStart := readinessGraceStart(&sb)
+			age := now.Sub(graceStart)
 			if age <= graceWindow {
 				// Not Ready but still within the grace period. In a quiet
 				// cluster nothing else touches the Sandbox objects of a pool
@@ -575,6 +640,11 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 				healthySandboxes = append(healthySandboxes, sb)
 				continue
 			}
+			if remaining := graceStart.Add(graceWindow + stuckDelay).Sub(now); remaining > 0 {
+				healthySandboxes = append(healthySandboxes, sb)
+				requeueAfter = minNonZeroDuration(requeueAfter, remaining)
+				continue
+			}
 			logger.Info("Deleting stuck warm pool sandbox",
 				"sandbox", sb.Name,
 				"age", age.Round(time.Second))
@@ -592,15 +662,16 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			// until the deletion is observed; the replacement is created on a
 			// later reconcile once it no longer counts against the target.
 			inactiveReplicas++
+			deletedStuck = true
 			continue
 		}
 		healthySandboxes = append(healthySandboxes, sb)
 	}
 	activeSandboxes = healthySandboxes
 
-	desiredReplicas := int32(1)
-	if warmPool.Spec.Replicas != nil {
-		desiredReplicas = *warmPool.Spec.Replicas
+	if deletedStuck {
+		stuckDelay, repeatedStuck = r.observeStuckBackoff(poolKey, true, readyReplicas, desiredReplicas, now, lastReady, graceWindow)
+		logger.Info("Backing off stuck warm pool deletions", "delay", stuckDelay, "repeated", repeatedStuck)
 	}
 	currentReplicas := int32(len(activeSandboxes))
 	// totalReplicas is the pool's whole live population: active plus
@@ -620,13 +691,6 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	warmPool.Status.Replicas = currentReplicas
 	warmPool.Status.Selector = labelSelector.String()
 
-	// Calculate ready replicas by checking Sandbox Ready condition
-	readyReplicas := int32(0)
-	for i := range activeSandboxes {
-		if isSandboxReady(&activeSandboxes[i]) {
-			readyReplicas++
-		}
-	}
 	warmPool.Status.ReadyReplicas = readyReplicas
 
 	// Surface the pool's observed generation so clients can gate on
@@ -810,8 +874,25 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		r.setNotProgressing(warmPool, poolKey, reasonSandboxTemplateError, "", "")
 	}
 	cause, message := notProgressingSignal(unschedulableReplicas, gatedReplicas, desiredReplicas, graceWindow)
-	r.setNotProgressing(warmPool, poolKey, reasonWarmPoolNotProgressing, cause, message)
+	if cause == "" && repeatedStuck && readyReplicas == 0 {
+		cause = "BackingOffStuckMembers"
+		message = "Repeated stuck warm pool replacements have produced no Ready members. The controller is backing off stuck deletions to allow kubelet retries."
+	}
+	condition := metav1.Condition{
+		Type:               reasonWarmPoolNotProgressing,
+		Status:             metav1.ConditionFalse,
+		Reason:             reasonWarmPoolProgressing,
+		Message:            "No repeated stuck replacements or scheduling holds observed",
+		ObservedGeneration: warmPool.Generation,
+	}
 	if cause != "" {
+		condition.Status = metav1.ConditionTrue
+		condition.Reason = cause
+		condition.Message = message
+	}
+	meta.SetStatusCondition(&warmPool.Status.Conditions, condition)
+	r.setNotProgressing(warmPool, poolKey, reasonWarmPoolNotProgressing, cause, message)
+	if unschedulableReplicas+gatedReplicas > 0 {
 		requeueAfter = minNonZeroDuration(requeueAfter, r.unschedulableRecheckInterval())
 	}
 

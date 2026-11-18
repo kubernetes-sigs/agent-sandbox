@@ -2763,6 +2763,14 @@ var schemaYAML = typed.YAMLObject(`types:
 - name: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.SandboxWarmPoolStatus
   map:
     fields:
+    - name: conditions
+      type:
+        list:
+          elementType:
+            namedType: Condition.v1.meta.apis.pkg.apimachinery.k8s.io
+          elementRelationship: associative
+          keys:
+          - type
     - name: observedGeneration
       type:
         scalar: numeric

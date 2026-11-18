@@ -468,6 +468,8 @@ func (f *Files) validateLegacyWritePath(path string) error {
 
 // Read downloads a file from the sandbox and returns its complete contents.
 // With the sandboxd runtime, reading a directory fails with a 409 HTTPError.
+// Reading the sandbox root ("/" or ".") is the exception: it fails locally
+// before any request, so the error is not an HTTPError.
 func (f *Files) Read(ctx context.Context, path string, opts ...CallOption) ([]byte, error) {
 	var destination bytes.Buffer
 	if _, err := f.readTo(ctx, path, &destination, opts...); err != nil {

@@ -792,7 +792,7 @@ Move does not retry unless WithMaxAttempts is set, because a repeat after a lost
 func (f *Files) Read(ctx context.Context, path string, opts ...CallOption) ([]byte, error)
 ```
 
-Read downloads a file from the sandbox and returns its complete contents. With the sandboxd runtime, reading a directory fails with a 409 HTTPError.
+Read downloads a file from the sandbox and returns its complete contents. With the sandboxd runtime, reading a directory fails with a 409 HTTPError. Reading the sandbox root \("/" or "."\) is the exception: it fails locally before any request, so the error is not an HTTPError.
 
 <a name="Files.ReadTo"></a>
 #### func \(\*Files\) [ReadTo](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go>)

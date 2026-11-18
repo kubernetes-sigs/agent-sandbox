@@ -2374,7 +2374,7 @@ func TestReconcilePool_PriorityClassName(t *testing.T) {
 		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
 			Spec: corev1.PodSpec{
 				PriorityClassName: "template-class",
-				Priority:          ptr.To(int32(10)),
+				Priority:          new(int32(10)),
 				PreemptionPolicy:  ptr.To(corev1.PreemptNever),
 				Containers:        []corev1.Container{{Name: "app", Image: "image-v1"}},
 			},

@@ -15,25 +15,34 @@
 package sandbox
 
 import (
+	"context"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
 )
 
-// discoveryLatencyInstrumentName follows the OTel convention of keeping the
-// unit out of the name and declaring it with metric.WithUnit instead. The
-// OTel Prometheus exporter sanitizes dots to underscores and appends the
-// unit, so this histogram exports as
-// sandbox_client_discovery_latency_seconds, the name the Python SDK's
-// discovery latency metric is moving to.
-const discoveryLatencyInstrumentName = "sandbox.client.discovery.latency"
+// Latency instrument names follow the OTel convention of keeping the unit
+// out of the name and declaring it with metric.WithUnit instead. The OTel
+// Prometheus exporter sanitizes dots to underscores and appends the unit, so
+// these histograms export as sandbox_client_discovery_latency_seconds,
+// sandbox_client_suspend_latency_seconds, and
+// sandbox_client_resume_latency_seconds, the names the Python SDK's latency
+// metrics are moving to. The Python SDK's snapshot restore metric has no Go
+// counterpart: the Go SDK does not support snapshots.
+const (
+	discoveryLatencyInstrumentName = "sandbox.client.discovery.latency"
+	suspendLatencyInstrumentName   = "sandbox.client.suspend.latency"
+	resumeLatencyInstrumentName    = "sandbox.client.resume.latency"
+)
 
-// discoveryLatencyBucketsSeconds are the Python SDK's _LATENCY_BUCKETS_MS
-// expressed in seconds, so cross-SDK dashboards aggregate identically.
-var discoveryLatencyBucketsSeconds = []float64{
+// latencyBucketsSeconds are the Python SDK's _LATENCY_BUCKETS_MS expressed
+// in seconds, so cross-SDK dashboards aggregate identically.
+var latencyBucketsSeconds = []float64{
 	0.1, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 5,
 	10, 30, 60, 120, 240,
 }
@@ -50,20 +59,57 @@ func newMeter(opts Options) metric.Meter {
 	return provider.Meter(scope)
 }
 
-// newDiscoveryLatencyHistogram creates the histogram that records how long
-// connecting to a sandbox takes. Instrument creation only fails for invalid
-// names on a real provider; metrics must never break connectivity, so the
-// error is logged and a noop histogram is returned instead.
-func newDiscoveryLatencyHistogram(meter metric.Meter, log logr.Logger) metric.Float64Histogram {
+// newLatencyHistogram creates a latency histogram in seconds with the shared
+// bucket boundaries. Instrument creation only fails for invalid names on a
+// real provider; metrics must never break sandbox operations, so the error
+// is logged and a noop histogram is returned instead.
+func newLatencyHistogram(meter metric.Meter, log logr.Logger, name, description string) metric.Float64Histogram {
 	hist, err := meter.Float64Histogram(
-		discoveryLatencyInstrumentName,
-		metric.WithDescription("Latency of establishing connection to the sandbox"),
+		name,
+		metric.WithDescription(description),
 		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(discoveryLatencyBucketsSeconds...),
+		metric.WithExplicitBucketBoundaries(latencyBucketsSeconds...),
 	)
 	if err != nil {
-		log.Error(err, "Failed to create discovery latency histogram; sandbox client metrics are disabled")
+		log.Error(err, "Failed to create latency histogram; sandbox client metrics are disabled", "instrument", name)
 		return noop.Float64Histogram{}
 	}
 	return hist
+}
+
+// newDiscoveryLatencyHistogram creates the histogram that records how long
+// connecting to a sandbox takes.
+func newDiscoveryLatencyHistogram(meter metric.Meter, log logr.Logger) metric.Float64Histogram {
+	return newLatencyHistogram(meter, log, discoveryLatencyInstrumentName,
+		"Latency of establishing connection to the sandbox")
+}
+
+// newSuspendLatencyHistogram creates the histogram that records how long
+// suspending a sandbox takes.
+func newSuspendLatencyHistogram(meter metric.Meter, log logr.Logger) metric.Float64Histogram {
+	return newLatencyHistogram(meter, log, suspendLatencyInstrumentName,
+		"Latency of suspending the sandbox")
+}
+
+// newResumeLatencyHistogram creates the histogram that records how long
+// resuming a sandbox takes.
+func newResumeLatencyHistogram(meter metric.Meter, log logr.Logger) metric.Float64Histogram {
+	return newLatencyHistogram(meter, log, resumeLatencyInstrumentName,
+		"Latency of resuming the sandbox")
+}
+
+// recordLatency records the seconds elapsed since start on hist with a
+// status attribute derived from err, mirroring the Python SDK's
+// record_latency decorator. A nil histogram means metrics were not wired;
+// recording is skipped.
+func recordLatency(ctx context.Context, hist metric.Float64Histogram, start time.Time, err error) {
+	if hist == nil {
+		return
+	}
+	status := "success"
+	if err != nil {
+		status = "failure"
+	}
+	hist.Record(ctx, time.Since(start).Seconds(),
+		metric.WithAttributes(attribute.String("status", status)))
 }

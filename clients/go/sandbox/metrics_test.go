@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/attribute"
@@ -34,8 +35,8 @@ type failingStrategy struct {
 func (f *failingStrategy) Connect(context.Context) (string, error) { return "", f.err }
 func (f *failingStrategy) Close() error                            { return nil }
 
-// discoveryLatencyPoints collects the recorded histogram data points.
-func discoveryLatencyPoints(t *testing.T, reader *metric.ManualReader) []metricdata.HistogramDataPoint[float64] {
+// latencyPoints collects the recorded data points of one histogram.
+func latencyPoints(t *testing.T, reader *metric.ManualReader, instrumentName string) []metricdata.HistogramDataPoint[float64] {
 	t.Helper()
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(context.Background(), &rm); err != nil {
@@ -44,7 +45,7 @@ func discoveryLatencyPoints(t *testing.T, reader *metric.ManualReader) []metricd
 	var points []metricdata.HistogramDataPoint[float64]
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
-			if m.Name != discoveryLatencyInstrumentName {
+			if m.Name != instrumentName {
 				continue
 			}
 			h, ok := m.Data.(metricdata.Histogram[float64])
@@ -77,7 +78,7 @@ func TestConnectorConnect_RecordsDiscoveryLatencyOnSuccess(t *testing.T) {
 		t.Fatalf("Connect: %v", err)
 	}
 
-	points := discoveryLatencyPoints(t, reader)
+	points := latencyPoints(t, reader, discoveryLatencyInstrumentName)
 	if len(points) != 1 {
 		t.Fatalf("got %d data points, want 1", len(points))
 	}
@@ -121,7 +122,7 @@ func TestConnectorConnect_RecordsDiscoveryLatencyOnFailure(t *testing.T) {
 		t.Fatalf("Connect error = %v, want %v", err, wantErr)
 	}
 
-	points := discoveryLatencyPoints(t, reader)
+	points := latencyPoints(t, reader, discoveryLatencyInstrumentName)
 	if len(points) != 1 {
 		t.Fatalf("got %d data points, want 1", len(points))
 	}
@@ -194,7 +195,7 @@ func TestNewDiscoveryLatencyHistogram_InstrumentName(t *testing.T) {
 	hist := newDiscoveryLatencyHistogram(mp.Meter("test"), logr.Discard())
 	hist.Record(context.Background(), 123.0)
 
-	if points := discoveryLatencyPoints(t, reader); len(points) != 1 {
+	if points := latencyPoints(t, reader, discoveryLatencyInstrumentName); len(points) != 1 {
 		t.Errorf("got %d data points, want 1", len(points))
 	}
 }
@@ -215,11 +216,106 @@ func TestNew_WiresMeterProviderToConnector(t *testing.T) {
 		t.Fatalf("Connect: %v", err)
 	}
 
-	points := discoveryLatencyPoints(t, reader)
+	points := latencyPoints(t, reader, discoveryLatencyInstrumentName)
 	if len(points) != 1 {
 		t.Fatalf("got %d data points, want 1: Options.MeterProvider is not wired into the connector", len(points))
 	}
 	if !attrsContain(points[0].Attributes, "mode", "direct") || !attrsContain(points[0].Attributes, "status", "success") {
 		t.Errorf("got attributes %v, want mode=direct status=success", points[0].Attributes)
+	}
+}
+
+func TestSuspendResumeLatencyHistograms_InstrumentNames(t *testing.T) {
+	// Guards the cross-SDK contract: the OTel Prometheus exporter renders
+	// these instrument names and their "s" unit as
+	// sandbox_client_suspend_latency_seconds and
+	// sandbox_client_resume_latency_seconds.
+	if suspendLatencyInstrumentName != "sandbox.client.suspend.latency" {
+		t.Errorf("instrument name = %q, want sandbox.client.suspend.latency", suspendLatencyInstrumentName)
+	}
+	if resumeLatencyInstrumentName != "sandbox.client.resume.latency" {
+		t.Errorf("instrument name = %q, want sandbox.client.resume.latency", resumeLatencyInstrumentName)
+	}
+}
+
+func TestRecordLatency_StatusAttribute(t *testing.T) {
+	reader := metric.NewManualReader()
+	mp := metric.NewMeterProvider(metric.WithReader(reader))
+	hist := newSuspendLatencyHistogram(mp.Meter("test"), logr.Discard())
+
+	recordLatency(context.Background(), hist, time.Now(), nil)
+	recordLatency(context.Background(), hist, time.Now(), errors.New("boom"))
+
+	points := latencyPoints(t, reader, suspendLatencyInstrumentName)
+	if len(points) != 2 {
+		t.Fatalf("got %d data points, want 2", len(points))
+	}
+	var sawSuccess, sawFailure bool
+	for _, p := range points {
+		if p.Count != 1 {
+			t.Errorf("got count %d, want 1", p.Count)
+		}
+		sawSuccess = sawSuccess || attrsContain(p.Attributes, "status", "success")
+		sawFailure = sawFailure || attrsContain(p.Attributes, "status", "failure")
+	}
+	if !sawSuccess || !sawFailure {
+		t.Errorf("got points %v, want one status=success and one status=failure", points)
+	}
+}
+
+func TestRecordLatency_NilHistogramDoesNotPanic(_ *testing.T) {
+	recordLatency(context.Background(), nil, time.Now(), nil)
+}
+
+func TestSuspend_RecordsFailureLatency(t *testing.T) {
+	// A handle that never went through Open has no sandbox name, so Suspend
+	// fails before touching the API server; the failure must still be
+	// recorded, matching the Python SDK's decorator on the whole method.
+	reader := metric.NewManualReader()
+	mp := metric.NewMeterProvider(metric.WithReader(reader))
+
+	sb, err := New(context.Background(), Options{
+		K8sHelper:     &K8sHelper{},
+		APIURL:        "http://127.0.0.1:8080",
+		MeterProvider: mp,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := sb.Suspend(context.Background()); err == nil {
+		t.Fatal("Suspend on an unresolved sandbox succeeded, want error")
+	}
+
+	points := latencyPoints(t, reader, suspendLatencyInstrumentName)
+	if len(points) != 1 {
+		t.Fatalf("got %d data points, want 1", len(points))
+	}
+	if !attrsContain(points[0].Attributes, "status", "failure") {
+		t.Errorf("got attributes %v, want status=failure", points[0].Attributes)
+	}
+}
+
+func TestResume_RecordsFailureLatency(t *testing.T) {
+	reader := metric.NewManualReader()
+	mp := metric.NewMeterProvider(metric.WithReader(reader))
+
+	sb, err := New(context.Background(), Options{
+		K8sHelper:     &K8sHelper{},
+		APIURL:        "http://127.0.0.1:8080",
+		MeterProvider: mp,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := sb.Resume(context.Background()); err == nil {
+		t.Fatal("Resume on an unresolved sandbox succeeded, want error")
+	}
+
+	points := latencyPoints(t, reader, resumeLatencyInstrumentName)
+	if len(points) != 1 {
+		t.Fatalf("got %d data points, want 1", len(points))
+	}
+	if !attrsContain(points[0].Attributes, "status", "failure") {
+		t.Errorf("got attributes %v, want status=failure", points[0].Attributes)
 	}
 }

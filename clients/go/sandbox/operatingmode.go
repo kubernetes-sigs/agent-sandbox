@@ -37,6 +37,15 @@ import (
 // of returning early.
 // Pass WithTimeout to override Options.SandboxReadyTimeout as the wait budget.
 func (s *Sandbox) Suspend(ctx context.Context, opts ...CallOption) error {
+	// Mirrors the Python SDK's sandbox_client_suspend_latency metric: the
+	// sample covers the whole operation, including the condition wait.
+	start := time.Now()
+	err := s.suspend(ctx, opts...)
+	recordLatency(ctx, s.suspendLatency, start, err)
+	return err
+}
+
+func (s *Sandbox) suspend(ctx context.Context, opts ...CallOption) error {
 	timeout := s.suspendResumeTimeout(opts)
 
 	// WithTimeout documents a total operation timeout, so the deadline
@@ -115,6 +124,16 @@ func (s *Sandbox) Suspend(ctx context.Context, opts ...CallOption) error {
 // transport always reconnects.
 // Pass WithTimeout to override Options.SandboxReadyTimeout as the wait budget.
 func (s *Sandbox) Resume(ctx context.Context, opts ...CallOption) error {
+	// Mirrors the Python SDK's sandbox_client_resume_latency metric: the
+	// sample covers the whole operation, including the readiness wait and
+	// the reconnect.
+	start := time.Now()
+	err := s.resume(ctx, opts...)
+	recordLatency(ctx, s.resumeLatency, start, err)
+	return err
+}
+
+func (s *Sandbox) resume(ctx context.Context, opts ...CallOption) error {
 	timeout := s.suspendResumeTimeout(opts)
 
 	// WithTimeout documents a total operation timeout, so the deadline

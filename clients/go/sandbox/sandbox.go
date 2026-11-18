@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -67,6 +68,11 @@ type Sandbox struct {
 	traceServiceName string
 	lifecycleSpan    trace.Span
 	lifecycleCtx     context.Context
+
+	// suspendLatency and resumeLatency record how long Suspend and Resume
+	// take. They are never nil on a Sandbox built by New.
+	suspendLatency metric.Float64Histogram
+	resumeLatency  metric.Float64Histogram
 }
 
 // Compile-time interface checks.
@@ -159,6 +165,7 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 		routerHeaders = true
 		serverPort = opts.SandboxdRESTPort
 	}
+	meter := newMeter(opts)
 	conn := newConnector(connectorConfig{
 		Strategy:            strategy,
 		Namespace:           opts.Namespace,
@@ -173,7 +180,7 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 		Log:                 opts.Logger,
 		Tracer:              tracer,
 		TraceServiceName:    svcName,
-		DiscoveryLatency:    newDiscoveryLatencyHistogram(newMeter(opts), opts.Logger),
+		DiscoveryLatency:    newDiscoveryLatencyHistogram(meter, opts.Logger),
 	})
 
 	// Wire strategy connector references for death notifications (and, for
@@ -198,6 +205,8 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 		inflightOps:      &sync.WaitGroup{},
 		tracer:           tracer,
 		traceServiceName: svcName,
+		suspendLatency:   newSuspendLatencyHistogram(meter, opts.Logger),
+		resumeLatency:    newResumeLatencyHistogram(meter, opts.Logger),
 	}
 
 	errPrefix := s.errPrefix

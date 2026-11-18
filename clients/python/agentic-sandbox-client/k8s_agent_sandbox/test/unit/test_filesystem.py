@@ -602,7 +602,7 @@ class TestAsyncSandboxdFilesystem(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(args[:2], ("PUT", "v1/files/?extract=tar"))
 
     async def test_stat_returns_the_entry(self):
-        response = MagicMock()
+        response = MagicMock(aread=AsyncMock(), aclose=AsyncMock())
         response.headers = {"Content-Type": "application/json"}
         response.json.return_value = {
             "name": "/", "size": 4096, "type": "directory",
@@ -612,13 +612,40 @@ class TestAsyncSandboxdFilesystem(unittest.IsolatedAsyncioTestCase):
 
         entry = await self.fs.stat("/")
 
-        args, _ = self.connector.send_request.call_args
+        args, kwargs = self.connector.send_request.call_args
         self.assertEqual(args[:2], ("GET", "v1/files/?stat=true"))
+        self.assertTrue(kwargs["stream"])
+        response.aclose.assert_awaited_once_with()
         self.assertEqual(
             (entry.name, entry.type, entry.size, entry.mode),
             ("/", "directory", 4096, "0755"),
         )
         self.assertEqual(entry.modified.microsecond, 500000)
+
+    async def test_stat_rejects_a_file_served_instead_of_its_entry(self):
+        response = MagicMock(aread=AsyncMock(), aclose=AsyncMock())
+        response.headers = {"Content-Type": "application/octet-stream"}
+        self.connector.send_request.return_value = response
+
+        with self.assertRaisesRegex(RuntimeError, "may not support stat"):
+            await self.fs.stat("notes.txt")
+        # The body is the whole file, so stat must close the response unread.
+        response.aread.assert_not_awaited()
+        response.aclose.assert_awaited_once_with()
+
+    async def test_stat_invalidates_the_transport_when_the_body_read_fails(self):
+        response = MagicMock(aclose=AsyncMock())
+        response.headers = {"Content-Type": "application/json"}
+        response.extensions = {"sandboxd_transport_token": (token := object())}
+        response.aread = AsyncMock(side_effect=httpx.ReadError("lost"))
+        self.connector.send_request.return_value = response
+        self.connector.invalidate_sandboxd_transport = AsyncMock()
+
+        with self.assertRaises(httpx.ReadError):
+            await self.fs.stat("notes.txt")
+        self.connector.invalidate_sandboxd_transport.assert_awaited_once_with(
+            None, transport_token=token)
+        response.aclose.assert_awaited_once_with()
 
     @patch("k8s_agent_sandbox.files.async_filesystem.trace")
     async def test_delete_records_path_in_trace(self, mock_trace):

@@ -309,23 +309,27 @@ class _JSONResponse(Protocol):
     """The part of a requests or httpx response that ``_stat_entry`` reads."""
 
     @property
-    def headers(self) -> Mapping[str, str]: ...
-
-    @property
     def text(self) -> str: ...
 
     def json(self) -> Any: ...
 
 
-def _stat_entry(response: _JSONResponse) -> FileEntry:
-    """Decode the FileEntry in a sandboxd stat response."""
-    # A sandboxd that predates stat ignores the query. It answers a file with
-    # the file's bytes, which must not end up in the error message.
-    media_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+def _require_stat_json(headers: Mapping[str, str]) -> None:
+    """Reject a stat response that is not JSON, without reading its body.
+
+    A sandboxd that predates stat ignores the query and answers a file with
+    the file's bytes. The caller must neither download them nor put them in an
+    error message.
+    """
+    media_type = headers.get("Content-Type", "").split(";")[0].strip().lower()
     if media_type != "application/json":
         raise RuntimeError(
             "Server returned a non-JSON stat response; this sandboxd may not support stat"
         )
+
+
+def _stat_entry(response: _JSONResponse) -> FileEntry:
+    """Decode the FileEntry in the body of a sandboxd stat response."""
     try:
         entry = response.json()
     except ValueError as e:
@@ -716,8 +720,21 @@ class Filesystem:
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
         endpoint = _stat_endpoint(self.connector, path)
-        response = self.connector.send_request("GET", endpoint, timeout=timeout)
-        return _stat_entry(response)
+        response = self.connector.send_request(
+            "GET", endpoint, timeout=timeout, stream=True
+        )
+        try:
+            _require_stat_json(response.headers)
+            return _stat_entry(response)
+        except requests.exceptions.RequestException:
+            transport_token = getattr(response, "_sandboxd_transport_token", None)
+            if transport_token is not None:
+                self.connector.invalidate_sandboxd_transport(
+                    None, transport_token=transport_token
+                )
+            raise
+        finally:
+            response.close()
 
     @trace_span("delete")
     def delete(self, path: str, recursive: bool = False, timeout: int = 60) -> None:

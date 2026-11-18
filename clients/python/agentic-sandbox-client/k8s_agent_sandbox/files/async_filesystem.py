@@ -36,6 +36,7 @@ from k8s_agent_sandbox.files.filesystem import (
     _STREAM_CHUNK_SIZE,
     _list_endpoint,
     _mkdir_endpoint,
+    _require_stat_json,
     _check_write_options,
     _sandboxd_files_endpoint,
     _sandboxd_read_endpoint,
@@ -438,9 +439,21 @@ class AsyncFilesystem:
             span.set_attribute("sandbox.file.path", path)
         endpoint = _stat_endpoint(self.connector, path)
         response = await self.connector.send_request(
-            "GET", endpoint, timeout=timeout
+            "GET", endpoint, timeout=timeout, stream=True
         )
-        return _stat_entry(response)
+        try:
+            _require_stat_json(response.headers)
+            await response.aread()
+            return _stat_entry(response)
+        except httpx.HTTPError:
+            transport_token = response.extensions.get("sandboxd_transport_token")
+            if transport_token is not None:
+                await self.connector.invalidate_sandboxd_transport(
+                    None, transport_token=transport_token
+                )
+            raise
+        finally:
+            await response.aclose()
 
     @async_trace_span("delete")
     async def delete(

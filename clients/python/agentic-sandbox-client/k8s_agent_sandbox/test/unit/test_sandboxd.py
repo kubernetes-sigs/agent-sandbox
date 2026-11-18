@@ -24,6 +24,8 @@ import io
 import unittest
 from unittest.mock import MagicMock
 
+import requests
+
 from k8s_agent_sandbox import (
     SandboxdInClusterConnectionConfig as PublicInClusterConfig,
     SandboxNoServiceError,
@@ -356,8 +358,10 @@ class TestSandboxdFilesystem(unittest.TestCase):
 
         entry = self._fs.stat("my dir/notes.txt")
 
-        args, _ = self._last_call()
+        args, kwargs = self._last_call()
         self.assertEqual(args[:2], ("GET", "v1/files/my%20dir/notes.txt?stat=true"))
+        self.assertTrue(kwargs["stream"])
+        resp.close.assert_called_once_with()
         self.assertEqual(entry, FileEntry(
             name="notes.txt", size=11, type="file", mode="0644",
             modified=datetime.datetime(
@@ -367,12 +371,26 @@ class TestSandboxdFilesystem(unittest.TestCase):
     def test_stat_rejects_a_file_served_instead_of_its_entry(self):
         resp = MagicMock()
         resp.headers = {"Content-Type": "application/octet-stream"}
-        resp.text = "file contents"
         self._connector.send_request.return_value = resp
 
-        with self.assertRaisesRegex(RuntimeError, "may not support stat") as raised:
+        with self.assertRaisesRegex(RuntimeError, "may not support stat"):
             self._fs.stat("notes.txt")
-        self.assertNotIn("file contents", str(raised.exception))
+        # The body is the whole file, so stat must close the response unread.
+        self.assertEqual(
+            [name for name, _, _ in resp.method_calls], ["close"])
+
+    def test_stat_invalidates_the_transport_when_the_body_read_fails(self):
+        resp = MagicMock()
+        resp.headers = {"Content-Type": "application/json"}
+        resp._sandboxd_transport_token = token = object()
+        resp.json.side_effect = requests.exceptions.ChunkedEncodingError("lost")
+        self._connector.send_request.return_value = resp
+
+        with self.assertRaises(requests.exceptions.ChunkedEncodingError):
+            self._fs.stat("notes.txt")
+        self._connector.invalidate_sandboxd_transport.assert_called_once_with(
+            None, transport_token=token)
+        resp.close.assert_called_once_with()
 
     def test_stat_rejects_a_directory_listing(self):
         resp = MagicMock()

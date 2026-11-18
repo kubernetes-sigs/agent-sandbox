@@ -16,7 +16,7 @@
 # sigs.k8s.io/agent-sandbox with ../.. :
 #   docker build -f examples/managed-agents/claude-managed-agents/Dockerfile -t cma-runner:v1 .
 
-FROM golang:1.27 AS build
+FROM golang:1.27.3 AS build
 WORKDIR /src
 # The replaced root module's go.mod must exist for the example module to load.
 COPY go.mod go.sum ./

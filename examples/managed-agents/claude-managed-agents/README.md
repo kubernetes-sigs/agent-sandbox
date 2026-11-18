@@ -6,7 +6,7 @@ A local controller polls the CMA work API, claims one warm sandbox per agent
 session, and suspends idle sandboxes; an in-sandbox runner daemon executes
 the tool calls and heartbeats the work lease.
 
-This is one bridge of the [managed-agents](../README.md) example collection;
+This is one bridge of the [managed-agents](../../managed-agents/README.md) example collection;
 that README explains how these bridges map onto Agent Sandbox in general.
 This one adapts [agent-substrate/claude-managed-agents](https://github.com/agent-substrate/claude-managed-agents)
 (Apache-2.0) from Agent Substrate actors to the Agent Sandbox CRDs and Go
@@ -152,6 +152,11 @@ workspace PVC.
   `--release-after`) deletes the PVC with it.
 - The runner's file tools are confined to `/workspace` and `/tmp`; the pod
   is the security boundary.
+- **Any session on your environment can obtain `ANTHROPIC_ENVIRONMENT_KEY`.**
+  The bash tool runs as the same UID as the runner, so a model-issued command
+  can read the key from `/proc/1/environ` even though the SDK scrubs it from
+  the shell environment. The key is environment-wide: do not share one CMA
+  environment across mutually untrusted sessions.
 - The runner image holds an idle TCP listener on :9090 because the Go SDK
   requires its two tunnel ports to differ; the controller never speaks gRPC
   to the runner.

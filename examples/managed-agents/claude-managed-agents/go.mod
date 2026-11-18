@@ -1,6 +1,6 @@
 module sigs.k8s.io/agent-sandbox/examples/managed-agents/claude-managed-agents
 
-go 1.27.0
+go 1.26.0
 
 toolchain go1.27.3
 

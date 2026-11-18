@@ -289,6 +289,15 @@ def discover_images(args, excluded_dirs):
                 context_dir = "."
                 service_name = "sandboxed-tools-acp-server"
 
+            # The Claude Managed Agents runner builds from the repo root (its
+            # module replaces the root module) and takes a qualified name:
+            # "claude-managed-agents" alone says nothing about the binary, and
+            # the manifests and README refer to it as cma-runner.
+            cma_runner_dir = os.path.join(".", "examples", "managed-agents", "claude-managed-agents")
+            if root == cma_runner_dir:
+                context_dir = "."
+                service_name = "cma-runner"
+
             # The multi-cluster-fleet image copies the Python SDK and the
             # example's python/ tree with repo-root-relative paths, so it
             # too builds from the repo root. Its directory is named after

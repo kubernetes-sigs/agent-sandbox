@@ -137,8 +137,9 @@ replacements:
     description: "TypeScript client src/index.ts to GitHub"
 
   # managed-agents collection: the child README links to its parent
-  # collection README one level up; map it to the parent docs page.
-  - pattern: '\]\(\.\./README\.md(#[^)]+)?\)'
+  # collection README via a path-specific form (../../managed-agents/README.md
+  # rather than ../README.md) so this rule cannot capture other READMEs.
+  - pattern: '\]\(\.\./\.\./managed-agents/README\.md(#[^)]+)?\)'
     replacement: '](/docs/use-cases/examples/managed-agents/$1)'
     description: "managed-agents parent README to its docs page"
 

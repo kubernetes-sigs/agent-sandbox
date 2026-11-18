@@ -162,6 +162,13 @@ export interface RuntimeCallOptions {
   signal?: AbortSignal;
 }
 
+/** Options for sandbox.suspend() and sandbox.resume(). */
+export interface SuspendResumeOptions {
+  /** Total budget (ms) for the call. Default: 180000. */
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
 /**
  * Options accepted by every sandbox.files.* method. Kept as an alias of
  * {@link RuntimeCallOptions} so existing callers keep compiling.

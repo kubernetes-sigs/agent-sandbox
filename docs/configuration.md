@@ -32,6 +32,8 @@ For the benchmark data and sizing rationale behind these settings — including 
 
 A `SandboxWarmPool` can override the readiness grace period for its own sandboxes with `spec.readinessGracePeriodSeconds`, for example for a pool backed by a slower runtime. The effective value is the pool field, then an explicitly set `--sandbox-warm-pool-readiness-grace-period` flag, then the value from the [agent-sandbox-config ConfigMap](#agent-sandbox-config-configmap), then the built-in default. The unschedulable re-check interval stays controller-level.
 
+If replacing stuck sandboxes does not produce a Ready one, for example because the image, command, or readiness probe in the template is broken, the pool waits longer before each further replacement: 30 seconds beyond the grace period after the first round, doubling up to 30 minutes. It keeps the stuck sandbox meanwhile, so the kubelet keeps retrying it, and emits a `WarmPoolStuckReplacements` warning event from the second round on. Any sandbox that stays Ready, or a change to the template, ends the backoff.
+
 ## API Write and Cache Optimization
 
 * `--disable-sandbox-events` (default: `false`): Disable Kubernetes Event emission from the Sandbox controller (its `Eventf` calls become no-ops), reducing API server and etcd write volume during large warm-pool fills and high-churn workloads.

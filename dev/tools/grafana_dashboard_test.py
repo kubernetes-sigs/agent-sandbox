@@ -22,7 +22,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DASHBOARD_PATH = REPO_ROOT / "helm" / "dashboards" / "agent-sandbox-controller.json"
 METRICS_DOC_PATH = REPO_ROOT / "docs" / "metrics.md"
 
-METRIC_ROW_RE = re.compile(r"^\| `(?P<name>agent_sandbox[a-z0-9_]*)` \|", re.MULTILINE)
+METRIC_ROW_RE = re.compile(
+    r"^\| `(?P<name>agent_sandbox[a-z0-9_]*)` \| (?P<type>\w+) \|",
+    re.MULTILINE,
+)
 METRIC_REF_RE = re.compile(r"\bagent_sandbox[a-z0-9_]*\b")
 HISTOGRAM_SUFFIXES = ("_bucket", "_sum", "_count")
 CORE_METRICS = {
@@ -42,7 +45,10 @@ CORE_METRICS = {
 
 
 def _documented_metrics():
-    return set(METRIC_ROW_RE.findall(METRICS_DOC_PATH.read_text()))
+    return {
+        match.group("name"): match.group("type")
+        for match in METRIC_ROW_RE.finditer(METRICS_DOC_PATH.read_text())
+    }
 
 
 def _dashboard():
@@ -65,8 +71,9 @@ def _normalized_metric(name, documented):
     if name in documented:
         return name
     for suffix in HISTOGRAM_SUFFIXES:
-        if name.endswith(suffix) and name[: -len(suffix)] in documented:
-            return name[: -len(suffix)]
+        base = name[: -len(suffix)] if name.endswith(suffix) else ""
+        if documented.get(base) == "Histogram":
+            return base
     return name
 
 
@@ -82,8 +89,8 @@ def test_dashboard_only_queries_documented_metric_families():
     documented = _documented_metrics()
     referenced = _referenced_metrics(_dashboard(), documented)
     assert referenced
-    assert referenced <= documented, (
-        f"Undocumented dashboard metrics: {sorted(referenced - documented)}"
+    assert referenced <= set(documented), (
+        f"Undocumented dashboard metrics: {sorted(referenced - set(documented))}"
     )
 
 
@@ -96,8 +103,20 @@ def test_metric_guard_also_checks_template_variable_queries():
             ],
         },
     }
-    assert _referenced_metrics(dashboard, documented) - documented == {
+    assert _referenced_metrics(dashboard, documented) - set(documented) == {
         "agent_sandbox_typo",
+    }
+
+
+def test_metric_guard_rejects_histogram_suffixes_on_non_histograms():
+    documented = _documented_metrics()
+    dashboard = {
+        "panels": [
+            {"targets": [{"expr": "agent_sandboxes_bucket"}]},
+        ],
+    }
+    assert _referenced_metrics(dashboard, documented) - set(documented) == {
+        "agent_sandboxes_bucket",
     }
 
 

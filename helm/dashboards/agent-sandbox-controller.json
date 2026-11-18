@@ -87,7 +87,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(agent_sandboxes{namespace=~\"$namespace\"})",
+          "expr": "sum(agent_sandboxes)",
           "instant": true,
           "legendFormat": "Sandboxes",
           "range": false,
@@ -150,7 +150,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(agent_sandboxes{namespace=~\"$namespace\", ready_condition=\"true\"})",
+          "expr": "sum(agent_sandboxes{ready_condition=\"true\"})",
           "instant": true,
           "legendFormat": "Ready",
           "range": false,
@@ -213,7 +213,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(agent_sandboxes{namespace=~\"$namespace\", operating_mode=\"Suspended\"})",
+          "expr": "sum(agent_sandboxes{operating_mode=\"Suspended\"})",
           "instant": true,
           "legendFormat": "Suspended",
           "range": false,
@@ -305,7 +305,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (ready_condition, operating_mode) (agent_sandboxes{namespace=~\"$namespace\"})",
+          "expr": "sum by (ready_condition, operating_mode) (agent_sandboxes)",
           "legendFormat": "ready={{ready_condition}} mode={{operating_mode}}",
           "range": true,
           "refId": "A"
@@ -409,7 +409,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (sandbox_status) (agent_sandbox_warmpool_size{namespace=~\"$namespace\"})",
+          "expr": "sum by (sandbox_status) (agent_sandbox_warmpool_size)",
           "legendFormat": "{{sandbox_status}}",
           "range": true,
           "refId": "A"
@@ -506,7 +506,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "(sum(rate(agent_sandbox_claim_creation_total{namespace=~\"$namespace\", launch_type=\"warm\"}[5m])) or vector(0)) / clamp_min(sum(rate(agent_sandbox_claim_creation_total{namespace=~\"$namespace\"}[5m])), 0.001)",
+          "expr": "(sum(rate(agent_sandbox_claim_creation_total{launch_type=\"warm\"}[5m])) or vector(0)) / clamp_min(sum(rate(agent_sandbox_claim_creation_total[5m])), 0.001)",
           "legendFormat": "Warm launches",
           "range": true,
           "refId": "A"
@@ -723,7 +723,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.50, sum by (le, launch_type) (rate(agent_sandbox_creation_latency_ms_bucket{namespace=~\"$namespace\"}[5m])))",
+          "expr": "histogram_quantile(0.50, sum by (le, launch_type) (rate(agent_sandbox_creation_latency_ms_bucket[5m])))",
           "legendFormat": "p50 {{launch_type}}",
           "range": true,
           "refId": "A"
@@ -734,7 +734,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le, launch_type) (rate(agent_sandbox_creation_latency_ms_bucket{namespace=~\"$namespace\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, launch_type) (rate(agent_sandbox_creation_latency_ms_bucket[5m])))",
           "legendFormat": "p95 {{launch_type}}",
           "range": true,
           "refId": "B"
@@ -745,7 +745,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by (le, launch_type) (rate(agent_sandbox_creation_latency_ms_bucket{namespace=~\"$namespace\"}[5m])))",
+          "expr": "histogram_quantile(0.99, sum by (le, launch_type) (rate(agent_sandbox_creation_latency_ms_bucket[5m])))",
           "legendFormat": "p99 {{launch_type}}",
           "range": true,
           "refId": "C"
@@ -849,7 +849,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (result) (rate(agent_sandbox_suspend_total{namespace=~\"$namespace\"}[5m]))",
+          "expr": "sum by (result) (rate(agent_sandbox_suspend_total[5m]))",
           "legendFormat": "suspend {{result}}",
           "range": true,
           "refId": "A"
@@ -860,7 +860,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (result) (rate(agent_sandbox_resume_total{namespace=~\"$namespace\"}[5m]))",
+          "expr": "sum by (result) (rate(agent_sandbox_resume_total[5m]))",
           "legendFormat": "resume {{result}}",
           "range": true,
           "refId": "B"
@@ -951,7 +951,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(agent_sandbox_suspend_latency_ms_bucket{namespace=~\"$namespace\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(agent_sandbox_suspend_latency_ms_bucket[5m])))",
           "legendFormat": "suspend p95",
           "range": true,
           "refId": "A"
@@ -962,7 +962,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(agent_sandbox_resume_latency_ms_bucket{namespace=~\"$namespace\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(agent_sandbox_resume_latency_ms_bucket[5m])))",
           "legendFormat": "resume p95",
           "range": true,
           "refId": "B"
@@ -1066,7 +1066,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (reason) (rate(agent_sandbox_finished_total{namespace=~\"$namespace\"}[5m]))",
+          "expr": "sum by (reason) (rate(agent_sandbox_finished_total[5m]))",
           "legendFormat": "finished {{reason}}",
           "range": true,
           "refId": "A"
@@ -1157,7 +1157,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (shutdown_policy) (rate(agent_sandbox_expired_total{namespace=~\"$namespace\"}[5m]))",
+          "expr": "sum by (shutdown_policy) (rate(agent_sandbox_expired_total[5m]))",
           "legendFormat": "expired {{shutdown_policy}}",
           "range": true,
           "refId": "A"
@@ -1222,7 +1222,7 @@
           "fields": "",
           "values": false
         },
-        "textMode": "auto",
+        "textMode": "name_and_value",
         "wideLayout": true
       },
       "targets": [
@@ -1232,9 +1232,9 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max(agent_sandbox_build_info)",
+          "expr": "max by (git_version, git_commit, build_date, go_version, platform) (agent_sandbox_build_info)",
           "instant": true,
-          "legendFormat": "Build info",
+          "legendFormat": "{{git_version}} ({{git_commit}})",
           "range": false,
           "refId": "A"
         }
@@ -1330,7 +1330,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (service) (up{namespace=~\"$namespace\", service=~\"$service\"})",
+          "expr": "sum by (service) (up{service=~\"$service\"})",
           "legendFormat": "{{service}}",
           "range": true,
           "refId": "A"
@@ -1367,62 +1367,18 @@
         "type": "datasource"
       },
       {
-        "allValue": ".*",
         "current": {
-          "selected": true,
-          "text": [
-            "All"
-          ],
-          "value": [
-            "$__all"
-          ]
+          "selected": false,
+          "text": "agent-sandbox-controller",
+          "value": "agent-sandbox-controller"
         },
-        "datasource": {
-          "type": "prometheus",
-          "uid": "${datasource}"
-        },
-        "definition": "label_values(agent_sandboxes, namespace)",
         "hide": 0,
-        "includeAll": true,
-        "label": "Namespace",
-        "multi": true,
-        "name": "namespace",
-        "options": [],
-        "query": "label_values(agent_sandboxes, namespace)",
-        "refresh": 1,
-        "regex": "",
-        "skipUrlSync": false,
-        "sort": 1,
-        "type": "query"
-      },
-      {
-        "allValue": ".*",
-        "current": {
-          "selected": true,
-          "text": [
-            "All"
-          ],
-          "value": [
-            "$__all"
-          ]
-        },
-        "datasource": {
-          "type": "prometheus",
-          "uid": "${datasource}"
-        },
-        "definition": "label_values(up{namespace=~\"$namespace\"}, service)",
-        "hide": 0,
-        "includeAll": true,
-        "label": "Service",
-        "multi": true,
+        "label": "Controller service",
         "name": "service",
         "options": [],
-        "query": "label_values(up{namespace=~\"$namespace\"}, service)",
-        "refresh": 1,
-        "regex": "",
+        "query": "agent-sandbox-controller",
         "skipUrlSync": false,
-        "sort": 1,
-        "type": "query"
+        "type": "textbox"
       }
     ]
   },

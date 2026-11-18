@@ -16,8 +16,11 @@ import * as http2 from "node:http2";
 import type * as net from "node:net";
 import { create } from "@bufbuild/protobuf";
 import { Code, ConnectError, type ConnectRouter } from "@connectrpc/connect";
-import { connectNodeAdapter } from "@connectrpc/connect-node";
-import { afterEach, describe, expect, it } from "vitest";
+import {
+  connectNodeAdapter,
+  Http2SessionManager,
+} from "@connectrpc/connect-node";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ExecuteResponseSchema,
   InitEventSchema,
@@ -797,6 +800,38 @@ describe("ProcessClient.watchDir", () => {
     const err = await events.next().catch((e: unknown) => e);
     expect(err).toBeInstanceOf(SandboxdRpcError);
     expect(err).toMatchObject({ code: "unimplemented" });
+  });
+
+  it("reports an unreachable sandboxd before returning the iterator", async () => {
+    const server = await startH2Server(() => {});
+    await server.close();
+    activeClient = new ProcessClient({
+      grpcBaseUrl: server.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+
+    const err = await activeClient
+      .watchDir(".", false, new AbortController().signal)
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(SandboxConnectionError);
+    expect(err).toMatchObject({ kind: "unavailable" });
+  });
+
+  it("stops waiting for a stalled connection when the signal aborts", async () => {
+    const client = await startClient(async function* () {});
+    const connect = vi
+      .spyOn(Http2SessionManager.prototype, "connect")
+      .mockReturnValue(new Promise(() => {}));
+    const controller = new AbortController();
+    const reason = new Error("startup budget spent");
+
+    const opening = client.watchDir(".", false, controller.signal);
+    await vi.waitFor(() => expect(connect).toHaveBeenCalled());
+    controller.abort(reason);
+
+    await expect(opening).rejects.toBe(reason);
+    connect.mockRestore();
   });
 
   it("throws the signal's own reason when the caller aborts the stream", async () => {

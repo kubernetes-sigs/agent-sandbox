@@ -320,7 +320,7 @@ export interface StartedProcess {
 
 export class ProcessClient {
   private closed = false;
-  private sessionManager: { abort(reason?: Error): void } | null = null;
+  private sessionManager: H2SessionManager | null = null;
   private client: ProcessRpcClient | null = null;
   private watcher: WatcherRpcClient | null = null;
   private deps: GrpcDeps | null = null;
@@ -580,12 +580,15 @@ export class ProcessClient {
   }
 
   /**
-   * Prepares a WatchDir stream. Connect sends the request on the first
-   * `next()`. sandboxd then answers only with the first event or with a
-   * refusal (for example a path that does not exist), so that read can wait
-   * as long as the directory stays unchanged. The iterator ends when sandboxd
-   * ends the stream. `signal` governs the stream's whole lifetime, and no
-   * gRPC deadline is set, for the same reason as in start().
+   * Connects to sandboxd, then prepares a WatchDir stream. Connect sends the
+   * request on the first `next()`. sandboxd then answers only with the first
+   * event or with a refusal (for example a path that does not exist), so that
+   * read can wait as long as the directory stays unchanged. Connecting here
+   * lets the caller's deadline cover an unreachable sandboxd, which that read
+   * could not tell apart from an unchanged directory. The iterator ends when
+   * sandboxd ends the stream. `signal` governs the connecting and the
+   * stream's whole lifetime, and no gRPC deadline is set, for the same reason
+   * as in start().
    */
   async watchDir(
     path: string,
@@ -593,6 +596,7 @@ export class ProcessClient {
     signal: AbortSignal,
   ): Promise<AsyncIterator<FileEvent, undefined>> {
     await this.ensureInit();
+    await this.connectSession(signal, "WatchDir");
     const deps = this.deps as GrpcDeps;
     const watcher = this.watcher as WatcherRpcClient;
 
@@ -618,6 +622,32 @@ export class ProcessClient {
         };
       },
     };
+  }
+
+  /** Waits until the HTTP/2 session to sandboxd is open, or `signal` aborts. */
+  private async connectSession(
+    signal: AbortSignal,
+    rpc: string,
+  ): Promise<void> {
+    const sessionManager = this.sessionManager as H2SessionManager;
+    let onAbort!: () => void;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(signal.reason);
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      const state = await Promise.race([sessionManager.connect(), aborted]);
+      if (state === "error") {
+        throw this.classifyError(
+          sessionManager.error(),
+          this.deps as GrpcDeps,
+          rpc,
+        );
+      }
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+    }
   }
 
   private async unary(

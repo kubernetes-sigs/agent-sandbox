@@ -338,6 +338,11 @@ Neither is retried, and an append is not atomic. The legacy runtime raises
 a directory, or the sandbox root for `/`. `archive` is `bytes` or a binary file
 object. The legacy runtime raises `NotImplementedError`.
 
+`files.stat(path)` returns the `FileEntry` for one file or directory: its
+`name`, `type`, `size`, `mode` and `modified` time. `/` names the sandbox root.
+A missing path fails with a 404 `SandboxRequestError`. The legacy runtime
+raises `NotImplementedError`.
+
 ### 6. Async Client
 
 For async applications (FastAPI, aiohttp, async agent orchestrators), use the `AsyncSandboxClient`.

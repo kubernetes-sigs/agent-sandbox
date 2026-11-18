@@ -15,6 +15,7 @@
 package sandbox
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -143,18 +144,24 @@ func stampClientRequestTime(annotations map[string]string, now time.Time) map[st
 	return annotations
 }
 
-// claimLifecycle returns the lifecycle that expires a claim ttl after now, or
-// nil when ttl is unset. The API keeps whole seconds and truncates, so the
-// deadline is rounded up to keep a short ttl from expiring early.
-func claimLifecycle(now time.Time, ttl time.Duration) *extv1beta1.Lifecycle {
-	if ttl <= 0 {
+// claimLifecycle returns the claim lifecycle from opts, or nil when opts sets
+// none of ShutdownAfter, ShutdownPolicy, and TTLSecondsAfterFinished. The API
+// keeps whole seconds and truncates, so the deadline is rounded up to keep a
+// short ShutdownAfter from expiring early. The policy defaults to Delete
+// because the API's own default, Retain, would leave every expired claim behind.
+func claimLifecycle(now time.Time, opts *Options) *extv1beta1.Lifecycle {
+	if opts.ShutdownAfter <= 0 && opts.ShutdownPolicy == "" && opts.TTLSecondsAfterFinished == nil {
 		return nil
 	}
-	shutdownTime := metav1.NewTime(now.Add(ttl).Add(time.Second - 1).Truncate(time.Second))
-	return &extv1beta1.Lifecycle{
-		ShutdownTime:   &shutdownTime,
-		ShutdownPolicy: extv1beta1.ShutdownPolicyDelete,
+	lifecycle := &extv1beta1.Lifecycle{
+		ShutdownPolicy:          cmp.Or(opts.ShutdownPolicy, extv1beta1.ShutdownPolicyDelete),
+		TTLSecondsAfterFinished: opts.TTLSecondsAfterFinished,
 	}
+	if opts.ShutdownAfter > 0 {
+		shutdownTime := metav1.NewTime(now.Add(opts.ShutdownAfter).Add(time.Second - 1).Truncate(time.Second))
+		lifecycle.ShutdownTime = &shutdownTime
+	}
+	return lifecycle
 }
 
 // newClaim builds the SandboxClaim that Open creates from opts. The claim
@@ -175,7 +182,7 @@ func newClaim(opts *Options, now time.Time) *extv1beta1.SandboxClaim {
 				Name: opts.WarmPoolName,
 			},
 			Env:                  opts.Env,
-			Lifecycle:            claimLifecycle(now, opts.ShutdownAfter),
+			Lifecycle:            claimLifecycle(now, opts),
 			VolumeClaimTemplates: opts.VolumeClaimTemplates,
 		},
 	}

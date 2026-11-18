@@ -42,6 +42,8 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func WithPodLabels\(labels map\[string\]string\) CreateOption](<#WithPodLabels>)
   - [func WithSandboxReadyTimeout\(d time.Duration\) CreateOption](<#WithSandboxReadyTimeout>)
   - [func WithShutdownAfter\(d time.Duration\) CreateOption](<#WithShutdownAfter>)
+  - [func WithShutdownPolicy\(p extv1beta1.ShutdownPolicy\) CreateOption](<#WithShutdownPolicy>)
+  - [func WithTTLSecondsAfterFinished\(seconds int32\) CreateOption](<#WithTTLSecondsAfterFinished>)
   - [func WithVolumeClaimTemplates\(templates \[\]sandboxv1beta1.PersistentVolumeClaimTemplate\) CreateOption](<#WithVolumeClaimTemplates>)
 - [type DirectStrategy](<#DirectStrategy>)
   - [func \(s \*DirectStrategy\) Close\(\) error](<#DirectStrategy.Close>)
@@ -561,6 +563,24 @@ func WithShutdownAfter(d time.Duration) CreateOption
 ```
 
 WithShutdownAfter sets the claim lifetime for a single CreateSandbox call, replacing Client\-level Options.ShutdownAfter. Zero means no expiry.
+
+<a name="WithShutdownPolicy"></a>
+#### func [WithShutdownPolicy](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithShutdownPolicy(p extv1beta1.ShutdownPolicy) CreateOption
+```
+
+WithShutdownPolicy sets spec.lifecycle.shutdownPolicy for a single CreateSandbox call, replacing Client\-level Options.ShutdownPolicy.
+
+<a name="WithTTLSecondsAfterFinished"></a>
+#### func [WithTTLSecondsAfterFinished](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithTTLSecondsAfterFinished(seconds int32) CreateOption
+```
+
+WithTTLSecondsAfterFinished sets spec.lifecycle.ttlSecondsAfterFinished for a single CreateSandbox call, replacing Client\-level Options.TTLSecondsAfterFinished.
 
 <a name="WithVolumeClaimTemplates"></a>
 #### func [WithVolumeClaimTemplates](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
@@ -1085,6 +1105,16 @@ type Options struct {
     // gets spec.lifecycle.shutdownTime and the Delete shutdown policy; the
     // deadline is rounded up to a whole second. Zero (the default) means no expiry.
     ShutdownAfter time.Duration
+
+    // ShutdownPolicy sets spec.lifecycle.shutdownPolicy on every SandboxClaim
+    // this client creates: Delete, DeleteForeground, or Retain. Empty means
+    // Delete when ShutdownAfter or TTLSecondsAfterFinished is set. The API's own
+    // default for an omitted policy is Retain.
+    ShutdownPolicy extv1beta1.ShutdownPolicy
+
+    // TTLSecondsAfterFinished sets spec.lifecycle.ttlSecondsAfterFinished on
+    // every SandboxClaim this client creates. Nil (the default) leaves it unset.
+    TTLSecondsAfterFinished *int32
 
     // PodLabels are propagated to the backing Sandbox Pod via
     // spec.additionalPodMetadata.labels (unlike Labels, which are placed on the

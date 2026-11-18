@@ -1456,6 +1456,7 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 		expectSandboxDeleted       bool
 		expectSandboxStatusCleared bool // SandboxStatus.Name, PodIPs, and ServiceFQDN must be empty
 		expectStatus               string
+		expectPropagation          metav1.DeletionPropagation // sent with the claim delete; "" means none
 	}{
 		{
 			name:                 "Policy=Retain -> Should Retain Claim but DELETE Sandbox",
@@ -1528,6 +1529,7 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 		{
 			name:               "Policy=DeleteForeground && Sandbox Running -> Should Delete Claim with foreground propagation",
 			claim:              createClaim("delete-fg-claim", extensionsv1beta1.ShutdownPolicyDeleteForeground),
+			expectPropagation:  metav1.DeletePropagationForeground,
 			sandboxIsExpired:   false,
 			expectClaimDeleted: true,
 			// FakeClient doesn't simulate GC or foreground propagation,
@@ -1538,6 +1540,7 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 		{
 			name:                 "Policy=DeleteForeground && Sandbox Expired -> Should Delete Claim with foreground propagation",
 			claim:                createClaim("delete-fg-claim-expired", extensionsv1beta1.ShutdownPolicyDeleteForeground),
+			expectPropagation:    metav1.DeletePropagationForeground,
 			sandboxIsExpired:     true,
 			expectClaimDeleted:   true,
 			expectSandboxDeleted: false,
@@ -1588,9 +1591,21 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 				tc.claim.Status.SandboxStatus.ServiceFQDN = "previous-sandbox.default.svc.cluster.local"
 			}
 
-			client := fake.NewClientBuilder().WithScheme(scheme).
+			baseClient := fake.NewClientBuilder().WithScheme(scheme).
 				WithObjects(template, warmPool, tc.claim, sandbox).
 				WithStatusSubresource(tc.claim).Build()
+			// The fake client ignores propagation, so record what the claim delete sends.
+			var gotPropagation metav1.DeletionPropagation
+			client := interceptor.NewClient(baseClient, interceptor.Funcs{
+				Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+					if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok {
+						if p := (&client.DeleteOptions{}).ApplyOptions(opts).PropagationPolicy; p != nil {
+							gotPropagation = *p
+						}
+					}
+					return c.Delete(ctx, obj, opts...)
+				},
+			})
 
 			reconciler := &SandboxClaimReconciler{
 				Client:           client,
@@ -1607,6 +1622,10 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 				if err != nil {
 					t.Fatalf("reconcile failed: %v", err)
 				}
+			}
+
+			if gotPropagation != tc.expectPropagation {
+				t.Errorf("claim delete propagation = %q, want %q", gotPropagation, tc.expectPropagation)
 			}
 
 			// 1. Verify Claim

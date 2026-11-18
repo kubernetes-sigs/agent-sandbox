@@ -1453,6 +1453,7 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 		noShutdownTime             bool // no expiry configured at all
 		sandboxFinished            bool // sandbox reports Finished=True
 		expectClaimDeleted         bool
+		expectForegroundDelete     bool // the claim delete request asks for foreground propagation
 		expectSandboxDeleted       bool
 		expectSandboxStatusCleared bool // SandboxStatus.Name, PodIPs, and ServiceFQDN must be empty
 		expectStatus               string
@@ -1526,22 +1527,24 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 			expectStatus:         "",
 		},
 		{
-			name:               "Policy=DeleteForeground && Sandbox Running -> Should Delete Claim with foreground propagation",
-			claim:              createClaim("delete-fg-claim", extensionsv1beta1.ShutdownPolicyDeleteForeground),
-			sandboxIsExpired:   false,
-			expectClaimDeleted: true,
+			name:                   "Policy=DeleteForeground && Sandbox Running -> Should Delete Claim with foreground propagation",
+			claim:                  createClaim("delete-fg-claim", extensionsv1beta1.ShutdownPolicyDeleteForeground),
+			sandboxIsExpired:       false,
+			expectClaimDeleted:     true,
+			expectForegroundDelete: true,
 			// FakeClient doesn't simulate GC or foreground propagation,
 			// so the Sandbox will remain. The important thing is the Claim is deleted.
 			expectSandboxDeleted: false,
 			expectStatus:         "",
 		},
 		{
-			name:                 "Policy=DeleteForeground && Sandbox Expired -> Should Delete Claim with foreground propagation",
-			claim:                createClaim("delete-fg-claim-expired", extensionsv1beta1.ShutdownPolicyDeleteForeground),
-			sandboxIsExpired:     true,
-			expectClaimDeleted:   true,
-			expectSandboxDeleted: false,
-			expectStatus:         "",
+			name:                   "Policy=DeleteForeground && Sandbox Expired -> Should Delete Claim with foreground propagation",
+			claim:                  createClaim("delete-fg-claim-expired", extensionsv1beta1.ShutdownPolicyDeleteForeground),
+			sandboxIsExpired:       true,
+			expectClaimDeleted:     true,
+			expectForegroundDelete: true,
+			expectSandboxDeleted:   false,
+			expectStatus:           "",
 		},
 	}
 
@@ -1588,9 +1591,17 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 				tc.claim.Status.SandboxStatus.ServiceFQDN = "previous-sandbox.default.svc.cluster.local"
 			}
 
-			client := fake.NewClientBuilder().WithScheme(scheme).
-				WithObjects(template, warmPool, tc.claim, sandbox).
-				WithStatusSubresource(tc.claim).Build()
+			var claimDeleteOpts client.DeleteOptions
+			client := interceptor.NewClient(
+				fake.NewClientBuilder().WithScheme(scheme).
+					WithObjects(template, warmPool, tc.claim, sandbox).
+					WithStatusSubresource(tc.claim).Build(),
+				interceptor.Funcs{Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+					if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok {
+						claimDeleteOpts.ApplyOptions(opts)
+					}
+					return c.Delete(ctx, obj, opts...)
+				}})
 
 			reconciler := &SandboxClaimReconciler{
 				Client:           client,
@@ -1616,6 +1627,11 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 			if tc.expectClaimDeleted {
 				if !k8errors.IsNotFound(err) {
 					t.Errorf("Expected Claim to be deleted, but it still exists")
+				}
+				gotForeground := claimDeleteOpts.PropagationPolicy != nil &&
+					*claimDeleteOpts.PropagationPolicy == metav1.DeletePropagationForeground
+				if gotForeground != tc.expectForegroundDelete {
+					t.Errorf("claim delete foreground propagation = %v, want %v", gotForeground, tc.expectForegroundDelete)
 				}
 			} else {
 				if err != nil {

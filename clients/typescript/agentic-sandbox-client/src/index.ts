@@ -39,6 +39,8 @@ export type {
   ExecutionResult,
   FileCallOptions,
   FileEntry,
+  FileEvent,
+  FileEventType,
   GetSandboxByNameOptions,
   GetSandboxOptions,
   ListOptions,
@@ -63,5 +65,7 @@ export type {
   StartOptions,
   SuspendResumeOptions,
   VolumeClaimTemplate,
+  WatchOptions,
   WriteOptions,
 } from "./types.js";
+export { SandboxWatcher } from "./watcher.js";

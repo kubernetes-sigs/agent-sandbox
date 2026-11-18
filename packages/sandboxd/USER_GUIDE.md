@@ -59,7 +59,9 @@ same workspace and execution environment:
   when the configured runtime is the legacy python-runtime. Against a runtime
   that does not serve the service, the `Unimplemented` gRPC status surfaces
   from the stream instead: the Go SDK delivers it as a terminal `error`
-  FileEvent, and the Python SDK raises `RuntimeError` during iteration. A
+  FileEvent, and the Python SDK raises `RuntimeError` during iteration. The
+  TypeScript SDK supports only sandboxd-compatible runtimes, and its iteration
+  rejects with a `SandboxdRpcError` whose code is `unimplemented`. A
   compatible runtime that wants watcher support must implement `WatchDir` with
   the same path-confinement and terminal-ERROR semantics as the reference
   server.
@@ -195,8 +197,9 @@ non-directory path).
 the call with `ErrUnsupportedByRuntime` (Go) / `RuntimeError` (Python) when
 the configured runtime is the legacy python-runtime; against a runtime that
 does not serve the service, the `Unimplemented` gRPC status surfaces from the
-stream as a terminal `error` FileEvent (Go) or a `RuntimeError` raised during
-iteration (Python).
+stream as a terminal `error` FileEvent (Go), a `RuntimeError` raised during
+iteration (Python), or a `SandboxdRpcError` with code `unimplemented` rejected
+during iteration (TypeScript).
 
 ### Filesystem & Runtime REST API (`:8080`)
 

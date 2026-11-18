@@ -1,0 +1,11 @@
+# values files decode numbers as float64; ints >= 1e6 must not render as 1e+06
+controller:
+  pprofBlockProfileRate: 1000000
+  pprofMutexProfileFraction: 1000000
+  kubeApiBurst: 1000000
+  apiConnections: 1000000
+  sandboxConcurrentWorkers: 1000000
+  sandboxClaimConcurrentWorkers: 1000000
+  sandboxWarmPoolConcurrentWorkers: 1000000
+  sandboxTemplateConcurrentWorkers: 1000000
+  sandboxWarmPoolMaxBatchSize: 1000000

@@ -80,7 +80,7 @@ Router command-line arguments. Unset optional flags are omitted.
 - --health-probe-bind-address=:8081
 - --cluster-domain={{ .Values.router.clusterDomain }}
 - --proxy-timeout={{ .Values.router.proxyTimeout }}
-- --upstream-max-retries={{ .Values.router.upstreamMaxRetries }}
+- --upstream-max-retries={{ include "sandbox-router.int" .Values.router.upstreamMaxRetries }}
 - --cache-enabled={{ .Values.router.cacheEnabled }}
 {{- with .Values.router.cacheNamespace }}
 - --cache-namespace={{ . }}
@@ -96,7 +96,7 @@ Router command-line arguments. Unset optional flags are omitted.
 - --access-log={{ .Values.router.accessLog }}
 {{- end }}
 {{- if not (kindIs "invalid" .Values.router.maxRequestBodyBytes) }}
-- --max-request-body-bytes={{ .Values.router.maxRequestBodyBytes }}
+- --max-request-body-bytes={{ include "sandbox-router.int" .Values.router.maxRequestBodyBytes }}
 {{- end }}
 {{- with .Values.router.pathRoutingPrefix }}
 - --path-routing-prefix={{ . }}
@@ -104,4 +104,13 @@ Router command-line arguments. Unset optional flags are omitted.
 {{- range .Values.router.extraArgs }}
 - {{ . | quote }}
 {{- end }}
+{{- end }}
+
+{{/*
+An integer flag value. Values files decode numbers as float64, so a whole
+float renders as an integer instead of 1e+06. Anything else renders as given
+so the binary still rejects invalid input.
+*/}}
+{{- define "sandbox-router.int" -}}
+{{- if and (kindIs "float64" .) (eq . (floor .)) }}{{ int64 . }}{{ else }}{{ . }}{{ end }}
 {{- end }}

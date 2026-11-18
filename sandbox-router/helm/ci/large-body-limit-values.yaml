@@ -1,0 +1,6 @@
+# values files decode numbers as float64; ints >= 1e6 must not render as 1e+06
+image:
+  tag: v0.0.0-lint
+router:
+  upstreamMaxRetries: 1000000
+  maxRequestBodyBytes: 104857600

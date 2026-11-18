@@ -176,7 +176,9 @@ class ClassifyRedRunTest(unittest.TestCase):
 
         def fetch(name):
             if name == "build-log.txt":
-                return ("error: linker `cc` not found\n"
+                return ("--- Found Dockerfile at: ./examples/python-runtime-sandbox/Dockerfile\n"
+                        "--- Service Name: python-runtime-sandbox\n"
+                        "error: linker `cc` not found\n"
                         "ERROR: failed to build 1 of 6 image(s): "
                         "['python-runtime-sandbox']\n")
             return data(name)
@@ -205,14 +207,35 @@ class ClassifyRedRunTest(unittest.TestCase):
             "infra")
         self.assertEqual(flake_report.classify_red_run(False, False, fetch), "infra")
 
+    def test_same_named_directory_elsewhere_is_not_the_image(self):
+        # Only files under the image's Dockerfile directory can break its
+        # build; docs that share the image's name cannot.
+        cls = flake_report.classify_red_run(
+            False, False, self._image_build_failure_fetch(),
+            changed_files=lambda: ["docs/python-runtime-sandbox/README.md"])
+        self.assertEqual(cls, "infra")
+
     def test_every_failed_image_must_be_touched_by_the_pr(self):
+        log = ("--- Found Dockerfile at: ./sandbox-router/Dockerfile\n"
+               "--- Service Name: sandbox-router-go\n"
+               "--- Found Dockerfile at: ./examples/x/Dockerfile\n"
+               "--- Service Name: x\n"
+               "--- Found Dockerfile at: ./Dockerfile\n"
+               "--- Service Name: agent-sandbox-controller\n")
+        both = flake_report.failed_image_dirs(
+            log + "ERROR: failed to build 2 of 6 image(s): ['sandbox-router-go', 'x']")
+        self.assertEqual(both, ["sandbox-router", "examples/x"])
         self.assertTrue(flake_report.pr_touches_images(
-            ["a/sandbox-router/Dockerfile", "examples/x/req.txt"], ["sandbox-router", "x"]))
-        self.assertFalse(flake_report.pr_touches_images(
-            ["a/sandbox-router/Dockerfile"], ["sandbox-router", "x"]))
-        self.assertEqual(
-            flake_report.failed_image_names(
-                "ERROR: failed to build 2 of 6 image(s): ['a', 'b-c']"), ["a", "b-c"])
+            ["sandbox-router/main.go", "examples/x/req.txt"], both))
+        self.assertFalse(flake_report.pr_touches_images(["sandbox-router/main.go"], both))
+        # The root Dockerfile's directory holds every file, and an image the
+        # log does not locate has no directory: neither proves PR breakage.
+        unprovable = flake_report.failed_image_dirs(
+            log + "ERROR: failed to build 2 of 6 image(s): "
+                  "['agent-sandbox-controller', 'missing']")
+        self.assertEqual(unprovable, [".", None])
+        self.assertFalse(flake_report.pr_touches_images(["Dockerfile"], unprovable[:1]))
+        self.assertFalse(flake_report.pr_touches_images(["missing/a"], unprovable[1:]))
 
     def test_missing_artifacts_stay_infra(self):
         # When the run dir has no finished.json or clone-records.json we

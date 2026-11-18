@@ -52,6 +52,7 @@ Read-only preview:
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -251,19 +252,33 @@ PRETEST_GATE_MARKERS = ("ERROR: Generated files out-of-date",)
 IMAGE_BUILD_FAILURE = re.compile(r"ERROR: failed to build \d+ of \d+ image\(s\): \[([^\]]*)\]")
 
 
-def failed_image_names(build_log):
-    """Returns the image names a push-images build failure line lists."""
+# push-images prints each image's Dockerfile path and then its name before it
+# builds the image.
+IMAGE_DOCKERFILE = re.compile(
+    r"--- Found Dockerfile at: (\S+)\s+--- Service Name: (\S+)")
+
+
+def failed_image_dirs(build_log):
+    """Returns the Dockerfile directory of each image a push-images build
+    failure line lists, or None for an image the log does not locate."""
     match = IMAGE_BUILD_FAILURE.search(build_log or "")
-    return re.findall(r"'([^']+)'", match.group(1)) if match else []
+    if not match:
+        return []
+    dirs = {name: os.path.normpath(os.path.dirname(dockerfile))
+            for dockerfile, name in IMAGE_DOCKERFILE.findall(build_log)}
+    return [dirs.get(name) for name in re.findall(r"'([^']+)'", match.group(1))]
 
 
-def pr_touches_images(files, images):
-    """True when the PR changed a file under a directory named after every
-    failed image. Image names are their build directory's name, so this ties
-    the build failure to the PR's own change; a failure in an image the PR
-    did not touch (a registry or module-proxy error) stays infrastructure."""
-    return bool(images) and all(
-        any(image in path.split("/")[:-1] for path in files) for image in images)
+def pr_touches_images(files, image_dirs):
+    """True when the PR changed a file under the Dockerfile directory of every
+    failed image. This ties the build failure to the PR's own change; a
+    failure in an image the PR did not touch (a registry or module-proxy
+    error) stays infrastructure. The controller image's Dockerfile sits at the
+    repo root, where every PR changes a file, so it never counts as touched."""
+    return bool(image_dirs) and all(
+        image_dir not in (None, ".")
+        and any(path.startswith(image_dir + "/") for path in files)
+        for image_dir in image_dirs)
 
 
 def classify_red_run(has_failing_test, has_test_results, fetch_artifact,
@@ -331,10 +346,10 @@ def classify_red_run(has_failing_test, has_test_results, fetch_artifact,
         return "unknown"
     if build_log and any(marker in build_log for marker in PRETEST_GATE_MARKERS):
         return "pretest_failure"
-    images = failed_image_names(build_log)
-    if images and changed_files is not None:
+    image_dirs = failed_image_dirs(build_log)
+    if image_dirs and changed_files is not None:
         files = changed_files()
-        if files and pr_touches_images(files, images):
+        if files and pr_touches_images(files, image_dirs):
             return "pretest_failure"
     # Without a gate marker, a PR-caused image build failure, or
     # clone-records.json, the cause of a junit-less red run cannot be proven

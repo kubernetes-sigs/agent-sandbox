@@ -43,8 +43,8 @@ import (
 
 func newTestClient(t *testing.T) (*Client, *fakeextensions.Clientset) {
 	t.Helper()
-	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	agentsCS := fakeagents.NewClientset()
+	extensionsCS := fakeextensions.NewClientset()
 	opts := Options{
 		WarmPoolName:        "test-warmpool",
 		Namespace:           "default",
@@ -254,8 +254,8 @@ func TestClient_CreateSandbox_InvalidWarmPoolName(t *testing.T) {
 }
 
 func TestClient_CreateSandbox_CreateOptions(t *testing.T) {
-	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	agentsCS := fakeagents.NewClientset()
+	extensionsCS := fakeextensions.NewClientset()
 
 	baseOpts := Options{
 		Namespace:           "default",
@@ -371,8 +371,8 @@ func TestClient_CreateSandbox_CreateOptions(t *testing.T) {
 }
 
 func TestClient_CreateSandbox_WithClaimName_AdoptsExisting(t *testing.T) {
-	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	agentsCS := fakeagents.NewClientset()
+	extensionsCS := fakeextensions.NewClientset()
 
 	opts := Options{
 		Namespace:           "default",
@@ -446,8 +446,8 @@ func TestClient_CreateSandbox_InvalidCreateOptions(t *testing.T) {
 }
 
 func TestClient_GetSandbox_Reattach_WithoutClientWarmPoolName(t *testing.T) {
-	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	agentsCS := fakeagents.NewClientset()
+	extensionsCS := fakeextensions.NewClientset()
 
 	const (
 		claimName   = "reattach-claim"
@@ -570,8 +570,8 @@ func TestClient_DeleteSandbox_Tracked(t *testing.T) {
 // redundant transport (Disconnect) and NOT delete the shared claim — otherwise
 // it deletes the sandbox out from under the tracked handle it returns.
 func TestClient_CreateSandbox_RedundantHandleKeepsSharedClaim(t *testing.T) {
-	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	agentsCS := fakeagents.NewClientset()
+	extensionsCS := fakeextensions.NewClientset()
 
 	opts := Options{
 		WarmPoolName:        "test-warmpool",
@@ -663,8 +663,8 @@ func TestClient_CreateSandbox_RedundantHandleKeepsSharedClaim(t *testing.T) {
 // attaching), so by the time it reaches trackOrAdoptRace the adopt branch is
 // guaranteed to fire.
 func TestClient_GetSandbox_AdoptsRacingHandleKeepsSharedClaim(t *testing.T) {
-	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	agentsCS := fakeagents.NewClientset()
+	extensionsCS := fakeextensions.NewClientset()
 
 	opts := Options{
 		WarmPoolName:        "test-warmpool",
@@ -830,7 +830,7 @@ func TestNewClient_RejectsPerSandboxClaimOptions(t *testing.T) {
 func TestClient_CreateSandbox_PerCallLifetimeAndTimeout(t *testing.T) {
 	c, extensionsCS := newTestClient(t)
 	c.opts.ShutdownAfter = time.Hour
-	agentsCS := fakeagents.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	agentsCS := fakeagents.NewClientset()
 	c.k8s.AgentsClient = agentsCS.AgentsV1beta1()
 	setupWatchWithReactor(agentsCS, extensionsCS, readySandbox("placeholder"))
 	extensionsCS.PrependReactor("get", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
@@ -877,8 +877,8 @@ func TestClient_CreateSandbox_PerCallLifetimeAndTimeout(t *testing.T) {
 
 // TestResolveSandboxName_FromClaimStatus verifies the new resolution path.
 func TestResolveSandboxName_FromClaimStatus(t *testing.T) {
-	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	agentsCS := fakeagents.NewClientset()
+	extensionsCS := fakeextensions.NewClientset()
 	k8s := &K8sHelper{
 		AgentsClient:     agentsCS.AgentsV1beta1(),
 		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
@@ -988,7 +988,7 @@ func TestClaimFailure(t *testing.T) {
 // the timeout, whether it is seen by the initial get or by the watch.
 func TestResolveSandboxName_FailsFastOnTerminalClaim(t *testing.T) {
 	newHelper := func() (*K8sHelper, *fakeextensions.Clientset) {
-		extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+		extensionsCS := fakeextensions.NewClientset()
 		return &K8sHelper{ExtensionsClient: extensionsCS.ExtensionsV1beta1(), Log: logr.Discard()}, extensionsCS
 	}
 	tracer := noop.NewTracerProvider().Tracer("test")
@@ -1048,7 +1048,7 @@ func TestResolveSandboxName_PinnedUID(t *testing.T) {
 	} {
 		for _, path := range []string{"get", "watch"} {
 			t.Run(tc.name+"/"+path, func(t *testing.T) {
-				extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+				extensionsCS := fakeextensions.NewClientset()
 				k8s := &K8sHelper{ExtensionsClient: extensionsCS.ExtensionsV1beta1(), Log: logr.Discard()}
 				if path == "get" {
 					extensionsCS.PrependReactor("get", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
@@ -1119,7 +1119,7 @@ func TestWaitForSandboxReady_FailsFastOnTerminalSandbox(t *testing.T) {
 	}
 	for _, scenario := range []string{"list", "watch"} {
 		t.Run(scenario, func(t *testing.T) {
-			agentsCS := fakeagents.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+			agentsCS := fakeagents.NewClientset()
 			k8s := &K8sHelper{AgentsClient: agentsCS.AgentsV1beta1(), Log: logr.Discard()}
 			agentsCS.PrependReactor("list", "sandboxes", func(_ ktesting.Action) (bool, runtime.Object, error) {
 				list := &sandboxv1beta1.SandboxList{}
@@ -1146,8 +1146,8 @@ func TestWaitForSandboxReady_FailsFastOnTerminalSandbox(t *testing.T) {
 // TestWaitForSandboxReady_UsesSandboxName verifies the ready check uses the
 // resolved sandbox name, not the claim name.
 func TestWaitForSandboxReady_UsesSandboxName(t *testing.T) {
-	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	agentsCS := fakeagents.NewClientset()
+	extensionsCS := fakeextensions.NewClientset()
 	k8s := &K8sHelper{
 		AgentsClient:     agentsCS.AgentsV1beta1(),
 		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),

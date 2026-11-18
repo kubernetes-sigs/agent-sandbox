@@ -73,8 +73,8 @@ func validateAllOptions(o *Options) error {
 }
 
 func newTestSandbox(opts Options) (*Sandbox, *fakeagents.Clientset, *fakeextensions.Clientset) {
-	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	agentsCS := fakeagents.NewClientset()
+	extensionsCS := fakeextensions.NewClientset()
 	opts.K8sHelper = &K8sHelper{
 		AgentsClient:     agentsCS.AgentsV1beta1(),
 		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
@@ -110,8 +110,8 @@ func newTestSandbox(opts Options) (*Sandbox, *fakeagents.Clientset, *fakeextensi
 }
 
 func newTestSandboxWithDynamic(opts Options, dynCS *fakedynamic.FakeDynamicClient) (*Sandbox, *fakeagents.Clientset, *fakeextensions.Clientset) {
-	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	agentsCS := fakeagents.NewClientset()
+	extensionsCS := fakeextensions.NewClientset()
 	opts.K8sHelper = &K8sHelper{
 		AgentsClient:     agentsCS.AgentsV1beta1(),
 		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
@@ -530,7 +530,7 @@ func TestResolveRouterPod_Success(t *testing.T) {
 		}},
 	}
 
-	kubeCS := fakekube.NewSimpleClientset(slice) //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	kubeCS := fakekube.NewClientset(slice)
 	ts := &tunnelStrategy{
 		discoveryClient: kubeCS.DiscoveryV1(),
 		namespace:       "default",
@@ -554,7 +554,7 @@ func TestResolveRouterPod_NoEndpoints(t *testing.T) {
 		},
 	}
 
-	kubeCS := fakekube.NewSimpleClientset(slice) //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	kubeCS := fakekube.NewClientset(slice)
 	ts := &tunnelStrategy{
 		discoveryClient: kubeCS.DiscoveryV1(),
 		namespace:       "default",
@@ -1140,7 +1140,7 @@ func TestCreateClaim_Labels(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+			extensionsCS := fakeextensions.NewClientset()
 			var created *extv1beta1.SandboxClaim
 			extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 				created = action.(ktesting.CreateAction).GetObject().(*extv1beta1.SandboxClaim)
@@ -3441,7 +3441,7 @@ func TestDisconnect_Timeout(t *testing.T) {
 }
 
 func TestDeleteClaim_EmptyName(t *testing.T) {
-	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck
+	extensionsCS := fakeextensions.NewClientset()
 	deleteCalled := false
 	extensionsCS.PrependReactor("delete", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
 		deleteCalled = true

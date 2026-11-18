@@ -319,6 +319,7 @@ Lifecycle defines the lifecycle management for the SandboxClaim.
 
 _Appears in:_
 - [SandboxClaimSpec](#sandboxclaimspec)
+- [SandboxClaimStatus](#sandboxclaimstatus)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -384,6 +385,22 @@ SandboxClaim is the Schema for the sandbox Claim API.
 | `status` _[SandboxClaimStatus](#sandboxclaimstatus)_ | status defines the observed state of Sandbox |  | Optional: \{\} <br /> |
 
 
+#### SandboxClaimDefaults
+
+
+
+SandboxClaimDefaults defines lifecycle defaults for newly provisioned claims.
+
+
+
+_Appears in:_
+- [SandboxWarmPoolSpec](#sandboxwarmpoolspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `ttlSecondsAfterCreated` _integer_ | ttlSecondsAfterCreated limits claim lifetime from its creation time.<br />The controller snapshots this default before provisioning a claim without<br />an explicit lifecycle. Later pool changes do not affect that claim.<br />Expiration retains only the claim record and deletes its backing resources,<br />including Sandbox-owned persistent volume claims and their data where<br />the storage reclaim policy deletes the volume. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+
+
 #### SandboxClaimSpec
 
 
@@ -417,6 +434,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `defaultLifecycle` _[Lifecycle](#lifecycle)_ | defaultLifecycle is the pool default frozen before provisioning.<br />An empty object records that no default applied. An absent object means<br />the controller has not resolved defaults yet. Explicit spec.lifecycle<br />always takes precedence. Pool changes never modify this snapshot. |  | Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | conditions represent the latest available observations of a Sandbox's current state. |  | Optional: \{\} <br /> |
 | `sandbox` _[SandboxStatus](#sandboxstatus)_ | sandbox defines the state of Sandbox |  | Optional: \{\} <br /> |
 
@@ -548,6 +566,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `claimDefaults` _[SandboxClaimDefaults](#sandboxclaimdefaults)_ | claimDefaults applies only to claims without an explicit lifecycle.<br />Existing assigned claims are not retroactively given a deadline. |  | Optional: \{\} <br /> |
 | `replicas` _integer_ | replicas is the desired number of sandboxes in the pool.<br />This field is controlled by an HPA if specified. | 1 | Minimum: 0 <br />Optional: \{\} <br /> |
 | `sandboxTemplateRef` _[SandboxTemplateRef](#sandboxtemplateref)_ | sandboxTemplateRef - name of the SandboxTemplate to be used for creating a Sandbox<br />Warning: Any change to the json tag "sandboxTemplateRef" must be synchronized with the TemplateRefField constant. |  | Required: \{\} <br /> |
 | `updateStrategy` _[SandboxWarmPoolUpdateStrategy](#sandboxwarmpoolupdatestrategy)_ | updateStrategy controls how the pool replaces its stale sandboxes. A sandbox is<br />considered stale when the effective SandboxBlueprint derived from the referenced<br />SandboxTemplate (or the sandboxTemplateRef name) changes; metadata-only edits<br />(annotations or labels) do not make a sandbox stale and never trigger replacement.<br />It applies only to sandboxes still owned by the pool (i.e. unclaimed). Once a sandbox<br />is claimed by a SandboxClaim, ownership transfers to the claim and the pool no longer<br />manages or replaces it.<br />Defaults to OnReplenish. |  | Optional: \{\} <br /> |

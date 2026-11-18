@@ -2607,6 +2607,12 @@ var schemaYAML = typed.YAMLObject(`types:
       type:
         namedType: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.SandboxClaimStatus
       default: {}
+- name: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.SandboxClaimDefaults
+  map:
+    fields:
+    - name: ttlSecondsAfterCreated
+      type:
+        scalar: numeric
 - name: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.SandboxClaimSpec
   map:
     fields:
@@ -2642,6 +2648,9 @@ var schemaYAML = typed.YAMLObject(`types:
           elementType:
             namedType: Condition.v1.meta.apis.pkg.apimachinery.k8s.io
           elementRelationship: atomic
+    - name: defaultLifecycle
+      type:
+        namedType: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.Lifecycle
     - name: sandbox
       type:
         namedType: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.SandboxStatus
@@ -2747,6 +2756,9 @@ var schemaYAML = typed.YAMLObject(`types:
 - name: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.SandboxWarmPoolSpec
   map:
     fields:
+    - name: claimDefaults
+      type:
+        namedType: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.SandboxClaimDefaults
     - name: readinessGracePeriodSeconds
       type:
         scalar: numeric

@@ -149,6 +149,13 @@ type SandboxClaimSpec struct {
 
 // SandboxClaimStatus defines the observed state of Sandbox.
 type SandboxClaimStatus struct {
+	// defaultLifecycle is the pool default frozen before provisioning.
+	// An empty object records that no default applied. An absent object means
+	// the controller has not resolved defaults yet. Explicit spec.lifecycle
+	// always takes precedence. Pool changes never modify this snapshot.
+	// +optional
+	DefaultLifecycle *Lifecycle `json:"defaultLifecycle,omitempty"`
+
 	// conditions represent the latest available observations of a Sandbox's current state.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`

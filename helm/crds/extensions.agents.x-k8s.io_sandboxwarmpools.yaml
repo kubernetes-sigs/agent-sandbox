@@ -42,6 +42,13 @@ spec:
             type: object
           spec:
             properties:
+              claimDefaults:
+                properties:
+                  ttlSecondsAfterCreated:
+                    format: int32
+                    minimum: 1
+                    type: integer
+                type: object
               readinessGracePeriodSeconds:
                 format: int32
                 minimum: 30

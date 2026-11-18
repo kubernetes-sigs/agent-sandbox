@@ -133,6 +133,20 @@ func (s *ProcessServer) buildCommand(_ context.Context, config *processv1.Proces
 			}
 			return nil, status.Errorf(codes.Internal, "cwd: %v", err)
 		}
+		// Match WatchDir: a path that exists but is not a directory is an
+		// invalid argument. A missing leaf is NOT_FOUND. ENOTDIR from
+		// executing a command path such as "f.txt/prog" stays in
+		// mapCommandError, where NOT_FOUND is the right code.
+		info, err := os.Stat(sanitizedCwd)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil, status.Errorf(codes.NotFound, "cwd: path does not exist: %s", config.GetCwd())
+			}
+			return nil, status.Errorf(codes.Internal, "cwd: %v", err)
+		}
+		if !info.IsDir() {
+			return nil, status.Errorf(codes.InvalidArgument, "cwd is not a directory: %s", config.GetCwd())
+		}
 		cmd.Dir = sanitizedCwd
 	} else {
 		cmd.Dir = s.rootDir

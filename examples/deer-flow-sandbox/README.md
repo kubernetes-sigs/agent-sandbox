@@ -17,7 +17,7 @@ daemon.
 | Tool transport | OpenSandbox SDK | sandboxd: gRPC ProcessService (commands) + REST filesystem (files), reached by pod port-forward |
 | `ready_timeout` | server-side sandbox readiness | seconds to wait for the claim to bind |
 | `sandbox_timeout` | sandbox TTL | claim TTL (`shutdownTime`, auto-delete); cached sandboxes are checked against TTL deletion on `acquire()` |
-| `bash_command_timeout` | server-side command timeout | per-command gRPC deadline via sandboxd (default 600s) |
+| `bash_command_timeout` | server-side command timeout | per-command time limit via sandboxd (default 600s) |
 | `idle_timeout` | server-side reaper | not enforced; `release()` destroys the claim |
 
 ## Files

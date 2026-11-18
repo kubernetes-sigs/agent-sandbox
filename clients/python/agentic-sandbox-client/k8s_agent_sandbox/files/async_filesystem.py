@@ -41,6 +41,8 @@ from k8s_agent_sandbox.files.filesystem import (
     _sandboxd_read_endpoint,
     _sandboxd_op_endpoint,
     _sandboxd_write_request,
+    _stat_endpoint,
+    _stat_entry,
     _transfer_endpoint,
 )
 from k8s_agent_sandbox.models import FileEntry, SandboxFileConfig
@@ -427,6 +429,18 @@ class AsyncFilesystem:
         if span.is_recording():
             span.set_attribute("sandbox.file.exists", exists)
         return bool(exists)
+
+    @async_trace_span("stat")
+    async def stat(self, path: str, timeout: int = 60) -> FileEntry:
+        """Return the metadata of a sandboxd path. See ``Filesystem.stat``."""
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", path)
+        endpoint = _stat_endpoint(self.connector, path)
+        response = await self.connector.send_request(
+            "GET", endpoint, timeout=timeout
+        )
+        return _stat_entry(response)
 
     @async_trace_span("delete")
     async def delete(

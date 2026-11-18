@@ -296,6 +296,48 @@ def _extract_endpoint(connector: _RuntimeProbe, path: str) -> str:
         connector, "extract", path, query={"extract": "tar"}, allow_root=True)
 
 
+def _stat_endpoint(connector: _RuntimeProbe, path: str) -> str:
+    """Return the endpoint for a sandboxd stat.
+
+    The path may name the sandbox root.
+    """
+    return _sandboxd_op_endpoint(
+        connector, "stat", path, query={"stat": "true"}, allow_root=True)
+
+
+class _JSONResponse(Protocol):
+    """The part of a requests or httpx response that ``_stat_entry`` reads."""
+
+    @property
+    def headers(self) -> Mapping[str, str]: ...
+
+    @property
+    def text(self) -> str: ...
+
+    def json(self) -> Any: ...
+
+
+def _stat_entry(response: _JSONResponse) -> FileEntry:
+    """Decode the FileEntry in a sandboxd stat response."""
+    # A sandboxd that predates stat ignores the query. It answers a file with
+    # the file's bytes, which must not end up in the error message.
+    media_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+    if media_type != "application/json":
+        raise RuntimeError(
+            "Server returned a non-JSON stat response; this sandboxd may not support stat"
+        )
+    try:
+        entry = response.json()
+    except ValueError as e:
+        raise RuntimeError(f"Failed to decode JSON response from sandbox: {response.text}") from e
+    # The same sandboxd answers a directory with its listing, which is not a
+    # FileEntry.
+    try:
+        return FileEntry.from_sandboxd(entry)
+    except Exception as e:
+        raise RuntimeError(f"Server returned invalid file entry format: {entry}") from e
+
+
 def _coerce_binary(
     content: bytes | bytearray | memoryview | BinaryIO,
 ) -> bytes | BinaryIO:
@@ -660,6 +702,22 @@ class Filesystem:
         if span.is_recording():
             span.set_attribute("sandbox.file.exists", exists)
         return bool(exists)
+
+    @trace_span("stat")
+    def stat(self, path: str, timeout: int = 60) -> FileEntry:
+        """Return the type, size, mode, and modification time of a path.
+
+        sandboxd runtime only. ``path`` may be ``/`` for the sandbox root, and
+        the entry's ``name`` is the last segment of ``path``. A missing path
+        fails with a 404 ``SandboxRequestError``. The legacy python-runtime
+        raises NotImplementedError.
+        """
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", path)
+        endpoint = _stat_endpoint(self.connector, path)
+        response = self.connector.send_request("GET", endpoint, timeout=timeout)
+        return _stat_entry(response)
 
     @trace_span("delete")
     def delete(self, path: str, recursive: bool = False, timeout: int = 60) -> None:

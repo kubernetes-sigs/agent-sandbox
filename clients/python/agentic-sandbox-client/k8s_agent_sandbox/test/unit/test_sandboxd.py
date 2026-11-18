@@ -345,6 +345,53 @@ class TestSandboxdFilesystem(unittest.TestCase):
                 call()
         self._connector.send_request.assert_not_called()
 
+    def test_stat_returns_the_entry(self):
+        resp = MagicMock()
+        resp.headers = {"Content-Type": "application/json"}
+        resp.json.return_value = {
+            "name": "notes.txt", "size": 11, "type": "file",
+            "modified_at": "2026-10-26T10:00:00.123456Z", "mode": "0644",
+        }
+        self._connector.send_request.return_value = resp
+
+        entry = self._fs.stat("my dir/notes.txt")
+
+        args, _ = self._last_call()
+        self.assertEqual(args[:2], ("GET", "v1/files/my%20dir/notes.txt?stat=true"))
+        self.assertEqual(entry, FileEntry(
+            name="notes.txt", size=11, type="file", mode="0644",
+            modified=datetime.datetime(
+                2026, 10, 26, 10, 0, 0, 123456, tzinfo=datetime.timezone.utc),
+        ))
+
+    def test_stat_rejects_a_file_served_instead_of_its_entry(self):
+        resp = MagicMock()
+        resp.headers = {"Content-Type": "application/octet-stream"}
+        resp.text = "file contents"
+        self._connector.send_request.return_value = resp
+
+        with self.assertRaisesRegex(RuntimeError, "may not support stat") as raised:
+            self._fs.stat("notes.txt")
+        self.assertNotIn("file contents", str(raised.exception))
+
+    def test_stat_rejects_a_directory_listing(self):
+        resp = MagicMock()
+        resp.headers = {"Content-Type": "application/json; charset=utf-8"}
+        resp.json.return_value = {"path": "/notes", "entries": []}
+        self._connector.send_request.return_value = resp
+
+        with self.assertRaisesRegex(RuntimeError, "invalid file entry"):
+            self._fs.stat("notes")
+
+    def test_stat_rejects_malformed_json(self):
+        resp = MagicMock()
+        resp.headers = {"Content-Type": "application/json"}
+        resp.json.side_effect = ValueError("no JSON")
+        self._connector.send_request.return_value = resp
+
+        with self.assertRaisesRegex(RuntimeError, "Failed to decode JSON"):
+            self._fs.stat("notes.txt")
+
 
 class TestLegacyFileOpsUnsupported(unittest.TestCase):
     def test_sandboxd_only_ops_raise_on_legacy(self):
@@ -357,6 +404,7 @@ class TestLegacyFileOpsUnsupported(unittest.TestCase):
             lambda: fs.move("a", "b"),
             lambda: fs.copy("a", "b"),
             lambda: fs.extract("d", b"x"),
+            lambda: fs.stat("a"),
             lambda: fs.write("a", b"x", append=True),
             lambda: fs.write("a", b"x", create_only=True),
         ):

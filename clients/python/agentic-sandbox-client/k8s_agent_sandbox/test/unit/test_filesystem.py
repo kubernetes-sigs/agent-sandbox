@@ -601,6 +601,25 @@ class TestAsyncSandboxdFilesystem(unittest.IsolatedAsyncioTestCase):
         args, _ = self.connector.send_request.call_args
         self.assertEqual(args[:2], ("PUT", "v1/files/?extract=tar"))
 
+    async def test_stat_returns_the_entry(self):
+        response = MagicMock()
+        response.headers = {"Content-Type": "application/json"}
+        response.json.return_value = {
+            "name": "/", "size": 4096, "type": "directory",
+            "modified_at": "2026-10-26T10:00:00.5Z", "mode": "0755",
+        }
+        self.connector.send_request.return_value = response
+
+        entry = await self.fs.stat("/")
+
+        args, _ = self.connector.send_request.call_args
+        self.assertEqual(args[:2], ("GET", "v1/files/?stat=true"))
+        self.assertEqual(
+            (entry.name, entry.type, entry.size, entry.mode),
+            ("/", "directory", 4096, "0755"),
+        )
+        self.assertEqual(entry.modified.microsecond, 500000)
+
     @patch("k8s_agent_sandbox.files.async_filesystem.trace")
     async def test_delete_records_path_in_trace(self, mock_trace):
         span = MagicMock()

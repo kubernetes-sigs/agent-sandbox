@@ -321,6 +321,16 @@ class DockerfileOverridesTest(unittest.TestCase):
         self.assertEqual(context_dir, ".")
         self.assertEqual(dockerfile_path, os.path.join(acp_server_dir, "Dockerfile"))
 
+    def test_cma_runner_builds_from_repo_root(self):
+        cma_runner_dir = os.path.join(
+            ".", "examples", "managed-agents", "claude-managed-agents")
+        calls = self._build_calls([(cma_runner_dir, [], ["Dockerfile"])])
+        self.assertEqual(len(calls), 1)
+        _, service_name, context_dir, dockerfile_path, _ = calls[0].args
+        self.assertEqual(service_name, "cma-runner")
+        self.assertEqual(context_dir, ".")
+        self.assertEqual(dockerfile_path, os.path.join(cma_runner_dir, "Dockerfile"))
+
     def test_multi_cluster_fleet_deploy_builds_from_repo_root(self):
         # Regression: discovery built this Dockerfile from its own directory
         # as image "deploy", and every post-merge push-images run failed on

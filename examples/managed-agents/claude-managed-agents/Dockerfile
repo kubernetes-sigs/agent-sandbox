@@ -16,13 +16,16 @@
 # sigs.k8s.io/agent-sandbox with ../.. :
 #   docker build -f examples/managed-agents/claude-managed-agents/Dockerfile -t cma-runner:v1 .
 
-FROM golang:1.27.3 AS build
+# The builder runs on the build host's native platform and cross-compiles
+# for the target, which is much faster than emulation.
+FROM --platform=$BUILDPLATFORM golang:1.27.3 AS build
+ARG TARGETARCH
 WORKDIR /src
 # The replaced root module's go.mod must exist for the example module to load.
 COPY go.mod go.sum ./
 COPY examples/managed-agents/claude-managed-agents/ ./examples/managed-agents/claude-managed-agents/
 WORKDIR /src/examples/managed-agents/claude-managed-agents
-RUN CGO_ENABLED=0 go build -trimpath -o /runner ./cmd/runner
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH go build -trimpath -o /runner ./cmd/runner
 
 # The runtime needs a real shell and coreutils because CMA tool calls execute
 # bash commands inside the sandbox. git is deliberately not installed: it

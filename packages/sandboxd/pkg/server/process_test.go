@@ -54,16 +54,18 @@ func newProcessClient(t *testing.T, rootDir string) processv1.ProcessServiceClie
 	return connectProcessClient(t, grpcServer)
 }
 
-func connectProcessClient(t *testing.T, grpcServer *grpc.Server) processv1.ProcessServiceClient {
+func connectProcessClient(t *testing.T, grpcServer *grpc.Server, opts ...grpc.DialOption) processv1.ProcessServiceClient {
 	t.Helper()
 	lis := bufconn.Listen(1024 * 1024)
 	go func() { _ = grpcServer.Serve(lis) }()
 
-	conn, err := grpc.NewClient("passthrough:///bufnet",
+	opts = append([]grpc.DialOption{
 		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 			return lis.DialContext(ctx)
 		}),
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	}, opts...)
+	conn, err := grpc.NewClient("passthrough:///bufnet", opts...)
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
@@ -309,6 +311,80 @@ func TestStartClosesOutputPipes(t *testing.T) {
 	require.Equal(t, "stderr", result.stderr.String())
 	require.Equal(t, int32(0), result.exitCode)
 	require.Equal(t, before, pipeCount(), "completed streams must close both output readers")
+}
+
+// TestStartDeliversOutputTailToASlowConsumer guards against Start discarding
+// the output still in the pipe when the client reads slowly. The child exits
+// while the stdout reader is blocked in stream.Send on flow control, and the
+// client stays idle for longer than pipeDrainGrace. Start must still deliver
+// every byte before the ExitEvent.
+func TestStartDeliversOutputTailToASlowConsumer(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	grpcServer := grpc.NewServer()
+	processv1.RegisterProcessServiceServer(grpcServer,
+		NewProcessServer(root, processmanager.NewProcessRegistry(), 0, logr.Discard()))
+	// A fixed 64 KiB receive window (the HTTP/2 default) turns off dynamic
+	// window sizing, so the output below overflows the window and the child
+	// still exits while the reader waits in Send.
+	const window = 64 * 1024
+	client := connectProcessClient(t, grpcServer,
+		grpc.WithInitialWindowSize(window), grpc.WithInitialConnWindowSize(window))
+
+	// About 132 KiB fits in the flow-control window, the stream's write
+	// quota and the chunk held by the blocked reader. The rest waits in the
+	// pipe, which holds 64 KiB, so the child still exits.
+	const total = 160 * 1024
+	stream, err := client.Start(testCtx(t), &processv1.StartRequest{
+		Config: &processv1.ProcessConfig{Command: []string{
+			"sh", "-c", "head -c " + strconv.Itoa(total) + " /dev/zero; touch exited",
+		}},
+	})
+	require.NoError(t, err)
+	recvInit(t, stream)
+
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(root, "exited"))
+		return err == nil
+	}, 10*time.Second, 10*time.Millisecond, "child never finished writing")
+	time.Sleep(pipeDrainGrace + 2*time.Second)
+
+	res := drainStart(t, stream)
+	require.Equal(t, int32(0), res.exitCode)
+	require.Equal(t, total, res.stdout.Len(), "Start reported exit 0 with part of stdout missing")
+}
+
+// TestStartEndsWhenADetachedChildHoldsTheOutputPipe guards the reason
+// pipeDrainGrace exists: a background child that inherits stdout and keeps it
+// open past the command's exit must not hold the stream open.
+func TestStartEndsWhenADetachedChildHoldsTheOutputPipe(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	client := newProcessClient(t, root)
+	pidFile := filepath.Join(root, "child.pid")
+	t.Cleanup(func() {
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			return
+		}
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
+
+	started := time.Now()
+	stream, err := client.Start(testCtx(t), &processv1.StartRequest{
+		Config: &processv1.ProcessConfig{Command: []string{
+			"sh", "-c", "printf before; sleep 30 & echo $! > child.pid; exit 0",
+		}},
+	})
+	require.NoError(t, err)
+
+	res := drainStart(t, stream)
+	require.Equal(t, int32(0), res.exitCode)
+	require.Equal(t, "before", res.stdout.String())
+	require.Less(t, time.Since(started), pipeDrainGrace+5*time.Second,
+		"the background child's open pipe must not hold the stream open")
 }
 
 func TestWriteStdinAndEOF(t *testing.T) {

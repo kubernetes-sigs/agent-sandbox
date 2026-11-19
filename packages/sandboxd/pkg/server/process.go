@@ -249,6 +249,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 
 	var streamWg sync.WaitGroup
 	var sendMu sync.Mutex
+	sends := newSendTracker()
 
 	// streamOutput copies reader into stdout/stderr stream events until the
 	// reader is exhausted (EOF on pipes, EIO/ErrClosed on a PTY).
@@ -266,9 +267,11 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 				} else {
 					event = &processv1.StartResponse{Event: &processv1.StartResponse_Stdout{Stdout: chunk}}
 				}
+				sends.add(1)
 				sendMu.Lock()
 				sErr := stream.Send(event)
 				sendMu.Unlock()
+				sends.add(-1)
 				if sErr != nil {
 					return
 				}
@@ -290,7 +293,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		// Closing the PTY only on timeout unblocks a straggling read (e.g. a
 		// grandchild still holds the slave side).
 		waitErr = cmd.Wait()
-		waitForReaders(&streamWg, func() { _ = proc.ClosePTY() })
+		waitForReaders(&streamWg, sends, func() { _ = proc.ClosePTY() })
 		_ = proc.ClosePTY()
 	} else {
 		streamWg.Add(2)
@@ -298,7 +301,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		go streamOutput(stderrR, true)
 
 		waitErr = cmd.Wait()
-		waitForReaders(&streamWg, func() { closeAll(stdoutR, stderrR) })
+		waitForReaders(&streamWg, sends, func() { closeAll(stdoutR, stderrR) })
 		closeAll(stdoutR, stderrR)
 	}
 
@@ -829,21 +832,78 @@ func readProcChildren(ctx context.Context, pid int) []int {
 	return children
 }
 
+// sendTracker records how many output readers are delivering a chunk to the
+// client, including waiting for their turn on the stream. A reader in this
+// state is not waiting for the process, so waitForReaders does not count the
+// time against pipeDrainGrace.
+type sendTracker struct {
+	mu      sync.Mutex
+	active  int
+	changed chan struct{}
+}
+
+func newSendTracker() *sendTracker {
+	return &sendTracker{changed: make(chan struct{})}
+}
+
+// add changes the number of readers that are sending and wakes waitForReaders.
+func (t *sendTracker) add(delta int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.active += delta
+	close(t.changed)
+	t.changed = make(chan struct{})
+}
+
+// state reports whether any reader is sending, and returns a channel that is
+// closed at the next change.
+func (t *sendTracker) state() (bool, <-chan struct{}) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.active > 0, t.changed
+}
+
 // waitForReaders blocks until every output reader in wg has finished. Readers
 // get pipeDrainGrace to reach EOF on their own; after that forceClose is called
 // to unblock any that are stuck (a grandchild may still hold the write side),
 // and waitForReaders waits for them to return.
-func waitForReaders(wg *sync.WaitGroup, forceClose func()) {
+//
+// The grace only runs while no reader is sending to the client. A slow client
+// blocks the readers in stream.Send while the pipe still holds output, and
+// closing the pipe then would discard that output. A reader that is sending
+// cannot be stopped by forceClose anyway, so pausing the grace does not let a
+// stalled client hold the stream open any longer than it already could.
+func waitForReaders(wg *sync.WaitGroup, sends *sendTracker, forceClose func()) {
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
 		close(done)
 	}()
-	select {
-	case <-done:
-	case <-time.After(pipeDrainGrace):
-		forceClose()
-		<-done
+	remaining := pipeDrainGrace
+	for {
+		sending, changed := sends.state()
+		if sending {
+			select {
+			case <-done:
+				return
+			case <-changed:
+				continue
+			}
+		}
+		paused := time.Now()
+		timer := time.NewTimer(remaining)
+		select {
+		case <-done:
+			timer.Stop()
+			return
+		case <-timer.C:
+			forceClose()
+			<-done
+			return
+		case <-changed:
+			timer.Stop()
+			remaining -= time.Since(paused)
+		}
 	}
 }
 

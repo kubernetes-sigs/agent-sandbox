@@ -22,6 +22,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"sigs.k8s.io/agent-sandbox/packages/sandboxd/pkg/server"
 )
 
 func TestAuthTokenDigest(t *testing.T) {
@@ -44,4 +46,27 @@ func TestAuthTokenDigest(t *testing.T) {
 
 	_, err = authTokenDigest(&config{authTokenSHA256: hexSum, authTokenFile: file})
 	require.Error(t, err)
+}
+
+func TestRunAsPolicy(t *testing.T) {
+	got, err := runAsPolicy(&config{})
+	require.NoError(t, err)
+	require.Nil(t, got, "no flag refuses every named user")
+
+	got, err = runAsPolicy(&config{runAsUIDRange: "1000-1999", runAsGIDRange: "2000-2999"})
+	require.NoError(t, err)
+	require.Equal(t, &server.RunAsPolicy{
+		UIDs: server.IDRange{Min: 1000, Max: 1999},
+		GIDs: server.IDRange{Min: 2000, Max: 2999},
+	}, got)
+
+	for _, cfg := range []config{
+		{runAsUIDRange: "1000-1999"},
+		{runAsGIDRange: "2000-2999"},
+		{runAsUIDRange: "1000", runAsGIDRange: "2000-2999"},
+		{runAsUIDRange: "1000-1999", runAsGIDRange: "2999-2000"},
+	} {
+		_, err = runAsPolicy(&cfg)
+		require.Error(t, err)
+	}
 }

@@ -66,6 +66,7 @@ type ProcessServer struct {
 	registry        *processmanager.ProcessRegistry
 	streamChunkSize int
 	executionPolicy ExecutionPolicy
+	runAs           *RunAsPolicy
 	log             logr.Logger
 }
 
@@ -94,7 +95,9 @@ func NewProcessServer(rootDir string, registry *processmanager.ProcessRegistry, 
 }
 
 // buildCommand translates a ProcessConfig into an exec.Cmd with env merged
-// over the daemon environment and cwd confined to rootDir.
+// over the daemon environment and cwd confined to rootDir. It always sets
+// cmd.SysProcAttr, with the credential of the user the request names, so
+// callers add their own attributes to it instead of replacing it.
 //
 // Unlike exec.CommandContext, this does NOT install Go's default context
 // cancellation handler (which only sends SIGKILL to the child PID). Callers
@@ -105,8 +108,14 @@ func (s *ProcessServer) buildCommand(_ context.Context, config *processv1.Proces
 		return nil, status.Error(codes.InvalidArgument, "command is required")
 	}
 
+	credential, err := s.runAs.credential(config.GetUser())
+	if err != nil {
+		return nil, err
+	}
+
 	command := config.GetCommand()
 	cmd := exec.Command(command[0], command[1:]...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: credential}
 
 	// A nil cmd.Env inherits the daemon environment automatically, so it is
 	// only materialized when the request adds vars. Request vars are
@@ -172,13 +181,17 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		// The initial size must be applied before the child starts: setting
 		// it afterwards races with a child that reads the terminal size
 		// immediately (e.g. `stty size` would report 0 0).
+		var size *pty.Winsize
 		if req.GetPty().GetCols() > 0 && req.GetPty().GetRows() > 0 {
-			ptyFile, err = pty.StartWithSize(cmd, &pty.Winsize{
+			size = &pty.Winsize{
 				Cols: uint16(req.GetPty().GetCols()),
 				Rows: uint16(req.GetPty().GetRows()),
-			})
+			}
+		}
+		if cmd.SysProcAttr.Credential != nil {
+			ptyFile, err = startPTYAsUser(cmd, size)
 		} else {
-			ptyFile, err = pty.Start(cmd)
+			ptyFile, err = pty.StartWithSize(cmd, size)
 		}
 		if err != nil {
 			return mapCommandError(err, "failed to start command with PTY")
@@ -188,7 +201,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 	} else {
 		// Put the child in its own process group so SendSignal reaches the
 		// whole tree and shutdown sweeps don't leak grandchildren.
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.SysProcAttr.Setpgid = true
 		stdoutR, stdoutW, err = os.Pipe()
 		if err != nil {
 			return status.Errorf(codes.Internal, "failed to create stdout pipe: %v", err)
@@ -206,6 +219,11 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 
 		cmd.Stdout, cmd.Stderr, cmd.Stdin = stdoutW, stderrW, stdinR
 		proc.Stdin = stdinW
+
+		if err := chownStdio(cmd, stdoutW, stderrW, stdinR); err != nil {
+			closeAll(stdoutR, stdoutW, stderrR, stderrW, stdinR, stdinW)
+			return status.Errorf(codes.Internal, "failed to give the command its pipes: %v", err)
+		}
 
 		// Bail out early if the client already disconnected.
 		if err := stream.Context().Err(); err != nil {
@@ -452,7 +470,7 @@ func (s *ProcessServer) execute(ctx context.Context, config *processv1.ProcessCo
 	if err != nil {
 		return nil, err
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr.Setpgid = true
 	drainGrace := waitDelay
 	if limits.timeLimit > 0 {
 		drainGrace = pipeDrainGrace
@@ -470,6 +488,9 @@ func (s *ProcessServer) execute(ctx context.Context, config *processv1.ProcessCo
 	defer stderrBuf.close()
 	cmd.Stdout = stdoutBuf.writer
 	cmd.Stderr = stderrBuf.writer
+	if err := chownStdio(cmd, stdoutBuf.writer, stderrBuf.writer); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to give the command its pipes: %v", err)
+	}
 
 	// Bail out early if the caller's context is already cancelled.
 	if err := ctx.Err(); err != nil {
@@ -714,6 +735,34 @@ func (s *ProcessServer) ResizeTTY(_ context.Context, req *processv1.ResizeTTYReq
 	}
 
 	return &processv1.ResizeTTYResponse{}, nil
+}
+
+// startPTYAsUser does what pty.StartWithSize does for a command that runs as
+// another user. pty.StartWithSize opens the terminal itself, which leaves no
+// point before the command starts at which chownStdio could reach it.
+func startPTYAsUser(cmd *exec.Cmd, size *pty.Winsize) (*os.File, error) {
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tty.Close() }()
+	if err := chownStdio(cmd, tty); err != nil {
+		_ = ptmx.Close()
+		return nil, err
+	}
+	if size != nil {
+		if err := pty.Setsize(ptmx, size); err != nil {
+			_ = ptmx.Close()
+			return nil, err
+		}
+	}
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = tty, tty, tty
+	cmd.SysProcAttr.Setsid, cmd.SysProcAttr.Setctty = true, true
+	if err := cmd.Start(); err != nil {
+		_ = ptmx.Close()
+		return nil, err
+	}
+	return ptmx, nil
 }
 
 func closeAll(files ...*os.File) {

@@ -122,8 +122,14 @@ explicitly as shown in [Agent Sandbox SDK access](#agent-sandbox-sdk-access).
 | `ResizeTTY` | Unary | Resize the pseudo-terminal window (`cols`, `rows`). |
 
 Errors surface as standard gRPC status codes (`NOT_FOUND` for unknown
-process IDs, `PERMISSION_DENIED` for a `cwd` escaping the sandbox root,
-`FAILED_PRECONDITION` for `ResizeTTY` on a process without a PTY).
+process IDs, `PERMISSION_DENIED` for a `cwd` escaping the sandbox root or a
+`user` the deployment does not allow, `FAILED_PRECONDITION` for `ResizeTTY` on
+a process without a PTY).
+
+`Start`, `Execute` and `ExecuteWithLimits` run the command as the daemon's own
+user unless the request names another one in `ProcessConfig.user` and the
+deployment allows it. See
+[Running a command as another user](#running-a-command-as-another-user).
 
 `exit_code` is the process's exit status, or `128+n` when signal `n` killed
 it (e.g. `137` for `SIGKILL`), as a shell reports it.
@@ -328,6 +334,8 @@ Complete, runnable manifests for both (plus an end-to-end SDK client) live in
 | `--execute-max-stderr-limit-bytes` | `0` | Maximum stderr capture limit per unary execution. |
 | `--auth-token-sha256` | (none) | Hex SHA-256 digest of the bearer token clients must send. See [Client authentication](#client-authentication). |
 | `--auth-token-file` | (none) | File holding the bearer token (e.g. a mounted Secret). Alternative to `--auth-token-sha256`; set at most one. Neither leaves the API unauthenticated. |
+| `--run-as-uid-range` | (none) | Inclusive range of user IDs, as `<min>-<max>`, that a request may run its command as. Set it together with `--run-as-gid-range`. See [Running a command as another user](#running-a-command-as-another-user). |
+| `--run-as-gid-range` | (none) | Inclusive range of group IDs, as `<min>-<max>`, that a request may give its command. Neither flag refuses every request that names a user. |
 | `--version` | | Print version info and exit. |
 
 For example, start a local daemon with optional execution policy:
@@ -554,6 +562,14 @@ The Python gRPC path requires the `grpc` extra: `pip install k8s-agent-sandbox[g
   keys into the sandbox environment.
 - **Process hygiene:** children run in their own process groups; daemon
   shutdown SIGTERMs them, waits a grace period, then SIGKILLs stragglers.
+- **Process user:** every command runs as the daemon's own user unless the
+  deployment opts in twice: it gives the daemon the privilege to change user,
+  and it sets `--run-as-uid-range` and `--run-as-gid-range`. The caller is then
+  trusted to name the user, as it is already trusted to name the command, so
+  whoever can call the API can run a command as any user in the range. Code
+  inside the sandbox must not be able to make that call. Set
+  `--auth-token-sha256` as well and keep the token out of the sandbox. See
+  [Running a command as another user](#running-a-command-as-another-user).
 
 ## Client authentication
 
@@ -620,6 +636,71 @@ curl -sf -H "Authorization: Bearer $TOKEN" localhost:8080/v1/files/src/main.py
 grpcurl -plaintext -H "authorization: Bearer $TOKEN" \
   -d '{"config":{"command":["echo","hello"]}}' localhost:9090 process.v1.ProcessService/Execute
 ```
+
+## Running a command as another user
+
+By default every command runs as the user `sandboxd` itself runs as. In a
+sandbox that several people share, each person's commands can instead run as
+that person's own Linux user. Ordinary file modes then keep one person's files
+and running sessions away from another person's commands. A request names the
+user in `ProcessConfig.user`:
+
+```bash
+grpcurl -plaintext -H "authorization: Bearer $TOKEN" \
+  -d '{"config":{"command":["id"],"user":{"uid":1001,"gid":1001,"supplementaryGids":[2000]}}}' \
+  localhost:9090 process.v1.ProcessService/Execute
+```
+
+`Start` (with or without a PTY), `Execute` and `ExecuteWithLimits` accept the
+field. `WriteStdin`, `SendSignal`, `ResizeTTY`, a cancelled stream and daemon
+shutdown treat the process like any other.
+
+The feature is off until the deployment does both of the following:
+
+- Pass `--run-as-uid-range=<min>-<max>` and `--run-as-gid-range=<min>-<max>`.
+  Both ranges are inclusive. Set both flags or neither.
+- Run `sandboxd` as root, or give it the capabilities `CAP_SETUID`,
+  `CAP_SETGID`, `CAP_KILL` and `CAP_CHOWN`. `CAP_SETUID` and `CAP_SETGID`
+  change the user and groups, `CAP_KILL` lets the daemon signal the command
+  afterwards, and `CAP_CHOWN` lets it give the command its pipes or terminal.
+  With the flags set, `sandboxd` checks its effective capabilities at startup
+  and exits with an error that names any it lacks. The published image runs as
+  user `1000`, which holds none of them. A container that runs as a non-root
+  user does not hold the capabilities its security context adds, so in
+  Kubernetes set `runAsUser: 0` on the container.
+
+`sandboxd` applies these rules to a request that names a user:
+
+- The `uid`, the `gid` and every entry of `supplementary_gids` must be inside
+  the matching range. `0` is never accepted, whatever the range says, so a
+  caller cannot ask for root. A request that breaks this rule fails with
+  `PERMISSION_DENIED` and nothing runs. Without the flags, every request that
+  names a user fails that way.
+- The command gets exactly the named groups. It does not keep the daemon's
+  supplementary groups, and an empty `supplementary_gids` leaves it with none.
+- The command holds no capabilities. To keep it that way, `sandboxd` refuses
+  to start with the flags set while it holds ambient capabilities, because
+  every command would inherit them. Give a non-root daemon file capabilities
+  instead.
+- `sandboxd` does not look the IDs up in `/etc/passwd`, so they need no entry
+  there. The environment is the same as without a user: the daemon's own
+  environment plus `env_vars`. Set `HOME`, `USER` and similar variables in
+  `env_vars`.
+- `cwd` is confined to `--root-dir` as before. The named user must also be able
+  to enter the working directory, which is `--root-dir` when `cwd` is unset.
+  Otherwise the command fails to start with `PERMISSION_DENIED`.
+- The named user owns the command's pipes or terminal, so the command can open
+  `/dev/stdout`, `/dev/stderr` and its terminal by path.
+
+The REST file API does not take a user. It still reads and writes as the
+daemon's own user.
+
+A runtime that predates `ProcessConfig.user` ignores the field and runs the
+command as its own user. Before relying on the field, confirm that the runtime
+supports it, for example by running `id -u` as a named user.
+
+Anything that can call the API can run a command as any user in the range. See
+the process user entry in the [Security model](#security-model).
 
 ## Local development
 

@@ -40,7 +40,7 @@ class PTY(_message.Message):
     def __init__(self, cols: _Optional[int] = ..., rows: _Optional[int] = ...) -> None: ...
 
 class ProcessConfig(_message.Message):
-    __slots__ = ("command", "env_vars", "cwd")
+    __slots__ = ("command", "env_vars", "cwd", "user")
     class EnvVarsEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -51,10 +51,22 @@ class ProcessConfig(_message.Message):
     COMMAND_FIELD_NUMBER: _ClassVar[int]
     ENV_VARS_FIELD_NUMBER: _ClassVar[int]
     CWD_FIELD_NUMBER: _ClassVar[int]
+    USER_FIELD_NUMBER: _ClassVar[int]
     command: _containers.RepeatedScalarFieldContainer[str]
     env_vars: _containers.ScalarMap[str, str]
     cwd: str
-    def __init__(self, command: _Optional[_Iterable[str]] = ..., env_vars: _Optional[_Mapping[str, str]] = ..., cwd: _Optional[str] = ...) -> None: ...
+    user: User
+    def __init__(self, command: _Optional[_Iterable[str]] = ..., env_vars: _Optional[_Mapping[str, str]] = ..., cwd: _Optional[str] = ..., user: _Optional[_Union[User, _Mapping]] = ...) -> None: ...
+
+class User(_message.Message):
+    __slots__ = ("uid", "gid", "supplementary_gids")
+    UID_FIELD_NUMBER: _ClassVar[int]
+    GID_FIELD_NUMBER: _ClassVar[int]
+    SUPPLEMENTARY_GIDS_FIELD_NUMBER: _ClassVar[int]
+    uid: int
+    gid: int
+    supplementary_gids: _containers.RepeatedScalarFieldContainer[int]
+    def __init__(self, uid: _Optional[int] = ..., gid: _Optional[int] = ..., supplementary_gids: _Optional[_Iterable[int]] = ...) -> None: ...
 
 class StartRequest(_message.Message):
     __slots__ = ("config", "pty")

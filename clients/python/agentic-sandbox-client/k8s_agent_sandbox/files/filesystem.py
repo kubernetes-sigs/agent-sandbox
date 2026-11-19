@@ -506,6 +506,9 @@ class Filesystem:
         A configured ``max_download_size`` is enforced while downloading;
         exceeding it raises ``SandboxResponseTooLargeError`` without returning
         partial content. Downloads remain unlimited when it is unset.
+
+        On the sandboxd runtime, a directory raises ``SandboxRequestError``
+        with status 409.
         """
         if self._file_config.max_download_size is not None:
             with io.BytesIO() as destination:
@@ -550,6 +553,9 @@ class Filesystem:
         ``SandboxResponseTooLargeError`` (a ``RuntimeError`` subclass). Data
         written before an error remains in the destination. The returned value
         is the number of bytes written.
+
+        On the sandboxd runtime, a directory raises ``SandboxRequestError``
+        with status 409.
         """
         return self._read_to(path, destination, timeout, allow_unsafe_paths, max_bytes)
 

@@ -136,6 +136,13 @@ replacements:
     replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/typescript/agentic-sandbox-client/src/index.ts)'
     description: "TypeScript client src/index.ts to GitHub"
 
+  # managed-agents collection: the child README links to its parent
+  # collection README via a path-specific form (../../managed-agents/README.md
+  # rather than ../README.md) so this rule cannot capture other READMEs.
+  - pattern: '\]\(\.\./\.\./managed-agents/README\.md(#[^)]+)?\)'
+    replacement: '](/docs/use-cases/examples/managed-agents/$1)'
+    description: "managed-agents parent README to its docs page"
+
   # Generic relative README.md links (must come after specific rules)
 
   - pattern: '\]\(README\.md(#[^)]+)?\)'

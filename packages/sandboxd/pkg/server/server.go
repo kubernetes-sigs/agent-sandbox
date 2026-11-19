@@ -73,9 +73,10 @@ type Options struct {
 	// unauthenticated.
 	AuthTokenSHA256 []byte
 	// RunAs, when set, lets a request run its command as a user and groups
-	// inside these ranges (ProcessConfig.user). New returns an error unless
-	// the daemon may change user and signal the command afterwards. Nil
-	// refuses every request that names a user.
+	// inside these ranges (ProcessConfig.user), and runs every other command
+	// as the policy's default user. New returns an error unless
+	// AuthTokenSHA256 is set and the daemon may change user and signal the
+	// command afterwards. Nil refuses every request that names a user.
 	RunAs *RunAsPolicy
 	Log   logr.Logger
 }
@@ -108,6 +109,14 @@ func New(opts Options) (*Server, error) {
 	}
 	s.processServer.executionPolicy = opts.ExecutionPolicy
 	if opts.RunAs != nil {
+		// The caller names the user, so authentication is all that stops a
+		// command inside the sandbox from calling the API as someone else.
+		if opts.AuthTokenSHA256 == nil {
+			return nil, errors.New("running commands as another user needs client authentication (--auth-token-sha256); without it any command in the sandbox can call the API and run as every allowed user")
+		}
+		if err := opts.RunAs.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid run-as policy: %w", err)
+		}
 		if err := checkRunAsPrivileges(); err != nil {
 			return nil, err
 		}

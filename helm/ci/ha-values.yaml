@@ -1,0 +1,12 @@
+replicaCount: 2
+priorityClassName: agent-sandbox-controller
+pdb:
+  enabled: true
+  minAvailable: 1
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: agent-sandbox

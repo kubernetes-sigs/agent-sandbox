@@ -1593,8 +1593,9 @@ func TestStuckBackoffDelay(t *testing.T) {
 	}
 }
 
-func TestHasStableReadyMember(t *testing.T) {
+func TestReadyReplacements(t *testing.T) {
 	now := time.Now()
+	roundStart := now.Add(-10 * time.Minute)
 	ready := func(since time.Duration) sandboxv1beta1.Sandbox {
 		return sandboxv1beta1.Sandbox{Status: sandboxv1beta1.SandboxStatus{Conditions: []metav1.Condition{{
 			Type:               string(sandboxv1beta1.SandboxConditionReady),
@@ -1605,15 +1606,29 @@ func TestHasStableReadyMember(t *testing.T) {
 	notReady := sandboxv1beta1.Sandbox{Status: sandboxv1beta1.SandboxStatus{Conditions: []metav1.Condition{{
 		Type:               string(sandboxv1beta1.SandboxConditionReady),
 		Status:             metav1.ConditionFalse,
-		LastTransitionTime: metav1.Time{Time: now.Add(-time.Hour)},
+		LastTransitionTime: metav1.Time{Time: now.Add(-time.Minute)},
 	}}}}
 
-	require.False(t, hasStableReadyMember(nil, now))
-	require.False(t, hasStableReadyMember([]sandboxv1beta1.Sandbox{notReady}, now))
+	stable, remaining := readyReplacements(nil, roundStart, now)
+	require.False(t, stable)
+	require.Zero(t, remaining)
+
+	stable, _ = readyReplacements([]sandboxv1beta1.Sandbox{notReady}, roundStart, now)
+	require.False(t, stable)
+
 	// A crash loop without a readiness probe is Ready for seconds after each restart.
-	require.False(t, hasStableReadyMember([]sandboxv1beta1.Sandbox{ready(3 * time.Second)}, now),
-		"a member that just turned Ready is not yet progress")
-	require.True(t, hasStableReadyMember([]sandboxv1beta1.Sandbox{notReady, ready(time.Minute)}, now))
+	stable, remaining = readyReplacements([]sandboxv1beta1.Sandbox{ready(3 * time.Second)}, roundStart, now)
+	require.False(t, stable, "a replacement that just turned Ready is not yet progress")
+	require.Equal(t, stuckProgressReadyFor-3*time.Second, remaining)
+
+	stable, _ = readyReplacements([]sandboxv1beta1.Sandbox{notReady, ready(time.Minute)}, roundStart, now)
+	require.True(t, stable)
+
+	// A member that was already Ready before the round began says nothing
+	// about whether the replacements succeed.
+	stable, remaining = readyReplacements([]sandboxv1beta1.Sandbox{ready(time.Hour)}, roundStart, now)
+	require.False(t, stable, "a member Ready before the round does not count as progress")
+	require.Zero(t, remaining)
 }
 
 func TestObserveStuckBackoff(t *testing.T) {
@@ -1626,18 +1641,37 @@ func TestObserveStuckBackoff(t *testing.T) {
 		r.noteStuckReplacement(key, "hash-a", grace, base.Add(grace+time.Second))
 		return r
 	}
+	readySince := func(since time.Time) []sandboxv1beta1.Sandbox {
+		return []sandboxv1beta1.Sandbox{{Status: sandboxv1beta1.SandboxStatus{Conditions: []metav1.Condition{{
+			Type:               string(sandboxv1beta1.SandboxConditionReady),
+			Status:             metav1.ConditionTrue,
+			LastTransitionTime: metav1.Time{Time: since},
+		}}}}}
+	}
+	observe := func(r *SandboxWarmPoolReconciler, hash string, members []sandboxv1beta1.Sandbox, now time.Time) int {
+		failures, _ := r.observeStuckBackoff(key, hash, members, grace, now)
+		return failures
+	}
+	now := base.Add(grace + time.Minute) // the second round began at base+grace+1s
 
-	r := seed()
-	require.Equal(t, 2, r.observeStuckBackoff(key, "hash-a", false, grace, base.Add(grace+30*time.Second)),
+	require.Equal(t, 2, observe(seed(), "hash-a", nil, now),
 		"unchanged blueprint without progress keeps the count")
-	require.Equal(t, 0, seed().observeStuckBackoff(key, "hash-a", true, grace, base.Add(grace)),
-		"a stably Ready member is progress")
-	require.Equal(t, 0, seed().observeStuckBackoff(key, "hash-b", false, grace, base.Add(grace)),
+	require.Equal(t, 0, observe(seed(), "hash-a", readySince(base.Add(grace+5*time.Second)), now),
+		"a replacement that stayed Ready is progress")
+	require.Equal(t, 2, observe(seed(), "hash-a", readySince(base.Add(-time.Hour)), now),
+		"a member that was Ready before the round began is not")
+	require.Equal(t, 0, observe(seed(), "hash-b", nil, now),
 		"a changed blueprint is a new experiment")
-	require.Equal(t, 0, seed().observeStuckBackoff(key, "hash-a", false, grace, base.Add(3*time.Hour)),
+	require.Equal(t, 0, observe(seed(), "hash-a", nil, base.Add(3*time.Hour)),
 		"a long quiet period means nothing is being replaced any more")
-	require.Equal(t, 0, (&SandboxWarmPoolReconciler{}).observeStuckBackoff(key, "hash-a", false, grace, base),
+	require.Equal(t, 0, observe(&SandboxWarmPoolReconciler{}, "hash-a", nil, now),
 		"no state means no backoff")
+
+	// A replacement that only just turned Ready keeps the history and asks for a recheck.
+	r := seed()
+	failures, recheck := r.observeStuckBackoff(key, "hash-a", readySince(now.Add(-5*time.Second)), grace, now)
+	require.Equal(t, 2, failures)
+	require.Equal(t, stuckProgressReadyFor-5*time.Second, recheck)
 
 	// Deletions within one grace period are one round; the next round starts a grace later.
 	r = &SandboxWarmPoolReconciler{}
@@ -1735,7 +1769,8 @@ func TestReconcilePool_StuckReplacementBackoff(t *testing.T) {
 	require.False(t, exists(third))
 	require.Empty(t, warnings(), "the same backoff does not repeat its event")
 
-	// A member that stays Ready ends the backoff, and the pool says it is progressing again.
+	// A replacement that stays Ready ends the backoff, and the pool says it is progressing again.
+	current = current.Add(2 * time.Minute)
 	replacement("pool-fourth", metav1.Condition{
 		Type:               string(sandboxv1beta1.SandboxConditionReady),
 		Status:             metav1.ConditionTrue,
@@ -1746,7 +1781,8 @@ func TestReconcilePool_StuckReplacementBackoff(t *testing.T) {
 	ev = warnings()
 	require.Len(t, ev, 1)
 	require.Contains(t, ev[0], reasonWarmPoolProgressing)
-	require.Equal(t, 0, r.observeStuckBackoff(types.NamespacedName{Namespace: warmPool.Namespace, Name: warmPool.Name}, "", false, grace, current))
+	failures, _ := r.observeStuckBackoff(types.NamespacedName{Namespace: warmPool.Namespace, Name: warmPool.Name}, "", nil, grace, current)
+	require.Zero(t, failures)
 }
 
 // TestReconcilePool_StuckBackoffRechecksStableReady: a member that has only
@@ -1783,12 +1819,65 @@ func TestReconcilePool_StuckBackoffRechecksStableReady(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, stuckProgressReadyFor-5*time.Second+graceRequeueSlack, requeueAfter,
 		"the recheck lands once the member has been Ready long enough")
-	require.Equal(t, 1, r.observeStuckBackoff(key, hash, false, grace, current), "not progress yet")
+	failures, _ := r.observeStuckBackoff(key, hash, nil, grace, current)
+	require.Equal(t, 1, failures, "not progress yet")
 
 	current = current.Add(requeueAfter)
 	_, err = r.reconcilePool(ctx, warmPool)
 	require.NoError(t, err)
-	require.Zero(t, r.observeStuckBackoff(key, hash, false, grace, current), "a member that stayed Ready ends the backoff")
+	failures, _ = r.observeStuckBackoff(key, hash, nil, grace, current)
+	require.Zero(t, failures, "a replacement that stayed Ready ends the backoff")
+}
+
+// TestReconcilePool_StuckBackoffIgnoresOlderReadyMember: a pool with a member
+// that has been Ready for a long time must still back off while its
+// replacements keep failing. The older member says nothing about whether the
+// replacements succeed.
+func TestReconcilePool_StuckBackoffIgnoresOlderReadyMember(t *testing.T) {
+	zeroGraceJitter(t)
+	base := time.Now().Truncate(time.Second)
+	grace := DefaultWarmPoolReadinessGracePeriod
+	warmPool, stuck, template := newGraceTestPool(base, grace+time.Minute, nil, false)
+	replicas := int32(2)
+	warmPool.Spec.Replicas = &replicas
+
+	healthy := stuck.DeepCopy()
+	healthy.Name, healthy.UID = "pool-healthy", "uid-healthy"
+	healthy.Status.Conditions = []metav1.Condition{{
+		Type:               string(sandboxv1beta1.SandboxConditionReady),
+		Status:             metav1.ConditionTrue,
+		LastTransitionTime: metav1.Time{Time: base.Add(-time.Hour)},
+	}}
+
+	scheme := newTestScheme()
+	inner := newFakeClient(scheme, template, warmPool, stuck, healthy)
+	current := base
+	r := SandboxWarmPoolReconciler{
+		Client:       newLaggingClient(inner),
+		Scheme:       scheme,
+		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+		Recorder:     events.NewFakeRecorder(16),
+		now:          func() time.Time { return current },
+	}
+	ctx := context.Background()
+	get := func(name string) error {
+		return inner.Get(ctx, types.NamespacedName{Namespace: stuck.Namespace, Name: name}, &sandboxv1beta1.Sandbox{})
+	}
+
+	_, err := r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	require.True(t, k8serrors.IsNotFound(get(stuck.Name)), "the first stuck member is replaced at once")
+
+	replacement := stuck.DeepCopy()
+	replacement.Name, replacement.UID, replacement.ResourceVersion = "pool-replacement", "uid-replacement", ""
+	replacement.CreationTimestamp = metav1.Time{Time: current}
+	require.NoError(t, inner.Create(ctx, replacement))
+
+	current = current.Add(grace + time.Second)
+	requeue, err := r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	require.NoError(t, get(replacement.Name), "the failing replacement is held, although another member has long been Ready")
+	require.Equal(t, stuckBackoffDelay(1)-time.Second+graceRequeueSlack, requeue)
 }
 
 // TestWarmPoolDefaults pins the exported defaults behind the

@@ -424,7 +424,7 @@ type stuckBackoffState struct {
 	// different blueprint is a different experiment, so the count restarts.
 	blueprintHash string
 	// failures is the number of rounds in a row that replaced stuck members
-	// without any member becoming stably Ready.
+	// without a replacement becoming stably Ready.
 	failures int
 	// roundStart is when the latest round began. Deletions within one grace
 	// period of it belong to the same round: a replacement created at or after
@@ -449,22 +449,29 @@ func stuckBackoffDelay(failures int) time.Duration {
 }
 
 // observeStuckBackoff updates the pool's backoff state from what this
-// reconcile sees and returns the failure count to act on. The count resets on
-// progress (a member that stayed Ready), on a changed blueprint, and after a
-// quiet period long enough that the pool must have been replacing nothing.
-func (r *SandboxWarmPoolReconciler) observeStuckBackoff(key types.NamespacedName, blueprintHash string, progress bool, grace time.Duration, now time.Time) int {
+// reconcile sees. It returns the failure count to act on and, when a
+// replacement has only just turned Ready, how long until it has stayed Ready
+// long enough to count, so the caller can schedule a recheck.
+//
+// The count resets when a replacement stays Ready, when the blueprint changes,
+// and after a quiet period long enough that the pool must have been replacing
+// nothing. Only members that turned Ready after the latest round began count
+// as progress: a member that was already Ready says nothing about whether the
+// replacements are succeeding.
+func (r *SandboxWarmPoolReconciler) observeStuckBackoff(key types.NamespacedName, blueprintHash string, members []sandboxv1beta1.Sandbox, grace time.Duration, now time.Time) (int, time.Duration) {
 	r.stuckMu.Lock()
 	defer r.stuckMu.Unlock()
 	st := r.stuckBackoff[key]
 	if st == nil {
-		return 0
+		return 0, 0
 	}
 	quiet := !st.roundStart.IsZero() && now.Sub(st.roundStart) > 2*(grace+stuckBackoffDelay(st.failures))
-	if progress || quiet || (blueprintHash != "" && st.blueprintHash != blueprintHash) {
+	stable, remaining := readyReplacements(members, st.roundStart, now)
+	if stable || quiet || (blueprintHash != "" && st.blueprintHash != blueprintHash) {
 		delete(r.stuckBackoff, key)
-		return 0
+		return 0, 0
 	}
-	return st.failures
+	return st.failures, remaining
 }
 
 // noteStuckReplacement records that this reconcile deleted stuck members and
@@ -487,36 +494,27 @@ func (r *SandboxWarmPoolReconciler) noteStuckReplacement(key types.NamespacedNam
 	return st.failures
 }
 
-// hasStableReadyMember reports whether any member has stayed Ready long enough
-// to count as the pool making progress.
-func hasStableReadyMember(members []sandboxv1beta1.Sandbox, now time.Time) bool {
-	for i := range members {
-		cond := meta.FindStatusCondition(members[i].Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
-		if cond == nil || cond.Status != metav1.ConditionTrue {
-			continue
-		}
-		if cond.LastTransitionTime.IsZero() || now.Sub(cond.LastTransitionTime.Time) >= stuckProgressReadyFor {
-			return true
-		}
-	}
-	return false
-}
-
-// stableReadyRemaining is how long until the soonest member that is Ready but
-// not yet stably so counts as progress, or 0 if there is none. Nothing else
-// wakes a pool whose members are all Ready, so the caller schedules a recheck.
-func stableReadyRemaining(members []sandboxv1beta1.Sandbox, now time.Time) time.Duration {
+// readyReplacements looks at the members that turned Ready after since, which
+// is when the latest round of stuck replacement began. It reports whether any
+// has stayed Ready for stuckProgressReadyFor, and otherwise how long until the
+// soonest one will, or 0 if there is none. Nothing else wakes a pool whose
+// members are all Ready, so the caller schedules a recheck for that time.
+func readyReplacements(members []sandboxv1beta1.Sandbox, since, now time.Time) (bool, time.Duration) {
 	var remaining time.Duration
 	for i := range members {
 		cond := meta.FindStatusCondition(members[i].Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
-		if cond == nil || cond.Status != metav1.ConditionTrue || cond.LastTransitionTime.IsZero() {
+		if cond == nil || cond.Status != metav1.ConditionTrue || !cond.LastTransitionTime.Time.After(since) {
 			continue
 		}
-		if left := stuckProgressReadyFor - now.Sub(cond.LastTransitionTime.Time); left > 0 && (remaining == 0 || left < remaining) {
+		left := stuckProgressReadyFor - now.Sub(cond.LastTransitionTime.Time)
+		if left <= 0 {
+			return true, 0
+		}
+		if remaining == 0 || left < remaining {
 			remaining = left
 		}
 	}
-	return remaining
+	return false, remaining
 }
 
 // clockNow returns the reconciler's current time (time.Now unless a test
@@ -686,17 +684,15 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	// same blueprint did not produce a Ready member, so each failed round
 	// extends the wait before the next one. Only the delete path waits longer:
 	// the unschedulable and gated holds below are unchanged.
-	stuckFailures := r.observeStuckBackoff(poolKey, currentSandboxBlueprintHash, hasStableReadyMember(activeSandboxes, now), graceWindow, now)
+	stuckFailures, stuckRecheck := r.observeStuckBackoff(poolKey, currentSandboxBlueprintHash, activeSandboxes, graceWindow, now)
 	stuckDelay := stuckBackoffDelay(stuckFailures)
 	stuckDeleted := false
-	// A member that only just turned Ready is not yet progress, and with every
-	// member Ready no other deadline wakes the pool, so recheck once the
-	// member has stayed Ready long enough. Otherwise the failure history and
-	// its warning would linger until some unrelated event.
-	if stuckFailures > 0 {
-		if remaining := stableReadyRemaining(activeSandboxes, now); remaining > 0 {
-			requeueAfter = minNonZeroDuration(requeueAfter, remaining+graceRequeueSlack)
-		}
+	// A replacement that only just turned Ready is not yet progress, and with
+	// every member Ready no other deadline wakes the pool, so recheck once it
+	// has stayed Ready long enough. Otherwise the failure history and its
+	// warning would linger until some unrelated event.
+	if stuckRecheck > 0 {
+		requeueAfter = minNonZeroDuration(requeueAfter, stuckRecheck+graceRequeueSlack)
 	}
 	for _, sb := range activeSandboxes {
 		if !isSandboxReady(&sb) && !sb.CreationTimestamp.IsZero() {

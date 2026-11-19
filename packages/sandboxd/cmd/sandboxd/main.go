@@ -87,6 +87,8 @@ type config struct {
 	streamChunkSize   int
 	authTokenSHA256   string
 	authTokenFile     string
+	runAsUIDRange     string
+	runAsGIDRange     string
 	printVersion      bool
 	executionPolicy   server.ExecutionPolicy
 }
@@ -127,6 +129,10 @@ func main() {
 		"Hex SHA-256 digest of a bearer token required on every gRPC call and REST request except GET /v1/health. The token itself never reaches the daemon. Mutually exclusive with --auth-token-file; both empty disables authentication.")
 	flag.StringVar(&cfg.authTokenFile, "auth-token-file", "",
 		"File holding a bearer token (e.g. a mounted Secret), required like --auth-token-sha256. Mutually exclusive with it.")
+	flag.StringVar(&cfg.runAsUIDRange, "run-as-uid-range", "",
+		"Inclusive range of user IDs, as <min>-<max>, that a request may run its command as. 0 is never allowed. Requires --run-as-gid-range, and a daemon that is root or holds CAP_SETUID, CAP_SETGID, CAP_KILL and CAP_CHOWN. Empty refuses every request that names a user.")
+	flag.StringVar(&cfg.runAsGIDRange, "run-as-gid-range", "",
+		"Inclusive range of group IDs, as <min>-<max>, that a request may give its command. 0 is never allowed. Requires --run-as-uid-range.")
 	flag.BoolVar(&cfg.printVersion, "version", false, "Print version information and exit.")
 	zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -168,6 +174,26 @@ func authTokenDigest(cfg *config) ([]byte, error) {
 	return nil, nil
 }
 
+// runAsPolicy returns the users and groups a request may run its command as,
+// or nil when neither range flag is set.
+func runAsPolicy(cfg *config) (*server.RunAsPolicy, error) {
+	if cfg.runAsUIDRange == "" && cfg.runAsGIDRange == "" {
+		return nil, nil
+	}
+	if cfg.runAsUIDRange == "" || cfg.runAsGIDRange == "" {
+		return nil, errors.New("--run-as-uid-range and --run-as-gid-range must be set together")
+	}
+	uids, err := server.ParseIDRange(cfg.runAsUIDRange)
+	if err != nil {
+		return nil, fmt.Errorf("--run-as-uid-range: %w", err)
+	}
+	gids, err := server.ParseIDRange(cfg.runAsGIDRange)
+	if err != nil {
+		return nil, fmt.Errorf("--run-as-gid-range: %w", err)
+	}
+	return &server.RunAsPolicy{UIDs: uids, GIDs: gids}, nil
+}
+
 func run(cfg *config, log logr.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -193,12 +219,18 @@ func run(cfg *config, log logr.Logger) error {
 		return err
 	}
 
+	runAs, err := runAsPolicy(cfg)
+	if err != nil {
+		return err
+	}
+
 	srv, err := server.New(server.Options{
 		RootDir:           cfg.rootDir,
 		MetadataEnvPrefix: cfg.metadataEnvPrefix,
 		StreamChunkSize:   cfg.streamChunkSize,
 		ExecutionPolicy:   cfg.executionPolicy,
 		AuthTokenSHA256:   authDigest,
+		RunAs:             runAs,
 		Log:               log.WithName("rest"),
 	})
 	if err != nil {
@@ -294,6 +326,7 @@ func run(cfg *config, log logr.Logger) error {
 		"rest", restLis.Addr().String(),
 		"rootDir", cfg.rootDir,
 		"auth", authDigest != nil,
+		"runAs", runAs != nil,
 	)
 	return g.Wait()
 }

@@ -72,7 +72,12 @@ type Options struct {
 	// every REST request except GET /v1/health. Nil leaves the API
 	// unauthenticated.
 	AuthTokenSHA256 []byte
-	Log             logr.Logger
+	// RunAs, when set, lets a request run its command as a user and groups
+	// inside these ranges (ProcessConfig.user). New returns an error unless
+	// the daemon may change user and signal the command afterwards. Nil
+	// refuses every request that names a user.
+	RunAs *RunAsPolicy
+	Log   logr.Logger
 }
 
 // Server bundles the gRPC ProcessService and FileWatcherService and the REST
@@ -102,6 +107,12 @@ func New(opts Options) (*Server, error) {
 		restServer:    NewRESTServer(opts.RootDir, opts.MetadataEnvPrefix, opts.Log),
 	}
 	s.processServer.executionPolicy = opts.ExecutionPolicy
+	if opts.RunAs != nil {
+		if err := checkRunAsPrivileges(); err != nil {
+			return nil, err
+		}
+		s.processServer.runAs = opts.RunAs
+	}
 	if opts.AuthTokenSHA256 != nil {
 		if len(opts.AuthTokenSHA256) != AuthTokenDigestSize {
 			return nil, fmt.Errorf("AuthTokenSHA256 must be %d bytes, got %d",

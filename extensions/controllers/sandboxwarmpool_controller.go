@@ -96,8 +96,8 @@ const (
 	// SandboxTemplate whose Pod keeps exiting is replaced at a bounded rate.
 	finishedBackoffBase = 5 * time.Second
 	finishedBackoffMax  = 5 * time.Minute
-	// finishedBackoffResetAfter is how long a pool must stay full and Ready
-	// before the controller clears its finished-member backoff.
+	// finishedBackoffResetAfter is how long a pool must go without deleting a
+	// finished member before the controller clears its finished-member backoff.
 	finishedBackoffResetAfter = 2 * finishedBackoffMax
 )
 
@@ -226,9 +226,15 @@ type SandboxWarmPoolReconciler struct {
 // finishedBackoffState holds the per-pool backoff state behind
 // observeFinishedBackoff.
 type finishedBackoffState struct {
-	failures   int
-	nextCreate time.Time
-	readySince time.Time
+	failures    int
+	lastFailure time.Time
+	holds       []time.Time
+	// nextBump is when the delay started by the last increase of failures
+	// ends. Finished members deleted before it share that delay. A finished
+	// member deleted at or after it counts as a new failure and grows the
+	// delay. Gating on time, not on the pool having no held slots, keeps the
+	// backoff growing when members exit out of phase.
+	nextBump time.Time
 }
 
 // refillBucket is the per-pool token bucket behind MaxRefillRate. Tokens
@@ -326,19 +332,22 @@ func (r *SandboxWarmPoolReconciler) forgetReplenishState(key types.NamespacedNam
 }
 
 // observeFinishedBackoff updates the pool's finished-member backoff state and
-// returns how long to defer replacement creation, or zero to create immediately.
-func (r *SandboxWarmPoolReconciler) observeFinishedBackoff(key types.NamespacedName, deletedFinished bool, readyReplicas, desiredReplicas int32, now time.Time) time.Duration {
+// returns how many replacement slots to hold back, the time until the next
+// held slot releases, and (when backoff starts or grows) the new delay and
+// failure count.
+func (r *SandboxWarmPoolReconciler) observeFinishedBackoff(key types.NamespacedName, deletedFinished, currentReplicas, desiredReplicas int32, now time.Time) (int32, time.Duration, time.Duration, int) {
 	r.replenishMu.Lock()
 	defer r.replenishMu.Unlock()
 
 	if desiredReplicas <= 0 {
 		delete(r.finishedBackoff, key)
-		return 0
+		return 0, 0, 0, 0
 	}
 
+	maxHolds := max(0, int(desiredReplicas-currentReplicas))
 	st, ok := r.finishedBackoff[key]
-	if !ok && !deletedFinished {
-		return 0
+	if !ok && (deletedFinished <= 0 || maxHolds == 0) {
+		return 0, 0, 0, 0
 	}
 	if !ok {
 		if r.finishedBackoff == nil {
@@ -348,37 +357,49 @@ func (r *SandboxWarmPoolReconciler) observeFinishedBackoff(key types.NamespacedN
 		r.finishedBackoff[key] = st
 	}
 
-	if !st.readySince.IsZero() && now.Sub(st.readySince) >= finishedBackoffResetAfter {
-		if !deletedFinished {
+	st.holds = slices.DeleteFunc(st.holds, func(releaseAt time.Time) bool {
+		return !releaseAt.After(now)
+	})
+
+	if !st.lastFailure.IsZero() && now.Sub(st.lastFailure) >= finishedBackoffResetAfter {
+		if deletedFinished <= 0 && len(st.holds) == 0 {
 			delete(r.finishedBackoff, key)
-			return 0
+			return 0, 0, 0, 0
 		}
 		st.failures = 0
 	}
 
-	if deletedFinished {
-		st.readySince = time.Time{}
-		if remaining := st.nextCreate.Sub(now); remaining > 0 {
-			return remaining
+	var bumpedDelay time.Duration
+	var bumpedFailures int
+	if deletedFinished > 0 && maxHolds > 0 {
+		if !now.Before(st.nextBump) {
+			st.failures++
+			bumpedDelay = finishedDelayForFailures(st.failures)
+			bumpedFailures = st.failures
+			st.nextBump = now.Add(bumpedDelay)
 		}
-		st.failures++
 		delay := finishedDelayForFailures(st.failures)
-		st.nextCreate = now.Add(delay)
-		return delay
-	}
-
-	if readyReplicas >= desiredReplicas {
-		if st.readySince.IsZero() {
-			st.readySince = now
+		st.lastFailure = now
+		releaseAt := now.Add(delay)
+		for range deletedFinished {
+			st.holds = append(st.holds, releaseAt)
 		}
-	} else {
-		st.readySince = time.Time{}
 	}
 
-	if remaining := st.nextCreate.Sub(now); remaining > 0 {
-		return remaining
+	if len(st.holds) > maxHolds {
+		st.holds = slices.Delete(st.holds, 0, len(st.holds)-maxHolds)
 	}
-	return 0
+	if st.failures == 0 && len(st.holds) == 0 {
+		delete(r.finishedBackoff, key)
+		return 0, 0, 0, 0
+	}
+	if len(st.holds) == 0 {
+		return 0, 0, bumpedDelay, bumpedFailures
+	}
+
+	// Members deleted in this pass already count toward inactiveReplicas.
+	held := max(int32(0), int32(len(st.holds))-deletedFinished)
+	return held, st.holds[0].Sub(now), bumpedDelay, bumpedFailures
 }
 
 func finishedDelayForFailures(failures int) time.Duration {
@@ -622,7 +643,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	var healthySandboxes []sandboxv1beta1.Sandbox
 	unschedulableReplicas := int32(0)
 	gatedReplicas := int32(0)
-	deletedFinished := false
+	deletedFinished := int32(0)
 	// nextGraceDeadline is the time remaining until the earliest readiness
 	// grace deadline among not-yet-Ready sandboxes (0 = none pending).
 	var nextGraceDeadline time.Duration
@@ -680,7 +701,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 				continue
 			}
 			if terminal {
-				deletedFinished = true
+				deletedFinished++
 			}
 			// Successfully deleted: it now occupies capacity as terminating
 			// until the deletion is observed; the replacement is created on a
@@ -731,10 +752,20 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	maxBatchSize := int32(r.MaxBatchSize)
 
 	// Record the observed member count and check whether replacement creation
-	// should wait for a recent member drop or finished-member backoff.
+	// should yield to a recent member drop (claim adoption burst). No-op when
+	// ReplenishDelay is zero.
 	replenishHold := r.observeMembersForReplenish(poolKey, currentReplicas, desiredReplicas, now)
-	finishedBackoff := r.observeFinishedBackoff(poolKey, deletedFinished, readyReplicas, desiredReplicas, now)
-	createHold := max(replenishHold, finishedBackoff)
+	heldFinished, finishedWait, bumpedDelay, finishedFailures := r.observeFinishedBackoff(poolKey, deletedFinished, currentReplicas, desiredReplicas, now)
+	if bumpedDelay > 0 {
+		logger.Info("Backing off replacement of finished warm pool sandboxes",
+			"poolName", warmPool.Name,
+			"failures", finishedFailures,
+			"delay", bumpedDelay)
+	}
+	if finishedWait > 0 && tmplErr == nil {
+		requeueAfter = minNonZeroDuration(requeueAfter, finishedWait)
+	}
+	createTarget := max(int32(0), desiredReplicas-heldFinished)
 
 	// Create new sandboxes if we need more.
 	// Hard invariant: never create while the existing population (active,
@@ -746,10 +777,10 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	// as terminating members must keep the hold's wake-up armed, so that once
 	// the deletions are observed the remaining hold window (not a watch-event
 	// race) decides when refill starts.
-	if createHold > 0 && currentReplicas < desiredReplicas && tmplErr == nil {
-		// Defer replacement creation so an adoption burst gets the API
-		// server budget first, or so a template whose Pod keeps exiting backs off.
-		// The status update above still reports actual replica counts.
+	if replenishHold > 0 && currentReplicas < createTarget && tmplErr == nil {
+		// Members recently dropped out of the pool (e.g. adopted by a burst
+		// of claims). Defer replacement creation so the burst gets the API
+		// server budget first; status above still reflects actual counts.
 		// The refill token bucket is untouched during the hold (its
 		// capacity caps carryover at one second of creates), so when the
 		// hold expires the paced stream starts fresh: delay defers the
@@ -757,12 +788,12 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		// V(4): fires on every reconcile while the hold re-arms (one per
 		// adoption during a claim burst) — routine pacing, not a
 		// lifecycle event.
-		logger.V(4).Info("Deferring pool replenishment",
-			"deficit", desiredReplicas-currentReplicas,
-			"requeueAfter", createHold)
-		requeueAfter = minNonZeroDuration(requeueAfter, createHold)
-	} else if totalReplicas < desiredReplicas && tmplErr == nil {
-		deficit := min(desiredReplicas-totalReplicas, maxBatchSize)
+		logger.V(4).Info("Deferring pool replenishment after recent member drop",
+			"deficit", createTarget-currentReplicas,
+			"requeueAfter", replenishHold)
+		requeueAfter = minNonZeroDuration(requeueAfter, replenishHold)
+	} else if totalReplicas < createTarget && tmplErr == nil {
+		deficit := min(createTarget-totalReplicas, maxBatchSize)
 		// Shape first, then gate: the token bucket decides how many creates
 		// this pass may issue, and the expectations gate below decides
 		// whether issuing them against the current cache is safe.

@@ -41,8 +41,9 @@ type SandboxWarmPoolSpecApplyConfiguration struct {
 	// period is counted from the later of the sandbox's creation and its Pod
 	// being scheduled, not from when it last lost readiness. A sandbox whose Pod
 	// is unschedulable or waiting on scheduling gates is held rather than
-	// replaced. Pools backed by slow-starting runtimes generally
-	// need a longer grace period than pools backed by fast ones.
+	// replaced. Finished members (whose Pod has exited) are replaced without
+	// waiting for the grace period. Pools backed by slow-starting runtimes
+	// generally need a longer grace period than pools backed by fast ones.
 	// If unset, the controller-level value is used (the
 	// --sandbox-warm-pool-readiness-grace-period flag or the controller
 	// ConfigMap), which defaults to 300 seconds.

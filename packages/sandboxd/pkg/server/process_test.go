@@ -26,6 +26,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -612,6 +613,75 @@ func TestStartWithPTY_DeliversAllOutputOfShortLivedProcess(t *testing.T) {
 			require.Len(t, lines, 2000, "last line: %q", lines[len(lines)-1])
 		})
 	}
+}
+
+// gatedStartStream is a Start stream whose output events wait for release,
+// like a client that stops reading. Init and Exit events pass through.
+type gatedStartStream struct {
+	grpc.ServerStream
+	ctx     context.Context
+	release chan struct{}
+	stdout  bytes.Buffer
+	exit    *int32
+}
+
+func (s *gatedStartStream) Context() context.Context { return s.ctx }
+
+func (s *gatedStartStream) Send(resp *processv1.StartResponse) error {
+	if out := resp.GetStdout(); out != nil {
+		<-s.release
+		s.stdout.Write(out)
+	}
+	if exit := resp.GetExit(); exit != nil {
+		code := exit.GetExitCode()
+		s.exit = &code
+	}
+	return nil
+}
+
+// TestStartWithPTY_DeliversOutputTailToASlowConsumer is the PTY form of
+// TestStartDeliversOutputTailToASlowConsumer. The PTY reader takes one chunk
+// and blocks in Send, the rest of the output stays in the PTY, and the child
+// exits. The client stays idle for longer than pipeDrainGrace. Start must
+// still deliver every byte before the ExitEvent.
+func TestStartWithPTY_DeliversOutputTailToASlowConsumer(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	// The reader takes one 64-byte chunk and the rest of the 1 KiB output
+	// waits in the PTY, which holds that much on Linux and macOS.
+	const chunk, total = 64, 1024
+	srv := NewProcessServer(root, processmanager.NewProcessRegistry(), chunk, logr.Discard())
+	stream := &gatedStartStream{ctx: testCtx(t), release: make(chan struct{})}
+
+	finished := make(chan struct{})
+	var startErr error
+	go func() {
+		defer close(finished)
+		startErr = srv.Start(&processv1.StartRequest{
+			Config: &processv1.ProcessConfig{Command: []string{
+				"sh", "-c", "head -c " + strconv.Itoa(total) + " /dev/zero; touch exited",
+			}},
+			Pty: &processv1.PTY{Cols: 80, Rows: 24},
+		}, stream)
+	}()
+	release := sync.OnceFunc(func() { close(stream.release) })
+	t.Cleanup(func() {
+		release()
+		<-finished
+	})
+
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(root, "exited"))
+		return err == nil
+	}, 10*time.Second, 10*time.Millisecond, "child never finished writing")
+	time.Sleep(pipeDrainGrace + 2*time.Second)
+	release()
+	<-finished
+
+	require.NoError(t, startErr)
+	require.NotNil(t, stream.exit, "no ExitEvent")
+	require.Equal(t, int32(0), *stream.exit)
+	require.Equal(t, total, stream.stdout.Len(), "Start reported exit 0 with part of the PTY output missing")
 }
 
 // TestStartWithPTY_InitialSizeVisibleImmediately guards against the requested

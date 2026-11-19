@@ -974,7 +974,7 @@ func waitForReaders(wg *sync.WaitGroup, sends *sendTracker, forceClose func()) {
 			return
 		case <-changed:
 			timer.Stop()
-			remaining -= time.Since(paused)
+			remaining = max(0, remaining-time.Since(paused))
 		}
 	}
 }

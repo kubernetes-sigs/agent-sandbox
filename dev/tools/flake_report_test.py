@@ -528,6 +528,74 @@ class AnalyzeTabTest(unittest.TestCase):
         self.assertEqual(infra["pretest_failures"], 0)
         self.assertEqual(infra["infra_runs"], 0)
 
+    def test_tab_with_only_job_level_rows_is_not_classified(self):
+        # The real row shape of presubmit-test-autogen-up-to-date: the job
+        # writes no junit, so TestGrid serves only the Overall and Pod rows.
+        # Such a tab reports no infra entry and costs no artifact fetch.
+        table = {
+            "query": "kubernetes-ci-logs/pr-logs/directory/presubmit-test-autogen-up-to-date",
+            "changelists": ["g0", "g1"],
+            "column_ids": ["\ue000g0", "\ue000g1"],
+            "timestamps": [200, 100],
+            "tests": [
+                {"name": "presubmit-test-autogen-up-to-date.Overall",
+                 "statuses": rle([12, 1])},
+                {"name": "presubmit-test-autogen-up-to-date.Pod",
+                 "statuses": rle([1, 1])},
+            ],
+        }
+        fetched = []
+
+        def fake_fetcher(gcs_query, build_id):
+            return lambda name: fetched.append((build_id, name))
+
+        with mock.patch.object(flake_report, "fetch_json",
+                               return_value=table), \
+             mock.patch.object(flake_report, "make_artifact_fetcher",
+                               fake_fetcher):
+            result = flake_report.analyze_tab("dash", "tab", 2)
+        self.assertEqual(result, ([], [], None, [], []))
+        self.assertEqual(fetched, [])
+
+    def test_gate_failure_on_a_tab_with_a_test_row_is_pretest_breakage(self):
+        # When TestGrid also serves a test row for the gate's tab, red runs
+        # are classified: the run whose build log ends with the gate's error
+        # is the PR's breakage, and the run with no such line stays infra.
+        table = {
+            "query": "kubernetes-ci-logs/pr-logs/directory/presubmit-test-autogen-up-to-date",
+            "changelists": ["g0", "g1", "g2"],
+            "column_ids": ["\ue000g0", "\ue000g1", "\ue000g2"],
+            "timestamps": [300, 200, 100],
+            "tests": [
+                {"name": "presubmit-test-autogen-up-to-date.Overall",
+                 "statuses": rle([12, 12, 1])},
+                {"name": "presubmit-test-autogen-up-to-date.Pod",
+                 "statuses": rle([1, 1, 1])},
+                {"name": "pkg.TestStray", "statuses": rle([0, 0, 1])},
+            ],
+        }
+        finished = {"result": "FAILURE", "revision": "abc"}
+        clone = [{"refs": {"repo": "agent-sandbox"}}]
+        art = {
+            "g0": {"finished.json": finished, "clone-records.json": clone,
+                   "build-log.txt": "ERROR: Generated files out-of-date. "
+                                    "Please run 'dev/tools/fix-api-docs'\n"},
+            "g1": {"finished.json": finished, "clone-records.json": clone,
+                   "build-log.txt": "signal: killed\n"},
+        }
+
+        def fake_fetcher(gcs_query, build_id):
+            return lambda name: art.get(build_id, {}).get(name)
+
+        with mock.patch.object(flake_report, "fetch_json",
+                               return_value=table), \
+             mock.patch.object(flake_report, "make_artifact_fetcher",
+                               fake_fetcher):
+            _, _, infra, _, _ = flake_report.analyze_tab("dash", "tab", 3)
+        self.assertEqual(
+            (infra["red_runs"], infra["pretest_failures"], infra["infra_runs"]),
+            (2, 1, 1))
+
     def test_render_report_calls_out_benign_red_runs(self):
         flaky, consistent, infra = self.analyze()
         report = flake_report.render_report("dash", flaky, consistent, [infra], 6)

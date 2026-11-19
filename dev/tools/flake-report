@@ -243,7 +243,10 @@ def clone_merge_conflict(record):
 # Error lines printed by junit-less gates when the PR's own change fails
 # them. dev/ci/presubmits/test-autogen-up-to-date writes no junit at all, so
 # a PR with stale generated files goes red in the same shape as a pod that
-# died, and only the build log tells them apart.
+# died, and only the build log tells them apart. analyze_tab classifies red
+# runs only on a tab that has a test row, so the markers matter when TestGrid
+# serves such a row for the gate's tab. A tab with only its job-level Overall
+# and Pod rows is skipped before any run is classified.
 PRETEST_GATE_MARKERS = ("ERROR: Generated files out-of-date",)
 
 # dev/tools/push-images names the images it could not build. The e2e lanes
@@ -338,8 +341,8 @@ def classify_red_run(has_failing_test, has_test_results, fetch_artifact,
             # The clone failed without a merge conflict (network error,
             # unreachable ref): that is infrastructure, not a stale PR.
             return "infra"
-    # A junit-less gate (autogen) leaves no test rows to show that the PR's
-    # own change failed it; its build log ends with the gate's error line.
+    # A junit-less gate (autogen) writes no failing test to show that the
+    # PR's own change failed it; its build log ends with the gate's error line.
     try:
         build_log = fetch_artifact("build-log.txt")
     except FetchUnavailable:

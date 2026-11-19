@@ -216,6 +216,25 @@ func TestRead_ReturnsContent(t *testing.T) {
 	}
 }
 
+func TestRead_SandboxdRejectsDirectory(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("type") != "file" {
+			t.Errorf("query = %q, want type=file", r.URL.RawQuery)
+		}
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"code":"CONFLICT","message":"path is a directory"}`))
+	}))
+	defer server.Close()
+
+	c := newReadyTestSandbox(server.URL)
+	c.files.runtime = RuntimeSandboxd
+	_, err := c.Read(context.Background(), "dir")
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusConflict {
+		t.Fatalf("Read() error = %v, want 409 HTTPError", err)
+	}
+}
+
 func TestRead_EmptyFileReturnsNonNilSlice(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer server.Close()

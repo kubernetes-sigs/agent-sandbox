@@ -162,6 +162,9 @@ fmt.Printf("downloaded %d bytes\n", written)
 // Check existence
 exists, err := sb.Exists(ctx, "script.py")
 
+// Get a file's type, size, mode, and modification time (sandboxd runtime only)
+info, err := sb.Stat(ctx, "script.py")
+
 // Create a directory, rename a file, and copy it (sandboxd runtime only)
 err = sb.Mkdir(ctx, "out/logs", true) // parents
 if err != nil { log.Fatal(err) }
@@ -192,7 +195,7 @@ streams the archive once, and the unpack is not atomic. `Write()` and `WriteRead
 atomic.
 
 `Read()` and `ReadTo()` responses are capped by `MaxDownloadSize` (256 MB by
-default). `Run()` responses are capped at 16 MB; `List()`/`Exists()` at 8 MB.
+default). `Run()` responses are capped at 16 MB; `List()`/`Exists()`/`Stat()` at 8 MB.
 
 ### Runtime Health and Metadata
 

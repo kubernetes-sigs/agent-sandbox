@@ -160,12 +160,13 @@ def _sandboxd_read_endpoint(path: str) -> str:
     """Return the sandboxd GET path for a file read.
 
     The sandbox root is a directory. Reject it before the request, as the Go
-    and TypeScript clients do, instead of downloading the directory listing.
+    and TypeScript clients do. For other directories, ``type=file`` makes
+    sandboxd answer 409 instead of returning the directory listing.
     """
     endpoint = _sandboxd_files_endpoint(path)
     if endpoint == "v1/files/":
         raise ValueError(f"read: path {path!r} names the sandbox root")
-    return endpoint
+    return endpoint + "?type=file"
 
 
 class _RuntimeProbe(Protocol):

@@ -321,13 +321,15 @@ type Options struct {
 	// service meshes, or secure overlays where direct pod-to-pod IP routing is
 	// restricted but service-based DNS routing works correctly.
 	//
-	// ConnectivityRouterPortForward sends X-Sandbox-Pod-IP by default, which
-	// makes the router dial the stored pod IP directly and skip its cache and
-	// DNS lookup. If the sandbox pod was rescheduled, that stale IP may now
-	// belong to another pod. Set DisablePodIPRouting: true when the router runs
-	// with --cache-enabled or the Sandbox has a headless Service
-	// (spec.service: true), so the router resolves the live pod by cache or
-	// DNS instead.
+	// ConnectivityRouterPortForward sends X-Sandbox-Pod-IP by default. Current
+	// routers dial it only when it is a loopback address and otherwise route
+	// by the Sandbox name. Older routers dial the stored pod IP directly and
+	// skip their cache and DNS lookup. If the sandbox pod was rescheduled,
+	// that stale IP may now belong to another pod. Set DisablePodIPRouting:
+	// true when an older router runs with --cache-enabled or the Sandbox has a
+	// headless Service (spec.service: true), so the router resolves the live
+	// pod by cache or DNS instead. Also set it with --authz-mode=scoped-token,
+	// which rejects requests that carry the header.
 	// Note: this only affects router-based transports that send X-Sandbox-* headers.
 	// Default: false (header is sent when router headers are enabled and a pod IP is present).
 	DisablePodIPRouting bool

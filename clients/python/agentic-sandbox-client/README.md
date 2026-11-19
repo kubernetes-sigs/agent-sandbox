@@ -564,8 +564,8 @@ metadata. `rest_port` and `grpc_port` select the sandboxd listeners, which defau
 to 8080 and 9090. gRPC requires sandbox-router v1.0.9 or later. The client omits
 `X-Sandbox-Pod-IP` unless `pod_ip_routing` is true, so the router selects the
 current Pod from its cache or DNS. Leave the default for `scoped-token`, which
-rejects that header. Set `pod_ip_routing=True` only when the router cache is
-disabled and the Sandbox has no Service.
+rejects that header. Current routers ignore the header. Set `pod_ip_routing=True` only
+for an older router with the cache disabled and a Sandbox without a Service.
 
 ```python
 from k8s_agent_sandbox import SandboxClient, SandboxdRouterTunnelConnectionConfig

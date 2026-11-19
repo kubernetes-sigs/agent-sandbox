@@ -33,20 +33,20 @@ explicit `X-Sandbox-Port`; see [Native gRPC](#native-grpc) and
 | Header | Required | Default | Notes |
 |---|---|---|---|
 | `X-Sandbox-ID` | yes | — | Sandbox name. With `--cache-enabled=true`, combined with the namespace to look up the live PodIP in the cache's name index; otherwise (or on miss) used as the host component of the DNS form. |
-| `X-Sandbox-UID` | no | — | Sandbox CR UID. With `--cache-enabled=true` it names the requested incarnation, but the current owner of an indexed namespace/name wins over it, so a stale UID cannot reach a replacement. On its own it only selects a warm-pool member that no SandboxClaim has adopted yet. Scoped-token v2 does not need it. |
+| `X-Sandbox-UID` | no | — | Sandbox CR UID. With `--cache-enabled=true` it names the requested incarnation, but the current owner of an indexed namespace/name wins over it, so a stale UID still routes to the replacement. Scoped-token v2 rejects a token minted for the old UID. On its own it only selects a warm-pool member that no SandboxClaim has adopted yet. Scoped-token v2 does not need it. |
 | `X-Sandbox-Namespace` | no | `default` | Must be ASCII letters / digits / hyphens, with at least one alphanumeric. |
 | `X-Sandbox-Port` | no | `8888` | Numeric. |
-| `X-Sandbox-Pod-IP` | no | — | When set, bypasses both cache and DNS and dials this IP directly. |
+| `X-Sandbox-Pod-IP` | no | — | The router dials this IP directly only when it is a loopback address allowed by `--allow-loopback-pod-ip`. It still validates any other value but does not dial it. |
 
 Resolution priority (first match wins):
 
-1. `X-Sandbox-Pod-IP` — explicit caller override, used by SDKs that already know the Pod IP.
+1. `X-Sandbox-Pod-IP` — only a loopback address allowed by `--allow-loopback-pod-ip`, for a sandbox running as a sidecar in the router's Pod.
 2. One canonical cache lookup over `X-Sandbox-Namespace`/`X-Sandbox-ID` and `X-Sandbox-UID` — KEP-NNNN's secure fast path, only attempted when `--cache-enabled=true`; deployments running with the cache disabled fall straight through to step 3. When the namespace/name is indexed, its current owner wins, including over a stale `X-Sandbox-UID`. The name index is what keeps warm-pool sandboxes (which have no per-sandbox Service, so step 3 is guaranteed NXDOMAIN) routable for SDK traffic that carries no UID or Pod IP. Warm-pool Pods that no SandboxClaim has adopted yet are excluded from the name index — they remain reachable only by an exact UID whose namespace and name also match, preserving the UID-as-capability property so callers cannot reach an unclaimed pool Pod by guessing pool-generated names.
 3. DNS form — compatibility fallback used without an informer cache or after a cache miss; matches the Python router's behavior. Scoped-token v2 rejects a request that reaches this step, because DNS yields no canonical Sandbox UID.
 
 The router constructs the upstream URL as:
 - DNS form: `http://<ID>.<Namespace>.svc.<cluster-domain>:<port>/<path>?<query>`
-- Pod-IP form (cache hit or override): `http://<Pod-IP>:<port>/<path>?<query>`
+- Pod-IP form (cache hit or loopback override): `http://<Pod-IP>:<port>/<path>?<query>`
 
 It strips the inbound `Host` and `Authorization` headers before forwarding. `Host` is stripped so `net/http` picks the upstream URL's host; `Authorization` is stripped because the router consumes it (e.g. `--authz-mode=tokenreview` validates a Bearer token via the K8s TokenReview API) and forwarding the credential to the sandbox would let any sandbox impersonate the caller against the K8s API. All other headers pass through.
 
@@ -59,7 +59,7 @@ The router validates the routing headers before constructing the upstream URL, m
 | `X-Sandbox-ID` | required; must be a valid DNS-1123 label (`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, max 63 chars). Rejects DNS injection inputs like `foo.evil.com` and traversal-style inputs like `foo/bar`. |
 | `X-Sandbox-Namespace` | optional (defaults to `default`); same DNS-1123 label check. |
 | `X-Sandbox-Port` | optional (defaults to `8888`); must parse as integer in `[1, 65535]`. |
-| `X-Sandbox-Pod-IP` | optional; must be a valid IP literal AND not loopback / link-local / multicast / unspecified. The class check is the SSRF defense — without it, a caller could set `X-Sandbox-Pod-IP: 169.254.169.254` and have the router proxy to cloud metadata. With `AllowAll` as the default authorizer (Python compatibility), this validation is the only thing preventing the gadget. See `--allow-loopback-pod-ip` for the sidecar case. |
+| `X-Sandbox-Pod-IP` | optional; must be a valid IP literal AND not loopback / link-local / multicast / unspecified. See `--allow-loopback-pod-ip` for the sidecar case. |
 | `X-Sandbox-UID` | optional; used as cache lookup key only, no further validation. |
 
 ### Endpoints
@@ -296,8 +296,8 @@ Run `sandbox-router --help` for the full list. The most relevant:
 | `--path-routing-preserve-prefix` | `false` | Forward path-routed requests with the full `<prefix>/<namespace>/<id>/<port>/` path, for a sandbox that serves under its own base path. Requires `--path-routing-prefix`. See [Keeping redirects and cookies under the prefix](#keeping-redirects-and-cookies-under-the-prefix). |
 | `--path-routing-rewrite-responses` | `true` | Rewrite upstream `Location` and `Set-Cookie` Path for path-routed responses so they stay under the prefix. Set-Cookie Path is rewritten in both modes; Location only without `--path-routing-preserve-prefix`. Set `false` to forward responses unmodified. |
 | `--grpc-web-allowed-origins` | `""` (same-origin only) | Comma-separated `scheme://host[:port]` allowlist of browser origins permitted to call the router with gRPC-Web. Gates only gRPC-Web CORS — see [gRPC-Web](#grpc-web-browser-clients). Transcoding itself is always on. |
-| `--cache-enabled` | `false` | Enable the Pod-IP cache (KEP-NNNN fast path). Requires the RBAC in `deploy/rbac.yaml`. |
-| `--cache-namespace` | `""` (cluster-wide) | Restrict the Pod informer to a single namespace. |
+| `--cache-enabled` | `false` | Enable the Pod-IP cache (KEP-NNNN fast path). Requires the RBAC in `deploy/rbac.yaml`. With `false`, a Sandbox without `spec.service: true` returns 502, even when the SDK sends its Pod IP. |
+| `--cache-namespace` | `""` (cluster-wide) | Restrict the Pod informer to a single namespace. Sandboxes in other namespaces resolve only through DNS, so a Sandbox without a Service returns 502, and scoped-token v2 rejects the request. |
 | `--kubeconfig` | `""` (in-cluster) | Kubeconfig for the cache's informer client. Honors `KUBECONFIG`. |
 | `--enable-tracing` | auto | OTel traces via OTLP gRPC. Auto-enabled when `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set; pass `--enable-tracing=false` to override. |
 | `--enable-otel-metrics` | auto | Additionally push metrics via OTLP gRPC. Auto-enabled when `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` is set; Prometheus `/metrics` stays active either way. |
@@ -309,7 +309,7 @@ Run `sandbox-router --help` for the full list. The most relevant:
 
 When `--cache-enabled=true`, the router runs an in-process Kubernetes informer that watches sandbox-owned Pods cluster-wide (or scoped to `--cache-namespace`) and maintains a UID → live PodIP map plus a namespace/name secondary index over the same entries. The informer filters server-side on the `agents.x-k8s.io/sandbox-name-hash` label that the controller stamps on every sandbox Pod, so memory and API traffic scale with the number of sandboxes — not the size of the cluster.
 
-For every inbound request, the proxy resolves the upstream in this order: explicit `X-Sandbox-Pod-IP` header → one canonical cache lookup over `X-Sandbox-UID` and `X-Sandbox-Namespace`/`X-Sandbox-ID` (the name index) → DNS form. Cache hits skip the DNS resolution hop entirely, which is the property the KEP requires for high-throughput tenants. The name-index step matters most for warm-pool sandboxes: they have no per-sandbox Service, so for traffic that carries only the ID header the DNS form can never resolve and the name index is the only working path. Cache misses fall through to DNS, but a scoped-token v2 request that misses is rejected, because a miss cannot produce the canonical Sandbox UID its claims bind.
+For every inbound request, the proxy resolves the upstream in this order: loopback `X-Sandbox-Pod-IP` header (sidecar only) → one canonical cache lookup over `X-Sandbox-UID` and `X-Sandbox-Namespace`/`X-Sandbox-ID` (the name index) → DNS form. Cache hits skip the DNS resolution hop entirely, which is the property the KEP requires for high-throughput tenants. The name-index step matters most for warm-pool sandboxes: they have no per-sandbox Service, so for traffic that carries only the ID header the DNS form can never resolve and the name index is the only working path. Cache misses fall through to DNS, but a scoped-token v2 request that misses is rejected, because a miss cannot produce the canonical Sandbox UID its claims bind.
 
 **Active invalidation.** When the proxy dials an IP that came from the cache and the dial fails because the host is unreachable (timeout, no route — the Pod was rescheduled and the cache hasn't caught up), the cache entry that supplied the IP is evicted immediately, by its Sandbox UID whichever index resolved it, so the next request for the same sandbox falls through to DNS instead of retrying the same stale IP. A connection *refusal* does not evict: it proves a live host (typically a caller-selected port the Pod isn't listening on), and evicting on it would strand warm-pool traffic on the DNS path until the next resync. The eviction is additionally conditional on the entry still carrying the Pod UID and IP that failed, so a recreated Pod cached mid-dial is never evicted by a late failure against its predecessor, even when it reuses the address. This is the resilience guarantee called out in the KEP. The `sandbox_router_cache_invalidations_total` counter tracks how often this fires.
 
@@ -590,7 +590,7 @@ The Docker image is built by `dev/tools/push-images`, which is patched to use th
 
 ## Compatibility with the Python router
 
-This Go router is a **drop-in replacement** for the protocol contract: same `sandbox-router-svc:8080` Service name, same headers, same JSON error shape, same `PROXY_TIMEOUT_SECONDS` and `CLUSTER_DOMAIN` env-var support. The Python router's source is retained at `clients/python/agentic-sandbox-client/sandbox-router/` for reference until deprecation is formalized; the Docker images, however, are distinct (`sandbox-router` vs `sandbox-router-go`).
+This Go router is a **drop-in replacement** for the protocol contract: same `sandbox-router-svc:8080` Service name, same headers (except that `X-Sandbox-Pod-IP` is dialed only for loopback), same JSON error shape, same `PROXY_TIMEOUT_SECONDS` and `CLUSTER_DOMAIN` env-var support. The Python router's source is retained at `clients/python/agentic-sandbox-client/sandbox-router/` for reference until deprecation is formalized; the Docker images, however, are distinct (`sandbox-router` vs `sandbox-router-go`).
 
 What's new beyond the Python router:
 

@@ -960,7 +960,7 @@ export class Sandbox {
       "x-sandbox-id": this.sandboxName,
       "x-sandbox-namespace": this.namespace,
     };
-    // A captured pod IP overrides the router's cache and DNS.
+    // Older routers dial a captured pod IP ahead of their cache and DNS.
     if (
       this.podIP !== "" &&
       this.serviceFQDN === "" &&

@@ -40,6 +40,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -88,6 +89,7 @@ type config struct {
 	authTokenFile     string
 	runAsUIDRange     string
 	runAsGIDRange     string
+	runAsDefaultUser  string
 	printVersion      bool
 	executionPolicy   server.ExecutionPolicy
 }
@@ -129,9 +131,11 @@ func main() {
 	flag.StringVar(&cfg.authTokenFile, "auth-token-file", "",
 		"File holding a bearer token (e.g. a mounted Secret), required like --auth-token-sha256. Mutually exclusive with it.")
 	flag.StringVar(&cfg.runAsUIDRange, "run-as-uid-range", "",
-		"Inclusive range of user IDs, as <min>-<max>, that a request may run its command as. 0 is never allowed. Requires --run-as-gid-range, and a daemon that is root or holds CAP_SETUID, CAP_SETGID, CAP_KILL and CAP_CHOWN. Empty refuses every request that names a user.")
+		"Inclusive range of user IDs, as <min>-<max>, that a request may run its command as. 0 is never allowed. Requires --run-as-gid-range, --run-as-default-user, an auth token, and a daemon that is root or holds CAP_SETUID, CAP_SETGID, CAP_KILL and CAP_CHOWN. Empty refuses every request that names a user.")
 	flag.StringVar(&cfg.runAsGIDRange, "run-as-gid-range", "",
 		"Inclusive range of group IDs, as <min>-<max>, that a request may give its command. 0 is never allowed. Requires --run-as-uid-range.")
+	flag.StringVar(&cfg.runAsDefaultUser, "run-as-default-user", "",
+		"User and group, as <uid>:<gid>, of a command whose request names no user. Both must be inside the ranges. Requires --run-as-uid-range.")
 	flag.BoolVar(&cfg.printVersion, "version", false, "Print version information and exit.")
 	zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -173,14 +177,32 @@ func authTokenDigest(cfg *config) ([]byte, error) {
 	return nil, nil
 }
 
-// runAsPolicy returns the users and groups a request may run its command as,
-// or nil when neither range flag is set.
+// parseUser parses a "<uid>:<gid>" flag value such as "1000:1000".
+func parseUser(value string) (uid, gid uint32, err error) {
+	u, g, ok := strings.Cut(value, ":")
+	if !ok {
+		return 0, 0, fmt.Errorf("user %q must be <uid>:<gid>", value)
+	}
+	parsedUID, err := strconv.ParseUint(u, 10, 32)
+	if err != nil {
+		return 0, 0, fmt.Errorf("user %q: %w", value, err)
+	}
+	parsedGID, err := strconv.ParseUint(g, 10, 32)
+	if err != nil {
+		return 0, 0, fmt.Errorf("user %q: %w", value, err)
+	}
+	return uint32(parsedUID), uint32(parsedGID), nil
+}
+
+// runAsPolicy returns the users and groups a request may run its command as
+// and the user of a command whose request names none, or nil when none of the
+// run-as flags is set.
 func runAsPolicy(cfg *config) (*server.RunAsPolicy, error) {
-	if cfg.runAsUIDRange == "" && cfg.runAsGIDRange == "" {
+	if cfg.runAsUIDRange == "" && cfg.runAsGIDRange == "" && cfg.runAsDefaultUser == "" {
 		return nil, nil
 	}
-	if cfg.runAsUIDRange == "" || cfg.runAsGIDRange == "" {
-		return nil, errors.New("--run-as-uid-range and --run-as-gid-range must be set together")
+	if cfg.runAsUIDRange == "" || cfg.runAsGIDRange == "" || cfg.runAsDefaultUser == "" {
+		return nil, errors.New("--run-as-uid-range, --run-as-gid-range and --run-as-default-user must be set together")
 	}
 	uids, err := server.ParseIDRange(cfg.runAsUIDRange)
 	if err != nil {
@@ -190,7 +212,15 @@ func runAsPolicy(cfg *config) (*server.RunAsPolicy, error) {
 	if err != nil {
 		return nil, fmt.Errorf("--run-as-gid-range: %w", err)
 	}
-	return &server.RunAsPolicy{UIDs: uids, GIDs: gids}, nil
+	uid, gid, err := parseUser(cfg.runAsDefaultUser)
+	if err != nil {
+		return nil, fmt.Errorf("--run-as-default-user: %w", err)
+	}
+	policy := &server.RunAsPolicy{UIDs: uids, GIDs: gids, DefaultUID: uid, DefaultGID: gid}
+	if err := policy.Validate(); err != nil {
+		return nil, fmt.Errorf("--run-as-default-user: %w", err)
+	}
+	return policy, nil
 }
 
 func run(cfg *config, log logr.Logger) error {

@@ -39,8 +39,16 @@ import (
 // The policy and the user the tests name. The IDs need no passwd or group
 // entry.
 var (
-	testRunAsPolicy = &RunAsPolicy{UIDs: IDRange{Min: 10000, Max: 19999}, GIDs: IDRange{Min: 20000, Max: 29999}}
-	testRunAsUser   = &processv1.User{Uid: 12345, Gid: 23456, SupplementaryGids: []uint32{23457, 23458}}
+	testRunAsPolicy = &RunAsPolicy{
+		UIDs:       IDRange{Min: 10000, Max: 19999},
+		GIDs:       IDRange{Min: 20000, Max: 29999},
+		DefaultUID: 10001,
+		DefaultGID: 20001,
+	}
+	testRunAsUser = &processv1.User{Uid: 12345, Gid: 23456, SupplementaryGids: []uint32{23457, 23458}}
+	// testAuthDigest stands in for a token digest: Server.New refuses a
+	// RunAsPolicy without one.
+	testAuthDigest = make([]byte, AuthTokenDigestSize)
 )
 
 // newRunAsClient is newProcessClient for a ProcessServer with a RunAsPolicy.
@@ -122,21 +130,54 @@ func TestParseIDRange(t *testing.T) {
 }
 
 func TestCheckRunAsCapabilities(t *testing.T) {
-	const procStatus = "Name:\tsandboxd\nCapInh:\t0000000000000000\nCapPrm:\t%[1]s\nCapEff:\t%[1]s\nCapBnd:\t000001ffffffffff\nCapAmb:\t%[2]s\n"
+	// Effective capabilities, ambient capabilities, UID and NoNewPrivs.
+	const procStatus = "Name:\tsandboxd\nUid:\t%[3]s\t%[3]s\t%[3]s\t%[3]s\nCapInh:\t0000000000000000\nCapPrm:\t%[1]s\nCapEff:\t%[1]s\nCapBnd:\t000001ffffffffff\nCapAmb:\t%[2]s\nNoNewPrivs:\t%[4]s\n"
 	none := "0000000000000000"
 	// CAP_CHOWN, CAP_KILL, CAP_SETGID and CAP_SETUID are bits 0, 5, 6 and 7.
-	require.NoError(t, checkRunAsCapabilities(fmt.Sprintf(procStatus, "000001ffffffffff", none)), "root")
-	require.NoError(t, checkRunAsCapabilities(fmt.Sprintf(procStatus, "00000000000000e1", none)), "only the four it needs")
+	four := "00000000000000e1"
+	require.NoError(t, checkRunAsCapabilities(fmt.Sprintf(procStatus, "000001ffffffffff", none, "0", "0")), "root")
+	require.NoError(t, checkRunAsCapabilities(fmt.Sprintf(procStatus, four, none, "0", "0")), "root with only the four it needs")
+	require.NoError(t, checkRunAsCapabilities(fmt.Sprintf(procStatus, four, none, "65534", "1")), "file capabilities under no_new_privs")
 
-	err := checkRunAsCapabilities(fmt.Sprintf(procStatus, none, none))
+	err := checkRunAsCapabilities(fmt.Sprintf(procStatus, none, none, "0", "0"))
 	require.ErrorContains(t, err, "lacks CAP_SETUID, CAP_SETGID, CAP_KILL, CAP_CHOWN")
 	// Root with CAP_KILL dropped could start a command it then cannot signal.
-	err = checkRunAsCapabilities(fmt.Sprintf(procStatus, "000001ffffffffdf", none))
+	err = checkRunAsCapabilities(fmt.Sprintf(procStatus, "000001ffffffffdf", none, "0", "0"))
 	require.ErrorContains(t, err, "lacks CAP_KILL")
-	err = checkRunAsCapabilities(fmt.Sprintf(procStatus, "00000000000000e0", none))
+	err = checkRunAsCapabilities(fmt.Sprintf(procStatus, "00000000000000e0", none, "0", "0"))
 	require.ErrorContains(t, err, "lacks CAP_CHOWN")
-	err = checkRunAsCapabilities(fmt.Sprintf(procStatus, "00000000000000e1", "00000000000000e1"))
+	err = checkRunAsCapabilities(fmt.Sprintf(procStatus, four, four, "0", "0"))
 	require.ErrorContains(t, err, "ambient capabilities")
+	// The capabilities of a daemon that is not root come from its binary, so
+	// without no_new_privs a command gains them by executing that binary.
+	err = checkRunAsCapabilities(fmt.Sprintf(procStatus, four, none, "65534", "0"))
+	require.ErrorContains(t, err, "needs no_new_privs")
+	// A status without the two lines is not taken for root or for no_new_privs.
+	err = checkRunAsCapabilities("CapEff:\t" + four + "\nCapAmb:\t" + none + "\n")
+	require.ErrorContains(t, err, "needs no_new_privs")
+}
+
+// TestNewRunAsNeedsAuthToken verifies that a policy is refused without client
+// authentication: the token is all that stops a command inside the sandbox
+// from calling the API and naming another user.
+func TestNewRunAsNeedsAuthToken(t *testing.T) {
+	_, err := New(Options{RootDir: t.TempDir(), RunAs: testRunAsPolicy, Log: logr.Discard()})
+	require.ErrorContains(t, err, "needs client authentication")
+}
+
+// TestNewRunAsValidatesDefaultUser verifies that the default user must be one
+// a request could name, so it can be neither root nor outside the ranges.
+func TestNewRunAsValidatesDefaultUser(t *testing.T) {
+	fromZero := RunAsPolicy{UIDs: IDRange{Min: 0, Max: 19999}, GIDs: IDRange{Min: 0, Max: 29999}}
+	for reason, policy := range map[string]RunAsPolicy{
+		"default uid 0 is not allowed":     {UIDs: fromZero.UIDs, GIDs: fromZero.GIDs, DefaultUID: 0, DefaultGID: 20001},
+		"default gid 0 is not allowed":     {UIDs: fromZero.UIDs, GIDs: fromZero.GIDs, DefaultUID: 10001, DefaultGID: 0},
+		"default uid 9999 is not allowed":  {UIDs: testRunAsPolicy.UIDs, GIDs: testRunAsPolicy.GIDs, DefaultUID: 9999, DefaultGID: 20001},
+		"default gid 30000 is not allowed": {UIDs: testRunAsPolicy.UIDs, GIDs: testRunAsPolicy.GIDs, DefaultUID: 10001, DefaultGID: 30000},
+	} {
+		_, err := New(Options{RootDir: t.TempDir(), RunAs: &policy, AuthTokenSHA256: testAuthDigest, Log: logr.Discard()})
+		require.ErrorContains(t, err, reason)
+	}
 }
 
 // TestNewRunAsNeedsPrivileges verifies that a daemon that may not change user
@@ -145,8 +186,9 @@ func TestNewRunAsNeedsPrivileges(t *testing.T) {
 	if checkRunAsPrivileges() == nil {
 		t.Skip("the test process may run a command as another user, so there is no refusal to observe")
 	}
-	_, err := New(Options{RootDir: t.TempDir(), RunAs: testRunAsPolicy, Log: logr.Discard()})
+	_, err := New(Options{RootDir: t.TempDir(), RunAs: testRunAsPolicy, AuthTokenSHA256: testAuthDigest, Log: logr.Discard()})
 	require.ErrorContains(t, err, "running commands as another user")
+	require.NotContains(t, err.Error(), "client authentication")
 }
 
 // requireRefused asserts that no path runs config's command, and that each
@@ -196,7 +238,7 @@ func TestRunAsRefusesUserOutsidePolicy(t *testing.T) {
 
 // requireRunAsPrivileges skips a test that really changes user unless the
 // test process could be a daemon with a RunAsPolicy: root on Linux, or the
-// four capabilities.
+// four capabilities under no_new_privs.
 func requireRunAsPrivileges(t *testing.T) {
 	t.Helper()
 	if err := checkRunAsPrivileges(); err != nil {
@@ -214,19 +256,22 @@ func runAsRootDir(t *testing.T) string {
 	return root
 }
 
-// runAsCases pairs every test that names a user with its control: the same
-// command without a user runs as the daemon, which here is the test process.
+// runAsCases are the two ways a command gets its user from a daemon with a
+// RunAsPolicy: the request names it, or the request names none and the command
+// runs as the policy's default user. Neither is the daemon's own user, which
+// here is the test process.
 var runAsCases = []struct {
 	name     string
 	user     *processv1.User
 	uid, gid uint32
 }{
 	{"named user", testRunAsUser, testRunAsUser.GetUid(), testRunAsUser.GetGid()},
-	{"no user", nil, uint32(os.Getuid()), uint32(os.Getgid())},
+	{"no user", nil, testRunAsPolicy.DefaultUID, testRunAsPolicy.DefaultGID},
 }
 
 // TestRunAsUser verifies on every path that the command runs as the named
-// user and group, and that a file it creates belongs to them.
+// user and group, or as the default ones when the request names no user, and
+// that a file it creates belongs to them.
 func TestRunAsUser(t *testing.T) {
 	requireRunAsPrivileges(t)
 	for _, path := range runAsPaths {
@@ -240,6 +285,7 @@ func TestRunAsUser(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, int32(0), res.exitCode, res.stderr)
 				require.Equal(t, fmt.Sprintf("%d\n%d\n", tc.uid, tc.gid), res.stdout)
+				require.NotEqual(t, uint32(os.Getuid()), tc.uid, "the command must not run as the daemon")
 
 				info, err := os.Stat(filepath.Join(root, "owned"))
 				require.NoError(t, err)
@@ -259,6 +305,8 @@ func TestRunAsUserGroups(t *testing.T) {
 	for want, user := range map[string]*processv1.User{
 		"23456 23457 23458\n": testRunAsUser,
 		"23456\n":             {Uid: 12345, Gid: 23456},
+		// The default user: only its own group.
+		"20001\n": nil,
 	} {
 		resp, err := client.Execute(testCtx(t), &processv1.ExecuteRequest{
 			Config: &processv1.ProcessConfig{Command: []string{"id", "-G"}, User: user},
@@ -273,14 +321,16 @@ func TestRunAsUserGroups(t *testing.T) {
 func TestRunAsUserHoldsNoCapabilities(t *testing.T) {
 	requireRunAsPrivileges(t)
 	client := newRunAsClient(t, runAsRootDir(t), testRunAsPolicy)
-	resp, err := client.Execute(testCtx(t), &processv1.ExecuteRequest{
-		Config: &processv1.ProcessConfig{
-			Command: []string{"grep", "-E", "^Cap(Prm|Eff|Amb):", "/proc/self/status"},
-			User:    testRunAsUser,
-		},
-	})
-	require.NoError(t, err)
-	require.Equal(t, "CapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapAmb:\t0000000000000000\n", string(resp.GetStdout()))
+	for _, tc := range runAsCases {
+		resp, err := client.Execute(testCtx(t), &processv1.ExecuteRequest{
+			Config: &processv1.ProcessConfig{
+				Command: []string{"grep", "-E", "^Cap(Prm|Eff|Amb):", "/proc/self/status"},
+				User:    tc.user,
+			},
+		})
+		require.NoError(t, err, tc.name)
+		require.Equal(t, "CapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapAmb:\t0000000000000000\n", string(resp.GetStdout()), tc.name)
+	}
 }
 
 // TestRunAsUserOwnsStdio verifies that the command can open its own output by
@@ -366,7 +416,7 @@ func TestRunAsUserIsSignalled(t *testing.T) {
 
 		t.Run("shutdown sweep/"+tc.name, func(t *testing.T) {
 			// Server.New also proves that a privileged daemon accepts the policy.
-			srv, err := New(Options{RootDir: runAsRootDir(t), RunAs: testRunAsPolicy, Log: logr.Discard()})
+			srv, err := New(Options{RootDir: runAsRootDir(t), RunAs: testRunAsPolicy, AuthTokenSHA256: testAuthDigest, Log: logr.Discard()})
 			require.NoError(t, err)
 			grpcServer := grpc.NewServer()
 			srv.RegisterGRPC(grpcServer)

@@ -63,21 +63,44 @@ func (r IDRange) contains(id uint32) bool {
 }
 
 // RunAsPolicy lists the users and groups a request may name in
-// ProcessConfig.user. A nil policy refuses every named user.
+// ProcessConfig.user, and the user of a command whose request names none. A
+// nil policy refuses every named user.
 type RunAsPolicy struct {
 	UIDs IDRange
 	GIDs IDRange
+	// DefaultUID and DefaultGID are the user and group of a command whose
+	// request names no user. With a policy, no command runs as the daemon's
+	// own user, so leaving the user out is not a way around the ranges.
+	DefaultUID, DefaultGID uint32
 }
 
-// credential returns the credential a command runs with: nil when the request
-// names no user, and PERMISSION_DENIED when the policy does not allow the user
-// it names.
-func (p *RunAsPolicy) credential(user *processv1.User) (*syscall.Credential, error) {
-	if user == nil {
-		return nil, nil
+// Validate reports whether the default user is one a request could name.
+func (p *RunAsPolicy) Validate() error {
+	if !p.UIDs.contains(p.DefaultUID) {
+		return fmt.Errorf("default uid %d is not allowed", p.DefaultUID)
 	}
+	if !p.GIDs.contains(p.DefaultGID) {
+		return fmt.Errorf("default gid %d is not allowed", p.DefaultGID)
+	}
+	return nil
+}
+
+// credential returns the credential a command runs with. Without a policy it
+// is nil, which is the daemon's own user, and a request that names a user gets
+// PERMISSION_DENIED. With a policy it is the named user, or the default user
+// when the request names none, and PERMISSION_DENIED when the policy does not
+// allow the user the request names.
+func (p *RunAsPolicy) credential(user *processv1.User) (*syscall.Credential, error) {
 	if p == nil {
+		if user == nil {
+			return nil, nil
+		}
 		return nil, status.Error(codes.PermissionDenied, "user: this daemon does not run commands as another user")
+	}
+	if user == nil {
+		// Groups stays empty, so the command gets none of the daemon's
+		// supplementary groups.
+		return &syscall.Credential{Uid: p.DefaultUID, Gid: p.DefaultGID}, nil
 	}
 	if !p.UIDs.contains(user.GetUid()) {
 		return nil, status.Errorf(codes.PermissionDenied, "user: uid %d is not allowed", user.GetUid())
@@ -122,7 +145,7 @@ const (
 // so a daemon that lacks it fails at startup instead of on the first request.
 // It reads the effective set instead of checking for uid 0, because a root
 // daemon can have capabilities dropped and a non-root daemon can hold them
-// through file capabilities.
+// through file capabilities on its binary.
 func checkRunAsPrivileges() error {
 	procStatus, err := os.ReadFile("/proc/self/status")
 	if err != nil {
@@ -135,13 +158,27 @@ func checkRunAsPrivileges() error {
 // /proc/self/status.
 func checkRunAsCapabilities(procStatus string) error {
 	sets := map[string]uint64{}
+	var effectiveUID, noNewPrivs string
 	for line := range strings.Lines(procStatus) {
-		if name, value, ok := strings.Cut(line, ":"); ok && strings.HasPrefix(name, "Cap") {
-			set, err := strconv.ParseUint(strings.TrimSpace(value), 16, 64)
+		name, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		switch {
+		case strings.HasPrefix(name, "Cap"):
+			set, err := strconv.ParseUint(value, 16, 64)
 			if err != nil {
 				return fmt.Errorf("read /proc/self/status %s: %w", name, err)
 			}
 			sets[name] = set
+		case name == "Uid":
+			// Real, effective, saved and filesystem UID.
+			if ids := strings.Fields(value); len(ids) > 1 {
+				effectiveUID = ids[1]
+			}
+		case name == "NoNewPrivs":
+			noNewPrivs = value
 		}
 	}
 	var missing []string
@@ -164,7 +201,14 @@ func checkRunAsCapabilities(procStatus string) error {
 	// A command would inherit ambient capabilities, CAP_SETUID among them, and
 	// could use them to become root.
 	if sets["CapAmb"] != 0 {
-		return errors.New("running commands as another user is unsafe while sandboxd holds ambient capabilities, because every command would inherit them; run sandboxd as root or grant its binary file capabilities instead")
+		return errors.New("running commands as another user is unsafe while sandboxd holds ambient capabilities, because every command would inherit them; run sandboxd as root, or grant its binary file capabilities and set no_new_privs")
+	}
+	// A non-root daemon holds the capabilities through file capabilities on its
+	// binary, and those go to whoever executes the binary. Without no_new_privs
+	// a command could start a second sandboxd with its own ranges and no token.
+	// With it, executing the binary gives a command nothing.
+	if effectiveUID != "0" && noNewPrivs != "1" {
+		return errors.New("running commands as another user from a sandboxd that is not root needs no_new_privs (allowPrivilegeEscalation: false in Kubernetes); without it any command can execute the sandboxd binary, gain its file capabilities and run commands as every other user")
 	}
 	return nil
 }

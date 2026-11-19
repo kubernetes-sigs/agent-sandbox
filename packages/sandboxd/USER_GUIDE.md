@@ -127,8 +127,8 @@ process IDs, `PERMISSION_DENIED` for a `cwd` escaping the sandbox root or a
 a process without a PTY).
 
 `Start`, `Execute` and `ExecuteWithLimits` run the command as the daemon's own
-user unless the request names another one in `ProcessConfig.user` and the
-deployment allows it. See
+user. A deployment can instead let a request name the user in
+`ProcessConfig.user`; no command then runs as the daemon's own user. See
 [Running a command as another user](#running-a-command-as-another-user).
 
 `exit_code` is the process's exit status, or `128+n` when signal `n` killed
@@ -334,8 +334,9 @@ Complete, runnable manifests for both (plus an end-to-end SDK client) live in
 | `--execute-max-stderr-limit-bytes` | `0` | Maximum stderr capture limit per unary execution. |
 | `--auth-token-sha256` | (none) | Hex SHA-256 digest of the bearer token clients must send. See [Client authentication](#client-authentication). |
 | `--auth-token-file` | (none) | File holding the bearer token (e.g. a mounted Secret). Alternative to `--auth-token-sha256`; set at most one. Neither leaves the API unauthenticated. |
-| `--run-as-uid-range` | (none) | Inclusive range of user IDs, as `<min>-<max>`, that a request may run its command as. Set it together with `--run-as-gid-range`. See [Running a command as another user](#running-a-command-as-another-user). |
-| `--run-as-gid-range` | (none) | Inclusive range of group IDs, as `<min>-<max>`, that a request may give its command. Neither flag refuses every request that names a user. |
+| `--run-as-uid-range` | (none) | Inclusive range of user IDs, as `<min>-<max>`, that a request may run its command as. Set it together with `--run-as-gid-range`, `--run-as-default-user` and an auth token. See [Running a command as another user](#running-a-command-as-another-user). |
+| `--run-as-gid-range` | (none) | Inclusive range of group IDs, as `<min>-<max>`, that a request may give its command. |
+| `--run-as-default-user` | (none) | User and group, as `<uid>:<gid>`, of a command whose request names no user. Both must be inside the ranges. Without the three flags, every request that names a user is refused. |
 | `--version` | | Print version info and exit. |
 
 For example, start a local daemon with optional execution policy:
@@ -564,11 +565,12 @@ The Python gRPC path requires the `grpc` extra: `pip install k8s-agent-sandbox[g
   shutdown SIGTERMs them, waits a grace period, then SIGKILLs stragglers.
 - **Process user:** every command runs as the daemon's own user unless the
   deployment opts in twice: it gives the daemon the privilege to change user,
-  and it sets `--run-as-uid-range` and `--run-as-gid-range`. The caller is then
-  trusted to name the user, as it is already trusted to name the command, so
-  whoever can call the API can run a command as any user in the range. Code
-  inside the sandbox must not be able to make that call. Set
-  `--auth-token-sha256` as well and keep the token out of the sandbox. See
+  and it sets `--run-as-uid-range`, `--run-as-gid-range` and
+  `--run-as-default-user`. The caller is then trusted to name the user, as it
+  is already trusted to name the command, so whoever can call the API can run
+  a command as any user in the range. Code inside the sandbox must not be able
+  to make that call, so `sandboxd` refuses to start with these flags and no
+  auth token. Keep the token out of the sandbox. See
   [Running a command as another user](#running-a-command-as-another-user).
 
 ## Client authentication
@@ -655,22 +657,44 @@ grpcurl -plaintext -H "authorization: Bearer $TOKEN" \
 field. `WriteStdin`, `SendSignal`, `ResizeTTY`, a cancelled stream and daemon
 shutdown treat the process like any other.
 
-The feature is off until the deployment does both of the following:
+The feature is off until the deployment does all of the following. With the
+flags set, `sandboxd` checks the rest at startup and exits with an error that
+says what is missing.
 
-- Pass `--run-as-uid-range=<min>-<max>` and `--run-as-gid-range=<min>-<max>`.
-  Both ranges are inclusive. Set both flags or neither.
+- Pass `--run-as-uid-range=<min>-<max>`, `--run-as-gid-range=<min>-<max>` and
+  `--run-as-default-user=<uid>:<gid>`. Both ranges are inclusive. Set all three
+  flags or none.
+- Require a token from clients (see
+  [Client authentication](#client-authentication)). The caller names the user,
+  so without a token any command in the sandbox could call the API on
+  localhost and run as every other user. Use `--auth-token-sha256`: the daemon
+  then holds only the digest. If you use `--auth-token-file` instead, no user
+  in the range may be able to read the file. A Kubernetes Secret volume is
+  mode `0644` unless you set `defaultMode`, so every user can read it.
 - Run `sandboxd` as root, or give it the capabilities `CAP_SETUID`,
   `CAP_SETGID`, `CAP_KILL` and `CAP_CHOWN`. `CAP_SETUID` and `CAP_SETGID`
   change the user and groups, `CAP_KILL` lets the daemon signal the command
   afterwards, and `CAP_CHOWN` lets it give the command its pipes or terminal.
-  With the flags set, `sandboxd` checks its effective capabilities at startup
-  and exits with an error that names any it lacks. The published image runs as
-  user `1000`, which holds none of them. A container that runs as a non-root
-  user does not hold the capabilities its security context adds, so in
-  Kubernetes set `runAsUser: 0` on the container.
+  The published image runs as user `1000`, which holds none of them. A
+  container that runs as a non-root user does not hold the capabilities its
+  security context adds, so in Kubernetes set `runAsUser: 0` on the container
+  and keep the four capabilities.
 
-`sandboxd` applies these rules to a request that names a user:
+A daemon that is not root can hold the four capabilities only through file
+capabilities on its binary, and file capabilities go to whoever executes the
+binary. A command could then start a second `sandboxd` with its own ranges and
+no token. `sandboxd` therefore refuses to start with the flags set as a
+non-root user unless `no_new_privs` is set, which is
+`allowPrivilegeEscalation: false` in Kubernetes. With it, the daemon still
+gets the capabilities, as long as the container keeps the four in its security
+context, and a command that executes the binary gets none. `no_new_privs` also
+stops setuid programs such as `sudo` from gaining privileges in every command.
 
+`sandboxd` applies these rules to every request:
+
+- A request that names no user runs its command as `--run-as-default-user`.
+  No command runs as the daemon's own user, so leaving the user out is not a
+  way around the ranges.
 - The `uid`, the `gid` and every entry of `supplementary_gids` must be inside
   the matching range. `0` is never accepted, whatever the range says, so a
   caller cannot ask for root. A request that breaks this rule fails with
@@ -680,8 +704,7 @@ The feature is off until the deployment does both of the following:
   supplementary groups, and an empty `supplementary_gids` leaves it with none.
 - The command holds no capabilities. To keep it that way, `sandboxd` refuses
   to start with the flags set while it holds ambient capabilities, because
-  every command would inherit them. Give a non-root daemon file capabilities
-  instead.
+  every command would inherit them.
 - `sandboxd` does not look the IDs up in `/etc/passwd`, so they need no entry
   there. The environment is the same as without a user: the daemon's own
   environment plus `env_vars`. Set `HOME`, `USER` and similar variables in
@@ -693,7 +716,7 @@ The feature is off until the deployment does both of the following:
   `/dev/stdout`, `/dev/stderr` and its terminal by path.
 
 The REST file API does not take a user. It still reads and writes as the
-daemon's own user.
+daemon's own user, whatever the flags.
 
 A runtime that predates `ProcessConfig.user` ignores the field and runs the
 command as its own user. Before relying on the field, confirm that the runtime

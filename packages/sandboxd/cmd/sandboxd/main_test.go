@@ -53,20 +53,32 @@ func TestRunAsPolicy(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, got, "no flag refuses every named user")
 
-	got, err = runAsPolicy(&config{runAsUIDRange: "1000-1999", runAsGIDRange: "2000-2999"})
+	got, err = runAsPolicy(&config{runAsUIDRange: "1000-1999", runAsGIDRange: "2000-2999", runAsDefaultUser: "1000:2000"})
 	require.NoError(t, err)
 	require.Equal(t, &server.RunAsPolicy{
-		UIDs: server.IDRange{Min: 1000, Max: 1999},
-		GIDs: server.IDRange{Min: 2000, Max: 2999},
+		UIDs:       server.IDRange{Min: 1000, Max: 1999},
+		GIDs:       server.IDRange{Min: 2000, Max: 2999},
+		DefaultUID: 1000,
+		DefaultGID: 2000,
 	}, got)
 
 	for _, cfg := range []config{
 		{runAsUIDRange: "1000-1999"},
 		{runAsGIDRange: "2000-2999"},
-		{runAsUIDRange: "1000", runAsGIDRange: "2000-2999"},
-		{runAsUIDRange: "1000-1999", runAsGIDRange: "2999-2000"},
+		{runAsDefaultUser: "1000:2000"},
+		// Without a default user, a request that names no user would run as
+		// the daemon.
+		{runAsUIDRange: "1000-1999", runAsGIDRange: "2000-2999"},
+		{runAsUIDRange: "1000", runAsGIDRange: "2000-2999", runAsDefaultUser: "1000:2000"},
+		{runAsUIDRange: "1000-1999", runAsGIDRange: "2999-2000", runAsDefaultUser: "1000:2000"},
+		{runAsUIDRange: "1000-1999", runAsGIDRange: "2000-2999", runAsDefaultUser: "1000"},
+		{runAsUIDRange: "1000-1999", runAsGIDRange: "2000-2999", runAsDefaultUser: "a:b"},
+		{runAsUIDRange: "1000-1999", runAsGIDRange: "2000-2999", runAsDefaultUser: "999:2000"},
+		{runAsUIDRange: "1000-1999", runAsGIDRange: "2000-2999", runAsDefaultUser: "1000:3000"},
+		{runAsUIDRange: "0-1999", runAsGIDRange: "0-2999", runAsDefaultUser: "0:2000"},
+		{runAsUIDRange: "0-1999", runAsGIDRange: "0-2999", runAsDefaultUser: "1000:0"},
 	} {
 		_, err = runAsPolicy(&cfg)
-		require.Error(t, err)
+		require.Error(t, err, cfg)
 	}
 }

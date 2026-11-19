@@ -40,17 +40,22 @@ export interface SandboxdRestClientOptions {
   maxMetadataResponseSize: number;
   /** `Authorization` header value sent on every request, when set. */
   authorization?: string;
+  /** Lowercase x-sandbox-* routing headers, sent only in router mode. */
+  routingHeaders?: Readonly<Record<string, string>>;
 }
 
 export type SandboxPathOperation =
   | "read"
   | "write"
+  | "stat"
   | "exists"
   | "list"
   | "delete"
   | "mkdir"
   | "move"
-  | "copy";
+  | "copy"
+  | "extract"
+  | "watch";
 
 function invalidArgument(message: string): SandboxError {
   return new SandboxError(message, { telemetryCode: "invalid_argument" });
@@ -63,12 +68,26 @@ export interface WriteRequestOptions {
   createOnly?: boolean;
 }
 
+/**
+ * Throws before any request when the write options are invalid: a `mode`
+ * that is not four octal digits, or `append` combined with `createOnly`.
+ * Sandbox calls this before connecting, and the REST layer calls it again
+ * so direct SandboxdRestClient users get the same guarantee.
+ * @internal
+ */
+export function validateWriteOptions(opts: WriteRequestOptions): void {
+  validateMode(opts.mode);
+  if (opts.append && opts.createOnly) {
+    throw invalidArgument("append and createOnly cannot be combined");
+  }
+}
+
 /** Query and headers of a PUT file request for the given write options. */
 function writeRequestParts(opts: WriteRequestOptions): {
   query?: Record<string, string>;
   headers: Record<string, string>;
 } {
-  validateMode(opts.mode);
+  validateWriteOptions(opts);
   const query: Record<string, string> = {};
   if (opts.mode) query.mode = opts.mode;
   if (opts.append) query.append = "true";
@@ -136,6 +155,7 @@ function hasParentSegment(p: string): boolean {
 
 /** Operations that reject the sandbox root, and how the error words it. */
 const ROOT_REJECTED_AS: Partial<Record<SandboxPathOperation, string>> = {
+  read: "read",
   write: "written to",
   delete: "deleted",
   mkdir: "created",
@@ -144,11 +164,11 @@ const ROOT_REJECTED_AS: Partial<Record<SandboxPathOperation, string>> = {
 };
 
 /**
- * Validates a caller-supplied sandbox-root-relative path WITHOUT decoding or
- * normalizing it first, then returns the single encodeURIComponent-encoded
- * path segment to append after "/v1/files/" — empty string for the sandbox
- * root. Throws SandboxError before any network request for every case that
- * must be rejected client-side.
+ * Validates a caller-supplied sandbox-root-relative path without decoding or
+ * normalizing it first, then returns the percent-encoded path to append after
+ * "/v1/files/" — "" for the sandbox root on list, stat, exists, and watch.
+ * Read rejects that root. Separators stay literal "/".
+ * "." and empty segments are dropped. Invalid paths throw before any request.
  * @internal
  */
 export function resolveSandboxPath(
@@ -187,7 +207,11 @@ export function resolveSandboxPath(
       `invalid path '${input}': a trailing '/' is not allowed for ${operation}`,
     );
   }
-  return encodeURIComponent(input);
+  return input
+    .split("/")
+    .filter((segment) => segment !== "" && segment !== ".")
+    .map(encodeURIComponent)
+    .join("/");
 }
 
 function mediaType(contentType: string | null): string {
@@ -533,9 +557,13 @@ export class SandboxdRestClient {
     const fetchInit: RequestInit & { duplex?: "half" } = {
       method,
       body: init.body,
-      headers: this.opts.authorization
-        ? { ...init.headers, Authorization: this.opts.authorization }
-        : init.headers,
+      headers: {
+        ...this.opts.routingHeaders,
+        ...init.headers,
+        ...(this.opts.authorization
+          ? { Authorization: this.opts.authorization }
+          : {}),
+      },
       // Never follow a redirect: it could carry the token to another host.
       redirect: "error",
       signal: combined,
@@ -837,21 +865,55 @@ export class SandboxdRestClient {
     signal: AbortSignal,
   ): Promise<number> {
     const { query, headers } = writeRequestParts(opts);
-    if (content.locked) {
-      throw invalidArgument(
-        "writeStream content is already locked by another reader",
-      );
-    }
     const encoded = resolveSandboxPath(path, "write");
-    const reqPath = `/v1/files/${encoded}`;
+    return this.putStream(
+      "writeStream content",
+      `/v1/files/${encoded}`,
+      query,
+      headers,
+      content,
+      signal,
+    );
+  }
 
+  /**
+   * Streams a tar archive, optionally gzipped, to sandboxd, which unpacks it
+   * into the directory at `path`. The root aliases name the sandbox root.
+   * Streaming, limits, and failure handling are the same as writeStream(),
+   * except that an early 204 is accepted: sandboxd stops reading at the tar
+   * end marker. Returns the number of bytes sent before that point.
+   */
+  async extract(
+    path: string,
+    archive: ReadableStream<Uint8Array>,
+    signal: AbortSignal,
+  ): Promise<number> {
+    const encoded = resolveSandboxPath(path, "extract");
+    return this.putStream(
+      "extract archive",
+      `/v1/files/${encoded}`,
+      { extract: "tar" },
+      { "Content-Type": "application/octet-stream" },
+      archive,
+      signal,
+      false,
+    );
+  }
+
+  private async putStream(
+    what: string,
+    reqPath: string,
+    query: Record<string, string> | undefined,
+    headers: Record<string, string>,
+    content: ReadableStream<Uint8Array>,
+    signal: AbortSignal,
+    requireEof = true,
+  ): Promise<number> {
     let sourceReader: ReadableStreamDefaultReader<Uint8Array>;
     try {
       sourceReader = content.getReader();
     } catch {
-      throw invalidArgument(
-        "writeStream content is already locked by another reader",
-      );
+      throw invalidArgument(`${what} is already locked by another reader`);
     }
 
     const controller = new AbortController();
@@ -894,6 +956,7 @@ export class SandboxdRestClient {
         controller,
         signal,
       ).catch(() => {});
+      if (!requireEof) return bytesSent();
       throw invalidResponse(
         "sandboxd acknowledged the write before the input stream reached EOF",
       );
@@ -905,6 +968,46 @@ export class SandboxdRestClient {
       signal,
     ).catch(() => {});
     return bytesSent();
+  }
+
+  async stat(path: string, signal: AbortSignal): Promise<FileEntry> {
+    const encoded = resolveSandboxPath(path, "stat");
+    const reqPath = `/v1/files/${encoded}`;
+    const { response, controller } = await this.request("GET", reqPath, {
+      signal,
+      query: { stat: "true" },
+    });
+    if (response.status !== 200) {
+      throw await this.buildApiError(
+        response,
+        controller,
+        "GET",
+        reqPath,
+        signal,
+      );
+    }
+    const bodyBytes = await readBoundedBody(
+      response,
+      this.opts.maxMetadataResponseSize,
+      controller,
+      signal,
+    );
+    if (
+      mediaType(response.headers.get("content-type")) !== "application/json"
+    ) {
+      throw invalidResponse("sandboxd stat returned a non-JSON response");
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(new TextDecoder().decode(bodyBytes));
+    } catch (err) {
+      throw invalidResponse("sandboxd stat returned malformed JSON", err);
+    }
+    const entry = parseFileEntry(parsed);
+    if (!entry) {
+      throw invalidResponse("sandboxd stat returned an unsupported file type");
+    }
+    return entry;
   }
 
   async exists(path: string, signal: AbortSignal): Promise<boolean> {
@@ -1132,48 +1235,53 @@ function parseDirectoryListing(raw: unknown): DirectoryListing {
   }
   const entries: FileEntry[] = [];
   for (const rawEntry of obj.entries) {
-    if (typeof rawEntry !== "object" || rawEntry === null) {
-      throw invalidResponse(
-        "sandboxd directory listing contains a non-object entry",
-      );
-    }
-    const e = rawEntry as Record<string, unknown>;
-    if (typeof e.type !== "string") {
-      throw invalidResponse("sandboxd directory entry has a non-string 'type'");
-    }
-    if (e.type !== "file" && e.type !== "directory") {
-      // Unknown entry type: skip, without logging the entry's name or type.
-      continue;
-    }
-    if (typeof e.name !== "string" || e.name.length === 0) {
-      throw invalidResponse("sandboxd directory entry has an invalid 'name'");
-    }
-    if (
-      typeof e.size !== "number" ||
-      !Number.isSafeInteger(e.size) ||
-      e.size < 0
-    ) {
-      throw invalidResponse("sandboxd directory entry has an invalid 'size'");
-    }
-    if (typeof e.modified_at !== "string" || !isValidRfc3339(e.modified_at)) {
-      throw invalidResponse(
-        "sandboxd directory entry has an invalid 'modified_at'",
-      );
-    }
-    let mode: string | undefined;
-    if (e.mode !== undefined) {
-      if (typeof e.mode !== "string" || !MODE_RE.test(e.mode)) {
-        throw invalidResponse("sandboxd directory entry has an invalid 'mode'");
-      }
-      mode = e.mode;
-    }
-    entries.push({
-      name: e.name,
-      size: e.size,
-      type: e.type,
-      modifiedAt: e.modified_at,
-      mode,
-    });
+    const entry = parseFileEntry(rawEntry);
+    if (entry) entries.push(entry);
   }
   return { path: obj.path, entries };
+}
+
+function parseFileEntry(rawEntry: unknown): FileEntry | undefined {
+  if (typeof rawEntry !== "object" || rawEntry === null) {
+    throw invalidResponse(
+      "sandboxd directory listing contains a non-object entry",
+    );
+  }
+  const e = rawEntry as Record<string, unknown>;
+  if (typeof e.type !== "string") {
+    throw invalidResponse("sandboxd directory entry has a non-string 'type'");
+  }
+  if (e.type !== "file" && e.type !== "directory") {
+    // Unknown entry type: skip, without logging the entry's name or type.
+    return undefined;
+  }
+  if (typeof e.name !== "string" || e.name.length === 0) {
+    throw invalidResponse("sandboxd directory entry has an invalid 'name'");
+  }
+  if (
+    typeof e.size !== "number" ||
+    !Number.isSafeInteger(e.size) ||
+    e.size < 0
+  ) {
+    throw invalidResponse("sandboxd directory entry has an invalid 'size'");
+  }
+  if (typeof e.modified_at !== "string" || !isValidRfc3339(e.modified_at)) {
+    throw invalidResponse(
+      "sandboxd directory entry has an invalid 'modified_at'",
+    );
+  }
+  let mode: string | undefined;
+  if (e.mode !== undefined) {
+    if (typeof e.mode !== "string" || !MODE_RE.test(e.mode)) {
+      throw invalidResponse("sandboxd directory entry has an invalid 'mode'");
+    }
+    mode = e.mode;
+  }
+  return {
+    name: e.name,
+    size: e.size,
+    type: e.type,
+    modifiedAt: e.modified_at,
+    mode,
+  };
 }

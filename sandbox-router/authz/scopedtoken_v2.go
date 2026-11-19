@@ -30,6 +30,7 @@ const (
 	scopedTokenV2Version        = "v2"
 	scopedTokenV2SigningContext = "agent-sandbox/scoped-token/v2."
 	maxScopedTokenKeyIDLen      = 128
+	scopedTokenV2ScopeSandbox   = "sandbox"
 )
 
 type scopedTokenV2Claims struct {
@@ -40,6 +41,10 @@ type scopedTokenV2Claims struct {
 	Method      string `json:"method"`
 	Path        string `json:"path"`
 	Exp         int64  `json:"exp"`
+	// Scope "sandbox" authorizes every port, method, and path of the
+	// Sandbox UID. Port, Method, and Path must stay zero so that routers
+	// without scope support deny the token.
+	Scope string `json:"scope,omitempty"`
 }
 
 type scopedTokenVerificationKeyFile struct {
@@ -95,12 +100,6 @@ func ParseScopedTokenVerificationKeys(data []byte) (map[string]ed25519.PublicKey
 // authorization target. The key ID is protected by the signature so it
 // cannot be swapped to select a different verification key.
 func MintScopedTokenV2(privateKey ed25519.PrivateKey, keyID string, target AuthorizationTarget, ttl time.Duration) (string, error) {
-	if len(privateKey) != ed25519.PrivateKeySize {
-		return "", fmt.Errorf("scopedtoken: private key must be %d bytes, got %d", ed25519.PrivateKeySize, len(privateKey))
-	}
-	if !validScopedTokenKeyID(keyID) {
-		return "", fmt.Errorf("scopedtoken: invalid key ID %q", keyID)
-	}
 	if target.SandboxUID == "" {
 		return "", errors.New("scopedtoken: Sandbox UID is required")
 	}
@@ -108,18 +107,41 @@ func MintScopedTokenV2(privateKey ed25519.PrivateKey, keyID string, target Autho
 	if err != nil {
 		return "", fmt.Errorf("scopedtoken: %w", err)
 	}
-	if ttl < time.Second {
-		return "", fmt.Errorf("scopedtoken: ttl must be at least %s (exp has one-second resolution), got %s", time.Second, ttl)
-	}
-	claims := scopedTokenV2Claims{
+	return mintScopedTokenV2(privateKey, keyID, scopedTokenV2Claims{
 		Namespace:   normalized.Namespace,
 		SandboxName: normalized.SandboxName,
 		SandboxUID:  normalized.SandboxUID,
 		Port:        normalized.Port,
 		Method:      normalized.Method,
 		Path:        normalized.Path,
-		Exp:         time.Now().Add(ttl).Unix(),
+	}, ttl)
+}
+
+// MintScopedTokenV2Sandbox produces an Ed25519 token that authorizes every
+// port, method, and path of one Sandbox UID.
+func MintScopedTokenV2Sandbox(privateKey ed25519.PrivateKey, keyID, namespace, name, uid string, ttl time.Duration) (string, error) {
+	if namespace == "" || name == "" || uid == "" {
+		return "", errors.New("scopedtoken: namespace, name, and Sandbox UID are required")
 	}
+	return mintScopedTokenV2(privateKey, keyID, scopedTokenV2Claims{
+		Namespace:   namespace,
+		SandboxName: name,
+		SandboxUID:  uid,
+		Scope:       scopedTokenV2ScopeSandbox,
+	}, ttl)
+}
+
+func mintScopedTokenV2(privateKey ed25519.PrivateKey, keyID string, claims scopedTokenV2Claims, ttl time.Duration) (string, error) {
+	if len(privateKey) != ed25519.PrivateKeySize {
+		return "", fmt.Errorf("scopedtoken: private key must be %d bytes, got %d", ed25519.PrivateKeySize, len(privateKey))
+	}
+	if !validScopedTokenKeyID(keyID) {
+		return "", fmt.Errorf("scopedtoken: invalid key ID %q", keyID)
+	}
+	if ttl < time.Second {
+		return "", fmt.Errorf("scopedtoken: ttl must be at least %s (exp has one-second resolution), got %s", time.Second, ttl)
+	}
+	claims.Exp = time.Now().Add(ttl).Unix()
 	payload, err := json.Marshal(claims)
 	if err != nil {
 		return "", fmt.Errorf("scopedtoken: marshal v2 claims: %w", err)

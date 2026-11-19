@@ -137,7 +137,7 @@ func TestSandboxdWrite_PutsRawBody(t *testing.T) {
 	if gotMethod != http.MethodPut {
 		t.Errorf("expected PUT, got %s", gotMethod)
 	}
-	if gotPath != "/v1/files/dir%2Fscript.py" {
+	if gotPath != "/v1/files/dir/script.py" {
 		t.Errorf("unexpected path: %s", gotPath)
 	}
 	if gotContentType != "application/octet-stream" {
@@ -145,6 +145,45 @@ func TestSandboxdWrite_PutsRawBody(t *testing.T) {
 	}
 	if string(gotBody) != "print(1)" {
 		t.Errorf("unexpected body: %q", gotBody)
+	}
+}
+
+func TestSandboxdWrite_KeepsAbsolutePath(t *testing.T) {
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	c := newReadySandboxdTestSandbox(server.URL)
+	if err := c.Write(context.Background(), "/workspace/a.txt", []byte("x")); err != nil {
+		t.Fatalf("Write() error: %v", err)
+	}
+	if gotPath != "/v1/files/%2Fworkspace/a.txt" {
+		t.Fatalf("path = %s, want /v1/files/%%2Fworkspace/a.txt", gotPath)
+	}
+}
+
+func TestSandboxdPathErrorsIncludeOperation(t *testing.T) {
+	c := newReadySandboxdTestSandbox("http://unused")
+	prefix := "sandbox[default/test-claim-abc123]"
+	checks := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"write", c.Write(context.Background(), "..", []byte("x")), prefix + `: write(".."):`},
+		{"read", func() error { _, err := c.Read(context.Background(), "."); return err }(), prefix + `: read("."):`},
+		{"list", func() error { _, err := c.List(context.Background(), "../x"); return err }(), prefix + `: list("../x"):`},
+		{"delete", c.Delete(context.Background(), ".", false), prefix + `: delete("."):`},
+	}
+	for _, tc := range checks {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.err == nil || !strings.Contains(tc.err.Error(), tc.want) {
+				t.Fatalf("error = %v, want substring %q", tc.err, tc.want)
+			}
+		})
 	}
 }
 
@@ -157,7 +196,7 @@ func TestSandboxdWrite_RejectsTraversal(t *testing.T) {
 	defer server.Close()
 
 	c := newReadySandboxdTestSandbox(server.URL)
-	for _, p := range []string{"../etc/passwd", "dir/../../etc/passwd", ".."} {
+	for _, p := range []string{"../etc/passwd", "dir/../../etc/passwd", "dir/../a.txt", "..", ".", "foo/.."} {
 		err := c.Write(context.Background(), p, []byte("x"))
 		if err == nil {
 			t.Errorf("Write(%q) should be rejected client-side", p)
@@ -165,6 +204,22 @@ func TestSandboxdWrite_RejectsTraversal(t *testing.T) {
 	}
 	if called {
 		t.Error("traversal write must not reach the server")
+	}
+}
+
+func TestSandboxdReadAndDelete_RejectRoot(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("root path must not reach the server")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	c := newReadySandboxdTestSandbox(server.URL)
+	if _, err := c.Read(context.Background(), "."); err == nil || !strings.Contains(err.Error(), "sandbox root") {
+		t.Fatalf("Read(.): %v", err)
+	}
+	if err := c.Delete(context.Background(), "foo/..", true); err == nil || !strings.Contains(err.Error(), "sandbox root") {
+		t.Fatalf("Delete(foo/..): %v", err)
 	}
 }
 
@@ -187,9 +242,96 @@ func TestSandboxdWrite_NoRouterHeaders(t *testing.T) {
 	}
 }
 
+func TestSandboxdWrite_AppendAndCreateOnly(t *testing.T) {
+	var gotURI, gotIfNoneMatch string
+	var attempts int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		gotURI = r.URL.RequestURI()
+		gotIfNoneMatch = r.Header.Get("If-None-Match")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	c := newReadySandboxdTestSandbox(server.URL)
+	writes := map[string]func(...CallOption) error{
+		"Write": func(opts ...CallOption) error {
+			return c.Write(context.Background(), "log.txt", []byte("x"), opts...)
+		},
+		"WriteReader": func(opts ...CallOption) error {
+			return c.WriteReader(context.Background(), "log.txt", strings.NewReader("x"), opts...)
+		},
+	}
+	for name, write := range writes {
+		attempts = 0
+		_ = write(WithAppend())
+		if gotURI != "/v1/files/log.txt?append=true" || gotIfNoneMatch != "" {
+			t.Errorf("%s append: got %q If-None-Match=%q", name, gotURI, gotIfNoneMatch)
+		}
+		if attempts != 1 {
+			t.Errorf("%s append: got %d attempts, want 1", name, attempts)
+		}
+
+		attempts = 0
+		_ = write(WithCreateOnly())
+		if gotURI != "/v1/files/log.txt" || gotIfNoneMatch != "*" {
+			t.Errorf("%s create-only: got %q If-None-Match=%q", name, gotURI, gotIfNoneMatch)
+		}
+		if attempts != 1 {
+			t.Errorf("%s create-only: got %d attempts, want 1", name, attempts)
+		}
+	}
+}
+
+func TestSandboxdWrite_AppendWithCreateOnlyRejected(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Error("rejected calls must not reach the server")
+	}))
+	defer server.Close()
+
+	c := newReadySandboxdTestSandbox(server.URL)
+	if err := c.Write(context.Background(), "f.txt", []byte("x"), WithAppend(), WithCreateOnly()); err == nil {
+		t.Error("Write: expected an error")
+	}
+	if err := c.WriteReader(context.Background(), "f.txt", strings.NewReader("x"), WithAppend(), WithCreateOnly()); err == nil {
+		t.Error("WriteReader: expected an error")
+	}
+}
+
+func TestSandboxdWrite_CreateOnlyConflict(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusPreconditionFailed)
+	}))
+	defer server.Close()
+
+	c := newReadySandboxdTestSandbox(server.URL)
+	err := c.Write(context.Background(), "f.txt", []byte("x"), WithCreateOnly())
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusPreconditionFailed {
+		t.Fatalf("expected a 412 HTTPError, got: %v", err)
+	}
+}
+
+func TestWrite_AppendAndCreateOnlyLegacyRuntimeUnsupported(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Error("legacy calls must not reach the server")
+	}))
+	defer server.Close()
+
+	c := newReadyTestSandbox(server.URL)
+	for _, opt := range []CallOption{WithAppend(), WithCreateOnly()} {
+		if err := c.Write(context.Background(), "f.txt", []byte("x"), opt); !errors.Is(err, ErrUnsupportedByRuntime) {
+			t.Errorf("Write: expected ErrUnsupportedByRuntime, got: %v", err)
+		}
+		if err := c.WriteReader(context.Background(), "f.txt", strings.NewReader("x"), opt); !errors.Is(err, ErrUnsupportedByRuntime) {
+			t.Errorf("WriteReader: expected ErrUnsupportedByRuntime, got: %v", err)
+		}
+	}
+}
+
 func TestSandboxdRead_GetsFileBytes(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.EscapedPath() != "/v1/files/notes%2Fhello.txt" {
+		if r.URL.EscapedPath() != "/v1/files/notes/hello.txt" {
 			t.Errorf("unexpected path: %s", r.URL.EscapedPath())
 		}
 		_, _ = w.Write([]byte("hello"))
@@ -208,7 +350,7 @@ func TestSandboxdRead_GetsFileBytes(t *testing.T) {
 
 func TestSandboxdReadTo_GetsFileBytes(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.EscapedPath() != "/v1/files/notes%2Fhello.txt" {
+		if r.URL.EscapedPath() != "/v1/files/notes/hello.txt" {
 			t.Errorf("unexpected path: %s", r.URL.EscapedPath())
 		}
 		_, _ = w.Write([]byte("hello"))
@@ -255,6 +397,43 @@ func TestSandboxdList_ParsesDirectoryListing(t *testing.T) {
 	}
 	if entries[1].Type != FileTypeDirectory {
 		t.Errorf("unexpected second entry: %+v", entries[1])
+	}
+}
+
+func TestSandboxdList_RecursiveQuery(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []CallOption
+		want string
+	}{
+		{"flat", nil, ""},
+		{"recursive", []CallOption{WithRecursive()}, "recursive=true"},
+		{"max depth", []CallOption{WithRecursive(), WithMaxDepth(2)}, "max_depth=2&recursive=true"},
+		{"max depth alone", []CallOption{WithMaxDepth(2)}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.URL.RawQuery
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"entries": []map[string]any{
+						{"name": "sub/a.txt", "size": 5, "type": "file", "modified_at": "2026-08-06T10:00:00Z", "mode": "0644"},
+					},
+				})
+			}))
+			defer server.Close()
+
+			entries, err := newReadySandboxdTestSandbox(server.URL).List(context.Background(), "notes", tc.opts...)
+			if err != nil {
+				t.Fatalf("List() error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("query = %q, want %q", got, tc.want)
+			}
+			if len(entries) != 1 || entries[0].Name != "sub/a.txt" {
+				t.Errorf("unexpected entries: %+v", entries)
+			}
+		})
 	}
 }
 
@@ -323,6 +502,44 @@ func TestDelete_LegacyRuntimeUnsupported(t *testing.T) {
 	}
 }
 
+func TestSandboxdFilesEndpointCollapsesDotSegments(t *testing.T) {
+	cases := []struct {
+		path    string
+		want    string
+		wantErr bool
+	}{
+		{path: "dir/script.py", want: "v1/files/dir/script.py"},
+		{path: "./a.txt", want: "v1/files/a.txt"},
+		{path: "dir//a.txt", want: "v1/files/dir/a.txt"},
+		{path: "dir/", want: "v1/files/dir"},
+		{path: "/", want: "v1/files/"},
+		{path: ".", want: "v1/files/"},
+		{path: "/workspace/a.txt", want: "v1/files/%2Fworkspace/a.txt"},
+		{path: "/dir", want: "v1/files/%2Fdir"},
+		{path: "//dir//a.txt", want: "v1/files/%2Fdir/a.txt"},
+		{path: "dir/../a.txt", wantErr: true},
+		{path: "../escape", wantErr: true},
+		{path: "dir/../../escape", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			got, err := filesEndpoint(tc.path)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("filesEndpoint(%q) = %q, want error", tc.path, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("filesEndpoint(%q) error: %v", tc.path, err)
+			}
+			if got != tc.want {
+				t.Fatalf("filesEndpoint(%q) = %q, want %q", tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSandboxdFileOps_Requests(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -332,9 +549,9 @@ func TestSandboxdFileOps_Requests(t *testing.T) {
 		wantQuery  string
 	}{
 		{"mkdir", func(c *Sandbox) error { return c.Mkdir(context.Background(), "a/b", false) },
-			http.MethodPut, "/v1/files/a%2Fb", "type=directory"},
+			http.MethodPut, "/v1/files/a/b", "type=directory"},
 		{"mkdir parents", func(c *Sandbox) error { return c.Mkdir(context.Background(), "a/b", true) },
-			http.MethodPut, "/v1/files/a%2Fb", "parents=true&type=directory"},
+			http.MethodPut, "/v1/files/a/b", "parents=true&type=directory"},
 		{"move", func(c *Sandbox) error { return c.Move(context.Background(), "a", "dir/b c", false) },
 			http.MethodPost, "/v1/files/a:move", "destination=dir%2Fb+c"},
 		{"copy overwrite", func(c *Sandbox) error { return c.Copy(context.Background(), "a", "b", true) },
@@ -356,6 +573,70 @@ func TestSandboxdFileOps_Requests(t *testing.T) {
 				t.Errorf("got %s %s?%s, want %s %s?%s", gotMethod, gotPath, gotQuery, tt.wantMethod, tt.wantPath, tt.wantQuery)
 			}
 		})
+	}
+}
+
+func TestSandboxExtract(t *testing.T) {
+	var gotMethod, gotPath, gotQuery, gotBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotMethod, gotPath, gotQuery, gotBody = r.Method, r.URL.EscapedPath(), r.URL.RawQuery, string(body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	for _, tc := range []struct{ path, wantPath string }{
+		{"a/b", "/v1/files/a/b"},
+		{"/", "/v1/files/"},
+	} {
+		c := newReadySandboxdTestSandbox(server.URL)
+		if err := c.Extract(context.Background(), tc.path, strings.NewReader("tar-bytes")); err != nil {
+			t.Fatalf("Extract(%q): %v", tc.path, err)
+		}
+		if gotMethod != http.MethodPut || gotPath != tc.wantPath || gotQuery != "extract=tar" || gotBody != "tar-bytes" {
+			t.Errorf("Extract(%q): got %s %s?%s %q", tc.path, gotMethod, gotPath, gotQuery, gotBody)
+		}
+	}
+}
+
+func TestSandboxExtract_DoesNotRetry(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	c := newReadySandboxdTestSandbox(server.URL)
+	if err := c.Extract(context.Background(), "d", strings.NewReader("x")); err == nil {
+		t.Fatal("expected the 503 to be returned")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("server saw %d calls, want 1", got)
+	}
+}
+
+func TestSandboxExtract_Validation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("an invalid call must not reach the server")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	c := newReadySandboxdTestSandbox(server.URL)
+	ctx := context.Background()
+	if err := c.Extract(ctx, "", strings.NewReader("x")); err == nil {
+		t.Error("empty path: expected error")
+	}
+	if err := c.Extract(ctx, "d", nil); err == nil {
+		t.Error("nil archive: expected error")
+	}
+	if err := c.Extract(ctx, "d", strings.NewReader("x"), WithMaxAttempts(2)); err == nil {
+		t.Error("WithMaxAttempts(2): expected error")
+	}
+	legacy := newReadyTestSandbox(server.URL)
+	if err := legacy.Extract(ctx, "d", strings.NewReader("x")); !errors.Is(err, ErrUnsupportedByRuntime) {
+		t.Errorf("legacy runtime: expected ErrUnsupportedByRuntime, got: %v", err)
 	}
 }
 
@@ -444,7 +725,7 @@ func TestSandboxdError_DecodesAPIError(t *testing.T) {
 	defer server.Close()
 
 	c := newReadySandboxdTestSandbox(server.URL)
-	_, err := c.Read(context.Background(), "../etc/passwd")
+	_, err := c.Read(context.Background(), "secret/file.txt")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -676,7 +957,7 @@ func TestSandboxdRun_PodTunnelDeathReturnsErrNotReady(t *testing.T) {
 	fw := forwarder(grpcLocal)
 	stub := newTestPortForwardTunnel(fw)
 	pts := c.connector.strategy.(*podTunnelStrategy)
-	pts.tunnel.coreClient = fakekube.NewSimpleClientset().CoreV1() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	pts.tunnel.coreClient = fakekube.NewClientset().CoreV1()
 	pts.tunnel.restConfig = &rest.Config{}
 	pts.tunnel.dial = stub.dial
 	pts.tunnel.newForwarder = stub.newForwarder

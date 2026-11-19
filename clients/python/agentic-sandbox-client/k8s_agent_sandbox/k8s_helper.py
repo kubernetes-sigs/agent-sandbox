@@ -135,7 +135,10 @@ class K8sHelper:
             body=manifest
         ))
 
-    def resolve_sandbox_name(self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None) -> str:
+    def resolve_sandbox_name(
+        self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None,
+        *, initial_claim: dict[str, Any] | None = None,
+    ) -> str:
         """Resolves the actual Sandbox name from the SandboxClaim status.
         With warm pool adoption, the sandbox name may differ from the claim
         name. This method watches the SandboxClaim until the sandbox name
@@ -145,9 +148,11 @@ class K8sHelper:
             resource_version: Optional resourceVersion to start the watch
                 from (e.g. ``metadata.resourceVersion`` of the create
                 response). Defaults to ``"0"`` — see ``_watch_claim``.
+            initial_claim: Optional GET response to evaluate before
+                waiting for future watch events.
         """
         return self._watch_claim(claim_name, namespace, timeout, require_ready=False,
-                                 resource_version=resource_version)
+                                 resource_version=resource_version, initial_claim=initial_claim)
 
     def wait_for_claim_ready(
         self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None,
@@ -311,18 +316,25 @@ class K8sHelper:
             finally:
                 w.stop()
 
-    def wait_for_sandbox_ready(self, name: str, namespace: str, timeout: int) -> str | None:
+    def wait_for_sandbox_ready(
+        self, name: str, namespace: str, timeout: int,
+        *, condition: str = "Ready", min_generation: int = 0,
+    ) -> str | None:
         """Waits for the Sandbox custom resource to have a 'Ready' status.
 
         Returns the selected pod IP from the sandbox status when ready, or None if
         no valid IP can be selected.
+
+        `condition` names the condition to wait for. The wait ignores a condition
+        whose `observedGeneration` is less than `min_generation`.
         """
+        description = "ready" if condition == "Ready" else f"{condition}=True"
         deadline = time.monotonic() + timeout
-        logger.info(f"Watching for Sandbox {name} to become ready...")
+        logger.info(f"Watching for Sandbox {name} to become {description}...")
         while True:
             remaining = math.ceil(deadline - time.monotonic())
             if remaining <= 0:
-                raise TimeoutError(f"Sandbox {name} did not become ready within {timeout} seconds.")
+                raise TimeoutError(f"Sandbox {name} did not become {description} within {timeout} seconds.")
             w = watch.Watch()
             try:
                 for event in w.stream(
@@ -341,15 +353,16 @@ class K8sHelper:
                         status = sandbox_object.get('status') or {}
                         conditions = status.get('conditions', [])
                         for cond in conditions:
-                            if cond.get('type') == 'Ready' and cond.get('status') == 'True':
-                                logger.info(f"Sandbox {name} is ready.")
+                            if (cond.get('type') == condition and cond.get('status') == 'True'
+                                    and (cond.get('observedGeneration') or 0) >= min_generation):
+                                logger.info(f"Sandbox {name} is {description}.")
                                 w.stop()
                                 pod_ips = status.get('podIPs', [])
                                 return select_pod_ip(pod_ips)
                     elif event["type"] == "DELETED":
-                        logger.error(f"Sandbox {name} was deleted before becoming ready.")
+                        logger.error(f"Sandbox {name} was deleted before becoming {description}.")
                         w.stop()
-                        raise SandboxNotFoundError(f"Sandbox {name} was deleted before becoming ready.")
+                        raise SandboxNotFoundError(f"Sandbox {name} was deleted before becoming {description}.")
             except (
                 urllib3.exceptions.ProtocolError,
                 urllib3.exceptions.ReadTimeoutError,
@@ -393,6 +406,22 @@ class K8sHelper:
             if e.status != 404:
                 logger.error(f"Error terminating SandboxClaim {name}: {e}")
                 raise
+
+    def patch_sandbox_operating_mode(
+        self, name: str, namespace: str, mode: str, uid: str,
+    ) -> dict[str, Any]:
+        """Change operating mode only if the named Sandbox still has this UID."""
+        if not uid:
+            raise ValueError("Sandbox UID must not be empty")
+        # The API server rejects UID changes, so this also refuses a replaced Sandbox.
+        return cast(dict[str, Any], self.custom_objects_api.patch_namespaced_custom_object(
+            group=SANDBOX_API_GROUP,
+            version=SANDBOX_API_VERSION,
+            namespace=namespace,
+            plural=SANDBOX_PLURAL_NAME,
+            name=name,
+            body={"metadata": {"uid": uid}, "spec": {"operatingMode": mode}},
+        ))
 
     def get_sandbox(self, name: str, namespace: str) -> dict[str, Any] | None:
         """Gets a Sandbox custom resource."""

@@ -193,17 +193,23 @@ class SandboxWithSnapshotSupport(Sandbox):
         return None
 
     @record_latency(sandbox_client_suspend_latency_ms)
-    def suspend(self, snapshot_before_suspend: bool = True, wait_timeout: int = 180) -> SuspendResponse:
+    def suspend(  # type: ignore[override]  # Returns a response model; the base method returns None.
+        self, snapshot_before_suspend: bool = True, wait_timeout: int = 180,
+        *, timeout: int | None = None,
+    ) -> SuspendResponse:
         """
         Suspends the sandbox.
 
         Args:
             snapshot_before_suspend: Whether to take a snapshot of the sandbox before suspending it. Defaults to True.
             wait_timeout: The maximum time in seconds to wait for termination. Defaults to 180.
+            timeout: Keyword-only wait timeout. Takes precedence over wait_timeout when given.
 
         Returns:
             SuspendResponse: An object containing the success status, potential snapshot response, and any error details.
         """
+        if timeout is not None:
+            wait_timeout = timeout
         if self.is_suspended():
             logger.info(f"Sandbox '{self.sandbox_id}' is already suspended.")
             self._skip_latency_metric = True
@@ -404,16 +410,21 @@ class SandboxWithSnapshotSupport(Sandbox):
         )
 
     @record_latency(sandbox_client_resume_latency_ms)
-    def resume(self, wait_timeout: int = 180) -> ResumeResponse:
+    def resume(  # type: ignore[override]  # Returns a response model; the base method returns None.
+        self, wait_timeout: int = 180, *, timeout: int | None = None,
+    ) -> ResumeResponse:
         """
         Resumes the sandbox from the latest available snapshot.
 
         Args:
             wait_timeout: The maximum time in seconds to wait for the pod to become ready. Defaults to 180.
+            timeout: Keyword-only wait timeout. Takes precedence over wait_timeout when given.
 
         Returns:
             ResumeResponse: An object containing the success status, restoration details, and any error information.
         """
+        if timeout is not None:
+            wait_timeout = timeout
         if not self.is_suspended():
             logger.info(f"Sandbox '{self.sandbox_id}' is already running (not suspended).")
             self._skip_latency_metric = True

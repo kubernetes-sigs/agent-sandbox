@@ -60,6 +60,7 @@ import type {
   Logger,
   PodMetadata,
   SandboxClientOptions,
+  ShutdownPolicy,
   VolumeClaimTemplate,
 } from "./types.js";
 
@@ -185,7 +186,62 @@ interface ClaimSpecExtras {
   additionalPodMetadata?: PodMetadata;
   env?: Array<{ name: string; value: string }>;
   volumeClaimTemplates?: VolumeClaimTemplate[];
-  lifecycle?: { shutdownTime: string; shutdownPolicy: "Delete" };
+  lifecycle?: ClaimLifecycle;
+}
+
+/** The SandboxClaim `spec.lifecycle` block the SDK sends. */
+interface ClaimLifecycle {
+  shutdownTime?: string;
+  shutdownPolicy: ShutdownPolicy;
+  ttlSecondsAfterFinished?: number;
+}
+
+const SHUTDOWN_POLICY_VALUES: readonly ShutdownPolicy[] = [
+  "Delete",
+  "DeleteForeground",
+  "Retain",
+];
+
+// The API stores ttlSecondsAfterFinished as an int32.
+const MAX_TTL_SECONDS_AFTER_FINISHED = 2147483647;
+
+/**
+ * Builds `spec.lifecycle` from the optional timers and shutdown policy, or
+ * returns undefined when the caller set none of them. A lifecycle block
+ * without an explicit policy gets `"Delete"`, because the API's own default,
+ * `"Retain"`, would leave every expired claim behind.
+ */
+function buildClaimLifecycle(
+  opts: CreateSandboxOptions | undefined,
+  shutdownTime: string | undefined,
+): ClaimLifecycle | undefined {
+  const policy = opts?.shutdownPolicy;
+  if (policy !== undefined && !SHUTDOWN_POLICY_VALUES.includes(policy)) {
+    throw new SandboxError(
+      `shutdownPolicy must be one of ${SHUTDOWN_POLICY_VALUES.map((v) => `"${v}"`).join(", ")}, got: ${String(policy)}`,
+    );
+  }
+  const ttl = opts?.ttlSecondsAfterFinished;
+  if (
+    ttl !== undefined &&
+    !(
+      Number.isInteger(ttl) &&
+      ttl >= 0 &&
+      ttl <= MAX_TTL_SECONDS_AFTER_FINISHED
+    )
+  ) {
+    throw new SandboxError(
+      `ttlSecondsAfterFinished must be a non-negative 32-bit integer, got: ${String(ttl)}`,
+    );
+  }
+  if (policy === undefined && ttl === undefined && !shutdownTime) {
+    return undefined;
+  }
+  return {
+    ...(shutdownTime ? { shutdownTime } : {}),
+    shutdownPolicy: policy ?? "Delete",
+    ...(ttl !== undefined ? { ttlSecondsAfterFinished: ttl } : {}),
+  };
 }
 
 /**
@@ -209,8 +265,9 @@ function buildClaimSpecExtras(
   if (opts?.volumeClaimTemplates?.length) {
     extras.volumeClaimTemplates = opts.volumeClaimTemplates;
   }
-  if (shutdownTime) {
-    extras.lifecycle = { shutdownTime, shutdownPolicy: "Delete" };
+  const lifecycle = buildClaimLifecycle(opts, shutdownTime);
+  if (lifecycle) {
+    extras.lifecycle = lifecycle;
   }
   return extras;
 }
@@ -708,10 +765,10 @@ export class SandboxClient {
   /**
    * Retrieves an existing sandbox handle by claim name.
    * Returns the cached handle if still active, otherwise re-attaches.
-   * `opts` applies only to a re-attach; a cached handle is returned without
-   * waiting, unless it was attached with `waitForReady: false` before the
-   * Sandbox had an in-cluster address, in which case it is closed and replaced. A concurrent call for the same claim joins the attach already in
-   * flight, including its options.
+   * `opts` applies only to a re-attach. A cached handle is returned as-is,
+   * unless an in-cluster mode attached it before the Sandbox had an address.
+   * Port-forward and router-port-forward keep a handle with no pod IP.
+   * A concurrent call for the same claim joins the attach already in flight.
    */
   async getSandbox(
     claimName: string,
@@ -1359,12 +1416,12 @@ export class SandboxClient {
       namespace,
       timeoutMs,
     );
-    if (this.sandboxdOptions.connectivity !== "port-forward") {
-      resolveInClusterHost(
-        this.sandboxdOptions.connectivity,
-        ready.podIP,
-        ready.serviceFQDN,
-      );
+    const connectivity = this.sandboxdOptions.connectivity;
+    if (
+      connectivity === "in-cluster-service" ||
+      connectivity === "in-cluster-pod-ip"
+    ) {
+      resolveInClusterHost(connectivity, ready.podIP, ready.serviceFQDN);
     }
     return ready;
   }
@@ -1763,7 +1820,12 @@ export class SandboxClient {
   /** False when an in-cluster mode has no address to dial for this handle. */
   private hasConnectionAddress(sandbox: Sandbox): boolean {
     const { connectivity } = this.sandboxdOptions;
-    if (connectivity === "port-forward") return true;
+    if (
+      connectivity === "port-forward" ||
+      connectivity === "router-port-forward"
+    ) {
+      return true;
+    }
     try {
       resolveInClusterHost(connectivity, sandbox.podIP, sandbox.serviceFQDN);
       return true;

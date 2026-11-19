@@ -35,6 +35,12 @@ import {
   WriteStdinResponseSchema,
 } from "../_proto/process/v1/process_pb.js";
 import {
+  FileEventSchema,
+  FileEventType,
+  FileWatcherService,
+  type WatchDirRequest,
+} from "../_proto/watcher/v1/watcher_pb.js";
+import {
   SandboxClosedError,
   SandboxConnectionError,
   SandboxdRpcError,
@@ -46,7 +52,11 @@ import { noopLogger } from "../logger.js";
 import type { SandboxInit } from "../sandbox.js";
 import { normalizeSandboxdOptions, Sandbox } from "../sandbox.js";
 import type { Span, Tracer, TracerManager } from "../trace-manager.js";
-import type { ProcessEvent, SandboxdConnectivity } from "../types.js";
+import type {
+  FileEvent,
+  ProcessEvent,
+  SandboxdConnectivity,
+} from "../types.js";
 
 // ---------- fake apiserver: routes by the requested target port to one of
 // two real backends (REST / gRPC), mirroring how sandboxd exposes both ports
@@ -216,6 +226,20 @@ async function startRestBackend(
     }
     if (req.url?.startsWith("/v1/files/")) {
       fileRequests.push(`${req.method} ${req.url}`);
+    }
+    if (req.method === "GET" && req.url?.endsWith("?stat=true")) {
+      if (req.url.includes("slow.txt")) return;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          name: "a.txt",
+          size: 5,
+          type: "file",
+          modified_at: "2026-11-16T00:00:00.123456789Z",
+          mode: "0644",
+        }),
+      );
+      return;
     }
     if (
       req.method === "GET" &&
@@ -909,6 +933,32 @@ describe("Sandbox commands.run() arguments", () => {
     expect(restBackend?.healthHits).toBe(0);
   });
 
+  it.each([
+    [
+      "files.write",
+      () =>
+        (sandbox as Sandbox).files.write("a.txt", "x", {
+          append: true,
+          createOnly: true,
+        }),
+    ],
+    [
+      "files.writeStream",
+      () =>
+        (sandbox as Sandbox).files.writeStream("a.txt", new ReadableStream(), {
+          append: true,
+          createOnly: true,
+        }),
+    ],
+  ])("rejects %s with append and createOnly combined before connecting", async (_, call) => {
+    await startRecordingSandbox();
+    await expect(call()).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof SandboxError && err.telemetryCode === "invalid_argument",
+    );
+    expect(restBackend?.healthHits).toBe(0);
+  });
+
   it("records only the executable's base name on the span", async () => {
     const { tracingManager, events } = makeRecordingTracerManager();
     await startRecordingSandbox(tracingManager);
@@ -1018,6 +1068,85 @@ describe("Sandbox in-cluster connectivity", () => {
     const content = await sandbox.files.read("a.txt");
     expect(new TextDecoder().decode(content)).toBe("file contents");
     expect(restBackend.healthHits).toBe(2);
+  });
+});
+
+describe("Sandbox files.stat()", () => {
+  it("uses the public facade and the shared connection", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    const { tracingManager, events } = makeRecordingTracerManager();
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+      tracingManager,
+    });
+    await expect(
+      sandbox.files.stat("dir/a.txt", { timeoutMs: 1000 }),
+    ).resolves.toEqual({
+      name: "a.txt",
+      size: 5,
+      type: "file",
+      mode: "0644",
+      modifiedAt: "2026-11-16T00:00:00.123456789Z",
+    });
+    await sandbox.files.exists("a.txt");
+    expect(restBackend.fileRequests).toEqual([
+      "GET /v1/files/dir/a.txt?stat=true",
+      "HEAD /v1/files/a.txt",
+    ]);
+    expect(restBackend.healthHits).toBe(1);
+    expect(events).toContain("attr:sandbox.file.operation=stat");
+    expect(events).toContain("attr:sandbox.file.size=5");
+  });
+
+  it("validates paths and timeout before connecting", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+    });
+    for (const path of ["../secret", "/absolute", "bad\0name"]) {
+      await expect(sandbox.files.stat(path)).rejects.toMatchObject({
+        telemetryCode: "invalid_argument",
+      });
+    }
+    await expect(
+      sandbox.files.stat("a", { timeoutMs: -1 }),
+    ).rejects.toMatchObject({ telemetryCode: "invalid_argument" });
+    expect(restBackend.healthHits).toBe(0);
+    expect(restBackend.fileRequests).toEqual([]);
+  });
+
+  it("honors timeout and cancellation and releases the operation", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+    });
+    await sandbox.files.exists("a.txt");
+    await expect(
+      sandbox.files.stat("slow.txt", { timeoutMs: 100 }),
+    ).rejects.toBeInstanceOf(SandboxTimeoutError);
+    const controller = new AbortController();
+    const pending = sandbox.files.stat("slow.txt", {
+      signal: controller.signal,
+    });
+    const rejected = expect(pending).rejects.toThrow();
+    controller.abort();
+    await rejected;
+    await expect(sandbox.files.stat("a.txt")).resolves.toMatchObject({
+      type: "file",
+    });
+    await sandbox.closeLocal();
+    await expect(sandbox.files.stat("a.txt")).rejects.toBeInstanceOf(
+      SandboxClosedError,
+    );
   });
 });
 
@@ -1270,8 +1399,8 @@ describe("Sandbox streaming integration", () => {
     await sandbox.files.copy("c", "d");
 
     expect(restBackend.fileRequests).toEqual([
-      "PUT /v1/files/a%2Fb?type=directory&parents=true&mode=0700",
-      "POST /v1/files/a%2Fb:move?destination=c&overwrite=true",
+      "PUT /v1/files/a/b?type=directory&parents=true&mode=0700",
+      "POST /v1/files/a/b:move?destination=c&overwrite=true",
       "POST /v1/files/c:copy?destination=d",
     ]);
     for (const op of ["mkdir", "move", "copy"]) {
@@ -1296,6 +1425,53 @@ describe("Sandbox streaming integration", () => {
     );
     await expect(sandbox.files.move("a", "../b")).rejects.toThrow(SandboxError);
     await expect(sandbox.files.copy(".", "b")).rejects.toThrow(SandboxError);
+    expect(restBackend.healthHits).toBe(0);
+    expect(restBackend.fileRequests).toEqual([]);
+  });
+
+  it("extract streams the archive to sandboxd and records the operation", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    const { tracingManager, events } = makeRecordingTracerManager();
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+      tracingManager,
+    });
+
+    await sandbox.files.extract(
+      "repo",
+      new Blob(["tar bytes"]).stream() as ReadableStream<Uint8Array>,
+    );
+
+    expect(restBackend.fileRequests).toEqual([
+      "PUT /v1/files/repo?extract=tar",
+    ]);
+    expect(restBackend.putBodies[0].toString()).toBe("tar bytes");
+    expect(events).toContain("attr:sandbox.file.operation=extract");
+    expect(events).toContain("attr:sandbox.file.size=9");
+  });
+
+  it("extract rejects bad input before connecting", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+    });
+    const archive = () =>
+      new Blob(["x"]).stream() as ReadableStream<Uint8Array>;
+    const locked = archive();
+    locked.getReader();
+
+    await expect(sandbox.files.extract("/abs", archive())).rejects.toThrow(
+      SandboxError,
+    );
+    await expect(sandbox.files.extract("d", locked)).rejects.toThrow(
+      /already locked/,
+    );
     expect(restBackend.healthHits).toBe(0);
     expect(restBackend.fileRequests).toEqual([]);
   });
@@ -2054,5 +2230,253 @@ describe("Sandbox commands.start()", () => {
       SandboxConnectionError,
     );
     expect(log.stdin).toHaveLength(0);
+  });
+});
+
+describe("Sandbox watcher.watch()", () => {
+  let watches: WatchDirRequest[];
+  let released: number;
+
+  /**
+   * A fake FileWatcherService whose behavior is picked by the watched path:
+   * "missing" (NOT_FOUND), "removed" (one event, a terminal error event,
+   * then a clean end), anything else (one event, then idle until aborted).
+   */
+  async function startSandbox(
+    tracingManager?: TracerManager,
+  ): Promise<Sandbox> {
+    watches = [];
+    released = 0;
+    restBackend = await startRestBackend();
+    grpcBackend = await startGrpcBackend((router) => {
+      router.service(ProcessService, {
+        execute: () => create(ExecuteResponseSchema, { exitCode: 0 }),
+      });
+      router.service(FileWatcherService, {
+        async *watchDir(req, ctx) {
+          watches.push(req);
+          if (req.path === "missing") {
+            throw new ConnectError("watch path does not exist", Code.NotFound);
+          }
+          yield create(FileEventSchema, {
+            type: FileEventType.CREATE,
+            path: `${req.path}/a.txt`,
+          });
+          if (req.path === "removed") {
+            yield create(FileEventSchema, {
+              type: FileEventType.ERROR,
+              error: "watched directory was removed",
+            });
+            return;
+          }
+          await new Promise<void>((resolve) => {
+            const onAbort = () => {
+              released++;
+              resolve();
+            };
+            if (ctx.signal.aborted) onAbort();
+            else ctx.signal.addEventListener("abort", onAbort, { once: true });
+          });
+        },
+      });
+    });
+    sandbox = makeSandbox({
+      apiServerPort: UNUSED_API_SERVER_PORT,
+      restPort: restBackend.port,
+      grpcPort: grpcBackend.port,
+      connectivity: "in-cluster-pod-ip",
+      podIP: "127.0.0.1",
+      tracingManager,
+    });
+    return sandbox;
+  }
+
+  /** A recording tracer whose span also records when it ends. */
+  function makeEndRecordingTracerManager() {
+    const { tracingManager, events } = makeRecordingTracerManager();
+    const tracer = tracingManager.tracer as Tracer;
+    const startActiveSpan = tracer.startActiveSpan.bind(tracer);
+    tracer.startActiveSpan = (name, fn) =>
+      startActiveSpan(name, (span) =>
+        fn({ ...span, end: () => events.push("end") }),
+      );
+    return { tracingManager, events };
+  }
+
+  it("yields events, including a terminal error event, and ends with the stream", async () => {
+    const s = await startSandbox();
+
+    const events: FileEvent[] = [];
+    for await (const event of s.watcher.watch("removed", { recursive: true })) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([
+      { type: "create", path: "removed/a.txt", error: "" },
+      { type: "error", path: "", error: "watched directory was removed" },
+    ]);
+    expect(watches).toHaveLength(1);
+    expect(watches[0]).toMatchObject({ path: "removed", recursive: true });
+  });
+
+  it("does not open the watch until it is iterated", async () => {
+    const s = await startSandbox();
+
+    s.watcher.watch("src");
+    await s.commands.run("true");
+
+    expect(watches).toHaveLength(0);
+  });
+
+  it("releases the watch on sandboxd when the loop is left, and keeps the connection", async () => {
+    const s = await startSandbox();
+
+    const watch = s.watcher.watch("src");
+    for await (const _event of watch) break;
+
+    await eventually(() => released === 1);
+    expect((await watch.next()).done).toBe(true);
+    await expect(s.commands.run("true")).resolves.toMatchObject({
+      exitCode: 0,
+    });
+    expect(restBackend?.healthHits).toBe(1);
+  });
+
+  it("rejects a watch sandboxd refuses to start, and keeps the connection", async () => {
+    const s = await startSandbox();
+
+    const watch = s.watcher.watch("missing");
+
+    const err = await watch.next().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SandboxdRpcError);
+    expect(err).toMatchObject({ code: "not_found" });
+    expect((await watch.next()).done).toBe(true);
+    await expect(s.commands.run("true")).resolves.toMatchObject({
+      exitCode: 0,
+    });
+    expect(restBackend?.healthHits).toBe(1);
+  });
+
+  it("validates arguments when called, before connecting", async () => {
+    const s = await startSandbox();
+
+    for (const path of ["../secret", "/absolute", "bad\0name"]) {
+      expect(() => s.watcher.watch(path)).toThrow(
+        expect.objectContaining({ telemetryCode: "invalid_argument" }),
+      );
+    }
+    expect(() => s.watcher.watch("src", { recursive: "yes" as never })).toThrow(
+      expect.objectContaining({ telemetryCode: "invalid_argument" }),
+    );
+    expect(() => s.watcher.watch("src", { timeoutMs: 0 })).toThrow(
+      expect.objectContaining({ telemetryCode: "invalid_argument" }),
+    );
+    expect(restBackend?.healthHits).toBe(0);
+    expect(watches).toHaveLength(0);
+  });
+
+  it("ends the watch with the caller's reason when its signal is aborted", async () => {
+    const s = await startSandbox();
+    const controller = new AbortController();
+    const reason = new Error("stop it");
+    const watch = s.watcher.watch("src", { signal: controller.signal });
+    await watch.next();
+    const next = watch.next();
+
+    controller.abort(reason);
+
+    await expect(next).rejects.toBe(reason);
+    await eventually(() => released === 1);
+  });
+
+  it("does not hold up closeLocal(), and ends the watch with SandboxClosedError", async () => {
+    const s = await startSandbox();
+    const watch = s.watcher.watch("src");
+    await watch.next();
+    const next = watch.next();
+
+    await s.closeLocal();
+
+    await expect(next).rejects.toBeInstanceOf(SandboxClosedError);
+  });
+
+  it("records only whether the watch is recursive on the span, never the path", async () => {
+    const { tracingManager, events } = makeEndRecordingTracerManager();
+    const s = await startSandbox(tracingManager);
+
+    for await (const _event of s.watcher.watch("secret-dir")) break;
+
+    await eventually(() => events.includes("end"));
+    expect(events).toContain("attr:sandbox.recursive=false");
+    expect(events.join("\n")).not.toContain("secret-dir");
+  });
+
+  it("keeps the span open until the watch ends", async () => {
+    const { tracingManager, events } = makeEndRecordingTracerManager();
+    const s = await startSandbox(tracingManager);
+
+    const watch = s.watcher.watch("src");
+    await watch.next();
+    expect(events).not.toContain("end");
+
+    await watch.return?.();
+    await eventually(() => events.includes("end"));
+    expect(events.join("\n")).not.toContain("sandbox.error.code");
+  });
+
+  it("records a watch sandboxd refuses to start as a failed span", async () => {
+    const { tracingManager, events } = makeEndRecordingTracerManager();
+    const s = await startSandbox(tracingManager);
+
+    await expect(s.watcher.watch("missing").next()).rejects.toBeInstanceOf(
+      SandboxdRpcError,
+    );
+
+    await eventually(() => events.includes("end"));
+    expect(events).toContain("attr:sandbox.error.code=not_found");
+  });
+
+  it("ends the span when the caller's signal is aborted between reads", async () => {
+    const { tracingManager, events } = makeEndRecordingTracerManager();
+    const s = await startSandbox(tracingManager);
+    const controller = new AbortController();
+    const watch = s.watcher.watch("src", { signal: controller.signal });
+    await watch.next();
+
+    controller.abort(new Error("stop it"));
+
+    await eventually(() => events.includes("end"));
+    expect(events).toContain("attr:sandbox.error.code=cancelled");
+  });
+
+  it("ends a read that return() interrupts while it waits for the connection", async () => {
+    const { tracingManager, events } = makeEndRecordingTracerManager();
+    // Never answers /v1/health, so the connection never becomes ready.
+    const stalled = http.createServer(() => {});
+    await new Promise<void>((resolve) =>
+      stalled.listen(0, "127.0.0.1", resolve),
+    );
+    try {
+      sandbox = makeSandbox({
+        apiServerPort: UNUSED_API_SERVER_PORT,
+        restPort: (stalled.address() as net.AddressInfo).port,
+        grpcPort: 1,
+        connectivity: "in-cluster-pod-ip",
+        podIP: "127.0.0.1",
+        tracingManager,
+      });
+      const watch = sandbox.watcher.watch("src");
+      const next = watch.next();
+
+      await watch.return?.();
+
+      await expect(next).resolves.toMatchObject({ done: true });
+      await eventually(() => events.includes("end"));
+      expect(events.join("\n")).not.toContain("sandbox.error.code");
+    } finally {
+      await sandbox?.closeLocal().catch(() => {});
+      stalled.closeAllConnections();
+      stalled.close();
+    }
   });
 });

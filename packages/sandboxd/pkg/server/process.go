@@ -299,6 +299,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 
 		waitErr = cmd.Wait()
 		waitForReaders(&streamWg, func() { closeAll(stdoutR, stderrR) })
+		closeAll(stdoutR, stderrR)
 	}
 
 	exitCode := int32(0)
@@ -654,6 +655,10 @@ func (s *ProcessServer) WriteStdin(_ context.Context, req *processv1.WriteStdinR
 
 	if req.GetEof() != nil {
 		if err := proc.CloseStdin(); err != nil {
+			if errors.Is(err, processmanager.ErrStdinIsTerminal) {
+				return nil, status.Errorf(codes.FailedPrecondition,
+					"process %d has a PTY; write 0x04 (Ctrl-D) at the start of a line to end input, or use SendSignal", req.GetProcessId())
+			}
 			return nil, status.Errorf(codes.Internal, "failed to close stdin: %v", err)
 		}
 		return &processv1.WriteStdinResponse{}, nil

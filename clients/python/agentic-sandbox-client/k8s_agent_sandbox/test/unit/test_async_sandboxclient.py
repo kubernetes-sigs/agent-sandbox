@@ -171,6 +171,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         mock_sandbox.terminate = AsyncMock()
         self.client._active_connection_sandboxes[("test-namespace", "test-claim")] = mock_sandbox
 
+        self.mock_k8s_helper.get_sandbox_claim = AsyncMock(return_value={"metadata": {}})
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")
         self.mock_k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
 
@@ -186,6 +187,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         mock_inactive.close_connection = AsyncMock()
         self.client._active_connection_sandboxes[("test-namespace", "test-claim")] = mock_inactive
 
+        self.mock_k8s_helper.get_sandbox_claim = AsyncMock(return_value={"metadata": {}})
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")
         self.mock_k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
 
@@ -198,6 +200,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
     async def test_get_sandbox_replaces_handle_when_claim_rebinds(self):
         """A claim deleted and re-created under the same name binds to a new
         sandbox, so get_sandbox must not return the old sandbox's handle."""
+        self.mock_k8s_helper.get_sandbox_claim = AsyncMock(return_value={"metadata": {}})
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="python-aaaaa")
         self.mock_k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
         self.mock_k8s_helper.delete_sandbox_claim = AsyncMock()
@@ -227,6 +230,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
     async def test_get_sandbox_replaces_stale_handle_when_close_fails(self):
         """A stale handle that fails to close is still replaced, so the caller
         gets a handle for the claim's current sandbox."""
+        self.mock_k8s_helper.get_sandbox_claim = AsyncMock(return_value={"metadata": {}})
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="python-bbbbb")
         self.mock_k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
         stale_handle = MagicMock()
@@ -246,6 +250,27 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.client._active_connection_sandboxes[("ns", "c1")], new_handle)
         stale_handle.close_connection.assert_awaited_once_with()
         self.assertIn("socket already gone", logs.output[0])
+
+    async def test_concurrent_get_sandbox_shares_one_handle(self):
+        async def resolve(*_args, **_kwargs):
+            await asyncio.sleep(0)
+            return "resolved-id"
+
+        self.mock_k8s_helper.get_sandbox_claim = AsyncMock(return_value={"metadata": {}})
+        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(side_effect=resolve)
+        self.mock_k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
+        handles = [MagicMock(is_active=True, sandbox_id="resolved-id", close_connection=AsyncMock()) for _ in range(2)]
+        self.mock_sandbox_class.side_effect = handles
+
+        first, second = await asyncio.gather(
+            self.client.get_sandbox("c1", "ns"), self.client.get_sandbox("c1", "ns")
+        )
+
+        self.assertIs(first, handles[0])
+        self.assertIs(second, handles[0])
+        self.assertIs(self.client._active_connection_sandboxes[("ns", "c1")], handles[0])
+        handles[0].close_connection.assert_not_awaited()
+        handles[1].close_connection.assert_awaited_once_with()
 
     async def test_get_sandbox_not_found(self):
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(
@@ -1371,6 +1396,7 @@ class TestAsyncTLSContextReuse(unittest.IsolatedAsyncioTestCase):
         helper = client.k8s_helper
         helper.create_sandbox_claim = AsyncMock(return_value={"metadata": {"uid": "u"}})
         helper.wait_for_claim_ready = AsyncMock(side_effect=lambda name, *a, **kw: name)
+        helper.get_sandbox_claim = AsyncMock(return_value={"metadata": {}})
         helper.resolve_sandbox_name = AsyncMock(side_effect=lambda name, *a, **kw: name)
         helper.get_sandbox = AsyncMock(return_value={"metadata": {"name": "sandbox"}})
         return client
@@ -2147,6 +2173,7 @@ class TestAsyncSandboxClientInClusterConnectionConfig(unittest.IsolatedAsyncioTe
         self.assertEqual(call_kwargs["connection_config"], self.config)
 
     async def test_get_sandbox_passes_connection_config(self):
+        self.mock_k8s_helper.get_sandbox_claim = AsyncMock(return_value={"metadata": {}})
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="sandbox-123")
         self.mock_k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
 
@@ -2162,6 +2189,7 @@ class TestAsyncSandboxClientInClusterConnectionConfig(unittest.IsolatedAsyncioTe
         """Verify connection_config is passed through for non-InCluster configs."""
         config = SandboxDirectConnectionConfig(api_url="http://test", server_port=8888)
         client = AsyncSandboxClient(connection_config=config, cleanup=False)
+        client.k8s_helper.get_sandbox_claim = AsyncMock(return_value={"metadata": {}})
         client.k8s_helper.resolve_sandbox_name = AsyncMock(return_value="sandbox-123")
         client.k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
 

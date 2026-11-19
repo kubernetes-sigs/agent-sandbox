@@ -17,12 +17,13 @@ import threading
 import unittest
 import weakref
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 
 from pydantic import ValidationError
 
+from k8s_agent_sandbox.exceptions import SandboxError, SandboxNotFoundError
 from k8s_agent_sandbox.sandbox import Sandbox
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
@@ -68,6 +69,56 @@ class TestSandbox(unittest.TestCase):
             sandbox_id=self.sandbox_id,
             namespace=self.namespace,
         )
+
+    RUNNING = {"metadata": {"uid": "original", "generation": 1}}
+    SUSPENDED = {"metadata": {"uid": "original", "generation": 2}, "spec": {"operatingMode": "Suspended"}}
+
+    def test_suspend_then_resume(self):
+        resumed = {"metadata": {"uid": "original", "generation": 3}}
+        self.mock_k8s_helper.get_sandbox.side_effect = [self.RUNNING, self.SUSPENDED, self.SUSPENDED, resumed]
+        self.mock_k8s_helper.patch_sandbox_operating_mode.side_effect = [self.SUSPENDED, resumed]
+        calls = MagicMock()
+        calls.attach_mock(self.mock_k8s_helper.patch_sandbox_operating_mode, "patch")
+        calls.attach_mock(self.mock_connector.close, "close")
+        calls.attach_mock(self.mock_k8s_helper.wait_for_sandbox_ready, "wait")
+
+        self.sandbox.suspend()
+        self.sandbox.resume()
+
+        self.assertEqual(calls.mock_calls, [
+            call.patch(self.sandbox_id, self.namespace, "Suspended", "original"),
+            call.close(),
+            call.wait(self.sandbox_id, self.namespace, ANY, condition="Suspended", min_generation=2),
+            call.patch(self.sandbox_id, self.namespace, "Running", "original"),
+            call.close(),
+            call.wait(self.sandbox_id, self.namespace, ANY, condition="Ready", min_generation=3),
+        ])
+        self.assertTrue(self.sandbox.is_active)
+
+    def test_is_suspended_reports_requested_mode(self):
+        self.mock_k8s_helper.get_sandbox.side_effect = [self.RUNNING, self.SUSPENDED]
+        self.assertFalse(self.sandbox.is_suspended())
+        self.assertTrue(self.sandbox.is_suspended())
+
+    def test_suspend_rejects_replaced_sandbox(self):
+        self.mock_k8s_helper.get_sandbox.side_effect = [self.RUNNING, {"metadata": {"uid": "replacement"}}]
+        self.sandbox.is_suspended()
+        with self.assertRaises(SandboxNotFoundError):
+            self.sandbox.suspend()
+
+    def test_suspend_rejects_mode_changed_during_wait(self):
+        self.mock_k8s_helper.get_sandbox.return_value = self.RUNNING
+        self.mock_k8s_helper.patch_sandbox_operating_mode.return_value = self.SUSPENDED
+        with self.assertRaisesRegex(SandboxError, "changed operating mode"):
+            self.sandbox.suspend()
+
+    def test_resume_times_out_while_lifecycle_lock_held(self):
+        with self.sandbox._lifecycle_lock, self.assertRaisesRegex(TimeoutError, "lifecycle lock"):
+            self.sandbox.resume(timeout=0)
+    def test_suspend_rejects_closed_handle(self):
+        self.sandbox.close_connection()
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            self.sandbox.suspend()
 
     def test_init_with_defaults(self):
         """Tests sandbox initialization with default configurations."""

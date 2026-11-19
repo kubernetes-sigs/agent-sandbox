@@ -72,6 +72,7 @@ function makeClient(
     maxUploadSize: number;
     maxMetadataResponseSize: number;
     authorization: string;
+    routingHeaders: Readonly<Record<string, string>>;
   }> = {},
 ): SandboxdRestClient {
   return new SandboxdRestClient({
@@ -80,6 +81,7 @@ function makeClient(
     maxUploadSize: overrides.maxUploadSize ?? 1024 * 1024,
     maxMetadataResponseSize: overrides.maxMetadataResponseSize ?? 1024 * 1024,
     authorization: overrides.authorization,
+    routingHeaders: overrides.routingHeaders,
   });
 }
 
@@ -93,30 +95,41 @@ afterEach(async () => {
 // ---------- resolveSandboxPath (client-side validation) ----------
 
 describe("resolveSandboxPath", () => {
-  it("maps '' and '.' to the sandbox root for read/list/exists", () => {
-    expect(resolveSandboxPath("", "read")).toBe("");
-    expect(resolveSandboxPath(".", "list")).toBe("");
-    expect(resolveSandboxPath("./.", "exists")).toBe("");
+  it("maps '' and '.' to the sandbox root for list/exists", () => {
+    expect(resolveSandboxPath("", "list")).toBe("");
+    expect(resolveSandboxPath(".", "exists")).toBe("");
+    expect(resolveSandboxPath("./.", "list")).toBe("");
   });
 
-  it("rejects the sandbox root for write/delete", () => {
+  it("rejects the sandbox root for read/write/delete", () => {
+    expect(() => resolveSandboxPath("", "read")).toThrow(SandboxError);
+    expect(() => resolveSandboxPath(".", "read")).toThrow(SandboxError);
+    expect(() => resolveSandboxPath("./", "read")).toThrow(SandboxError);
     expect(() => resolveSandboxPath("", "write")).toThrow(SandboxError);
     expect(() => resolveSandboxPath(".", "delete")).toThrow(SandboxError);
     expect(() => resolveSandboxPath("./", "write")).toThrow(SandboxError);
   });
 
-  it("rejects the sandbox root for mkdir/move/copy but allows a trailing slash", () => {
+  it("rejects the sandbox root for mkdir/move/copy and drops a trailing slash before encoding", () => {
     for (const op of ["mkdir", "move", "copy"] as const) {
       expect(() => resolveSandboxPath("", op)).toThrow(SandboxError);
       expect(() => resolveSandboxPath("./", op)).toThrow(SandboxError);
-      expect(resolveSandboxPath("dir/", op)).toBe("dir%2F");
+      expect(resolveSandboxPath("dir/", op)).toBe("dir");
     }
   });
 
-  it("rejects a trailing slash for write/delete but not read/list/exists", () => {
+  it("maps '' and '.' to the sandbox root for extract and drops a trailing slash", () => {
+    expect(resolveSandboxPath("", "extract")).toBe("");
+    expect(resolveSandboxPath("./", "extract")).toBe("");
+    expect(resolveSandboxPath("dir/", "extract")).toBe("dir");
+  });
+
+  it("rejects a trailing slash for write/delete and drops it for read/list/exists", () => {
     expect(() => resolveSandboxPath("dir/", "write")).toThrow(SandboxError);
     expect(() => resolveSandboxPath("dir/", "delete")).toThrow(SandboxError);
-    expect(() => resolveSandboxPath("dir/", "list")).not.toThrow();
+    expect(resolveSandboxPath("dir/", "read")).toBe("dir");
+    expect(resolveSandboxPath("dir/", "list")).toBe("dir");
+    expect(resolveSandboxPath("dir/", "exists")).toBe("dir");
   });
 
   it("rejects absolute paths for every operation", () => {
@@ -129,6 +142,7 @@ describe("resolveSandboxPath", () => {
       "mkdir",
       "move",
       "copy",
+      "extract",
     ] as const) {
       expect(() => resolveSandboxPath("/etc/passwd", op)).toThrow(SandboxError);
     }
@@ -152,13 +166,22 @@ describe("resolveSandboxPath", () => {
     expect(() => resolveSandboxPath("a\ud800b", "read")).toThrow(SandboxError);
   });
 
-  it("encodes '/', '%', space, '?', and '#' via a single encodeURIComponent pass", () => {
+  it("encodes each segment with encodeURIComponent but keeps separators literal", () => {
     expect(resolveSandboxPath("dir/sub file.txt", "read")).toBe(
-      encodeURIComponent("dir/sub file.txt"),
+      "dir/sub%20file.txt",
     );
     expect(resolveSandboxPath("a?b#c%d", "read")).toBe(
       encodeURIComponent("a?b#c%d"),
     );
+  });
+
+  it("drops interior '.' segments", () => {
+    expect(resolveSandboxPath("./a.txt", "read")).toBe("a.txt");
+    expect(resolveSandboxPath("dir/./a.txt", "read")).toBe("dir/a.txt");
+    expect(resolveSandboxPath("dir/sub/./file.txt", "write")).toBe(
+      "dir/sub/file.txt",
+    );
+    expect(resolveSandboxPath("dir//a.txt", "read")).toBe("dir/a.txt");
   });
 });
 
@@ -343,21 +366,19 @@ describe("SandboxdRestClient.read", () => {
     );
     expect(new TextDecoder().decode(result)).toBe("hello");
     expect(activeServer.requests[0].method).toBe("GET");
-    expect(activeServer.requests[0].url).toBe(
-      `/v1/files/${encodeURIComponent("dir/sub file.txt")}`,
-    );
+    expect(activeServer.requests[0].url).toBe(`/v1/files/dir/sub%20file.txt`);
   });
 
-  it("requests '/v1/files/' for the sandbox root", async () => {
+  it("rejects the sandbox root before any request", async () => {
     activeServer = await startServer((_req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ path: "/", entries: [] }));
     });
     const client = makeClient(activeServer.baseUrl);
-    await expect(client.read("", new AbortController().signal)).rejects.toThrow(
-      SandboxError,
-    );
-    expect(activeServer.requests[0].url).toBe("/v1/files/");
+    const signal = new AbortController().signal;
+    await expect(client.read("", signal)).rejects.toThrow(SandboxError);
+    await expect(client.read(".", signal)).rejects.toThrow(SandboxError);
+    expect(activeServer.requests).toHaveLength(0);
   });
 
   it("errors when the response is a directory listing (JSON content-type)", async () => {
@@ -496,6 +517,48 @@ describe("SandboxdRestClient authorization", () => {
       expect(JSON.stringify(err)).not.toContain("wrong-token");
       expect((err as Error).message).not.toContain("wrong-token");
     }
+  });
+});
+
+describe("SandboxdRestClient routing headers", () => {
+  it("sends the sandbox-router routing headers on every request", async () => {
+    activeServer = await startServer((req, res) => {
+      if (req.method === "PUT") {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok", uptime_seconds: 1 }));
+    });
+    const client = makeClient(activeServer.baseUrl, {
+      routingHeaders: {
+        "X-Sandbox-ID": "sb-kata",
+        "X-Sandbox-Namespace": "default",
+        "X-Sandbox-Port": "18080",
+        "X-Sandbox-Pod-IP": "10.244.0.7",
+      },
+    });
+    const signal = new AbortController().signal;
+    await client.health(signal);
+    await client.write("a.txt", new Uint8Array([1]), {}, signal);
+
+    expect(activeServer.requests).toHaveLength(2);
+    for (const req of activeServer.requests) {
+      expect(req.headers["x-sandbox-id"]).toBe("sb-kata");
+      expect(req.headers["x-sandbox-namespace"]).toBe("default");
+      expect(req.headers["x-sandbox-port"]).toBe("18080");
+      expect(req.headers["x-sandbox-pod-ip"]).toBe("10.244.0.7");
+    }
+  });
+
+  it("sends no routing headers when none are configured", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok", uptime_seconds: 1 }));
+    });
+    await makeClient(activeServer.baseUrl).health(new AbortController().signal);
+    expect(activeServer.requests[0].headers["x-sandbox-id"]).toBeUndefined();
   });
 });
 
@@ -705,6 +768,23 @@ describe("SandboxdRestClient.write", () => {
     expect(plainReq.headers["if-none-match"]).toBeUndefined();
   });
 
+  it("rejects append combined with createOnly before any request", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await expect(
+      client.write(
+        "a.txt",
+        new Uint8Array(),
+        { append: true, createOnly: true },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(SandboxError);
+    expect(activeServer.requests).toHaveLength(0);
+  });
+
   it("maps 412 to FAILED_PRECONDITION", async () => {
     activeServer = await startServer((_req, res) => {
       res.writeHead(412, { "Content-Type": "application/json" });
@@ -865,16 +945,44 @@ describe("SandboxdRestClient.writeStream", () => {
       res.end();
     });
     const client = makeClient(activeServer.baseUrl);
+    const signal = new AbortController().signal;
     await client.writeStream(
       "a.txt",
       toReadableStream([]),
-      { mode: "0644", append: true, createOnly: true },
-      new AbortController().signal,
+      { mode: "0644", append: true },
+      signal,
+    );
+    await client.writeStream(
+      "b.txt",
+      toReadableStream([]),
+      { mode: "0644", createOnly: true },
+      signal,
     );
     expect(activeServer.requests[0].url).toBe(
       "/v1/files/a.txt?mode=0644&append=true",
     );
-    expect(activeServer.requests[0].headers["if-none-match"]).toBe("*");
+    expect(activeServer.requests[0].headers["if-none-match"]).toBeUndefined();
+    expect(activeServer.requests[1].url).toBe("/v1/files/b.txt?mode=0644");
+    expect(activeServer.requests[1].headers["if-none-match"]).toBe("*");
+  });
+
+  it("rejects append combined with createOnly before touching the source stream", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    const stream = toReadableStream(textChunks("x"));
+    await expect(
+      client.writeStream(
+        "a.txt",
+        stream,
+        { append: true, createOnly: true },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(SandboxError);
+    expect(activeServer.requests).toHaveLength(0);
+    expect(stream.locked).toBe(false);
   });
 
   it("rejects an invalid mode before ever touching the source stream", async () => {
@@ -1121,6 +1229,120 @@ describe("SandboxdRestClient.writeStream", () => {
 
 // ---------- exists ----------
 
+describe("SandboxdRestClient.extract", () => {
+  it("PUTs the archive with extract=tar and returns the byte count", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    const bytesSent = await client.extract(
+      "src/dir",
+      toReadableStream(textChunks("tar", "ball")),
+      new AbortController().signal,
+    );
+    const req = activeServer.requests[0];
+    expect(bytesSent).toBe(7);
+    expect(req.method).toBe("PUT");
+    expect(req.url).toBe("/v1/files/src/dir?extract=tar");
+    expect(req.headers["content-type"]).toBe("application/octet-stream");
+    expect(req.body.toString()).toBe("tarball");
+  });
+
+  it("accepts a 204 sent before the archive source reaches EOF", async () => {
+    // sandboxd stops reading at the tar end marker, so trailing bytes may be unread.
+    const server = await startServerWithLiveByteCount((_req, res) => {
+      res.writeHead(204, { Connection: "close" });
+      res.end();
+    });
+    const client = makeClient(server.baseUrl);
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        await new Promise((r) => setTimeout(r, 20));
+        controller.enqueue(new Uint8Array(4));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    try {
+      await expect(
+        client.extract("d", stream, new AbortController().signal),
+      ).resolves.toBeGreaterThanOrEqual(0);
+      expect(cancelled).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("targets the sandbox root for '' and '.'", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    const signal = new AbortController().signal;
+    await client.extract("", toReadableStream([]), signal);
+    await client.extract(".", toReadableStream([]), signal);
+    expect(activeServer.requests.map((r) => r.url)).toEqual([
+      "/v1/files/?extract=tar",
+      "/v1/files/?extract=tar",
+    ]);
+  });
+
+  it("maps an error response to SandboxdApiError", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(409, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ code: "CONFLICT", message: "entry exists" }));
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await expect(
+      client.extract(
+        "d",
+        toReadableStream(textChunks("x")),
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "CONFLICT",
+    } satisfies Partial<SandboxdApiError>);
+  });
+
+  it("rejects a bad path and a locked stream before sending any request", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    const signal = new AbortController().signal;
+    await expect(
+      client.extract("../d", toReadableStream([]), signal),
+    ).rejects.toThrow(SandboxError);
+    const locked = toReadableStream(textChunks("x"));
+    locked.getReader();
+    await expect(client.extract("d", locked, signal)).rejects.toThrow(
+      /extract archive is already locked/,
+    );
+    expect(activeServer.requests).toHaveLength(0);
+  });
+
+  it("rejects an archive over the upload limit", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl, { maxUploadSize: 4 });
+    await expect(
+      client.extract(
+        "d",
+        toReadableStream(textChunks("too large")),
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(SandboxError);
+  });
+});
+
 describe("SandboxdRestClient.exists", () => {
   it("returns true on 2xx and issues a HEAD request", async () => {
     activeServer = await startServer((_req, res) => {
@@ -1156,6 +1378,125 @@ describe("SandboxdRestClient.exists", () => {
     ).rejects.toMatchObject({
       status: 403,
     } satisfies Partial<SandboxdApiError>);
+  });
+});
+
+describe("SandboxdRestClient.stat", () => {
+  const metadata = {
+    name: "a.txt",
+    size: 5,
+    type: "file",
+    modified_at: "2026-11-16T00:00:00.123456789Z",
+    mode: "0640",
+  };
+
+  it.each([
+    {
+      path: "dir/a #?.txt",
+      encoded: "dir/a%20%23%3F.txt",
+      type: "file",
+      name: "a #?.txt",
+    },
+    { path: "dir/", encoded: "dir", type: "directory", name: "dir" },
+    { path: ".", encoded: "", type: "directory", name: "/" },
+    { path: "", encoded: "", type: "directory", name: "/" },
+  ])("returns metadata for '$path' without losing precision", async ({
+    path,
+    encoded,
+    type,
+    name,
+  }) => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ...metadata, type, name }));
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await expect(
+      client.stat(path, new AbortController().signal),
+    ).resolves.toEqual({
+      name,
+      type,
+      size: 5,
+      mode: "0640",
+      modifiedAt: metadata.modified_at,
+    });
+    expect(activeServer.requests[0].url).toBe(`/v1/files/${encoded}?stat=true`);
+    expect(activeServer.requests[0].method).toBe("GET");
+  });
+
+  it.each([
+    { status: 404, code: "NOT_FOUND" },
+    { status: 403, code: "PERMISSION_DENIED" },
+    { status: 401, code: "UNAUTHENTICATED" },
+  ])("propagates HTTP $status", async ({ status, code }) => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ code, message: "lookup failed" }));
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await expect(
+      client.stat("a.txt", new AbortController().signal),
+    ).rejects.toMatchObject({
+      status,
+      code,
+    });
+    expect(activeServer.requests).toHaveLength(1);
+  });
+
+  it.each([
+    null,
+    { path: "/", entries: [] },
+    { ...metadata, name: "" },
+    { ...metadata, size: -1 },
+    { ...metadata, size: Number.MAX_SAFE_INTEGER + 1 },
+    { ...metadata, type: "symlink" },
+    { ...metadata, modified_at: "2026-02-30T00:00:00Z" },
+    { ...metadata, mode: "755" },
+  ])("rejects invalid metadata %j", async (body) => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(body));
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await expect(
+      client.stat("a.txt", new AbortController().signal),
+    ).rejects.toMatchObject({
+      telemetryCode: "invalid_response",
+    });
+  });
+
+  it.each([
+    { contentType: "application/octet-stream", body: JSON.stringify(metadata) },
+    { contentType: "application/json", body: "invalid json" },
+  ])("rejects a $contentType response with an invalid stat body", async ({
+    contentType,
+    body,
+  }) => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": contentType });
+      res.end(body);
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await expect(
+      client.stat("a.txt", new AbortController().signal),
+    ).rejects.toMatchObject({
+      telemetryCode: "invalid_response",
+    });
+  });
+
+  it("bounds stat responses by maxMetadataResponseSize", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(metadata));
+    });
+    const client = makeClient(activeServer.baseUrl, {
+      maxMetadataResponseSize: 32,
+    });
+    await expect(
+      client.stat("a.txt", new AbortController().signal),
+    ).rejects.toMatchObject({
+      telemetryCode: "response_too_large",
+    });
   });
 });
 
@@ -1318,7 +1659,7 @@ describe("SandboxdRestClient.list", () => {
       new AbortController().signal,
     );
     expect(activeServer.requests[0].url).toBe(
-      "/v1/files/dir%2Fsub?recursive=true&max_depth=2",
+      "/v1/files/dir/sub?recursive=true&max_depth=2",
     );
     expect(listing.path).toBe("/dir/sub");
     expect(listing.entries.map((entry) => entry.name)).toEqual([
@@ -1448,7 +1789,7 @@ describe("SandboxdRestClient.mkdir", () => {
     await client.mkdir("a/b", {}, new AbortController().signal);
     const req = activeServer.requests[0];
     expect(req.method).toBe("PUT");
-    expect(req.url).toBe("/v1/files/a%2Fb?type=directory");
+    expect(req.url).toBe("/v1/files/a/b?type=directory");
     expect(req.body).toHaveLength(0);
   });
 
@@ -1523,7 +1864,7 @@ describe.each(["move", "copy"] as const)("SandboxdRestClient.%s", (action) => {
     const req = activeServer.requests[0];
     expect(req.method).toBe("POST");
     expect(req.url).toBe(
-      `/v1/files/src%2Fa.txt:${action}?destination=dst%2Fa.txt`,
+      `/v1/files/src/a.txt:${action}?destination=dst%2Fa.txt`,
     );
   });
 

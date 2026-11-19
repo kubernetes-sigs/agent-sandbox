@@ -61,16 +61,25 @@ export interface SandboxdOptions {
    * {@link SandboxdConnectivity}.
    */
   connectivity?: SandboxdConnectivity;
+  /**
+   * Namespace of the sandbox-router ("agent-sandbox-system" in shipped
+   * manifests); defaults to the claim namespace. Router mode only.
+   */
+  routerNamespace?: string;
+  /**
+   * Omit X-Sandbox-Pod-IP. Also omitted when the Sandbox has a headless
+   * Service. Set for a router cache, or for scoped-token authz (it rejects
+   * a raw pod IP). Router mode only. Default: false.
+   */
+  disablePodIPRouting?: boolean;
   /** sandboxd's REST files/health port inside the Pod. Default: 8080. */
   restPort?: number;
   /** sandboxd's gRPC process port inside the Pod. Default: 9090. */
   grpcPort?: number;
   /**
-   * Budget (ms) for establishing the shared connection, through a
-   * successful /v1/health check: for "port-forward" it starts when both
-   * local listeners are opened; for the in-cluster modes it bounds the
-   * health polling against the pod address. Re-applied in full on every
-   * reconnect. Default: 30000.
+   * Budget (ms) for one connect attempt through /v1/health, including
+   * router EndpointSlice discovery. Reapplied on every reconnect.
+   * Default: 30000.
    */
   portForwardReadyTimeoutMs?: number;
   /**
@@ -95,13 +104,15 @@ export interface SandboxdOptions {
    */
   maxCommandOutputSize?: number;
   /**
-   * Bearer token for a sandboxd started with --auth-token-sha256 or
-   * --auth-token-file. Sent as `Authorization: Bearer <token>` on every REST
-   * request and gRPC call, and never logged or put in an error. It is not
-   * encrypted on the wire: with the in-cluster modes it travels in plaintext.
-   * Must be non-empty printable ASCII with no spaces. Default: none.
+   * sandboxd token: `Authorization: Bearer <token>`, or bare `X-Sandboxd-Token`
+   * in router mode (the router strips Authorization). Never logged.
    */
   authToken?: string;
+  /**
+   * The sandbox-router's own credential, sent as `Authorization: Bearer
+   * <token>` in router mode only; the router strips it before forwarding.
+   */
+  routerAuthToken?: string;
 }
 
 /**
@@ -123,6 +134,8 @@ export interface SandboxdOptions {
  *   Service, but nothing detects that the pod was rescheduled: requests can
  *   continue to a stale address Kubernetes may have reassigned to an
  *   unrelated pod.
+ * - `"router-port-forward"`: port-forwards the sandbox-router, the laptop/CI
+ *   path for Kata/gVisor sandboxes (gRPC needs sandbox-router v1.0.9+).
  *
  * Both in-cluster modes require this process to run inside the same cluster
  * as the sandbox pods, and send REST and gRPC in plaintext across the pod
@@ -130,6 +143,7 @@ export interface SandboxdOptions {
  */
 export type SandboxdConnectivity =
   | "port-forward"
+  | "router-port-forward"
   | "in-cluster-service"
   | "in-cluster-pod-ip";
 
@@ -144,6 +158,13 @@ export interface RuntimeCallOptions {
    * processing — including any time spent waiting on the shared connect.
    * Default: 60000.
    */
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+/** Options for sandbox.suspend() and sandbox.resume(). */
+export interface SuspendResumeOptions {
+  /** Total budget (ms) for the call. Default: 180000. */
   timeoutMs?: number;
   signal?: AbortSignal;
 }
@@ -237,12 +258,14 @@ export interface WriteOptions extends RuntimeCallOptions {
   mode?: string;
   /**
    * Add to the end of the file instead of replacing it. Not atomic. Default:
-   * false. A sandboxd that predates this option ignores it and replaces the file.
+   * false. Cannot be combined with `createOnly`. A sandboxd that predates this
+   * option ignores it and replaces the file.
    */
   append?: boolean;
   /**
-   * Fail with `FAILED_PRECONDITION` if `path` already exists. Default: false. A
-   * sandboxd that predates this option ignores it and replaces the file.
+   * Fail with `FAILED_PRECONDITION` if `path` already exists. Default: false.
+   * Cannot be combined with `append`. A sandboxd that predates this option
+   * ignores it and replaces the file.
    */
   createOnly?: boolean;
 }
@@ -284,9 +307,9 @@ export interface ExecutionResult {
   exitCode: number;
 }
 
-/** One row of a DirectoryListing returned by sandbox.files.list(). */
+/** Metadata returned by sandbox.files.stat() or an entry in files.list(). */
 export interface FileEntry {
-  /** Path relative to the listed directory, including subdirectories. */
+  /** Basename for stat ("/" for the root), or path relative to the listed directory. */
   name: string;
   size: number;
   type: "file" | "directory";
@@ -300,6 +323,51 @@ export interface FileEntry {
 export interface DirectoryListing {
   path: string;
   entries: FileEntry[];
+}
+
+/**
+ * Kind of change a {@link FileEvent} reports. The names match the Go and
+ * Python SDKs. A sandboxd newer than this SDK can send a kind that has no
+ * name here; it arrives as `unknown(<number>)`, so handle the kinds you need
+ * and ignore the rest.
+ */
+export type FileEventType =
+  | "create"
+  | "write"
+  | "remove"
+  | "rename"
+  | "chmod"
+  | "error"
+  | `unknown(${number})`;
+
+/** One filesystem change reported by sandbox.watcher.watch(). */
+export interface FileEvent {
+  type: FileEventType;
+  /**
+   * Sandbox-root-relative path of the file or directory that changed. A
+   * `rename` event carries the old path. When the new name is inside the
+   * watched tree, it arrives as a separate `create` event.
+   */
+  path: string;
+  /** Message of an `error` event, and "" for every other type. */
+  error: string;
+}
+
+/** Options accepted by sandbox.watcher.watch(). */
+export interface WatchOptions {
+  /**
+   * Also watch subdirectories, including ones created during the watch.
+   * Default: false.
+   */
+  recursive?: boolean;
+  /**
+   * Budget (ms) for connecting to sandboxd before the watch starts. It does
+   * NOT bound the wait for the first event or how long the watch runs. Use
+   * `signal` to bound those. Default: 60000.
+   */
+  timeoutMs?: number;
+  /** Aborting this signal, before or during the watch, ends the watch. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -360,17 +428,39 @@ export interface VolumeClaimTemplate {
   spec: k8s.V1PersistentVolumeClaimSpec;
 }
 
+/** Values the SandboxClaim `spec.lifecycle.shutdownPolicy` field accepts. */
+export type ShutdownPolicy = "Delete" | "DeleteForeground" | "Retain";
+
 export interface CreateSandboxOptions {
   sandboxReadyTimeout?: number;
   labels?: Record<string, string>;
   /**
-   * Delete the claim and its sandbox after this many seconds, measured from
-   * the createSandbox call (including provisioning time). Sets the claim's
+   * Expire the claim after this many seconds, measured from the createSandbox
+   * call (including provisioning time). Sets the claim's
    * `spec.lifecycle.shutdownTime` to that absolute deadline and its
-   * `spec.lifecycle.shutdownPolicy` to `"Delete"`. Must be a positive integer
-   * that produces a valid RFC3339 deadline. Omit to leave expiration unset.
+   * `spec.lifecycle.shutdownPolicy` to `"Delete"` unless `shutdownPolicy` is
+   * given. Must be a positive integer that produces a valid RFC3339 deadline.
+   * Omit to leave expiration unset.
    */
   shutdownAfterSeconds?: number;
+  /**
+   * Value for the claim's `spec.lifecycle.shutdownPolicy`. `"Delete"` deletes
+   * the claim and its sandbox. `"DeleteForeground"` does the same but keeps
+   * the claim visible until the sandbox and its Pod are gone. `"Retain"`
+   * deletes the sandbox and keeps the expired claim. When a timer is set and
+   * no policy is given, the SDK sends `"Delete"`; the API's own default for an
+   * omitted policy is `"Retain"`.
+   */
+  shutdownPolicy?: ShutdownPolicy;
+  /**
+   * Seconds, zero or more, for the claim's
+   * `spec.lifecycle.ttlSecondsAfterFinished`. The timer starts only when the
+   * Pod reaches Succeeded or Failed. A Pod with `restartPolicy: Always` does
+   * not reach either phase when its containers exit, although node-pressure
+   * eviction can still mark it Failed, so pair this with
+   * `shutdownAfterSeconds`. With both timers, the earlier deadline wins.
+   */
+  ttlSecondsAfterFinished?: number;
   /**
    * Labels stamped onto the running Sandbox Pod through the claim's
    * `spec.additionalPodMetadata.labels`. Unlike `labels`, which land on the

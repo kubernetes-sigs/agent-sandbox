@@ -24,7 +24,7 @@ import json
 import os
 import tempfile
 import time
-from typing import Any, Callable, ParamSpec, TypeVar, cast
+from typing import Any, Callable, Literal, ParamSpec, TypeVar, cast
 
 from .constants import SANDBOX_NAME_HASH_LABEL
 from .models import (
@@ -96,34 +96,50 @@ def record_latency(metric: Any) -> Callable[[Callable[P, R]], Callable[P, R]]:
         return cast(Callable[P, R], wrapper)
     return decorator
 
-def construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds: int) -> dict[str, str]:
-    """Construct a SandboxClaim lifecycle spec dict from a TTL in seconds.
+def construct_sandbox_claim_lifecycle_spec(
+    shutdown_after_seconds: int | None = None,
+    *,
+    shutdown_policy: Literal["Delete", "DeleteForeground", "Retain"] | None = None,
+    ttl_seconds_after_finished: int | None = None,
+) -> dict[str, Any]:
+    """Construct spec.lifecycle from optional timers and shutdownPolicy.
 
-    Returns a dict suitable for inclusion as ``spec.lifecycle`` in a
-    SandboxClaim manifest, with ``shutdownTime`` set to *now + TTL* (UTC)
-    and ``shutdownPolicy`` set to ``"Delete"``.
-
-    Raises ``ValueError`` if the input is not a positive integer or is
-    too large for datetime arithmetic.
+    When a timer is set and no policy is given, the SDK sends Delete; the API's
+    own default for an omitted policy is Retain. Omitted options produce an
+    empty dict. Invalid policies or timer values raise ValueError.
     """
-    if type(shutdown_after_seconds) is not int:
-        raise ValueError(
-            f"shutdown_after_seconds must be an integer, got {type(shutdown_after_seconds).__name__}"
-        )
-    if shutdown_after_seconds <= 0:
-        raise ValueError(
-            f"shutdown_after_seconds must be positive, got {shutdown_after_seconds}"
-        )
-    try:
-        shutdown_time = datetime.now(timezone.utc) + timedelta(seconds=shutdown_after_seconds)
-    except OverflowError:
-        raise ValueError(
-            f"shutdown_after_seconds is too large: {shutdown_after_seconds}"
-        ) from None
-    return {
-        "shutdownTime": shutdown_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "shutdownPolicy": "Delete",
-    }
+    lifecycle: dict[str, Any] = {}
+    if shutdown_policy is not None:
+        if shutdown_policy not in ("Delete", "DeleteForeground", "Retain"):
+            raise ValueError(
+                f"shutdown_policy must be Delete, DeleteForeground, or Retain, got {shutdown_policy!r}"
+            )
+        lifecycle["shutdownPolicy"] = shutdown_policy
+    if ttl_seconds_after_finished is not None:
+        if not (type(ttl_seconds_after_finished) is int and 0 <= ttl_seconds_after_finished <= 2147483647):
+            raise ValueError(
+                f"ttl_seconds_after_finished must be a nonnegative 32-bit integer, got {ttl_seconds_after_finished!r}"
+            )
+        lifecycle["ttlSecondsAfterFinished"] = ttl_seconds_after_finished
+    if shutdown_after_seconds is not None:
+        if type(shutdown_after_seconds) is not int:
+            raise ValueError(
+                f"shutdown_after_seconds must be an integer, got {type(shutdown_after_seconds).__name__}"
+            )
+        if shutdown_after_seconds <= 0:
+            raise ValueError(
+                f"shutdown_after_seconds must be positive, got {shutdown_after_seconds}"
+            )
+        try:
+            shutdown_time = datetime.now(timezone.utc) + timedelta(seconds=shutdown_after_seconds)
+        except OverflowError:
+            raise ValueError(
+                f"shutdown_after_seconds is too large: {shutdown_after_seconds}"
+            ) from None
+        lifecycle["shutdownTime"] = shutdown_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+    if lifecycle:
+        lifecycle.setdefault("shutdownPolicy", "Delete")
+    return lifecycle
 
 
 def select_pod_ip(ips: Sequence[object] | None) -> str | None:

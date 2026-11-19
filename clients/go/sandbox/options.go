@@ -232,6 +232,16 @@ type Options struct {
 	// deadline is rounded up to a whole second. Zero (the default) means no expiry.
 	ShutdownAfter time.Duration
 
+	// ShutdownPolicy sets spec.lifecycle.shutdownPolicy on every SandboxClaim
+	// this client creates: Delete, DeleteForeground, or Retain. Empty means
+	// Delete when ShutdownAfter or TTLSecondsAfterFinished is set. The API's own
+	// default for an omitted policy is Retain.
+	ShutdownPolicy extv1beta1.ShutdownPolicy
+
+	// TTLSecondsAfterFinished sets spec.lifecycle.ttlSecondsAfterFinished on
+	// every SandboxClaim this client creates. Nil (the default) leaves it unset.
+	TTLSecondsAfterFinished *int32
+
 	// PodLabels are propagated to the backing Sandbox Pod via
 	// spec.additionalPodMetadata.labels (unlike Labels, which are placed on the
 	// SandboxClaim object itself). Label keys must carry a domain prefix from
@@ -502,6 +512,14 @@ func (o *Options) validateCommon() error {
 	}
 	if o.ShutdownAfter < 0 {
 		return fmt.Errorf("sandbox: ShutdownAfter must not be negative, got %s", o.ShutdownAfter)
+	}
+	switch o.ShutdownPolicy {
+	case "", extv1beta1.ShutdownPolicyDelete, extv1beta1.ShutdownPolicyDeleteForeground, extv1beta1.ShutdownPolicyRetain:
+	default:
+		return fmt.Errorf("sandbox: ShutdownPolicy must be Delete, DeleteForeground, or Retain, got %q", o.ShutdownPolicy)
+	}
+	if o.TTLSecondsAfterFinished != nil && *o.TTLSecondsAfterFinished < 0 {
+		return fmt.Errorf("sandbox: TTLSecondsAfterFinished must not be negative, got %d", *o.TTLSecondsAfterFinished)
 	}
 	if o.ClaimName != "" && !isValidDNSSubdomain(o.ClaimName) {
 		return fmt.Errorf("sandbox: ClaimName %q is not a valid Kubernetes DNS subdomain name", o.ClaimName)

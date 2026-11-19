@@ -28,6 +28,7 @@ import (
 	pathpkg "path"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -116,9 +117,47 @@ type Files struct {
 	lifecycleCtx func() context.Context
 }
 
-// filesEndpoint returns the sandboxd REST path for a file path.
-func filesEndpoint(path string) string {
-	return "v1/files/" + encodeFilePath(path)
+// filesEndpoint returns the sandboxd REST path for path. It percent-encodes
+// each segment and leaves "/" separators in place. A leading "/" is encoded
+// as "%2F", so "/workspace/a.txt" stays absolute and sandboxd can strip its
+// own root. Stripping the slash here would join that path under the root a
+// second time. A ".." segment is rejected before cleaning, so "dir/../a.txt"
+// is an error instead of a silent rewrite to "a.txt". Cleaning still drops
+// "." and empty segments, including a trailing slash. The sandbox root
+// ("/", ".", and "") is "v1/files/".
+func filesEndpoint(path string) (string, error) {
+	if slices.Contains(strings.Split(path, "/"), "..") {
+		return "", fmt.Errorf("path %q escapes the sandbox root", path)
+	}
+	cleaned := pathpkg.Clean(path)
+	if cleaned == "." || cleaned == "/" {
+		return "v1/files/", nil
+	}
+	absolute := strings.HasPrefix(cleaned, "/")
+	rel := strings.TrimPrefix(cleaned, "/")
+
+	var b strings.Builder
+	b.WriteString("v1/files/")
+	if absolute {
+		b.WriteString("%2F")
+	}
+	for i, part := range strings.Split(rel, "/") {
+		if i > 0 {
+			b.WriteByte('/')
+		}
+		b.WriteString(percentEncode(part))
+	}
+	return b.String(), nil
+}
+
+// nonRootFilesEndpoint is filesEndpoint for an operation that cannot name
+// the sandbox root.
+func nonRootFilesEndpoint(path string) (string, error) {
+	ep, err := filesEndpoint(path)
+	if err != nil || ep != "v1/files/" {
+		return ep, err
+	}
+	return "", fmt.Errorf("path %q names the sandbox root", path)
 }
 
 // httpErrorFromResponse builds an HTTPError from a non-2xx response. For the
@@ -146,14 +185,20 @@ func newHTTPError(resp *http.Response, op string, runtime Runtime) *HTTPError {
 // With the legacy runtime the path must be a plain filename without
 // directory separators (e.g., "script.py", not "dir/script.py"). The
 // sandboxd runtime supports relative paths and creates parent directories
-// automatically.
+// automatically. On sandboxd, WithAppend and WithCreateOnly add to the file or
+// fail if it exists.
 //
 // The entire content is buffered in memory to support retries on transient
 // failures. Content exceeding MaxUploadSize (default 256 MB) is rejected
 // before any network I/O.
 func (f *Files) Write(ctx context.Context, path string, content []byte, opts ...CallOption) error {
 	defer f.trackOp()()
-	ctx, callCancel, maxAttempts := applyCallOpts(ctx, opts)
+	co := resolveCallOpts(opts)
+	apply := applyCallOpts
+	if co.conditionalWrite() {
+		apply = applyCallOptsNoRetry
+	}
+	ctx, callCancel, maxAttempts := apply(ctx, opts)
 	defer callCancel()
 	ctx, span := startSpan(withLifecycleSpan(ctx, f.lifecycleCtx()), f.tracer, f.svcName, "write", AttrFilePath.String(path), AttrFileSize.Int(len(content)))
 	defer span.End()
@@ -164,11 +209,16 @@ func (f *Files) Write(ctx context.Context, path string, content []byte, opts ...
 		return err
 	}
 
+	if err := f.checkWriteOptions(path, co); err != nil {
+		recordError(span, err)
+		return err
+	}
+
 	var method, endpoint, contentType string
 	var body *bytes.Reader
 	var err error
 	if f.runtime == RuntimeSandboxd {
-		method, endpoint, contentType, body, err = f.sandboxdWriteReq(path, content)
+		method, endpoint, contentType, body, err = f.sandboxdWriteReq(path, content, co)
 	} else {
 		method, endpoint, contentType, body, err = f.legacyWriteReq(path, content)
 	}
@@ -177,7 +227,7 @@ func (f *Files) Write(ctx context.Context, path string, content []byte, opts ...
 		return err
 	}
 
-	if err := f.sendWriteRequest(ctx, path, method, endpoint, body, contentType, maxAttempts, span); err != nil {
+	if err := f.sendWriteRequest(ctx, path, method, endpoint, body, contentType, co.writeHeaders(), maxAttempts, span); err != nil {
 		return err
 	}
 	f.log.V(1).Info("write completed", "path", path, "size", len(content))
@@ -199,6 +249,7 @@ func (f *Files) Write(ctx context.Context, path string, content []byte, opts ...
 // bodies without a Content-Length header.
 func (f *Files) WriteReader(ctx context.Context, path string, content io.Reader, opts ...CallOption) error {
 	defer f.trackOp()()
+	co := resolveCallOpts(opts)
 	ctx, callCancel, maxAttempts := applyCallOpts(ctx, opts)
 	defer callCancel()
 	ctx, span := startSpan(withLifecycleSpan(ctx, f.lifecycleCtx()), f.tracer, f.svcName, "write", AttrFilePath.String(path))
@@ -211,6 +262,10 @@ func (f *Files) WriteReader(ctx context.Context, path string, content io.Reader,
 	}
 	if maxAttempts > 1 {
 		err := fmt.Errorf("%s: write(%q): streaming uploads do not support retries", f.errPrefix(), path)
+		recordError(span, err)
+		return err
+	}
+	if err := f.checkWriteOptions(path, co); err != nil {
 		recordError(span, err)
 		return err
 	}
@@ -229,7 +284,12 @@ func (f *Files) WriteReader(ctx context.Context, path string, content io.Reader,
 			recordError(span, err)
 			return err
 		}
-		method, endpoint, contentType = http.MethodPut, filesEndpoint(path), "application/octet-stream"
+		ep, err := sandboxdWriteEndpoint(path, co)
+		if err != nil {
+			recordError(span, err)
+			return fmt.Errorf("%s: write(%q): %w", f.errPrefix(), path, err)
+		}
+		method, endpoint, contentType = http.MethodPut, ep, "application/octet-stream"
 		body = &uploadLimitReader{reader: content, remaining: f.maxUpload, maxUpload: f.maxUpload}
 	} else {
 		if err := f.validateLegacyWritePath(path); err != nil {
@@ -244,7 +304,7 @@ func (f *Files) WriteReader(ctx context.Context, path string, content io.Reader,
 		}
 	}
 
-	if err := f.sendWriteRequest(ctx, path, method, endpoint, body, contentType, maxAttempts, span); err != nil {
+	if err := f.sendWriteRequest(ctx, path, method, endpoint, body, contentType, co.writeHeaders(), maxAttempts, span); err != nil {
 		return err
 	}
 	f.log.V(1).Info("streaming write completed", "path", path)
@@ -256,10 +316,11 @@ func (f *Files) sendWriteRequest(
 	path, method, endpoint string,
 	body io.Reader,
 	contentType string,
+	headers http.Header,
 	maxAttempts int,
 	span trace.Span,
 ) error {
-	resp, err := f.connector.SendRequest(ctx, method, endpoint, body, contentType, maxAttempts)
+	resp, err := f.connector.SendRequestWithHeaders(ctx, method, endpoint, body, contentType, headers, maxAttempts)
 	if err != nil {
 		recordError(span, err)
 		return fmt.Errorf("%s: write(%q) failed: %w", f.errPrefix(), path, err)
@@ -303,22 +364,56 @@ func (r *uploadLimitReader) Read(p []byte) (int, error) {
 
 // sandboxdWriteReq builds the sandboxd PUT request: an idempotent write of the
 // raw bytes to /v1/files/{path}. Parent directories are created server-side.
-// Relative paths are allowed, but ".." components that escape the sandbox root
-// are rejected client-side as defense in depth (sandboxd also enforces this
-// server-side via SanitizePath).
-func (f *Files) sandboxdWriteReq(path string, content []byte) (method, endpoint, contentType string, body *bytes.Reader, err error) {
+// Relative paths are allowed. A ".." segment is rejected before the path is
+// cleaned, so the client does not rewrite it.
+func (f *Files) sandboxdWriteReq(path string, content []byte, co callOptions) (method, endpoint, contentType string, body *bytes.Reader, err error) {
 	if err := f.validateSandboxdWritePath(path); err != nil {
 		return "", "", "", nil, err
 	}
-	return http.MethodPut, filesEndpoint(path), "application/octet-stream", bytes.NewReader(content), nil
+	endpoint, err = sandboxdWriteEndpoint(path, co)
+	if err != nil {
+		return "", "", "", nil, fmt.Errorf("%s: write(%q): %w", f.errPrefix(), path, err)
+	}
+	return http.MethodPut, endpoint, "application/octet-stream", bytes.NewReader(content), nil
+}
+
+func sandboxdWriteEndpoint(path string, co callOptions) (string, error) {
+	ep, err := nonRootFilesEndpoint(path)
+	if err != nil || !co.appendWrite {
+		return ep, err
+	}
+	return ep + "?append=true", nil
+}
+
+// conditionalWrite reports whether the call appends or creates only. Neither
+// is safe to repeat after a lost response.
+func (co callOptions) conditionalWrite() bool {
+	return co.appendWrite || co.createOnly
+}
+
+func (co callOptions) writeHeaders() http.Header {
+	if !co.createOnly {
+		return nil
+	}
+	return http.Header{"If-None-Match": {"*"}}
+}
+
+// checkWriteOptions rejects write options the legacy python-runtime cannot
+// honor, rather than silently overwriting the file. It also rejects
+// WithAppend together with WithCreateOnly, which sandboxd resolves silently.
+func (f *Files) checkWriteOptions(path string, co callOptions) error {
+	if f.runtime != RuntimeSandboxd && co.conditionalWrite() {
+		return fmt.Errorf("%s: write(%q): %w: the legacy python-runtime ignores WithAppend and WithCreateOnly", f.errPrefix(), path, ErrUnsupportedByRuntime)
+	}
+	if co.appendWrite && co.createOnly {
+		return fmt.Errorf("%s: write(%q): WithAppend and WithCreateOnly cannot be combined", f.errPrefix(), path)
+	}
+	return nil
 }
 
 func (f *Files) validateSandboxdWritePath(path string) error {
-	if path == "" || path == "." || path == ".." || strings.HasSuffix(path, "/") {
+	if strings.HasSuffix(path, "/") {
 		return fmt.Errorf("%s: write: %q is not a valid file path", f.errPrefix(), path)
-	}
-	if slices.Contains(strings.Split(path, "/"), "..") {
-		return fmt.Errorf("%s: write: %q must not contain %q path segments (escapes the sandbox root)", f.errPrefix(), path, "..")
 	}
 	return nil
 }
@@ -413,7 +508,12 @@ func (f *Files) readTo(ctx context.Context, path string, destination io.Writer, 
 
 	endpoint := "download/" + encodeFilePath(path)
 	if f.runtime == RuntimeSandboxd {
-		endpoint = filesEndpoint(path)
+		ep, err := nonRootFilesEndpoint(path)
+		if err != nil {
+			recordError(span, err)
+			return 0, fmt.Errorf("%s: read(%q): %w", f.errPrefix(), path, err)
+		}
+		endpoint = ep
 	}
 	resp, err := f.connector.SendRequest(ctx, http.MethodGet, endpoint, nil, "", maxAttempts)
 	if err != nil {
@@ -468,9 +568,12 @@ func isNilWriter(writer io.Writer) bool {
 	}
 }
 
-// List returns the contents of a directory in the sandbox.
+// List returns the contents of a directory in the sandbox. WithRecursive
+// includes nested entries, and WithMaxDepth limits how deep it goes. Both
+// need the sandboxd runtime.
 func (f *Files) List(ctx context.Context, path string, opts ...CallOption) ([]FileEntry, error) {
 	defer f.trackOp()()
+	co := resolveCallOpts(opts)
 	ctx, callCancel, maxAttempts := applyCallOpts(ctx, opts)
 	defer callCancel()
 	ctx, span := startSpan(withLifecycleSpan(ctx, f.lifecycleCtx()), f.tracer, f.svcName, "list", AttrFilePath.String(path))
@@ -484,7 +587,23 @@ func (f *Files) List(ctx context.Context, path string, opts ...CallOption) ([]Fi
 
 	endpoint := "list/" + encodeFilePath(path)
 	if f.runtime == RuntimeSandboxd {
-		endpoint = filesEndpoint(path)
+		ep, err := filesEndpoint(path)
+		if err != nil {
+			recordError(span, err)
+			return nil, fmt.Errorf("%s: list(%q): %w", f.errPrefix(), path, err)
+		}
+		endpoint = ep
+		if co.recursive {
+			query := url.Values{"recursive": {"true"}}
+			if co.maxDepth > 0 {
+				query.Set("max_depth", strconv.Itoa(co.maxDepth))
+			}
+			endpoint += "?" + query.Encode()
+		}
+	} else if co.recursive {
+		err := fmt.Errorf("%s: list(%q): %w: the legacy python-runtime cannot list recursively", f.errPrefix(), path, ErrUnsupportedByRuntime)
+		recordError(span, err)
+		return nil, err
 	}
 	resp, err := f.connector.SendRequest(ctx, http.MethodGet, endpoint, nil, "", maxAttempts)
 	if err != nil {
@@ -560,7 +679,12 @@ func (f *Files) Exists(ctx context.Context, path string, opts ...CallOption) (bo
 	if f.runtime == RuntimeSandboxd {
 		// sandboxd has no dedicated exists endpoint: HEAD on the file path
 		// answers existence without transferring the body (200 vs 404).
-		resp, err := f.connector.SendRequest(ctx, http.MethodHead, filesEndpoint(path), nil, "", maxAttempts)
+		endpoint, err := filesEndpoint(path)
+		if err != nil {
+			recordError(span, err)
+			return false, fmt.Errorf("%s: exists(%q): %w", f.errPrefix(), path, err)
+		}
+		resp, err := f.connector.SendRequest(ctx, http.MethodHead, endpoint, nil, "", maxAttempts)
 		if err != nil {
 			recordError(span, err)
 			return false, fmt.Errorf("%s: exists(%q) failed: %w", f.errPrefix(), path, err)
@@ -623,7 +747,7 @@ func (f *Files) Delete(ctx context.Context, path string, recursive bool, opts ..
 	if recursive {
 		query.Set("recursive", "true")
 	}
-	return f.sandboxdFileOp(ctx, "delete", http.MethodDelete, path, "", query, true, opts)
+	return f.sandboxdFileOp(ctx, sandboxdOp{name: "delete", method: http.MethodDelete, path: path, query: query, retry: true}, opts)
 }
 
 // Mkdir creates a directory in the sandbox. It succeeds when the directory
@@ -636,7 +760,7 @@ func (f *Files) Mkdir(ctx context.Context, path string, parents bool, opts ...Ca
 	if parents {
 		query.Set("parents", "true")
 	}
-	return f.sandboxdFileOp(ctx, "mkdir", http.MethodPut, path, "", query, true, opts)
+	return f.sandboxdFileOp(ctx, sandboxdOp{name: "mkdir", method: http.MethodPut, path: path, query: query, retry: true}, opts)
 }
 
 // Move renames the file or directory at source to destination, creating
@@ -666,52 +790,100 @@ func (f *Files) transfer(ctx context.Context, action, source, destination string
 	}
 	// The encoded path never contains a literal colon, so sandboxd can split
 	// the action off at the last one.
-	return f.sandboxdFileOp(ctx, action, http.MethodPost, source, ":"+action, query, false, opts)
+	return f.sandboxdFileOp(ctx, sandboxdOp{name: action, method: http.MethodPost, path: source, suffix: ":" + action, query: query}, opts)
 }
 
-// sandboxdFileOp sends a request that sandboxd answers with an empty 2xx body.
-// It appends actionSuffix to the path's endpoint and fails with
-// ErrUnsupportedByRuntime on the legacy python-runtime. Unless retry is true,
-// it sends the request once unless the caller sets WithMaxAttempts.
-func (f *Files) sandboxdFileOp(ctx context.Context, op, method, path, actionSuffix string, query url.Values, retry bool, opts []CallOption) error {
+// Extract unpacks a tar archive, optionally gzipped, into the directory at
+// path, creating it when missing. "/" names the sandbox root. The archive is
+// streamed once. Extract does not retry, and WithMaxAttempts above 1 is an
+// error, because a reader cannot be replayed. The unpack is not atomic, so a
+// failure leaves the entries written so far. The archive size is capped by
+// MaxUploadSize.
+//
+// Only supported by the sandboxd runtime.
+func (f *Files) Extract(ctx context.Context, path string, archive io.Reader, opts ...CallOption) error {
+	if archive == nil {
+		return fmt.Errorf("%s: extract(%q): archive reader must not be nil", f.errPrefix(), path)
+	}
+	if resolveCallOpts(opts).maxAttempts > 1 {
+		return fmt.Errorf("%s: extract(%q): streaming uploads do not support retries", f.errPrefix(), path)
+	}
+	body := &uploadLimitReader{reader: archive, remaining: f.maxUpload, maxUpload: f.maxUpload}
+	return f.sandboxdFileOp(ctx, sandboxdOp{
+		name: "extract", method: http.MethodPut, path: path,
+		query: url.Values{"extract": {"tar"}}, body: body, allowRoot: true,
+	}, opts)
+}
+
+// sandboxdOp describes a request that sandboxd answers with an empty 2xx body.
+type sandboxdOp struct {
+	name, method, path string
+	// suffix is appended to the path's endpoint, before the query.
+	suffix string
+	query  url.Values
+	body   io.Reader
+	// retry lets the call retry by default. Otherwise it sends the request
+	// once unless the caller sets WithMaxAttempts.
+	retry bool
+	// allowRoot permits a path that names the sandbox root.
+	allowRoot bool
+}
+
+// sandboxdFileOp sends op and fails with ErrUnsupportedByRuntime on the
+// legacy python-runtime.
+func (f *Files) sandboxdFileOp(ctx context.Context, op sandboxdOp, opts []CallOption) error {
 	defer f.trackOp()()
+	name, path := op.name, op.path
 	apply := applyCallOptsNoRetry
-	if retry {
+	if op.retry {
 		apply = applyCallOpts
 	}
 	ctx, callCancel, maxAttempts := apply(ctx, opts)
 	defer callCancel()
-	ctx, span := startSpan(withLifecycleSpan(ctx, f.lifecycleCtx()), f.tracer, f.svcName, op, AttrFilePath.String(path))
+	ctx, span := startSpan(withLifecycleSpan(ctx, f.lifecycleCtx()), f.tracer, f.svcName, name, AttrFilePath.String(path))
 	defer span.End()
 
 	if f.runtime != RuntimeSandboxd {
-		err := fmt.Errorf("%s: %s(%q): %w: the legacy python-runtime has no %s endpoint", f.errPrefix(), op, path, ErrUnsupportedByRuntime, op)
+		err := fmt.Errorf("%s: %s(%q): %w: the legacy python-runtime has no %s endpoint", f.errPrefix(), name, path, ErrUnsupportedByRuntime, name)
 		recordError(span, err)
 		return err
 	}
 	if path == "" {
-		err := fmt.Errorf("%s: %s: path must not be empty", f.errPrefix(), op)
+		err := fmt.Errorf("%s: %s: path must not be empty", f.errPrefix(), name)
 		recordError(span, err)
 		return err
 	}
 
-	endpoint := filesEndpoint(path) + actionSuffix
-	if len(query) > 0 {
-		endpoint += "?" + query.Encode()
+	endpointFor := nonRootFilesEndpoint
+	if op.allowRoot {
+		endpointFor = filesEndpoint
 	}
-	resp, err := f.connector.SendRequest(ctx, method, endpoint, nil, "", maxAttempts)
+	endpoint, err := endpointFor(path)
 	if err != nil {
 		recordError(span, err)
-		return fmt.Errorf("%s: %s(%q) failed: %w", f.errPrefix(), op, path, err)
+		return fmt.Errorf("%s: %s(%q): %w", f.errPrefix(), name, path, err)
+	}
+	endpoint += op.suffix
+	if len(op.query) > 0 {
+		endpoint += "?" + op.query.Encode()
+	}
+	contentType := ""
+	if op.body != nil {
+		contentType = "application/octet-stream"
+	}
+	resp, err := f.connector.SendRequest(ctx, op.method, endpoint, op.body, contentType, maxAttempts)
+	if err != nil {
+		recordError(span, err)
+		return fmt.Errorf("%s: %s(%q) failed: %w", f.errPrefix(), name, path, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		retErr := fmt.Errorf("%s: %s(%q): %w", f.errPrefix(), op, path, f.httpErrorFromResponse(resp, op))
+		retErr := fmt.Errorf("%s: %s(%q): %w", f.errPrefix(), name, path, f.httpErrorFromResponse(resp, name))
 		recordError(span, retErr)
 		return retErr
 	}
 	defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes)) }()
-	f.log.V(1).Info(op+" completed", "path", path)
+	f.log.V(1).Info(name+" completed", "path", path)
 	return nil
 }

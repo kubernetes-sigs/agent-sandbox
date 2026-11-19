@@ -114,10 +114,10 @@ class AgentSandbox(Sandbox):
         return self._root if rel == "." else posixpath.join(self._root, rel)
 
     def _resolve_command_timeout(self, timeout: float | None) -> float | None:
-        """Map the contract's ``timeout`` onto sandboxd's command deadline.
+        """Map the contract's ``timeout`` onto sandboxd's command time limit.
 
-        ``None`` takes the provider default so the SDK reports exceeded
-        deadlines as a ``timed_out`` result with exit code 124 (without a
+        ``None`` takes the provider default so the SDK reports an exceeded
+        limit as a ``timed_out`` result with exit code 124 (without a
         ``command_timeout`` the SDK disables that reporting and a slow command
         dies as a raw gRPC error instead). ``0`` is this example's "no limit"
         sentinel (same convention as ``idle_timeout: 0`` in the README): pass
@@ -134,8 +134,8 @@ class AgentSandbox(Sandbox):
         return value
 
     def _run(self, command: str, timeout: float | None = None):
-        # The sandboxd runtime uses ``command_timeout`` as the gRPC deadline
-        # (ignoring the outer ``timeout``) when set; passing ``timeout=None``
+        # The sandboxd runtime uses ``command_timeout`` as its execution time
+        # limit (ignoring the outer ``timeout``) when set; passing ``timeout=None``
         # with ``command_timeout=None`` means "no deadline". This example is
         # sandboxd-only (SandboxdPodTunnelConnectionConfig); the legacy REST
         # runtime would need a finite outer wait here.
@@ -168,9 +168,8 @@ class AgentSandbox(Sandbox):
         # Mirror the reference remote provider's text contract: consumers
         # parse the trailing "\nExit Code: N" marker (tools.py's
         # _BASH_EXIT_MARKER_TAIL_RE), and a timeout must surface as exit code
-        # 124, not an exception — sandboxd reports deadline-exceeded results
-        # with exit_code=124 already; note that partial output is not
-        # recoverable through the gRPC deadline.
+        # 124, not an exception — the SDK already reports a sandboxd timeout
+        # with exit_code=124.
         output = _append_output(result.stdout or "", result.stderr or "")
         if result.exit_code != 0:
             output = (

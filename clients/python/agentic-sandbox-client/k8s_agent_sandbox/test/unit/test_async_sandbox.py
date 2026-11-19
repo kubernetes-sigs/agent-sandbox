@@ -18,7 +18,7 @@ import gc
 import unittest
 import weakref
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -27,6 +27,7 @@ pytest.importorskip("kubernetes_asyncio")
 
 from pydantic import ValidationError
 
+from k8s_agent_sandbox.exceptions import SandboxError, SandboxNotFoundError
 from k8s_agent_sandbox.async_sandbox import AsyncSandbox
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
@@ -87,6 +88,62 @@ class TestAsyncSandbox(unittest.IsolatedAsyncioTestCase):
             namespace=self.namespace,
             connection_config=self.connection_config,
         )
+
+    RUNNING = {"metadata": {"uid": "original", "generation": 1}}
+    SUSPENDED = {"metadata": {"uid": "original", "generation": 2}, "spec": {"operatingMode": "Suspended"}}
+
+    async def test_suspend_then_resume(self):
+        resumed = {"metadata": {"uid": "original", "generation": 3}}
+        self.mock_k8s_helper.get_sandbox.side_effect = [self.RUNNING, self.SUSPENDED, self.SUSPENDED, resumed]
+        self.mock_k8s_helper.patch_sandbox_operating_mode = AsyncMock(side_effect=[self.SUSPENDED, resumed])
+        self.mock_k8s_helper.wait_for_sandbox_ready = AsyncMock()
+        calls = MagicMock()
+        calls.attach_mock(self.mock_k8s_helper.patch_sandbox_operating_mode, "patch")
+        calls.attach_mock(self.mock_connector.close, "close")
+        calls.attach_mock(self.mock_k8s_helper.wait_for_sandbox_ready, "wait")
+
+        await self.sandbox.suspend()
+        await self.sandbox.resume()
+
+        self.assertEqual(calls.mock_calls, [
+            call.patch(self.sandbox_id, self.namespace, "Suspended", "original"),
+            call.close(),
+            call.wait(self.sandbox_id, self.namespace, ANY, condition="Suspended", min_generation=2),
+            call.patch(self.sandbox_id, self.namespace, "Running", "original"),
+            call.wait(self.sandbox_id, self.namespace, ANY, condition="Ready", min_generation=3),
+        ])
+        self.assertTrue(self.sandbox.is_active)
+        # AsyncSandboxConnector cannot be reused after close(), so suspend and resume replace it.
+        self.assertIsNot(self.sandbox.connector, self.mock_connector)
+        for engine in (self.sandbox.commands, self.sandbox.files, self.sandbox.watcher):
+            self.assertIs(engine.connector, self.sandbox.connector)
+
+    async def test_is_suspended_reports_requested_mode(self):
+        self.mock_k8s_helper.get_sandbox.side_effect = [self.RUNNING, self.SUSPENDED]
+        self.assertFalse(await self.sandbox.is_suspended())
+        self.assertTrue(await self.sandbox.is_suspended())
+
+    async def test_suspend_rejects_replaced_sandbox(self):
+        self.mock_k8s_helper.get_sandbox.side_effect = [self.RUNNING, {"metadata": {"uid": "replacement"}}]
+        await self.sandbox.is_suspended()
+        with self.assertRaises(SandboxNotFoundError):
+            await self.sandbox.suspend()
+
+    async def test_suspend_rejects_mode_changed_during_wait(self):
+        self.mock_k8s_helper.get_sandbox.return_value = self.RUNNING
+        self.mock_k8s_helper.patch_sandbox_operating_mode = AsyncMock(return_value=self.SUSPENDED)
+        self.mock_k8s_helper.wait_for_sandbox_ready = AsyncMock()
+        with self.assertRaisesRegex(SandboxError, "changed operating mode"):
+            await self.sandbox.suspend()
+
+    async def test_resume_times_out_while_lifecycle_lock_held(self):
+        async with self.sandbox._lifecycle_lock:
+            with self.assertRaisesRegex(TimeoutError, "lifecycle lock"):
+                await self.sandbox.resume(timeout=0)
+    async def test_suspend_rejects_closed_handle(self):
+        await self.sandbox.close_connection()
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            await self.sandbox.suspend()
 
     def test_init_with_defaults(self):
         """Tests sandbox initialization with default configurations."""

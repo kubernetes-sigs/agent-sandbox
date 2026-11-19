@@ -99,6 +99,13 @@ PYTHON_TEST_SUITES = [
         "requirements": "requirements.txt",
     },
     {
+        "name": "ci-runner-sandbox",
+        # run_ci_job.py drives the Python SDK; the test mocks SandboxClient,
+        # so only the SDK wheel (requirements.txt) is needed, no cluster.
+        "dir": os.path.join("examples", "ci-runner-sandbox"),
+        "requirements": "requirements.txt",
+    },
+    {
         "name": "firecracker-sandbox",
         "dir": os.path.join("examples", "firecracker-sandbox"),
         "requirements": "requirements.txt",

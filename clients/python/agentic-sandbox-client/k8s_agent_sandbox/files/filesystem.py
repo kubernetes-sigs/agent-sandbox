@@ -132,20 +132,40 @@ def _iter_multipart_body(
 
 
 def _sandboxd_files_endpoint(path: str) -> str:
-    """Return the sandboxd REST path for a sandbox-relative file path."""
-    # HTTP clients and proxies may decode %2E before the server routes it.
-    # Use the root endpoint directly to avoid a dot-segment redirect.
-    if path == ".":
+    """Return the sandboxd REST path for a sandbox file path.
+
+    Separators stay literal "/". A leading "/" is encoded as "%2F", so
+    "/workspace/a.txt" stays absolute and sandboxd can strip its own root.
+    Stripping the slash here would join that path under the root a second
+    time. A ".." segment is rejected before normalization, so
+    "dir/../a.txt" is an error instead of a rewrite to "a.txt". "." and
+    empty segments, including a trailing slash, are dropped.
+    """
+    if any(part == ".." for part in path.split("/")):
+        raise ValueError(f"path {path!r} escapes the sandbox root")
+    normalized = posixpath.normpath(path)
+    if normalized in ("", ".", "/"):
         return "v1/files/"
-    encoded = []
-    for segment in path.split("/"):
-        if segment == ".":
-            encoded.append("%2E")
-        elif segment == "..":
-            encoded.append("%2E%2E")
-        else:
-            encoded.append(urllib.parse.quote(segment, safe=""))
-    return f"v1/files/{'%2F'.join(encoded)}"
+    absolute = normalized.startswith("/")
+    body = normalized[1:] if absolute else normalized
+    encoded = "/".join(
+        urllib.parse.quote(part, safe="") for part in body.split("/")
+    )
+    if absolute:
+        return "v1/files/%2F" + encoded
+    return "v1/files/" + encoded
+
+
+def _sandboxd_read_endpoint(path: str) -> str:
+    """Return the sandboxd GET path for a file read.
+
+    The sandbox root is a directory. Reject it before the request, as the Go
+    and TypeScript clients do, instead of downloading the directory listing.
+    """
+    endpoint = _sandboxd_files_endpoint(path)
+    if endpoint == "v1/files/":
+        raise ValueError(f"read: path {path!r} names the sandbox root")
+    return endpoint
 
 
 class _RuntimeProbe(Protocol):
@@ -160,11 +180,13 @@ def _sandboxd_op_endpoint(
     path: str,
     action: str = "",
     query: Mapping[str, str] | None = None,
+    allow_root: bool = False,
 ) -> str:
     """Return the endpoint for a sandboxd-only file operation.
 
     Raises NotImplementedError on the legacy runtime, which has none of these
-    endpoints, and ValueError for an empty path.
+    endpoints, and ValueError for an empty path or, unless ``allow_root`` is
+    set, one that names the sandbox root.
     """
     if not connector.is_sandboxd():
         raise NotImplementedError(
@@ -173,7 +195,67 @@ def _sandboxd_op_endpoint(
         )
     if path == "":
         raise ValueError(f"{op}: path must not be empty")
-    endpoint = _sandboxd_files_endpoint(path) + action
+    endpoint = _sandboxd_files_endpoint(path)
+    if endpoint == "v1/files/" and not allow_root:
+        raise ValueError(f"{op}: path {path!r} names the sandbox root")
+    endpoint += action
+    if query:
+        endpoint += "?" + urllib.parse.urlencode(query)
+    return endpoint
+
+
+def _sandboxd_write_request(
+    path: str, append: bool, create_only: bool,
+) -> tuple[str, dict[str, str], bool]:
+    """Return the endpoint, headers and retry-safety of a sandboxd PUT.
+
+    Append and create-only writes are not idempotent, so a retry could
+    duplicate content or fail with 412 after the first attempt succeeded.
+    """
+    endpoint = _sandboxd_files_endpoint(path)
+    if append:
+        endpoint += "?append=true"
+    headers = {"Content-Type": "application/octet-stream"}
+    if create_only:
+        headers["If-None-Match"] = "*"
+    return endpoint, headers, not (append or create_only)
+
+
+def _check_write_options(
+    connector: _RuntimeProbe, append: bool, create_only: bool,
+) -> None:
+    """Reject write options that are contradictory or unsupported."""
+    if append and create_only:
+        raise ValueError("append and create_only cannot be combined")
+    if (append or create_only) and not connector.is_sandboxd():
+        raise NotImplementedError(
+            "append and create_only are only supported by the sandboxd runtime"
+        )
+
+
+def _list_endpoint(
+    connector: _RuntimeProbe, path: str, recursive: bool, max_depth: int | None
+) -> str:
+    """Return the sandboxd endpoint for a directory listing.
+
+    Raises NotImplementedError when ``recursive`` is set on the legacy
+    runtime, and ValueError when ``max_depth`` is not a positive integer.
+    """
+    if max_depth is not None and (
+        isinstance(max_depth, bool) or not isinstance(max_depth, int) or max_depth < 1
+    ):
+        raise ValueError(f"list: max_depth must be a positive integer, got {max_depth!r}")
+    if recursive and not connector.is_sandboxd():
+        raise NotImplementedError(
+            "recursive listing is only supported by the sandboxd runtime; the "
+            "legacy python-runtime lists a single directory level"
+        )
+    endpoint = _sandboxd_files_endpoint(path)
+    query = {}
+    if recursive:
+        query["recursive"] = "true"
+        if max_depth is not None:
+            query["max_depth"] = str(max_depth)
     if query:
         endpoint += "?" + urllib.parse.urlencode(query)
     return endpoint
@@ -205,6 +287,72 @@ def _transfer_endpoint(
     return _sandboxd_op_endpoint(connector, op, source, f":{op}", query)
 
 
+def _extract_endpoint(connector: _RuntimeProbe, path: str) -> str:
+    """Return the endpoint for a sandboxd tar extraction.
+
+    The path may name the sandbox root.
+    """
+    return _sandboxd_op_endpoint(
+        connector, "extract", path, query={"extract": "tar"}, allow_root=True)
+
+
+def _stat_endpoint(connector: _RuntimeProbe, path: str) -> str:
+    """Return the endpoint for a sandboxd stat.
+
+    The path may name the sandbox root.
+    """
+    return _sandboxd_op_endpoint(
+        connector, "stat", path, query={"stat": "true"}, allow_root=True)
+
+
+class _JSONResponse(Protocol):
+    """The part of a requests or httpx response that ``_stat_entry`` reads."""
+
+    @property
+    def text(self) -> str: ...
+
+    def json(self) -> Any: ...
+
+
+def _require_stat_json(headers: Mapping[str, str]) -> None:
+    """Reject a stat response that is not JSON, without reading its body.
+
+    A sandboxd that predates stat ignores the query and answers a file with
+    the file's bytes. The caller must neither download them nor put them in an
+    error message.
+    """
+    media_type = headers.get("Content-Type", "").split(";")[0].strip().lower()
+    if media_type != "application/json":
+        raise RuntimeError(
+            "Server returned a non-JSON stat response; this sandboxd may not support stat"
+        )
+
+
+def _stat_entry(response: _JSONResponse) -> FileEntry:
+    """Decode the FileEntry in the body of a sandboxd stat response."""
+    try:
+        entry = response.json()
+    except ValueError as e:
+        raise RuntimeError(f"Failed to decode JSON response from sandbox: {response.text}") from e
+    # The same sandboxd answers a directory with its listing, which is not a
+    # FileEntry.
+    try:
+        return FileEntry.from_sandboxd(entry)
+    except Exception as e:
+        raise RuntimeError(f"Server returned invalid file entry format: {entry}") from e
+
+
+def _coerce_binary(
+    content: bytes | bytearray | memoryview | BinaryIO,
+) -> bytes | BinaryIO:
+    """Return binary content as bytes or a validated binary stream."""
+    if isinstance(content, (bytearray, memoryview)):
+        return bytes(content)
+    if not isinstance(content, bytes):
+        _validate_binary_stream(content)
+    return content
+
+
 class Filesystem:
     """
     Handles file operations within the sandbox.
@@ -229,19 +377,26 @@ class Filesystem:
         content: bytes | str | BinaryIO,
         timeout: int = 60,
         allow_unsafe_paths: bool = False,
+        append: bool = False,
+        create_only: bool = False,
     ) -> None:
         """Upload content to a sandbox-relative path.
 
         Binary file objects are read in chunks from their current position and
         sent once without retries. The caller must close the file object; its
         position may advance if the upload fails.
+
+        On the sandboxd runtime, ``append=True`` adds to the end of the file
+        and ``create_only=True`` fails with a 412 ``SandboxRequestError`` if
+        the path exists. Neither is retried, and they cannot be combined
+        (``ValueError``). The legacy runtime raises
+        ``NotImplementedError``.
         """
+        _check_write_options(self.connector, append, create_only)
         if isinstance(content, str):
             content = content.encode("utf-8")
-        elif isinstance(content, (bytearray, memoryview)):
-            content = bytes(content)
-        elif not isinstance(content, bytes):
-            _validate_binary_stream(content)
+        else:
+            content = _coerce_binary(content)
 
         span = trace.get_current_span()
         if span.is_recording():
@@ -257,24 +412,29 @@ class Filesystem:
         # Sanitize here to guarantee the filename is a normalized
         # relative path with no upward traversal.
         if not allow_unsafe_paths:
-            path = self._safe_upload_path(path)
+            path = self._safe_upload_path(
+                path, preserve_absolute=self.connector.is_sandboxd()
+            )
 
         if self.connector.is_sandboxd():
-            # sandboxd write is an idempotent PUT of the raw bytes; parent
-            # directories are created server-side (temp-file + rename).
+            # A plain write is an atomic, idempotent PUT. Append is not
+            # atomic, and neither append nor create_only is idempotent, so
+            # they disable retries. Parent directories are created
+            # server-side.
+            endpoint, headers, retry_safe = _sandboxd_write_request(
+                path, append, create_only)
             data: bytes | Iterator[bytes]
             if isinstance(content, bytes):
                 data = content
-                disable_retries = False
             else:
                 data = _iter_binary_chunks(content)
-                disable_retries = True
+                retry_safe = False
             self.connector.send_request(
-                "PUT", _sandboxd_files_endpoint(path),
+                "PUT", endpoint,
                 data=data,
-                headers={"Content-Type": "application/octet-stream"},
+                headers=headers,
                 timeout=timeout,
-                _disable_retries=disable_retries,
+                _disable_retries=not retry_safe,
             )
         elif not isinstance(content, bytes):
             prefix, suffix, content_type = _multipart_framing(path)
@@ -295,8 +455,8 @@ class Filesystem:
         logger.info(f"File '{path}' uploaded successfully.")
 
     @staticmethod
-    def _safe_upload_path(path: str) -> str:
-        """Return a relative, ``..``-free filename safe to send as multipart filename.
+    def _safe_upload_path(path: str, *, preserve_absolute: bool = False) -> str:
+        """Return a ``..``-free path safe to send to the runtime.
 
         Rejects NUL bytes and ASCII control characters before normalisation:
         ``os.path.normpath`` preserves embedded NULs, and a NUL in the
@@ -304,7 +464,13 @@ class Filesystem:
         check ``foo\\x00../etc/passwd`` would survive the ``..`` split (no
         part equals ``".."`` because the NUL-prefixed segment doesn't
         match) yet resolve to ``foo`` on the filesystem — or worse,
-        something server-dependent.``.
+        something server-dependent.
+
+        A leading "/" is kept when ``preserve_absolute`` is set. sandboxd
+        needs that slash so "/workspace/a.txt" is not joined under the
+        workspace root a second time. The legacy multipart filename leaves
+        it unset and strips the slash, because that field is a relative
+        path and an absolute filename would escape the runtime directory.
         """
         if any(ord(c) < 0x20 or ord(c) == 0x7F for c in path):
             raise ValueError(
@@ -312,15 +478,18 @@ class Filesystem:
             )
         if not path.strip():
             raise ValueError("Upload path cannot be empty.")
-
-        normalized = posixpath.normpath(path).lstrip("/")
-        if not normalized or normalized == ".":
-            raise ValueError(f"Upload path '{path}' does not name a file.")
-        parts = normalized.split("/")
-        if any(part == ".." for part in parts):
+        # Reject ".." before normpath. Otherwise "dir/../a.txt" is rewritten
+        # to "a.txt" and the caller never sees that the path moved.
+        if any(part == ".." for part in path.split("/")):
             raise ValueError(
                 f"Upload path '{path}' escapes the sandbox root."
             )
+
+        normalized = posixpath.normpath(path)
+        if not preserve_absolute:
+            normalized = normalized.lstrip("/")
+        if normalized in ("", ".", "/"):
+            raise ValueError(f"Upload path '{path}' does not name a file.")
         return normalized
 
     @trace_span("read")
@@ -347,10 +516,12 @@ class Filesystem:
             span.set_attribute("sandbox.file.path", path)
 
         if not allow_unsafe_paths:
-            path = self._safe_upload_path(path)
+            path = self._safe_upload_path(
+                path, preserve_absolute=self.connector.is_sandboxd()
+            )
 
         if self.connector.is_sandboxd():
-            endpoint = _sandboxd_files_endpoint(path)
+            endpoint = _sandboxd_read_endpoint(path)
         else:
             endpoint = f"download/{urllib.parse.quote(path, safe='')}"
         response = self.connector.send_request("GET", endpoint, timeout=timeout)
@@ -394,10 +565,12 @@ class Filesystem:
             span.set_attribute("sandbox.file.path", path)
 
         if not allow_unsafe_paths:
-            path = self._safe_upload_path(path)
+            path = self._safe_upload_path(
+                path, preserve_absolute=self.connector.is_sandboxd()
+            )
 
         if self.connector.is_sandboxd():
-            endpoint = _sandboxd_files_endpoint(path)
+            endpoint = _sandboxd_read_endpoint(path)
         else:
             endpoint = f"download/{urllib.parse.quote(path, safe='')}"
 
@@ -441,16 +614,30 @@ class Filesystem:
         return total
 
     @trace_span("list")
-    def list(self, path: str, timeout: int = 60) -> List[FileEntry]:
-        """List files and directories at a sandbox-relative path."""
+    def list(
+        self,
+        path: str,
+        timeout: int = 60,
+        recursive: bool = False,
+        max_depth: int | None = None,
+    ) -> List[FileEntry]:
+        """List files and directories at a sandbox-relative path.
+
+        With ``recursive=True`` the listing includes nested entries, and entry
+        names are paths relative to ``path``. ``max_depth`` limits how many
+        levels it descends, where 1 lists only the directory's own entries.
+        ``recursive=True`` needs the sandboxd runtime; the legacy python-runtime
+        raises NotImplementedError.
+        """
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
         encoded_path = urllib.parse.quote(path, safe='')
+        endpoint = _list_endpoint(self.connector, path, recursive, max_depth)
 
         if self.connector.is_sandboxd():
             response = self.connector.send_request(
-                "GET", _sandboxd_files_endpoint(path), timeout=timeout)
+                "GET", endpoint, timeout=timeout)
             try:
                 listing = response.json()
             except ValueError as e:
@@ -520,6 +707,35 @@ class Filesystem:
             span.set_attribute("sandbox.file.exists", exists)
         return bool(exists)
 
+    @trace_span("stat")
+    def stat(self, path: str, timeout: int = 60) -> FileEntry:
+        """Return the type, size, mode, and modification time of a path.
+
+        sandboxd runtime only. ``path`` may be ``/`` for the sandbox root, and
+        the entry's ``name`` is the last segment of ``path``. A missing path
+        fails with a 404 ``SandboxRequestError``. The legacy python-runtime
+        raises NotImplementedError.
+        """
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", path)
+        endpoint = _stat_endpoint(self.connector, path)
+        response = self.connector.send_request(
+            "GET", endpoint, timeout=timeout, stream=True
+        )
+        try:
+            _require_stat_json(response.headers)
+            return _stat_entry(response)
+        except requests.exceptions.RequestException:
+            transport_token = getattr(response, "_sandboxd_transport_token", None)
+            if transport_token is not None:
+                self.connector.invalidate_sandboxd_transport(
+                    None, transport_token=transport_token
+                )
+            raise
+        finally:
+            response.close()
+
     @trace_span("delete")
     def delete(self, path: str, recursive: bool = False, timeout: int = 60) -> None:
         """Remove a file or directory. sandboxd runtime only.
@@ -583,3 +799,34 @@ class Filesystem:
             self.connector, "copy", source, destination, overwrite)
         self.connector.send_request("POST", endpoint, timeout=timeout)
         logger.info(f"Path '{source}' copied to '{destination}'.")
+
+    @trace_span("extract")
+    def extract(
+        self, path: str, archive: bytes | BinaryIO, timeout: int = 60
+    ) -> None:
+        """Unpack a tar archive, optionally gzipped, into a directory.
+
+        sandboxd runtime only. ``path`` may be ``/`` for the sandbox root.
+        Missing directories are created. The unpack is not atomic, so a
+        failure leaves the entries written so far. Binary file objects are
+        streamed once without retries. The legacy python-runtime raises
+        NotImplementedError.
+        """
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", path)
+        endpoint = _extract_endpoint(self.connector, path)
+        archive = _coerce_binary(archive)
+        data: bytes | Iterator[bytes]
+        if isinstance(archive, bytes):
+            data = archive
+        else:
+            data = _iter_binary_chunks(archive)
+        self.connector.send_request(
+            "PUT", endpoint,
+            data=data,
+            headers={"Content-Type": "application/octet-stream"},
+            timeout=timeout,
+            _disable_retries=not isinstance(archive, bytes),
+        )
+        logger.info(f"Archive extracted into '{path}'.")

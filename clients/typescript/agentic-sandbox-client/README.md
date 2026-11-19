@@ -2,7 +2,7 @@
 
 This TypeScript client provides a high-level interface for creating and interacting with sandboxes managed by the Agent Sandbox controller, mirroring the [Go client](../../go/README.md) and [Python client](../../python/agentic-sandbox-client/README.md).
 
-The surface covers the Kubernetes resource layer (provisioning a `SandboxClaim`, watching it to readiness, and tearing it down via `SandboxClient` / `Sandbox`) and the sandboxd runtime layer (`sandbox.commands.{run,start}()`, `sandbox.files.{read,write,readStream,writeStream,exists,list,delete,mkdir,move,copy}()`, `sandbox.health()`, and `sandbox.metadata()`), plus `sandbox.status()` for the Sandbox's Kubernetes readiness. `start()` covers long-running and interactive processes: streamed output, stdin, signals, and a PTY with resizing.
+The surface covers the Kubernetes resource layer (provisioning a `SandboxClaim`, watching it to readiness, and tearing it down via `SandboxClient` / `Sandbox`) and the sandboxd runtime layer (`sandbox.commands.{run,start}()`, `sandbox.files.{read,write,readStream,writeStream,exists,list,stat,delete,mkdir,move,copy,extract}()`, `sandbox.watcher.watch()`, `sandbox.health()`, and `sandbox.metadata()`), plus `sandbox.status()` for the Sandbox's Kubernetes readiness and `sandbox.{suspend,resume,isSuspended}()` for its operating mode. `start()` covers long-running and interactive processes: streamed output, stdin, signals, and a PTY with resizing.
 
 ## Usage
 
@@ -31,12 +31,26 @@ try {
   await sandbox.files.mkdir("backup", { parents: true });
   await sandbox.files.copy("greeting.txt", "backup/greeting.txt");
 
+  const entry = await sandbox.files.stat("greeting.txt");
+  console.log(entry.size, entry.mode, entry.modifiedAt);
+
   const listing = await sandbox.files.list(".");
   console.log(listing.entries.map((e) => e.name));
 } finally {
   await sandbox.close();
 }
 ```
+
+### File metadata
+
+Use `sandbox.files.stat(path, { timeoutMs, signal })` to retrieve metadata for one
+file or directory. Use `"."` or `""` for the sandbox root. The response uses
+`FileEntry`, with `modifiedAt` preserved as an RFC3339 string including sub-second
+precision. Missing paths and access failures surface as `SandboxdApiError`.
+
+This method requires sandboxd support for `GET /v1/files/{path}?stat=true`.
+Older servers that return file contents or directory listings fail response
+validation.
 
 ### Automatic expiration
 
@@ -60,6 +74,34 @@ The option sets an absolute `spec.lifecycle.shutdownTime` and
 RFC3339 deadline; invalid values reject with `SandboxError` before provisioning.
 Omitting it leaves expiration unset. Continue to call `sandbox.close()` when work
 finishes; expiration provides a fallback if the client cannot clean up.
+
+Use `shutdownPolicy` and `ttlSecondsAfterFinished` to control what happens when
+the claim expires:
+
+```typescript
+const sandbox = await client.createSandbox("my-warm-pool", "default", {
+  shutdownAfterSeconds: 3600,
+  shutdownPolicy: "Retain",
+  ttlSecondsAfterFinished: 60,
+});
+```
+
+These populate `spec.lifecycle.shutdownPolicy` and
+`spec.lifecycle.ttlSecondsAfterFinished`, matching the Python SDK's
+`shutdown_policy` and `ttl_seconds_after_finished`. `"Delete"` deletes the claim
+and its sandbox. `"DeleteForeground"` does the same, but the claim stays visible
+until the sandbox and its Pod are gone. `"Retain"` deletes the sandbox and keeps
+the expired claim. When a timer is set and no policy is given, the SDK sends
+`"Delete"`; the API's own default for an omitted policy is `"Retain"`.
+
+The `ttlSecondsAfterFinished` timer starts only when the Pod reaches `Succeeded`
+or `Failed`. A Pod with `restartPolicy: Always` does not reach either phase when
+its containers exit, although node-pressure eviction can still mark it `Failed`,
+so pair it with `shutdownAfterSeconds`. With both timers, the earlier deadline
+wins. Invalid values for either option reject with `SandboxError` before
+provisioning.
+`sandbox.close()` still deletes a `"Retain"` claim, and so does
+`enableAutoCleanup()` for a claim with a generated name.
 
 ### Pod labels and annotations
 
@@ -198,8 +240,8 @@ default.
 ### Timeouts
 
 - `sandboxReadyTimeout` (constructor / `createSandbox()` options) is in **seconds** and bounds waiting for the `SandboxClaim`/`Sandbox` to become `Ready`. Default: 180.
-- `sandboxd.portForwardReadyTimeoutMs` (constructor option, under `sandboxd`) is in **milliseconds** and bounds the shared connection to sandboxd, through a successful health check: for `port-forward` connectivity it starts when both local port-forward listeners are opened, and for the in-cluster modes it bounds health polling against the pod address (see [Connectivity](#connectivity)). It applies in full to every (re)connect attempt, including reconnects after a transport failure. Default: 30000.
-- Every `sandbox.files.*` / `sandbox.commands.run()` / `sandbox.health()` / `sandbox.metadata()` call takes a per-call `timeoutMs` (default 60000). This is a total budget for the call, including any time spent waiting on the shared connection above — a cold first call can spend most of its budget just connecting. For `sandbox.commands.start()` it covers only the time until the process has started (see [Interactive processes](#interactive-processes)); the calls on the returned handle each take their own `timeoutMs`.
+- `sandboxd.portForwardReadyTimeoutMs` (constructor option, under `sandboxd`) is in **milliseconds** and bounds each shared connect attempt, from the start of that attempt through a successful health check. For `router-port-forward` that includes EndpointSlice discovery. It applies in full to every (re)connect, including reconnects after a transport failure. Default: 30000.
+- Every `sandbox.files.*` / `sandbox.commands.run()` / `sandbox.health()` / `sandbox.metadata()` call takes a per-call `timeoutMs` (default 60000). This is a total budget for the call, including any time spent waiting on the shared connection above — a cold first call can spend most of its budget just connecting. For `sandbox.commands.start()` it covers only the time until the process has started (see [Interactive processes](#interactive-processes)); the calls on the returned handle each take their own `timeoutMs`. For `sandbox.watcher.watch()` it covers only connecting to sandboxd (see [Watching files](#watching-files)).
 - `sandboxd.maxCommandOutputSize` bounds the fully-decoded `ExecuteResponse` (stdout + stderr + protobuf framing combined, not stdout alone) that `sandbox.commands.run()` will accept.
 
 ### Connectivity
@@ -209,18 +251,43 @@ default.
 | Value | Path | Requirements |
 | --- | --- | --- |
 | `"port-forward"` (default) | WebSocket port-forward brokered by the apiserver | A kubeconfig that allows `pods/portforward`. Works from anywhere, including a laptop or CI runner. |
+| `"router-port-forward"` | Port-forwards the sandbox-router, which proxies sandboxd's REST API to `restPort` and its gRPC API to `grpcPort` over one shared local port | A kubeconfig that allows `pods/portforward` and `list` on `endpointslices` in `routerNamespace`, plus a deployed sandbox-router (v1.0.9+ for gRPC). The laptop/CI path for Kata and gVisor sandboxes. |
 | `"in-cluster-service"` | Dials the Sandbox's headless Service by DNS name (`status.serviceFQDN`) | The process runs inside the cluster, and the template sets `spec.service: true`. |
 | `"in-cluster-pod-ip"` | Dials the pod IP (`status.podIPs`, IPv4 preferred) | The process runs inside the cluster. |
 
 `"port-forward"` doesn't work on Kata or gVisor: their workload runs in a separate
 kernel, so the pod's host-side network namespace has nothing for the port-forward to
-reach — use an in-cluster mode (the Sandbox NetworkPolicy must admit the client).
+reach — use `"router-port-forward"` or an in-cluster mode (the Sandbox NetworkPolicy
+must admit the client).
 
 ```ts
 const client = new SandboxClient({
   sandboxd: { connectivity: "in-cluster-service" },
 });
 ```
+
+`"router-port-forward"` resolves a ready `sandbox-router` pod through its
+EndpointSlices and port-forwards the router's own port instead of sandboxd's ports
+on the sandbox pod, so it works for Kata and gVisor sandboxes that pod
+port-forward cannot reach. REST and gRPC share a single local port-forward; the
+router selects the sandbox and its REST or gRPC port from the routing headers and
+metadata the SDK sends (`X-Sandbox-ID`, `X-Sandbox-Namespace`, `X-Sandbox-Port`,
+and `X-Sandbox-Pod-IP` when the Sandbox has no headless Service and
+`disablePodIPRouting` is not set). gRPC needs sandbox-router v1.0.9 or later.
+
+- `sandboxd.routerNamespace` names the namespace where the router runs (shipped
+  manifests use `"agent-sandbox-system"`). It defaults to the claim's namespace.
+- When the Sandbox has a headless Service (`status.serviceFQDN`), the SDK omits
+  `X-Sandbox-Pod-IP`. The router then resolves the live pod by DNS. The IP
+  captured when the handle was created would override that lookup, and after a
+  reschedule it can belong to a different pod.
+- When the Sandbox has no Service, the SDK sends that captured IP so a router
+  without a cache can still reach the sandbox. `sandboxd.disablePodIPRouting: true`
+  omits the header in that case too, and the router resolves the live pod from
+  its cache or DNS. Set it when the router runs with `--cache-enabled`.
+  Scoped-token authorization rejects `X-Sandbox-Pod-IP` (v2 rejects a raw pod
+  IP as well, and resolves through the cache), so set
+  `disablePodIPRouting: true` when the router uses `--authz-mode=scoped-token`.
 
 The in-cluster modes take the apiserver off the data path. Each uses exactly one address, and neither falls back to the other or to port-forwarding:
 
@@ -240,9 +307,28 @@ const client = new SandboxClient({
 });
 ```
 
-The SDK sends it as `Authorization: Bearer <token>` on every REST request and gRPC call, and never logs it or puts it in a trace or error. It must be non-empty printable ASCII with no spaces. A missing or wrong token fails the call with `SandboxdApiError` (`code: "UNAUTHENTICATED"`) for files and metadata, and `SandboxdRpcError` (`code: "unauthenticated"`) for commands. `GET /v1/health` needs no token, so the connect health check passes even with a wrong one and the first real call reports it.
+With `port-forward` and the in-cluster modes, the SDK sends `authToken` as `Authorization: Bearer <token>` on every REST request and gRPC call. With `router-port-forward`, `Authorization` is the router's own credential (`sandboxd.routerAuthToken`). The SDK sends `authToken` as the bare `X-Sandboxd-Token` header on REST and as `x-sandboxd-token` metadata on gRPC. The router strips `Authorization` and forwards `X-Sandboxd-Token`, which sandboxd reads as its bearer token. The SDK never logs either token or puts one in a trace or error. `authToken` must be non-empty printable ASCII with no spaces. A missing or wrong token fails the call with `SandboxdApiError` (`code: "UNAUTHENTICATED"`) for files and metadata, and `SandboxdRpcError` (`code: "unauthenticated"`) for commands. `GET /v1/health` needs no token, so the connect health check passes even with a wrong one and the first real call reports it.
 
 With `port-forward` the token rides the TLS connection to the apiserver. sandboxd has no TLS, so with the in-cluster modes it is sent in plaintext, and `in-cluster-pod-ip` can send it to an unrelated pod if the IP was reassigned. Prefer `in-cluster-service` or `port-forward`. See [Trust boundary](#trust-boundary).
+
+With `"router-port-forward"`, `X-Sandboxd-Token` still travels in plaintext from the router to the sandbox pod. A NetworkPolicy that admits only the router keeps it off the shared pod network.
+
+If the router itself requires authentication (e.g. `--authz-mode=tokenreview` or
+`scoped-token`), pass its credential as `sandboxd.routerAuthToken`. The SDK sends
+it as `Authorization: Bearer <token>` on every REST request and gRPC call in
+router mode only; the router consumes and strips it before forwarding, so it
+never reaches sandboxd. `authToken` and `routerAuthToken` are two independent
+credentials and can be set together.
+
+```ts
+const client = new SandboxClient({
+  sandboxd: {
+    connectivity: "router-port-forward",
+    authToken: process.env.SANDBOXD_TOKEN,
+    routerAuthToken: process.env.ROUTER_TOKEN,
+  },
+});
+```
 
 ### Streaming
 
@@ -298,6 +384,19 @@ const { status, message } = await sandbox.status();
 
 It resolves with `SandboxNotFound` when the Sandbox object is gone (also after `close()`) and rejects with a `SandboxError` on any other read failure. The values match the Python client's `status()`.
 
+### Suspend and resume
+
+`suspend()` sets the Sandbox operating mode to `Suspended`, closes the sandboxd connection, and waits for the controller to report it. `resume()` sets the mode to `Running` and waits for the Sandbox to become ready. The next `files` or `commands` call reconnects.
+
+```ts
+await sandbox.suspend();
+console.log(await sandbox.isSuspended()); // true
+await sandbox.resume({ timeoutMs: 60_000 });
+console.log((await sandbox.commands.run("cat", ["/workspace/note.txt"])).stdout);
+```
+
+Data on a persistent volume survives. Processes, memory, and `emptyDir` volumes do not. Both methods reject on failure and take `timeoutMs` (180000 by default) and `signal`. A call that times out or is aborted stops waiting at once, but a Kubernetes request already sent is not cancelled, so a late `patch` can still take effect. The next call waits for that `patch` to settle before it reads the Sandbox. They poll the Sandbox, so the credentials need `get` and `patch` on `sandboxes`. They match the Go and Python clients.
+
 ### Interactive processes
 
 `sandbox.commands.start(command, args?, options?)` starts a process and resolves, once sandboxd reports it running, with a `ProcessHandle`. Like `run()`, `[command, ...args]` is the argv (no shell), and `env`/`cwd` behave the same.
@@ -331,6 +430,26 @@ await shell.write("stty size\nexit\n");
 - **Lifetime**: the process lives exactly as long as its stream. `handle.close()`, aborting `options.signal`, `sandbox.close()`/`closeLocal()`, or a lost connection ends the stream, and sandboxd then **SIGKILLs the process's whole process group**. There is no way to detach and leave a process running, and a process is not restarted if the connection is re-established. `options.timeoutMs` bounds only the time until the process has started, never its lifetime. Closing one handle does not affect other calls sharing the connection, and a long-running process does not delay `sandbox.close()`.
 - **Connection**: `handle.pid` is sandboxd's own numbering and only meaningful on the connection that started the process. If that connection is replaced after a transport failure, the handle's stream fails and its control calls throw `SandboxConnectionError`; they never reconnect and act on a different connection.
 
+### Watching files
+
+`sandbox.watcher.watch(path, options?)` streams the filesystem changes under a directory as an async iterable of events.
+
+```ts
+for await (const event of sandbox.watcher.watch("src", { recursive: true })) {
+  if (event.type === "error") console.warn("watch problem:", event.error);
+  else console.log(event.type, event.path);
+  if (event.path === "src/done.txt") break; // Leaving the loop ends the watch.
+}
+```
+
+- **Events**: each event has a `type` (`"create"`, `"write"`, `"remove"`, `"rename"`, `"chmod"`, or `"error"`), a sandbox-root-relative `path`, and an `error` message that is empty except on `"error"` events. The names match the Go and Python clients. A `"rename"` event carries the old path; when the new name is inside the watched tree, it arrives as a separate `"create"` event. sandboxd batches events in windows of about 250ms. A type this SDK version does not know (from a newer sandboxd) arrives as `unknown(<number>)`.
+- **Options**: `recursive` also watches subdirectories, including ones created during the watch. `signal` ends the watch when aborted. `timeoutMs` bounds only connecting to sandboxd before the watch starts, never the wait for the first event or how long the watch runs. Use `signal` to bound those.
+- **Errors**: sandboxd reports a problem with a running watch as an `"error"` event, not a thrown error. If the problem ends the watch (for example, the watched directory was removed), that event is the last one and the loop then ends normally. Other `"error"` events, such as an event overflow, do not end the watch. A watch that cannot start rejects on the first iteration with a `SandboxdRpcError`: `not_found` for a path that does not exist, `invalid_argument` for a path that is not a directory, `permission_denied` for a path that leaves the sandbox root through a symlink, `resource_exhausted` when sandboxd already runs its maximum number of watches, and `unimplemented` for a runtime that does not serve the watcher service. An invalid path, `recursive`, or `timeoutMs` throws a `SandboxError` from `watch()` itself, before anything is sent.
+- **Lifetime**: the watch opens when iteration starts, not when `watch()` is called. Leaving the `for await` loop (break, return, or throw), aborting `options.signal`, `sandbox.close()`/`closeLocal()`, or a lost connection ends it, and sandboxd then releases the watch. If you drive the iterator by hand with `next()`, call its `return()` when you are done. A running watch does not delay `sandbox.close()`, and a failed watch is never restarted.
+- **Missed changes**: sandboxd does not confirm that a watch is in place, so a change made immediately after iteration starts can be missed.
+
+`watch()` requires the same optional dependencies as `sandbox.commands`.
+
 ### Execution target and path rules
 
 `sandbox.commands.run(command, args?, options?)` (or `run(command, options?)`) passes `[command, ...args]` to sandboxd as the process's argv, exactly like `ProcessConfig.command` — it is never wrapped in a shell, so there is no word splitting, globbing, or variable expansion. Use `run("sh", ["-c", "..."])` when you need shell syntax. Because there is no shell in between, an executable that cannot be found is reported by sandboxd as a `SandboxdRpcError` with code `not_found`, not as a result with exit code 127.
@@ -342,7 +461,7 @@ await shell.write("stty size\nexit\n");
 
 All file paths are sandbox-root-relative POSIX paths and are validated **before any network request**, without being decoded or normalized first:
 
-- `""` and `"."` (and equivalent all-dot/empty-segment forms) refer to the sandbox root. `list()` and `exists()` accept it; `read()` passes validation but then rejects because the root is a directory; `write()`, `delete()`, `mkdir()`, `move()`, and `copy()` reject it up front, and `write()`/`delete()` also reject a trailing `/`.
+- `""` and `"."` (and equivalent all-dot/empty-segment forms) refer to the sandbox root. `list()`, `exists()`, `extract()`, and `watcher.watch()` accept it; `read()` passes validation but then rejects because the root is a directory; `write()`, `delete()`, `mkdir()`, `move()`, and `copy()` reject it up front, and `write()`/`delete()` also reject a trailing `/`.
 - An absolute path (leading `/`) is always rejected.
 - Any `..` path segment is always rejected, including for `exists()` (which never silently reports `false` for a rejected path — it throws).
 
@@ -350,7 +469,7 @@ This path confinement covers the files API and the working directory sandboxd ru
 
 ### No automatic retry
 
-A failed `files.*`, `commands.run()`, `health()` or `metadata()` call is never retried automatically by the SDK. If the underlying connection was invalidated by a transport failure, the *next* call you make reconnects from scratch; other calls already in flight on the same connection fail together with it.
+A failed `files.*`, `commands.run()`, `watcher.watch()`, `health()` or `metadata()` call is never retried automatically by the SDK. If the underlying connection was invalidated by a transport failure, the *next* call you make reconnects from scratch; other calls already in flight on the same connection fail together with it.
 
 What "retrying" safely means differs per method:
 
@@ -361,12 +480,14 @@ What "retrying" safely means differs per method:
 | `start()` and its handle's `write()`/`signal()`/`resize()` | No | Start the process again | A failed `start()` may have launched the process; a failed `write()` may have delivered a prefix of its data. A process interrupted by a lost connection is killed, not resumed. |
 | `read()` | No | Call it again | The file may have changed between attempts. |
 | `write()` | No | Resend the same `content` | sandboxd replaces the target atomically via a temporary file and rename, so a failed call never leaves the target partially written. But if the acknowledgement was lost, the write may already have committed server-side, and a retry can overwrite a concurrent update from someone else. |
-| `write()` with `append` | No | Check the file first | The append is not atomic, and a retry adds the content again. |
-| `write()` with `createOnly` | No | Call it again | If the acknowledgement was lost, the retry fails with `FAILED_PRECONDITION` because the file exists. A sandboxd that predates `append` and `createOnly` ignores them and replaces the file, so use them only with a matching sandboxd. |
+| `write()` with `append` | No | Check the file first | The append is not atomic, and a retry adds the content again. `append` and `createOnly` cannot be combined; a call with both is rejected before any request. |
+| `write()` with `createOnly` | No | Call it again | If the acknowledgement was lost, the retry fails with `FAILED_PRECONDITION` because the file exists. Cannot be combined with `append`. A sandboxd that predates `append` and `createOnly` ignores them and replaces the file, so use them only with a matching sandboxd. |
 | `mkdir()` | No | Call it again | Idempotent: it succeeds when the directory already exists. |
 | `move()` / `copy()` | No | Check the source and destination first | If the acknowledgement was lost, the operation may already have happened. A repeated `move()` then fails with `NOT_FOUND` because the source is gone. A repeated `copy()` fails with `CONFLICT` because the destination exists, unless `overwrite` replaces a destination file. |
+| `extract()` | No | Provide a fresh stream producing the same archive | The unpack is not atomic, so a failed call leaves the entries written so far. Same streaming caveats as `writeStream()`. |
 | `readStream()` | No | Call it again from the beginning | Discard any partial output and reset your destination first — a partial download is never resumed. The file may have changed between attempts. |
 | `writeStream()` | No | Provide a fresh stream producing the same content | The input stream is consumed at most once, so retrying needs a new stream instance, not the same one rewound. Same atomicity/acknowledgement/concurrent-update caveats as `write()`. With `append`, an oversized or interrupted stream can leave a prefix in the target, and a retry adds it again. |
+| `watcher.watch()` | No | Call it again to start a new watch | A watch does not resume. Changes made between the end of one watch and the start of the next are not reported, so list the directory again if you need its current state. |
 
 Replacement writes never briefly show partial content at the target path (`append` does not). That guarantee is independent of whether *you* can tell a given call actually completed server-side, and of whether a retry might overwrite someone else's concurrent write.
 
@@ -386,7 +507,7 @@ With the in-cluster modes, REST and gRPC travel in plaintext across the pod netw
 ### Not supported
 
 - The legacy python-runtime. The SDK only talks to sandboxd.
-- The Gateway and Direct connection modes, and access to sandboxd through sandbox-router ([#1889](https://github.com/kubernetes-sigs/agent-sandbox/issues/1889)). Use one of the `sandboxd.connectivity` values above.
+- The Gateway and Direct connection modes. Use one of the `sandboxd.connectivity` values above.
 
 ## Publishing status
 
@@ -406,6 +527,6 @@ npm install
 npm run build
 ```
 
-`sandbox.commands.run()` and `sandbox.commands.start()` additionally require the optional `@bufbuild/protobuf`, `@connectrpc/connect`, and `@connectrpc/connect-node` peer dependencies (declared as optional peers in [package.json](package.json)). They are loaded lazily on first use, so `sandbox.files.*` and everything else in the package works without them installed; calling `run()` or `start()` without them throws a clear error naming the packages to install.
+`sandbox.commands.run()`, `sandbox.commands.start()`, and `sandbox.watcher.watch()` additionally require the optional `@bufbuild/protobuf`, `@connectrpc/connect`, and `@connectrpc/connect-node` peer dependencies (declared as optional peers in [package.json](package.json)). They are loaded lazily on first use, so `sandbox.files.*` and everything else in the package works without them installed; calling `run()` or `start()`, or iterating a `watch()`, without them throws a clear error naming the packages to install.
 
 See [src/index.ts](src/index.ts) for the full set of exports.

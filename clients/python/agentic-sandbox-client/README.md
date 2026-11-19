@@ -325,7 +325,23 @@ written = await sandbox.files.read_to(
 On the sandboxd runtime, `files.mkdir(path, parents=False)`,
 `files.move(source, destination, overwrite=False)` and
 `files.copy(source, destination, overwrite=False)` create, rename and copy
-paths. The legacy runtime raises `NotImplementedError`.
+paths. `files.list(path, recursive=True, max_depth=2)` includes nested entries,
+named relative to `path`. The legacy runtime raises `NotImplementedError` for
+all of these.
+
+`files.write(path, content, append=True)` adds to the end of a file, and
+`create_only=True` fails with a 412 `SandboxRequestError` if the path exists.
+Neither is retried, and an append is not atomic. The legacy runtime raises
+`NotImplementedError`.
+
+`files.extract(path, archive)` unpacks a tar archive, optionally gzipped, into
+a directory, or the sandbox root for `/`. `archive` is `bytes` or a binary file
+object. The legacy runtime raises `NotImplementedError`.
+
+`files.stat(path)` returns the `FileEntry` for one file or directory: its
+`name`, `type`, `size`, `mode` and `modified` time. `/` names the sandbox root.
+A missing path fails with a 404 `SandboxRequestError`. The legacy runtime
+raises `NotImplementedError`.
 
 ### 6. Async Client
 
@@ -578,10 +594,12 @@ This mode is opt-in. `SandboxdPodTunnelConnectionConfig` continues to connect
 directly to the sandbox Pod. The router caps REST request timeouts at its proxy
 timeout. When the router is not in `allow-all` mode, set `router_auth_token`.
 The SDK sends that token as `Authorization` on REST requests and gRPC calls.
-Use a Kubernetes bearer token for `tokenreview`, or a scoped token for
-`scoped-token`. The router strips `Authorization`, so the SDK sends `auth_token`
-in `X-Sandboxd-Token` instead. sandboxd accepts that header since
-[#2164](https://github.com/kubernetes-sigs/agent-sandbox/pull/2164).
+Use a Kubernetes bearer token for `tokenreview`, or a v1 or
+[sandbox-scoped v2](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/sandbox-router/README.md#scoped-token-authorizer)
+token for `scoped-token`. Mint a scoped token after its claim binds, then attach
+with `get_sandbox(claim_name)`. The router strips `Authorization`, so the SDK
+sends `auth_token` in `X-Sandboxd-Token` instead. sandboxd accepts that header
+since [#2164](https://github.com/kubernetes-sigs/agent-sandbox/pull/2164).
 
 ### 10. Labels and Pod Metadata
 
@@ -818,7 +836,9 @@ finally:
 ```
 
 `signal()` accepts either the cross-SDK name (`"SIGINT"`) or Python's own
-`signal.SIGINT`. `env` and `cwd` work as they do on `run()`. Passing
+`signal.SIGINT`. The `timeout` argument defaults to five seconds and controls
+how long `signal()` waits for a response. If the deadline expires, it raises
+`TimeoutError`. `env` and `cwd` work as they do on `run()`. Passing
 `pty=PtySize(cols=120, rows=40)` (from `k8s_agent_sandbox.models`) allocates a
 pseudo-terminal, which merges stderr into stdout.
 
@@ -835,6 +855,25 @@ async with await sandbox.commands.start("python long_task.py") as handle:
 `start()` is only available on the sandboxd runtime and raises
 `NotImplementedError` on the legacy python-runtime connector, which does not
 expose a streaming exec endpoint.
+
+## Suspend and resume
+
+`suspend()` sets the Sandbox operating mode to `Suspended` and waits for the
+controller to report it. `resume()` sets the mode to `Running` and waits for
+the Sandbox to become ready. The next command or file request reconnects.
+
+```python
+sandbox.suspend()
+print(sandbox.is_suspended())  # True
+sandbox.resume(timeout=60)
+print(sandbox.commands.run("cat /workspace/note.txt").stdout)
+```
+
+Data on a persistent volume survives. Processes, memory, and `emptyDir` volumes
+do not. Both methods raise on failure and take a keyword-only `timeout` in
+seconds, 180 by default. `AsyncSandbox` provides the same methods with `await`.
+For snapshot-backed suspension on GKE, use the
+[GKE snapshot extension](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/k8s_agent_sandbox/gke_extensions/snapshots/README.md).
 
 ## Testing
 

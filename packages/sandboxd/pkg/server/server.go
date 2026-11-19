@@ -44,6 +44,7 @@ const (
 	// pipeDrainGrace bounds how long Start waits for the stdout/stderr pipe
 	// readers, or the PTY reader, to reach EOF after the child process has
 	// exited (a grandchild may still hold the write end or the PTY slave).
+	// Time a reader spends sending output to a slow client does not count.
 	pipeDrainGrace = 5 * time.Second
 	// waitDelay bounds how long cmd.Wait blocks on I/O drain after the
 	// child exits. Without it, a grandchild holding the stdout/stderr

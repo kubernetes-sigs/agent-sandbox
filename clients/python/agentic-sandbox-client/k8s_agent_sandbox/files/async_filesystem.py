@@ -204,7 +204,7 @@ class AsyncFilesystem:
         partial content. Downloads remain unlimited when it is unset.
 
         On the sandboxd runtime, a directory raises ``SandboxRequestError``
-        with status 409.
+        with status 409, and the root path ``/`` raises ``ValueError``.
         """
         if self._file_config.max_download_size is not None:
             with io.BytesIO() as destination:
@@ -253,7 +253,7 @@ class AsyncFilesystem:
         The returned value is the number of bytes written.
 
         On the sandboxd runtime, a directory raises ``SandboxRequestError``
-        with status 409.
+        with status 409, and the root path ``/`` raises ``ValueError``.
         """
         return await self._read_to(path, destination, timeout, allow_unsafe_paths, max_bytes)
 

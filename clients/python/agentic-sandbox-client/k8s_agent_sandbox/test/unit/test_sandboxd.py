@@ -186,7 +186,7 @@ class TestSandboxdFilesystem(unittest.TestCase):
         self.assertEqual(data, b"hello")
         args, _ = self._last_call()
         self.assertEqual(args[0], "GET")
-        self.assertEqual(args[1], "v1/files/notes/hello.txt")
+        self.assertEqual(args[1], "v1/files/notes/hello.txt?type=file")
 
     def test_list_unwraps_directory_listing(self):
         resp = MagicMock()

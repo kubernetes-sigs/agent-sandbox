@@ -17,6 +17,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -265,6 +266,63 @@ func TestRecordLatency_StatusAttribute(t *testing.T) {
 
 func TestRecordLatency_NilHistogramDoesNotPanic(_ *testing.T) {
 	recordLatency(context.Background(), nil, time.Now(), nil)
+}
+
+func TestRecordLatency_SkipsCanceledOperations(t *testing.T) {
+	// A canceled operation stops at an arbitrary point, so its duration
+	// must not land in the histogram as a failure sample. The error reaches
+	// recordLatency wrapped, so the check uses errors.Is.
+	reader := metric.NewManualReader()
+	mp := metric.NewMeterProvider(metric.WithReader(reader))
+	hist := newSuspendLatencyHistogram(mp.Meter("test"), logr.Discard())
+
+	recordLatency(context.Background(), hist, time.Now(),
+		fmt.Errorf("operation cancelled waiting for lifecycle lock: %w", context.Canceled))
+
+	if points := latencyPoints(t, reader, suspendLatencyInstrumentName); len(points) != 0 {
+		t.Errorf("got %d data points, want 0 for a canceled operation", len(points))
+	}
+}
+
+func TestRecordLatency_RecordsDeadlineExceeded(t *testing.T) {
+	// A timeout is a real failure: the operation ran to its full budget, so
+	// the duration is meaningful and must stay in the histogram.
+	reader := metric.NewManualReader()
+	mp := metric.NewMeterProvider(metric.WithReader(reader))
+	hist := newSuspendLatencyHistogram(mp.Meter("test"), logr.Discard())
+
+	recordLatency(context.Background(), hist, time.Now(),
+		fmt.Errorf("timed out: %w", context.DeadlineExceeded))
+
+	points := latencyPoints(t, reader, suspendLatencyInstrumentName)
+	if len(points) != 1 {
+		t.Fatalf("got %d data points, want 1", len(points))
+	}
+	if !attrsContain(points[0].Attributes, "status", "failure") {
+		t.Errorf("got attributes %v, want status=failure", points[0].Attributes)
+	}
+}
+
+func TestConnectorConnect_SkipsCanceledDiscovery(t *testing.T) {
+	// connector.Connect records discovery latency inline, so it needs the
+	// same cancellation skip as recordLatency.
+	reader := metric.NewManualReader()
+	mp := metric.NewMeterProvider(metric.WithReader(reader))
+	hist := newDiscoveryLatencyHistogram(mp.Meter("test"), logr.Discard())
+
+	conn := newConnector(connectorConfig{
+		Strategy:         &failingStrategy{err: context.Canceled},
+		Namespace:        "default",
+		Log:              logr.Discard(),
+		DiscoveryLatency: hist,
+	})
+	if err := conn.Connect(context.Background()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Connect error = %v, want context.Canceled", err)
+	}
+
+	if points := latencyPoints(t, reader, discoveryLatencyInstrumentName); len(points) != 0 {
+		t.Errorf("got %d data points, want 0 for a canceled discovery", len(points))
+	}
 }
 
 func TestSuspend_RecordsFailureLatency(t *testing.T) {

@@ -16,6 +16,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -100,10 +101,12 @@ func newResumeLatencyHistogram(meter metric.Meter, log logr.Logger) metric.Float
 
 // recordLatency records the seconds elapsed since start on hist with a
 // status attribute derived from err, mirroring the Python SDK's
-// record_latency decorator. A nil histogram means metrics were not wired;
-// recording is skipped.
+// record_latency decorator. It records nothing when hist is nil or when err
+// is a context cancellation: a canceled operation stops at an arbitrary
+// point, so its duration is not a meaningful latency sample. Timeouts stay
+// recorded as failures.
 func recordLatency(ctx context.Context, hist metric.Float64Histogram, start time.Time, err error) {
-	if hist == nil {
+	if hist == nil || errors.Is(err, context.Canceled) {
 		return
 	}
 	status := "success"

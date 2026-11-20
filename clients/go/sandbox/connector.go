@@ -227,7 +227,7 @@ func (c *connector) Connect(ctx context.Context) error {
 	start := time.Now()
 	url, err := c.strategy.Connect(ctx)
 	// A canceled discovery is not sampled; see canceledOperation.
-	if c.discoveryLatency != nil && !canceledOperation(ctx, err) {
+	if c.discoveryLatency != nil && !canceledOperation(err) {
 		status := "success"
 		if err != nil {
 			status = "failure"

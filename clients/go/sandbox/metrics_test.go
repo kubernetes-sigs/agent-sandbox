@@ -355,9 +355,9 @@ func newGatewayTestConnector(t *testing.T, hist apimetric.Float64Histogram, time
 }
 
 func TestConnectorConnect_SkipsCanceledGatewayDiscovery(t *testing.T) {
-	// gatewayStrategy.Connect reports any ctx.Done() as ErrTimeout without
-	// wrapping context.Canceled, so the cancellation check must also look
-	// at the context.
+	// gatewayStrategy.Connect reports ctx.Done() as ErrTimeout and must
+	// wrap the cause it observed, so cancellation stays discoverable with
+	// errors.Is and the discovery sample is skipped.
 	reader := metric.NewManualReader()
 	mp := metric.NewMeterProvider(metric.WithReader(reader))
 	hist := newDiscoveryLatencyHistogram(mp.Meter("test"), logr.Discard())
@@ -365,8 +365,9 @@ func TestConnectorConnect_SkipsCanceledGatewayDiscovery(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := conn.Connect(ctx); !errors.Is(err, ErrTimeout) {
-		t.Fatalf("Connect error = %v, want ErrTimeout", err)
+	err := conn.Connect(ctx)
+	if !errors.Is(err, ErrTimeout) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("Connect error = %v, want ErrTimeout wrapping context.Canceled", err)
 	}
 
 	if points := latencyPoints(t, reader, discoveryLatencyInstrumentName); len(points) != 0 {
@@ -382,8 +383,9 @@ func TestConnectorConnect_RecordsGatewayTimeout(t *testing.T) {
 	hist := newDiscoveryLatencyHistogram(mp.Meter("test"), logr.Discard())
 	conn := newGatewayTestConnector(t, hist, 50*time.Millisecond)
 
-	if err := conn.Connect(context.Background()); !errors.Is(err, ErrTimeout) {
-		t.Fatalf("Connect error = %v, want ErrTimeout", err)
+	err := conn.Connect(context.Background())
+	if !errors.Is(err, ErrTimeout) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Connect error = %v, want ErrTimeout wrapping context.DeadlineExceeded", err)
 	}
 
 	points := latencyPoints(t, reader, discoveryLatencyInstrumentName)

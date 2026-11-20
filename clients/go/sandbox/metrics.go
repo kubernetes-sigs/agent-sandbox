@@ -100,15 +100,11 @@ func newResumeLatencyHistogram(meter metric.Meter, log logr.Logger) metric.Float
 }
 
 // canceledOperation reports whether a failed operation stopped because its
-// context was canceled. The context is checked alongside the error because
-// gatewayStrategy.Connect reports cancellation as ErrTimeout without
-// wrapping context.Canceled. Timeouts are not cancellation and stay
-// recorded as failures.
-func canceledOperation(ctx context.Context, err error) bool {
-	if err == nil {
-		return false
-	}
-	return errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled)
+// context was canceled. Operations wrap the cause they observed when they
+// stopped into their error, so the error alone classifies the outcome; a
+// timeout wraps context.DeadlineExceeded and stays recorded as a failure.
+func canceledOperation(err error) bool {
+	return errors.Is(err, context.Canceled)
 }
 
 // recordLatency records the seconds elapsed since start on hist with a
@@ -116,7 +112,7 @@ func canceledOperation(ctx context.Context, err error) bool {
 // record_latency decorator. It records nothing when hist is nil or when the
 // operation was canceled; see canceledOperation.
 func recordLatency(ctx context.Context, hist metric.Float64Histogram, start time.Time, err error) {
-	if hist == nil || canceledOperation(ctx, err) {
+	if hist == nil || canceledOperation(err) {
 		return
 	}
 	status := "success"

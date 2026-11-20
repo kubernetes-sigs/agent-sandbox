@@ -44,7 +44,7 @@ import (
 // permission denied) into appropriate gRPC status codes (NOT_FOUND,
 // PERMISSION_DENIED) instead of generic INTERNAL error codes.
 func mapCommandError(err error, msg string) error {
-	if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
+	if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
 		return status.Errorf(codes.NotFound, "%s: command or path not found: %v", msg, err)
 	}
 	if errors.Is(err, fs.ErrPermission) {
@@ -128,7 +128,24 @@ func (s *ProcessServer) buildCommand(_ context.Context, config *processv1.Proces
 			if errors.Is(err, pathutil.ErrPathEscapes) {
 				return nil, status.Errorf(codes.PermissionDenied, "cwd: %v", err)
 			}
+			if errors.Is(err, syscall.ENOTDIR) {
+				return nil, status.Errorf(codes.NotFound, "cwd: path does not exist: %v", err)
+			}
 			return nil, status.Errorf(codes.Internal, "cwd: %v", err)
+		}
+		// Match WatchDir: a path that exists but is not a directory is an
+		// invalid argument. A missing leaf is NOT_FOUND. ENOTDIR from
+		// executing a command path such as "f.txt/prog" stays in
+		// mapCommandError, where NOT_FOUND is the right code.
+		info, err := os.Stat(sanitizedCwd)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil, status.Errorf(codes.NotFound, "cwd: path does not exist: %s", config.GetCwd())
+			}
+			return nil, status.Errorf(codes.Internal, "cwd: %v", err)
+		}
+		if !info.IsDir() {
+			return nil, status.Errorf(codes.InvalidArgument, "cwd is not a directory: %s", config.GetCwd())
 		}
 		cmd.Dir = sanitizedCwd
 	} else {

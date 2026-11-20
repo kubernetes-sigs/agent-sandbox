@@ -24,6 +24,8 @@ import io
 import unittest
 from unittest.mock import MagicMock
 
+import requests
+
 from k8s_agent_sandbox import (
     SandboxdInClusterConnectionConfig as PublicInClusterConfig,
     SandboxNoServiceError,
@@ -345,6 +347,69 @@ class TestSandboxdFilesystem(unittest.TestCase):
                 call()
         self._connector.send_request.assert_not_called()
 
+    def test_stat_returns_the_entry(self):
+        resp = MagicMock()
+        resp.headers = {"Content-Type": "application/json"}
+        resp.json.return_value = {
+            "name": "notes.txt", "size": 11, "type": "file",
+            "modified_at": "2026-10-26T10:00:00.123456Z", "mode": "0644",
+        }
+        self._connector.send_request.return_value = resp
+
+        entry = self._fs.stat("my dir/notes.txt")
+
+        args, kwargs = self._last_call()
+        self.assertEqual(args[:2], ("GET", "v1/files/my%20dir/notes.txt?stat=true"))
+        self.assertTrue(kwargs["stream"])
+        resp.close.assert_called_once_with()
+        self.assertEqual(entry, FileEntry(
+            name="notes.txt", size=11, type="file", mode="0644",
+            modified=datetime.datetime(
+                2026, 10, 26, 10, 0, 0, 123456, tzinfo=datetime.timezone.utc),
+        ))
+
+    def test_stat_rejects_a_file_served_instead_of_its_entry(self):
+        resp = MagicMock()
+        resp.headers = {"Content-Type": "application/octet-stream"}
+        self._connector.send_request.return_value = resp
+
+        with self.assertRaisesRegex(RuntimeError, "may not support stat"):
+            self._fs.stat("notes.txt")
+        # The body is the whole file, so stat must close the response unread.
+        self.assertEqual(
+            [name for name, _, _ in resp.method_calls], ["close"])
+
+    def test_stat_invalidates_the_transport_when_the_body_read_fails(self):
+        resp = MagicMock()
+        resp.headers = {"Content-Type": "application/json"}
+        resp._sandboxd_transport_token = token = object()
+        resp.json.side_effect = requests.exceptions.ChunkedEncodingError("lost")
+        self._connector.send_request.return_value = resp
+
+        with self.assertRaises(requests.exceptions.ChunkedEncodingError):
+            self._fs.stat("notes.txt")
+        self._connector.invalidate_sandboxd_transport.assert_called_once_with(
+            None, transport_token=token)
+        resp.close.assert_called_once_with()
+
+    def test_stat_rejects_a_directory_listing(self):
+        resp = MagicMock()
+        resp.headers = {"Content-Type": "application/json; charset=utf-8"}
+        resp.json.return_value = {"path": "/notes", "entries": []}
+        self._connector.send_request.return_value = resp
+
+        with self.assertRaisesRegex(RuntimeError, "invalid file entry"):
+            self._fs.stat("notes")
+
+    def test_stat_rejects_malformed_json(self):
+        resp = MagicMock()
+        resp.headers = {"Content-Type": "application/json"}
+        resp.json.side_effect = ValueError("no JSON")
+        self._connector.send_request.return_value = resp
+
+        with self.assertRaisesRegex(RuntimeError, "Failed to decode JSON"):
+            self._fs.stat("notes.txt")
+
 
 class TestLegacyFileOpsUnsupported(unittest.TestCase):
     def test_sandboxd_only_ops_raise_on_legacy(self):
@@ -357,6 +422,7 @@ class TestLegacyFileOpsUnsupported(unittest.TestCase):
             lambda: fs.move("a", "b"),
             lambda: fs.copy("a", "b"),
             lambda: fs.extract("d", b"x"),
+            lambda: fs.stat("a"),
             lambda: fs.write("a", b"x", append=True),
             lambda: fs.write("a", b"x", create_only=True),
         ):

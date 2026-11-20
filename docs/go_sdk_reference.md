@@ -42,6 +42,8 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func WithPodLabels\(labels map\[string\]string\) CreateOption](<#WithPodLabels>)
   - [func WithSandboxReadyTimeout\(d time.Duration\) CreateOption](<#WithSandboxReadyTimeout>)
   - [func WithShutdownAfter\(d time.Duration\) CreateOption](<#WithShutdownAfter>)
+  - [func WithShutdownPolicy\(p extv1beta1.ShutdownPolicy\) CreateOption](<#WithShutdownPolicy>)
+  - [func WithTTLSecondsAfterFinished\(seconds int32\) CreateOption](<#WithTTLSecondsAfterFinished>)
   - [func WithVolumeClaimTemplates\(templates \[\]sandboxv1beta1.PersistentVolumeClaimTemplate\) CreateOption](<#WithVolumeClaimTemplates>)
 - [type DirectStrategy](<#DirectStrategy>)
   - [func \(s \*DirectStrategy\) Close\(\) error](<#DirectStrategy.Close>)
@@ -61,6 +63,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(f \*Files\) Move\(ctx context.Context, source, destination string, overwrite bool, opts ...CallOption\) error](<#Files.Move>)
   - [func \(f \*Files\) Read\(ctx context.Context, path string, opts ...CallOption\) \(\[\]byte, error\)](<#Files.Read>)
   - [func \(f \*Files\) ReadTo\(ctx context.Context, path string, destination io.Writer, opts ...CallOption\) \(int64, error\)](<#Files.ReadTo>)
+  - [func \(f \*Files\) Stat\(ctx context.Context, path string, opts ...CallOption\) \(\*FileEntry, error\)](<#Files.Stat>)
   - [func \(f \*Files\) Write\(ctx context.Context, path string, content \[\]byte, opts ...CallOption\) error](<#Files.Write>)
   - [func \(f \*Files\) WriteReader\(ctx context.Context, path string, content io.Reader, opts ...CallOption\) error](<#Files.WriteReader>)
 - [type HTTPError](<#HTTPError>)
@@ -113,6 +116,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(s \*Sandbox\) Run\(ctx context.Context, command string, opts ...CallOption\) \(\*ExecutionResult, error\)](<#Sandbox.Run>)
   - [func \(s \*Sandbox\) SandboxName\(\) string](<#Sandbox.SandboxName>)
   - [func \(s \*Sandbox\) ServiceFQDN\(\) string](<#Sandbox.ServiceFQDN>)
+  - [func \(s \*Sandbox\) Stat\(ctx context.Context, path string, opts ...CallOption\) \(\*FileEntry, error\)](<#Sandbox.Stat>)
   - [func \(s \*Sandbox\) Suspend\(ctx context.Context, opts ...CallOption\) error](<#Sandbox.Suspend>)
   - [func \(s \*Sandbox\) WatchDir\(ctx context.Context, path string, recursive bool, opts ...CallOption\) \(\<\-chan FileEvent, error\)](<#Sandbox.WatchDir>)
   - [func \(s \*Sandbox\) Watchers\(\) \*Watchers](<#Sandbox.Watchers>)
@@ -562,6 +566,24 @@ func WithShutdownAfter(d time.Duration) CreateOption
 
 WithShutdownAfter sets the claim lifetime for a single CreateSandbox call, replacing Client\-level Options.ShutdownAfter. Zero means no expiry.
 
+<a name="WithShutdownPolicy"></a>
+#### func [WithShutdownPolicy](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithShutdownPolicy(p extv1beta1.ShutdownPolicy) CreateOption
+```
+
+WithShutdownPolicy sets spec.lifecycle.shutdownPolicy for a single CreateSandbox call, replacing Client\-level Options.ShutdownPolicy.
+
+<a name="WithTTLSecondsAfterFinished"></a>
+#### func [WithTTLSecondsAfterFinished](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithTTLSecondsAfterFinished(seconds int32) CreateOption
+```
+
+WithTTLSecondsAfterFinished sets spec.lifecycle.ttlSecondsAfterFinished for a single CreateSandbox call, replacing Client\-level Options.TTLSecondsAfterFinished.
+
 <a name="WithVolumeClaimTemplates"></a>
 #### func [WithVolumeClaimTemplates](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
 
@@ -792,7 +814,7 @@ Move does not retry unless WithMaxAttempts is set, because a repeat after a lost
 func (f *Files) Read(ctx context.Context, path string, opts ...CallOption) ([]byte, error)
 ```
 
-Read downloads a file from the sandbox and returns its complete contents.
+Read downloads a file from the sandbox and returns its complete contents. With the sandboxd runtime, reading a directory fails with a 409 HTTPError. Reading the sandbox root \("/" or "."\) is the exception: it fails locally before any request, so the error is not an HTTPError.
 
 <a name="Files.ReadTo"></a>
 #### func \(\*Files\) [ReadTo](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go>)
@@ -802,6 +824,17 @@ func (f *Files) ReadTo(ctx context.Context, path string, destination io.Writer, 
 ```
 
 ReadTo downloads a file into a caller\-owned destination without buffering the complete response. It returns the number of bytes written. The destination is never closed. If the response exceeds MaxDownloadSize, ReadTo writes at most MaxDownloadSize bytes and returns an error. Data written before an error or context cancellation remains in the destination.
+
+<a name="Files.Stat"></a>
+#### func \(\*Files\) [Stat](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go>)
+
+```go
+func (f *Files) Stat(ctx context.Context, path string, opts ...CallOption) (*FileEntry, error)
+```
+
+Stat returns the type, size, mode, and modification time of the file or directory at path. "/" names the sandbox root. A missing path fails with a 404 HTTPError.
+
+Only supported by the sandboxd runtime.
 
 <a name="Files.Write"></a>
 #### func \(\*Files\) [Write](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go>)
@@ -1085,6 +1118,16 @@ type Options struct {
     // gets spec.lifecycle.shutdownTime and the Delete shutdown policy; the
     // deadline is rounded up to a whole second. Zero (the default) means no expiry.
     ShutdownAfter time.Duration
+
+    // ShutdownPolicy sets spec.lifecycle.shutdownPolicy on every SandboxClaim
+    // this client creates: Delete, DeleteForeground, or Retain. Empty means
+    // Delete when ShutdownAfter or TTLSecondsAfterFinished is set. The API's own
+    // default for an omitted policy is Retain.
+    ShutdownPolicy extv1beta1.ShutdownPolicy
+
+    // TTLSecondsAfterFinished sets spec.lifecycle.ttlSecondsAfterFinished on
+    // every SandboxClaim this client creates. Nil (the default) leaves it unset.
+    TTLSecondsAfterFinished *int32
 
     // PodLabels are propagated to the backing Sandbox Pod via
     // spec.additionalPodMetadata.labels (unlike Labels, which are placed on the
@@ -1569,6 +1612,15 @@ func (s *Sandbox) ServiceFQDN() string
 ```
 
 ServiceFQDN returns the in\-cluster DNS name of the Sandbox's headless Service, or "" when it has none \(spec.service unset or false\). Not part of the Info interface, which is frozen for backward compatibility.
+
+<a name="Sandbox.Stat"></a>
+#### func \(\*Sandbox\) [Stat](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
+
+```go
+func (s *Sandbox) Stat(ctx context.Context, path string, opts ...CallOption) (*FileEntry, error)
+```
+
+Stat returns the type, size, mode, and modification time of a file or directory \(sandboxd runtime only\). See Files.Stat.
 
 <a name="Sandbox.Suspend"></a>
 #### func \(\*Sandbox\) [Suspend](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/operatingmode.go>)

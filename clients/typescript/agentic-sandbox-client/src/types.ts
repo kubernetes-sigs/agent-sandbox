@@ -162,6 +162,13 @@ export interface RuntimeCallOptions {
   signal?: AbortSignal;
 }
 
+/** Options for sandbox.suspend() and sandbox.resume(). */
+export interface SuspendResumeOptions {
+  /** Total budget (ms) for the call. Default: 180000. */
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
 /**
  * Options accepted by every sandbox.files.* method. Kept as an alias of
  * {@link RuntimeCallOptions} so existing callers keep compiling.
@@ -300,9 +307,9 @@ export interface ExecutionResult {
   exitCode: number;
 }
 
-/** One row of a DirectoryListing returned by sandbox.files.list(). */
+/** Metadata returned by sandbox.files.stat() or an entry in files.list(). */
 export interface FileEntry {
-  /** Path relative to the listed directory, including subdirectories. */
+  /** Basename for stat ("/" for the root), or path relative to the listed directory. */
   name: string;
   size: number;
   type: "file" | "directory";
@@ -316,6 +323,51 @@ export interface FileEntry {
 export interface DirectoryListing {
   path: string;
   entries: FileEntry[];
+}
+
+/**
+ * Kind of change a {@link FileEvent} reports. The names match the Go and
+ * Python SDKs. A sandboxd newer than this SDK can send a kind that has no
+ * name here; it arrives as `unknown(<number>)`, so handle the kinds you need
+ * and ignore the rest.
+ */
+export type FileEventType =
+  | "create"
+  | "write"
+  | "remove"
+  | "rename"
+  | "chmod"
+  | "error"
+  | `unknown(${number})`;
+
+/** One filesystem change reported by sandbox.watcher.watch(). */
+export interface FileEvent {
+  type: FileEventType;
+  /**
+   * Sandbox-root-relative path of the file or directory that changed. A
+   * `rename` event carries the old path. When the new name is inside the
+   * watched tree, it arrives as a separate `create` event.
+   */
+  path: string;
+  /** Message of an `error` event, and "" for every other type. */
+  error: string;
+}
+
+/** Options accepted by sandbox.watcher.watch(). */
+export interface WatchOptions {
+  /**
+   * Also watch subdirectories, including ones created during the watch.
+   * Default: false.
+   */
+  recursive?: boolean;
+  /**
+   * Budget (ms) for connecting to sandboxd before the watch starts. It does
+   * NOT bound the wait for the first event or how long the watch runs. Use
+   * `signal` to bound those. Default: 60000.
+   */
+  timeoutMs?: number;
+  /** Aborting this signal, before or during the watch, ends the watch. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -376,17 +428,39 @@ export interface VolumeClaimTemplate {
   spec: k8s.V1PersistentVolumeClaimSpec;
 }
 
+/** Values the SandboxClaim `spec.lifecycle.shutdownPolicy` field accepts. */
+export type ShutdownPolicy = "Delete" | "DeleteForeground" | "Retain";
+
 export interface CreateSandboxOptions {
   sandboxReadyTimeout?: number;
   labels?: Record<string, string>;
   /**
-   * Delete the claim and its sandbox after this many seconds, measured from
-   * the createSandbox call (including provisioning time). Sets the claim's
+   * Expire the claim after this many seconds, measured from the createSandbox
+   * call (including provisioning time). Sets the claim's
    * `spec.lifecycle.shutdownTime` to that absolute deadline and its
-   * `spec.lifecycle.shutdownPolicy` to `"Delete"`. Must be a positive integer
-   * that produces a valid RFC3339 deadline. Omit to leave expiration unset.
+   * `spec.lifecycle.shutdownPolicy` to `"Delete"` unless `shutdownPolicy` is
+   * given. Must be a positive integer that produces a valid RFC3339 deadline.
+   * Omit to leave expiration unset.
    */
   shutdownAfterSeconds?: number;
+  /**
+   * Value for the claim's `spec.lifecycle.shutdownPolicy`. `"Delete"` deletes
+   * the claim and its sandbox. `"DeleteForeground"` does the same but keeps
+   * the claim visible until the sandbox and its Pod are gone. `"Retain"`
+   * deletes the sandbox and keeps the expired claim. When a timer is set and
+   * no policy is given, the SDK sends `"Delete"`; the API's own default for an
+   * omitted policy is `"Retain"`.
+   */
+  shutdownPolicy?: ShutdownPolicy;
+  /**
+   * Seconds, zero or more, for the claim's
+   * `spec.lifecycle.ttlSecondsAfterFinished`. The timer starts only when the
+   * Pod reaches Succeeded or Failed. A Pod with `restartPolicy: Always` does
+   * not reach either phase when its containers exit, although node-pressure
+   * eviction can still mark it Failed, so pair this with
+   * `shutdownAfterSeconds`. With both timers, the earlier deadline wins.
+   */
+  ttlSecondsAfterFinished?: number;
   /**
    * Labels stamped onto the running Sandbox Pod through the claim's
    * `spec.additionalPodMetadata.labels`. Unlike `labels`, which land on the

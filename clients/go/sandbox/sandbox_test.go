@@ -73,8 +73,8 @@ func validateAllOptions(o *Options) error {
 }
 
 func newTestSandbox(opts Options) (*Sandbox, *fakeagents.Clientset, *fakeextensions.Clientset) {
-	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	agentsCS := fakeagents.NewClientset()
+	extensionsCS := fakeextensions.NewClientset()
 	opts.K8sHelper = &K8sHelper{
 		AgentsClient:     agentsCS.AgentsV1beta1(),
 		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
@@ -110,8 +110,8 @@ func newTestSandbox(opts Options) (*Sandbox, *fakeagents.Clientset, *fakeextensi
 }
 
 func newTestSandboxWithDynamic(opts Options, dynCS *fakedynamic.FakeDynamicClient) (*Sandbox, *fakeagents.Clientset, *fakeextensions.Clientset) {
-	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	agentsCS := fakeagents.NewClientset()
+	extensionsCS := fakeextensions.NewClientset()
 	opts.K8sHelper = &K8sHelper{
 		AgentsClient:     agentsCS.AgentsV1beta1(),
 		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
@@ -530,7 +530,7 @@ func TestResolveRouterPod_Success(t *testing.T) {
 		}},
 	}
 
-	kubeCS := fakekube.NewSimpleClientset(slice) //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	kubeCS := fakekube.NewClientset(slice)
 	ts := &tunnelStrategy{
 		discoveryClient: kubeCS.DiscoveryV1(),
 		namespace:       "default",
@@ -554,7 +554,7 @@ func TestResolveRouterPod_NoEndpoints(t *testing.T) {
 		},
 	}
 
-	kubeCS := fakekube.NewSimpleClientset(slice) //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	kubeCS := fakekube.NewClientset(slice)
 	ts := &tunnelStrategy{
 		discoveryClient: kubeCS.DiscoveryV1(),
 		namespace:       "default",
@@ -1140,7 +1140,7 @@ func TestCreateClaim_Labels(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+			extensionsCS := fakeextensions.NewClientset()
 			var created *extv1beta1.SandboxClaim
 			extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 				created = action.(ktesting.CreateAction).GetObject().(*extv1beta1.SandboxClaim)
@@ -1549,13 +1549,79 @@ func TestClaimLifecycle_RoundsUpToWholeSecond(t *testing.T) {
 		{time.Hour, now.Truncate(time.Second).Add(time.Hour + time.Second)},
 		{time.Second - 100, now.Truncate(time.Second).Add(time.Second)},
 	} {
-		if got := claimLifecycle(now, tc.ttl).ShutdownTime.Time; !got.Equal(tc.want) {
+		if got := claimLifecycle(now, &Options{ShutdownAfter: tc.ttl}).ShutdownTime.Time; !got.Equal(tc.want) {
 			t.Errorf("ttl %s: shutdownTime = %v, want %v", tc.ttl, got, tc.want)
 		}
 	}
 	whole := now.Truncate(time.Second)
-	if got := claimLifecycle(whole, time.Minute).ShutdownTime.Time; !got.Equal(whole.Add(time.Minute)) {
+	if got := claimLifecycle(whole, &Options{ShutdownAfter: time.Minute}).ShutdownTime.Time; !got.Equal(whole.Add(time.Minute)) {
 		t.Errorf("whole-second deadline moved: %v", got)
+	}
+}
+
+func TestClaimLifecycle_PolicyAndTTL(t *testing.T) {
+	now := time.Now()
+	ttl := int32(30)
+	for _, tc := range []struct {
+		name       string
+		opts       Options
+		wantPolicy extv1beta1.ShutdownPolicy
+		wantTTL    *int32
+		wantTime   bool
+	}{
+		{"policy only", Options{ShutdownPolicy: extv1beta1.ShutdownPolicyRetain}, extv1beta1.ShutdownPolicyRetain, nil, false},
+		{"ttl only defaults to Delete", Options{TTLSecondsAfterFinished: &ttl}, extv1beta1.ShutdownPolicyDelete, &ttl, false},
+		{"zero ttl is kept", Options{TTLSecondsAfterFinished: new(int32)}, extv1beta1.ShutdownPolicyDelete, new(int32), false},
+		{"all set", Options{ShutdownAfter: time.Hour, ShutdownPolicy: extv1beta1.ShutdownPolicyDeleteForeground, TTLSecondsAfterFinished: &ttl}, extv1beta1.ShutdownPolicyDeleteForeground, &ttl, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := claimLifecycle(now, &tc.opts)
+			if got == nil {
+				t.Fatal("expected a lifecycle")
+			}
+			if got.ShutdownPolicy != tc.wantPolicy {
+				t.Errorf("shutdownPolicy = %q, want %q", got.ShutdownPolicy, tc.wantPolicy)
+			}
+			if (got.TTLSecondsAfterFinished == nil) != (tc.wantTTL == nil) || (tc.wantTTL != nil && *got.TTLSecondsAfterFinished != *tc.wantTTL) {
+				t.Errorf("ttlSecondsAfterFinished = %v, want %v", got.TTLSecondsAfterFinished, tc.wantTTL)
+			}
+			if (got.ShutdownTime != nil) != tc.wantTime {
+				t.Errorf("shutdownTime = %v, want set: %v", got.ShutdownTime, tc.wantTime)
+			}
+		})
+	}
+}
+
+func TestCreateOptions_ShutdownPolicyAndTTLOverrideClientLevel(t *testing.T) {
+	clientTTL := int32(60)
+	base := Options{ShutdownPolicy: extv1beta1.ShutdownPolicyRetain, TTLSecondsAfterFinished: &clientTTL}
+
+	var kept createOptions
+	o := base
+	kept.apply(&o)
+	if o.ShutdownPolicy != extv1beta1.ShutdownPolicyRetain || *o.TTLSecondsAfterFinished != 60 {
+		t.Errorf("without per-call options the Client values should apply, got %q and %d", o.ShutdownPolicy, *o.TTLSecondsAfterFinished)
+	}
+
+	var co createOptions
+	WithShutdownPolicy(extv1beta1.ShutdownPolicyDeleteForeground)(&co)
+	WithTTLSecondsAfterFinished(0)(&co)
+	o = base
+	co.apply(&o)
+	if o.ShutdownPolicy != extv1beta1.ShutdownPolicyDeleteForeground || *o.TTLSecondsAfterFinished != 0 {
+		t.Errorf("per-call options should win, got %q and %d", o.ShutdownPolicy, *o.TTLSecondsAfterFinished)
+	}
+	if clientTTL != 60 {
+		t.Errorf("the Client-level TTL was modified: %d", clientTTL)
+	}
+
+	// An explicit empty policy replaces the Client's, restoring the Delete default.
+	var empty createOptions
+	WithShutdownPolicy("")(&empty)
+	o = Options{ShutdownAfter: time.Hour, ShutdownPolicy: extv1beta1.ShutdownPolicyRetain}
+	empty.apply(&o)
+	if got := claimLifecycle(time.Now(), &o).ShutdownPolicy; got != extv1beta1.ShutdownPolicyDelete {
+		t.Errorf("empty per-call policy should restore Delete, got %q", got)
 	}
 }
 
@@ -1732,6 +1798,8 @@ func TestValidation_NegativeTimeouts(t *testing.T) {
 		{"negative PerAttemptTimeout", Options{WarmPoolName: "pool", PerAttemptTimeout: -1}},
 		{"negative MaxDownloadSize", Options{WarmPoolName: "pool", MaxDownloadSize: -1}},
 		{"negative ShutdownAfter", Options{WarmPoolName: "pool", ShutdownAfter: -time.Second}},
+		{"unknown ShutdownPolicy", Options{WarmPoolName: "pool", ShutdownPolicy: "Keep"}},
+		{"negative TTLSecondsAfterFinished", Options{WarmPoolName: "pool", TTLSecondsAfterFinished: new(int32(-1))}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -3373,7 +3441,7 @@ func TestDisconnect_Timeout(t *testing.T) {
 }
 
 func TestDeleteClaim_EmptyName(t *testing.T) {
-	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck
+	extensionsCS := fakeextensions.NewClientset()
 	deleteCalled := false
 	extensionsCS.PrependReactor("delete", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
 		deleteCalled = true

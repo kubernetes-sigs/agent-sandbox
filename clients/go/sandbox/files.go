@@ -467,6 +467,9 @@ func (f *Files) validateLegacyWritePath(path string) error {
 }
 
 // Read downloads a file from the sandbox and returns its complete contents.
+// With the sandboxd runtime, reading a directory fails with a 409 HTTPError.
+// Reading the sandbox root ("/" or ".") is the exception: it fails locally
+// before any request, so the error is not an HTTPError.
 func (f *Files) Read(ctx context.Context, path string, opts ...CallOption) ([]byte, error) {
 	var destination bytes.Buffer
 	if _, err := f.readTo(ctx, path, &destination, opts...); err != nil {
@@ -513,7 +516,8 @@ func (f *Files) readTo(ctx context.Context, path string, destination io.Writer, 
 			recordError(span, err)
 			return 0, fmt.Errorf("%s: read(%q): %w", f.errPrefix(), path, err)
 		}
-		endpoint = ep
+		// Without type=file, sandboxd answers a directory with its JSON listing.
+		endpoint = ep + "?type=file"
 	}
 	resp, err := f.connector.SendRequest(ctx, http.MethodGet, endpoint, nil, "", maxAttempts)
 	if err != nil {
@@ -633,13 +637,7 @@ func (f *Files) List(ctx context.Context, path string, opts ...CallOption) ([]Fi
 				f.log.V(1).Info("skipping entry with unsupported file type", "path", path, "entry", e.Name, "type", e.Type)
 				continue
 			}
-			// RFC3339Nano so fractional-second timestamps are preserved
-			// (it also parses whole-second RFC3339 values).
-			modTime, parseErr := time.Parse(time.RFC3339Nano, e.ModifiedAt)
-			if parseErr != nil {
-				f.log.V(1).Info("entry has unparseable modified_at; using zero time", "path", path, "entry", e.Name, "modified_at", e.ModifiedAt)
-			}
-			entries = append(entries, FileEntry{Name: e.Name, Size: e.Size, Type: e.Type, ModTime: modTime, Mode: e.Mode})
+			entries = append(entries, f.fileEntry(path, e))
 		}
 	} else {
 		var legacy []legacyFileEntry
@@ -736,6 +734,47 @@ func (f *Files) Exists(ctx context.Context, path string, opts ...CallOption) (bo
 	return result.Exists, nil
 }
 
+// Stat returns the type, size, mode, and modification time of the file or
+// directory at path. "/" names the sandbox root. A missing path fails with a
+// 404 HTTPError.
+//
+// Only supported by the sandboxd runtime.
+func (f *Files) Stat(ctx context.Context, path string, opts ...CallOption) (*FileEntry, error) {
+	var entry *FileEntry
+	err := f.sandboxdFileOp(ctx, sandboxdOp{
+		name: "stat", method: http.MethodGet, path: path,
+		query: url.Values{"stat": {"true"}}, retry: true, allowRoot: true,
+		decode: func(r io.Reader) error {
+			var e sandboxdFileEntry
+			if err := json.NewDecoder(r).Decode(&e); err != nil {
+				return err
+			}
+			if e.Type != FileTypeFile && e.Type != FileTypeDirectory {
+				return fmt.Errorf("unsupported file type %q", e.Type)
+			}
+			fe := f.fileEntry(path, e)
+			entry = &fe
+			return nil
+		},
+	}, opts)
+	if err != nil {
+		return nil, err
+	}
+	return entry, nil
+}
+
+// fileEntry converts a sandboxd entry. It uses the zero time when
+// modified_at does not parse.
+func (f *Files) fileEntry(path string, e sandboxdFileEntry) FileEntry {
+	// RFC3339Nano so fractional-second timestamps are preserved
+	// (it also parses whole-second RFC3339 values).
+	modTime, err := time.Parse(time.RFC3339Nano, e.ModifiedAt)
+	if err != nil {
+		f.log.V(1).Info("entry has unparseable modified_at; using zero time", "path", path, "entry", e.Name, "modified_at", e.ModifiedAt)
+	}
+	return FileEntry{Name: e.Name, Size: e.Size, Type: e.Type, ModTime: modTime, Mode: e.Mode}
+}
+
 // Delete removes a file or directory in the sandbox. When recursive is
 // true, directories are removed with their contents (rm -rf semantics);
 // otherwise deleting a non-empty directory fails with a 409 HTTPError.
@@ -815,7 +854,8 @@ func (f *Files) Extract(ctx context.Context, path string, archive io.Reader, opt
 	}, opts)
 }
 
-// sandboxdOp describes a request that sandboxd answers with an empty 2xx body.
+// sandboxdOp describes a request to sandboxd. The response body is ignored
+// unless decode is set.
 type sandboxdOp struct {
 	name, method, path string
 	// suffix is appended to the path's endpoint, before the query.
@@ -827,6 +867,8 @@ type sandboxdOp struct {
 	retry bool
 	// allowRoot permits a path that names the sandbox root.
 	allowRoot bool
+	// decode reads a 2xx response body, capped at maxMetadataResponseSize.
+	decode func(io.Reader) error
 }
 
 // sandboxdFileOp sends op and fails with ErrUnsupportedByRuntime on the
@@ -884,6 +926,12 @@ func (f *Files) sandboxdFileOp(ctx context.Context, op sandboxdOp, opts []CallOp
 		return retErr
 	}
 	defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes)) }()
+	if op.decode != nil {
+		if err := op.decode(io.LimitReader(resp.Body, maxMetadataResponseSize)); err != nil {
+			recordError(span, err)
+			return fmt.Errorf("%s: %s(%q): failed to decode response: %w", f.errPrefix(), name, path, err)
+		}
+	}
 	f.log.V(1).Info(name+" completed", "path", path)
 	return nil
 }

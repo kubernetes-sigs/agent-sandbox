@@ -16,6 +16,7 @@ import type {
   DeleteOptions,
   DirectoryListing,
   FileCallOptions,
+  FileEntry,
   ListOptions,
   MkdirOptions,
   MoveCopyOptions,
@@ -46,6 +47,7 @@ export interface FilesOperations {
     content: ReadableStream<Uint8Array>,
     opts?: WriteOptions,
   ): Promise<void>;
+  stat(path: string, opts?: FileCallOptions): Promise<FileEntry>;
   exists(path: string, opts?: FileCallOptions): Promise<boolean>;
   list(path: string, opts?: ListOptions): Promise<DirectoryListing>;
   delete(path: string, opts?: DeleteOptions): Promise<void>;
@@ -59,6 +61,11 @@ export interface FilesOperations {
     source: string,
     destination: string,
     opts?: MoveCopyOptions,
+  ): Promise<void>;
+  extract(
+    path: string,
+    archive: ReadableStream<Uint8Array>,
+    opts?: FileCallOptions,
   ): Promise<void>;
 }
 
@@ -157,6 +164,15 @@ export class SandboxFiles {
     return this.ops.writeStream(path, content, opts);
   }
 
+  /**
+   * Returns metadata for one file or directory. Accepts "." or "" for the
+   * sandbox root and follows symlinks within that root. modifiedAt preserves
+   * sub-second precision. Requires sandboxd support for the stat query.
+   */
+  stat(path: string, opts?: FileCallOptions): Promise<FileEntry> {
+    return this.ops.stat(path, opts);
+  }
+
   /** Returns whether `path` exists (file or directory). */
   exists(path: string, opts?: FileCallOptions): Promise<boolean> {
     return this.ops.exists(path, opts);
@@ -208,5 +224,22 @@ export class SandboxFiles {
     opts?: MoveCopyOptions,
   ): Promise<void> {
     return this.ops.copy(source, destination, opts);
+  }
+
+  /**
+   * Unpacks a tar archive, optionally gzipped, into the directory at `path`,
+   * creating it when missing. `""` or `"."` names the sandbox root. The
+   * archive is streamed once and bounded by `sandboxd.maxUploadSize`. The
+   * SDK never retries automatically, and the unpack is not atomic, so a
+   * failed call leaves the entries written so far. To retry, provide a fresh
+   * stream. Streaming, timeout, and cancellation behave like `writeStream()`.
+   * Requires the sandboxd runtime.
+   */
+  extract(
+    path: string,
+    archive: ReadableStream<Uint8Array>,
+    opts?: FileCallOptions,
+  ): Promise<void> {
+    return this.ops.extract(path, archive, opts);
   }
 }

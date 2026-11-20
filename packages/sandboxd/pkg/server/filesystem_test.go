@@ -1019,6 +1019,77 @@ func TestDeleteSymlinkRemovesLinkNotTarget(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestPathUnderRegularFileNotFound(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o644))
+
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/v1/files/f.txt/child"},
+		{http.MethodHead, "/v1/files/f.txt/child"},
+		{http.MethodDelete, "/v1/files/f.txt/child"},
+		{http.MethodPut, "/v1/files/f.txt/child"},
+		{http.MethodGet, "/v1/files/f.txt/a/b"},
+	} {
+		rec := doRequest(handler, tc.method, tc.path, []byte("y"), nil)
+		require.Equal(t, http.StatusNotFound, rec.Code, "%s %s: %s", tc.method, tc.path, rec.Body.String())
+		if tc.method != http.MethodHead {
+			require.Equal(t, "NOT_FOUND", decodeError(t, rec).Code)
+		}
+	}
+}
+
+func TestPathComponentTooLongIsInvalidArgument(t *testing.T) {
+	_, handler, _ := newRESTFixture(t)
+	long := strings.Repeat("a", 300) // longer than any common filesystem's 255-byte name limit
+
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodPut, "/v1/files/" + long},
+		{http.MethodGet, "/v1/files/" + long},
+		{http.MethodDelete, "/v1/files/" + long},
+		{http.MethodPut, "/v1/files/dir/" + long + "?type=directory&parents=true"},
+	} {
+		rec := doRequest(handler, tc.method, tc.path, []byte("y"), nil)
+		require.Equal(t, http.StatusBadRequest, rec.Code, "%s %s: %s", tc.method, tc.path[:20], rec.Body.String())
+		require.Equal(t, "INVALID_ARGUMENT", decodeError(t, rec).Code)
+	}
+}
+
+// A full disk cannot be produced in a portable unit test, so this checks the
+// mapping on the wrapped errors the filesystem calls return.
+func TestUnexpectedFSErrorCodes(t *testing.T) {
+	s, _, _ := newRESTFixture(t)
+	for _, tc := range []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{"disk full", &os.PathError{Op: "write", Path: "/workspace/.sandboxd-tmp-1", Err: syscall.ENOSPC}, http.StatusInsufficientStorage, "RESOURCE_EXHAUSTED"},
+		{"quota exceeded", fmt.Errorf("failed to write file contents: %w", &os.PathError{Op: "write", Path: "x", Err: syscall.EDQUOT}), http.StatusInsufficientStorage, "RESOURCE_EXHAUSTED"},
+		{"anything else", &os.PathError{Op: "read", Path: "x", Err: syscall.EIO}, http.StatusInternalServerError, "INTERNAL"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			s.writeUnexpectedFSError(rec, tc.err)
+			require.Equal(t, tc.status, rec.Code)
+			require.Equal(t, tc.code, decodeError(t, rec).Code)
+		})
+	}
+
+	// extract=tar and directory creation fall back to the same mapping, so a
+	// full disk during an extraction is a 507 too.
+	full := fmt.Errorf("writing archive entry: %w", &os.PathError{Op: "write", Path: "x", Err: syscall.ENOSPC})
+	for name, write := range map[string]func(http.ResponseWriter, error){
+		"extract":   s.writeExtractError,
+		"directory": s.writeMakeDirectoryError,
+	} {
+		rec := httptest.NewRecorder()
+		write(rec, full)
+		require.Equal(t, http.StatusInsufficientStorage, rec.Code, name)
+		require.Equal(t, "RESOURCE_EXHAUSTED", decodeError(t, rec).Code, name)
+	}
+}
+
 func TestDeleteInvalidRecursiveRejected(t *testing.T) {
 	_, handler, root := newRESTFixture(t)
 	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o644))

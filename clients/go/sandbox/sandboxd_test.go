@@ -576,6 +576,80 @@ func TestSandboxdFileOps_Requests(t *testing.T) {
 	}
 }
 
+func TestSandboxStat(t *testing.T) {
+	var gotMethod, gotPath, gotQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotQuery = r.Method, r.URL.EscapedPath(), r.URL.RawQuery
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"name": "a.txt", "size": 5, "type": "file",
+			"modified_at": "2026-08-06T10:00:00.123456789Z", "mode": "0644",
+		})
+	}))
+	defer server.Close()
+
+	for _, tc := range []struct{ path, wantPath string }{
+		{"dir/a.txt", "/v1/files/dir/a.txt"},
+		{"/", "/v1/files/"},
+	} {
+		got, err := newReadySandboxdTestSandbox(server.URL).Stat(context.Background(), tc.path)
+		if err != nil {
+			t.Fatalf("Stat(%q): %v", tc.path, err)
+		}
+		if gotMethod != http.MethodGet || gotPath != tc.wantPath || gotQuery != "stat=true" {
+			t.Errorf("Stat(%q): got %s %s?%s", tc.path, gotMethod, gotPath, gotQuery)
+		}
+		want := FileEntry{
+			Name: "a.txt", Size: 5, Type: FileTypeFile, Mode: "0644",
+			ModTime: time.Date(2026, 8, 6, 10, 0, 0, 123456789, time.UTC),
+		}
+		if got.Name != want.Name || got.Size != want.Size || got.Type != want.Type || got.Mode != want.Mode || !got.ModTime.Equal(want.ModTime) {
+			t.Errorf("Stat(%q) = %+v, want %+v", tc.path, *got, want)
+		}
+	}
+}
+
+func TestSandboxStat_Errors(t *testing.T) {
+	tests := []struct {
+		name    string
+		handler http.HandlerFunc
+		wantErr string
+	}{
+		{"not found", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) }, "404"},
+		{"bad json", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("{")) }, "failed to decode"},
+		{"unsupported type", func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"name":"l","type":"symlink"}`))
+		}, "unsupported file type"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(tt.handler)
+			defer server.Close()
+
+			got, err := newReadySandboxdTestSandbox(server.URL).Stat(context.Background(), "p")
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("Stat() = %+v, %v; want error containing %q", got, err, tt.wantErr)
+			}
+			if got != nil {
+				t.Errorf("Stat() returned %+v with an error", got)
+			}
+		})
+	}
+}
+
+func TestSandboxStat_Validation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Error("an invalid call must not reach the server")
+	}))
+	defer server.Close()
+
+	if _, err := newReadySandboxdTestSandbox(server.URL).Stat(context.Background(), ""); err == nil {
+		t.Error("empty path: expected error")
+	}
+	if _, err := newReadyTestSandbox(server.URL).Stat(context.Background(), "p"); !errors.Is(err, ErrUnsupportedByRuntime) {
+		t.Errorf("legacy runtime: expected ErrUnsupportedByRuntime, got: %v", err)
+	}
+}
+
 func TestSandboxExtract(t *testing.T) {
 	var gotMethod, gotPath, gotQuery, gotBody string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -957,7 +1031,7 @@ func TestSandboxdRun_PodTunnelDeathReturnsErrNotReady(t *testing.T) {
 	fw := forwarder(grpcLocal)
 	stub := newTestPortForwardTunnel(fw)
 	pts := c.connector.strategy.(*podTunnelStrategy)
-	pts.tunnel.coreClient = fakekube.NewSimpleClientset().CoreV1() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	pts.tunnel.coreClient = fakekube.NewClientset().CoreV1()
 	pts.tunnel.restConfig = &rest.Config{}
 	pts.tunnel.dial = stub.dial
 	pts.tunnel.newForwarder = stub.newForwarder

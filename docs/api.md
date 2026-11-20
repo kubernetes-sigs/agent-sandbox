@@ -322,9 +322,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `shutdownTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | shutdownTime is the absolute time when the SandboxClaim expires.<br />This time governs the lifecycle of the claim. It is not propagated to the<br />underlying Sandbox. Instead, the SandboxClaim controller enforces this<br />expiration by deleting the Sandbox resources when the time is reached.<br />If this field is omitted or set to nil, the SandboxClaim itself won't expire.<br />This implies unsetting a Sandbox's ShutdownTime via SandboxClaim isn't supported. |  | Format: date-time <br />Optional: \{\} <br /> |
-| `ttlSecondsAfterFinished` _integer_ | ttlSecondsAfterFinished limits how long a finished claim is retained.<br />The timer starts from the mirrored Finished condition's LastTransitionTime. |  | Minimum: 0 <br />Optional: \{\} <br /> |
-| `shutdownPolicy` _[ShutdownPolicy](#shutdownpolicy)_ | shutdownPolicy determines the behavior when the SandboxClaim expires. | Retain | Enum: [Delete DeleteForeground Retain] <br />Optional: \{\} <br /> |
+| `shutdownTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | shutdownTime is the absolute time when the SandboxClaim expires.<br />This time governs the lifecycle of the claim. It is not propagated to the<br />underlying Sandbox. Instead, the SandboxClaim controller enforces this<br />expiration by deleting the Sandbox resources when the time is reached.<br />If this field is omitted or set to nil, the SandboxClaim does not expire at a<br />scheduled time. It can still expire through ttlSecondsAfterFinished.<br />This implies unsetting a Sandbox's ShutdownTime via SandboxClaim isn't supported. |  | Format: date-time <br />Optional: \{\} <br /> |
+| `ttlSecondsAfterFinished` _integer_ | ttlSecondsAfterFinished is how long after its Sandbox finishes the claim<br />expires. The shutdownPolicy decides whether expiry deletes the claim.<br />The timer starts from the mirrored Finished condition's LastTransitionTime. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `shutdownPolicy` _[ShutdownPolicy](#shutdownpolicy)_ | shutdownPolicy determines what happens to the SandboxClaim object when it<br />expires, either at shutdownTime or after ttlSecondsAfterFinished, whichever<br />comes first. The controller always deletes the underlying Sandbox on expiry.<br />  - Retain (default): the controller keeps the SandboxClaim and sets its Ready<br />    condition to False with reason ClaimExpired.<br />  - Delete: the controller deletes the SandboxClaim.<br />  - DeleteForeground: like Delete, but uses foreground cascading deletion.<br />This field has no effect while the SandboxClaim cannot expire. | Retain | Enum: [Delete DeleteForeground Retain] <br />Optional: \{\} <br /> |
 
 
 #### NetworkPolicyManagement
@@ -551,6 +551,7 @@ _Appears in:_
 | `replicas` _integer_ | replicas is the desired number of sandboxes in the pool.<br />This field is controlled by an HPA if specified. | 1 | Minimum: 0 <br />Optional: \{\} <br /> |
 | `sandboxTemplateRef` _[SandboxTemplateRef](#sandboxtemplateref)_ | sandboxTemplateRef - name of the SandboxTemplate to be used for creating a Sandbox<br />Warning: Any change to the json tag "sandboxTemplateRef" must be synchronized with the TemplateRefField constant. |  | Required: \{\} <br /> |
 | `updateStrategy` _[SandboxWarmPoolUpdateStrategy](#sandboxwarmpoolupdatestrategy)_ | updateStrategy controls how the pool replaces its stale sandboxes. A sandbox is<br />considered stale when the effective SandboxBlueprint derived from the referenced<br />SandboxTemplate (or the sandboxTemplateRef name) changes; metadata-only edits<br />(annotations or labels) do not make a sandbox stale and never trigger replacement.<br />It applies only to sandboxes still owned by the pool (i.e. unclaimed). Once a sandbox<br />is claimed by a SandboxClaim, ownership transfers to the claim and the pool no longer<br />manages or replaces it.<br />Defaults to OnReplenish. |  | Optional: \{\} <br /> |
+| `readinessGracePeriodSeconds` _integer_ | readinessGracePeriodSeconds is how long a sandbox in this pool may stay<br />non-Ready before the controller treats it as stuck and replaces it. The<br />period is counted from the later of the sandbox's creation and its Pod<br />being scheduled, not from when it last lost readiness. A sandbox whose Pod<br />is unschedulable or waiting on scheduling gates is held rather than<br />replaced. Pools backed by slow-starting runtimes generally<br />need a longer grace period than pools backed by fast ones.<br />If unset, the controller-level value is used (the<br />--sandbox-warm-pool-readiness-grace-period flag or the controller<br />ConfigMap), which defaults to 300 seconds.<br />Changing this field does not mark existing sandboxes stale. Shortening it<br />can still replace a non-Ready sandbox that is already older than the new<br />value.<br />The minimum is 30 seconds: a shorter period would delete members before<br />they could start, and the pool would keep recreating them. |  | Minimum: 30 <br />Optional: \{\} <br /> |
 
 
 #### SandboxWarmPoolStatus
@@ -621,9 +622,9 @@ _Appears in:_
 
 | Field | Description |
 | --- | --- |
-| `Delete` | ShutdownPolicyDelete deletes the SandboxClaim (and cascadingly the Sandbox) when expired.<br /> |
-| `DeleteForeground` | ShutdownPolicyDeleteForeground deletes the SandboxClaim when expired using foreground<br />cascade deletion. The claim remains in the API (with a deletionTimestamp) until its<br />underlying Sandbox and Pod are fully terminated. This allows external systems to observe<br />shutdown progress by checking whether the claim still exists.<br /> |
-| `Retain` | ShutdownPolicyRetain keeps the SandboxClaim when expired (Status will show Expired).<br />The underlying SandboxClaim resources (Sandbox, Pod, Service) are deleted to save resources,<br />but the SandboxClaim object itself remains.<br /> |
+| `Delete` | ShutdownPolicyDelete deletes the SandboxClaim on expiry.<br /> |
+| `DeleteForeground` | ShutdownPolicyDeleteForeground deletes the SandboxClaim on expiry with foreground cascade deletion.<br /> |
+| `Retain` | ShutdownPolicyRetain keeps the SandboxClaim on expiry and sets its Ready condition to False<br />with reason ClaimExpired.<br /> |
 
 
 #### VolumeClaimTemplatesPolicy

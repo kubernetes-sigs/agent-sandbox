@@ -118,6 +118,12 @@ describe("resolveSandboxPath", () => {
     }
   });
 
+  it("maps '' and '.' to the sandbox root for extract and drops a trailing slash", () => {
+    expect(resolveSandboxPath("", "extract")).toBe("");
+    expect(resolveSandboxPath("./", "extract")).toBe("");
+    expect(resolveSandboxPath("dir/", "extract")).toBe("dir");
+  });
+
   it("rejects a trailing slash for write/delete and drops it for read/list/exists", () => {
     expect(() => resolveSandboxPath("dir/", "write")).toThrow(SandboxError);
     expect(() => resolveSandboxPath("dir/", "delete")).toThrow(SandboxError);
@@ -136,6 +142,7 @@ describe("resolveSandboxPath", () => {
       "mkdir",
       "move",
       "copy",
+      "extract",
     ] as const) {
       expect(() => resolveSandboxPath("/etc/passwd", op)).toThrow(SandboxError);
     }
@@ -1222,6 +1229,120 @@ describe("SandboxdRestClient.writeStream", () => {
 
 // ---------- exists ----------
 
+describe("SandboxdRestClient.extract", () => {
+  it("PUTs the archive with extract=tar and returns the byte count", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    const bytesSent = await client.extract(
+      "src/dir",
+      toReadableStream(textChunks("tar", "ball")),
+      new AbortController().signal,
+    );
+    const req = activeServer.requests[0];
+    expect(bytesSent).toBe(7);
+    expect(req.method).toBe("PUT");
+    expect(req.url).toBe("/v1/files/src/dir?extract=tar");
+    expect(req.headers["content-type"]).toBe("application/octet-stream");
+    expect(req.body.toString()).toBe("tarball");
+  });
+
+  it("accepts a 204 sent before the archive source reaches EOF", async () => {
+    // sandboxd stops reading at the tar end marker, so trailing bytes may be unread.
+    const server = await startServerWithLiveByteCount((_req, res) => {
+      res.writeHead(204, { Connection: "close" });
+      res.end();
+    });
+    const client = makeClient(server.baseUrl);
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        await new Promise((r) => setTimeout(r, 20));
+        controller.enqueue(new Uint8Array(4));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    try {
+      await expect(
+        client.extract("d", stream, new AbortController().signal),
+      ).resolves.toBeGreaterThanOrEqual(0);
+      expect(cancelled).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("targets the sandbox root for '' and '.'", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    const signal = new AbortController().signal;
+    await client.extract("", toReadableStream([]), signal);
+    await client.extract(".", toReadableStream([]), signal);
+    expect(activeServer.requests.map((r) => r.url)).toEqual([
+      "/v1/files/?extract=tar",
+      "/v1/files/?extract=tar",
+    ]);
+  });
+
+  it("maps an error response to SandboxdApiError", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(409, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ code: "CONFLICT", message: "entry exists" }));
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await expect(
+      client.extract(
+        "d",
+        toReadableStream(textChunks("x")),
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "CONFLICT",
+    } satisfies Partial<SandboxdApiError>);
+  });
+
+  it("rejects a bad path and a locked stream before sending any request", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    const signal = new AbortController().signal;
+    await expect(
+      client.extract("../d", toReadableStream([]), signal),
+    ).rejects.toThrow(SandboxError);
+    const locked = toReadableStream(textChunks("x"));
+    locked.getReader();
+    await expect(client.extract("d", locked, signal)).rejects.toThrow(
+      /extract archive is already locked/,
+    );
+    expect(activeServer.requests).toHaveLength(0);
+  });
+
+  it("rejects an archive over the upload limit", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl, { maxUploadSize: 4 });
+    await expect(
+      client.extract(
+        "d",
+        toReadableStream(textChunks("too large")),
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(SandboxError);
+  });
+});
+
 describe("SandboxdRestClient.exists", () => {
   it("returns true on 2xx and issues a HEAD request", async () => {
     activeServer = await startServer((_req, res) => {
@@ -1257,6 +1378,125 @@ describe("SandboxdRestClient.exists", () => {
     ).rejects.toMatchObject({
       status: 403,
     } satisfies Partial<SandboxdApiError>);
+  });
+});
+
+describe("SandboxdRestClient.stat", () => {
+  const metadata = {
+    name: "a.txt",
+    size: 5,
+    type: "file",
+    modified_at: "2026-11-16T00:00:00.123456789Z",
+    mode: "0640",
+  };
+
+  it.each([
+    {
+      path: "dir/a #?.txt",
+      encoded: "dir/a%20%23%3F.txt",
+      type: "file",
+      name: "a #?.txt",
+    },
+    { path: "dir/", encoded: "dir", type: "directory", name: "dir" },
+    { path: ".", encoded: "", type: "directory", name: "/" },
+    { path: "", encoded: "", type: "directory", name: "/" },
+  ])("returns metadata for '$path' without losing precision", async ({
+    path,
+    encoded,
+    type,
+    name,
+  }) => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ...metadata, type, name }));
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await expect(
+      client.stat(path, new AbortController().signal),
+    ).resolves.toEqual({
+      name,
+      type,
+      size: 5,
+      mode: "0640",
+      modifiedAt: metadata.modified_at,
+    });
+    expect(activeServer.requests[0].url).toBe(`/v1/files/${encoded}?stat=true`);
+    expect(activeServer.requests[0].method).toBe("GET");
+  });
+
+  it.each([
+    { status: 404, code: "NOT_FOUND" },
+    { status: 403, code: "PERMISSION_DENIED" },
+    { status: 401, code: "UNAUTHENTICATED" },
+  ])("propagates HTTP $status", async ({ status, code }) => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ code, message: "lookup failed" }));
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await expect(
+      client.stat("a.txt", new AbortController().signal),
+    ).rejects.toMatchObject({
+      status,
+      code,
+    });
+    expect(activeServer.requests).toHaveLength(1);
+  });
+
+  it.each([
+    null,
+    { path: "/", entries: [] },
+    { ...metadata, name: "" },
+    { ...metadata, size: -1 },
+    { ...metadata, size: Number.MAX_SAFE_INTEGER + 1 },
+    { ...metadata, type: "symlink" },
+    { ...metadata, modified_at: "2026-02-30T00:00:00Z" },
+    { ...metadata, mode: "755" },
+  ])("rejects invalid metadata %j", async (body) => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(body));
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await expect(
+      client.stat("a.txt", new AbortController().signal),
+    ).rejects.toMatchObject({
+      telemetryCode: "invalid_response",
+    });
+  });
+
+  it.each([
+    { contentType: "application/octet-stream", body: JSON.stringify(metadata) },
+    { contentType: "application/json", body: "invalid json" },
+  ])("rejects a $contentType response with an invalid stat body", async ({
+    contentType,
+    body,
+  }) => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": contentType });
+      res.end(body);
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await expect(
+      client.stat("a.txt", new AbortController().signal),
+    ).rejects.toMatchObject({
+      telemetryCode: "invalid_response",
+    });
+  });
+
+  it("bounds stat responses by maxMetadataResponseSize", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(metadata));
+    });
+    const client = makeClient(activeServer.baseUrl, {
+      maxMetadataResponseSize: 32,
+    });
+    await expect(
+      client.stat("a.txt", new AbortController().signal),
+    ).rejects.toMatchObject({
+      telemetryCode: "response_too_large",
+    });
   });
 });
 

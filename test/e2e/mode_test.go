@@ -98,6 +98,13 @@ func TestSandboxSuspendResumeCycleWithOperatingMode(t *testing.T) {
 					Message:            "Pod has been terminated. Sandbox is suspended",
 				},
 				{
+					Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: gen,
+					Reason:             sandboxv1beta1.SandboxReasonPodAbsent,
+					Message:            "Sandbox has no backing Pod",
+				},
+				{
 					Type:               "Ready",
 					Status:             metav1.ConditionFalse,
 					ObservedGeneration: gen,
@@ -348,6 +355,13 @@ func TestSandboxSuspensionWithTerminatingPod(t *testing.T) {
 					Message:            "Pod has been terminated. Sandbox is suspended",
 				},
 				{
+					Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: 2,
+					Reason:             sandboxv1beta1.SandboxReasonPodAbsent,
+					Message:            "Sandbox has no backing Pod",
+				},
+				{
 					Type:               "Ready",
 					Status:             metav1.ConditionFalse,
 					ObservedGeneration: 2,
@@ -531,6 +545,13 @@ func TestSandboxSuspensionBlockedByUnownedPodConflict(t *testing.T) {
 				ObservedGeneration: 1,
 				Reason:             sandboxv1beta1.SandboxReasonSuspendedPodNotOwned,
 				Message:            "Refused to delete pod because it is not owned by this sandbox",
+			},
+			{
+				Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: 1,
+				Reason:             sandboxv1beta1.SandboxReasonPodAbsent,
+				Message:            "Sandbox has no backing Pod",
 			},
 			{
 				Type:               "Ready",

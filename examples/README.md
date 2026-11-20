@@ -11,6 +11,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**analytics-tool**](./analytics-tool): An example of running an analytics workload in a sandbox with a companion service.
 - [**apf-insulation**](./apf-insulation): An opt-in API Priority and Fairness overlay giving the controller dedicated apiserver concurrency for high-rate claim workloads (claim path > bulk refill > events).
 - [**chrome-sandbox**](./chrome-sandbox): An example of running a Chrome browser in a sandbox.
+- [**ci-runner-sandbox**](./ci-runner-sandbox): Run each CI job in its own sandbox — a Python driver claims a warm sandbox per job, runs build/test commands, echoes logs back to the CI system, and destroys the sandbox even if the job crashes.
 - [**claimed-sandbox-service**](./claimed-sandbox-service): Route application traffic through one Kubernetes Service to multiple claimed, ready Sandboxes while excluding the unclaimed warm reserve.
 - [**claude-code-sandbox**](./claude-code-sandbox): Headless Claude Code driven by the Python SDK: JSON output, session resume, warm-pool claims, and Secret-injected credentials.
 - [**code-interpreter-agent-on-adk**](./code-interpreter-agent-on-adk): An example of using Agent Sandbox as a tool in Agent Development Kit (ADK).
@@ -41,6 +42,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**kueue-agent-sandbox**](./kueue-agent-sandbox): An example of admission-controlling sandbox workloads with Kueue.
 - [**langchain**](./langchain): An example of a coding agent using Agent-Sandbox and LangGraph.
 - [**latebind-storage-gke-sandbox**](./latebind-storage-gke-sandbox): Late-binding persistent storage for sandboxes on GKE using the managed add-on APIs.
+- [**managed-agents**](./managed-agents): Run managed agent platforms' self-hosted work items — bash and file tool calls — inside Sandbox pods, with warm-pool claims, lease hand-off, and idle suspend/resume.
 - [**manual-pdb**](./manual-pdb): An example of manual PodDisruptionBudget (PDB) configuration for sandboxes.
 - [**mcp-server-sandbox**](./mcp-server-sandbox): Run an MCP (Model Context Protocol) server inside a Sandbox with attached storage.
 - [**n8n-mcp**](./n8n-mcp): An example of connecting n8n workflows to sandboxes through the MCP server integration.

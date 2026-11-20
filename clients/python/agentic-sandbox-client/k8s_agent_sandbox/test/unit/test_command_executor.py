@@ -19,6 +19,7 @@ import signal as sig
 import threading
 import sys
 import unittest
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -33,25 +34,55 @@ from k8s_agent_sandbox.models import (
 
 
 
-class DeadlineRpcError(Exception):
+class FakeRpcError(Exception):
+    def __init__(self, code, details=""):
+        super().__init__(details)
+        self._code = code
+        self._details = details
+
     def code(self):
-        return "DEADLINE_EXCEEDED"
+        return self._code
 
     def details(self):
-        return "Deadline Exceeded"
+        return self._details
 
 
-def _deadline_modules(stub):
+class DeadlineRpcError(FakeRpcError):
+    def __init__(self):
+        super().__init__("DEADLINE_EXCEEDED", "Deadline Exceeded")
+
+
+TIME_LIMIT_EXCEEDED = 2
+
+
+def _limited_response(stdout=b"", stderr=b"", exit_code=0, reason=1, truncated=False):
+    return SimpleNamespace(
+        stdout=stdout,
+        stderr=stderr,
+        exit_code=exit_code,
+        termination_reason=reason,
+        stdout_truncated=truncated,
+        stderr_truncated=False,
+    )
+
+
+def _grpc_modules(stub):
     return {
         "grpc": SimpleNamespace(
-            RpcError=DeadlineRpcError,
+            RpcError=FakeRpcError,
             StatusCode=SimpleNamespace(
-                UNAVAILABLE="UNAVAILABLE", DEADLINE_EXCEEDED="DEADLINE_EXCEEDED"
+                UNAVAILABLE="UNAVAILABLE",
+                DEADLINE_EXCEEDED="DEADLINE_EXCEEDED",
+                UNIMPLEMENTED="UNIMPLEMENTED",
+                INVALID_ARGUMENT="INVALID_ARGUMENT",
             ),
         ),
         "k8s_agent_sandbox.commands._process_stubs": SimpleNamespace(
             process_pb2=SimpleNamespace(
-                ProcessConfig=MagicMock(), ExecuteRequest=MagicMock()
+                ProcessConfig=MagicMock(),
+                ExecuteRequest=MagicMock(),
+                ExecuteWithLimitsRequest=MagicMock(),
+                EXECUTE_TERMINATION_REASON_TIME_LIMIT_EXCEEDED=TIME_LIMIT_EXCEEDED,
             ),
             process_pb2_grpc=stub,
         ),
@@ -143,7 +174,7 @@ class TestCommandExecutor(unittest.TestCase):
 
         self.assertGreater(connector.send_request.call_args.kwargs["timeout"], 600)
 
-    def test_sync_sandboxd_uses_command_timeout_as_deadline(self):
+    def test_sync_sandboxd_passes_command_timeout(self):
         connector = MagicMock()
         connector.is_sandboxd.return_value = True
         executor = CommandExecutor(connector, MagicMock(), "sandbox-client")
@@ -152,7 +183,81 @@ class TestCommandExecutor(unittest.TestCase):
             executor.run("echo hello", timeout=60, command_timeout=5)
 
         run_sandboxd.assert_called_once_with(
-            "echo hello", 5, report_timeout=True, env=None, cwd=None)
+            "echo hello", 60, 5, env=None, cwd=None)
+
+    def test_sync_sandboxd_time_limit_returns_retained_output(self):
+        stub = MagicMock()
+        rpc = stub.ProcessServiceStub.return_value.ExecuteWithLimits
+        rpc.return_value = _limited_response(
+            stdout=b"before\n", stderr=b"warn", exit_code=137,
+            reason=TIME_LIMIT_EXCEEDED)
+        modules = _grpc_modules(stub)
+        process_pb2 = modules["k8s_agent_sandbox.commands._process_stubs"].process_pb2
+        with patch.dict(sys.modules, modules):
+            executor = CommandExecutor(MagicMock(), MagicMock(), "sandbox-client")
+            result = executor._run_sandboxd("echo before; sleep 5", 60, 1)
+
+        process_pb2.ExecuteWithLimitsRequest.assert_called_once_with(
+            config=process_pb2.ProcessConfig.return_value,
+            time_limit=timedelta(seconds=1))
+        self.assertEqual(rpc.call_args.kwargs["timeout"], 11)
+        self.assertEqual(result, ExecutionResult(
+            stdout="before\n",
+            stderr="warn\nCommand timed out after 1 seconds",
+            exit_code=124,
+            timed_out=True,
+        ))
+        stub.ProcessServiceStub.return_value.Execute.assert_not_called()
+
+    def test_sync_sandboxd_exited_under_time_limit_keeps_exit_code(self):
+        stub = MagicMock()
+        stub.ProcessServiceStub.return_value.ExecuteWithLimits.return_value = (
+            _limited_response(stdout=b"out", stderr=b"err", exit_code=3))
+        with patch.dict(sys.modules, _grpc_modules(stub)):
+            executor = CommandExecutor(MagicMock(), MagicMock(), "sandbox-client")
+            result = executor._run_sandboxd("make test", 60, 5)
+
+        self.assertEqual(result, ExecutionResult(stdout="out", stderr="err", exit_code=3))
+
+    def test_sync_sandboxd_rejected_limit_falls_back_to_execute_deadline(self):
+        # UNIMPLEMENTED: sandboxd before ExecuteWithLimits. INVALID_ARGUMENT:
+        # command_timeout above --execute-max-time-limit.
+        for code in ("UNIMPLEMENTED", "INVALID_ARGUMENT"):
+            with self.subTest(code=code):
+                stub = MagicMock()
+                service = stub.ProcessServiceStub.return_value
+                service.ExecuteWithLimits.side_effect = FakeRpcError(code)
+                service.Execute.return_value = MagicMock(
+                    stdout=b"ok", stderr=b"", exit_code=0)
+                with patch.dict(sys.modules, _grpc_modules(stub)):
+                    executor = CommandExecutor(MagicMock(), MagicMock(), "sandbox-client")
+                    result = executor._run_sandboxd("echo ok", 60, 5)
+
+                service.ExecuteWithLimits.assert_called_once()
+                service.Execute.assert_called_once()
+                self.assertEqual(service.Execute.call_args.kwargs["timeout"], 5)
+                self.assertEqual(result, ExecutionResult(stdout="ok", exit_code=0))
+
+    def test_sync_sandboxd_truncated_output_raises(self):
+        stub = MagicMock()
+        stub.ProcessServiceStub.return_value.ExecuteWithLimits.return_value = (
+            _limited_response(stdout=b"x" * 1024, truncated=True))
+        with patch.dict(sys.modules, _grpc_modules(stub)):
+            executor = CommandExecutor(MagicMock(), MagicMock(), "sandbox-client")
+            with self.assertRaisesRegex(RuntimeError, "truncated"):
+                executor._run_sandboxd("yes", 60, 5)
+
+    def test_sync_sandboxd_truncated_output_at_time_limit_reports_timed_out(self):
+        stub = MagicMock()
+        stub.ProcessServiceStub.return_value.ExecuteWithLimits.return_value = (
+            _limited_response(stdout=b"x" * 1024, exit_code=137,
+                              reason=TIME_LIMIT_EXCEEDED, truncated=True))
+        with patch.dict(sys.modules, _grpc_modules(stub)):
+            executor = CommandExecutor(MagicMock(), MagicMock(), "sandbox-client")
+            result = executor._run_sandboxd("yes", 60, 5)
+
+        self.assertTrue(result.timed_out)
+        self.assertEqual(result.exit_code, 124)
 
     def test_sync_sandboxd_unavailable_invalidates_without_replaying(self):
         class UnavailableRpcError(Exception):
@@ -232,10 +337,11 @@ class TestCommandExecutor(unittest.TestCase):
     def test_sync_sandboxd_deadline_with_command_timeout_reports_timed_out(self):
         connector = MagicMock()
         stub = MagicMock()
-        stub.ProcessServiceStub.return_value.Execute.side_effect = DeadlineRpcError()
-        with patch.dict(sys.modules, _deadline_modules(stub)):
+        stub.ProcessServiceStub.return_value.ExecuteWithLimits.side_effect = (
+            DeadlineRpcError())
+        with patch.dict(sys.modules, _grpc_modules(stub)):
             executor = CommandExecutor(connector, MagicMock(), "sandbox-client")
-            result = executor._run_sandboxd("sleep 30", timeout=2, report_timeout=True)
+            result = executor._run_sandboxd("sleep 30", timeout=60, command_timeout=2)
 
         self.assertTrue(result.timed_out)
         self.assertEqual(result.exit_code, 124)
@@ -245,7 +351,7 @@ class TestCommandExecutor(unittest.TestCase):
     def test_sync_sandboxd_deadline_without_command_timeout_still_raises(self):
         stub = MagicMock()
         stub.ProcessServiceStub.return_value.Execute.side_effect = DeadlineRpcError()
-        with patch.dict(sys.modules, _deadline_modules(stub)):
+        with patch.dict(sys.modules, _grpc_modules(stub)):
             executor = CommandExecutor(MagicMock(), MagicMock(), "sandbox-client")
             with self.assertRaisesRegex(RuntimeError, "Deadline Exceeded"):
                 executor._run_sandboxd("sleep 30", timeout=2)
@@ -319,7 +425,7 @@ class TestAsyncCommandExecutor(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.exit_code, 124)
         self.assertEqual(result.stdout, "partial")
 
-    async def test_async_sandboxd_uses_command_timeout_as_deadline(self):
+    async def test_async_sandboxd_passes_command_timeout(self):
         connector = MagicMock()
         connector.is_sandboxd.return_value = True
         executor = AsyncCommandExecutor(connector, MagicMock(), "sandbox-client")
@@ -328,7 +434,55 @@ class TestAsyncCommandExecutor(unittest.IsolatedAsyncioTestCase):
             await executor.run("echo hello", timeout=60, command_timeout=5)
 
         run_sandboxd.assert_awaited_once_with(
-            "echo hello", 5, report_timeout=True, env=None, cwd=None)
+            "echo hello", 60, 5, env=None, cwd=None)
+
+    def _async_connector(self):
+        connector = MagicMock()
+        connector.connect = AsyncMock()
+        connector.grpc_channel = AsyncMock(return_value=MagicMock())
+        connector.invalidate_sandboxd_transport = AsyncMock()
+        return connector
+
+    async def test_async_sandboxd_time_limit_returns_retained_output(self):
+        stub = MagicMock()
+        rpc = AsyncMock(return_value=_limited_response(
+            stdout=b"before\n", exit_code=137, reason=TIME_LIMIT_EXCEEDED))
+        stub.ProcessServiceStub.return_value.ExecuteWithLimits = rpc
+        stub.ProcessServiceStub.return_value.Execute = AsyncMock()
+        modules = _grpc_modules(stub)
+        process_pb2 = modules["k8s_agent_sandbox.commands._process_stubs"].process_pb2
+        with patch.dict(sys.modules, modules):
+            executor = AsyncCommandExecutor(
+                self._async_connector(), MagicMock(), "sandbox-client")
+            result = await executor._run_sandboxd("echo before; sleep 5", 60, 1.5)
+
+        process_pb2.ExecuteWithLimitsRequest.assert_called_once_with(
+            config=process_pb2.ProcessConfig.return_value,
+            time_limit=timedelta(seconds=1.5))
+        self.assertEqual(rpc.call_args.kwargs["timeout"], 11.5)
+        self.assertEqual(result, ExecutionResult(
+            stdout="before\n",
+            stderr="Command timed out after 1.5 seconds",
+            exit_code=124,
+            timed_out=True,
+        ))
+        stub.ProcessServiceStub.return_value.Execute.assert_not_awaited()
+
+    async def test_async_sandboxd_rejected_limit_falls_back_to_execute_deadline(self):
+        stub = MagicMock()
+        service = stub.ProcessServiceStub.return_value
+        service.ExecuteWithLimits = AsyncMock(side_effect=FakeRpcError("UNIMPLEMENTED"))
+        service.Execute = AsyncMock(
+            return_value=MagicMock(stdout=b"ok", stderr=b"", exit_code=0))
+        with patch.dict(sys.modules, _grpc_modules(stub)):
+            executor = AsyncCommandExecutor(
+                self._async_connector(), MagicMock(), "sandbox-client")
+            result = await executor._run_sandboxd("echo ok", 60, 5)
+
+        service.ExecuteWithLimits.assert_awaited_once()
+        service.Execute.assert_awaited_once()
+        self.assertEqual(service.Execute.call_args.kwargs["timeout"], 5)
+        self.assertEqual(result, ExecutionResult(stdout="ok", exit_code=0))
 
     async def test_async_sandboxd_executor_uses_grpc(self):
         mock_connector = MagicMock()
@@ -453,13 +607,13 @@ class TestAsyncCommandExecutor(unittest.IsolatedAsyncioTestCase):
         connector.grpc_channel = AsyncMock(return_value=MagicMock())
         connector.invalidate_sandboxd_transport = AsyncMock()
         stub = MagicMock()
-        stub.ProcessServiceStub.return_value.Execute = AsyncMock(
+        stub.ProcessServiceStub.return_value.ExecuteWithLimits = AsyncMock(
             side_effect=DeadlineRpcError()
         )
-        with patch.dict(sys.modules, _deadline_modules(stub)):
+        with patch.dict(sys.modules, _grpc_modules(stub)):
             executor = AsyncCommandExecutor(connector, MagicMock(), "sandbox-client")
             result = await executor._run_sandboxd(
-                "sleep 30", timeout=1.5, report_timeout=True
+                "sleep 30", timeout=60, command_timeout=1.5
             )
 
         self.assertTrue(result.timed_out)
@@ -475,7 +629,7 @@ class TestAsyncCommandExecutor(unittest.IsolatedAsyncioTestCase):
         stub.ProcessServiceStub.return_value.Execute = AsyncMock(
             side_effect=DeadlineRpcError()
         )
-        with patch.dict(sys.modules, _deadline_modules(stub)):
+        with patch.dict(sys.modules, _grpc_modules(stub)):
             executor = AsyncCommandExecutor(connector, MagicMock(), "sandbox-client")
             with self.assertRaisesRegex(RuntimeError, "Deadline Exceeded"):
                 await executor._run_sandboxd("sleep 30", timeout=1.5)

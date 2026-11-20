@@ -50,6 +50,11 @@ go get sigs.k8s.io/agent-sandbox/clients/go/sandbox@latest
 
 ## Usage Examples
 
+`NewClient` returns a `*Client` that manages multiple sandboxes.
+`CreateSandbox` returns an open `*Sandbox` handle. Command, file, and lifecycle
+operations (`Run`, `Open`, `Close`, and `Disconnect`) use that handle, named `sb`
+in the examples below.
+
 ### 1. Gateway Mode
 
 Use this when running against a cluster with a public Gateway IP. The client automatically
@@ -157,6 +162,9 @@ fmt.Printf("downloaded %d bytes\n", written)
 // Check existence
 exists, err := sb.Exists(ctx, "script.py")
 
+// Get a file's type, size, mode, and modification time (sandboxd runtime only)
+info, err := sb.Stat(ctx, "script.py")
+
 // Create a directory, rename a file, and copy it (sandboxd runtime only)
 err = sb.Mkdir(ctx, "out/logs", true) // parents
 if err != nil { log.Fatal(err) }
@@ -187,7 +195,7 @@ streams the archive once, and the unpack is not atomic. `Write()` and `WriteRead
 atomic.
 
 `Read()` and `ReadTo()` responses are capped by `MaxDownloadSize` (256 MB by
-default). `Run()` responses are capped at 16 MB; `List()`/`Exists()` at 8 MB.
+default). `Run()` responses are capped at 16 MB; `List()`/`Exists()`/`Stat()` at 8 MB.
 
 ### Runtime Health and Metadata
 
@@ -335,6 +343,17 @@ fmt.Println(names) // includes sb3.ClaimName()
 ttl, err := sandbox.NewClient(ctx, sandbox.Options{ShutdownAfter: time.Hour})
 if err != nil { log.Fatal(err) }
 defer ttl.DeleteAll(ctx)
+
+// Keep expired claims so callers can tell they expired
+// (Options.ShutdownPolicy, or sandbox.WithShutdownPolicy per call)
+// extv1beta1 is imported as:
+//   extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+keep, err := sandbox.NewClient(ctx, sandbox.Options{
+    ShutdownAfter:  time.Hour,
+    ShutdownPolicy: extv1beta1.ShutdownPolicyRetain,
+})
+if err != nil { log.Fatal(err) }
+defer keep.DeleteAll(ctx)
 ```
 
 ## Configuration
@@ -349,6 +368,11 @@ All options are documented on the `Options` struct in
 - `Labels`: labels added to every `SandboxClaim` the client creates.
 - `ShutdownAfter`: expire every claim this client creates after this long, so a
   crashed client does not leak sandboxes. Unset by default (no expiry).
+- `ShutdownPolicy`: `Delete`, `DeleteForeground`, or `Retain` for expired
+  claims. Defaults to `Delete` when `ShutdownAfter` or
+  `TTLSecondsAfterFinished` is set.
+- `TTLSecondsAfterFinished`: seconds to keep a claim after its workload
+  finishes. Unset by default.
 - `Connectivity`: `port-forward` (default), `router-port-forward`,
   `in-cluster-service`, or `in-cluster-pod-ip`. `router-port-forward`
   port-forwards the sandbox-router, which proxies sandboxd's REST and gRPC
@@ -374,7 +398,7 @@ context unless an explicit timeout is supplied. Retry options depend on the
 operation: in particular, streaming `Start` rejects attempts greater than one.
 
 ```go
-result, err := client.Run(ctx, "make build", sandbox.WithTimeout(10*time.Minute))
+result, err := sb.Run(ctx, "make build", sandbox.WithTimeout(10*time.Minute))
 ```
 
 `Run` and `Commands.Start` also take `WithEnv` and `WithWorkingDir`
@@ -383,7 +407,7 @@ result, err := client.Run(ctx, "make build", sandbox.WithTimeout(10*time.Minute)
 to the sandbox root:
 
 ```go
-result, err := client.Run(ctx, "make build",
+result, err := sb.Run(ctx, "make build",
     sandbox.WithEnv(map[string]string{"CI": "1"}),
     sandbox.WithWorkingDir("project"))
 ```
@@ -409,19 +433,19 @@ in to retries for idempotent commands; sandboxd `Run` always sends one Execute
 RPC. Streaming `Commands.Start` rejects attempts greater than one:
 
 ```go
-result, err := client.Run(ctx, "cat /etc/hostname", sandbox.WithMaxAttempts(6))
+result, err := sb.Run(ctx, "cat /etc/hostname", sandbox.WithMaxAttempts(6))
 ```
 
 ## Disconnect / Reconnect
 
-`Disconnect()` closes the transport connection **without deleting** the
-SandboxClaim. The sandbox stays alive on the server. Call `Open()` to
+`sb.Disconnect()` closes the transport connection **without deleting** the
+SandboxClaim. The sandbox stays alive on the server. Call `sb.Open()` to
 reconnect to the same sandbox:
 
 ```go
-client.Disconnect(ctx) // transport closed, claim preserved
+sb.Disconnect(ctx) // transport closed, claim preserved
 // ... later ...
-client.Open(ctx)       // reconnects to the same sandbox
+sb.Open(ctx)       // reconnects to the same sandbox
 ```
 
 This is useful for suspending a session (e.g., between user requests in a
@@ -468,16 +492,23 @@ PersistentVolumeClaim whose volume is retained; ephemeral storage, including
 
 ## Timeouts and Context
 
-`Open()` executes several sequential phases (claim creation, sandbox
+`Client.CreateSandbox()` opens the returned Sandbox before returning.
+`Sandbox.Open()` executes several sequential phases (claim creation, sandbox
 readiness, transport connection), each bounded by its own timeout
 (`SandboxReadyTimeout`, `GatewayReadyTimeout`, `PortForwardReadyTimeout`).
-**Pass a context with a deadline** to bound the total `Open()` duration:
+**Pass a context with a deadline** to limit creation or a later `sb.Open()`
+reconnect:
 
 ```go
 ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 defer cancel()
-if err := client.Open(ctx); err != nil { ... }
+sb, err := client.CreateSandbox(ctx, "my-sandbox-pool", "default")
+if err != nil { log.Fatal(err) }
 ```
+
+If creation fails after creating a claim, synchronous rollback can take up to
+`CleanupTimeout` (30 seconds by default) beyond the caller's deadline before the
+call returns.
 
 | Option | Default | Governs |
 |--------|---------|---------|
@@ -493,51 +524,78 @@ if err := client.Open(ctx); err != nil { ... }
 ## Port-Forward Recovery
 
 In port-forward mode, a background monitor detects tunnel death and clears the
-client's ready state. Subsequent operations fail immediately with `ErrNotReady`
+sandbox handle's ready state. Subsequent operations fail immediately with `ErrNotReady`
 (wrapping `ErrPortForwardDied`) instead of timing out.
 
-To recover, call `Open()` again. The client will verify the claim and sandbox
+To recover, call `sb.Open()` again. The handle will verify the claim and sandbox
 still exist, then establish a new tunnel:
 
 ```go
-result, err := client.Run(ctx, "echo hi")
+result, err := sb.Run(ctx, "echo hi")
 if errors.Is(err, sandbox.ErrNotReady) {
     // Port-forward died; reconnect.
-    if reconnErr := client.Open(ctx); reconnErr != nil {
-        if errors.Is(reconnErr, sandbox.ErrSandboxDeleted) {
-            // Claim was deleted externally; start fresh.
-            reconnErr = client.Open(ctx)
-        } else if errors.Is(reconnErr, sandbox.ErrOrphanedClaim) {
-            // Sandbox no longer ready or verification failed; clean up and start fresh.
-            client.Close(ctx)
-            reconnErr = client.Open(ctx)
+    if reconnErr := sb.Open(ctx); reconnErr != nil {
+        if errors.Is(reconnErr, sandbox.ErrSandboxDeleted) && sb.ClaimName() == "" {
+            // The claim was deleted and the handle's identity was cleared; start fresh.
+            reconnErr = sb.Open(ctx)
         }
         if reconnErr != nil {
-            log.Fatal("reconnect failed:", reconnErr)
+            // Keep sb for investigation or an explicit cleanup retry.
+            log.Printf("reconnect failed: %v", reconnErr)
+            return
         }
     }
-    result, err = client.Run(ctx, "echo hi")
+    result, err = sb.Run(ctx, "echo hi")
 }
 ```
 
-If `Close()` fails to delete the claim (e.g., API server unavailable), the client
-preserves the claim name so `Close()` can be retried to clean up the orphaned claim.
-Calling `Open()` on a client with an orphaned claim returns `ErrOrphanedClaim`.
+`ErrSandboxDeleted` also covers a changed sandbox UID. In that case the claim
+name is preserved; inspect the replacement rather than retrying `Open()` with
+the unchanged handle or deleting the claim automatically.
+
+`ErrOrphanedClaim` can wrap temporary claim or sandbox verification errors.
+Keep the handle and claim while investigating them. A temporary sandbox
+verification failure preserves the sandbox identity so a later `Open()` can
+retry verification.
+
+A temporary claim verification failure instead retains the claim name but clears
+the sandbox identity. Later `Open()` calls on that unchanged handle return
+`ErrOrphanedClaim` without rechecking the claim. Keep the handle and claim for
+investigation; do not call `Close()` merely to retry verification, because it
+deletes the claim.
+
+Only after confirming that a claim is orphaned and deciding to delete it,
+check the cleanup error before opening a fresh sandbox:
+
+```go
+if err := sb.Close(ctx); err != nil {
+    // The claim name is retained; keep sb and retry Close() later.
+    log.Printf("claim cleanup failed: %v", err)
+    return
+}
+if err := sb.Open(ctx); err != nil {
+    log.Printf("opening a fresh sandbox failed: %v", err)
+    return
+}
+```
+
+Calling `sb.Open()` while the handle still has a claim but no sandbox identity
+returns `ErrOrphanedClaim`; retry `sb.Close()` first if cleanup previously failed.
 
 ## Error Reference
 
 | Error | Meaning |
 |-------|---------|
-| `ErrNotReady` | Client is not open or transport died. Call `Open()`. |
-| `ErrAlreadyOpen` | `Open()` called on an already-open client. Call `Close()` first. |
-| `ErrOrphanedClaim` | A previous claim could not be cleaned up (failed `Close()`, failed `Open()` rollback, or sandbox disappeared during reconnect); call `Close()` to retry deletion. |
+| `ErrNotReady` | Sandbox handle is not open or transport died. Call `Open()`. |
+| `ErrAlreadyOpen` | `Open()` called on an already-open Sandbox handle. Reuse the handle, or call `Disconnect()` before reconnecting if a new transport is needed. |
+| `ErrOrphanedClaim` | A claim could not be cleaned up, or claim/sandbox verification failed during reconnect. Inspect the cause before deciding to delete the claim; see Port-Forward Recovery. |
 | `ErrTimeout` | Sandbox or Gateway did not become ready within the configured timeout. |
 | `ErrClaimFailed` | SandboxClaim creation was rejected by the API server, or the claim reported a failure the controller does not retry (for example `InvalidMetadata` or `ClaimExpired`). |
 | `ErrWarmPoolNotFound` | The claim's SandboxWarmPool does not exist. |
 | `ErrTemplateNotFound` | The SandboxTemplate behind the warm pool does not exist. |
 | `ErrPortForwardDied` | The SPDY tunnel dropped. Call `Open()` to reconnect. |
 | `ErrRetriesExhausted` | All HTTP retry attempts failed. |
-| `ErrSandboxDeleted` | The Sandbox was deleted before becoming ready. |
+| `ErrSandboxDeleted` | The Sandbox was deleted before becoming ready, or the claim disappeared or sandbox UID changed during reconnect. A retained claim requires inspection. |
 | `ErrGatewayDeleted` | The Gateway was deleted during address discovery. |
 | `ErrProcessProtocol` | A streaming command returned invalid events or ended without the required Init/Exit. Missing-event EOF also matches `io.ErrUnexpectedEOF`. |
 | `ErrConcurrentRecv` | Another receive call is active on this process handle; the session remains open. |

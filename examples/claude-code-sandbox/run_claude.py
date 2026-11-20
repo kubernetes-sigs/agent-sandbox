@@ -14,9 +14,9 @@
 
 """Drive Claude Code headlessly inside an Agent Sandbox.
 
-Claims a sandbox from the claude-code-pool warm pool and runs three stages:
-a one-shot answer, seeding a memory, then resuming the same session to prove
-multi-turn continuity via `claude --resume <session_id>`.
+Claims a sandbox from the claude-code-pool warm pool, runs a one-shot answer,
+then seeds a memory. Suspends and resumes the sandbox before continuing the
+conversation via `claude --resume <session_id>` on a replacement Pod.
 """
 
 import json
@@ -57,15 +57,14 @@ def run_claude(sandbox, prompt: str, extra_args: str = "") -> dict:
 
 
 def main() -> None:
+    api_client = None
     if KUBE_CONTEXT:
         # Pin the control plane (claims) and the data plane (the tunnel's
         # kubectl port-forward reuses this api_client) to one cluster.
         kube_config = k8s_config.load_kube_config(context=KUBE_CONTEXT)
-        client = SandboxClient(
-            api_client=k8s_client.ApiClient(configuration=kube_config)
-        )
-    else:
-        client = SandboxClient()
+        api_client = k8s_client.ApiClient(configuration=kube_config)
+    client = SandboxClient(api_client=api_client)
+    pods = k8s_client.CoreV1Api(api_client)
     print(f"Claiming a sandbox from warmpool {WARMPOOL!r} in {NAMESPACE!r}...")
     sandbox = client.create_sandbox(warmpool=WARMPOOL, namespace=NAMESPACE)
     try:
@@ -83,7 +82,20 @@ def main() -> None:
             sys.exit("no session_id in claude JSON output")
         print(f"[session_id] {session_id}")
 
-        print("\n=== stage 3: resume the session ===")
+        print("\n=== stage 3: suspend and resume the sandbox ===")
+        pod_uid = pods.read_namespaced_pod(
+            sandbox.get_pod_name(), NAMESPACE
+        ).metadata.uid
+        sandbox.suspend()
+        sandbox.resume()
+        resumed_pod_uid = pods.read_namespaced_pod(
+            sandbox.get_pod_name(), NAMESPACE
+        ).metadata.uid
+        if resumed_pod_uid == pod_uid:
+            sys.exit("suspend verification failed: Pod was not replaced")
+        print("[sandbox] Pod replaced.")
+
+        print("\n=== stage 4: resume the session ===")
         out = run_claude(
             sandbox,
             "What is my favorite sandbox number? Reply with just the number.",
@@ -95,7 +107,7 @@ def main() -> None:
         # wrong recall like "142" cannot slip through a substring check.
         if answer.strip().rstrip(".") != "42":
             sys.exit(f"resume verification failed: expected 42, got {answer!r}")
-        print("\nSUCCESS: session resumed across headless invocations.")
+        print("\nSUCCESS: session resumed after sandbox suspend and resume.")
     finally:
         sandbox.terminate()
 

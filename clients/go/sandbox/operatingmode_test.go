@@ -42,7 +42,9 @@ const seedGeneration = int64(3)
 // sandboxGVR is the Sandbox resource the typed fake clientset acts on.
 // Seeding through NewSimpleClientset(cr) does not work for this kind: the
 // tracker guesses the plural as "sandboxs", so objects must be added under
-// the real GVR explicitly.
+// the real GVR explicitly. These tests stay on NewSimpleClientset because
+// the field-managed tracker behind NewClientset makes the same guess when it
+// maps a GVR to a kind, so it rejects creates and patches under sandboxGVR.
 var sandboxGVR = schema.GroupVersionResource{
 	Group:    "agents.x-k8s.io",
 	Version:  "v1beta1",
@@ -87,7 +89,7 @@ func readyCond(observedGeneration int64) metav1.Condition {
 // IsReady report true.
 func newSuspendTestSandbox(t *testing.T, cr *sandboxv1beta1.Sandbox, connected bool) (*Sandbox, *fakeagents.Clientset) {
 	t.Helper()
-	agentsCS := fakeagents.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	agentsCS := fakeagents.NewSimpleClientset()
 	if err := agentsCS.Tracker().Create(sandboxGVR, cr, cr.Namespace); err != nil {
 		t.Fatalf("seed sandbox CR: %v", err)
 	}
@@ -849,7 +851,7 @@ func TestPatchSandboxOperatingMode_UIDTestOp(t *testing.T) {
 	// metadata.uid) so a same-name replacement cannot be modified in the
 	// window between the SDK's read and write.
 	cr := newOperatingModeCR("sbx-1", sandboxv1beta1.SandboxOperatingModeRunning)
-	agentsCS := fakeagents.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	agentsCS := fakeagents.NewSimpleClientset()
 	if err := agentsCS.Tracker().Create(sandboxGVR, cr, cr.Namespace); err != nil {
 		t.Fatalf("seed sandbox CR: %v", err)
 	}

@@ -393,35 +393,68 @@ func TestStartDeliversOutputTailToASlowConsumer(t *testing.T) {
 
 // TestStartEndsWhenADetachedChildHoldsTheOutputPipe guards the reason
 // pipeDrainGrace exists: a background child that inherits stdout and keeps it
-// open past the command's exit must not hold the stream open.
+// open past the command's exit must not hold the stream open, whether it is
+// silent or keeps writing to a client that reads more slowly than it writes.
 func TestStartEndsWhenADetachedChildHoldsTheOutputPipe(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	client := newProcessClient(t, root)
-	pidFile := filepath.Join(root, "child.pid")
-	t.Cleanup(func() {
-		data, err := os.ReadFile(pidFile)
-		if err != nil {
-			return
-		}
-		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
-		}
-	})
+	tests := []struct {
+		name       string
+		background string
+		// readDelay paces the client after each message; 2 ms per 4 KiB
+		// chunk is about 2 MB/s, slower than yes writes.
+		readDelay  time.Duration
+		wantPrefix string
+	}{
+		{name: "silent", background: "sleep 30", wantPrefix: "before"},
+		{name: "writing to a slow client", background: "yes", readDelay: 2 * time.Millisecond, wantPrefix: "beforey\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			client := newProcessClient(t, root)
+			pidFile := filepath.Join(root, "child.pid")
+			t.Cleanup(func() {
+				data, err := os.ReadFile(pidFile)
+				if err != nil {
+					return
+				}
+				if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
+					_ = syscall.Kill(pid, syscall.SIGKILL)
+				}
+			})
 
-	started := time.Now()
-	stream, err := client.Start(testCtx(t), &processv1.StartRequest{
-		Config: &processv1.ProcessConfig{Command: []string{
-			"sh", "-c", "printf before; sleep 30 & echo $! > child.pid; exit 0",
-		}},
-	})
-	require.NoError(t, err)
+			// The deadline is well past the bound, so a stream the child
+			// keeps open fails here rather than at the test timeout.
+			ctx, cancel := context.WithTimeout(context.Background(), pipeDrainGrace+15*time.Second)
+			defer cancel()
+			started := time.Now()
+			stream, err := client.Start(ctx, &processv1.StartRequest{
+				Config: &processv1.ProcessConfig{Command: []string{
+					"sh", "-c", "printf before; " + tc.background + " & echo $! > child.pid; exit 0",
+				}},
+			})
+			require.NoError(t, err)
 
-	res := drainStart(t, stream)
-	require.Equal(t, int32(0), res.exitCode)
-	require.Equal(t, "before", res.stdout.String())
-	require.Less(t, time.Since(started), pipeDrainGrace+5*time.Second,
-		"the background child's open pipe must not hold the stream open")
+			var head bytes.Buffer
+			var exit *int32
+			for exit == nil {
+				msg, err := stream.Recv()
+				require.NoError(t, err, "stream still open after %v", time.Since(started))
+				if out := msg.GetStdout(); head.Len() < 64 {
+					head.Write(out)
+				}
+				if e := msg.GetExit(); e != nil {
+					code := e.GetExitCode()
+					exit = &code
+				}
+				time.Sleep(tc.readDelay)
+			}
+			require.Equal(t, int32(0), *exit)
+			require.True(t, strings.HasPrefix(head.String(), tc.wantPrefix), "stdout starts %q", head.String())
+			require.Less(t, time.Since(started), pipeDrainGrace+5*time.Second,
+				"the background child's open pipe must not hold the stream open")
+		})
+	}
 }
 
 func TestWriteStdinAndEOF(t *testing.T) {

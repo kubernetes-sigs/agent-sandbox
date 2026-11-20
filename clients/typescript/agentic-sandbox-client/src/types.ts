@@ -68,8 +68,8 @@ export interface SandboxdOptions {
   routerNamespace?: string;
   /**
    * Omit X-Sandbox-Pod-IP. Also omitted when the Sandbox has a headless
-   * Service. Set for a router cache, or for scoped-token authz (it rejects
-   * a raw pod IP). Router mode only. Default: false.
+   * Service. Set for an older router with a cache, or for scoped-token authz
+   * (it rejects a raw pod IP). Router mode only. Default: false.
    */
   disablePodIPRouting?: boolean;
   /** sandboxd's REST files/health port inside the Pod. Default: 8080. */

@@ -91,11 +91,30 @@ func TestResolve(t *testing.T) {
 		wantUID    types.UID
 	}{
 		{
-			name:       "pod ip override beats everything",
-			target:     Target{ID: "id", UID: "u1", Namespace: "ns", Port: 9999, PodIP: "10.0.0.1"},
-			lookup:     &fakeLookup{entries: map[types.UID]cache.Entry{"u1": {PodIP: "10.0.0.99"}}},
-			wantURL:    "http://10.0.0.1:9999",
+			name:   "loopback pod ip override beats cache",
+			target: Target{ID: "id", UID: "u1", Namespace: "ns", Port: 9999, PodIP: "127.0.0.1"},
+			lookup: &fakeLookup{entries: map[types.UID]cache.Entry{
+				"u1": {PodIP: "10.0.0.42", SandboxName: "id", Namespace: "ns"},
+			}},
+			wantURL:    "http://127.0.0.1:9999",
 			wantSource: SourcePodIP,
+		},
+		{
+			name:       "non-loopback pod ip without cache falls back to DNS",
+			target:     Target{ID: "id", Namespace: "ns", Port: 9999, PodIP: "100.100.100.200"},
+			lookup:     nil,
+			wantURL:    "http://id.ns.svc.cluster.local:9999",
+			wantSource: SourceDNS,
+		},
+		{
+			name:   "non-loopback pod ip with cache uses the cache entry",
+			target: Target{ID: "id", Namespace: "ns", Port: 9999, PodIP: "10.0.0.1"},
+			lookup: &fakeLookup{entries: map[types.UID]cache.Entry{
+				"u1": {PodIP: "10.0.0.42", SandboxName: "id", Namespace: "ns"},
+			}},
+			wantURL:    "http://10.0.0.42:9999",
+			wantSource: SourceCacheName,
+			wantUID:    "u1",
 		},
 		{
 			name:       "cache hit by UID",
@@ -215,10 +234,10 @@ func TestResolveBracketsIPv6PodIP(t *testing.T) {
 	}
 
 	// Same expectation for an explicit X-Sandbox-Pod-IP override.
-	tgt = Target{ID: "id", Namespace: "ns", Port: 8888, PodIP: "fe80::1"}
+	tgt = Target{ID: "id", Namespace: "ns", Port: 8888, PodIP: "::1"}
 	got, src, resolved = tgt.Resolve("http", "cluster.local", "/", "", nil)
-	if got.String() != "http://[fe80::1]:8888/" {
-		t.Fatalf("ipv6 override: got %q want http://[fe80::1]:8888/", got.String())
+	if got.String() != "http://[::1]:8888/" {
+		t.Fatalf("ipv6 override: got %q want http://[::1]:8888/", got.String())
 	}
 	if src != SourcePodIP {
 		t.Fatalf("source: got %q want pod-ip", src)

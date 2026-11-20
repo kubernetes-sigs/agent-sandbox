@@ -278,13 +278,14 @@ and `X-Sandbox-Pod-IP` when the Sandbox has no headless Service and
 - `sandboxd.routerNamespace` names the namespace where the router runs (shipped
   manifests use `"agent-sandbox-system"`). It defaults to the claim's namespace.
 - When the Sandbox has a headless Service (`status.serviceFQDN`), the SDK omits
-  `X-Sandbox-Pod-IP`. The router then resolves the live pod by DNS. The IP
-  captured when the handle was created would override that lookup, and after a
-  reschedule it can belong to a different pod.
-- When the Sandbox has no Service, the SDK sends that captured IP so a router
-  without a cache can still reach the sandbox. `sandboxd.disablePodIPRouting: true`
-  omits the header in that case too, and the router resolves the live pod from
-  its cache or DNS. Set it when the router runs with `--cache-enabled`.
+  `X-Sandbox-Pod-IP`. The router then resolves the live pod from its cache or
+  DNS. With an older router, the IP captured when the handle was created would
+  override that lookup, and after a reschedule it can belong to a different pod.
+- When the Sandbox has no Service, the SDK sends that captured IP so an older
+  router without a cache can still reach the sandbox. Current routers ignore it.
+  `sandboxd.disablePodIPRouting: true` omits the header in that case too, and
+  the router resolves the live pod from its cache or DNS. Set it when an older
+  router runs with `--cache-enabled`.
   Scoped-token authorization rejects `X-Sandbox-Pod-IP` (v2 rejects a raw pod
   IP as well, and resolves through the cache), so set
   `disablePodIPRouting: true` when the router uses `--authz-mode=scoped-token`.

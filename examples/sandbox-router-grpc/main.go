@@ -53,7 +53,7 @@ func main() {
 	flag.StringVar(&opts.Sandbox, "sandbox", "box-a", "X-Sandbox-ID on every RPC")
 	flag.StringVar(&opts.Namespace, "namespace", "grpc-router-demo", "X-Sandbox-Namespace on every RPC")
 	flag.IntVar(&opts.Port, "port", 9090, "Explicit sandboxd target port, not the router listener")
-	flag.StringVar(&opts.PodIP, "pod-ip", "", "Optional X-Sandbox-Pod-IP override; normally use Service/cache discovery")
+	flag.StringVar(&opts.PodIP, "pod-ip", "", "Optional loopback X-Sandbox-Pod-IP override for a sidecar router; normally use Service/cache discovery")
 	flag.StringVar(&opts.Mode, "mode", "execute", "execute, start, interact, signal, or mint-token")
 	flag.DurationVar(&opts.Timeout, "timeout", 30*time.Second, "Positive total budget for the call, including routing/authentication")
 	flag.BoolVar(&opts.Plaintext, "plaintext", false, "Use h2c only on a trusted internal connection")

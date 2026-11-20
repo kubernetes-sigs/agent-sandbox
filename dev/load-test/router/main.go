@@ -63,7 +63,9 @@ func main() {
 	warmup := flag.Duration("warmup", 2*time.Second,
 		"How long to drive load before starting to record samples.")
 	backendHost := flag.String("backend-host", "",
-		"Sandbox Pod IP to send in X-Sandbox-Pod-IP. Required with --router-url; "+
+		"Sandbox Pod IP to send in X-Sandbox-Pod-IP. Required with --router-url, "+
+			"and the external router dials it only when it is a loopback address "+
+			"and the router runs with --allow-loopback-pod-ip; "+
 			"populated automatically from the in-process httptest backend when --in-process is set.")
 	backendPort := flag.Int("backend-port", 0,
 		"Sandbox port to send in X-Sandbox-Port. Required with --router-url; "+

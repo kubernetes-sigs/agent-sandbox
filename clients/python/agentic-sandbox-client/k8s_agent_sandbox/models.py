@@ -315,7 +315,7 @@ class SandboxdRouterTunnelConnectionConfig(BaseModel):
         pattern=r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
     )  # Namespace of sandbox-router-svc. Defaults to agent-sandbox-system.
     port_forward_ready_timeout: int = Field(default=30, gt=0)  # Seconds to wait for the router tunnel. Must be positive.
-    pod_ip_routing: bool = False  # Send X-Sandbox-Pod-IP on REST and gRPC. Set true only when the router cache is disabled and the Sandbox has no Service.
+    pod_ip_routing: bool = False  # Send X-Sandbox-Pod-IP on REST and gRPC. Current routers ignore it. Set true only for an older router with the cache disabled and a Sandbox without a Service.
 
     @model_validator(mode="after")
     def validate_distinct_ports(self) -> "SandboxdRouterTunnelConnectionConfig":

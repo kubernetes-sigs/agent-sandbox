@@ -41,6 +41,11 @@ When you create a sandbox, a persistent Kubernetes Pod is provisioned and identi
   -  **Returns:** JSON object containing field `exists`.
   -  **Purpose:** Check whether a file or directory exists in a sandbox.
 
+- **`get_sandbox_health`**
+  - **Arguments:** `sandbox_claim_name` (string), `namespace` (string), `timeout` (int, optional).
+  - **Returns:** JSON object containing fields `healthy`, `uptime_seconds`, and `message`.
+  - **Purpose:** Report whether `sandboxd` is serving inside a sandbox. This complements `get_sandbox_status`, which reports Kubernetes readiness: a sandbox whose Pod is Ready can still report `healthy` false here, because `sandboxd` stops serving while it shuts down. Read `healthy` false as a normal state and decide whether to wait or create a new sandbox. Requires the sandboxd runtime.
+
 - **`get_sandbox_status`**
   - **Arguments:** `sandbox_claim_name` (string), `namespace` (string).
   - **Returns:** JSON object containing fields `status`, `ready`, and `message`.

@@ -1315,7 +1315,7 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 			continue
 		}
 
-		if isSandboxTerminal(adopted) {
+		if isSandboxFinished(adopted) {
 			logger.V(1).Info("Skipping finished warm pool candidate", "sandbox", adopted.Name, "warmPool", claim.Spec.WarmPoolRef.Name)
 			continue
 		}

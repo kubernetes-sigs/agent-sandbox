@@ -229,11 +229,9 @@ type finishedBackoffState struct {
 	failures    int
 	lastFailure time.Time
 	holds       []time.Time
-	// nextBump is when the delay started by the last increase of failures
-	// ends. Finished members deleted before it share that delay. A finished
-	// member deleted at or after it counts as a new failure and grows the
-	// delay. Gating on time, not on the pool having no held slots, keeps the
-	// backoff growing when members exit out of phase.
+	// nextBump is when the current delay ends. Finished members deleted
+	// before it share that delay, so members that exit out of phase still
+	// grow the backoff once per delay.
 	nextBump time.Time
 }
 
@@ -651,8 +649,8 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	for _, sb := range activeSandboxes {
 		if !isSandboxReady(&sb) && !sb.CreationTimestamp.IsZero() {
 			age := now.Sub(readinessGraceStart(&sb))
-			terminal := isSandboxTerminal(&sb)
-			if !terminal && age <= graceWindow {
+			finished := isSandboxFinished(&sb)
+			if !finished && age <= graceWindow {
 				// Not Ready but still within the grace period. In a quiet
 				// cluster nothing else touches the Sandbox objects of a pool
 				// that settles at Ready=False (pod FailedScheduling events do
@@ -700,7 +698,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 				healthySandboxes = append(healthySandboxes, sb)
 				continue
 			}
-			if terminal {
+			if finished {
 				deletedFinished++
 			}
 			// Successfully deleted: it now occupies capacity as terminating
@@ -765,7 +763,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	if finishedWait > 0 && tmplErr == nil {
 		requeueAfter = minNonZeroDuration(requeueAfter, finishedWait)
 	}
-	createTarget := max(int32(0), desiredReplicas-heldFinished)
+	createTarget := desiredReplicas - heldFinished
 
 	// Create new sandboxes if we need more.
 	// Hard invariant: never create while the existing population (active,
@@ -1092,9 +1090,9 @@ func podNotScheduledReason(sb *sandboxv1beta1.Sandbox) string {
 	return cond.Reason
 }
 
-// isSandboxTerminal reports whether a pool member's Pod has exited, so it can
+// isSandboxFinished reports whether a pool member's Pod has exited, so it can
 // never become Ready.
-func isSandboxTerminal(sb *sandboxv1beta1.Sandbox) bool {
+func isSandboxFinished(sb *sandboxv1beta1.Sandbox) bool {
 	return meta.IsStatusConditionTrue(sb.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished))
 }
 

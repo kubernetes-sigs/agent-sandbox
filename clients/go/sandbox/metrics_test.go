@@ -22,9 +22,14 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	apimetric "go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	fakedynamic "k8s.io/client-go/dynamic/fake"
 )
 
 // failingStrategy is a ConnectionStrategy whose Connect always fails, so the
@@ -322,6 +327,74 @@ func TestConnectorConnect_SkipsCanceledDiscovery(t *testing.T) {
 
 	if points := latencyPoints(t, reader, discoveryLatencyInstrumentName); len(points) != 0 {
 		t.Errorf("got %d data points, want 0 for a canceled discovery", len(points))
+	}
+}
+
+// newGatewayTestConnector builds a connector with a real gatewayStrategy
+// backed by a fake dynamic client that serves no Gateway, so discovery can
+// only end in a timeout.
+func newGatewayTestConnector(t *testing.T, hist apimetric.Float64Histogram, timeout time.Duration) *connector {
+	t.Helper()
+	dynCS := fakedynamic.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+		gatewayGVR: "GatewayList",
+	})
+	return newConnector(connectorConfig{
+		Strategy: &gatewayStrategy{
+			dynamicClient:    dynCS,
+			gatewayName:      "test-gw",
+			gatewayNamespace: "default",
+			gatewayScheme:    "http",
+			timeout:          timeout,
+			log:              logr.Discard(),
+			tracer:           otel.GetTracerProvider().Tracer("test"),
+		},
+		Namespace:        "default",
+		Log:              logr.Discard(),
+		DiscoveryLatency: hist,
+	})
+}
+
+func TestConnectorConnect_SkipsCanceledGatewayDiscovery(t *testing.T) {
+	// gatewayStrategy.Connect reports any ctx.Done() as ErrTimeout without
+	// wrapping context.Canceled, so the cancellation check must also look
+	// at the context.
+	reader := metric.NewManualReader()
+	mp := metric.NewMeterProvider(metric.WithReader(reader))
+	hist := newDiscoveryLatencyHistogram(mp.Meter("test"), logr.Discard())
+	conn := newGatewayTestConnector(t, hist, time.Minute)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := conn.Connect(ctx); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("Connect error = %v, want ErrTimeout", err)
+	}
+
+	if points := latencyPoints(t, reader, discoveryLatencyInstrumentName); len(points) != 0 {
+		t.Errorf("got %d data points, want 0 for a canceled gateway discovery", len(points))
+	}
+}
+
+func TestConnectorConnect_RecordsGatewayTimeout(t *testing.T) {
+	// A gateway timeout runs to the full budget, so it must stay recorded
+	// as a failure.
+	reader := metric.NewManualReader()
+	mp := metric.NewMeterProvider(metric.WithReader(reader))
+	hist := newDiscoveryLatencyHistogram(mp.Meter("test"), logr.Discard())
+	conn := newGatewayTestConnector(t, hist, 50*time.Millisecond)
+
+	if err := conn.Connect(context.Background()); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("Connect error = %v, want ErrTimeout", err)
+	}
+
+	points := latencyPoints(t, reader, discoveryLatencyInstrumentName)
+	if len(points) != 1 {
+		t.Fatalf("got %d data points, want 1", len(points))
+	}
+	if !attrsContain(points[0].Attributes, "status", "failure") {
+		t.Errorf("got attributes %v, want status=failure", points[0].Attributes)
+	}
+	if !attrsContain(points[0].Attributes, "mode", "gateway") {
+		t.Errorf("got attributes %v, want mode=gateway", points[0].Attributes)
 	}
 }
 

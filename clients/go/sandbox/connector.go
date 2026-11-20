@@ -18,7 +18,6 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -227,8 +226,8 @@ func (c *connector) Connect(ctx context.Context) error {
 	mode := strategyMode(c.strategy)
 	start := time.Now()
 	url, err := c.strategy.Connect(ctx)
-	// A canceled discovery is not sampled; see recordLatency.
-	if c.discoveryLatency != nil && !errors.Is(err, context.Canceled) {
+	// A canceled discovery is not sampled; see canceledOperation.
+	if c.discoveryLatency != nil && !canceledOperation(ctx, err) {
 		status := "success"
 		if err != nil {
 			status = "failure"

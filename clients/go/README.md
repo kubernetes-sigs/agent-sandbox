@@ -392,6 +392,10 @@ The client records three latency histograms, in seconds:
   including the readiness wait and the reconnect. Each observation carries
   a `status` attribute (`success` or `failure`).
 
+A canceled operation records no sample: the client stops at an arbitrary
+point, so its duration would skew the histogram. Timeouts run to their full
+budget and are recorded as `status=failure`.
+
 The OTel Prometheus exporter renders these histograms as
 `sandbox_client_discovery_latency_seconds`,
 `sandbox_client_suspend_latency_seconds`, and

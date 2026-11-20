@@ -281,6 +281,8 @@ async function readBoundedBody(
     reader.cancel(signal.reason).catch(() => {});
   };
   signal.addEventListener("abort", cancelBody, { once: true });
+  // An abort between fetch() resolving and this call fires no further event.
+  if (signal.aborted) cancelBody();
   try {
     while (true) {
       const { done, value } = await reader.read();

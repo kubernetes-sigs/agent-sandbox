@@ -2002,6 +2002,29 @@ describe("SandboxdRestClient network behavior", () => {
     }
   });
 
+  it("aborts a body read when the caller aborted before the read started", async () => {
+    // The caller aborts while fetch() is resolving, so the abort event has
+    // already fired when the body read starts. The body is open and empty,
+    // so the read ends only if the client checks the signal up front.
+    const controller = new AbortController();
+    const reason = new Error("caller timeout");
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      controller.abort(reason);
+      return new Response(new ReadableStream<Uint8Array>(), {
+        headers: { "Content-Type": "application/octet-stream" },
+      });
+    };
+    try {
+      const client = makeClient("http://127.0.0.1:1");
+      await expect(client.read("a.txt", controller.signal)).rejects.toBe(
+        reason,
+      );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
   it("wraps a mid-body disconnect (no caller abort) as SandboxConnectionError", async () => {
     activeServer = await startServer((req, res) => {
       res.writeHead(200, { "Content-Type": "application/octet-stream" });
